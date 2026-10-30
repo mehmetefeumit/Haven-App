@@ -23,9 +23,9 @@
 
 use std::time::Duration;
 
-use haven_core::circle::DecryptedIngest;
 use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
 use haven_core::nostr::mls::types::{GroupId, UNRESOLVABLE_INPUT_MAX_AGE_SECS};
+use haven_core::relay::fanout::{FanoutClock as _, WallClock};
 use haven_core::relay::live_sync::config::{
     BACKOFF_JITTER_FRACTION_BP, BACKOFF_MAX_SECS, BURST_BACKLOG_WAIT_SECS,
     COMMIT_SETTLE_WINDOW_SECS, DELIVERY_SILENCE_RETENTION_MULTIPLE, SUBSCRIBE_CONNECT_WAIT_SECS,
@@ -36,7 +36,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 use haven_soak::nemesis::types::{Fault, Schedule};
 use haven_soak::oracle::quiescence::{self, PendingReason, Quiescence, Settled};
-use haven_soak::oracle::undecryptable::{self, StoredRow};
+use haven_soak::oracle::undecryptable::{self, Probe, StoredRow};
 use haven_soak::oracle::vacuity::{grade, ExpectationFloor, FloorTerm, Observed};
 use haven_soak::oracle::{
     bounds, Finding, Invariant, ProbeToken, Reach, Recovery, RemovalPath, RemovalProbe, RemovalRow,
@@ -45,14 +45,20 @@ use haven_soak::oracle::{
 use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
 use haven_soak::rc::Rc;
 use haven_soak::relay::SimRelay;
-use haven_soak::rig::{CapturedLine, DeviceTag, LogDrain, RelayPlane, RelayTag, SimWorld};
+use haven_soak::rig::{
+    CapturedLine, Change, DeviceTag, LogDrain, PublishVerdict, RelayPlane, RelayTag, SimWorld,
+};
 use haven_soak::scenarios::s02_receiver_partition::unwitnessed_control;
 use haven_soak::scenarios::s05_publish_confirm::acked_kill_control;
 use haven_soak::scenarios::s08_live_plane_burial::below_the_cap_control;
 use haven_soak::scenarios::s12_key_package_rotation::unexpired_control;
-use haven_soak::scenarios::s14_restart_race::{co_admin, merge_race, stage_race, SecondCommit};
+use haven_soak::scenarios::s14_restart_race::{
+    co_admin, deafen, merge_race, stage_race, SecondCommit,
+};
 use haven_soak::scenarios::s20_catchup_sweep::empty_store_control;
 use haven_soak::scenarios::s23_chained_backlog::one_commit_control;
+use haven_soak::scenarios::s24_routing_collision::uncollided_control;
+use haven_soak::scenarios::s25_silent_relays::answering_control;
 use haven_soak::scenarios::Scenario;
 use haven_soak::timeline::Timeline;
 
@@ -351,18 +357,19 @@ async fn o2_holds_on_a_converged_world_and_fails_while_a_commit_is_staged_and_un
         "a freshly built circle agrees on everything and can send"
     );
 
-    // The plant, in the product's own terms: a commit staged and neither
-    // confirmed nor rolled back. Every READ accessor is still cheerful about
-    // this group — which is exactly why O2 carries a send attempt.
+    // The plant, in the product's own terms: a commit staged under its record
+    // and neither confirmed nor rolled back. Every READ accessor is still
+    // cheerful about this group — which is exactly why O2 carries a send
+    // attempt.
     let staged = world
         .device(alice)
         .expect("alice")
         .manager()
         .expect("a manager")
-        .update_circle_relays(&group, &relay_set(&world))
+        .update_circle_relays_staging(&group, &relay_set(&world), WallClock.now_ms())
         .await
         .expect("a relay-list commit stages");
-    let outstanding = world.note_pending_staged();
+    assert!(staged.commit.is_some(), "premise: a commit was staged");
 
     let verdict = Invariant::SendPathLiveness
         .check(&mut world, &round(2))
@@ -390,19 +397,13 @@ async fn o2_holds_on_a_converged_world_and_fails_while_a_commit_is_staged_and_un
         "a circle that cannot send is a finding about the subject"
     );
 
-    drop(outstanding);
-    let ingest = world
-        .device(alice)
-        .expect("alice")
-        .manager()
-        .expect("a manager")
-        .publish_failed(staged.pending)
-        .await
-        .expect("the staged commit rolls back");
+    // The product's driver resolves the plant: a relay acknowledges it, it is
+    // confirmed, and every device follows it.
+    let resumed = world.resume(alice).await.expect("the driver runs");
+    assert!(!resumed.errored, "the staged commit's drive erred");
     assert!(
-        ingest.auto_commits.is_empty() && ingest.proposals.is_empty(),
-        "nothing was buffered behind this commit, so its rollback has nothing \
-         further to publish; work here would be a ref nobody resolves"
+        wait_until_epochs_agree(&world, &group, bounds::round_trip(Recovery::Undisturbed)).await,
+        "the confirmed commit was not followed by every device"
     );
 
     assert!(
@@ -439,12 +440,7 @@ async fn sealed_now(world: &World, device: DeviceTag, group: &GroupId) -> nostr:
     let (event, _, _) = sender
         .manager()
         .expect("a manager")
-        .encrypt_location(
-            group,
-            &sender.keys.public_key(),
-            &ProbeToken::mint(9, 9).as_location(),
-            LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(group, &ProbeToken::mint(9, 9).as_location())
         .await
         .expect("a location seals at the current epoch");
     event
@@ -453,43 +449,30 @@ async fn sealed_now(world: &World, device: DeviceTag, group: &GroupId) -> nostr:
 /// Advances the group by `count` confirmed commits, and waits for both devices
 /// to sit on the result.
 ///
-/// Each commit carries a DIFFERENT relay list: a repeat of the list the group
-/// already holds is a no-op, and a no-op advances no epoch — which would leave
-/// the window uncrossed while the arm believed it had crossed it.
+/// Each commit carries a DIFFERENT relay list, across calls too: a repeat of
+/// the list the group already holds is a no-op, and a no-op advances no epoch
+/// — which would leave the window uncrossed while the arm believed it had
+/// crossed it.
 async fn advance_epochs(world: &World, device: DeviceTag, group: &GroupId, count: u64) {
-    for index in 0..count {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    for _ in 0..count {
+        let index = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut relays = world.relay_urls();
         relays.push(format!("wss://o4-{index}.example.com"));
-        let staged = world
-            .device(device)
-            .expect("a device")
-            .manager()
-            .expect("a manager")
-            .update_circle_relays(group, &relays)
+        let changed = world
+            .change(
+                device,
+                Change::Relays {
+                    group,
+                    relays: &relays,
+                },
+            )
             .await
-            .expect("a relay-list commit stages");
-        let guard = world.note_pending_staged();
-        let witnessed = world
-            .publish_witnessed(device, std::slice::from_ref(&staged.commit_event))
-            .await
-            .expect("the witness reads");
+            .expect("the driver makes the change");
         assert!(
-            witnessed.is_some(),
+            changed.verdict == PublishVerdict::Confirmed,
             "a commit nobody acked may not be merged (Rule 13)"
         );
-        let ingest = world
-            .device(device)
-            .expect("a device")
-            .manager()
-            .expect("a manager")
-            .finalize_relay_update(staged.pending, group)
-            .await
-            .expect("the confirmed commit merges");
-        drop(guard);
-        world
-            .resolve_ingest(device, ingest)
-            .await
-            .expect("whatever the replay released is resolved");
     }
     assert!(
         wait_until_epochs_agree(world, group, bounds::round_trip(Recovery::Undisturbed)).await,
@@ -610,11 +593,11 @@ async fn o4_grades_both_edges_of_the_window_the_engine_really_keeps() {
 ///
 /// # Why the race runs in a circle of its own
 ///
-/// The circle S14 builds is outside `world.circles()`, so no engine subscribes
-/// to it — which is what makes "neither device has ingested the other's commit"
-/// a property of the arm rather than of a pause that has to be timed. The engine
-/// records every message's disposition and answers the second look at one MLS
-/// message with a duplicate, so a race delivered live would classify as one.
+/// The circle S14 builds is outside `world.circles()`, and the racers' engines
+/// are stopped for the race (`deafen`): an engine listens to every circle its
+/// device holds, and it records every message's disposition and answers the
+/// second look at one MLS message with a duplicate, so a race delivered live
+/// would classify as one.
 ///
 /// # Why the named arm does not go through `classify`
 ///
@@ -625,12 +608,15 @@ async fn o4_grades_both_edges_of_the_window_the_engine_really_keeps() {
 /// after the ingest, which is exactly what the classifier's pure half exists
 /// for. One ingest either way.
 async fn same_epoch_race(name_the_row: bool) -> Vec<undecryptable::Verdict> {
-    let world = build_world().await;
+    let mut world = build_world().await;
     let circle = world
         .build_extra_circle()
         .await
-        .expect("a circle no engine subscribes to");
+        .expect("a circle outside the world's table");
     let (alice, bob) = pair(&world);
+    deafen(&mut world, (alice, bob))
+        .await
+        .expect("the racers' engines stop");
     co_admin(&world, &circle, alice, bob)
         .await
         .expect("the handoff confirms and the successor applies it");
@@ -651,15 +637,21 @@ async fn same_epoch_race(name_the_row: bool) -> Vec<undecryptable::Verdict> {
     } else {
         let mut out = Vec::with_capacity(2);
         for (ingester, sibling) in [(bob, &stage.first), (alice, &stage.second)] {
-            out.push(
-                undecryptable::classify(
-                    world.device(ingester).expect("a device"),
-                    sibling,
-                    StoredRow::Unknown,
-                )
+            let device = world.device(ingester).expect("a device");
+            let held = undecryptable::classify(device, sibling, StoredRow::Unknown)
                 .await
-                .expect("the classifier reads"),
+                .expect("the classifier reads");
+            assert!(
+                held == undecryptable::Verdict::CommitGap,
+                "MDK v0.10.4 holds a race's sibling for the pass that adjudicates it"
             );
+            device
+                .session()
+                .expect("a session")
+                .settle_receive_for_test(circle.mls_group_id())
+                .await
+                .expect("the pass closes");
+            out.push(undecryptable::classify_settled_sibling(Probe::Unnamed));
         }
         out
     };
@@ -997,33 +989,24 @@ const EXCLUDED_FROM_THE_SWEEP: [&str; 2] = ["lost-commit-unnamed", "full-intake"
 /// rc 1 rather than recorded as a canary, and the day one grades rc 0 its own
 /// test fails with the instruction to promote it to `SWEPT` in the same change.
 ///
-/// C9 (`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`, attribution between
-/// product and rig OPEN): a device hard-killed while owing a peer's eviction
-/// reopens with the obligation orphaned, and then (A) its sends on that circle
-/// are refused with no typed reason at either layer and (B) the peer's own
-/// commit of the same removal is answered `Buffered` and never heals it, so O2
-/// and O6 report the owed eviction.
+/// (C9's `kill-receive-auto-commit` stood here until MDK v0.10.4, where the
+/// killed device takes its peer's commit of the owed eviction; it is `SWEPT`.)
 ///
-/// C7 (`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`): a device that misses
-/// two chained commits never converges again at the pinned engine, because the
-/// deferred-peel sweep is only ever driven by a peelable inbound event and a
-/// device one epoch behind never receives one. That is a PRODUCT DEFECT, not a
-/// decision.
+/// (S16 `outsider-flood` stood here from the bump until Haven gave every
+/// deferred-peel row its try before each send, `docs/MDK_UPSTREAM_TRACKER.md`
+/// T-FOREGROUND-PEEL; it is `SWEPT`.)
 ///
-/// C8 (`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`): a commit dated before more
-/// than a relay's replay cap of outsider forgeries is never on the page the
-/// live plane's limitless REQ is served, the `EOSE` is trusted as complete and
-/// the cursor passes over it, so neither the next REQ nor the catch-up sweep
-/// ever asks for it again: the device that missed it is stranded for good.
-const EXPECTED_RED: [(Scenario, &str); 3] = [
-    (Scenario::ChainedBacklog, "chained-commit-backlog"),
-    (Scenario::PublishConfirmWindow, "kill-receive-auto-commit"),
-    (Scenario::LivePlaneBurial, "buried-past-the-cap"),
-];
+/// (S08 `buried-past-the-cap` stood here for C8 until R4's NIP-77 pass
+/// recovered a commit buried past a relay's replay cap; it is `SWEPT`, and its
+/// relay-without-NIP-77 twin records the residual.)
+///
+/// Empty: no arm is required red today. The list and its checks stay, so the
+/// next measured product red has a home.
+const EXPECTED_RED: [(Scenario, &str); 0] = [];
 
 /// Every (scenario, arm) the sweep below runs, written out so that an arm added
 /// to a scenario without a test here fails rather than widening a loop.
-const SWEPT: [(Scenario, &str); 50] = [
+const SWEPT: [(Scenario, &str); 64] = [
     (Scenario::RelayOutage, "single-relay-outage"),
     (Scenario::RelayOutage, "all-relay-outage"),
     (Scenario::RelayOutage, "rolling-outage"),
@@ -1039,11 +1022,26 @@ const SWEPT: [(Scenario, &str); 50] = [
         "confirm-err-is-not-a-failure",
     ),
     (Scenario::PublishConfirmWindow, "kill-send-plane"),
+    (Scenario::PublishConfirmWindow, "kill-receive-auto-commit"),
     (Scenario::PublishConfirmWindow, "negative-gates-silent"),
+    (Scenario::PublishConfirmWindow, "kill-sweep-eviction"),
     (Scenario::StuckRow, "stuck-row-sweep"),
+    (Scenario::LivePlaneBurial, "buried-past-the-cap"),
     (Scenario::LivePlaneBurial, "unpacked-control"),
+    (
+        Scenario::LivePlaneBurial,
+        "buried-on-a-relay-without-negentropy",
+    ),
     (Scenario::CursorPoisoning, "standing-adversary"),
     (Scenario::CursorPoisoning, "rewrap-created-at-binding"),
+    (
+        Scenario::CursorPoisoning,
+        "member-commit-past-expiration-applied",
+    ),
+    (
+        Scenario::CursorPoisoning,
+        "past-expiration-dropped-by-the-relay-pool",
+    ),
     (Scenario::QuietCircle, "quiet-circle-resume"),
     (Scenario::KeyPackageRotation, "kp-rotation-slot"),
     (Scenario::KeyPackageRotation, "kp-expired-rejected"),
@@ -1054,9 +1052,11 @@ const SWEPT: [(Scenario, &str); 50] = [
     (Scenario::RestartRace, "race-anchor-exhausted"),
     (Scenario::ClosedPrefixes, "closed-prefixes"),
     (Scenario::ClosedPrefixes, "notice"),
-    (Scenario::SwallowedOk, "swallowed-ok-create"),
+    (Scenario::SwallowedOk, "swallowed-ok-founding-welcome"),
     (Scenario::SwallowedOk, "swallowed-ok-relay-update"),
+    (Scenario::SwallowedOk, "swallowed-ok-peers-online-converge"),
     (Scenario::SwallowedOk, "swallowed-ok-location-send"),
+    (Scenario::SwallowedOk, "location-resumes-after-the-ack"),
     (Scenario::DuplicateReorder, "duplicate-replay"),
     (Scenario::DuplicateReorder, "reordered-pages"),
     (Scenario::DuplicateReorder, "cross-sub-eose"),
@@ -1072,14 +1072,23 @@ const SWEPT: [(Scenario, &str); 50] = [
     (Scenario::StorageGrowth, "outsider-flood"),
     (Scenario::StorageGrowth, "member-future-header-flood"),
     (Scenario::StorageGrowth, "pending-window-flood"),
+    (Scenario::StorageGrowth, "processed-ids-growth"),
     (Scenario::RemovalEffectiveness, "removal-withheld-commit"),
     (Scenario::RemovalEffectiveness, "removal-delivered-commit"),
     (Scenario::RemovalEffectiveness, "removal-lag"),
     (Scenario::CatchupSweep, "healthy-drain"),
     (Scenario::CatchupSweep, "clamped-limit"),
     (Scenario::CatchupSweep, "refused-page"),
+    (Scenario::CatchupSweep, "same-second-pile-up"),
+    (
+        Scenario::CatchupSweep,
+        "same-second-pile-up-without-negentropy",
+    ),
     (Scenario::CatchupSweep, "cold-first-connect"),
     (Scenario::CatchupSweep, "future-dated-page"),
+    (Scenario::ChainedBacklog, "chained-commit-backlog"),
+    (Scenario::RoutingCollision, "collided-circles-leave-apart"),
+    (Scenario::SilentRelays, "dead-and-silent-relays"),
 ];
 
 /// The world one arm is run in: the PR profile's own shape, widened only where
@@ -1102,8 +1111,13 @@ fn shape_for(label: &str) -> WorldShape {
             | "rolling-outage"
             | "refusal-is-relay-count-invariant"
             | "cold-first-connect"
+            | "collided-circles-leave-apart"
     ) {
         shape.relays = shape.relays.max(2);
+    }
+    // A dead relay, a silent one, and one that answers.
+    if label == "dead-and-silent-relays" {
+        shape.relays = shape.relays.max(3);
     }
     if matches!(
         label,
@@ -1149,10 +1163,17 @@ async fn happy_path(scenario: Scenario, label: &str) {
         .await
         .expect("the scenario runs");
 
+    let graded: Vec<String> = report
+        .graded
+        .iter()
+        .map(|(invariant, verdict)| format!("{} {verdict}", invariant.id()))
+        .collect();
     assert!(
         report.holds(),
         "a registered arm must have a success path in this crate's own tests, \
-         or the registry claims coverage no lane executes"
+         or the registry claims coverage no lane executes: {report}; floor {}; {}",
+        report.floor,
+        graded.join("; ")
     );
     assert!(
         report.rc() == Rc::Clean,
@@ -1262,58 +1283,12 @@ async fn s05_kill_send_plane_holds() {
     happy_path(Scenario::PublishConfirmWindow, "kill-send-plane").await;
 }
 
-/// The receive-plane kill, required red with exactly the wedge C9 records.
-///
-/// The `stale_expectation` pin is the first assertion: a clean report means the
-/// reopened device healed (or never wedged), and the arm must be promoted to
-/// `SWEPT` (and deleted from `EXPECTED_RED`) in the same change.
+/// The receive-plane kill: the device killed while owing a peer's eviction
+/// takes its peer's commit of it. `EXPECTED_RED` with C9's wedge until MDK
+/// v0.10.4; promoted to `SWEPT` when it graded rc 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn s05_kill_receive_auto_commit_is_red_at_rc_1_with_the_wedge_c9_records() {
-    let (scenario, label) = (Scenario::PublishConfirmWindow, "kill-receive-auto-commit");
-    assert!(
-        EXPECTED_RED.contains(&(scenario, label)),
-        "this test grades an arm the expected-red list names"
-    );
-    let arm = arm_of(scenario, label);
-    let mut world = build_shaped_world(&shape_for(label)).await;
-    let committer = world.devices()[2].tag;
-
-    let report = scenario
-        .run(&mut world, arm, pr_tick())
-        .await
-        .expect("the scenario runs");
-
-    assert!(
-        report.rc() != Rc::Clean,
-        "STALE EXPECTATION: C9 is fixed — the device killed while owing an \
-         eviction took its peer's commit of it. Promote kill-receive-auto-commit \
-         to SWEPT and delete it from EXPECTED_RED in the same change"
-    );
-    assert!(
-        report.floor == Verdict::Holds,
-        "the arm must have parked, published into the silence, killed and \
-         reopened, or the red below is about something else"
-    );
-    assert!(
-        report.rc() == Rc::ViolationOrLeak,
-        "a device left owing an eviction nobody can land is a finding about the \
-         subject"
-    );
-    assert!(
-        report.graded.iter().any(|(invariant, verdict)| {
-            *invariant == Invariant::SendPathLiveness
-                && *verdict == Verdict::Failed(Finding::RemovalOwed { device: committer })
-        }),
-        "O2 must report the killed device's owed eviction"
-    );
-    assert!(
-        report.graded.iter().any(|(invariant, verdict)| {
-            *invariant == Invariant::LocationRoundTrip && *verdict == Verdict::Holds
-        }),
-        "and nothing else: every world circle still round-trips"
-    );
-
-    world.teardown().await.expect("teardown");
+async fn s05_kill_receive_auto_commit_holds() {
+    happy_path(Scenario::PublishConfirmWindow, "kill-receive-auto-commit").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1339,6 +1314,24 @@ async fn s09_standing_adversary_holds() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s09_rewrap_created_at_binding_holds() {
     happy_path(Scenario::CursorPoisoning, "rewrap-created-at-binding").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s09_member_commit_past_expiration_applied_holds() {
+    happy_path(
+        Scenario::CursorPoisoning,
+        "member-commit-past-expiration-applied",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s09_past_expiration_dropped_by_the_relay_pool_holds() {
+    happy_path(
+        Scenario::CursorPoisoning,
+        "past-expiration-dropped-by-the-relay-pool",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1392,8 +1385,8 @@ async fn s17_notice_holds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn s18_swallowed_ok_create_holds() {
-    happy_path(Scenario::SwallowedOk, "swallowed-ok-create").await;
+async fn s18_swallowed_ok_founding_welcome_holds() {
+    happy_path(Scenario::SwallowedOk, "swallowed-ok-founding-welcome").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1402,8 +1395,18 @@ async fn s18_swallowed_ok_relay_update_holds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s18_swallowed_ok_peers_online_converge_holds() {
+    happy_path(Scenario::SwallowedOk, "swallowed-ok-peers-online-converge").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s18_swallowed_ok_location_send_holds() {
     happy_path(Scenario::SwallowedOk, "swallowed-ok-location-send").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s18_location_resumes_after_the_ack_holds() {
+    happy_path(Scenario::SwallowedOk, "location-resumes-after-the-ack").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1455,6 +1458,8 @@ async fn s10_ten_circle_roster_holds() {
     happy_path(Scenario::TenCircleRoster, "ten-circle-roster").await;
 }
 
+/// Promoted from `EXPECTED_RED` once the pre-send drain landed
+/// (`docs/MDK_UPSTREAM_TRACKER.md` T-FOREGROUND-PEEL).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s16_outsider_flood_holds() {
     happy_path(Scenario::StorageGrowth, "outsider-flood").await;
@@ -1468,6 +1473,14 @@ async fn s16_member_future_header_flood_holds() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s16_pending_window_flood_holds() {
     happy_path(Scenario::StorageGrowth, "pending-window-flood").await;
+}
+
+/// A recorded expectation (`docs/MDK_UPSTREAM_TRACKER.md` T-DEDUPE-GROWTH): the
+/// day the engine prunes its processed-transport-id table this goes rc 3, and
+/// the arm is replaced by a graded bound in the same change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s16_processed_ids_growth_holds() {
+    happy_path(Scenario::StorageGrowth, "processed-ids-growth").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1510,22 +1523,98 @@ async fn s20_future_dated_page_holds() {
     happy_path(Scenario::CatchupSweep, "future-dated-page").await;
 }
 
-/// Runs the one `EXPECTED_RED` arm and requires exactly the red it is expected
-/// to be: its floor met (the arm produced its condition), rc 1, and the two
-/// findings C7 predicts — the stranded device's epoch diverged, and this
-/// round's probe never reached it.
-///
-/// The `stale_expectation` pin is the first assertion: a clean report means C7
-/// is FIXED, and the arm must be promoted to `SWEPT` (and deleted from
-/// `EXPECTED_RED`) in the same change, never left asserting a defect the
-/// product no longer has.
+/// S23 was `EXPECTED_RED` until C7's fix; promoted to `SWEPT` with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn s23_chained_commit_backlog_is_red_at_rc_1_with_the_strand_c7_predicts() {
-    let (scenario, label) = EXPECTED_RED[0];
+async fn s23_chained_commit_backlog_holds() {
+    happy_path(Scenario::ChainedBacklog, "chained-commit-backlog").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s24_collided_circles_leave_apart_holds() {
+    happy_path(Scenario::RoutingCollision, "collided-circles-leave-apart").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s24_two_circles_that_never_collided_prove_nothing_about_a_collision() {
+    // The mis-configuration: no routing update, so nothing is held and the
+    // arm has no collision to grade.
+    let mut world = build_shaped_world(&shape_for("collided-circles-leave-apart")).await;
+
+    let report = uncollided_control(&mut world, pr_tick())
+        .await
+        .expect("the scenario runs");
+    floor_is_unusable(&report);
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s25_dead_and_silent_relays_holds() {
+    happy_path(Scenario::SilentRelays, "dead-and-silent-relays").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s25_relays_that_all_answered_prove_nothing_about_a_silent_one() {
+    // The mis-configuration: no relay is dead or silent, so nothing held the
+    // circle and nothing was owed.
+    let mut world = build_shaped_world(&shape_for("dead-and-silent-relays")).await;
+
+    let report = answering_control(&mut world, pr_tick())
+        .await
+        .expect("the scenario runs");
+    floor_is_unusable(&report);
+
+    world.teardown().await.expect("teardown");
+}
+
+/// S08 `buried-past-the-cap` was `EXPECTED_RED` for C8 until R4: the victim's
+/// foreground entry now runs a NIP-77 pass that recovers the buried commit, and
+/// the arm grades rc 0 with its `reconciled_on_the_wire` canary met — so a
+/// recovery by any other mechanism would leave the floor unmet, not green.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s08_buried_past_the_cap_holds() {
+    happy_path(Scenario::LivePlaneBurial, "buried-past-the-cap").await;
+}
+
+/// The residual on a relay that does not speak NIP-77, recorded: the burial
+/// persists there, every canary met — the day it stops, the arm is rc 3.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s08_buried_on_a_relay_without_negentropy_holds() {
+    happy_path(
+        Scenario::LivePlaneBurial,
+        "buried-on-a-relay-without-negentropy",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s20_same_second_pile_up_holds() {
+    happy_path(Scenario::CatchupSweep, "same-second-pile-up").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s20_same_second_pile_up_without_negentropy_holds() {
+    happy_path(
+        Scenario::CatchupSweep,
+        "same-second-pile-up-without-negentropy",
+    )
+    .await;
+}
+
+/// Runs S05's `kill-sweep-eviction` and requires it green on the path that
+/// replaced the wake sweep's own staging: its floor met — the sweep made
+/// nothing of the departure, the process died, and the foreground's drive made
+/// the eviction under a record and a relay acknowledged it — and every oracle
+/// holding (decision 27's window closed in W9q).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s05_kill_sweep_eviction_is_green_on_the_driven_path() {
+    let (scenario, label) = (Scenario::PublishConfirmWindow, "kill-sweep-eviction");
+    assert!(
+        !EXPECTED_RED.contains(&(scenario, label)),
+        "the arm this test requires green is not on the expected-red list"
+    );
     let arm = arm_of(scenario, label);
     let mut world = build_shaped_world(&shape_for(label)).await;
-    let victim = world.devices()[2].tag;
-    let circle = world.circles()[0].tag;
 
     let report = scenario
         .run(&mut world, arm, pr_tick())
@@ -1533,107 +1622,30 @@ async fn s23_chained_commit_backlog_is_red_at_rc_1_with_the_strand_c7_predicts()
         .expect("the scenario runs");
 
     assert!(
-        report.rc() != Rc::Clean,
-        "STALE EXPECTATION: C7 is fixed — a device that missed two chained commits \
-         converged. Promote chained-commit-backlog to SWEPT and delete it from \
-         EXPECTED_RED in the same change"
-    );
-    assert!(
         report.floor == Verdict::Holds,
-        "the arm must have produced the chained backlog it grades, or the red \
-         below is about something else"
+        "the arm did not reach its own conditions: the sweep made something of the \
+         departure, or the foreground's drive did not make the eviction"
     );
     assert!(
-        report.rc() == Rc::ViolationOrLeak,
-        "a device stranded behind a chained backlog is a finding about the subject"
-    );
-    assert!(
-        report.graded.iter().any(
-            |(invariant, verdict)| *invariant == Invariant::SendPathLiveness
-                && *verdict == Verdict::Failed(Finding::EpochDiverged { circle })
-        ),
-        "O2 must report the stranded device's epoch as diverged"
-    );
-    assert!(
-        report.graded.iter().any(|(invariant, verdict)| {
-            *invariant == Invariant::LocationRoundTrip
-                && matches!(
-                    verdict,
-                    Verdict::Failed(Finding::ProbeNotDelivered { to, circle: c, .. })
-                        if *to == victim && *c == circle
-                )
-        }),
-        "O1 must report this round's probe as never reaching the stranded device"
+        report.rc() == Rc::Clean && report.holds(),
+        "a wake sweep killed after taking a departure in left a circle that does not \
+         converge, or a send it refuses"
     );
 
     world.teardown().await.expect("teardown");
 }
 
-/// Runs S08's `EXPECTED_RED` arm and requires exactly the red C8 predicts: its
-/// floor met (every burial condition held), rc 1, the buried commit's circle
-/// diverged, and the closing round's probe never reaching the victim.
-///
-/// The `stale_expectation` pin is the first assertion. The arm's canaries are
-/// the burial's conditions and never its symptoms, so a product that serves the
-/// buried commit grades rc 0 here rather than rc 3 — and that is C8 FIXED: the
-/// arm moves to `SWEPT` (and out of `EXPECTED_RED`) in the same change.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn s08_buried_past_the_cap_is_red_at_rc_1_with_the_strand_c8_predicts() {
-    let (scenario, label) = (Scenario::LivePlaneBurial, "buried-past-the-cap");
-    assert!(
-        EXPECTED_RED.contains(&(scenario, label)),
-        "the arm this test requires red is the one the expected-red list names"
-    );
-    let arm = arm_of(scenario, label);
-    let mut world = build_shaped_world(&shape_for(label)).await;
-    let circle = world.circles()[0].tag;
-    let admin = world.circles()[0].admin();
-    let victim = world
-        .devices()
-        .iter()
-        .map(|device| device.tag)
-        .filter(|tag| *tag != admin)
-        .nth(1)
-        .expect("a third device");
+async fn s05_a_sweep_under_no_silence_proves_nothing() {
+    // The mis-configuration: no plane swallows an acknowledgement while the
+    // sweep runs, so the silence the arm's floor counts never falls and the
+    // run proves nothing about a sweep that could have sent into one.
+    let mut world = build_shaped_world(&shape_for("kill-sweep-eviction")).await;
 
-    let report = scenario
-        .run(&mut world, arm, pr_tick())
+    let report = acked_kill_control(&mut world, "kill-sweep-eviction", pr_tick())
         .await
         .expect("the scenario runs");
-
-    assert!(
-        report.rc() != Rc::Clean,
-        "STALE EXPECTATION: C8 is fixed — a commit buried past the relay's replay \
-         cap reached the device that missed it. Promote buried-past-the-cap to SWEPT \
-         and delete it from EXPECTED_RED in the same change"
-    );
-    assert!(
-        report.floor == Verdict::Holds,
-        "the arm must have produced the burial it grades, or the red below is \
-         about something else"
-    );
-    assert!(
-        report.rc() == Rc::ViolationOrLeak,
-        "a device stranded behind a buried commit is a finding about the subject"
-    );
-    assert!(
-        report.graded.iter().any(
-            |(invariant, verdict)| *invariant == Invariant::SendPathLiveness
-                && *verdict == Verdict::Failed(Finding::EpochDiverged { circle })
-        ),
-        "O2 must report the victim's epoch as diverged"
-    );
-    assert!(
-        report.graded.iter().any(|(invariant, verdict)| {
-            *invariant == Invariant::LocationRoundTrip
-                && matches!(
-                    verdict,
-                    Verdict::Failed(Finding::ProbeNotDelivered { to, circle: c, .. })
-                        if *to == victim && *c == circle
-                )
-        }),
-        "O1 must report the closing round's probe as never reaching the victim"
-    );
+    floor_is_unusable(&report);
 
     world.teardown().await.expect("teardown");
 }
@@ -1657,7 +1669,7 @@ async fn a_scenario_arm_graded_against_a_floor_it_cannot_reach_is_unusable() {
     // The plant: one more fault than the arm fires. Nothing about the world
     // changes — the same observation is graded against a declaration it cannot
     // satisfy, which is the ARITHMETIC of a floor rather than a world that
-    // proved nothing. The thirteen controls below are the other half: a real
+    // proved nothing. The controls below are the other half: a real
     // mis-configuration, one per scenario.
     let unreachable = ExpectationFloor {
         faults_applied: report.observed.faults_applied + 1,
@@ -1679,7 +1691,7 @@ async fn a_scenario_arm_graded_against_a_floor_it_cannot_reach_is_unusable() {
 
 // ── One real mis-configuration control per scenario (R-M5) ──────────────────
 //
-// A floor re-graded against a bigger number is arithmetic. These thirteen are
+// A floor re-graded against a bigger number is arithmetic. These controls are
 // the other thing: the arm is run for real against a world deliberately arranged so
 // the condition it grades cannot arise, and the run must report rc 3 — "this
 // proves nothing" — rather than the rc 0 every oracle would otherwise give it.
@@ -1899,8 +1911,9 @@ async fn s05_a_kill_after_the_ack_has_no_window_to_die_inside() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s05_an_eviction_acked_before_the_kill_leaves_nothing_owed_to_orphan() {
     // The receive-plane kill's mis-configuration: nothing swallows the
-    // committer's acknowledgement, so the foreground open publishes the parked
-    // eviction, Rule 13 confirms it, and the process dies owing nothing.
+    // committer's acknowledgement, so the foreground's drive sends the
+    // eviction, Rule 13 confirms it, and the process dies with no record
+    // awaiting a relay.
     let mut world = build_shaped_world(&shape_for("kill-receive-auto-commit")).await;
 
     let report = acked_kill_control(&mut world, "kill-receive-auto-commit", pr_tick())
@@ -2180,7 +2193,7 @@ async fn s23_one_commit_while_away_is_not_a_chained_backlog() {
     // The mis-configuration: ONE commit lands while the victim is away. A
     // single commit is redelivered and applied on its own (S04), so the victim
     // converges, every oracle holds, and what the floor demands — a chain of
-    // two — never formed: rc 3, never the C7 red the arm is expected to grade.
+    // two — never formed: rc 3, never a green that proves nothing about C7.
     let mut world = build_shaped_world(&shape_for("chained-commit-backlog")).await;
 
     let report = one_commit_control(&mut world, pr_tick())
@@ -2216,6 +2229,27 @@ async fn s16_a_seal_no_plane_ever_carried_floods_no_buffer() {
         Err(refused) => assert!(
             refused.rc() == Rc::Unusable,
             "a flood with no plane to carry it is rc 3, never clean"
+        ),
+    }
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s16_fixes_no_plane_ever_carried_grow_no_processed_ids() {
+    // The mis-configuration: the endpoint is gone, so the circle's only sends
+    // are dropped at the plane. No wrapper reaches the victim, nothing is
+    // peeled, and the arm refuses at its first fix rather than reporting a
+    // table that grew.
+    let mut world = build_shaped_world(&shape_for("processed-ids-growth")).await;
+    down_and_noticed(&mut world, 0).await;
+
+    let report = run_arm(Scenario::StorageGrowth, "processed-ids-growth", &mut world).await;
+    match report {
+        Ok(report) => floor_is_unusable(&report),
+        Err(refused) => assert!(
+            refused.rc() == Rc::Unusable,
+            "growth with no plane to carry the traffic is rc 3, never clean"
         ),
     }
 
@@ -2322,7 +2356,7 @@ fn every_registered_scenario_has_a_mis_configuration_control() {
     // The controls above, by the scenario each one controls. Written out
     // so that a scenario added to the registry without a control fails here
     // rather than inheriting somebody else's.
-    const CONTROLLED: [Scenario; 21] = [
+    const CONTROLLED: [Scenario; 23] = [
         Scenario::RelayOutage,
         Scenario::ReceiverPartition,
         Scenario::LostCommit,
@@ -2344,6 +2378,8 @@ fn every_registered_scenario_has_a_mis_configuration_control() {
         Scenario::StorageGrowth,
         Scenario::RemovalEffectiveness,
         Scenario::CatchupSweep,
+        Scenario::RoutingCollision,
+        Scenario::SilentRelays,
     ];
     assert!(
         CONTROLLED.len() == Scenario::REGISTRY.len(),
@@ -2357,16 +2393,16 @@ fn every_registered_scenario_has_a_mis_configuration_control() {
     }
 }
 
-/// The rig's ladder resolves what a resolution hands back, rather than leaving
-/// a staged commit for nobody.
+/// A commit staged under its record and left for a later drive — the shape a
+/// resolution hands back when it stages the next commit of a cascade — is sent
+/// and confirmed by the next foreground drive the rig asks the product for,
+/// never left staged for nobody.
 ///
-/// haven-core ends both Rule-13 rungs in the engine's replay, so a confirm can
-/// hand back the NEXT staged commit. The rig has one ladder for that
-/// (`rig::circle::resolve_ingest`), and its whole job is that a ref arriving
-/// that way is published and resolved like any other — a commit left staged
-/// forks the group, which is the state every oracle in this file assumes away.
+/// The rig resolves no pending state of its own any more: the product's driver
+/// (`Publishing::resume`) is the one that does, and a commit left staged forks
+/// the group, which is the state every oracle in this file assumes away.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_rigs_ladder_resolves_a_commit_a_resolution_handed_back() {
+async fn a_commit_left_for_the_next_drive_is_sent_and_confirmed_by_it() {
     let world = build_shaped_world(&pr_spec().world).await;
     let group = world.circles()[0].mls_group_id().clone();
     let admin = world.devices()[0].tag;
@@ -2379,56 +2415,35 @@ async fn the_rigs_ladder_resolves_a_commit_a_resolution_handed_back() {
         .expect("the admin")
         .manager()
         .expect("a manager")
-        .update_circle_relays(&group, &relays)
+        .update_circle_relays_staging(&group, &relays, WallClock.now_ms())
         .await
         .expect("a relay-list commit stages");
+    assert!(staged.commit.is_some(), "premise: a commit was staged");
+    let seal = |index| {
+        let world = &world;
+        let group = &group;
+        async move {
+            world
+                .device(admin)
+                .expect("the admin")
+                .manager()
+                .expect("a manager")
+                .seal_location_for_test(group, &ProbeToken::mint(0, index).as_location())
+                .await
+        }
+    };
     assert!(
-        world
-            .device(admin)
-            .expect("the admin")
-            .manager()
-            .expect("a manager")
-            .encrypt_location(
-                &group,
-                &world.device(admin).expect("the admin").keys.public_key(),
-                &ProbeToken::mint(0, 1).as_location(),
-                LOCATION_MESSAGE_RETENTION_SECS,
-            )
-            .await
-            .is_err(),
+        seal(1).await.is_err(),
         "precondition: the staged commit really does hold the circle in a \
          publish-before-apply transition"
     );
 
-    // Handed to the ladder the way a resolution's own replay hands one back.
-    world
-        .resolve_ingest(
-            admin,
-            DecryptedIngest {
-                results: Vec::new(),
-                auto_commits: vec![staged],
-                proposals: Vec::new(),
-            },
-        )
-        .await
-        .expect("the ladder resolves it");
+    let resumed = world.resume(admin).await.expect("the driver runs");
 
     assert!(
-        world
-            .device(admin)
-            .expect("the admin")
-            .manager()
-            .expect("a manager")
-            .encrypt_location(
-                &group,
-                &world.device(admin).expect("the admin").keys.public_key(),
-                &ProbeToken::mint(0, 2).as_location(),
-                LOCATION_MESSAGE_RETENTION_SECS,
-            )
-            .await
-            .is_ok(),
+        !resumed.errored && seal(2).await.is_ok(),
         "the circle sends again, which only a RESOLVED pending state allows — a \
-         ladder that dropped it would leave the group staged for ever"
+         drive that left it would leave the group staged for ever"
     );
 
     world.teardown().await.expect("teardown");

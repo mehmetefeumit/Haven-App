@@ -14,7 +14,7 @@
 ///
 /// Haven's inner rumor is stamped by `nostr::EventBuilder::build`, i.e.
 /// `Timestamp::now()`, which is a **u64 of whole seconds**. So two circles
-/// whose `encryptLocation` calls land in the same wall-clock second emit two
+/// whose seals land in the same wall-clock second emit two
 /// kind-445 events carrying a byte-identical `created_at` (and, since the
 /// NIP-40 `expiration` tag is `created_at + LOCATION_MESSAGE_RETENTION_SECS`,
 /// an identical expiration too). That equality is inside the SIGNED event: it

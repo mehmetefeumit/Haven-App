@@ -171,6 +171,10 @@ class SyncStatusNotifier extends Notifier<SyncStatus> {
       case FfiSyncStatusReason.relayError:
         // A non-fatal issue: record it but keep the current connection phase.
         return current.copyWith(lastIssue: reason);
+      case FfiSyncStatusReason.refetchOwed:
+        // Work owed to the catch-up sweep (`requestCatchupOnRefetchOwed`),
+        // not a connection state or an issue.
+        return current;
     }
   }
 

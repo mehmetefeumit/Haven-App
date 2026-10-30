@@ -159,7 +159,11 @@ class _FakeCircleManager implements CircleManagerFfi {
 
   Exception? buildRelayListPublishThrows;
   BuiltRelayListEventFfi buildRelayListPublishResult =
-      const BuiltRelayListEventFfi(targets: [], suppressed: true);
+      const BuiltRelayListEventFfi(
+        targets: [],
+        suppressed: true,
+        awaitingResetAcknowledgement: false,
+      );
   List<int>? lastBuildRelayListPublishSecret;
 
   @override
@@ -710,6 +714,7 @@ void main() {
       final manager = _FakeCircleManager()
         ..buildRelayListPublishResult = const BuiltRelayListEventFfi(
           suppressed: false,
+          awaitingResetAcknowledgement: false,
           eventJson: '{"kind":10002}',
           eventIdHex: 'abc123',
           targets: ['wss://a.example'],
@@ -739,6 +744,7 @@ void main() {
         final manager = _FakeCircleManager()
           ..buildRelayListPublishResult = const BuiltRelayListEventFfi(
             suppressed: true,
+            awaitingResetAcknowledgement: false,
             targets: [],
           );
         final service = NostrRelayPreferencesService(manager: manager);
@@ -749,6 +755,28 @@ void main() {
         expect(result.suppressed, isTrue);
         expect(result.eventJson, isNull);
         expect(result.eventIdHex, isNull);
+        expect(result.targets, isEmpty);
+      },
+    );
+
+    test(
+      'a response held for the storage-reset notice carries no event data and '
+      'says why — the caller must not be handed anything publishable',
+      () async {
+        final manager = _FakeCircleManager()
+          ..buildRelayListPublishResult = const BuiltRelayListEventFfi(
+            suppressed: false,
+            awaitingResetAcknowledgement: true,
+            targets: [],
+          );
+        final service = NostrRelayPreferencesService(manager: manager);
+        final result = await service.buildRelayListPublish(
+          identitySecretBytes: Uint8List(32),
+          category: RelayCategory.keyPackage,
+        );
+        expect(result.awaitingResetAcknowledgement, isTrue);
+        expect(result.suppressed, isFalse);
+        expect(result.eventJson, isNull);
         expect(result.targets, isEmpty);
       },
     );

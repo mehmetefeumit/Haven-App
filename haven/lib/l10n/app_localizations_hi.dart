@@ -698,9 +698,6 @@ class AppLocalizationsHi extends AppLocalizations {
   String get nameCircleStageCreatingGroup => 'सुरक्षित समूह बनाया जा रहा है...';
 
   @override
-  String get nameCircleStageSendingInvites => 'निमंत्रण भेजे जा रहे हैं...';
-
-  @override
   String get nameCircleStageComplete => 'हो गया!';
 
   @override
@@ -718,7 +715,7 @@ class AppLocalizationsHi extends AppLocalizations {
   }
 
   @override
-  String nameCircleCreatedPartialSnack(String name, int sent, int total) {
+  String nameCircleCreatedSentSoFarSnack(String name, int sent, int total) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -727,7 +724,15 @@ class AppLocalizationsHi extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'सर्कल \"$name\" बन गया। निमंत्रण भेजे गए ($totalString में से $sentString); बाकी की डिलीवरी लंबित है।';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          'सर्कल \"$name\" बन गया। अब तक भेजे गए निमंत्रण: $totalString में से $sentString। ऐप खुला रहने के दौरान Haven बाकी निमंत्रण ज़्यादा से ज़्यादा एक दिन तक भेजता रहता है।',
+      one:
+          'सर्कल \"$name\" बन गया। अब तक भेजे गए निमंत्रण: $totalString में से $sentString। ऐप खुला रहने के दौरान Haven इसे ज़्यादा से ज़्यादा एक दिन तक भेजता रहता है।',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -808,7 +813,7 @@ class AppLocalizationsHi extends AppLocalizations {
   }
 
   @override
-  String addMemberPartialDelivery(int sent, int total) {
+  String addMemberSentSoFar(int sent, int total, String circleName) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -817,7 +822,38 @@ class AppLocalizationsHi extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'निमंत्रण भेजे गए ($totalString में से $sentString)। बाकी की डिलीवरी लंबित है।';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          '$circleName सर्कल के लिए अब तक भेजे गए निमंत्रण: $totalString में से $sentString। ऐप खुला रहने के दौरान Haven बाकी निमंत्रण ज़्यादा से ज़्यादा एक दिन तक भेजता रहता है।',
+      one:
+          '$circleName सर्कल के लिए अब तक भेजे गए निमंत्रण: $totalString में से $sentString। ऐप खुला रहने के दौरान Haven इसे ज़्यादा से ज़्यादा एक दिन तक भेजता रहता है।',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String addMemberReinviteNeeded(String circleName) {
+    return '$circleName सर्कल का निमंत्रण Haven नहीं भेज सकता। उस व्यक्ति को हटाकर फिर से जोड़ें।';
+  }
+
+  @override
+  String get memberCannotReceiveInvitations =>
+      'Haven आपके चुने हुए सभी लोगों को आमंत्रित नहीं कर सकता, क्योंकि उनमें से कम से कम एक व्यक्ति का निमंत्रण कहाँ भेजना है, यह उसे पता नहीं चल सका। आपने जिन लोगों को चुना है, उनसे कहें कि वे जाँच लें कि उनका ऐप निमंत्रण प्राप्त कर सकता है या नहीं, उसके बाद फिर कोशिश करें।';
+
+  @override
+  String get missedInvitationsShowWho => 'लोग दिखाएँ';
+
+  @override
+  String missedInvitationsTitle(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'निमंत्रण नहीं भेजे जा सके',
+      one: 'निमंत्रण नहीं भेजा जा सका',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -872,6 +908,11 @@ class AppLocalizationsHi extends AppLocalizations {
   }
 
   @override
+  String circleMemberRemoveAwaitingAnnouncement(String name) {
+    return '$name को अभी भी हटाया जा रहा है: रिले की पुष्टि का इंतज़ार है। जब तक यह पूरा नहीं होता, इस सर्कल के साथ कुछ भी साझा नहीं किया जाता।';
+  }
+
+  @override
   String get circleMemberAdmin => 'एडमिन';
 
   @override
@@ -906,7 +947,12 @@ class AppLocalizationsHi extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'आमंत्रित करने के लिए तैयार';
 
   @override
-  String get pendingMemberNeedsUpdate => 'Haven अपडेट करना होगा';
+  String get pendingMemberNeedsUpdate =>
+      'उन्हें Haven अपडेट करना या खोलना होगा';
+
+  @override
+  String get memberKeyPackageStale =>
+      'Haven अभी उन्हें आमंत्रित नहीं कर सकता। उनसे Haven खोलने के लिए कहें, उसके बाद फिर कोशिश करें।';
 
   @override
   String get memberSearchHint => 'सदस्य ID दर्ज करें...';
@@ -1058,6 +1104,27 @@ class AppLocalizationsHi extends AppLocalizations {
       'निमंत्रण स्वीकार करने में विफल। कृपया फिर कोशिश करें।';
 
   @override
+  String invitationNeedsNewInviteError(String name) {
+    return 'यह निमंत्रण अब इस्तेमाल नहीं किया जा सकता। $name से आपको फिर से आमंत्रित करने के लिए कहें। हो सकता है उन्हें पहले Haven अपडेट करना पड़े।';
+  }
+
+  @override
+  String get rejoinDialogTitle => 'क्या इस सर्कल में फिर से शामिल होना है?';
+
+  @override
+  String rejoinDialogBody(String inviterName, String circleName) {
+    return '$inviterName ने आपको “$circleName” सर्कल में आमंत्रित किया है, जो इस फ़ोन पर पहले से है। ऐसा तब हो सकता है जब आपको सर्कल से हटाकर फिर से आमंत्रित किया गया हो। फिर से शामिल होने पर इस फ़ोन पर मौजूद सर्कल की कॉपी बदल दी जाएगी। “अस्वीकार करें” चुनने पर यह निमंत्रण हमेशा के लिए खत्म हो जाता है; “रद्द करें” चुनने पर यह बाद के लिए बना रहता है।';
+  }
+
+  @override
+  String rejoinDialogBodyUnnamed(String circleName) {
+    return 'आपको “$circleName” सर्कल में आमंत्रित किया गया है, जो इस फ़ोन पर पहले से है। ऐसा तब हो सकता है जब आपको सर्कल से हटाकर फिर से आमंत्रित किया गया हो। फिर से शामिल होने पर इस फ़ोन पर मौजूद सर्कल की कॉपी बदल दी जाएगी। “अस्वीकार करें” चुनने पर यह निमंत्रण हमेशा के लिए खत्म हो जाता है; “रद्द करें” चुनने पर यह बाद के लिए बना रहता है।';
+  }
+
+  @override
+  String get rejoinDialogConfirm => 'फिर से शामिल हों';
+
+  @override
   String invitationRosterFullError(int limit) {
     final intl.NumberFormat limitNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1190,11 +1257,22 @@ class AppLocalizationsHi extends AppLocalizations {
   String get circleDetailsLeaveCircle => 'सर्कल छोड़ें';
 
   @override
+  String get circleDetailsLeavingInProgress => 'सर्कल छोड़ा जा रहा है…';
+
+  @override
   String get leaveCircleDialogTitle => 'सर्कल छोड़ें';
 
   @override
   String get leaveCircleDialogBody =>
       'यह सर्कल छोड़ें? आप इसके सदस्यों को अपना स्थान भेजना बंद कर देंगे और उनका स्थान देखना भी बंद हो जाएगा। आपने आखिरी बार जो स्थान भेजा था वह एक दिन तक उनके फ़ोन पर बना रहता है। इसे पूर्ववत नहीं किया जा सकता: दोबारा शामिल होने के लिए आपको नया निमंत्रण चाहिए होगा।';
+
+  @override
+  String get leaveDisbandedCircleDialogBody =>
+      'यह सर्कल समाप्त हो गया है, इसलिए इसके साथ अब कुछ भी साझा नहीं किया जाता। इसे छोड़ने से यह इस फ़ोन से हट जाता है।';
+
+  @override
+  String get leaveCircleDialogAdminNote =>
+      'आप इस सर्कल के एडमिन हैं। आपके सर्कल छोड़ने से पहले, Haven किसी दूसरे सदस्य को एडमिन बनाने की कोशिश करता है, ताकि सर्कल काम करता रहे।';
 
   @override
   String get leaveCircleConfirm => 'छोड़ें';
@@ -1209,52 +1287,32 @@ class AppLocalizationsHi extends AppLocalizations {
   String get leaveCircleError => 'सर्कल छोड़ने में विफल';
 
   @override
-  String get circleBlockedBannerTitle => 'यह सर्कल अपडेट नहीं किया जा सकता';
-
-  @override
-  String get circleBlockedBannerBody =>
-      'इस सर्कल की एन्क्रिप्शन में कुछ गड़बड़ हो गई, इसलिए Haven अब इसमें न तो अपडेट भेज सकता है और न ही प्राप्त कर सकता है। आपको आख़िरी बार जो पता था, वह आप अभी भी नीचे देख सकते हैं, या यह सर्कल छोड़ सकते हैं।';
-
-  @override
-  String get legacyCircleBannerTitle => 'इस सर्कल को फिर से बनाना ज़रूरी है';
-
-  @override
-  String get legacyCircleBannerBody =>
-      'Haven का एन्क्रिप्शन इंजन अपग्रेड हो गया है, इसलिए यह सर्कल अब इस्तेमाल नहीं किया जा सकता। उन्हीं लोगों के साथ स्थान साझा करना जारी रखने के लिए इसे फिर से बनाएँ। आपको उन्हें दोबारा आमंत्रित करना होगा।';
-
-  @override
   String get legacyCircleRecreateCta => 'सर्कल फिर से बनाएँ';
 
   @override
-  String get legacyCircleRemoveCta => 'हटाएँ';
+  String get storageResetTitle => 'Haven अपडेट हो गया है';
 
   @override
-  String get legacyCircleRemoveDialogTitle => 'सर्कल हटाएँ?';
+  String get storageResetKept =>
+      'आपकी पहचान नहीं बदली है, और आपने जो सार्वजनिक प्रोफ़ाइल पहले ही प्रकाशित की है, वह जैसी है वैसी ही रहेगी।';
 
   @override
-  String get legacyCircleRemoveDialogBody =>
-      'यह सर्कल अब इस्तेमाल नहीं किया जा सकता और आपकी सूची से हटा दिया जाएगा। इसकी जगह आप जो भी नया सर्कल बनाएँगे, उस पर इसका कोई असर नहीं पड़ेगा।';
+  String get storageResetLost =>
+      'Haven के नए एन्क्रिप्शन इंजन पर जाने के लिए इस अपडेट से पहले बनाए गए सर्कल हटा दिए गए। उन्हें फिर से बनाएँ और उनके सदस्यों को दोबारा आमंत्रित करें। इस अपडेट से पहले आपने लोगों को जो उपनाम दिए थे, और प्रोफ़ाइल का कोई भी बदलाव जो तब तक पूरी तरह सहेजा नहीं गया था, वे भी हटा दिए गए।';
 
   @override
-  String get legacyCircleRemoveConfirm => 'हटाएँ';
+  String get storageResetRelays =>
+      'इस अपडेट ने आपकी रिले सेटिंग्स को Haven की डिफ़ॉल्ट सेटिंग्स पर रीसेट कर दिया। जब तक आप आगे नहीं बढ़ते या रिले सेटिंग्स से वापस नहीं आते, तब तक ये सेटिंग्स प्रकाशित नहीं होंगी, इसलिए आप पहले अपने रिले जोड़ सकते हैं।';
 
   @override
-  String get legacyCutoverExplainerTitle => 'Haven अपडेट हो गया है';
+  String get storageResetContinue => 'आगे बढ़ें';
 
   @override
-  String get legacyCutoverExplainerIdentityUnchanged =>
-      'आपकी पहचान और सार्वजनिक प्रोफ़ाइल पहले जैसी ही हैं। इनके लिए आपको कुछ भी नहीं करना है।';
+  String get storageResetOpenRelaySettings => 'रिले सेटिंग्स';
 
   @override
-  String get legacyCutoverExplainerCirclesNeedRecreation =>
-      'बेहतर सुरक्षा के लिए, आपके सर्कल फिर से बनाने होंगे और उनके सदस्यों को दोबारा आमंत्रित करना होगा, तभी आप उनमें फिर से स्थान साझा कर पाएँगे।';
-
-  @override
-  String get legacyCutoverExplainerAcknowledge => 'ठीक है';
-
-  @override
-  String get relaySettingsLegacyRetractionPending =>
-      'Haven अभी भी रिले से कह रहा है कि हाल के सुरक्षा अपडेट से बचा कुछ पुराना डेटा हटा दें।';
+  String get storageResetAcknowledgeFailed =>
+      'Haven आपका जवाब सहेज नहीं सका। जब तक यह सहेजा नहीं जाता, Haven आपकी रिले सेटिंग्स या निमंत्रण कुंजी प्रकाशित नहीं करेगा, इसलिए अभी कोई आपको आमंत्रित नहीं कर सकता। फिर से कोशिश करें, नहीं तो अगली बार खुलने पर Haven फिर पूछेगा।';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'सर्कल पैनल संक्षिप्त हुआ';
@@ -1479,6 +1537,9 @@ class AppLocalizationsHi extends AppLocalizations {
   @override
   String get identityAdvancedDeleteError =>
       'पहचान हटाने में विफल। कृपया फिर कोशिश करें।';
+
+  @override
+  String get identityAdvancedDeletingProgress => 'आपकी पहचान हटाई जा रही है…';
 
   @override
   String identityAdvancedCopiedToClipboard(String label) {
@@ -1765,7 +1826,7 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get clockSkewBodyBehind =>
-      'इस फ़ोन की घड़ी आपके बाकी सर्कलों से पीछे चल रही है, इसलिए आपका स्थान भेजा तो जाता है, पर किसी के देखने से पहले ही उसकी समय-सीमा खत्म हो जाती है। इसे ठीक करने के लिए सिस्टम सेटिंग में तारीख और समय अपने आप सेट करना चालू करें।';
+      'इस फ़ोन की घड़ी आपके सर्कलों के बाकी सदस्यों से पीछे चल रही है, इसलिए आपके स्थान भेजे तो जाते हैं, पर उनकी समय-सीमा जल्दी खत्म हो जाती है, और आपके सर्कल उनमें से कुछ या सभी को देखने से चूक सकते हैं। इसे ठीक करने के लिए सिस्टम सेटिंग में तारीख और समय अपने आप सेट करना चालू करें।';
 
   @override
   String get clockSkewResolvedAnnouncement =>
@@ -1842,24 +1903,8 @@ class AppLocalizationsHi extends AppLocalizations {
   String get sharingHealthRepairAction => 'ठीक करें';
 
   @override
-  String get sharingHealthRepairUnavailableHint =>
-      'इस सर्कल के लिए ठीक करने का विकल्प उपलब्ध नहीं है';
-
-  @override
-  String get sharingHealthRepairHint =>
-      'रिले से दोबारा जुड़ता है, आपका स्थान फिर से भेजने की कोशिश करता है, और अगर आप इस सर्कल के एडमिन हैं तो इसे नई कुंजी दे सकता है';
-
-  @override
   String get sharingHealthRepairSent =>
       'ठीक करने का बदलाव भेज दिया गया। जब यह दूसरों के फ़ोन तक पहुँच जाएगा, तब उनके अपडेट भी आने लगेंगे।';
-
-  @override
-  String get sharingHealthRepairNotOwner =>
-      'इस सर्कल को सिर्फ़ इसके एडमिन ही ठीक कर सकते हैं। उनसे कहें कि वे आपको हटाकर दोबारा जोड़ दें।';
-
-  @override
-  String get sharingHealthRepairNeedsNewCircle =>
-      'इस सर्कल को इस फ़ोन पर ठीक नहीं किया जा सकता। उन्हीं लोगों के साथ नया सर्कल बनाएँ।';
 
   @override
   String get sharingHealthRepairNothingToDo =>
@@ -1872,6 +1917,194 @@ class AppLocalizationsHi extends AppLocalizations {
   @override
   String get sharingHealthResumedAnnouncement =>
       'स्थान साझाकरण फिर से काम कर रहा है।';
+
+  @override
+  String get sharingHealthTitleQuarantined =>
+      'Haven अभी यह सर्कल नहीं खोल पा रहा है';
+
+  @override
+  String get sharingHealthBodyQuarantined =>
+      'इस फ़ोन पर यह सर्कल लोड करते समय कुछ गड़बड़ हो गई। सर्कल अब भी यहीं है।';
+
+  @override
+  String get sharingHealthTitleDisbanded => 'यह सर्कल समाप्त हो गया है';
+
+  @override
+  String get sharingHealthBodyDisbanded =>
+      'एक एडमिन ने यह सर्कल समाप्त कर दिया है, इसलिए इसके साथ अब कुछ भी साझा नहीं किया जाता। इसे इस फ़ोन से हटाने के लिए सर्कल छोड़ें।';
+
+  @override
+  String get sharingHealthQuarantineRetryHint =>
+      'इस सर्कल को फिर से लोड करने की कोशिश करता है';
+
+  @override
+  String get sharingHealthQuarantineRetryFailedAnnouncement =>
+      'Haven अभी भी यह सर्कल नहीं खोल पा रहा है।';
+
+  @override
+  String get sharingHealthTitleUnrecoverable =>
+      'इस फ़ोन पर इस सर्कल ने काम करना बंद कर दिया है';
+
+  @override
+  String get sharingHealthBodyUnrecoverable =>
+      'Haven अब इस फ़ोन पर इस सर्कल में न तो अपडेट भेज सकता है और न ही प्राप्त कर सकता है। इसके किसी एडमिन से कहें कि वे आपको हटाकर फिर से जोड़ दें। अगर कोई भी ऐसा न कर सके, तो उन्हीं लोगों के साथ एक नया सर्कल बनाएँ।';
+
+  @override
+  String get sharingHealthTitleStalled =>
+      'Haven इस सर्कल के अपडेट नहीं पढ़ पा रहा है';
+
+  @override
+  String get sharingHealthBodyStalled =>
+      'लगता है कि इस फ़ोन से सर्कल का कोई बदलाव छूट गया है, और यह फ़ोन उसे रिले पर नहीं ढूँढ पाया। इसके किसी एडमिन से कहें कि वे आपको हटाकर फिर से जोड़ दें। अगर कोई भी ऐसा न कर सके, तो उन्हीं लोगों के साथ एक नया सर्कल बनाएँ।';
+
+  @override
+  String get sharingHealthTitlePaused => 'Haven ने यह सर्कल रोक दिया है';
+
+  @override
+  String get sharingHealthBodyCollision =>
+      'Haven को इस फ़ोन पर इस सर्कल में एक समस्या मिली, और आपका स्थान निजी रखने के लिए उसने इसके साथ साझा करना बंद कर दिया। इसे ठीक करने का एकमात्र तरीका सर्कल छोड़ना है। इसमें फिर से शामिल होने के लिए आपको नया निमंत्रण चाहिए होगा।';
+
+  @override
+  String get sharingHealthBodyCannotCheck =>
+      'Haven इस फ़ोन पर इस सर्कल की जाँच नहीं कर सका, इसलिए आपका स्थान निजी रखने के लिए उसने इसके साथ साझा करना रोक दिया है। Haven अपने आप फिर से जाँच करेगा।';
+
+  @override
+  String get sharingHealthTitleLeaving => 'यह सर्कल छोड़ा जा रहा है';
+
+  @override
+  String get sharingHealthBodyLeaving =>
+      'जब तक Haven इसे छोड़ने का काम पूरा करता है, तब तक इस सर्कल के साथ कुछ भी साझा नहीं किया जाता। इसमें करीब एक दिन लग सकता है। यह पूरा होने पर सर्कल इस फ़ोन से हट जाता है।';
+
+  @override
+  String get sharingHealthBodyRemovalUnmade =>
+      'आपने जो हटाने का अनुरोध किया था, वह पूरा नहीं हुआ, इसलिए Haven ने इस सर्कल के साथ आपका स्थान साझा करना रोक दिया है, ताकि आपने जिस किसी को हटाना चाहा था, उसे आपका स्थान न दिखे।';
+
+  @override
+  String get sharingHealthBodyRemovalUnmadeNoNotice =>
+      'आपने जो हटाने का अनुरोध किया था, वह पूरा नहीं हुआ, इसलिए Haven ने इस सर्कल के साथ आपका स्थान साझा करना रोक दिया है, ताकि आपने जिस किसी को हटाना चाहा था, उसे आपका स्थान न दिखे। कौन अभी भी सर्कल में है, यह देखने के लिए सदस्य सूची खोलें।';
+
+  @override
+  String get sharingHealthBodyDepartureDue =>
+      'किसी ने यह सर्कल छोड़ा है, पर उसकी प्रक्रिया अभी पूरी नहीं हुई है। जब तक यह पूरी नहीं होती, Haven इस सर्कल के साथ आपका स्थान साझा नहीं करता।';
+
+  @override
+  String get sharingHealthTitleBackgroundPaused =>
+      'इस सर्कल के लिए बैकग्राउंड साझाकरण रुका हुआ है';
+
+  @override
+  String get sharingHealthBodyAwaitsForeground =>
+      'जब Haven बैकग्राउंड में था, तब इस सर्कल के रिले बदल गए। Haven खुला होने पर रिले बदलने का काम पूरा करता है; तब तक इस सर्कल के साथ बैकग्राउंड में साझा नहीं किया जाता।';
+
+  @override
+  String get sharingHealthBodyAwaitingRelays =>
+      'इस सर्कल का एक बदलाव किसी रिले की पुष्टि का इंतज़ार कर रहा है। तब तक Haven न तो इस सर्कल को आपका स्थान भेज रहा है और न ही इससे आए नए स्थान दिखा रहा है। जब तक ऐप खुला है, Haven कोशिश करता रहता है।';
+
+  @override
+  String get sharingHealthBodyAcknowledged =>
+      'एक रिले ने इस सर्कल का एक बदलाव स्वीकार कर लिया है और Haven उसे पूरा कर रहा है। तब तक इस सर्कल के अपडेट रुके रहते हैं।';
+
+  @override
+  String get sharingHealthBodyStagedWithoutRecord =>
+      'इस सर्कल का एक बदलाव सहेजा नहीं जा सका, इसलिए वह भेजा नहीं गया। Haven इसे सुलझा लेता है, ज़्यादा से ज़्यादा अपने अगली बार शुरू होने पर। तब तक इस सर्कल के अपडेट रुके रहते हैं।';
+
+  @override
+  String get sharingHealthBodyStoredInput =>
+      'इस फ़ोन पर इस सर्कल के कुछ ऐसे अपडेट हैं जिन्हें यह अभी तक प्रोसेस नहीं कर पाया है। जब तक यह इन्हें प्रोसेस नहीं कर लेता, Haven इस सर्कल के साथ आपका स्थान साझा नहीं करता।';
+
+  @override
+  String get sharingHealthBodySessionHeld =>
+      'Haven अभी भी अपना पिछला कनेक्शन बंद कर रहा है, इसलिए स्थान साझाकरण रुका हुआ है। वह पूरा होते ही साझाकरण फिर शुरू हो जाता है। अपना फ़ोन रीस्टार्ट करने पर यह रुकावट हमेशा हट जाती है।';
+
+  @override
+  String get sharingHealthRepairHintAnyMember =>
+      'रिले से दोबारा जुड़ता है, आपका स्थान फिर से भेजने की कोशिश करता है, और इस सर्कल को नई एन्क्रिप्शन कुंजियाँ दे सकता है';
+
+  @override
+  String get sharingHealthAttentionAnnouncement =>
+      'इस सर्कल में स्थान साझाकरण पर ध्यान देने की ज़रूरत है। वजह जानने के लिए सर्कल विवरण खोलें।';
+
+  @override
+  String changeNoticeArrivedAnnouncement(String circleName) {
+    return '$circleName सर्कल में हाल के बदलावों से जुड़ी एक बात पर आपका ध्यान चाहिए। उसे पढ़ने के लिए उस सर्कल का विवरण खोलें।';
+  }
+
+  @override
+  String get circleDetailsAttentionTooltip =>
+      'सर्कल विवरण, ध्यान देने की ज़रूरत है';
+
+  @override
+  String circleRowAttentionSemantics(String circleName) {
+    return '$circleName, ध्यान देने की ज़रूरत है';
+  }
+
+  @override
+  String get changeNoticeHeading => 'इस सर्कल में बदलाव';
+
+  @override
+  String get changeNoteRemovalUndone =>
+      'इस सर्कल का एक बदलाव पूरा नहीं हो सका। अगर उसमें किसी को हटाया जाना था, तो वे अब भी सर्कल में हैं, और इस सर्कल के साथ जो कुछ साझा होता है, वह उन्हें दिखता है।';
+
+  @override
+  String get changeNoteChangeUndone =>
+      'इस सर्कल का एक बदलाव पूरा नहीं हो सका, इसलिए कुछ नहीं बदला। अगर वह बदलाव आपका था और आपको अब भी उसकी ज़रूरत है, तो उसे फिर से करें।';
+
+  @override
+  String get changeNoteMayBeOutOfStep =>
+      'हो सकता है कि इस सर्कल का कोई बदलाव इस फ़ोन को पता चले बिना दूसरों तक पहुँच गया हो, इसलिए हो सकता है कि यह फ़ोन उनसे तालमेल में न हो।';
+
+  @override
+  String get changeNoteReinviteOwed =>
+      'आपने जिस व्यक्ति को आमंत्रित किया था, उनका नाम इस सर्कल की सूची में है, पर उनका शामिल होना संभव नहीं है, क्योंकि Haven उनका निमंत्रण नहीं भेज सकता। उन्हें हटाकर फिर से जोड़ें।';
+
+  @override
+  String get changeNoteChangeUnrecorded =>
+      'इस सर्कल का एक बदलाव सहेजा नहीं जा सका, इसलिए वह भेजा नहीं गया।';
+
+  @override
+  String get changeNoteQueuedChangeDropped =>
+      'इस सर्कल में इंतज़ार कर रहा एक बदलाव रद्द कर दिया गया, क्योंकि अब उसे माँगे गए तरीके से नहीं किया जा सकता था। हो सकता है कि वह किसी और तरीके से पहले ही हो चुका हो।';
+
+  @override
+  String get changeNoteQueuedChangesHeld =>
+      'इस सर्कल के कुछ बदलाव अभी भी होने बाकी हैं।';
+
+  @override
+  String get changeNoteQueuedRemovalDropped =>
+      'इस सर्कल में आपने जो हटाने का अनुरोध किया था, वह पूरा नहीं हुआ। आपने जिस किसी को हटाना चाहा था, हो सकता है वह अब भी सर्कल में हो।';
+
+  @override
+  String get changeNoteChangeWithdrawn =>
+      'किसी दूसरे सदस्य के बदलाव ने इस सर्कल में आपके एक बदलाव की जगह ले ली, इसलिए आपका बदलाव नहीं किया गया। अगर आपको अब भी उसकी ज़रूरत है, तो उसे फिर से करें।';
+
+  @override
+  String get changeNoteWelcomeOwed =>
+      'इस सर्कल का एक निमंत्रण अभी तक भेजा नहीं जा सका है। आपके आमंत्रित करने के बाद ज़्यादा से ज़्यादा एक दिन तक, जब भी ऐप खुला होता है, Haven इसे भेजता रहता है। अगर तब तक भी वह व्यक्ति शामिल न हो, तो उन्हें हटाकर फिर से जोड़ें।';
+
+  @override
+  String get changeNoteUnreadLocation =>
+      'इस सर्कल में भेजे गए कुछ हाल के अपडेट इस फ़ोन पर खोले नहीं जा सके।';
+
+  @override
+  String get changeNoticeStillInCircleLabel => 'अब भी सर्कल में:';
+
+  @override
+  String get changeNoticeRemoveAgain => 'फिर से हटाएँ';
+
+  @override
+  String get changeNoticeReviewMembers => 'सदस्य देखें';
+
+  @override
+  String get changeNoticeKeepMembers => 'उन्हें सर्कल में रहने दें';
+
+  @override
+  String get changeNoticeKeepConfirmTitle => 'उन्हें सर्कल में रहने दें?';
+
+  @override
+  String get changeNoticeKeepConfirmBody =>
+      'इस हटाने के अनुरोध की वजह से इस सर्कल के साथ साझा करने पर लगी रोक Haven हटा देगा। आपने जिस किसी को हटाना चाहा था और जो अब भी सर्कल में है, उसकी सदस्यता बनी रहेगी, और जब भी Haven इस सर्कल के साथ आपका स्थान साझा करेगा, उसे आपका स्थान दिखेगा।';
+
+  @override
+  String get changeNoticeKeepConfirmAction => 'उन्हें रहने दें';
 
   @override
   String circleMemberLastSeenMinutes(int count) {

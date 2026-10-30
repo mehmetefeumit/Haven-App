@@ -512,35 +512,44 @@ void main() {
     // -----------------------------------------------------------------------
     // 15. A circle that cannot send has no window to report (Rule 8).
     // -----------------------------------------------------------------------
-    testWidgets('15. a blocked circle reports no window, seen or spoken', (
-      tester,
-    ) async {
-      final handle = tester.ensureSemantics();
-      final circle = _makeCircle();
+    // A halted (or ended, or unloaded) circle still HAS an MLS group, so the
+    // accessor happily returns Haven's own window for it — "about four
+    // minutes" for a circle that cannot send, under a member count Rust
+    // reports as none (UX-A6). The override supplies that window so the
+    // assertion is about the sheet's gate, not how the read happens to fail.
+    // One test per state: a ProviderScope pumped again keeps its first
+    // `overrideWith` closures, so a loop would test the first state thrice.
+    for (final state in const [
+      CircleEngineState.unrecoverable,
+      CircleEngineState.disbanded,
+      CircleEngineState.quarantined,
+    ]) {
+      testWidgets('15. a ${state.name} circle shows no member, epoch or '
+          'window line, seen or spoken', (tester) async {
+        final handle = tester.ensureSemantics();
+        final circle = TestCircleFactory.createCircle(
+          displayName: 'Family',
+          engineState: state,
+          members: _makeCircle().members,
+        );
+        await _pumpAndOpenDetails(
+          tester,
+          circle: circle,
+          mockService: MockCircleService(circles: [circle]),
+          expiryOverride: _expiry(circle, _havensOwnWindowSecs),
+        );
 
-      // An `Unrecoverable` circle still HAS an MLS group, so the accessor
-      // happily returns Haven's own window for it — the exact "about four
-      // minutes for a circle that cannot send" this segment must never
-      // report. The override supplies that value so the assertion is about
-      // the sheet's gate and not about how the read happens to fail.
-      await _pumpAndOpenDetails(
-        tester,
-        circle: circle,
-        mockService: MockCircleService(circles: [circle])
-          ..markCircleBlocked(circle.mlsGroupId),
-        expiryOverride: _expiry(circle, _havensOwnWindowSecs),
-      );
-
-      expect(_subtitle(tester), '2 members · epoch 14');
-      expect(find.textContaining('4 min'), findsNothing);
-      // A screen-reader user gets the whole sentence read out, so a stale
-      // window is worse here than on screen, not better.
-      expect(
-        tester.getSemantics(find.byKey(WidgetKeys.circleDetailsMembers)).label,
-        '2 members · epoch 14',
-      );
-
-      handle.dispose();
-    });
+        expect(
+          find.byKey(WidgetKeys.circleDetailsMembers),
+          findsNothing,
+          reason: 'the card above says what the circle is instead',
+        );
+        expect(find.textContaining('4 min'), findsNothing);
+        expect(find.bySemanticsLabel(RegExp('epoch 14')), findsNothing);
+        // Anti-vacuity: the sheet itself is open.
+        expect(find.byKey(WidgetKeys.leaveCircleCta), findsOneWidget);
+        handle.dispose();
+      });
+    }
   });
 }

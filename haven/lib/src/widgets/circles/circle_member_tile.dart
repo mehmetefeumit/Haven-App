@@ -531,7 +531,8 @@ class PendingMemberTile extends StatelessWidget {
   /// Callback when remove button is pressed.
   final VoidCallback? onRemove;
 
-  /// Callback when retry button is pressed (for network failures).
+  /// Callback when retry button is pressed: given only for a member a retry
+  /// can still turn valid.
   final VoidCallback? onRetry;
 
   @override
@@ -553,8 +554,8 @@ class PendingMemberTile extends StatelessWidget {
   Widget? _buildTrailing(AppLocalizations l10n) {
     if (onRemove == null && onRetry == null) return null;
 
-    // Show retry + close for retryable failures
-    if (status == ValidationStatus.invalid && onRetry != null) {
+    // Show retry + close for a member a retry can still turn valid
+    if (onRetry != null) {
       return Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -622,12 +623,13 @@ class PendingMemberTile extends StatelessWidget {
           semanticLabel: l10n.pendingMemberWarning,
         ),
       ),
+      // The subtitle already says the person needs to update.
       ValidationStatus.needsUpdate => CircleAvatar(
         backgroundColor: HavenSecurityColors.warning.withValues(alpha: 0.1),
         child: Icon(
           LucideIcons.cloudDownload,
           color: HavenSecurityColors.warning,
-          semanticLabel: l10n.pendingMemberNeedsUpdate,
+          semanticLabel: l10n.pendingMemberWarning,
         ),
       ),
     };
@@ -670,10 +672,9 @@ enum ValidationStatus {
   /// Validation failed (no KeyPackage found).
   invalid,
 
-  /// A KeyPackage was found, but it carries the deprecated pre-Dark-Matter
-  /// kind (443) — the person is running an old Haven build and cannot be
-  /// invited into a circle on the new engine until they update (DM-4c, plan
-  /// §6 F11). Distinct from [invalid]: this is not a network/lookup failure
-  /// and offers no retry.
+  /// A KeyPackage was found, but it comes from an older Haven (the retired
+  /// kind 443, or a package made before the encryption-engine upgrade), so the
+  /// person cannot be invited until they update. Distinct from [invalid]: the
+  /// lookup worked; a Retry finds the current package once they have updated.
   needsUpdate,
 }

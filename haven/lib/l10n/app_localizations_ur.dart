@@ -696,9 +696,6 @@ class AppLocalizationsUr extends AppLocalizations {
   String get nameCircleStageCreatingGroup => 'محفوظ گروہ بنایا جا رہا ہے...';
 
   @override
-  String get nameCircleStageSendingInvites => 'دعوت نامے بھیجے جا رہے ہیں...';
-
-  @override
   String get nameCircleStageComplete => 'ہو گیا!';
 
   @override
@@ -716,7 +713,7 @@ class AppLocalizationsUr extends AppLocalizations {
   }
 
   @override
-  String nameCircleCreatedPartialSnack(String name, int sent, int total) {
+  String nameCircleCreatedSentSoFarSnack(String name, int sent, int total) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -725,7 +722,15 @@ class AppLocalizationsUr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'حلقہ \"$name\" بن گیا۔ دعوت نامے بھیج دیے گئے ($totalString میں سے $sentString)؛ باقی کی ترسیل زیر التوا ہے۔';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          'حلقہ \"$name\" بن گیا۔ اب تک بھیجے گئے دعوت نامے: $totalString میں سے $sentString۔ جب تک ایپ کھلی ہو، Haven زیادہ سے زیادہ ایک دن تک باقی دعوت نامے بھیجتا رہتا ہے۔',
+      one:
+          'حلقہ \"$name\" بن گیا۔ اب تک بھیجا گیا دعوت نامہ: $totalString میں سے $sentString۔ جب تک ایپ کھلی ہو، Haven زیادہ سے زیادہ ایک دن تک اسے بھیجتا رہتا ہے۔',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -806,7 +811,7 @@ class AppLocalizationsUr extends AppLocalizations {
   }
 
   @override
-  String addMemberPartialDelivery(int sent, int total) {
+  String addMemberSentSoFar(int sent, int total, String circleName) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -815,7 +820,38 @@ class AppLocalizationsUr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'دعوت نامے بھیج دیے گئے ($totalString میں سے $sentString)۔ باقی کی ترسیل زیر التوا ہے۔';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          '$circleName کے لیے اب تک بھیجے گئے دعوت نامے: $totalString میں سے $sentString۔ جب تک ایپ کھلی ہو، Haven زیادہ سے زیادہ ایک دن تک باقی دعوت نامے بھیجتا رہتا ہے۔',
+      one:
+          '$circleName کے لیے اب تک بھیجا گیا دعوت نامہ: $totalString میں سے $sentString۔ جب تک ایپ کھلی ہو، Haven زیادہ سے زیادہ ایک دن تک اسے بھیجتا رہتا ہے۔',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String addMemberReinviteNeeded(String circleName) {
+    return 'Haven $circleName کا دعوت نامہ نہیں بھیج سکتا۔ اُس شخص کو ہٹا کر دوبارہ شامل کریں۔';
+  }
+
+  @override
+  String get memberCannotReceiveInvitations =>
+      'Haven آپ کے چنے ہوئے سب لوگوں کو مدعو نہیں کر سکتا، کیونکہ اسے یہ معلوم نہ ہو سکا کہ ان میں سے کم از کم ایک کا دعوت نامہ کہاں بھیجا جائے۔ جن لوگوں کو آپ نے چنا ہے، ان سے کہیں کہ دیکھ لیں کہ ان کی ایپ دعوت نامے وصول کر سکتی ہے، پھر دوبارہ کوشش کریں۔';
+
+  @override
+  String get missedInvitationsShowWho => 'افراد دکھائیں';
+
+  @override
+  String missedInvitationsTitle(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'دعوت نامے نہیں بھیجے جا سکے',
+      one: 'دعوت نامہ نہیں بھیجا جا سکا',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -871,6 +907,11 @@ class AppLocalizationsUr extends AppLocalizations {
   }
 
   @override
+  String circleMemberRemoveAwaitingAnnouncement(String name) {
+    return '$name کو ہٹانے کا عمل ابھی جاری ہے، ریلے کا انتظار ہے۔ جب تک یہ مکمل نہ ہو، اس حلقے کے ساتھ کچھ بھی شیئر نہیں ہوتا۔';
+  }
+
+  @override
   String get circleMemberAdmin => 'منتظم';
 
   @override
@@ -905,7 +946,12 @@ class AppLocalizationsUr extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'دعوت دینے کے لیے تیار';
 
   @override
-  String get pendingMemberNeedsUpdate => 'Haven کو اپ ڈیٹ کرنے کی ضرورت ہے';
+  String get pendingMemberNeedsUpdate =>
+      'انہیں Haven اپ ڈیٹ کرنے یا کھولنے کی ضرورت ہے';
+
+  @override
+  String get memberKeyPackageStale =>
+      'Haven ابھی انہیں مدعو نہیں کر سکتا۔ ان سے کہیں کہ Haven کھولیں، پھر دوبارہ کوشش کریں۔';
 
   @override
   String get memberSearchHint => 'رکن کی ID درج کریں...';
@@ -1057,6 +1103,27 @@ class AppLocalizationsUr extends AppLocalizations {
       'دعوت قبول کرنے میں ناکامی۔ براہِ کرم دوبارہ کوشش کریں۔';
 
   @override
+  String invitationNeedsNewInviteError(String name) {
+    return 'یہ دعوت اب استعمال نہیں کی جا سکتی۔ $name سے کہیں کہ آپ کو دوبارہ مدعو کریں۔ ہو سکتا ہے انہیں پہلے Haven اپ ڈیٹ کرنا پڑے۔';
+  }
+
+  @override
+  String get rejoinDialogTitle => 'کیا اس حلقے میں دوبارہ شامل ہونا ہے؟';
+
+  @override
+  String rejoinDialogBody(String inviterName, String circleName) {
+    return '$inviterName نے آپ کو «$circleName» میں مدعو کیا ہے، جو اس فون پر پہلے سے موجود ہے۔ ایسا تب ہو سکتا ہے جب آپ کو حلقے سے ہٹا کر دوبارہ مدعو کیا گیا ہو۔ دوبارہ شامل ہونے سے اس فون پر حلقے کی کاپی بدل دی جائے گی۔ «مسترد کریں» اس دعوت کو ہمیشہ کے لیے ختم کر دیتا ہے؛ «منسوخ کریں» اسے بعد کے لیے رکھ لیتا ہے۔';
+  }
+
+  @override
+  String rejoinDialogBodyUnnamed(String circleName) {
+    return 'آپ کو «$circleName» میں مدعو کیا گیا ہے، جو اس فون پر پہلے سے موجود ہے۔ ایسا تب ہو سکتا ہے جب آپ کو حلقے سے ہٹا کر دوبارہ مدعو کیا گیا ہو۔ دوبارہ شامل ہونے سے اس فون پر حلقے کی کاپی بدل دی جائے گی۔ «مسترد کریں» اس دعوت کو ہمیشہ کے لیے ختم کر دیتا ہے؛ «منسوخ کریں» اسے بعد کے لیے رکھ لیتا ہے۔';
+  }
+
+  @override
+  String get rejoinDialogConfirm => 'دوبارہ شامل ہوں';
+
+  @override
   String invitationRosterFullError(int limit) {
     final intl.NumberFormat limitNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1189,11 +1256,22 @@ class AppLocalizationsUr extends AppLocalizations {
   String get circleDetailsLeaveCircle => 'حلقہ چھوڑیں';
 
   @override
+  String get circleDetailsLeavingInProgress => 'حلقہ چھوڑا جا رہا ہے…';
+
+  @override
   String get leaveCircleDialogTitle => 'حلقہ چھوڑیں';
 
   @override
   String get leaveCircleDialogBody =>
       'یہ حلقہ چھوڑ دیں؟ آپ اس کے ارکان کو اپنا مقام بھیجنا اور ان کا مقام دیکھنا بند کر دیں گے۔ آپ نے آخری بار جو مقام بھیجا وہ ایک دن تک ان کے فونوں پر رہتا ہے۔ اسے واپس نہیں کیا جا سکتا: دوبارہ شامل ہونے کے لیے آپ کو نئی دعوت درکار ہوگی۔';
+
+  @override
+  String get leaveDisbandedCircleDialogBody =>
+      'یہ حلقہ ختم ہو چکا ہے، اس لیے اب اس کے ساتھ کچھ بھی شیئر نہیں ہوتا۔ اسے چھوڑنے سے یہ اس فون سے ہٹ جاتا ہے۔';
+
+  @override
+  String get leaveCircleDialogAdminNote =>
+      'آپ اس حلقے کے منتظم ہیں۔ آپ کے حلقہ چھوڑنے سے پہلے، Haven کوشش کرتا ہے کہ کسی دوسرے رکن کو منتظم بنا دے تاکہ حلقہ کام کرتا رہے۔';
 
   @override
   String get leaveCircleConfirm => 'چھوڑیں';
@@ -1208,52 +1286,32 @@ class AppLocalizationsUr extends AppLocalizations {
   String get leaveCircleError => 'حلقہ چھوڑنے میں ناکامی';
 
   @override
-  String get circleBlockedBannerTitle => 'یہ حلقہ اپ ڈیٹ نہیں کیا جا سکتا';
-
-  @override
-  String get circleBlockedBannerBody =>
-      'اس حلقے کی خفیہ کاری میں کچھ گڑبڑ ہو گئی، اس لیے Haven اب اس میں نہ تو اپ ڈیٹس بھیج سکتا ہے اور نہ وصول کر سکتا ہے۔ آپ پھر بھی نیچے اپنی آخری معلوم صورتحال دیکھ سکتے ہیں، یا حلقہ چھوڑ سکتے ہیں۔';
-
-  @override
-  String get legacyCircleBannerTitle => 'اس حلقے کو دوبارہ بنانا ضروری ہے';
-
-  @override
-  String get legacyCircleBannerBody =>
-      'Haven کے خفیہ کاری کے نظام کو اپ گریڈ کر دیا گیا ہے، اس لیے یہ حلقہ اب استعمال نہیں کیا جا سکتا۔ انہی لوگوں کے ساتھ مقام شیئر کرتے رہنے کے لیے اسے دوبارہ بنائیں۔ آپ کو انہیں دوبارہ دعوت دینی ہوگی۔';
-
-  @override
   String get legacyCircleRecreateCta => 'حلقہ دوبارہ بنائیں';
 
   @override
-  String get legacyCircleRemoveCta => 'ہٹائیں';
+  String get storageResetTitle => 'Haven اپ ڈیٹ ہو چکا ہے';
 
   @override
-  String get legacyCircleRemoveDialogTitle => 'حلقہ ہٹائیں؟';
+  String get storageResetKept =>
+      'آپ کی شناخت میں کوئی تبدیلی نہیں آئی، اور جو عوامی پروفائل آپ پہلے شائع کر چکے ہیں وہ جوں کا توں رہے گا۔';
 
   @override
-  String get legacyCircleRemoveDialogBody =>
-      'یہ حلقہ اب استعمال نہیں کیا جا سکتا اور آپ کی فہرست سے ہٹا دیا جائے گا۔ اس کی جگہ آپ جو بھی نیا حلقہ بنائیں گے، اس پر اس کا کوئی اثر نہیں پڑے گا۔';
+  String get storageResetLost =>
+      'Haven کے خفیہ کاری کے نئے نظام پر منتقل ہونے کے لیے، اس اپ ڈیٹ سے پہلے بنائے گئے حلقے ہٹا دیے گئے۔ انہیں دوبارہ بنائیں اور ان کے ارکان کو پھر سے مدعو کریں۔ اس اپ ڈیٹ سے پہلے آپ نے لوگوں کو جو عرفی نام دیے تھے، اور پروفائل کی کوئی بھی ایسی تبدیلی جو اس وقت تک مکمل طور پر محفوظ نہیں ہوئی تھی، وہ بھی ہٹا دیے گئے۔';
 
   @override
-  String get legacyCircleRemoveConfirm => 'ہٹائیں';
+  String get storageResetRelays =>
+      'اس اپ ڈیٹ نے آپ کی ریلے کی ترتیبات Haven کی طے شدہ ترتیبات پر واپس کر دیں۔ جب تک آپ جاری نہ رکھیں یا ریلے کی ترتیبات سے واپس نہ آئیں، یہ ترتیبات شائع نہیں ہوں گی، اس لیے آپ پہلے اپنے ریلے شامل کر سکتے ہیں۔';
 
   @override
-  String get legacyCutoverExplainerTitle => 'Haven اپ ڈیٹ ہو چکا ہے';
+  String get storageResetContinue => 'جاری رکھیں';
 
   @override
-  String get legacyCutoverExplainerIdentityUnchanged =>
-      'آپ کی شناخت اور عوامی پروفائل میں کوئی تبدیلی نہیں آئی۔ ان کے لیے آپ کو کچھ کرنے کی ضرورت نہیں۔';
+  String get storageResetOpenRelaySettings => 'ریلے کی ترتیبات';
 
   @override
-  String get legacyCutoverExplainerCirclesNeedRecreation =>
-      'بہتر سیکیورٹی کے لیے، آپ کے حلقوں کو دوبارہ بنانا اور ان کے ارکان کو دوبارہ دعوت دینا ضروری ہے، اس کے بعد ہی آپ ان میں دوبارہ مقام شیئر کر سکیں گے۔';
-
-  @override
-  String get legacyCutoverExplainerAcknowledge => 'ٹھیک ہے';
-
-  @override
-  String get relaySettingsLegacyRetractionPending =>
-      'Haven ابھی بھی ریلے سے کہہ رہا ہے کہ حالیہ سیکیورٹی اپ ڈیٹ کا کچھ پرانا ڈیٹا ہٹا دے۔';
+  String get storageResetAcknowledgeFailed =>
+      'Haven آپ کا جواب محفوظ نہیں کر سکا۔ جب تک یہ محفوظ نہ ہو، Haven آپ کی ریلے کی ترتیبات یا دعوتی کلید شائع نہیں کرے گا، اس لیے ابھی کوئی آپ کو مدعو نہیں کر سکتا۔ دوبارہ کوشش کریں، ورنہ اگلی بار کھلنے پر Haven پھر پوچھے گا۔';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'حلقوں کا پینل سمیٹا گیا';
@@ -1477,6 +1535,10 @@ class AppLocalizationsUr extends AppLocalizations {
   @override
   String get identityAdvancedDeleteError =>
       'شناخت حذف کرنے میں ناکامی۔ براہِ کرم دوبارہ کوشش کریں۔';
+
+  @override
+  String get identityAdvancedDeletingProgress =>
+      'آپ کی شناخت حذف کی جا رہی ہے…';
 
   @override
   String identityAdvancedCopiedToClipboard(String label) {
@@ -1763,7 +1825,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get clockSkewBodyBehind =>
-      'اس فون کی گھڑی آپ کے باقی حلقہ ارکان سے پیچھے چل رہی ہے، اس لیے یہ فون مقام تو بھیج دیتا ہے، مگر کسی کے دیکھنے سے پہلے ہی اس کی میعاد ختم ہو جاتی ہے۔ یہ مسئلہ حل کرنے کے لیے سسٹم کی ترتیبات میں خودکار تاریخ اور وقت آن کریں۔';
+      'اس فون کی گھڑی آپ کے باقی حلقہ ارکان سے پیچھے چل رہی ہے، اس لیے یہ فون مقامات تو بھیج دیتا ہے، مگر ان کی میعاد جلد ختم ہو جاتی ہے، اور ہو سکتا ہے آپ کے حلقے ان میں سے کچھ یا سبھی نہ دیکھ پائیں۔ یہ مسئلہ حل کرنے کے لیے سسٹم کی ترتیبات میں خودکار تاریخ اور وقت آن کریں۔';
 
   @override
   String get clockSkewResolvedAnnouncement =>
@@ -1840,24 +1902,8 @@ class AppLocalizationsUr extends AppLocalizations {
   String get sharingHealthRepairAction => 'ٹھیک کریں';
 
   @override
-  String get sharingHealthRepairUnavailableHint =>
-      'ٹھیک کرنے کا بٹن اس حلقے کے لیے دستیاب نہیں';
-
-  @override
-  String get sharingHealthRepairHint =>
-      'ریلے سے کنکشن بحال کرتا ہے، آپ کا مقام بھیجنے کی دوبارہ کوشش کرتا ہے، اور اگر آپ اس حلقے کے منتظم ہیں تو اسے نئی کلید دے سکتا ہے';
-
-  @override
   String get sharingHealthRepairSent =>
       'حلقہ ٹھیک کرنے کی تبدیلی بھیج دی گئی ہے۔ دوسرے اُس وقت ہم آہنگ ہوں گے جب اُن کے فون یہ وصول کر لیں گے۔';
-
-  @override
-  String get sharingHealthRepairNotOwner =>
-      'اس حلقے کو اس کے منتظم کے سوا کوئی ٹھیک نہیں کر سکتا۔ اُن سے کہیں کہ وہ آپ کو ہٹا کر دوبارہ شامل کر لیں۔';
-
-  @override
-  String get sharingHealthRepairNeedsNewCircle =>
-      'اس حلقے کو اس فون پر ٹھیک نہیں کیا جا سکتا۔ اُنہی لوگوں کے ساتھ نیا حلقہ بنائیں۔';
 
   @override
   String get sharingHealthRepairNothingToDo =>
@@ -1870,6 +1916,194 @@ class AppLocalizationsUr extends AppLocalizations {
   @override
   String get sharingHealthResumedAnnouncement =>
       'مقام کی شیئرنگ پھر سے کام کر رہی ہے۔';
+
+  @override
+  String get sharingHealthTitleQuarantined =>
+      'Haven ابھی یہ حلقہ نہیں کھول سکتا';
+
+  @override
+  String get sharingHealthBodyQuarantined =>
+      'اس فون پر یہ حلقہ لوڈ کرتے وقت کچھ غلط ہو گیا۔ حلقہ اب بھی یہیں ہے۔';
+
+  @override
+  String get sharingHealthTitleDisbanded => 'یہ حلقہ ختم ہو چکا ہے';
+
+  @override
+  String get sharingHealthBodyDisbanded =>
+      'ایک منتظم نے یہ حلقہ ختم کر دیا ہے، اس لیے اب اس کے ساتھ کچھ بھی شیئر نہیں ہوتا۔ اسے اس فون سے ہٹانے کے لیے یہ حلقہ چھوڑیں۔';
+
+  @override
+  String get sharingHealthQuarantineRetryHint =>
+      'اس حلقے کو دوبارہ لوڈ کرنے کی کوشش کرتا ہے';
+
+  @override
+  String get sharingHealthQuarantineRetryFailedAnnouncement =>
+      'Haven اب بھی یہ حلقہ نہیں کھول سکتا۔';
+
+  @override
+  String get sharingHealthTitleUnrecoverable =>
+      'یہ حلقہ اس فون پر کام کرنا بند کر چکا ہے';
+
+  @override
+  String get sharingHealthBodyUnrecoverable =>
+      'Haven اب اس فون پر اس حلقے میں نہ اپ ڈیٹس بھیج سکتا ہے نہ وصول کر سکتا ہے۔ اس کے منتظمین میں سے کسی ایک سے کہیں کہ آپ کو ہٹا کر دوبارہ شامل کر لے۔ اگر کوئی ایسا نہ کر سکے تو اُنہی لوگوں کے ساتھ نیا حلقہ بنائیں۔';
+
+  @override
+  String get sharingHealthTitleStalled =>
+      'Haven اس حلقے کی اپ ڈیٹس پڑھ نہیں پا رہا';
+
+  @override
+  String get sharingHealthBodyStalled =>
+      'لگتا ہے اس فون سے حلقے کی کوئی تبدیلی چھوٹ گئی ہے، اور ریلے پر تلاش کرنے سے بھی وہ نہیں ملی۔ اس کے منتظمین میں سے کسی ایک سے کہیں کہ آپ کو ہٹا کر دوبارہ شامل کر لے۔ اگر کوئی ایسا نہ کر سکے تو اُنہی لوگوں کے ساتھ نیا حلقہ بنائیں۔';
+
+  @override
+  String get sharingHealthTitlePaused => 'Haven نے یہ حلقہ روک رکھا ہے';
+
+  @override
+  String get sharingHealthBodyCollision =>
+      'Haven کو اس فون پر اس حلقے میں ایک مسئلہ ملا، اس لیے آپ کا مقام نجی رکھنے کے لیے اس نے اس حلقے کے ساتھ شیئرنگ روک دی ہے۔ اسے ٹھیک کرنے کا واحد طریقہ حلقہ چھوڑنا ہے۔ اس میں دوبارہ شامل ہونے کے لیے آپ کو نئی دعوت درکار ہوگی۔';
+
+  @override
+  String get sharingHealthBodyCannotCheck =>
+      'Haven اس فون پر اس حلقے کی جانچ نہیں کر سکا، اس لیے آپ کا مقام نجی رکھنے کے لیے اس نے اس حلقے کے ساتھ شیئرنگ روک رکھی ہے۔ Haven خود ہی دوبارہ جانچ کرتا ہے۔';
+
+  @override
+  String get sharingHealthTitleLeaving => 'یہ حلقہ چھوڑا جا رہا ہے';
+
+  @override
+  String get sharingHealthBodyLeaving =>
+      'جب تک Haven اس حلقے کو چھوڑنے کا عمل مکمل کر رہا ہے، اس کے ساتھ کچھ بھی شیئر نہیں کیا جاتا۔ اس میں تقریباً ایک دن لگ سکتا ہے۔ عمل مکمل ہونے پر یہ حلقہ اس فون سے غائب ہو جاتا ہے۔';
+
+  @override
+  String get sharingHealthBodyRemovalUnmade =>
+      'ہٹانے کی جو درخواست آپ نے کی تھی اس پر عمل نہیں ہوا، اس لیے Haven نے اس حلقے کو آپ کا مقام بھیجنا روک رکھا ہے، تاکہ یہ کسی بھی ایسے شخص تک نہ پہنچے جسے آپ نے ہٹانے کی کوشش کی تھی۔';
+
+  @override
+  String get sharingHealthBodyRemovalUnmadeNoNotice =>
+      'ہٹانے کی جو درخواست آپ نے کی تھی اس پر عمل نہیں ہوا، اس لیے Haven نے اس حلقے کو آپ کا مقام بھیجنا روک رکھا ہے، تاکہ یہ کسی بھی ایسے شخص تک نہ پہنچے جسے آپ نے ہٹانے کی کوشش کی تھی۔ یہ دیکھنے کے لیے کہ حلقے میں اب بھی کون ہے، ارکان کی فہرست کھولیں۔';
+
+  @override
+  String get sharingHealthBodyDepartureDue =>
+      'کسی نے یہ حلقہ چھوڑ دیا ہے، مگر اُن کے جانے کا عمل ابھی مکمل نہیں ہوا۔ جب تک یہ مکمل نہ ہو، Haven اس حلقے کے ساتھ آپ کا مقام شیئر نہیں کرتا۔';
+
+  @override
+  String get sharingHealthTitleBackgroundPaused =>
+      'اس حلقے کے لیے پس منظر میں شیئرنگ رکی ہوئی ہے';
+
+  @override
+  String get sharingHealthBodyAwaitsForeground =>
+      'Haven کے پس منظر میں ہوتے ہوئے اس حلقے کے ریلے بدل گئے۔ Haven نئے ریلے پر منتقلی اُس وقت مکمل کرتا ہے جب وہ کھلا ہو؛ تب تک پس منظر میں اس حلقے کے ساتھ شیئرنگ نہیں ہوتی۔';
+
+  @override
+  String get sharingHealthBodyAwaitingRelays =>
+      'اس حلقے میں ایک تبدیلی کسی ریلے کی تصدیق کا انتظار کر رہی ہے۔ تب تک Haven نہ اس حلقے کو آپ کا مقام بھیج رہا ہے اور نہ اس کی طرف سے آنے والے نئے مقامات دکھا رہا ہے۔ جب تک ایپ کھلی ہو، Haven کوشش کرتا رہتا ہے۔';
+
+  @override
+  String get sharingHealthBodyAcknowledged =>
+      'ایک ریلے نے اس حلقے میں ایک تبدیلی قبول کر لی ہے اور Haven اسے مکمل کر رہا ہے۔ تب تک اس حلقے کی اپ ڈیٹس رکی رہتی ہیں۔';
+
+  @override
+  String get sharingHealthBodyStagedWithoutRecord =>
+      'اس حلقے میں ایک تبدیلی محفوظ نہ ہو سکی، اس لیے وہ بھیجی نہیں گئی۔ Haven یہ معاملہ سلجھا لیتا ہے، زیادہ سے زیادہ اگلی بار شروع ہونے تک؛ تب تک اس حلقے کی اپ ڈیٹس رکی رہتی ہیں۔';
+
+  @override
+  String get sharingHealthBodyStoredInput =>
+      'اس فون کے پاس اس حلقے کی کچھ ایسی اپ ڈیٹس ہیں جنہیں یہ ابھی تک پروسیس نہیں کر سکا۔ جب تک یہ ایسا نہ کر لے، Haven اس حلقے کے ساتھ آپ کا مقام شیئر نہیں کرتا۔';
+
+  @override
+  String get sharingHealthBodySessionHeld =>
+      'Haven ابھی اپنا پچھلا کنکشن بند کر رہا ہے، اس لیے مقام کی شیئرنگ رکی ہوئی ہے۔ یہ عمل مکمل ہوتے ہی شیئرنگ پھر سے شروع ہو جاتی ہے۔ اپنا فون دوبارہ چالو کرنے سے یہ رکاوٹ ہمیشہ دور ہو جاتی ہے۔';
+
+  @override
+  String get sharingHealthRepairHintAnyMember =>
+      'ریلے سے کنکشن بحال کرتا ہے، آپ کا مقام بھیجنے کی دوبارہ کوشش کرتا ہے، اور اس حلقے کو خفیہ کاری کی نئی کلیدیں دے سکتا ہے';
+
+  @override
+  String get sharingHealthAttentionAnnouncement =>
+      'اس حلقے میں مقام کی شیئرنگ پر توجہ درکار ہے۔ وجہ جاننے کے لیے حلقے کی تفصیلات کھولیں۔';
+
+  @override
+  String changeNoticeArrivedAnnouncement(String circleName) {
+    return '$circleName میں حالیہ تبدیلیوں کے بارے میں ایک بات پر آپ کی توجہ درکار ہے۔ اسے پڑھنے کے لیے اُس حلقے کی تفصیلات کھولیں۔';
+  }
+
+  @override
+  String get circleDetailsAttentionTooltip => 'حلقے کی تفصیلات، توجہ درکار ہے';
+
+  @override
+  String circleRowAttentionSemantics(String circleName) {
+    return '$circleName، توجہ درکار ہے';
+  }
+
+  @override
+  String get changeNoticeHeading => 'اس حلقے میں تبدیلیاں';
+
+  @override
+  String get changeNoteRemovalUndone =>
+      'اس حلقے میں ایک تبدیلی نافذ نہیں ہو سکی۔ اگر اس تبدیلی میں کسی کو ہٹایا گیا تھا تو وہ اب بھی حلقے میں ہیں، اور اس حلقے کے ساتھ جو کچھ شیئر ہوتا ہے وہ انہیں نظر آتا ہے۔';
+
+  @override
+  String get changeNoteChangeUndone =>
+      'اس حلقے میں ایک تبدیلی نافذ نہیں ہو سکی، اس لیے کچھ نہیں بدلا۔ اگر یہ تبدیلی آپ کی تھی اور اب بھی درکار ہے تو اسے دوبارہ کریں۔';
+
+  @override
+  String get changeNoteMayBeOutOfStep =>
+      'ہو سکتا ہے اس حلقے میں کوئی تبدیلی اس فون کے علم میں آئے بغیر دوسروں تک پہنچ گئی ہو، اس لیے ممکن ہے کہ یہ فون اُن سے ہم آہنگ نہ ہو۔';
+
+  @override
+  String get changeNoteReinviteOwed =>
+      'آپ کے مدعو کردہ کسی شخص کا نام اس حلقے میں درج ہے، مگر اُن کے لیے شامل ہونا ممکن نہیں، کیونکہ Haven اُن کا دعوت نامہ نہیں بھیج سکتا۔ انہیں ہٹا کر دوبارہ شامل کریں۔';
+
+  @override
+  String get changeNoteChangeUnrecorded =>
+      'اس حلقے میں ایک تبدیلی محفوظ نہ ہو سکی، اس لیے وہ بھیجی نہیں گئی۔';
+
+  @override
+  String get changeNoteQueuedChangeDropped =>
+      'اس حلقے میں ایک زیرِ التوا تبدیلی منسوخ کر دی گئی، کیونکہ اسے اب اُس طرح نہیں کیا جا سکتا تھا جیسے کہا گیا تھا۔ ہو سکتا ہے یہ تبدیلی کسی اور طریقے سے پہلے ہی ہو چکی ہو۔';
+
+  @override
+  String get changeNoteQueuedChangesHeld =>
+      'اس حلقے میں کچھ تبدیلیاں ابھی زیرِ التوا ہیں۔';
+
+  @override
+  String get changeNoteQueuedRemovalDropped =>
+      'اس حلقے سے ہٹانے کی جو درخواست آپ نے کی تھی اس پر عمل نہیں ہوا۔ ہو سکتا ہے کہ جس کسی کو بھی آپ نے ہٹانے کی کوشش کی تھی، وہ اب بھی حلقے میں ہو۔';
+
+  @override
+  String get changeNoteChangeWithdrawn =>
+      'کسی دوسرے رکن کی تبدیلی نے اس حلقے میں آپ کی ایک تبدیلی کی جگہ لے لی، اس لیے آپ کی تبدیلی عمل میں نہیں آئی۔ اگر اب بھی درکار ہو تو اسے دوبارہ کریں۔';
+
+  @override
+  String get changeNoteWelcomeOwed =>
+      'اس حلقے کا ایک دعوت نامہ ابھی تک بھیجا نہیں جا سکا۔ جب تک ایپ کھلی ہو، Haven آپ کے مدعو کرنے کے بعد زیادہ سے زیادہ ایک دن تک اسے بھیجتا رہتا ہے۔ اگر تب تک وہ شامل نہ ہوں تو انہیں ہٹا کر دوبارہ شامل کریں۔';
+
+  @override
+  String get changeNoteUnreadLocation =>
+      'اس حلقے کو بھیجی گئی کچھ حالیہ اپ ڈیٹس اس فون پر کھولی نہیں جا سکیں۔';
+
+  @override
+  String get changeNoticeStillInCircleLabel => 'اب بھی حلقے میں:';
+
+  @override
+  String get changeNoticeRemoveAgain => 'دوبارہ ہٹائیں';
+
+  @override
+  String get changeNoticeReviewMembers => 'ارکان کا جائزہ لیں';
+
+  @override
+  String get changeNoticeKeepMembers => 'انہیں حلقے میں رہنے دیں';
+
+  @override
+  String get changeNoticeKeepConfirmTitle =>
+      'کیا انہیں حلقے میں رہنے دیا جائے؟';
+
+  @override
+  String get changeNoticeKeepConfirmBody =>
+      'Haven اب ہٹانے کی اس کارروائی کی وجہ سے اس حلقے کے ساتھ شیئرنگ نہیں روکے گا۔ جس کسی کو بھی آپ نے ہٹانے کی کوشش کی تھی، اگر وہ اب بھی حلقے میں ہے تو اس کی رکنیت برقرار رہے گی، اور جب بھی Haven اس حلقے کے ساتھ آپ کا مقام شیئر کرے گا، وہ مقام اسے نظر آئے گا۔';
+
+  @override
+  String get changeNoticeKeepConfirmAction => 'انہیں رہنے دیں';
 
   @override
   String circleMemberLastSeenMinutes(int count) {

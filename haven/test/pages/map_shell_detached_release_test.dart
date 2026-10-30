@@ -13,13 +13,17 @@
 /// and per CLAUDE.md `MapShell` cannot be widget-tested without the Rust
 /// bridge, so these assert over the source — the same fallback used for the
 /// session-reclaim gates. They are written to fail if the handling is removed,
-/// reordered, or widened into something unsafe.
+/// reordered, or widened into something unsafe. The pause-time handoff's own
+/// decisions are a static (`MapShell.handOffMlsSession`) and are exercised.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/pages/map_shell.dart';
+import 'package:haven/src/services/subscription_service.dart';
 
 void main() {
   late String source;
@@ -80,7 +84,7 @@ void main() {
     // A periodic heal landing mid-teardown would restart the engine while this
     // is tearing it down — leaving a FRESH session orphaned instead of
     // releasing the old one, which is strictly worse than doing nothing.
-    final cancel = detachedBody.indexOf('_liveSyncHealTimer?.cancel()');
+    final cancel = detachedBody.indexOf('_healBackstop.stop()');
     final stop = detachedBody.indexOf('_stopLiveSyncBounded()');
     expect(cancel, isNonNegative);
     expect(stop, isNonNegative);
@@ -137,8 +141,8 @@ void main() {
     // heals unconditionally, ahead of its own debounce.
     final resume = source.indexOf('Future<void> _onResumed() async {');
     expect(resume, isNonNegative);
-    final heal = source.indexOf('_healLiveSyncIfStopped()', resume);
-    final debounce = source.indexOf('_resumeStopwatch.elapsed', resume);
+    final heal = source.indexOf('_healBackstop.heal()', resume);
+    final debounce = source.indexOf('resumeExtrasDue()', resume);
     expect(heal, isNonNegative);
     expect(debounce, isNonNegative);
     expect(
@@ -150,33 +154,76 @@ void main() {
   });
 
   group('the pause-time MLS handoff', () {
-    test('live-sync is stopped BEFORE the manager is released', () {
+    test('live-sync is stopped BEFORE the manager is released', () async {
       // The engine holds its own Arc on the circle manager, so releasing the
       // manager first leaves the guard held by the engine and hands over
       // nothing — the foreground service still cannot open, and background
       // publishing stays dead for the whole session.
-      final src = File('lib/src/pages/map_shell.dart').readAsStringSync();
-      final at = src.indexOf('Future<bool> _handOffMlsSession() async {');
-      expect(at, isNonNegative, reason: 'the handoff must exist');
-      // Bounded by the NEXT member's doc, so the ordering below is read from
-      // the handoff alone and cannot be satisfied by its mirror underneath it.
-      final body = src.substring(
-        at,
-        src.indexOf('\n  /// Takes the MLS session back', at),
+      final order = <String>[];
+      final stop = Completer<LiveSyncStopOutcome>();
+      final handing = MapShell.handOffMlsSession(
+        engineStop: stop.future,
+        releaseSession: () {
+          order.add('release');
+          return true;
+        },
+        announce: ({required handedOff}) => order.add('announce:$handedOff'),
+        ownershipWrites: const [],
+        superseded: () => false,
+      );
+      await pumpEventQueue();
+      expect(
+        order,
+        isEmpty,
+        reason: 'releasing before the engine stops frees nothing',
       );
 
-      final stop = body.indexOf('_stopLiveSyncBounded()');
-      final release = body.indexOf('releaseForHandoff()');
-      expect(stop, isNonNegative);
+      stop.complete(LiveSyncStopOutcome.stopped);
+      await handing;
+      expect(order, ['release', 'announce:true']);
+
+      // And the shell hands that static its own bounded stop and its own
+      // release, which is the one place `releaseForHandoff()` is called.
+      final src = File('lib/src/pages/map_shell.dart').readAsStringSync();
+      final at = src.indexOf('Future<void> _handOffMlsSession({');
+      expect(at, isNonNegative, reason: 'the handoff must exist');
+      final wiring = src.substring(at, src.indexOf('\n  /// ', at));
+      expect(wiring, contains('MapShell.handOffMlsSession('));
+      expect(wiring, contains('engineStop: engineStop,'));
+      // The stop it is handed is the pause's own, issued as its first act.
+      final paused = src.indexOf('Future<void> _onPaused() async {');
+      expect(
+        src.indexOf('engineStop = _stopLiveSyncBounded();', paused),
+        allOf(
+          greaterThan(paused),
+          lessThan(src.indexOf('await _handOffMlsSession(', paused)),
+        ),
+        reason: 'the hand-off must be handed a stop already issued',
+      );
+      // Through the circle service the pause captured while mounted: the
+      // release runs behind the stop, and `ref` may be gone by then.
+      expect(
+        wiring,
+        contains(
+          'releaseSession: () => _releaseMlsSessionForHandoff(circleService),',
+        ),
+      );
+      final release = src.indexOf(
+        'static bool _releaseMlsSessionForHandoff(CircleService service) {',
+      );
       expect(release, isNonNegative);
       expect(
-        stop,
-        lessThan(release),
-        reason: 'releasing before the engine stops frees nothing',
+        src.substring(release, src.indexOf('\n  /// ', release)),
+        contains('service.releaseForHandoff()'),
+      );
+      expect(
+        RegExp(r'\.releaseForHandoff\(\)').allMatches(src).length,
+        1,
+        reason: 'a second release site is one the stop outcome does not gate',
       );
     });
 
-    test('a stop that did not drain declines the release entirely', () {
+    test('a stop that did not drain declines the release entirely', () async {
       // The C1 wedge, from the pause side. When the engine reports
       // `stillHolding`, its supervisor tasks are still running and still hold
       // the `Arc<CircleManager>` — so disposing THIS isolate's handle frees
@@ -184,44 +231,28 @@ void main() {
       // static keeps registered. The service then cannot open (held), its
       // reclaim declines (this isolate is provably alive), and the app returns
       // to a database nothing can open until a Force Stop.
-      //
-      // Source-asserted for the same reason as the ordering above: the branch
-      // needs a live engine handle and a paused `MapShell`, neither of which
-      // this harness can produce.
-      final src = File('lib/src/pages/map_shell.dart').readAsStringSync();
-      final at = src.indexOf('Future<bool> _handOffMlsSession() async {');
-      final body = src.substring(
-        at,
-        src.indexOf('\n  /// Takes the MLS session back', at),
+      var released = 0;
+      final announced = <bool>[];
+      await MapShell.handOffMlsSession(
+        engineStop: Future.value(LiveSyncStopOutcome.stillHolding),
+        releaseSession: () {
+          released++;
+          return true;
+        },
+        announce: ({required handedOff}) => announced.add(handedOff),
+        ownershipWrites: const [],
+        superseded: () => false,
       );
 
-      final refusal = body.indexOf('LiveSyncStopOutcome.stillHolding');
       expect(
-        refusal,
-        isNonNegative,
-        reason: 'the pause path must read the stop outcome, not discard it',
-      );
-
-      // Anchored on the statement that BEGINS the release path, not on
-      // `releaseForHandoff()` itself. The method's own `if (service is!
-      // NostrCircleService) return false;` sits between the two, so a bound of
-      // "some return before the release call" is satisfied by that unrelated
-      // return even when the refusal's own return is deleted — i.e. it passed
-      // with C1 fully re-introduced. The first thing the release path does is
-      // read the provider, so a return that lands before THAT is necessarily
-      // the refusal's.
-      final releasePathStart = body.indexOf(
-        'final service = ref.read(circleServiceProvider)',
-      );
-      expect(
-        releasePathStart,
-        greaterThan(refusal),
-        reason: 'the refusal must be decided before the release path begins',
-      );
-      expect(
-        body.indexOf('return false;', refusal),
-        allOf(isNonNegative, lessThan(releasePathStart)),
+        released,
+        0,
         reason: 'the refusal must SKIP the release, not merely log beside it',
+      );
+      expect(
+        announced,
+        [false],
+        reason: 'and the pause must be told the session was not handed over',
       );
     });
 
@@ -233,10 +264,10 @@ void main() {
       // would make the one visible surface assert exactly what is not
       // happening.
       //
-      // Source-asserted like its siblings: the branch needs a live engine and a
-      // paused MapShell, neither of which this harness can produce.
+      // Source-asserted: which text each result picks is decided where the
+      // strings are, in the paused `MapShell` this harness cannot produce.
       final src = File('lib/src/pages/map_shell.dart').readAsStringSync();
-      final call = src.indexOf('await _handOffMlsSession();');
+      final call = src.indexOf('await _handOffMlsSession(');
       expect(call, isNonNegative);
       // The window from the handoff to the end of the notification call that
       // follows it, so an unrelated `updateNotification` elsewhere in the file
@@ -295,7 +326,7 @@ void main() {
       // while this one is merely paused. On iOS this isolate keeps publishing.
       final src = File('lib/src/pages/map_shell.dart').readAsStringSync();
       // The CALL, not the definition — which appears earlier in the file.
-      final call = src.indexOf('await _handOffMlsSession();');
+      final call = src.indexOf('await _handOffMlsSession(');
       expect(call, isNonNegative);
       final before = src.substring(0, call);
       final branch = before.lastIndexOf('if (bgEnabled && Platform.isAndroid)');
@@ -331,8 +362,8 @@ void main() {
 
     test('the handoff ends before the heal and before the debounce', () {
       final end = resumeBody.indexOf('_endMlsSessionHandoff()');
-      final heal = resumeBody.indexOf('_healLiveSyncIfStopped()');
-      final debounce = resumeBody.indexOf('_resumeStopwatch.elapsed');
+      final heal = resumeBody.indexOf('_healBackstop.heal()');
+      final debounce = resumeBody.indexOf('resumeExtrasDue()');
       expect(
         end,
         isNonNegative,

@@ -27,8 +27,8 @@ import 'package:haven/src/rust/api.dart';
 // function can be called from the identically-named method below without
 // shadowing/recursion.
 import 'package:haven/src/rust/api.dart' as rust_ffi;
+import 'package:haven/src/services/circle_change_driver.dart';
 import 'package:haven/src/services/circle_service.dart';
-import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:meta/meta.dart' show useResult;
 
@@ -110,6 +110,8 @@ SubscriptionHealthAction mapSubscriptionHealthAction(
       return SubscriptionHealthAction.targetedReanchor;
     case SubscriptionHealthActionFfi.paused:
       return SubscriptionHealthAction.paused;
+    case SubscriptionHealthActionFfi.awaitingForeground:
+      return SubscriptionHealthAction.awaitingForeground;
   }
 }
 
@@ -192,27 +194,161 @@ KeyPackageMaintenanceOutcome classifyKeyPackageMaintenance(
         relayErrors: r.relayErrors,
         isMalformedSlotRetired: r.retiredMalformedSlot,
       );
+    case KpMaintenanceActionFfi.awaitingResetAcknowledgement:
+      return KeyPackageMaintenanceFailed(
+        KeyPackageFailureKind.awaitingResetAcknowledgement,
+        relayErrors: r.relayErrors,
+        expiredInitKeyPurged: r.expiredInitKeyPurged,
+      );
   }
 }
 
 /// Production implementation of [RelayService].
 ///
 /// Uses the Rust core for direct WSS relay connections.
-class NostrRelayService implements RelayService {
+class NostrRelayService implements RelayService, CircleChangeDriver {
   /// Creates a new [NostrRelayService].
   ///
   /// The service must be initialized with [initialize] before use.
-  NostrRelayService();
+  ///
+  /// [circleManagerFactory] hands back the circle manager the circle service
+  /// already opened (never a second one over the same database). Only
+  /// [fetchKeyPackage] needs it: the package is chosen by what the inviter's
+  /// own circle can admit.
+  ///
+  /// [openPool] opens a pool; a test seam, [RelayManagerFfi.newInstance]
+  /// unless given.
+  ///
+  /// [onClockRejected] hears every driver entry's clock evidence: what the
+  /// relays of the drives it made blamed on this device's clock;
+  /// [onRelayAccepted], each change a relay acknowledged.
+  ///
+  /// [fixOf] builds the fix a seal takes; a test seam, built through
+  /// [HavenCore] unless given.
+  NostrRelayService({
+    Future<CircleManagerFfi> Function()? circleManagerFactory,
+    Future<RelayManagerFfi> Function()? openPool,
+    void Function(DeviceClockComplaintFfi complaint)? onClockRejected,
+    void Function()? onRelayAccepted,
+    Future<LocationMessage> Function(double latitude, double longitude)? fixOf,
+  }) : _circleManagerFactory = circleManagerFactory,
+       _openPool = openPool ?? RelayManagerFfi.newInstance,
+       _onClockRejected = onClockRejected,
+       _onRelayAccepted = onRelayAccepted,
+       _fixOf = fixOf;
+
+  /// Creates a [NostrRelayService] over an already-built [manager], so the
+  /// service's handling of FFI results can be tested against a fake.
+  @visibleForTesting
+  NostrRelayService.withInjectedManager(
+    RelayManagerFfi manager, {
+    Future<CircleManagerFfi> Function()? circleManagerFactory,
+  }) : _manager = manager,
+       _circleManagerFactory = circleManagerFactory,
+       _openPool = RelayManagerFfi.newInstance,
+       _onClockRejected = null,
+       _onRelayAccepted = null,
+       _fixOf = null,
+       _initialized = true;
+
+  final Future<CircleManagerFfi> Function()? _circleManagerFactory;
+  final Future<RelayManagerFfi> Function() _openPool;
+  final void Function(DeviceClockComplaintFfi complaint)? _onClockRejected;
+  final void Function()? _onRelayAccepted;
+  final Future<LocationMessage> Function(double latitude, double longitude)?
+  _fixOf;
+
+  /// Hands a drive's clock evidence to [_onClockRejected], then [outcome].
+  T _heard<T>(T outcome, DeviceClockComplaintFfi? complaint) {
+    if (complaint != null) _onClockRejected?.call(complaint);
+    return outcome;
+  }
+
+  /// As [_heard], for a change: one a relay acknowledged (`confirmed`) also
+  /// tells [_onRelayAccepted], since a relay took this device's timestamp —
+  /// not one the core found already so, which no relay was asked about.
+  T _heardChange<T>(T outcome, EvolutionOutcomeFfi? change) {
+    if (change?.status == PublishStatusFfi.confirmed &&
+        change?.alreadySo != true) {
+      _onRelayAccepted?.call();
+    }
+    return _heard(outcome, change?.clockRejected);
+  }
+
+  final _DriveRegistry _drives = _DriveRegistry();
+  final _DriveRegistry _nonLocationDrives = _DriveRegistry();
+
+  /// The driver entries this service has in flight, or `null` when it has
+  /// none: what the iOS burst teardown awaits before it shuts this service's
+  /// pool (the Android service awaits [inFlightNonLocationDrives] instead).
+  ///
+  /// Every `*Driven` entry sends what its circle owes, waits for a relay's
+  /// acknowledgement and resolves it inside the one call. A pool shut under
+  /// one forks nothing — the core keeps a commit whose acknowledgement it
+  /// never saw recorded and awaiting, applies it only on an ack and undoes it
+  /// only on every relay's refusal (`fanout_change_e2e`
+  /// `a_change_no_relay_answers_for_is_awaiting_relays_never_failed`) — but
+  /// it cuts the drive short and leaves its sends to the next wake. Waiting
+  /// lets it finish; each drive is bounded by the core's own budget.
+  ///
+  /// Non-null while any is in flight: the drives in flight at the read, as
+  /// one future — the same one on every read until another drive joins —
+  /// and `null` once every one has ended, those that threw included. A
+  /// reader waits out what it saw, never a chain growing behind it, so each
+  /// read is bounded by the longest of those drives' own budgets: the burst
+  /// adopts later work for a capped number of rounds, and the Android
+  /// service reads once, after the latch that keeps any later drive from
+  /// taking the pool.
+  Future<void>? get inFlightDrives => _drives.quiescent;
+
+  /// As [inFlightDrives], without a location's seal and send: what the
+  /// Android service's teardown awaits past its one bounded drain, which a
+  /// location drive stays inside. One cut at that bound loses a sample and
+  /// leaves what it carried recorded for the next wake; waiting it out would
+  /// outlast the UI's handover budget and push a resume into a force-release.
+  Future<void>? get inFlightNonLocationDrives => _nonLocationDrives.quiescent;
+
+  /// Runs [drive] registered in [inFlightDrives], and — unless it is a
+  /// [location] seal or send — in [inFlightNonLocationDrives].
+  Future<T> _driving<T>(Future<T> Function() drive, {bool location = false}) =>
+      _drives.run(location ? drive : () => _nonLocationDrives.run(drive));
+
+  /// Hands [complaint] to where this service's drives' clock evidence goes,
+  /// as a drive would: what proves the provider's wiring.
+  @visibleForTesting
+  void hearClockEvidenceForTest(DeviceClockComplaintFfi complaint) =>
+      _heard(null, complaint);
+
+  /// Reports one acknowledged change where this service reports them, as a
+  /// change a relay acknowledged would: what proves the provider's wiring.
+  @visibleForTesting
+  void hearRelayAcceptedForTest() => _heardChange(
+    null,
+    const EvolutionOutcomeFfi(
+      status: PublishStatusFfi.confirmed,
+      welcomesDelivered: 0,
+      welcomesTotal: 0,
+      reinviteOwed: false,
+      replayed: [],
+    ),
+  );
 
   RelayManagerFfi? _manager;
   bool _initialized = false;
   Completer<void>? _initCompleter;
+
+  /// Whether a pool is open: the next call reuses it rather than open one.
+  @visibleForTesting
+  bool get poolOpenForTest => _manager != null;
 
   /// Initializes the relay manager.
   ///
   /// Must be called before any other methods.
   /// Thread-safe: concurrent calls will wait for the first initialization.
   Future<void> initialize() async {
+    if (_latched) {
+      throw const RelayServiceException('Relay service latched');
+    }
     if (_initialized) return;
 
     // If initialization is in progress, wait for it
@@ -221,10 +357,12 @@ class NostrRelayService implements RelayService {
       return;
     }
 
-    // Start initialization
-    _initCompleter = Completer<void>();
+    // Start initialization. The completer's own future is marked handled:
+    // the caller that opens hears a failure through the rethrow below, and a
+    // waiter through its own await, so nobody else needs it reported.
+    _initCompleter = Completer<void>()..future.ignore();
     try {
-      _manager = await RelayManagerFfi.newInstance();
+      _manager = await _openPool();
       _initialized = true;
       _initCompleter!.complete();
       _initCompleter = null;
@@ -235,13 +373,39 @@ class NostrRelayService implements RelayService {
     }
   }
 
-  /// Ensures the manager is initialized.
+  /// Ensures the manager is initialized, and never hands out one a shutdown
+  /// is forgetting: a call that waited on the same open as a shutdown waits
+  /// for the shutdown to let go of that pool, then opens its own.
   Future<RelayManagerFfi> _ensureInitialized() async {
-    if (!_initialized || _manager == null) {
+    while (true) {
+      final forgetting = _forgetting;
+      if (forgetting != null) {
+        await forgetting.future;
+        continue;
+      }
       await initialize();
+      // An open that was under way when the latch landed hands its pool to
+      // nobody: the teardown's shutdown closes it.
+      if (_latched) throw const RelayServiceException('Relay service latched');
+      final manager = _manager;
+      if (_forgetting == null && manager != null) return manager;
     }
-    return _manager!;
   }
+
+  /// Set from a [shutdown]'s call until it has forgotten the pool it shuts.
+  Completer<void>? _forgetting;
+
+  /// Set by [latch]: this instance hands out no pool again.
+  bool _latched = false;
+
+  /// Latches this instance: every later call — and one still waiting on an
+  /// open — fails with a [RelayServiceException] through its caller's own
+  /// failure path before it reaches a relay, the pool already open
+  /// included. A call already holding the pool runs on until [shutdown]
+  /// closes it. The Android service's stop, so a step that slips past its
+  /// stop reads reaches no relay; never the iOS burst plane, which shuts its
+  /// pool between bursts and opens it again.
+  void latch() => _latched = true;
 
   /// Converts FFI RelayRejection to service RelayRejection.
   RelayRejection _convertRejection(RelayRejectionFfi ffiRejection) {
@@ -259,18 +423,6 @@ class NostrRelayService implements RelayService {
   }
 
   @override
-  Future<List<String>> fetchKeyPackageRelays(String pubkey) async {
-    final manager = await _ensureInitialized();
-
-    try {
-      return await manager.fetchKeypackageRelays(pubkey: pubkey);
-    } on Object catch (e) {
-      debugPrint('Failed to fetch KeyPackage relays: ${e.runtimeType}');
-      throw const RelayServiceException('Failed to fetch KeyPackage relays');
-    }
-  }
-
-  @override
   Future<List<String>> fetchNip65Relays(String pubkey) async {
     final manager = await _ensureInitialized();
 
@@ -283,19 +435,34 @@ class NostrRelayService implements RelayService {
   }
 
   @override
-  Future<KeyPackageData?> fetchKeyPackage(String pubkey) async {
+  Future<KeyPackageData?> fetchKeyPackage(
+    String pubkey, {
+    List<int>? mlsGroupId,
+  }) async {
     final manager = await _ensureInitialized();
 
     try {
+      // No inviter, no selection: which package fits depends on the circle
+      // the person is being invited into.
+      final circleManagerFactory = _circleManagerFactory;
+      if (circleManagerFactory == null) {
+        throw StateError('no circle manager to select a KeyPackage for');
+      }
       // Use the convenience method that fetches both key package and relays
-      final result = await manager.fetchMemberKeypackage(pubkey: pubkey);
+      final result = await manager.fetchMemberKeypackage(
+        pubkey: pubkey,
+        circle: await circleManagerFactory(),
+        mlsGroupId: mlsGroupId == null ? null : Uint8List.fromList(mlsGroupId),
+      );
 
       if (result == null) {
         return null;
       }
 
+      // The verified author Rust returns, never the requested label: that is
+      // who the Welcome reaches and whom the confirm screen names.
       return KeyPackageData(
-        pubkey: pubkey,
+        pubkey: result.authorNpub,
         eventJson: result.keyPackageJson,
         relays: result.inboxRelays,
         nip65Relays: result.nip65Relays,
@@ -303,42 +470,6 @@ class NostrRelayService implements RelayService {
     } on Object catch (e) {
       debugPrint('Failed to fetch KeyPackage: ${e.runtimeType}');
       throw const RelayServiceException('Failed to fetch KeyPackage');
-    }
-  }
-
-  @override
-  Future<PublishResult> publishWelcome({
-    required GiftWrappedWelcome welcomeEvent,
-  }) async {
-    final manager = await _ensureInitialized();
-
-    try {
-      final ffiResult = await manager.publishEvent(
-        eventJson: welcomeEvent.eventJson,
-        relays: welcomeEvent.recipientRelays,
-      );
-
-      return _convertPublishResult(ffiResult);
-    } on Object catch (e) {
-      debugPrint('Failed to publish welcome event: ${e.runtimeType}');
-      throw const RelayServiceException('Failed to publish welcome event');
-    }
-  }
-
-  @override
-  Future<void> publishEventFireAndForget({
-    required String eventJson,
-    required List<String> relays,
-  }) async {
-    final manager = await _ensureInitialized();
-
-    try {
-      manager.publishEventFireAndForget(eventJson: eventJson, relays: relays);
-    } on Object catch (e) {
-      debugPrint('Failed to publish fire-and-forget event: ${e.runtimeType}');
-      throw const RelayServiceException(
-        'Failed to publish fire-and-forget event',
-      );
     }
   }
 
@@ -428,6 +559,31 @@ class NostrRelayService implements RelayService {
   }
 
   @override
+  Future<CatchupResult> runRefusedRefetch({
+    required CircleManagerFfi circle,
+    int maxDurationSecs = 20,
+  }) async {
+    try {
+      final manager = await _ensureInitialized();
+      final r = await manager.runRefusedRefetch(
+        circle: circle,
+        maxDurationSecs: BigInt.from(maxDurationSecs),
+      );
+      return CatchupResult(
+        circlesSwept: r.circlesSwept,
+        eventsApplied: r.eventsApplied,
+        eventsDeferred: r.eventsDeferred,
+        cursorsAdvanced: r.cursorsAdvanced,
+        deadlineHit: r.deadlineHit,
+        relayErrors: r.relayErrors,
+      );
+    } on Object catch (e) {
+      debugPrint('[Catchup] refetch failed: ${e.runtimeType}');
+      return const CatchupResult.empty();
+    }
+  }
+
+  @override
   @useResult
   Future<KeyPackageMaintenanceOutcome> maintainKeyPackage({
     required CircleManagerFfi circle,
@@ -473,36 +629,15 @@ class NostrRelayService implements RelayService {
   }
 
   @override
-  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
-    required CircleManagerFfi circle,
-    required List<int> identitySecretBytes,
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth({
+    required bool foreground,
   }) async {
-    // Best-effort: a scheduled/cutover tick must never throw into its
-    // caller. The secret bytes are consumed + zeroized Rust-side.
-    try {
-      final manager = await _ensureInitialized();
-      final r = await manager.retractLegacyKeyMaterial(
-        circle: circle,
-        identitySecretBytes: identitySecretBytes,
-      );
-      return LegacyRetractionResult(
-        alreadyDone: r.alreadyDone,
-        legacy443Scrubbed: r.legacy443Scrubbed,
-        relayListRetracted: r.relayListRetracted,
-        relayErrors: r.relayErrors,
-      );
-    } on Object catch (e) {
-      debugPrint('[Cutover] legacy retraction failed: ${e.runtimeType}');
-      return const LegacyRetractionResult.empty();
-    }
-  }
-
-  @override
-  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async {
     // Best-effort: never throws. No secret, no circle handle — the FFI reads
     // the live-sync engine's SESSION and self-gates to a no-op when off.
     try {
-      final r = await rust_ffi.maintainSubscriptionHealth();
+      final r = await rust_ffi.maintainSubscriptionHealth(
+        foreground: foreground,
+      );
       return SubscriptionHealthResult(
         action: mapSubscriptionHealthAction(r.action),
         relaysTotal: r.relaysTotal,
@@ -530,6 +665,8 @@ class NostrRelayService implements RelayService {
         action = RelayListMaintenanceAction.alreadyCurrent;
       case RelayListActionFfi.republished:
         action = RelayListMaintenanceAction.republished;
+      case RelayListActionFfi.awaitingResetAcknowledgement:
+        action = RelayListMaintenanceAction.awaitingResetAcknowledgement;
     }
     return RelayListCategoryResult(action: action, relayErrors: c.relayErrors);
   }
@@ -548,70 +685,26 @@ class NostrRelayService implements RelayService {
       );
 
       return _convertPublishResult(ffiResult);
-    } on Object catch (e) {
+    } on PublishFailureFfi catch (failure) {
       // A device-clock rejection must NOT be flattened into the generic
-      // failure: it is the one publish error the user can actually act on, and
-      // collapsing it here is what made a fast clock a silent outage. The
-      // token is Haven-authored (`RelayError::DeviceClockRejected`), so the
-      // match cannot be steered by a hostile relay, and no relay prose is
-      // logged or rethrown (Security Rule 8).
-      final complaintToken = _deviceClockComplaintToken(e);
-      if (complaintToken != null) {
+      // failure: it is the one publish error the user can act on. Read by its
+      // typed field, never from text (Security Rule 8).
+      final verdict = failure.clockRejected;
+      if (verdict != null) {
         debugPrint(
           'Publish rejected on timestamp grounds (device clock '
-          '$complaintToken)',
+          '${verdict.name})',
         );
-        throw RelayClockRejectionException(complaintToken);
+        throw RelayClockRejectionException(verdict);
       }
+      final refusalKind = failure.refused?.name ?? '-';
+      debugPrint('Failed to publish event: refused $refusalKind');
+      throw const RelayServiceException('Failed to publish event');
+    } on Object catch (e) {
       debugPrint('Failed to publish event: ${e.runtimeType}');
       throw const RelayServiceException('Failed to publish event');
     }
   }
-
-  @override
-  Future<PublishResult> publishLocationEvent({
-    required String eventJson,
-    required List<String> relays,
-  }) async {
-    final manager = await _ensureInitialized();
-
-    try {
-      final ffiResult = await manager.publishLocationEvent(
-        eventJson: eventJson,
-        relays: relays,
-      );
-
-      return _convertPublishResult(ffiResult);
-    } on Object catch (e) {
-      // Same mapping as [publishEvent], deliberately: the one-shot ladder
-      // shortens the ATTEMPT budget, never the error contract. Collapsing a
-      // device-clock rejection into the generic failure here would make a
-      // fast clock a silent outage on the location plane alone — the one
-      // plane the user watches — and no relay prose is logged or rethrown
-      // either way (Security Rule 8).
-      final complaintToken = _deviceClockComplaintToken(e);
-      if (complaintToken != null) {
-        debugPrint(
-          'Location publish rejected on timestamp grounds (device clock '
-          '$complaintToken)',
-        );
-        throw RelayClockRejectionException(complaintToken);
-      }
-      debugPrint('Failed to publish location event: ${e.runtimeType}');
-      throw const RelayServiceException('Failed to publish location event');
-    }
-  }
-
-  /// Extracts the wire token from a `RelayError::DeviceClockRejected` that the
-  /// FFI flattened to a string, or `null` for any other error.
-  ///
-  /// Delegates to [ClockSkewDetector.complaintFromError] rather than
-  /// re-implementing the match: a second copy of the parser is a second thing
-  /// that can silently stop recognising the token, and only one of them would
-  /// have tests. `DeviceClockComplaint.name` is the wire token by construction
-  /// — pinned by `clock_skew_detector_test.dart`.
-  static String? _deviceClockComplaintToken(Object error) =>
-      ClockSkewDetector.complaintFromError(error)?.name;
 
   @override
   Future<List<String>> fetchGroupMessages({
@@ -672,17 +765,306 @@ class NostrRelayService implements RelayService {
 
   /// Shuts down the relay manager.
   ///
-  /// Call this when the app is being closed or going to background.
+  /// Call this when the app is being closed or going to background. The next
+  /// call opens a fresh pool. A pool still being opened is waited for and shut
+  /// too: left to finish, it would be the one the next call is handed.
   Future<void> shutdown() async {
-    if (_manager != null) {
-      try {
-        await _manager!.shutdown();
-      } on Exception {
-        // Ignore shutdown errors
+    final forgotten = _forgetting = Completer<void>();
+    final RelayManagerFfi? manager;
+    try {
+      final opening = _initCompleter?.future;
+      if (opening != null) {
+        try {
+          await opening;
+        } on Object catch (_) {
+          // Nothing was opened.
+        }
       }
+      // Forgotten before the disconnect is awaited: a call meanwhile opens a
+      // pool of its own rather than ride one going down.
+      manager = _manager;
       _manager = null;
       _initialized = false;
+    } finally {
+      if (identical(_forgetting, forgotten)) _forgetting = null;
+      forgotten.complete();
     }
+    if (manager != null) {
+      try {
+        await manager.shutdown();
+      } on Object catch (_) {
+        // Ignore shutdown errors
+      }
+    }
+  }
+
+  // The fanout driver's change entries. FFI errors propagate to the circle
+  // service, which classifies none of them (Rule 8).
+
+  @override
+  Future<CircleCreationOutcomeFfi> createCircle({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+    required List<MemberKeyPackageFfi> members,
+    required String name,
+    required String circleType,
+    required List<String> relays,
+    required bool foreground,
+    String? description,
+  }) => _driving(
+    () async => (await _ensureInitialized()).createCircleDriven(
+      circle: circle,
+      identitySecretBytes: identitySecretBytes,
+      members: members,
+      name: name,
+      description: description,
+      circleType: circleType,
+      relays: relays,
+      foreground: foreground,
+    ),
+  );
+
+  @override
+  Future<EvolutionOutcomeFfi> addMembers({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required List<MemberKeyPackageFfi> members,
+    required bool foreground,
+  }) => _driving(() async {
+    final outcome = await (await _ensureInitialized()).addMembersDriven(
+      circle: circle,
+      mlsGroupId: mlsGroupId,
+      members: members,
+      foreground: foreground,
+    );
+    return _heardChange(outcome, outcome);
+  });
+
+  @override
+  Future<EvolutionOutcomeFfi> removeMembers({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required List<String> memberPubkeys,
+    required bool foreground,
+  }) => _driving(() async {
+    final outcome = await (await _ensureInitialized()).removeMembersDriven(
+      circle: circle,
+      mlsGroupId: mlsGroupId,
+      memberPubkeys: memberPubkeys,
+      foreground: foreground,
+    );
+    return _heardChange(outcome, outcome);
+  });
+
+  @override
+  Future<EvolutionOutcomeFfi> updateCircleRelays({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required List<String> relays,
+    required bool foreground,
+  }) => _driving(() async {
+    final outcome = await (await _ensureInitialized()).updateCircleRelaysDriven(
+      circle: circle,
+      mlsGroupId: mlsGroupId,
+      relays: relays,
+      foreground: foreground,
+    );
+    return _heardChange(outcome, outcome);
+  });
+
+  @override
+  Future<EvolutionOutcomeFfi> adminHandoff({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required String successor,
+    required bool foreground,
+  }) => _driving(() async {
+    final outcome = await (await _ensureInitialized()).adminHandoffDriven(
+      circle: circle,
+      mlsGroupId: mlsGroupId,
+      successor: successor,
+      foreground: foreground,
+    );
+    return _heardChange(outcome, outcome);
+  });
+
+  @override
+  Future<EvolutionOutcomeFfi> selfDemote({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required bool foreground,
+  }) => _driving(() async {
+    final outcome = await (await _ensureInitialized()).selfDemoteDriven(
+      circle: circle,
+      mlsGroupId: mlsGroupId,
+      foreground: foreground,
+    );
+    return _heardChange(outcome, outcome);
+  });
+
+  @override
+  Future<RepairOutcomeFfi> repairRotation({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required bool foreground,
+  }) => _driving(() async {
+    final outcome = await (await _ensureInitialized()).repairRotationDriven(
+      circle: circle,
+      mlsGroupId: mlsGroupId,
+      foreground: foreground,
+    );
+    return _heardChange(outcome, outcome.rotated);
+  });
+
+  @override
+  Future<RecoveryCauseFfi?> circleRecovery({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required bool foreground,
+  }) => _driving(
+    () async => (await _ensureInitialized()).circleRecovery(
+      circle: circle,
+      mlsGroupId: mlsGroupId,
+      foreground: foreground,
+    ),
+  );
+
+  @override
+  Future<IngestOutcomeFfi> ingest({
+    required CircleManagerFfi circle,
+    required String eventJson,
+    required bool foreground,
+  }) => _driving(() async {
+    final outcome = await (await _ensureInitialized()).ingestDriven(
+      circle: circle,
+      eventJson: eventJson,
+      foreground: foreground,
+    );
+    return _heard(outcome, outcome.clockRejected);
+  });
+
+  @override
+  Future<ResumeOutcomeFfi> resume({
+    required CircleManagerFfi circle,
+    required bool foreground,
+  }) => _driving(() async {
+    final outcome = await (await _ensureInitialized()).resumeDriven(
+      circle: circle,
+      foreground: foreground,
+    );
+    return _heard(outcome, outcome.clockRejected);
+  });
+
+  @override
+  Future<ReinviteDrivenFfi> reinvite({
+    required CircleManagerFfi circle,
+    required bool foreground,
+  }) => _driving(
+    () async => (await _ensureInitialized()).reinviteDriven(
+      circle: circle,
+      foreground: foreground,
+    ),
+  );
+
+  @override
+  Future<SealOutcomeFfi> sealLocation({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required double latitude,
+    required double longitude,
+    required bool foreground,
+  }) => _driving(location: true, () async {
+    final manager = await _ensureInitialized();
+    final fix = await (_fixOf ?? _coreFix)(latitude, longitude);
+    try {
+      final outcome = await manager.sealLocationDriven(
+        circle: circle,
+        mlsGroupId: mlsGroupId,
+        location: fix,
+        foreground: foreground,
+      );
+      return _heard(outcome, outcome.clockRejected);
+    } finally {
+      // The exact coordinates: held no longer than the seal that read them.
+      fix.dispose();
+    }
+  });
+
+  Future<LocationMessage> _coreFix(double latitude, double longitude) async =>
+      (_locationCore ??= await HavenCore.newInstance()).updateLocation(
+        latitude: latitude,
+        longitude: longitude,
+      );
+
+  /// Builds the fix a seal takes; holds no state of its own.
+  HavenCore? _locationCore;
+
+  @override
+  Future<LocationPublishFfi> publishLocation({
+    required CircleManagerFfi circle,
+    required SealedLocationFfi sealed,
+  }) => _driving(
+    location: true,
+    () async => (await _ensureInitialized()).publishLocationDriven(
+      circle: circle,
+      sealed: sealed,
+    ),
+  );
+
+  /// The leave presses and carry-ons in flight, by MLS group id: one of
+  /// each per circle at a time in this isolate. A carry-on landing beside a
+  /// press, or beside another carry-on, joins it; a press landing beside a
+  /// carry-on runs once that carry-on has ended, since it must write the
+  /// intent the carry-on read before it.
+  final Map<String, Future<LeaveOutcomeFfi>> _leavePresses = {};
+  final Map<String, Future<LeaveOutcomeFfi>> _leaveCarryOns = {};
+
+  @override
+  Future<LeaveOutcomeFfi> leave({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required bool foreground,
+  }) {
+    final key = mlsGroupId.join(',');
+    final carryOn = _leaveCarryOns[key];
+    return _leavePresses[key] ??= _driving(() async {
+      if (carryOn != null) {
+        try {
+          await carryOn;
+        } on Object catch (_) {
+          // That carry-on's failure is its caller's; the press goes on.
+        }
+      }
+      final outcome = await (await _ensureInitialized()).leaveDriven(
+        circle: circle,
+        mlsGroupId: mlsGroupId,
+        foreground: foreground,
+      );
+      return _heard(outcome, outcome.clockRejected);
+    }).whenComplete(() {
+      _leavePresses.remove(key);
+    });
+  }
+
+  @override
+  Future<LeaveOutcomeFfi> resumeLeave({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required bool foreground,
+  }) {
+    final key = mlsGroupId.join(',');
+    final press = _leavePresses[key];
+    if (press != null) return press;
+    return _leaveCarryOns[key] ??= _driving(() async {
+      final outcome = await (await _ensureInitialized()).resumeLeaveDriven(
+        circle: circle,
+        mlsGroupId: mlsGroupId,
+        foreground: foreground,
+      );
+      return _heard(outcome, outcome.clockRejected);
+    }).whenComplete(() {
+      _leaveCarryOns.remove(key);
+    });
   }
 
   @override
@@ -695,6 +1077,37 @@ class NostrRelayService implements RelayService {
       // point, so even if the disconnect fails, no further publishes /
       // fetches will target it.
       debugPrint('disconnectRelay failed: ${e.runtimeType}');
+    }
+  }
+}
+
+/// The driver entries in flight, and one future per read of [quiescent]
+/// covering those it saw, until another entry joins.
+class _DriveRegistry {
+  final Set<Future<void>> _running = {};
+  Future<void>? _seen;
+
+  /// The drives in flight at the read, as one future: the same one until
+  /// another drive joins.
+  Future<void>? get quiescent {
+    if (_running.isEmpty) return null;
+    return _seen ??= Future.wait(_running.toList());
+  }
+
+  /// Runs [drive] registered, rethrowing what it throws. The bookkeeping
+  /// stays in the `finally`: a drive that threw and never left the registry
+  /// would hold every teardown that reads it forever.
+  Future<T> run<T>(Future<T> Function() drive) async {
+    final ended = Completer<void>();
+    _running.add(ended.future);
+    _seen = null;
+    try {
+      return await drive();
+    } finally {
+      // Left before it completes, so whatever runs on the completion reads
+      // the registry without it.
+      _running.remove(ended.future);
+      ended.complete();
     }
   }
 }

@@ -353,7 +353,7 @@ mkdir -p "${LOG_DIR}"
 # isolate, so another branch would mean a foreign debugger)
 # and the driver script's verdict (`All tests passed.`, or
 # `Failure Details:` when it is not) — 9 per slice, 18 for the pair, and more
-# for every retry. The aggregate EXIT gate sums all seven targets, so it clears
+# for every retry. The aggregate EXIT gate sums every target, so it clears
 # this by a wide margin. The --self-test reds if the floor ever exceeds the
 # pair.
 #

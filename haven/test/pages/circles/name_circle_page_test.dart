@@ -1,6 +1,7 @@
 /// Widget tests for [NameCirclePage].
 library;
 
+import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -23,8 +24,13 @@ import 'package:haven/src/services/publish_stagger.dart'
     show kMaxCirclesPerAccount;
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/utils/bidi_isolate.dart';
+import 'package:haven/src/utils/npub_validator.dart';
+import 'package:haven/src/widgets/circles/missed_invitations_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../helpers/accessibility_announcements.dart';
+import '../../helpers/log_capture.dart';
 import '../../mocks/mock_circle_service.dart';
 
 // ---------------------------------------------------------------------------
@@ -154,12 +160,21 @@ Widget _buildNavApp({
   required ProviderContainer container,
   required NavigatorObserver observer,
   required List<KeyPackageData> memberKeyPackages,
+  Locale? locale,
+  TextScaler? textScaler,
 }) {
   return UncontrolledProviderScope(
     container: container,
     child: MaterialApp(
+      locale: locale,
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
+      builder: textScaler == null
+          ? null
+          : (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+              child: child!,
+            ),
       navigatorObservers: [observer],
       home: Scaffold(
         body: Builder(
@@ -220,6 +235,7 @@ Future<AppLocalizations> _createCircle(
   );
 
   await tester.enterText(find.byKey(WidgetKeys.circleNameInput), name);
+  await tester.ensureVisible(find.byKey(WidgetKeys.createCircleConfirm));
   await tester.tap(find.byKey(WidgetKeys.createCircleConfirm));
 
   // Drain the async chain (creator-fallback-relays fetch, secret-bytes
@@ -456,7 +472,7 @@ void main() {
         final l10n = await _createCircle(tester, name: 'Weekend Trip');
 
         expect(
-          find.text(l10n.nameCircleCreatedSnack('Weekend Trip', 2)),
+          find.text(l10n.nameCircleCreatedSnack(bidiIsolate('Weekend Trip'), 2)),
           findsOneWidget,
         );
 
@@ -470,13 +486,12 @@ void main() {
     );
 
     testWidgets(
-      'partial delivery: snackbar tells the truth (N of M delivered), never '
+      'partial sending: snackbar tells the truth (N of M sent), never '
       'claims every invitation was sent',
       (tester) async {
-        // 1 of 3 Welcomes actually reached a relay — the scenario from the
-        // bug report: NostrCircleService confirms the circle as soon as ANY
-        // Welcome lands, so failure of the other two is silent unless the
-        // UI is told the real count.
+        // 1 of 3 Welcomes actually reached a relay. The circle exists either
+        // way, so the failure of the other two is silent unless the UI is told
+        // the real count.
         final mockCircle = MockCircleService()
           ..createCircleResult = CircleCreationResult(
             circle: TestCircleFactory.createCircle(displayName: 'Family'),
@@ -502,19 +517,396 @@ void main() {
           ),
         );
 
+        final said = captureAccessibilityAnnouncements(tester);
         final l10n = await _createCircle(tester, name: 'Family');
 
-        // The truthful, partial-delivery message is shown — and it still leads
-        // with the circle having been created, which is the outcome the user
-        // came here for and which this screen pops away from immediately.
+        // A SnackBar is not a live region: the same words are spoken, with
+        // the name raw (no isolate marks read aloud).
         expect(
-          find.text(l10n.nameCircleCreatedPartialSnack('Family', 1, 3)),
+          said,
+          contains(l10n.nameCircleCreatedSentSoFarSnack('Family', 1, 3)),
+        );
+
+        // The truthful count is shown — and it still leads with the circle
+        // having been created, which is the outcome the user came here for and
+        // which this screen pops away from immediately.
+        expect(
+          find.text(
+            l10n.nameCircleCreatedSentSoFarSnack(bidiIsolate('Family'), 1, 3),
+          ),
           findsOneWidget,
         );
         // ...and the false "all 3 sent" claim must never appear.
         expect(
-          find.text(l10n.nameCircleCreatedSnack('Family', 3)),
+          find.text(l10n.nameCircleCreatedSnack(bidiIsolate('Family'), 3)),
           findsNothing,
+        );
+        // It carries the remedy, so it stays up long enough to read and can
+        // be dismissed sooner.
+        final snacks = tester.widgetList<SnackBar>(find.byType(SnackBar));
+        expect(snacks, isNotEmpty);
+        for (final snack in snacks) {
+          expect(snack.persist, isTrue);
+          expect(snack.action, isNotNull);
+        }
+
+        container.read(joinWatcherProvider.notifier).cancel();
+      },
+    );
+
+    testWidgets(
+      'partial sending to several people says the count and offers who was '
+      'missed',
+      (tester) async {
+        const missedB = 'npub1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+        const missedC = 'npub1cccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+        final mockCircle = MockCircleService()
+          ..createCircleResult = CircleCreationResult(
+            circle: TestCircleFactory.createCircle(displayName: 'Family'),
+            welcomesSent: 1,
+            welcomesTotal: 3,
+            unsentNpubs: const [missedB, missedC],
+          );
+        final container = ProviderContainer(
+          overrides: _overrides(mockCircle: mockCircle),
+        );
+        addTearDown(container.dispose);
+        await tester.pumpWidget(
+          _buildNavApp(
+            container: container,
+            observer: _PopCountingNavigatorObserver(),
+            memberKeyPackages: [_invitee('a'), _invitee('b'), _invitee('c')],
+          ),
+        );
+
+        final l10n = await _createCircle(tester, name: 'Family');
+
+        expect(
+          find.text(
+            l10n.nameCircleCreatedSentSoFarSnack(bidiIsolate('Family'), 1, 3),
+          ),
+          findsOneWidget,
+        );
+        final snack = tester.widget<SnackBar>(find.byType(SnackBar).first);
+        expect(snack.persist, isTrue);
+        // Still there long after any timeout a snackbar could have had.
+        await tester.pump(const Duration(minutes: 5));
+        expect(
+          find.descendant(
+            of: find.byType(SnackBar),
+            matching: find.widgetWithText(
+              TextButton,
+              l10n.missedInvitationsShowWho,
+            ),
+          ),
+          findsOneWidget,
+          reason: 'the member list does not mark who was missed, so the '
+              'remedy is only doable if the snack can say who',
+        );
+        expect(snack.showCloseIcon, isTrue, reason: 'and it can be closed');
+
+        await tester.tap(find.text(l10n.missedInvitationsShowWho));
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+        expect(find.byType(MissedInvitationsDialog), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(MissedInvitationsDialog),
+            matching: find.text(
+              l10n.nameCircleCreatedSentSoFarSnack(bidiIsolate('Family'), 1, 3),
+            ),
+          ),
+          findsOneWidget,
+          reason: 'the remedy goes with the list when the snackbar closes',
+        );
+        for (final npub in const [missedB, missedC]) {
+          expect(
+            find.text(bidiIsolate(NpubValidator.shortenForDisplay(npub))),
+            findsOneWidget,
+          );
+        }
+
+        container.read(joinWatcherProvider.notifier).cancel();
+      },
+    );
+
+    testWidgets(
+      'a missed list that is not everyone who was missed is not offered',
+      (tester) async {
+        final mockCircle = MockCircleService()
+          ..createCircleResult = CircleCreationResult(
+            circle: TestCircleFactory.createCircle(displayName: 'Family'),
+            welcomesSent: 1,
+            welcomesTotal: 3,
+            unsentNpubs: const [
+              'npub1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            ],
+          );
+        final container = ProviderContainer(
+          overrides: _overrides(mockCircle: mockCircle),
+        );
+        addTearDown(container.dispose);
+        await tester.pumpWidget(
+          _buildNavApp(
+            container: container,
+            observer: _PopCountingNavigatorObserver(),
+            memberKeyPackages: [_invitee('a'), _invitee('b'), _invitee('c')],
+          ),
+        );
+
+        final l10n = await _createCircle(tester, name: 'Family');
+
+        expect(
+          find.text(l10n.missedInvitationsShowWho),
+          findsNothing,
+          reason: 'naming one of two people would read as naming everyone',
+        );
+        final snack = tester.widget<SnackBar>(find.byType(SnackBar).first);
+        expect(snack.action?.label, l10n.commonDismiss);
+        container.read(joinWatcherProvider.notifier).cancel();
+      },
+    );
+
+    testWidgets(
+      'at 200% text on a small phone in German, three missed people: nothing '
+      'overflows, and Show who and every person can be reached',
+      (tester) async {
+        tester.view
+          ..physicalSize = const Size(320, 568)
+          ..devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final missed = [
+          for (final c in ['b', 'c', 'd']) 'npub1${c * 52}qqqqqq',
+        ];
+        final mockCircle = MockCircleService()
+          ..createCircleResult = CircleCreationResult(
+            circle: TestCircleFactory.createCircle(displayName: 'Familie'),
+            welcomesSent: 1,
+            welcomesTotal: 4,
+            unsentNpubs: missed,
+          );
+        final container = ProviderContainer(
+          overrides: _overrides(mockCircle: mockCircle),
+        );
+        addTearDown(container.dispose);
+        await tester.pumpWidget(
+          _buildNavApp(
+            container: container,
+            observer: _PopCountingNavigatorObserver(),
+            memberKeyPackages: [
+              for (final c in ['a', 'b', 'c', 'd']) _invitee(c),
+            ],
+            locale: const Locale('de'),
+            textScaler: const TextScaler.linear(2),
+          ),
+        );
+
+        final l10n = await _createCircle(tester, name: 'Familie');
+        await tester.pump(const Duration(seconds: 1));
+        expect(tester.takeException(), isNull);
+
+        final showWho = find.text(l10n.missedInvitationsShowWho);
+        expect(showWho, findsOneWidget);
+        expect(tester.getRect(showWho).bottom, lessThanOrEqualTo(568));
+        // The remedy is taller than the screen here, so it scrolls to its end
+        // rather than being clipped.
+        final message = find.descendant(
+          of: find.byType(SnackBar),
+          matching: find.byType(Scrollable),
+        );
+        final position = tester.state<ScrollableState>(message).position;
+        expect(position.maxScrollExtent, greaterThan(0), reason: 'precondition');
+        await tester.drag(message, const Offset(0, -2000));
+        await tester.pump();
+        expect(position.pixels, position.maxScrollExtent);
+        expect(tester.getRect(message).top, greaterThanOrEqualTo(0));
+        await tester.tap(showWho);
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+        expect(tester.takeException(), isNull);
+
+        for (final npub in missed) {
+          final row = find.text(
+            bidiIsolate(NpubValidator.shortenForDisplay(npub)),
+          );
+          await tester.ensureVisible(row);
+          await tester.pump(const Duration(milliseconds: 300));
+          final rect = tester.getRect(row);
+          expect(rect.top, greaterThanOrEqualTo(0));
+          expect(rect.bottom, lessThanOrEqualTo(568));
+        }
+        expect(tester.takeException(), isNull);
+        container.read(joinWatcherProvider.notifier).cancel();
+      },
+    );
+
+    testWidgets(
+      'while the circle is being created there is no back arrow, and a back '
+      'gesture hears why it waits',
+      (tester) async {
+        final gate = Completer<CircleCreationResult>();
+        final container = ProviderContainer(
+          overrides: _overrides(mockCircle: _GatedCreateCircleService(gate)),
+        );
+        addTearDown(container.dispose);
+        await tester.pumpWidget(
+          _buildNavApp(
+            container: container,
+            observer: _PopCountingNavigatorObserver(),
+            memberKeyPackages: [_invitee('a')],
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Open'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('OpenName'));
+        await tester.pumpAndSettle();
+        expect(find.byType(BackButton), findsOneWidget, reason: 'precondition');
+        final l10n = AppLocalizations.of(
+          tester.element(find.byType(NameCirclePage)),
+        );
+
+        await tester.enterText(find.byKey(WidgetKeys.circleNameInput), 'Hold');
+        await tester.tap(find.byKey(WidgetKeys.createCircleConfirm));
+        for (var i = 0; i < 6; i++) {
+          await tester.pump(Duration.zero);
+        }
+        expect(
+          find.byType(BackButton),
+          findsNothing,
+          reason: 'an arrow that does nothing for up to a minute reads as broken',
+        );
+
+        tester.takeAnnouncements();
+        await tester.state<NavigatorState>(find.byType(Navigator)).maybePop();
+        await tester.pump();
+        expect(
+          tester.takeAnnouncements().map((a) => a.message),
+          contains(
+            l10n.nameCircleProgressSemantics(
+              CreationStage.creatingGroup.label(l10n),
+            ),
+          ),
+        );
+
+        gate.complete(
+          CircleCreationResult(
+            circle: TestCircleFactory.createCircle(displayName: 'Hold'),
+            welcomesSent: 1,
+            welcomesTotal: 1,
+          ),
+        );
+        for (var i = 0; i < 6; i++) {
+          await tester.pump(Duration.zero);
+        }
+        container.read(joinWatcherProvider.notifier).cancel();
+      },
+    );
+
+    testWidgets(
+      'leaving while the circle is being created is held until it finishes',
+      (tester) async {
+        final gate = Completer<CircleCreationResult>();
+        final mockCircle = _GatedCreateCircleService(gate);
+        final observer = _PopCountingNavigatorObserver();
+        final container = ProviderContainer(
+          overrides: _overrides(mockCircle: mockCircle),
+        );
+        addTearDown(container.dispose);
+        await tester.pumpWidget(
+          _buildNavApp(
+            container: container,
+            observer: observer,
+            memberKeyPackages: [_invitee('a')],
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Open'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('OpenName'));
+        await tester.pumpAndSettle();
+        final pops = observer.popCount;
+        await tester.enterText(find.byKey(WidgetKeys.circleNameInput), 'Hold');
+        await tester.tap(find.byKey(WidgetKeys.createCircleConfirm));
+        for (var i = 0; i < 6; i++) {
+          await tester.pump(Duration.zero);
+        }
+
+        final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+        await navigator.maybePop();
+        await tester.pump();
+        expect(
+          find.byType(NameCirclePage),
+          findsOneWidget,
+          reason: 'the outcome would have nowhere left to be said',
+        );
+        expect(observer.popCount, pops);
+
+        gate.complete(
+          CircleCreationResult(
+            circle: TestCircleFactory.createCircle(displayName: 'Hold'),
+            welcomesSent: 1,
+            welcomesTotal: 1,
+          ),
+        );
+        for (var i = 0; i < 6; i++) {
+          await tester.pump(Duration.zero);
+        }
+        container.read(joinWatcherProvider.notifier).cancel();
+      },
+    );
+
+    testWidgets(
+      'no invitation sent: the circle is still created, the snackbar says 0 '
+      'of N, and the create flow unwinds',
+      (tester) async {
+        // A founded circle is canonical whatever reached a relay, so zero
+        // acked Welcomes is a created circle with an honest count — never the
+        // "failed to create" error, which would send the user to make a
+        // duplicate.
+        final mockCircle = MockCircleService()
+          ..createCircleResult = CircleCreationResult(
+            circle: TestCircleFactory.createCircle(displayName: 'Trip'),
+            welcomesSent: 0,
+            welcomesTotal: 2,
+            unsentNpubs: const [
+              'npub1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+              'npub1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            ],
+          );
+
+        final observer = _PopCountingNavigatorObserver();
+        final container = ProviderContainer(
+          overrides: _overrides(mockCircle: mockCircle),
+        );
+        addTearDown(container.dispose);
+
+        await tester.pumpWidget(
+          _buildNavApp(
+            container: container,
+            observer: observer,
+            memberKeyPackages: [_invitee('a'), _invitee('b')],
+          ),
+        );
+
+        final l10n = await _createCircle(tester, name: 'Trip');
+
+        expect(
+          find.text(
+            l10n.nameCircleCreatedSentSoFarSnack(bidiIsolate('Trip'), 0, 2),
+          ),
+          findsOneWidget,
+        );
+        expect(find.text(l10n.nameCircleCreateError), findsNothing);
+        expect(
+          find.text(l10n.missedInvitationsShowWho),
+          findsNothing,
+          reason: '"0 of 2" already says it was everyone',
+        );
+        expect(
+          observer.popCount,
+          2,
+          reason: 'the circle exists, so both create-flow routes pop',
         );
 
         container.read(joinWatcherProvider.notifier).cancel();
@@ -653,6 +1045,23 @@ void main() {
       );
     }
 
+    testWidgets('an invitee no invitation can reach gets its own copy as a '
+        'live region, never the generic error', (tester) async {
+      final handle = tester.ensureSemantics();
+      final capture = LogCapture.install();
+      final l10n = await pumpFailedCreate(
+        tester,
+        mockCircle: _UnreachableInviteeCircleService(),
+      );
+      expectAnnounced(tester, l10n.memberCannotReceiveInvitations);
+      expect(find.text(l10n.nameCircleCreateError), findsNothing);
+      capture
+        ..restore()
+        ..assertContains('[CircleCreate] invitee unreachable')
+        ..assertNoNeedles(['Announce me']);
+      handle.dispose();
+    });
+
     testWidgets('the roster-bound refusal is a live region', (tester) async {
       // Disposed explicitly, not via addTearDown: the end-of-test
       // semantics-handle verification runs before tearDowns.
@@ -721,10 +1130,26 @@ class _RosterFullCircleService extends MockCircleService {
     required CircleType circleType,
     String? description,
     List<String>? relays,
-    List<String> creatorFallbackRelays = const [],
   }) async {
     methodCalls.add('createCircle');
     throw const CircleRosterFullException();
+  }
+}
+
+/// A circle service whose create the core refuses: an invitee lists no inbox
+/// relay a Welcome could reach.
+class _UnreachableInviteeCircleService extends MockCircleService {
+  @override
+  Future<CircleCreationResult> createCircle({
+    required List<int> identitySecretBytes,
+    required List<KeyPackageData> memberKeyPackages,
+    required String name,
+    required CircleType circleType,
+    String? description,
+    List<String>? relays,
+  }) async {
+    methodCalls.add('createCircle');
+    throw const CircleInviteesUnreachableException();
   }
 }
 
@@ -739,7 +1164,6 @@ class _FailingCircleService extends MockCircleService {
     required CircleType circleType,
     String? description,
     List<String>? relays,
-    List<String> creatorFallbackRelays = const [],
   }) async {
     methodCalls.add('createCircle');
     throw const CircleServiceException('relay unreachable');
@@ -755,4 +1179,24 @@ class _FailingIdentityNotifier extends IdentityNotifier {
   @override
   Future<List<int>> getSecretBytes() async =>
       throw const IdentityServiceException('secret unavailable');
+}
+
+/// A circle service whose create finishes only when the test says.
+class _GatedCreateCircleService extends MockCircleService {
+  _GatedCreateCircleService(this.gate);
+
+  final Completer<CircleCreationResult> gate;
+
+  @override
+  Future<CircleCreationResult> createCircle({
+    required List<int> identitySecretBytes,
+    required List<KeyPackageData> memberKeyPackages,
+    required String name,
+    required CircleType circleType,
+    String? description,
+    List<String>? relays,
+  }) {
+    methodCalls.add('createCircle');
+    return gate.future;
+  }
 }

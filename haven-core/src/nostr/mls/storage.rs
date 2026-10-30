@@ -38,7 +38,9 @@ use std::sync::{Mutex, OnceLock};
 
 use rand::rngs::OsRng;
 use rand::RngCore;
-use storage_sqlite::{SqlCipherKey, SqliteAccountStorage, SqliteStorageOptions};
+#[cfg(any(test, feature = "test-utils"))]
+use storage_sqlite::SqliteAccountStorage;
+use storage_sqlite::{SqlCipherKey, SqliteStorageOptions};
 use zeroize::Zeroizing;
 
 use crate::nostr::error::{NostrError, Result};
@@ -265,19 +267,13 @@ impl Drop for LiveSessionGuard {
 /// service.
 const SERVICE_ID: &str = "com.oblivioustech.haven";
 
-/// Keyring key identifier for the Dark Matter MLS session passphrase.
-const MLS_DB_KEY_ID: &str = "mls.session.key.default";
+/// Keyring key identifier for the MLS session passphrase. New with the MDK
+/// v0.10.4 store (`crate::storage_reset` destroys the pre-v2 id).
+const MLS_DB_KEY_ID: &str = "mls.session.key.v2";
 
-/// File name of the Dark Matter MLS database.
-const MLS_DB_FILENAME: &str = "session.sqlite";
-
-/// Pre-Dark-Matter MLS database file name. Retained only so the cutover wipe
-/// can find and delete it (plus its WAL/SHM/journal sidecars).
-const LEGACY_MLS_DB_FILENAME: &str = "haven_mdk.db";
-
-/// Pre-Dark-Matter MLS DB keyring key identifier. Retained only so the cutover
-/// can destroy it (security F6).
-const LEGACY_MLS_DB_KEY_ID: &str = "mdk.db.key.default";
+/// File name of the MLS database. New with the MDK v0.10.4 store, so a v0.9.4
+/// file is never opened (`crate::storage_reset` deletes it).
+const MLS_DB_FILENAME: &str = "session-v2.sqlite";
 
 /// Configuration for the MLS session storage.
 ///
@@ -305,19 +301,10 @@ impl StorageConfig {
         }
     }
 
-    /// Path to the Dark Matter MLS database file (`session.sqlite`).
+    /// Path to the MLS database file (`session-v2.sqlite`).
     #[must_use]
     pub fn database_path(&self) -> PathBuf {
         self.data_dir.join(MLS_DB_FILENAME)
-    }
-
-    /// Path to the pre-Dark-Matter MLS database file (`haven_mdk.db`).
-    ///
-    /// Present only so the cutover wipe can locate the abandoned database and
-    /// its sidecars; nothing reads or writes it at runtime.
-    #[must_use]
-    pub fn legacy_database_path(&self) -> PathBuf {
-        self.data_dir.join(LEGACY_MLS_DB_FILENAME)
     }
 
     /// The `storage-sqlite` options the session opens with.
@@ -334,7 +321,7 @@ impl StorageConfig {
     ///
     /// On first call this mints a fresh 32-byte `OsRng` passphrase, stores the
     /// raw bytes in the platform keyring under
-    /// (`com.oblivioustech.haven`, `mls.session.key.default`), and on iOS
+    /// (`com.oblivioustech.haven`, `mls.session.key.v2`), and on iOS
     /// migrates the entry to `AfterFirstUnlockThisDeviceOnly` so a locked-device
     /// background wake can open the database. Subsequent calls read it back.
     ///
@@ -360,10 +347,7 @@ impl StorageConfig {
             log::warn!("MLS session DB key access-policy migration deferred");
         }
 
-        // `as_str()` copies into a fresh String that `SqlCipherKey::new` moves
-        // into its own `Zeroizing<String>`; `passphrase` is zeroized on drop.
-        SqlCipherKey::new(passphrase.as_str())
-            .map_err(|e| NostrError::StorageError(format!("Failed to build SQLCipher key: {e}")))
+        cipher_key(passphrase.as_str())
     }
 
     /// Opens (or creates) the encrypted `session.sqlite` backend.
@@ -377,28 +361,27 @@ impl StorageConfig {
     /// At most ONE live handle on `session.sqlite` may exist across all isolates
     /// and processes: two opens hydrate two divergent in-memory epoch states,
     /// which risks exporter-key/epoch reuse and forward-secrecy erosion. In
-    /// production (DM-2 onward) the session opens this file itself; do NOT call
-    /// this while a session is live on the same directory.
+    /// production (DM-2 onward) the session opens this file itself, so this is
+    /// compiled for tests and test-utils builds only; do NOT call it while a
+    /// session is live on the same directory.
     ///
     /// # Errors
     ///
     /// Returns [`NostrError::StorageError`] if the directory cannot be created,
     /// the keyring is unavailable, or the database cannot be opened/decrypted.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn open_encrypted_storage(&self) -> Result<SqliteAccountStorage> {
-        std::fs::create_dir_all(&self.data_dir).map_err(|e| {
-            NostrError::StorageError(format!(
-                "Failed to create data directory {}: {e}",
-                self.data_dir.display()
-            ))
-        })?;
+        std::fs::create_dir_all(&self.data_dir)
+            .map_err(|_| NostrError::StorageError("Failed to create the data directory".into()))?;
 
         let key = self.sqlcipher_key()?;
+        crate::sqlcipher_init::ensure().map_err(|_| storage_err("initialise SQLite"))?;
         SqliteAccountStorage::open_encrypted_with_options(
             self.database_path(),
             &key,
             Self::storage_options(),
         )
-        .map_err(|e| NostrError::StorageError(format!("Failed to open MLS storage: {e}")))
+        .map_err(super::manager::map_storage_err)
     }
 
     /// Creates an ephemeral, unencrypted in-memory MLS storage backend for
@@ -415,9 +398,8 @@ impl StorageConfig {
     /// initialized.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn in_memory_storage() -> Result<SqliteAccountStorage> {
-        SqliteAccountStorage::in_memory().map_err(|e| {
-            NostrError::StorageError(format!("Failed to open in-memory MLS storage: {e}"))
-        })
+        crate::sqlcipher_init::ensure().map_err(|_| storage_err("initialise SQLite"))?;
+        SqliteAccountStorage::in_memory().map_err(super::manager::map_storage_err)
     }
 
     /// The fixed `SQLCipher` key every keyring-free test session opens with.
@@ -500,6 +482,95 @@ pub fn openmls_group_keys_for_test(
     Ok(keys)
 }
 
+/// The distinct labels of every `OpenMLS` value stored under no group.
+///
+/// That is account-level state — the MLS signing key pair, the `KeyPackage`
+/// bundles — or a leaf key a staged own commit would hold outside its group
+/// (MDK `storage-sqlite/src/openmls_storage/provider.rs` 183-197). Read on a
+/// **closed** database, as [`openmls_group_keys_for_test`].
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or read.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn ungrouped_openmls_labels_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+) -> Result<Vec<String>> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT label FROM openmls_values WHERE group_key IS NULL ORDER BY label")
+        .map_err(|_| storage_err("prepare the openmls_values read"))?;
+    let labels = stmt
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|_| storage_err("read openmls_values"))?
+        .map(|label| label.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| storage_err("collect openmls_values"))?;
+    Ok(labels)
+}
+
+/// Moves every `OpenMLS` state row of `group` aside, into a table of the
+/// test's own in the same database.
+///
+/// The next open quarantines the group as
+/// [`delete_openmls_group_state_for_test`] makes it, and
+/// [`restore_openmls_group_state_for_test`] puts the rows back for a retry
+/// to hydrate it. Run on a **closed** database.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn stash_openmls_group_state_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    group: &OpenMlsGroupKey,
+) -> Result<usize> {
+    let conn = open_tamper_connection(db_path, key)?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS haven_test_openmls_stash AS
+         SELECT * FROM openmls_values WHERE 0",
+    )
+    .map_err(|_| storage_err("create the stash"))?;
+    conn.execute(
+        "INSERT INTO haven_test_openmls_stash SELECT * FROM openmls_values WHERE group_key = ?1",
+        [&group.0],
+    )
+    .map_err(|_| storage_err("stash openmls_values"))?;
+    conn.execute(
+        "DELETE FROM openmls_values WHERE group_key = ?1",
+        [&group.0],
+    )
+    .map_err(|_| storage_err("delete openmls_values"))
+}
+
+/// Puts back what [`stash_openmls_group_state_for_test`] moved aside.
+///
+/// The one rows-only write a test makes on a LIVE database here: the group
+/// it names is quarantined, so the engine holds nothing of it in memory,
+/// and MDK's retry reads it back from the store.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn restore_openmls_group_state_for_test(db_path: &Path, key: &SqlCipherKey) -> Result<usize> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let restored = conn
+        .execute(
+            "INSERT INTO openmls_values SELECT * FROM haven_test_openmls_stash",
+            [],
+        )
+        .map_err(|_| storage_err("restore openmls_values"))?;
+    conn.execute_batch("DROP TABLE haven_test_openmls_stash")
+        .map_err(|_| storage_err("drop the stash"))?;
+    Ok(restored)
+}
+
 /// Deletes every `OpenMLS` state row belonging to `group`, returning how many
 /// rows went.
 ///
@@ -525,6 +596,42 @@ pub fn delete_openmls_group_state_for_test(
         [&group.0],
     )
     .map_err(|_| storage_err("delete openmls_values"))
+}
+
+/// Marks `group_id` unrecoverable — or, with `halted` false, no longer —
+/// in a **closed** database.
+///
+/// As MDK's convergence persists it when it halts a group
+/// (`traits/src/group.rs` 65-75): how a test has a terminal circle, which no
+/// event can be made to reach on cue, and one an in-place repair brought
+/// back. The next open re-seeds the state from the flag.
+///
+/// # Errors
+///
+/// A redacted storage error when the database or the group cannot be read
+/// or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_group_unrecoverable_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    group_id: &cgka_traits::types::GroupId,
+    halted: bool,
+) -> Result<()> {
+    use cgka_traits::storage::GroupStorage;
+    crate::sqlcipher_init::ensure().map_err(|_| storage_err("initialise SQLite"))?;
+    let store = SqliteAccountStorage::open_encrypted_with_options(
+        db_path,
+        key,
+        StorageConfig::storage_options(),
+    )
+    .map_err(|_| storage_err("open the MLS database"))?;
+    let mut group = store
+        .get_group(group_id)
+        .map_err(|_| storage_err("read the group"))?;
+    group.unrecoverable = halted;
+    store
+        .put_group(&group)
+        .map_err(|_| storage_err("write the group"))
 }
 
 /// Arms or disarms a `BEFORE UPDATE` abort trigger on the engine's stored
@@ -567,6 +674,563 @@ pub fn set_stored_message_write_fault_for_test(
         .map_err(|_| storage_err("set the stored-message write fault"))
 }
 
+/// [`set_stored_message_write_fault_for_test`], sparing the one stored row
+/// `spared` names: every other state change in `cgka_messages` aborts.
+///
+/// How a resolution is made to fail in the engine's own tail — the replay of
+/// what was buffered while a commit was staged, which re-states each replayed
+/// row — AFTER its transaction committed, while the write Haven then makes to
+/// that commit's own row still lands.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_stored_message_write_fault_sparing_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    spared: &[u8],
+    armed: bool,
+) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let sql = if armed {
+        format!(
+            "CREATE TRIGGER haven_stored_message_write_fault_sparing
+             BEFORE UPDATE ON cgka_messages WHEN OLD.id <> X'{}'
+             BEGIN SELECT RAISE(ABORT, 'injected stored-message write fault'); END;",
+            hex::encode(spared)
+        )
+    } else {
+        "DROP TRIGGER IF EXISTS haven_stored_message_write_fault_sparing;".to_owned()
+    };
+    conn.execute_batch(&sql)
+        .map_err(|_| storage_err("set the stored-message write fault"))
+}
+
+/// Arms or disarms an abort on the write of every stored message row that
+/// does not exist yet; a row written again over itself still lands.
+///
+/// How the engine is made to fail at the first thing it stores of a message
+/// it opens — the row keyed by what the message carries, which it writes in
+/// the transaction that processes the message (v0.10.4
+/// `cgka-engine/src/message_processor/ingest.rs` 1207-1213) — while what it
+/// had already stored is re-stated freely. Armed across a rollback it fails
+/// the replay that follows the rollback's own transaction at the first
+/// parked event, with nothing of that event stored; armed across the sweep
+/// of a deferred row it fails that row's re-ingest.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_new_stored_message_fault_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    armed: bool,
+) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let sql = if armed {
+        "CREATE TRIGGER haven_new_stored_message_fault
+         BEFORE INSERT ON cgka_messages
+         WHEN NOT EXISTS (SELECT 1 FROM cgka_messages WHERE id = NEW.id)
+         BEGIN SELECT RAISE(ABORT, 'injected new-stored-message fault'); END;"
+    } else {
+        "DROP TRIGGER IF EXISTS haven_new_stored_message_fault;"
+    };
+    conn.execute_batch(sql)
+        .map_err(|_| storage_err("set the new-stored-message fault"))
+}
+
+/// Arms or disarms an abort on every first storing of the one event `row`
+/// names.
+///
+/// Of that event and no other: its row, whichever shape the engine gives it,
+/// and the engine's record that it processed it.
+/// [`set_new_stored_message_fault_for_test`] for a single event, so that
+/// everything else the engine stores — this device's own commits among it —
+/// goes on landing while that event's ingest fails with nothing of it
+/// recorded, however often it is handed over.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_new_stored_message_fault_naming_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    row: &[u8],
+    armed: bool,
+) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let sql = if armed {
+        format!(
+            "CREATE TRIGGER haven_new_stored_message_fault_naming
+             BEFORE INSERT ON cgka_messages WHEN NEW.id = X'{id}'
+             BEGIN SELECT RAISE(ABORT, 'injected new-stored-message fault'); END;
+             CREATE TRIGGER haven_processed_id_fault_naming
+             BEFORE INSERT ON cgka_processed_transport_ids WHEN NEW.id = X'{id}'
+             BEGIN SELECT RAISE(ABORT, 'injected processed-id fault'); END;",
+            id = hex::encode(row)
+        )
+    } else {
+        "DROP TRIGGER IF EXISTS haven_new_stored_message_fault_naming;
+         DROP TRIGGER IF EXISTS haven_processed_id_fault_naming;"
+            .to_owned()
+    };
+    conn.execute_batch(&sql)
+        .map_err(|_| storage_err("set the new-stored-message fault"))
+}
+
+/// Arms or disarms an abort on every state change of the one stored row
+/// `row` names, and of no other.
+///
+/// How the engine's replay of what it parked behind a commit is made to fail
+/// at one row AFTER it has opened that row's message and stored what it
+/// held: the last thing the replay does with a parked row is re-state it
+/// (v0.10.4 `cgka-engine/src/message_processor/mod.rs` 3661-3663), and when
+/// that write fails the loop ends there with every row behind it still
+/// parked (3698-3706).
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_stored_message_write_fault_naming_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    row: &[u8],
+    armed: bool,
+) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let sql = if armed {
+        format!(
+            "CREATE TRIGGER haven_stored_message_write_fault_naming
+             BEFORE UPDATE ON cgka_messages WHEN OLD.id = X'{}'
+             BEGIN SELECT RAISE(ABORT, 'injected stored-message write fault'); END;",
+            hex::encode(row)
+        )
+    } else {
+        "DROP TRIGGER IF EXISTS haven_stored_message_write_fault_naming;".to_owned()
+    };
+    conn.execute_batch(&sql)
+        .map_err(|_| storage_err("set the stored-message write fault"))
+}
+
+/// Arms or disarms an abort on the deletion of every stored message row.
+///
+/// How MDK's `release_message_for_replay` is made to fail as it does when
+/// its receipt journal is full or the store errs (v0.10.4
+/// `storage-sqlite/src/storage/messages.rs` 267-312): the release is one
+/// transaction that ends in the row's deletion, so the row stands.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_stored_message_delete_fault_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    armed: bool,
+) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let sql = if armed {
+        "CREATE TRIGGER haven_stored_message_delete_fault
+         BEFORE DELETE ON cgka_messages
+         BEGIN SELECT RAISE(ABORT, 'injected stored-message delete fault'); END;"
+    } else {
+        "DROP TRIGGER IF EXISTS haven_stored_message_delete_fault;"
+    };
+    conn.execute_batch(sql)
+        .map_err(|_| storage_err("set the stored-message delete fault"))
+}
+
+/// Makes each of the next `writes` peel attempts outlast MDK's background
+/// advance budget, as on a device too slow to try 64 rows an advance.
+///
+/// An attempt rewrites its parked row's deferred-peel lifecycle (`PeelDeferred`
+/// is state 6, `storage-sqlite/src/codec.rs:267`); each armed rewrite costs more
+/// than `BACKGROUND_CONVERGENCE_BUDGET_MS` (500 ms), so the advance it lands in
+/// ends after that row (`message_processor/mod.rs:1928-1934`). The cost is
+/// `SQLite`'s own work, a counted cross join, as no trigger can sleep.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn slow_deferred_peel_writes_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    writes: u32,
+) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS haven_test_burn (x INTEGER);
+         DELETE FROM haven_test_burn;
+         WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 300)
+         INSERT INTO haven_test_burn SELECT x FROM r;
+         CREATE TABLE IF NOT EXISTS haven_test_slow_writes (n INTEGER);
+         DELETE FROM haven_test_slow_writes;
+         CREATE TRIGGER IF NOT EXISTS haven_test_slow_peel_write
+         BEFORE UPDATE OF deferred_peel ON cgka_messages
+         WHEN OLD.state = 6 AND NEW.state = 6
+             AND (SELECT n FROM haven_test_slow_writes) > 0
+         BEGIN
+             UPDATE haven_test_slow_writes SET n = n - 1;
+             SELECT count(*) FROM haven_test_burn a, haven_test_burn b, haven_test_burn c;
+         END;",
+    )
+    .and_then(|()| {
+        conn.execute(
+            "INSERT INTO haven_test_slow_writes (n) VALUES (?1)",
+            [writes],
+        )
+    })
+    .map(|_| ())
+    .map_err(|_| storage_err("arm the slow deferred-peel writes"))
+}
+
+/// How many of the writes [`slow_deferred_peel_writes_for_test`] armed are
+/// still to come.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or read, or nothing was armed.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn slow_deferred_peel_writes_left_for_test(db_path: &Path, key: &SqlCipherKey) -> Result<u32> {
+    open_tamper_connection(db_path, key)?
+        .query_row("SELECT n FROM haven_test_slow_writes", [], |row| row.get(0))
+        .map_err(|_| storage_err("read the slow deferred-peel writes"))
+}
+
+/// Changes one character of the signature of the event the stored row `row`
+/// keeps, leaving everything else of the row as it was. Returns whether a
+/// signature was found to change.
+///
+/// What nothing but a damaged store can produce — every event the engine is
+/// handed has been verified by the relay client (Security Rule 16) — and
+/// what Haven must still not take for an event when it reads the row back.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn forge_stored_event_signature_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    row: &[u8],
+) -> Result<bool> {
+    const FIELD: &[u8] = b"\"sig\":\"";
+    let conn = open_tamper_connection(db_path, key)?;
+    let mut payload: Vec<u8> = conn
+        .query_row(
+            "SELECT payload FROM cgka_messages WHERE id = ?1",
+            [row],
+            |found| found.get(0),
+        )
+        .map_err(|_| storage_err("read the stored message"))?;
+    let Some(at) = payload
+        .windows(FIELD.len())
+        .position(|window| window == FIELD)
+        .map(|at| at + FIELD.len())
+    else {
+        return Ok(false);
+    };
+    payload[at] = if payload[at] == b'0' { b'1' } else { b'0' };
+    conn.execute(
+        "UPDATE cgka_messages SET payload = ?1 WHERE id = ?2",
+        rusqlite::params![payload, row],
+    )
+    .map_err(|_| storage_err("write the stored message"))?;
+    Ok(true)
+}
+
+/// Makes Haven's retirement of one commit's stored row fail and nothing
+/// else: the write that marks the row `commit` names `Failed` aborts, while
+/// the engine may still give that row any other state.
+///
+/// `3` is `MessageState::Failed` as `storage-sqlite` stores it
+/// (v0.10.4 `storage-sqlite/src/codec.rs` 264). Were MDK to renumber it, the
+/// retirement would simply succeed and the test that armed this would say so.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_commit_retirement_fault_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    commit: &[u8],
+    armed: bool,
+) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let sql = if armed {
+        format!(
+            "CREATE TRIGGER haven_commit_retirement_fault
+             BEFORE UPDATE ON cgka_messages WHEN OLD.id = X'{}' AND NEW.state = 3
+             BEGIN SELECT RAISE(ABORT, 'injected commit-retirement fault'); END;",
+            hex::encode(commit)
+        )
+    } else {
+        "DROP TRIGGER IF EXISTS haven_commit_retirement_fault;".to_owned()
+    };
+    conn.execute_batch(&sql)
+        .map_err(|_| storage_err("set the commit-retirement fault"))
+}
+
+/// An engine write [`set_engine_write_fault_for_test`] can make fail.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineWrite {
+    /// Haven's acknowledgement of application outputs: a delete from
+    /// `pending_application_events`.
+    AcknowledgeOutputs,
+    /// `forget_group_local`: its insert into `locally_forgotten_groups`.
+    ForgetGroup,
+    /// `put_outbound_fanout`: its upsert into `cgka_outbound_fanout`, whose
+    /// insert trigger fires whether or not the row exists.
+    FanoutPut,
+    /// `delete_outbound_fanout`: its delete from `cgka_outbound_fanout`.
+    FanoutDelete,
+    /// The plain rollback of a commit the engine keeps an own-commit intent
+    /// for (a removal, an invite, a settings change): its rewind transaction
+    /// deletes that intent first, so the whole rollback fails with nothing
+    /// rewound.
+    OwnCommitIntentDelete,
+    /// The retirement of a queued change
+    /// (`confirm_regenerated_queued_intent`): its delete from
+    /// `cgka_queued_outbound`.
+    QueuedIntentDelete,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl EngineWrite {
+    const fn target(self) -> (&'static str, &'static str) {
+        match self {
+            Self::AcknowledgeOutputs => ("DELETE", "pending_application_events"),
+            Self::ForgetGroup => ("INSERT", "locally_forgotten_groups"),
+            Self::FanoutPut => ("INSERT", "cgka_outbound_fanout"),
+            Self::FanoutDelete => ("DELETE", "cgka_outbound_fanout"),
+            Self::OwnCommitIntentDelete => ("DELETE", "cgka_own_commit_intents"),
+            Self::QueuedIntentDelete => ("DELETE", "cgka_queued_outbound"),
+        }
+    }
+}
+
+/// Arms (or disarms) an abort trigger on one engine write, so the one write a
+/// test means to break fails while every other lands.
+///
+/// Like [`set_stored_message_write_fault_for_test`] it runs against a LIVE
+/// database and is disarmed as soon as the assertion is made. If the table can
+/// no longer be found, MDK renamed it at the pinned rev — re-aim the injection.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_engine_write_fault_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    write: EngineWrite,
+    armed: bool,
+) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let (op, table) = write.target();
+    let sql = if armed {
+        format!(
+            "CREATE TRIGGER haven_write_fault_{table}_{op} BEFORE {op} ON {table}
+             BEGIN SELECT RAISE(ABORT, 'injected write fault'); END;"
+        )
+    } else {
+        format!("DROP TRIGGER IF EXISTS haven_write_fault_{table}_{op};")
+    };
+    conn.execute_batch(&sql)
+        .map_err(|_| storage_err("set the engine write fault"))
+}
+
+/// Arms (or disarms) an abort on every Welcome delivery record written past
+/// the next `landing`.
+///
+/// The records MDK stores now, and `landing` more, land; the one after
+/// fails. How a hand-over is stopped part-way.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, read or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_welcome_record_write_fault_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    landing: usize,
+    armed: bool,
+) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let sql = if armed {
+        let stored: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cgka_transport_fanout", [], |row| {
+                row.get(0)
+            })
+            .map_err(|_| storage_err("count the Welcome records"))?;
+        format!(
+            "CREATE TRIGGER haven_welcome_record_fault BEFORE INSERT ON cgka_transport_fanout
+             WHEN (SELECT COUNT(*) FROM cgka_transport_fanout) >= {}
+             BEGIN SELECT RAISE(ABORT, 'injected write fault'); END;",
+            usize::try_from(stored).unwrap_or(0) + landing
+        )
+    } else {
+        "DROP TRIGGER IF EXISTS haven_welcome_record_fault;".to_owned()
+    };
+    conn.execute_batch(&sql)
+        .map_err(|_| storage_err("set the Welcome record write fault"))
+}
+
+/// Arms or disarms an abort on the write of one epoch's retained anchor: the
+/// snapshot the engine takes of a group as it stands at `epoch`.
+///
+/// How a confirm is made to fail AFTER its durable transaction: the engine
+/// retains the anchor of the epoch a commit leaves before it merges, and the
+/// anchor of the epoch it reaches once the merge has committed and before it
+/// leaves `PendingPublish` (v0.10.4 `cgka-engine/src/publish.rs` 105-107,
+/// 260-272). Arm it for the epoch the commit reaches.
+///
+/// The name is MDK's (`cgka-engine/src/openmls_projection.rs`
+/// `retained_anchor_snapshot_name`); were it to change, the confirm would
+/// simply succeed and the test that armed this would say so.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_epoch_anchor_write_fault_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    epoch: u64,
+    armed: bool,
+) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let sql = if armed {
+        format!(
+            "CREATE TRIGGER haven_epoch_anchor_write_fault
+             BEFORE INSERT ON cgka_group_snapshots
+             WHEN NEW.name = 'openmls-retained-anchor-{epoch}'
+             BEGIN SELECT RAISE(ABORT, 'injected epoch-anchor write fault'); END;"
+        )
+    } else {
+        "DROP TRIGGER IF EXISTS haven_epoch_anchor_write_fault;".to_owned()
+    };
+    conn.execute_batch(&sql)
+        .map_err(|_| storage_err("set the epoch-anchor write fault"))
+}
+
+/// Arms or disarms an abort on every write of a fanout row whose stored
+/// record contains `needle` — a relay host, say — and on no other.
+///
+/// How one write of a row is failed while another of the same row lands: a
+/// record frozen for no relay does not name one, the same record once it has
+/// been given its relays does.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_fanout_write_fault_naming_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    needle: &str,
+    armed: bool,
+) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let sql = if armed {
+        format!(
+            "CREATE TRIGGER haven_fanout_write_fault_naming
+             BEFORE INSERT ON cgka_outbound_fanout
+             WHEN instr(NEW.record, X'{}') > 0
+             BEGIN SELECT RAISE(ABORT, 'injected fanout write fault'); END;",
+            hex::encode(needle)
+        )
+    } else {
+        "DROP TRIGGER IF EXISTS haven_fanout_write_fault_naming;".to_owned()
+    };
+    conn.execute_batch(&sql)
+        .map_err(|_| storage_err("set the fanout write fault"))
+}
+
+/// How many outer transport ids the engine holds as processed for `group`.
+///
+/// Test-only read. The engine keeps one `cgka_processed_transport_ids` row per
+/// peeled wrapper for the life of its group (MDK v0.10.4
+/// `storage-sqlite/src/migrations/0058_processed_transport_ids.rs`), prunes
+/// none and exposes no count, so this is the only instrument that can watch
+/// the table grow (`docs/MDK_UPSTREAM_TRACKER.md` T-DEDUPE-GROWTH). It only
+/// reads, so a live database is fine. The count is compared in process, never
+/// rendered.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or read.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn processed_transport_id_count_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    group: &cgka_traits::types::GroupId,
+) -> Result<usize> {
+    let conn = open_tamper_connection(db_path, key)?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM cgka_processed_transport_ids WHERE group_id = ?1",
+        [group.as_slice()],
+        |row| row.get::<_, i64>(0),
+    )
+    .ok()
+    .and_then(|rows| usize::try_from(rows).ok())
+    .ok_or_else(|| storage_err("count processed transport ids"))
+}
+
+/// How many rows MDK's journal of released transport receipts holds, and
+/// how many its account projection does.
+///
+/// Test-only read. `MessageStorage::release_message_for_replay` journals a
+/// receipt for each row it releases only where the account projection has a
+/// row — a host of MDK's own — and fails once that journal holds 8 192 of
+/// them (v0.10.4 `storage-sqlite/src/storage/messages.rs` 267-303). Haven
+/// has no such host and consumes no receipt, so both must read zero.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or read.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn released_receipts_and_account_rows_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+) -> Result<(usize, usize)> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let count = |table: &str| {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .ok()
+        .and_then(|rows| usize::try_from(rows).ok())
+        .ok_or_else(|| storage_err("count an MDK table"))
+    };
+    Ok((
+        count("cgka_released_transport_receipts")?,
+        count("account_state")?,
+    ))
+}
+
 /// A second plain `rusqlite` connection onto an MLS database, keyed the way
 /// `storage-sqlite` keys its own.
 ///
@@ -579,6 +1243,7 @@ pub fn set_stored_message_write_fault_for_test(
 /// function's.
 #[cfg(any(test, feature = "test-utils"))]
 fn open_tamper_connection(db_path: &Path, key: &SqlCipherKey) -> Result<rusqlite::Connection> {
+    crate::sqlcipher_init::ensure().map_err(|_| storage_err("initialise SQLite"))?;
     let conn =
         rusqlite::Connection::open(db_path).map_err(|_| storage_err("open the MLS database"))?;
     conn.pragma_update(None, "cipher_compatibility", 4i64)
@@ -586,6 +1251,138 @@ fn open_tamper_connection(db_path: &Path, key: &SqlCipherKey) -> Result<rusqlite
     conn.pragma_update(None, "key", key.as_secret_str())
         .map_err(|_| storage_err("apply the SQLCipher key"))?;
     Ok(conn)
+}
+
+/// Counts the writes to the fanout table since the last call.
+///
+/// Every insert, update and delete from the first call on: how a test
+/// measures what a send costs the store.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened or
+/// the count cannot be kept.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn fanout_writes_for_test(db_path: &Path, key: &SqlCipherKey) -> Result<usize> {
+    let conn = open_tamper_connection(db_path, key)?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS haven_test_fanout_writes (n INTEGER);
+         CREATE TRIGGER IF NOT EXISTS haven_test_fanout_insert AFTER INSERT ON cgka_outbound_fanout
+         BEGIN INSERT INTO haven_test_fanout_writes VALUES (1); END;
+         CREATE TRIGGER IF NOT EXISTS haven_test_fanout_update AFTER UPDATE ON cgka_outbound_fanout
+         BEGIN INSERT INTO haven_test_fanout_writes VALUES (1); END;
+         CREATE TRIGGER IF NOT EXISTS haven_test_fanout_delete AFTER DELETE ON cgka_outbound_fanout
+         BEGIN INSERT INTO haven_test_fanout_writes VALUES (1); END;",
+    )
+    .map_err(|_| storage_err("count fanout writes"))?;
+    let counted: i64 = conn
+        .query_row("SELECT COUNT(*) FROM haven_test_fanout_writes", [], |row| {
+            row.get(0)
+        })
+        .map_err(|_| storage_err("read the fanout write count"))?;
+    conn.execute_batch("DELETE FROM haven_test_fanout_writes")
+        .map_err(|_| storage_err("reset the fanout write count"))?;
+    Ok(usize::try_from(counted).unwrap_or(usize::MAX))
+}
+
+/// Makes every read of a group's record fail (`on`), or succeed again.
+///
+/// The table is set aside under another name, so the engine's own statement
+/// errs as it would on a store it cannot read.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened or
+/// the table cannot be renamed.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_group_read_fault_for_test(db_path: &Path, key: &SqlCipherKey, on: bool) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let (from, to) = if on {
+        ("cgka_groups", "cgka_groups_set_aside")
+    } else {
+        ("cgka_groups_set_aside", "cgka_groups")
+    };
+    conn.execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
+        .map_err(|_| storage_err("set the group table aside"))
+}
+
+/// Makes every read of a stored message fail (`on`), or succeed again, as
+/// [`set_group_read_fault_for_test`] does for group records.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened or
+/// the table cannot be renamed.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_message_read_fault_for_test(db_path: &Path, key: &SqlCipherKey, on: bool) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let (from, to) = if on {
+        ("cgka_messages", "cgka_messages_set_aside")
+    } else {
+        ("cgka_messages_set_aside", "cgka_messages")
+    };
+    conn.execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
+        .map_err(|_| storage_err("set the message table aside"))
+}
+
+/// Makes every read of a stored fanout row fail (`on`), or succeed again, as
+/// [`set_group_read_fault_for_test`] does for group records.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened or
+/// the table cannot be renamed.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_fanout_read_fault_for_test(db_path: &Path, key: &SqlCipherKey, on: bool) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let (from, to) = if on {
+        ("cgka_outbound_fanout", "cgka_outbound_fanout_set_aside")
+    } else {
+        ("cgka_outbound_fanout_set_aside", "cgka_outbound_fanout")
+    };
+    conn.execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
+        .map_err(|_| storage_err("set the fanout table aside"))
+}
+
+/// Marks this device's copy of `group_id` removed in MDK's own group record,
+/// leaving the epoch where it stands.
+///
+/// The field MDK's own tests write (`cgka-engine/src/group_authority.rs`
+/// 213, 263). No engine path reaches a removed
+/// copy that is still stable at an epoch a live seal used; this is how the
+/// clause that reads it is held. The record is MDK's JSON, rewritten with
+/// that one field changed.
+///
+/// # Errors
+///
+/// Returns a storage error naming the step that failed.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn mark_group_removed_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    group_id: &cgka_traits::types::GroupId,
+) -> Result<()> {
+    use rusqlite::OptionalExtension as _;
+    let conn = open_tamper_connection(db_path, key)?;
+    let record: Vec<u8> = conn
+        .query_row(
+            "SELECT record FROM cgka_groups WHERE id = ?1",
+            [group_id.as_slice()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| storage_err("read the group record"))?
+        .ok_or_else(|| storage_err("find the group record"))?;
+    let mut group: serde_json::Value =
+        serde_json::from_slice(&record).map_err(|_| storage_err("decode the group record"))?;
+    group["removed"] = serde_json::Value::Bool(true);
+    let record = serde_json::to_vec(&group).map_err(|_| storage_err("encode the group record"))?;
+    conn.execute(
+        "UPDATE cgka_groups SET record = ?2 WHERE id = ?1",
+        rusqlite::params![group_id.as_slice(), record],
+    )
+    .map(|_| ())
+    .map_err(|_| storage_err("write the group record"))
 }
 
 /// A storage error naming what failed and nothing else.
@@ -603,6 +1400,12 @@ fn storage_err(doing: &str) -> NostrError {
 /// The keyring holds the RAW 32-byte secret; the returned passphrase is its
 /// lowercase-hex encoding. Both the raw bytes and the hex string are
 /// `Zeroizing`.
+/// `as_str()` copies into a fresh String that `SqlCipherKey::new` moves into its
+/// own `Zeroizing<String>`; the caller's passphrase is zeroized on drop.
+fn cipher_key(passphrase: &str) -> Result<SqlCipherKey> {
+    SqlCipherKey::new(passphrase).map_err(super::manager::map_storage_err)
+}
+
 fn get_or_create_passphrase(service: &str, key_id: &str) -> Result<Zeroizing<String>> {
     let entry = keyring_core::Entry::new(service, key_id)
         .map_err(|_| NostrError::StorageError("keyring unavailable".to_string()))?;
@@ -626,37 +1429,6 @@ fn get_or_create_passphrase(service: &str, key_id: &str) -> Result<Zeroizing<Str
     }
 }
 
-/// Destroys the pre-Dark-Matter MLS DB keyring entry (`mdk.db.key.default`).
-///
-/// Called on the Dark Matter cutover (DM-5). Because unlinking `haven_mdk.db` is
-/// not a secure erase, destroying its key is the practical secure-erase for the
-/// abandoned `SQLCipher` database (security F6). Idempotent: a missing entry — or
-/// no installed store — is treated as success, since nothing is then left at
-/// rest. Any other keyring failure is propagated so the caller can retry.
-///
-/// # Errors
-///
-/// Returns [`NostrError::StorageError`] if a genuine keyring failure (e.g. a
-/// locked / unavailable Secret Service) leaves the legacy key at rest.
-pub fn destroy_legacy_mls_key_material() -> Result<()> {
-    let entry = match keyring_core::Entry::new(SERVICE_ID, LEGACY_MLS_DB_KEY_ID) {
-        Ok(entry) => entry,
-        // No store installed / no matching entry ⇒ nothing left at rest.
-        Err(keyring_core::Error::NoDefaultStore | keyring_core::Error::NoEntry) => return Ok(()),
-        Err(_) => {
-            return Err(NostrError::StorageError(
-                "failed to destroy legacy MLS DB key".to_string(),
-            ))
-        }
-    };
-    match entry.delete_credential() {
-        Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
-        Err(_) => Err(NostrError::StorageError(
-            "failed to destroy legacy MLS DB key".to_string(),
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,6 +1437,17 @@ mod tests {
     use std::sync::Once;
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn an_unusable_key_is_reported_by_kind_alone() {
+        let Err(NostrError::StorageError(payload)) = cipher_key("") else {
+            panic!("an empty passphrase is no key");
+        };
+        assert!(
+            !payload.contains("SQLCipher") && !payload.contains("empty"),
+            "the engine's own error prose stays out of the error: {payload}"
+        );
+    }
     static MOCK_STORE: Once = Once::new();
 
     /// Installs the in-memory mock keyring store for the test binary.
@@ -919,20 +1702,11 @@ mod tests {
     }
 
     #[test]
-    fn database_path_is_session_sqlite() {
+    fn database_path_is_session_v2_sqlite() {
         let config = StorageConfig::new("/tmp/haven-mls");
         assert_eq!(
             config.database_path(),
-            PathBuf::from("/tmp/haven-mls/session.sqlite")
-        );
-    }
-
-    #[test]
-    fn legacy_database_path_is_haven_mdk_db() {
-        let config = StorageConfig::new("/tmp/haven-mls");
-        assert_eq!(
-            config.legacy_database_path(),
-            PathBuf::from("/tmp/haven-mls/haven_mdk.db")
+            PathBuf::from("/tmp/haven-mls/session-v2.sqlite")
         );
     }
 
@@ -998,6 +1772,7 @@ mod tests {
 
         // A different key must NOT decrypt the same file.
         let wrong_key = SqlCipherKey::new("a-different-passphrase").unwrap();
+        crate::sqlcipher_init::ensure().expect("SQLite initialises");
         let wrong = SqliteAccountStorage::open_encrypted_with_options(
             config.database_path(),
             &wrong_key,
@@ -1009,24 +1784,10 @@ mod tests {
     }
 
     #[test]
-    fn destroy_legacy_key_is_idempotent() {
-        install_mock_store();
-        // No legacy entry present ⇒ idempotent success.
-        destroy_legacy_mls_key_material().expect("destroying an absent legacy key is a no-op");
-
-        // Provision the legacy entry, then destroy it, then destroy again.
-        let _ = get_or_create_passphrase(SERVICE_ID, LEGACY_MLS_DB_KEY_ID).unwrap();
-        destroy_legacy_mls_key_material().expect("destroy existing legacy key");
-        destroy_legacy_mls_key_material().expect("second destroy is still a no-op");
-    }
-
-    #[test]
     fn keyring_constants_are_valid() {
         assert_eq!(SERVICE_ID, "com.oblivioustech.haven");
-        assert_eq!(MLS_DB_KEY_ID, "mls.session.key.default");
-        assert_eq!(LEGACY_MLS_DB_KEY_ID, "mdk.db.key.default");
-        assert_eq!(MLS_DB_FILENAME, "session.sqlite");
-        assert_eq!(LEGACY_MLS_DB_FILENAME, "haven_mdk.db");
+        assert_eq!(MLS_DB_KEY_ID, "mls.session.key.v2");
+        assert_eq!(MLS_DB_FILENAME, "session-v2.sqlite");
     }
 
     #[test]

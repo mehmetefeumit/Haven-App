@@ -16,6 +16,12 @@ class MockRelayService implements RelayService {
     int maxDurationSecs = 20,
   }) async => const CatchupResult.empty();
 
+  @override
+  Future<CatchupResult> runRefusedRefetch({
+    required CircleManagerFfi circle,
+    int maxDurationSecs = 20,
+  }) async => const CatchupResult.empty();
+
   /// The outcome [maintainKeyPackage] reports.
   ///
   /// Defaults to a *confirmed* healthy tick (one relay answered, serving one
@@ -42,14 +48,10 @@ class MockRelayService implements RelayService {
   }) async => const RelayListMaintenanceResult.empty();
 
   @override
-  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
-      const SubscriptionHealthResult.empty();
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth({
+    required bool foreground,
+  }) async => const SubscriptionHealthResult.empty();
 
-  @override
-  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
-    required CircleManagerFfi circle,
-    required List<int> identitySecretBytes,
-  }) async => const LegacyRetractionResult.empty();
 
   /// Creates a [MockRelayService].
   MockRelayService({
@@ -88,12 +90,19 @@ class MockRelayService implements RelayService {
   /// Complete it in tests to simulate network delay.
   Completer<void>? fetchKeyPackageGate;
 
+  /// The circle each [fetchKeyPackage] call was made for, in call order:
+  /// its MLS group id, or `null` for a new circle.
+  final List<List<int>?> fetchKeyPackageTargets = [];
+
   /// Optional handler for [fetchGiftWrapsPerRelay].
   ///
   /// When null, every relay is reported as responded with no events. Set
   /// this to simulate unreachable relays or per-relay gift-wrap payloads.
   Future<List<RelayGiftWrapFetch>> Function(List<String> relays)?
   fetchGiftWrapsPerRelayHandler;
+
+  /// The `since` of the most recent per-relay gift-wrap fetch.
+  DateTime? lastGiftWrapSince;
 
   /// Optional per-relay gates for [checkEventOnRelay], keyed by relay URL.
   ///
@@ -114,16 +123,7 @@ class MockRelayService implements RelayService {
   /// relay list was used rather than a stale caller-held snapshot).
   final List<List<String>> publishEventRelayCalls = [];
 
-  /// The same, for [publishLocationEvent].
-  ///
-  /// Kept apart from [publishEventRelayCalls] because nothing in the types
-  /// keeps the two ladders apart: both take an event JSON and a relay list,
-  /// so which one a send path took is only observable in which method it
-  /// called. A commit on the one-shot ladder would be neither confirmed nor
-  /// rolled back after a single missed ack (Security Rule 13).
-  final List<List<String>> publishLocationRelayCalls = [];
-
-  /// When `true`, either publish reports that NO relay accepted the event
+  /// When `true`, a publish reports that NO relay accepted the event
   /// (every relay rejects) — simulates a publish failure so a caller's
   /// rollback (publish-before-apply, Rule 13) path can be exercised.
   /// Defaults to `false` (every relay acks).
@@ -150,8 +150,12 @@ class MockRelayService implements RelayService {
     int? limit,
   }) async {
     methodCalls.add('fetchGroupMessages');
+    groupMessageSinces.add(since);
     return groupMessages;
   }
+
+  /// The `since` each [fetchGroupMessages] was asked with, in call order.
+  final List<DateTime?> groupMessageSinces = [];
 
   @override
   Future<PublishResult> publishEvent({
@@ -160,16 +164,6 @@ class MockRelayService implements RelayService {
   }) async {
     methodCalls.add('publishEvent');
     publishEventRelayCalls.add(List.of(relays));
-    return _publish(eventJson, relays);
-  }
-
-  @override
-  Future<PublishResult> publishLocationEvent({
-    required String eventJson,
-    required List<String> relays,
-  }) async {
-    methodCalls.add('publishLocationEvent');
-    publishLocationRelayCalls.add(List.of(relays));
     return _publish(eventJson, relays);
   }
 
@@ -200,42 +194,18 @@ class MockRelayService implements RelayService {
   }
 
   @override
-  Future<void> publishEventFireAndForget({
-    required String eventJson,
-    required List<String> relays,
-  }) async {
-    methodCalls.add('publishEventFireAndForget');
-    publishedEvents.add(eventJson);
-  }
-
-  @override
-  Future<PublishResult> publishWelcome({
-    required GiftWrappedWelcome welcomeEvent,
-  }) async {
-    methodCalls.add('publishWelcome');
-    return const PublishResult(
-      eventId: 'mock-event-id',
-      acceptedBy: ['wss://relay.example.com'],
-      rejectedBy: [],
-      failed: [],
-    );
-  }
-
-  @override
-  Future<List<String>> fetchKeyPackageRelays(String pubkey) async {
-    methodCalls.add('fetchKeyPackageRelays');
-    return [];
-  }
-
-  @override
   Future<List<String>> fetchNip65Relays(String pubkey) async {
     methodCalls.add('fetchNip65Relays');
     return [];
   }
 
   @override
-  Future<KeyPackageData?> fetchKeyPackage(String pubkey) async {
+  Future<KeyPackageData?> fetchKeyPackage(
+    String pubkey, {
+    List<int>? mlsGroupId,
+  }) async {
     methodCalls.add('fetchKeyPackage');
+    fetchKeyPackageTargets.add(mlsGroupId);
     if (fetchKeyPackageGate != null) {
       await fetchKeyPackageGate!.future;
     }
@@ -263,6 +233,7 @@ class MockRelayService implements RelayService {
     DateTime? since,
   }) async {
     methodCalls.add('fetchGiftWrapsPerRelay');
+    lastGiftWrapSince = since;
     final handler = fetchGiftWrapsPerRelayHandler;
     if (handler != null) return handler(relays);
     return [

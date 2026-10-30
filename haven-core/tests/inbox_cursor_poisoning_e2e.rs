@@ -52,7 +52,7 @@
 //!
 //! Everything above is about a floor pushed too HIGH. The bounded re-subscribe
 //! lookback (`INBOX_RESUBSCRIBE_LOOKBACK_SECS`) moves the floor deliberately
-//! upward — a re-anchor asks for 49 h, not 7 days — so the last three gates in
+//! upward — a re-anchor asks for 96 h, not 7 days — so the last three gates in
 //! this file assert the opposite direction: what the narrowed window must still
 //! reach. They are the availability counterweight to the poisoning gates, and
 //! they are in this file rather than a new one precisely because the two
@@ -67,7 +67,7 @@ use haven_core::relay::cursor::{
     since_for_stream, SubscribePhase, INBOX_GIFTWRAP_LOOKBACK_SECS,
     INBOX_RESUBSCRIBE_LOOKBACK_SECS, STREAM_INBOX_1059,
 };
-use haven_core::relay::live_sync::{LiveSyncCore, LiveSyncEvent, StopOutcome};
+use haven_core::relay::live_sync::{Claim, LiveSyncCore, LiveSyncEvent, StopOutcome};
 use nostr::nips::nip59::RANGE_RANDOM_TIMESTAMP_TWEAK;
 use nostr::{
     Event, EventBuilder, EventId, Filter, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp,
@@ -83,9 +83,10 @@ fn now_secs() -> i64 {
     i64::try_from(Timestamp::now().as_secs()).unwrap()
 }
 
-/// Mirrors `live_sync::session::SEED_LOOKBACK_SECS` (private): the cold-start
-/// floor `start` installs on an unseeded cursor. Only used to know what value
-/// the EOSE anchor has to beat.
+/// A day before `start`'s own clock read, which the EOSE anchor — the REQ's
+/// open time — clears by a day: the cursor's first write is that anchor
+/// (`start` seeds no inbox cursor), and a reading above this bound can only
+/// be it.
 const COLD_SEED_LOOKBACK_SECS: i64 = 86_400;
 
 /// Scales the wall-clock budget of the waits below.
@@ -256,7 +257,11 @@ async fn a_future_dated_gift_wrap_never_pushes_the_inbox_cursor_past_the_local_c
     publish(&url, &routed_giftwrap_at(own, forged_secs)).await;
 
     let opened_at = now_secs();
-    let engine = LiveSyncCore::new_local(Arc::clone(&circle), own);
+    let engine = LiveSyncCore::new_local(
+        Arc::clone(&circle),
+        own,
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     // Subscribe BEFORE start so the stored replay cannot be missed.
     let mut bus = engine.bus().subscribe();
     engine
@@ -277,27 +282,15 @@ async fn a_future_dated_gift_wrap_never_pushes_the_inbox_cursor_past_the_local_c
          the inbox subscription, or the cursor gates below prove nothing"
     );
 
-    // `start` cold-seeds the inbox cursor to `now - 24h`; the EOSE anchor then
-    // raises it to the REQ's open time. Comparing against the seed VALUE rather
-    // than a read-back makes the anti-vacuity check race-free — by the time the
-    // welcome above surfaced, the EOSE may already have landed, so a read-back
-    // "before" would sample the advanced value and the comparison would be
-    // trivially false.
-    //
-    // The seed value has to be bounded from ABOVE, though, and `opened_at` is a
-    // bound from below: `start` reads its OWN clock (`live_sync::session`,
-    // `SEED_LOOKBACK_SECS`) after this test read `opened_at`, so under load the
-    // two readings differ and the seed lands strictly above
-    // `(opened_at - 24h) * 1000` — whereupon the wait returns on the SEED and
-    // the anti-vacuity check passes on exactly the value it exists to exclude.
-    // (The gate below then fails on the seed, which is how this surfaced.) The
-    // clock read once `start` returned bounds the engine's reading from above,
-    // so no seed can exceed `max_cold_seed_ms` and the advance — anchored at the
-    // REQ's open time, itself at or after `opened_at` — clears it by a full 24h.
+    // The EOSE anchor writes the inbox cursor at the REQ's open time, at or
+    // after `opened_at`; comparing against a fixed bound a day below the clock
+    // read once `start` returned, rather than a read-back, keeps the
+    // anti-vacuity check race-free — by the time the welcome above surfaced,
+    // the EOSE may already have landed.
     let max_cold_seed_ms = (after_start - COLD_SEED_LOOKBACK_SECS) * 1000;
     let advanced = wait_inbox_cursor_above(&circle, Some(max_cold_seed_ms), wait_budget(10))
         .await
-        .expect("start seeds the inbox cursor, so it always reads back");
+        .expect("the inbox REQ's end of stored events writes the cursor");
 
     // Anti-vacuity: the advance still happens on its own trusted signal.
     // Without this the assertions below would pass just as well if the inbox
@@ -369,18 +362,20 @@ async fn a_live_gift_wrap_after_eose_moves_the_inbox_cursor_nowhere() {
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
     let own = Keys::generate().public_key();
 
-    let engine = LiveSyncCore::new_local(Arc::clone(&circle), own);
+    let engine = LiveSyncCore::new_local(
+        Arc::clone(&circle),
+        own,
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     engine
         .start(&[], std::slice::from_ref(&url))
         .await
         .expect("start session");
     let after_start = now_secs();
 
-    // Against an UPPER BOUND on the cold-seed value, not a read-back: a
-    // read-back taken after the EOSE has already landed would sample the
-    // advanced value and make the precondition trivially false, and a bound
-    // taken before `start` would be a LOWER one, letting the seed itself
-    // satisfy the wait. See the first test.
+    // Against a fixed bound, not a read-back: a read-back taken after the
+    // EOSE has already landed would sample the advanced value and make the
+    // precondition trivially false. See the first test.
     let max_cold_seed_ms = (after_start - COLD_SEED_LOOKBACK_SECS) * 1000;
     let anchored = wait_inbox_cursor_above(&circle, Some(max_cold_seed_ms), wait_budget(10))
         .await
@@ -430,13 +425,16 @@ async fn the_anchored_inbox_cursor_survives_a_restart() {
 
     publish(&url, &routed_giftwrap_at(own, now_secs() + 365 * 86_400)).await;
 
-    let engine1 = LiveSyncCore::new_local(Arc::clone(&circle), own);
+    let engine1 = LiveSyncCore::new_local(
+        Arc::clone(&circle),
+        own,
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     engine1
         .start(&[], std::slice::from_ref(&url))
         .await
         .expect("start session 1");
-    // An UPPER bound on the cold seed, read once `start` returned — see the
-    // first test for why a reading taken before it is the wrong direction.
+    // A day below the clock read once `start` returned — see the first test.
     let max_cold_seed_ms = (now_secs() - COLD_SEED_LOOKBACK_SECS) * 1000;
     let advanced = wait_inbox_cursor_above(&circle, Some(max_cold_seed_ms), wait_budget(10))
         .await
@@ -473,7 +471,11 @@ async fn the_anchored_inbox_cursor_survives_a_restart() {
         "and across a full process restart"
     );
 
-    let engine2 = LiveSyncCore::new_local(Arc::clone(&reopened), own);
+    let engine2 = LiveSyncCore::new_local(
+        Arc::clone(&reopened),
+        own,
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     engine2
         .start(&[], std::slice::from_ref(&url))
         .await
@@ -539,7 +541,11 @@ async fn a_cursor_poisoned_by_a_pre_fix_build_is_repaired_on_the_next_start() {
          test is not about the defect"
     );
 
-    let engine = LiveSyncCore::new_local(Arc::clone(&circle), own);
+    let engine = LiveSyncCore::new_local(
+        Arc::clone(&circle),
+        own,
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     engine
         .start(&[], std::slice::from_ref(&url))
         .await
@@ -604,7 +610,11 @@ async fn a_session_start_never_lowers_a_healthy_inbox_cursor() {
         .advance_sync_cursor(STREAM_INBOX_1059, healthy_ms)
         .expect("plant a healthy cursor");
 
-    let engine = LiveSyncCore::new_local(Arc::clone(&circle), own);
+    let engine = LiveSyncCore::new_local(
+        Arc::clone(&circle),
+        own,
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     engine
         .start(&[], std::slice::from_ref(&url))
         .await
@@ -643,7 +653,7 @@ fn max_nip59_backdate_secs() -> i64 {
 /// A `QueryPolicy` runs on the REQ itself, before any event is matched, so it
 /// observes the FILTER this device actually put on the wire — the only place
 /// the derived floor is observable from outside `haven-core`. Reading the
-/// delivered events instead could not tell "asked for 49 h" from "asked for 7
+/// delivered events instead could not tell "asked for 96 h" from "asked for 7
 /// days and the extra five days happened to be empty".
 #[derive(Debug)]
 struct RecordInboxSince {
@@ -745,8 +755,8 @@ impl InboxRelay {
 /// on.
 ///
 /// `planted_cursor_secs` is written first so the FIRST REQ's floor is an exact
-/// number the caller chose, rather than one derived from whatever `start`'s
-/// cold seed happened to compute against its own clock read.
+/// number the caller chose, rather than one derived from `start`'s own clock
+/// read.
 async fn engine_anchored_on(
     circle: &Arc<CircleManager>,
     own: PublicKey,
@@ -758,7 +768,11 @@ async fn engine_anchored_on(
         .advance_sync_cursor(STREAM_INBOX_1059, planted_ms)
         .expect("plant a healthy cursor");
 
-    let engine = LiveSyncCore::new_local(Arc::clone(circle), own);
+    let engine = LiveSyncCore::new_local(
+        Arc::clone(circle),
+        own,
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     engine.start(&[], relays).await.expect("start session");
 
     let anchored = wait_inbox_cursor_above(circle, Some(planted_ms), wait_budget(10))
@@ -772,7 +786,7 @@ async fn engine_anchored_on(
     (engine, anchored)
 }
 
-/// THE BOUND. A re-anchor asks for 2 days + 1 hour; only a store with no inbox
+/// THE BOUND. A re-anchor asks for 4 days; only a store with no inbox
 /// cursor at all asks for seven days
 /// (`a_first_ever_start_with_no_cursor_asks_for_seven_days`).
 ///
@@ -798,7 +812,7 @@ async fn a_resubscribe_asks_for_two_days_plus_an_hour_never_seven() {
         engine_anchored_on(&circle, own, std::slice::from_ref(&relay.url), planted_secs).await;
 
     engine
-        .resume_after_background()
+        .resume_after_background(Claim::Foreground)
         .await
         .expect("re-anchor succeeds");
     let seen = relay.wait_for_inbox_reqs(2, wait_budget(10)).await;
@@ -815,15 +829,15 @@ async fn a_resubscribe_asks_for_two_days_plus_an_hour_never_seven() {
     // conformant invitation.
     assert_eq!(
         seen[0],
-        Some(planted_secs - 176_400),
+        Some(planted_secs - 345_600),
         "a start over an ALREADY-KNOWN cursor is a re-anchor too: the cursor \
          outlives the process, so it — not the freshness of the engine — is \
          what decides the width"
     );
     assert_eq!(
         seen[1],
-        Some(anchored_ms.div_euclid(1000) - 176_400),
-        "and the RE-ANCHOR asks from its own anchored cursor minus 49 h — \
+        Some(anchored_ms.div_euclid(1000) - 345_600),
+        "and the RE-ANCHOR asks from its own anchored cursor minus 96 h — \
          exactly, not approximately"
     );
 
@@ -840,15 +854,14 @@ async fn a_resubscribe_asks_for_two_days_plus_an_hour_never_seven() {
 
 /// The seven days, where they are actually spent: a store with NO inbox cursor.
 ///
-/// This is the one width that can recover a wrap backdated further than 49 h,
+/// This is the one width that can recover a wrap backdated further than 96 h,
 /// and it is the width `CircleStorage::PROCESSED_GIFT_WRAP_RETENTION_SECS` is
 /// derived from, so it needs its own wire-level gate rather than riding on the
 /// first REQ of a fixture that plants a cursor.
 ///
 /// A two-sided bound, not an equality: the floor is `start`'s OWN clock read
-/// minus the 24 h cold seed minus the lookback, and the two readings taken
-/// around `start` bracket that read exactly. Both bounds are 604 800 s wide
-/// apart from the seed, so a 49-hour floor misses the window by five days.
+/// minus the lookback, and the two readings taken around `start` bracket that
+/// read exactly, so a 96-hour floor misses the window by three days.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_first_ever_start_with_no_cursor_asks_for_seven_days() {
     let relay = InboxRelay::run().await;
@@ -865,7 +878,11 @@ async fn a_first_ever_start_with_no_cursor_asks_for_seven_days() {
     );
 
     let before = now_secs();
-    let engine = LiveSyncCore::new_local(Arc::clone(&circle), own);
+    let engine = LiveSyncCore::new_local(
+        Arc::clone(&circle),
+        own,
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     engine
         .start(&[], std::slice::from_ref(&relay.url))
         .await
@@ -878,19 +895,111 @@ async fn a_first_ever_start_with_no_cursor_asks_for_seven_days() {
         .copied()
         .flatten()
         .expect("the cold start must put a since on the wire, never send-all-history");
-    let lowest = before - COLD_SEED_LOOKBACK_SECS - 604_800;
-    let highest = after - COLD_SEED_LOOKBACK_SECS - 604_800;
+    let lowest = before - 604_800;
+    let highest = after - 604_800;
     assert!(
         (lowest..=highest).contains(&floor),
-        "a store with no inbox cursor must ask from its cold seed minus the \
-         full seven days, i.e. within [{lowest}, {highest}]; got {floor}"
+        "a store with no inbox cursor must ask for the full seven days, i.e. \
+         within [{lowest}, {highest}]; got {floor}"
     );
 
     let _ = engine.stop().await;
 }
 
+/// A start cut before its inbox REQ's end of stored events leaves the next
+/// start the cold-start seven days: nothing confirmed that window, so no
+/// cursor is written to narrow the next one to 96 hours.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_cut_before_its_inbox_end_leaves_the_next_start_seven_days() {
+    let relay = haven_core::relay::scripted_relay::ScriptedRelay::start();
+    let url = relay.url().to_owned();
+    let floors: Arc<Mutex<Vec<Option<u64>>>> = Arc::new(Mutex::new(Vec::new()));
+    let heard = Arc::new(tokio::sync::Notify::new());
+    let recorded = Arc::clone(&floors);
+    let told = Arc::clone(&heard);
+    relay.answer(
+        move |filter| {
+            let inbox = filter
+                .kinds
+                .as_ref()
+                .is_some_and(|kinds| kinds.contains(&nostr::Kind::GiftWrap));
+            if inbox {
+                recorded
+                    .lock()
+                    .expect("recorder mutex")
+                    .push(filter.since.map(|since| since.as_secs()));
+                told.notify_waiters();
+            }
+            inbox
+        },
+        Vec::new(),
+    );
+    let dir = TempDir::new().unwrap();
+    let keys = Keys::generate();
+    let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
+    let own = Keys::generate().public_key();
+    let asked = |count: usize| {
+        let floors = Arc::clone(&floors);
+        let heard = Arc::clone(&heard);
+        async move {
+            let deadline = tokio::time::Instant::now() + wait_budget(10);
+            loop {
+                // Armed before the read, so a REQ recorded in between still wakes it.
+                let next = heard.notified();
+                tokio::pin!(next);
+                next.as_mut().enable();
+                let seen = floors.lock().expect("recorder mutex").clone();
+                if seen.len() >= count || tokio::time::timeout_at(deadline, next).await.is_err() {
+                    return floors.lock().expect("recorder mutex").clone();
+                }
+            }
+        }
+    };
+
+    let first = LiveSyncCore::new_local(
+        Arc::clone(&circle),
+        own,
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
+    first
+        .start(&[], std::slice::from_ref(&url))
+        .await
+        .expect("start session 1");
+    assert_eq!(asked(1).await.len(), 1, "premise: the inbox was asked for");
+    assert_ne!(
+        first.stop().await,
+        StopOutcome::TimedOut,
+        "session 1 drains"
+    );
+
+    let before = now_secs();
+    let second = LiveSyncCore::new_local(
+        Arc::clone(&circle),
+        own,
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
+    second
+        .start(&[], std::slice::from_ref(&url))
+        .await
+        .expect("start session 2");
+    let after = now_secs();
+    let floor = asked(2)
+        .await
+        .get(1)
+        .copied()
+        .flatten()
+        .and_then(|since| i64::try_from(since).ok())
+        .expect("the second start put a since on the wire");
+    assert!(
+        (before - 604_800..=after - 604_800).contains(&floor),
+        "a start after one cut before its inbox end of stored events asked for less than \
+         the cold-start seven days: {floor}",
+    );
+    let _ = second.stop().await;
+}
+
 /// THE RESTART GATE. A fresh engine over a store that ALREADY has an inbox
-/// cursor asks 49 hours — not the seven days a cold start pays.
+/// cursor asks 96 hours — not the seven days a cold start pays.
 ///
 /// The engine is no longer a process-lifetime thing: turning background sharing
 /// off stops it, and the next foreground glance builds a new core and calls
@@ -929,7 +1038,11 @@ async fn a_restart_on_a_known_cursor_asks_for_forty_nine_hours_not_seven_days() 
         .expect("session 1 anchored a cursor")
         .div_euclid(1000);
 
-    let engine2 = LiveSyncCore::new_local(Arc::clone(&circle), own);
+    let engine2 = LiveSyncCore::new_local(
+        Arc::clone(&circle),
+        own,
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     engine2
         .start(&[], std::slice::from_ref(&relay.url))
         .await
@@ -944,8 +1057,8 @@ async fn a_restart_on_a_known_cursor_asks_for_forty_nine_hours_not_seven_days() 
     );
     assert_eq!(
         seen[1],
-        Some(carried_secs - 176_400),
-        "the RESTART must ask from the persisted cursor minus 49 h. A literal, \
+        Some(carried_secs - 345_600),
+        "the RESTART must ask from the persisted cursor minus 96 h. A literal, \
          so a bound that slides with the constant cannot hide here — and the \
          value this replaces was {} (seven days), asked on every sharing-off \
          glance cycle",
@@ -1006,7 +1119,7 @@ async fn a_wrap_backdated_forty_eight_hours_published_after_the_last_open_is_sti
     relay.seed(&slow_clock).await;
 
     engine
-        .resume_after_background()
+        .resume_after_background(Claim::Foreground)
         .await
         .expect("re-anchor succeeds");
 
@@ -1021,7 +1134,7 @@ async fn a_wrap_backdated_forty_eight_hours_published_after_the_last_open_is_sti
         "every conformant gift wrap at or above the re-anchor floor of {} s \
          must be delivered — the accurate-clock one is {} s and the \
          nearly-an-hour-slow one is {} s; missing: {missing:?}",
-        anchored_secs - 176_400,
+        anchored_secs - 345_600,
         accurate_clock.created_at.as_secs(),
         slow_clock.created_at.as_secs(),
     );
@@ -1030,7 +1143,7 @@ async fn a_wrap_backdated_forty_eight_hours_published_after_the_last_open_is_sti
     let seen = relay.wait_for_inbox_reqs(2, wait_budget(10)).await;
     assert_eq!(
         seen.last().copied().flatten(),
-        Some(anchored_secs - 176_400),
+        Some(anchored_secs - 345_600),
     );
 
     let _ = engine.stop().await;
@@ -1077,7 +1190,7 @@ async fn a_wrap_only_the_slow_inbox_relay_holds_is_fetched_within_the_lookback()
 
     let mut bus = engine.bus().subscribe();
     engine
-        .resume_after_background()
+        .resume_after_background(Claim::Foreground)
         .await
         .expect("re-anchor succeeds");
 
@@ -1094,7 +1207,7 @@ async fn a_wrap_only_the_slow_inbox_relay_holds_is_fetched_within_the_lookback()
     // the relay that was behind is asked from the SHARED floor, not from its own
     // last EOSE — so how far behind it may fall is decided by this constant
     // alone.
-    let shared_floor = Some(anchored_secs - 176_400);
+    let shared_floor = Some(anchored_secs - 345_600);
     let asked_answering = answering.wait_for_inbox_reqs(2, wait_budget(10)).await;
     let asked_lagging = lagging.wait_for_inbox_reqs(2, wait_budget(10)).await;
     assert_eq!(asked_answering.last().copied().flatten(), shared_floor);

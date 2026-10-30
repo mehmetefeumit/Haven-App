@@ -142,25 +142,23 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/jittered_scheduler.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
-import 'package:haven/src/utils/log_alias.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Circles eligible for outbound location publishing: accepted, not a
-/// pre-cutover orphan (no live MLS group to encrypt against), and not flagged
-/// Unrecoverable by the engine (Rule 8 — no send/mutate for a blocked circle).
+/// Circles eligible for outbound location publishing: accepted, and live on
+/// this device's engine — never quarantined, disbanded or unrecoverable, and
+/// failing closed for any engine state added later (Rule 8).
 ///
 /// Single source of truth shared by the foreground per-circle scheduler and
 /// (duplicated by value, since the background isolate has no Riverpod
 /// container) the background publish cycle, so the two planes can never diverge
 /// on eligibility.
-List<Circle> filterPublishEligibleCircles(
-  List<Circle> circles,
-  CircleService circleService,
-) {
+List<Circle> filterPublishEligibleCircles(List<Circle> circles) {
   return circles
-      .where((c) => c.membershipStatus == MembershipStatus.accepted)
-      .where((c) => !c.isLegacyOrphaned)
-      .where((c) => !circleService.isCircleBlocked(c.mlsGroupId))
+      .where(
+        (c) =>
+            c.membershipStatus == MembershipStatus.accepted &&
+            c.engineState == CircleEngineState.live,
+      )
       .toList();
 }
 
@@ -184,14 +182,6 @@ final locationPublishJitterSamplerProvider =
     }
   };
 });
-
-/// Hex-encodes a `nostrGroupId` for use as a per-circle scheduler key.
-///
-/// Delegates to [sharingCircleKey] rather than re-implementing it: the same key
-/// now also indexes the sharing-health model, and two copies of one encoder in
-/// one file is exactly how the scheduler's keys and the health model's keys
-/// would drift apart.
-String _circleKey(List<int> nostrGroupId) => sharingCircleKey(nostrGroupId);
 
 /// Ceiling on a single chained tick before the chain moves on without it.
 ///
@@ -220,8 +210,8 @@ String _circleKey(List<int> nostrGroupId) => sharingCircleKey(nostrGroupId);
 ///
 /// Letting the abandoned link run on does not weaken Rule 14. The
 /// single-writer guarantee is the engine's `tokio::sync::Mutex<
-/// AccountDeviceSession>`, which every `encrypt_location` funnels through
-/// (documented at `rust_builder/src/api.rs`'s `encryptLocation`); this chain
+/// AccountDeviceSession>`, which every seal funnels through (documented at
+/// `rust_builder/src/api.rs`'s `seal_location_driven`); this chain
 /// is the belt on top of those suspenders, and a stall long enough to trip
 /// this cap is overwhelmingly in the GPS/permission stage, before the engine
 /// is touched at all.
@@ -254,7 +244,7 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
   final List<String> _rotation = [];
 
   /// Serializes every publish onto one FIFO chain so two circles can never run
-  /// `encryptLocation` concurrently (Rule 14 — belt-and-suspenders on top of
+  /// a seal concurrently (Rule 14 — belt-and-suspenders on top of
   /// the engine's own session mutex).
   Future<void> _publishChain = Future<void>.value();
 
@@ -324,15 +314,14 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
       _cancelScheduling();
       return;
     }
-    final circleService = ref.read(circleServiceProvider);
-    final eligible = filterPublishEligibleCircles(circles, circleService);
+    final eligible = filterPublishEligibleCircles(circles);
     // Replaced wholesale: this roster is the burst's target set AND the answer
     // [eligibleCircle] gives a burst re-reading eligibility at fire time, so a
     // circle that dropped out (left / blocked / orphaned / removed) has to
     // leave it in the same step it stops qualifying.
     _circles
       ..clear()
-      ..addAll({for (final c in eligible) _circleKey(c.nostrGroupId): c});
+      ..addAll({for (final c in eligible) sharingCircleKey(c): c});
 
     if (_circles.isEmpty) {
       // Nothing to publish: hold no timer at all rather than wake to find that
@@ -593,28 +582,23 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
       final outcome = await service.publishLocation(
         mlsGroupId: circle.mlsGroupId,
         nostrGroupId: circle.nostrGroupId,
-        senderPubkeyHex: fix.senderPubkeyHex,
         latitude: fix.latitude,
         longitude: fix.longitude,
       );
       switch (outcome) {
-        // A `PublishResult` no relay accepted delivered nothing, and used to be
-        // indistinguishable here from a success — the outcome was dropped
-        // entirely. Record it so the sharing-health model can see the plane die.
-        case LocationPublishSent(:final result):
-          _recordPublishOutcome(circle, acked: result.acceptedBy.isNotEmpty);
-        // A deferral is NOT a publish failure: nothing was rejected, the MLS
-        // engine simply could not encrypt. It gets its own health verdict so
-        // the banner can name the real cause, and deliberately does NOT reach
-        // `recordPublishOutcome` — a deferred send has no relay verdict to
-        // report, and `notePublishAcked` stays untouched (nothing was acked).
-        case LocationPublishDeferred(:final unresolvedInputs, :final repaired):
-          debugPrint(
-            '[LocationPublishScheduler] send deferred by the MLS engine — '
-            'gating=${magnitudeBucket(unresolvedInputs)}, '
-            'repaired=$repaired',
-          );
+        // A send no relay took delivered nothing: recorded, so the
+        // sharing-health model can see the plane die.
+        case LocationPublishSent(:final acked):
+          _recordPublishOutcome(circle, acked: acked);
+        // A held send is NOT a publish failure: nothing was rejected, the core
+        // held the circle's sends. It gets its own health verdict so the
+        // banner can name the real cause, and no relay verdict.
+        case LocationPublishDeferred():
+          debugPrint('[LocationPublishScheduler] send held by the core');
           _recordDeferredSend(circle);
+        // Another send of the same location is under way: nothing to say.
+        case LocationPublishInFlight():
+          break;
       }
     } on Object catch (e) {
       debugPrint('[LocationPublishScheduler] per-circle publish failed: '
@@ -631,7 +615,7 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
     try {
       ref
           .read(sharingHealthProvider.notifier)
-          .recordPublishOutcome(_circleKey(circle.nostrGroupId), acked: acked);
+          .recordPublishOutcome(sharingCircleKey(circle), acked: acked);
     } on Object catch (e) {
       debugPrint('[LocationPublishScheduler] health record failed: '
           '${e.runtimeType}');
@@ -647,7 +631,7 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
     try {
       ref
           .read(sharingHealthProvider.notifier)
-          .recordDeferredSend(_circleKey(circle.nostrGroupId));
+          .recordDeferredSend(sharingCircleKey(circle));
     } on Object catch (e) {
       debugPrint('[LocationPublishScheduler] deferred record failed: '
           '${e.runtimeType}');

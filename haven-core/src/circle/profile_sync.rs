@@ -6,9 +6,10 @@
 //! half — the idempotent, serialized attempt to make the network agree.
 //!
 //! One pass does: upload a staged picture to Blossom **while** reading the
-//! freshest kind-0 back from the whole profile pool, merge the pending edits
-//! onto whichever object that read produced, sign one kind-0, publish it to
-//! every pool relay, and record exactly how far the coverage got.
+//! freshest kind-0 back from the whole profile pool, cache that copy when it
+//! is newer than the row, merge the pending edits onto whichever object that
+//! read produced, sign one kind-0, publish it to every pool relay, and record
+//! exactly how far the coverage got.
 //!
 //! # Failure is an outcome, not an error
 //!
@@ -146,8 +147,6 @@ impl CircleManager {
         } else {
             None
         };
-        let local = self.storage.get_profile(&own_hex)?;
-        let salt = self.storage.get_or_create_profile_relay_salt()?;
         let attempted = u32::try_from(pool.len()).unwrap_or(u32::MAX);
 
         // A signer-less client (`RelayManager::new`), so a relay's NIP-42 AUTH
@@ -158,8 +157,17 @@ impl CircleManager {
         // is what keeps a photo save from costing the sum of both round trips.
         let (uploaded, (fetched, _settled)) = tokio::join!(
             upload_staged_picture(keys, staged),
-            fetch_own_profile(&relay, own_pk, &salt, &pool, now),
+            fetch_own_profile(&relay, own_pk, &pool, now),
         );
+        // A copy read is kept when it is newer, before anything below can
+        // fail: an upload or a publish that does not land must not leave the
+        // row older than what this pass saw, or the retry could build on an
+        // older copy another relay still serves and sign back a field another
+        // client had removed. The write keeps the queued edits on top.
+        if let Some(fetched) = &fetched {
+            self.storage.upsert_profile_if_newer(fetched)?;
+        }
+        let local = self.storage.get_profile(&own_hex)?;
         let uploaded: Option<ProfilePicture> = match uploaded {
             Some(Ok(picture)) => Some(picture),
             Some(Err(_)) => {
@@ -204,7 +212,7 @@ impl CircleManager {
         let fully_acked = result.accepted_by.len() == result.total_attempted();
         self.storage.commit_profile_sync(&ProfileSyncCommit {
             pubkey: &own_pk,
-            published_version: snapshot.local_version,
+            published_version: Some(snapshot.local_version),
             merged: &merged,
             event_id: &event.id,
             event_created_at: i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX),

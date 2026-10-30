@@ -202,6 +202,7 @@ impl TransportPeeler for RetentionBoundPeeler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn an_undeclared_policy_takes_havens_own_window() {
@@ -263,7 +264,7 @@ mod tests {
         assert_eq!(bounded, GroupMessageMetadata::CommitOrProposal);
         assert_eq!(
             bounded.expiration_timestamp(),
-            Ok(None),
+            None,
             "a commit or proposal must resolve to no expiration timestamp"
         );
     }
@@ -275,13 +276,43 @@ mod tests {
         let unstamped = GroupMessageMetadata::application(1_000, None);
         assert_eq!(
             unstamped.expiration_timestamp(),
-            Ok(None),
+            None,
             "the engine's own metadata for such a circle stamps nothing"
         );
         assert_eq!(
             bounded(&unstamped).expiration_timestamp(),
-            Ok(Some(1_000 + LOCATION_MESSAGE_RETENTION_SECS))
+            Some(1_000 + LOCATION_MESSAGE_RETENTION_SECS)
         );
+    }
+
+    proptest! {
+        /// The recorded deviation (T-RETENTION-DEVIATION) has an exact
+        /// boundary: where a group declares a window no longer than Haven's —
+        /// every Haven-created circle declares exactly Haven's — the wrapper
+        /// hands MDK's own metadata through unchanged, so the 445 carries
+        /// MDK's `expiration_timestamp()`. It differs only where the group
+        /// declares nothing, zero, or longer.
+        #[test]
+        fn retention_wrapper_is_identity_in_haven_circles(
+            inner_created_at in any::<u64>(),
+            declared in prop_oneof![
+                Just(None),
+                Just(Some(0)),
+                Just(Some(LOCATION_MESSAGE_RETENTION_SECS)),
+                (1..=LOCATION_MESSAGE_RETENTION_SECS).prop_map(Some),
+                (LOCATION_MESSAGE_RETENTION_SECS + 1..).prop_map(Some),
+            ],
+        ) {
+            let engine = GroupMessageMetadata::application(inner_created_at, declared);
+            let wrapped = bounded(&engine);
+            let within_havens_window =
+                declared.is_some_and(|secs| (1..=LOCATION_MESSAGE_RETENTION_SECS).contains(&secs));
+            prop_assert_eq!(wrapped == engine, within_havens_window);
+            prop_assert_eq!(wrapped.outer_created_at(), engine.outer_created_at());
+            if within_havens_window {
+                prop_assert_eq!(wrapped.expiration_timestamp(), engine.expiration_timestamp());
+            }
+        }
     }
 
     #[test]
@@ -293,7 +324,7 @@ mod tests {
         assert_eq!(bounded.outer_created_at(), Some(12_345));
         assert_eq!(
             bounded.expiration_timestamp(),
-            Ok(Some(12_345 + LOCATION_MESSAGE_RETENTION_SECS))
+            Some(12_345 + LOCATION_MESSAGE_RETENTION_SECS)
         );
     }
 }

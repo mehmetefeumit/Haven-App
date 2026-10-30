@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter/widgets.dart';
@@ -6,18 +7,25 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
+import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/live_sync_provider.dart'
+    show liveSyncEnabled;
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/circle_service.dart'
+    show LocationEventKind, LocationEventResult, ReinviteDelivery;
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/leaver_backstop.dart';
 import 'package:haven/src/services/maintenance_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
 import '../helpers/log_capture.dart';
+import '../mocks/background_task_fakes.dart' show FakeLocationSharingService;
 import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_profile_service.dart';
 import '../mocks/mock_relay_service.dart';
@@ -95,11 +103,80 @@ class _FakeMaintenanceService extends MaintenanceService {
     return const RelayListMaintenanceResult.empty();
   }
 
+  /// The foreground claim each health tick carried, in call order.
+  final List<bool> healthClaims = [];
+
+  /// When set, the health probe answers only once it completes.
+  Completer<void>? healthGate;
+
   @override
-  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async {
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth({
+    required bool foreground,
+  }) async {
     healthCalls++;
+    healthClaims.add(foreground);
     if (foldInFlight) healthCallsDuringFold++;
+    await healthGate?.future;
     return const SubscriptionHealthResult.empty();
+  }
+
+  /// The foreground word each re-invite request carried, in call order.
+  final List<bool> reinviteClaims = [];
+
+  /// When set, the re-invites answer only once it completes.
+  Completer<void>? reinviteGate;
+
+  @override
+  Future<List<ReinviteDelivery>> reinviteOwed({
+    required bool foreground,
+  }) async {
+    reinviteClaims.add(foreground);
+    await reinviteGate?.future;
+    return const [];
+  }
+
+  /// The foreground word each stored-record drive carried, in call order.
+  final List<bool> resumeClaims = [];
+
+  @override
+  Future<void> resumeDrive({required bool foreground}) async {
+    resumeClaims.add(foreground);
+  }
+
+  /// What each leave carry-on's lifecycle read said as it began, in call
+  /// order; `null` for a carry-on handed none (a burst's).
+  final List<bool?> leaveReads = [];
+
+  /// The `nostr_group_id`s each leave carry-on answers as left.
+  List<LeftCircle> leftByCarryOn = const [];
+
+  /// What each leave carry-on answers about a leave still standing.
+  LeaveCarryOn standingByCarryOn = LeaveCarryOn.none;
+
+  /// Whether each leave carry-on asked past the waits, in call order.
+  final List<bool> pastWaitsAsks = [];
+
+  /// When set, each leave carry-on parks on it.
+  Completer<void>? carryOnGate;
+
+  /// When set, each leave carry-on throws it.
+  Error? carryOnThrows;
+
+  @override
+  Future<LeaveCarryOn> carryOnLeaves({
+    bool Function()? inFront,
+    bool pastWaits = false,
+  }) async {
+    leaveReads.add(inFront?.call());
+    pastWaitsAsks.add(pastWaits);
+    await carryOnGate?.future;
+    final boom = carryOnThrows;
+    if (boom != null) throw boom;
+    return LeaveCarryOn(
+      left: leftByCarryOn,
+      namedWait: standingByCarryOn.namedWait,
+      unnamedStanding: standingByCarryOn.unnamedStanding,
+    );
   }
 
   /// Awaits [gate] with [foldInFlight] raised for exactly that window.
@@ -137,7 +214,9 @@ class _FixedBackgroundSharingNotifier extends BackgroundSharingNotifier {
 /// A maintenance service whose health task throws (fail-soft health test).
 class _ThrowingHealthService extends _FakeMaintenanceService {
   @override
-  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async {
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth({
+    required bool foreground,
+  }) async {
     healthCalls++;
     throw StateError('health boom');
   }
@@ -168,10 +247,16 @@ ProviderContainer _containerWith(
   bool isIOS = false,
   bool backgroundSharing = false,
   DateTime Function()? clock,
+  FakeLocationSharingService? sharing,
+  MockCircleService? circleService,
+  List<Override> extra = const [],
 }) {
   return ProviderContainer(
     overrides: [
+      ...extra,
       maintenanceServiceProvider.overrideWithValue(fake),
+      if (sharing != null)
+        locationSharingServiceProvider.overrideWithValue(sharing),
       if (clock != null) maintenanceClockProvider.overrideWithValue(clock),
       isIOSProvider.overrideWithValue(isIOS),
       backgroundSharingProvider.overrideWith(
@@ -195,7 +280,8 @@ ProviderContainer _containerWith(
         profileService ?? MockProfileService(),
       ),
       circleServiceProvider.overrideWithValue(
-        MockCircleService(circles: [TestCircleFactory.createCircle()]),
+        circleService ??
+            MockCircleService(circles: [TestCircleFactory.createCircle()]),
       ),
       identityProvider.overrideWith((_) async => _testIdentity),
     ],
@@ -418,7 +504,7 @@ void main() {
       // enters, and a burst clears that flag for its whole duration: a tick
       // landing inside one passes the gate, reads the mid-`connect()` pool as
       // dropped, and repairs it through the FOREGROUND re-anchor — standing
-      // REQs, an inbox REQ replaying 49 h of gift wraps keyed on this device's
+      // REQs, an inbox REQ replaying 96 h of gift wraps keyed on this device's
       // own pubkey, and a socket held open until the next burst's pause, at an
       // instant that is not a publish. Between bursts it is a background wake
       // that inspects nothing.
@@ -747,6 +833,229 @@ void main() {
 
         container.dispose();
       });
+    });
+
+    // The tick's GATE and the tick's CLAIM are two reads on purpose. The gate
+    // fails open on an unset lifecycle so that a tick is never lost at
+    // startup; the claim is what lets the engine treat its session as in
+    // front of the user, and that fails closed.
+    group('the foreground claim it hands the engine', () {
+      final binding = TestWidgetsFlutterBinding.ensureInitialized();
+
+      tearDown(
+        () =>
+            binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+      );
+
+      Future<_FakeMaintenanceService> tickIn(AppLifecycleState? state) async {
+        binding.resetInternalState();
+        if (state != null) binding.handleAppLifecycleStateChanged(state);
+        final fake = _FakeMaintenanceService();
+        final container = _containerWith(fake);
+        addTearDown(container.dispose);
+        await container
+            .read(maintenanceSchedulerProvider.notifier)
+            .triggerHealthTickForTest();
+        return fake;
+      }
+
+      test('a resumed app claims the foreground', () async {
+        final fake = await tickIn(AppLifecycleState.resumed);
+        expect(fake.healthClaims, [true]);
+      });
+
+      test('the owed re-invites are asked for on the tick, with the strict '
+          'claim', () async {
+        expect((await tickIn(AppLifecycleState.resumed)).reinviteClaims, [
+          true,
+        ]);
+        expect(
+          (await tickIn(null)).reinviteClaims,
+          [false],
+          reason: 'an unset lifecycle is no claim: the driver asks nothing',
+        );
+        expect(
+          (await tickIn(AppLifecycleState.paused)).reinviteClaims,
+          isEmpty,
+          reason: 'a backgrounded app asked for re-invites',
+        );
+      });
+
+      test('a tick a logout superseded during its probe asks for no '
+          're-invite', () async {
+        binding
+          ..resetInternalState()
+          ..handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        final fake = _FakeMaintenanceService()..healthGate = Completer<void>();
+        final container = _containerWith(fake);
+        addTearDown(container.dispose);
+        final tick = container
+            .read(maintenanceSchedulerProvider.notifier)
+            .triggerHealthTickForTest();
+        await pumpEventQueue();
+        expect(fake.healthCalls, 1, reason: 'premise: inside the probe');
+
+        // What a logout does to the scheduler: a fresh generation.
+        container
+          ..invalidate(maintenanceSchedulerProvider)
+          ..read(maintenanceSchedulerProvider.notifier);
+        fake.healthGate!.complete();
+        await tick;
+
+        expect(fake.reinviteClaims, isEmpty);
+      });
+
+      test('a tick a logout superseded during its re-invites drives no '
+          'stored record and carries no leave on', () async {
+        binding
+          ..resetInternalState()
+          ..handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        final fake = _FakeMaintenanceService()
+          ..reinviteGate = Completer<void>();
+        final container = _containerWith(fake);
+        addTearDown(container.dispose);
+        final tick = container
+            .read(maintenanceSchedulerProvider.notifier)
+            .triggerHealthTickForTest();
+        await pumpEventQueue();
+        expect(fake.reinviteClaims, [true], reason: 'premise: inside them');
+
+        container
+          ..invalidate(maintenanceSchedulerProvider)
+          ..read(maintenanceSchedulerProvider.notifier);
+        fake.reinviteGate!.complete();
+        await tick;
+
+        expect(fake.resumeClaims, isEmpty);
+        expect(
+          fake.leaveReads,
+          isEmpty,
+          reason: "the deleted identity's tick carried the next one's leaves "
+              'on',
+        );
+      });
+
+      test('with no live plane the tick drives the stored records, with the '
+          'strict claim; with one it leaves them to it', () async {
+        final fake = await tickIn(AppLifecycleState.resumed);
+        expect(fake.resumeClaims, liveSyncEnabled ? isEmpty : [true]);
+      });
+
+      test('with no live plane the roster is read again after the drive, so '
+          'a removal it made reaches the location read', () async {
+        binding
+          ..resetInternalState()
+          ..handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        final circles = MockCircleService(
+          circles: [TestCircleFactory.createCircle()],
+        );
+        final fake = _FakeMaintenanceService();
+        final container = _containerWith(fake, circleService: circles);
+        addTearDown(container.dispose);
+        await container.read(circlesProvider.future);
+        final reads = circles.methodCalls
+            .where((c) => c == 'getVisibleCircles')
+            .length;
+
+        await container
+            .read(maintenanceSchedulerProvider.notifier)
+            .triggerHealthTickForTest();
+        await container.read(circlesProvider.future);
+
+        expect(
+          circles.methodCalls.where((c) => c == 'getVisibleCircles').length,
+          liveSyncEnabled ? reads : reads + 1,
+        );
+      });
+
+      test('every leave is carried on at the tick, the lifecycle read per '
+          'circle', () async {
+        expect((await tickIn(AppLifecycleState.resumed)).leaveReads, [true]);
+        expect(
+          (await tickIn(null)).leaveReads,
+          [false],
+          reason: 'an unset lifecycle is no claim',
+        );
+      });
+
+      test('a circle a leave ended for is forgotten, and its selection '
+          'cleared', () async {
+        binding
+          ..resetInternalState()
+          ..handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        final sharing = FakeLocationSharingService();
+        final fake = _FakeMaintenanceService()
+          ..leftByCarryOn = const [
+            (mlsGroupId: [7, 7, 7], nostrGroupId: [8, 8, 8]),
+          ];
+        final container = _containerWith(fake, sharing: sharing);
+        addTearDown(container.dispose);
+        container.read(selectedCircleIdProvider.notifier).state = const [
+          7,
+          7,
+          7,
+        ];
+
+        await container
+            .read(maintenanceSchedulerProvider.notifier)
+            .triggerHealthTickForTest();
+
+        expect(sharing.removed, const [
+          [7, 7, 7],
+        ]);
+        expect(container.read(selectedCircleIdProvider), isNull);
+      });
+
+      test("another circle's selection is kept", () async {
+        binding
+          ..resetInternalState()
+          ..handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        final fake = _FakeMaintenanceService()
+          ..leftByCarryOn = const [
+            (mlsGroupId: [7, 7, 7], nostrGroupId: [8, 8, 8]),
+          ];
+        final container = _containerWith(
+          fake,
+          sharing: FakeLocationSharingService(),
+        );
+        addTearDown(container.dispose);
+        container.read(selectedCircleIdProvider.notifier).state = const [1];
+
+        await container
+            .read(maintenanceSchedulerProvider.notifier)
+            .triggerHealthTickForTest();
+
+        expect(container.read(selectedCircleIdProvider), const [1]);
+      });
+
+      test('an unset lifecycle still ticks, and claims nothing', () async {
+        // Before the first lifecycle event — startup, or a process the OS
+        // launched in the background that never was in front of anyone. The
+        // tick runs (the gate is open), so subscription health is still
+        // looked at; what it must not do is tell the engine the app is in
+        // the foreground.
+        final fake = await tickIn(null);
+        expect(
+          fake.healthClaims,
+          [false],
+          reason: 'an unset lifecycle handed to the engine as a foreground '
+              'claim is how a background-launched process would be allowed '
+              'to record and drive commits',
+        );
+      });
+
+      for (final state in [
+        AppLifecycleState.inactive,
+        AppLifecycleState.hidden,
+        AppLifecycleState.paused,
+        AppLifecycleState.detached,
+      ]) {
+        test('${state.name} makes no claim: the tick never reaches the '
+            'engine', () async {
+          final fake = await tickIn(state);
+          expect(fake.healthClaims, isEmpty);
+        });
+      }
     });
 
     test('a throwing health tick does not kill its loop', () async {
@@ -1342,6 +1651,409 @@ void main() {
     });
   });
 
+  group('MaintenanceScheduler — leave carry-on', () {
+    final binding = TestWidgetsFlutterBinding.ensureInitialized();
+
+    setUp(
+      () => binding
+        ..resetInternalState()
+        ..handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+    );
+    tearDown(
+      () => binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+    );
+
+    test('two carry-ons at once are one, and a group update among them runs '
+        'once more, past the waits', () async {
+      final fake = _FakeMaintenanceService()..carryOnGate = Completer<void>();
+      final container = _containerWith(fake);
+      addTearDown(container.dispose);
+      final scheduler = container.read(maintenanceSchedulerProvider.notifier);
+
+      final first = scheduler.carryOnLeavesNow(inFront: () => true);
+      final second = scheduler.carryOnLeavesNow(inFront: () => true);
+      final update = scheduler.carryOnLeavesNow(
+        inFront: () => true,
+        pastWaits: true,
+      );
+      await pumpEventQueue();
+      expect(fake.pastWaitsAsks, [false], reason: 'a second ran beside it');
+
+      fake.carryOnGate!.complete();
+      await Future.wait([first, second, update]);
+
+      expect(fake.pastWaitsAsks, [false, true]);
+    });
+
+    test('a carry-on a logout superseded runs no owed pass, and the next '
+        "lifecycle's caller is not joined to it", () {
+      fakeAsync((async) {
+        final fake = _FakeMaintenanceService()..carryOnGate = Completer<void>();
+        final container = _containerWith(fake);
+        final scheduler = container.read(maintenanceSchedulerProvider.notifier)
+          ..carryOnLeavesNow(inFront: () => true)
+          // A burst's ask, owed after the foreground pass.
+          ..carryOnLeaves();
+        async.flushMicrotasks();
+        expect(fake.leaveReads, hasLength(1), reason: 'premise: parked');
+
+        container
+          ..invalidate(maintenanceSchedulerProvider)
+          ..read(maintenanceSchedulerProvider.notifier);
+        final stale = fake.carryOnGate!;
+        fake.carryOnGate = Completer<void>();
+        scheduler.carryOnLeavesNow(inFront: () => true);
+        async.flushMicrotasks();
+        expect(
+          fake.leaveReads,
+          hasLength(2),
+          reason: "the new lifecycle's carry-on waited on the old one",
+        );
+
+        // A group update in the new lifecycle: owed to ITS carry-on.
+        scheduler.carryOnLeavesNow(inFront: () => true, pastWaits: true);
+
+        stale.complete();
+        async.flushMicrotasks();
+        expect(
+          fake.leaveReads,
+          hasLength(2),
+          reason: 'the superseded carry-on ran a pass into the next lifecycle',
+        );
+        scheduler.carryOnLeavesNow(inFront: () => true);
+        async.flushMicrotasks();
+        expect(
+          fake.leaveReads,
+          hasLength(2),
+          reason: "the old carry-on's end let a second run beside the new one",
+        );
+
+        fake.carryOnGate!.complete();
+        async.flushMicrotasks();
+        expect(
+          fake.leaveReads,
+          [true, true, true],
+          reason: 'the new carry-on ran its own owed pass, and the old '
+              "lifecycle's burst ask not at all",
+        );
+        container.dispose();
+      });
+    });
+
+    test("a new lifecycle's first follow-up waits the base unnamed wait, not "
+        "the last one's doubled wait", () {
+      fakeAsync((async) {
+        final fake = _FakeMaintenanceService()
+          ..standingByCarryOn = const LeaveCarryOn(unnamedStanding: true);
+        final container = _containerWith(fake);
+        container
+            .read(maintenanceSchedulerProvider.notifier)
+            .carryOnLeavesNow(inFront: () => true);
+        async.elapse(const Duration(seconds: 15));
+        expect(fake.leaveReads, hasLength(2), reason: 'premise: doubling');
+
+        container
+          ..invalidate(maintenanceSchedulerProvider)
+          ..read(
+            maintenanceSchedulerProvider.notifier,
+          ).carryOnLeavesNow(inFront: () => true);
+        async.flushMicrotasks();
+        final before = fake.leaveReads.length;
+        async.elapse(const Duration(seconds: 15));
+        expect(fake.leaveReads.length, greaterThan(before));
+        container.dispose();
+      });
+    });
+
+    test('a burst landing beside a foreground pass that stopped at the pause '
+        'gets a pass of its own; a foreground caller beside a burst gets its '
+        'claim', () async {
+      final fake = _FakeMaintenanceService()..carryOnGate = Completer<void>();
+      final container = _containerWith(fake);
+      addTearDown(container.dispose);
+      final scheduler = container.read(maintenanceSchedulerProvider.notifier);
+
+      final front = scheduler.carryOnLeavesNow(inFront: () => false);
+      final burst = scheduler.carryOnLeaves();
+      final again = scheduler.carryOnLeavesNow(inFront: () => false);
+      await pumpEventQueue();
+      fake.carryOnGate!.complete();
+      await Future.wait([front, burst, again]);
+      expect(
+        fake.leaveReads,
+        [false, null],
+        reason: 'the burst was swallowed by a pass that claims nothing past '
+            'the pause, or a covered caller ran again',
+      );
+
+      fake.leaveReads.clear();
+      final backFirst = scheduler.carryOnLeaves();
+      final claim = scheduler.carryOnLeavesNow(inFront: () => true);
+      await Future.wait([backFirst, claim]);
+      expect(fake.leaveReads, [null, true]);
+    });
+
+    test('a leave still standing in front of the user is carried on again at '
+        'the wait the core named, once', () {
+      fakeAsync((async) {
+        final fake = _FakeMaintenanceService()
+          ..standingByCarryOn = const LeaveCarryOn(
+            namedWait: Duration(seconds: 40),
+          );
+        final container = _containerWith(fake);
+        container
+            .read(maintenanceSchedulerProvider.notifier)
+            .carryOnLeavesNow(inFront: () => true);
+        async.flushMicrotasks();
+        expect(fake.leaveReads, hasLength(1));
+
+        // The health tick carries leaves on too; only the rest are counted.
+        int followUps() => fake.leaveReads.length - 1 - fake.healthCalls;
+        async.elapse(const Duration(seconds: 39));
+        expect(followUps(), 0, reason: 'asked inside the wait');
+        // The follow-up's own answer is that the leave ended.
+        fake.standingByCarryOn = LeaveCarryOn.none;
+        async.elapse(const Duration(seconds: 1));
+        expect(followUps(), 1);
+
+        async.elapse(const Duration(minutes: 30));
+        expect(followUps(), 1, reason: 'an ended leave re-armed');
+        container.dispose();
+      });
+    });
+
+    test('a leave whose answer named no wait is asked again at 15 s, doubling '
+        'to the health cadence, never more often', () {
+      fakeAsync((async) {
+        final fake = _FakeMaintenanceService()
+          ..standingByCarryOn = const LeaveCarryOn(unnamedStanding: true);
+        final container = _containerWith(fake);
+        container
+            .read(maintenanceSchedulerProvider.notifier)
+            .carryOnLeavesNow(inFront: () => true);
+        // The health tick carries leaves on too; only the rest are counted.
+        int followUps() => fake.leaveReads.length - 1 - fake.healthCalls;
+        final at = <Duration>[];
+        final start = async.elapsed;
+        var seen = 0;
+        for (var i = 0; i < 60 * 60; i++) {
+          async.elapse(const Duration(seconds: 1));
+          if (followUps() > seen) {
+            seen = followUps();
+            at.add(async.elapsed - start);
+          }
+        }
+        expect(at.take(4), const [
+          Duration(seconds: 15),
+          Duration(seconds: 45),
+          Duration(seconds: 105),
+          Duration(seconds: 225),
+        ]);
+        expect(at.length, lessThan(12), reason: 'it spun: ${at.length}');
+        container.dispose();
+      });
+    });
+
+    test('a pause cancels the follow-up, and a background carry-on arms none',
+        () {
+      fakeAsync((async) {
+        final fake = _FakeMaintenanceService()
+          ..standingByCarryOn = const LeaveCarryOn(unnamedStanding: true);
+        final container = _containerWith(fake);
+        final scheduler = container.read(maintenanceSchedulerProvider.notifier)
+          ..carryOnLeavesNow(inFront: () => true);
+        async.flushMicrotasks();
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        scheduler
+          ..suspendForBackground()
+          ..carryOnLeaves();
+        async.flushMicrotasks();
+        // Back in front with nothing re-armed: a timer the pause left would
+        // fire now.
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        async.elapse(const Duration(minutes: 5));
+
+        expect(fake.leaveReads, hasLength(2), reason: 'the pause left the '
+            'follow-up armed, or the burst armed one');
+        container.dispose();
+      });
+    });
+
+    test('a follow-up that fires while the app is away carries nothing on',
+        () {
+      fakeAsync((async) {
+        final fake = _FakeMaintenanceService()
+          ..standingByCarryOn = const LeaveCarryOn(unnamedStanding: true);
+        final container = _containerWith(fake);
+        container
+            .read(maintenanceSchedulerProvider.notifier)
+            .carryOnLeavesNow(inFront: () => true);
+        async.flushMicrotasks();
+        // Paused, and the pause handler has not reached the scheduler yet.
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        async.elapse(const Duration(seconds: 20));
+
+        expect(fake.leaveReads, hasLength(1));
+        container.dispose();
+      });
+    });
+
+    test('a group update an ingest reports carries every leave on at once, '
+        'past the waits', () async {
+      const groupUpdate = LocationEventResult(
+        kind: LocationEventKind.groupUpdate,
+        mlsGroupId: [9, 9],
+        epoch: 3,
+      );
+      final circle = TestCircleFactory.createCircle(mlsGroupId: const [9, 9]);
+      final circles = MockCircleService(circles: [circle])
+        ..decryptLocationResults = [
+          [groupUpdate],
+        ];
+      final fake = _FakeMaintenanceService();
+      final container = _containerWith(
+        fake,
+        circleService: circles,
+        extra: [
+          relayServiceProvider.overrideWithValue(
+            MockRelayService(groupMessages: const ['{"id":"e","kind":445}']),
+          ),
+          identityServiceProvider.overrideWithValue(_NoIdentityService()),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container
+          .read(locationSharingServiceProvider)
+          .fetchMemberLocations(circle: circle);
+      await pumpEventQueue();
+
+      expect(fake.pastWaitsAsks, [true]);
+      expect(fake.leaveReads, [true]);
+    });
+
+    test("the live plane's group update carries every leave on at once, past "
+        'the waits', () async {
+      final circle = TestCircleFactory.createCircle(
+        mlsGroupId: const [9, 9],
+        nostrGroupId: const [8, 8],
+      );
+      final fake = _FakeMaintenanceService();
+      final container = _containerWith(
+        fake,
+        circleService: MockCircleService(circles: [circle]),
+        extra: [
+          relayServiceProvider.overrideWithValue(MockRelayService()),
+          identityServiceProvider.overrideWithValue(_NoIdentityService()),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(liveEventRouterProvider).handleEvent(
+        FfiRelayEvent(
+          kind: FfiRelayEventKind.groupUpdate,
+          nostrGroupId: Uint8List.fromList(const [8, 8]),
+        ),
+      );
+      await pumpEventQueue();
+
+      expect(fake.pastWaitsAsks, [true]);
+    });
+
+    test("a carry-on the live plane's group update cannot start says so with "
+        'fixed text, naming nothing', () async {
+      final logs = LogCapture.install();
+      addTearDown(logs.restore);
+      final circle = TestCircleFactory.createCircle(
+        mlsGroupId: const [9, 9],
+        nostrGroupId: const [8, 8],
+      );
+      final container = _containerWith(
+        _FakeMaintenanceService(),
+        circleService: MockCircleService(circles: [circle]),
+        extra: [
+          relayServiceProvider.overrideWithValue(MockRelayService()),
+          identityServiceProvider.overrideWithValue(_NoIdentityService()),
+          maintenanceSchedulerProvider.overrideWith(
+            _UnstartableCarryOnScheduler.new,
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(liveEventRouterProvider).handleEvent(
+        FfiRelayEvent(
+          kind: FfiRelayEventKind.groupUpdate,
+          nostrGroupId: Uint8List.fromList(const [8, 8]),
+        ),
+      );
+      await pumpEventQueue();
+
+      logs
+        ..assertContains('[ServiceProvider] leaveCarryOn invalidation error')
+        ..assertNoNeedles([
+          _UnstartableCarryOnScheduler.plantedGroup,
+          'wss://planted.example',
+        ]);
+    });
+
+    test('a carry-on that throws says so with fixed text', () async {
+      final logs = LogCapture.install();
+      addTearDown(logs.restore);
+      final fake = _FakeMaintenanceService()
+        ..carryOnThrows = StateError(
+          'circle ${'ef' * 16} at wss://planted.example',
+        );
+      final container = _containerWith(fake);
+      addTearDown(container.dispose);
+
+      await container
+          .read(maintenanceSchedulerProvider.notifier)
+          .carryOnLeavesNow(inFront: () => true);
+
+      logs
+        ..assertContains('[Maintenance] leave carry-on threw')
+        ..assertNoNeedles(['ef' * 16, 'wss://planted.example']);
+    });
+
+    test('a follow-up is never armed while the app is away', () {
+      final fake = _FakeMaintenanceService();
+      final container = _containerWith(fake);
+      addTearDown(container.dispose);
+      final scheduler = container.read(maintenanceSchedulerProvider.notifier);
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+
+      scheduler.followUpLeave();
+
+      expect(
+        scheduler.leaveFollowUpArmedForTest,
+        isFalse,
+        reason: 'a timer armed in a paused app wakes it to carry a leave on',
+      );
+    });
+
+    test("a press's follow-up asks at 15 s", () {
+      fakeAsync((async) {
+        final fake = _FakeMaintenanceService();
+        final container = _containerWith(fake);
+        final scheduler = container.read(maintenanceSchedulerProvider.notifier);
+        expect(scheduler.leaveFollowUpArmedForTest, isFalse);
+        scheduler.followUpLeave();
+        expect(
+          scheduler.leaveFollowUpArmedForTest,
+          isTrue,
+          reason: 'the e2e Phase 5 observable of a press answered leaving',
+        );
+
+        async.elapse(const Duration(seconds: 14));
+        expect(fake.leaveReads, isEmpty);
+        async.elapse(const Duration(seconds: 1));
+        expect(fake.leaveReads, [true]);
+        container.dispose();
+      });
+    });
+  });
+
   group('MaintenanceScheduler — background burst fold (P4)', () {
     // While backgrounded on iOS the KeyPackage and relay-list timers are not
     // armed at all (the foreground gate), so the ONLY way either task runs is
@@ -1363,6 +2075,19 @@ void main() {
     }
 
     final t0 = DateTime(2026, 9, 7, 12);
+
+    test("a burst's leave carry-on hands no lifecycle read: it claims no "
+        'foreground', () async {
+      background();
+      final fake = _FakeMaintenanceService();
+      final container = _containerWith(fake, clock: () => t0);
+      addTearDown(container.dispose);
+
+      await container.read(maintenanceSchedulerProvider.notifier)
+          .carryOnLeaves();
+
+      expect(fake.leaveReads, [null]);
+    });
 
     test('a task that is not yet due is not folded in', () async {
       final fake = _FakeMaintenanceService();
@@ -1440,7 +2165,7 @@ void main() {
       // burst clears that flag from its open until its pause — so a tick
       // landing in between passes the gate, reads the mid-`connect()` pool as
       // dropped (`Terminated` counts as disconnected) and repairs it with the
-      // FOREGROUND re-anchor: standing REQs, the inbox REQ's 49 h gift-wrap
+      // FOREGROUND re-anchor: standing REQs, the inbox REQ's 96 h gift-wrap
       // replay keyed on this device's own pubkey, and a socket held until the
       // next burst's pause — plus a `reset_commit_activity` that can make the
       // burst's own settle return early on a burst that DID see commits.
@@ -1575,4 +2300,30 @@ void main() {
       expect(fake.relayListCalls, 0);
     });
   });
+}
+
+/// An identity service with no identity: the location service's own-pubkey
+/// read finds none.
+/// A scheduler whose carry-on cannot even start: the throw carries a group
+/// id and a relay URL, which no log line may repeat.
+class _UnstartableCarryOnScheduler extends MaintenanceSchedulerNotifier {
+  static final String plantedGroup = 'cd' * 32;
+
+  @override
+  void build() {}
+
+  @override
+  Future<void> carryOnLeavesNow({
+    bool Function()? inFront,
+    bool pastWaits = false,
+    bool migrateFirst = false,
+  }) => throw StateError('group $plantedGroup at wss://planted.example');
+}
+
+class _NoIdentityService extends Fake implements IdentityService {
+  @override
+  Future<Identity?> getIdentity() async => null;
+
+  @override
+  Future<bool> hasIdentity() async => false;
 }

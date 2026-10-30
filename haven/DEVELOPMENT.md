@@ -7,6 +7,7 @@
 | [Flutter SDK](https://docs.flutter.dev/get-started/install/linux/android) | App framework | See Flutter docs |
 | [Android SDK](https://developer.android.com/studio) | Android build tools | Via Android Studio or command-line tools |
 | [Android NDK](https://developer.android.com/ndk) | Native development (for Rust FFI) | Installed automatically by Flutter |
+| [Rust](https://rustup.rs) ≥ 1.97.1 | `haven-core` and the FFI crate | `rustup toolchain install 1.97.1` — MDK v0.10.4's SQLCipher build (`libsqlite3-sys` from `rusqlite@5ae7fdf`) uses `cfg_select!`, which older compilers reject |
 
 ### Flutter Installation
 
@@ -365,6 +366,16 @@ scripts/ci/check_coverage_floors.sh --repin flutter haven/coverage/lcov_filtered
 
 `--repin` only ever raises a floor. A path whose coverage **fell** is left
 alone: that needs tests, not a smaller number.
+
+When a change deletes a pinned file, its row becomes stale and fails every
+coverage run. Remove it with the tool, in the same change:
+
+```bash
+scripts/ci/check_coverage_floors.sh --drop-stale
+```
+
+It deletes only rows whose path no longer exists in the tree, and refuses to
+write while any floor is lower than the committed manifest's.
 
 There is no pre-push hook: `git push` runs nothing, and CI's Coverage job is
 what enforces these gates. Run the full gate yourself before pushing when you

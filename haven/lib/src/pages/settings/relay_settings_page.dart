@@ -28,7 +28,6 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/pages/settings/add_relay_sheet.dart';
 import 'package:haven/src/providers/identity_provider.dart';
-import 'package:haven/src/providers/legacy_retraction_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/relay_status_provider.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
@@ -152,52 +151,9 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
           subtitle: l10n.relaySettingsProfileSubtitle,
         ),
         const SizedBox(height: HavenSpacing.lg),
-        const _LegacyRetractionPendingNote(),
         const _BackendCaption(),
         const SizedBox(height: HavenSpacing.base),
       ],
-    );
-  }
-}
-
-/// Subtle, non-blocking note shown only while the Dark Matter cutover's
-/// once-only legacy-KeyPackage retraction (plan §6 F10b) has not yet
-/// completed — most commonly because no relay was reachable this session.
-/// Absent entirely once the retraction succeeds (or was already done), so
-/// most users never see it.
-class _LegacyRetractionPendingNote extends ConsumerWidget {
-  const _LegacyRetractionPendingNote();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final status = ref.watch(legacyRetractionProvider).valueOrNull;
-    if (status != LegacyRetractionUiStatus.pending) {
-      return const SizedBox.shrink();
-    }
-    final l10n = AppLocalizations.of(context);
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: HavenSpacing.lg),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(
-            LucideIcons.clock,
-            size: 16,
-            color: scheme.onSurfaceVariant,
-          ),
-          const SizedBox(width: HavenSpacing.xs),
-          Expanded(
-            child: Text(
-              l10n.relaySettingsLegacyRetractionPending,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

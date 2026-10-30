@@ -136,6 +136,7 @@ class NostrRelayPreferencesService implements RelayPreferencesService {
       );
       return BuiltRelayListPublish(
         suppressed: ffi.suppressed,
+        awaitingResetAcknowledgement: ffi.awaitingResetAcknowledgement,
         eventJson: ffi.eventJson,
         eventIdHex: ffi.eventIdHex,
         targets: ffi.targets,

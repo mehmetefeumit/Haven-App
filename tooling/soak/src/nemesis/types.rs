@@ -289,6 +289,16 @@ pub enum Fault {
     /// The next connection each endpoint accepts is dropped before its
     /// handshake; every later one is served.
     ColdFirstConnect,
+    /// Every live connection is dropped, and every later one is accepted and
+    /// never answered: its handshake waits until the heal, as a relay that
+    /// takes the socket and then says nothing does.
+    Unanswering,
+    /// Every stored-event page is served and its `EOSE` is never sent.
+    WithholdEose,
+    /// Every `NEG-OPEN` is answered `NOTICE "ERROR: bad msg: unknown cmd"`
+    /// and never reaches the relay: a relay that does not speak NIP-77, as
+    /// strfry with negentropy off. The in-process relay has no switch for it.
+    RefusesNegentropy,
     /// Everything above is undone.
     Heal,
 }
@@ -314,6 +324,9 @@ impl Fault {
             Self::ClampLimit(_) => "clamp-limit",
             Self::RefusePage { .. } => "refuse-page",
             Self::ColdFirstConnect => "cold-first-connect",
+            Self::Unanswering => "unanswering",
+            Self::WithholdEose => "withhold-eose",
+            Self::RefusesNegentropy => "refuses-negentropy",
             Self::Heal => "heal",
         }
     }
@@ -336,6 +349,9 @@ impl Fault {
             Self::ClampLimit(_) => 13,
             Self::RefusePage { .. } => 14,
             Self::ColdFirstConnect => 15,
+            Self::Unanswering => 16,
+            Self::WithholdEose => 17,
+            Self::RefusesNegentropy => 18,
         };
         buf.push(code);
         match self {
@@ -948,6 +964,10 @@ mod tests {
             applied(Fault::ColdFirstConnect).digest(),
             applied(Fault::Heal).digest()
         );
+        assert_ne!(
+            applied(Fault::Unanswering).digest(),
+            applied(Fault::WithholdEose).digest()
+        );
 
         for fault in [
             Fault::ClampLimit(RigCount::new(7919)),
@@ -976,6 +996,8 @@ mod tests {
             "refuse-page"
         );
         assert_eq!(Fault::ColdFirstConnect.label(), "cold-first-connect");
+        assert_eq!(Fault::Unanswering.label(), "unanswering");
+        assert_eq!(Fault::WithholdEose.label(), "withhold-eose");
         assert_eq!(
             Op::Device {
                 device: DeviceTag::new(0),

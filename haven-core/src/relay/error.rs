@@ -78,17 +78,14 @@ pub enum RelayError {
     /// per-relay reasons on the floor, so the reason never crossed the FFI at
     /// all.
     ///
-    /// # Display is a machine token, on purpose
+    /// # Display names the classification, never the relay's words
     ///
-    /// The FFI flattens errors to `String`, and this is the one classification
-    /// that has to survive that flattening. `Display` therefore renders a
-    /// stable, Haven-authored token — `haven.clock.device_clock_rejected:ahead`
-    /// — and **never** the relay's own words. Relay prose is consumed by
+    /// It renders a Haven-authored token — `haven.clock.device_clock_rejected:ahead`.
+    /// Relay prose is consumed by
     /// [`super::clock_skew::classify_relay_rejection`] and discarded there, so
     /// no remote-controlled text can reach a log or a UI string (Security
-    /// Rule 8). The token is matched in Dart by
-    /// `haven/lib/src/services/clock_skew_detector.dart`, and the pair is
-    /// pinned by `scripts/ci/check_clock_skew_policy_parity.sh`.
+    /// Rule 8). Nothing parses the rendering: the bridge carries the complaint
+    /// as a typed field (`PublishFailureFfi.clock_rejected`).
     #[error("{DEVICE_CLOCK_REJECTED_TOKEN}:{}", complaint.wire_token())]
     DeviceClockRejected {
         /// What the relays said about the direction of the skew.
@@ -108,6 +105,14 @@ pub enum RelayError {
     /// No events found.
     #[error("No events found for filter")]
     NoEventsFound,
+
+    /// The event has a durable fanout row: only the fanout driver sends it.
+    ///
+    /// Nothing was sent. A second sender of a fanout's event would have its
+    /// relay answers counted as the fanout's own
+    /// ([`crate::relay::fanout::is_owned`]).
+    #[error("The event is sent by its durable fanout only")]
+    FanoutOwned,
 }
 
 impl RelayError {
@@ -127,6 +132,7 @@ impl RelayError {
             Self::Initialization(_) => "initialization",
             Self::Fetch(_) => "fetch",
             Self::NoEventsFound => "no-events-found",
+            Self::FanoutOwned => "fanout-owned",
         }
     }
 }
@@ -233,36 +239,6 @@ mod tests {
     fn all_relays_failed_error_display() {
         let error = RelayError::AllRelaysFailed;
         assert_eq!(error.to_string(), "All relays failed to accept the event");
-    }
-
-    #[test]
-    fn device_clock_rejected_display_is_a_stable_machine_token() {
-        // This exact rendering is the ONLY thing that survives the FFI's
-        // `Result<T, String>` flattening, and Dart matches it verbatim. If it
-        // changes, `clock_skew_detector.dart` stops recognising a fast-clock
-        // rejection and the failure goes silent again — which is the entire
-        // defect this variant exists to fix.
-        assert_eq!(
-            RelayError::DeviceClockRejected {
-                complaint: DeviceClockComplaint::Ahead,
-            }
-            .to_string(),
-            "haven.clock.device_clock_rejected:ahead"
-        );
-        assert_eq!(
-            RelayError::DeviceClockRejected {
-                complaint: DeviceClockComplaint::Behind,
-            }
-            .to_string(),
-            "haven.clock.device_clock_rejected:behind"
-        );
-        assert_eq!(
-            RelayError::DeviceClockRejected {
-                complaint: DeviceClockComplaint::Unspecified,
-            }
-            .to_string(),
-            "haven.clock.device_clock_rejected:unspecified"
-        );
     }
 
     #[test]

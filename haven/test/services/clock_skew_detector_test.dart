@@ -11,30 +11,15 @@ library;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
+import 'package:haven/src/rust/api.dart'
+    show DeviceClockComplaintFfi, LocationPublishFfi;
 import 'package:haven/src/services/clock_skew_detector.dart';
-import 'package:haven/src/services/relay_service.dart';
 
 /// A controllable clock so sample expiry is exercised without sleeping.
 class _FakeClock {
   DateTime now = DateTime.utc(2026, 8, 3, 12);
   DateTime call() => now;
 }
-
-PublishResult _publishResult({
-  List<String> acceptedBy = const [],
-  List<String> rejectionReasons = const [],
-}) => PublishResult(
-  eventId: 'e' * 64,
-  acceptedBy: acceptedBy,
-  rejectedBy: [
-    for (var i = 0; i < rejectionReasons.length; i++)
-      RelayRejection(
-        relay: 'wss://relay$i.example.com',
-        reason: rejectionReasons[i],
-      ),
-  ],
-  failed: const [],
-);
 
 void main() {
   group('threshold', () {
@@ -47,340 +32,159 @@ void main() {
         const Duration(seconds: 120),
         reason:
             'the alert threshold moved. See the derivation on '
-            'kClockSkewAlertThreshold; it must stay 2x the receiver grace '
-            'window and well under the total-loss point.',
+            'kClockSkewAlertThreshold; it must stay past the lag at which '
+            'most publish cycles leave a hole and well under the total-loss '
+            'point.',
       );
 
-      // Lower bound: RECEIVER_EXPIRATION_GRACE_SECS = 60 s is the band of
-      // disagreement the protocol absorbs by design. Alerting inside it fires
-      // on skew that costs the user nothing.
-      const grace = Duration(seconds: 60);
-      expect(kClockSkewAlertThreshold, greaterThan(grace));
-      expect(kClockSkewAlertThreshold, grace * 2);
+      // The retention as Dart derives it: the cadence ceiling plus two
+      // network buffers (LOCATION_MESSAGE_RETENTION_SECS = 168 + 2 * 30).
+      final retention =
+          kLocationPublishMaxInterval +
+          const Duration(seconds: 2 * kTtlNetworkBufferSeconds);
 
-      // Upper bound: at 288 s every location is already silently discarded by
-      // a correctly-clocked peer. The alarm must fire strictly before that.
+      // The total-loss point IS the retention: the relay pool drops an event
+      // once its expiration is behind the receiver's clock, with no grace.
       expect(
         kClockSkewTotalLossThreshold,
-        const Duration(seconds: 288),
-        reason: 'total loss = retention (228) + receiver grace (60)',
+        retention,
+        reason:
+            'total loss = the retention, because the relay pool drops an '
+            'expired event on receipt with no grace',
       );
+
+      // Lower bound: past the lag at which the residency left to a lagging
+      // publisher drops under the median publish interval, so a lag whose
+      // holes are only the jitter's tail never raises the alarm.
+      expect(
+        kClockSkewAlertThreshold,
+        greaterThan(retention - kLocationUpdateInterval),
+      );
+
+      // Upper bound: at the total-loss point every location is already
+      // silently discarded. The alarm must fire strictly before that.
       expect(kClockSkewAlertThreshold, lessThan(kClockSkewTotalLossThreshold));
 
-      // ...and before the no-gap invariant is beyond rescue: at the threshold
-      // the residency left to a lagging publisher (228 - 120 = 108 s) is
-      // already under the 168 s worst-case inter-publish gap, so the harm is
-      // real by the time we speak.
-      const retention = Duration(seconds: 228);
-      const maxPublishGap = kLocationPublishMaxInterval;
-      expect(kClockSkewAlertThreshold, lessThan(retention));
-      expect(retention - kClockSkewAlertThreshold, lessThan(maxPublishGap));
-    });
-  });
-
-  group('relay rejection classification', () {
-    test("reads strfry's timestamp refusal as a clock complaint", () {
+      // ...and the harm is real by the time we speak: the residency left
+      // (228 - 120 = 108 s) is under the 168 s worst-case interval.
       expect(
-        ClockSkewDetector.classifyRelayRejection(
-          'invalid: event too far off from the current time',
-        ),
-        DeviceClockComplaint.unspecified,
-      );
-    });
-
-    test('reads an explicit future refusal as "ahead"', () {
-      for (final reason in [
-        'invalid: event created_at is too far in the future',
-        'invalid: event is too new',
-        'invalid: created_at newer than 900 seconds from now',
-        'invalid: future timestamp not allowed',
-      ]) {
-        expect(
-          ClockSkewDetector.classifyRelayRejection(reason),
-          DeviceClockComplaint.ahead,
-          reason: reason,
-        );
-      }
-    });
-
-    test('reads an explicit past / expired refusal as "behind"', () {
-      for (final reason in [
-        'invalid: event too old',
-        'invalid: created_at older than 3600 seconds',
-        'invalid: event is too far in the past',
-        'invalid: event expired',
-        'invalid: outdated event',
-      ]) {
-        expect(
-          ClockSkewDetector.classifyRelayRejection(reason),
-          DeviceClockComplaint.behind,
-          reason: reason,
-        );
-      }
-    });
-
-    test('is case-insensitive', () {
-      expect(
-        ClockSkewDetector.classifyRelayRejection(
-          'INVALID: EVENT TOO FAR OFF FROM THE CURRENT TIME',
-        ),
-        DeviceClockComplaint.unspecified,
-      );
-    });
-
-    // The negative control for the entire mechanism.
-    test('never reads an ordinary failure as a clock complaint', () {
-      for (final reason in [
-        'blocked: pubkey not on the allowlist',
-        'rate-limited: slow down',
-        'invalid: bad signature',
-        'invalid: event id does not match',
-        'pow: difficulty 20 is less than 25',
-        'duplicate: already have this event',
-        'restricted: we do not accept events from unauthenticated users',
-        'error: event too large',
-        'connection timed out',
-        'operation timed out after 30s',
-        'not connected (status: disconnected)',
-        'websocket error: connection reset by peer',
-        '',
-      ]) {
-        expect(
-          ClockSkewDetector.classifyRelayRejection(reason),
-          isNull,
-          reason: 'must NOT be read as a clock complaint: "$reason"',
-        );
-      }
-    });
-  });
-
-  group('FFI error token', () {
-    test('extracts the complaint from the Haven-authored token', () {
-      expect(
-        ClockSkewDetector.complaintFromError(
-          'haven.clock.device_clock_rejected:ahead',
-        ),
-        DeviceClockComplaint.ahead,
-      );
-      expect(
-        ClockSkewDetector.complaintFromError(
-          'haven.clock.device_clock_rejected:behind',
-        ),
-        DeviceClockComplaint.behind,
-      );
-      expect(
-        ClockSkewDetector.complaintFromError(
-          'haven.clock.device_clock_rejected:unspecified',
-        ),
-        DeviceClockComplaint.unspecified,
-      );
-    });
-
-    test('the enum name IS the wire token', () {
-      // `NostrRelayService` converts a parsed complaint back to a token with
-      // `.name`, and the Rust `Display` emits exactly these three suffixes. A
-      // rename of any enum member would silently produce a token neither side
-      // recognises, so pin the mapping rather than the enum.
-      expect(DeviceClockComplaint.ahead.name, 'ahead');
-      expect(DeviceClockComplaint.behind.name, 'behind');
-      expect(DeviceClockComplaint.unspecified.name, 'unspecified');
-      for (final complaint in DeviceClockComplaint.values) {
-        expect(
-          ClockSkewDetector.complaintFromError(
-            '${ClockSkewDetector.deviceClockRejectedToken}:${complaint.name}',
-          ),
-          complaint,
-        );
-      }
-    });
-
-    test('survives a wrapped / decorated error string', () {
-      expect(
-        ClockSkewDetector.complaintFromError(
-          Exception('haven.clock.device_clock_rejected:ahead)'),
-        ),
-        DeviceClockComplaint.ahead,
-      );
-    });
-
-    test('ignores an unrelated error', () {
-      expect(
-        ClockSkewDetector.complaintFromError('All relays failed'),
-        isNull,
-      );
-      expect(
-        ClockSkewDetector.complaintFromError(
-          const RelayServiceException('Failed to publish event'),
-        ),
-        isNull,
+        retention - kClockSkewAlertThreshold,
+        lessThan(kLocationPublishMaxInterval),
       );
     });
   });
+
+  // How a relay's refusal text is read for the clock is Rust's alone now
+  // (`relay/clock_skew.rs` `classifies_strfry_future_rejection`,
+  // `classifies_explicit_future_rejections`,
+  // `classifies_explicit_past_rejections`,
+  // `classification_is_case_insensitive`,
+  // `ordinary_rejections_are_not_clock_complaints`); it crosses typed, and
+  // what `publishEvent` makes of it is
+  // `nostr_relay_service_publish_event_test.dart`'s. Dart used to mirror the
+  // phrase tables and parse an error-string token.
 
   group('publish signal', () {
-    test('a fully-rejected clock publish raises the relay signal', () {
-      // Before the fix this outcome reached nothing at all: the reason was
-      // dropped inside publish_with_retry and the caller only logged.
-      final detector = ClockSkewDetector();
-      addTearDown(detector.dispose);
+    test("a drive's clock evidence raises the relay signal in its direction",
+        () {
+      for (final (evidence, complaint) in [
+        (DeviceClockComplaintFfi.ahead, DeviceClockComplaint.ahead),
+        (DeviceClockComplaintFfi.behind, DeviceClockComplaint.behind),
+        (DeviceClockComplaintFfi.unspecified, DeviceClockComplaint.unspecified),
+      ]) {
+        final detector = ClockSkewDetector();
+        addTearDown(detector.dispose);
 
-      expect(detector.status.isSkewed, isFalse);
-      detector.recordPublishResult(
-        _publishResult(
-          rejectionReasons: const [
-            'invalid: event too far off from the current time',
-          ],
-        ),
-      );
+        detector.recordDriveClockRejection(evidence);
 
-      expect(detector.status.signal, ClockSkewSignal.relayRejectedTimestamp);
-      expect(detector.status.complaint, DeviceClockComplaint.unspecified);
+        expect(detector.status.signal, ClockSkewSignal.relayRejectedTimestamp);
+        expect(detector.status.complaint, complaint);
+      }
     });
 
-    test('a fully-rejected NON-clock publish does not blame the clock', () {
-      final detector = ClockSkewDetector();
-      addTearDown(detector.dispose);
+    // Which relays blamed what, and how their answers merge, is classified in
+    // Rust now (`relay/clock_skew.rs`
+    // `publish_outcome_merges_a_specific_direction_over_unspecified`,
+    // `publish_outcome_collapses_contradicting_directions`,
+    // `publish_outcome_is_silent_for_non_clock_rejections`); a send any relay
+    // took crosses as `accepted` (`rust_builder` api.rs, the LocationPublish
+    // mapping). Before, Dart classified the relays' text itself.
+    test('a send no relay took for its time raises the relay signal in its '
+        'direction', () {
+      for (final (publish, complaint) in [
+        (LocationPublishFfi.clockAhead, DeviceClockComplaint.ahead),
+        (LocationPublishFfi.clockBehind, DeviceClockComplaint.behind),
+        (LocationPublishFfi.clockUnspecified, DeviceClockComplaint.unspecified),
+      ]) {
+        final detector = ClockSkewDetector();
+        addTearDown(detector.dispose);
 
-      detector.recordPublishResult(
-        _publishResult(rejectionReasons: const ['rate-limited: slow down']),
-      );
+        detector.recordLocationPublish(publish);
 
-      expect(detector.status.signal, ClockSkewSignal.none);
+        expect(detector.status.signal, ClockSkewSignal.relayRejectedTimestamp);
+        expect(detector.status.complaint, complaint);
+      }
     });
 
-    test('a partially-accepted publish does not blame the clock', () {
-      // The location DID reach the network. Warning here would be crying wolf.
-      final detector = ClockSkewDetector();
-      addTearDown(detector.dispose);
-
-      detector.recordPublishResult(
-        _publishResult(
-          acceptedBy: const ['wss://ok.example.com'],
-          rejectionReasons: const [
-            'invalid: event too far off from the current time',
-          ],
-        ),
-      );
-
-      expect(detector.status.signal, ClockSkewSignal.none);
-    });
-
-    test('a later success clears a raised relay signal', () {
-      final detector = ClockSkewDetector();
-      addTearDown(detector.dispose);
-
-      detector.recordPublishClockRejection('ahead');
-      expect(detector.status.isSkewed, isTrue);
-
-      detector.recordPublishResult(
-        _publishResult(acceptedBy: const ['wss://ok.example.com']),
-      );
-
-      expect(detector.status.signal, ClockSkewSignal.none);
-    });
-
-    test('an ordinary transport failure does not clear a raised signal', () {
-      // A dropped connection says nothing either way about the clock; letting
-      // it clear the verdict would hide a clock that is still wrong.
+    test('a change a relay acknowledged clears a raised signal, and a later '
+        "drive's evidence raises it again", () {
       final detector = ClockSkewDetector();
       addTearDown(detector.dispose);
 
       detector
-        ..recordPublishClockRejection('ahead')
-        ..recordPublishError(
-          const RelayServiceException('Failed to publish event'),
-        );
+        ..recordDriveClockRejection(DeviceClockComplaintFfi.ahead)
+        ..recordDriveAccepted();
+      expect(detector.status.signal, ClockSkewSignal.none);
 
-      expect(detector.status.signal, ClockSkewSignal.relayRejectedTimestamp);
-    });
-
-    test('the generic entry point still classifies the TYPED rejection', () {
-      // `RelayClockRejectionException.toString()` is
-      // `'RelayClockRejectionException(device clock ahead)'` — it carries no
-      // `haven.clock.device_clock_rejected:` marker, because the token lives in
-      // a field so the relay layer needs no dependency on this enum. So the
-      // text parser cannot see it, and a caller that hands the typed exception
-      // to the generic entry point used to drop the classification in silence.
-      //
-      // That silence is not hypothetical: it is exactly what made the B8 lane
-      // report three findings (verdict, surface, copy) against production code
-      // that was correct — the drive had copied the publish call site and read
-      // the token out of `toString()`. Production catches the typed exception
-      // first and never relied on this path; this pins the backstop so the
-      // next caller to reach for it cannot lose the verdict the same way.
-      final detector = ClockSkewDetector();
-      addTearDown(detector.dispose);
-
-      const error = RelayClockRejectionException('ahead');
-      expect(
-        ClockSkewDetector.complaintFromError(error),
-        isNull,
-        reason: 'the marker is deliberately absent from toString()',
-      );
-
-      detector.recordPublishError(error);
-
-      expect(detector.status.signal, ClockSkewSignal.relayRejectedTimestamp);
-      expect(detector.status.complaint, DeviceClockComplaint.ahead);
-    });
-
-    test('the typed rejection carries the slow direction through too', () {
-      final detector = ClockSkewDetector();
-      addTearDown(detector.dispose);
-
-      detector.recordPublishError(const RelayClockRejectionException('behind'));
-
+      detector.recordDriveClockRejection(DeviceClockComplaintFfi.behind);
       expect(detector.status.complaint, DeviceClockComplaint.behind);
     });
 
-    test('an unknown typed token degrades to unspecified, not silence', () {
-      // Not reachable from production today — NostrRelayService builds the
-      // token from `DeviceClockComplaint.name`, a closed enum — so this pins
-      // the CONTRACT rather than a live path: if a future wire token arrives
-      // that this build does not know, the fault must still surface as "the
-      // clock is wrong, direction unknown" rather than vanish. Degrading
-      // loudly beats dropping it.
-      final detector = ClockSkewDetector();
-      addTearDown(detector.dispose);
+    test('a send a relay took, or one every relay refused for something '
+        'else, clears a raised signal', () {
+      for (final publish in [
+        LocationPublishFfi.accepted,
+        LocationPublishFfi.refused,
+      ]) {
+        final detector = ClockSkewDetector();
+        addTearDown(detector.dispose);
 
-      detector.recordPublishError(
-        const RelayClockRejectionException('sideways'),
-      );
+        detector
+          ..recordLocationPublish(LocationPublishFfi.clockAhead)
+          ..recordLocationPublish(publish);
 
-      expect(detector.status.signal, ClockSkewSignal.relayRejectedTimestamp);
-      expect(detector.status.complaint, DeviceClockComplaint.unspecified);
+        expect(
+          detector.status.signal,
+          ClockSkewSignal.none,
+          reason: '$publish',
+        );
+      }
     });
 
-    test('two relays disagreeing about direction collapse to unspecified', () {
-      final detector = ClockSkewDetector();
-      addTearDown(detector.dispose);
+    test('a send no relay was reached for, or that was not sent, does not '
+        'clear a raised signal', () {
+      // A dropped connection says nothing either way about the clock; letting
+      // it clear the verdict would hide a clock that is still wrong.
+      for (final publish in [
+        LocationPublishFfi.unreachable,
+        LocationPublishFfi.expired,
+        LocationPublishFfi.superseded,
+        LocationPublishFfi.ended,
+        LocationPublishFfi.inFlight,
+      ]) {
+        final detector = ClockSkewDetector();
+        addTearDown(detector.dispose);
 
-      detector.recordPublishResult(
-        _publishResult(
-          rejectionReasons: const [
-            'invalid: created_at is in the future',
-            'invalid: event too old',
-          ],
-        ),
-      );
+        detector
+          ..recordLocationPublish(LocationPublishFfi.clockAhead)
+          ..recordLocationPublish(publish);
 
-      expect(detector.status.complaint, DeviceClockComplaint.unspecified);
-    });
-
-    test('a stated direction beats an unspecified one', () {
-      final detector = ClockSkewDetector();
-      addTearDown(detector.dispose);
-
-      detector.recordPublishResult(
-        _publishResult(
-          rejectionReasons: const [
-            'invalid: event too far off from the current time',
-            'invalid: created_at is in the future',
-          ],
-        ),
-      );
-
-      expect(detector.status.complaint, DeviceClockComplaint.ahead);
+        expect(
+          detector.status.signal,
+          ClockSkewSignal.relayRejectedTimestamp,
+          reason: '$publish',
+        );
+      }
     });
   });
 
@@ -676,7 +480,7 @@ void main() {
       final detector = build(clock);
 
       detector
-        ..recordPublishClockRejection('ahead')
+        ..recordLocationPublish(LocationPublishFfi.clockAhead)
         ..recordPeerTimestamp(
           senderPubkey: 'aa' * 32,
           peerTimestamp: clock.now.add(const Duration(hours: 6)),
@@ -704,7 +508,7 @@ void main() {
           senderPubkey: 'bb' * 32,
           peerTimestamp: clock.now.add(const Duration(hours: 6)),
         )
-        ..recordPublishClockRejection('ahead');
+        ..recordLocationPublish(LocationPublishFfi.clockAhead);
 
       expect(detector.status.signal, ClockSkewSignal.relayRejectedTimestamp);
       expect(detector.status.complaint, DeviceClockComplaint.ahead);
@@ -719,11 +523,9 @@ void main() {
       addTearDown(sub.cancel);
 
       detector
-        ..recordPublishClockRejection('ahead')
-        ..recordPublishClockRejection('ahead')
-        ..recordPublishResult(
-          _publishResult(acceptedBy: const ['wss://ok.example.com']),
-        );
+        ..recordLocationPublish(LocationPublishFfi.clockAhead)
+        ..recordLocationPublish(LocationPublishFfi.clockAhead)
+        ..recordLocationPublish(LocationPublishFfi.accepted);
 
       await Future<void>.delayed(Duration.zero);
       expect(seen.map((s) => s.signal).toList(), [

@@ -13,7 +13,7 @@
 #
 # `23 0 * * 1-6`: off the hour, because scheduled runs queue hardest at `:00`,
 # and 00:xx is the only hour no other scheduled workflow uses. 00:23 plus the
-# nightly job cap (135 min) is 02:38, clear of e2e-nightly.yml at 03:00 — that
+# nightly job cap (140 min) is 02:43, clear of e2e-nightly.yml at 03:00 — that
 # is DESIGN INTENT, not a bound: GitHub delays scheduled runs under load, and a
 # collision queues (`cancel-in-progress: false`) rather than kills. No Sunday,
 # so the Phase-4 weekly never overlaps. check_soak_lane_reachable.sh L8 reads
@@ -33,16 +33,17 @@
 # ci.yml calls the same reusable and a fork PR's token cannot carry
 # `issues: write`.
 #
-# # Expected red, and why it is not run here
+# # Expected red, and why none is run here
 #
-# Three arms are REQUIRED to be red until their product fixes land — S23
-# `chained-commit-backlog` (C7), S08 `buried-past-the-cap` (C8) and S05
-# `kill-receive-auto-commit` (C9, attribution open) — and none of them is in
-# the nightly profile. `verdict.log` records a run's FIRST violation only, so
-# an expected-red arm early in the walk would mask every later defect from the
-# issue path and the monitor, and no night could be all-slot green. They are
-# asserted red on every commit by tooling/soak/tests/oracles.rs and return to
-# the nightly in the change that fixes each. A red night is therefore a finding.
+# No arm is required to be red today (`EXPECTED_RED` in
+# tooling/soak/tests/oracles.rs is empty). `verdict.log` records a run's FIRST
+# violation only, so an expected-red arm early in the walk would mask every
+# later defect from the issue path and the monitor, and no night could be
+# all-slot green: such an arm runs in `weekly` and is asserted red on every
+# commit by tooling/soak/tests/oracles.rs, and returns to the nightly in the
+# change that fixes it, as S23 `chained-commit-backlog` did with C7's, S05
+# `kill-sweep-eviction` with W9q's and S08 `buried-past-the-cap` with C8's.
+# A red night is therefore a finding.
 # docs/SOAK_LANE.md "When a night goes red" says what each rc means for a
 # night and what to do.
 

@@ -21,7 +21,7 @@
 //!   deliberately backdated by up to 48h, so a freshly-delivered invitation can
 //!   carry a `created_at` well before the cursor. 7 days when NO inbox cursor is
 //!   persisted yet ([`INBOX_GIFTWRAP_LOOKBACK_SECS`] — that device cannot know
-//!   how long it was gone), 2 days + 1 hour whenever one is
+//!   how long it was gone), 4 days whenever one is
 //!   ([`INBOX_RESUBSCRIBE_LOOKBACK_SECS`], which carries the two residuals that
 //!   bound buys).
 //!
@@ -89,8 +89,8 @@ pub const GROUP_RESUBSCRIBE_BUFFER_SECS: i64 = 60;
 /// re-request its wrapper). Asserted at compile time there.
 pub const INBOX_GIFTWRAP_LOOKBACK_SECS: i64 = 604_800;
 
-/// Gift-wrap lookback (seconds, 2 days + 1 hour) applied to the inbox cursor
-/// whenever one is already persisted ([`SubscribePhase::Resubscribe`]).
+/// Gift-wrap lookback (seconds, 4 days) applied to the inbox cursor whenever
+/// one is already persisted ([`SubscribePhase::Resubscribe`]).
 ///
 /// # Why a re-subscribe does not pay the cold-start price
 ///
@@ -101,14 +101,20 @@ pub const INBOX_GIFTWRAP_LOOKBACK_SECS: i64 = 604_800;
 /// this device's `#p` — radio, relay load, and a standing re-advertisement of
 /// the one query that links this npub to itself.
 ///
-/// # Why 2 days + 1 hour, exactly
+/// # Why 4 days, exactly (decision 231)
 ///
 /// A NIP-59 sender subtracts a uniform random offset in `0..172_800` seconds
 /// from the wrapper's build time (`nostr::nips::nip59::RANGE_RANDOM_TIMESTAMP_TWEAK`
 /// — always subtracted, never added), so two days is the largest gap a
-/// conformant sender can put between a wrap's ARRIVAL and its `created_at`. The
-/// extra hour is the sender/relay clock-skew margin, and it is the only margin
-/// there is.
+/// conformant sender can put between a wrap's BUILD and its `created_at`. A
+/// Welcome is then sent again from its record, byte for byte, for up to a day
+/// after it was built (`WELCOME_RECORD_BOUND_SECS`) — its arrival can lag its
+/// `created_at` by three days — and the last day is slack for clock skew. The
+/// sender's record ends an hour before a wrap could fall below this window
+/// (`welcome_record`), so no retry reaches a relay after a Haven invitee could
+/// still see it. The REQ is `#p`-filtered to this user's own gift wraps on
+/// their own inbox relays: the wider window reveals nothing new, and costs
+/// only more of the user's own stored wraps fetched again.
 ///
 /// # What the floor actually tracks
 ///
@@ -116,24 +122,22 @@ pub const INBOX_GIFTWRAP_LOOKBACK_SECS: i64 = 604_800;
 /// when an inbox REQ's own EOSE is consumed (`live_sync::anchor::InboxAnchor`).
 /// So the window slides with the last EOSE, not with the wall clock: while the
 /// device is offline the cursor is FROZEN, and a three-day outage with the
-/// process alive still leaves the floor at `T_lastEOSE − 49 h`. A wrap is
-/// fetched whenever its `created_at` is no more than 48 h below its own arrival,
-/// however long the outage lasted.
+/// process alive still leaves the floor at `T_lastEOSE − 96 h`. A wrap is
+/// fetched whenever its `created_at` is no more than 96 h below its own
+/// arrival, however long the outage lasted.
 ///
 /// # Residual 1 — the exact boundary at which a wrap is missed
 ///
-/// A wrap is missed if and only if BOTH hold: its sender's clock is slow by more
-/// than the 1 h margin, AND that sender used a near-maximal backdate — together
-/// putting `created_at` below `T_lastEOSE − 49 h` for a wrap that arrived after
-/// `T_lastEOSE`. Either condition alone lands above the floor.
+/// A wrap is missed if and only if its `created_at` lies more than 96 h below
+/// `T_lastEOSE` for a wrap that arrived after `T_lastEOSE`: a sender's clock
+/// slow by more than the margin left after its backdate and its retries.
 ///
 /// Nothing re-requests such a wrap later: the 7-day window is spent on the one
 /// REQ made before any inbox cursor exists, and the first start persists one. So
 /// the invitation is lost silently — and an invitation that is never fetched is
 /// indistinguishable from one that was never sent. That is the price of not
 /// re-advertising this npub's `#p` query across a week of history on every
-/// restart, and it is bounded by a condition no conformant sender meets (a clock
-/// slow by over an hour AND a near-maximal backdate).
+/// restart, and it is bounded by a condition no conformant sender meets.
 ///
 /// # Residual 2 — one anchor, several inbox relays
 ///
@@ -143,8 +147,8 @@ pub const INBOX_GIFTWRAP_LOOKBACK_SECS: i64 = 604_800;
 /// relay keeps EOSE-ing and advancing that shared anchor, therefore loses
 /// exactly the wraps only IT held: by the time it answers again, the floor has
 /// moved past them. Not a new failure — the same loss exists at 7 days — but the
-/// bound moves its threshold from ≈ 7 days of unreachability to ≈ 49 hours.
-pub const INBOX_RESUBSCRIBE_LOOKBACK_SECS: i64 = 2 * 86_400 + 3_600;
+/// bound moves its threshold from ≈ 7 days of unreachability to ≈ 96 hours.
+pub const INBOX_RESUBSCRIBE_LOOKBACK_SECS: i64 = 4 * 86_400;
 
 /// Which phase a (re)subscription is being issued in.
 ///
@@ -334,7 +338,7 @@ pub const fn cursor_ms_for_window(
 /// let since = since_for_stream(STREAM_GROUP_445, 10_000, SubscribePhase::Initial, 1_000);
 /// assert_eq!(since, 0);
 ///
-/// // The inbox: 7 days on a cold start, 2 days + 1 hour on every re-anchor.
+/// // The inbox: 7 days on a cold start, 4 days on every re-anchor.
 /// let cursor_ms = 1_000_000_000; // 1_000_000 s
 /// let now = 2_000_000;
 /// assert_eq!(
@@ -343,7 +347,7 @@ pub const fn cursor_ms_for_window(
 /// );
 /// assert_eq!(
 ///     since_for_stream(STREAM_INBOX_1059, cursor_ms, SubscribePhase::Resubscribe, now),
-///     1_000_000 - 176_400,
+///     1_000_000 - 345_600,
 /// );
 /// ```
 #[must_use]
@@ -525,17 +529,17 @@ mod tests {
     }
 
     #[test]
-    fn inbox_resubscribe_subtracts_two_days_plus_one_hour() {
+    fn inbox_resubscribe_subtracts_four_days() {
         // Every re-anchor — foreground resume, `CLOSED` repair, health tick —
         // lands here, so this is the number that runs constantly.
-        assert_eq!(INBOX_RESUBSCRIBE_LOOKBACK_SECS, 2 * 86_400 + 3_600);
+        assert_eq!(INBOX_RESUBSCRIBE_LOOKBACK_SECS, 4 * 86_400);
         let since = since_for_stream(
             STREAM_INBOX_1059,
             1_000_000_000, // 1_000_000 s
             SubscribePhase::Resubscribe,
             NOW,
         );
-        assert_eq!(since, 1_000_000 - 176_400);
+        assert_eq!(since, 1_000_000 - 345_600);
     }
 
     #[test]
@@ -555,9 +559,9 @@ mod tests {
         );
         assert_eq!(
             INBOX_RESUBSCRIBE_LOOKBACK_SECS - max_backdate,
-            3_600,
-            "and the margin is one hour — the residual documented on the \
-             constant is derived from exactly this number"
+            i64::try_from(crate::nostr::mls::types::WELCOME_RECORD_BOUND_SECS).unwrap() + 86_400,
+            "and past the backdate it covers the Welcome outbox's day of \
+             retries plus a day of slack (decision 231)"
         );
     }
 
@@ -581,8 +585,8 @@ mod tests {
         );
         assert_eq!(
             resub - initial,
-            428_400,
-            "≈ 4.96 days of gift-wrap replay that no longer rides every \
+            259_200,
+            "3 days of gift-wrap replay that no longer rides every \
              re-anchor — and the width of the window in which a cold start can \
              still recover a wrap a resubscribe missed"
         );

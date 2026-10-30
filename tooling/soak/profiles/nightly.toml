@@ -3,20 +3,21 @@
 # Superset of `pr` — every PR arm runs here too, so a nightly red is never
 # something the PR lane silently stopped covering. The scenarios that appear
 # only here (S02, S03, S04, S05, S08, S09, S10, S12, S14, S16, S17, S18, S19,
-# S20, S21, S22) have lane execution only in `soak-nightly.yml` — its schedule
-# (four slots, Monday to Saturday) or a dispatch of it — never on a pull
-# request.
+# S20, S21, S22, S23, S24) have lane execution only in `soak-nightly.yml` — its
+# schedule (four slots, Monday to Saturday) or a dispatch of it — never on a
+# pull request.
 #
-# # The expected-red arms are NOT here
+# # No expected-red arm is here
 #
-# S23 `chained-commit-backlog` (C7), S08 `buried-past-the-cap` (C8) and S05
-# `kill-receive-auto-commit` (C9) are required to be red, and `verdict.log`
-# records a run's FIRST violation only: an expected-red arm early in the walk
-# would mask every later defect from the issue path and the monitor, and no
-# night could ever be all-slot green, so the fourteen-night gate could never
-# start. They stay asserted red on every commit by `tests/oracles.rs`
-# `EXPECTED_RED` (`cargo test`, the `soak-tooling` job) and run in `weekly`;
-# each returns here in the same change that fixes its defect.
+# `verdict.log` records a run's FIRST violation only: an expected-red arm early
+# in the walk would mask every later defect from the issue path and the
+# monitor, and no night could ever be all-slot green, so the fourteen-night gate
+# could never start. An arm required red stays asserted so on every commit by
+# `tests/oracles.rs` `EXPECTED_RED` and runs in `weekly`; it returns here in the
+# same change that fixes its defect, as S23 `chained-commit-backlog` did with
+# C7's fix, S05 `kill-sweep-eviction` with W9q's, and S08 `buried-past-the-cap`
+# with R4's NIP-77 pass (C8), beside the recorded relay-without-NIP-77 residual
+# and S20's two same-second pile-up arms (C10).
 #
 # `run_budget_secs` is the work: the ARMS and the background nemesis phase the
 # driver walks before them, both priced at the product's own worst-case
@@ -26,16 +27,32 @@
 # the arm set moves or a product constant does; the slack it leaves is what an
 # added arm spends, and a plain arm (undisturbed recovery, two probe rounds, a
 # resubscribe) costs 48.75 s of it. Raise the budget rather than loosen a bound.
-# With the three expected-red arms out and S08's `unpacked-control` back, the
-# priced run plus the margin is 4 670.25 s of 4 800: 129.75 s of slack.
+# With the expected-red arm out (S08's burial), S08's `unpacked-control` back,
+# S23 returned, S09's two expiration arms added, S16's outsider flood back
+# (its MDK v0.10.4 red fixed in Haven) and S16's `processed-ids-growth` added
+# (26.75 s), and S14's `race-restart-before-confirm` paying for the one
+# fanout drive whose acknowledgement it withholds (20 s), the run was 4 845.25
+# s of 4 860. Since every commit went through the product's driver (W9p) each
+# arm pays what the driver waits rather than the rig's old ladder: S22's two
+# refused commits wait for nothing (a refusal is an answer) and its wedge for
+# one drive, S18 gained two arms at one drive each, and S14's control now
+# restarts the racers' engines; S24 joined (26.75 s). S05's
+# `kill-sweep-eviction` returned once W9q fixed its red (35.75 s). R4 added S08
+# `buried-past-the-cap` and `buried-on-a-relay-without-negentropy` and S20's two
+# pile-up arms, each pile-up paying the NIP-77 spacing it waits out: the priced
+# run became 4 782.25 s, which with the margin is 5 082.25 s, past the 4 860 s
+# budget, so the budget rose to the next whole minute, 5 100 s (85 min), and the
+# deadline and the lane's caps with it (PLAN_PHASE2 §7.5). The budget is not
+# lowered with the price: the rule (PLAN §2) moves it only when the priced run
+# outgrows it.
 #
 # `deadline_secs` is the timeout the lane arms above it: the budget plus twice
 # the margin, as every profile here does. `check_soak_lane_reachable.sh` L6 ties
 # it to `soak-core.yml`'s own literal in both directions, and that literal's
 # step cap and job cap move with it (`check_e2e_step_timeout_ordering.sh`).
 name = "nightly"
-run_budget_secs = 4800
-deadline_secs = 5400
+run_budget_secs = 5100
+deadline_secs = 5700
 margin_secs = 300
 duration_secs = 900
 tick_ms = 250
@@ -64,8 +81,11 @@ arms = ["offline-quiet", "offline-across-commits", "offline-past-retention",
 
 [[scenarios]]
 id = "S05"
-arms = ["confirm-err-is-not-a-failure", "kill-send-plane", "negative-gates-silent"]
-# kill-receive-auto-commit is weekly: expected red (C9), see the header
+arms = ["confirm-err-is-not-a-failure", "kill-send-plane", "negative-gates-silent",
+        "kill-sweep-eviction"]
+# kill-receive-auto-commit grades rc 0 since MDK v0.10.4 but stays weekly:
+# returning it is the owner's call (O5). Its 65.75 s bound no longer fits the
+# 44.75 s of slack kill-sweep-eviction left, so returning it raises the budget.
 
 [[scenarios]]
 id = "S06"
@@ -73,11 +93,12 @@ arms = ["stuck-row-sweep"]
 
 [[scenarios]]
 id = "S08"
-arms = ["unpacked-control"]  # the burial arm's control; buried-past-the-cap is weekly (C8, header)
+arms = ["buried-past-the-cap", "unpacked-control", "buried-on-a-relay-without-negentropy"]
 
 [[scenarios]]
 id = "S09"
-arms = ["standing-adversary", "rewrap-created-at-binding"]
+arms = ["standing-adversary", "rewrap-created-at-binding", "member-commit-past-expiration-applied",
+        "past-expiration-dropped-by-the-relay-pool"]
 
 [[scenarios]]
 id = "S11"
@@ -102,7 +123,13 @@ arms = ["closed-prefixes", "notice"]
 
 [[scenarios]]
 id = "S18"
-arms = ["swallowed-ok-create", "swallowed-ok-relay-update", "swallowed-ok-location-send"]
+arms = [
+    "swallowed-ok-founding-welcome",
+    "swallowed-ok-relay-update",
+    "swallowed-ok-peers-online-converge",
+    "swallowed-ok-location-send",
+    "location-resumes-after-the-ack",
+]
 
 [[scenarios]]
 id = "S19"
@@ -117,17 +144,24 @@ arms = ["oversized-commit", "refusal-is-relay-count-invariant", "oversized-welco
 id = "S10"
 arms = ["ten-circle-roster"]
 
-# S23's one arm, `chained-commit-backlog`, is weekly: expected red (C7), see the header.
+[[scenarios]]
+id = "S23"
+arms = ["chained-commit-backlog"]
 
 [[scenarios]]
 id = "S16"
-arms = ["outsider-flood", "member-future-header-flood", "pending-window-flood"]
+arms = ["outsider-flood", "member-future-header-flood", "pending-window-flood",
+        "processed-ids-growth"]
 
 [[scenarios]]
 id = "S20"
 arms = ["healthy-drain", "clamped-limit", "refused-page", "cold-first-connect",
-        "future-dated-page"]
+        "future-dated-page", "same-second-pile-up", "same-second-pile-up-without-negentropy"]
 
 [[scenarios]]
 id = "S21"
 arms = ["removal-withheld-commit", "removal-delivered-commit", "removal-lag"]
+
+[[scenarios]]
+id = "S24"
+arms = ["collided-circles-leave-apart"]

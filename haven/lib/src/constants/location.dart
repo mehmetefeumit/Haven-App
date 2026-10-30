@@ -189,11 +189,11 @@
 /// an ephemeral key inside the engine's peeler, so no Haven-side
 /// per-message TTL variation is possible (or desirable — a jittered
 /// delta would single Haven out among engine-derived Marmot clients).
-/// `updateIntervalSecs` passed to `CircleService.encryptLocation` is
-/// retained for signature stability but no longer drives the TTL.
-/// `RECEIVER_EXPIRATION_GRACE_SECS = 60 s` in `ttl.rs` sits on top as
-/// defense-in-depth against clock skew, not to cover the publish/TTL
-/// gap.
+/// No interval crosses from Dart into a seal any more; the retention is the
+/// group component's alone.
+/// `RECEIVER_EXPIRATION_GRACE_SECS = 60 s` in `ttl.rs` is slack in Haven's
+/// own reasoning about how long a relay can still serve an event; it drops
+/// nothing and spares nothing, and it does not cover the publish/TTL gap.
 ///
 /// ## Overlap guard
 ///
@@ -659,35 +659,38 @@ const String kBatteryOptimizationDeniedKey =
 // Device-clock skew
 // ---------------------------------------------------------------------------
 
-/// Skew magnitude at which every location this device publishes is discarded
-/// by a correctly-clocked peer.
+/// Clock disagreement past which every location sent across it is lost.
 ///
-/// A receiver drops an event whose NIP-40 expiration is more than
-/// `RECEIVER_EXPIRATION_GRACE_SECS` (60 s) into its past, and the expiration is
-/// `created_at + LOCATION_MESSAGE_RETENTION_SECS` (228 s) — both computed from
-/// the *sender's* clock. A publisher lagging by this much therefore loses 100 %
-/// of its updates while still seeing a successful relay ACK.
+/// The relay pool (`nostr-relay-pool`) drops an event whose NIP-40 expiration
+/// is behind the receiving device's own clock, on receipt and with no grace,
+/// and the expiration is `created_at + LOCATION_MESSAGE_RETENTION_SECS`
+/// (228 s) by the sender's clock. At this disagreement a location's residency
+/// is zero: a publisher lagging by it loses 100 % of its updates while still
+/// seeing a successful relay ACK, and a receiver running this far ahead hears
+/// no peer at all. Below it the residency is `228 s − skew`.
 ///
 /// Drift-check only; the authoritative value lives in Rust at
-/// `haven_core::relay::clock_skew::TOTAL_LOSS_SKEW_SECS`.
-const Duration kClockSkewTotalLossThreshold = Duration(seconds: 288);
+/// `haven_core::relay::clock_skew::TOTAL_LOSS_SKEW_SECS`, which IS the
+/// retention.
+const Duration kClockSkewTotalLossThreshold = Duration(seconds: 228);
 
 /// Skew magnitude at or above which Haven tells the user their clock is wrong.
 ///
-/// Derived from the two constants that bound what actually breaks, not chosen
-/// for feel:
+/// Nothing absorbs a disagreement — the relay pool judges every expiration
+/// with no grace — so a lag of `d` leaves a location `228 − d` seconds of
+/// residency. The number is placed against what that costs:
 ///
-/// * **Lower bound — do not cry wolf.** `RECEIVER_EXPIRATION_GRACE_SECS` is
-///   60 s: the band of disagreement the protocol already absorbs by design.
-///   Alerting inside it would fire on skew that costs the user nothing.
-///   `2 × 60 = 120` sits strictly outside every tolerated band.
+/// * **Lower bound — do not cry wolf.** Until the residency falls below the
+///   median publish interval ([kLocationUpdateInterval], 120 s), i.e. while
+///   the lag is under `228 − 120 = 108 s`, a member who is not connected at
+///   the moment of a publish still finds the location on the relay in most
+///   cycles; the holes are the jitter's tail.
 /// * **Upper bound — do not hide real breakage.** At
-///   [kClockSkewTotalLossThreshold] (288 s) delivery is already 100 % lost and
+///   [kClockSkewTotalLossThreshold] (228 s) delivery is already 100 % lost and
 ///   silent; the alarm must fire well before that.
-/// * **It is already a real defect here.** The no-gap invariant is
-///   `retention (228 s) > max publish gap (168 s)`. A publisher lagging 120 s
-///   has an effective relay residency of `228 − 120 = 108 s`, under the 168 s
-///   worst-case inter-publish gap, so peers are *guaranteed* coverage holes.
+/// * **It is already a real defect here.** A publisher lagging 120 s leaves a
+///   residency of `228 − 120 = 108 s`, under the 168 s worst-case interval, so
+///   most cycles leave a member who catches up later a coverage hole.
 ///
 /// Moving this in either direction is a behaviour change: widening hides
 /// breakage, narrowing cries wolf. Pinned by `clock_skew_detector_test.dart`

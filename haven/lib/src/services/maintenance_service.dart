@@ -20,7 +20,11 @@ library;
 import 'package:flutter/foundation.dart';
 
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/circle_change_driver.dart';
+import 'package:haven/src/services/circle_service.dart'
+    show ReinviteDelivery, reinviteDeliveryOf;
 import 'package:haven/src/services/fresh_secret.dart';
+import 'package:haven/src/services/leaver_backstop.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:meta/meta.dart' show useResult;
 
@@ -32,13 +36,129 @@ class MaintenanceService {
     required Future<CircleManagerFfi> Function() circleManagerFactory,
     required Future<List<int>> Function() identitySecretBytes,
     required RelayService relayService,
+    CircleChangeDriver? changeDriver,
+    void Function(List<LocationMessageResultFfi> replayed)? onReplayed,
+    DateTime Function() clock = DateTime.now,
+    LeaverBackstop? leaverBackstop,
   }) : _circleManagerFactory = circleManagerFactory,
        _identitySecretBytes = identitySecretBytes,
-       _relayService = relayService;
+       _relayService = relayService,
+       _changeDriver =
+           changeDriver ??
+           (relayService is CircleChangeDriver
+               ? relayService as CircleChangeDriver
+               : null),
+       _onReplayed = onReplayed,
+       _clock = clock,
+       _leaverBackstop = leaverBackstop ?? LeaverBackstop(clock: clock);
 
   final Future<CircleManagerFfi> Function() _circleManagerFactory;
   final Future<List<int>> Function() _identitySecretBytes;
   final RelayService _relayService;
+  final CircleChangeDriver? _changeDriver;
+  final void Function(List<LocationMessageResultFfi> replayed)? _onReplayed;
+  final DateTime Function() _clock;
+
+  final LeaverBackstop _leaverBackstop;
+
+  /// Carries on every leave this device asked for ([LeaverBackstop.carryOn]);
+  /// [inFront] is a foreground caller's lifecycle read, `null` for a burst,
+  /// and [pastWaits] asks every circle whatever wait it last named. Never
+  /// throws.
+  Future<LeaveCarryOn> carryOnLeaves({
+    bool Function()? inFront,
+    bool pastWaits = false,
+  }) async {
+    final driver = _changeDriver;
+    if (driver == null) return LeaveCarryOn.none;
+    final CircleManagerFfi circle;
+    try {
+      circle = await _circleManagerFactory();
+    } on Object catch (e) {
+      debugPrint('[Maintenance] leave carry-on failed: ${e.runtimeType}');
+      return LeaveCarryOn.none;
+    }
+    return _leaverBackstop.carryOn(
+      manager: circle,
+      driver: driver,
+      inFront: inFront,
+      pastWaits: pastWaits,
+    );
+  }
+
+  /// Forgets every wait this service holds: an identity's circles are not
+  /// the next one's.
+  void forget() {
+    _forgets++;
+    _leaverBackstop.forget();
+    _resumeNotBefore = null;
+  }
+
+  /// Bumped by [forget]: a drive begun before it writes no wait after it.
+  int _forgets = 0;
+
+  /// Asks the fanout driver for the re-invites MDK owes whose lookup is due —
+  /// only in the foreground, and nothing at all otherwise — each classified
+  /// by variant: none is made. Never throws; a failure answers none.
+  ///
+  /// The lookups keep MDK's own schedule, and the drive that follows them
+  /// each record's own: asking at every tick re-asks nothing that is not due,
+  /// so the drive's wait does not hold the lookups back. What that drive
+  /// handed back is handed to the `onReplayed` callback; its locations are
+  /// already stored.
+  Future<List<ReinviteDelivery>> reinviteOwed({
+    required bool foreground,
+  }) async {
+    final driver = _changeDriver;
+    if (driver == null || !foreground) return const [];
+    try {
+      final driven = await driver.reinvite(
+        circle: await _circleManagerFactory(),
+        foreground: foreground,
+      );
+      _onReplayed?.call(driven.drive.replayed);
+      if (driven.drive.errored) {
+        debugPrint('[Maintenance] re-invite drive ended on an error');
+      }
+      return [for (final r in driven.reinvites) reinviteDeliveryOf(r.result)];
+    } on Object catch (e) {
+      debugPrint('[Maintenance] re-invite failed: ${e.runtimeType}');
+      return const [];
+    }
+  }
+
+  /// Drives every stored record that has something due, in every circle —
+  /// for the configuration no live plane drives (the flag-off one). Not
+  /// before the wait the last drive named; what it hands back is converted
+  /// (the `onReplayed` callback). [foreground] is the caller's claim, handed
+  /// on untouched.
+  /// Never throws.
+  Future<void> resumeDrive({required bool foreground}) async {
+    final driver = _changeDriver;
+    if (driver == null) return;
+    final notBefore = _resumeNotBefore;
+    if (notBefore != null && _clock().isBefore(notBefore)) return;
+    final forgets = _forgets;
+    try {
+      final drive = await driver.resume(
+        circle: await _circleManagerFactory(),
+        foreground: foreground,
+      );
+      // Forgotten meanwhile (a logout): its wait is the previous identity's.
+      if (forgets != _forgets) return;
+      final wait = drive.retryAfterMs;
+      _resumeNotBefore = wait == null
+          ? null
+          : _clock().add(Duration(milliseconds: wait.toInt()));
+      _onReplayed?.call(drive.replayed);
+      if (drive.errored) debugPrint('[Maintenance] drive ended on an error');
+    } on Object catch (e) {
+      debugPrint('[Maintenance] drive failed: ${e.runtimeType}');
+    }
+  }
+
+  /// Not before this instant is the stored-record drive asked again.
+  DateTime? _resumeNotBefore;
 
   /// Runs a `KeyPackage` maintenance tick (kinds 30443 + 443).
   ///
@@ -87,36 +207,22 @@ class MaintenanceService {
     );
   }
 
-  /// Runs the Dark Matter cutover's once-only legacy-KeyPackage retraction
-  /// tick (plan §6 step 5 / security F10a/F10b): retracts this account's
-  /// stale pre-migration KeyPackage advertisements (legacy kind-443 twins +
-  /// the kind-10002 NIP-65 relay list).
-  ///
-  /// Self-gates on a persisted Rust-side sentinel, so calling this on every
-  /// app session (or relay reconnect) is safe — after the first successful
-  /// run it becomes a fast, traffic-free no-op.
-  ///
-  /// Returns [LegacyRetractionResult.empty] on any failure — never throws.
-  Future<LegacyRetractionResult> retractLegacyKeyMaterial() async {
-    return _withSecret(
-      (circle, secret) => _relayService.retractLegacyKeyMaterial(
-        circle: circle,
-        identitySecretBytes: secret,
-      ),
-      onFailure: (_) => const LegacyRetractionResult.empty(),
-      opKind: 'legacy-retraction',
-    );
-  }
-
   /// Runs a subscription-health maintenance tick (engine-coupled).
   ///
   /// Unlike the other two tasks this needs neither the identity secret nor the
   /// circle handle — it only reads the live-sync engine's session — so it
   /// forwards straight to [RelayService.maintainSubscriptionHealth], which is
   /// itself best-effort and self-gates to a no-op when the engine is off.
-  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async {
+  ///
+  /// [foreground] is the caller's claim, handed on untouched: see
+  /// [RelayService.maintainSubscriptionHealth].
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth({
+    required bool foreground,
+  }) async {
     try {
-      return await _relayService.maintainSubscriptionHealth();
+      return await _relayService.maintainSubscriptionHealth(
+        foreground: foreground,
+      );
     } on Object catch (e) {
       debugPrint('[Maintenance] health orchestration failed: ${e.runtimeType}');
       return const SubscriptionHealthResult.empty();

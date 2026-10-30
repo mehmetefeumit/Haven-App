@@ -798,8 +798,9 @@ impl LocationEventService {
     ///
     /// Callers pass the nominal interval (typically 120 s) and rearm their
     /// timer with the returned value. This is NOT the TTL window — the
-    /// `expiration` tag sampled inside `encrypt_location` is independent
-    /// and intentionally decoupled (see `haven-core/SECURITY.md`).
+    /// `expiration` tag a sealed location carries is the circle's retention
+    /// window, independent and intentionally decoupled (see
+    /// `haven-core/SECURITY.md`).
     ///
     /// On `nominal_secs == 0` the call falls back to `nominal_secs` rather
     /// than panicking, so a zero at the boundary does not silently
@@ -970,27 +971,22 @@ fn platform_init_keyring() -> Result<(), String> {
 /// Keyring service identifier for circles.db encryption.
 const CIRCLES_DB_SERVICE: &str = "com.oblivioustech.haven";
 
-/// Keyring key identifier for the circles.db encryption key.
-const CIRCLES_DB_KEY_ID: &str = "circles.db.key";
+/// Keyring key identifier for the circle-metadata DB encryption key. New with
+/// the MDK v0.10.4 store; `haven_core::storage_reset` destroys the pre-v2 id.
+const CIRCLES_DB_KEY_ID: &str = "circles.db.key.v2";
 
 /// On-disk filename for the encrypted circle-metadata DB (rollback-journal
 /// mode → `-journal` sidecar).
-const CIRCLES_DB_FILENAME: &str = "circles.db";
+const CIRCLES_DB_FILENAME: &str = haven_core::circle::CIRCLES_DB_FILENAME;
 
-/// On-disk filename for the Dark Matter MLS-state DB (WAL mode →
-/// `-wal`/`-shm` sidecars). Mirrors
-/// [`haven_core::nostr::mls::StorageConfig::database_path`] (`session.sqlite`).
-const MLS_SESSION_DB_FILENAME: &str = "session.sqlite";
+/// On-disk filename for the MLS session DB (WAL mode → `-wal`/`-shm`
+/// sidecars). Mirrors [`haven_core::nostr::mls::storage::session_db_path`].
+const MLS_SESSION_DB_FILENAME: &str = "session-v2.sqlite";
 
-/// Keyring key identifier for the Dark Matter MLS session passphrase. The
-/// service identifier is the shared [`CIRCLES_DB_SERVICE`]; only the key id
-/// differs. Mirrors the `MLS_DB_KEY_ID` constant in
-/// `haven_core::nostr::mls::storage`.
-const MLS_SESSION_DB_KEY_ID: &str = "mls.session.key.default";
-
-/// On-disk filename for the PRE-Dark-Matter MLS-state DB (retained only for the
-/// one-time first-launch cutover cleanup; see [`destroy_legacy_mls_state`]).
-const LEGACY_MLS_DB_FILENAME: &str = "haven_mdk.db";
+/// Keyring key identifier for the MLS session passphrase. The service
+/// identifier is the shared [`CIRCLES_DB_SERVICE`]; only the key id differs.
+/// Mirrors the `MLS_DB_KEY_ID` constant in `haven_core::nostr::mls::storage`.
+const MLS_SESSION_DB_KEY_ID: &str = "mls.session.key.v2";
 
 /// Retrieves or creates the circles.db encryption key from the system keyring.
 ///
@@ -1058,7 +1054,20 @@ fn get_or_create_circle_db_key() -> Result<zeroize::Zeroizing<String>, String> {
 /// still live at rest, so it is propagated to the caller. The returned message
 /// is generic/opaque — it never carries the service, key id, or the raw backend
 /// error (Security: no secret/path leak).
+///
+/// The key goes with its iOS access-policy companions
+/// ([`haven_core::keyring_policy::access_policy_companions`]): the backup is a
+/// full copy of the key, and a surviving marker would make the next key minted
+/// under this id skip its migration.
 fn remove_keyring_key(service: &str, key_id: &str) -> Result<(), String> {
+    let mut result = remove_keyring_entry(service, key_id);
+    for companion in haven_core::keyring_policy::access_policy_companions(key_id) {
+        result = result.and(remove_keyring_entry(service, &companion));
+    }
+    result
+}
+
+fn remove_keyring_entry(service: &str, key_id: &str) -> Result<(), String> {
     let entry = match keyring_core::Entry::new(service, key_id) {
         Ok(entry) => entry,
         // No store installed / no matching entry ⇒ nothing persisted for us to
@@ -1084,11 +1093,11 @@ fn remove_circles_db_key() -> Result<(), String> {
     remove_keyring_key(CIRCLES_DB_SERVICE, CIRCLES_DB_KEY_ID)
 }
 
-/// Removes the Dark Matter MLS session's DB keyring entry. See [`remove_keyring_key`].
+/// Removes the MLS session's DB keyring entry. See [`remove_keyring_key`].
 ///
 /// The core `haven_core::nostr::mls::storage` provisions this key; we never
 /// touch the core, only delete the keyring entry so the next identity
-/// re-provisions a fresh `session.sqlite` passphrase (wipe-on-logout).
+/// re-provisions a fresh session passphrase (wipe-on-logout).
 fn remove_mls_session_db_key() -> Result<(), String> {
     remove_keyring_key(CIRCLES_DB_SERVICE, MLS_SESSION_DB_KEY_ID)
 }
@@ -1140,32 +1149,29 @@ fn delete_db_files(data_dir: &str, filename: &str) -> Result<(), String> {
     }
 }
 
-/// Deletes `circles.db` (+ sidecars) under `data_dir`. See [`delete_db_files`].
+/// Deletes the circle-metadata DB (+ sidecars) under `data_dir`. See
+/// [`delete_db_files`].
 fn delete_circles_db_files(data_dir: &str) -> Result<(), String> {
     delete_db_files(data_dir, CIRCLES_DB_FILENAME)
 }
 
-/// Deletes `session.sqlite` (+ sidecars) under `data_dir`. See [`delete_db_files`].
+/// Deletes the MLS session DB (+ sidecars) under `data_dir`. See
+/// [`delete_db_files`].
 fn delete_mls_session_db_files(data_dir: &str) -> Result<(), String> {
     delete_db_files(data_dir, MLS_SESSION_DB_FILENAME)
 }
 
-/// Deletes the PRE-Dark-Matter `haven_mdk.db` (+ sidecars) under `data_dir` —
-/// the first-launch cutover cleanup. See [`delete_db_files`].
-fn delete_legacy_mls_db_files(data_dir: &str) -> Result<(), String> {
-    delete_db_files(data_dir, LEGACY_MLS_DB_FILENAME)
-}
-
-/// Wipes ALL local NEW-STACK MLS state on logout: deletes both encrypted
-/// databases' files (`circles.db` and the Dark Matter `session.sqlite`, plus
-/// every WAL/SHM/journal sidecar) and then removes both keyring keys.
+/// Wipes ALL local MLS state on logout: deletes both encrypted databases' files
+/// (the circle-metadata DB and the MLS session DB, plus every WAL/SHM/journal
+/// sidecar), removes both keyring keys and this identity's part of the storage
+/// reset (its pending notice, and the record that its preferences were cleared).
 ///
 /// This is the highest-severity teardown in the logout path: it guarantees a
 /// returning (or different) identity never inherits the prior identity's MLS
-/// group state, circle metadata, dedup cache, sync cursors, or DB keys. It
-/// targets the NEW Dark Matter stack (`session.sqlite` +
-/// `mls.session.key.default`); the PRE-Dark-Matter legacy DB/key are handled
-/// separately by the one-time first-launch cutover ([`destroy_legacy_mls_state`]).
+/// group state, circle metadata, dedup cache, sync cursors, or DB keys. The
+/// reset notice goes with them: it discloses what the MDK v0.10.4 reset removed
+/// from THIS identity's data, which a returning or different identity never
+/// had (`haven_core::storage_reset`).
 ///
 /// # Ordering and safety
 ///
@@ -1202,7 +1208,7 @@ fn delete_legacy_mls_db_files(data_dir: &str) -> Result<(), String> {
 /// opposed to "already gone", which is success. Surfacing a genuine failure is
 /// load-bearing: it tells the Dart M10.1 logout to KEEP its durable retry
 /// marker and re-attempt on the next launch, instead of clearing it and leaving
-/// a decryptable `circles.db` / `session.sqlite` + keyring key at rest. The
+/// a decryptable `circles-v2.db` / `session-v2.sqlite` + keyring key at rest. The
 /// error string is generic/opaque — no path, key id, or backend detail (Security).
 pub async fn wipe_all_mls_state(data_dir: String) -> Result<(), String> {
     run_blocking(move || {
@@ -1219,6 +1225,8 @@ pub async fn wipe_all_mls_state(data_dir: String) -> Result<(), String> {
         failed |= delete_mls_session_db_files(&data_dir).is_err();
         failed |= remove_circles_db_key().is_err();
         failed |= remove_mls_session_db_key().is_err();
+        failed |= haven_core::storage_reset::forget_storage_reset(std::path::Path::new(&data_dir))
+            .is_err();
         // Unconditional, and after the teardown rather than before it: the
         // handles this process emitted must stop being linkable to the wiped
         // state even when a step failed (Security Rule 15).
@@ -1232,45 +1240,74 @@ pub async fn wipe_all_mls_state(data_dir: String) -> Result<(), String> {
     .await
 }
 
-/// First-launch cutover hook (Dark Matter §6 step 2 / security F6): destroys ALL
-/// PRE-Dark-Matter MLS state so the new stack starts on a clean slate and the
-/// old key material is gone.
+/// Runs the one-time MDK v0.10.4 storage reset
+/// ([`haven_core::storage_reset::reset_pre_v2_storage`]) and reports whether its
+/// notice is owed — `true` from the first pass that deleted a pre-migration
+/// store, in any isolate, until [`acknowledge_storage_reset`].
 ///
-/// Deletes the legacy `haven_mdk.db` (+ WAL/SHM/journal sidecars) AND destroys
-/// the legacy keyring entry `mdk.db.key.default` (via the core helper). The old
-/// DB was NOT written with `secure_delete` and flash wear-leveling can leave
-/// residual ciphertext, so key destruction is the practical secure-erase for
-/// the abandoned SQLCipher DB (F6). Distinct from [`wipe_all_mls_state`]: THIS
-/// destroys LEGACY state (a one-time migration), that wipes NEW-stack state on
-/// logout.
-///
-/// Idempotent and fail-soft on "already gone"; the Dart cutover guard should
-/// call this ONCE on the first launch of the Dark Matter build (before opening
-/// the new `CircleManagerFfi`), keyed off a persisted one-time flag.
+/// Sync, so `main.dart` decides the notice before `runApp`. The store openers
+/// (`CircleManager::new` and [`tile_cache_init`]) also run it, because a
+/// background isolate may open first; it is idempotent. A fresh install has no
+/// pre-migration circle data and is never shown the notice.
+#[flutter_rust_bridge::frb(sync)]
+#[must_use]
+pub fn reset_pre_v2_storage(data_dir: String) -> bool {
+    // The reset destroys keyring entries, so the platform store must exist
+    // first; a failed install leaves the keys for the next opener to retry.
+    let _ = init_keyring_store();
+    haven_core::storage_reset::reset_pre_v2_storage(std::path::Path::new(&data_dir))
+}
+
+/// Whether the storage-reset notice is owed: its marker stands, whichever
+/// isolate's reset wrote it, or a pre-migration user store survives. Reads
+/// files and deletes nothing — the answer `main.dart` falls back to when
+/// [`reset_pre_v2_storage`] itself failed.
+#[flutter_rust_bridge::frb(sync)]
+#[must_use]
+pub fn storage_reset_notice_owed(data_dir: String) -> bool {
+    !haven_core::storage_reset::storage_reset_acknowledged(std::path::Path::new(&data_dir))
+}
+
+/// Whether the app still owes clearing its preferences that name what the reset
+/// deleted — the circles, and a display name the deleted outbox may never have
+/// published: `true` from the pass that removed the user's data, in any
+/// isolate, until [`storage_reset_prefs_cleared`]
+/// ([`haven_core::storage_reset::storage_reset_prefs_owed`]).
+#[flutter_rust_bridge::frb(sync)]
+#[must_use]
+pub fn storage_reset_prefs_owed(data_dir: String) -> bool {
+    haven_core::storage_reset::storage_reset_prefs_owed(std::path::Path::new(&data_dir))
+}
+
+/// Records that the app cleared those preferences, so no later launch clears
+/// them again ([`haven_core::storage_reset::storage_reset_prefs_cleared`]).
 ///
 /// # Errors
 ///
-/// Returns `Err` (generic/opaque) if deleting a legacy DB file or destroying the
-/// legacy keyring key hit a GENUINE failure (locked file / unavailable keyring),
-/// so the Dart guard KEEPS its "cutover pending" flag and retries next launch.
-pub async fn destroy_legacy_mls_state(data_dir: String) -> Result<(), String> {
-    run_blocking(move || {
-        let mut failed = false;
-        failed |= delete_legacy_mls_db_files(&data_dir).is_err();
-        // Key destruction is the practical secure-erase for the abandoned DB.
-        failed |= haven_core::nostr::mls::storage::destroy_legacy_mls_key_material().is_err();
-        if failed {
-            Err("failed to destroy legacy MLS state".to_string())
-        } else {
-            Ok(())
-        }
-    })
-    .await
+/// Returns an opaque error when the record cannot be written — the preferences
+/// are then cleared again on the next launch — or the marker cannot be
+/// removed, which the record already makes harmless.
+#[flutter_rust_bridge::frb(sync)]
+pub fn storage_reset_prefs_cleared(data_dir: String) -> Result<(), String> {
+    haven_core::storage_reset::storage_reset_prefs_cleared(std::path::Path::new(&data_dir))
+}
+
+/// Records that the user has seen the storage-reset notice, which lets
+/// relay-list publishing resume
+/// ([`haven_core::storage_reset::acknowledge_storage_reset`]).
+///
+/// # Errors
+///
+/// Returns an opaque error when the notice marker cannot be removed; the notice
+/// shows again on the next launch.
+#[flutter_rust_bridge::frb(sync)]
+pub fn acknowledge_storage_reset(data_dir: String) -> Result<(), String> {
+    haven_core::storage_reset::acknowledge_storage_reset(std::path::Path::new(&data_dir))
 }
 
 /// Process-wide serialization for EVERY test that creates a `CircleManagerFfi`
-/// or otherwise touches the shared, fixed keyring key-ids (`circles.db.key` /
-/// `mdk.db.key.default`) — the M10 wipe end-to-end tests AND the
+/// or otherwise touches the shared, fixed keyring key-ids (`circles.db.key.v2` /
+/// `mls.session.key.v2`) — the M10 wipe end-to-end tests AND the
 /// `maintenance_real_ffi_tests` (tc1/tc2/tc3).
 ///
 /// `CircleManagerFfi::new` provisions those fixed global key-ids, so a `tc*`
@@ -1301,11 +1338,14 @@ use haven_core::tiles::{TileCacheError, TileCacheStorage, TileEntry};
 /// Keyring service identifier for the tiles.db encryption key.
 const TILES_DB_SERVICE: &str = "com.oblivioustech.haven";
 
-/// Keyring key identifier for the tiles.db encryption key.
-const TILES_DB_KEY_ID: &str = "tiles.db.key";
+/// Keyring key identifier for the tile-cache encryption key. New with the MDK
+/// v0.10.4 store; `haven_core::storage_reset` destroys the pre-v2 id.
+const TILES_DB_KEY_ID: &str = "tiles.db.key.v2";
 
 /// On-disk filename for the encrypted tile cache (with `-wal`/`-shm` sidecars).
-const TILES_DB_FILENAME: &str = "tiles.db";
+/// New with the MDK v0.10.4 store, so a cache SQLCipher 4.5.7 wrote is never
+/// opened by 4.17.
+const TILES_DB_FILENAME: &str = "tiles-v2.db";
 
 /// The live encrypted tile cache, shared across FFI calls.
 ///
@@ -1412,9 +1452,7 @@ fn get_or_create_tiles_db_key() -> Result<zeroize::Zeroizing<String>, String> {
 /// Ignores `NoEntry` (already gone). Used by the disposable-cache recovery and
 /// the logout wipe.
 fn remove_tiles_db_key() {
-    if let Ok(entry) = keyring_core::Entry::new(TILES_DB_SERVICE, TILES_DB_KEY_ID) {
-        let _ = entry.delete_credential();
-    }
+    let _ = remove_keyring_key(TILES_DB_SERVICE, TILES_DB_KEY_ID);
 }
 
 /// Best-effort deletion of `tiles.db` and its WAL/SHM/journal sidecars under
@@ -1511,6 +1549,8 @@ pub fn tile_cache_init(data_dir: String) -> Result<(), String> {
     // sufficient regardless of call order.
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("Failed to create tile cache data dir: {e}"))?;
+    // A store opener: the tile cache may open before any other store does.
+    let _ = haven_core::storage_reset::reset_pre_v2_storage(std::path::Path::new(&data_dir));
 
     let path = std::path::Path::new(&data_dir).join(TILES_DB_FILENAME);
 
@@ -1731,13 +1771,13 @@ pub async fn tile_cache_wipe() -> Result<(), String> {
 use std::path::Path;
 
 use haven_core::circle::{
-    Circle as CoreCircle, CircleConfig as CoreCircleConfig, CircleManager as CoreCircleManager,
-    CircleMember as CoreCircleMember, CircleType as CoreCircleType,
-    CircleWithMembers as CoreCircleWithMembers, Contact as CoreContact,
-    DirectoryEntry as CoreDirectoryEntry, DirectoryReconcile, DirectoryTier as CoreDirectoryTier,
-    Invitation as CoreInvitation,
+    Circle as CoreCircle, CircleConfig as CoreCircleConfig, CircleError as CoreCircleError,
+    CircleManager as CoreCircleManager, CircleMember as CoreCircleMember,
+    CircleType as CoreCircleType, CircleWithMembers as CoreCircleWithMembers,
+    Contact as CoreContact, DirectoryEntry as CoreDirectoryEntry, DirectoryReconcile,
+    DirectoryTier as CoreDirectoryTier, Invitation as CoreInvitation,
 };
-use haven_core::nostr::mls::types::{GroupId, GroupIdExt, PendingStateRef};
+use haven_core::nostr::mls::types::{GroupId, GroupIdExt};
 
 /// Circle information (FFI-friendly).
 ///
@@ -1993,6 +2033,29 @@ fn hex_to_npub(hex: &str) -> String {
         .unwrap_or_else(|| hex.to_string())
 }
 
+/// Parses the members' key packages, refusing one whose
+/// [`MemberKeyPackageFfi::author_npub`] does not name its signer: the Welcome
+/// goes to the signer, so the member the user confirmed is the member invited.
+fn member_key_packages(
+    members: Vec<MemberKeyPackageFfi>,
+) -> Result<Vec<haven_core::circle::MemberKeyPackage>, String> {
+    members
+        .into_iter()
+        .map(|m| {
+            let key_package_event: nostr::Event = serde_json::from_str(&m.key_package_json)
+                .map_err(|e| format!("Invalid key package JSON: {e}"))?;
+            if nostr::PublicKey::parse(&m.author_npub).ok() != Some(key_package_event.pubkey) {
+                return Err("Key package author does not match the member".to_string());
+            }
+            Ok(haven_core::circle::MemberKeyPackage {
+                key_package_event,
+                inbox_relays: m.inbox_relays,
+                nip65_relays: m.nip65_relays,
+            })
+        })
+        .collect()
+}
+
 /// Circle with its membership and member list (FFI-friendly).
 #[derive(Clone)]
 pub struct CircleWithMembersFfi {
@@ -2002,8 +2065,41 @@ pub struct CircleWithMembersFfi {
     pub membership_status: String,
     /// Public key of who invited us (if known).
     pub inviter_pubkey: Option<String>,
-    /// Members with resolved contact info.
+    /// Members with resolved contact info. Empty for a quarantined circle.
     pub members: Vec<CircleMemberFfi>,
+    /// Whether the engine holds this circle's MLS state live.
+    pub engine_state: CircleEngineStateFfi,
+}
+
+/// Whether the engine holds a circle's MLS state live (FFI mirror of
+/// [`haven_core::circle::CircleEngineState`]). A quarantined circle can neither
+/// send nor receive until [`CircleManagerFfi::retry_quarantined_circle`]
+/// re-hydrates it; nothing about it is lost, so it is never offered a
+/// destructive remedy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircleEngineStateFfi {
+    /// The engine holds the group live.
+    Live,
+    /// The group failed session-open hydration and awaits a retry.
+    Quarantined,
+    /// An admin disbanded the circle: nothing is sent or received for it,
+    /// and it can only be left.
+    Disbanded,
+    /// MDK halted the circle at its last stable epoch and applies nothing it
+    /// receives: read from its persisted flag on every read, so it holds
+    /// across a restart and ends when an admin adds this device again.
+    Unrecoverable,
+}
+
+impl From<haven_core::circle::CircleEngineState> for CircleEngineStateFfi {
+    fn from(state: haven_core::circle::CircleEngineState) -> Self {
+        match state {
+            haven_core::circle::CircleEngineState::Live => Self::Live,
+            haven_core::circle::CircleEngineState::Quarantined => Self::Quarantined,
+            haven_core::circle::CircleEngineState::Disbanded => Self::Disbanded,
+            haven_core::circle::CircleEngineState::Unrecoverable => Self::Unrecoverable,
+        }
+    }
 }
 
 /// Redacting `Debug`: the nested [`CircleFfi`] and [`CircleMemberFfi`] impls
@@ -2021,6 +2117,7 @@ impl std::fmt::Debug for CircleWithMembersFfi {
             .field("membership_status", &self.membership_status)
             .field("inviter", &inviter)
             .field("has_members", &!self.members.is_empty())
+            .field("engine_state", &self.engine_state)
             .finish()
     }
 }
@@ -2032,6 +2129,64 @@ impl From<&CoreCircleWithMembers> for CircleWithMembersFfi {
             membership_status: c.membership.status.as_str().to_string(),
             inviter_pubkey: c.membership.inviter_pubkey.clone(),
             members: c.members.iter().map(CircleMemberFfi::from).collect(),
+            engine_state: c.engine_state.into(),
+        }
+    }
+}
+
+/// What [`CircleManagerFfi::accept_invitation`] did. Exactly one of the two is
+/// `Some`.
+#[derive(Clone)]
+pub struct AcceptInvitationOutcomeFfi {
+    /// The joined circle.
+    pub joined: Option<CircleWithMembersFfi>,
+    /// Why the invitation cannot be accepted, when it cannot.
+    pub failure: Option<AcceptFailureFfi>,
+}
+
+/// Presence-only: the joined circle's own `Debug` already aliases it.
+impl std::fmt::Debug for AcceptInvitationOutcomeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcceptInvitationOutcomeFfi")
+            .field("joined", &self.joined)
+            .field("failure", &self.failure)
+            .finish()
+    }
+}
+
+/// A typed reason an invitation cannot be accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptFailureFfi {
+    /// The invitation can never be accepted on this device (its KeyPackage's
+    /// private bundle is gone, or the Welcome is invalid or already
+    /// processed); only a new invitation can add this device. The invitation
+    /// has already been resolved like a decline.
+    NeedsNewInvite,
+    /// The invitation would replace a circle this device still holds (a
+    /// removal it never saw, or a fork), which needs the user's explicit
+    /// confirmation. The invitation stays held.
+    RejoinConfirmationRequired,
+}
+
+/// Whether a fetched KeyPackage can be invited (FFI mirror of
+/// [`haven_core::nostr::mls::types::KeyPackageAdmission`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPackageAdmissionFfi {
+    /// MDK admits it for the target.
+    Admissible,
+    /// A pre-migration package: the person needs to update Haven.
+    NeedsUpdate,
+    /// It cannot be invited for any other reason.
+    Unusable,
+}
+
+impl From<haven_core::nostr::mls::types::KeyPackageAdmission> for KeyPackageAdmissionFfi {
+    fn from(admission: haven_core::nostr::mls::types::KeyPackageAdmission) -> Self {
+        use haven_core::nostr::mls::types::KeyPackageAdmission as A;
+        match admission {
+            A::Admissible => Self::Admissible,
+            A::NeedsUpdate => Self::NeedsUpdate,
+            A::Unusable => Self::Unusable,
         }
     }
 }
@@ -2101,12 +2256,19 @@ impl From<CoreInvitation> for InvitationFfi {
 /// cascading fallback: inbox (kind 10050) → NIP-65 (kind 10002) → defaults.
 #[derive(Clone)]
 pub struct MemberKeyPackageFfi {
-    /// The key package event JSON (kind 30443 or legacy kind 443).
+    /// The key package event JSON (kind 30443).
     pub key_package_json: String,
     /// Relay URLs from the member's inbox relay list (kind 10050).
     pub inbox_relays: Vec<String>,
-    /// Fallback relay URLs from NIP-65 relay list (kind 10002).
+    /// Fallback relay URLs: the read-capable set of the NIP-65 relay list
+    /// (kind 10002).
     pub nip65_relays: Vec<String>,
+    /// The account the key package was verified to belong to, as an npub: its
+    /// signer, its MLS credential and the pubkey that was asked for, all one
+    /// (`fetch_member_keypackage` sets it, never from the request). Passed back
+    /// into `create_circle` / `add_members_to_circle`, it must name the
+    /// package's signer, because that is who the Welcome reaches.
+    pub author_npub: String,
 }
 
 impl std::fmt::Debug for MemberKeyPackageFfi {
@@ -2121,214 +2283,80 @@ impl std::fmt::Debug for MemberKeyPackageFfi {
     }
 }
 
-/// A gift-wrapped Welcome ready for publishing (FFI-friendly).
-///
-/// Contains the kind 1059 gift-wrapped event along with recipient
-/// information needed for relay publishing.
+/// What [`RelayManagerFfi::create_circle_driven`] did: the circle, unless
+/// a refusal the UI tells apart stopped the create, and its founding
+/// Welcomes — how many an inbox relay acknowledged during the call, how many
+/// there are, and whose are still owed (later foreground drives send them
+/// from their records).
 #[derive(Clone)]
-pub struct GiftWrappedWelcomeFfi {
-    /// The recipient's Nostr public key (hex).
-    pub recipient_pubkey: String,
-    /// Relay URLs to publish this Welcome to (recipient's inbox relays).
-    pub recipient_relays: Vec<String>,
-    /// The gift-wrapped event JSON (kind 1059), ready to publish.
-    pub event_json: String,
+pub struct CircleCreationOutcomeFfi {
+    /// The circle, as stored; `None` when refused.
+    pub circle: Option<CircleFfi>,
+    /// Why nothing was created, when the UI must tell it apart.
+    pub refusal: Option<RefusalFfi>,
+    /// Founding Welcomes an inbox relay acknowledged during the call.
+    pub welcomes_sent: u32,
+    /// Founding Welcomes: one per invitee.
+    pub welcomes_total: u32,
+    /// The invitees (hex) whose founding Welcome is still owed.
+    pub unsent_recipients: Vec<String>,
 }
 
-impl std::fmt::Debug for GiftWrappedWelcomeFfi {
+/// Presence only: the counts are how many were invited and the recipients
+/// name them (Security Rule 15); the circle's own `Debug` aliases it.
+impl std::fmt::Debug for CircleCreationOutcomeFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GiftWrappedWelcomeFfi")
+        f.debug_struct("CircleCreationOutcomeFfi")
+            .field("circle", &self.circle)
+            .field("refusal", &self.refusal)
+            .field("all_sent", &self.unsent_recipients.is_empty())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A replacement Welcome awaiting the user's consent
+/// ([`CircleManagerFfi::rejoin_offers_for_invitation`]).
+#[derive(Clone)]
+pub struct RejoinOfferFfi {
+    /// The circle it would join again.
+    pub mls_group_id: Vec<u8>,
+    /// Its MLS-authenticated author, as hex: the inviter the invitation
+    /// showed.
+    pub welcomer_pubkey: String,
+    /// The token of the local branch the consent discards; handed back to
+    /// [`CircleManagerFfi::confirm_group_rejoin`] unchanged.
+    pub local_state_token: Vec<u8>,
+}
+
+impl std::fmt::Debug for RejoinOfferFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RejoinOfferFfi")
+            .field("mls_group_id", &"<redacted>")
             .field(
-                "recipient",
-                &haven_core::log_alias::peer(PeerPubkey(&self.recipient_pubkey)),
+                "welcomer",
+                &haven_core::log_alias::peer(PeerPubkey(&self.welcomer_pubkey)),
             )
-            .field("has_recipient_relays", &!self.recipient_relays.is_empty())
-            .field("event_json", &"<redacted>")
+            .field("local_state_token", &"<redacted>")
             .finish()
     }
 }
 
-/// A publish-before-apply token (FFI mirror of `PendingStateRef`).
-///
-/// The Dark Matter engine stages a group-evolving commit and returns an opaque
-/// `PendingStateRef` (a `u64` newtype). Haven publishes the commit (and, for an
-/// Add, the welcomes), and ONLY after ≥1 relay returns OK confirms the token via
-/// [`CircleManagerFfi::confirm_published`] so the engine applies the commit and
-/// advances the epoch (Rule 13, publish-before-apply). On publish FAILURE the
-/// token is rolled back via [`CircleManagerFfi::publish_failed`]. The `token` is
-/// an in-memory session handle — meaningless across a process restart, never
-/// persisted, never published.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PendingStateRefFfi {
-    /// The opaque engine token (a `PendingStateRef` `u64`).
-    pub token: u64,
-}
-
-impl From<PendingStateRef> for PendingStateRefFfi {
-    fn from(p: PendingStateRef) -> Self {
-        Self { token: p.as_u64() }
-    }
-}
-
-impl From<PendingStateRefFfi> for PendingStateRef {
-    fn from(p: PendingStateRefFfi) -> Self {
-        Self::new(p.token)
-    }
-}
-
-/// Result of circle creation (FFI-friendly).
-///
-/// Publish-before-apply (Rule 13): publish `welcome_events`, then confirm
-/// `pending` via [`CircleManagerFfi::confirm_published`] once ≥1 relay ACKs a
-/// welcome (or roll back via [`CircleManagerFfi::publish_failed`]).
-#[derive(Debug, Clone)]
-pub struct CircleCreationResultFfi {
-    /// The created circle.
-    pub circle: CircleFfi,
-    /// Gift-wrapped Welcome events ready to publish to recipients.
-    /// Each is a kind 1059 event containing an encrypted kind 444 Welcome.
-    pub welcome_events: Vec<GiftWrappedWelcomeFfi>,
-    /// The pending group-creation state to confirm after ≥1-relay welcome ACK.
-    pub pending: PendingStateRefFfi,
-}
-
-/// Result of adding members to an existing circle (FFI-friendly).
-///
-/// Publish-before-apply (Rule 13): publish `commit_event_json`, confirm
-/// `pending`, THEN publish `welcome_events` (a welcome for a losing/unconfirmed
-/// commit references an epoch that never applied).
+/// The replacement offers of a held invitation, or why there are none to
+/// show: the invitation was resolved as a decline and only a new one can
+/// add this device ([`AcceptFailureFfi::NeedsNewInvite`]).
 #[derive(Clone)]
-pub struct AddMembersResultFfi {
-    /// JSON-serialized kind 445 evolution (Add commit) event, to publish to
-    /// the circle's relays before confirming `pending`.
-    pub commit_event_json: String,
-    /// Gift-wrapped Welcome events for the newly added members.
-    /// Each is a kind 1059 event containing an encrypted kind 444 Welcome.
-    /// Publish these only after `commit_event_json` is published and `pending`
-    /// is confirmed.
-    pub welcome_events: Vec<GiftWrappedWelcomeFfi>,
-    /// The pending commit to confirm after ≥1-relay commit ACK.
-    pub pending: PendingStateRefFfi,
+pub struct RejoinOffersOutcomeFfi {
+    /// The offers to show.
+    pub offers: Vec<RejoinOfferFfi>,
+    /// Why none is shown, when that is not merely "none held".
+    pub failure: Option<AcceptFailureFfi>,
 }
 
-impl std::fmt::Debug for AddMembersResultFfi {
+impl std::fmt::Debug for RejoinOffersOutcomeFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The commit-event JSON can embed the MLS group ID in its tags;
-        // redact it. Welcome events redact themselves via their own Debug impl.
-        f.debug_struct("AddMembersResultFfi")
-            .field("commit_event_json", &"<redacted>")
-            // A welcome count is the number of people added (Rule 15).
-            .field("has_welcome_events", &!self.welcome_events.is_empty())
-            .field("pending", &self.pending)
-            .finish()
-    }
-}
-
-/// A group-evolving commit awaiting publish + confirm (remove / relay update /
-/// admin change) — FFI mirror of `haven_core::circle::CommitToPublish`.
-///
-/// Publish-before-apply (Rule 13): publish `commit_event_json` to the circle's
-/// relays, then confirm `pending` via [`CircleManagerFfi::confirm_published`]
-/// on ≥1-relay ACK (or roll back via [`CircleManagerFfi::publish_failed`]).
-#[derive(Clone)]
-pub struct CommitToPublishFfi {
-    /// JSON-serialized kind 445 commit event to publish to the circle's relays.
-    pub commit_event_json: String,
-    /// The pending commit to confirm after ≥1-relay ACK.
-    pub pending: PendingStateRefFfi,
-}
-
-impl std::fmt::Debug for CommitToPublishFfi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The commit-event JSON's `h` tag carries the nostr_group_id; redact.
-        f.debug_struct("CommitToPublishFfi")
-            .field("commit_event_json", &"<redacted>")
-            .field("pending", &self.pending)
-            .finish()
-    }
-}
-
-/// Publish work handed back by a DEFERRED location send — FFI mirror of
-/// `haven_core::circle::DeferredWork` plus the outcome's counters.
-///
-/// The engine QUEUED the location update instead of encrypting it, so there is
-/// no event to publish for the location itself. Two things still need doing,
-/// and both are the caller's:
-///
-/// 1. **Rule 13.** [`Self::commits`] carries any commit the engine STAGED
-///    inside that same call — a peer `SelfRemove` eviction that came due. Each
-///    MUST be published and then confirmed via
-///    [`CircleManagerFfi::confirm_published`] on a ≥1-relay ACK (or rolled back
-///    via [`CircleManagerFfi::publish_failed`]). Dropping one leaves the group
-///    in `PendingPublish`, where every later send fails.
-/// 2. [`Self::proposals`] carries bare proposals (no staged state, nothing to
-///    confirm): publish-or-lose, and recoverable — a re-proposed `SelfRemove`
-///    is driven by the durable leave request, so a later convergence pass
-///    re-emits it.
-///
-/// The three scalars are presence-only counters for the sharing-health model.
-#[derive(Clone)]
-pub struct DeferredSendFfi {
-    /// Stored rows still gating outbound sends for this circle, read after the
-    /// in-place repair. `0` means the next send should encrypt.
-    pub unresolved_inputs: u32,
-    /// Queued location intents the repair discarded so a stalled circle cannot
-    /// bank one stale fix per publish cycle.
-    pub discarded_intents: u32,
-    /// Whether the circle was left with nothing gating.
-    pub repaired: bool,
-    /// Staged commits awaiting the publish → confirm ladder (Rule 13).
-    pub commits: Vec<CommitToPublishFfi>,
-    /// JSON-serialized bare proposal events to publish (no confirm).
-    pub proposals: Vec<String>,
-}
-
-impl std::fmt::Debug for DeferredSendFfi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Both event lists carry `h` tags (the nostr_group_id) and group
-        // ciphertext (Rules 4/6/8), and a count of gating rows, discarded
-        // intents or staged events tells one circle from another (Rule 15), so
-        // every field here is a boolean.
-        f.debug_struct("DeferredSendFfi")
-            .field("gated", &(self.unresolved_inputs > 0))
-            .field("discarded_any_intent", &(self.discarded_intents > 0))
-            .field("repaired", &self.repaired)
-            .field("has_commits", &!self.commits.is_empty())
-            .field("has_proposals", &!self.proposals.is_empty())
-            .finish()
-    }
-}
-
-/// What [`CircleManagerFfi::encrypt_location`] produced: either an event to
-/// publish, or a typed deferral.
-///
-/// Struct shape with two `Option`s rather than a tagged enum, following the
-/// same convention as [`LeavePlanFfi`] and [`DecryptOutcomeFfi`] — it avoids
-/// pulling Dart `freezed` into the bindings while preserving all the
-/// information. **Exactly one of the two is `Some`**; the Dart wrapper narrows
-/// that into a sealed type so call sites cannot forget a case.
-///
-/// This exists because the deferral used to be flattened to an error STRING.
-/// Classifying it in Dart would then have meant substring-matching error prose,
-/// which Haven forbids: error strings interpolate remote-authored text (a relay
-/// URL, a peer's component), so a `contains` over them is a control channel a
-/// remote party can write. The variant is matched in Rust instead.
-#[derive(Clone)]
-pub struct EncryptLocationOutcomeFfi {
-    /// The signed kind-445 event and its routing, when the engine encrypted.
-    pub sent: Option<EncryptedLocationFfi>,
-    /// The typed deferral, when the engine queued instead.
-    pub deferred_send: Option<DeferredSendFfi>,
-}
-
-impl std::fmt::Debug for EncryptLocationOutcomeFfi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `EncryptedLocationFfi` aliases its own circle; this wrapper stays
-        // presence-only, so a stray `{:?}` on the outcome says only whether the
-        // engine encrypted, which is the whole diagnostic question here.
-        f.debug_struct("EncryptLocationOutcomeFfi")
-            .field("sent", &self.sent.as_ref().map(|_| "<redacted>"))
-            .field("deferred_send", &self.deferred_send)
+        f.debug_struct("RejoinOffersOutcomeFfi")
+            .field("offers", &self.offers)
+            .field("failure", &self.failure)
             .finish()
     }
 }
@@ -2364,59 +2392,25 @@ impl From<haven_core::nostr::mls::types::ConvergenceSweep> for ConvergenceSweepF
     }
 }
 
-/// Converts a core `DeferredWork` plus the outcome's counters into the FFI
-/// mirror, serializing every staged commit and proposal event.
-///
-/// Split out of [`CircleManagerFfi::encrypt_location`] so the field-for-field
-/// mapping is unit-testable without an MLS session.
-fn convert_deferred_send(
-    unresolved_inputs: usize,
-    discarded_intents: usize,
-    repaired: bool,
-    work: haven_core::circle::DeferredWork,
-) -> Result<DeferredSendFfi, String> {
-    let c = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-    let commits = work
-        .commits
-        .into_iter()
-        .map(convert_commit_to_publish)
-        .collect::<Result<Vec<_>, _>>()?;
-    let proposals = work
-        .proposals
-        .iter()
-        .map(commit_event_to_json)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(DeferredSendFfi {
-        unresolved_inputs: c(unresolved_inputs),
-        discarded_intents: c(discarded_intents),
-        repaired,
-        commits,
-        proposals,
-    })
-}
-
 /// Why an epoch-rotation repair was declined — FFI mirror of
 /// `haven_core::circle::SkipReason`.
 ///
 /// Fieldless by construction: a skip is surfaced to the UI and to logs, and no
 /// variant may carry a group id, a pubkey or an epoch (Security Rules 4/6/8).
 ///
-/// **Three of these route differently and the UI must not collapse them.**
-/// [`Self::NotSoleAdmin`] and [`Self::EpochUnrecoverable`] are terminal for this
-/// device — offering a retry would be a loop that cannot succeed — while every
-/// other variant means "try again shortly".
+/// **The UI must not collapse them.** [`Self::EpochUnrecoverable`] is the one
+/// terminal reason — offering a retry would be a loop that cannot succeed —
+/// while every other variant means "try again shortly". Any member may
+/// repair: the repair is a self-update, which needs no admin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReasonFfi {
-    /// This device is not the circle's ONLY admin, so it must not commit. Either
-    /// somebody else can, or an admin handoff is mid-flight. Terminal for this
-    /// device: the remedy is to ask the circle's owner to remove and re-add you.
-    NotSoleAdmin,
     /// The engine's epoch state is not `Stable` but will settle on its own (a
     /// commit is staged, merging, or recovering). Retryable.
     EpochNotStable,
     /// The engine has frozen this group at its last stable epoch and refuses
-    /// further group state. NEVER clears by waiting — the circle has to be
-    /// re-created, or this member re-added.
+    /// further group state. NEVER clears by waiting — this member has to be
+    /// added again (MDK repairs the circle in place), or the circle
+    /// re-created.
     EpochUnrecoverable,
     /// The group's epoch changed too recently for a ratchet to be exhausted.
     RecentEpochChange,
@@ -2434,7 +2428,6 @@ impl From<haven_core::circle::SkipReason> for SkipReasonFfi {
     fn from(reason: haven_core::circle::SkipReason) -> Self {
         use haven_core::circle::SkipReason as R;
         match reason {
-            R::NotSoleAdmin => Self::NotSoleAdmin,
             R::EpochNotStable => Self::EpochNotStable,
             R::EpochUnrecoverable => Self::EpochUnrecoverable,
             R::RecentEpochChange => Self::RecentEpochChange,
@@ -2442,76 +2435,6 @@ impl From<haven_core::circle::SkipReason> for SkipReasonFfi {
             R::PendingProposal => Self::PendingProposal,
             R::RotatedRecently => Self::RotatedRecently,
         }
-    }
-}
-
-/// What [`CircleManagerFfi::repair_epoch_rotation`] did — FFI mirror of
-/// `haven_core::circle::RepairRotationOutcome`.
-///
-/// Struct shape with three `Option`s rather than a tagged enum, following the
-/// same convention as [`EncryptLocationOutcomeFfi`] and [`LeavePlanFfi`] — it
-/// keeps Dart `freezed` out of the bindings while preserving all the
-/// information. **Exactly one of the three is `Some`**; the Dart wrapper narrows
-/// that into a sealed type so call sites cannot forget a case.
-///
-/// Matched by VARIANT in Rust, never by testing error prose: Haven's error
-/// strings interpolate remote-authored text, so a `contains` over one is a
-/// channel a remote party can write.
-#[derive(Clone)]
-pub struct RepairRotationOutcomeFfi {
-    /// The staged ratchet-reset commit, when every gate was open. Publish
-    /// `commit_event_json`, then confirm on a ≥1-relay ACK or roll back.
-    pub rotated: Option<CommitToPublishFfi>,
-    /// The gate that declined, when nothing was staged and nothing changed.
-    pub skipped: Option<SkipReasonFfi>,
-    /// The circle is send-gated: nothing was staged, and any work the engine
-    /// surfaced during the in-place repair is here for the same Rule-13 ladder a
-    /// deferred location send uses.
-    ///
-    /// Named `deferred_send`, not `deferred`, for the reason Unit B's field is:
-    /// FRB mangles `deferred` to `deferred_` in Dart, where it collides with
-    /// deferred imports.
-    pub deferred_send: Option<DeferredSendFfi>,
-}
-
-impl std::fmt::Debug for RepairRotationOutcomeFfi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `CommitToPublishFfi`'s own Debug redacts the event JSON; keep this
-        // wrapper presence-only so a stray `{:?}` cannot widen that.
-        f.debug_struct("RepairRotationOutcomeFfi")
-            .field("rotated", &self.rotated.as_ref().map(|_| "<redacted>"))
-            .field("skipped", &self.skipped)
-            .field("deferred_send", &self.deferred_send)
-            .finish()
-    }
-}
-
-/// Encrypted location event ready for relay publishing (FFI-friendly).
-///
-/// Contains the signed kind 445 event and routing metadata.
-#[derive(Clone)]
-pub struct EncryptedLocationFfi {
-    /// JSON-serialized signed Nostr event (kind 445).
-    pub event_json: String,
-    /// Nostr group ID (32 bytes, for h-tag relay routing).
-    pub nostr_group_id: Vec<u8>,
-    /// Relay URLs to publish to.
-    pub relays: Vec<String>,
-}
-
-/// Redacting `Debug`: the circle gets a salted handle; the event JSON (which
-/// embeds that same group id in its `h` tag, plus the ciphertext) and the
-/// publish fan-out do not print (Security Rules 4/6/15).
-impl std::fmt::Debug for EncryptedLocationFfi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EncryptedLocationFfi")
-            .field("event_json", &"<redacted>")
-            .field(
-                "circle",
-                &haven_core::log_alias::alias(LogAliasClass::Circle, &self.nostr_group_id),
-            )
-            .field("has_relays", &!self.relays.is_empty())
-            .finish()
     }
 }
 
@@ -2637,13 +2560,15 @@ pub enum LocationMessageResultKindFfi {
 /// One folded engine [`haven_core::nostr::mls::types::LocationMessageResult`],
 /// FFI-friendly. A single `kind:445` ingest can yield SEVERAL of these (an
 /// engine `advance_convergence` may release buffered inbound after the outer
-/// event), so [`CircleManagerFfi::decrypt_location`] returns a `Vec` of them.
+/// event), so a driven ingest's outcome carries a `Vec` of them
+/// ([`IngestOutcomeFfi::replayed`]).
 ///
-/// Cursor contract (DM-4b): the engine now owns out-of-order buffering, so the
-/// caller advances its relay sync cursor on the OUTER event's `created_at`
-/// (which Dart already holds — it passed `event_json` in), NOT per result.
-/// A buffered future-epoch event is re-surfaced by the engine once the gap
-/// fills; the caller never needs to re-fetch it.
+/// No result moves a sync cursor, and the caller may not move one from them:
+/// the group cursor is raised only in haven-core, from the local instant an
+/// observation window opened (`haven_core::relay::cursor`), never from an
+/// event's `created_at`, which the sender chose. A buffered future-epoch event
+/// is re-surfaced by the engine once the gap fills; the caller never needs to
+/// re-fetch it.
 pub struct LocationMessageResultFfi {
     /// Which of the five outcomes this result is.
     pub kind: LocationMessageResultKindFfi,
@@ -2785,55 +2710,6 @@ fn convert_location_result(
             mls_group_id: group_id.as_slice().to_vec(),
             epoch: 0,
         },
-    }
-}
-
-/// What the engine folded out of one call — FFI mirror of
-/// `haven_core::circle::DecryptedIngest`.
-///
-/// Two origins, one shape: ingesting one received `kind:445`
-/// ([`CircleManagerFfi::decrypt_location_collecting_commits`]), and RESOLVING a
-/// staged commit ([`CircleManagerFfi::confirm_published`] /
-/// [`CircleManagerFfi::publish_failed`] / [`CircleManagerFfi::finalize_relay_update`]),
-/// which replays everything the engine buffered while that commit was in flight.
-///
-/// Carries the folded location results, any receive-side auto-commit the engine
-/// staged (a peer `SelfRemove` eviction), and any bare proposal.
-/// Publish-before-apply (Rule 13 / security F13): for EACH [`Self::auto_commits`]
-/// entry, publish `commit_event_json` to the circle's relays, then
-/// [`CircleManagerFfi::confirm_published`] on a ≥1-relay ACK (or
-/// [`CircleManagerFfi::publish_failed`] on failure) — exactly like the
-/// [`CommitToPublishFfi`] returned by remove / relay-update. NEVER confirm before
-/// a relay ACKs, and NEVER drop an entry silently (that re-forks the group the
-/// leaver departed).
-///
-/// Every location it carries is ALREADY persisted to the last-known store by the
-/// core before the call returns; the caller routes them for DISPLAY and for the
-/// receive-liveness stamp, never for durability.
-pub struct DecryptLocationOutcomeFfi {
-    /// The folded location-facing results (locations, joins, updates, …).
-    pub results: Vec<LocationMessageResultFfi>,
-    /// Receive-side auto-commits the caller MUST publish then confirm/fail.
-    pub auto_commits: Vec<CommitToPublishFfi>,
-    /// JSON-serialized bare proposal events to publish (no confirm), mirroring
-    /// [`DeferredSendFfi::proposals`]: publish-or-lose, and recoverable — a
-    /// re-proposed `SelfRemove` is driven by the durable leave request, so a
-    /// later convergence pass re-emits it.
-    pub proposals: Vec<String>,
-}
-
-impl std::fmt::Debug for DecryptLocationOutcomeFfi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `proposals` is raw event JSON — it carries the `h` tag (the
-        // nostr_group_id) and an ephemeral pubkey (Rules 4/6) — and a count of
-        // folded results or staged commits tells one circle from another
-        // (Rule 15), so every field renders as a presence bit, exactly as
-        // `DeferredSendFfi` does.
-        f.debug_struct("DecryptLocationOutcomeFfi")
-            .field("has_results", &!self.results.is_empty())
-            .field("has_auto_commits", &!self.auto_commits.is_empty())
-            .field("has_proposals", &!self.proposals.is_empty())
-            .finish()
     }
 }
 
@@ -3078,6 +2954,10 @@ pub struct BuiltRelayListEventFfi {
     /// `true` when the user's privacy toggle is OFF for this category;
     /// the caller must NOT publish anything in this case.
     pub suppressed: bool,
+    /// `true` when nothing was built because the storage-reset notice has not
+    /// been acknowledged yet; the caller must NOT publish anything, and
+    /// publishes the list once the notice is acknowledged.
+    pub awaiting_reset_acknowledgement: bool,
 }
 
 /// Redacting `Debug`: the event is named by a salted handle, and the event JSON
@@ -3098,6 +2978,10 @@ impl std::fmt::Debug for BuiltRelayListEventFfi {
             .field("has_targets", &!self.targets.is_empty())
             .field("kind", &self.kind)
             .field("suppressed", &self.suppressed)
+            .field(
+                "awaiting_reset_acknowledgement",
+                &self.awaiting_reset_acknowledgement,
+            )
             .finish()
     }
 }
@@ -3144,16 +3028,6 @@ impl std::fmt::Debug for BuiltUnpublishFfi {
 /// Serializes a group-evolving commit event to JSON for the Dart publish path.
 fn commit_event_to_json(event: &nostr::Event) -> Result<String, String> {
     serde_json::to_string(event).map_err(|e| format!("Failed to serialize commit event: {e}"))
-}
-
-/// Converts a core [`haven_core::circle::CommitToPublish`] into its FFI mirror.
-fn convert_commit_to_publish(
-    commit: haven_core::circle::CommitToPublish,
-) -> Result<CommitToPublishFfi, String> {
-    Ok(CommitToPublishFfi {
-        commit_event_json: commit_event_to_json(&commit.commit_event)?,
-        pending: commit.pending.into(),
-    })
 }
 
 // ==================== FFI input validation helpers ====================
@@ -3282,6 +3156,27 @@ fn relay_list_urls_for(
     }
 }
 
+/// Keeps only the events `own` signed as `kind` in a probe of the user's own
+/// relays.
+///
+/// A relay answers a REQ with whatever it likes and the publish client does not
+/// hold it to the filter, so without this another account's events would read
+/// as this account's slots and lists: a foreign 30443 in the tracked slot would
+/// unblock the orphan retraction, a re-signed copy of our package would be
+/// adopted, a planted `d` would seed the slot id, and a foreign relay list would
+/// pass for ours.
+fn retain_own_events(
+    outcomes: &mut [haven_core::relay::RelayFetchOutcome],
+    own: &nostr::PublicKey,
+    kind: nostr::Kind,
+) {
+    for outcome in outcomes {
+        outcome
+            .events
+            .retain(|event| event.pubkey == *own && event.kind == kind);
+    }
+}
+
 #[inline]
 async fn run_blocking<F, T>(f: F) -> Result<T, String>
 where
@@ -3350,129 +3245,6 @@ impl CircleManagerFfi {
     }
 
     // ==================== Circle Lifecycle ====================
-
-    /// Creates a new circle with gift-wrapped Welcome events.
-    ///
-    /// Returns the created circle and gift-wrapped Welcome events ready
-    /// to publish to the invited members' inbox relays.
-    ///
-    /// # Arguments
-    ///
-    /// * `identity_secret_bytes` - The creator's identity secret bytes (32 bytes,
-    ///   from `NostrIdentityManager.get_secret_bytes()`)
-    /// * `members` - Key packages and inbox relays for each member
-    /// * `name` - Circle name
-    /// * `description` - Optional circle description
-    /// * `circle_type` - Circle type: "location_sharing" or "direct_share"
-    /// * `relays` - Relay URLs for the circle's messages
-    /// * `creator_fallback_relays` - The creator's own inbox relays (kind
-    ///   10050), used as the third tier in the Welcome delivery cascade
-    ///   (member 10050 → member 10002 → creator inbox → FAIL CLOSED). Pass an
-    ///   empty list if the creator has no inbox relays; delivery then fails
-    ///   closed (no public-default fallback) when tiers 1–2 are also empty.
-    ///
-    /// # Security
-    ///
-    /// The Welcome events are gift-wrapped per NIP-59, hiding the sender's
-    /// identity behind an ephemeral key. Each Welcome uses a fresh ephemeral
-    /// keypair and randomized timestamp.
-    //
-    // The FFI signature is dictated by the Flutter-Rust contract (one Dart
-    // argument per Rust parameter); grouping these into a struct would
-    // change the generated bindings. The arity is reviewed at the
-    // architectural level, not by clippy.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_circle(
-        &self,
-        identity_secret_bytes: Vec<u8>,
-        members: Vec<MemberKeyPackageFfi>,
-        name: String,
-        description: Option<String>,
-        circle_type: String,
-        relays: Vec<String>,
-        creator_fallback_relays: Vec<String>,
-    ) -> Result<CircleCreationResultFfi, String> {
-        let keys = keys_from_secret_bytes(identity_secret_bytes)?;
-
-        // Parse member key packages
-        let member_key_packages: Vec<haven_core::circle::MemberKeyPackage> = members
-            .into_iter()
-            .map(|m| {
-                let key_package_event: nostr::Event = serde_json::from_str(&m.key_package_json)
-                    .map_err(|e| format!("Invalid key package JSON: {e}"))?;
-                Ok(haven_core::circle::MemberKeyPackage {
-                    key_package_event,
-                    inbox_relays: m.inbox_relays,
-                    nip65_relays: m.nip65_relays,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-
-        // Parse circle type
-        let ct = CoreCircleType::parse(&circle_type)
-            .ok_or_else(|| format!("Invalid circle type: {circle_type}"))?;
-
-        let config = CoreCircleConfig::new(&name)
-            .with_type(ct)
-            .with_relays(relays);
-
-        let config = if let Some(desc) = description {
-            config.with_description(desc)
-        } else {
-            config
-        };
-
-        // `CircleManager::create_circle` is genuinely async (giftwrap
-        // construction awaits), so it stays on the current tokio worker.
-        // The inner SQLite writes are still protected by the core's own
-        // fine-grained mutex.
-        let result = self
-            .inner
-            .create_circle(
-                &keys,
-                member_key_packages,
-                &config,
-                &creator_fallback_relays,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // Convert gift-wrapped welcome events to FFI. F3: if serialization fails
-        // after the create was staged, roll the pending back BEFORE returning
-        // (the core `publish_failed` also deletes the just-saved circle rows), so
-        // neither a leaked `PendingStateRef` nor a ghost circle row survives.
-        let pending_ref = result.pending;
-        let welcome_events: Vec<GiftWrappedWelcomeFfi> = match result
-            .welcome_events
-            .into_iter()
-            .map(|w| {
-                let event_json = serde_json::to_string(&w.event)
-                    .map_err(|e| format!("Failed to serialize welcome event: {e}"))?;
-                Ok(GiftWrappedWelcomeFfi {
-                    recipient_pubkey: w.recipient_pubkey,
-                    recipient_relays: w.recipient_relays,
-                    event_json,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()
-        {
-            Ok(events) => events,
-            Err(e) => {
-                // The batch that rollback replays is discarded here: the core
-                // has already persisted every location in it, and this error
-                // path returns no outcome to route the rest through.
-                let _ = self.inner.publish_failed(pending_ref).await;
-                return Err(e);
-            }
-        };
-
-        let pending = pending_ref.into();
-        Ok(CircleCreationResultFfi {
-            circle: CircleFfi::from(&result.circle),
-            welcome_events,
-            pending,
-        })
-    }
 
     /// Gets a circle by its MLS group ID.
     ///
@@ -3548,92 +3320,23 @@ impl CircleManagerFfi {
         })
     }
 
-    /// Step 1 of admin handoff: propose promoting `successor_hex` to admin via
-    /// an `UpdateAppComponents(admin-policy.v1)` commit.
-    ///
-    /// Additive — the caller stays admin, so the group is admin-covered at every
-    /// intermediate epoch. Returns a [`CommitToPublishFfi`]: publish
-    /// `commit_event_json` to the circle's relays, then
-    /// [`confirm_published`](Self::confirm_published) on a ≥1-relay ACK or
-    /// [`publish_failed`](Self::publish_failed) on failure (Rule 13). Admin
-    /// authorization and the "an admin must hold a member leaf" rule are both
-    /// enforced by the engine against live MLS state.
-    pub async fn propose_admin_handoff(
-        &self,
-        mls_group_id: Vec<u8>,
-        successor_hex: String,
-    ) -> Result<CommitToPublishFfi, String> {
-        let group_id = GroupId::from_slice(&mls_group_id);
-        let successor = nostr::PublicKey::from_hex(&successor_hex)
-            .map_err(|_| "Invalid successor_hex".to_string())?;
-        let commit = self
-            .inner
-            .propose_admin_handoff(&group_id, &successor)
-            .await
-            .map_err(|e| e.to_string())?;
-        convert_commit_to_publish(commit)
-    }
-
-    /// Admin: replace this circle's group relay list (MIP-01) via an
-    /// `UpdateAppComponents(nostr-routing.v1)` commit.
-    ///
-    /// Returns a [`CommitToPublishFfi`]. Publish `commit_event_json` to the
-    /// **union of the circle's current relays and `new_relays`** (so a member
-    /// only listening on a relay being removed still receives the commit), then
-    /// call [`finalize_relay_update`](Self::finalize_relay_update) on a ≥1-relay
-    /// ACK or [`publish_failed`](Self::publish_failed) on failure. `new_relays`
-    /// MUST be non-empty, `wss://` (or the debug loopback test seam),
-    /// credential-free, and at most 20 entries; admin authorization is enforced
-    /// by the engine against live MLS state.
-    pub async fn update_circle_relays(
-        &self,
-        mls_group_id: Vec<u8>,
-        new_relays: Vec<String>,
-    ) -> Result<CommitToPublishFfi, String> {
-        let group_id = GroupId::from_slice(&mls_group_id);
-        let commit = self
-            .inner
-            .update_circle_relays(&group_id, &new_relays)
-            .await
-            .map_err(|e| e.to_string())?;
-        convert_commit_to_publish(commit)
-    }
-
-    /// Step 2 of admin handoff (or the sole step on the `AdminDemote` path):
-    /// demote self from admin.
-    ///
-    /// Same publish-then-confirm contract as
-    /// [`propose_admin_handoff`](Self::propose_admin_handoff). Fails closed when
-    /// the caller is the last admin — a sole admin must promote a successor
-    /// first, so a circle can never be left with an empty admin set.
-    pub async fn propose_self_demote(
-        &self,
-        mls_group_id: Vec<u8>,
-    ) -> Result<CommitToPublishFfi, String> {
-        let group_id = GroupId::from_slice(&mls_group_id);
-        let commit = self
-            .inner
-            .propose_self_demote(&group_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        convert_commit_to_publish(commit)
-    }
-
     /// Returns a `SelfRemove` proposal event JSON. Publish it, then call
     /// [`complete_leave`](Self::complete_leave).
     ///
     /// A bare `SelfRemove` proposal has NO `PendingStateRef` — a remaining
     /// member commits it later (RFC 9420 §12.1.2), so there is nothing to
     /// confirm or roll back. The returned string is the signed kind:445 event
-    /// JSON to publish to the circle's relays.
-    pub async fn propose_leave(&self, mls_group_id: Vec<u8>) -> Result<String, String> {
+    /// JSON to publish to the circle's relays. `None` when this epoch's
+    /// proposal already exists: the leave stands, there is nothing new to
+    /// publish, and the caller proceeds as after a publish.
+    pub async fn propose_leave(&self, mls_group_id: Vec<u8>) -> Result<Option<String>, String> {
         let group_id = GroupId::from_slice(&mls_group_id);
         let event = self
             .inner
             .propose_leave(&group_id)
             .await
             .map_err(|e| e.to_string())?;
-        commit_event_to_json(&event)
+        event.as_ref().map(commit_event_to_json).transpose()
     }
 
     /// Removes the local circle row after a successful leave sequence, or
@@ -3661,217 +3364,7 @@ impl CircleManagerFfi {
             .map_err(|e| e.to_string())
     }
 
-    // ==================== Publish-before-apply (Rule 13) ====================
-
-    /// Converts a core `DecryptedIngest` into its FFI mirror, rolling every
-    /// staged auto-commit back if any item fails to serialize.
-    ///
-    /// F3: a convert failure MUST NOT drop the OTHER surfaced auto-commit
-    /// pendings on the floor. Every pending is collected up-front so a
-    /// mid-stream failure rolls each staged receive-side auto-commit back
-    /// item-by-item (`publish_failed`) instead of leaking them — otherwise a
-    /// group the leaver departed silently re-forks (Rule 13 / security F13).
-    async fn convert_ingest(
-        &self,
-        ingest: haven_core::circle::DecryptedIngest,
-    ) -> Result<DecryptLocationOutcomeFfi, String> {
-        let haven_core::circle::DecryptedIngest {
-            results,
-            auto_commits,
-            proposals,
-        } = ingest;
-        let results: Vec<LocationMessageResultFfi> =
-            results.into_iter().map(convert_location_result).collect();
-        let all_pendings: Vec<PendingStateRef> = auto_commits.iter().map(|c| c.pending).collect();
-        let converted = auto_commits
-            .into_iter()
-            .map(convert_commit_to_publish)
-            .collect::<Result<Vec<_>, String>>()
-            .and_then(|commits| {
-                proposals
-                    .iter()
-                    .map(commit_event_to_json)
-                    .collect::<Result<Vec<_>, String>>()
-                    .map(|proposals| (commits, proposals))
-            });
-        match converted {
-            Ok((auto_commits, proposals)) => Ok(DecryptLocationOutcomeFfi {
-                results,
-                auto_commits,
-                proposals,
-            }),
-            Err(e) => {
-                for pending in all_pendings {
-                    // Each rollback's own batch is discarded for the same
-                    // reason: the core persisted its locations before
-                    // returning, and this path hands the caller an error
-                    // rather than an outcome.
-                    let _ = self.inner.publish_failed(pending).await;
-                }
-                Err(e)
-            }
-        }
-    }
-
-    /// Confirms a staged commit was published (≥1-relay OK-ack) so the engine
-    /// applies it and advances the epoch.
-    ///
-    /// "Acked" MUST mean a relay returned OK — never merely "sent" — to avoid
-    /// optimistic-merge forks (Rule 13, security F13). Pass the `pending` token
-    /// carried in a [`CircleCreationResultFfi`] / [`AddMembersResultFfi`] /
-    /// [`CommitToPublishFfi`].
-    ///
-    /// Returns everything the engine replayed out of the buffer it filled while
-    /// that commit was in flight — peer locations included. The locations are
-    /// already persisted by the core; the caller routes them for DISPLAY, and
-    /// must run [`DecryptLocationOutcomeFfi::auto_commits`] through this same
-    /// ladder and publish its `proposals`.
-    pub async fn confirm_published(
-        &self,
-        pending: PendingStateRefFfi,
-    ) -> Result<DecryptLocationOutcomeFfi, String> {
-        let ingest = self
-            .inner
-            .confirm_published(pending.into())
-            .await
-            .map_err(|e| e.to_string())?;
-        self.convert_ingest(ingest).await
-    }
-
-    /// Reports that a staged publish FAILED; the engine discards the staged
-    /// commit and returns the group to `Stable` at the prior epoch.
-    ///
-    /// The publish-failure counterpart to [`confirm_published`](Self::confirm_published);
-    /// pass the same `pending` token. It replays the same buffer, so it returns
-    /// the same outcome — a no-ack must not cost the peer's fix either.
-    pub async fn publish_failed(
-        &self,
-        pending: PendingStateRefFfi,
-    ) -> Result<DecryptLocationOutcomeFfi, String> {
-        let ingest = self
-            .inner
-            .publish_failed(pending.into())
-            .await
-            .map_err(|e| e.to_string())?;
-        self.convert_ingest(ingest).await
-    }
-
     // ==================== Member Management ====================
-
-    /// Adds members to an existing circle and gift-wraps their Welcomes.
-    ///
-    /// The add-time counterpart to [`create_circle`]: stages an MLS Add commit
-    /// (kind 445, advances existing members on finalize) and gift-wraps the
-    /// resulting per-member Welcome rumors (kind 444) for delivery, resolving
-    /// each recipient's relays through the same fail-closed cascade.
-    ///
-    /// The caller owns the publish/finalize cycle: publish
-    /// `evolution_event_json` to the circle's relays, finalize the pending
-    /// commit on success (or clear it on failure), then publish each
-    /// gift-wrapped Welcome only after a successful finalize.
-    ///
-    /// # Arguments
-    ///
-    /// * `identity_secret_bytes` - The admin's 32-byte Nostr secret key.
-    /// * `mls_group_id` - The circle's MLS group ID.
-    /// * `members` - Key packages and inbox/NIP-65 relays for the new members.
-    /// * `creator_fallback_relays` - The admin's own inbox relays (kind 10050),
-    ///   used as the third tier in the Welcome delivery cascade (member 10050 →
-    ///   member 10002 → admin inbox → FAIL CLOSED). Pass an empty list if the
-    ///   admin has no inbox relays; delivery then fails closed (no
-    ///   public-default fallback) when tiers 1–2 are also empty.
-    ///
-    /// # Security
-    ///
-    /// The Welcome events are gift-wrapped per NIP-59, hiding the sender's
-    /// identity behind a fresh ephemeral key. The secret bytes are zeroized.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the secret bytes are invalid, a key package fails to
-    /// parse, the caller is not an admin, or a member has no reachable Welcome
-    /// relay (fail-closed).
-    pub async fn add_members_to_circle(
-        &self,
-        identity_secret_bytes: Vec<u8>,
-        mls_group_id: Vec<u8>,
-        members: Vec<MemberKeyPackageFfi>,
-        creator_fallback_relays: Vec<String>,
-    ) -> Result<AddMembersResultFfi, String> {
-        let keys = keys_from_secret_bytes(identity_secret_bytes)?;
-
-        // Parse member key packages.
-        let member_key_packages: Vec<haven_core::circle::MemberKeyPackage> = members
-            .into_iter()
-            .map(|m| {
-                let key_package_event: nostr::Event = serde_json::from_str(&m.key_package_json)
-                    .map_err(|e| format!("Invalid key package JSON: {e}"))?;
-                Ok(haven_core::circle::MemberKeyPackage {
-                    key_package_event,
-                    inbox_relays: m.inbox_relays,
-                    nip65_relays: m.nip65_relays,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-
-        let group_id = GroupId::from_slice(&mls_group_id);
-
-        // `add_members_with_welcomes` is genuinely async (engine send +
-        // giftwrap construction await), so it stays on the current tokio worker.
-        let result = self
-            .inner
-            .add_members_with_welcomes(
-                &keys,
-                &group_id,
-                member_key_packages,
-                &creator_fallback_relays,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let commit_event_json = commit_event_to_json(&result.commit_event)?;
-        let pending = result.pending.into();
-
-        // Convert gift-wrapped welcome events to FFI.
-        let welcome_events: Vec<GiftWrappedWelcomeFfi> = result
-            .welcome_events
-            .into_iter()
-            .map(|w| {
-                let event_json = serde_json::to_string(&w.event)
-                    .map_err(|e| format!("Failed to serialize welcome event: {e}"))?;
-                Ok(GiftWrappedWelcomeFfi {
-                    recipient_pubkey: w.recipient_pubkey,
-                    recipient_relays: w.recipient_relays,
-                    event_json,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-
-        Ok(AddMembersResultFfi {
-            commit_event_json,
-            welcome_events,
-            pending,
-        })
-    }
-
-    /// Removes members from a circle.
-    ///
-    /// Returns a [`CommitToPublishFfi`] (publish-before-apply, Rule 13):
-    /// publish `commit_event_json`, then [`confirm_published`](Self::confirm_published)
-    /// on a ≥1-relay ACK or [`publish_failed`](Self::publish_failed) on failure.
-    pub async fn remove_members(
-        &self,
-        mls_group_id: Vec<u8>,
-        member_pubkeys: Vec<String>,
-    ) -> Result<CommitToPublishFfi, String> {
-        let group_id = GroupId::from_slice(&mls_group_id);
-        let commit = self
-            .inner
-            .remove_members(&group_id, &member_pubkeys)
-            .await
-            .map_err(|e| e.to_string())?;
-        convert_commit_to_publish(commit)
-    }
 
     /// Gets members of a circle with resolved contact info.
     ///
@@ -3979,8 +3472,8 @@ impl CircleManagerFfi {
     ///   accept or decline.
     /// * `Ok(None)` — the gift wrap has already been processed on a prior
     ///   poll cycle and should be silently skipped. This is the expected
-    ///   outcome for NIP-59's 2-day lookback window repeatedly surfacing
-    ///   the same wrapper events.
+    ///   outcome for the inbox lookback (96 h, wider than NIP-59's 2-day
+    ///   backdating) repeatedly surfacing the same wrapper events.
     /// * `Err(msg)` — a real failure (malformed event, MDK error, etc.).
     ///   The message is already sanitized via `redact_hex_sequences`.
     pub async fn process_gift_wrapped_invitation(
@@ -4039,51 +3532,181 @@ impl CircleManagerFfi {
     ///
     /// Feeds the still-encrypted 1059 held for `gift_wrap_id` (the stand-in
     /// `mlsGroupId` bytes from [`process_gift_wrapped_invitation`]) to the
-    /// engine, which peels + joins and yields the real circle.
+    /// engine, which peels + joins and yields the real circle. An invitation
+    /// that can never be accepted on this device comes back as the typed
+    /// [`AcceptFailureFfi::NeedsNewInvite`], already resolved like a decline;
+    /// one that would replace a circle this device still holds comes back as
+    /// [`AcceptFailureFfi::RejoinConfirmationRequired`], still held.
     pub async fn accept_invitation(
         &self,
         gift_wrap_id: Vec<u8>,
-    ) -> Result<CircleWithMembersFfi, String> {
+    ) -> Result<AcceptInvitationOutcomeFfi, String> {
+        let event_id = nostr::EventId::from_slice(&gift_wrap_id)
+            .map_err(|e| format!("Invalid gift-wrap id: {e}"))?;
+        match self.inner.accept_invitation(&event_id).await {
+            Ok(joined) => Ok(AcceptInvitationOutcomeFfi {
+                joined: Some(CircleWithMembersFfi::from(&joined)),
+                failure: None,
+            }),
+            Err(CoreCircleError::NeedsNewInvite) => Ok(AcceptInvitationOutcomeFfi {
+                joined: None,
+                failure: Some(AcceptFailureFfi::NeedsNewInvite),
+            }),
+            Err(CoreCircleError::RejoinConfirmationRequired) => Ok(AcceptInvitationOutcomeFfi {
+                joined: None,
+                failure: Some(AcceptFailureFfi::RejoinConfirmationRequired),
+            }),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// The replacement offers of the held invitation `gift_wrap_id` that an
+    /// accept answered [`AcceptFailureFfi::RejoinConfirmationRequired`] for:
+    /// joining would discard this device's still-active copy of the circle,
+    /// which happens only on the user's press
+    /// ([`Self::confirm_group_rejoin`]). An offer whose author is not the
+    /// inviter shown, or for a circle being left, is declined with the
+    /// invitation: [`AcceptFailureFfi::NeedsNewInvite`].
+    pub async fn rejoin_offers_for_invitation(
+        &self,
+        gift_wrap_id: Vec<u8>,
+    ) -> Result<RejoinOffersOutcomeFfi, String> {
+        let event_id = nostr::EventId::from_slice(&gift_wrap_id)
+            .map_err(|e| format!("Invalid gift-wrap id: {e}"))?;
+        match self.inner.rejoin_offers_for_invitation(&event_id).await {
+            Ok(offers) => Ok(RejoinOffersOutcomeFfi {
+                offers: offers
+                    .into_iter()
+                    .map(|offer| RejoinOfferFfi {
+                        mls_group_id: offer.group_id.as_slice().to_vec(),
+                        welcomer_pubkey: hex::encode(offer.welcomer.as_slice()),
+                        local_state_token: offer.local_state_token,
+                    })
+                    .collect(),
+                failure: None,
+            }),
+            Err(CoreCircleError::NeedsNewInvite) => Ok(RejoinOffersOutcomeFfi {
+                offers: Vec::new(),
+                failure: Some(AcceptFailureFfi::NeedsNewInvite),
+            }),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// The user's consent to the offer of the held invitation `gift_wrap_id`
+    /// whose token is `local_state_token`, as
+    /// [`Self::rejoin_offers_for_invitation`] showed it. A branch that moved
+    /// since comes back as [`AcceptFailureFfi::RejoinConfirmationRequired`]
+    /// (read the offers again); an offer no longer held, or one now declined,
+    /// as [`AcceptFailureFfi::NeedsNewInvite`].
+    pub async fn confirm_group_rejoin(
+        &self,
+        gift_wrap_id: Vec<u8>,
+        local_state_token: Vec<u8>,
+    ) -> Result<AcceptInvitationOutcomeFfi, String> {
+        let event_id = nostr::EventId::from_slice(&gift_wrap_id)
+            .map_err(|e| format!("Invalid gift-wrap id: {e}"))?;
+        match self
+            .inner
+            .confirm_group_rejoin(&event_id, &local_state_token)
+            .await
+        {
+            Ok(joined) => Ok(AcceptInvitationOutcomeFfi {
+                joined: Some(CircleWithMembersFfi::from(&joined)),
+                failure: None,
+            }),
+            Err(CoreCircleError::NeedsNewInvite) => Ok(AcceptInvitationOutcomeFfi {
+                joined: None,
+                failure: Some(AcceptFailureFfi::NeedsNewInvite),
+            }),
+            Err(CoreCircleError::RejoinConfirmationRequired) => Ok(AcceptInvitationOutcomeFfi {
+                joined: None,
+                failure: Some(AcceptFailureFfi::RejoinConfirmationRequired),
+            }),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Declines every replacement offer of the held invitation
+    /// `gift_wrap_id`, and the invitation with them: nothing on the wire,
+    /// and redelivery opens none again.
+    pub async fn decline_group_rejoin(&self, gift_wrap_id: Vec<u8>) -> Result<(), String> {
         let event_id = nostr::EventId::from_slice(&gift_wrap_id)
             .map_err(|e| format!("Invalid gift-wrap id: {e}"))?;
         self.inner
-            .accept_invitation(&event_id)
+            .decline_group_rejoin(&event_id)
             .await
-            .map(|c| CircleWithMembersFfi::from(&c))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Who disbanded the circle `mls_group_id`, as hex, for the notice the
+    /// user is shown; `None` for a circle not disbanded. Never logged.
+    pub async fn disbanded_by(&self, mls_group_id: Vec<u8>) -> Option<String> {
+        self.inner
+            .disbanded_by(&GroupId::from_slice(&mls_group_id))
+            .await
+    }
+
+    /// Whether a fetched KeyPackage event (JSON) can be invited: into the
+    /// existing circle `mls_group_id`, or — `None` — into a new circle.
+    ///
+    /// MDK's own admission check decides
+    /// ([`haven_core::nostr::mls::SessionManager::key_package_admission`]), so
+    /// the pickers can say "needs to update Haven" or "can't be invited right
+    /// now" before an invite that the engine would refuse.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only for event JSON that does not parse.
+    pub async fn check_member_key_package(
+        &self,
+        key_package_json: String,
+        mls_group_id: Option<Vec<u8>>,
+    ) -> Result<KeyPackageAdmissionFfi, String> {
+        let event: nostr::Event = serde_json::from_str(&key_package_json)
+            .map_err(|_| "Invalid key package event".to_string())?;
+        let group_id = mls_group_id.map(|id| GroupId::from_slice(&id));
+        Ok(self
+            .inner
+            .session()
+            .key_package_admission(&event, group_id.as_ref())
+            .await
+            .into())
+    }
+
+    /// Retries a quarantined circle's hydration (non-destructive; never
+    /// re-joins). `true` when the circle is live again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the circle is not quarantined or the retry failed.
+    pub async fn retry_quarantined_circle(&self, mls_group_id: Vec<u8>) -> Result<bool, String> {
+        self.inner
+            .retry_quarantined_circle(&GroupId::from_slice(&mls_group_id))
+            .await
             .map_err(|e| e.to_string())
     }
 
     /// Declines an invitation, keyed by the gift-wrap event id.
     ///
     /// Drops the held 1059 locally (never ingested → nothing on the wire,
-    /// Rule 10) and marks the gift wrap resolved so a re-poll never re-surfaces
-    /// it. (Storage-only; sync in the core.)
+    /// Rule 10), with the replacement offer MDK holds for that gift wrap, and
+    /// marks the gift wrap resolved so a re-poll never re-surfaces it.
     pub async fn decline_invitation(&self, gift_wrap_id: Vec<u8>) -> Result<(), String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            let event_id = nostr::EventId::from_slice(&gift_wrap_id)
-                .map_err(|e| format!("Invalid gift-wrap id: {e}"))?;
-            inner
-                .decline_invitation(&event_id)
-                .map_err(|e| e.to_string())
-        })
-        .await
+        let event_id = nostr::EventId::from_slice(&gift_wrap_id)
+            .map_err(|e| format!("Invalid gift-wrap id: {e}"))?;
+        self.inner
+            .decline_invitation(&event_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     // ==================== Key Packages ====================
 
-    // NOTE (Dark Matter): the old `create_key_package` / `sign_key_package_event`
-    // / `record_published_key_packages` trio is RETIRED. It built the kind
-    // 30443+443 TWIN from a `KeyPackageBundle`, which no longer exists — the
-    // Dark Matter engine mints a single last-resort KeyPackage (`fresh_key_package`)
-    // and the 443 twin is dropped (W1). The ONE onboarding/login/heal KeyPackage
-    // publish path is now [`RelayManagerFfi::maintain_key_package`], which mints
-    // via the engine, builds+signs the single kind-30443 event, publishes it to
-    // the user's own NIP-65 relays, records the tracking row, and deletes the
-    // minted material on a failed publish (mdk#160) — all under one idempotent,
-    // fail-soft tick that also serves the first-ever publish (a responding relay
-    // that serves nothing + no tracked slot ⇒ mint-fresh Republish). DM-4b
-    // re-points onboarding/login to call `maintainKeyPackage`.
+    // The ONE onboarding/login/heal KeyPackage publish path is
+    // [`RelayManagerFfi::maintain_key_package`]: an idempotent, fail-soft tick
+    // over MDK's lifecycle record that also serves the first-ever publish (a
+    // responding relay that serves nothing + no tracked slot ⇒ mint).
 
     /// Signs a NIP-09 event deletion event.
     ///
@@ -4130,283 +3753,11 @@ impl CircleManagerFfi {
     // NOTE (Dark Matter): `self_update` and `groups_needing_self_update` are
     // RETIRED. The Dark Matter engine internalizes leaf-key rotation and
     // convergence (there is no app-driven periodic self-update; Haven already
-    // shipped `enablePeriodicSelfUpdate = false`). The publish-before-apply
-    // pending-commit lifecycle that `finalize_pending_commit` /
-    // `clear_pending_commit` used to drive is now
-    // [`confirm_published`](Self::confirm_published) /
-    // [`publish_failed`](Self::publish_failed), keyed by the typed
-    // `PendingStateRefFfi` token carried in each result — not by group id.
-
-    /// Finalizes an admin relay update: confirms the pending commit, then
-    /// re-syncs the admin's own `circle.relays` from the engine's routing
-    /// component so the admin converges on the new set immediately.
-    ///
-    /// Use this instead of a bare [`confirm_published`](Self::confirm_published)
-    /// for the [`update_circle_relays`](Self::update_circle_relays) flow
-    /// (members converge via the receive path). Pass the `pending` token from
-    /// the [`CommitToPublishFfi`] and the circle's `mls_group_id`.
-    ///
-    /// Returns the confirm's replayed outcome, exactly as
-    /// [`confirm_published`](Self::confirm_published) does.
-    pub async fn finalize_relay_update(
-        &self,
-        pending: PendingStateRefFfi,
-        mls_group_id: Vec<u8>,
-    ) -> Result<DecryptLocationOutcomeFfi, String> {
-        let group_id = GroupId::from_slice(&mls_group_id);
-        let ingest = self
-            .inner
-            .finalize_relay_update(pending.into(), &group_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        self.convert_ingest(ingest).await
-    }
+    // shipped `enablePeriodicSelfUpdate = false`). Publish-before-apply lives
+    // in Rust: every commit is staged under a durable fanout and resolved by
+    // the fanout driver, and no `PendingStateRef` crosses this boundary.
 
     // ==================== Location Sharing ====================
-
-    /// Encrypts a location for a circle.
-    ///
-    /// Creates an MLS-encrypted kind 445 event containing the location data.
-    /// The returned event is ready to publish to the circle's relays.
-    ///
-    /// # Concurrency
-    ///
-    /// Concurrent calls for the same group are **safe**. Every engine write
-    /// funnels through one `tokio::sync::Mutex<AccountDeviceSession>`
-    /// (`haven-core/src/nostr/mls/manager.rs:99-101`, taken in `send` at
-    /// `:494-501`), which `encrypt_location` reaches via `send_location` →
-    /// `create_message` → `send`. Application messages advance no epoch and
-    /// carry no `PendingStateRef`, and past-epoch app messages are tolerated to
-    /// `app_message_past_epoch_limit`, so the encrypt→publish gap is covered
-    /// too.
-    ///
-    /// This paragraph previously said the opposite — that `create_message`
-    /// races on the epoch counter and callers "must not" invoke it
-    /// concurrently, naming a `locationPublisherProvider` that no longer owns
-    /// publishing. That described PRE-Dark-Matter MDK, before the session
-    /// mutex existed. It is corrected rather than deleted because acting on it
-    /// is expensive in a specific way: it invites building a cross-isolate lock
-    /// for a problem upstream already solved, while the REAL hazard sits
-    /// elsewhere.
-    ///
-    /// **The real hazard: compound sequences, not this call.** The mutex is
-    /// released between FFI calls, so a Rule-13 publish-before-apply cycle —
-    /// stage → publish → `confirm_published`/`publish_failed` — spans three
-    /// round-trips with the lock dropped in between (`manager.rs:651-658`,
-    /// `:667-674`). Two concurrent commit-producing flows CAN interleave there.
-    /// The engine refuses a second send while the group is non-`Stable`, so the
-    /// result is a wedged group rather than a fork — a liveness failure, not a
-    /// confidentiality one — but callers must still serialize the whole
-    /// TRANSACTION, which is what `LocationPublishSchedulerNotifier`'s
-    /// `_publishChain` does. Location publishing produces no commits and needs
-    /// no such fence.
-    ///
-    /// # Arguments
-    ///
-    /// * `mls_group_id` - The circle's MLS group ID
-    /// * `sender_pubkey_hex` - The sender's Nostr public key (hex)
-    /// * `latitude` - GPS latitude (exact)
-    /// * `longitude` - GPS longitude (exact)
-    /// * `update_interval_secs` - **Retired, and no longer reaches the wire.**
-    ///   It once seeded a per-send jittered NIP-40 TTL; since the Dark Matter
-    ///   cutover the expiration is stamped by the ENGINE from the group-level
-    ///   `marmot.group.message-retention.v1` component (0x8005) as
-    ///   `inner_created_at + LOCATION_MESSAGE_RETENTION_SECS` (228 s), so
-    ///   `CircleManager::encrypt_location` binds this argument as
-    ///   `_update_interval_secs` and discards it. The `[60, 3600]` range check
-    ///   below is therefore the parameter's only remaining effect. Kept because
-    ///   removing it is an FFI signature change; do NOT reintroduce a per-send
-    ///   TTL path here without re-reading `haven-core/SECURITY.md`, "Outer
-    ///   kind:445 metadata".
-    ///
-    /// # The deferred outcome
-    ///
-    /// Returns [`EncryptLocationOutcomeFfi`], not a bare event: the engine can
-    /// QUEUE the update instead of encrypting it, and that is a distinct,
-    /// actionable state rather than a failure. It is detected by matching the
-    /// `CircleError::SendDeferred` VARIANT — never by inspecting error prose,
-    /// which interpolates remote-authored text and would hand a remote party a
-    /// classification channel (see `nostr::mls::storage::is_session_live`).
-    pub async fn encrypt_location(
-        &self,
-        mls_group_id: Vec<u8>,
-        sender_pubkey_hex: String,
-        latitude: f64,
-        longitude: f64,
-        update_interval_secs: u64,
-    ) -> Result<EncryptLocationOutcomeFfi, String> {
-        // Validate at the FFI boundary so a buggy Dart caller cannot produce
-        // already-expired (0) or multi-day TTLs. The range mirrors
-        // `haven_core::location::ttl::{MIN,MAX}_UPDATE_INTERVAL_SECS`
-        // (60..=3600) so callers get an explicit error instead of a silent
-        // clamp-up inside the core.
-        if !(60..=3600).contains(&update_interval_secs) {
-            return Err(format!(
-                "update_interval_secs out of range [60, 3600]: {update_interval_secs}"
-            ));
-        }
-        let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)
-            .map_err(|e| format!("Invalid sender pubkey: {e}"))?;
-        // Location messages no longer carry a display name: names moved to
-        // public kind-0 profiles at the public-profile migration.
-        let location = haven_core::location::LocationMessage::new(latitude, longitude);
-
-        // `encrypt_location` sends via the Dark Matter engine (async), so it
-        // awaits directly on the current worker.
-        let group_id = GroupId::from_slice(&mls_group_id);
-        let (event, nostr_group_id, relays) = match self
-            .inner
-            .encrypt_location(&group_id, &sender_pubkey, &location, update_interval_secs)
-            .await
-        {
-            Ok(sent) => sent,
-            // Matched by VARIANT. The counters and the staged work go straight
-            // back to Dart, which owns the Rule-13 ladder for `commits`.
-            Err(haven_core::circle::CircleError::SendDeferred {
-                unresolved_inputs,
-                discarded_intents,
-                repaired,
-                work,
-            }) => {
-                // An exact count of gating rows or staged commits tells circles
-                // apart (Rule 15); `repaired` already carries whether anything
-                // is still gating, so the magnitude adds nothing triage needs.
-                log::debug!(
-                    "[FFI encrypt] send deferred (repaired={repaired}, has_staged_commits={})",
-                    !work.commits.is_empty()
-                );
-                return Ok(EncryptLocationOutcomeFfi {
-                    sent: None,
-                    deferred_send: Some(convert_deferred_send(
-                        unresolved_inputs,
-                        discarded_intents,
-                        repaired,
-                        work,
-                    )?),
-                });
-            }
-            Err(e) => return Err(e.to_string()),
-        };
-
-        let event_json =
-            serde_json::to_string(&event).map_err(|e| format!("Failed to serialize event: {e}"))?;
-
-        // A salted per-process handle, so a re-publish of the same event is
-        // still recognisable in one log without the event id appearing in it
-        // (Rule 15). The relay fan-out is dropped: its size fingerprints a
-        // customised pool.
-        log::debug!(
-            "[FFI encrypt] {} → kind:445 ready",
-            haven_core::log_alias::event(EventIdHex(&event.id.to_hex()))
-        );
-
-        Ok(EncryptLocationOutcomeFfi {
-            sent: Some(EncryptedLocationFfi {
-                event_json,
-                nostr_group_id: nostr_group_id.to_vec(),
-                relays,
-            }),
-            deferred_send: None,
-        })
-    }
-
-    /// Repairs a circle whose sender ratchets are exhausted, by committing a
-    /// byte-identical `UpdateAppComponents(admin-policy.v1)`.
-    ///
-    /// This is a **ratchet reset**, not key rotation: applying the commit
-    /// derives a fresh `encryption_secret`, so every sender ratchet in the group
-    /// restarts at generation 0 and a peer whose messages had run past
-    /// `maximum_forward_distance` becomes decryptable again. The commit carries
-    /// no `UpdatePath`, so it rotates no leaf key and provides **no**
-    /// post-compromise security. Never describe it as key rotation in code, in
-    /// logs, or in user copy.
-    ///
-    /// # The caller MUST fetch first
-    ///
-    /// Await one relay fetch / live-sync drain for this circle and let it settle
-    /// BEFORE calling this. A departure proposal sitting on a relay that has not
-    /// yet reached this device turns into a same-epoch race; the same proposal
-    /// ingested first turns into a clean `PendingProposal` decline. The engine's
-    /// deterministic ordering makes the race survivable (one extra epoch, never
-    /// a fork), but the fetch converts a race into a decline for free.
-    ///
-    /// # Rule 14 / gate 5
-    ///
-    /// Foreground service layer ONLY — never from a background isolate. Enforced
-    /// by `scripts/ci/check_epoch_repair_isolation.sh`, not by this comment.
-    ///
-    /// # Outcomes
-    ///
-    /// Exactly one field of [`RepairRotationOutcomeFfi`] is `Some`:
-    /// `rotated` → publish then confirm on a ≥1-relay ACK (or roll back);
-    /// `deferred_send` → run that same ladder over its `commits`;
-    /// `skipped` → a normal, user-visible answer, NOT a failure.
-    ///
-    /// `now_secs` is the wall clock in Unix seconds.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error string only for a real failure — no circle row, an
-    /// unreadable store, or an engine rejection that is not about epoch state
-    /// (a non-`Stable` epoch is a `skipped` outcome, not an error).
-    pub async fn repair_epoch_rotation(
-        &self,
-        mls_group_id: Vec<u8>,
-        now_secs: u64,
-    ) -> Result<RepairRotationOutcomeFfi, String> {
-        use haven_core::circle::RepairRotationOutcome as Outcome;
-
-        let group_id = GroupId::from_slice(&mls_group_id);
-        let outcome = self
-            .inner
-            .repair_epoch_rotation(&group_id, now_secs)
-            .await
-            .map_err(|e| e.to_string())?;
-        match outcome {
-            Outcome::Rotated(commit) => {
-                log::debug!("[FFI repair] epoch-rotation repair staged");
-                Ok(RepairRotationOutcomeFfi {
-                    rotated: Some(convert_commit_to_publish(commit)?),
-                    skipped: None,
-                    deferred_send: None,
-                })
-            }
-            Outcome::Skipped(reason) => {
-                // log-scan-ok: SkipReason Debug redacts (fieldless: a variant name only)
-                log::debug!("[FFI repair] declined: {reason:?}");
-                Ok(RepairRotationOutcomeFfi {
-                    rotated: None,
-                    skipped: Some(reason.into()),
-                    deferred_send: None,
-                })
-            }
-            Outcome::Deferred {
-                unresolved_inputs,
-                discarded_intents,
-                repaired,
-                work,
-            } => {
-                log::debug!(
-                    "[FFI repair] send-gated (repaired={repaired}, has_staged_commits={})",
-                    !work.commits.is_empty()
-                );
-                // The REAL counters, never placeholders: `unresolved_inputs`
-                // reaches the sharing-health model, where `0` is read as "the
-                // next send will encrypt". Passing zeros here would tell the UI
-                // a stalled circle had recovered.
-                Ok(RepairRotationOutcomeFfi {
-                    rotated: None,
-                    skipped: None,
-                    deferred_send: Some(convert_deferred_send(
-                        unresolved_inputs,
-                        discarded_intents,
-                        repaired,
-                        work,
-                    )?),
-                })
-            }
-        }
-    }
 
     /// Gives a terminal disposition to stored convergence inputs the relay can
     /// no longer redeliver, across every circle, and reports what still gates
@@ -4431,122 +3782,6 @@ impl CircleManagerFfi {
             .await
             .map(Into::into)
             .map_err(|e| e.to_string())
-    }
-
-    /// Decrypts / ingests a received `kind:445` event, returning the folded
-    /// engine results (Dark Matter five-variant taxonomy).
-    ///
-    /// A single ingest can yield SEVERAL [`LocationMessageResultFfi`] — the
-    /// engine's `advance_convergence` may release buffered inbound after the
-    /// outer event — so this returns a `Vec`. The engine owns stale / duplicate
-    /// / out-of-order handling internally (a future-epoch event is durably
-    /// buffered and re-surfaced once the gap fills), so there is no
-    /// `Unprocessable` / `PreviouslyFailed` outcome anymore.
-    ///
-    /// # Peer `SelfRemove` eviction (auto-commit) — Rule 13
-    ///
-    /// This variant does NOT surface receive-side auto-commits (a peer
-    /// `SelfRemove` eviction the engine staged): to stay Rule-13-safe the core
-    /// rolls back any that surfaced rather than confirm an unpublished commit.
-    /// The eviction still propagates via the background catch-up sweep (which
-    /// publishes it). Callers that own relay publishing in poll mode SHOULD
-    /// migrate to [`Self::decrypt_location_collecting_commits`], which surfaces the
-    /// auto-commit so the caller can publish-then-confirm it in the foreground.
-    ///
-    /// # Cursor contract (DM-4b)
-    ///
-    /// The engine owns retry/buffering, so the caller advances its relay sync
-    /// cursor on the OUTER event's `created_at` (which the Dart caller already
-    /// holds — it passed `event_json` in). A buffered event is re-delivered by
-    /// the engine when the epoch gap fills; the caller never re-fetches it.
-    ///
-    /// # Concurrency
-    ///
-    /// The session is `&mut`-serialized behind a `tokio` mutex, so concurrent
-    /// calls are serialized by the engine; this awaits directly.
-    ///
-    /// # Arguments
-    ///
-    /// * `event_json` - JSON-serialized `kind:445` event.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted error string if the event JSON is invalid or the
-    /// engine ingest fails hard.
-    pub async fn decrypt_location(
-        &self,
-        event_json: String,
-    ) -> Result<Vec<LocationMessageResultFfi>, String> {
-        let event: nostr::Event =
-            serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
-
-        // A salted per-process handle: it distinguishes a duplicate delivery of
-        // one event from two events without the id reaching the log (Rule 15).
-        let event_handle = haven_core::log_alias::event(EventIdHex(&event.id.to_hex()));
-
-        // Defense-in-depth: the core `decrypt_location` already redacts its
-        // error strings; re-redact at the boundary so the invariant is local.
-        let results = self
-            .inner
-            .decrypt_location(&event)
-            .await
-            .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))?;
-
-        let out: Vec<LocationMessageResultFfi> =
-            results.into_iter().map(convert_location_result).collect();
-
-        log::debug!(
-            "[FFI decrypt] {event_handle} ingested (any_result={})",
-            !out.is_empty()
-        );
-
-        Ok(out)
-    }
-
-    /// Decrypts / ingests a received `kind:445`, returning the folded results AND
-    /// any receive-side auto-commit the engine staged (publish-before-apply).
-    ///
-    /// Identical ingest to [`Self::decrypt_location`], but surfaces a peer
-    /// `SelfRemove` eviction the engine auto-committed instead of dropping it.
-    /// Rule 13 / security F13: for EACH
-    /// [`DecryptLocationOutcomeFfi::auto_commits`] entry, publish
-    /// `commit_event_json` to the circle's relays, then
-    /// [`confirm_published`](Self::confirm_published) on a ≥1-relay ACK (or
-    /// [`publish_failed`](Self::publish_failed) on failure) — exactly like the
-    /// [`CommitToPublishFfi`] from remove / relay-update. Confirming before an
-    /// ACK, or dropping an entry, re-forks the group the leaver departed. The
-    /// foreground poll receive path SHOULD call this in place of
-    /// [`Self::decrypt_location`].
-    ///
-    /// The cursor contract of [`Self::decrypt_location`] applies unchanged.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted error string if the event JSON is invalid or the
-    /// engine ingest fails hard.
-    pub async fn decrypt_location_collecting_commits(
-        &self,
-        event_json: String,
-    ) -> Result<DecryptLocationOutcomeFfi, String> {
-        let event: nostr::Event =
-            serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
-        let event_handle = haven_core::log_alias::event(EventIdHex(&event.id.to_hex()));
-
-        let ingest = self
-            .inner
-            .decrypt_location_collecting_commits(&event)
-            .await
-            .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))?;
-
-        let outcome = self.convert_ingest(ingest).await?;
-
-        log::debug!(
-            "[FFI decrypt] {event_handle} ingested (any_result={}, any_auto_commit={})",
-            !outcome.results.is_empty(),
-            !outcome.auto_commits.is_empty()
-        );
-
-        Ok(outcome)
     }
 
     // ==================== Sync Cursors ====================
@@ -5173,6 +4408,21 @@ impl CircleManagerFfi {
         let inner = self.inner.clone();
         let own_pk = keys.public_key();
 
+        // No relay list (10050/10002) is published before the storage-reset
+        // notice is acknowledged: the toggle is the post-reset default until
+        // then.
+        if !inner.storage_reset_acknowledged() {
+            return Ok(BuiltRelayListEventFfi {
+                event_json: None,
+                event_id_hex: None,
+                targets: Vec::new(),
+                kind: None,
+                created_at_secs: None,
+                suppressed: false,
+                awaiting_reset_acknowledgement: true,
+            });
+        }
+
         // Read toggle + list + compute targets + the previous publication's
         // `created_at` all under one blocking dispatch.
         let prep: (bool, Vec<String>, Vec<String>, Option<i64>) = run_blocking(move || {
@@ -5219,6 +4469,7 @@ impl CircleManagerFfi {
                 kind: None,
                 created_at_secs: None,
                 suppressed: true,
+                awaiting_reset_acknowledgement: false,
             });
         }
 
@@ -5246,6 +4497,7 @@ impl CircleManagerFfi {
             kind: Some(kind_u16),
             created_at_secs,
             suppressed: false,
+            awaiting_reset_acknowledgement: false,
         })
     }
 
@@ -5532,14 +4784,19 @@ impl CircleManagerFfi {
 // region (its own top-level `impl CircleManagerFfi`) so the privacy CI guard
 // (scripts/ci/check_profile_privacy_boundaries.sh) can scope its scan exactly.
 
-use haven_core::circle::{ProfilePendingState, ProfileSyncOutcome, ProfileSyncReport};
+use haven_core::circle::{
+    ProfilePendingState, ProfileSyncCommit, ProfileSyncOutcome, ProfileSyncReport,
+};
 use haven_core::profile::{
     build_blank_metadata_event, build_metadata_event, build_nip09_deletion,
-    download_profile_picture, fetch_own_profile, fetch_profiles_assigned, merge_edits,
-    picture_sync_action, publish_metadata, AssignedFetch, CachedProfile, PendingEdits,
-    PictureSyncAction, ProfileEdits, ProfileError, ProfileMetadata, ProfileState,
-    PROFILE_INTER_REQ_JITTER_MS,
+    download_profile_picture, fetch_own_profile, fetch_profiles_assigned, merge_base, merge_edits,
+    picture_sync_action, publish_metadata, read_own_profile_on_relays, AssignedFetch,
+    CachedProfile, OwnProfileOnRelays, PendingEdits, PictureSyncAction, ProfileEdits, ProfileError,
+    ProfileState, PROFILE_INTER_REQ_JITTER_MS,
 };
+// Only the test modules build a profile row by hand.
+#[cfg(test)]
+use haven_core::profile::ProfileMetadata;
 
 /// Redacts hex sequences (>= 16 chars) from an error before it crosses the FFI.
 ///
@@ -5557,9 +4814,38 @@ fn redact_profile_err(e: impl std::fmt::Display) -> String {
 /// mean" is not a question the UI may answer for a caller that got it wrong.
 const PROFILE_IDENTITY_MISMATCH: &str = "Secret does not match this identity";
 
+/// Refusal of a profile retraction whose target could not be checked: nothing
+/// local says a profile was published and no profile relay answered, so the
+/// retraction can neither run nor honestly report that there was nothing to
+/// retract — or a photo removal found no copy of the profile to republish
+/// without the photo, on any relay or on this device. A constant, for the same
+/// reason as [`PROFILE_IDENTITY_MISMATCH`].
+const PROFILE_RETRACTION_UNVERIFIED: &str =
+    "Could not read the public profile to retract; nothing was published";
+
 /// Returns the current Unix time in whole seconds, saturating (never negative).
+#[cfg(not(test))]
 fn profile_now_secs() -> i64 {
     i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// How far a test has moved its own task's profile clock ahead, in
+    /// seconds: a retraction that "takes" longer than a backoff rung, with
+    /// nothing waiting for it to.
+    static PROFILE_CLOCK_AHEAD_SECS: std::sync::Arc<std::sync::atomic::AtomicI64>;
+}
+
+/// The same clock, plus what the running test's task has moved it ahead by.
+#[cfg(test)]
+fn profile_now_secs() -> i64 {
+    let ahead = PROFILE_CLOCK_AHEAD_SECS
+        .try_with(|ahead| ahead.load(std::sync::atomic::Ordering::SeqCst))
+        .unwrap_or(0);
+    i64::try_from(nostr::Timestamp::now().as_secs())
+        .unwrap_or(i64::MAX)
+        .saturating_add(ahead)
 }
 
 /// Wall-clock budget for one paced batch of member profile-picture downloads.
@@ -5748,6 +5034,21 @@ impl ProfilePendingStateFfi {
     }
 }
 
+/// What the profile relays answered about the local user's OWN kind-0 on one
+/// [`CircleManagerFfi::fetch_my_profile`] call.
+///
+/// No catch-all variant, for the reason [`ProfileSyncOutcomeFfi`] has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnProfileRelayAnswerFfi {
+    /// Nothing settled it: a cache read, a fetch that was not due, or one that
+    /// found no kind-0 while a relay had yet to answer.
+    Unanswered,
+    /// A relay served the kind-0.
+    Published,
+    /// EVERY relay answered, and none has one: no profile is published.
+    Absent,
+}
+
 /// A member's public Nostr profile (kind-0 metadata), FFI-friendly.
 ///
 /// Carries the resolved display fields plus `has_picture` (whether picture BYTES
@@ -5774,6 +5075,10 @@ pub struct ProfileMetadataFfi {
     pub is_known: bool,
     /// Unix seconds when this profile was last fetched (TTL base; `0` = never).
     pub fetched_at: i64,
+    /// What the relays answered on THIS call — only
+    /// [`CircleManagerFfi::fetch_my_profile`] sets it. A cache read is always
+    /// [`OwnProfileRelayAnswerFfi::Unanswered`].
+    pub relay_answer: OwnProfileRelayAnswerFfi,
     /// Hex SHA-256 of the cached picture bytes, or `None` when no CURRENT bytes
     /// are cached (always `None` whenever `has_picture` is false, so it can never
     /// key a decode of stale bytes).
@@ -5802,6 +5107,7 @@ impl std::fmt::Debug for ProfileMetadataFfi {
             .field("about", &"<redacted>")
             .field("has_picture", &self.has_picture)
             .field("is_known", &self.is_known)
+            .field("relay_answer", &self.relay_answer)
             .field(
                 "picture_sha256_hex",
                 &self.picture_sha256_hex.as_ref().map(|_| "<redacted>"),
@@ -5831,6 +5137,7 @@ impl ProfileMetadataFfi {
             has_picture,
             is_known: cached.state == ProfileState::Known,
             fetched_at: cached.fetched_at,
+            relay_answer: OwnProfileRelayAnswerFfi::Unanswered,
             picture_sha256_hex: if has_picture {
                 picture_sha256_hex
             } else {
@@ -5850,6 +5157,7 @@ impl ProfileMetadataFfi {
             has_picture: false,
             is_known: false,
             fetched_at: 0,
+            relay_answer: OwnProfileRelayAnswerFfi::Unanswered,
             picture_sha256_hex: None,
         }
     }
@@ -6142,6 +5450,53 @@ impl CircleManagerFfi {
         } else {
             Err(PROFILE_IDENTITY_MISMATCH.to_string())
         }
+    }
+
+    /// The relays' copy of the own profile a retraction is about to act on,
+    /// from ONE read of the pool.
+    ///
+    /// With a record of its own that a profile was published
+    /// (`published_here`), this is the merge-base read and a relay that does
+    /// not answer costs nothing. Without one it is also the second half of the
+    /// retraction no-op gate, re-armed after the MDK v0.10.4 storage reset:
+    /// `has_published_profile` reads only what this device published or
+    /// cached, and the reset wiped all of that while the kind-0 stayed public
+    /// on the relays. So the same read has to tell "never published" — `None`,
+    /// every relay answered without one, and the retraction mints nothing —
+    /// from "could not ask", which is [`PROFILE_RETRACTION_UNVERIFIED`],
+    /// failing closed rather than reporting "nothing to retract". The copy
+    /// that read finds is the one the caller builds on: asking the pool again
+    /// would cost every relay a second request for an answer already in hand.
+    ///
+    /// The copy is cached when it is newer than the row, here, before the
+    /// caller's publish can fail: a retraction no relay takes must not leave
+    /// the row older than what it read, or the retry could build on an older
+    /// copy another relay still serves. The caller reads the row after this.
+    async fn own_profile_to_retract(
+        &self,
+        relay: &haven_core::relay::RelayManager,
+        own_pk: nostr::PublicKey,
+        pool: &[String],
+        published_here: bool,
+        now: i64,
+    ) -> Result<Option<CachedProfile>, String> {
+        let fetched = if published_here {
+            fetch_own_profile(relay, own_pk, pool, now).await.0
+        } else {
+            match read_own_profile_on_relays(relay, own_pk, pool, now).await {
+                OwnProfileOnRelays::Published(copy) => Some(*copy),
+                OwnProfileOnRelays::Absent => None,
+                OwnProfileOnRelays::Unverified => {
+                    return Err(PROFILE_RETRACTION_UNVERIFIED.to_string());
+                }
+            }
+        };
+        if let Some(copy) = &fetched {
+            self.inner
+                .upsert_profile_if_newer(copy)
+                .map_err(redact_profile_err)?;
+        }
+        Ok(fetched)
     }
 
     /// Health of the profile-plane relay pool, as counts only.
@@ -6712,77 +6067,123 @@ impl CircleManagerFfi {
     /// profile; no secret crosses the FFI. A missing kind-0 yields an `Unknown`
     /// result rather than an error (offline-tolerant, plan D7).
     ///
-    /// Reads from the WHOLE profile pool rather than one salted-assignment
-    /// relay, concurrently — see [`fetch_own_profile`].
+    /// Unless `force`d, asks nothing while the own row's miss backoff runs —
+    /// the schedule [`Self::fetch_member_profiles`] keeps for a profile no
+    /// relay served — so a caller that repeats it until the relays settle the
+    /// answer (the storage-reset name reseed) is not asking on every
+    /// foreground. It then reads EVERY relay of the profile pool, not one
+    /// salted-assignment relay ([`read_own_profile_on_relays`]), and
+    /// `relay_answer` says what they answered.
+    ///
+    /// The row returned with [`OwnProfileRelayAnswerFfi::Published`] is the
+    /// cache WINNER: the relays' newest copy, unless this device holds a newer
+    /// one, and with any edit still waiting to publish re-applied on top.
     ///
     /// # Errors
     ///
     /// Returns a redacted error string on relay or database failure.
-    pub async fn fetch_my_profile(&self, pubkey_hex: String) -> Result<ProfileMetadataFfi, String> {
+    pub async fn fetch_my_profile(
+        &self,
+        pubkey_hex: String,
+        force: bool,
+    ) -> Result<ProfileMetadataFfi, String> {
+        self.fetch_my_profile_at(pubkey_hex, force, profile_now_secs())
+            .await
+    }
+
+    /// [`Self::fetch_my_profile`] at an injected `now`.
+    async fn fetch_my_profile_at(
+        &self,
+        pubkey_hex: String,
+        force: bool,
+        now: i64,
+    ) -> Result<ProfileMetadataFfi, String> {
         let own_pk = nostr::PublicKey::from_hex(&pubkey_hex)
             .map_err(|_| "Invalid pubkey_hex".to_string())?;
         // Canonical lowercase key (matches how fetched rows are keyed), so the
         // newer-wins gate and the winning-row re-read line up.
         let own_hex = own_pk.to_hex();
-        let now = profile_now_secs();
+        let own = std::slice::from_ref(&own_hex);
 
-        let (fetched, settled) = match self.usable_profile_pool()? {
-            Some(pool) => {
-                let salt = self
-                    .inner
-                    .profile_relay_salt()
-                    .map_err(redact_profile_err)?;
-                let relay = haven_core::relay::RelayManager::new();
-                fetch_own_profile(&relay, own_pk, &salt, &pool, now).await
-            }
-            // Pool underflow: nothing was asked, so nothing may be stamped.
-            None => (None, false),
+        let due = force
+            || self
+                .inner
+                .profile_retry_due(&own_hex, now)
+                .map_err(redact_profile_err)?;
+        let pool = if due {
+            self.usable_profile_pool()?
+        } else {
+            None
+        };
+        // Backing off, or pool underflow: nothing is asked, so nothing is
+        // stamped.
+        let Some(pool) = pool else {
+            return self.own_cached_view(&own_hex, OwnProfileRelayAnswerFfi::Unanswered);
         };
 
-        if let Some(cp) = fetched {
-            // Newer-wins: never let a lagging relay revert a newer cached row /
-            // just-published optimistic edit (bug MEDIUM-3). Return the WINNING
-            // row, which may be the kept cached one rather than this fetch.
-            self.inner
-                .upsert_profile_if_newer(&cp)
-                .map_err(redact_profile_err)?;
-            // Stamp the HIT even when the upsert declined to write: kind-0 is
-            // replaceable, so an unchanged profile returns the same
-            // `created_at`, and without this the staleness clock would stay
-            // pinned to the first-ever fetch.
-            self.inner
-                .touch_profiles_hit(std::slice::from_ref(&own_hex), now)
-                .map_err(redact_profile_err)?;
-            let winner = self
-                .inner
-                .get_profile(&own_hex)
-                .map_err(redact_profile_err)?
-                .unwrap_or(cp);
-            let has_picture = self
-                .inner
-                .has_current_picture(&own_hex, winner.metadata.picture())
-                .map_err(redact_profile_err)?;
-            let hash = self.current_picture_hash(&own_hex, has_picture)?;
-            Ok(ProfileMetadataFfi::from_cached(&winner, has_picture, hash))
-        } else {
-            // Record a MISS only when a relay actually answered "nothing". If
-            // the pool underflowed, or every attempt fell to the deadline, this
-            // is an UNATTEMPTED author and stamping it would schedule a backoff
-            // for something we never asked.
-            if settled {
+        let relay = haven_core::relay::RelayManager::new();
+        let relay_answer = match read_own_profile_on_relays(&relay, own_pk, &pool, now).await {
+            OwnProfileOnRelays::Published(cp) => {
+                // Newer-wins: never let a lagging relay revert a newer cached
+                // row / just-published optimistic edit (bug MEDIUM-3). Return
+                // the WINNING row, which may be the kept cached one rather than
+                // this fetch.
                 self.inner
-                    .record_profile_misses(std::slice::from_ref(&own_hex), now)
+                    .upsert_profile_if_newer(&cp)
                     .map_err(redact_profile_err)?;
+                // Stamp the HIT even when the upsert declined to write: kind-0
+                // is replaceable, so an unchanged profile returns the same
+                // `created_at`, and without this the staleness clock would stay
+                // pinned to the first-ever fetch.
+                self.inner
+                    .touch_profiles_hit(own, now)
+                    .map_err(redact_profile_err)?;
+                let winner = self
+                    .inner
+                    .get_profile(&own_hex)
+                    .map_err(redact_profile_err)?
+                    .unwrap_or(*cp);
+                let has_picture = self
+                    .inner
+                    .has_current_picture(&own_hex, winner.metadata.picture())
+                    .map_err(redact_profile_err)?;
+                let hash = self.current_picture_hash(&own_hex, has_picture)?;
+                return Ok(ProfileMetadataFfi {
+                    relay_answer: OwnProfileRelayAnswerFfi::Published,
+                    ..ProfileMetadataFfi::from_cached(&winner, has_picture, hash)
+                });
             }
-            Ok(self
-                .inner
-                .get_profile(&own_hex)
-                .map_err(redact_profile_err)?
-                .map_or_else(
-                    || ProfileMetadataFfi::unknown(own_hex.clone()),
-                    |cp| ProfileMetadataFfi::from_cached(&cp, false, None),
-                ))
-        }
+            OwnProfileOnRelays::Absent => OwnProfileRelayAnswerFfi::Absent,
+            OwnProfileOnRelays::Unverified => OwnProfileRelayAnswerFfi::Unanswered,
+        };
+        // No kind-0 came back: a relay answered without one, or none could be
+        // reached at all. The miss backoff advances either way, or a relay
+        // that never answers would have each call ask the rest again.
+        self.inner
+            .record_profile_misses(own, now)
+            .map_err(redact_profile_err)?;
+        self.own_cached_view(&own_hex, relay_answer)
+    }
+
+    /// The cached own row — or an `Unknown` placeholder — for a
+    /// [`Self::fetch_my_profile`] call that served no kind-0.
+    fn own_cached_view(
+        &self,
+        own_hex: &str,
+        relay_answer: OwnProfileRelayAnswerFfi,
+    ) -> Result<ProfileMetadataFfi, String> {
+        let cached = self
+            .inner
+            .get_profile(own_hex)
+            .map_err(redact_profile_err)?
+            .map_or_else(
+                || ProfileMetadataFfi::unknown(own_hex.to_string()),
+                |cp| ProfileMetadataFfi::from_cached(&cp, false, None),
+            );
+        Ok(ProfileMetadataFfi {
+            relay_answer,
+            ..cached
+        })
     }
 
     /// Removes the local user's OWN profile picture (retraction republish).
@@ -6790,16 +6191,28 @@ impl CircleManagerFfi {
     /// A **no-op unless a profile was published** (`has_published_profile`) — a
     /// retraction must never mint a first public event for a pubkey that never
     /// published. Otherwise it clears the `picture` field on the freshest kind-0
-    /// and republishes.
+    /// — the relays' copy, or the cached one when that is newer or no relay
+    /// served one — and republishes. With neither a relay copy nor a dated
+    /// cached one it publishes nothing and fails: an empty profile is never
+    /// published over one this device cannot see.
     ///
     /// Either way, a photo still QUEUED for upload is cancelled: it was going
-    /// to publish the picture the user is removing. A queued NAME edit is left
-    /// alone — it has nothing to do with the photo.
+    /// to publish the picture the user is removing. One saved while the
+    /// removal is running is kept, and stays queued. A queued NAME edit has
+    /// nothing to do with the photo and stays queued — unless the removal is
+    /// built on the cached row, which already carries it: the name is then
+    /// published with the removal and recorded as published.
+    ///
+    /// A removal some pool relay did not acknowledge is not finished: that
+    /// relay still serves the photo. It is left pending, partly published,
+    /// with the retry ladder advanced, for [`Self::sync_my_profile`] to
+    /// republish to the whole pool.
     ///
     /// # Errors
     ///
     /// Returns a redacted error string on a secret that is not this account's
-    /// identity, or on relay or database failure.
+    /// identity, when no copy of the profile could be read to build on, or on
+    /// relay or database failure.
     pub async fn remove_my_profile_picture(
         &self,
         identity_secret_bytes: Vec<u8>,
@@ -6818,15 +6231,32 @@ impl CircleManagerFfi {
         let now = profile_now_secs();
 
         // Retraction no-op gate: never mint a first public event for a pubkey
-        // that never published a profile.
-        let published = self
+        // that never published a profile — and never mistake a profile the
+        // storage reset forgot for one that does not exist.
+        let published_here = self
             .inner
             .has_published_profile(&own_pk)
             .map_err(redact_profile_err)?;
+        // The local cancel comes before the relay read-back can fail closed: a
+        // photo queued for upload must not be published later by the sync
+        // retry just because this removal could not be verified.
         self.inner
             .cancel_staged_profile_picture(&own_hex)
             .map_err(redact_profile_err)?;
-        if !published {
+        // Against the WHOLE usable pool, the read and the republish both. A
+        // retraction that reached only a subset would leave the removed avatar
+        // live on every other pool relay — and those are precisely the relays
+        // some peers are assigned to read us from, so the "removed" picture
+        // would keep rendering for them.
+        let relay = haven_core::relay::RelayManager::new();
+        let write_relays = self
+            .inner
+            .usable_profile_relays()
+            .map_err(redact_profile_err)?;
+        let fetched = self
+            .own_profile_to_retract(&relay, own_pk, &write_relays, published_here, now)
+            .await?;
+        if !published_here && fetched.is_none() {
             return Ok(self
                 .inner
                 .get_profile(&own_hex)
@@ -6837,32 +6267,31 @@ impl CircleManagerFfi {
                 ));
         }
 
-        // Clear the `picture` field on the freshest kind-0 and republish, both
-        // against the WHOLE usable pool. A retraction that reached only a subset
-        // would leave the removed avatar live on every other pool relay — and
-        // those are precisely the relays some peers are assigned to read us
-        // from, so the "removed" picture would keep rendering for them.
-        let relay = haven_core::relay::RelayManager::new();
-        let write_relays = self
+        // The outbox BEFORE the row: a save landing between the two reads then
+        // leaves its edit queued, where the other order would report an edit
+        // this event never carried as published.
+        let queued = self
             .inner
-            .usable_profile_relays()
+            .pending_profile_sync(&own_hex)
             .map_err(redact_profile_err)?;
-        let salt = self
+        let local = self
             .inner
-            .profile_relay_salt()
+            .get_profile(&own_hex)
             .map_err(redact_profile_err)?;
-        let base_cp = fetch_own_profile(&relay, own_pk, &salt, &write_relays, now)
-            .await
-            .0;
-        // Floor the republished kind-0's `created_at` above the freshest one we
-        // merged onto, so a same-second edit still deterministically supersedes
-        // it under NIP-01 replaceable-event semantics (otherwise a peer's forced
-        // re-fetch resolves the stale profile — the relay keeps the old event on
-        // a `created_at` tie).
-        let prev_created_at = base_cp
-            .as_ref()
-            .and_then(|cp| u64::try_from(cp.event_created_at).ok());
-        let base = base_cp.map_or_else(ProfileMetadata::default, |cp| cp.metadata);
+        // No relay served the profile and this device holds no dated copy of
+        // it: there is nothing to remove a photo FROM. What the device does
+        // hold — nothing, or a name saved here and never sent — would be
+        // published over a profile it cannot see.
+        if fetched.is_none() && !local.as_ref().is_some_and(|row| row.event_created_at > 0) {
+            return Err(PROFILE_RETRACTION_UNVERIFIED.to_string());
+        }
+        // The same base a sync takes: the relays' copy unless it is older than
+        // the cached row — a superseded copy is not built on — and the cached
+        // row when no relay served one. The floor is the newest `created_at`
+        // of the two, so a same-second edit still deterministically supersedes
+        // under NIP-01 (otherwise a peer's forced re-fetch resolves the stale
+        // profile — the relay keeps the old event on a `created_at` tie).
+        let (base, prev_created_at) = merge_base(fetched.as_ref(), local.as_ref());
         let merged = merge_edits(
             &base,
             &ProfileEdits {
@@ -6872,43 +6301,69 @@ impl CircleManagerFfi {
         );
         let event =
             build_metadata_event(&keys, &merged, prev_created_at).map_err(redact_profile_err)?;
-        publish_metadata(&relay, &event, &write_relays)
+        let published = publish_metadata(&relay, &event, &write_relays)
             .await
             .map_err(redact_profile_err)?;
+        let event_created_at = i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX);
 
-        let cached = CachedProfile {
-            pubkey_hex: own_hex.clone(),
-            metadata: merged,
-            state: ProfileState::Known,
-            event_created_at: i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX),
-            fetched_at: now,
-        };
-        // SHADOWED by the row as stored, never the row as assembled: `merged`
-        // is built on the freshest RELAY copy, which another Nostr client may
-        // have written, so the assembled row still carries whatever name that
-        // client published. Rendering it would show the user exactly the text
-        // the sanitizer stripped out of both the DB row and the event.
-        let cached = self
+        // What the outbox holds is settled by this event when applying it
+        // again would change nothing: a removal built on the cached row
+        // already carries a queued name, and one built on the relays' copy
+        // does not. Settled, it is recorded as a sync of that version is, or
+        // the name would read "not published" while every relay serves it. A
+        // photo staged since this removal cancelled the last one is never
+        // settled: it has not been uploaded, and this event names no picture.
+        let settled = queued.as_ref().filter(|queued| {
+            !queued.picture_staged
+                && merge_edits(&merged, &queued.edits.to_edits(None)).sanitized()
+                    == merged.sanitized()
+        });
+        // One transaction for the row, the publish and the coverage, settled
+        // or not. A removal some relay did not take is left owed there, so the
+        // sync retry sends it to the whole pool again: that relay still serves
+        // the photo to every peer reading the profile from it.
+        //
+        // The row rendered is the row as STORED, never the row as assembled:
+        // `merged` is normally built on the RELAY copy, which another Nostr
+        // client may have written, so the assembled row still carries
+        // whatever name that client published. Rendering it would show the
+        // user exactly the text the sanitizer stripped out of both the DB row
+        // and the event. The commit also keeps on the row what is queued when
+        // it writes — a name saved and not yet sent, even one saved during
+        // the publish above — as a fetch that rewrites the row does.
+        let stored = self
             .inner
-            .upsert_profile(&cached)
-            .map_err(redact_profile_err)?;
-        self.inner
-            .record_published_event(0, "", &event.id, &own_pk, now)
+            .commit_profile_sync(&ProfileSyncCommit {
+                pubkey: &own_pk,
+                published_version: settled.map(|queued| queued.local_version),
+                merged: &merged,
+                event_id: &event.id,
+                event_created_at,
+                uploaded_picture_url: None,
+                fully_acked: published.accepted_by.len() == published.total_attempted(),
+                // Read here, not taken from the start: the round on the
+                // relays can outlast the first backoff rung, and a retry
+                // dated from the start would come back already due.
+                now: profile_now_secs(),
+            })
             .map_err(redact_profile_err)?;
         // Drop the cached picture BYTES too — updating only the kind-0 row would
         // leave the old bytes in `profile_pictures`, so the removed avatar would
-        // re-render from cache and persist across restart (bug HIGH-1).
+        // re-render from cache and persist across restart (bug HIGH-1). A photo
+        // staged while this removal ran is not among them.
         self.inner
             .delete_profile_picture(&own_hex)
             .map_err(redact_profile_err)?;
-        Ok(ProfileMetadataFfi::from_cached(&cached, false, None))
+        Ok(ProfileMetadataFfi::from_cached(&stored, false, None))
     }
 
     /// Deletes the local user's OWN public profile (best-effort, plan D10).
     ///
     /// A **no-op unless a profile was published** (`has_published_profile`).
     /// Otherwise it republishes a blank kind-0, best-effort NIP-09-deletes the
-    /// last published kind-0, and clears the local profile cache. The Blossom
+    /// last published kind-0, and clears the local profile cache, keeping one
+    /// row: the dated record of the blank, so that nothing a relay still
+    /// serves of the deleted profile is cached again or built on. The Blossom
     /// blob DELETE is deferred (no delete helper in the profile module;
     /// documented best-effort).
     ///
@@ -6916,6 +6371,11 @@ impl CircleManagerFfi {
     /// going to publish the profile the user is deleting. Nothing else about
     /// the no-op branch changes — a pubkey that never published keeps its local
     /// rows.
+    ///
+    /// A blank some pool relay did not acknowledge is not a finished deletion:
+    /// that relay still serves the profile. The blank is left pending, partly
+    /// published, with the retry ladder advanced, for
+    /// [`Self::sync_my_profile`] to publish a blank to the whole pool again.
     ///
     /// # Errors
     ///
@@ -6939,18 +6399,19 @@ impl CircleManagerFfi {
         let now = profile_now_secs();
 
         // Retraction no-op gate: never publish a blank kind-0 / kind-5 for a
-        // pubkey that never published a profile (no new public footprint).
-        let published = self
+        // pubkey that never published a profile (no new public footprint) —
+        // and never mistake a profile the storage reset forgot for one that
+        // does not exist.
+        let published_here = self
             .inner
             .has_published_profile(&own_pk)
             .map_err(redact_profile_err)?;
+        // The local outbox empties before the relay read-back can fail closed:
+        // a queued edit must not be published later by the sync retry just
+        // because this deletion could not be verified.
         self.inner
             .clear_profile_sync_state(&own_pk.to_hex())
             .map_err(redact_profile_err)?;
-        if !published {
-            return Ok(());
-        }
-
         let relay = haven_core::relay::RelayManager::new();
         // The WHOLE usable pool, for the same reason the publishers use it: we
         // published to all of it, and a deletion that reached only a subset
@@ -6959,10 +6420,12 @@ impl CircleManagerFfi {
             .inner
             .usable_profile_relays()
             .map_err(redact_profile_err)?;
-        let salt = self
-            .inner
-            .profile_relay_salt()
-            .map_err(redact_profile_err)?;
+        let fetched = self
+            .own_profile_to_retract(&relay, own_pk, &write_relays, published_here, now)
+            .await?;
+        if !published_here && fetched.is_none() {
+            return Ok(());
+        }
 
         // 1. Blank kind-0 republish (supersedes any prior profile). Floor its
         // `created_at` above the freshest kind-0 we know about — the newer of
@@ -6971,10 +6434,7 @@ impl CircleManagerFfi {
         // edit and even when the delete lands in the same second as the last
         // edit (replaceable-event determinism — otherwise the blank could tie and
         // the relay keep the old profile, so peers never see the deletion).
-        let fetched_prev = fetch_own_profile(&relay, own_pk, &salt, &write_relays, now)
-            .await
-            .0
-            .and_then(|cp| u64::try_from(cp.event_created_at).ok());
+        let fetched_prev = fetched.and_then(|cp| u64::try_from(cp.event_created_at).ok());
         let local_prev = self
             .inner
             .get_profile(&own_pk.to_hex())
@@ -6984,7 +6444,7 @@ impl CircleManagerFfi {
         let prev_created_at = [fetched_prev, local_prev].into_iter().flatten().max();
         let blank =
             build_blank_metadata_event(&keys, prev_created_at).map_err(redact_profile_err)?;
-        publish_metadata(&relay, &blank, &write_relays)
+        let published = publish_metadata(&relay, &blank, &write_relays)
             .await
             .map_err(redact_profile_err)?;
 
@@ -7000,11 +6460,22 @@ impl CircleManagerFfi {
             let _ = publish_metadata(&relay, &deletion, &write_relays).await;
         }
 
-        // Record the blank publish and clear local profile rows.
+        // Record the blank publish and clear local profile rows, in one
+        // transaction. What stays is the record of the blank itself, dated as
+        // it is: the deleted profile is still on any relay that did not take
+        // the blank, and nothing older than this row is built on or cached
+        // again. A blank some relay did not take is left owed there too, so
+        // the sync retry sends a blank to the whole pool again — its backoff
+        // running from now, not from before the round on the relays.
         self.inner
-            .record_published_event(0, "", &blank.id, &own_pk, now)
+            .wipe_all_profiles(
+                &own_pk,
+                &blank.id,
+                i64::try_from(blank.created_at.as_secs()).unwrap_or(i64::MAX),
+                published.accepted_by.len() == published.total_attempted(),
+                profile_now_secs(),
+            )
             .map_err(redact_profile_err)?;
-        self.inner.wipe_all_profiles().map_err(redact_profile_err)?;
         Ok(())
     }
 
@@ -7457,6 +6928,10 @@ pub struct RelayRejectionFfi {
     pub url: String,
     /// Rejection reason.
     pub reason: String,
+    /// What the refusal said about the event's timestamp, read in Rust
+    /// (`clock_skew::classify_clock_refusal`); `None` when it is not a
+    /// timestamp refusal. A caller reads this, never `reason` (Rule 8).
+    pub clock: Option<DeviceClockComplaintFfi>,
 }
 
 /// Redacting `Debug`: the relay is named by a salted handle and its `reason` is
@@ -7544,6 +7019,53 @@ impl std::fmt::Debug for RelayGiftWrapFetchFfi {
     }
 }
 
+/// Why [`RelayManagerFfi::publish_event`] published nothing: thrown in the
+/// result's place, so a caller that treats a throw as "not sent" goes on
+/// doing so, and read by its fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublishFailureFfi {
+    /// The event was refused before any relay was asked.
+    pub refused: Option<PublishRefusalFfi>,
+    /// The relays that answered refused it on timestamp grounds, as this
+    /// device's clock: the one failure the user can act on.
+    pub clock_rejected: Option<DeviceClockComplaintFfi>,
+}
+
+/// Why [`RelayManagerFfi::publish_event`] asked no relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishRefusalFfi {
+    /// A group message (kind 445): it leaves the device only under a durable
+    /// fanout record (Security Rule 13).
+    GroupMessage,
+    /// A gift wrap (kind 1059): a Welcome leaves the device only from its
+    /// delivery record, through the fanout driver.
+    GiftWrap,
+    /// The JSON is not a signed event.
+    InvalidEvent,
+    /// A relay URL may not be dialled.
+    InvalidRelay,
+}
+
+impl From<haven_core::relay::RelayError> for PublishFailureFfi {
+    fn from(error: haven_core::relay::RelayError) -> Self {
+        use haven_core::relay::RelayError as E;
+        match error {
+            E::DeviceClockRejected { complaint } => Self {
+                refused: None,
+                clock_rejected: Some(complaint.into()),
+            },
+            E::InvalidUrl(_) => Self {
+                refused: Some(PublishRefusalFfi::InvalidRelay),
+                clock_rejected: None,
+            },
+            _ => Self {
+                refused: None,
+                clock_rejected: None,
+            },
+        }
+    }
+}
+
 impl From<CorePublishResult> for PublishResultFfi {
     fn from(r: CorePublishResult) -> Self {
         let is_success = r.is_success();
@@ -7553,7 +7075,12 @@ impl From<CorePublishResult> for PublishResultFfi {
             rejected_by: r
                 .rejected_by
                 .into_iter()
-                .map(|(url, reason)| RelayRejectionFfi { url, reason })
+                .map(|(url, reason)| RelayRejectionFfi {
+                    clock: haven_core::relay::clock_skew::classify_clock_refusal(&reason)
+                        .map(Into::into),
+                    url,
+                    reason,
+                })
                 .collect(),
             failed: r.failed,
             is_success,
@@ -7618,6 +7145,1522 @@ impl From<haven_core::relay::CatchupOutcome> for CatchupResultFfi {
     }
 }
 
+// ── The fanout driver's entries (W9m) ────────────────────────────────────────
+//
+// Each entry takes the circle manager whose session it drives and its
+// caller's word on whether the app is in front of its user. The mode is the
+// full one only on that word AND while the live plane sharing the session
+// makes commits (`haven_core::relay::fanout::Claimed`): Android's background
+// service passes `false`. Every outcome the UI distinguishes crosses as a
+// fieldless enum or a struct of them; no id, relay, count of anybody, epoch
+// or remote text crosses in an error string or a `Debug`.
+
+/// Where a send-side change stands when the call returns (FFI mirror of
+/// `haven_core::relay::fanout::EvolutionStatus`).
+///
+/// Only [`Self::RolledBack`] says the circle is as it was. [`Self::Unresolved`]
+/// is "awaiting relays", never a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishStatusFfi {
+    /// The engine applied the commit and a relay acknowledged it — or, with
+    /// the outcome's `already_so`, the circle already was as the change asks
+    /// and no relay was asked.
+    Confirmed,
+    /// Staged and recorded; no relay has acknowledged it yet: awaiting
+    /// relays. Every later drive sends the same bytes again.
+    Unresolved,
+    /// Every relay proved it refused the commit: the circle is as it was.
+    RolledBack,
+    /// Not made: queued behind what the circle is still resolving, and
+    /// retired, said dropped, at the next open if nothing makes it first.
+    Queued,
+    /// The engine set the commit aside by a path of its own; the circle may
+    /// be out of step with its other members.
+    Stale,
+    /// Staged and neither recorded nor undone: not sent.
+    Unrecorded,
+    /// Not asked of the engine at all: see the outcome's `refusal`.
+    Refused,
+}
+
+impl From<haven_core::relay::fanout::EvolutionStatus> for PublishStatusFfi {
+    fn from(status: haven_core::relay::fanout::EvolutionStatus) -> Self {
+        use haven_core::relay::fanout::EvolutionStatus as S;
+        match status {
+            // The circle is as asked either way; the outcome's `already_so`
+            // says no relay was asked.
+            S::Confirmed | S::AlreadySo => Self::Confirmed,
+            S::Unresolved => Self::Unresolved,
+            S::RolledBack => Self::RolledBack,
+            S::Queued => Self::Queued,
+            S::Stale => Self::Stale,
+            S::Unrecorded => Self::Unrecorded,
+        }
+    }
+}
+
+/// Why an entry asked nothing of the engine: each is fixed copy the UI
+/// chooses by variant (Security Rule 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalFfi {
+    /// This device asked to leave the circle: nothing else is made for it.
+    LeaveInProgress,
+    /// A change is made only by the app in front of its user.
+    ForegroundOnly,
+    /// An invitee lists no inbox relay a Welcome could reach.
+    MissingWelcomeRelays,
+    /// Input the engine still holds for the circle comes first; the next call
+    /// carries on.
+    EngineHeld,
+    /// The circle cannot share from this device until a member's departure
+    /// is finished.
+    SendBlockedByDeparture,
+    /// The circle's routing id is another circle's on this device too: of
+    /// its commits, only what its leave needs is made until it is left.
+    RoutingCollision,
+}
+
+/// The typed refusal `error` is, if the UI must tell it apart.
+fn refusal_of(error: &haven_core::circle::CircleError) -> Option<RefusalFfi> {
+    use haven_core::circle::CircleError as E;
+    match error {
+        E::LeaveInProgress => Some(RefusalFfi::LeaveInProgress),
+        E::ForegroundOnly => Some(RefusalFfi::ForegroundOnly),
+        E::MissingWelcomeRelays => Some(RefusalFfi::MissingWelcomeRelays),
+        E::EngineHeld => Some(RefusalFfi::EngineHeld),
+        E::SendBlockedByDeparture => Some(RefusalFfi::SendBlockedByDeparture),
+        E::RoutingCollision => Some(RefusalFfi::RoutingCollision),
+        _ => None,
+    }
+}
+
+/// What a send-side change did (plan X2).
+pub struct EvolutionOutcomeFfi {
+    /// Where the change stands.
+    pub status: PublishStatusFfi,
+    /// Why nothing was asked of the engine, when `status` is `Refused`.
+    pub refusal: Option<RefusalFfi>,
+    /// How many of this change's Welcomes an inbox relay acknowledged.
+    pub welcomes_delivered: u32,
+    /// How many Welcomes this change carries: one per invitee.
+    pub welcomes_total: u32,
+    /// An invite was applied with no Welcome left to deliver: the invitee must
+    /// be invited again.
+    pub reinvite_owed: bool,
+    /// When to drive again (`resume_driven`), relative; never shown.
+    pub retry_after_ms: Option<u64>,
+    /// What resolving it handed back; every location is already stored.
+    pub replayed: Vec<LocationMessageResultFfi>,
+    /// What a relay's refusal during the call blamed on this device's clock:
+    /// evidence for the clock check, never the relay's words.
+    pub clock_rejected: Option<DeviceClockComplaintFfi>,
+    /// `Some(true)` when the circle already was as the change asks: the
+    /// status reads `Confirmed`, nothing was staged and no relay was asked,
+    /// so it is no relay's acknowledgement. `None` otherwise.
+    pub already_so: Option<bool>,
+}
+
+/// The status and refusal alone: the counts say how many people were
+/// invited, and what was replayed names circles (Security Rule 15).
+impl std::fmt::Debug for EvolutionOutcomeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EvolutionOutcomeFfi")
+            .field("status", &self.status)
+            .field("refusal", &self.refusal)
+            .finish_non_exhaustive()
+    }
+}
+
+fn count(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+impl From<haven_core::relay::fanout::EvolutionOutcome> for EvolutionOutcomeFfi {
+    fn from(outcome: haven_core::relay::fanout::EvolutionOutcome) -> Self {
+        Self {
+            status: outcome.status.into(),
+            refusal: None,
+            welcomes_delivered: count(outcome.welcomes_sent),
+            welcomes_total: count(outcome.welcomes_total),
+            reinvite_owed: outcome
+                .notes
+                .contains(&haven_core::nostr::mls::ChangeNote::ReinviteOwed),
+            retry_after_ms: outcome.retry_after_ms,
+            replayed: outcome
+                .replayed
+                .into_iter()
+                .map(convert_location_result)
+                .collect(),
+            clock_rejected: outcome.clock_rejected.map(Into::into),
+            already_so: (outcome.status == haven_core::relay::fanout::EvolutionStatus::AlreadySo)
+                .then_some(true),
+        }
+    }
+}
+
+impl EvolutionOutcomeFfi {
+    /// A change entry's answer: a refusal the UI tells apart crosses typed, any
+    /// other error as its redacted text.
+    fn answer(
+        result: Result<
+            haven_core::relay::fanout::EvolutionOutcome,
+            haven_core::circle::CircleError,
+        >,
+    ) -> Result<Self, String> {
+        match result {
+            Ok(outcome) => Ok(outcome.into()),
+            Err(error) => refusal_of(&error).map_or_else(
+                || Err(error.to_string()),
+                |refusal| {
+                    Ok(Self {
+                        status: PublishStatusFfi::Refused,
+                        refusal: Some(refusal),
+                        welcomes_delivered: 0,
+                        welcomes_total: 0,
+                        reinvite_owed: false,
+                        retry_after_ms: None,
+                        replayed: Vec::new(),
+                        clock_rejected: None,
+                        already_so: None,
+                    })
+                },
+            ),
+        }
+    }
+}
+
+/// What holds a circle's location sends (FFI mirror of
+/// `haven_core::relay::fanout::SendHeld`): fixed copy chosen by variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendHeldFfi {
+    /// A change of the circle awaits its relays.
+    AwaitingRelays,
+    /// A change of the circle was acknowledged and awaits its confirm.
+    Acknowledged,
+    /// A commit is staged with no record.
+    StagedWithoutRecord,
+    /// The removal of a member who left is due and not made by this call.
+    DepartureDue,
+    /// A change of the circle's relays was applied while the app was away.
+    AwaitsForeground,
+    /// A removal the user asked for was set aside or dropped unmade.
+    RemovalUnmade,
+    /// This device asked to leave the circle.
+    Leaving,
+    /// An admin disbanded the circle: nothing is sealed for it again.
+    Disbanded,
+    /// The circle's routing id is another circle's on this device too: held
+    /// until this circle itself is left.
+    RoutingCollision,
+    /// Stored input the engine cannot settle still gates the circle.
+    StoredInput,
+    /// Nothing holds it.
+    Nothing,
+}
+
+impl From<haven_core::relay::fanout::SendHeld> for SendHeldFfi {
+    fn from(held: haven_core::relay::fanout::SendHeld) -> Self {
+        use haven_core::relay::fanout::SendHeld as H;
+        match held {
+            H::AwaitingRelays => Self::AwaitingRelays,
+            H::Acknowledged => Self::Acknowledged,
+            H::StagedWithoutRecord => Self::StagedWithoutRecord,
+            H::DepartureDue => Self::DepartureDue,
+            H::AwaitsForeground => Self::AwaitsForeground,
+            H::RemovalUnmade => Self::RemovalUnmade,
+            H::Leaving => Self::Leaving,
+            H::Disbanded => Self::Disbanded,
+            H::RoutingCollision => Self::RoutingCollision,
+            H::StoredInput => Self::StoredInput,
+            H::Nothing => Self::Nothing,
+        }
+    }
+}
+
+/// What a user needs to know first about a circle that is not sharing,
+/// worst first ([`RelayManagerFfi::circle_recovery`]) — FFI mirror of
+/// `haven_core::relay::fanout::RecoveryCause`. Fieldless: each maps to fixed
+/// copy and its remedy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryCauseFfi {
+    /// An admin disbanded the circle: nothing is ever sent for it again.
+    Disbanded,
+    /// MDK halted the circle: an admin adding this device again repairs it in
+    /// place; re-creating it is the other way out.
+    Unrecoverable,
+    /// The circle failed to load; a retry may bring it back.
+    Quarantined,
+    /// The circle's routing id is another circle's on this device too: it can
+    /// only be left.
+    RoutingCollision,
+    /// This device asked to leave the circle.
+    Leaving,
+    /// This device cannot read its peers: walks of the circle's history the
+    /// relays answered in full brought back nothing that moves it. No retry
+    /// helps; an admin removing and re-adding this device does.
+    Stalled,
+    /// A removal the user asked for was dropped unmade and a member it named
+    /// is still in the circle.
+    RemovalUnmade,
+    /// The removal of a member who left is due and not made yet.
+    DepartureDue,
+    /// A change of the circle's relays waits for the app's foreground.
+    AwaitsForeground,
+    /// A change of the circle awaits a relay's acknowledgement.
+    AwaitingRelays,
+    /// A change a relay acknowledged awaits its confirm.
+    Acknowledged,
+    /// A commit is staged in the circle with no record.
+    StagedWithoutRecord,
+    /// Stored input still holds the circle's sends; the next call carries on.
+    StoredInput,
+}
+
+impl From<haven_core::relay::fanout::RecoveryCause> for RecoveryCauseFfi {
+    fn from(cause: haven_core::relay::fanout::RecoveryCause) -> Self {
+        use haven_core::relay::fanout::RecoveryCause as C;
+        match cause {
+            C::Disbanded => Self::Disbanded,
+            C::Unrecoverable => Self::Unrecoverable,
+            C::Quarantined => Self::Quarantined,
+            C::RoutingCollision => Self::RoutingCollision,
+            C::Leaving => Self::Leaving,
+            C::Stalled => Self::Stalled,
+            C::RemovalUnmade => Self::RemovalUnmade,
+            C::DepartureDue => Self::DepartureDue,
+            C::AwaitsForeground => Self::AwaitsForeground,
+            C::AwaitingRelays => Self::AwaitingRelays,
+            C::Acknowledged => Self::Acknowledged,
+            C::StagedWithoutRecord => Self::StagedWithoutRecord,
+            C::StoredInput => Self::StoredInput,
+        }
+    }
+}
+
+/// What [`RelayManagerFfi::repair_rotation_driven`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairKindFfi {
+    /// The repair — a self-update of this device's leaf — was staged: see
+    /// `rotated`.
+    Rotated,
+    /// A gate declined it: see `skipped`.
+    Skipped,
+    /// The circle is send-gated; the deferred-send repair ran: see `held_by`.
+    Deferred,
+    /// Not asked of the engine: see `refusal`.
+    Refused,
+}
+
+/// What a repair did.
+pub struct RepairOutcomeFfi {
+    /// Which of the fields below says it.
+    pub kind: RepairKindFfi,
+    /// The rotation's outcome.
+    pub rotated: Option<EvolutionOutcomeFfi>,
+    /// Why a gate declined it.
+    pub skipped: Option<SkipReasonFfi>,
+    /// What still holds the circle's sends.
+    pub held_by: Option<SendHeldFfi>,
+    /// Why nothing was asked of the engine.
+    pub refusal: Option<RefusalFfi>,
+}
+
+impl std::fmt::Debug for RepairOutcomeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RepairOutcomeFfi")
+            .field("kind", &self.kind)
+            .field("rotated", &self.rotated)
+            .field("skipped", &self.skipped)
+            .field("held_by", &self.held_by)
+            .field("refusal", &self.refusal)
+            .finish()
+    }
+}
+
+/// Whether a cursor may pass a received event (Security Rule 12): FFI mirror
+/// of `haven_core::relay::ReceiveOnlyOutcome`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiveVerdictFfi {
+    /// Applied or terminally handled: it does not hold the cursor.
+    Applied,
+    /// Held: the cursor stays at or below it and it is fetched again.
+    Deferred,
+    /// Rejected before any authentication: neither applied nor a hold.
+    NoEvidence,
+    /// Answered from a row the engine holds stranded: not applied and not a
+    /// hold; the circle is told.
+    Stranded,
+}
+
+/// What [`RelayManagerFfi::ingest_driven`] did with one event.
+pub struct IngestOutcomeFfi {
+    /// Whether a cursor may pass it.
+    pub verdict: ReceiveVerdictFfi,
+    /// What it and the drives it made handed back; every location is stored.
+    pub replayed: Vec<LocationMessageResultFfi>,
+    /// When to drive again, relative.
+    pub retry_after_ms: Option<u64>,
+    /// Whether a drive ended on an error; what it did stands.
+    pub errored: bool,
+    /// Why nothing was taken in, when the engine was not asked: the event is
+    /// held ([`ReceiveVerdictFfi::Deferred`]) and fetched again.
+    pub refusal: Option<RefusalFfi>,
+    /// What a relay's refusal during the call blamed on this device's clock:
+    /// evidence for the clock check, never the relay's words.
+    pub clock_rejected: Option<DeviceClockComplaintFfi>,
+}
+
+impl std::fmt::Debug for IngestOutcomeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IngestOutcomeFfi")
+            .field("verdict", &self.verdict)
+            .field("errored", &self.errored)
+            .field("refusal", &self.refusal)
+            .finish_non_exhaustive()
+    }
+}
+
+impl IngestOutcomeFfi {
+    /// An ingest's answer: a refusal the UI tells apart crosses typed, the
+    /// event held; any other error as its redacted text.
+    fn answer(
+        result: Result<haven_core::relay::fanout::PollOutcome, haven_core::circle::CircleError>,
+    ) -> Result<Self, String> {
+        use haven_core::relay::ReceiveOnlyOutcome as V;
+        match result {
+            Ok(outcome) => Ok(Self {
+                verdict: match outcome.verdict {
+                    V::Applied => ReceiveVerdictFfi::Applied,
+                    V::Deferred => ReceiveVerdictFfi::Deferred,
+                    V::NoEvidence => ReceiveVerdictFfi::NoEvidence,
+                    V::Stranded => ReceiveVerdictFfi::Stranded,
+                },
+                replayed: outcome
+                    .replayed
+                    .into_iter()
+                    .map(convert_location_result)
+                    .collect(),
+                retry_after_ms: outcome.retry_after_ms,
+                errored: outcome.errored,
+                refusal: None,
+                clock_rejected: outcome.clock_rejected.map(Into::into),
+            }),
+            Err(error) => refusal_of(&error).map_or_else(
+                || Err(error.to_string()),
+                |refusal| {
+                    Ok(Self {
+                        verdict: ReceiveVerdictFfi::Deferred,
+                        replayed: Vec::new(),
+                        retry_after_ms: None,
+                        errored: false,
+                        refusal: Some(refusal),
+                        clock_rejected: None,
+                    })
+                },
+            ),
+        }
+    }
+}
+
+/// A location [`RelayManagerFfi::seal_location_driven`] sealed and
+/// recorded. Opaque: nothing of it — the event, its circle's id, the relays
+/// its record names — is Dart's to read; it is handed to
+/// [`RelayManagerFfi::publish_location_driven`] and to nothing else.
+#[frb(opaque)]
+pub struct SealedLocationFfi {
+    event: nostr::Event,
+}
+
+/// The signed event a sealed location carries, as JSON, for an integration
+/// test that has to check what reached a relay — and `None` in any build
+/// without debug assertions, a release among them, where the event never
+/// leaves Rust. No app path calls it (`a_sealed_locations_test_accessor_is_debug_only_and_unused_by_the_app`);
+/// it returns the very event the location's send hands every relay, writes
+/// no log and renders through no `Debug`.
+#[frb(sync)]
+#[must_use]
+pub fn sealed_location_event_json_for_test(sealed: &SealedLocationFfi) -> Option<String> {
+    if cfg!(debug_assertions) {
+        Some(nostr::JsonUtil::as_json(&sealed.event))
+    } else {
+        None
+    }
+}
+
+/// Nothing: the event names its circle.
+impl std::fmt::Debug for SealedLocationFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SealedLocationFfi").finish_non_exhaustive()
+    }
+}
+
+/// What [`RelayManagerFfi::seal_location_driven`] made of a fix.
+pub struct SealOutcomeFfi {
+    /// The sealed location, recorded.
+    pub sealed: Option<SealedLocationFfi>,
+    /// What holds the circle's sends, when nothing was sealed.
+    pub held_by: Option<SendHeldFfi>,
+    /// Why nothing was asked of the engine.
+    pub refusal: Option<RefusalFfi>,
+    /// What the call's drives handed back; every location is stored.
+    pub replayed: Vec<LocationMessageResultFfi>,
+    /// When to drive again, relative.
+    pub retry_after_ms: Option<u64>,
+    /// Whether a drive ended on an error.
+    pub errored: bool,
+    /// What a relay's refusal during the call's drives blamed on this
+    /// device's clock.
+    pub clock_rejected: Option<DeviceClockComplaintFfi>,
+}
+
+impl std::fmt::Debug for SealOutcomeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SealOutcomeFfi")
+            .field("sealed", &self.sealed.is_some())
+            .field("held_by", &self.held_by)
+            .field("refusal", &self.refusal)
+            .field("errored", &self.errored)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SealOutcomeFfi {
+    /// A seal's answer: a refusal the UI tells apart crosses typed; any other
+    /// error as its redacted text.
+    fn answer(
+        result: Result<haven_core::relay::fanout::SealOutcome, haven_core::circle::CircleError>,
+    ) -> Result<Self, String> {
+        use haven_core::relay::fanout::LocationSeal as S;
+        match result {
+            Ok(outcome) => {
+                let (sealed, held_by) = match outcome.seal {
+                    S::Sealed { event, .. } => (Some(SealedLocationFfi { event: *event }), None),
+                    S::Deferred(held_by) => (None, Some(held_by.into())),
+                };
+                Ok(Self {
+                    sealed,
+                    held_by,
+                    refusal: None,
+                    replayed: outcome
+                        .replayed
+                        .into_iter()
+                        .map(convert_location_result)
+                        .collect(),
+                    retry_after_ms: outcome.retry_after_ms,
+                    errored: outcome.errored,
+                    clock_rejected: outcome.clock_rejected.map(Into::into),
+                })
+            }
+            Err(error) => refusal_of(&error).map_or_else(
+                || Err(error.to_string()),
+                |refusal| {
+                    Ok(Self {
+                        sealed: None,
+                        held_by: None,
+                        refusal: Some(refusal),
+                        replayed: Vec::new(),
+                        retry_after_ms: None,
+                        errored: false,
+                        clock_rejected: None,
+                    })
+                },
+            ),
+        }
+    }
+}
+
+/// What the one send of a recorded location did (FFI mirror of
+/// `haven_core::relay::fanout::LocationPublish`). A relay's own words never
+/// cross: an `OK false` is [`Self::Refused`] whatever it said.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocationPublishFfi {
+    /// A relay acknowledged it.
+    Accepted,
+    /// Every relay that answered refused it.
+    Refused,
+    /// No relay could be reached.
+    Unreachable,
+    /// Not sent: it had expired.
+    Expired,
+    /// Not sent: a fresh seal would not be made for its circle now.
+    Superseded,
+    /// Not sent: no record of it is stored.
+    Ended,
+    /// Not sent by this call: a send of it is under way.
+    InFlight,
+    /// No relay took it, and a relay's `invalid:`, `blocked:` or unprefixed
+    /// refusal blamed its timestamp (`clock_skew::classify_publish_outcome`): this
+    /// device's clock runs fast, as the relays judged it.
+    ClockAhead,
+    /// As [`Self::ClockAhead`]: the clock runs slow.
+    ClockBehind,
+    /// As [`Self::ClockAhead`], with no direction, or with relays that
+    /// disagreed on it.
+    ClockUnspecified,
+}
+
+/// Which way the relays said this device's clock is off (FFI mirror of
+/// `haven_core::relay::clock_skew::DeviceClockComplaint`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceClockComplaintFfi {
+    /// The event is in the relays' future: the clock runs fast.
+    Ahead,
+    /// The event is too far in the relays' past: the clock runs slow.
+    Behind,
+    /// The timestamp was blamed with no direction.
+    Unspecified,
+}
+
+impl From<haven_core::relay::clock_skew::DeviceClockComplaint> for DeviceClockComplaintFfi {
+    fn from(complaint: haven_core::relay::clock_skew::DeviceClockComplaint) -> Self {
+        use haven_core::relay::clock_skew::DeviceClockComplaint as C;
+        match complaint {
+            C::Ahead => Self::Ahead,
+            C::Behind => Self::Behind,
+            C::Unspecified => Self::Unspecified,
+        }
+    }
+}
+
+impl From<haven_core::relay::fanout::LocationPublish> for LocationPublishFfi {
+    fn from(publish: haven_core::relay::fanout::LocationPublish) -> Self {
+        use haven_core::relay::fanout::LocationPublish as P;
+        match publish {
+            P::Sent(Ok(result)) if result.is_success() => Self::Accepted,
+            P::Sent(Ok(_)) => Self::Refused,
+            P::Sent(Err(haven_core::relay::RelayError::DeviceClockRejected { complaint })) => {
+                use haven_core::relay::clock_skew::DeviceClockComplaint as C;
+                match complaint {
+                    C::Ahead => Self::ClockAhead,
+                    C::Behind => Self::ClockBehind,
+                    C::Unspecified => Self::ClockUnspecified,
+                }
+            }
+            P::Sent(Err(_)) => Self::Unreachable,
+            P::Expired => Self::Expired,
+            P::Superseded => Self::Superseded,
+            P::Ended => Self::Ended,
+            P::InFlight => Self::InFlight,
+        }
+    }
+}
+
+/// What a background burst's open did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BurstOpenFfi {
+    /// The burst is open.
+    Opened,
+    /// No live-sync session runs: nothing was opened.
+    NoSession,
+}
+
+impl BurstOpenFfi {
+    fn answer(result: haven_core::relay::live_sync::LiveSyncResult<()>) -> Result<Self, String> {
+        match result {
+            Ok(()) => Ok(Self::Opened),
+            Err(haven_core::relay::live_sync::LiveSyncError::NoSession) => Ok(Self::NoSession),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+/// Where a leave stands (FFI mirror of `haven_core::relay::fanout::LeaveStatus`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaveStatusFfi {
+    /// The proposal is recorded and driven; a peer commits it.
+    Proposed,
+    /// Not proposed yet; nothing is shared with the circle meanwhile.
+    Pending,
+    /// Left on this device.
+    Completed,
+    /// No leave was asked for.
+    NotLeaving,
+    /// A leave step is made only by the app in front of its user.
+    ForegroundOnly,
+    /// Refused for good, the leave's intent ended: this device is an admin
+    /// and must step down first.
+    AdminMustStepDown,
+    /// Refused for good, the leave's intent ended: the circle is not on this
+    /// device.
+    CircleNotFound,
+    /// Input the engine still holds for the circle comes first; the intent
+    /// stands and the next call carries on.
+    EngineHeld,
+}
+
+/// What a leave call did.
+pub struct LeaveOutcomeFfi {
+    /// Where the leave stands.
+    pub status: LeaveStatusFfi,
+    /// When to call `resume_leave_driven` again, relative.
+    pub retry_after_ms: Option<u64>,
+    /// What a relay's refusal during the call blamed on this device's clock.
+    pub clock_rejected: Option<DeviceClockComplaintFfi>,
+}
+
+/// The status alone: the wait is the driver's schedule.
+impl std::fmt::Debug for LeaveOutcomeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeaveOutcomeFfi")
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LeaveOutcomeFfi {
+    /// A leave call's answer. An error no variant names is an error only when
+    /// no leave intent stands for the circle afterwards (`intent_stands`):
+    /// while one does, the leave goes on, and the press is told so —
+    /// [`LeaveStatusFfi::Pending`], with no hint — never "failed".
+    fn answer_standing(
+        result: Result<haven_core::relay::fanout::LeaveOutcome, haven_core::circle::CircleError>,
+        intent_stands: impl FnOnce() -> bool,
+    ) -> Result<Self, String> {
+        use haven_core::relay::fanout::LeaveStatus as L;
+        match result {
+            Ok(outcome) => Ok(Self {
+                status: match outcome.status {
+                    L::Proposed => LeaveStatusFfi::Proposed,
+                    L::Pending => LeaveStatusFfi::Pending,
+                    L::Completed => LeaveStatusFfi::Completed,
+                    L::NotLeaving => LeaveStatusFfi::NotLeaving,
+                },
+                retry_after_ms: outcome.retry_after_ms,
+                clock_rejected: outcome.clock_rejected.map(Into::into),
+            }),
+            Err(error) => {
+                use haven_core::circle::CircleError as E;
+                let status = match error {
+                    E::ForegroundOnly => LeaveStatusFfi::ForegroundOnly,
+                    E::AdminSelfDemoteRequired => LeaveStatusFfi::AdminMustStepDown,
+                    E::NotFound(_) => LeaveStatusFfi::CircleNotFound,
+                    E::EngineHeld => LeaveStatusFfi::EngineHeld,
+                    _ if intent_stands() => LeaveStatusFfi::Pending,
+                    other => return Err(other.to_string()),
+                };
+                Ok(Self {
+                    status,
+                    retry_after_ms: None,
+                    clock_rejected: None,
+                })
+            }
+        }
+    }
+}
+
+/// Whether a leave intent stands for `group`; a store that cannot say is
+/// read as "none", so the call's own error is what the caller is told.
+fn leave_intent_stands(circle: &CircleManagerFfi, group: &GroupId) -> bool {
+    matches!(circle.inner.leave_intent_at(group), Ok(Some(_)))
+}
+
+/// What a change of this device's that branch selection withdrew was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WithdrawnKindFfi {
+    /// The circle's name or description.
+    GroupProfile,
+    /// The relays, the admins or a disband.
+    AppComponents,
+    /// A removal.
+    RemoveMembers,
+    /// An invite.
+    Invite,
+}
+
+/// What became of a withdrawn change. None of these is "made": the two that
+/// are on their way say so in their names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WithdrawnOutcomeFfi {
+    /// Asked for again and staged under a record: awaiting its relays.
+    ReissuedAwaitingRelays,
+    /// Asked for again and queued, not staged: a later advance makes it.
+    QueuedAgain,
+    /// The winning change touched the same thing: the user asks again.
+    Conflict,
+    /// What it asked for is already so.
+    AlreadySatisfied,
+    /// An invite whose key packages are spent: invited again
+    /// ([`RelayManagerFfi::reinvite_driven`]) or by the user.
+    ReinviteRequired,
+    /// Given up: the user asks again.
+    Abandoned,
+    /// This device is no longer in the circle.
+    NotMember,
+    /// The circle is being left; it was taken back, not failed.
+    RetiredForLeave,
+}
+
+/// One withdrawn change and what became of it.
+pub struct WithdrawnChangeFfi {
+    /// The circle.
+    pub mls_group_id: Vec<u8>,
+    /// What the change was.
+    pub kind: WithdrawnKindFfi,
+    /// What became of it.
+    pub outcome: WithdrawnOutcomeFfi,
+}
+
+/// Never the circle.
+impl std::fmt::Debug for WithdrawnChangeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WithdrawnChangeFfi")
+            .field("kind", &self.kind)
+            .field("outcome", &self.outcome)
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<haven_core::nostr::mls::types::WithdrawnChange> for WithdrawnChangeFfi {
+    fn from(change: haven_core::nostr::mls::types::WithdrawnChange) -> Self {
+        use haven_core::nostr::mls::types::{WithdrawnKind as K, WithdrawnOutcome as O};
+        Self {
+            mls_group_id: change.group_id.as_slice().to_vec(),
+            kind: match change.kind {
+                K::GroupProfile => WithdrawnKindFfi::GroupProfile,
+                K::AppComponents => WithdrawnKindFfi::AppComponents,
+                K::RemoveMembers => WithdrawnKindFfi::RemoveMembers,
+                K::Invite => WithdrawnKindFfi::Invite,
+            },
+            outcome: match change.outcome {
+                O::Reissued => WithdrawnOutcomeFfi::ReissuedAwaitingRelays,
+                O::Queued => WithdrawnOutcomeFfi::QueuedAgain,
+                O::Conflict => WithdrawnOutcomeFfi::Conflict,
+                O::AlreadySatisfied => WithdrawnOutcomeFfi::AlreadySatisfied,
+                O::ReinviteRequired => WithdrawnOutcomeFfi::ReinviteRequired,
+                O::Abandoned => WithdrawnOutcomeFfi::Abandoned,
+                O::NotMember => WithdrawnOutcomeFfi::NotMember,
+                O::RetiredForLeave => WithdrawnOutcomeFfi::RetiredForLeave,
+            },
+        }
+    }
+}
+
+/// What became of a removal set aside unmade and asked for again (decision
+/// 180). Only [`Self::Made`] and [`Self::AlreadyMade`] mean nobody it named is
+/// still in the circle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequeueOutcomeFfi {
+    /// Made.
+    Made,
+    /// Staged under a record: awaiting its relays, not made.
+    PendingAwaitingRelays,
+    /// Undone before it took effect.
+    Undone,
+    /// Not staged; nothing was sent.
+    NotMade,
+    /// Nobody it named is listed any more.
+    AlreadyMade,
+    /// Asked for as often as Haven allows: the user asks again.
+    Abandoned,
+    /// Too late to ask for: the user asks again.
+    Expired,
+}
+
+/// One re-queued removal and what became of it.
+pub struct RequeuedRemovalFfi {
+    /// The circle.
+    pub mls_group_id: Vec<u8>,
+    /// What became of it.
+    pub outcome: RequeueOutcomeFfi,
+}
+
+/// Never the circle.
+impl std::fmt::Debug for RequeuedRemovalFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequeuedRemovalFfi")
+            .field("outcome", &self.outcome)
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<haven_core::nostr::mls::types::RequeuedRemoval> for RequeuedRemovalFfi {
+    fn from(removal: haven_core::nostr::mls::types::RequeuedRemoval) -> Self {
+        use haven_core::nostr::mls::types::RequeueOutcome as O;
+        Self {
+            mls_group_id: removal.group_id.as_slice().to_vec(),
+            outcome: match removal.outcome {
+                O::Made => RequeueOutcomeFfi::Made,
+                O::Pending => RequeueOutcomeFfi::PendingAwaitingRelays,
+                O::Undone => RequeueOutcomeFfi::Undone,
+                O::NotMade => RequeueOutcomeFfi::NotMade,
+                O::AlreadyMade => RequeueOutcomeFfi::AlreadyMade,
+                O::Abandoned => RequeueOutcomeFfi::Abandoned,
+                O::Expired => RequeueOutcomeFfi::Expired,
+            },
+        }
+    }
+}
+
+/// What a drive of the stored records did ([`RelayManagerFfi::resume_driven`]).
+pub struct ResumeOutcomeFfi {
+    /// The withdrawn changes it asked MDK about.
+    pub withdrawn: Vec<WithdrawnChangeFfi>,
+    /// The set-aside removals it took up.
+    pub requeued: Vec<RequeuedRemovalFfi>,
+    /// What it handed back; every location is stored.
+    pub replayed: Vec<LocationMessageResultFfi>,
+    /// When to drive again, relative.
+    pub retry_after_ms: Option<u64>,
+    /// Whether a drive ended on an error; what it did stands.
+    pub errored: bool,
+    /// What a relay's refusal during the call blamed on this device's clock:
+    /// evidence for the clock check, never the relay's words.
+    pub clock_rejected: Option<DeviceClockComplaintFfi>,
+}
+
+/// Presence alone: how many changes were withdrawn is a count of a circle's
+/// history.
+impl std::fmt::Debug for ResumeOutcomeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResumeOutcomeFfi")
+            .field("has_withdrawn", &!self.withdrawn.is_empty())
+            .field("has_requeued", &!self.requeued.is_empty())
+            .field("errored", &self.errored)
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<haven_core::relay::fanout::ResumeOutcome> for ResumeOutcomeFfi {
+    fn from(outcome: haven_core::relay::fanout::ResumeOutcome) -> Self {
+        Self {
+            withdrawn: outcome.withdrawn.into_iter().map(Into::into).collect(),
+            requeued: outcome.requeued.into_iter().map(Into::into).collect(),
+            replayed: outcome
+                .replayed
+                .into_iter()
+                .map(convert_location_result)
+                .collect(),
+            retry_after_ms: outcome.retry_after_ms,
+            errored: outcome.errored,
+            clock_rejected: outcome.clock_rejected.map(Into::into),
+        }
+    }
+}
+
+/// What became of one re-invite MDK owed (FFI mirror of
+/// `haven_core::relay::fanout::ReinviteResult`). None of these is "made":
+/// the one on its way says so in its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReinviteResultFfi {
+    /// Staged under a record with a fresh package: awaiting its relays.
+    ReissuedAwaitingRelays,
+    /// Not made: queued with a fresh package; a later advance makes it.
+    Queued,
+    /// Its next lookup is not due yet.
+    NotDue,
+    /// Not looked for: its circle is not settled yet; nothing was spent.
+    Unsettled,
+    /// No admissible package was found, or the one found was refused; looked
+    /// for again later.
+    KeyPackageMissing,
+    /// The invitee lists no inbox relay a Welcome could reach.
+    NoInbox,
+    /// Given up: the user invites again.
+    GaveUp,
+    /// Ended by MDK: this device is no member, the invitees are already in,
+    /// or a conflict.
+    Ended,
+    /// Not made this time: the engine or the store failed; it is still owed
+    /// and tried again at its next lookup.
+    Unmade,
+}
+
+/// One re-invite and what became of it.
+pub struct ReinviteFfi {
+    /// The circle.
+    pub mls_group_id: Vec<u8>,
+    /// What became of it.
+    pub result: ReinviteResultFfi,
+}
+
+/// What [`RelayManagerFfi::reinvite_driven`] did: the re-invites MDK owed,
+/// and the drive of the stored records that followed them.
+pub struct ReinviteDrivenFfi {
+    /// The re-invites, each with what became of it.
+    pub reinvites: Vec<ReinviteFfi>,
+    /// The drive that followed them, and when to drive again.
+    pub drive: ResumeOutcomeFfi,
+}
+
+/// Presence alone: how many re-invites were owed is a count of circles.
+impl std::fmt::Debug for ReinviteDrivenFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReinviteDrivenFfi")
+            .field("has_reinvites", &!self.reinvites.is_empty())
+            .field("drive", &self.drive)
+            .finish()
+    }
+}
+
+/// Never the circle.
+impl std::fmt::Debug for ReinviteFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReinviteFfi")
+            .field("result", &self.result)
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<haven_core::relay::fanout::Reinvite> for ReinviteFfi {
+    fn from(reinvite: haven_core::relay::fanout::Reinvite) -> Self {
+        use haven_core::relay::fanout::ReinviteResult as R;
+        Self {
+            mls_group_id: reinvite.group_id.as_slice().to_vec(),
+            result: match reinvite.result {
+                R::Reissued => ReinviteResultFfi::ReissuedAwaitingRelays,
+                R::Queued => ReinviteResultFfi::Queued,
+                R::NotDue => ReinviteResultFfi::NotDue,
+                R::Unsettled => ReinviteResultFfi::Unsettled,
+                R::KeyPackageMissing => ReinviteResultFfi::KeyPackageMissing,
+                R::NoInbox => ReinviteResultFfi::NoInbox,
+                R::GaveUp => ReinviteResultFfi::GaveUp,
+                R::Ended => ReinviteResultFfi::Ended,
+                R::Unmade => ReinviteResultFfi::Unmade,
+            },
+        }
+    }
+}
+
+/// What a circle has not been told about its changes (FFI mirror of
+/// `haven_core::nostr::mls::ChangeNote`): each is fixed copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeNoteFfi {
+    /// A removal was undone: the member is still in the circle.
+    RemovalUndone,
+    /// A change that removed nobody was undone.
+    ChangeUndone,
+    /// The circle may be out of step with its other members.
+    MayBeOutOfStep,
+    /// An invitee is on the roster with no Welcome left: invite again.
+    ReinviteOwed,
+    /// A change was staged and neither recorded nor undone.
+    ChangeUnrecorded,
+    /// A queued change was retired unmade.
+    QueuedChangeDropped,
+    /// Queued changes are held behind a failed advance.
+    QueuedChangesHeld,
+    /// The circle holds a change this device has not applied.
+    UnreadChange,
+    /// Fixes of this circle were not delivered.
+    UnreadLocation,
+    /// A change of the circle's relays waits for the app to be opened.
+    AwaitsForeground,
+    /// A removal the user asked for was not made: ask again.
+    QueuedRemovalDropped,
+    /// A change the user made was withdrawn: ask again.
+    ChangeWithdrawn,
+    /// An invitee's Welcome is not delivered yet.
+    WelcomeOwed,
+    /// The circle's routing id is another circle's on this device too: each
+    /// circle is held until it itself is left; leaving one does not release
+    /// the other.
+    RoutingCollision,
+}
+
+impl From<haven_core::nostr::mls::ChangeNote> for ChangeNoteFfi {
+    fn from(note: haven_core::nostr::mls::ChangeNote) -> Self {
+        use haven_core::nostr::mls::ChangeNote as N;
+        match note {
+            N::RemovalUndone => Self::RemovalUndone,
+            N::ChangeUndone => Self::ChangeUndone,
+            N::MayBeOutOfStep => Self::MayBeOutOfStep,
+            N::ReinviteOwed => Self::ReinviteOwed,
+            N::ChangeUnrecorded => Self::ChangeUnrecorded,
+            N::QueuedChangeDropped => Self::QueuedChangeDropped,
+            N::QueuedChangesHeld => Self::QueuedChangesHeld,
+            N::UnreadChange => Self::UnreadChange,
+            N::UnreadLocation => Self::UnreadLocation,
+            N::AwaitsForeground => Self::AwaitsForeground,
+            N::QueuedRemovalDropped => Self::QueuedRemovalDropped,
+            N::ChangeWithdrawn => Self::ChangeWithdrawn,
+            N::WelcomeOwed => Self::WelcomeOwed,
+            N::RoutingCollision => Self::RoutingCollision,
+        }
+    }
+}
+
+/// The notes one circle has not been told, as read for showing
+/// ([`CircleManagerFfi::change_notice`]). Opaque: the only way to drop notes
+/// is [`CircleManagerFfi::acknowledge_shown_notice`] with a notice read this
+/// way, and it drops what this notice read only while nothing was written for
+/// the circle since: a note raised, or a member held, after the read is not
+/// dropped unseen.
+#[frb(opaque)]
+pub struct ChangeNoticeFfi {
+    group_id: GroupId,
+    notice: haven_core::nostr::mls::ChangeNotice,
+}
+
+/// The notes alone, never the circle.
+impl std::fmt::Debug for ChangeNoticeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChangeNoticeFfi")
+            .field("notes", &self.notice.notes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChangeNoticeFfi {
+    /// What the circle is to be shown.
+    #[frb(sync)]
+    #[must_use]
+    pub fn notes(&self) -> Vec<ChangeNoteFfi> {
+        self.notice.notes.iter().copied().map(Into::into).collect()
+    }
+}
+
+impl CircleManagerFfi {
+    /// What `mls_group_id`'s circle has not been told about its changes, to be
+    /// shown. Reading takes nothing: a process that dies before the notice is
+    /// acknowledged reads it again.
+    #[frb(sync)]
+    #[must_use]
+    pub fn change_notice(&self, mls_group_id: Vec<u8>) -> ChangeNoticeFfi {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        ChangeNoticeFfi {
+            notice: self.inner.session().change_notice(&group_id),
+            group_id,
+        }
+    }
+
+    /// Who a removal the user asked for named, dropped unmade, that is still
+    /// in the circle of `mls_group_id`, as lowercase hex: the members a
+    /// "Remove again" is offered for. Read-only; never logged.
+    ///
+    /// # Errors
+    ///
+    /// A fixed message when the circle store cannot be read: an empty list
+    /// would hide a member the user tried to remove.
+    #[frb(sync)]
+    pub fn unmade_removal_members(&self, mls_group_id: Vec<u8>) -> Result<Vec<String>, String> {
+        self.inner
+            .session()
+            .unmade_removal_members(&GroupId::from_slice(&mls_group_id))
+            .ok_or_else(|| "the circle's unmade removal could not be read".to_string())
+    }
+
+    /// Drops what `notice` read from what its circle has not been told: call
+    /// it once the notice has been SHOWN. Only while nothing was written for
+    /// the circle since the read; otherwise nothing is dropped and the next
+    /// notice shows it all again. A second call with the same notice drops
+    /// nothing more. The notes that say what is (unread input, a relay change
+    /// awaiting the foreground) are not dropped; they end when it does.
+    /// Returns `false` when a write since the read superseded the notice:
+    /// read and show the next one.
+    #[frb(sync)]
+    pub fn acknowledge_shown_notice(&self, notice: &ChangeNoticeFfi) -> bool {
+        self.inner
+            .session()
+            .acknowledge_change_notice(&notice.group_id, &notice.notice)
+    }
+}
+
+/// The publish half a driver entry runs on: this manager's own publish
+/// client, the device clock, and a budget of two rows' worth, cut at the end
+/// of the background burst the live plane is in.
+struct Driving<'a> {
+    transport: haven_core::relay::FanoutTransport,
+    clock: haven_core::relay::fanout::WallClock,
+    mode: haven_core::relay::fanout::Claimed<'a>,
+    relays: &'a CoreRelayManager,
+    circle: &'a CoreCircleManager,
+}
+
+impl<'a> Driving<'a> {
+    fn new(relays: &'a CoreRelayManager, circle: &'a CircleManagerFfi, foreground: bool) -> Self {
+        Self {
+            transport: relays.fanout_transport(),
+            clock: haven_core::relay::fanout::WallClock,
+            mode: haven_core::relay::fanout::Claimed::new(&circle.inner, foreground),
+            relays,
+            circle: &circle.inner,
+        }
+    }
+
+    fn publishing(
+        &self,
+    ) -> haven_core::relay::fanout::Publishing<'_, haven_core::relay::FanoutTransport> {
+        haven_core::relay::fanout::Publishing {
+            fanout: &self.transport,
+            publisher: self.relays,
+            clock: &self.clock,
+            deadline_ms: Some(haven_core::relay::fanout::wake_deadline(
+                self.circle,
+                &self.clock,
+                haven_core::relay::fanout::RESUME_BUDGET_MS,
+            )),
+            mode: &self.mode,
+        }
+    }
+}
+
+fn pubkey_of(text: &str) -> Result<nostr::PublicKey, String> {
+    nostr::PublicKey::parse(text).map_err(|_| "Invalid public key".to_string())
+}
+
+impl RelayManagerFfi {
+    /// Creates a circle through the fanout driver: the create writes a
+    /// delivery record for each founding Welcome before it returns, and each
+    /// is then sent from it — the exact stored gift wrap, to its invitee's
+    /// inbox relays alone, until one acknowledges it. A Welcome no relay took
+    /// is sent again by later foreground drives, for a day.
+    ///
+    /// `foreground` is the caller's word that the app is in front of its
+    /// user; a circle is created only then ([`RefusalFfi::ForegroundOnly`]).
+    /// An invitee with no inbox relay a Welcome could reach refuses the
+    /// create before anything exists ([`RefusalFfi::MissingWelcomeRelays`]).
+    // One Dart argument per Rust parameter (the FRB contract).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_circle_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        identity_secret_bytes: Vec<u8>,
+        members: Vec<MemberKeyPackageFfi>,
+        name: String,
+        description: Option<String>,
+        circle_type: String,
+        relays: Vec<String>,
+        foreground: bool,
+    ) -> Result<CircleCreationOutcomeFfi, String> {
+        let keys = keys_from_secret_bytes(identity_secret_bytes)?;
+        let members = member_key_packages(members)?;
+        let circle_type = CoreCircleType::parse(&circle_type)
+            .ok_or_else(|| format!("Invalid circle type: {circle_type}"))?;
+        let config = CoreCircleConfig::new(&name)
+            .with_type(circle_type)
+            .with_relays(relays);
+        let config = match description {
+            Some(description) => config.with_description(description),
+            None => config,
+        };
+        let driving = Driving::new(&self.inner, circle, foreground);
+        match driving
+            .publishing()
+            .create_circle(&circle.inner, &keys, members, &config)
+            .await
+        {
+            Ok(created) => Ok(CircleCreationOutcomeFfi {
+                circle: Some(CircleFfi::from(&created.circle)),
+                refusal: None,
+                welcomes_sent: u32::try_from(created.welcomes_sent).unwrap_or(u32::MAX),
+                welcomes_total: u32::try_from(created.welcomes_total).unwrap_or(u32::MAX),
+                unsent_recipients: created.unsent_recipients,
+            }),
+            Err(error) => refusal_of(&error).map_or_else(
+                || Err(error.to_string()),
+                |refusal| {
+                    Ok(CircleCreationOutcomeFfi {
+                        circle: None,
+                        refusal: Some(refusal),
+                        welcomes_sent: 0,
+                        welcomes_total: 0,
+                        unsent_recipients: Vec::new(),
+                    })
+                },
+            ),
+        }
+    }
+
+    /// Invites `members` to the circle through the fanout driver: the circle's
+    /// older records are driven first, the invite is staged under a record of
+    /// its own and driven, and each Welcome goes from a record of its own to
+    /// its invitee's inbox relays once a relay takes the commit.
+    ///
+    /// `foreground` is the caller's word that the app is in front of its user;
+    /// a change is made only then ([`RefusalFfi::ForegroundOnly`]).
+    pub async fn add_members_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        mls_group_id: Vec<u8>,
+        members: Vec<MemberKeyPackageFfi>,
+        foreground: bool,
+    ) -> Result<EvolutionOutcomeFfi, String> {
+        let members = member_key_packages(members)?;
+        let driving = Driving::new(&self.inner, circle, foreground);
+        EvolutionOutcomeFfi::answer(
+            driving
+                .publishing()
+                .add_members(&circle.inner, &GroupId::from_slice(&mls_group_id), &members)
+                .await,
+        )
+    }
+
+    /// Removes members (hex or npub) through the fanout driver.
+    pub async fn remove_members_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        mls_group_id: Vec<u8>,
+        member_pubkeys: Vec<String>,
+        foreground: bool,
+    ) -> Result<EvolutionOutcomeFfi, String> {
+        let pubkeys = member_pubkeys
+            .iter()
+            .map(|text| pubkey_of(text).map(|key| key.to_hex()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let driving = Driving::new(&self.inner, circle, foreground);
+        EvolutionOutcomeFfi::answer(
+            driving
+                .publishing()
+                .remove_members(&circle.inner, &GroupId::from_slice(&mls_group_id), &pubkeys)
+                .await,
+        )
+    }
+
+    /// Replaces the circle's relays through the fanout driver.
+    pub async fn update_circle_relays_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        mls_group_id: Vec<u8>,
+        relays: Vec<String>,
+        foreground: bool,
+    ) -> Result<EvolutionOutcomeFfi, String> {
+        let driving = Driving::new(&self.inner, circle, foreground);
+        EvolutionOutcomeFfi::answer(
+            driving
+                .publishing()
+                .update_relays(&circle.inner, &GroupId::from_slice(&mls_group_id), &relays)
+                .await,
+        )
+    }
+
+    /// Makes `successor` an admin beside this device: a leaving admin's first
+    /// step.
+    pub async fn admin_handoff_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        mls_group_id: Vec<u8>,
+        successor: String,
+        foreground: bool,
+    ) -> Result<EvolutionOutcomeFfi, String> {
+        let successor = pubkey_of(&successor)?;
+        let driving = Driving::new(&self.inner, circle, foreground);
+        EvolutionOutcomeFfi::answer(
+            driving
+                .publishing()
+                .admin_handoff(
+                    &circle.inner,
+                    &GroupId::from_slice(&mls_group_id),
+                    &successor,
+                )
+                .await,
+        )
+    }
+
+    /// Steps this device down from admin: a leaving admin's second step.
+    pub async fn self_demote_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        mls_group_id: Vec<u8>,
+        foreground: bool,
+    ) -> Result<EvolutionOutcomeFfi, String> {
+        let driving = Driving::new(&self.inner, circle, foreground);
+        EvolutionOutcomeFfi::answer(
+            driving
+                .publishing()
+                .self_demote(&circle.inner, &GroupId::from_slice(&mls_group_id))
+                .await,
+        )
+    }
+
+    /// What the user needs to know first about the circle of
+    /// `mls_group_id`, worst first; `None` when nothing holds it. One standing
+    /// read: what holds its sends is read in the caller's claimed mode, so
+    /// pass whether the app is in front of its user.
+    ///
+    /// # Errors
+    ///
+    /// A fixed, redacted message when no circle row names the group or the
+    /// store cannot be read.
+    pub async fn circle_recovery(
+        &self,
+        circle: &CircleManagerFfi,
+        mls_group_id: Vec<u8>,
+        foreground: bool,
+    ) -> Result<Option<RecoveryCauseFfi>, String> {
+        let driving = Driving::new(&self.inner, circle, foreground);
+        driving
+            .publishing()
+            .circle_recovery(&circle.inner, &GroupId::from_slice(&mls_group_id))
+            .await
+            .map(|cause| cause.map(Into::into))
+            .map_err(|error| error.to_string())
+    }
+
+    /// The epoch-repair rotation through the fanout driver: a self-update of
+    /// this device's leaf, which any member may make.
+    pub async fn repair_rotation_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        mls_group_id: Vec<u8>,
+        foreground: bool,
+    ) -> Result<RepairOutcomeFfi, String> {
+        use haven_core::relay::fanout::RepairOutcome as R;
+        let driving = Driving::new(&self.inner, circle, foreground);
+        let none = |kind| RepairOutcomeFfi {
+            kind,
+            rotated: None,
+            skipped: None,
+            held_by: None,
+            refusal: None,
+        };
+        match driving
+            .publishing()
+            .repair_rotation(&circle.inner, &GroupId::from_slice(&mls_group_id))
+            .await
+        {
+            Ok(R::Rotated(outcome)) => Ok(RepairOutcomeFfi {
+                rotated: Some(outcome.into()),
+                ..none(RepairKindFfi::Rotated)
+            }),
+            Ok(R::Skipped(reason)) => Ok(RepairOutcomeFfi {
+                skipped: Some(reason.into()),
+                ..none(RepairKindFfi::Skipped)
+            }),
+            Ok(R::Deferred { held_by, .. }) => Ok(RepairOutcomeFfi {
+                held_by: Some(held_by.into()),
+                ..none(RepairKindFfi::Deferred)
+            }),
+            Err(error) => refusal_of(&error).map_or_else(
+                || Err(error.to_string()),
+                |refusal| {
+                    Ok(RepairOutcomeFfi {
+                        refusal: Some(refusal),
+                        ..none(RepairKindFfi::Refused)
+                    })
+                },
+            ),
+        }
+    }
+
+    /// Ingests one received `kind:445` (a poll's) through the fanout driver:
+    /// its circle's records are driven first, and whatever the engine stages
+    /// on the way is recorded and driven.
+    pub async fn ingest_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        event_json: String,
+        foreground: bool,
+    ) -> Result<IngestOutcomeFfi, String> {
+        let event = <nostr::Event as nostr::JsonUtil>::from_json(&event_json)
+            .map_err(|_| "Invalid event".to_string())?;
+        let driving = Driving::new(&self.inner, circle, foreground);
+        IngestOutcomeFfi::answer(
+            driving
+                .publishing()
+                .ingest_for_poll(&circle.inner, &event)
+                .await,
+        )
+    }
+
+    /// Seals a fix for the circle and records it, in one engine hold, after
+    /// its records are driven. The sealed event goes to
+    /// [`Self::publish_location_driven`] and nowhere else.
+    pub async fn seal_location_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        mls_group_id: Vec<u8>,
+        location: &LocationMessage,
+        foreground: bool,
+    ) -> Result<SealOutcomeFfi, String> {
+        let driving = Driving::new(&self.inner, circle, foreground);
+        SealOutcomeFfi::answer(
+            driving
+                .publishing()
+                .seal_location(
+                    &circle.inner,
+                    &GroupId::from_slice(&mls_group_id),
+                    &location.inner,
+                )
+                .await,
+        )
+    }
+
+    /// Sends a location [`Self::seal_location_driven`] sealed, once, to the
+    /// relays its record names, and ends its record whatever was answered.
+    pub async fn publish_location_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        sealed: &SealedLocationFfi,
+    ) -> LocationPublishFfi {
+        let driving = Driving::new(&self.inner, circle, false);
+        driving
+            .publishing()
+            .publish_location(&circle.inner, &sealed.event)
+            .await
+            .into()
+    }
+
+    /// Leaves the circle: the intent is written first, and from then nothing
+    /// is shared with the circle; the proposal is recorded and driven.
+    pub async fn leave_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        mls_group_id: Vec<u8>,
+        foreground: bool,
+    ) -> Result<LeaveOutcomeFfi, String> {
+        let me = pubkey_of(&circle.own_pubkey_hex)?;
+        let driving = Driving::new(&self.inner, circle, foreground);
+        let group = GroupId::from_slice(&mls_group_id);
+        LeaveOutcomeFfi::answer_standing(
+            driving.publishing().leave(&circle.inner, &group, &me).await,
+            || leave_intent_stands(circle, &group),
+        )
+    }
+
+    /// Carries a leave on: what a start and every drive call for each circle a
+    /// leave was asked for in.
+    pub async fn resume_leave_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        mls_group_id: Vec<u8>,
+        foreground: bool,
+    ) -> Result<LeaveOutcomeFfi, String> {
+        let me = pubkey_of(&circle.own_pubkey_hex)?;
+        let driving = Driving::new(&self.inner, circle, foreground);
+        let group = GroupId::from_slice(&mls_group_id);
+        LeaveOutcomeFfi::answer_standing(
+            driving
+                .publishing()
+                .resume_leave(&circle.inner, &group, &me)
+                .await,
+            || leave_intent_stands(circle, &group),
+        )
+    }
+
+    /// Drives every stored record that has something due, in every circle: for
+    /// a process the live-sync engine does not drive (no live plane — the
+    /// flag-off configuration, and Android's background service).
+    pub async fn resume_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        foreground: bool,
+    ) -> ResumeOutcomeFfi {
+        let driving = Driving::new(&self.inner, circle, foreground);
+        driving.publishing().resume(&circle.inner).await.into()
+    }
+
+    /// Drives the re-invites MDK owes — fresh key packages looked up through
+    /// this manager's invite lookup, on MDK's own pacing (5 s, 30 s, 2 min,
+    /// 10 min, 1 h, 6 h, then daily, eight lookups in all) — and then the
+    /// stored records, so a re-invite staged here is sent in the same call;
+    /// that drive's outcome, its wait included, comes back with the
+    /// re-invites. Only in the foreground.
+    pub async fn reinvite_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        foreground: bool,
+    ) -> ReinviteDrivenFfi {
+        let driving = Driving::new(&self.inner, circle, foreground);
+        let publishing = driving.publishing();
+        let reinvited = publishing.reinvite(&circle.inner, &self.inner).await;
+        let drive = publishing.resume(&circle.inner).await;
+        ReinviteDrivenFfi {
+            reinvites: reinvited.into_iter().map(Into::into).collect(),
+            drive: drive.into(),
+        }
+    }
+}
+
 /// What an M8-2 `KeyPackage` maintenance tick did (FFI mirror of
 /// [`haven_core::relay::maintenance::KpMaintenanceAction`]).
 ///
@@ -7648,6 +8691,9 @@ pub enum KpMaintenanceActionFfi {
     /// why it is a distinct value rather than folded into
     /// [`Self::RotatedExpiringMaterial`].
     RotatedUnreadableLifetime,
+    /// No relay was probed or published to: the storage-reset notice has not
+    /// been acknowledged yet (the `not_after` purge still ran).
+    AwaitingResetAcknowledgement,
 }
 
 impl From<haven_core::relay::maintenance::KpMaintenanceAction> for KpMaintenanceActionFfi {
@@ -7660,6 +8706,7 @@ impl From<haven_core::relay::maintenance::KpMaintenanceAction> for KpMaintenance
             A::RepublishedFreshD => Self::RepublishedFreshD,
             A::RotatedExpiringMaterial => Self::RotatedExpiringMaterial,
             A::RotatedUnreadableLifetime => Self::RotatedUnreadableLifetime,
+            A::AwaitingResetAcknowledgement => Self::AwaitingResetAcknowledgement,
         }
     }
 }
@@ -7763,25 +8810,38 @@ fn maintenance_now_secs() -> u64 {
     }
 }
 
-/// The resolved inputs for one `KeyPackage` (re)publish — a struct rather than
-/// six positional arguments, and INTERNAL (never crosses the FFI: it carries
-/// relay urls, a NIP-33 `d`, and MLS wire bytes).
-struct KpPublishPlan<'a> {
-    /// The stable slot to publish into, or `None` to mint a fresh one.
+/// What became of one publish of a staged `KeyPackage` — INTERNAL.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StagedPublish {
+    /// A relay acknowledged it; the write went to this many relays.
+    Acknowledged(usize),
+    /// No relay acknowledged it.
+    Unacknowledged,
+    /// Every relay that answered refused it for its `created_at`.
+    RefusedForItsClock,
+}
+
+impl StagedPublish {
+    const fn acknowledged_by(self) -> usize {
+        match self {
+            Self::Acknowledged(relays) => relays,
+            Self::Unacknowledged | Self::RefusedForItsClock => 0,
+        }
+    }
+}
+
+/// The resolved inputs for one `KeyPackage` mint-and-publish — INTERNAL (never
+/// crosses the FFI: it carries relay urls and a NIP-33 `d`).
+struct KpMintPlan<'a> {
+    /// The stable slot to mint into, or `None` to mint a fresh one.
     existing_d: Option<&'a str>,
-    /// The own-relay URLs to write to (heal subset, or every responder for a
-    /// rotation).
+    /// The own-relay URLs to write to.
     targets: &'a [String],
-    /// The currently-tracked row, read ONCE by the caller so the `d`, the cached
-    /// bytes, and the lifetime verdict all describe the same package.
-    tracked: Option<haven_core::circle::PublishedKeyPackageRow>,
-    /// Forbid reusing the cached bytes even when they exist. Set only by a
-    /// rotation — the whole point of which is that the cached material is the
-    /// thing being replaced.
-    force_mint: bool,
-    /// Overrides the reported action (a rotation reports why it rotated instead
-    /// of the generic `Republished*`). `None` keeps the pre-existing mapping.
-    mint_action: Option<haven_core::relay::maintenance::KpMaintenanceAction>,
+    /// `created_at` of the newest event known in the slot, which the new
+    /// event's stamp must clear.
+    prev_created_at: Option<i64>,
+    /// The branch to report.
+    action: haven_core::relay::maintenance::KpMaintenanceAction,
 }
 
 /// The resolved inputs for one malformed-slot retirement attempt — INTERNAL
@@ -7792,14 +8852,12 @@ struct KpRetirementInputs<'a> {
     /// The kind-30443 events the probe actually returned. Needed only to
     /// recognise a replacement this device published but failed to record.
     probed: &'a [nostr::Event],
-    /// The tracked row, read once with its lifetime so the `d`, the cached
-    /// bytes and the lifetime verdict all describe the same package.
-    tracked: Option<haven_core::circle::PublishedKeyPackageRow>,
-    /// That row's lifetime verdict, which decides whether the cached package can
-    /// be MOVED to the new slot or must be replaced by fresh material.
+    /// The tracked package, read once with its lifetime so the `d`, the bytes
+    /// and the lifetime verdict all describe the same package.
+    tracked: Option<&'a haven_core::nostr::mls::TrackedKeyPackage>,
+    /// That package's lifetime verdict, which decides whether it can be MOVED
+    /// to the new slot or must be replaced by fresh material.
     tracked_lifetime: haven_core::relay::maintenance::TrackedKpLifetime,
-    /// The tick clock, shared with the rotation threshold and the purge bound.
-    now_secs: u64,
 }
 
 /// What a malformed-slot retirement attempt did, when it did anything at all.
@@ -7828,6 +8886,9 @@ pub enum RelayListActionFfi {
     AlreadyCurrent,
     /// The list was (re)published to own relays this tick.
     Republished,
+    /// Nothing was published: the storage-reset notice has not been
+    /// acknowledged yet.
+    AwaitingResetAcknowledgement,
 }
 
 impl From<haven_core::relay::maintenance::RelayListAction> for RelayListActionFfi {
@@ -7837,6 +8898,7 @@ impl From<haven_core::relay::maintenance::RelayListAction> for RelayListActionFf
             A::Suppressed => Self::Suppressed,
             A::AlreadyCurrent => Self::AlreadyCurrent,
             A::Republished => Self::Republished,
+            A::AwaitingResetAcknowledgement => Self::AwaitingResetAcknowledgement,
         }
     }
 }
@@ -7921,6 +8983,14 @@ pub enum SubscriptionHealthActionFfi {
     /// as "the receive plane is whole". The next burst re-issues every REQ at
     /// its persisted cursor, which is what a healer would have done anyway.
     Paused,
+    /// A relay had dropped, or a REQ the session expects was missing, and the
+    /// tick was not told the app is in the foreground: NOTHING was
+    /// re-anchored. The whole-session repair is the foreground's, and waits
+    /// for a caller that can claim it.
+    ///
+    /// The opposite of proof: the tick saw a receive plane that is not whole
+    /// and left it so. A consumer must never read it as healthy.
+    AwaitingForeground,
 }
 
 impl From<haven_core::relay::live_sync::HealthAction> for SubscriptionHealthActionFfi {
@@ -7932,6 +9002,7 @@ impl From<haven_core::relay::live_sync::HealthAction> for SubscriptionHealthActi
             A::Resubscribed => Self::Resubscribed,
             A::TargetedReanchor => Self::TargetedReanchor,
             A::Paused => Self::Paused,
+            A::AwaitingForeground => Self::AwaitingForeground,
         }
     }
 }
@@ -7986,22 +9057,6 @@ impl From<haven_core::relay::live_sync::SubscriptionHealthOutcome>
     }
 }
 
-/// Presence-only result of the one-time legacy KeyPackage retraction (F10a).
-///
-/// Counters only — no relay urls, event ids, or `d` values — so a derived
-/// `Debug` is leak-free (Security Rule 4/6).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LegacyRetractionOutcomeFfi {
-    /// `true` when the sentinel was already set (no work done this call).
-    pub already_done: bool,
-    /// Stale legacy kind-443 KeyPackage twins scrubbed (kind-5 deletions ACKed).
-    pub legacy_443_scrubbed: u32,
-    /// `true` when the kind-10051 KeyPackage-relay list was retracted (≥1 ACK).
-    pub relay_list_retracted: bool,
-    /// Relay probes / publishes that errored (tallied, never fatal).
-    pub relay_errors: u32,
-}
-
 impl RelayManagerFfi {
     /// Creates a new relay manager.
     pub async fn new_instance() -> Result<Self, String> {
@@ -8010,7 +9065,20 @@ impl RelayManagerFfi {
         })
     }
 
-    /// Publishes a signed event to the specified relays.
+    /// Publishes a signed event that is neither a group message nor a gift
+    /// wrap — the relay-removal scrub, a relay list — to the specified
+    /// relays.
+    ///
+    /// A group message (kind 445) is refused before any relay is asked: a
+    /// commit, a proposal and a location leave the device only under a
+    /// durable fanout record, through the fanout driver (Security Rule 13).
+    /// So is a gift wrap (kind 1059): every Welcome, a founding one included,
+    /// is sent from its delivery record by the driver
+    /// ([`Self::create_circle_driven`]).
+    ///
+    /// # Errors
+    ///
+    /// A [`PublishFailureFfi`], read by its fields, never its text (Rule 8).
     ///
     /// # Arguments
     ///
@@ -8020,72 +9088,25 @@ impl RelayManagerFfi {
         &self,
         event_json: String,
         relays: Vec<String>,
-    ) -> Result<PublishResultFfi, String> {
-        // Parse the event from JSON
-        let event: nostr::Event =
-            serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
-
+    ) -> Result<PublishResultFfi, PublishFailureFfi> {
+        let refused = |refusal| PublishFailureFfi {
+            refused: Some(refusal),
+            clock_rejected: None,
+        };
+        let event: nostr::Event = serde_json::from_str(&event_json)
+            .map_err(|_| refused(PublishRefusalFfi::InvalidEvent))?;
+        if event.kind.as_u16() == haven_core::nostr::KIND_GROUP_MESSAGE {
+            return Err(refused(PublishRefusalFfi::GroupMessage));
+        }
+        if event.kind == nostr::Kind::GiftWrap {
+            return Err(refused(PublishRefusalFfi::GiftWrap));
+        }
         let result = self
             .inner
             .publish_event(&event, &relays)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(PublishFailureFfi::from)?;
         Ok(PublishResultFfi::from(result))
-    }
-
-    /// Publishes a kind-445 LOCATION event: one bounded fan-out, no retry.
-    ///
-    /// The location plane's publish, and the only one that may take it. One
-    /// connect and one 5 s per-relay window — 10 s worst case against the
-    /// ~49 s [`RelayManagerFfi::publish_event`] ladder — succeeding as soon as
-    /// one relay returns `OK`. A location that misses is superseded by the next
-    /// tick; a commit is not, so commits, welcomes, proposals, key packages,
-    /// relay lists and profiles keep `publish_event` (Security Rule 13). Never
-    /// call this for anything whose outcome resolves a `PendingStateRef`.
-    ///
-    /// # Arguments
-    ///
-    /// * `event_json` - JSON-serialized signed kind-445 event
-    /// * `relays` - List of relay URLs (must be wss://)
-    ///
-    /// # Errors
-    ///
-    /// The error string keeps `RelayError`'s `Display`, so the
-    /// `haven.clock.device_clock_rejected:` token a fast device clock produces
-    /// still reaches `nostr_relay_service.dart` and still becomes a
-    /// `RelayClockRejectionException` — the one publish failure the user can
-    /// act on. No relay prose and no key material is ever in it (Rule 8).
-    pub async fn publish_location_event(
-        &self,
-        event_json: String,
-        relays: Vec<String>,
-    ) -> Result<PublishResultFfi, String> {
-        let event: nostr::Event =
-            serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
-
-        let result = self
-            .inner
-            .publish_location_event(&event, &relays)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(PublishResultFfi::from(result))
-    }
-
-    /// Publishes an event in the background without waiting for relay acknowledgment.
-    ///
-    /// Spawns a background task. Suitable for location updates and key package
-    /// re-publishes where periodic timers ensure eventual delivery.
-    pub fn publish_event_fire_and_forget(
-        &self,
-        event_json: String,
-        relays: Vec<String>,
-    ) -> Result<(), String> {
-        let event: nostr::Event =
-            serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
-
-        self.inner
-            .publish_event_background(event, &relays)
-            .map_err(|e| e.to_string())
     }
 
     /// Gets the connection status of all relays.
@@ -8153,68 +9174,35 @@ impl RelayManagerFfi {
 
     // ==================== Event Fetching ====================
 
-    /// Fetches a user's `KeyPackage` relay list (kind 10051).
-    ///
-    /// Returns the relay URLs where the user publishes their KeyPackages.
-    /// Used to discover where to fetch a user's KeyPackage for inviting them.
-    ///
-    /// # Arguments
-    ///
-    /// * `pubkey` - The user's public key (hex or npub format)
-    ///
-    /// # Returns
-    ///
-    /// List of relay URLs, or empty if no relay list is published.
-    pub async fn fetch_keypackage_relays(&self, pubkey: String) -> Result<Vec<String>, String> {
-        self.inner
-            .fetch_keypackage_relays(&pubkey)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    /// Fetches a user's key package (kind 30443; legacy 443 is detected but
-    /// never returned).
-    ///
-    /// Resolves the user's relay lists (legacy kind 10051, then NIP-65 kind
-    /// 10002), then fetches the most recent key package from those relays,
-    /// falling back to the read-only discovery plane.
-    ///
-    /// # Arguments
-    ///
-    /// * `pubkey` - The user's public key (hex or npub format)
-    ///
-    /// # Returns
-    ///
-    /// The KeyPackage event as JSON, or `None` if not found.
-    /// Returns the event JSON so Flutter can cache and use it for circle creation.
-    pub async fn fetch_keypackage(&self, pubkey: String) -> Result<Option<String>, String> {
-        let event = self
-            .inner
-            .fetch_keypackage(&pubkey)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        Ok(event.map(|e| serde_json::to_string(&e).expect("Failed to serialize event")))
-    }
-
     /// Fetches a user's `KeyPackage` with their relay lists.
     ///
-    /// Concurrently fetches three replaceable relay-list events:
-    /// - kind 10051 for `KeyPackage` discovery
+    /// Concurrently fetches two replaceable relay-list events:
     /// - kind 10050 for Welcome delivery (NIP-17 inbox)
-    /// - kind 10002 for Welcome delivery fallback (NIP-65)
+    /// - kind 10002 (NIP-65): its write-capable set for `KeyPackage`
+    ///   discovery, its read-capable set for the Welcome delivery fallback
     ///
-    /// Then runs the shared `KeyPackage` discovery cascade
-    /// (`fetch_keypackage_with_cascade`): 10051 → NIP-65 → defaults.
+    /// Then runs the `KeyPackage` discovery cascade for one invite target
+    /// (`RelayManager::fetch_keypackage_for_invite`): the person's NIP-65
+    /// write set, then the read-only discovery relays.
     ///
     /// Each relay-list fetch is tolerated independently: a transient failure
     /// on one list does not abort the whole call. The returned
-    /// `MemberKeyPackageFfi` carries the 10050 and 10002 lists so the caller
-    /// can run the Welcome delivery cascade (10050 → 10002 → defaults).
+    /// `MemberKeyPackageFfi` carries the 10050 list — the one place a Welcome
+    /// goes — and the 10002 read set.
+    ///
+    /// The selection is made for one invite target: `circle`'s existing circle
+    /// `mls_group_id`, or — `None` — a new circle. MDK's own admission rule for
+    /// that target is read once and applied to every candidate BEFORE they are
+    /// ranked, so a fresher package the target cannot admit never hides an
+    /// older one it can. When nothing is admissible the best valid candidate
+    /// is still returned, so [`CircleManagerFfi::check_member_key_package`]
+    /// can say why the person cannot be invited.
     ///
     /// # Arguments
     ///
     /// * `pubkey` - The user's public key (hex or npub format)
+    /// * `circle` - The inviter's circle manager
+    /// * `mls_group_id` - The circle the person is being added to, if it exists
     ///
     /// # Returns
     ///
@@ -8223,35 +9211,37 @@ impl RelayManagerFfi {
     pub async fn fetch_member_keypackage(
         &self,
         pubkey: String,
+        circle: &CircleManagerFfi,
+        mls_group_id: Option<Vec<u8>>,
     ) -> Result<Option<MemberKeyPackageFfi>, String> {
-        // Fetch all three relay lists concurrently. Each arm is tolerated
-        // independently: a transient failure on one list is logged and treated
-        // as an empty list so the cascade can still fall through to later
+        let group_id = mls_group_id.map(|id| GroupId::from_slice(&id));
+        let admit = circle
+            .inner
+            .session()
+            .key_package_admission_rule(group_id.as_ref())
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Each list is tolerated independently: a transient failure is logged
+        // and treated as empty so the cascade can still fall through to later
         // tiers rather than aborting the whole operation.
-        let (keypackage_result, inbox_result, nip65_result) = tokio::join!(
-            self.inner.fetch_keypackage_relays(&pubkey),
+        let (inbox_result, nip65_result) = tokio::join!(
             self.inner.fetch_inbox_relays(&pubkey),
-            self.inner.fetch_nip65_relays(&pubkey),
+            self.inner.fetch_nip65_relay_list(&pubkey),
         );
 
-        let keypackage_relays = keypackage_result.unwrap_or_else(|_| {
-            log::debug!("[fetch_member_keypackage] kind 10051 fetch failed");
-            Vec::new()
-        });
         let inbox_relays = inbox_result.unwrap_or_else(|_| {
             log::debug!("[fetch_member_keypackage] kind 10050 fetch failed");
             Vec::new()
         });
-        let nip65_relays = nip65_result.unwrap_or_else(|_| {
+        let nip65 = nip65_result.unwrap_or_else(|_| {
             log::debug!("[fetch_member_keypackage] kind 10002 fetch failed");
-            Vec::new()
+            haven_core::relay::Nip65Relays::default()
         });
 
-        // Delegate the KeyPackage discovery cascade to the core helper so the
-        // 10051 → NIP-65 → defaults logic lives in exactly one place.
         let event = self
             .inner
-            .fetch_keypackage_with_cascade(&pubkey, &keypackage_relays, &nip65_relays)
+            .fetch_keypackage_for_invite(&pubkey, &nip65.write, &admit)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -8260,9 +9250,10 @@ impl RelayManagerFfi {
                 let key_package_json = serde_json::to_string(&e)
                     .map_err(|e| format!("Failed to serialize key package event: {e}"))?;
                 Ok(Some(MemberKeyPackageFfi {
+                    author_npub: hex_to_npub(&e.pubkey.to_hex()),
                     key_package_json,
                     inbox_relays,
-                    nip65_relays,
+                    nip65_relays: nip65.read,
                 }))
             }
             None => Ok(None),
@@ -8367,7 +9358,7 @@ impl RelayManagerFfi {
 
         // The per-relay count is shown to the user as exact, so the cap is a
         // generous flood-guard rather than a paging limit: a real inbox holds
-        // far fewer than this many gift wraps in the 2-day lookback window, so
+        // far fewer than this many gift wraps in its 96-hour lookback window, so
         // the headline "N new invitations" is not silently truncated.
         let mut filter = nostr::Filter::new()
             .kind(nostr::Kind::GiftWrap)
@@ -8427,31 +9418,52 @@ impl RelayManagerFfi {
         Ok(CatchupResultFfi::from(outcome))
     }
 
-    /// `KeyPackage` maintenance (Dark Matter DM-2b) — republish-if-missing into
-    /// a stable NIP-33 `d` slot on the user's own NIP-65 relays. Also the
-    /// FIRST-publish path (onboarding / login): a responding relay serving
-    /// nothing + no tracked slot mints a fresh package.
+    /// Runs only the refused-object redelivery, for only the circles that owe
+    /// one ([`haven_core::relay::catchup::run_refused_refetch`]): what the live
+    /// plane's `RefetchOwed` asks for. Sweeps no window and moves no cursor.
+    /// Returns presence-only counters.
+    pub async fn run_refused_refetch(
+        &self,
+        circle: &CircleManagerFfi,
+        max_duration_secs: u64,
+    ) -> Result<CatchupResultFfi, String> {
+        let circle_mgr = circle.inner.clone();
+        let outcome = haven_core::relay::catchup::run_refused_refetch(
+            &circle_mgr,
+            &self.inner,
+            max_duration_secs,
+        )
+        .await;
+        Ok(CatchupResultFfi::from(outcome))
+    }
+
+    /// `KeyPackage` maintenance — republish-if-missing into a stable NIP-33 `d`
+    /// slot on the user's own NIP-65 relays. Also the FIRST-publish path
+    /// (onboarding / login): a responding relay serving nothing + no tracked
+    /// slot mints a fresh package.
     ///
     /// Dart-timer-driven (the identity secret lives only in Dart, Security Rule
     /// 9): the secret bytes are consumed per-call and zeroized. Fail-soft and
     /// idempotent — one tick of the periodic maintenance loop.
     ///
-    /// Steps:
+    /// The tracked package lives in MDK's durable lifecycle record
+    /// (`SessionManager::tracked_key_package`); this is the scheduler over it
+    /// (`docs/MDK_UPSTREAM_TRACKER.md` T-KP-DRIVER). Steps:
     /// 1. Derive `Keys`/pubkey from the secret bytes (zeroized after).
-    /// 2. Probe the user's OWN NIP-65 relays (dedup'd, own-relays-only — never a
-    ///    default union) for kind-30443 events authored by self.
-    /// 3. Build the presence snapshot (`(d, event_id)` per responder) — under
-    ///    Dark Matter a published 30443 is a last-resort package that never dies
-    ///    on join, so the presence gate is pure relay presence of the tracked
-    ///    stable slot (the M8-2 live-material gate is gone).
-    /// 4. Read the tracked package's OWN MLS `Lifetime` and honour the spec's
-    ///    `not_after` init-key deletion bound (step 4a below) — unconditionally,
-    ///    before any relay decision, because that bound does not depend on the
-    ///    transport.
-    /// 5. Decide via [`decide_kp_maintenance`]; on `SeedD` record the seed row;
-    ///    on `Republish`/`Rotate` reuse-or-mint the single kind-30443 event,
-    ///    publish to OWN relays only (publish-first), record the row, and delete
-    ///    minted material on a failed publish (mdk#160).
+    /// 2. Honour the spec's `not_after` init-key deletion bound (4a below) —
+    ///    unconditionally, before any relay decision, because that bound does
+    ///    not depend on the transport.
+    /// 3. Probe the user's OWN NIP-65 relays (dedup'd, own-relays-only — never a
+    ///    default union) for kind-30443 events authored by self, and build the
+    ///    presence snapshot.
+    /// 4. A replacement staged by an earlier tick that no relay acknowledged is
+    ///    republished, byte for byte, and promoted on the first acknowledgement.
+    /// 5. Otherwise decide via [`decide_kp_maintenance`]: on `SeedD` record the
+    ///    slot; on a heal republish the tracked event's own bytes; on a
+    ///    replacement stage a fresh package (minted and frozen in one MDK
+    ///    transaction), publish it to OWN relays only, and promote it on the
+    ///    first acknowledgement — which deletes the private material of every
+    ///    package it supersedes.
     ///
     /// # Lifetime-aware rotation
     ///
@@ -8461,21 +9473,18 @@ impl RelayManagerFfi {
     /// relay and still fetchable, but every `Add` referencing it fails
     /// validation — the account is **silently uninvitable**. So the tick asks
     /// the package itself, never a Nostr timestamp, whether it is past
-    /// `KP_ROTATE_AT_LIFETIME_FRACTION` of its own window. Timing this off
-    /// `event.created_at` would be wrong here even though the reference app
-    /// does it: Haven's heal path re-publishes CACHED bytes under a FRESH
-    /// `created_at`, so an event-age timer would reset on every relay heal
-    /// while the real `not_after` kept ticking.
+    /// `KP_ROTATE_AT_LIFETIME_FRACTION` of its own window.
     ///
     /// # 4a. The `not_after` deletion bound
     ///
     /// `foundation/key-packages.md`: a last-resort `KeyPackage` MUST delete its
     /// private `init_key` at the earlier of (a) confirmed publication of a
-    /// replacement — handled by the publish-then-delete step in
-    /// [`Self::republish_key_package`] — or (b) `Lifetime.not_after`. Bound (b)
-    /// is transport-independent, so it runs here even when no relay responded
-    /// and nothing can be published. Retaining it would mean a compromise of
-    /// that one key decrypts *every recorded Welcome* ever sent to it.
+    /// replacement — the promotion in [`Self::mint_key_package`] — or (b)
+    /// `Lifetime.not_after`. Bound (b) is transport-independent, so it runs
+    /// here even when no relay responded and nothing can be published.
+    /// Retaining it would mean a compromise of that one key decrypts *every
+    /// recorded Welcome* ever sent to it. The slot survives, so the
+    /// replacement reuses it.
     ///
     /// Returns a presence-only [`KpMaintenanceOutcomeFfi`] (counters + enum).
     ///
@@ -8486,27 +9495,65 @@ impl RelayManagerFfi {
         identity_secret_bytes: Vec<u8>,
     ) -> Result<KpMaintenanceOutcomeFfi, String> {
         use haven_core::relay::maintenance::{
-            decide_kp_maintenance, kp_event_d_tag, KpMaintenanceAction, KpMaintenanceDecision,
-            KpMaintenanceOutcome, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
+            decide_kp_maintenance, kp_event_d_tag, kp_event_is_pre_migration, read_kp_lifetime,
+            KpMaintenanceAction, KpMaintenanceDecision, KpMaintenanceOutcome, RelayKpEntry,
+            RelayKpPerRelay, RelayKpSnapshot, TrackedKpLifetime, TrackedKpSlot,
         };
 
         let keys = keys_from_secret_bytes(identity_secret_bytes)?;
         let own_pk = keys.public_key();
         let circle_mgr = circle.inner.clone();
+        let session = circle_mgr.session();
+        // One tick at a time for this account, from here to the promotion
+        // (the slot retirement included): two that overlap each stage their
+        // own replacement, and the second promotion deletes the first's key
+        // while a relay still serves it.
+        let _tick = session.key_package_tick().await;
 
         // ── Step 4a: the transport-INDEPENDENT half, first ───────────────────
         //
-        // Read the tracked row and its package's own MLS Lifetime, and honour
-        // `foundation/key-packages.md`'s `not_after` deletion bound BEFORE any
-        // relay work. Ordering is deliberate: that bound is a MUST that does not
-        // depend on a relay answering, on a relay even being configured, or on a
-        // replacement being publishable. Every early return below it would
+        // Ordering is deliberate: the `not_after` bound is a MUST that does not
+        // depend on a relay answering, on a relay even being configured, or on
+        // a replacement being publishable. Every early return below it would
         // otherwise skip it.
         // ONE clock read for the whole tick, so the purge bound and the rotation
         // threshold can never disagree about what "now" is.
         let now = maintenance_now_secs();
-        let (mut tracked, tracked_lifetime, expired_init_key_purged) =
-            Self::purge_key_package_past_not_after(&circle_mgr, now).await?;
+        let expired_init_key_purged = match session.sweep_expired_key_packages(now).await {
+            Ok(purged) => {
+                if purged {
+                    log::info!(
+                        "[maintain_key_package] deleted a KeyPackage init key that reached \
+                         Lifetime.not_after"
+                    );
+                }
+                purged
+            }
+            Err(_) => {
+                log::debug!("[maintain_key_package] expired init-key delete failed");
+                false
+            }
+        };
+        // Read ONCE, after the sweep, so the `d`, the bytes and the lifetime
+        // verdict all describe the same package.
+        let tracked = session
+            .tracked_key_package()
+            .await
+            .map_err(|e| e.to_string())?;
+        let tracked_lifetime = tracked
+            .as_ref()
+            .map_or(TrackedKpLifetime::Absent, |t| read_kp_lifetime(&t.package));
+
+        // A KeyPackage is discoverable only through the NIP-65 list, which
+        // waits for the storage-reset notice; so does this tick's relay work.
+        // The `not_after` purge above never waits.
+        if !circle_mgr.storage_reset_acknowledged() {
+            return Ok(KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome {
+                action: KpMaintenanceAction::AwaitingResetAcknowledgement,
+                expired_init_key_purged,
+                ..KpMaintenanceOutcome::no_op(0, 0)
+            }));
+        }
 
         // Own NIP-65 (KeyPackage-discovery) relays only — no default union, no
         // discovery plane. Persisted under the `KeyPackage` slot (W2).
@@ -8540,7 +9587,7 @@ impl RelayManagerFfi {
             .author(own_pk)
             .limit(64);
         let mut relay_errors: usize = 0;
-        let per_relay = match self.inner.fetch_events_per_relay(filter, &own_relays).await {
+        let mut per_relay = match self.inner.fetch_events_per_relay(filter, &own_relays).await {
             Ok(v) => v,
             Err(_) => {
                 // Fail-closed: a top-level probe error yields NO responders ⇒
@@ -8550,10 +9597,10 @@ impl RelayManagerFfi {
                 Vec::new()
             }
         };
+        retain_own_events(&mut per_relay, &own_pk, nostr::Kind::Custom(30443));
 
         // Build the snapshot from RESPONDING relays only (non-responders are
-        // excluded structurally, C4). Each responder contributes `(d, event_id)`
-        // per on-relay 30443 — no live-material verdict under Dark Matter.
+        // excluded structurally, C4).
         let mut responders: Vec<RelayKpPerRelay> = Vec::new();
         for outcome in &per_relay {
             if !outcome.responded {
@@ -8565,6 +9612,8 @@ impl RelayManagerFfi {
                 .map(|ev| RelayKpEntry {
                     d_tag: kp_event_d_tag(ev).unwrap_or_default(),
                     event_id: ev.id.to_hex(),
+                    created_at: ev.created_at.as_secs(),
+                    pre_migration: kp_event_is_pre_migration(ev),
                 })
                 .collect();
             responders.push(RelayKpPerRelay {
@@ -8575,6 +9624,81 @@ impl RelayManagerFfi {
         let responders_probed = responders.len();
         let canonical_on_relays: usize = responders.iter().map(|r| r.canonical.len()).sum();
         let snapshot = RelayKpSnapshot { responders };
+        let outcome = |action, relays_healed, relay_errors, retired_malformed_slot| {
+            KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome {
+                action,
+                canonical_on_relays,
+                relays_targeted,
+                responders_probed,
+                relays_healed,
+                relay_errors,
+                expired_init_key_purged,
+                retired_malformed_slot,
+            })
+        };
+
+        // ── A staged replacement no relay acknowledged yet ───────────────────
+        //
+        // Its event was signed once when it was staged; this is the same bytes
+        // again, to every responder, until one acknowledges it. Nothing else is
+        // decided while it is outstanding: the record already says what the
+        // slot should hold.
+        if let Some((slot, pending)) = tracked
+            .as_ref()
+            .and_then(|t| t.pending.as_ref().map(|pending| (t.slot.as_str(), pending)))
+        {
+            let targets: Vec<String> = snapshot
+                .responders
+                .iter()
+                .map(|r| r.relay_url.clone())
+                .collect();
+            if targets.is_empty() {
+                return Ok(outcome(
+                    KpMaintenanceAction::AlreadyHealthy,
+                    0,
+                    relay_errors,
+                    false,
+                ));
+            }
+            let published = self
+                .publish_and_promote(&circle_mgr, pending, &targets, &mut relay_errors)
+                .await;
+            // Signed by a clock that has since been set back: its `created_at`
+            // is ahead of every relay for good, so the same bytes can never be
+            // acknowledged and the tick would stop here for ever. Minted again
+            // when — and only when — the present clock would stamp it EARLIER;
+            // the refused package's key goes with the next acknowledgement. A
+            // clock that is still ahead, or a slot whose last event already
+            // sits in that future, would stamp the same refusal again, so
+            // nothing is minted for those.
+            let prev_created_at = tracked
+                .as_ref()
+                .and_then(|t| t.created_at)
+                .and_then(|at| i64::try_from(at).ok());
+            let restamped =
+                haven_core::relay::maintenance::monotonic_kp_created_at(prev_created_at, now);
+            let healed = if published == StagedPublish::RefusedForItsClock
+                && restamped < pending.created_at
+            {
+                let plan = KpMintPlan {
+                    existing_d: Some(slot),
+                    targets: &targets,
+                    prev_created_at,
+                    action: KpMaintenanceAction::RepublishedStableD,
+                };
+                self.mint_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
+                    .await?
+                    .1
+            } else {
+                published.acknowledged_by()
+            };
+            return Ok(outcome(
+                KpMaintenanceAction::RepublishedStableD,
+                healed,
+                relay_errors,
+                false,
+            ));
+        }
 
         // ── One-time malformed-slot retirement, BEFORE the maintenance decision ─
         //
@@ -8604,396 +9728,226 @@ impl RelayManagerFfi {
                     KpRetirementInputs {
                         snapshot: &snapshot,
                         probed: &probed,
-                        tracked: tracked.clone(),
+                        tracked: tracked.as_ref(),
                         tracked_lifetime,
-                        now_secs: now,
                     },
                     &mut relay_errors,
                 )
                 .await;
             if let Some(tick) = retirement {
-                return Ok(KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome {
-                    action: tick.action,
-                    canonical_on_relays,
-                    relays_targeted,
-                    responders_probed,
-                    relays_healed: tick.relays_healed,
+                return Ok(outcome(
+                    tick.action,
+                    tick.relays_healed,
                     relay_errors,
-                    expired_init_key_purged,
-                    retired_malformed_slot: tick.completed,
-                }));
+                    tick.completed,
+                ));
             }
         }
 
-        // Decide. The stable slot and the tracked package's lifetime both come
-        // from the SAME row read in step 4a, so the `d` and the lifetime can
-        // never describe different packages.
-        let stored_stable_d = tracked.as_ref().map(|r| r.d_tag.clone());
-        let decision =
-            decide_kp_maintenance(&snapshot, stored_stable_d.as_deref(), tracked_lifetime, now);
-
-        // Republished-relay tally, only non-zero on a successful Republish.
-        let mut relays_healed: usize = 0;
-        let action = match decision {
-            KpMaintenanceDecision::NoOp => KpMaintenanceAction::AlreadyHealthy,
-            KpMaintenanceDecision::SeedD { d } => {
-                // Record the seed row (on-relay event id + `d`, EMPTY bytes)
-                // BEFORE any future mint so stability holds from cycle 1. The
-                // empty `key_package` marks "adopt but not-yet-minted": the next
-                // republish tick mints fresh into this slot (heal reuse needs
-                // non-empty tracked bytes). No publish this tick.
-                let event_id = snapshot
-                    .responders
-                    .iter()
-                    .flat_map(|r| r.canonical.iter())
-                    .find(|e| e.d_tag == d)
-                    .map(|e| e.event_id.clone())
-                    .unwrap_or_default();
-                let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(0);
-                let seeded = run_blocking({
-                    let mgr = circle_mgr.clone();
-                    let d = d.clone();
-                    move || {
-                        mgr.record_published_key_package(
-                            &haven_core::circle::PublishedKeyPackageRow {
-                                event_id,
-                                d_tag: d,
-                                key_package: Vec::new(),
-                                created_at: now,
-                            },
-                        )
+        // Decide. The slot, the tracked event and the lifetime all come from the
+        // one record read above.
+        let tracked_event_id = tracked
+            .as_ref()
+            .and_then(|t| t.published.as_ref())
+            .map(|event| event.id.to_hex())
+            .unwrap_or_default();
+        let prev_created_at = tracked
+            .as_ref()
+            .and_then(|t| t.created_at)
+            .and_then(|at| i64::try_from(at).ok());
+        // A package a Welcome consumed can still open the other invitations
+        // made for it, and replacing it deletes its key at the first
+        // acknowledgement. While the user holds an invitation unanswered that
+        // replacement waits, for a bounded time; a lost bundle, the rotation
+        // and the `not_after` deletion do not.
+        let replacement_waits = if tracked
+            .as_ref()
+            .is_some_and(|t| t.replacement_owed && t.consumed_but_held)
+        {
+            run_blocking({
+                let mgr = circle_mgr.clone();
+                move || {
+                    mgr.consumed_key_package_replacement_waits(now)
                         .map_err(|e| e.to_string())
-                    }
-                })
-                .await;
-                if seeded.is_err() {
+                }
+            })
+            .await?
+        } else {
+            false
+        };
+        let decision = decide_kp_maintenance(
+            &snapshot,
+            tracked.as_ref().map(|t| TrackedKpSlot {
+                d_tag: &t.slot,
+                event_id: &tracked_event_id,
+                created_at: t.created_at.unwrap_or(0),
+                adopted: t.adopted,
+                replacement_owed: t.replacement_owed && !replacement_waits,
+            }),
+            tracked_lifetime,
+            now,
+        );
+
+        let mint = |existing_d, targets, action| KpMintPlan {
+            existing_d,
+            targets,
+            prev_created_at,
+            action,
+        };
+        let (action, relays_healed) = match &decision {
+            KpMaintenanceDecision::NoOp => (KpMaintenanceAction::AlreadyHealthy, 0),
+            KpMaintenanceDecision::SeedD { d } => {
+                // Record the slot BEFORE any future mint so stability holds
+                // from cycle 1; the next tick mints into it. No publish this
+                // tick. The wall clock, at or after the adopted event's own
+                // stamp, is the floor that mint must clear.
+                let floor = haven_core::relay::maintenance::now_secs();
+                if session.adopt_key_package_slot(d, floor).await.is_err() {
                     relay_errors += 1;
                 }
-                KpMaintenanceAction::SeededD
+                (KpMaintenanceAction::SeededD, 0)
             }
             KpMaintenanceDecision::Republish {
                 existing_d,
                 targets,
             } => {
-                let plan = KpPublishPlan {
-                    existing_d: existing_d.as_deref(),
-                    targets: &targets,
-                    tracked: tracked.take(),
-                    force_mint: false,
-                    mint_action: None,
-                };
-                let (act, healed) = self
-                    .republish_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
-                    .await?;
-                relays_healed = healed;
-                act
+                // HEAL when the tracked package's own signed event can be sent
+                // again; otherwise the slot has no package to re-advertise (an
+                // adopted slot, a purged one, a first publish) and one is minted.
+                let frozen = tracked.as_ref().and_then(|t| {
+                    t.published
+                        .as_ref()
+                        .filter(|_| existing_d.as_deref() == Some(t.slot.as_str()))
+                });
+                match frozen {
+                    Some(event) => {
+                        let healed = match self.inner.publish_event(event, targets).await {
+                            Ok(_) => targets.len(),
+                            Err(_) => {
+                                relay_errors += 1;
+                                log::debug!("[maintain_key_package] 30443 publish failed");
+                                0
+                            }
+                        };
+                        (KpMaintenanceAction::RepublishedStableD, healed)
+                    }
+                    None => {
+                        let plan = mint(
+                            existing_d.as_deref(),
+                            targets,
+                            KpMaintenanceAction::RepublishedFreshD,
+                        );
+                        self.mint_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
+                            .await?
+                    }
+                }
+            }
+            KpMaintenanceDecision::Replace {
+                existing_d,
+                targets,
+            } => {
+                let plan = mint(
+                    Some(existing_d.as_str()),
+                    targets,
+                    KpMaintenanceAction::RepublishedStableD,
+                );
+                self.mint_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
+                    .await?
             }
             KpMaintenanceDecision::Rotate {
                 existing_d,
                 targets,
                 lifetime_unreadable,
             } => {
-                // ROTATION: `force_mint` is the load-bearing bit. Cached bytes
-                // exist for this slot, so without it the reuse branch would
-                // re-advertise the very material that is aging out — the exact
-                // defect this path was added to fix.
-                let plan = KpPublishPlan {
-                    existing_d: Some(existing_d.as_str()),
-                    targets: &targets,
-                    tracked: tracked.take(),
-                    force_mint: true,
-                    mint_action: Some(if lifetime_unreadable {
-                        KpMaintenanceAction::RotatedUnreadableLifetime
-                    } else {
-                        KpMaintenanceAction::RotatedExpiringMaterial
-                    }),
+                let action = if *lifetime_unreadable {
+                    KpMaintenanceAction::RotatedUnreadableLifetime
+                } else {
+                    KpMaintenanceAction::RotatedExpiringMaterial
                 };
-                let (act, healed) = self
-                    .republish_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
-                    .await?;
-                relays_healed = healed;
-                act
+                let plan = mint(Some(existing_d.as_str()), targets, action);
+                self.mint_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
+                    .await?
             }
         };
 
-        Ok(KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome {
-            action,
-            canonical_on_relays,
-            relays_targeted,
-            responders_probed,
-            relays_healed,
-            relay_errors,
-            expired_init_key_purged,
-            // Ordinary maintenance retires nothing: a tick that completed the
-            // one-time slot retirement returned above.
-            retired_malformed_slot: false,
-        }))
+        // Ordinary maintenance retires nothing: a tick that completed the
+        // one-time slot retirement returned above.
+        Ok(outcome(action, relays_healed, relay_errors, false))
     }
 
-    /// Honours `foundation/key-packages.md`'s SECOND `init_key` deletion bound:
-    /// "a last-resort KeyPackage ... MUST delete that material at the earlier of
-    /// [confirmed replacement publication]; the KeyPackage `Lifetime.not_after`
-    /// time."
+    /// Stages a fresh `KeyPackage` — minted and its signed event frozen in the
+    /// lifecycle record — publishes it to `plan.targets`, and promotes it on the
+    /// first acknowledgement.
     ///
-    /// Returns `(tracked row, its lifetime, whether a purge happened)`. The row
-    /// is returned so the caller reads storage ONCE — the stable `d` and the
-    /// lifetime must describe the same package or the decision is incoherent.
-    ///
-    /// # Why this is unconditional
-    ///
-    /// The first bound (confirmed replacement) is handled by
-    /// [`Self::republish_key_package`], but it only fires on a tick that can
-    /// actually reach a relay. A device that is offline, has no `KeyPackage`
-    /// relays configured, or whose relays are all down would otherwise retain
-    /// dead private init material indefinitely — and the spec is explicit that
-    /// "local retention policy MUST NOT extend either bound". The stated risk is
-    /// not abstract: compromising a retained `init_key` lets an attacker decrypt
-    /// every recorded Welcome ever encrypted to that `KeyPackage` and recover
-    /// the join secrets those Welcomes carried.
-    ///
-    /// On purge the tracking row is rewritten with EMPTY bytes rather than
-    /// deleted: that preserves the stable `d` (the transport binding forbids
-    /// minting a fresh slot for a routine replacement) while making it
-    /// structurally impossible for any later code path to re-publish material
-    /// the engine no longer holds.
-    ///
-    /// Fail-soft — a failed delete or rewrite is logged (redacted) and reported
-    /// as "not purged" rather than aborting the tick.
-    ///
-    /// `now_secs` is injected so the bound is provable without waiting 84 days;
-    /// production passes the wall clock.
-    async fn purge_key_package_past_not_after(
-        circle_mgr: &Arc<CoreCircleManager>,
-        now_secs: u64,
-    ) -> Result<
-        (
-            Option<haven_core::circle::PublishedKeyPackageRow>,
-            haven_core::relay::maintenance::TrackedKpLifetime,
-            bool,
-        ),
-        String,
-    > {
-        use haven_core::relay::maintenance::{kp_init_key_purge_due, read_kp_lifetime};
-
-        let tracked = run_blocking({
-            let mgr = circle_mgr.clone();
-            move || {
-                mgr.latest_published_key_package()
-                    .map_err(|e| e.to_string())
-            }
-        })
-        .await?;
-
-        let Some(row) = tracked else {
-            return Ok((
-                None,
-                haven_core::relay::maintenance::TrackedKpLifetime::Absent,
-                false,
-            ));
-        };
-        // The lifetime is read off the KeyPackage's OWN bytes — never off
-        // `row.created_at`, which a heal refreshes without re-minting anything.
-        let lifetime = read_kp_lifetime(&row.key_package);
-        if !kp_init_key_purge_due(lifetime, now_secs) {
-            return Ok((Some(row), lifetime, false));
-        }
-
-        let superseded = haven_core::nostr::mls::types::KeyPackage::new(row.key_package.clone());
-        if circle_mgr.delete_key_package(&superseded).await.is_err() {
-            log::debug!("[maintain_key_package] expired init-key delete failed");
-            return Ok((Some(row), lifetime, false));
-        }
-        // Blank the cached bytes so no later path can re-advertise material the
-        // engine no longer has; keep the slot id and its timestamp floor.
-        let blanked = haven_core::circle::PublishedKeyPackageRow {
-            key_package: Vec::new(),
-            ..row
-        };
-        let recorded = run_blocking({
-            let mgr = circle_mgr.clone();
-            let blanked = blanked.clone();
-            move || {
-                mgr.record_published_key_package(&blanked)
-                    .map_err(|e| e.to_string())
-            }
-        })
-        .await;
-        if recorded.is_err() {
-            log::debug!("[maintain_key_package] expired KP row blanking failed");
-        }
-        log::info!(
-            "[maintain_key_package] deleted a KeyPackage init key that reached \
-             Lifetime.not_after"
-        );
-        // The lifetime verdict is deliberately UNCHANGED: the material is gone,
-        // but the account still needs a published replacement, so the decision
-        // must still resolve to `Rotate` (not a heal that skips serving relays).
-        Ok((Some(blanked), lifetime, true))
-    }
-
-    /// Reuses-or-mints, signs, publishes (to the confirmed-drop TARGET relays
-    /// only), and records a `KeyPackage` republish for
-    /// [`Self::maintain_key_package`]. Publish-first: only after a relay write
-    /// succeeds is the tracking row recorded; freshly-minted material that
-    /// FAILS to publish is deleted (mdk#160) so a retry loop never leaks
-    /// private init keys.
-    ///
-    /// `plan.targets` is the relay subset the decision resolved (the
-    /// non-serving responders for a heal, EVERY responder for a rotation). When
-    /// the tracked slot still holds cached last-resort bytes AND
-    /// `plan.force_mint` is false, HEAL by re-publishing the SAME bytes verbatim
-    /// (no re-mint); otherwise MINT a fresh package into the slot (first publish
-    /// / seed-handoff / rotation).
-    ///
-    /// [`KpMaintenanceDecision::Republish`]: haven_core::relay::maintenance::KpMaintenanceDecision::Republish
-    async fn republish_key_package(
+    /// A publish no relay acknowledged deletes nothing: the replacement stays
+    /// staged and the next tick republishes the same bytes, so a retry loop
+    /// against a failing relay mints once.
+    async fn mint_key_package(
         &self,
         circle_mgr: &Arc<CoreCircleManager>,
         keys: &nostr::Keys,
-        plan: KpPublishPlan<'_>,
+        plan: KpMintPlan<'_>,
         relay_errors: &mut usize,
     ) -> Result<(haven_core::relay::maintenance::KpMaintenanceAction, usize), String> {
-        use haven_core::relay::maintenance::{
-            build_kp_maintenance_events, build_kp_maintenance_events_reusing, KpMaintenanceAction,
-        };
-
-        let KpPublishPlan {
-            existing_d,
-            targets,
-            tracked,
-            force_mint,
-            mint_action,
-        } = plan;
-
-        // Reuse only when the tracked row is the SAME slot, carries non-empty
-        // cached bytes (a seed row has empty bytes → mint fresh instead), and the
-        // decision did not demand a re-mint. `force_mint` is what makes a
-        // rotation a rotation: without it, a package past its lifetime threshold
-        // would be "healed" by re-advertising the very bytes that are expiring.
-        let reuse_bytes: Option<Vec<u8>> = match (&tracked, existing_d) {
-            _ if force_mint => None,
-            (Some(row), Some(d)) if row.d_tag == d && !row.key_package.is_empty() => {
-                Some(row.key_package.clone())
-            }
-            _ => None,
-        };
-        let minted_fresh = reuse_bytes.is_none();
-        // NIP-01 tie-break floor: a replacement landing in the same second as
-        // its predecessor loses the lowest-event-id tiebreaker ~half the time
-        // and silently fails to replace anything. See `monotonic_kp_created_at`.
-        let prev_created_at = tracked.as_ref().map(|r| r.created_at);
-
-        let events = if let Some(bytes) = reuse_bytes {
-            // HEAL: re-advertise the cached last-resort package into the same slot.
-            let d = existing_d.unwrap_or_default().to_owned();
-            build_kp_maintenance_events_reusing(keys, &bytes, targets, &d, prev_created_at)
-                .map_err(|e| format!("build (reuse) key package events: {e}"))?
-        } else {
-            // MINT: a fresh last-resort package into `existing_d` (or a new slot).
-            // Reuses the single process-global session (Rule 14) via the manager.
-            build_kp_maintenance_events(
-                circle_mgr.session(),
-                keys,
-                targets,
-                existing_d,
-                prev_created_at,
-            )
+        let staged = haven_core::relay::maintenance::build_kp_maintenance_events(
+            circle_mgr.session(),
+            keys,
+            plan.targets,
+            plan.existing_d,
+            plan.prev_created_at,
+        )
+        .await
+        .map_err(|e| format!("build (mint) key package events: {e}"))?;
+        let healed = self
+            .publish_and_promote(circle_mgr, &staged.event, plan.targets, relay_errors)
             .await
-            .map_err(|e| format!("build (mint) key package events: {e}"))?
-        };
-
-        let event_id = events.event.id.to_hex();
-        let d_tag = events.d_tag.clone();
-        let kp_bytes = events.key_package.bytes().to_vec();
-        // Record the EVENT's own `created_at`, not the wall clock at insert
-        // time, so the next publish's monotonic floor is exact rather than
-        // merely conservative.
-        let event_created_at = i64::try_from(events.event.created_at.as_secs()).unwrap_or(i64::MAX);
-
-        // Publish-first to the TARGET relays only (targets ⊆ configured ⊆ own).
-        // `publish_event` returns `Ok` only when at least one relay OK-ACKED, so
-        // `published` means acked, never merely sent.
-        let published = match self.inner.publish_event(&events.event, targets).await {
-            Ok(_) => true,
-            Err(_) => {
-                *relay_errors += 1;
-                log::debug!("[maintain_key_package] 30443 publish failed");
-                false
-            }
-        };
-
-        if published {
-            // Record the single-row-per-slot tracking row (drops the prior row).
-            let record = run_blocking({
-                let mgr = circle_mgr.clone();
-                move || {
-                    mgr.record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
-                        event_id,
-                        d_tag,
-                        key_package: kp_bytes,
-                        created_at: event_created_at,
-                    })
-                    .map_err(|e| e.to_string())
-                }
-            })
-            .await;
-            if record.is_err() {
-                *relay_errors += 1;
-            }
-
-            // ROTATION cleanup. Ordering is the point: this runs only inside
-            // `published`, i.e. only after a relay OK-acked the replacement, so
-            // the account is never left with zero fetchable packages and no
-            // init key.
-            if minted_fresh {
-                Self::delete_superseded_kp(circle_mgr, &tracked, events.key_package.bytes()).await;
-            }
-        } else if minted_fresh {
-            // FAILED publish of freshly-minted material: delete it so a retry
-            // loop against a failing relay never leaks private init keys (mdk#160).
-            if circle_mgr
-                .delete_key_package(&events.key_package)
-                .await
-                .is_err()
-            {
-                log::debug!("[maintain_key_package] minted-on-failure KP delete failed");
-            }
-        }
-
-        let action = mint_action.unwrap_or(if minted_fresh {
-            KpMaintenanceAction::RepublishedFreshD
-        } else {
-            KpMaintenanceAction::RepublishedStableD
-        });
-        // `relays_healed` = the target count only when the write succeeded.
-        let healed = if published { targets.len() } else { 0 };
-        Ok((action, healed))
+            .acknowledged_by();
+        Ok((plan.action, healed))
     }
 
-    /// Deletes the private init material of the `KeyPackage` a freshly minted
-    /// replacement has just superseded — `foundation/key-packages.md`'s FIRST
-    /// deletion bound ("confirmed publication of a replacement"), and mdk#160's
-    /// leak fix.
+    /// Publishes a staged replacement's frozen event to `targets` and, once a
+    /// relay acknowledged it, promotes it — which deletes the private material
+    /// of every package it supersedes (`foundation/key-packages.md`'s FIRST
+    /// deletion bound).
     ///
-    /// The caller MUST hold an OK-acked replacement: deleting before the ack
-    /// leaves the account with a dead key AND nothing published. No-op when the
-    /// superseded row carried no bytes (a seed row, or one the `not_after`
-    /// purge already blanked) or when the "replacement" is that same package (a
-    /// heal re-advertises it verbatim). Fail-soft: a failed delete is logged,
-    /// redacted, never propagated.
-    async fn delete_superseded_kp(
+    /// `publish_event` returns `Ok` only when at least one relay OK-ACKED, so
+    /// promotion means acked, never merely sent: the account is never left
+    /// with a deleted key and nothing published.
+    async fn publish_and_promote(
+        &self,
         circle_mgr: &Arc<CoreCircleManager>,
-        superseded: &Option<haven_core::circle::PublishedKeyPackageRow>,
-        replacement_bytes: &[u8],
-    ) {
-        let Some(row) = superseded else { return };
-        if row.key_package.is_empty() || row.key_package == replacement_bytes {
-            return;
+        event: &nostr::Event,
+        targets: &[String],
+        relay_errors: &mut usize,
+    ) -> StagedPublish {
+        if let Err(refusal) = self.inner.publish_event(event, targets).await {
+            *relay_errors += 1;
+            log::debug!("[maintain_key_package] 30443 publish failed");
+            return if matches!(
+                refusal,
+                haven_core::relay::RelayError::DeviceClockRejected { .. }
+            ) {
+                StagedPublish::RefusedForItsClock
+            } else {
+                StagedPublish::Unacknowledged
+            };
         }
-        let dead = haven_core::nostr::mls::types::KeyPackage::new(row.key_package.clone());
-        if circle_mgr.delete_key_package(&dead).await.is_err() {
-            log::debug!("[maintain_key_package] superseded KP delete failed");
+        let session = circle_mgr.session();
+        if matches!(session.promote_key_package(&event.id).await, Ok(true)) {
+            let replacement_consumed = matches!(
+                session.tracked_key_package().await,
+                Ok(Some(tracked)) if tracked.consumed_but_held
+            );
+            let mgr = circle_mgr.clone();
+            let _ = run_blocking(move || {
+                mgr.note_key_package_replaced(replacement_consumed);
+                Ok(())
+            })
+            .await;
+        } else {
+            *relay_errors += 1;
         }
+        StagedPublish::Acknowledged(targets.len())
     }
 
     /// Runs the ONE-TIME retirement of a malformed (pre-width-fix) kind-30443
@@ -9016,8 +9970,8 @@ impl RelayManagerFfi {
     ///    treat it as landed only when a relay OK-ACKED it (`publish_event`
     ///    returns `Ok` on nothing less — Rule 13's discipline applied to the
     ///    reachability plane).
-    /// 2. Only then record it, drop the retired row, and publish the NIP-09
-    ///    retraction of the orphaned coordinate.
+    /// 2. Only then record it and publish the NIP-09 retraction of the orphaned
+    ///    coordinate.
     /// 3. Latch the sentinel only when both landed. Any earlier failure leaves
     ///    it unset, so the next tick resumes instead of latching a migration
     ///    that did not happen.
@@ -9034,28 +9988,19 @@ impl RelayManagerFfi {
     /// in-flight Welcome against the retired coordinate still decrypts, and a
     /// lenient peer that keeps selecting the orphan (NIP-09 deletion is advisory
     /// — a relay MAY ignore it) still gets a usable package. That window closes
-    /// when the package is next rotated or reaches `not_after`, whichever comes
+    /// when the package is next replaced or reaches `not_after`, whichever comes
     /// first; both delete its init key, and both are the spec's own bounds.
     ///
-    /// That holds only when the row carries material worth moving, which is the
-    /// `(Known, non-empty)` case and no other. The four the branch mints into
-    /// instead — no tracked row at all; a `Known` row with empty bytes (a seed
-    /// row, or one the `not_after` purge blanked); a `NotCurrent` row whose
-    /// bytes survived because that purge's engine delete failed; and an
-    /// `Unreadable` row, which [`kp_init_key_purge_due`] deliberately never
-    /// blanks — publish DIFFERENT material, so in the last two an in-flight
-    /// Welcome against the retired coordinate does NOT survive. That is the
-    /// correct trade there (the package is dead or unverifiable, so
-    /// re-advertising it would be worse), and it is why those two also hand the
-    /// superseded bytes to [`Self::delete_superseded_kp`]: the retired tracking
-    /// row is dropped on the way out, and material no row tracks can never
-    /// reach the `not_after` bound again.
+    /// That holds only when the record carries material worth moving, which is
+    /// the `(Known, non-empty)` case and no other. Otherwise — nothing tracked,
+    /// no package held, a package whose lifetime has ended or cannot be read —
+    /// a fresh package is staged into the new slot, and its acknowledgement
+    /// deletes whatever it supersedes.
     ///
     /// Fail-soft throughout: relay and storage failures are tallied into
     /// `relay_errors` and reported, never propagated.
     ///
     /// [`build_kp_slot_repoint_event`]: haven_core::relay::maintenance::build_kp_slot_repoint_event
-    /// [`kp_init_key_purge_due`]: haven_core::relay::maintenance::kp_init_key_purge_due
     async fn retire_malformed_kp_slot(
         &self,
         circle_mgr: &Arc<CoreCircleManager>,
@@ -9064,8 +10009,8 @@ impl RelayManagerFfi {
         relay_errors: &mut usize,
     ) -> Option<KpRetirementTick> {
         use haven_core::relay::maintenance::{
-            build_kp_maintenance_events, build_kp_slot_repoint_event, decide_kp_slot_retirement,
-            find_adoptable_kp_slot, KpMaintenanceAction, KpSlotRetirement, TrackedKpLifetime,
+            build_kp_slot_repoint_event, decide_kp_slot_retirement, find_adoptable_kp_slot,
+            kp_event_d_tag, KpMaintenanceAction, KpSlotRetirement, TrackedKpLifetime,
         };
 
         let KpRetirementInputs {
@@ -9073,15 +10018,22 @@ impl RelayManagerFfi {
             probed,
             tracked,
             tracked_lifetime,
-            now_secs,
         } = inputs;
-        let tracked_bytes: &[u8] = tracked.as_ref().map_or(&[], |r| &r.key_package);
+        let session = circle_mgr.session();
+        let tracked_bytes: &[u8] = tracked.map_or(&[], |t| &t.package);
         let adoptable = find_adoptable_kp_slot(probed, tracked_bytes);
         let decision = decide_kp_slot_retirement(
             snapshot,
-            tracked.as_ref().map(|r| r.d_tag.as_str()),
+            tracked.map(|t| t.slot.as_str()),
             adoptable.as_deref(),
         );
+        let unfinished = |action, relays_healed| {
+            Some(KpRetirementTick {
+                action,
+                relays_healed,
+                completed: false,
+            })
+        };
 
         let (action, relays_healed, orphans, targets) = match decision {
             // Nothing may be concluded or safely done this tick; ordinary
@@ -9099,126 +10051,82 @@ impl RelayManagerFfi {
                 targets,
             } => {
                 // RESUME: the replacement is already on a relay, carrying this
-                // device's tracked package verbatim. Re-point tracking to it
-                // rather than publishing a second fresh slot, which would orphan
-                // the first — and with it the material that row makes purgeable.
-                let event_id = snapshot
-                    .responders
-                    .iter()
-                    .flat_map(|r| r.canonical.iter())
-                    .find(|e| e.d_tag == d)
-                    .map(|e| e.event_id.clone())
-                    .unwrap_or_default();
-                let row = haven_core::circle::PublishedKeyPackageRow {
-                    event_id,
-                    d_tag: d,
-                    key_package: tracked_bytes.to_vec(),
-                    // The tick clock, not the event's own stamp: the next
-                    // same-slot replacement needs a floor at or above the
-                    // observed `created_at` (`monotonic_kp_created_at`), and a
-                    // tick that observes a publish runs after it.
-                    created_at: i64::try_from(now_secs).unwrap_or(i64::MAX),
+                // device's tracked package verbatim. Re-point the record to it
+                // rather than publishing a second fresh slot.
+                let served = probed.iter().find(|event| {
+                    kp_event_d_tag(event).as_deref() == Some(d.as_str())
+                        && find_adoptable_kp_slot([*event], tracked_bytes).is_some()
+                });
+                let recorded = match served {
+                    Some(event) => session.repoint_key_package_slot(&d, event).await.is_ok(),
+                    None => false,
                 };
-                if !self.record_retired_slot(circle_mgr, &row, &tracked).await {
+                if !recorded {
                     *relay_errors += 1;
-                    return Some(KpRetirementTick {
-                        action: KpMaintenanceAction::SeededD,
-                        relays_healed: 0,
-                        completed: false,
-                    });
+                    log::debug!("[maintain_key_package] slot retirement record failed");
+                    return unfinished(KpMaintenanceAction::SeededD, 0);
                 }
                 (KpMaintenanceAction::SeededD, 0, orphans, targets)
             }
             KpSlotRetirement::Repoint { orphans, targets } => {
                 // Move the SAME package when there is one to move; mint only
-                // when the row carries no usable material.
-                let events = match (tracked_lifetime, tracked_bytes.is_empty()) {
-                    (TrackedKpLifetime::Known(_), false) => {
-                        build_kp_slot_repoint_event(keys, tracked_bytes, &targets)
-                    }
-                    _ => {
-                        build_kp_maintenance_events(
-                            circle_mgr.session(),
-                            keys,
-                            &targets,
-                            None,
-                            None,
-                        )
-                        .await
-                    }
-                };
-                let events = match events {
-                    Ok(e) => e,
-                    Err(_) => {
+                // when the record carries no usable material.
+                let healed = if matches!(tracked_lifetime, TrackedKpLifetime::Known(_))
+                    && !tracked_bytes.is_empty()
+                {
+                    let Ok(moved) = build_kp_slot_repoint_event(keys, tracked_bytes, &targets)
+                    else {
                         *relay_errors += 1;
                         log::debug!("[maintain_key_package] slot repoint build failed");
-                        return Some(KpRetirementTick {
-                            action: KpMaintenanceAction::RepublishedFreshD,
-                            relays_healed: 0,
-                            completed: false,
-                        });
+                        return unfinished(KpMaintenanceAction::RepublishedFreshD, 0);
+                    };
+                    // PUBLISH-FIRST: nothing is recorded until a relay acked.
+                    if self
+                        .inner
+                        .publish_event(&moved.event, &targets)
+                        .await
+                        .is_err()
+                    {
+                        *relay_errors += 1;
+                        log::debug!("[maintain_key_package] slot repoint publish failed");
+                        return unfinished(KpMaintenanceAction::RepublishedFreshD, 0);
                     }
-                };
-                let minted_fresh = events.key_package.bytes() != tracked_bytes;
-
-                // PUBLISH-FIRST: nothing destructive happens until a relay acked.
-                if self
-                    .inner
-                    .publish_event(&events.event, &targets)
-                    .await
-                    .is_err()
-                {
-                    *relay_errors += 1;
-                    log::debug!("[maintain_key_package] slot repoint publish failed");
-                    if minted_fresh {
-                        // Freshly minted and unpublished: delete it so a retry
-                        // loop never leaks private init keys (mdk#160).
-                        if circle_mgr
-                            .delete_key_package(&events.key_package)
-                            .await
-                            .is_err()
-                        {
-                            log::debug!(
-                                "[maintain_key_package] unpublished repoint KP delete failed"
-                            );
+                    if session
+                        .repoint_key_package_slot(&moved.d_tag, &moved.event)
+                        .await
+                        .is_err()
+                    {
+                        *relay_errors += 1;
+                        log::debug!("[maintain_key_package] slot retirement record failed");
+                        return unfinished(KpMaintenanceAction::RepublishedFreshD, targets.len());
+                    }
+                    targets.len()
+                } else {
+                    let plan = KpMintPlan {
+                        existing_d: None,
+                        targets: &targets,
+                        prev_created_at: None,
+                        action: KpMaintenanceAction::RepublishedFreshD,
+                    };
+                    match self
+                        .mint_key_package(circle_mgr, keys, plan, relay_errors)
+                        .await
+                    {
+                        Ok((_, healed)) if healed > 0 => healed,
+                        Ok(_) => {
+                            log::debug!("[maintain_key_package] slot repoint publish failed");
+                            return unfinished(KpMaintenanceAction::RepublishedFreshD, 0);
+                        }
+                        Err(_) => {
+                            *relay_errors += 1;
+                            log::debug!("[maintain_key_package] slot repoint build failed");
+                            return unfinished(KpMaintenanceAction::RepublishedFreshD, 0);
                         }
                     }
-                    return Some(KpRetirementTick {
-                        action: KpMaintenanceAction::RepublishedFreshD,
-                        relays_healed: 0,
-                        completed: false,
-                    });
-                }
-
-                let row = haven_core::circle::PublishedKeyPackageRow {
-                    event_id: events.event.id.to_hex(),
-                    d_tag: events.d_tag.clone(),
-                    key_package: events.key_package.bytes().to_vec(),
-                    created_at: i64::try_from(events.event.created_at.as_secs())
-                        .unwrap_or(i64::MAX),
                 };
-                if !self.record_retired_slot(circle_mgr, &row, &tracked).await {
-                    *relay_errors += 1;
-                    return Some(KpRetirementTick {
-                        action: KpMaintenanceAction::RepublishedFreshD,
-                        relays_healed: targets.len(),
-                        completed: false,
-                    });
-                }
-                if minted_fresh {
-                    // The replacement carries DIFFERENT material, and
-                    // `record_retired_slot` just dropped the row that tracked
-                    // the old package — so nothing would ever hand it to the
-                    // `not_after` purge again. Delete it here instead, under
-                    // the spec's FIRST bound ("confirmed publication of a
-                    // replacement"), which the acked publish above satisfies.
-                    // Same ordering as a rotation: record, then delete.
-                    Self::delete_superseded_kp(circle_mgr, &tracked, events.key_package.bytes())
-                        .await;
-                }
                 (
                     KpMaintenanceAction::RepublishedFreshD,
-                    targets.len(),
+                    healed,
                     orphans,
                     targets,
                 )
@@ -9261,58 +10169,6 @@ impl RelayManagerFfi {
             relays_healed,
             completed: retracted,
         })
-    }
-
-    /// Records the retirement's replacement row and drops the retired one.
-    ///
-    /// Two writes, in this order: the replacement row FIRST, so a crash between
-    /// them leaves the account tracking a published, binding-shaped slot rather
-    /// than nothing. Dropping the retired row is what makes material escapable
-    /// from the `Lifetime.not_after` purge, which reads the newest row — so the
-    /// caller must first have made the drop lossless: either the replacement
-    /// carries the same package bytes, or the retired row carried none, or its
-    /// bytes were handed to [`Self::delete_superseded_kp`] under the spec's
-    /// first bound.
-    ///
-    /// Returns whether the replacement was recorded.
-    async fn record_retired_slot(
-        &self,
-        circle_mgr: &Arc<CoreCircleManager>,
-        row: &haven_core::circle::PublishedKeyPackageRow,
-        retired: &Option<haven_core::circle::PublishedKeyPackageRow>,
-    ) -> bool {
-        let recorded = run_blocking({
-            let mgr = circle_mgr.clone();
-            let row = row.clone();
-            move || {
-                mgr.record_published_key_package(&row)
-                    .map_err(|e| e.to_string())
-            }
-        })
-        .await;
-        if recorded.is_err() {
-            log::debug!("[maintain_key_package] slot retirement record failed");
-            return false;
-        }
-        if let Some(retired) = retired {
-            if retired.d_tag != row.d_tag {
-                let dropped = run_blocking({
-                    let mgr = circle_mgr.clone();
-                    let d = retired.d_tag.clone();
-                    move || {
-                        mgr.delete_published_key_package(&d)
-                            .map_err(|e| e.to_string())
-                    }
-                })
-                .await;
-                if dropped.is_err() {
-                    // Harmless if it fails: the replacement row is newer, so it
-                    // is the one every read resolves to.
-                    log::debug!("[maintain_key_package] retired slot row drop failed");
-                }
-            }
-        }
-        true
     }
 
     /// Publishes ONE NIP-09 (kind 5) deletion covering every orphaned slot, and
@@ -9383,174 +10239,6 @@ impl RelayManagerFfi {
             *relay_errors += 1;
             log::debug!("[maintain_key_package] slot retirement sentinel write failed");
         }
-    }
-
-    /// Once-only legacy relay hygiene (Dark Matter §6 step 5 / F10a): retracts
-    /// this account's stale pre-migration KeyPackage advertisements so an
-    /// old-stack client cannot mint a Welcome the new stack can't process.
-    ///
-    /// NON-OPTIONAL cutover cleanup, guarded by a persisted sentinel
-    /// (`legacy_kp_retraction_done`) so it fires at most once:
-    /// 1. If the sentinel is already set → no-op (`already_done = true`).
-    /// 2. Probe the user's OWN NIP-65 (KeyPackage-discovery) relays for their
-    ///    own kind-443 KeyPackages AND their kind-10051 relay list.
-    /// 3. For each 443, publish a self-authored NIP-09 (kind-5) id-only deletion
-    ///    ([`build_legacy_key_package_retraction`]). For a present 10051, publish
-    ///    an empty-replacement retraction ([`build_key_package_relay_list_retraction`])
-    ///    plus a best-effort NIP-09 coordinate deletion.
-    /// 4. On ≥1-relay ACK of ANY retraction, set the sentinel
-    ///    ([`mark_legacy_kp_retraction_done`]) so it never re-runs.
-    ///
-    /// Dart-driven (the identity secret lives only in Dart, Rule 9); the secret
-    /// bytes are consumed per-call and zeroized. Fail-soft: relay errors are
-    /// tallied, never fatal. Returns a presence-only [`LegacyRetractionOutcomeFfi`].
-    ///
-    /// [`build_legacy_key_package_retraction`]: haven_core::relay::maintenance::build_legacy_key_package_retraction
-    /// [`build_key_package_relay_list_retraction`]: haven_core::relay::maintenance::build_key_package_relay_list_retraction
-    pub async fn retract_legacy_key_material(
-        &self,
-        circle: &CircleManagerFfi,
-        identity_secret_bytes: Vec<u8>,
-    ) -> Result<LegacyRetractionOutcomeFfi, String> {
-        use haven_core::relay::maintenance::{
-            build_key_package_relay_list_retraction, build_legacy_key_package_retraction,
-        };
-
-        let keys = keys_from_secret_bytes(identity_secret_bytes)?;
-        let own_pk = keys.public_key();
-        let own_hex = own_pk.to_hex();
-        let circle_mgr = circle.inner.clone();
-
-        // Sentinel gate: fire at most once.
-        let done = run_blocking({
-            let mgr = circle_mgr.clone();
-            move || mgr.legacy_kp_retraction_done().map_err(|e| e.to_string())
-        })
-        .await?;
-        if done {
-            return Ok(LegacyRetractionOutcomeFfi {
-                already_done: true,
-                ..Default::default()
-            });
-        }
-
-        let mut outcome = LegacyRetractionOutcomeFfi::default();
-
-        // Own NIP-65 (KeyPackage-discovery) relays — where the stale 443/10051
-        // were published. Own-relays-only, no default union.
-        let own_relays: Vec<String> = run_blocking({
-            let mgr = circle_mgr.clone();
-            move || {
-                let user = mgr
-                    .list_user_relays(haven_core::circle::RelayType::KeyPackage)
-                    .map_err(|e| e.to_string())?;
-                Ok::<Vec<String>, String>(haven_core::relay::dedup_relay_targets(&user))
-            }
-        })
-        .await?;
-        if own_relays.is_empty() {
-            // Nowhere to probe or publish; leave the sentinel UNSET so a later
-            // call (once relays are configured) retries the cleanup.
-            log::debug!("[retract_legacy] no KeyPackage relays configured; deferring");
-            return Ok(outcome);
-        }
-
-        // Probe own relays for the account's legacy 443 KeyPackages and 10051
-        // relay list (single merged filter over both kinds).
-        let filter = nostr::Filter::new()
-            .kinds([nostr::Kind::Custom(443), nostr::Kind::MlsKeyPackageRelays])
-            .author(own_pk)
-            .limit(64);
-        let events = match self.inner.fetch_events(filter, &own_relays, None).await {
-            Ok(v) => v,
-            Err(_) => {
-                outcome.relay_errors += 1;
-                log::debug!("[retract_legacy] probe failed");
-                Vec::new()
-            }
-        };
-
-        let mut any_acked = false;
-
-        // Scrub each stale legacy 443 by an id-only kind-5 deletion; track the
-        // newest 10051 (created_at + id) for the relay-list retraction.
-        let mut latest_10051: Option<(i64, nostr::EventId)> = None;
-        for ev in &events {
-            match ev.kind {
-                nostr::Kind::Custom(443) => {
-                    match build_legacy_key_package_retraction(&keys, &ev.id.to_hex(), &own_hex) {
-                        Ok(deletion) => {
-                            match self.inner.publish_event(&deletion, &own_relays).await {
-                                Ok(_) => {
-                                    outcome.legacy_443_scrubbed += 1;
-                                    any_acked = true;
-                                }
-                                Err(_) => {
-                                    outcome.relay_errors += 1;
-                                    log::debug!("[retract_legacy] 443 deletion publish failed");
-                                }
-                            }
-                        }
-                        Err(_) => log::debug!("[retract_legacy] 443 deletion build skipped"),
-                    }
-                }
-                nostr::Kind::MlsKeyPackageRelays => {
-                    let at = i64::try_from(ev.created_at.as_secs()).unwrap_or(0);
-                    if latest_10051.is_none_or(|(prev, _)| at >= prev) {
-                        latest_10051 = Some((at, ev.id));
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Retract the 10051 relay list if one was present: publish an empty
-        // replaceable 10051 (superseding the last), plus a NIP-09 coordinate
-        // deletion of the observed list for relays that honor NIP-09 over
-        // replaceable supersession.
-        if let Some((at, id)) = latest_10051 {
-            match build_key_package_relay_list_retraction(&keys, Some(at)) {
-                Ok(retraction) => {
-                    match self.inner.publish_event(&retraction, &own_relays).await {
-                        Ok(_) => {
-                            outcome.relay_list_retracted = true;
-                            any_acked = true;
-                        }
-                        Err(_) => {
-                            outcome.relay_errors += 1;
-                            log::debug!("[retract_legacy] 10051 retraction publish failed");
-                        }
-                    }
-                    // Best-effort coordinate deletion (never fatal).
-                    if let Ok(deletion) = haven_core::relay::build_nip09_deletion(
-                        &keys,
-                        id,
-                        nostr::Kind::MlsKeyPackageRelays,
-                    ) {
-                        let _ = self.inner.publish_event(&deletion, &own_relays).await;
-                    }
-                }
-                Err(_) => log::debug!("[retract_legacy] 10051 retraction build skipped"),
-            }
-        }
-
-        // Set the once-only sentinel only after ≥1 retraction ACKed, so a
-        // fully-failed run retries next call (idempotent; NIP-09 twice is safe).
-        if any_acked {
-            let marked = run_blocking({
-                let mgr = circle_mgr.clone();
-                move || {
-                    mgr.mark_legacy_kp_retraction_done()
-                        .map_err(|e| e.to_string())
-                }
-            })
-            .await;
-            if marked.is_err() {
-                outcome.relay_errors += 1;
-            }
-        }
-
-        Ok(outcome)
     }
 
     /// M8-1 relay-list maintenance — republish-if-missing/drifted for the
@@ -9630,6 +10318,16 @@ impl RelayManagerFfi {
 
         let mut relay_errors: usize = 0;
 
+        // No relay list (10050/10002) is published before the reset notice is
+        // acknowledged: the toggle below is the post-reset default, not the
+        // user's choice.
+        let reset_acknowledged = circle_mgr.storage_reset_acknowledged();
+        if !reset_acknowledged {
+            return RelayListCategoryOutcome::no_publish(
+                RelayListAction::AwaitingResetAcknowledgement,
+            );
+        }
+
         // Toggle + configured relays (own-relays-only, dedup'd).
         let prep: Result<(bool, Vec<String>), String> = run_blocking({
             let mgr = circle_mgr.clone();
@@ -9686,7 +10384,7 @@ impl RelayManagerFfi {
         // top-level Err (e.g. URL validation) yields NO responders ⇒
         // decide_relay_list returns NoOp (fail-closed).
         let filter = nostr::Filter::new().kind(kind).author(*own_pk).limit(4);
-        let per_relay = match self.inner.fetch_events_per_relay(filter, &configured).await {
+        let mut per_relay = match self.inner.fetch_events_per_relay(filter, &configured).await {
             Ok(v) => v,
             Err(_) => {
                 relay_errors += 1;
@@ -9694,9 +10392,12 @@ impl RelayManagerFfi {
                 Vec::new()
             }
         };
+        retain_own_events(&mut per_relay, own_pk, kind);
 
         // Build responders-only verdicts. For each responding relay, the newest
-        // (max created_at) self-authored list wins; an absent list ⇒ empty
+        // list this account signed wins (`retain_own_events` above dropped
+        // every other author's) — the page's first event: newest `created_at`,
+        // lower id on a tie, the one NIP-01 keeps. An absent list ⇒ empty
         // on-relay set ⇒ unhealthy. Non-responders are excluded structurally.
         let mut responders: Vec<RelayListPerRelay> = Vec::new();
         for outcome in &per_relay {
@@ -9705,8 +10406,7 @@ impl RelayManagerFfi {
             }
             let on_relay_urls = outcome
                 .events
-                .iter()
-                .max_by_key(|e| e.created_at.as_secs())
+                .first()
                 .and_then(|e| relay_list_urls_for(ffi_type, e).ok())
                 .unwrap_or_default();
             let healthy = list_relay_healthy(&on_relay_urls, &configured);
@@ -9718,12 +10418,16 @@ impl RelayManagerFfi {
         let responders_probed = responders.len();
 
         let snapshot = RelayListSnapshot {
+            reset_acknowledged,
             publish_enabled,
             responders,
             configured_relays: configured.clone(),
         };
 
         match decide_relay_list(&snapshot) {
+            RelayListDecision::AwaitingResetAcknowledgement => {
+                RelayListCategoryOutcome::no_publish(RelayListAction::AwaitingResetAcknowledgement)
+            }
             RelayListDecision::Suppressed => {
                 RelayListCategoryOutcome::no_publish(RelayListAction::Suppressed)
             }
@@ -9887,6 +10591,498 @@ impl std::fmt::Debug for RelayManagerFfi {
 /// headless CI environments (Docker, SSH without a session bus).
 #[cfg(test)]
 mod tests {
+    /// Every refusal the caller of a driver entry must tell apart crosses as a
+    /// typed field, from each entry that can meet it — the seal, the ingest
+    /// and the leave — and every other error crosses as its redacted text,
+    /// never typed as something it is not (Security Rule 8: the UI never
+    /// reads an error string).
+    #[test]
+    fn every_refusal_a_driver_entry_meets_crosses_typed() {
+        use super::{
+            IngestOutcomeFfi, LeaveOutcomeFfi, LeaveStatusFfi, ReceiveVerdictFfi, RefusalFfi,
+            SealOutcomeFfi,
+        };
+        use haven_core::circle::CircleError as E;
+        let plain = || {
+            vec![
+                E::Storage("planted".into()),
+                E::Mls("planted".into()),
+                E::InvalidData("planted".into()),
+                E::MembershipConflict("planted".into()),
+                E::FanoutOwned,
+            ]
+        };
+        let refusals = || {
+            vec![
+                (E::EngineHeld, RefusalFfi::EngineHeld),
+                (
+                    E::SendBlockedByDeparture,
+                    RefusalFfi::SendBlockedByDeparture,
+                ),
+                (E::LeaveInProgress, RefusalFfi::LeaveInProgress),
+                (E::ForegroundOnly, RefusalFfi::ForegroundOnly),
+            ]
+        };
+        for (error, refusal) in refusals() {
+            assert!(
+                matches!(
+                    SealOutcomeFfi::answer(Err(error)),
+                    Ok(SealOutcomeFfi { sealed: None, held_by: None, refusal: Some(r), .. })
+                        if r == refusal
+                ),
+                "a seal's refusal crossed untyped: {refusal:?}",
+            );
+        }
+        for (error, refusal) in refusals() {
+            assert!(
+                matches!(
+                    IngestOutcomeFfi::answer(Err(error)),
+                    Ok(IngestOutcomeFfi {
+                        verdict: ReceiveVerdictFfi::Deferred,
+                        refusal: Some(r),
+                        ..
+                    }) if r == refusal
+                ),
+                "an ingest's refusal crossed untyped, or let the cursor pass: {refusal:?}",
+            );
+        }
+        for (error, status) in [
+            (
+                E::AdminSelfDemoteRequired,
+                LeaveStatusFfi::AdminMustStepDown,
+            ),
+            (
+                E::NotFound("planted".into()),
+                LeaveStatusFfi::CircleNotFound,
+            ),
+            (E::EngineHeld, LeaveStatusFfi::EngineHeld),
+            (E::ForegroundOnly, LeaveStatusFfi::ForegroundOnly),
+        ] {
+            assert!(
+                matches!(
+                    LeaveOutcomeFfi::answer_standing(Err(error), || false),
+                    Ok(LeaveOutcomeFfi { status: s, .. }) if s == status
+                ),
+                "a leave's refusal crossed untyped: {status:?}",
+            );
+        }
+        for error in plain() {
+            assert!(SealOutcomeFfi::answer(Err(error)).is_err_and(|text| !text.contains("planted")));
+        }
+        for error in plain() {
+            assert!(
+                IngestOutcomeFfi::answer(Err(error)).is_err_and(|text| !text.contains("planted"))
+            );
+        }
+        for error in plain() {
+            assert!(LeaveOutcomeFfi::answer_standing(Err(error), || false)
+                .is_err_and(|text| !text.contains("planted")));
+        }
+        // The same errors while a leave intent stands: the press is told the
+        // leave goes on, never "failed" — from `leave_driven` and from
+        // `resume_leave_driven` alike, which share this answer.
+        for error in plain() {
+            assert!(
+                matches!(
+                    LeaveOutcomeFfi::answer_standing(Err(error), || true),
+                    Ok(LeaveOutcomeFfi {
+                        status: LeaveStatusFfi::Pending,
+                        retry_after_ms: None,
+                        ..
+                    })
+                ),
+                "a leave whose intent stands was answered failed",
+            );
+        }
+        let source = include_str!("api.rs");
+        for entry in [
+            "pub async fn leave_driven(",
+            "pub async fn resume_leave_driven(",
+        ] {
+            let body = source
+                .split(entry)
+                .nth(1)
+                .and_then(|rest| rest.split("\n    }\n").next())
+                .expect("the entry is declared");
+            assert!(
+                body.contains("LeaveOutcomeFfi::answer_standing(")
+                    && body.contains("|| leave_intent_stands(circle, &group)"),
+                "{entry} answers an untyped error while its leave intent stands",
+            );
+        }
+    }
+
+    /// The session's lifecycle crosses as the variant it is, no session and a
+    /// stopped one each told apart from every lifecycle a running one serves.
+    #[test]
+    fn the_live_lifecycle_crosses_typed() {
+        use super::{live_lifecycle_of, LiveLifecycleFfi};
+        use haven_core::relay::live_sync::Lifecycle as L;
+        assert_eq!(
+            [
+                live_lifecycle_of(None),
+                live_lifecycle_of(Some(None)),
+                live_lifecycle_of(Some(Some(L::Launched))),
+                live_lifecycle_of(Some(Some(L::Foreground))),
+                live_lifecycle_of(Some(Some(L::Burst))),
+                live_lifecycle_of(Some(Some(L::Background))),
+            ],
+            [
+                LiveLifecycleFfi::NoSession,
+                LiveLifecycleFfi::Stopped,
+                LiveLifecycleFfi::Launched,
+                LiveLifecycleFfi::Foreground,
+                LiveLifecycleFfi::Burst,
+                LiveLifecycleFfi::Paused,
+            ],
+        );
+    }
+
+    /// A session slot whose lock a panicking holder poisoned reads as a
+    /// stopped session, never as none: "none" is what a caller starts a
+    /// second session on.
+    #[test]
+    fn a_poisoned_session_slot_reads_as_stopped_not_as_no_session() {
+        use super::{lifecycle_in, LiveLifecycleFfi};
+        use haven_core::relay::live_sync::Lifecycle as L;
+        use std::sync::RwLock;
+        let slot: RwLock<Option<Option<L>>> = RwLock::new(Some(Some(L::Foreground)));
+        assert_eq!(lifecycle_in(&slot, |l| *l), LiveLifecycleFfi::Foreground);
+        let empty: RwLock<Option<Option<L>>> = RwLock::new(None);
+        assert_eq!(lifecycle_in(&empty, |l| *l), LiveLifecycleFfi::NoSession);
+        std::thread::scope(|scope| {
+            let _ = scope
+                .spawn(|| {
+                    let _held = empty.write().expect("unpoisoned");
+                    std::panic::resume_unwind(Box::new("a holder panics"));
+                })
+                .join();
+        });
+        assert!(empty.is_poisoned(), "premise: the slot is poisoned");
+        assert_eq!(lifecycle_in(&empty, |l| *l), LiveLifecycleFfi::Stopped);
+    }
+
+    /// A location sealed through the driver crosses as nothing Dart can read:
+    /// opaque, with no field and no method — the event, its circle's id and
+    /// the relays its record names stay in Rust, where the send reads them.
+    /// The one way to a sealed location's event from Dart is a test's: it
+    /// answers only in a build with debug assertions, and no app Dart names
+    /// it — only integration tests may.
+    #[test]
+    fn a_sealed_locations_test_accessor_is_debug_only_and_unused_by_the_app() {
+        let source = include_str!("api.rs");
+        let body = source
+            .split("pub fn sealed_location_event_json_for_test(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the accessor is declared");
+        assert!(
+            body.contains("if cfg!(debug_assertions) {") && body.contains("} else {\n        None"),
+            "the sealed location's test accessor answers in a release build",
+        );
+        let lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../lib");
+        let mut pending = vec![lib];
+        let mut callers = Vec::new();
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read the app's Dart") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    if !path.ends_with("rust") {
+                        pending.push(path);
+                    }
+                } else if path.extension().is_some_and(|ext| ext == "dart")
+                    && std::fs::read_to_string(&path)
+                        .expect("read a Dart file")
+                        .contains(concat!("sealedLocationEventJson", "ForTest"))
+                {
+                    callers.push(path);
+                }
+            }
+        }
+        assert!(
+            callers.is_empty(),
+            "app Dart reaches a sealed location's event: {callers:?}"
+        );
+        let sealed = super::SealedLocationFfi {
+            event: nostr::EventBuilder::new(nostr::Kind::Custom(445), "ciphertext")
+                .sign_with_keys(&nostr::Keys::generate())
+                .expect("signed"),
+        };
+        assert_eq!(
+            super::sealed_location_event_json_for_test(&sealed),
+            cfg!(debug_assertions).then(|| nostr::JsonUtil::as_json(&sealed.event)),
+        );
+    }
+
+    #[test]
+    fn a_sealed_location_crosses_as_nothing_dart_can_read() {
+        let source = include_str!("api.rs");
+        let at = source
+            .find("pub struct SealedLocationFfi {")
+            .expect("the type is declared");
+        let body = &source[at + "pub struct SealedLocationFfi {".len()..];
+        let body = &body[..body.find('}').expect("the declaration ends")];
+        assert!(
+            source[..at].trim_end().ends_with("#[frb(opaque)]")
+                && !body.contains("pub ")
+                && !source.contains(concat!("impl Sealed", "LocationFfi {")),
+            "a sealed location's contents are readable from Dart",
+        );
+    }
+
+    /// A relay's own words in an `OK false` never reach Dart: a refused send of
+    /// a recorded location crosses as a [`LocationPublishFfi`] variant that
+    /// carries no text, whatever the relay said.
+    #[test]
+    fn an_ok_false_reason_never_crosses_the_ffi() {
+        const SAID: &str = "blocked: relay-authored canary 51d3";
+        let refused = haven_core::relay::fanout::LocationPublish::Sent(Ok(
+            haven_core::relay::PublishResult {
+                event_id: nostr::EventId::all_zeros(),
+                accepted_by: Vec::new(),
+                rejected_by: vec![("wss://relay.example.com".to_string(), SAID.to_string())],
+                failed: Vec::new(),
+            },
+        ));
+        let crossed = super::LocationPublishFfi::from(refused);
+        assert_eq!(crossed, super::LocationPublishFfi::Refused);
+        assert!(!format!("{crossed:?}").contains("canary"));
+        let unreachable = haven_core::relay::fanout::LocationPublish::Sent(Err(
+            haven_core::relay::RelayError::Publish(SAID.to_string()),
+        ));
+        assert_eq!(
+            super::LocationPublishFfi::from(unreachable),
+            super::LocationPublishFfi::Unreachable
+        );
+    }
+
+    /// Every outcome of a recorded location's one send crosses as its own
+    /// variant, and a refusal the relays blamed on the timestamp crosses as
+    /// the clock variant of its direction — never folded into "unreachable",
+    /// which would drop the clock check's evidence.
+    #[test]
+    fn every_location_publish_outcome_crosses_typed_and_a_clock_refusal_keeps_its_direction() {
+        use super::LocationPublishFfi as L;
+        use haven_core::relay::clock_skew::DeviceClockComplaint as C;
+        use haven_core::relay::fanout::LocationPublish as P;
+        use haven_core::relay::RelayError;
+        let result = |accepted: bool| haven_core::relay::PublishResult {
+            event_id: nostr::EventId::all_zeros(),
+            accepted_by: if accepted {
+                vec!["wss://relay.example.com".to_string()]
+            } else {
+                Vec::new()
+            },
+            rejected_by: Vec::new(),
+            failed: Vec::new(),
+        };
+        let clock = |complaint| P::Sent(Err(RelayError::DeviceClockRejected { complaint }));
+        let crossed: Vec<L> = [
+            P::Sent(Ok(result(true))),
+            P::Sent(Ok(result(false))),
+            P::Sent(Err(RelayError::AllRelaysFailed)),
+            P::Expired,
+            P::Superseded,
+            P::Ended,
+            P::InFlight,
+            clock(C::Ahead),
+            clock(C::Behind),
+            clock(C::Unspecified),
+        ]
+        .into_iter()
+        .map(L::from)
+        .collect();
+        assert_eq!(
+            crossed,
+            [
+                L::Accepted,
+                L::Refused,
+                L::Unreachable,
+                L::Expired,
+                L::Superseded,
+                L::Ended,
+                L::InFlight,
+                L::ClockAhead,
+                L::ClockBehind,
+                L::ClockUnspecified,
+            ],
+        );
+    }
+
+    /// A seal's and a leave's drives answer with the clock evidence their
+    /// relays gave, and a refusal crosses with none.
+    #[test]
+    fn a_seal_and_a_leave_carry_their_drives_clock_evidence() {
+        use super::{DeviceClockComplaintFfi as F, LeaveOutcomeFfi, LeaveStatusFfi};
+        use haven_core::relay::clock_skew::DeviceClockComplaint as C;
+        let leave = LeaveOutcomeFfi::answer_standing(
+            Ok(haven_core::relay::fanout::LeaveOutcome {
+                status: haven_core::relay::fanout::LeaveStatus::Proposed,
+                retry_after_ms: None,
+                clock_rejected: Some(C::Behind),
+            }),
+            || false,
+        )
+        .expect("answered");
+        assert!(
+            leave.status == LeaveStatusFfi::Proposed && leave.clock_rejected == Some(F::Behind)
+        );
+        let refused = LeaveOutcomeFfi::answer_standing(
+            Err(haven_core::circle::CircleError::ForegroundOnly),
+            || false,
+        )
+        .expect("typed");
+        assert_eq!(refused.clock_rejected, None);
+        let seal = super::SealOutcomeFfi::answer(Ok(haven_core::relay::fanout::SealOutcome {
+            seal: haven_core::relay::fanout::LocationSeal::Deferred(
+                haven_core::relay::fanout::SendHeld::AwaitingRelays,
+            ),
+            replayed: Vec::new(),
+            retry_after_ms: None,
+            errored: false,
+            clock_rejected: Some(C::Ahead),
+        }))
+        .expect("answered");
+        assert_eq!(seal.clock_rejected, Some(F::Ahead));
+    }
+
+    /// A change the circle already reflected crosses as made with
+    /// `already_so` set, and a change a relay acknowledged without it: the
+    /// first is never read as a relay's acknowledgement.
+    #[test]
+    fn a_change_already_so_is_no_relays_acknowledgement() {
+        use super::{EvolutionOutcomeFfi, PublishStatusFfi};
+        use haven_core::relay::fanout as fan;
+        let answer = |status| {
+            EvolutionOutcomeFfi::answer(Ok(fan::EvolutionOutcome {
+                status,
+                welcomes_sent: 0,
+                welcomes_total: 0,
+                notes: Vec::new(),
+                replayed: Vec::new(),
+                retry_after_ms: None,
+                clock_rejected: None,
+            }))
+            .expect("answered")
+        };
+        let already = answer(fan::EvolutionStatus::AlreadySo);
+        let acked = answer(fan::EvolutionStatus::Confirmed);
+        assert_eq!(
+            (already.status, already.already_so),
+            (PublishStatusFfi::Confirmed, Some(true)),
+        );
+        assert_eq!(
+            (acked.status, acked.already_so),
+            (PublishStatusFfi::Confirmed, None),
+            "a change a relay acknowledged reads as one no relay was asked for",
+        );
+    }
+
+    /// A change's, an ingest's and a drive's answers carry their drives'
+    /// clock evidence, each direction as itself, and a refusal crosses with
+    /// none.
+    #[test]
+    fn a_change_an_ingest_and_a_drive_carry_their_drives_clock_evidence() {
+        use super::{DeviceClockComplaintFfi as F, EvolutionOutcomeFfi, IngestOutcomeFfi};
+        use haven_core::relay::clock_skew::DeviceClockComplaint as C;
+        use haven_core::relay::fanout as fan;
+        for (core, ffi) in [
+            (None, None),
+            (Some(C::Ahead), Some(F::Ahead)),
+            (Some(C::Behind), Some(F::Behind)),
+            (Some(C::Unspecified), Some(F::Unspecified)),
+        ] {
+            let change = EvolutionOutcomeFfi::answer(Ok(fan::EvolutionOutcome {
+                status: fan::EvolutionStatus::Unresolved,
+                welcomes_sent: 0,
+                welcomes_total: 0,
+                notes: Vec::new(),
+                replayed: Vec::new(),
+                retry_after_ms: None,
+                clock_rejected: core,
+            }))
+            .expect("answered");
+            assert_eq!(change.clock_rejected, ffi);
+            let ingest = IngestOutcomeFfi::answer(Ok(fan::PollOutcome {
+                verdict: haven_core::relay::ReceiveOnlyOutcome::Applied,
+                replayed: Vec::new(),
+                welcomes_sent: 0,
+                retry_after_ms: None,
+                errored: false,
+                clock_rejected: core,
+            }))
+            .expect("answered");
+            assert_eq!(ingest.clock_rejected, ffi);
+            let drive = super::ResumeOutcomeFfi::from(fan::ResumeOutcome {
+                replayed: Vec::new(),
+                welcomes_sent: 0,
+                retry_after_ms: None,
+                errored: false,
+                withdrawn: Vec::new(),
+                requeued: Vec::new(),
+                clock_rejected: core,
+            });
+            assert_eq!(drive.clock_rejected, ffi);
+        }
+        let refused =
+            EvolutionOutcomeFfi::answer(Err(haven_core::circle::CircleError::ForegroundOnly))
+                .expect("typed");
+        assert_eq!(refused.clock_rejected, None);
+        let held = IngestOutcomeFfi::answer(Err(haven_core::circle::CircleError::EngineHeld))
+            .expect("typed");
+        assert_eq!(held.clock_rejected, None);
+    }
+
+    /// Every driver entry of the bridge builds its publish half from this
+    /// manager's own client and drives through `Publishing`, whose entries
+    /// each drive the circle's due records (plan §0.1, PR-L5); and the list
+    /// of them is exactly this one: an entry added that holds the transport
+    /// and drives nothing fails here.
+    #[test]
+    fn every_transport_holding_entry_drives_due_fanouts() {
+        let source = include_str!("api.rs");
+        let mut entries: Vec<&str> = Vec::new();
+        for (at, _) in source.match_indices("    pub async fn ") {
+            let rest = &source[at + "    pub async fn ".len()..];
+            let name = &rest[..rest.find('(').expect("a signature")];
+            if !name.ends_with("_driven") {
+                continue;
+            }
+            let body_start = at + rest.find('{').expect("a body") + "    pub async fn ".len();
+            let body_end = source[body_start..]
+                .find("\n    }\n")
+                .map(|end| body_start + end)
+                .expect("the body's end");
+            let body = &source[body_start..body_end];
+            assert!(
+                body.contains("Driving::new(&self.inner, circle, ")
+                    && body.contains(".publishing()"),
+                "`{name}` holds the transport without driving through `Publishing`",
+            );
+            entries.push(name);
+        }
+        entries.sort_unstable();
+        assert_eq!(
+            entries,
+            [
+                "add_members_driven",
+                "admin_handoff_driven",
+                "create_circle_driven",
+                "ingest_driven",
+                "leave_driven",
+                "publish_location_driven",
+                "reinvite_driven",
+                "remove_members_driven",
+                "repair_rotation_driven",
+                "resume_driven",
+                "resume_leave_driven",
+                "seal_location_driven",
+                "self_demote_driven",
+                "update_circle_relays_driven",
+            ],
+            "a driver entry was added or removed without this pin",
+        );
+    }
 
     /// The FFI opt-in reports the POSTCONDITION, not who installed it.
     ///
@@ -10065,6 +11261,33 @@ mod tests {
     #[test]
     fn parse_engine_location_rejects_invalid_content() {
         assert!(parse_engine_location("not json".to_string(), "ab".repeat(32)).is_err());
+    }
+
+    /// The Welcome reaches a key package's signer, so a package passed back
+    /// under one confirmed account must never invite another.
+    #[test]
+    fn a_key_package_confirmed_for_one_account_never_invites_another() {
+        let (signer, confirmed) = (nostr::Keys::generate(), nostr::Keys::generate());
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(30443), "")
+            .sign_with_keys(&signer)
+            .expect("sign");
+        let member = |author_npub: String| MemberKeyPackageFfi {
+            key_package_json: serde_json::to_string(&event).expect("serialize"),
+            inbox_relays: Vec::new(),
+            nip65_relays: Vec::new(),
+            author_npub,
+        };
+        let npub = |keys: &nostr::Keys| hex_to_npub(&keys.public_key().to_hex());
+
+        for refused in [npub(&confirmed), String::new(), "not-a-key".to_string()] {
+            assert!(
+                member_key_packages(vec![member(refused)]).is_err(),
+                "a package whose label does not name its signer was accepted"
+            );
+        }
+        let invited = member_key_packages(vec![member(npub(&signer))])
+            .expect("a package passed back under its signer parses");
+        assert_eq!(invited[0].key_package_event.pubkey, signer.public_key());
     }
 
     #[test]
@@ -10495,15 +11718,19 @@ mod tests {
         delete_circles_db_files(&dir_str).expect("second delete on empty slate must be Ok");
     }
 
-    // Migration note: the pre-Dark-Matter `delete_mdk_db_files` / `MDK_DB_FILENAME`
-    // (`haven_mdk.db`) were split into `delete_mls_session_db_files` (the NEW
-    // Dark Matter `session.sqlite` stack, wiped on logout) and
-    // `delete_legacy_mls_db_files` (the legacy `haven_mdk.db`, deleted once at the
-    // first-launch cutover). The base+sidecar deletion invariant is re-expressed
-    // over BOTH successors below.
+    /// The FFI's session-DB file name is the core's: a wipe that deleted a
+    /// different name would leave the MLS state at rest.
+    #[test]
+    fn the_wiped_session_db_is_the_one_the_core_opens() {
+        let dir = std::path::Path::new("/data");
+        assert_eq!(
+            haven_core::nostr::mls::storage::session_db_path(dir),
+            dir.join(MLS_SESSION_DB_FILENAME)
+        );
+    }
 
-    /// `delete_mls_session_db_files` removes the Dark Matter session DB's base
-    /// file + WAL/SHM/journal sidecars.
+    /// `delete_mls_session_db_files` removes the session DB's base file +
+    /// WAL/SHM/journal sidecars.
     #[test]
     fn delete_mls_session_db_files_removes_base_and_wal_sidecars() {
         let dir = ScratchDir::new("session_delete");
@@ -10528,37 +11755,6 @@ mod tests {
                 "session.sqlite '{suffix}' sidecar must be deleted"
             );
         }
-    }
-
-    /// `delete_legacy_mls_db_files` removes the PRE-Dark-Matter `haven_mdk.db`
-    /// base file + WAL/SHM/journal sidecars — the file half of the one-time
-    /// first-launch cutover cleanup (`destroy_legacy_mls_state`, whose keyring
-    /// half needs a live backend). Idempotent on an already-gone slate.
-    #[test]
-    fn delete_legacy_mls_db_files_removes_base_and_wal_sidecars() {
-        let dir = ScratchDir::new("legacy_delete");
-        for suffix in ["", "-wal", "-shm", "-journal"] {
-            let p = std::path::PathBuf::from(format!(
-                "{}{suffix}",
-                dir.path().join(LEGACY_MLS_DB_FILENAME).display()
-            ));
-            std::fs::write(&p, b"legacy mdk bytes").expect("seed file");
-        }
-
-        delete_legacy_mls_db_files(&dir.path().to_string_lossy())
-            .expect("deleting seeded legacy files must succeed");
-
-        for suffix in ["", "-wal", "-shm", "-journal"] {
-            let p = std::path::PathBuf::from(format!(
-                "{}{suffix}",
-                dir.path().join(LEGACY_MLS_DB_FILENAME).display()
-            ));
-            assert!(!p.exists(), "legacy '{suffix}' sidecar must be deleted");
-        }
-
-        // Idempotent: a second delete on the empty slate is a success (Ok).
-        delete_legacy_mls_db_files(&dir.path().to_string_lossy())
-            .expect("second legacy delete on empty slate must be Ok");
     }
 
     /// After wiping the circles.db file, a fresh open at the same path yields an
@@ -10708,8 +11904,28 @@ mod tests {
             "session.sqlite keyring key must exist after manager creation"
         );
 
+        // The iOS access-policy migration leaves a marker and, mid-migration, a
+        // backup that is a full copy of the key, under sibling ids.
+        let companions: Vec<String> = [CIRCLES_DB_KEY_ID, MLS_SESSION_DB_KEY_ID]
+            .iter()
+            .flat_map(|id| haven_core::keyring_policy::access_policy_companions(id))
+            .collect();
+        for companion in &companions {
+            keyring_core::Entry::new(CIRCLES_DB_SERVICE, companion)
+                .and_then(|entry| entry.set_secret(&[0x42; 32]))
+                .expect("plant an access-policy companion");
+        }
+
         // --- 4. Call the REAL wipe. ---
         run_wipe(&data_dir);
+        for companion in &companions {
+            assert!(
+                !keyring_key_present(CIRCLES_DB_SERVICE, companion),
+                "a wiped key's access-policy companion must go with it: the \
+                 backup IS the key, and a stale marker leaves the next key \
+                 unreadable while the device is locked"
+            );
+        }
 
         // --- 5a. Every DB file + sidecar must be gone. ---
         for base in [&circles_db, &session_db] {
@@ -11347,9 +12563,21 @@ mod tests {
 // events are pushed to Dart over a single `StreamSink<FfiRelayEvent>`.
 
 use haven_core::relay::live_sync::{
-    CircleSpec as CoreCircleSpec, LiveSyncCore, LiveSyncEvent as CoreLiveSyncEvent, StopOutcome,
-    SyncStatusReason as CoreSyncStatusReason,
+    CircleSpec as CoreCircleSpec, Claim, LiveSyncCore, LiveSyncEvent as CoreLiveSyncEvent,
+    StopOutcome, SyncStatusReason as CoreSyncStatusReason,
 };
+
+/// The claim a caller's `foreground` flag makes, as the core takes it: the
+/// one place the foreground is named on this side of the bridge. The core
+/// cannot see the screen, so it acts on this and on nothing it could infer
+/// from which entry was called.
+const fn foreground_claim(foreground: bool) -> Claim {
+    if foreground {
+        Claim::Foreground
+    } else {
+        Claim::Nothing
+    }
+}
 
 /// Returns the active engine, or `None` when no session is running.
 ///
@@ -11403,6 +12631,10 @@ pub enum FfiSyncStatusReason {
     /// threshold, so a health model fed this as an outage would confirm a relay
     /// fault on a deliberate pause.
     Paused,
+    /// The engine refused a group message for a local resource bound and
+    /// recorded it for a refetch by id, which only the catch-up sweep performs:
+    /// the consumer should run one.
+    RefetchOwed,
 }
 
 const fn sync_reason_to_ffi(reason: CoreSyncStatusReason) -> FfiSyncStatusReason {
@@ -11418,6 +12650,7 @@ const fn sync_reason_to_ffi(reason: CoreSyncStatusReason) -> FfiSyncStatusReason
         CoreSyncStatusReason::SessionStopped => FfiSyncStatusReason::SessionStopped,
         CoreSyncStatusReason::BackgroundResumed => FfiSyncStatusReason::BackgroundResumed,
         CoreSyncStatusReason::Paused => FfiSyncStatusReason::Paused,
+        CoreSyncStatusReason::RefetchOwed => FfiSyncStatusReason::RefetchOwed,
     }
 }
 
@@ -11484,9 +12717,6 @@ pub struct FfiRelayEvent {
     pub content: Option<String>,
     /// Source event `created_at` seconds (Location).
     pub event_created_at_secs: Option<i64>,
-    /// Outbound commit the consumer must publish+merge (GroupUpdate; `Some`
-    /// only for an auto-committed peer `SelfRemove`).
-    pub evolution_event_json: Option<String>,
     /// Raw `kind:1059` gift-wrap JSON (Welcome).
     ///
     /// The wrapper's `created_at` is deliberately NOT surfaced alongside it. Its
@@ -11500,14 +12730,15 @@ pub struct FfiRelayEvent {
     /// Closed status reason (Status). `None` on the one Status event that
     /// carries [`Self::unrecoverable_nostr_group_id`] instead.
     pub status_reason: Option<FfiSyncStatusReason>,
-    /// The pseudonymous `nostr_group_id` of a circle that CANNOT RECOVER on its
-    /// own and has to be re-created (Status).
+    /// The pseudonymous `nostr_group_id` of a circle MDK halted (Status): a
+    /// refresh nudge, emitted when MDK announces the halt — at the transition
+    /// and at each open. The state itself is `CircleEngineStateFfi::Unrecoverable`
+    /// and `RecoveryCauseFfi::Unrecoverable`, read on every circle read; act on
+    /// those, not on this.
     ///
-    /// A TERMINAL, per-circle verdict, and the only thing on this stream a
-    /// consumer may act on destructively. It means this device holds group state
-    /// no code path will move again: waiting cannot help and neither can a
-    /// retry, so a "reconnecting" banner is the wrong response and a re-invite
-    /// is the right one.
+    /// The halt is per-circle and outlasts waiting and retries — only joining a
+    /// replacement Welcome (a re-invite) clears it — so a "reconnecting" banner
+    /// is the wrong response to it.
     ///
     /// Deliberately NOT a [`FfiSyncStatusReason`]. Every reason in that enum is
     /// self-clearing and names no circle — a relay outage, a pause, one message
@@ -11515,15 +12746,13 @@ pub struct FfiRelayEvent {
     /// spelling a terminal per-circle verdict the same way is how a user gets
     /// told to re-create a working circle. `status_reason` is `None` whenever
     /// this is `Some`, so the two can never be read as one event.
-    ///
-    /// It REPEATS — on every foreground re-anchor that finds either an
-    /// unpublishable deferral or a group the engine declared unrecoverable; the
-    /// engine itself announces its verdict only once per session, so that sweep
-    /// is what repeats it. No event ever clears it. Do NOT act on the first: a
-    /// parked deferral a peer already healed is reported once, and only that
-    /// circle's next successful send discharges it, so a SECOND verdict from a
-    /// LATER re-anchor is the proof that the circle is genuinely wedged.
     pub unrecoverable_nostr_group_id: Option<Vec<u8>>,
+    /// What a live drive's relays blamed on this device's clock (Status): the
+    /// same evidence a bridge driver entry's outcome carries, never the
+    /// relays' words. Like the verdict above, not a [`FfiSyncStatusReason`]:
+    /// it says nothing about the connection. `status_reason` is `None` when
+    /// this is `Some`.
+    pub clock_rejected: Option<DeviceClockComplaintFfi>,
 }
 
 impl std::fmt::Debug for FfiRelayEvent {
@@ -11536,13 +12765,13 @@ impl std::fmt::Debug for FfiRelayEvent {
             .field("has_nostr_group_id", &self.nostr_group_id.is_some())
             .field("has_sender_pubkey", &self.sender_pubkey.is_some())
             .field("has_content", &self.content.is_some())
-            .field("has_evolution_event", &self.evolution_event_json.is_some())
             .field("has_gift_wrap", &self.gift_wrap_json.is_some())
             .field("status_reason", &self.status_reason)
             .field(
                 "has_unrecoverable_circle",
                 &self.unrecoverable_nostr_group_id.is_some(),
             )
+            .field("has_clock_rejected", &self.clock_rejected.is_some())
             .finish()
     }
 }
@@ -11554,10 +12783,10 @@ fn live_event_to_ffi(event: CoreLiveSyncEvent) -> FfiRelayEvent {
         sender_pubkey: None,
         content: None,
         event_created_at_secs: None,
-        evolution_event_json: None,
         gift_wrap_json: None,
         status_reason: None,
         unrecoverable_nostr_group_id: None,
+        clock_rejected: None,
     };
     match event {
         CoreLiveSyncEvent::Location {
@@ -11572,13 +12801,9 @@ fn live_event_to_ffi(event: CoreLiveSyncEvent) -> FfiRelayEvent {
             out.content = Some(content);
             out.event_created_at_secs = Some(event_created_at_secs);
         }
-        CoreLiveSyncEvent::GroupUpdate {
-            nostr_group_id,
-            evolution_event_json,
-        } => {
+        CoreLiveSyncEvent::GroupUpdate { nostr_group_id } => {
             out.kind = FfiRelayEventKind::GroupUpdate;
             out.nostr_group_id = Some(nostr_group_id);
-            out.evolution_event_json = evolution_event_json;
         }
         CoreLiveSyncEvent::Welcome { gift_wrap_json } => {
             out.kind = FfiRelayEventKind::Welcome;
@@ -11594,6 +12819,10 @@ fn live_event_to_ffi(event: CoreLiveSyncEvent) -> FfiRelayEvent {
         CoreLiveSyncEvent::Status { reason } => {
             out.kind = FfiRelayEventKind::Status;
             out.status_reason = Some(sync_reason_to_ffi(reason));
+        }
+        CoreLiveSyncEvent::ClockRejected { complaint } => {
+            out.kind = FfiRelayEventKind::Status;
+            out.clock_rejected = Some(complaint.into());
         }
     }
     out
@@ -11633,8 +12862,16 @@ impl LiveSyncFfi {
         })
     }
 
-    /// Starts the live session over `groups` + `inbox_relays`. Idempotent — a
-    /// second call while a session is live returns `Ok` without rebuilding.
+    /// Starts the live session over `groups` + `inbox_relays`, replacing any
+    /// session already installed.
+    ///
+    /// A start carries no claim that the app's lifecycle reads `resumed`,
+    /// and the session it leaves is only started: it records nothing it stages
+    /// as a durable fanout, and drives a stored one only as far as finishing
+    /// it — no first send, nothing undone. A start takes seconds,
+    /// and a claim read when it was asked would be acted on after the app
+    /// may have left. The caller claims once this has returned
+    /// ([`Self::claim_foreground`]), from a fresh read of the lifecycle.
     ///
     /// # Errors
     ///
@@ -11644,6 +12881,37 @@ impl LiveSyncFfi {
         &self,
         groups: Vec<FfiGroupSpec>,
         inbox_relays: Vec<String>,
+    ) -> Result<(), String> {
+        self.start_session_as(groups, inbox_relays, None).await
+    }
+
+    /// [`Self::start_session`] for a background wake that finds no session
+    /// (decision 190): the session it installs is in a background burst —
+    /// subscribed, making no commit — and the caller waits out its backlog
+    /// and pauses it as it does any burst
+    /// (`LiveSyncCore::start_into_burst`). `budget_ms` is the OS budget the
+    /// caller measured for the burst, from now
+    /// ([`Self::open_background_burst_within`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::start_session`].
+    pub async fn start_session_into_burst(
+        &self,
+        groups: Vec<FfiGroupSpec>,
+        inbox_relays: Vec<String>,
+        budget_ms: u64,
+    ) -> Result<(), String> {
+        self.start_session_as(groups, inbox_relays, Some(budget_ms))
+            .await
+    }
+
+    /// `burst_budget_ms` is `Some` for a start into a burst.
+    async fn start_session_as(
+        &self,
+        groups: Vec<FfiGroupSpec>,
+        inbox_relays: Vec<String>,
+        burst_budget_ms: Option<u64>,
     ) -> Result<(), String> {
         // Validate + map specs BEFORE reserving the session slot.
         let mut circles = Vec::with_capacity(groups.len());
@@ -11655,9 +12923,16 @@ impl LiveSyncFfi {
             });
         }
 
+        // The session's own publish pool, for its fanout drives and nothing
+        // else. Not the handle Dart publishes through: Dart shuts that one
+        // down and drops it at every background transition, and the session
+        // closes this one whenever it cuts its radio — which, on a pool Dart
+        // still published through, would cut a commit between its send and
+        // its relay's answer (Security Rule 13).
         let core = Arc::new(LiveSyncCore::new_local(
             Arc::clone(&self.circle),
             self.own_pubkey,
+            Arc::new(CoreRelayManager::new()),
         ));
 
         // Install this handle's session as the single live engine, REPLACING
@@ -11716,7 +12991,14 @@ impl LiveSyncFfi {
         // engine's per-core lifecycle lock guarantees this core's `start` ran to
         // completion (pool intact) before any concurrent `stop`, so a failure
         // here is a genuine one, not the emptied-pool race.
-        if let Err(e) = core.start(&circles, &inbox_relays).await {
+        let started = match burst_budget_ms {
+            Some(budget_ms) => {
+                core.start_into_burst(&circles, &inbox_relays, Some(budget_ms))
+                    .await
+            }
+            None => core.start(&circles, &inbox_relays).await,
+        };
+        if let Err(e) = started {
             // Best-effort: on a poisoned `SESSION` lock we skip the clear rather
             // than panic. The worst case is an already-stopped core (start's error
             // path ran `stop_inner`) left in the slot — degraded (`is_running()`
@@ -11766,11 +13048,16 @@ impl LiveSyncFfi {
     /// consume a position in the inbox fold, and Rust cannot tell the callers
     /// apart through one entry point.
     ///
+    /// `foreground` is the caller's claim that the app's lifecycle state
+    /// reads `resumed`: `true` ONLY when it does at the moment of the call.
+    /// On `false` the call is refused before it touches the session — this is
+    /// a foreground open, and nothing else may make one.
+    ///
     /// # Errors
     ///
-    /// Returns an error if there is no active session, the lock is poisoned, or
-    /// a re-subscription fails.
-    pub async fn resume_after_background(&self) -> Result<(), String> {
+    /// Returns an error if there is no active session, the lock is poisoned,
+    /// the caller did not claim the foreground, or a re-subscription fails.
+    pub async fn resume_after_background(&self, foreground: bool) -> Result<(), String> {
         let core = SESSION
             .read()
             .map_err(|_| "session lock poisoned".to_string())?
@@ -11778,11 +13065,37 @@ impl LiveSyncFfi {
             .map(Arc::clone);
         match core {
             Some(core) => core
-                .resume_after_background()
+                .resume_after_background(foreground_claim(foreground))
                 .await
                 .map_err(|e| e.to_string()),
             None => Err("no active live-sync session".to_string()),
         }
+    }
+
+    /// Tells a started session that the app's lifecycle reads `resumed`:
+    /// the session is in the foreground from here and is served as one,
+    /// once — a removal whose publish an earlier pass left owed is published
+    /// again, a circle that can no longer move is reported, and one drive of
+    /// the stored records is asked for. Every start is followed by this, once
+    /// the caller holds the handle; a start itself claims nothing. Nothing is
+    /// re-anchored, and no relay is contacted unless a publish is owed or a
+    /// stored record is due one.
+    ///
+    /// `foreground` is the caller's claim: `true` ONLY when the app's
+    /// lifecycle state reads `resumed` at the moment of the call. On `false`,
+    /// for a session already in the foreground, and for one that is paused or
+    /// in a background burst, the call does nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no active session or the lock is
+    /// poisoned.
+    pub async fn claim_foreground(&self, foreground: bool) -> Result<(), String> {
+        let Some(core) = live_session_core()? else {
+            return Err("no active live-sync session".to_string());
+        };
+        core.claim_foreground(foreground_claim(foreground)).await;
+        Ok(())
     }
 
     /// Opens ONE background burst: the same re-anchor as
@@ -11795,6 +13108,11 @@ impl LiveSyncFfi {
     /// the fold permanently un-applied — every burst would re-request the
     /// bounded inbox window, which is the metadata cost the fold exists to cut.
     ///
+    /// A burst makes no commit. What it receives is applied without staging
+    /// anything, and what is stored is driven only as far as finishing it: a
+    /// commit sent before goes again to a relay that is due, and one a relay
+    /// has acknowledged is confirmed.
+    ///
     /// # Errors
     ///
     /// Returns an error if there is no active session, the lock is poisoned, or
@@ -11806,6 +13124,26 @@ impl LiveSyncFfi {
         core.open_background_burst()
             .await
             .map_err(|e| e.to_string())
+    }
+
+    /// [`Self::open_background_burst`] for a caller that measured the OS
+    /// budget the burst has, `budget_ms` from now: no drive of the burst
+    /// begins a relay call it would not have the room to finish, so the OS
+    /// ending the process never leaves one stored as possibly exposed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open_background_burst`], except that no session — none
+    /// installed, or one that has stopped — is the typed
+    /// [`BurstOpenFfi::NoSession`].
+    pub async fn open_background_burst_within(
+        &self,
+        budget_ms: u64,
+    ) -> Result<BurstOpenFfi, String> {
+        let Some(core) = live_session_core()? else {
+            return Ok(BurstOpenFfi::NoSession);
+        };
+        BurstOpenFfi::answer(core.open_background_burst_within(budget_ms).await)
     }
 
     /// Closes whatever is open: drops every standing REQ and disconnects the
@@ -11920,6 +13258,15 @@ impl LiveSyncFfi {
             .map_err(|e| e.to_string())
     }
 
+    /// Where the live session stands, typed: the read a caller decides a
+    /// stop, a claim or a burst on, rather than inferring it from calls it
+    /// made.
+    #[frb(sync)]
+    #[must_use]
+    pub fn lifecycle(&self) -> LiveLifecycleFfi {
+        lifecycle_in(&SESSION, |core| core.lifecycle())
+    }
+
     /// Whether a live session is currently running.
     #[frb(sync)]
     #[must_use]
@@ -11996,6 +13343,32 @@ impl LiveSyncFfi {
         Ok(u32::try_from(core.in_flight_publishes()).unwrap_or(u32::MAX))
     }
 
+    /// How many of this session's drive-pool relays are connected right now.
+    ///
+    /// The socket half of the burst promise: every NIP-77 session of a burst
+    /// runs on the drive pool and cannot outlive its socket, and the pause
+    /// closes the pool, so zero between publish ticks means no reconciliation
+    /// and no drive socket stands. Associated, not a method, so the iOS
+    /// background drive can read it without a handle.
+    ///
+    /// Presence-only: a COUNT, which a caller renders bucketed. Never a relay
+    /// url. Test and diagnostic surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no active session, the lock is poisoned,
+    /// or the session holds no drive pool, so a caller can never read "nothing
+    /// to ask" as "no socket".
+    pub async fn drive_pool_connected_relays() -> Result<u32, String> {
+        let Some(core) = live_session_core()? else {
+            return Err("no active live-sync session".to_string());
+        };
+        core.drive_pool_connected_relays()
+            .await
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+            .ok_or_else(|| "no drive pool in this live-sync session".to_string())
+    }
+
     /// Streams decrypted live events to Dart for the lifetime of the session.
     ///
     /// Returns `Err` immediately if no session is active (a cold-start race, not
@@ -12046,6 +13419,15 @@ impl LiveSyncFfi {
 /// if any relay has dropped, re-anchors every subscription at its persisted
 /// cursor via `resume_after_background` — self-healing dropped subscriptions.
 ///
+/// `foreground` is the caller's claim: `true` ONLY when the app's lifecycle
+/// state reads `resumed` at the moment of the call. Three things happen on
+/// `true` alone — that whole-session re-anchor, the promotion of a session
+/// that had only been started, and the request for a drive of the stored
+/// fanout records. On `false` the tick
+/// still probes and still re-issues the endpoints that went quiet, changes no
+/// lifecycle, and answers [`SubscriptionHealthActionFfi::AwaitingForeground`]
+/// where the whole-session repair was due.
+///
 /// The `SESSION` read snapshots the `Arc` and drops the lock guard BEFORE any
 /// `.await` (via [`live_session_core`]), so the returned future is `Send` and
 /// the build stays clippy-clean under `-D warnings`.
@@ -12057,12 +13439,14 @@ impl LiveSyncFfi {
 ///
 /// Returns a redacted error string if the `SESSION` lock is poisoned or a
 /// re-anchor's re-subscription fails.
-pub async fn maintain_subscription_health() -> Result<SubscriptionHealthOutcomeFfi, String> {
+pub async fn maintain_subscription_health(
+    foreground: bool,
+) -> Result<SubscriptionHealthOutcomeFfi, String> {
     let Some(core) = live_session_core()? else {
         return Ok(haven_core::relay::live_sync::SubscriptionHealthOutcome::engine_off().into());
     };
     let outcome = core
-        .maintain_subscription_health()
+        .maintain_subscription_health(foreground_claim(foreground))
         .await
         .map_err(|e| e.to_string())?;
     Ok(outcome.into())
@@ -12076,8 +13460,10 @@ pub async fn maintain_subscription_health() -> Result<SubscriptionHealthOutcomeF
 pub enum ForceReleaseOutcomeFfi {
     /// No live session was installed; nothing to release.
     NoSession,
-    /// The session was stopped and every supervisor task joined, so every
-    /// `Arc<CircleManager>` the ENGINE held has been dropped.
+    /// The session was stopped and every supervisor task joined, so no task
+    /// of the ENGINE holds an `Arc<CircleManager>`. A call still inside the
+    /// stopped core — a start or a pause the stop tore down beside — keeps
+    /// its manager until that call returns.
     ///
     /// This does NOT mean the guard is free. Other holders — most importantly a
     /// `CircleManagerFfi` handle in another isolate — are untouched by this call,
@@ -12088,6 +13474,52 @@ pub enum ForceReleaseOutcomeFfi {
     /// The session was stopped but a supervisor task was still running when the
     /// join budget elapsed. The caller MUST NOT infer that the guard is free.
     StopTimedOut,
+}
+
+/// Where the live session stands ([`LiveSyncFfi::lifecycle`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveLifecycleFfi {
+    /// No session is installed.
+    NoSession,
+    /// A session is installed and no longer running: stopped, or its worker
+    /// gone. A stop that answered `stillHolding` leaves one here.
+    Stopped,
+    /// Started, and claimed for by nobody yet: it makes no commit.
+    Launched,
+    /// Claimed for the foreground: the one lifecycle that makes commits.
+    Foreground,
+    /// In a background burst: subscribed, making no commit.
+    Burst,
+    /// Paused between bursts: no REQ and no socket.
+    Paused,
+}
+
+/// The lifecycle of the session in `slot`. A poisoned slot reads as
+/// [`LiveLifecycleFfi::Stopped`], never as no session: a caller that read
+/// "no session" would start a second one beside a holder that may live.
+fn lifecycle_in<T>(
+    slot: &RwLock<Option<T>>,
+    lifecycle: impl FnOnce(&T) -> Option<haven_core::relay::live_sync::Lifecycle>,
+) -> LiveLifecycleFfi {
+    slot.read().map_or(LiveLifecycleFfi::Stopped, |installed| {
+        live_lifecycle_of(installed.as_ref().map(lifecycle))
+    })
+}
+
+/// The FFI reading of an installed session's lifecycle: `None` for no
+/// session, `Some(None)` for one that is not running.
+fn live_lifecycle_of(
+    lifecycle: Option<Option<haven_core::relay::live_sync::Lifecycle>>,
+) -> LiveLifecycleFfi {
+    use haven_core::relay::live_sync::Lifecycle as L;
+    match lifecycle {
+        None => LiveLifecycleFfi::NoSession,
+        Some(None) => LiveLifecycleFfi::Stopped,
+        Some(Some(L::Launched)) => LiveLifecycleFfi::Launched,
+        Some(Some(L::Foreground)) => LiveLifecycleFfi::Foreground,
+        Some(Some(L::Burst)) => LiveLifecycleFfi::Burst,
+        Some(Some(L::Background)) => LiveLifecycleFfi::Paused,
+    }
 }
 
 /// Reinstalls `core` into [`SESSION`] iff the slot is still empty, after a
@@ -12259,10 +13691,9 @@ mod live_sync_ffi_tests {
     fn maps_group_update_welcome_and_status() {
         let g = live_event_to_ffi(Ev::GroupUpdate {
             nostr_group_id: vec![9],
-            evolution_event_json: Some("commit".to_string()),
         });
         assert_eq!(g.kind, FfiRelayEventKind::GroupUpdate);
-        assert_eq!(g.evolution_event_json.as_deref(), Some("commit"));
+        assert_eq!(g.nostr_group_id, Some(vec![9]));
 
         let w = live_event_to_ffi(Ev::Welcome {
             gift_wrap_json: "wrap".to_string(),
@@ -12278,6 +13709,34 @@ mod live_sync_ffi_tests {
             s.status_reason,
             Some(FfiSyncStatusReason::BackgroundResumed)
         );
+    }
+
+    /// A live drive's clock verdict crosses on its own field, each direction
+    /// as itself, and as nothing else: no reason, no circle.
+    #[test]
+    fn a_clock_verdict_crosses_typed_and_as_nothing_else() {
+        use crate::api::DeviceClockComplaintFfi as F;
+        use haven_core::relay::clock_skew::DeviceClockComplaint as C;
+        for (core, ffi) in [
+            (C::Ahead, F::Ahead),
+            (C::Behind, F::Behind),
+            (C::Unspecified, F::Unspecified),
+        ] {
+            let c = live_event_to_ffi(Ev::ClockRejected { complaint: core });
+            assert_eq!(c.kind, FfiRelayEventKind::Status);
+            assert_eq!(c.clock_rejected, Some(ffi));
+            assert!(
+                c.status_reason.is_none()
+                    && c.unrecoverable_nostr_group_id.is_none()
+                    && c.nostr_group_id.is_none()
+                    && c.content.is_none(),
+                "a clock verdict crossed as something else",
+            );
+        }
+        let other = live_event_to_ffi(Ev::Status {
+            reason: haven_core::relay::live_sync::SyncStatusReason::Connected,
+        });
+        assert_eq!(other.clock_rejected, None);
     }
 
     /// The terminal per-circle verdict crosses the FFI on its OWN field, carrying
@@ -12299,7 +13758,6 @@ mod live_sync_ffi_tests {
             u.content.is_none()
                 && u.sender_pubkey.is_none()
                 && u.nostr_group_id.is_none()
-                && u.evolution_event_json.is_none()
                 && u.gift_wrap_json.is_none()
                 && u.event_created_at_secs.is_none(),
             "the verdict carries the circle id and nothing else"
@@ -12367,19 +13825,18 @@ mod live_sync_ffi_tests {
         assert!(!dbg.contains("42"), "source instant must not show: {dbg}");
         assert!(dbg.contains("Location"));
 
-        // GroupUpdate: the outbound commit JSON MUST be redacted, but its
-        // presence renders as a boolean flag.
+        // GroupUpdate: the circle's id MUST be redacted, but its presence
+        // renders as a boolean flag.
         let g = live_event_to_ffi(Ev::GroupUpdate {
             nostr_group_id: vec![0xAB, 0xCD],
-            evolution_event_json: Some("SECRET_EVOLUTION".to_string()),
         });
         let dbg = format!("{g:?}");
         assert!(
-            !dbg.contains("SECRET_EVOLUTION"),
-            "leaked evolution json: {dbg}"
+            !dbg.contains("abcd") && !dbg.contains("ABCD") && !dbg.contains("171"),
+            "leaked group id: {dbg}"
         );
         assert!(
-            dbg.contains("has_evolution_event: true"),
+            dbg.contains("has_nostr_group_id: true"),
             "presence flag must render: {dbg}"
         );
 
@@ -12474,9 +13931,34 @@ mod live_sync_ffi_tests {
                 SubscriptionHealthActionFfi::TargetedReanchor,
             ),
             (A::Paused, SubscriptionHealthActionFfi::Paused),
+            (
+                A::AwaitingForeground,
+                SubscriptionHealthActionFfi::AwaitingForeground,
+            ),
         ] {
             assert_eq!(SubscriptionHealthActionFfi::from(core), ffi);
         }
+    }
+
+    /// A tick that left a dropped session alone for want of a foreground
+    /// claim found a receive plane that is not whole. Mapped onto any action
+    /// that proves it whole, it would clear a real lost-subscription verdict
+    /// on the Dart side.
+    #[test]
+    fn awaiting_foreground_is_never_folded_onto_a_repair_verdict() {
+        use haven_core::relay::live_sync::HealthAction as A;
+        let awaiting = SubscriptionHealthActionFfi::from(A::AwaitingForeground);
+        for proof in [A::Healthy, A::Resubscribed, A::TargetedReanchor] {
+            assert_ne!(awaiting, SubscriptionHealthActionFfi::from(proof));
+        }
+    }
+
+    /// The one conversion: only `true` claims the foreground.
+    #[test]
+    fn only_a_true_flag_claims_the_foreground() {
+        use haven_core::relay::live_sync::Claim;
+        assert_eq!(super::foreground_claim(true), Claim::Foreground);
+        assert_eq!(super::foreground_claim(false), Claim::Nothing);
     }
 
     #[test]
@@ -12522,6 +14004,7 @@ mod live_sync_ffi_tests {
             (R::SessionStopped, FfiSyncStatusReason::SessionStopped),
             (R::BackgroundResumed, FfiSyncStatusReason::BackgroundResumed),
             (R::Paused, FfiSyncStatusReason::Paused),
+            (R::RefetchOwed, FfiSyncStatusReason::RefetchOwed),
         ] {
             assert_eq!(sync_reason_to_ffi(core), ffi);
         }
@@ -12541,11 +14024,10 @@ mod live_sync_ffi_tests {
 // (`converge_result_to_ffi`, `ConvergeIntentFfi`/`ConvergeIntentKind`,
 // `ConvergeResultKind`, `StagedCommitFfi`/`StagedAddFfi`, and the core
 // `CommitConvergence`/`CommitIntent` they mapped) — was DELETED. Convergence is
-// now engine-owned (branch selection happens inside the MDK engine), and the
-// send path is publish-before-apply (`CommitToPublishFfi` +
-// `confirm_published`/`publish_failed`, Rule 13). There is no FFI-helper-level
-// conversion surface left to unit-test here; the publish-before-apply commit
-// lifecycle needs a live manager and is exercised by the live-sync e2e lanes.
+// now engine-owned (branch selection happens inside the MDK engine), and
+// publish-before-apply lives in the core's fanout driver behind the `*_driven`
+// entries (Rule 13). There is no FFI-helper-level conversion surface left to
+// unit-test here.
 
 // ============================================================================
 // KeyPackage maintenance — REAL-FFI end-to-end over MockRelay (Dark Matter).
@@ -12573,8 +14055,8 @@ mod live_sync_ffi_tests {
 //     surviving half of the partial-drop fix, re-expressed over the presence gate.
 // TC-2 (aged-out-dead-material → republish + kind-5 GC of the 443 twin) was
 // DELETED with its subject: the dead-material gate is gone and there is no more
-// 443 twin on the publish path (the legacy 443/10051 hygiene moved to the
-// one-time `retract_legacy_key_material` retraction cutover, not maintenance).
+// 443 twin on the publish path, and no 443/10051 is ever retracted: both are
+// retired protocol objects).
 //
 // Security: presence-only — no secret bytes, `d` slots, hash_refs, or group ids
 // are printed or asserted on; only event kinds, counts, action enums, and public
@@ -12585,8 +14067,8 @@ mod live_sync_ffi_tests {
 mod maintenance_real_ffi_tests {
     use super::{
         allow_ws_loopback_for_test, hex_to_npub, profile_now_secs, use_in_memory_keyring_for_test,
-        CachedProfile, CircleManagerFfi, KpMaintenanceActionFfi, ProfileMetadata, ProfileState,
-        ProfileSyncOutcomeFfi, RelayManagerFfi, RelayTypeFfi,
+        CachedProfile, CircleManagerFfi, KpMaintenanceActionFfi, OwnProfileRelayAnswerFfi,
+        ProfileMetadata, ProfileState, ProfileSyncOutcomeFfi, RelayManagerFfi, RelayTypeFfi,
     };
     use haven_core::circle::RelayType;
     use nostr::{Keys, Kind};
@@ -12628,6 +14110,78 @@ mod maintenance_real_ffi_tests {
         // Idempotent; a second install returns Err which we ignore.
         let _ = use_in_memory_keyring_for_test();
         let _ = allow_ws_loopback_for_test();
+        discovery_plane();
+    }
+
+    /// The discovery plane of this test binary: one in-process relay that
+    /// holds nothing and records which accounts it was asked about. Without
+    /// it a lookup of another account's relay lists or `KeyPackage` falls
+    /// back to the production indexers — real public hosts.
+    struct DiscoveryPlane {
+        asked: std::sync::Arc<std::sync::Mutex<Vec<nostr::PublicKey>>>,
+    }
+
+    impl DiscoveryPlane {
+        /// How many `REQ`s named `account` as an author.
+        fn asked_about(&self, account: &nostr::PublicKey) -> usize {
+            self.asked
+                .lock()
+                .expect("the record of queries")
+                .iter()
+                .filter(|asked| *asked == account)
+                .count()
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordAuthors(std::sync::Arc<std::sync::Mutex<Vec<nostr::PublicKey>>>);
+
+    impl nostr_relay_builder::builder::QueryPolicy for RecordAuthors {
+        fn admit_query<'a>(
+            &'a self,
+            query: &'a nostr::Filter,
+            _addr: &'a std::net::SocketAddr,
+        ) -> nostr_sdk::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult>
+        {
+            self.0
+                .lock()
+                .expect("the record of queries")
+                .extend(query.authors.iter().flatten().copied());
+            Box::pin(async { nostr_relay_builder::builder::PolicyResult::Accept })
+        }
+    }
+
+    /// Installs the plane once per process. The override is install-once, so
+    /// the relay runs on a thread of its own and outlives every test's
+    /// runtime.
+    fn discovery_plane() -> &'static DiscoveryPlane {
+        static PLANE: std::sync::OnceLock<DiscoveryPlane> = std::sync::OnceLock::new();
+        PLANE.get_or_init(|| {
+            let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recording = asked.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime")
+                    .block_on(async {
+                        let relay = nostr_relay_builder::LocalRelay::new(
+                            nostr_relay_builder::RelayBuilder::default()
+                                .query_policy(RecordAuthors(recording)),
+                        );
+                        relay.run().await.expect("run the discovery relay");
+                        tx.send(relay.url().await.to_string())
+                            .expect("hand the url over");
+                        std::future::pending::<()>().await;
+                    });
+            });
+            let url = rx.recv().expect("the discovery relay's url");
+            let _ = allow_ws_loopback_for_test();
+            haven_core::relay::set_discovery_relays_for_test(vec![url])
+                .expect("nothing else installs a discovery plane in this binary");
+            DiscoveryPlane { asked }
+        })
     }
 
     /// A generic 32-byte identity secret. Deterministic per test call is fine —
@@ -12645,6 +14199,31 @@ mod maintenance_real_ffi_tests {
         format!("ws://127.0.0.1:{port}")
     }
 
+    /// Contaminates every curated profile relay — eight real public hosts — so
+    /// the account's profile pool is only what the test seeds after it.
+    fn retire_curated_profile_pool(circle: &CircleManagerFfi) {
+        for url in haven_core::profile::profile_relay_pool_default() {
+            circle
+                .inner
+                .add_user_relay(&url, RelayType::Inbox)
+                .expect("contaminate a curated pool relay");
+        }
+    }
+
+    /// Fails unless the account's whole profile pool is `expected` loopback
+    /// relays. Asserted before a test publishes or fetches: anything else in
+    /// the pool is a real public host.
+    fn assert_profile_pool_is_local(circle: &CircleManagerFfi, expected: usize) {
+        let pool = circle
+            .inner
+            .usable_profile_relays()
+            .expect("the pool satisfies its minimum");
+        assert!(
+            pool.len() == expected && pool.iter().all(|url| url.starts_with("ws://127.0.0.1:")),
+            "the profile pool must be the test's own relays and nothing else",
+        );
+    }
+
     /// Points one account's profile plane at three DEAD loopback relays.
     ///
     /// The curated pool is eight real public hosts, so a test that must stay
@@ -12654,23 +14233,102 @@ mod maintenance_real_ffi_tests {
     /// pool usable — the pre-check passes, so what follows it is what is under
     /// test — while guaranteeing no packet can leave the machine.
     fn isolate_profile_plane(circle: &CircleManagerFfi) {
-        for url in haven_core::profile::profile_relay_pool_default() {
-            circle
-                .inner
-                .add_user_relay(&url, RelayType::Inbox)
-                .expect("contaminate a curated pool relay");
-        }
+        retire_curated_profile_pool(circle);
         for _ in 0..3 {
             circle
                 .inner
                 .add_user_relay(&dead_loopback_relay(), RelayType::Profile)
                 .expect("seed a dead profile relay");
         }
-        assert!(
-            circle.inner.usable_profile_relays().is_ok(),
-            "the isolated plane must still satisfy the pool minimum, or the \
-             pre-check would answer instead of the code under test",
-        );
+        // Also holds the pool minimum, without which the pre-check would
+        // answer instead of the code under test.
+        assert_profile_pool_is_local(circle, 3);
+    }
+
+    /// Points one account's profile plane at three LIVE in-process relays, so
+    /// every own-profile read settles — with whatever the test seeded — and no
+    /// packet leaves the machine. The relays must outlive the test body.
+    async fn reachable_profile_plane(circle: &CircleManagerFfi) -> Vec<MockRelay> {
+        retire_curated_profile_pool(circle);
+        let mut relays = Vec::new();
+        for _ in 0..3 {
+            let relay = MockRelay::run().await.expect("start MockRelay");
+            circle
+                .inner
+                .add_user_relay(&relay.url().await.to_string(), RelayType::Profile)
+                .expect("seed a live profile relay");
+            relays.push(relay);
+        }
+        assert_profile_pool_is_local(circle, relays.len());
+        relays
+    }
+
+    /// Admits every `REQ` and counts it relay-side, so a zero means *never
+    /// asked* rather than "asked and had nothing".
+    #[derive(Debug)]
+    struct CountEveryQuery(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl nostr_relay_builder::builder::QueryPolicy for CountEveryQuery {
+        fn admit_query<'a>(
+            &'a self,
+            _query: &'a nostr::Filter,
+            _addr: &'a std::net::SocketAddr,
+        ) -> nostr_sdk::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult>
+        {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { nostr_relay_builder::builder::PolicyResult::Accept })
+        }
+    }
+
+    /// A hermetic profile plane whose relays count what they are asked.
+    struct CountedProfilePlane {
+        /// The live relays' URLs, then the dead ones'.
+        urls: Vec<String>,
+        /// Every `REQ` any live relay has been asked.
+        asked: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// Kept alive for the test body.
+        _relays: Vec<nostr_relay_builder::LocalRelay>,
+    }
+
+    impl CountedProfilePlane {
+        /// Starts `live` counting in-process relays and reserves `dead`
+        /// loopback URLs that refuse every connection.
+        async fn start(live: usize, dead: usize) -> Self {
+            let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut urls = Vec::new();
+            let mut relays = Vec::new();
+            for _ in 0..live {
+                let relay = nostr_relay_builder::LocalRelay::new(
+                    nostr_relay_builder::RelayBuilder::default()
+                        .query_policy(CountEveryQuery(asked.clone())),
+                );
+                relay.run().await.expect("run a counting relay");
+                urls.push(relay.url().await.to_string());
+                relays.push(relay);
+            }
+            urls.extend((0..dead).map(|_| dead_loopback_relay()));
+            Self {
+                urls,
+                asked,
+                _relays: relays,
+            }
+        }
+
+        /// Makes this plane the whole profile pool of `circle`.
+        fn serve(&self, circle: &CircleManagerFfi) {
+            retire_curated_profile_pool(circle);
+            for url in &self.urls {
+                circle
+                    .inner
+                    .add_user_relay(url, RelayType::Profile)
+                    .expect("seed a profile relay");
+            }
+            assert_profile_pool_is_local(circle, self.urls.len());
+        }
+
+        fn asked(&self) -> usize {
+            self.asked.load(Ordering::SeqCst)
+        }
     }
 
     /// Accepts writes until flipped, then rejects them — every kind, or only
@@ -12705,8 +14363,88 @@ mod maintenance_real_ffi_tests {
         }
     }
 
+    /// Holds every kind-30443 write at the relay until the gate opens, and
+    /// says when one arrived.
+    #[derive(Debug)]
+    struct HoldKeyPackagesUntilOpened {
+        arrived: std::sync::Arc<tokio::sync::Semaphore>,
+        /// Closing this semaphore opens the gate.
+        gate: std::sync::Arc<tokio::sync::Semaphore>,
+        seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl nostr_relay_builder::builder::WritePolicy for HoldKeyPackagesUntilOpened {
+        fn admit_event<'a>(
+            &'a self,
+            event: &'a nostr::Event,
+            _addr: &'a std::net::SocketAddr,
+        ) -> nostr_sdk::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult>
+        {
+            Box::pin(async move {
+                if event.kind == Kind::Custom(30443) {
+                    self.seen.fetch_add(1, Ordering::SeqCst);
+                    self.arrived.add_permits(1);
+                    let _ = self.gate.acquire().await;
+                }
+                nostr_relay_builder::builder::PolicyResult::Accept
+            })
+        }
+    }
+
     /// The NIP-33 `d` of a kind-30443 event (public tag; used only to assert the
     /// republished canonical reuses the stable slot). Never a secret.
+    /// The tracked `KeyPackage`, as these tests read it off the lifecycle
+    /// record.
+    struct TrackedRow {
+        d_tag: String,
+        key_package: Vec<u8>,
+        created_at: u64,
+    }
+
+    async fn tracked_row(circle: &CircleManagerFfi) -> Option<TrackedRow> {
+        let tracked = circle
+            .inner
+            .session()
+            .tracked_key_package()
+            .await
+            .expect("read the lifecycle record")?;
+        Some(TrackedRow {
+            d_tag: tracked.slot,
+            key_package: tracked.package,
+            created_at: tracked.created_at.unwrap_or(0),
+        })
+    }
+
+    /// Plants `key_package` as the tracked current package in `d_tag`, under an
+    /// event no relay serves: a state no current build writes.
+    async fn track(circle: &CircleManagerFfi, d_tag: &str, key_package: &[u8], created_at: u64) {
+        circle
+            .inner
+            .session()
+            .track_key_package_for_test(d_tag, key_package, None, created_at)
+            .await
+            .expect("plant the tracked package");
+    }
+
+    /// Makes `events` the tracked publication, as the tick that published it
+    /// would have left the record — and drops whatever a fixture mint staged.
+    async fn track_published(
+        circle: &CircleManagerFfi,
+        events: &haven_core::relay::maintenance::KpMaintenanceEvents,
+    ) {
+        circle
+            .inner
+            .session()
+            .track_key_package_for_test(
+                &events.d_tag,
+                events.key_package.bytes(),
+                Some(&events.event),
+                events.event.created_at.as_secs(),
+            )
+            .await
+            .expect("track the publication");
+    }
+
     fn kp_d_tag(ev: &nostr::Event) -> Option<String> {
         ev.tags.iter().find_map(|t| {
             let s = t.as_slice();
@@ -12726,7 +14464,7 @@ mod maintenance_real_ffi_tests {
         kind: Kind,
         relay: &str,
     ) -> Vec<nostr::Event> {
-        let client = nostr_sdk::Client::builder().build();
+        let client = nostr_sdk::Client::builder().build(); // test witness
         client.add_relay(relay).await.expect("add relay"); // e2e helper
         client.connect().await;
         let filter = nostr::Filter::new().kind(kind).author(author).limit(64);
@@ -12786,6 +14524,7 @@ mod maintenance_real_ffi_tests {
         let core = std::sync::Arc::new(super::LiveSyncCore::new_local(
             std::sync::Arc::clone(&manager.inner),
             keys.public_key(),
+            std::sync::Arc::new(super::CoreRelayManager::new()),
         ));
         *super::SESSION.write().expect("session lock") = Some(std::sync::Arc::clone(&core));
 
@@ -12804,7 +14543,8 @@ mod maintenance_real_ffi_tests {
 
         // THE claim: the manager is still alive, so the guard is still held and
         // the reclaim has granted the caller nothing.
-        let db = std::path::Path::new(&dir.as_str()).join("session.sqlite");
+        let db =
+            haven_core::nostr::mls::storage::session_db_path(std::path::Path::new(&dir.as_str()));
         assert!(
             haven_core::nostr::mls::storage::LiveSessionGuard::acquire(&db).is_err(),
             "the reclaim must never release a guard held by a LIVE handle — \
@@ -12829,7 +14569,7 @@ mod maintenance_real_ffi_tests {
     /// The FFI liveness query over the real production path.
     ///
     /// `haven-core` covers the registry semantics; what only this level can
-    /// catch is the wrapper's own `data_dir` → `session.sqlite` join. Get that
+    /// catch is the wrapper's own `data_dir` → session DB join. Get that
     /// wrong and the query answers `false` forever — the foreground service
     /// would conclude the guard is free, skip recovery, and never publish.
     ///
@@ -12889,6 +14629,98 @@ mod maintenance_real_ffi_tests {
                 .expect("second release"),
             super::ForceReleaseOutcomeFfi::NoSession
         );
+    }
+
+    /// The drive-pool socket read the iOS background drive asserts on throws
+    /// with no session installed and answers the installed core's count with
+    /// one, so "nothing to ask" can never read as "no socket".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_drive_pool_socket_read_needs_a_session_and_answers_its_count() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        assert!(
+            super::LiveSyncFfi::drive_pool_connected_relays()
+                .await
+                .is_err(),
+            "with no session the read is an error, never a zero"
+        );
+
+        let keys = Keys::generate();
+        let dir = DataDir::new("drive_pool_read");
+        let manager = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        let core = std::sync::Arc::new(super::LiveSyncCore::new_local(
+            std::sync::Arc::clone(&manager.inner),
+            keys.public_key(),
+            std::sync::Arc::new(super::CoreRelayManager::new()),
+        ));
+        *super::SESSION.write().expect("session lock") = Some(std::sync::Arc::clone(&core));
+        let answer = super::LiveSyncFfi::drive_pool_connected_relays().await;
+        let released = super::force_release_live_session().await;
+
+        assert_eq!(
+            answer,
+            Ok(0),
+            "a drive pool that has dialled nothing has no connected relay"
+        );
+        assert_eq!(
+            released.expect("force release"),
+            super::ForceReleaseOutcomeFfi::Drained
+        );
+        drop(core);
+        drop(manager);
+    }
+
+    /// A burst asked to open over no session answers the typed `NoSession`,
+    /// on both of its paths: no core installed (the bridge's own read), and a
+    /// core whose session has stopped (the core's `LiveSyncError::NoSession`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_burst_open_over_no_session_answers_no_session_typed() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let dir = DataDir::new("burst_open_no_session");
+        let manager = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        let live = super::LiveSyncFfi::new_instance(&manager, keys.public_key().to_hex())
+            .expect("a live-sync handle");
+        *super::SESSION.write().expect("session lock") = None;
+        assert_eq!(
+            live.open_background_burst_within(30_000).await,
+            Ok(super::BurstOpenFfi::NoSession),
+            "a burst open with no core installed did not answer NoSession",
+        );
+
+        let core = std::sync::Arc::new(super::LiveSyncCore::new_local(
+            std::sync::Arc::clone(&manager.inner),
+            keys.public_key(),
+            std::sync::Arc::new(super::CoreRelayManager::new()),
+        ));
+        let _ = core.stop().await;
+        *super::SESSION.write().expect("session lock") = Some(core);
+        let stopped = live.open_background_burst_within(30_000).await;
+        *super::SESSION.write().expect("session lock") = None;
+        assert_eq!(
+            stopped,
+            Ok(super::BurstOpenFfi::NoSession),
+            "a burst open over a stopped session did not answer NoSession",
+        );
+    }
+
+    /// Every core answer of a burst open crosses by variant: opened, no
+    /// session, and any other failure as the error it was.
+    #[test]
+    fn every_burst_open_answer_crosses_by_variant() {
+        use haven_core::relay::live_sync::LiveSyncError as E;
+        assert_eq!(
+            super::BurstOpenFfi::answer(Ok(())),
+            Ok(super::BurstOpenFfi::Opened)
+        );
+        assert_eq!(
+            super::BurstOpenFfi::answer(Err(E::NoSession)),
+            Ok(super::BurstOpenFfi::NoSession)
+        );
+        assert!(super::BurstOpenFfi::answer(Err(E::Timeout)).is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -12983,15 +14815,167 @@ mod maintenance_real_ffi_tests {
         relay.shutdown();
     }
 
+    /// The poll and background planes hand every fetched event to the FFI
+    /// `ingest_driven`. A gift-wrapped Welcome handed
+    /// there — a hostile relay can serve one on any page — must join nothing:
+    /// no group, no circle that would be sent the user's location, nothing
+    /// owed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_injected_welcome_through_the_ffi_decrypt_joins_nothing_via_real_ffi() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let dir = DataDir::new("injected_welcome");
+        let bob = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys)).expect("bob");
+        let bobs_package = haven_core::relay::maintenance::build_kp_maintenance_events(
+            bob.inner.session(),
+            &keys,
+            &["wss://kp.example.com".to_string()],
+            None,
+            None,
+        )
+        .await
+        .expect("bob's public key package")
+        .event;
+        let founder_dir = DataDir::new("injected_welcome_founder");
+        let founder_keys = Keys::generate();
+        let founder = haven_core::circle::CircleManager::new_unencrypted(
+            std::path::Path::new(&founder_dir.as_str()),
+            &founder_keys,
+        )
+        .expect("founder");
+        let relays = vec!["wss://group.example.com".to_string()];
+        let lure = founder
+            .create_circle(
+                &founder_keys,
+                vec![haven_core::circle::MemberKeyPackage {
+                    key_package_event: bobs_package,
+                    inbox_relays: relays.clone(),
+                    nip65_relays: vec![],
+                }],
+                &haven_core::circle::CircleConfig::new("Lure").with_relays(relays.clone()),
+            )
+            .await
+            .expect("a stranger founds a group with bob in it");
+
+        let relays = RelayManagerFfi::new_instance()
+            .await
+            .expect("relay manager");
+        let outcome = relays
+            .ingest_driven(
+                &bob,
+                nostr::JsonUtil::as_json(&lure.welcome_events[0].event),
+                true,
+            )
+            .await
+            .expect("a refused event is no error");
+
+        assert!(outcome.replayed.is_empty());
+        let group = &lure.circle.mls_group_id;
+        assert!(bob
+            .inner
+            .session()
+            .find_group(group)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(bob.inner.get_circle(group).await.unwrap().is_none());
+        assert_eq!(
+            bob.inner
+                .session()
+                .pending_application_output_count_for_test()
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    /// Another live client of the same account — a second Haven install here,
+    /// White Noise in the field — keeps a current package in a slot this install
+    /// adopts. That slot is the other client's (`transports/nostr.md:310-314`):
+    /// the next tick mints a slot of its own and leaves the other package alone,
+    /// instead of the two replacing each other's package for ever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_package_another_client_keeps_live_is_left_alone_via_real_ffi() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+
+        let other_dir = DataDir::new("kp_other_client");
+        let other =
+            CircleManagerFfi::new(other_dir.as_str(), secret.clone()).expect("the other client");
+        other
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+        assert_eq!(
+            circle_maintain(&relay_mgr, &other, secret.clone())
+                .await
+                .action,
+            KpMaintenanceActionFfi::RepublishedFreshD
+        );
+        let theirs = fetch_by_kind(author, Kind::Custom(30443), &url)
+            .await
+            .into_iter()
+            .next()
+            .expect("the other client's package is on the relay");
+        let their_d = theirs
+            .tags
+            .find(nostr::TagKind::d())
+            .and_then(|t| t.content())
+            .expect("d")
+            .to_owned();
+
+        let this_dir = DataDir::new("kp_this_client");
+        let this = CircleManagerFfi::new(this_dir.as_str(), secret.clone()).expect("this install");
+        this.add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+        assert_eq!(
+            circle_maintain(&relay_mgr, &this, secret.clone())
+                .await
+                .action,
+            KpMaintenanceActionFfi::SeededD,
+            "the first tick adopts the slot the relay already serves"
+        );
+        assert_eq!(
+            circle_maintain(&relay_mgr, &this, secret.clone())
+                .await
+                .action,
+            KpMaintenanceActionFfi::RepublishedFreshD,
+            "a current package in the adopted slot is another client's"
+        );
+        let tracked = tracked_row(&this).await.expect("a tracked package");
+        assert!(!tracked.key_package.is_empty(), "fresh material was minted");
+        assert_ne!(tracked.d_tag, their_d, "into a slot of its own");
+        let served = fetch_by_kind(author, Kind::Custom(30443), &url).await;
+        assert!(
+            served.iter().any(|e| e.id == theirs.id),
+            "the other client's package is untouched"
+        );
+        assert_eq!(
+            circle_maintain(&relay_mgr, &this, secret).await.action,
+            KpMaintenanceActionFfi::AlreadyHealthy,
+            "and the two slots then coexist quietly"
+        );
+        relay.shutdown();
+    }
+
     // REMOVED (Dark Matter migration): `tc2_stale_relay_republishes_and_gcs_legacy_twin_via_real_ffi`.
     // Its subject — the M8-2 aged-out "dead-material" live gate forcing a
     // Republish plus a self-authored kind-5 NIP-09 GC of the superseded legacy
     // 443 twin — no longer exists in production: presence is now pure relay
     // presence of the tracked stable `d` (there is no live-material verdict), and
     // `maintain_key_package` publishes ONLY the addressable kind-30443 (no 443
-    // twin, so nothing to GC on the publish path). The legacy 443/10051 hygiene
-    // moved to the one-time `retract_legacy_key_material` retraction cutover, not
-    // per-tick maintenance. Its dead-material state was fabricated via the deleted
+    // twin, so nothing to GC on the publish path). Its dead-material state was
+    // fabricated via the deleted
     // `record_published_key_packages` seam, which no longer exists. The surviving
     // "republish into the SAME stable `d`, leaving healthy relays untouched"
     // invariant is retained by the re-expressed per-relay isolation test below.
@@ -13096,13 +15080,14 @@ mod maintenance_real_ffi_tests {
             "no rival same-`d` canonical may be published to the already-healthy relay"
         );
 
-        // The EMPTY relay must now serve a canonical in the SAME stable `d`.
+        // The EMPTY relay must now serve the tracked event itself: a heal signs
+        // nothing, it republishes the frozen bytes.
         let on_empty = fetch_by_kind(author, Kind::Custom(30443), &url_empty).await;
         assert!(
             on_empty
                 .iter()
-                .any(|e| kp_d_tag(e).as_deref() == Some(stable_d.as_str())),
-            "the healed relay must receive a republished same-`d` canonical"
+                .any(|e| nostr::JsonUtil::as_json(e) == nostr::JsonUtil::as_json(live_canonical)),
+            "the healed relay must receive the tracked event byte for byte"
         );
 
         relay_live.shutdown();
@@ -13119,6 +15104,190 @@ mod maintenance_real_ffi_tests {
             .maintain_key_package(circle, secret)
             .await
             .expect("maintain_key_package must not error")
+    }
+
+    // ------------------------------------------------------------------------
+    // The MDK v0.10.4 storage reset returns the relay-list publishing choices to
+    // their defaults, so no relay list (10050/10002) and no KeyPackage (30443)
+    // is published until the user has seen the reset notice — through every
+    // Rust entry point a plane can reach.
+    // ------------------------------------------------------------------------
+
+    /// A pre-migration install: one old store file, so the first open resets
+    /// and leaves the reset notice owed.
+    fn plant_pre_migration_store(dir: &DataDir) {
+        std::fs::write(
+            std::path::Path::new(&dir.as_str()).join("circles.db"),
+            b"a store a v0.9.4 build wrote",
+        )
+        .expect("plant an old store file");
+    }
+
+    #[test]
+    fn wiping_mls_state_forgets_this_identitys_part_of_the_storage_reset() {
+        let _guard = super::SHARED_KEYRING_TEST_LOCK.blocking_lock();
+        install_test_seams();
+        let dir = DataDir::new("reset_wipe");
+        // A pre-migration store no unlink can remove, so every opener retries.
+        std::fs::create_dir(std::path::Path::new(&dir.as_str()).join("circles.db"))
+            .expect("plant a store the reset cannot delete");
+        assert!(super::reset_pre_v2_storage(dir.as_str()));
+        super::storage_reset_prefs_cleared(dir.as_str()).expect("cleared");
+        assert!(super::reset_pre_v2_storage(dir.as_str()));
+        assert!(
+            !super::storage_reset_prefs_owed(dir.as_str()),
+            "precondition: cleared once, never owed again by a retry"
+        );
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for the wipe")
+            .block_on(super::wipe_all_mls_state(dir.as_str()))
+            .expect("the wipe succeeds");
+
+        assert!(super::reset_pre_v2_storage(dir.as_str()));
+        assert!(
+            super::storage_reset_prefs_owed(dir.as_str()),
+            "the identity after a logout is owed the clearing again"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_relay_list_is_published_before_the_reset_is_acknowledged() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("reset_gate");
+        plant_pre_migration_store(&dir);
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        assert!(
+            !circle.inner.storage_reset_acknowledged(),
+            "precondition: the first open reset a pre-migration install"
+        );
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        for relay_type in [RelayTypeFfi::Inbox, RelayTypeFfi::Nip65] {
+            circle
+                .add_user_relay(url.clone(), relay_type)
+                .await
+                .expect("register an own relay");
+        }
+
+        // The maintenance tick (foreground scheduler, FGS cycle, burst and
+        // WorkManager all drive these two entry points) and the user-edit
+        // publish path.
+        let lists = relay_mgr
+            .maintain_relay_list(&circle, secret.clone())
+            .await
+            .expect("relay-list tick");
+        for category in [lists.inbox, lists.key_package] {
+            assert_eq!(
+                category.action,
+                super::RelayListActionFfi::AwaitingResetAcknowledgement
+            );
+        }
+        let kp = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert_eq!(
+            kp.action,
+            KpMaintenanceActionFfi::AwaitingResetAcknowledgement,
+            "a KeyPackage is discoverable only through the 10002 that waits too"
+        );
+        for relay_type in [RelayTypeFfi::Inbox, RelayTypeFfi::Nip65] {
+            let built = circle
+                .build_relay_list_publish(secret.clone(), relay_type)
+                .await
+                .expect("build");
+            assert!(built.awaiting_reset_acknowledgement && built.event_json.is_none());
+        }
+        for kind in [Kind::InboxRelays, Kind::RelayList, Kind::Custom(30443)] {
+            assert!(
+                fetch_by_kind(author, kind, &url).await.is_empty(),
+                "nothing of kind {kind} may reach a relay before the notice is acknowledged"
+            );
+        }
+
+        super::acknowledge_storage_reset(dir.as_str()).expect("acknowledge");
+        let lists = relay_mgr
+            .maintain_relay_list(&circle, secret.clone())
+            .await
+            .expect("relay-list tick");
+        assert_eq!(lists.inbox.action, super::RelayListActionFfi::Republished);
+        assert_eq!(
+            lists.key_package.action,
+            super::RelayListActionFfi::Republished
+        );
+        assert_eq!(
+            circle_maintain(&relay_mgr, &circle, secret).await.action,
+            KpMaintenanceActionFfi::RepublishedFreshD
+        );
+        assert!(!fetch_by_kind(author, Kind::InboxRelays, &url)
+            .await
+            .is_empty());
+        assert!(!fetch_by_kind(author, Kind::RelayList, &url)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_first_relay_lists_after_the_reset_carry_the_relays_the_user_added_first() {
+        // The point of waiting, as the notice tells the user: a relay they add
+        // before continuing is in the very first list Haven publishes, so the
+        // defaults never go out alone.
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+        let own = MockRelay::run().await.expect("start the user's own relay");
+        let own_url = own.url().await.to_string();
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("reset_own_relays");
+        plant_pre_migration_store(&dir);
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        for relay_type in [RelayTypeFfi::Inbox, RelayTypeFfi::Nip65] {
+            circle
+                .add_user_relay(url.clone(), relay_type)
+                .await
+                .expect("register a relay");
+            circle
+                .add_user_relay(own_url.clone(), relay_type)
+                .await
+                .expect("the user adds their own relay before continuing");
+        }
+        super::acknowledge_storage_reset(dir.as_str()).expect("acknowledge");
+
+        let lists = relay_mgr
+            .maintain_relay_list(&circle, secret)
+            .await
+            .expect("relay-list tick");
+        assert_eq!(lists.inbox.action, super::RelayListActionFfi::Republished);
+        assert_eq!(
+            lists.key_package.action,
+            super::RelayListActionFfi::Republished
+        );
+        for kind in [Kind::InboxRelays, Kind::RelayList] {
+            let published = fetch_by_kind(author, kind, &url).await;
+            assert_eq!(published.len(), 1, "one list of kind {kind}");
+            assert!(
+                published[0]
+                    .tags
+                    .iter()
+                    .any(|tag| tag.as_slice().get(1).map(String::as_str) == Some(own_url.as_str())),
+                "the first list of kind {kind} names the relay the user added first"
+            );
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -13157,10 +15326,8 @@ mod maintenance_real_ffi_tests {
         let first = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
         assert_eq!(first.action, KpMaintenanceActionFfi::RepublishedFreshD);
         tokio::time::sleep(Duration::from_millis(250)).await;
-        let tracked = circle
-            .inner
-            .latest_published_key_package()
-            .expect("read tracked row")
+        let tracked = tracked_row(&circle)
+            .await
             .expect("a row exists after the first publish");
         let stable_d = tracked.d_tag.clone();
         let original_bytes = tracked.key_package.clone();
@@ -13168,13 +15335,13 @@ mod maintenance_real_ffi_tests {
         // Corrupt the tracked BYTES only (slot + timestamps untouched), which is
         // exactly the state a truncated write or a wire-format change would
         // leave behind.
-        circle
-            .inner
-            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
-                key_package: vec![0xDE, 0xAD, 0xBE, 0xEF],
-                ..tracked
-            })
-            .expect("write corrupted row");
+        track(
+            &circle,
+            &tracked.d_tag,
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            tracked.created_at,
+        )
+        .await;
 
         let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
         assert_eq!(
@@ -13196,11 +15363,7 @@ mod maintenance_real_ffi_tests {
 
         tokio::time::sleep(Duration::from_millis(250)).await;
         // Same slot, new material.
-        let after = circle
-            .inner
-            .latest_published_key_package()
-            .expect("read tracked row")
-            .expect("row");
+        let after = tracked_row(&circle).await.expect("row");
         assert_eq!(
             after.d_tag, stable_d,
             "a routine replacement MUST reuse the same `d`"
@@ -13253,54 +15416,63 @@ mod maintenance_real_ffi_tests {
         // A REAL minted package, tracked exactly as a publish would track it.
         // NOTE: no relay is started and none is configured — the whole point is
         // that this bound does not depend on the transport.
-        let kp = circle.inner.fresh_key_package().await.expect("mint");
-        let bytes = kp.bytes().to_vec();
-        circle
+        let kp = circle
             .inner
-            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
-                event_id: "00".repeat(32),
-                d_tag: "aa".repeat(16),
-                key_package: bytes.clone(),
-                created_at: 1,
-            })
-            .expect("track the published package");
+            .session()
+            .fresh_key_package()
+            .await
+            .expect("mint");
+        let bytes = kp.bytes().to_vec();
+        track(&circle, &"aa".repeat(16), &bytes, 1).await;
 
         let TrackedKpLifetime::Known(lifetime) = read_kp_lifetime(&bytes) else {
             panic!("a freshly minted package must have a readable lifetime");
         };
 
+        let session = circle.inner.session();
         // One second BEFORE `not_after`: the material is still usable — a peer
         // may be mid-Welcome against it — so it must be RETAINED.
-        let (row, _, purged) = super::RelayManagerFfi::purge_key_package_past_not_after(
-            &circle.inner,
-            lifetime.not_after - 1,
-        )
-        .await
-        .expect("purge check");
+        let purged = session
+            .sweep_expired_key_packages(lifetime.not_after - 1)
+            .await
+            .expect("purge check");
         assert!(!purged, "the bound must not fire early");
         assert_eq!(
-            row.expect("row").key_package,
+            tracked_row(&circle).await.expect("row").key_package,
             bytes,
-            "a live package's cached bytes must be left intact"
+            "a live package's bytes must be left intact"
+        );
+        assert_eq!(
+            session
+                .key_package_bundle_count_for_test()
+                .await
+                .expect("count"),
+            1
         );
 
         // AT `not_after`: the bound fires, with no relay in sight.
-        let (row, _, purged) = super::RelayManagerFfi::purge_key_package_past_not_after(
-            &circle.inner,
-            lifetime.not_after,
-        )
-        .await
-        .expect("purge");
+        let purged = session
+            .sweep_expired_key_packages(lifetime.not_after)
+            .await
+            .expect("purge");
         assert!(
             purged,
             "the `not_after` bound MUST fire even on a tick that contacts no \
              relay — local retention policy may not extend it"
         );
-        let row = row.expect("row");
+        let row = tracked_row(&circle).await.expect("row");
         assert!(
             row.key_package.is_empty(),
-            "the cached bytes must be blanked so no later heal can re-advertise \
+            "no package may be left tracked, so no later heal can re-advertise \
              material the engine no longer holds"
+        );
+        assert_eq!(
+            session
+                .key_package_bundle_count_for_test()
+                .await
+                .expect("count"),
+            0,
+            "the private bundle itself is gone"
         );
         assert_eq!(
             row.d_tag,
@@ -13309,22 +15481,19 @@ mod maintenance_real_ffi_tests {
              reuse it, not mint a fresh coordinate"
         );
 
-        // Idempotent: a second tick over the blanked row is a clean no-op.
-        let (row, lifetime_after, purged_again) =
-            super::RelayManagerFfi::purge_key_package_past_not_after(
-                &circle.inner,
-                lifetime.not_after,
-            )
+        // Idempotent: a second tick over the emptied record is a clean no-op.
+        let purged_again = session
+            .sweep_expired_key_packages(lifetime.not_after)
             .await
             .expect("second purge");
         assert!(!purged_again, "the purge must not repeat every tick");
+        let row = tracked_row(&circle).await.expect("row");
         assert_eq!(
-            lifetime_after,
+            read_kp_lifetime(&row.key_package),
             TrackedKpLifetime::Absent,
-            "blanked bytes must read as Absent, not Unreadable — otherwise every \
-             later tick would report a spurious unreadable-lifetime rotation"
+            "an emptied record must read as Absent, not Unreadable — otherwise \
+             every later tick would report a spurious unreadable-lifetime rotation"
         );
-        assert!(row.expect("row").key_package.is_empty());
     }
 
     // ------------------------------------------------------------------------
@@ -13356,17 +15525,14 @@ mod maintenance_real_ffi_tests {
             .expect("RelayManagerFfi::new_instance");
 
         // A REAL tracked package. NO relay is configured — deliberately.
-        let kp = circle.inner.fresh_key_package().await.expect("mint");
-        let bytes = kp.bytes().to_vec();
-        circle
+        let kp = circle
             .inner
-            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
-                event_id: "11".repeat(32),
-                d_tag: "bb".repeat(16),
-                key_package: bytes.clone(),
-                created_at: 1,
-            })
-            .expect("track");
+            .session()
+            .fresh_key_package()
+            .await
+            .expect("mint");
+        let bytes = kp.bytes().to_vec();
+        track(&circle, &"bb".repeat(16), &bytes, 1).await;
         let TrackedKpLifetime::Known(lifetime) = read_kp_lifetime(&bytes) else {
             panic!("readable lifetime expected");
         };
@@ -13399,14 +15565,10 @@ mod maintenance_real_ffi_tests {
             after.relays_targeted, 0,
             "still nothing configured; the purge does not invent a target"
         );
-        let row = circle
-            .inner
-            .latest_published_key_package()
-            .expect("read row")
-            .expect("row");
+        let row = tracked_row(&circle).await.expect("row");
         assert!(
             row.key_package.is_empty(),
-            "the dead package's cached bytes must be blanked"
+            "no dead package may stay tracked"
         );
         assert_eq!(
             row.d_tag,
@@ -13473,11 +15635,7 @@ mod maintenance_real_ffi_tests {
         assert_eq!(first.relays_targeted, 1);
         tokio::time::sleep(Duration::from_millis(250)).await;
 
-        let tracked = bob
-            .inner
-            .latest_published_key_package()
-            .expect("read row")
-            .expect("row");
+        let tracked = tracked_row(&bob).await.expect("row");
         let kp1_bytes = tracked.key_package.clone();
         let stable_d = tracked.d_tag.clone();
         let TrackedKpLifetime::Known(kp1_lifetime) = read_kp_lifetime(&kp1_bytes) else {
@@ -13510,23 +15668,18 @@ mod maintenance_real_ffi_tests {
                     .create_group(vec![kp], config)
                     .await
                     .expect("alice creates a group with Bob's KeyPackage #1");
-                let mut welcome = None;
-                for work in &created.effects.publish {
-                    if let PublishWork::GroupCreated { welcomes, pending } = work {
-                        alice_inner
-                            .session()
-                            .confirm_published(*pending)
-                            .await
-                            .expect("confirm");
-                        welcome = Some(
-                            haven_core::nostr::mls::SessionManager::transport_message_to_event(
-                                &welcomes[0],
-                            )
-                            .expect("welcome event"),
-                        );
-                    }
-                }
-                welcome.expect("a welcome")
+                // A founding create is canonical at once: nothing to confirm.
+                let welcomes = created
+                    .effects
+                    .publish
+                    .iter()
+                    .find_map(|work| match work {
+                        PublishWork::FoundingGroupCreated { welcomes } => Some(welcomes),
+                        _ => None,
+                    })
+                    .expect("a founding create");
+                haven_core::nostr::mls::SessionManager::transport_message_to_event(&welcomes[0])
+                    .expect("a welcome")
             }
         };
         let welcome_during_failure = mint_welcome("DuringFailure").await;
@@ -13560,48 +15713,67 @@ mod maintenance_real_ffi_tests {
              `not_after`, so the second deletion bound must not fire"
         );
 
-        // The tracking row is untouched: no replacement exists, so none is
-        // recorded, and the superseded bytes stay available for the retry.
-        let after_failure = bob
-            .inner
-            .latest_published_key_package()
-            .expect("read row")
-            .expect("row");
+        // The current package is untouched: the replacement is staged, not
+        // current, until a relay acknowledges it.
+        let after_failure = tracked_row(&bob).await.expect("row");
         assert_eq!(
             after_failure.key_package, kp1_bytes,
-            "a failed publish must not overwrite the tracking row"
+            "a failed publish must not replace the tracked package"
         );
         assert_eq!(after_failure.d_tag, stable_d);
+        let staged = bob
+            .inner
+            .session()
+            .tracked_key_package()
+            .await
+            .expect("read the record")
+            .and_then(|tracked| tracked.pending)
+            .expect("the unacknowledged replacement stays staged");
 
         // THE ASSERTION: KeyPackage #1's private init key is still alive, so a
         // Welcome already encrypted to it can still be processed. If the
         // superseded delete had run before the ack, this would fail — and the
         // account would be holding a dead key with no replacement anywhere.
-        bob.inner
-            .session()
-            .accept_welcome(&welcome_during_failure)
-            .await
-            .expect(
-                "after a FAILED rotation publish, the superseded KeyPackage's \
-                 init key MUST still be usable — deleting it before a relay \
-                 confirmed the replacement leaves the account with neither",
-            );
+        assert!(
+            matches!(
+                bob.inner
+                    .session()
+                    .accept_welcome(&welcome_during_failure)
+                    .await,
+                Ok(haven_core::nostr::mls::types::WelcomeAcceptance::Ingested(
+                    _
+                ))
+            ),
+            "after a FAILED rotation publish, the superseded KeyPackage's \
+             init key MUST still be usable — deleting it before a relay \
+             confirmed the replacement leaves the account with neither"
+        );
 
-        // Now allow writes and rotate for real.
+        // Now allow writes. The retry mints nothing: it republishes the
+        // replacement the failed tick staged, the same signed event.
         reject.store(false, Ordering::Relaxed);
         let ok = circle_maintain(&relay_mgr, &bob, bob_secret).await;
-        assert_eq!(ok.action, KpMaintenanceActionFfi::RotatedExpiringMaterial);
+        assert_eq!(ok.action, KpMaintenanceActionFfi::RepublishedStableD);
         assert_eq!(
             ok.relays_healed, 1,
             "the retried rotation must be acked by the own relay"
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        let served = fetch_until(
+            bob_keys.public_key(),
+            Kind::Custom(30443),
+            &url,
+            "the staged replacement is the event the relay serves",
+            |events| events.iter().any(|e| e.id == staged.id),
+        )
+        .await;
+        assert!(
+            served
+                .iter()
+                .any(|e| nostr::JsonUtil::as_json(e) == nostr::JsonUtil::as_json(&staged)),
+            "the retry must republish the staged event byte for byte"
+        );
 
-        let after_success = bob
-            .inner
-            .latest_published_key_package()
-            .expect("read row")
-            .expect("row");
+        let after_success = tracked_row(&bob).await.expect("row");
         assert_eq!(
             after_success.d_tag, stable_d,
             "the rotation must reuse the stable slot"
@@ -13613,18 +15785,1122 @@ mod maintenance_real_ffi_tests {
 
         // And only NOW is the superseded init key gone — the first deletion
         // bound fires exactly on confirmed publication, not before.
-        bob.inner
-            .session()
-            .accept_welcome(&welcome_after_success)
-            .await
-            .expect_err(
-                "once the replacement is confirmed published, the superseded \
-                 init key MUST be deleted — retaining it means a compromise of \
-                 that one key decrypts every Welcome ever recorded to it",
-            );
+        assert!(
+            matches!(
+                bob.inner
+                    .session()
+                    .accept_welcome(&welcome_after_success)
+                    .await,
+                Ok(haven_core::nostr::mls::types::WelcomeAcceptance::NeedsNewInvite)
+            ),
+            "once the replacement is confirmed published, the superseded \
+             init key MUST be deleted — retaining it means a compromise of \
+             that one key decrypts every Welcome ever recorded to it"
+        );
 
         super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(0, Ordering::Relaxed);
         relay.shutdown();
+    }
+
+    // ------------------------------------------------------------------------
+    // TC-16: a Welcome that consumed the published package owes a replacement
+    // (`foundation/key-packages.md:86-87`), and the tick pays it: fresh
+    // material in the SAME slot, and the consumed package's init key deleted
+    // once a relay acknowledged the replacement.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc16_a_consumed_key_package_is_replaced_in_the_same_slot_via_real_ffi() {
+        use haven_core::nostr::mls::types::{LocationGroupConfig, PublishWork, WelcomeAcceptance};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+
+        let bob_keys = Keys::generate();
+        let bob_secret = secret_bytes(&bob_keys);
+        let bob_dir = DataDir::new("consumed_bob");
+        let bob = CircleManagerFfi::new(bob_dir.as_str(), bob_secret.clone())
+            .expect("bob CircleManagerFfi::new");
+        let alice_keys = Keys::generate();
+        let alice_dir = DataDir::new("consumed_alice");
+        let alice = CircleManagerFfi::new(alice_dir.as_str(), secret_bytes(&alice_keys))
+            .expect("alice CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        bob.add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+
+        let first = circle_maintain(&relay_mgr, &bob, bob_secret.clone()).await;
+        assert_eq!(first.action, KpMaintenanceActionFfi::RepublishedFreshD);
+        let published = fetch_until(
+            bob_keys.public_key(),
+            Kind::Custom(30443),
+            &url,
+            "Bob's first KeyPackage is served",
+            |events| events.len() == 1,
+        )
+        .await
+        .remove(0);
+        let before = tracked_row(&bob).await.expect("row");
+        assert_eq!(
+            circle_maintain(&relay_mgr, &bob, bob_secret.clone())
+                .await
+                .action,
+            KpMaintenanceActionFfi::AlreadyHealthy,
+            "control: an unconsumed package is left alone"
+        );
+
+        // Alice invites Bob with the published package, and Bob joins.
+        let created = alice
+            .inner
+            .session()
+            .create_group(
+                vec![
+                    haven_core::nostr::mls::SessionManager::key_package_from_event(&published)
+                        .expect("parse Bob's KeyPackage"),
+                ],
+                LocationGroupConfig::new("Consumed")
+                    .with_relay("wss://relay.test.com")
+                    .with_admin(alice_keys.public_key().to_hex()),
+            )
+            .await
+            .expect("alice creates a group with Bob's KeyPackage");
+        let welcome = created
+            .effects
+            .publish
+            .iter()
+            .find_map(|work| match work {
+                PublishWork::FoundingGroupCreated { welcomes } => welcomes.first(),
+                _ => None,
+            })
+            .map(haven_core::nostr::mls::SessionManager::transport_message_to_event)
+            .expect("a founding create carries a welcome")
+            .expect("a welcome event");
+        assert!(matches!(
+            bob.inner.session().accept_welcome(&welcome).await,
+            Ok(WelcomeAcceptance::Ingested(_))
+        ));
+
+        let replaced = circle_maintain(&relay_mgr, &bob, bob_secret.clone()).await;
+        assert_eq!(
+            replaced.action,
+            KpMaintenanceActionFfi::RepublishedStableD,
+            "a consumed package is replaced in its own slot"
+        );
+        assert_eq!(replaced.relays_healed, 1);
+        let served = fetch_until(
+            bob_keys.public_key(),
+            Kind::Custom(30443),
+            &url,
+            "the replacement supersedes the consumed package",
+            |events| events.len() == 1 && events[0].id != published.id,
+        )
+        .await;
+        assert_eq!(kp_d_tag(&served[0]), Some(before.d_tag.clone()));
+        assert_ne!(served[0].content, published.content, "fresh material");
+        let after = tracked_row(&bob).await.expect("row");
+        assert_eq!(after.d_tag, before.d_tag);
+        assert_ne!(after.key_package, before.key_package);
+        assert_eq!(
+            bob.inner
+                .session()
+                .key_package_bundle_count_for_test()
+                .await
+                .expect("count"),
+            1,
+            "the consumed package's init key went with the acknowledgement"
+        );
+        assert_eq!(
+            circle_maintain(&relay_mgr, &bob, bob_secret).await.action,
+            KpMaintenanceActionFfi::AlreadyHealthy,
+            "and nothing more is owed"
+        );
+
+        relay.shutdown();
+    }
+
+    // ------------------------------------------------------------------------
+    // TC-18..20: a consumed package and the invitations still held for it.
+    //
+    // Haven holds a Welcome un-ingested until the user accepts it. Replacing
+    // a consumed package deletes its key at the first acknowledgement, which
+    // would kill every OTHER invitation made for that package before the user
+    // has answered it. So the consumption-triggered replacement waits while an
+    // invitation is held — and only that: rotation and the `not_after`
+    // deletion are never held back.
+    // ------------------------------------------------------------------------
+
+    /// A Welcome `inviter` builds for the account that published `key_package`.
+    async fn welcome_to(
+        inviter: &CircleManagerFfi,
+        inviter_keys: &Keys,
+        key_package: &nostr::Event,
+        name: &str,
+    ) -> nostr::Event {
+        use haven_core::nostr::mls::types::{LocationGroupConfig, PublishWork};
+        let created = inviter
+            .inner
+            .session()
+            .create_group(
+                vec![
+                    haven_core::nostr::mls::SessionManager::key_package_from_event(key_package)
+                        .expect("parse the KeyPackage"),
+                ],
+                LocationGroupConfig::new(name)
+                    .with_relay("wss://relay.test.com")
+                    .with_admin(inviter_keys.public_key().to_hex()),
+            )
+            .await
+            .expect("create a group with the KeyPackage");
+        created
+            .effects
+            .publish
+            .iter()
+            .find_map(|work| match work {
+                PublishWork::FoundingGroupCreated { welcomes } => welcomes.first(),
+                _ => None,
+            })
+            .map(haven_core::nostr::mls::SessionManager::transport_message_to_event)
+            .expect("a founding create carries a welcome")
+            .expect("a welcome event")
+    }
+
+    /// Whether `circle`'s user accepting the held `invitation` joined.
+    async fn accepted(circle: &CircleManagerFfi, invitation: &nostr::Event) -> bool {
+        circle
+            .accept_invitation(invitation.id.to_bytes().to_vec())
+            .await
+            .expect("accept returns a typed outcome")
+            .joined
+            .is_some()
+    }
+
+    /// One account with a published `KeyPackage` and two invitations made for
+    /// it by two other accounts, neither yet shown to it.
+    struct TwiceInvited {
+        relay: MockRelay,
+        url: String,
+        keys: Keys,
+        dir: DataDir,
+        circle: Option<CircleManagerFfi>,
+        relay_mgr: RelayManagerFfi,
+        published: nostr::Event,
+        invitations: Vec<nostr::Event>,
+        _inviters: Vec<(DataDir, CircleManagerFfi)>,
+    }
+
+    impl TwiceInvited {
+        async fn new(tag: &str) -> Self {
+            install_test_seams();
+            let relay = MockRelay::run().await.expect("start MockRelay");
+            let url = relay.url().await.to_string();
+            let keys = Keys::generate();
+            let secret = secret_bytes(&keys);
+            let dir = DataDir::new(&format!("{tag}_invitee"));
+            let circle = CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("the invitee");
+            let relay_mgr = RelayManagerFfi::new_instance()
+                .await
+                .expect("RelayManagerFfi::new_instance");
+            circle
+                .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+                .await
+                .expect("register own NIP-65 relay");
+            let first = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+            assert_eq!(first.action, KpMaintenanceActionFfi::RepublishedFreshD);
+            let published = fetch_until(
+                keys.public_key(),
+                Kind::Custom(30443),
+                &url,
+                "the invitee's KeyPackage is served",
+                |events| events.len() == 1,
+            )
+            .await
+            .remove(0);
+
+            let mut inviters = Vec::new();
+            let mut invitations = Vec::new();
+            for name in ["first", "second"] {
+                let inviter_keys = Keys::generate();
+                let inviter_dir = DataDir::new(&format!("{tag}_{name}"));
+                let inviter =
+                    CircleManagerFfi::new(inviter_dir.as_str(), secret_bytes(&inviter_keys))
+                        .expect("an inviter");
+                invitations.push(welcome_to(&inviter, &inviter_keys, &published, name).await);
+                inviters.push((inviter_dir, inviter));
+            }
+            Self {
+                relay,
+                url,
+                keys,
+                dir,
+                circle: Some(circle),
+                relay_mgr,
+                published,
+                invitations,
+                _inviters: inviters,
+            }
+        }
+
+        fn circle(&self) -> &CircleManagerFfi {
+            self.circle.as_ref().expect("the invitee is open")
+        }
+
+        /// Derived per use, never held (Security Rule 7).
+        fn secret(&self) -> Vec<u8> {
+            secret_bytes(&self.keys)
+        }
+
+        /// A restart: the old manager is gone before the new one opens.
+        fn restart(&mut self) {
+            self.circle = None;
+            self.circle =
+                Some(CircleManagerFfi::new(self.dir.as_str(), self.secret()).expect("reopen"));
+        }
+
+        /// The poll finds invitation `which` and Haven holds it.
+        async fn hold(&self, which: usize) {
+            use nostr::JsonUtil as _;
+            assert!(
+                self.circle()
+                    .process_gift_wrapped_invitation(
+                        self.secret(),
+                        self.invitations[which].as_json()
+                    )
+                    .await
+                    .expect("hold the invitation")
+                    .is_some(),
+                "the invitation is held for the user's answer"
+            );
+        }
+
+        /// The user accepts invitation `which`; whether the join succeeded.
+        async fn accept(&self, which: usize) -> bool {
+            self.answer(which).await.joined.is_some()
+        }
+
+        async fn answer(&self, which: usize) -> super::AcceptInvitationOutcomeFfi {
+            self.circle()
+                .accept_invitation(self.invitations[which].id.to_bytes().to_vec())
+                .await
+                .expect("accept returns a typed outcome")
+        }
+
+        /// Another account invites this one with `key_package`; the index of
+        /// the invitation, not yet shown to the invitee.
+        async fn invited_again(&mut self, tag: &str, key_package: &nostr::Event) -> usize {
+            let inviter_keys = Keys::generate();
+            let inviter_dir = DataDir::new(tag);
+            let inviter = CircleManagerFfi::new(inviter_dir.as_str(), secret_bytes(&inviter_keys))
+                .expect("an inviter");
+            self.invitations
+                .push(welcome_to(&inviter, &inviter_keys, key_package, tag).await);
+            self._inviters.push((inviter_dir, inviter));
+            self.invitations.len() - 1
+        }
+
+        /// One tick with the tick's clock at `now`.
+        async fn tick_at(&self, now: u64) -> super::KpMaintenanceOutcomeFfi {
+            super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(now, Ordering::Relaxed);
+            let outcome = self.tick().await;
+            super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(0, Ordering::Relaxed);
+            outcome
+        }
+
+        /// The one `KeyPackage` the relay serves right now.
+        async fn serving(&self) -> nostr::Event {
+            self.served("one KeyPackage is served", |_| true).await
+        }
+
+        async fn tick(&self) -> super::KpMaintenanceOutcomeFfi {
+            circle_maintain(&self.relay_mgr, self.circle(), self.secret()).await
+        }
+
+        async fn bundles(&self) -> usize {
+            self.circle()
+                .inner
+                .session()
+                .key_package_bundle_count_for_test()
+                .await
+                .expect("count the bundles")
+        }
+
+        /// The one KeyPackage the relay serves, once `want` holds of it.
+        async fn served(&self, what: &str, want: impl Fn(&nostr::Event) -> bool) -> nostr::Event {
+            fetch_until(
+                self.keys.public_key(),
+                Kind::Custom(30443),
+                &self.url,
+                what,
+                |events| events.len() == 1 && want(&events[0]),
+            )
+            .await
+            .remove(0)
+        }
+
+        /// Asserts the consumed package was replaced in its own slot and its
+        /// key deleted.
+        async fn assert_replaced(&self) {
+            let replaced = self.tick().await;
+            assert_eq!(replaced.action, KpMaintenanceActionFfi::RepublishedStableD);
+            assert_eq!(replaced.relays_healed, 1);
+            let served = self
+                .served("the replacement supersedes the consumed package", |event| {
+                    event.id != self.published.id
+                })
+                .await;
+            assert_eq!(kp_d_tag(&served), kp_d_tag(&self.published));
+            assert_ne!(served.content, self.published.content, "fresh material");
+            assert_eq!(
+                self.bundles().await,
+                1,
+                "the consumed package's key is gone"
+            );
+            assert_eq!(
+                self.tick().await.action,
+                KpMaintenanceActionFfi::AlreadyHealthy
+            );
+        }
+
+        /// Asserts a tick leaves the consumed package published and its key
+        /// held.
+        async fn assert_left_in_place(&self, why: &str) {
+            assert_eq!(
+                self.tick().await.action,
+                KpMaintenanceActionFfi::AlreadyHealthy,
+                "{why}"
+            );
+            assert_eq!(self.bundles().await, 1);
+            self.served("the consumed package is still the one served", |event| {
+                event.id == self.published.id
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc18_a_held_invitation_survives_accepting_another() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let world = TwiceInvited::new("held_survives").await;
+        world.hold(0).await;
+        world.hold(1).await;
+
+        assert!(world.accept(0).await, "the first invitation joins");
+        let tracked = world
+            .circle()
+            .inner
+            .session()
+            .tracked_key_package()
+            .await
+            .expect("read the record")
+            .expect("tracked");
+        assert!(
+            tracked.replacement_owed && tracked.consumed_but_held,
+            "anti-vacuity: the join consumed the package, so a replacement is owed"
+        );
+
+        world
+            .assert_left_in_place("the other invitation is still unanswered")
+            .await;
+        assert!(
+            world.accept(1).await,
+            "the invitation the user answered second still opens"
+        );
+
+        // Nothing is held any more: the replacement is paid.
+        world.assert_replaced().await;
+        world.relay.shutdown();
+    }
+
+    /// Declining the last held invitation releases the replacement as an
+    /// accept does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc18b_declining_the_last_held_invitation_releases_the_replacement() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let world = TwiceInvited::new("held_declined").await;
+        world.hold(0).await;
+        world.hold(1).await;
+        assert!(world.accept(0).await);
+        world
+            .assert_left_in_place("the other invitation is still unanswered")
+            .await;
+
+        world
+            .circle()
+            .decline_invitation(world.invitations[1].id.to_bytes().to_vec())
+            .await
+            .expect("decline");
+        world.assert_replaced().await;
+        world.relay.shutdown();
+    }
+
+    /// The held copy of an invitation lives in memory. After a restart it is
+    /// gone until the next poll finds it again, and a tick in between must not
+    /// take that for "nothing is held".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc19_a_held_invitation_outlives_a_restart_before_the_next_poll() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let mut world = TwiceInvited::new("held_restart").await;
+        world.hold(0).await;
+        world.hold(1).await;
+        assert!(world.accept(0).await);
+
+        world.restart();
+        assert!(
+            world
+                .circle()
+                .get_pending_invitations()
+                .await
+                .expect("list")
+                .is_empty(),
+            "anti-vacuity: the restart lost the held copy"
+        );
+        world
+            .assert_left_in_place("an invitation was held before the restart and never answered")
+            .await;
+
+        // The poll finds it again, and it still opens.
+        world.hold(1).await;
+        assert!(world.accept(1).await);
+        world.assert_replaced().await;
+        world.relay.shutdown();
+    }
+
+    /// Only the consumption-triggered replacement waits. A package past its
+    /// rotation point is rotated, and one past `not_after` loses its key, with
+    /// an invitation still held.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc20_rotation_and_the_expiry_deletion_are_not_held_back_by_a_held_invitation() {
+        use haven_core::relay::maintenance::{read_kp_lifetime, TrackedKpLifetime};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let world = TwiceInvited::new("held_rotation").await;
+        world.hold(0).await;
+        world.hold(1).await;
+        assert!(world.accept(0).await);
+        world
+            .assert_left_in_place("control: the consumed package waits for the held invitation")
+            .await;
+
+        let lifetime = |bytes: &[u8]| match read_kp_lifetime(bytes) {
+            TrackedKpLifetime::Known(lifetime) => lifetime,
+            _ => panic!("a minted package has a readable lifetime"),
+        };
+        let first = lifetime(&tracked_row(world.circle()).await.expect("row").key_package);
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(first.rotate_at(), Ordering::Relaxed);
+        let rotated = world.tick().await;
+        assert_eq!(
+            rotated.action,
+            KpMaintenanceActionFfi::RotatedExpiringMaterial,
+            "a package past its rotation point is rotated whatever is held"
+        );
+        assert_eq!(rotated.relays_healed, 1);
+        assert_eq!(
+            world.bundles().await,
+            1,
+            "and the rotated-out key is deleted"
+        );
+
+        let second = lifetime(&tracked_row(world.circle()).await.expect("row").key_package);
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(second.not_after, Ordering::Relaxed);
+        assert!(
+            world.tick().await.expired_init_key_purged,
+            "a package at `not_after` loses its key whatever is held"
+        );
+        assert!(
+            !world
+                .circle()
+                .get_pending_invitations()
+                .await
+                .expect("list")
+                .is_empty(),
+            "anti-vacuity: the invitation was held throughout"
+        );
+
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(0, Ordering::Relaxed);
+        world.relay.shutdown();
+    }
+
+    // ------------------------------------------------------------------------
+    // TC-23..25: the hold is BOUNDED. The preview that makes Haven hold an
+    // invitation is only seal-authenticated, so anyone can send one; without a
+    // bound a stranger could keep every consumed package's key alive up to its
+    // rotation. The replacement waits at most 72 hours from the first tick
+    // that waited, whatever is still held and whatever arrives meanwhile.
+    // ------------------------------------------------------------------------
+
+    const HOLD: u64 = haven_core::circle::CONSUMED_KEY_PACKAGE_HOLD_SECS;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc23_a_held_invitation_holds_a_consumed_package_for_72_hours_and_no_longer() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let mut world = TwiceInvited::new("hold_bound").await;
+        world.hold(0).await;
+        world.hold(1).await;
+        assert!(world.accept(0).await);
+        assert_eq!(HOLD, 72 * 3600);
+
+        // The first tick that waits starts the clock.
+        let first = haven_core::relay::maintenance::now_secs();
+        for inside in [first, first + HOLD / 2] {
+            assert_eq!(
+                world.tick_at(inside).await.action,
+                KpMaintenanceActionFfi::AlreadyHealthy,
+                "inside the bound the consumed package is left in place"
+            );
+        }
+        // A restart inside the hold does not move its start: the last second
+        // inside the bound still waits, and the next one does not.
+        world.restart();
+        assert_eq!(
+            world.tick_at(first + HOLD - 1).await.action,
+            KpMaintenanceActionFfi::AlreadyHealthy,
+            "the reopened manager still counts from the first tick that waited"
+        );
+        assert_eq!(world.bundles().await, 1);
+        assert_eq!(world.serving().await.id, world.published.id);
+
+        // At the bound the replacement is paid, an invitation still held or not.
+        let replaced = world.tick_at(first + HOLD).await;
+        assert_eq!(replaced.action, KpMaintenanceActionFfi::RepublishedStableD);
+        assert_eq!(replaced.relays_healed, 1);
+        let served = world.serving().await;
+        assert_ne!(served.id, world.published.id);
+        assert_eq!(kp_d_tag(&served), kp_d_tag(&world.published));
+        assert_eq!(
+            world.bundles().await,
+            1,
+            "the consumed package's key went with the acknowledged replacement"
+        );
+
+        // The invitation that outlived the bound is polled back after the
+        // restart, and ends honestly.
+        world.hold(1).await;
+        let late = world.answer(1).await;
+        assert!(late.joined.is_none());
+        assert!(matches!(
+            late.failure,
+            Some(super::AcceptFailureFfi::NeedsNewInvite)
+        ));
+        world.relay.shutdown();
+    }
+
+    /// No clock movement keeps a consumed key. A clock set back behind the
+    /// hold's start ends the hold at that tick instead of starting it again:
+    /// the replacement is published, and the consumed package's key goes at
+    /// its acknowledgement.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc28_a_clock_set_back_behind_the_holds_start_ends_the_hold() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let world = TwiceInvited::new("hold_clock_back").await;
+        world.hold(0).await;
+        world.hold(1).await;
+        assert!(world.accept(0).await);
+
+        let first = haven_core::relay::maintenance::now_secs();
+        assert_eq!(
+            world.tick_at(first).await.action,
+            KpMaintenanceActionFfi::AlreadyHealthy,
+            "control: the hold started and the consumed package was left in place"
+        );
+        assert_eq!(world.serving().await.id, world.published.id);
+
+        let replaced = world.tick_at(first - 600).await;
+        assert_eq!(
+            replaced.action,
+            KpMaintenanceActionFfi::RepublishedStableD,
+            "a clock that reads earlier than the hold's start ends the hold"
+        );
+        assert_eq!(replaced.relays_healed, 1);
+        let served = world.serving().await;
+        assert_ne!(served.id, world.published.id);
+        assert_eq!(kp_d_tag(&served), kp_d_tag(&world.published));
+        assert_eq!(
+            world.bundles().await,
+            1,
+            "the consumed package's key went with the acknowledged replacement"
+        );
+
+        // The invitation still held ends honestly.
+        let late = world.answer(1).await;
+        assert!(late.joined.is_none());
+        assert!(matches!(
+            late.failure,
+            Some(super::AcceptFailureFfi::NeedsNewInvite)
+        ));
+        world.relay.shutdown();
+    }
+
+    /// An invitation that arrives during the hold — a stranger's, sent to keep
+    /// the key alive — does not move the bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc24_an_invitation_arriving_during_the_hold_cannot_extend_it() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let mut world = TwiceInvited::new("hold_stranger").await;
+        world.hold(0).await;
+        world.hold(1).await;
+        assert!(world.accept(0).await);
+
+        let first = haven_core::relay::maintenance::now_secs();
+        assert_eq!(
+            world.tick_at(first).await.action,
+            KpMaintenanceActionFfi::AlreadyHealthy
+        );
+        // One hour before the bound a stranger's invitation is held, and a
+        // tick sees it.
+        let published = world.published.clone();
+        let strangers = world.invited_again("hold_stranger_late", &published).await;
+        world.hold(strangers).await;
+        assert_eq!(
+            world.tick_at(first + HOLD - 3600).await.action,
+            KpMaintenanceActionFfi::AlreadyHealthy
+        );
+
+        let replaced = world.tick_at(first + HOLD).await;
+        assert_eq!(
+            replaced.action,
+            KpMaintenanceActionFfi::RepublishedStableD,
+            "the bound is counted from the first tick that waited, not from the newest invitation"
+        );
+        assert_ne!(world.serving().await.id, world.published.id);
+        assert_eq!(world.bundles().await, 1);
+        world.relay.shutdown();
+    }
+
+    /// The bound belongs to one consumption. Once the consumed package has been
+    /// replaced, a package consumed later gets a hold of its own, counted from
+    /// its own first waiting tick.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc25_the_hold_restarts_only_with_a_new_consumption() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let mut world = TwiceInvited::new("hold_restart").await;
+        world.hold(0).await;
+        world.hold(1).await;
+        assert!(world.accept(0).await);
+        let first = haven_core::relay::maintenance::now_secs();
+        assert_eq!(
+            world.tick_at(first).await.action,
+            KpMaintenanceActionFfi::AlreadyHealthy
+        );
+        assert_eq!(
+            world.tick_at(first + HOLD).await.action,
+            KpMaintenanceActionFfi::RepublishedStableD
+        );
+        let second_package = world.serving().await;
+        assert!(
+            !world.accept(1).await,
+            "the invitation that outlived the first bound is answered, and is dead"
+        );
+
+        // Two invitations for the replacement; one is accepted, one is held.
+        let accepted = world.invited_again("hold_restart_a", &second_package).await;
+        let held = world.invited_again("hold_restart_b", &second_package).await;
+        world.hold(accepted).await;
+        world.hold(held).await;
+        assert!(world.accept(accepted).await);
+
+        // Its own hold, from its own first waiting tick — not the old one's.
+        let second = first + HOLD + 600;
+        for inside in [second, second + HOLD - 1] {
+            assert_eq!(
+                world.tick_at(inside).await.action,
+                KpMaintenanceActionFfi::AlreadyHealthy,
+                "a new consumption is held for its own 72 hours"
+            );
+        }
+        assert_eq!(world.serving().await.id, second_package.id);
+        assert!(
+            world.accept(held).await,
+            "inside its own bound the held invitation still opens"
+        );
+        assert_eq!(
+            world.tick_at(second + HOLD - 1).await.action,
+            KpMaintenanceActionFfi::RepublishedStableD,
+            "nothing is held any more, so the replacement is paid at once"
+        );
+        world.relay.shutdown();
+    }
+
+    // ------------------------------------------------------------------------
+    // TC-26/27: the durable marker and an acknowledged replacement.
+    //
+    // After a restart the held copies are gone and only the marker says one
+    // was held. An acknowledged replacement deletes the key those invitations
+    // needed, so it clears the marker — unless the package just promoted was
+    // itself consumed while its publish was in flight, in which case another
+    // invitation from before the restart may be the other one made for it.
+    // ------------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc26_an_acknowledged_replacement_clears_a_marker_whose_invitation_never_came_back() {
+        use haven_core::nostr::mls::types::WelcomeAcceptance;
+        use haven_core::relay::maintenance::{read_kp_lifetime, TrackedKpLifetime};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let mut world = TwiceInvited::new("marker_cleared").await;
+        world.hold(0).await;
+        world.hold(1).await;
+        assert!(world.accept(0).await);
+
+        // Restart, and the other invitation is never polled back.
+        world.restart();
+        world
+            .assert_left_in_place("the marker still says an invitation was held")
+            .await;
+
+        // The package reaches its rotation point and is rotated: the key the
+        // lost invitation needed is gone with the acknowledgement.
+        let TrackedKpLifetime::Known(lifetime) =
+            read_kp_lifetime(&tracked_row(world.circle()).await.expect("row").key_package)
+        else {
+            panic!("a minted package has a readable lifetime");
+        };
+        assert_eq!(
+            world.tick_at(lifetime.rotate_at()).await.action,
+            KpMaintenanceActionFfi::RotatedExpiringMaterial
+        );
+        let rotated = world.serving().await;
+
+        // A later consumption with nothing held is replaced at once: the
+        // marker did not outlive the rotation.
+        let again = world.invited_again("marker_cleared_late", &rotated).await;
+        assert!(matches!(
+            world
+                .circle()
+                .inner
+                .session()
+                .accept_welcome(&world.invitations[again])
+                .await,
+            Ok(WelcomeAcceptance::Ingested(_))
+        ));
+        let replaced = world.tick().await;
+        assert_eq!(
+            replaced.action,
+            KpMaintenanceActionFfi::RepublishedStableD,
+            "nothing is held and nothing says so: the consumed package is replaced"
+        );
+        assert_ne!(world.serving().await.id, rotated.id);
+        world.relay.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc27_a_package_consumed_while_its_publish_was_in_flight_keeps_the_marker() {
+        use nostr::JsonUtil as _;
+        use nostr_relay_builder::{LocalRelay, RelayBuilder};
+        use std::sync::atomic::AtomicBool;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let reject = std::sync::Arc::new(AtomicBool::new(true));
+        let relay = LocalRelay::new(RelayBuilder::default().write_policy(
+            RejectWritesWhenFlipped {
+                flipped: reject.clone(),
+                only_kind: None,
+            },
+        ));
+        relay.run().await.expect("run relay");
+        let url = relay.url().await.to_string();
+
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("in_flight_invitee");
+        let open = || CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("the invitee");
+        let mut circle = open();
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+
+        // The first publish reaches no relay: the package is staged, unacknowledged.
+        let unacked = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert_eq!(unacked.relays_healed, 0);
+        let staged = circle
+            .inner
+            .session()
+            .tracked_key_package()
+            .await
+            .expect("read the record")
+            .expect("a slot is tracked")
+            .pending
+            .expect("the staged event");
+
+        // Two inviters got hold of it all the same, and one invitation is accepted.
+        let mut inviters = Vec::new();
+        let mut invitations = Vec::new();
+        for name in ["in_flight_first", "in_flight_second"] {
+            let inviter_keys = Keys::generate();
+            let inviter_dir = DataDir::new(name);
+            let inviter = CircleManagerFfi::new(inviter_dir.as_str(), secret_bytes(&inviter_keys))
+                .expect("an inviter");
+            invitations.push(welcome_to(&inviter, &inviter_keys, &staged, name).await);
+            inviters.push((inviter_dir, inviter));
+        }
+        for invitation in &invitations {
+            assert!(circle
+                .process_gift_wrapped_invitation(secret.clone(), invitation.as_json())
+                .await
+                .expect("hold the invitation")
+                .is_some());
+        }
+        assert!(accepted(&circle, &invitations[0]).await);
+
+        // Restart; then the relay takes the staged event and it is promoted —
+        // already consumed.
+        drop(circle);
+        circle = open();
+        reject.store(false, Ordering::Relaxed);
+        let promoted = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert_eq!(promoted.action, KpMaintenanceActionFfi::RepublishedStableD);
+        assert_eq!(promoted.relays_healed, 1);
+        let tracked = circle
+            .inner
+            .session()
+            .tracked_key_package()
+            .await
+            .expect("read the record")
+            .expect("tracked");
+        assert!(
+            tracked.published.as_ref().map(|event| event.id) == Some(staged.id)
+                && tracked.consumed_but_held,
+            "anti-vacuity: the package just promoted is the consumed one"
+        );
+
+        // The other invitation, from before the restart, was made for THIS
+        // package: the marker stays, and the replacement waits for it.
+        assert_eq!(
+            circle_maintain(&relay_mgr, &circle, secret.clone())
+                .await
+                .action,
+            KpMaintenanceActionFfi::AlreadyHealthy
+        );
+        assert!(circle
+            .process_gift_wrapped_invitation(secret.clone(), invitations[1].as_json())
+            .await
+            .expect("the poll finds it again")
+            .is_some());
+        assert!(
+            accepted(&circle, &invitations[1]).await,
+            "the invitation from before the restart still opens"
+        );
+        assert_eq!(
+            circle_maintain(&relay_mgr, &circle, secret.clone())
+                .await
+                .action,
+            KpMaintenanceActionFfi::RepublishedStableD,
+            "nothing is held any more: the consumed package is replaced"
+        );
+        relay.shutdown();
+    }
+
+    /// A consumed package whose private bundle is gone can open nothing, held
+    /// invitation or not: it is replaced at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc21_a_lost_bundle_is_replaced_even_while_an_invitation_is_held() {
+        use haven_core::nostr::mls::types::{KeyPackage, ProtocolProfile};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let world = TwiceInvited::new("held_lost").await;
+        world.hold(0).await;
+        world.hold(1).await;
+        assert!(world.accept(0).await);
+        world
+            .assert_left_in_place("control: the consumed package waits for the held invitation")
+            .await;
+
+        let session = world.circle().inner.session();
+        let consumed = tracked_row(world.circle()).await.expect("row").key_package;
+        session
+            .delete_key_package(
+                &KeyPackage::new(consumed).with_protocol_profile(ProtocolProfile::Current),
+            )
+            .await
+            .expect("lose the private bundle");
+        assert_eq!(world.bundles().await, 0);
+
+        let replaced = world.tick().await;
+        assert_eq!(replaced.action, KpMaintenanceActionFfi::RepublishedStableD);
+        assert_eq!(replaced.relays_healed, 1);
+        world
+            .served("a package this device can open is served", |event| {
+                event.id != world.published.id
+            })
+            .await;
+        assert_eq!(world.bundles().await, 1);
+        world.relay.shutdown();
+    }
+
+    // ------------------------------------------------------------------------
+    // TC-22: a replacement signed while the device clock was far ahead carries
+    // a `created_at` every relay refuses for good. The same bytes can never be
+    // acknowledged, so once the clock has been set back the tick mints again
+    // under it — and only then: while the clock is still ahead a new stamp
+    // would be refused just the same, and nothing is minted.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc22_a_replacement_stamped_by_a_fast_clock_is_reminted_once_the_clock_is_set_back() {
+        use haven_core::relay::scripted_relay::{ScriptedRelay, Verdict};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        // A relay refusing a stamp too far ahead as NIP-01 relays do, under
+        // the `invalid:` prefix: under any other a timestamp mention is no
+        // clock complaint (`clock_skew::classify_clock_refusal`).
+        let relay = ScriptedRelay::start();
+        relay.on_publish(|event| {
+            if event.created_at.as_secs() > haven_core::relay::maintenance::now_secs() + 900 {
+                Verdict::Refuse("invalid: created_at too far in the future".to_string())
+            } else {
+                Verdict::Keep
+            }
+        });
+        let url = relay.url().to_owned();
+        let key_packages = || {
+            relay
+                .published()
+                .into_iter()
+                .filter(|event| event.kind == Kind::Custom(30443))
+                .collect::<Vec<_>>()
+        };
+
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("fast_clock");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        let session = circle.inner.session();
+
+        // What a tick leaves behind when the device clock is a day ahead (far
+        // past any relay's tolerance, well inside the package's lifetime): a
+        // staged replacement, signed with that stamp, that no relay took.
+        let now = haven_core::relay::maintenance::now_secs();
+        let a_day_ahead = now + 24 * 3600;
+        let frozen = haven_core::relay::maintenance::build_kp_maintenance_events(
+            session,
+            &keys,
+            std::slice::from_ref(&url),
+            None,
+            i64::try_from(a_day_ahead).ok(),
+        )
+        .await
+        .expect("stage under the fast clock")
+        .event;
+        assert!(frozen.created_at.as_secs() > a_day_ahead);
+        let bundles = || async {
+            session
+                .key_package_bundle_count_for_test()
+                .await
+                .expect("count the bundles")
+        };
+        let pending = || async {
+            session
+                .tracked_key_package()
+                .await
+                .expect("read the record")
+                .expect("a slot is tracked")
+                .pending
+                .map(|event| event.id)
+        };
+
+        // The clock is STILL ahead: every relay refuses the stamp, and a new
+        // one would be no earlier. Nothing is minted.
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS
+            .store(frozen.created_at.as_secs() + 3600, Ordering::Relaxed);
+        let refused = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert_eq!(refused.relays_healed, 0);
+        assert_eq!(pending().await, Some(frozen.id), "the same staged event");
+        assert_eq!(
+            bundles().await,
+            1,
+            "no second package while the clock is ahead"
+        );
+        assert!(key_packages().is_empty());
+
+        // The clock is set back to the truth.
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(0, Ordering::Relaxed);
+        let reminted = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert_eq!(reminted.action, KpMaintenanceActionFfi::RepublishedStableD);
+        assert_eq!(reminted.relays_healed, 1, "the new stamp is acknowledged");
+        let [served] = <[_; 1]>::try_from(key_packages())
+            .unwrap_or_else(|_| panic!("a KeyPackage stamped by the corrected clock is kept"));
+        assert_ne!(served.id, frozen.id);
+        assert!(served.created_at.as_secs() <= now + 900);
+        assert_eq!(kp_d_tag(&served), kp_d_tag(&frozen), "the same slot");
+        let tracked = session
+            .tracked_key_package()
+            .await
+            .expect("read the record")
+            .expect("tracked");
+        assert!(tracked.pending.is_none());
+        assert_eq!(tracked.published.map(|event| event.id), Some(served.id));
+        assert_eq!(bundles().await, 1, "the refused package's key went with it");
+        // The relay serves what it kept, so the next tick finds it there.
+        let kept = served.clone();
+        relay.answer(
+            |filter| {
+                filter
+                    .kinds
+                    .as_ref()
+                    .is_some_and(|kinds| kinds.contains(&Kind::Custom(30443)))
+            },
+            vec![
+                haven_core::relay::scripted_relay::Frame::Event(kept),
+                haven_core::relay::scripted_relay::Frame::Eose,
+            ],
+        );
+        assert_eq!(
+            circle_maintain(&relay_mgr, &circle, secret).await.action,
+            KpMaintenanceActionFfi::AlreadyHealthy
+        );
+    }
+
+    /// A `KeyPackage` is chosen for the circle the person is being added to,
+    /// by that circle's own admission rule. The rule is read first, so a circle
+    /// this device does not hold is refused before any relay is asked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fetch_member_keypackage_reads_the_target_circles_rule_before_any_fetch() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let dir = DataDir::new("kp_target_rule");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys)).expect("the inviter");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+
+        let plane = discovery_plane();
+        let asked = Keys::generate().public_key();
+        assert!(
+            relay_mgr
+                .fetch_member_keypackage(asked.to_hex(), &circle, Some(vec![9; 32]))
+                .await
+                .is_err(),
+            "a circle this device does not hold has no rule to choose by"
+        );
+        assert_eq!(
+            plane.asked_about(&asked),
+            0,
+            "and no relay was asked about the person before that was known"
+        );
+
+        // Anti-vacuity: with a rule to choose by, this is the plane that is asked.
+        assert!(relay_mgr
+            .fetch_member_keypackage(asked.to_hex(), &circle, None)
+            .await
+            .expect("the fetch runs")
+            .is_none());
+        assert!(plane.asked_about(&asked) > 0);
     }
 
     // ========================================================================
@@ -13646,11 +16922,11 @@ mod maintenance_real_ffi_tests {
     }
 
     /// Puts the account in the exact state a pre-width-fix install is in: a REAL
-    /// `KeyPackage` published under a malformed slot id, and a tracking row that
-    /// names it.
+    /// `KeyPackage` published under a malformed slot id, and a lifecycle record
+    /// that names it.
     ///
     /// Minted through the real session and published through the real relay
-    /// manager, so the bytes, the event and the row are the ones production
+    /// manager, so the bytes, the event and the record are the ones production
     /// would have written — only the slot id is the old shape.
     async fn seed_pre_fix_install(
         relay_mgr: &RelayManagerFfi,
@@ -13673,16 +16949,118 @@ mod maintenance_real_ffi_tests {
             .publish_event(&events.event, own)
             .await
             .expect("seed the legacy KeyPackage onto the relay");
-        circle
-            .inner
-            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
-                event_id: events.event.id.to_hex(),
-                d_tag: d.to_owned(),
-                key_package: events.key_package.bytes().to_vec(),
-                created_at: i64::try_from(events.event.created_at.as_secs()).unwrap(),
-            })
-            .expect("track the legacy slot");
+        track_published(circle, &events).await;
         (events.event, events.key_package.bytes().to_vec())
+    }
+
+    // ------------------------------------------------------------------------
+    // TC-17: two maintenance ticks for one account never overlap. Two that did
+    // would each read the record before the other staged, each mint, and the
+    // second promotion would delete the first package's key while a relay
+    // still served it. Both ticks here start together, through two relay
+    // managers as two Dart call sites would; the relay holds the first
+    // KeyPackage write it receives until the test has looked.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc17_overlapping_ticks_publish_one_key_package_into_one_slot_via_real_ffi() {
+        use nostr::JsonUtil as _;
+        use nostr_relay_builder::{LocalRelay, RelayBuilder};
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::Semaphore;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let arrived = std::sync::Arc::new(Semaphore::new(0));
+        let gate = std::sync::Arc::new(Semaphore::new(0));
+        let seen = std::sync::Arc::new(AtomicUsize::new(0));
+        let relay = LocalRelay::new(RelayBuilder::default().write_policy(
+            HoldKeyPackagesUntilOpened {
+                arrived: arrived.clone(),
+                gate: gate.clone(),
+                seen: seen.clone(),
+            },
+        ));
+        relay.run().await.expect("run relay");
+        let url = relay.url().await.to_string();
+
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("overlapping_ticks");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+        let one = RelayManagerFfi::new_instance()
+            .await
+            .expect("a relay manager");
+        let other = RelayManagerFfi::new_instance().await.expect("another");
+
+        let (first, second, ()) = tokio::join!(
+            circle_maintain(&one, &circle, secret.clone()),
+            circle_maintain(&other, &circle, secret.clone()),
+            async {
+                arrived
+                    .acquire()
+                    .await
+                    .expect("a KeyPackage reaches the relay")
+                    .forget();
+                assert!(
+                    circle.inner.session().key_package_tick_held_for_test(),
+                    "the tick whose publish is in flight still holds the account's tick lock"
+                );
+                gate.close();
+            }
+        );
+
+        let mut actions = [first.action, second.action];
+        actions.sort_by_key(|action| *action != KpMaintenanceActionFfi::RepublishedFreshD);
+        assert_eq!(
+            actions,
+            [
+                KpMaintenanceActionFfi::RepublishedFreshD,
+                KpMaintenanceActionFfi::AlreadyHealthy
+            ],
+            "one tick published; the other ran after it and found the slot served"
+        );
+        assert_eq!(first.relays_healed + second.relays_healed, 1);
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "one KeyPackage write, ever");
+
+        let tracked = circle
+            .inner
+            .session()
+            .tracked_key_package()
+            .await
+            .expect("read the record")
+            .expect("a slot is tracked");
+        let served = fetch_until(
+            keys.public_key(),
+            Kind::Custom(30443),
+            &url,
+            "the one KeyPackage is served",
+            |events| events.len() == 1,
+        )
+        .await;
+        assert_eq!(
+            Some(served[0].as_json()),
+            tracked.published.as_ref().map(nostr::Event::as_json),
+            "the served event is the tracked one, byte for byte"
+        );
+        assert_eq!(kp_d_tag(&served[0]), Some(tracked.slot.clone()), "one slot");
+        assert!(tracked.pending.is_none() && !tracked.replacement_owed);
+        assert_eq!(
+            circle
+                .inner
+                .session()
+                .key_package_bundle_count_for_test()
+                .await
+                .expect("count the bundles"),
+            1,
+            "one private bundle: nothing minted twice, nothing orphaned"
+        );
+        relay.shutdown();
     }
 
     /// Fetches until `want` holds, and fails loudly if it never does.
@@ -13746,19 +17124,20 @@ mod maintenance_real_ffi_tests {
             !haven_core::relay::maintenance::is_conformant_slot_id(&legacy_d),
             "precondition: the seeded slot must be the malformed shape"
         );
-        // Stamp the retired row AHEAD of the clock, as a device whose clock ran
-        // fast when it published would have. Tracking resolves to the NEWEST
-        // row, so a retirement that left the row behind would resolve straight
-        // back onto the malformed slot after the sentinel latched.
+        // Stamp the tracked publication AHEAD of the clock, as a device whose
+        // clock ran fast when it published would have: the retirement must not
+        // depend on the retired slot's stamp being in the past.
         circle
             .inner
-            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
-                event_id: legacy_event.id.to_hex(),
-                d_tag: legacy_d.clone(),
-                key_package: legacy_bytes.clone(),
-                created_at: i64::try_from(legacy_event.created_at.as_secs()).unwrap() + 3_600,
-            })
-            .expect("re-stamp the legacy row");
+            .session()
+            .track_key_package_for_test(
+                &legacy_d,
+                &legacy_bytes,
+                Some(&legacy_event),
+                legacy_event.created_at.as_secs() + 3_600,
+            )
+            .await
+            .expect("re-stamp the tracked publication");
 
         let outcome = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
         assert_eq!(
@@ -13862,11 +17241,7 @@ mod maintenance_real_ffi_tests {
 
         // Local state: tracking moved to the conformant slot, and the retired
         // row is gone rather than left behind to shadow it.
-        let tracked = circle
-            .inner
-            .latest_published_key_package()
-            .expect("read row")
-            .expect("row");
+        let tracked = tracked_row(&circle).await.expect("row");
         assert_eq!(tracked.d_tag, live_d);
         assert_eq!(
             tracked.key_package, legacy_bytes,
@@ -14038,10 +17413,7 @@ mod maintenance_real_ffi_tests {
             "NOTHING destructive may be published before the replacement is acked"
         );
         assert_eq!(
-            circle
-                .inner
-                .latest_canonical_d_tag()
-                .expect("read tracked slot"),
+            tracked_row(&circle).await.map(|row| row.d_tag),
             Some(legacy_d.clone()),
             "with no replacement acked, the account must keep the slot it has — \
              an account with no usable KeyPackage is worse than a malformed one"
@@ -14063,10 +17435,9 @@ mod maintenance_real_ffi_tests {
             done.retired_malformed_slot,
             "the retry must complete the migration the failed tick started"
         );
-        let tracked_d = circle
-            .inner
-            .latest_canonical_d_tag()
-            .expect("read tracked slot")
+        let tracked_d = tracked_row(&circle)
+            .await
+            .map(|row| row.d_tag)
             .expect("a slot is tracked");
         assert!(
             haven_core::relay::maintenance::is_conformant_slot_id(&tracked_d),
@@ -14146,10 +17517,9 @@ mod maintenance_real_ffi_tests {
             "the sentinel must NOT latch while the orphan is still published — \
              latching here is how a half-done migration becomes permanent"
         );
-        let tracked_d = circle
-            .inner
-            .latest_canonical_d_tag()
-            .expect("read tracked slot")
+        let tracked_d = tracked_row(&circle)
+            .await
+            .map(|row| row.d_tag)
             .expect("a slot is tracked");
         assert!(
             haven_core::relay::maintenance::is_conformant_slot_id(&tracked_d),
@@ -14270,15 +17640,6 @@ mod maintenance_real_ffi_tests {
             .publish_event(&live.event, &own)
             .await
             .expect("publish the conformant slot");
-        circle
-            .inner
-            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
-                event_id: live.event.id.to_hex(),
-                d_tag: live.d_tag.clone(),
-                key_package: live.key_package.bytes().to_vec(),
-                created_at: i64::try_from(live.event.created_at.as_secs()).unwrap(),
-            })
-            .expect("track the conformant slot");
         let live_d = live.d_tag.clone();
         let live_bytes = live.key_package.bytes().to_vec();
         let live_id = live.event.id;
@@ -14299,6 +17660,8 @@ mod maintenance_real_ffi_tests {
             .publish_event(&orphan.event, &own)
             .await
             .expect("seed the leftover orphan");
+        // Tracked LAST: every fixture mint stages into the record.
+        track_published(&circle, &live).await;
 
         // The one thing that changes: the tracked package reaches the rotation
         // point of its own MLS `Lifetime`.
@@ -14329,11 +17692,7 @@ mod maintenance_real_ffi_tests {
         );
 
         // The rotation really happened: fresh material, same stable slot.
-        let rotated = circle
-            .inner
-            .latest_published_key_package()
-            .expect("read row")
-            .expect("row");
+        let rotated = tracked_row(&circle).await.expect("row");
         assert_eq!(
             rotated.d_tag, live_d,
             "a routine replacement MUST reuse the same `d`"
@@ -14421,18 +17780,14 @@ mod maintenance_real_ffi_tests {
 
         // Corrupt the tracked BYTES only — slot and timestamps untouched, the
         // state a truncated write or an unreadable wire format leaves behind.
-        let tracked = circle
-            .inner
-            .latest_published_key_package()
-            .expect("read row")
-            .expect("row");
-        circle
-            .inner
-            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
-                key_package: vec![0xDE, 0xAD, 0xBE, 0xEF],
-                ..tracked
-            })
-            .expect("write corrupted row");
+        let tracked = tracked_row(&circle).await.expect("row");
+        track(
+            &circle,
+            &tracked.d_tag,
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            tracked.created_at,
+        )
+        .await;
 
         let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
         assert_eq!(
@@ -14454,11 +17809,7 @@ mod maintenance_real_ffi_tests {
         // What the account now publishes: a conformant slot carrying material a
         // peer can actually validate — neither the corrupt bytes nor the
         // package the malformed event advertised.
-        let tracked = circle
-            .inner
-            .latest_published_key_package()
-            .expect("read row")
-            .expect("row");
+        let tracked = tracked_row(&circle).await.expect("row");
         assert!(
             haven_core::relay::maintenance::is_conformant_slot_id(&tracked.d_tag),
             "tracking must end on a binding-shaped slot"
@@ -14510,8 +17861,7 @@ mod maintenance_real_ffi_tests {
 
     /// TC-11 — the crash between the replacement's relay ACK and the local
     /// record: the next tick must ADOPT what is already published, not mint a
-    /// second slot (which would orphan the first, along with the material only
-    /// its tracking row can age out).
+    /// second slot (which would orphan the first).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn tc11_an_already_published_replacement_is_adopted_via_real_ffi() {
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
@@ -14564,10 +17914,7 @@ mod maintenance_real_ffi_tests {
         );
         assert!(outcome.retired_malformed_slot);
         assert_eq!(
-            circle
-                .inner
-                .latest_canonical_d_tag()
-                .expect("read tracked slot"),
+            tracked_row(&circle).await.map(|row| row.d_tag),
             Some(replacement.d_tag.clone()),
             "tracking must point at the slot that is already published"
         );
@@ -14585,7 +17932,7 @@ mod maintenance_real_ffi_tests {
             conformant.len(),
             1,
             "adoption must not mint a SECOND conformant slot — the orphan it \
-             would leave is material no tracking row could ever purge"
+             would leave is material nothing tracks"
         );
         assert_eq!(conformant[0].id, replacement.event.id);
 
@@ -14651,15 +17998,6 @@ mod maintenance_real_ffi_tests {
             .publish_event(&live.event, &own)
             .await
             .expect("publish the conformant slot");
-        circle
-            .inner
-            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
-                event_id: live.event.id.to_hex(),
-                d_tag: live.d_tag.clone(),
-                key_package: live.key_package.bytes().to_vec(),
-                created_at: i64::try_from(live.event.created_at.as_secs()).unwrap(),
-            })
-            .expect("track the conformant slot");
         let live_d = live.d_tag.clone();
         let live_id = live.event.id;
 
@@ -14680,6 +18018,8 @@ mod maintenance_real_ffi_tests {
             .publish_event(&orphan.event, &own)
             .await
             .expect("seed the leftover orphan");
+        // Tracked LAST: every fixture mint stages into the record.
+        track_published(&circle, &live).await;
         assert!(
             !circle
                 .inner
@@ -14721,15 +18061,647 @@ mod maintenance_real_ffi_tests {
             "the live slot's event must be exactly the one already published"
         );
         assert_eq!(
-            circle
-                .inner
-                .latest_canonical_d_tag()
-                .expect("read tracked slot"),
+            tracked_row(&circle).await.map(|row| row.d_tag),
             Some(live_d),
             "a retraction-only tick must not move the tracked slot"
         );
 
         relay.shutdown();
+    }
+
+    // ========================================================================
+    // A relay that holds no key can still forge an event under an id this
+    // client has seen. No forged event may reach a maintenance decision or the
+    // invitation poll: every relay event is verified before the pool acts on it
+    // (`haven_core::relay::verified`).
+    // ========================================================================
+
+    /// The slot retirement signs ONE deletion naming every event it saw in an
+    /// orphaned slot. A forged "own" `KeyPackage` in a pre-fix slot, under the
+    /// id of the account's real relay list, would make that deletion name the
+    /// relay list — signed by the identity key.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_forged_own_key_package_gets_no_other_own_event_deleted_via_real_ffi() {
+        use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let honest = MockRelay::run().await.expect("start MockRelay");
+        let honest_url = honest.url().await.to_string();
+        let hostile = ScriptedRelay::start();
+        let own = vec![hostile.url().to_owned(), honest_url.clone()];
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("forged_orphan");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        for url in &own {
+            circle
+                .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+                .await
+                .expect("register own NIP-65 relay");
+        }
+
+        // A healthy account: one conformant slot, published and tracked, and
+        // its NIP-65 relay list.
+        let live = haven_core::relay::maintenance::build_kp_maintenance_events(
+            circle.inner.session(),
+            &keys,
+            &own,
+            None,
+            None,
+        )
+        .await
+        .expect("mint the conformant slot");
+        relay_mgr
+            .inner
+            .publish_event(&live.event, &own)
+            .await
+            .expect("publish the conformant slot");
+        track_published(&circle, &live).await;
+        let relay_list = haven_core::relay::build_nip65_relay_list_event(&keys, &own, None)
+            .expect("build the relay list");
+        relay_mgr
+            .inner
+            .publish_event(&relay_list, std::slice::from_ref(&honest_url))
+            .await
+            .expect("publish the relay list");
+
+        // The hostile relay serves the live slot and, beside it, a KeyPackage
+        // "of this account" in a pre-fix slot that borrows the relay list's id.
+        let mut forged = relay_list.clone();
+        forged.kind = Kind::Custom(30443);
+        forged.tags = nostr::Tags::from_list(vec![nostr::Tag::identifier(legacy_slot_id())]);
+        hostile.answer(
+            |filter| {
+                filter
+                    .kinds
+                    .as_ref()
+                    .is_some_and(|kinds| kinds.contains(&Kind::Custom(30443)))
+            },
+            vec![
+                Frame::Unasked(relay_list.clone()),
+                Frame::Event(live.event.clone()),
+                Frame::Event(forged),
+                Frame::Eose,
+            ],
+        );
+
+        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
+        assert_eq!(outcome.action, KpMaintenanceActionFfi::AlreadyHealthy);
+
+        // The tick has returned, so anything it published has been acked.
+        let deleted_at_the_honest_relay =
+            fetch_by_kind(author, Kind::EventDeletion, &honest_url).await;
+        assert!(
+            deleted_at_the_honest_relay.is_empty()
+                && hostile
+                    .published()
+                    .iter()
+                    .all(|event| event.kind != Kind::EventDeletion),
+            "a forged own KeyPackage made the account sign a deletion"
+        );
+        assert!(
+            fetch_by_kind(author, Kind::RelayList, &honest_url).await == [relay_list],
+            "the account's relay list is no longer served"
+        );
+        assert_eq!(
+            tracked_row(&circle).await.map(|row| row.d_tag),
+            Some(live.d_tag),
+            "the tracked slot must not move"
+        );
+
+        honest.shutdown();
+    }
+
+    /// The invitation poll keeps the first gift wrap it sees under an id, so a
+    /// forged wrap under a genuine id, from the relay that answers first, would
+    /// hide the invitation on every poll.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_forged_gift_wrap_never_takes_the_genuine_ones_place_via_real_ffi() {
+        use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
+
+        install_test_seams();
+        let (hostile, honest) = (ScriptedRelay::start(), ScriptedRelay::start());
+        let both = vec![hostile.url().to_owned(), honest.url().to_owned()];
+        let recipient = Keys::generate().public_key();
+        let genuine = nostr::EventBuilder::new(Kind::GiftWrap, "b3BhcXVl")
+            .tag(nostr::Tag::public_key(recipient))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign the wrap");
+        let mut forged = genuine.clone();
+        forged.content = "Zm9yZ2Vk".to_owned();
+        let asks_for_wraps = |filter: &nostr::Filter| {
+            filter
+                .kinds
+                .as_ref()
+                .is_some_and(|kinds| kinds.contains(&Kind::GiftWrap))
+        };
+        hostile.answer(
+            asks_for_wraps,
+            vec![
+                Frame::Unasked(genuine.clone()),
+                Frame::Event(forged),
+                Frame::Event(genuine.clone()),
+                Frame::Eose,
+            ],
+        );
+        honest.answer(
+            asks_for_wraps,
+            vec![Frame::Event(genuine.clone()), Frame::Eose],
+        );
+        let is_the_genuine_wrap_alone = |wraps: &[String]| {
+            wraps.len() == 1
+                && serde_json::from_str::<nostr::Event>(&wraps[0]).is_ok_and(|wrap| wrap == genuine)
+        };
+
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        let per_relay = relay_mgr
+            .fetch_gift_wraps_per_relay(recipient.to_hex(), both.clone(), None)
+            .await
+            .expect("the poll runs");
+        assert_eq!(per_relay.len(), 2);
+        for inbox in &per_relay {
+            assert!(
+                inbox.responded && is_the_genuine_wrap_alone(&inbox.events),
+                "an inbox's answer is not exactly the genuine gift wrap"
+            );
+        }
+
+        // The pooled fetch: against the hostile relay alone, where the forgery
+        // is certain to be read first, and then beside the honest one.
+        for inboxes in [vec![hostile.url().to_owned()], both] {
+            let pooled = RelayManagerFfi::new_instance()
+                .await
+                .expect("RelayManagerFfi::new_instance")
+                .fetch_gift_wraps(recipient.to_hex(), inboxes, None)
+                .await
+                .expect("the fetch runs");
+            assert!(
+                is_the_genuine_wrap_alone(&pooled),
+                "the pooled fetch did not return exactly the genuine gift wrap"
+            );
+        }
+    }
+
+    // ========================================================================
+    // A relay answers a per-author REQ with whatever it likes. The probes of
+    // the user's OWN relays must act only on this account's own events, or a
+    // hostile own relay steers the slot migration and the relay-list heal.
+    // ========================================================================
+
+    /// A store that ignores a filter's `authors` and `kinds`: every REQ naming
+    /// this account and a kind is answered with every event it holds, whoever
+    /// signed it and whatever its kind.
+    #[derive(Debug)]
+    struct Substitutes(nostr_relay_builder::prelude::MemoryDatabase);
+
+    impl nostr_relay_builder::prelude::NostrDatabase for Substitutes {
+        fn backend(&self) -> nostr_relay_builder::prelude::Backend {
+            self.0.backend()
+        }
+
+        fn save_event<'a>(
+            &'a self,
+            event: &'a nostr::Event,
+        ) -> nostr_relay_builder::prelude::BoxedFuture<
+            'a,
+            Result<
+                nostr_relay_builder::prelude::SaveEventStatus,
+                nostr_relay_builder::prelude::DatabaseError,
+            >,
+        > {
+            self.0.save_event(event)
+        }
+
+        fn check_id<'a>(
+            &'a self,
+            event_id: &'a nostr::EventId,
+        ) -> nostr_relay_builder::prelude::BoxedFuture<
+            'a,
+            Result<
+                nostr_relay_builder::prelude::DatabaseEventStatus,
+                nostr_relay_builder::prelude::DatabaseError,
+            >,
+        > {
+            self.0.check_id(event_id)
+        }
+
+        fn event_by_id<'a>(
+            &'a self,
+            event_id: &'a nostr::EventId,
+        ) -> nostr_relay_builder::prelude::BoxedFuture<
+            'a,
+            Result<Option<nostr::Event>, nostr_relay_builder::prelude::DatabaseError>,
+        > {
+            self.0.event_by_id(event_id)
+        }
+
+        fn count(
+            &self,
+            filter: nostr::Filter,
+        ) -> nostr_relay_builder::prelude::BoxedFuture<
+            '_,
+            Result<usize, nostr_relay_builder::prelude::DatabaseError>,
+        > {
+            self.0.count(filter)
+        }
+
+        fn query(
+            &self,
+            mut filter: nostr::Filter,
+        ) -> nostr_relay_builder::prelude::BoxedFuture<
+            '_,
+            Result<
+                nostr_relay_builder::prelude::Events,
+                nostr_relay_builder::prelude::DatabaseError,
+            >,
+        > {
+            filter.authors = None;
+            filter.kinds = None;
+            self.0.query(filter)
+        }
+
+        fn delete(
+            &self,
+            filter: nostr::Filter,
+        ) -> nostr_relay_builder::prelude::BoxedFuture<
+            '_,
+            Result<(), nostr_relay_builder::prelude::DatabaseError>,
+        > {
+            self.0.delete(filter)
+        }
+
+        fn wipe(
+            &self,
+        ) -> nostr_relay_builder::prelude::BoxedFuture<
+            '_,
+            Result<(), nostr_relay_builder::prelude::DatabaseError>,
+        > {
+            self.0.wipe()
+        }
+    }
+
+    async fn substituting_relay() -> nostr_relay_builder::LocalRelay {
+        let relay = nostr_relay_builder::LocalRelay::new(
+            nostr_relay_builder::RelayBuilder::default().database(Substitutes(
+                nostr_relay_builder::prelude::MemoryDatabase::with_opts(
+                    nostr_relay_builder::prelude::MemoryDatabaseOptions {
+                        events: true,
+                        max_events: None,
+                    },
+                ),
+            )),
+        );
+        relay.run().await.expect("start the substituting relay");
+        relay
+    }
+
+    /// A validly signed 30443 in slot `d`, signed by `signer`.
+    fn signed_key_package_event(signer: &Keys, d: &str, content: &str) -> nostr::Event {
+        nostr::EventBuilder::new(Kind::Custom(30443), content)
+            .tag(nostr::Tag::parse(["d", d]).expect("d tag"))
+            .sign_with_keys(signer)
+            .expect("sign")
+    }
+
+    /// Another account's 30443 in the slot this account tracks must not count
+    /// as the slot being served — the one proof the orphan retraction waits
+    /// for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_foreign_key_package_in_the_tracked_slot_never_unblocks_a_retraction() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = substituting_relay().await;
+        let url = relay.url().await.to_string();
+        let own = vec![url.clone()];
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("foreign_in_tracked_slot");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+
+        // A conformant slot this device tracks but no relay serves yet …
+        let tracked = haven_core::relay::maintenance::build_kp_maintenance_events(
+            circle.inner.session(),
+            &keys,
+            &own,
+            None,
+            None,
+        )
+        .await
+        .expect("mint the tracked slot");
+        // … an orphan of ours in the malformed shape …
+        let orphan = haven_core::relay::maintenance::build_kp_maintenance_events(
+            circle.inner.session(),
+            &keys,
+            &own,
+            Some(&legacy_slot_id()),
+            None,
+        )
+        .await
+        .expect("mint into the legacy slot");
+        relay_mgr
+            .inner
+            .publish_event(&orphan.event, &own)
+            .await
+            .expect("seed our orphan");
+        // Tracked LAST: every fixture mint stages into the record.
+        track_published(&circle, &tracked).await;
+        // … and another account's event occupying the tracked slot id.
+        relay_mgr
+            .inner
+            .publish_event(
+                &signed_key_package_event(&Keys::generate(), &tracked.d_tag, ""),
+                &own,
+            )
+            .await
+            .expect("seed the foreign event");
+
+        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
+        assert!(
+            !outcome.retired_malformed_slot,
+            "the retraction ran on another account's event standing in for ours"
+        );
+        let deletions = fetch_by_kind(author, Kind::EventDeletion, &url).await;
+        assert!(
+            deletions
+                .iter()
+                .all(|e| e.pubkey != author || e.kind != Kind::EventDeletion),
+            "no retraction may be published while our own slot is not served"
+        );
+        let served = fetch_by_kind(author, Kind::Custom(30443), &url).await;
+        assert!(
+            served.iter().any(|e| e.pubkey == author
+                && e.kind == Kind::Custom(30443)
+                && kp_d_tag(e).as_deref() == Some(&tracked.d_tag)),
+            "the unserved tracked slot is healed with our own event"
+        );
+
+        relay.shutdown();
+    }
+
+    /// Our own `KeyPackage` bytes re-signed by another account under a
+    /// conformant slot are not a replacement we published: adopting them would
+    /// retract our live slot and leave only a copy no inviter accepts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_resigned_copy_of_our_key_package_is_never_adopted() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = substituting_relay().await;
+        let url = relay.url().await.to_string();
+        let own = vec![url.clone()];
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("resigned_copy");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+
+        let (_, tracked_bytes) =
+            seed_pre_fix_install(&relay_mgr, &circle, &keys, &own, &legacy_slot_id()).await;
+        // Our own repoint event — content and tags as the builder writes them —
+        // under another account's signature: nothing but its author is wrong.
+        let mut copy = haven_core::relay::maintenance::build_kp_slot_repoint_event(
+            &keys,
+            &tracked_bytes,
+            &own,
+        )
+        .expect("build the repoint event");
+        copy.event = nostr::EventBuilder::new(copy.event.kind, copy.event.content.clone())
+            .tags(copy.event.tags.clone())
+            .sign_with_keys(&Keys::generate())
+            .expect("re-sign our package elsewhere");
+        relay_mgr
+            .inner
+            .publish_event(&copy.event, &own)
+            .await
+            .expect("seed the re-signed copy");
+
+        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
+        assert_ne!(
+            outcome.action,
+            KpMaintenanceActionFfi::SeededD,
+            "another account's copy was adopted as our replacement"
+        );
+        let tracked_d = tracked_row(&circle)
+            .await
+            .map(|row| row.d_tag)
+            .expect("a slot is tracked");
+        assert_ne!(tracked_d, copy.d_tag);
+        let served = fetch_by_kind(author, Kind::Custom(30443), &url).await;
+        assert!(
+            served.iter().any(|e| e.pubkey == author
+                && e.kind == Kind::Custom(30443)
+                && kp_d_tag(e).as_deref() == Some(&tracked_d)),
+            "the tracked slot is one this account publishes"
+        );
+
+        relay.shutdown();
+    }
+
+    /// On a first tick — every install after a reset — the tracked slot id is
+    /// seeded from what the relay serves; a byte-minimum `d` on another
+    /// account's 30443, or on one of our own events of another kind, must not
+    /// become this account's slot id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_foreign_slot_id_never_seeds_this_accounts_slot() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = substituting_relay().await;
+        let url = relay.url().await.to_string();
+        let own = vec![url.clone()];
+
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("foreign_seed");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+        let planted = "0".repeat(64);
+        relay_mgr
+            .inner
+            .publish_event(
+                &signed_key_package_event(&Keys::generate(), &planted, ""),
+                &own,
+            )
+            .await
+            .expect("seed the foreign slot");
+        let own_note = nostr::EventBuilder::new(Kind::TextNote, "")
+            .tag(nostr::Tag::parse(["d", planted.as_str()]).expect("d tag"))
+            .sign_with_keys(&keys)
+            .expect("sign");
+        relay_mgr
+            .inner
+            .publish_event(&own_note, &own)
+            .await
+            .expect("seed our own event of another kind");
+
+        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
+        assert_eq!(
+            outcome.action,
+            KpMaintenanceActionFfi::RepublishedFreshD,
+            "nothing of ours is served, so the first tick mints its own slot"
+        );
+        assert_ne!(
+            tracked_row(&circle).await.map(|row| row.d_tag),
+            Some(planted),
+            "another account chose this account's slot id"
+        );
+
+        relay.shutdown();
+    }
+
+    /// The relay-list heal reads the newest list THIS account signed: another
+    /// account's list naming the same relays is not ours being served.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_foreign_relay_list_never_stands_in_for_ours() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = substituting_relay().await;
+        let url = relay.url().await.to_string();
+        let own = vec![url.clone()];
+
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("foreign_relay_list");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Inbox)
+            .await
+            .expect("register own inbox relay");
+        let foreign_list = nostr::EventBuilder::new(Kind::InboxRelays, "")
+            .tag(nostr::Tag::parse(["relay", url.as_str()]).expect("relay tag"))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign");
+        relay_mgr
+            .inner
+            .publish_event(&foreign_list, &own)
+            .await
+            .expect("seed the foreign list");
+
+        let outcome = relay_mgr
+            .maintain_relay_list(&circle, secret)
+            .await
+            .expect("maintain_relay_list must not error");
+        assert_eq!(
+            outcome.inbox.action,
+            super::RelayListActionFfi::Republished,
+            "our inbox list is not served, so it must be republished"
+        );
+
+        relay.shutdown();
+    }
+
+    /// A relay that serves two of this account's lists stamped the same second
+    /// is serving one the protocol has discarded: NIP-01 keeps the lower id. The
+    /// heal judges the relay by that one, whichever the relay sent first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_relay_list_heal_reads_the_list_nip01_keeps_on_a_same_second_tie() {
+        use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        for current_is_kept in [true, false] {
+            for kept_sent_first in [true, false] {
+                let relay = ScriptedRelay::start();
+                let keys = Keys::generate();
+                let secret = secret_bytes(&keys);
+                let dir = DataDir::new("relay_list_tie");
+                let circle = CircleManagerFfi::new(dir.as_str(), secret.clone())
+                    .expect("CircleManagerFfi::new");
+                circle
+                    .add_user_relay(relay.url().to_owned(), RelayTypeFfi::Inbox)
+                    .await
+                    .expect("register own inbox relay");
+                let list = |names: &str, at: u64| {
+                    nostr::EventBuilder::new(Kind::InboxRelays, "")
+                        .tag(nostr::Tag::parse(["relay", names]).expect("relay tag"))
+                        .custom_created_at(nostr::Timestamp::from_secs(at))
+                        .sign_with_keys(&keys)
+                        .expect("sign")
+                };
+                // The first second at which the two ids fall the way this case
+                // needs: the list naming the configured relay kept, or not.
+                let (current, outdated) = (1_000..)
+                    .map(|at| (list(relay.url(), at), list("wss://old.example.com", at)))
+                    .find(|(current, outdated)| (current.id < outdated.id) == current_is_kept)
+                    .expect("ids fall either way within a few seconds");
+                let (kept, discarded) = if current_is_kept {
+                    (current, outdated)
+                } else {
+                    (outdated, current)
+                };
+                let sent = if kept_sent_first {
+                    [kept, discarded]
+                } else {
+                    [discarded, kept]
+                };
+                relay.answer(
+                    |filter| {
+                        filter
+                            .kinds
+                            .as_ref()
+                            .is_some_and(|kinds| kinds.contains(&Kind::InboxRelays))
+                    },
+                    sent.into_iter()
+                        .map(Frame::Event)
+                        .chain(std::iter::once(Frame::Eose))
+                        .collect(),
+                );
+
+                let outcome = RelayManagerFfi::new_instance()
+                    .await
+                    .expect("RelayManagerFfi::new_instance")
+                    .maintain_relay_list(&circle, secret)
+                    .await
+                    .expect("maintain_relay_list must not error");
+                let expected = if current_is_kept {
+                    super::RelayListActionFfi::AlreadyCurrent
+                } else {
+                    super::RelayListActionFfi::Republished
+                };
+                assert_eq!(
+                    outcome.inbox.action, expected,
+                    "the relay was judged by the discarded list \
+                     (current list kept: {current_is_kept}, kept list sent first: {kept_sent_first})"
+                );
+            }
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -14994,6 +18966,7 @@ mod maintenance_real_ffi_tests {
         let dir = DataDir::new("resolve_stranger_bad_checksum");
         let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
             .expect("CircleManagerFfi::new");
+        isolate_profile_plane(&circle);
 
         // Charset-valid — passes Dart's `NpubValidator` (prefix, length, bech32
         // charset) — but checksum-invalid, so `PublicKey::parse` fails. No relay
@@ -15016,6 +18989,7 @@ mod maintenance_real_ffi_tests {
         let dir = DataDir::new("resolve_stranger_npub_equals_hex");
         let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
             .expect("CircleManagerFfi::new");
+        isolate_profile_plane(&circle);
 
         // Pre-seed a freshly-fetched row directly (bypassing the network) and
         // pass a `max_age_secs` large enough that `profiles_due` reports it NOT
@@ -15177,6 +19151,8 @@ mod maintenance_real_ffi_tests {
         let dir = DataDir::new("profile_delete_cancel");
         let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
             .expect("CircleManagerFfi::new");
+        // Every profile relay answers "nothing": genuinely never published.
+        let _relays = reachable_profile_plane(&circle).await;
 
         let saved = circle
             .save_my_profile_local(Some("Never Published".to_string()), None)
@@ -15234,6 +19210,8 @@ mod maintenance_real_ffi_tests {
         let dir = DataDir::new("profile_remove_staged");
         let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
             .expect("CircleManagerFfi::new");
+        // Every profile relay answers "nothing": genuinely never published.
+        let _relays = reachable_profile_plane(&circle).await;
 
         circle
             .save_my_profile_local(Some("Keep My Name".to_string()), None)
@@ -15301,6 +19279,1655 @@ mod maintenance_real_ffi_tests {
         );
     }
 
+    /// A relay can answer with a superseded copy of the user's own profile —
+    /// genuinely signed, so nothing refuses it. Removing the photo republishes
+    /// the profile, and built on that copy it would sign back every field the
+    /// user has removed since.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn removing_the_photo_never_signs_back_what_a_stale_relay_copy_still_carries() {
+        use haven_core::profile::build_metadata_event;
+        use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
+        use nostr::JsonUtil as _;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let dir = DataDir::new("profile_remove_stale_base");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        retire_curated_profile_pool(&circle);
+        let pool = [
+            ScriptedRelay::start(),
+            ScriptedRelay::start(),
+            ScriptedRelay::start(),
+        ];
+        for relay in &pool {
+            circle
+                .inner
+                .add_user_relay(relay.url(), RelayType::Profile)
+                .expect("seed a profile relay");
+        }
+        assert_profile_pool_is_local(&circle, 3);
+        let profile = |content: &str| {
+            ProfileMetadata::from_metadata(nostr::Metadata::from_json(content).expect("metadata"))
+        };
+
+        // What one pool relay still serves, and what superseded it: the copy
+        // this device published last, with the payment address gone.
+        let stale = build_metadata_event(
+            &keys,
+            &profile(
+                r#"{"display_name":"Old","lud16":"old@wallet.example.com","picture":"https://p.example.com/old.jpg"}"#,
+            ),
+            None,
+        )
+        .expect("the superseded profile");
+        let current = profile(r#"{"display_name":"Me","picture":"https://p.example.com/new.jpg"}"#);
+        let current_event = build_metadata_event(&keys, &current, Some(stale.created_at.as_secs()))
+            .expect("the current profile");
+        let now = profile_now_secs();
+        circle
+            .inner
+            .upsert_profile(&CachedProfile {
+                pubkey_hex: keys.public_key().to_hex(),
+                metadata: current,
+                state: ProfileState::Known,
+                event_created_at: i64::try_from(current_event.created_at.as_secs())
+                    .expect("a present-day timestamp"),
+                fetched_at: now,
+            })
+            .expect("cache the current profile");
+        circle
+            .inner
+            .record_published_event(0, "", &current_event.id, &keys.public_key(), now)
+            .expect("record its publication");
+        pool[0].answer(|_| true, vec![Frame::Event(stale), Frame::Eose]);
+
+        circle
+            .remove_my_profile_picture(secret_bytes(&keys))
+            .await
+            .expect("remove the picture");
+
+        let republished: Vec<nostr::Event> = pool
+            .iter()
+            .flat_map(ScriptedRelay::published)
+            .filter(|event| event.kind.as_u16() == 0)
+            .collect();
+        assert_eq!(republished.len(), 3, "the removal goes to every pool relay");
+        for event in republished {
+            assert!(event.content.contains(r#""display_name":"Me""#));
+            assert!(
+                !event.content.contains("lud16") && !event.content.contains("picture"),
+                "the removal signed back a field of a superseded copy"
+            );
+        }
+    }
+
+    /// When no relay serves the profile inside the read's budget, the removal
+    /// is built on the copy this device holds. Built on nothing, it would
+    /// publish an empty profile over the user's name.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn removing_the_photo_when_no_relay_serves_the_profile_keeps_the_rest_of_it() {
+        use haven_core::profile::build_metadata_event;
+        use haven_core::relay::scripted_relay::ScriptedRelay;
+        use nostr::JsonUtil as _;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let dir = DataDir::new("profile_remove_read_miss");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        retire_curated_profile_pool(&circle);
+        // Three relays that hold nothing and take what is published to them.
+        let pool = [
+            ScriptedRelay::start(),
+            ScriptedRelay::start(),
+            ScriptedRelay::start(),
+        ];
+        for relay in &pool {
+            circle
+                .inner
+                .add_user_relay(relay.url(), RelayType::Profile)
+                .expect("seed a profile relay");
+        }
+        assert_profile_pool_is_local(&circle, 3);
+        let current = ProfileMetadata::from_metadata(
+            nostr::Metadata::from_json(
+                r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg","lud16":"me@wallet.example.com"}"#,
+            )
+            .expect("metadata"),
+        );
+        let current_event =
+            build_metadata_event(&keys, &current, None).expect("the current profile");
+        let now = profile_now_secs();
+        circle
+            .inner
+            .upsert_profile(&CachedProfile {
+                pubkey_hex: keys.public_key().to_hex(),
+                metadata: current,
+                state: ProfileState::Known,
+                event_created_at: i64::try_from(current_event.created_at.as_secs())
+                    .expect("a present-day timestamp"),
+                fetched_at: now,
+            })
+            .expect("cache the current profile");
+        circle
+            .inner
+            .record_published_event(0, "", &current_event.id, &keys.public_key(), now)
+            .expect("record its publication");
+
+        circle
+            .remove_my_profile_picture(secret_bytes(&keys))
+            .await
+            .expect("remove the picture");
+
+        let republished: Vec<nostr::Event> = pool
+            .iter()
+            .flat_map(ScriptedRelay::published)
+            .filter(|event| event.kind.as_u16() == 0)
+            .collect();
+        assert_eq!(republished.len(), 3, "the removal goes to every pool relay");
+        for event in republished {
+            assert!(
+                event.content.contains(r#""display_name":"Me""#)
+                    && event.content.contains("me@wallet.example.com"),
+                "the removal dropped the rest of the profile"
+            );
+            assert!(!event.content.contains("picture"));
+        }
+    }
+
+    /// One account whose whole profile pool is three scripted relays: they
+    /// hold nothing, acknowledge every publish, and say only what a test
+    /// scripts for them.
+    struct ScriptedProfilePool {
+        keys: Keys,
+        circle: CircleManagerFfi,
+        pool: [haven_core::relay::scripted_relay::ScriptedRelay; 3],
+        _dir: DataDir,
+    }
+
+    impl ScriptedProfilePool {
+        /// The caller holds the keyring lock and has installed the test seams.
+        fn start(tag: &str) -> Self {
+            use haven_core::relay::scripted_relay::ScriptedRelay;
+
+            let keys = Keys::generate();
+            let dir = DataDir::new(tag);
+            let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+                .expect("CircleManagerFfi::new");
+            retire_curated_profile_pool(&circle);
+            let pool = [
+                ScriptedRelay::start(),
+                ScriptedRelay::start(),
+                ScriptedRelay::start(),
+            ];
+            for relay in &pool {
+                circle
+                    .inner
+                    .add_user_relay(relay.url(), RelayType::Profile)
+                    .expect("seed a profile relay");
+            }
+            assert_profile_pool_is_local(&circle, 3);
+            Self {
+                keys,
+                circle,
+                pool,
+                _dir: dir,
+            }
+        }
+
+        fn secret(&self) -> Vec<u8> {
+            secret_bytes(&self.keys)
+        }
+
+        fn own_hex(&self) -> String {
+            self.keys.public_key().to_hex()
+        }
+
+        /// This account's profile `content`, signed, stamped after `after`.
+        fn profile(&self, content: &str, after: Option<u64>) -> nostr::Event {
+            use nostr::JsonUtil as _;
+
+            haven_core::profile::build_metadata_event(
+                &self.keys,
+                &ProfileMetadata::from_metadata(
+                    nostr::Metadata::from_json(content).expect("metadata"),
+                ),
+                after,
+            )
+            .expect("sign the profile")
+        }
+
+        /// Makes `event` the profile this device holds as the one it last
+        /// published: the dated row and the record of the publish.
+        fn hold_as_published(&self, event: &nostr::Event) {
+            use nostr::JsonUtil as _;
+
+            let now = profile_now_secs();
+            self.circle
+                .inner
+                .upsert_profile(&CachedProfile {
+                    pubkey_hex: self.own_hex(),
+                    metadata: ProfileMetadata::from_metadata(
+                        nostr::Metadata::from_json(&event.content).expect("metadata"),
+                    ),
+                    state: ProfileState::Known,
+                    event_created_at: i64::try_from(event.created_at.as_secs())
+                        .expect("a present-day timestamp"),
+                    fetched_at: now,
+                })
+                .expect("cache the profile");
+            self.circle
+                .inner
+                .record_published_event(0, "", &event.id, &self.keys.public_key(), now)
+                .expect("record its publication");
+        }
+
+        /// Counts every `REQ` each relay is sent. A relay answers with `event`
+        /// when `serves` says so for the number of `REQ`s it had seen before,
+        /// and otherwise as one that holds nothing.
+        fn count_requests(
+            &self,
+            event: &nostr::Event,
+            serves: fn(usize) -> bool,
+        ) -> [std::sync::Arc<std::sync::atomic::AtomicUsize>; 3] {
+            use haven_core::relay::scripted_relay::Frame;
+
+            std::array::from_fn(|i| {
+                let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let counted = asked.clone();
+                self.pool[i].answer(
+                    move |_| serves(counted.fetch_add(1, Ordering::SeqCst)),
+                    vec![Frame::Event(event.clone()), Frame::Eose],
+                );
+                asked
+            })
+        }
+
+        /// Makes every relay refuse every publish until the switch is cleared.
+        fn refuse_writes(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+            let refusing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            for relay in &self.pool {
+                let refusing = refusing.clone();
+                relay.refuse(move |_| refusing.load(Ordering::SeqCst));
+            }
+            refusing
+        }
+
+        /// Every profile event the pool has taken, relay by relay.
+        fn profiles_sent(&self) -> Vec<nostr::Event> {
+            self.pool
+                .iter()
+                .flat_map(haven_core::relay::scripted_relay::ScriptedRelay::published)
+                .filter(|event| event.kind.as_u16() == 0)
+                .collect()
+        }
+    }
+
+    /// Waits for a scripted relay's signal that the call under test got as far
+    /// as that relay. Bounded: a call that never does fails the test, where an
+    /// unbounded wait would hang the binary.
+    async fn reached(signal: std::sync::mpsc::Receiver<()>, premise: &str) {
+        tokio::task::spawn_blocking(move || signal.recv_timeout(Duration::from_mins(1)))
+            .await
+            .expect("the wait runs")
+            .expect(premise);
+    }
+
+    /// The fields of a profile event's content, by name.
+    fn profile_fields(event: &nostr::Event) -> std::collections::BTreeMap<String, String> {
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&event.content)
+            .expect("a profile's content is a JSON object")
+            .into_iter()
+            .map(|(field, value)| (field, value.to_string()))
+            .collect()
+    }
+
+    const DELETED_PROFILE: &str = r#"{"display_name":"Old","about":"old bio","picture":"https://p.example.com/old.jpg","lud16":"old@wallet.example.com","nip05":"old@example.com","gone":true}"#;
+
+    /// Deleting the public profile publishes a blank one. A relay that never
+    /// took the blank still serves the deleted profile, and if it is the only
+    /// relay to answer when the user next saves a name, that edit must not be
+    /// built on it: everything the user deleted would be signed back, newer
+    /// than the blank, on every relay.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_deleted_profile_is_never_signed_back_by_the_next_edit() {
+        use haven_core::relay::scripted_relay::Frame;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_delete_then_edit");
+        let deleted = fx.profile(DELETED_PROFILE, None);
+        fx.hold_as_published(&deleted);
+        fx.pool[0].answer(|_| true, vec![Frame::Event(deleted), Frame::Eose]);
+
+        fx.circle
+            .delete_my_public_profile(fx.secret())
+            .await
+            .expect("delete the public profile");
+        let blanks = fx.profiles_sent();
+        assert!(
+            blanks.len() == 3 && blanks.iter().all(|blank| profile_fields(blank).is_empty()),
+            "anti-vacuity: the blank profile reached every pool relay"
+        );
+
+        fx.circle
+            .save_my_profile_local(Some("New".to_string()), None)
+            .await
+            .expect("save a name");
+        let synced = fx
+            .circle
+            .sync_my_profile(fx.secret())
+            .await
+            .expect("publish the name");
+        assert_eq!(synced.outcome, super::ProfileSyncOutcomeFfi::Published);
+
+        let edits: Vec<_> = fx
+            .profiles_sent()
+            .iter()
+            .map(profile_fields)
+            .filter(|fields| !fields.is_empty())
+            .collect();
+        assert_eq!(edits.len(), 3, "the edit follows the blank on every relay");
+        for edit in edits {
+            assert_eq!(
+                edit.into_iter().collect::<Vec<_>>(),
+                [
+                    ("display_name".to_string(), r#""New""#.to_string()),
+                    ("name".to_string(), r#""New""#.to_string()),
+                ],
+                "the edit after a deletion carries the name and nothing else"
+            );
+        }
+    }
+
+    /// The same lagging relay must not put the deleted profile back on this
+    /// device either: not in the cache, and not in front of the user.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_lagging_relays_copy_of_a_deleted_profile_is_not_cached_or_shown() {
+        use haven_core::relay::scripted_relay::Frame;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_delete_then_fetch");
+        let deleted = fx.profile(DELETED_PROFILE, None);
+        fx.hold_as_published(&deleted);
+        fx.circle
+            .inner
+            .upsert_profile_picture(
+                &fx.own_hex(),
+                "https://p.example.com/old.jpg",
+                &[7; 32],
+                b"canonical bytes",
+                b"thumbnail bytes",
+                profile_now_secs(),
+            )
+            .expect("cache its picture");
+        fx.pool[0].answer(|_| true, vec![Frame::Event(deleted), Frame::Eose]);
+
+        fx.circle
+            .delete_my_public_profile(fx.secret())
+            .await
+            .expect("delete the public profile");
+
+        let fetched = fx
+            .circle
+            .fetch_my_profile(fx.own_hex(), true)
+            .await
+            .expect("the own fetch");
+        assert_eq!(
+            fetched.relay_answer,
+            OwnProfileRelayAnswerFfi::Published,
+            "anti-vacuity: a relay served the deleted profile to this fetch"
+        );
+        let cached = fx
+            .circle
+            .get_cached_profile(fx.own_hex())
+            .await
+            .expect("cached read")
+            .expect("the record of the blank");
+        let listed = fx
+            .circle
+            .get_cached_profiles(vec![fx.own_hex()])
+            .await
+            .expect("batch read");
+        for shown in [&fetched, &cached, &listed[0]] {
+            assert_eq!(
+                (&shown.display_name, &shown.name, &shown.about),
+                (&None, &None, &None),
+                "the deleted profile is shown again"
+            );
+            assert!(shown.is_known && !shown.has_picture);
+        }
+        assert_eq!(listed.len(), 1);
+        assert!(fx
+            .circle
+            .inner
+            .get_profile_picture(&fx.own_hex())
+            .expect("picture read")
+            .is_none());
+    }
+
+    /// What a deletion leaves on the device: one own row, the record of the
+    /// blank it published, dated as the blank is. Nothing is pending, and the
+    /// retraction gate stays armed, as it was before the row existed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_deletion_leaves_the_dated_record_of_the_blank_it_published() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_delete_record");
+        fx.hold_as_published(&fx.profile(DELETED_PROFILE, None));
+        fx.circle
+            .save_my_profile_local(Some("Queued".to_string()), None)
+            .await
+            .expect("queue a name the deletion cancels");
+
+        fx.circle
+            .delete_my_public_profile(fx.secret())
+            .await
+            .expect("delete the public profile");
+
+        let blank = fx.profiles_sent().remove(0);
+        let row = fx
+            .circle
+            .inner
+            .get_profile(&fx.own_hex())
+            .expect("row read")
+            .expect("the record of the blank");
+        assert_eq!(row.metadata, ProfileMetadata::default());
+        assert_eq!(row.state, ProfileState::Known);
+        assert_eq!(
+            u64::try_from(row.event_created_at).expect("a timestamp"),
+            blank.created_at.as_secs(),
+            "the record is dated as the blank is, so nothing older is built on"
+        );
+        let state = fx
+            .circle
+            .profile_pending_state()
+            .await
+            .expect("pending state");
+        assert!(!state.pending && !state.partial);
+        assert!(fx
+            .circle
+            .inner
+            .has_published_profile(&fx.keys.public_key())
+            .expect("gate read"));
+        assert!(matches!(
+            fx.circle
+                .sync_my_profile(fx.secret())
+                .await
+                .expect("sync")
+                .outcome,
+            super::ProfileSyncOutcomeFfi::NothingPending
+        ));
+        assert_eq!(
+            fx.profiles_sent().len(),
+            3,
+            "the blank, and nothing after it"
+        );
+    }
+
+    /// A deletion two relays of three took: the third refuses every write
+    /// until the switch handed back is cleared. Also hands back the profile
+    /// that was deleted.
+    async fn delete_with_one_relay_refusing(
+        fx: &ScriptedProfilePool,
+    ) -> (std::sync::Arc<std::sync::atomic::AtomicBool>, nostr::Event) {
+        let deleted = fx.profile(DELETED_PROFILE, None);
+        fx.hold_as_published(&deleted);
+        let refusing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let refuses = refusing.clone();
+        fx.pool[2].refuse(move |_| refuses.load(Ordering::SeqCst));
+        fx.circle
+            .delete_my_public_profile(fx.secret())
+            .await
+            .expect("delete the public profile");
+        (refusing, deleted)
+    }
+
+    /// A deletion one relay refused is not done: that relay goes on serving
+    /// the whole deleted profile. The blank is left owed — sent, but not
+    /// everywhere — on the same backoff as any publish some relay did not
+    /// take. What the device shows of the profile is the deleted state all the
+    /// same, and the retraction gate stays armed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_deletion_one_relay_refused_leaves_the_blank_owed() {
+        use haven_core::profile::PROFILE_SYNC_BACKOFF_SECS;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_delete_owed");
+
+        let before = profile_now_secs();
+        let _refusing = delete_with_one_relay_refusing(&fx).await;
+        let after = profile_now_secs();
+
+        let blanks = fx.profiles_sent();
+        assert!(
+            blanks.len() == 2 && blanks.iter().all(|blank| profile_fields(blank).is_empty()),
+            "anti-vacuity: two relays of three took the blank"
+        );
+        let state = fx
+            .circle
+            .profile_pending_state()
+            .await
+            .expect("pending state");
+        assert!(
+            state.pending && state.partial,
+            "a deletion one relay refused reads as done"
+        );
+        // The deletion's own clock reading lies between the two taken here.
+        let due_at = |now| {
+            fx.circle
+                .inner
+                .profile_pending_state(&fx.own_hex(), now)
+                .expect("pending state")
+                .retry_due
+        };
+        assert!(
+            !due_at(before + PROFILE_SYNC_BACKOFF_SECS[0] - 1),
+            "the blank is republished sooner than the ladder allows"
+        );
+        assert!(
+            due_at(after + PROFILE_SYNC_BACKOFF_SECS[0]),
+            "the first retry waits longer than the first rung of the ladder"
+        );
+
+        let cached = fx
+            .circle
+            .get_cached_profile(fx.own_hex())
+            .await
+            .expect("cached read")
+            .expect("the record of the blank");
+        assert_eq!(
+            (&cached.display_name, &cached.name, &cached.about),
+            (&None, &None, &None),
+            "the deleted profile is shown again"
+        );
+        assert!(cached.is_known && !cached.has_picture);
+        let row = fx
+            .circle
+            .inner
+            .get_profile(&fx.own_hex())
+            .expect("row read")
+            .expect("the record of the blank");
+        assert_eq!(
+            u64::try_from(row.event_created_at).expect("a timestamp"),
+            blanks[0].created_at.as_secs()
+        );
+        assert!(fx
+            .circle
+            .inner
+            .has_published_profile(&fx.keys.public_key())
+            .expect("gate read"));
+    }
+
+    /// The next sync takes the owed blank to the relay that refused it, and
+    /// only a blank: nothing is left to publish after that.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_blank_one_relay_refused_reaches_it_with_the_next_sync() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_delete_owed_then_sync");
+        let (refusing, _deleted) = delete_with_one_relay_refusing(&fx).await;
+        let first_blank = fx.profiles_sent().remove(0);
+
+        refusing.store(false, Ordering::SeqCst);
+        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+
+        let reached_it: Vec<_> = fx.pool[2]
+            .published()
+            .into_iter()
+            .filter(|event| event.kind.as_u16() == 0)
+            .collect();
+        assert_eq!(
+            reached_it.len(),
+            1,
+            "the relay that refused the blank was not sent it again"
+        );
+        assert!(profile_fields(&reached_it[0]).is_empty());
+        assert!(
+            reached_it[0].created_at > first_blank.created_at,
+            "the blank sent again supersedes the first"
+        );
+        let state = fx
+            .circle
+            .profile_pending_state()
+            .await
+            .expect("pending state");
+        assert!(
+            !state.pending && !state.partial,
+            "a blank every relay now holds still reads as owed"
+        );
+        assert!(matches!(
+            fx.circle
+                .sync_my_profile(fx.secret())
+                .await
+                .expect("sync")
+                .outcome,
+            ProfileSyncOutcomeFfi::NothingPending
+        ));
+        assert_eq!(
+            fx.profiles_sent().len(),
+            5,
+            "and nothing is sent after that"
+        );
+    }
+
+    /// The other side: a deletion every relay took owes nothing, and no sync
+    /// follows it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_deletion_every_relay_took_owes_nothing() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_delete_not_owed");
+        fx.hold_as_published(&fx.profile(DELETED_PROFILE, None));
+
+        fx.circle
+            .delete_my_public_profile(fx.secret())
+            .await
+            .expect("delete the public profile");
+
+        assert_eq!(fx.profiles_sent().len(), 3);
+        let state = fx
+            .circle
+            .profile_pending_state()
+            .await
+            .expect("pending state");
+        assert!(
+            !state.pending && !state.partial,
+            "a deletion every relay took reads as owed"
+        );
+        assert!(matches!(
+            fx.circle
+                .sync_my_profile(fx.secret())
+                .await
+                .expect("sync")
+                .outcome,
+            ProfileSyncOutcomeFfi::NothingPending
+        ));
+        assert_eq!(fx.profiles_sent().len(), 3, "and it is not published twice");
+    }
+
+    /// While the blank is owed, the relay that refused it still serves the
+    /// deleted profile — and may be the only one to answer the retry's read.
+    /// The retry publishes the blank again; no field of the deleted profile
+    /// comes back, on the relays or on the device.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_relay_still_serving_the_deleted_profile_gets_the_blank_and_nothing_back() {
+        use haven_core::relay::scripted_relay::Frame;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_delete_owed_old_served");
+        let (refusing, deleted) = delete_with_one_relay_refusing(&fx).await;
+
+        fx.pool[2].answer(|_| true, vec![Frame::Event(deleted), Frame::Eose]);
+        refusing.store(false, Ordering::SeqCst);
+        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 5, "anti-vacuity: the retry reached every relay");
+        assert!(
+            sent.iter().all(|event| profile_fields(event).is_empty()),
+            "the retry signed a field of the deleted profile back"
+        );
+        let cached = fx
+            .circle
+            .get_cached_profile(fx.own_hex())
+            .await
+            .expect("cached read")
+            .expect("the record of the blank");
+        assert_eq!(
+            (&cached.display_name, &cached.name, &cached.about),
+            (&None, &None, &None),
+            "the deleted profile is shown again"
+        );
+        assert!(cached.is_known && !cached.has_picture);
+        assert!(
+            !fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending
+        );
+    }
+
+    /// The record is of a blank that was PUBLISHED. When no relay takes the
+    /// blank the profile is still public, and the device must go on holding
+    /// it as it is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_deletion_no_relay_acknowledged_leaves_the_own_row_as_it_was() {
+        use nostr_relay_builder::{LocalRelay, RelayBuilder};
+        use std::sync::atomic::AtomicBool;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let own_hex = keys.public_key().to_hex();
+        let dir = DataDir::new("profile_delete_refused");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        retire_curated_profile_pool(&circle);
+        let mut relays = Vec::new();
+        for _ in 0..3 {
+            let relay = LocalRelay::new(RelayBuilder::default().write_policy(
+                RejectWritesWhenFlipped {
+                    flipped: std::sync::Arc::new(AtomicBool::new(true)),
+                    only_kind: None,
+                },
+            ));
+            relay.run().await.expect("run a relay that refuses writes");
+            circle
+                .inner
+                .add_user_relay(&relay.url().await.to_string(), RelayType::Profile)
+                .expect("seed a profile relay");
+            relays.push(relay);
+        }
+        assert_profile_pool_is_local(&circle, 3);
+        let held = CachedProfile {
+            pubkey_hex: own_hex.clone(),
+            metadata: ProfileMetadata::from_metadata(nostr::Metadata::new().display_name("Old")),
+            state: ProfileState::Known,
+            event_created_at: profile_now_secs(),
+            fetched_at: profile_now_secs(),
+        };
+        circle
+            .inner
+            .upsert_profile(&held)
+            .expect("cache the profile");
+        circle
+            .inner
+            .record_published_event(
+                0,
+                "",
+                &nostr::EventId::all_zeros(),
+                &keys.public_key(),
+                profile_now_secs(),
+            )
+            .expect("record its publication");
+
+        circle
+            .delete_my_public_profile(secret_bytes(&keys))
+            .await
+            .expect_err("no relay took the blank");
+
+        let row = circle
+            .inner
+            .get_profile(&own_hex)
+            .expect("row read")
+            .expect("the profile is still held");
+        assert_eq!(
+            (row.metadata, row.event_created_at),
+            (held.metadata, held.event_created_at),
+            "a blank no relay acknowledged was recorded as the own profile"
+        );
+    }
+
+    /// Right after the storage reset this device holds nothing of its own
+    /// profile, so the removal has to find it on the relays — and the copy
+    /// that read returns is the one to build on. Asking the pool a second time
+    /// costs each relay a second request, and when that one misses, the
+    /// removal would publish an empty profile over the one it had just seen.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn removing_the_photo_builds_on_the_copy_the_gate_read_and_asks_each_relay_once() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_remove_gate_copy");
+        // Each relay serves the profile to the first request and to no other.
+        let asked = fx.count_requests(&fx.profile(DELETED_PROFILE, None), |before| before == 0);
+
+        fx.circle
+            .remove_my_profile_picture(fx.secret())
+            .await
+            .expect("remove the picture");
+
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3, "the removal goes to every pool relay");
+        for event in &sent {
+            let fields = profile_fields(event);
+            assert_eq!(
+                fields.get("lud16").map(String::as_str),
+                Some(r#""old@wallet.example.com""#),
+                "the removal dropped the rest of the profile"
+            );
+            assert_eq!(
+                fields.get("display_name").map(String::as_str),
+                Some(r#""Old""#)
+            );
+            assert!(!fields.contains_key("picture"));
+        }
+        for relay in &asked {
+            assert_eq!(
+                relay.load(Ordering::SeqCst),
+                1,
+                "one removal is one request to each relay"
+            );
+        }
+    }
+
+    /// A deletion right after the reset reads the pool once too: the read that
+    /// finds the profile is the read that dates the blank.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deleting_the_profile_right_after_a_reset_asks_each_relay_once() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_delete_gate_copy");
+        let published = fx.profile(DELETED_PROFILE, None);
+        let asked = fx.count_requests(&published, |_| true);
+
+        fx.circle
+            .delete_my_public_profile(fx.secret())
+            .await
+            .expect("delete the public profile");
+
+        let blanks = fx.profiles_sent();
+        assert_eq!(blanks.len(), 3);
+        for blank in &blanks {
+            assert!(profile_fields(blank).is_empty());
+            assert!(
+                blank.created_at > published.created_at,
+                "the blank supersedes the profile the read found"
+            );
+        }
+        for relay in &asked {
+            assert_eq!(
+                relay.load(Ordering::SeqCst),
+                1,
+                "one deletion is one request to each relay"
+            );
+        }
+    }
+
+    /// With no relay serving the profile and no dated copy of it on the
+    /// device there is nothing to remove a photo FROM. Publishing what the
+    /// device does hold — nothing, or a name saved here and never sent —
+    /// would replace a profile it cannot see.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_photo_removal_with_nothing_to_build_on_publishes_nothing() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        for name_saved_here in [false, true] {
+            let fx = ScriptedProfilePool::start("profile_remove_no_base");
+            // This device published a profile once, and holds no copy of it.
+            fx.circle
+                .inner
+                .record_published_event(
+                    0,
+                    "",
+                    &nostr::EventId::all_zeros(),
+                    &fx.keys.public_key(),
+                    profile_now_secs(),
+                )
+                .expect("record a publication");
+            if name_saved_here {
+                fx.circle
+                    .save_my_profile_local(Some("Saved Here".to_string()), None)
+                    .await
+                    .expect("save a name");
+            }
+
+            let refused = fx
+                .circle
+                .remove_my_profile_picture(fx.secret())
+                .await
+                .expect_err("there is no profile to remove the photo from");
+
+            assert_eq!(refused, super::PROFILE_RETRACTION_UNVERIFIED);
+            assert!(
+                fx.profiles_sent().is_empty(),
+                "a profile was published over one this device cannot see"
+            );
+        }
+    }
+
+    /// A removal built on the cached row publishes a name still waiting in the
+    /// outbox, because the row already carries it. From then on the name is
+    /// public, and the outbox must say so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_name_the_photo_removal_published_no_longer_reads_as_unpublished() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_remove_settles_queue");
+        let current = fx.profile(
+            r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg"}"#,
+            None,
+        );
+        fx.hold_as_published(&current);
+        // No relay serves the profile, so the removal is built on the row.
+        let asked = fx.count_requests(&current, |_| false);
+        fx.circle
+            .save_my_profile_local(Some("Renamed".to_string()), None)
+            .await
+            .expect("queue a name");
+        assert!(
+            fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending,
+            "anti-vacuity: the name is waiting to be published"
+        );
+
+        fx.circle
+            .remove_my_profile_picture(fx.secret())
+            .await
+            .expect("remove the picture");
+
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3);
+        for event in &sent {
+            assert_eq!(
+                profile_fields(event)
+                    .get("display_name")
+                    .map(String::as_str),
+                Some(r#""Renamed""#),
+                "anti-vacuity: the removal published the queued name"
+            );
+        }
+        let state = fx
+            .circle
+            .profile_pending_state()
+            .await
+            .expect("pending state");
+        assert!(
+            !state.pending,
+            "a name every relay acknowledged still reads as not published"
+        );
+        assert!(matches!(
+            fx.circle
+                .sync_my_profile(fx.secret())
+                .await
+                .expect("sync")
+                .outcome,
+            super::ProfileSyncOutcomeFfi::NothingPending
+        ));
+        assert_eq!(
+            fx.profiles_sent().len(),
+            3,
+            "and nothing is published twice"
+        );
+        for relay in &asked {
+            assert_eq!(
+                relay.load(Ordering::SeqCst),
+                1,
+                "one removal is one request to each relay"
+            );
+        }
+    }
+
+    const WITH_ADDRESS: &str = r#"{"display_name":"Me","lud16":"old@wallet.example.com","picture":"https://p.example.com/a.jpg"}"#;
+    const WITHOUT_ADDRESS: &str =
+        r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg"}"#;
+
+    /// A copy read for a removal is a copy this device has read, whether or
+    /// not the removal then lands. Another client removed the payment address;
+    /// the removal reads that newer copy and no relay takes its publish. On
+    /// the retry the only relay to answer never took the newer copy: built on
+    /// its old one, the removal would sign the address back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_newer_copy_read_for_a_removal_that_failed_is_what_the_retry_builds_on() {
+        use haven_core::relay::scripted_relay::Frame;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_remove_failed_then_retry");
+        let held = fx.profile(WITH_ADDRESS, None);
+        fx.hold_as_published(&held);
+        let newer = fx.profile(WITHOUT_ADDRESS, Some(held.created_at.as_secs() + 10));
+        fx.pool[1].answer(|_| true, vec![Frame::Event(newer), Frame::Eose]);
+        let refusing = fx.refuse_writes();
+
+        fx.circle
+            .remove_my_profile_picture(fx.secret())
+            .await
+            .expect_err("no relay took the removal");
+        assert!(fx.profiles_sent().is_empty());
+
+        fx.pool[1].answer(|_| true, vec![Frame::Eose]);
+        fx.pool[0].answer(|_| true, vec![Frame::Event(held), Frame::Eose]);
+        refusing.store(false, Ordering::SeqCst);
+        fx.circle
+            .remove_my_profile_picture(fx.secret())
+            .await
+            .expect("remove the picture");
+
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3);
+        for event in &sent {
+            let fields = profile_fields(event);
+            assert_eq!(
+                fields.get("display_name").map(String::as_str),
+                Some(r#""Me""#)
+            );
+            assert!(!fields.contains_key("picture"));
+            assert!(
+                !fields.contains_key("lud16"),
+                "a field another client removed was signed back into the profile"
+            );
+        }
+    }
+
+    /// Right after the reset the device has no record of its profile, so the
+    /// removal's read of the pool is also what says a profile exists. When
+    /// the publish then fails, that knowledge must not go with it: a retry
+    /// that every relay answers with nothing would otherwise report the
+    /// photo removed and publish nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_removal_that_failed_after_finding_the_profile_is_not_a_noop_on_the_retry() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_remove_failed_after_gate");
+        // Each relay serves the profile to the first request and to no other.
+        let _asked = fx.count_requests(&fx.profile(WITH_ADDRESS, None), |before| before == 0);
+        let refusing = fx.refuse_writes();
+
+        fx.circle
+            .remove_my_profile_picture(fx.secret())
+            .await
+            .expect_err("no relay took the removal");
+        refusing.store(false, Ordering::SeqCst);
+        fx.circle
+            .remove_my_profile_picture(fx.secret())
+            .await
+            .expect("remove the picture");
+
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3, "the retry removed nothing");
+        for event in &sent {
+            let fields = profile_fields(event);
+            assert!(fields.contains_key("lud16") && !fields.contains_key("picture"));
+        }
+    }
+
+    /// The same for a deletion no relay took: the profile is still public, and
+    /// the next edit is built on the newest copy the failed deletion read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_newer_copy_read_for_a_deletion_that_failed_is_what_the_next_edit_builds_on() {
+        use haven_core::relay::scripted_relay::Frame;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_delete_failed_then_edit");
+        let held = fx.profile(WITH_ADDRESS, None);
+        fx.hold_as_published(&held);
+        let newer = fx.profile(WITHOUT_ADDRESS, Some(held.created_at.as_secs() + 10));
+        fx.pool[1].answer(|_| true, vec![Frame::Event(newer), Frame::Eose]);
+        let refusing = fx.refuse_writes();
+
+        fx.circle
+            .delete_my_public_profile(fx.secret())
+            .await
+            .expect_err("no relay took the blank");
+        assert!(fx.profiles_sent().is_empty());
+
+        fx.pool[1].answer(|_| true, vec![Frame::Eose]);
+        fx.pool[0].answer(|_| true, vec![Frame::Event(held), Frame::Eose]);
+        refusing.store(false, Ordering::SeqCst);
+        fx.circle
+            .save_my_profile_local(Some("New".to_string()), None)
+            .await
+            .expect("save a name");
+        let synced = fx
+            .circle
+            .sync_my_profile(fx.secret())
+            .await
+            .expect("publish the name");
+        assert_eq!(synced.outcome, super::ProfileSyncOutcomeFfi::Published);
+
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3);
+        for event in &sent {
+            let fields = profile_fields(event);
+            assert_eq!(
+                fields.get("display_name").map(String::as_str),
+                Some(r#""New""#)
+            );
+            assert!(
+                !fields.contains_key("lud16"),
+                "a field another client removed was signed back into the profile"
+            );
+        }
+    }
+
+    /// A photo saved while the previous one is being removed is the user's
+    /// newer wish. The removal read the outbox after that save, so it must
+    /// neither report the new photo published nor delete its bytes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_photo_saved_while_the_old_one_is_being_removed_is_kept() {
+        use haven_core::relay::scripted_relay::Frame;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_remove_races_a_save");
+        let current = fx.profile(WITHOUT_ADDRESS, None);
+        fx.hold_as_published(&current);
+        // One relay holds the removal's read until the save has landed: the
+        // read comes after the removal cancelled what was queued, and before
+        // it looks at the outbox.
+        let (asked, was_asked) = std::sync::mpsc::channel::<()>();
+        let (answer, may_answer) = std::sync::mpsc::channel::<()>();
+        let may_answer = std::sync::Mutex::new(may_answer);
+        fx.pool[0].answer(
+            move |_| {
+                let _ = asked.send(());
+                let _ = may_answer.lock().expect("the gate").recv();
+                true
+            },
+            vec![Frame::Event(current), Frame::Eose],
+        );
+
+        let (removed, ()) = tokio::join!(fx.circle.remove_my_profile_picture(fx.secret()), async {
+            reached(was_asked, "the removal read the pool").await;
+            fx.circle
+                .save_my_profile_picture_local(tiny_png())
+                .await
+                .expect("save a new photo");
+            drop(answer);
+        });
+        removed.expect("remove the picture");
+
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3);
+        assert!(sent
+            .iter()
+            .all(|event| !profile_fields(event).contains_key("picture")));
+        assert!(
+            fx.circle
+                .inner
+                .profile_picture_is_staged(&fx.own_hex())
+                .expect("staged read"),
+            "a photo that was never uploaded reads as published"
+        );
+        assert!(
+            fx.circle
+                .inner
+                .get_profile_picture(&fx.own_hex())
+                .expect("picture read")
+                .is_some(),
+            "the removal deleted a photo saved after it began"
+        );
+        assert!(
+            fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending
+        );
+    }
+
+    /// A removal that settles the outbox reports the coverage it got, like a
+    /// sync: two relays of three is a name some peers still cannot read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_removal_only_some_relays_took_leaves_the_name_it_carried_partly_published() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_remove_partial");
+        fx.hold_as_published(&fx.profile(WITHOUT_ADDRESS, None));
+        fx.circle
+            .save_my_profile_local(Some("Renamed".to_string()), None)
+            .await
+            .expect("queue a name");
+        fx.pool[2].refuse(|_| true);
+
+        fx.circle
+            .remove_my_profile_picture(fx.secret())
+            .await
+            .expect("remove the picture");
+
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 2, "two relays of three took the removal");
+        assert!(sent.iter().all(|event| profile_fields(event)
+            .get("display_name")
+            .is_some_and(|name| name == r#""Renamed""#)));
+        let state = fx
+            .circle
+            .profile_pending_state()
+            .await
+            .expect("pending state");
+        assert!(
+            state.pending && state.partial,
+            "a name one relay refused reads as published everywhere"
+        );
+    }
+
+    /// A removal one relay refused is not done: that relay goes on serving the
+    /// photo to every peer who reads the profile there. With nothing queued to
+    /// carry it, the profile without the picture is itself left owed — sent,
+    /// but not everywhere — and the next sync takes it to the whole pool. Not
+    /// at once: the retry waits out the first rung of the ladder, as after any
+    /// publish some relay did not take.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_removal_one_relay_refused_is_owed_until_a_sync_reaches_that_relay() {
+        use haven_core::profile::PROFILE_SYNC_BACKOFF_SECS;
+        use haven_core::relay::scripted_relay::Frame;
+        use std::sync::atomic::AtomicBool;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_remove_owed");
+        let pictured = fx.profile(WITHOUT_ADDRESS, None);
+        fx.hold_as_published(&pictured);
+        let refusing = std::sync::Arc::new(AtomicBool::new(true));
+        let refuses = refusing.clone();
+        fx.pool[2].refuse(move |_| refuses.load(Ordering::SeqCst));
+
+        let before = profile_now_secs();
+        fx.circle
+            .remove_my_profile_picture(fx.secret())
+            .await
+            .expect("remove the picture");
+        let after = profile_now_secs();
+
+        assert_eq!(
+            fx.profiles_sent().len(),
+            2,
+            "two relays of three took the removal"
+        );
+        let state = fx
+            .circle
+            .profile_pending_state()
+            .await
+            .expect("pending state");
+        assert!(
+            state.pending && state.partial,
+            "a removal one relay refused reads as done"
+        );
+        // The removal's own clock reading lies between the two taken here.
+        let due_at = |now| {
+            fx.circle
+                .inner
+                .profile_pending_state(&fx.own_hex(), now)
+                .expect("pending state")
+                .retry_due
+        };
+        assert!(
+            !due_at(before + PROFILE_SYNC_BACKOFF_SECS[0] - 1),
+            "the removal is republished sooner than the ladder allows"
+        );
+        assert!(
+            due_at(after + PROFILE_SYNC_BACKOFF_SECS[0]),
+            "the first retry waits longer than the first rung of the ladder"
+        );
+
+        // The relay that refused still serves the profile WITH the photo, and
+        // is the only one to answer the retry's read: built on that copy, the
+        // retry would publish the photo back to every relay.
+        fx.pool[2].answer(|_| true, vec![Frame::Event(pictured), Frame::Eose]);
+        refusing.store(false, Ordering::SeqCst);
+        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+        let reached_it = fx.pool[2].published();
+        assert_eq!(
+            reached_it.len(),
+            1,
+            "the relay that refused the removal was not sent it again"
+        );
+        let fields = profile_fields(&reached_it[0]);
+        assert!(!fields.contains_key("picture"));
+        assert_eq!(
+            fields.get("display_name").map(String::as_str),
+            Some(r#""Me""#)
+        );
+        let state = fx
+            .circle
+            .profile_pending_state()
+            .await
+            .expect("pending state");
+        assert!(
+            !state.pending && !state.partial,
+            "a removal every relay now holds still reads as owed"
+        );
+        assert!(matches!(
+            fx.circle
+                .sync_my_profile(fx.secret())
+                .await
+                .expect("sync")
+                .outcome,
+            ProfileSyncOutcomeFfi::NothingPending
+        ));
+        assert_eq!(
+            fx.profiles_sent().len(),
+            5,
+            "and nothing is sent after that"
+        );
+    }
+
+    /// The retry's backoff runs from when a retraction was RECORDED, not from
+    /// when it began. A removal or a deletion that spent longer on the relays
+    /// than the first rung would otherwise come back with its retry already
+    /// due, and the status re-read that follows would republish to the whole
+    /// pool at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_retraction_does_not_leave_its_retry_already_due() {
+        use haven_core::profile::PROFILE_SYNC_BACKOFF_SECS;
+        use std::sync::atomic::AtomicI64;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        for deleting in [false, true] {
+            let fx = ScriptedProfilePool::start("profile_retract_slow");
+            fx.hold_as_published(&fx.profile(WITHOUT_ADDRESS, None));
+            // The publish "takes" longer than the first rung: this task's
+            // clock jumps ahead at the moment the refusing relay is offered
+            // the retraction.
+            let took = PROFILE_SYNC_BACKOFF_SECS[0] + 10;
+            let ahead = std::sync::Arc::new(AtomicI64::new(0));
+            let offered = ahead.clone();
+            fx.pool[2].refuse(move |_| {
+                offered.store(took, Ordering::SeqCst);
+                true
+            });
+
+            let state = super::PROFILE_CLOCK_AHEAD_SECS
+                .scope(ahead.clone(), async {
+                    if deleting {
+                        fx.circle
+                            .delete_my_public_profile(fx.secret())
+                            .await
+                            .expect("delete the public profile");
+                    } else {
+                        fx.circle
+                            .remove_my_profile_picture(fx.secret())
+                            .await
+                            .expect("remove the picture");
+                    }
+                    fx.circle
+                        .profile_pending_state()
+                        .await
+                        .expect("pending state")
+                })
+                .await;
+
+            assert_eq!(
+                ahead.load(Ordering::SeqCst),
+                took,
+                "anti-vacuity: the clock moved while the retraction was being published"
+            );
+            assert!(state.pending && state.partial, "deleting = {deleting}");
+            assert!(
+                !state.retry_due,
+                "a retraction that took longer than the first rung came back with its retry \
+                 due (deleting = {deleting})"
+            );
+        }
+    }
+
+    /// The other side of the rule above: a removal every relay took owes
+    /// nothing, and no sync follows it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_removal_every_relay_took_owes_nothing() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_remove_not_owed");
+        fx.hold_as_published(&fx.profile(WITHOUT_ADDRESS, None));
+
+        fx.circle
+            .remove_my_profile_picture(fx.secret())
+            .await
+            .expect("remove the picture");
+
+        assert_eq!(fx.profiles_sent().len(), 3);
+        let state = fx
+            .circle
+            .profile_pending_state()
+            .await
+            .expect("pending state");
+        assert!(
+            !state.pending && !state.partial,
+            "a removal every relay took reads as owed"
+        );
+        assert!(matches!(
+            fx.circle
+                .sync_my_profile(fx.secret())
+                .await
+                .expect("sync")
+                .outcome,
+            ProfileSyncOutcomeFfi::NothingPending
+        ));
+        assert_eq!(fx.profiles_sent().len(), 3, "and it is not published twice");
+    }
+
+    /// A name saved while the removal is being published is the user's newer
+    /// wish, and no relay has been sent it. It stays queued, it stays on the
+    /// row the name field reads, and it does not read as partly published:
+    /// the removal is what one relay refused, and the name's own sync takes
+    /// both to the whole pool.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_name_saved_while_the_removal_is_published_is_kept_and_reads_as_unsent() {
+        use std::sync::atomic::AtomicBool;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_remove_publish_races_a_save");
+        fx.hold_as_published(&fx.profile(WITHOUT_ADDRESS, None));
+        // One relay holds its answer to the removal until the save has landed,
+        // and then refuses it: the save falls after the removal read the
+        // outbox and before it records what it published.
+        let (offered, was_offered) = std::sync::mpsc::channel::<()>();
+        let (answer, may_answer) = std::sync::mpsc::channel::<()>();
+        let may_answer = std::sync::Mutex::new(may_answer);
+        let refusing = std::sync::Arc::new(AtomicBool::new(true));
+        let refuses = refusing.clone();
+        fx.pool[2].refuse(move |_| {
+            let _ = offered.send(());
+            let _ = may_answer.lock().expect("the gate").recv();
+            refuses.load(Ordering::SeqCst)
+        });
+
+        let (removed, ()) = tokio::join!(fx.circle.remove_my_profile_picture(fx.secret()), async {
+            reached(was_offered, "the removal was offered to the pool").await;
+            fx.circle
+                .save_my_profile_local(Some("Renamed".to_string()), None)
+                .await
+                .expect("save a name");
+            drop(answer);
+        });
+        let shown = removed.expect("remove the picture");
+
+        let removal = fx.profiles_sent();
+        assert_eq!(removal.len(), 2, "two relays of three took the removal");
+        assert!(
+            removal.iter().all(|event| profile_fields(event)
+                .get("display_name")
+                .is_some_and(|name| name == r#""Me""#)),
+            "anti-vacuity: the removal was signed before the name was saved"
+        );
+        let cached = fx
+            .circle
+            .get_cached_profile(fx.own_hex())
+            .await
+            .expect("cached read")
+            .expect("the own row");
+        for view in [&shown, &cached] {
+            assert_eq!(
+                view.display_name.as_deref(),
+                Some("Renamed"),
+                "the name the user saved is gone from the row their name field reads"
+            );
+            assert!(!view.has_picture);
+        }
+        let state = fx
+            .circle
+            .profile_pending_state()
+            .await
+            .expect("pending state");
+        assert!(state.pending, "a name no relay was sent reads as published");
+        assert!(
+            !state.partial,
+            "a name no relay was sent reads as published to some"
+        );
+        assert_eq!(
+            fx.circle
+                .inner
+                .pending_profile_sync(&fx.own_hex())
+                .expect("outbox read")
+                .expect("the name is still queued")
+                .edits
+                .display_name
+                .as_deref(),
+            Some("Renamed")
+        );
+
+        refusing.store(false, Ordering::SeqCst);
+        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+        for relay in &fx.pool {
+            let newest = relay.published().pop().expect("the relay took the sync");
+            let fields = profile_fields(&newest);
+            assert_eq!(
+                fields.get("display_name").map(String::as_str),
+                Some(r#""Renamed""#)
+            );
+            assert!(
+                !fields.contains_key("picture"),
+                "the sync that followed put the removed photo back"
+            );
+        }
+        assert!(
+            !fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending
+        );
+    }
+
+    /// A photo queued for upload and then removed leaves the outbox owing one
+    /// thing: a profile that names no picture. The removal publishes exactly
+    /// that, so nothing is left for a sync to send a second time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_removal_that_cancels_a_queued_photo_leaves_nothing_to_publish() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_remove_cancelled_photo");
+        let current = fx.profile(
+            r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg"}"#,
+            None,
+        );
+        fx.hold_as_published(&current);
+        let _asked = fx.count_requests(&current, |_| true);
+        fx.circle
+            .save_my_profile_picture_local(tiny_png())
+            .await
+            .expect("queue a photo");
+        assert!(
+            fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending,
+            "anti-vacuity: the photo is waiting to be published"
+        );
+
+        fx.circle
+            .remove_my_profile_picture(fx.secret())
+            .await
+            .expect("remove the picture");
+
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3);
+        assert!(sent
+            .iter()
+            .all(|event| !profile_fields(event).contains_key("picture")));
+        assert!(
+            !fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending,
+            "the profile without a picture is public and still reads as owed"
+        );
+        assert!(matches!(
+            fx.circle
+                .sync_my_profile(fx.secret())
+                .await
+                .expect("sync")
+                .outcome,
+            super::ProfileSyncOutcomeFfi::NothingPending
+        ));
+        assert_eq!(fx.profiles_sent().len(), 3, "and it is not published twice");
+    }
+
+    /// The other direction: a removal built on the relays' copy does not carry
+    /// the queued name, and must not report it published.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_queued_name_the_photo_removal_did_not_publish_stays_queued() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_remove_keeps_queue");
+        let held = fx.profile(
+            r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg"}"#,
+            None,
+        );
+        fx.hold_as_published(&held);
+        // Another client has since published a newer copy; every relay serves
+        // it, so the removal is built on it and not on the row.
+        let newer = fx.profile(
+            r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg","website":"https://w.example.com"}"#,
+            Some(held.created_at.as_secs() + 10),
+        );
+        let _asked = fx.count_requests(&newer, |_| true);
+        fx.circle
+            .save_my_profile_local(Some("Renamed".to_string()), None)
+            .await
+            .expect("queue a name");
+
+        let shown = fx
+            .circle
+            .remove_my_profile_picture(fx.secret())
+            .await
+            .expect("remove the picture");
+        let cached = fx
+            .circle
+            .get_cached_profile(fx.own_hex())
+            .await
+            .expect("cached read")
+            .expect("the own row");
+        for view in [&shown, &cached] {
+            assert_eq!(
+                view.display_name.as_deref(),
+                Some("Renamed"),
+                "the name the user saved is gone from the row their name field reads"
+            );
+        }
+
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3);
+        for event in &sent {
+            let fields = profile_fields(event);
+            assert_eq!(
+                fields.get("display_name").map(String::as_str),
+                Some(r#""Me""#),
+                "anti-vacuity: the removal was built on the relays' copy"
+            );
+            assert!(fields.contains_key("website") && !fields.contains_key("picture"));
+        }
+        assert!(
+            fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending,
+            "a name no relay was sent reads as published"
+        );
+        assert_eq!(
+            fx.circle
+                .inner
+                .pending_profile_sync(&fx.own_hex())
+                .expect("outbox read")
+                .expect("the name is still queued")
+                .edits
+                .display_name
+                .as_deref(),
+            Some("Renamed")
+        );
+    }
+
     // ------------------------------------------------------------------------
     // sync_my_profile: the pending pre-check must run BEFORE any signing key
     // is built from the caller's secret (Security Rule 9 — the resume/
@@ -15317,6 +20944,7 @@ mod maintenance_real_ffi_tests {
         let dir = DataDir::new("profile_sync_nothing_pending");
         let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
             .expect("CircleManagerFfi::new");
+        isolate_profile_plane(&circle);
 
         // Never staged anything, so the outbox is empty for this account.
         assert!(
@@ -15371,12 +20999,7 @@ mod maintenance_real_ffi_tests {
         // Eat the whole pool: every curated profile relay is now also a
         // location-plane relay for this account. `add_user_relay` is a local
         // write — no socket is opened to arrange this.
-        for url in haven_core::profile::profile_relay_pool_default() {
-            circle
-                .inner
-                .add_user_relay(&url, RelayType::Inbox)
-                .expect("contaminate a curated pool relay");
-        }
+        retire_curated_profile_pool(&circle);
         assert!(
             circle.inner.usable_profile_relays().is_err(),
             "the pool must really be unusable, or this test proves nothing",
@@ -15485,6 +21108,357 @@ mod maintenance_real_ffi_tests {
         );
     }
 
+    /// What a fresh install of the same account reads from `relays` — a store
+    /// of its own, so no cached row can stand in for the relays' answer.
+    async fn public_profile_seen_by_a_reader(
+        label: &str,
+        keys: &Keys,
+        relays: &[MockRelay],
+    ) -> super::ProfileMetadataFfi {
+        let dir = DataDir::new(label);
+        let reader =
+            CircleManagerFfi::new(dir.as_str(), secret_bytes(keys)).expect("the reader opens");
+        retire_curated_profile_pool(&reader);
+        for relay in relays {
+            reader
+                .inner
+                .add_user_relay(&relay.url().await.to_string(), RelayType::Profile)
+                .expect("the reader asks the same relays");
+        }
+        assert_profile_pool_is_local(&reader, relays.len());
+        reader
+            .fetch_my_profile(keys.public_key().to_hex(), true)
+            .await
+            .expect("the reader fetches the profile")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_relay_answer_is_reported_as_answered_by_a_relay() {
+        // The reset reseed takes the user's name from what a relay answers.
+        // When none can be asked the fetch hands back the cached row — which a
+        // local save made after the update fills — and that must not read as
+        // an answer, or the reseed is spent on a row the network never saw.
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let dir = DataDir::new("profile_answer_publisher");
+        let publisher = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        let relays = reachable_profile_plane(&publisher).await;
+        publisher
+            .save_my_profile_local(Some("Published Name".to_string()), None)
+            .await
+            .expect("stage the profile");
+        publisher
+            .sync_my_profile(secret_bytes(&keys))
+            .await
+            .expect("publish the profile");
+
+        let answered =
+            public_profile_seen_by_a_reader("profile_answer_reader", &keys, &relays).await;
+        assert_eq!(answered.display_name.as_deref(), Some("Published Name"));
+        assert_eq!(
+            answered.relay_answer,
+            OwnProfileRelayAnswerFfi::Published,
+            "a relay answered this call"
+        );
+
+        let isolated_dir = DataDir::new("profile_answer_isolated");
+        let isolated = CircleManagerFfi::new(isolated_dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        isolate_profile_plane(&isolated);
+        isolated
+            .save_my_profile_local(Some("Saved Here Only".to_string()), None)
+            .await
+            .expect("a profile saved locally, never published");
+        let cached = isolated
+            .fetch_my_profile(keys.public_key().to_hex(), true)
+            .await
+            .expect("the fetch falls back to the cache");
+        assert!(
+            cached.is_known,
+            "anti-vacuity: the cached row is a known profile"
+        );
+        assert_eq!(
+            cached.relay_answer,
+            OwnProfileRelayAnswerFfi::Unanswered,
+            "no relay answered"
+        );
+        assert_eq!(
+            isolated
+                .get_cached_profile(keys.public_key().to_hex())
+                .await
+                .expect("cache read")
+                .expect("the local save is cached")
+                .relay_answer,
+            OwnProfileRelayAnswerFfi::Unanswered,
+            "and a cache read never is an answer"
+        );
+    }
+
+    /// A fixed "now" for the own-profile fetch's injected clock.
+    const OWN_FETCH_NOW: i64 = 1_800_000_000;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_own_profile_no_relay_holds_is_absent_only_when_every_relay_answers() {
+        // The reset reseed stops asking once the relays settle that no profile
+        // is published. One silent relay may be the one holding it, so that
+        // must not read as settled.
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let own_hex = keys.public_key().to_hex();
+
+        let answering = CountedProfilePlane::start(3, 0).await;
+        let dir = DataDir::new("own_profile_absent");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        answering.serve(&circle);
+        let absent = circle
+            .fetch_my_profile_at(own_hex.clone(), false, OWN_FETCH_NOW)
+            .await
+            .expect("the fetch settles");
+        assert_eq!(answering.asked(), 3, "anti-vacuity: every relay was asked");
+        assert_eq!(absent.relay_answer, OwnProfileRelayAnswerFfi::Absent);
+        assert!(!absent.is_known);
+        assert_eq!((absent.display_name, absent.name), (None, None));
+
+        let one_silent = CountedProfilePlane::start(2, 1).await;
+        let dir = DataDir::new("own_profile_one_silent");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        one_silent.serve(&circle);
+        let unanswered = circle
+            .fetch_my_profile_at(own_hex, false, OWN_FETCH_NOW)
+            .await
+            .expect("the fetch returns");
+        assert_eq!(
+            one_silent.asked(),
+            2,
+            "anti-vacuity: the live relays were asked"
+        );
+        assert_eq!(
+            unanswered.relay_answer,
+            OwnProfileRelayAnswerFfi::Unanswered,
+            "the silent relay may be the one holding the profile"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_own_profile_fetch_asks_no_relay_inside_the_miss_backoff() {
+        // While the reseed is owed it fetches on every foreground. With no
+        // profile published and one pool relay dead for good, the relays never
+        // settle it — so the miss backoff, not the caller, has to space the
+        // asks, or every foreground tells each live relay the user is there.
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let own_hex = keys.public_key().to_hex();
+        let first_rung = haven_core::circle::PROFILE_MISS_BACKOFF_SECS[0];
+
+        let plane = CountedProfilePlane::start(2, 1).await;
+        let dir = DataDir::new("own_profile_backoff");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        plane.serve(&circle);
+        let fetch_at =
+            |force: bool, now: i64| circle.fetch_my_profile_at(own_hex.clone(), force, now);
+
+        fetch_at(false, OWN_FETCH_NOW)
+            .await
+            .expect("the first fetch");
+        assert_eq!(plane.asked(), 2, "anti-vacuity: the first fetch asks");
+
+        let inside = fetch_at(false, OWN_FETCH_NOW + first_rung - 1)
+            .await
+            .expect("a fetch inside the backoff");
+        assert_eq!(plane.asked(), 2, "no relay is asked inside the backoff");
+        assert_eq!(inside.relay_answer, OwnProfileRelayAnswerFfi::Unanswered);
+
+        fetch_at(true, OWN_FETCH_NOW + first_rung - 1)
+            .await
+            .expect("a forced fetch inside the backoff");
+        assert_eq!(plane.asked(), 4, "an explicit refresh still asks");
+
+        // The forced miss moved the retry on, by the next rung.
+        let second_rung = haven_core::circle::PROFILE_MISS_BACKOFF_SECS[1];
+        let retry_at = OWN_FETCH_NOW + first_rung - 1 + second_rung;
+        fetch_at(false, retry_at - 1)
+            .await
+            .expect("a fetch still inside the backoff");
+        assert_eq!(plane.asked(), 4);
+        fetch_at(false, retry_at).await.expect("a fetch once due");
+        assert_eq!(plane.asked(), 6, "and the relays are asked again once due");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_own_profile_fetch_is_not_put_off_by_a_refresh_of_the_same_row() {
+        // The member refresh fetches the user's own key too, and stamps the
+        // row fresh. Holding the reseed's fetch to that staleness tier would
+        // put it off every time the refresh got there first.
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let own_hex = keys.public_key().to_hex();
+
+        let plane = CountedProfilePlane::start(3, 0).await;
+        let publisher_dir = DataDir::new("own_profile_refresh_publisher");
+        let publisher = CircleManagerFfi::new(publisher_dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        plane.serve(&publisher);
+        publisher
+            .save_my_profile_local(Some("Quiet Wanderer".to_string()), None)
+            .await
+            .expect("stage the profile");
+        publisher
+            .sync_my_profile(secret_bytes(&keys))
+            .await
+            .expect("publish the profile");
+
+        let reader_dir = DataDir::new("own_profile_refresh_reader");
+        let reader = CircleManagerFfi::new(reader_dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        plane.serve(&reader);
+        let refreshed = reader
+            .fetch_member_profiles(vec![own_hex.clone()], 900)
+            .await
+            .expect("the refresh runs");
+        assert!(
+            refreshed.iter().any(|profile| profile.is_known),
+            "anti-vacuity: the refresh cached the own profile"
+        );
+        assert!(
+            reader
+                .inner
+                .profiles_due(std::slice::from_ref(&own_hex), profile_now_secs(), 900)
+                .expect("due read")
+                .is_empty(),
+            "anti-vacuity: and the staleness tier now holds the row"
+        );
+
+        let before = plane.asked();
+        let answer = reader
+            .fetch_my_profile(own_hex, false)
+            .await
+            .expect("the own fetch");
+        assert_eq!(plane.asked(), before + 3, "every pool relay is asked");
+        assert_eq!(answer.relay_answer, OwnProfileRelayAnswerFfi::Published);
+        assert_eq!(answer.display_name.as_deref(), Some("Quiet Wanderer"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_profile_retraction_after_reset_is_never_a_silent_noop() {
+        // The storage reset wiped every local sign that this account ever
+        // published a profile (`published_events`, the cached kind-0, the
+        // picture cache) while the kind-0 stayed public on the relays. A
+        // retraction must find it there — and, when no relay can be asked,
+        // refuse rather than report that there was nothing to retract.
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+
+        // A fresh install that knows nothing, and the same account's profile
+        // published to its relays by the install the reset wiped — through the
+        // product's own profile path, from a store of its own.
+        let dir = DataDir::new("profile_retract_after_reset");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        let relays = reachable_profile_plane(&circle).await;
+        let before_dir = DataDir::new("profile_retract_before_reset");
+        let before = CircleManagerFfi::new(before_dir.as_str(), secret_bytes(&keys))
+            .expect("the pre-reset install opens");
+        retire_curated_profile_pool(&before);
+        for relay in &relays {
+            before
+                .inner
+                .add_user_relay(&relay.url().await.to_string(), RelayType::Profile)
+                .expect("the pre-reset install publishes to the same relays");
+        }
+        assert_profile_pool_is_local(&before, relays.len());
+        before
+            .save_my_profile_local(Some("Published Before The Reset".to_string()), None)
+            .await
+            .expect("stage the profile");
+        before
+            .sync_my_profile(secret_bytes(&keys))
+            .await
+            .expect("publish the profile");
+        drop(before);
+        assert_eq!(
+            public_profile_seen_by_a_reader("profile_retract_reader_before", &keys, &relays)
+                .await
+                .display_name
+                .as_deref(),
+            Some("Published Before The Reset"),
+            "precondition: the profile is public on the relays"
+        );
+        assert!(
+            !circle
+                .inner
+                .has_published_profile(&keys.public_key())
+                .expect("gate read"),
+            "precondition: nothing local says a profile was published"
+        );
+
+        circle
+            .delete_my_public_profile(secret_bytes(&keys))
+            .await
+            .expect("the retraction runs");
+        let after =
+            public_profile_seen_by_a_reader("profile_retract_reader_after", &keys, &relays).await;
+        assert!(after.is_known, "a kind-0 is still on the relays");
+        assert_eq!(
+            (after.display_name, after.name, after.about),
+            (None, None, None),
+            "the public profile must be superseded by a blank kind-0, not left standing"
+        );
+
+        // No profile relay reachable at all: fail closed.
+        let isolated_dir = DataDir::new("profile_retract_unverified");
+        let isolated = CircleManagerFfi::new(isolated_dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        isolate_profile_plane(&isolated);
+        let own_hex = keys.public_key().to_hex();
+        let pending = |circle: &CircleManagerFfi| {
+            circle
+                .inner
+                .pending_profile_sync(&own_hex)
+                .expect("outbox read")
+        };
+        isolated
+            .save_my_profile_local(Some("Queued Before The Delete".to_string()), None)
+            .await
+            .expect("queue a name");
+        isolated
+            .save_my_profile_picture_local(tiny_png())
+            .await
+            .expect("queue a photo");
+        let err = isolated
+            .delete_my_public_profile(secret_bytes(&keys))
+            .await
+            .expect_err("an unverifiable retraction must never be a silent no-op");
+        assert_eq!(err, super::PROFILE_RETRACTION_UNVERIFIED);
+        assert!(
+            pending(&isolated).is_none(),
+            "an unverifiable deletion still empties the outbox, or the sync retry \
+             publishes the name and photo the user just deleted"
+        );
+
+        isolated
+            .save_my_profile_picture_local(tiny_png())
+            .await
+            .expect("queue a photo");
+        let err = isolated
+            .remove_my_profile_picture(secret_bytes(&keys))
+            .await
+            .expect_err("an unverifiable picture retraction must never be a silent no-op");
+        assert_eq!(err, super::PROFILE_RETRACTION_UNVERIFIED);
+        assert!(
+            !pending(&isolated).is_some_and(|snapshot| snapshot.picture_staged),
+            "an unverifiable removal still cancels the queued photo"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn remove_picture_rejects_a_secret_that_is_not_this_managers_identity() {
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
@@ -15496,6 +21470,7 @@ mod maintenance_real_ffi_tests {
         let dir = DataDir::new("profile_remove_foreign_secret");
         let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
             .expect("CircleManagerFfi::new");
+        isolate_profile_plane(&circle);
 
         circle
             .save_my_profile_picture_local(tiny_png())
@@ -15546,6 +21521,7 @@ mod maintenance_real_ffi_tests {
         let dir = DataDir::new("profile_delete_foreign_secret");
         let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
             .expect("CircleManagerFfi::new");
+        isolate_profile_plane(&circle);
 
         circle
             .save_my_profile_local(Some("Still Here".to_string()), None)
@@ -15660,11 +21636,12 @@ mod member_directory_real_ffi_tests {
             .expect("serialize the key package event"),
             inbox_relays: vec![url.to_string()],
             nip65_relays: Vec::new(),
+            author_npub: crate::api::hex_to_npub(&keys.public_key().to_hex()),
         }
     }
 
-    /// Creates a circle through the FFI and confirms its staged create, which is
-    /// what makes the roster converged (Rule 13) and therefore readable by the
+    /// Creates a circle through the FFI's driven create. A founding create is
+    /// canonical on return, so its roster is converged and readable by the
     /// reconcile.
     async fn confirmed_circle(
         owner: &CircleManagerFfi,
@@ -15672,24 +21649,24 @@ mod member_directory_real_ffi_tests {
         url: &str,
         members: Vec<MemberKeyPackageFfi>,
         name: &str,
-    ) -> super::CircleCreationResultFfi {
-        let created = owner
-            .create_circle(
+    ) -> super::CircleFfi {
+        RelayManagerFfi::new_instance()
+            .await
+            .expect("relay manager")
+            .create_circle_driven(
+                owner,
                 secret_bytes(keys),
                 members,
                 name.to_string(),
                 None,
                 "location_sharing".to_string(),
                 vec![url.to_string()],
-                vec![url.to_string()],
+                true,
             )
             .await
-            .expect("create circle");
-        owner
-            .confirm_published(created.pending)
-            .await
-            .expect("confirm the staged create");
-        created
+            .expect("create circle")
+            .circle
+            .expect("the circle is created")
     }
 
     // ------------------------------------------------------------------------
@@ -15750,7 +21727,7 @@ mod member_directory_real_ffi_tests {
 
         // Leaving the circle demotes them; reading past the window ERASES them.
         owner
-            .abandon_circle_local_only(created.circle.mls_group_id.clone())
+            .abandon_circle_local_only(created.mls_group_id.clone())
             .await
             .expect("abandon");
         let entries = owner.ranked_directory_members(now).await.expect("read");
@@ -15780,9 +21757,10 @@ mod member_directory_real_ffi_tests {
     // absent from the union, and every write site reconciles as it writes — so
     // the only way to reach that state is to make those internal passes DEFER,
     // which an in-flight membership commit does. Hence the staged, unconfirmed
-    // second circle: it holds the internal reconciles off until the call under
-    // test has run, and rolling it back is what lets the next internal pass
-    // complete and act on the mode this one asked for.
+    // add to a second circle (a create is canonical at once and stages
+    // nothing): it holds the internal reconciles off until the call under test
+    // has run, and rolling it back is what lets the next internal pass complete
+    // and act on the mode this one asked for.
     // ------------------------------------------------------------------------
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_picker_reconcile_never_asks_for_the_withdrawing_mode() {
@@ -15816,21 +21794,28 @@ mod member_directory_real_ffi_tests {
             DirectoryTierFfi::Current
         );
 
-        // A staged, unconfirmed create: from here every reconcile defers.
+        // A staged, unconfirmed add: from here every reconcile defers.
+        let errands_keys = Keys::generate();
+        let errands_member = published_member(&url, &errands_keys).await;
+        let errands =
+            confirmed_circle(&owner, &owner_keys, &url, vec![errands_member], "Errands").await;
         let other_keys = Keys::generate();
         let other = published_member(&url, &other_keys).await;
-        let staged = owner
-            .create_circle(
-                secret_bytes(&owner_keys),
-                vec![other],
-                "Errands".to_string(),
-                None,
-                "location_sharing".to_string(),
-                vec![url.clone()],
-                vec![url.clone()],
+        let package = haven_core::nostr::mls::SessionManager::key_package_from_event(
+            &<nostr::Event as nostr::JsonUtil>::from_json(&other.key_package_json)
+                .expect("a key package event"),
+        )
+        .expect("a key package");
+        owner
+            .inner
+            .session()
+            .add_members_staging(
+                &<haven_core::nostr::mls::types::GroupId as haven_core::nostr::mls::types::GroupIdExt>::from_slice(&errands.mls_group_id),
+                vec![package],
+                u64::try_from(super::now_ms()).expect("a clock after 1970"),
             )
             .await
-            .expect("stage a second create");
+            .expect("stage an add to the second circle");
 
         // THE CALL UNDER TEST. It defers — and a withdrawing ask would have
         // recorded a withdrawal as owed before deferring, which is sticky.
@@ -15845,7 +21830,7 @@ mod member_directory_real_ffi_tests {
         // Leave the shared circle. Its own reconcile defers too, so the
         // co-member stays CURRENT while no longer being in any roster.
         owner
-            .abandon_circle_local_only(shared.circle.mls_group_id.clone())
+            .abandon_circle_local_only(shared.mls_group_id.clone())
             .await
             .expect("abandon");
         assert_eq!(
@@ -15861,24 +21846,27 @@ mod member_directory_real_ffi_tests {
              test discriminates on never existed"
         );
 
-        // Roll the staged create back. Nothing is in flight now, so THIS
-        // internal pass completes — under the verdict the deferred call left
-        // behind.
-        owner
-            .publish_failed(staged.pending)
-            .await
-            .expect("roll the staged create back");
+        // Every relay refuses the staged add, so its drive rolls it back.
+        // Nothing is in flight now, so THIS internal pass completes — under the
+        // verdict the deferred call left behind.
+        owner.inner.refuse_staged_for_test().await;
 
         let entries = owner.ranked_directory_members(now).await.expect("read");
+        let departed = entries
+            .iter()
+            .find(|entry| entry.pubkey_hex == member_keys.public_key().to_hex())
+            .expect(
+                "the picker's reconcile must age a departed co-member out, never \
+                 delete them: a withdrawing ask erases someone the user shared a \
+                 circle with minutes ago",
+            );
+        assert_eq!(departed.tier, DirectoryTierFfi::Recent);
         assert_eq!(
             entries.len(),
-            1,
-            "the picker's reconcile must age a departed co-member out, never \
-             delete them: a withdrawing ask erases someone the user shared a \
-             circle with minutes ago"
+            2,
+            "the departed co-member and the second circle's member — and \
+             never the member whose add was rolled back"
         );
-        assert_eq!(entries[0].pubkey_hex, member_keys.public_key().to_hex());
-        assert_eq!(entries[0].tier, DirectoryTierFfi::Recent);
     }
 
     // ------------------------------------------------------------------------
@@ -15922,16 +21910,15 @@ mod member_directory_real_ffi_tests {
 
 #[cfg(test)]
 mod repair_rotation_ffi_tests {
-    use super::{CommitToPublishFfi, PendingStateRefFfi, RepairRotationOutcomeFfi, SkipReasonFfi};
+    use super::SkipReasonFfi;
     use haven_core::circle::SkipReason;
 
     #[test]
     fn every_skip_reason_crosses_the_boundary_as_itself() {
         // Exhaustive: a new core `SkipReason` breaks compilation here rather
-        // than silently reaching the UI as the wrong routing decision. The three
+        // than silently reaching the UI as the wrong routing decision. The two
         // groupings below are what the banner branches on.
         let cases = [
-            (SkipReason::NotSoleAdmin, SkipReasonFfi::NotSoleAdmin),
             (SkipReason::EpochNotStable, SkipReasonFfi::EpochNotStable),
             (
                 SkipReason::EpochUnrecoverable,
@@ -15961,7 +21948,7 @@ mod repair_rotation_ffi_tests {
             );
             // Exhaustiveness: this match has no wildcard.
             let _routed = match core {
-                SkipReason::NotSoleAdmin | SkipReason::EpochUnrecoverable => "terminal",
+                SkipReason::EpochUnrecoverable => "terminal",
                 SkipReason::EpochNotStable
                 | SkipReason::RecentEpochChange
                 | SkipReason::RecentInboundTraffic
@@ -15970,137 +21957,80 @@ mod repair_rotation_ffi_tests {
             };
         }
     }
+}
+
+#[cfg(test)]
+mod circle_recovery_ffi_tests {
+    use super::RecoveryCauseFfi;
+    use haven_core::relay::fanout::RecoveryCause;
 
     #[test]
-    fn the_outcome_debug_carries_no_identifier() {
-        // The staged commit's event JSON carries the circle's `h` tag, so a
-        // stray `{:?}` on the outcome must print nothing but presence
-        // (Security Rules 4/8).
-        let skipped = RepairRotationOutcomeFfi {
-            rotated: None,
-            skipped: Some(SkipReasonFfi::NotSoleAdmin),
-            deferred_send: None,
-        };
-        assert_eq!(
-            format!("{skipped:?}"),
-            "RepairRotationOutcomeFfi { rotated: None, skipped: Some(NotSoleAdmin), \
-             deferred_send: None }"
-        );
-
-        // The arm that actually carries a payload. `CommitToPublishFfi` holds
-        // the commit event JSON, whose `h` tag IS the circle's public group id,
-        // so this is the case a leak would come from.
-        let rotated = RepairRotationOutcomeFfi {
-            rotated: Some(CommitToPublishFfi {
-                commit_event_json: r#"{"tags":[["h","deadbeef"]]}"#.to_string(),
-                pending: PendingStateRefFfi { token: 1 },
-            }),
-            skipped: None,
-            deferred_send: None,
-        };
-        let debug = format!("{rotated:?}");
-        assert_eq!(
-            debug,
-            "RepairRotationOutcomeFfi { rotated: Some(\"<redacted>\"), skipped: None, \
-             deferred_send: None }"
-        );
-        assert!(
-            !debug.contains("deadbeef"),
-            "the commit event's h tag must never reach a log line: {debug}"
-        );
+    fn every_recovery_cause_crosses_the_boundary_as_itself_and_renders_no_payload() {
+        // Exhaustive: a new core cause breaks compilation here rather than
+        // reaching the UI as the wrong remedy.
+        let cases = [
+            (RecoveryCause::Disbanded, RecoveryCauseFfi::Disbanded),
+            (
+                RecoveryCause::Unrecoverable,
+                RecoveryCauseFfi::Unrecoverable,
+            ),
+            (RecoveryCause::Quarantined, RecoveryCauseFfi::Quarantined),
+            (
+                RecoveryCause::RoutingCollision,
+                RecoveryCauseFfi::RoutingCollision,
+            ),
+            (RecoveryCause::Leaving, RecoveryCauseFfi::Leaving),
+            (RecoveryCause::Stalled, RecoveryCauseFfi::Stalled),
+            (
+                RecoveryCause::RemovalUnmade,
+                RecoveryCauseFfi::RemovalUnmade,
+            ),
+            (RecoveryCause::DepartureDue, RecoveryCauseFfi::DepartureDue),
+            (
+                RecoveryCause::AwaitsForeground,
+                RecoveryCauseFfi::AwaitsForeground,
+            ),
+            (
+                RecoveryCause::AwaitingRelays,
+                RecoveryCauseFfi::AwaitingRelays,
+            ),
+            (RecoveryCause::Acknowledged, RecoveryCauseFfi::Acknowledged),
+            (
+                RecoveryCause::StagedWithoutRecord,
+                RecoveryCauseFfi::StagedWithoutRecord,
+            ),
+            (RecoveryCause::StoredInput, RecoveryCauseFfi::StoredInput),
+        ];
+        for (core, expected) in cases {
+            assert_eq!(RecoveryCauseFfi::from(core), expected);
+            let rendered = format!("{expected:?}");
+            assert!(
+                rendered.chars().all(char::is_alphabetic),
+                "a cause carrying a payload would render it: {rendered}"
+            );
+            match core {
+                RecoveryCause::Disbanded
+                | RecoveryCause::Unrecoverable
+                | RecoveryCause::Quarantined
+                | RecoveryCause::RoutingCollision
+                | RecoveryCause::Leaving
+                | RecoveryCause::Stalled
+                | RecoveryCause::RemovalUnmade
+                | RecoveryCause::DepartureDue
+                | RecoveryCause::AwaitsForeground
+                | RecoveryCause::AwaitingRelays
+                | RecoveryCause::Acknowledged
+                | RecoveryCause::StagedWithoutRecord
+                | RecoveryCause::StoredInput => {}
+            }
+        }
     }
 }
 
 #[cfg(test)]
-mod deferred_send_ffi_tests {
-    use super::{convert_deferred_send, ConvergenceSweepFfi, DeferredSendFfi};
-    use haven_core::circle::DeferredWork;
-    use haven_core::nostr::mls::types::{ConvergenceSweep, PendingStateRef};
-
-    /// A signed kind-445-shaped event, which is all the conversion needs (it
-    /// only serializes).
-    fn signed_event(content: &str) -> nostr::Event {
-        let keys = nostr::Keys::generate();
-        nostr::EventBuilder::new(nostr::Kind::Custom(445), content)
-            .sign_with_keys(&keys)
-            .expect("sign")
-    }
-
-    #[test]
-    fn every_field_of_a_deferral_reaches_the_ffi_shape() {
-        let commit_event = signed_event("staged-commit");
-        let proposal_event = signed_event("bare-proposal");
-        let commit_id = commit_event.id;
-        let proposal_id = proposal_event.id;
-
-        let ffi = convert_deferred_send(
-            3,
-            2,
-            false,
-            DeferredWork {
-                commits: vec![haven_core::circle::CommitToPublish {
-                    commit_event,
-                    pending: PendingStateRef::new(77),
-                }],
-                proposals: vec![proposal_event],
-            },
-        )
-        .expect("convert");
-
-        assert_eq!(ffi.unresolved_inputs, 3);
-        assert_eq!(ffi.discarded_intents, 2);
-        assert!(!ffi.repaired);
-        assert_eq!(ffi.commits.len(), 1);
-        // The pending token must survive: it is the ONLY handle Dart has for
-        // the Rule-13 confirm, and a dropped one pins the group in
-        // `PendingPublish`.
-        assert_eq!(ffi.commits[0].pending.token, 77);
-        assert!(ffi.commits[0]
-            .commit_event_json
-            .contains(&commit_id.to_hex()));
-        assert_eq!(ffi.proposals.len(), 1);
-        assert!(ffi.proposals[0].contains(&proposal_id.to_hex()));
-    }
-
-    #[test]
-    fn an_empty_deferral_carries_its_counters_and_no_work() {
-        let ffi = convert_deferred_send(0, 1, true, DeferredWork::default()).expect("convert");
-        assert_eq!(ffi.unresolved_inputs, 0);
-        assert_eq!(ffi.discarded_intents, 1);
-        assert!(ffi.repaired);
-        assert!(ffi.commits.is_empty());
-        assert!(ffi.proposals.is_empty());
-    }
-
-    #[test]
-    fn the_deferred_debug_is_presence_only() {
-        let ffi = convert_deferred_send(
-            1,
-            0,
-            false,
-            DeferredWork {
-                commits: vec![haven_core::circle::CommitToPublish {
-                    commit_event: signed_event("secret-ciphertext"),
-                    pending: PendingStateRef::new(9),
-                }],
-                proposals: vec![signed_event("another-secret")],
-            },
-        )
-        .expect("convert");
-        let debug = format!("{ffi:?}");
-        assert!(debug.contains("has_commits: true"));
-        assert!(debug.contains("has_proposals: true"));
-        // Rule 15: presence, never a magnitude — `1` staged commit vs `4` is a
-        // per-circle discriminator.
-        assert!(
-            !debug.contains('1') && !debug.contains('0'),
-            "no count may reach a Debug line: {debug}"
-        );
-        assert!(
-            !debug.contains("secret-ciphertext") && !debug.contains("another-secret"),
-            "event payloads must never reach a Debug line: {debug}"
-        );
-    }
+mod convergence_sweep_ffi_tests {
+    use super::ConvergenceSweepFfi;
+    use haven_core::nostr::mls::types::ConvergenceSweep;
 
     #[test]
     fn the_sweep_report_maps_counts_and_settlement() {
@@ -16127,24 +22057,6 @@ mod deferred_send_ffi_tests {
         assert!(!still_stuck.settled);
         assert_eq!(still_stuck.gating_rows, 4);
     }
-
-    /// A `DeferredSendFfi` is only ever built by [`convert_deferred_send`];
-    /// this pins that the struct stays constructible field-by-field so the
-    /// test above cannot silently stop covering a newly added field.
-    #[test]
-    fn the_ffi_shape_has_exactly_the_fields_under_test() {
-        let d = DeferredSendFfi {
-            unresolved_inputs: 1,
-            discarded_intents: 2,
-            repaired: true,
-            commits: Vec::new(),
-            proposals: Vec::new(),
-        };
-        assert_eq!(
-            (d.unresolved_inputs, d.discarded_intents, d.repaired),
-            (1, 2, true)
-        );
-    }
 }
 
 /// Log-anonymity coverage for every hand-written `Debug` impl in this file.
@@ -16162,17 +22074,23 @@ mod log_anonymity_tests {
     use haven_core::assert_debug_redacted;
 
     use super::{
-        AddMembersResultFfi, BuiltRelayListEventFfi, BuiltUnpublishFfi, CircleFfi, CircleMemberFfi,
-        CircleWithMembersFfi, CommitToPublishFfi, ContactFfi, DecryptLocationOutcomeFfi,
-        DecryptedLocationFfi, DeferredSendFfi, DirectoryEntryFfi, DirectoryTierFfi,
-        EncryptLocationOutcomeFfi, EncryptedLocationFfi, FfiRelayEvent, FfiRelayEventKind,
-        FfiSyncStatusReason, GiftWrappedWelcomeFfi, HavenTargetFilter, InMemoryStorage,
-        InvitationFfi, LastKnownLocationFfi, LeavePlanFfi, LeavePlanKindFfi, LocationMessage,
-        LocationMessageResultFfi, LocationMessageResultKindFfi, LogAliasClassFfi,
-        MemberKeyPackageFfi, NostrIdentityManager, PendingStateRefFfi, ProfileMetadataFfi,
-        ProfilePictureRefFfi, PublicIdentity, RelayConnectionStatusFfi, RelayEventCheckFfi,
-        RelayGiftWrapFetchFfi, RelayManagerFfi, RelayRejectionFfi, RepairRotationOutcomeFfi,
-        SignedLocationEventFfi, SkipReasonFfi,
+        AcceptFailureFfi, AcceptInvitationOutcomeFfi, BuiltRelayListEventFfi, BuiltUnpublishFfi,
+        CircleCreationOutcomeFfi, CircleEngineStateFfi, CircleFfi, CircleMemberFfi,
+        CircleWithMembersFfi, ContactFfi, DecryptedLocationFfi, DirectoryEntryFfi,
+        DirectoryTierFfi, FfiRelayEvent, FfiRelayEventKind, FfiSyncStatusReason, HavenTargetFilter,
+        InMemoryStorage, InvitationFfi, LastKnownLocationFfi, LeavePlanFfi, LeavePlanKindFfi,
+        LocationMessage, LocationMessageResultFfi, LocationMessageResultKindFfi, LogAliasClassFfi,
+        MemberKeyPackageFfi, NostrIdentityManager, OwnProfileRelayAnswerFfi, ProfileMetadataFfi,
+        ProfilePictureRefFfi, PublicIdentity, RejoinOfferFfi, RejoinOffersOutcomeFfi,
+        RelayConnectionStatusFfi, RelayEventCheckFfi, RelayGiftWrapFetchFfi, RelayManagerFfi,
+        RelayRejectionFfi, SignedLocationEventFfi, SkipReasonFfi,
+    };
+    use super::{
+        ChangeNoticeFfi, EvolutionOutcomeFfi, IngestOutcomeFfi, LeaveOutcomeFfi, LeaveStatusFfi,
+        PublishStatusFfi, ReceiveVerdictFfi, RefusalFfi, ReinviteDrivenFfi, ReinviteFfi,
+        ReinviteResultFfi, RepairKindFfi, RepairOutcomeFfi, RequeueOutcomeFfi, RequeuedRemovalFfi,
+        ResumeOutcomeFfi, SealOutcomeFfi, SendHeldFfi, WithdrawnChangeFfi, WithdrawnKindFfi,
+        WithdrawnOutcomeFfi,
     };
 
     /// The NIP-19 spec vector, so the hex and the npub below are one key.
@@ -16253,18 +22171,21 @@ mod log_anonymity_tests {
         hex::decode(HEX_ID).expect("the needle is valid hex")
     }
 
-    fn commit() -> CommitToPublishFfi {
-        CommitToPublishFfi {
-            commit_event_json: format!(r#"{{"tags":[["h","{HEX_ID}"]]}}"#),
-            pending: PendingStateRefFfi { token: 7 },
+    fn created(invitees: usize) -> CircleCreationOutcomeFfi {
+        CircleCreationOutcomeFfi {
+            circle: Some(circle(1)),
+            refusal: None,
+            welcomes_sent: u32::try_from(invitees).expect("small"),
+            welcomes_total: u32::try_from(invitees).expect("small"),
+            unsent_recipients: vec![HEX_ID.to_string(); invitees],
         }
     }
 
-    fn welcome(relays: usize) -> GiftWrappedWelcomeFfi {
-        GiftWrappedWelcomeFfi {
-            recipient_pubkey: HEX_ID.to_string(),
-            recipient_relays: vec![RELAY.to_string(); relays],
-            event_json: TEXT.to_string(),
+    fn offer() -> RejoinOfferFfi {
+        RejoinOfferFfi {
+            mls_group_id: group_id_bytes(),
+            welcomer_pubkey: HEX_ID.to_string(),
+            local_state_token: group_id_bytes(),
         }
     }
 
@@ -16294,32 +22215,7 @@ mod log_anonymity_tests {
             key_package_json: TEXT.to_string(),
             inbox_relays: vec![RELAY.to_string(); relays],
             nip65_relays: vec![RELAY.to_string(); relays],
-        }
-    }
-
-    fn added(welcomes: usize) -> AddMembersResultFfi {
-        AddMembersResultFfi {
-            commit_event_json: format!(r#"{{"tags":[["h","{HEX_ID}"]]}}"#),
-            welcome_events: (0..welcomes).map(|_| welcome(2)).collect(),
-            pending: PendingStateRefFfi { token: 7 },
-        }
-    }
-
-    fn deferred(magnitude: u32, staged: usize) -> DeferredSendFfi {
-        DeferredSendFfi {
-            unresolved_inputs: magnitude,
-            discarded_intents: magnitude,
-            repaired: false,
-            commits: (0..staged).map(|_| commit()).collect(),
-            proposals: vec![TEXT.to_string(); staged],
-        }
-    }
-
-    fn encrypted(relays: usize) -> EncryptedLocationFfi {
-        EncryptedLocationFfi {
-            event_json: format!(r#"{{"tags":[["h","{HEX_ID}"]]}}"#),
-            nostr_group_id: group_id_bytes(),
-            relays: vec![RELAY.to_string(); relays],
+            author_npub: NPUB.to_string(),
         }
     }
 
@@ -16340,6 +22236,7 @@ mod log_anonymity_tests {
             membership_status: "accepted".to_string(),
             inviter_pubkey: Some(HEX_ID.to_string()),
             members: (0..members).map(|_| member()).collect(),
+            engine_state: CircleEngineStateFfi::Live,
         }
     }
 
@@ -16351,6 +22248,7 @@ mod log_anonymity_tests {
             kind: Some(10_002),
             created_at_secs: Some(INSTANT),
             suppressed: false,
+            awaiting_reset_acknowledgement: false,
         }
     }
 
@@ -16503,6 +22401,147 @@ mod log_anonymity_tests {
         );
     }
 
+    /// A location result carrying every needle a replayed fix can carry.
+    fn a_replayed_fix() -> LocationMessageResultFfi {
+        LocationMessageResultFfi {
+            kind: LocationMessageResultKindFfi::Location,
+            location: Some(DecryptedLocationFfi {
+                sender_pubkey: HEX_ID.to_string(),
+                latitude: LAT,
+                longitude: LON,
+                geohash: GEOHASH.to_string(),
+                timestamp: INSTANT,
+                expires_at: INSTANT,
+            }),
+            mls_group_id: hex::decode(HASH_HEX).expect("hex"),
+            epoch: u64::from(COUNTER),
+        }
+    }
+
+    fn an_evolution(delivered: u32, replayed: usize) -> EvolutionOutcomeFfi {
+        EvolutionOutcomeFfi {
+            status: PublishStatusFfi::Unresolved,
+            refusal: Some(RefusalFfi::EngineHeld),
+            welcomes_delivered: delivered,
+            welcomes_total: delivered,
+            reinvite_owed: true,
+            retry_after_ms: Some(u64::from(COUNTER)),
+            replayed: (0..replayed).map(|_| a_replayed_fix()).collect(),
+            clock_rejected: Some(super::DeviceClockComplaintFfi::Unspecified),
+            already_so: Some(true),
+        }
+    }
+
+    #[test]
+    fn the_driver_outcomes_debug_redacts_every_id_count_and_relay() {
+        assert_debug_redacted!(an_evolution(COUNTER, 1), "EvolutionOutcomeFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", an_evolution(1, 1)),
+            &format!("{:?}", an_evolution(9, 4)),
+            "EvolutionOutcomeFfi",
+        );
+        let repair = RepairOutcomeFfi {
+            kind: RepairKindFfi::Rotated,
+            rotated: Some(an_evolution(COUNTER, 2)),
+            skipped: Some(SkipReasonFfi::RotatedRecently),
+            held_by: Some(SendHeldFfi::Leaving),
+            refusal: None,
+        };
+        assert_debug_redacted!(repair, "RepairOutcomeFfi", NEEDLES);
+        let ingest = |replayed: usize| IngestOutcomeFfi {
+            verdict: ReceiveVerdictFfi::Deferred,
+            replayed: (0..replayed).map(|_| a_replayed_fix()).collect(),
+            retry_after_ms: Some(u64::from(COUNTER)),
+            errored: false,
+            refusal: Some(RefusalFfi::SendBlockedByDeparture),
+            clock_rejected: Some(super::DeviceClockComplaintFfi::Behind),
+        };
+        assert_debug_redacted!(ingest(1), "IngestOutcomeFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", ingest(1)),
+            &format!("{:?}", ingest(5)),
+            "IngestOutcomeFfi",
+        );
+        let sealed = || super::SealedLocationFfi {
+            event: nostr::EventBuilder::new(nostr::Kind::Custom(445), TEXT)
+                .tag(nostr::Tag::custom(nostr::TagKind::h(), [HEX_ID]))
+                .sign_with_keys(&nostr::Keys::generate())
+                .expect("signed"),
+        };
+        assert_debug_redacted!(sealed(), "SealedLocationFfi", NEEDLES);
+        let seal = SealOutcomeFfi {
+            sealed: Some(sealed()),
+            held_by: None,
+            refusal: None,
+            replayed: vec![a_replayed_fix()],
+            retry_after_ms: Some(u64::from(COUNTER)),
+            errored: false,
+            clock_rejected: Some(super::DeviceClockComplaintFfi::Ahead),
+        };
+        assert_debug_redacted!(seal, "SealOutcomeFfi", NEEDLES);
+        let leave = LeaveOutcomeFfi {
+            status: LeaveStatusFfi::Pending,
+            retry_after_ms: Some(u64::from(COUNTER)),
+            clock_rejected: Some(super::DeviceClockComplaintFfi::Behind),
+        };
+        assert_debug_redacted!(leave, "LeaveOutcomeFfi", NEEDLES);
+        let withdrawn = || WithdrawnChangeFfi {
+            mls_group_id: hex::decode(HEX_ID).expect("hex"),
+            kind: WithdrawnKindFfi::RemoveMembers,
+            outcome: WithdrawnOutcomeFfi::ReissuedAwaitingRelays,
+        };
+        assert_debug_redacted!(withdrawn(), "WithdrawnChangeFfi", NEEDLES);
+        let requeued = || RequeuedRemovalFfi {
+            mls_group_id: hex::decode(HEX_ID).expect("hex"),
+            outcome: RequeueOutcomeFfi::PendingAwaitingRelays,
+        };
+        assert_debug_redacted!(requeued(), "RequeuedRemovalFfi", NEEDLES);
+        let resume = |n: usize| ResumeOutcomeFfi {
+            withdrawn: (0..n).map(|_| withdrawn()).collect(),
+            requeued: (0..n).map(|_| requeued()).collect(),
+            replayed: (0..n).map(|_| a_replayed_fix()).collect(),
+            retry_after_ms: Some(u64::from(COUNTER)),
+            errored: true,
+            clock_rejected: Some(super::DeviceClockComplaintFfi::Ahead),
+        };
+        assert_debug_redacted!(resume(1), "ResumeOutcomeFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", resume(1)),
+            &format!("{:?}", resume(6)),
+            "ResumeOutcomeFfi",
+        );
+        let reinvite = ReinviteFfi {
+            mls_group_id: hex::decode(HEX_ID).expect("hex"),
+            result: ReinviteResultFfi::ReissuedAwaitingRelays,
+        };
+        assert_debug_redacted!(reinvite, "ReinviteFfi", NEEDLES);
+        let reinvited = |n: usize| ReinviteDrivenFfi {
+            reinvites: (0..n)
+                .map(|_| ReinviteFfi {
+                    mls_group_id: hex::decode(HEX_ID).expect("hex"),
+                    result: ReinviteResultFfi::ReissuedAwaitingRelays,
+                })
+                .collect(),
+            drive: resume(n),
+        };
+        assert_debug_redacted!(reinvited(1), "ReinviteDrivenFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", reinvited(1)),
+            &format!("{:?}", reinvited(6)),
+            "ReinviteDrivenFfi",
+        );
+        let notice = ChangeNoticeFfi {
+            group_id: haven_core::nostr::mls::types::GroupId::new(
+                hex::decode(HEX_ID).expect("hex"),
+            ),
+            notice: haven_core::nostr::mls::ChangeNotice::read(
+                haven_core::nostr::mls::ChangeNote::WelcomeOwed.bit(),
+                Some(u64::from(COUNTER)),
+            ),
+        };
+        assert_debug_redacted!(notice, "ChangeNoticeFfi", NEEDLES);
+    }
+
     #[test]
     fn location_message_debug_redacts_the_fix() {
         let message = LocationMessage {
@@ -16620,72 +22659,25 @@ mod log_anonymity_tests {
     }
 
     #[test]
-    fn gift_wrapped_welcome_ffi_debug_redacts_the_recipient() {
-        let subject: GiftWrappedWelcomeFfi = welcome(3);
-        assert_debug_redacted!(subject, "GiftWrappedWelcomeFfi", NEEDLES);
+    fn circle_creation_outcome_ffi_debug_redacts_counts_and_recipients() {
+        let subject: CircleCreationOutcomeFfi = created(3);
+        assert_debug_redacted!(subject, "CircleCreationOutcomeFfi", NEEDLES);
         assert_magnitude_invisible(
-            &format!("{:?}", welcome(1)),
-            &format!("{:?}", welcome(5)),
-            "GiftWrappedWelcomeFfi",
+            &format!("{:?}", created(1)),
+            &format!("{:?}", created(5)),
+            "CircleCreationOutcomeFfi",
         );
     }
 
     #[test]
-    fn add_members_result_ffi_debug_redacts_the_welcomes() {
-        let subject: AddMembersResultFfi = added(3);
-        assert_debug_redacted!(subject, "AddMembersResultFfi", NEEDLES);
-        assert_magnitude_invisible(
-            &format!("{:?}", added(1)),
-            &format!("{:?}", added(5)),
-            "AddMembersResultFfi",
-        );
-    }
-
-    #[test]
-    fn commit_to_publish_ffi_debug_redacts_the_commit() {
-        let subject: CommitToPublishFfi = commit();
-        assert_debug_redacted!(subject, "CommitToPublishFfi", NEEDLES);
-    }
-
-    #[test]
-    fn deferred_send_ffi_debug_redacts_every_magnitude() {
-        let subject: DeferredSendFfi = deferred(COUNTER, 3);
-        assert_debug_redacted!(subject, "DeferredSendFfi", NEEDLES);
-        assert_magnitude_invisible(
-            &format!("{:?}", deferred(1, 1)),
-            &format!("{:?}", deferred(COUNTER, 5)),
-            "DeferredSendFfi",
-        );
-    }
-
-    #[test]
-    fn encrypted_location_ffi_debug_redacts_the_event() {
-        let subject: EncryptedLocationFfi = encrypted(3);
-        assert_debug_redacted!(subject, "EncryptedLocationFfi", NEEDLES);
-        assert_magnitude_invisible(
-            &format!("{:?}", encrypted(1)),
-            &format!("{:?}", encrypted(5)),
-            "EncryptedLocationFfi",
-        );
-    }
-
-    #[test]
-    fn encrypt_location_outcome_ffi_debug_redacts_the_send() {
-        let outcome = EncryptLocationOutcomeFfi {
-            sent: Some(encrypted(3)),
-            deferred_send: Some(deferred(COUNTER, 3)),
+    fn rejoin_offer_ffi_debug_redacts_the_circle_the_author_and_the_token() {
+        let subject: RejoinOfferFfi = offer();
+        assert_debug_redacted!(subject, "RejoinOfferFfi", NEEDLES);
+        let outcome = RejoinOffersOutcomeFfi {
+            offers: vec![offer()],
+            failure: None,
         };
-        assert_debug_redacted!(outcome, "EncryptLocationOutcomeFfi", NEEDLES);
-    }
-
-    #[test]
-    fn repair_rotation_outcome_ffi_debug_redacts_the_commit() {
-        let outcome = RepairRotationOutcomeFfi {
-            rotated: Some(commit()),
-            skipped: Some(SkipReasonFfi::NotSoleAdmin),
-            deferred_send: Some(deferred(COUNTER, 3)),
-        };
-        assert_debug_redacted!(outcome, "RepairRotationOutcomeFfi", NEEDLES);
+        assert_debug_redacted!(outcome, "RejoinOffersOutcomeFfi", NEEDLES);
     }
 
     #[test]
@@ -16723,28 +22715,6 @@ mod log_anonymity_tests {
     }
 
     #[test]
-    fn decrypt_location_outcome_ffi_debug_redacts_every_magnitude() {
-        let outcome = |items: usize| DecryptLocationOutcomeFfi {
-            results: (0..items)
-                .map(|_| LocationMessageResultFfi {
-                    kind: LocationMessageResultKindFfi::Location,
-                    location: Some(decrypted()),
-                    mls_group_id: group_id_bytes(),
-                    epoch: 1_757_000_123,
-                })
-                .collect(),
-            auto_commits: (0..items).map(|_| commit()).collect(),
-            proposals: vec![format!(r#"{{"tags":[["h","{HEX_ID}"]]}}"#); items],
-        };
-        assert_debug_redacted!(outcome(3), "DecryptLocationOutcomeFfi", NEEDLES);
-        assert_magnitude_invisible(
-            &format!("{:?}", outcome(1)),
-            &format!("{:?}", outcome(5)),
-            "DecryptLocationOutcomeFfi",
-        );
-    }
-
-    #[test]
     fn leave_plan_ffi_debug_redacts_the_successor() {
         let plan = LeavePlanFfi {
             kind: LeavePlanKindFfi::AdminHandoff,
@@ -16764,6 +22734,7 @@ mod log_anonymity_tests {
             has_picture: true,
             is_known: true,
             fetched_at: INSTANT,
+            relay_answer: OwnProfileRelayAnswerFfi::Published,
             picture_sha256_hex: Some(HASH_HEX.to_string()),
         };
         assert_debug_redacted!(profile, "ProfileMetadataFfi", NEEDLES);
@@ -16776,6 +22747,35 @@ mod log_anonymity_tests {
             sha256_hex: HASH_HEX.to_string(),
         };
         assert_debug_redacted!(reference, "ProfilePictureRefFfi", NEEDLES);
+    }
+
+    #[test]
+    fn accept_invitation_outcome_ffi_debug_redacts_the_joined_circle() {
+        let joined = AcceptInvitationOutcomeFfi {
+            joined: Some(with_members(3)),
+            failure: None,
+        };
+        assert_debug_redacted!(joined, "AcceptInvitationOutcomeFfi", NEEDLES);
+        let refused = AcceptInvitationOutcomeFfi {
+            joined: None,
+            failure: Some(AcceptFailureFfi::NeedsNewInvite),
+        };
+        assert_debug_redacted!(
+            refused,
+            "AcceptInvitationOutcomeFfi",
+            marker = "NeedsNewInvite",
+            NEEDLES
+        );
+        let held = AcceptInvitationOutcomeFfi {
+            joined: None,
+            failure: Some(AcceptFailureFfi::RejoinConfirmationRequired),
+        };
+        assert_debug_redacted!(
+            held,
+            "AcceptInvitationOutcomeFfi",
+            marker = "RejoinConfirmationRequired",
+            NEEDLES
+        );
     }
 
     #[test]
@@ -16828,6 +22828,7 @@ mod log_anonymity_tests {
             // Relay-authored prose: a relay may write anything here, including
             // this account's own npub back at it (§1).
             reason: format!("blocked: {NPUB}"),
+            clock: Some(crate::api::DeviceClockComplaintFfi::Behind),
         };
         assert_debug_redacted!(rejection, "RelayRejectionFfi", NEEDLES);
     }
@@ -16862,10 +22863,10 @@ mod log_anonymity_tests {
             sender_pubkey: Some(HEX_ID.to_string()),
             content: Some(format!("{LAT},{LON}")),
             event_created_at_secs: Some(INSTANT),
-            evolution_event_json: Some(TEXT.to_string()),
             gift_wrap_json: Some(TEXT.to_string()),
             status_reason: Some(FfiSyncStatusReason::Connected),
             unrecoverable_nostr_group_id: Some(group_id_bytes()),
+            clock_rejected: Some(crate::api::DeviceClockComplaintFfi::Ahead),
         };
         assert_debug_redacted!(event, "FfiRelayEvent", NEEDLES);
     }
@@ -16980,5 +22981,444 @@ mod log_anonymity_tests {
             .await
             .expect("the relay manager constructor never fails");
         assert_debug_redacted!(manager, "RelayManagerFfi", NEEDLES);
+    }
+}
+
+/// The fanout driver's bridge entries, end to end: a real `CircleManagerFfi`,
+/// a real `RelayManagerFfi` and an in-process relay that acknowledges what it
+/// is sent. Each entry is driven once and its typed outcome asserted.
+#[cfg(test)]
+mod driver_real_ffi_tests {
+    use super::maintenance_real_ffi_tests::{install_test_seams, secret_bytes, DataDir};
+    use super::{
+        allow_ws_loopback_for_test, hex_to_npub, CircleManagerFfi, LeaveStatusFfi, LocationMessage,
+        LocationMessageResultKindFfi, LocationPublishFfi, MemberKeyPackageFfi, PublishStatusFfi,
+        ReceiveVerdictFfi, RefusalFfi, RelayManagerFfi, RepairKindFfi,
+    };
+    use nostr::Keys;
+    use nostr_relay_builder::MockRelay;
+
+    async fn package_of(keys: &Keys, relay: &str) -> nostr::Event {
+        let dir = DataDir::new("driver_package");
+        let member = haven_core::circle::CircleManager::new_unencrypted(
+            std::path::Path::new(&dir.as_str()),
+            keys,
+        )
+        .expect("a member");
+        haven_core::relay::maintenance::build_kp_maintenance_events(
+            member.session(),
+            keys,
+            &[relay.to_string()],
+            None,
+            None,
+        )
+        .await
+        .expect("a key package")
+        .event
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::too_many_lines)]
+    async fn every_driver_entry_answers_typed_via_real_ffi() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let _ = allow_ws_loopback_for_test();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+        let other = MockRelay::run().await.expect("start a second MockRelay");
+        let other_url = other.url().await.to_string();
+
+        let alice_keys = Keys::generate();
+        let dir = DataDir::new("driver_entries");
+        let alice = CircleManagerFfi::new(dir.as_str(), secret_bytes(&alice_keys)).expect("alice");
+        let bob_dir = DataDir::new("driver_entries_bob");
+        let bob_keys = Keys::generate();
+        let bob = haven_core::circle::CircleManager::new_unencrypted(
+            std::path::Path::new(&bob_dir.as_str()),
+            &bob_keys,
+        )
+        .expect("bob");
+        let bob_package = haven_core::relay::maintenance::build_kp_maintenance_events(
+            bob.session(),
+            &bob_keys,
+            std::slice::from_ref(&url),
+            None,
+            None,
+        )
+        .await
+        .expect("bob's key package")
+        .event;
+        let created = alice
+            .inner
+            .create_circle(
+                &alice_keys,
+                vec![haven_core::circle::MemberKeyPackage {
+                    key_package_event: bob_package,
+                    inbox_relays: vec![url.clone()],
+                    nip65_relays: Vec::new(),
+                }],
+                &haven_core::circle::CircleConfig::new("Driven").with_relays(vec![url.clone()]),
+            )
+            .await
+            .expect("a circle with bob");
+        let group = created.circle.mls_group_id.as_slice().to_vec();
+        let relays = RelayManagerFfi::new_instance()
+            .await
+            .expect("relay manager");
+
+        // A received event, ingested through the driver.
+        let bobs_fix = alice_hears_from(&bob, &bob_keys, &created).await;
+        let ingested = relays
+            .ingest_driven(&alice, bobs_fix, true)
+            .await
+            .expect("the ingest");
+        assert_eq!(ingested.verdict, ReceiveVerdictFfi::Applied);
+        assert!(ingested
+            .replayed
+            .iter()
+            .any(|result| result.kind == LocationMessageResultKindFfi::Location));
+
+        // A change asked for away from the foreground is refused, typed.
+        let carol = Keys::generate();
+        let carol_member = |event: &nostr::Event| MemberKeyPackageFfi {
+            key_package_json: serde_json::to_string(event).expect("json"),
+            inbox_relays: vec![url.clone()],
+            nip65_relays: Vec::new(),
+            author_npub: hex_to_npub(&carol.public_key().to_hex()),
+        };
+        let carol_package = package_of(&carol, &url).await;
+        let refused = relays
+            .add_members_driven(
+                &alice,
+                group.clone(),
+                vec![carol_member(&carol_package)],
+                false,
+            )
+            .await
+            .expect("a refusal is an outcome");
+        assert_eq!(
+            (refused.status, refused.refusal),
+            (PublishStatusFfi::Refused, Some(RefusalFfi::ForegroundOnly)),
+        );
+
+        let added = relays
+            .add_members_driven(
+                &alice,
+                group.clone(),
+                vec![carol_member(&carol_package)],
+                true,
+            )
+            .await
+            .expect("the invite");
+        assert_eq!(
+            (added.status, added.welcomes_delivered, added.welcomes_total),
+            (PublishStatusFfi::Confirmed, 1, 1),
+            "the invite was not applied, or its Welcome not delivered to the inbox relay",
+        );
+        let removed = relays
+            .remove_members_driven(
+                &alice,
+                group.clone(),
+                vec![carol.public_key().to_hex()],
+                true,
+            )
+            .await
+            .expect("the removal");
+        assert_eq!(removed.status, PublishStatusFfi::Confirmed);
+        let moved = relays
+            .update_circle_relays_driven(&alice, group.clone(), vec![url.clone(), other_url], true)
+            .await
+            .expect("the relay change");
+        assert_eq!(moved.status, PublishStatusFfi::Confirmed);
+        let repaired = relays
+            .repair_rotation_driven(&alice, group.clone(), true)
+            .await
+            .expect("the repair");
+        assert!(matches!(
+            repaired.kind,
+            RepairKindFfi::Rotated | RepairKindFfi::Skipped | RepairKindFfi::Deferred
+        ));
+
+        // A location sealed and recorded, then sent once.
+        let fix = LocationMessage {
+            inner: haven_core::location::LocationMessage::new(51.5, -0.12),
+        };
+        let sealed = relays
+            .seal_location_driven(&alice, group.clone(), &fix, true)
+            .await
+            .expect("the seal");
+        let sealed = sealed.sealed.expect("a location sealed");
+        assert_eq!(
+            relays.publish_location_driven(&alice, &sealed).await,
+            LocationPublishFfi::Accepted,
+        );
+        assert_eq!(
+            relays.publish_location_driven(&alice, &sealed).await,
+            LocationPublishFfi::Ended,
+            "a recorded location was sent twice",
+        );
+
+        assert!(!relays.resume_driven(&alice, true).await.errored);
+        let reinvited = relays.reinvite_driven(&alice, true).await;
+        assert!(reinvited.reinvites.is_empty());
+        assert!(!reinvited.drive.errored);
+
+        let handed = relays
+            .admin_handoff_driven(&alice, group.clone(), bob_keys.public_key().to_hex(), true)
+            .await
+            .expect("the hand-over");
+        assert_eq!(handed.status, PublishStatusFfi::Confirmed);
+        let demoted = relays
+            .self_demote_driven(&alice, group.clone(), true)
+            .await
+            .expect("the step-down");
+        assert_eq!(demoted.status, PublishStatusFfi::Confirmed);
+
+        assert_eq!(
+            relays
+                .resume_leave_driven(&alice, group.clone(), true)
+                .await
+                .expect("no leave")
+                .status,
+            LeaveStatusFfi::NotLeaving,
+        );
+        let leaving = relays
+            .leave_driven(&alice, group.clone(), true)
+            .await
+            .expect("the leave");
+        assert!(matches!(
+            leaving.status,
+            LeaveStatusFfi::Proposed | LeaveStatusFfi::Pending
+        ));
+        let sealed_while_leaving = relays
+            .seal_location_driven(&alice, group.clone(), &fix, true)
+            .await
+            .expect("the seal");
+        assert_eq!(
+            sealed_while_leaving.held_by,
+            Some(super::SendHeldFfi::Leaving),
+            "a location was sealed for a circle this device is leaving",
+        );
+
+        let notice = alice.change_notice(group);
+        assert!(alice.acknowledge_shown_notice(&notice));
+    }
+
+    /// Bob, a member of `created`'s circle, joins from its Welcome and seals a
+    /// fix: what Alice's relay delivers to her.
+    async fn alice_hears_from(
+        bob: &haven_core::circle::CircleManager,
+        bob_keys: &Keys,
+        created: &haven_core::circle::CircleCreationResult,
+    ) -> String {
+        let welcome = &created.welcome_events[0].event;
+        bob.process_gift_wrapped_invitation(bob_keys, welcome)
+            .await
+            .expect("bob reads his Welcome");
+        bob.accept_invitation(&welcome.id).await.expect("bob joins");
+        let (event, _, _) = bob
+            .seal_location_for_test(
+                &created.circle.mls_group_id,
+                &haven_core::location::LocationMessage::new(48.85, 2.35),
+            )
+            .await
+            .expect("bob seals a fix");
+        nostr::JsonUtil::as_json(&event)
+    }
+}
+
+#[cfg(test)]
+mod publish_event_ffi_tests {
+    use super::{
+        allow_ws_loopback_for_test, DeviceClockComplaintFfi, PublishFailureFfi, PublishRefusalFfi,
+        PublishResultFfi, RelayManagerFfi,
+    };
+    use nostr::{EventBuilder, Filter, JsonUtil, Keys, Kind};
+    use nostr_relay_builder::MockRelay;
+
+    /// What a relay at `url` holds of `kind`.
+    async fn held(url: &str, kind: Kind) -> usize {
+        haven_core::relay::RelayManager::new()
+            .fetch_events(Filter::new().kind(kind), &[url.to_owned()], None)
+            .await
+            .expect("read the relay back")
+            .len()
+    }
+
+    /// A group message handed to the plain publish entry is refused, typed,
+    /// before any relay is asked — a commit, a proposal and a location leave
+    /// the device only under a durable fanout record (Security Rule 13) — while
+    /// a signed event of any other kind is published to the same relay.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_group_message_is_refused_before_any_relay_is_asked_and_nothing_else_is() {
+        let _ = allow_ws_loopback_for_test();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+        let relays = RelayManagerFfi::new_instance()
+            .await
+            .expect("relay manager");
+        let keys = Keys::generate();
+        let group_message = EventBuilder::new(Kind::Custom(445), "opaque")
+            .sign_with_keys(&keys)
+            .expect("sign");
+
+        let refused = relays
+            .publish_event(group_message.as_json(), vec![url.clone()])
+            .await;
+        assert_eq!(
+            refused.err(),
+            Some(PublishFailureFfi {
+                refused: Some(PublishRefusalFfi::GroupMessage),
+                clock_rejected: None,
+            }),
+            "a group message was not refused, typed, by the plain publish entry"
+        );
+        assert_eq!(
+            held(&url, Kind::Custom(445)).await,
+            0,
+            "a refused group message reached the relay"
+        );
+
+        let note = EventBuilder::new(Kind::Custom(10_002), "")
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let sent = relays
+            .publish_event(note.as_json(), vec![url.clone()])
+            .await
+            .expect("an event of another kind is published");
+        assert!(sent.is_success && sent.event_id == note.id.to_hex());
+        assert_eq!(held(&url, Kind::Custom(10_002)).await, 1);
+        relays.shutdown().await;
+    }
+
+    /// A gift wrap is refused, typed, before any relay is asked: every
+    /// Welcome — a founding one included — leaves the device only from its
+    /// delivery record, through the fanout driver.
+    #[tokio::test]
+    async fn the_plain_publish_refuses_a_gift_wrap() {
+        let _ = allow_ws_loopback_for_test();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+        let relays = RelayManagerFfi::new_instance()
+            .await
+            .expect("relay manager");
+        let wrap = EventBuilder::new(Kind::GiftWrap, "sealed")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign");
+
+        let refused = relays
+            .publish_event(wrap.as_json(), vec![url.clone()])
+            .await;
+
+        assert_eq!(
+            refused.err(),
+            Some(PublishFailureFfi {
+                refused: Some(PublishRefusalFfi::GiftWrap),
+                clock_rejected: None,
+            }),
+            "a gift wrap was not refused, typed, by the plain publish entry"
+        );
+        assert_eq!(
+            held(&url, Kind::GiftWrap).await,
+            0,
+            "a refused gift wrap reached the relay"
+        );
+        relays.shutdown().await;
+    }
+
+    /// What is not a signed event, and a relay that may not be dialled, are
+    /// each refused as itself before any relay is asked.
+    #[tokio::test]
+    async fn an_unreadable_event_and_an_undiallable_relay_are_each_refused_as_itself() {
+        let relays = RelayManagerFfi::new_instance()
+            .await
+            .expect("relay manager");
+        assert_eq!(
+            relays
+                .publish_event(
+                    "{not an event".to_string(),
+                    vec!["wss://relay.example".to_string()]
+                )
+                .await
+                .err(),
+            Some(PublishFailureFfi {
+                refused: Some(PublishRefusalFfi::InvalidEvent),
+                clock_rejected: None,
+            })
+        );
+        let event = EventBuilder::new(Kind::Custom(10_002), "")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign");
+        assert_eq!(
+            relays
+                .publish_event(event.as_json(), vec!["http://relay.example".to_string()])
+                .await
+                .err(),
+            Some(PublishFailureFfi {
+                refused: Some(PublishRefusalFfi::InvalidRelay),
+                clock_rejected: None,
+            })
+        );
+    }
+
+    /// A publish every answering relay refused as this device's clock crosses
+    /// as that complaint, typed; any other failure crosses as neither.
+    #[test]
+    fn a_clock_refusal_crosses_typed_and_no_other_failure_does() {
+        use haven_core::relay::clock_skew::DeviceClockComplaint as C;
+        use haven_core::relay::RelayError as E;
+        for (core, ffi) in [
+            (C::Ahead, DeviceClockComplaintFfi::Ahead),
+            (C::Behind, DeviceClockComplaintFfi::Behind),
+            (C::Unspecified, DeviceClockComplaintFfi::Unspecified),
+        ] {
+            assert_eq!(
+                PublishFailureFfi::from(E::DeviceClockRejected { complaint: core }),
+                PublishFailureFfi {
+                    refused: None,
+                    clock_rejected: Some(ffi),
+                }
+            );
+        }
+        assert_eq!(
+            PublishFailureFfi::from(E::AllRelaysFailed),
+            PublishFailureFfi {
+                refused: None,
+                clock_rejected: None,
+            }
+        );
+    }
+
+    /// Each relay's refusal carries what it blamed on this device's clock,
+    /// classified in Rust, so Dart never reads the relay's words.
+    #[test]
+    fn each_rejection_carries_its_clock_complaint_typed() {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(10_002), "")
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let result = haven_core::relay::PublishResult {
+            event_id: event.id,
+            accepted_by: Vec::new(),
+            rejected_by: vec![
+                (
+                    "wss://fast.example".to_string(),
+                    "invalid: event created_at is too far in the future".to_string(),
+                ),
+                (
+                    "wss://other.example".to_string(),
+                    "blocked: not on the allow list".to_string(),
+                ),
+            ],
+            failed: Vec::new(),
+        };
+        let ffi = PublishResultFfi::from(result);
+        assert_eq!(
+            ffi.rejected_by
+                .iter()
+                .map(|rejection| rejection.clock)
+                .collect::<Vec<_>>(),
+            [Some(DeviceClockComplaintFfi::Ahead), None]
+        );
     }
 }

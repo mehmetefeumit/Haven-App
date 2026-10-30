@@ -2,9 +2,11 @@
 /// already-created circle.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/l10n/app_localizations.dart';
@@ -14,20 +16,31 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/join_watcher_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/member_directory_provider.dart';
-import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
-import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/member_directory_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
-import 'package:haven/src/utils/key_package_kind.dart';
+import 'package:haven/src/utils/bidi_isolate.dart';
 import 'package:haven/src/utils/member_pick_state.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/member_picker.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+/// What became of an add, as the page hands it back to whoever opened it.
+enum AddMemberPageResult {
+  /// Every invitation was sent.
+  done,
+
+  /// The invite awaits its relays: the circle's sharing card says so.
+  awaiting,
+
+  /// Made, with invitations still owed: the snack and the change card say so.
+  partial,
+}
 
 /// Page that lets a circle admin add new members to an existing circle.
 ///
@@ -80,8 +93,10 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
   /// Error messages per member.
   final Map<String, String> _memberErrors = {};
 
-  /// Members whose validation failed due to a network error (retryable).
-  final Set<String> _networkFailures = {};
+  /// Members a Retry can still turn valid: a lookup that failed, a package
+  /// that could not be used, or one from a Haven that needs updating — which
+  /// opening Haven replaces with a current one.
+  final Set<String> _retryable = {};
 
   /// True while the add operation is in flight.
   bool _isAdding = false;
@@ -265,14 +280,14 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
     final npub = _selectedMembers[index];
     final status = _memberStatus[npub] ?? ValidationStatus.validating;
     final error = _memberErrors[npub];
-    final isNetworkFailure = _networkFailures.contains(npub);
+    final retryable = _retryable.contains(npub);
 
     return PendingMemberTile(
       npub: npub,
       status: status,
       errorMessage: error,
       onRemove: () => _onMemberRemoved(npub),
-      onRetry: isNetworkFailure ? () => _retryMember(npub) : null,
+      onRetry: retryable ? () => _retryMember(npub) : null,
     );
   }
 
@@ -331,7 +346,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
       _memberStatus.remove(npub);
       _memberKeyPackages.remove(npub);
       _memberErrors.remove(npub);
-      _networkFailures.remove(npub);
+      _retryable.remove(npub);
     });
   }
 
@@ -342,14 +357,19 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
       _memberStatus.clear();
       _memberKeyPackages.clear();
       _memberErrors.clear();
-      _networkFailures.clear();
+      _retryable.clear();
     });
   }
 
   Future<void> _validateMember(String npub) async {
     final relayService = ref.read(relayServiceProvider);
     try {
-      final keyPackage = await relayService.fetchKeyPackage(npub);
+      // Chosen for THIS circle: a package it cannot admit is never preferred
+      // to one it can.
+      final keyPackage = await relayService.fetchKeyPackage(
+        npub,
+        mlsGroupId: widget.circle.mlsGroupId,
+      );
       if (!mounted || !_selectedMembers.contains(npub)) return;
       final l10n = AppLocalizations.of(context);
 
@@ -361,16 +381,28 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
         return;
       }
 
-      // Dark Matter migration (DM-4c, plan §6 F11): a legacy (kind 443)
-      // KeyPackage means this person is still on a pre-migration Haven
-      // build and cannot be invited into a circle on the new engine until
-      // they update. Check this BEFORE the already-in-circle exclusion —
-      // a stale-protocol peer is blocked regardless of membership overlap.
-      if (isLegacyKeyPackageJson(keyPackage.eventJson)) {
+      // MDK's own admission check for THIS circle decides, so a person this
+      // page admits is one the invite will accept. Checked BEFORE the
+      // already-in-circle exclusion: an older Haven is blocked regardless of
+      // membership overlap.
+      final admission = await ref
+          .read(circleServiceProvider)
+          .checkMemberKeyPackage(
+            keyPackageJson: keyPackage.eventJson,
+            mlsGroupId: widget.circle.mlsGroupId,
+          );
+      if (admission != KeyPackageAdmission.admissible) {
         if (mounted && _selectedMembers.contains(npub)) {
           setState(() {
-            _memberStatus[npub] = ValidationStatus.needsUpdate;
-            _memberErrors[npub] = l10n.pendingMemberNeedsUpdate;
+            if (admission == KeyPackageAdmission.needsUpdate) {
+              _memberStatus[npub] = ValidationStatus.needsUpdate;
+              _memberErrors[npub] = l10n.pendingMemberNeedsUpdate;
+              _retryable.add(npub);
+            } else {
+              _memberStatus[npub] = ValidationStatus.invalid;
+              _memberErrors[npub] = l10n.memberKeyPackageStale;
+              _retryable.add(npub);
+            }
           });
         }
         return;
@@ -401,7 +433,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
         setState(() {
           _memberStatus[npub] = ValidationStatus.valid;
           _memberKeyPackages[npub] = keyPackage;
-          _networkFailures.remove(npub);
+          _retryable.remove(npub);
         });
       }
     } on RelayServiceException catch (e) {
@@ -413,7 +445,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;
         _memberErrors[npub] = l10n.createCircleCouldNotVerify;
-        _networkFailures.add(npub);
+        _retryable.add(npub);
       });
     } on Object catch (e) {
       debugPrint('Unexpected error fetching KeyPackage: ${e.runtimeType}');
@@ -422,7 +454,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;
         _memberErrors[npub] = l10n.createCircleSomethingWentWrong;
-        _networkFailures.add(npub);
+        _retryable.add(npub);
       });
     }
   }
@@ -431,7 +463,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
     setState(() {
       _memberStatus[npub] = ValidationStatus.validating;
       _memberErrors.remove(npub);
-      _networkFailures.remove(npub);
+      _retryable.remove(npub);
     });
     _validateMember(npub);
   }
@@ -475,94 +507,118 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
     final l10n = AppLocalizations.of(context);
 
     setState(() => _isAdding = true);
+    // Captured before the await: leaving the page mid-add must not drop the
+    // outcome, which the root messenger and navigator can still report.
+    final container = ProviderScope.containerOf(context, listen: false);
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+    final navigatorContext = navigator.context;
+    final view = View.of(context);
+    final direction = Directionality.of(context);
+    // Shown with the circle's name isolated, and spoken with it raw: a screen
+    // reader would read the isolate marks aloud.
+    void report(String shown, String spoken) {
+      messenger.showSnackBar(longMessageSnackBar(navigatorContext, shown));
+      // A SnackBar is not a live region.
+      unawaited(SemanticsService.sendAnnouncement(view, spoken, direction));
+    }
+
+    void refused() {
+      if (mounted) setState(() => _isAdding = false);
+      messenger.showSnackBar(SnackBar(content: Text(l10n.addMemberError)));
+    }
 
     try {
-      // Two-plane model: the adder's tier-3 Welcome-delivery fallback is
-      // their OWN inbox relays (kind 10050), read locally. Best-effort — a
-      // failure here must not block the add. If this and the invitee's own
-      // relays are all empty, the Rust layer FAILS CLOSED
-      // (no public-default fallback) rather than leaking the recipient's
-      // pubkey to public relays.
-      final creatorFallbackRelays = await _fetchCreatorFallbackRelays(ref);
-
-      // The identity secret is fetched FRESH inside addMember for each staging
-      // attempt and scrubbed immediately after (Rule 9), so pass the notifier's
-      // fetcher rather than holding raw bytes across the converge loop. The
-      // notifier is a non-autoDispose singleton, so the tear-off stays valid.
-      final identityNotifier = ref.read(identityNotifierProvider.notifier);
-      final result = await ref
+      final result = await container
           .read(circleServiceProvider)
           .addMember(
-            secretProvider: identityNotifier.getSecretBytes,
             mlsGroupId: widget.circle.mlsGroupId,
             memberKeyPackages: keyPackages,
-            creatorFallbackRelays: creatorFallbackRelays,
           );
+      // Not made: the existing error copy, and "try again" is honest.
+      if (result.delivery == ChangeDelivery.rejected) {
+        refused();
+        return;
+      }
 
-      if (!mounted) return;
-
-      ref
+      container
         ..invalidate(circlesProvider)
         ..invalidate(memberLocationsProvider);
 
-      ref
+      if (result.delivery == ChangeDelivery.awaitingRelays) {
+        // Never an error: the commit is staged and sent again until a relay
+        // takes it. The circle's sharing card says so at once, since the
+        // user's own action made the hold.
+        container
+            .read(sharingHealthProvider.notifier)
+            .recordDeferredSend(sharingCircleKey(widget.circle), byUser: true);
+        if (mounted) navigator.pop(AddMemberPageResult.awaiting);
+        return;
+      }
+
+      container
           .read(joinWatcherProvider.notifier)
           .startAdminWatch(widget.circle.mlsGroupId);
 
-      final circleName = widget.circle.displayName;
-      final message = result.welcomesSent == result.welcomesTotal
-          ? l10n.addMemberSentToCircle(result.welcomesTotal, circleName)
-          : l10n.addMemberPartialDelivery(
-              result.welcomesSent,
-              result.welcomesTotal,
-            );
+      // Isolated: a joined circle's name is the inviter's, and a
+      // right-to-left one must not reorder the sentence around it.
+      final rawName = widget.circle.displayName;
+      final circleName = bidiIsolate(rawName);
+      if (!navigatorContext.mounted) return;
+      final AddMemberPageResult outcome;
+      if (result.reinviteOwed) {
+        // Applied with no Welcome left to deliver: the copy's remedy (remove
+        // them and add them again) is the one that works.
+        report(
+          l10n.addMemberReinviteNeeded(circleName),
+          l10n.addMemberReinviteNeeded(rawName),
+        );
+        outcome = AddMemberPageResult.partial;
+      } else if (result.welcomesDelivered == result.welcomesTotal) {
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text(
+              l10n.addMemberSentToCircle(result.welcomesTotal, circleName),
+            ),
+          ),
+        );
+        outcome = AddMemberPageResult.done;
+      } else {
+        // The rest are sent again by the driver, while the app is open, for
+        // up to a day: "sent so far", never "sent".
+        report(
+          l10n.addMemberSentSoFar(
+            result.welcomesDelivered,
+            result.welcomesTotal,
+            circleName,
+          ),
+          l10n.addMemberSentSoFar(
+            result.welcomesDelivered,
+            result.welcomesTotal,
+            rawName,
+          ),
+        );
+        outcome = AddMemberPageResult.partial;
+      }
 
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
-
-      Navigator.of(context).pop();
-    } on IdentityServiceException catch (_) {
-      debugPrint('[AddMember] Identity error');
-      if (!mounted) return;
-      setState(() => _isAdding = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(l10n.addMemberError)));
+      if (mounted) navigator.pop(outcome);
+    } on CircleInviteesUnreachableException catch (_) {
+      // Nothing was made: the remedy is the invitee's, not a retry as is.
+      debugPrint('[AddMember] Invitee unreachable');
+      if (mounted) setState(() => _isAdding = false);
+      messenger.showSnackBar(
+        longMessageSnackBar(
+          navigatorContext,
+          l10n.memberCannotReceiveInvitations,
+          error: true,
+        ),
+      );
     } on CircleServiceException catch (_) {
       debugPrint('[AddMember] Service error');
-      if (!mounted) return;
-      setState(() => _isAdding = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(l10n.addMemberError)));
+      refused();
     } on Object catch (_) {
       debugPrint('[AddMember] Unexpected error');
-      if (!mounted) return;
-      setState(() => _isAdding = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(l10n.addMemberError)));
-    }
-  }
-
-  /// Best-effort lookup of the adder's own inbox (kind 10050) relays.
-  ///
-  /// Used as the third-tier fallback in the Welcome-delivery cascade
-  /// (member inbox → member NIP-65 → creator inbox → FAIL CLOSED). A failure
-  /// here must never block the add — if the relay read throws we
-  /// return an empty list. NOTE: an empty return does NOT fall through to
-  /// public defaults; the Rust cascade now fails closed with
-  /// `MissingWelcomeRelays` rather than leaking the recipient's pubkey. Do
-  /// NOT re-introduce a default-relay fallback here.
-  Future<List<String>> _fetchCreatorFallbackRelays(WidgetRef ref) async {
-    try {
-      return await ref.read(inboxRelaysProvider.future);
-    } on Object catch (e) {
-      debugPrint(
-        '[AddMember] creator inbox fallback fetch failed: ${e.runtimeType}',
-      );
-      return const [];
+      refused();
     }
   }
 }

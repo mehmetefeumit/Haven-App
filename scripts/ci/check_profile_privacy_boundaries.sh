@@ -12,8 +12,8 @@
 #   2. No circle/group identifier tokens in any profile code path (the profile
 #      plane must be unlinkable to circles at the source level).
 #   3. IMPORT BOUNDARY: haven-core/src/profile/** must not reach the circle or
-#      MLS modules (`crate::circle`, `crate::nostr::mls`, `mdk`,
-#      `exporter_secret`). This — not token check 2 — is what enforces key
+#      MLS modules (`crate::circle`, `crate::nostr::mls`, any MDK crate,
+#      `exporter_secret`); `--self-test` holds the pattern to MDK's crate names. This — not token check 2 — is what enforces key
 #      separation structurally: profile events can only ever be signed by the
 #      Nostr identity key because no MLS handle is reachable from the module
 #      (security review F3).
@@ -69,6 +69,8 @@
 #      as its enforcement.)
 
 set -euo pipefail
+LITERAL_FREE="$(cat "$(dirname "${BASH_SOURCE[0]}")/lib/literal_free.awk")"
+readonly LITERAL_FREE
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LIB_DIR="${REPO_ROOT}/haven/lib"
@@ -128,6 +130,47 @@ readonly -a CONSENT_GATE_EXEMPT_FNS=(
                              # DELETE — none exists in the profile module; the blob survives.
   remove_my_profile_picture  # FFI: clears the picture field via retraction republish (plan §5)
 )
+
+# ---------------------------------------------------------------------------
+# Check 3's forbidden imports. MDK v0.10.4 ships as `cgka-*`, `storage-sqlite`,
+# `transport-nostr-*` and `marmot-*` crates; the `mdk` tokens name the crates
+# before it and stay banned.
+# ---------------------------------------------------------------------------
+readonly IMPORT_BOUNDARY_PATTERN='crate::circle\b|crate::nostr::mls\b|\bcircle::|\bmls::|\bmdk|Mdk|MDK|\bcgka_|\bstorage_sqlite\b|\btransport_nostr_|\bmarmot_|exporter_secret|discovery_relays|relay::discovery|\bdiscovery\b'
+
+# ---------------------------------------------------------------------------
+# --self-test: check 3's pattern against fixture lines. Every MDK v0.10.4 crate
+# must be caught — the pattern once named only the earlier `mdk` crates, so a
+# `use cgka_engine::…` in the profile module passed — and ordinary profile code
+# must not be.
+# ---------------------------------------------------------------------------
+if [[ "${1:-}" == "--self-test" ]]; then
+  for line in \
+    'use cgka_engine::AccountDeviceSession;' \
+    'use cgka_session::SessionHold;' \
+    'let id = cgka_traits::types::GroupId::new(bytes);' \
+    'use storage_sqlite::SqliteStorage;' \
+    'use transport_nostr_peeler::NostrPeeler;' \
+    'use transport_nostr_adapter::NostrSdkRelayClient;' \
+    'use marmot_forensics::Recorder;' \
+    'use mdk_core::prelude::*;' \
+    'use crate::circle::CircleManager;' \
+    'use crate::nostr::mls::SessionManager;'; do
+    if ! printf '%s\n' "${line}" | grep -qE "${IMPORT_BOUNDARY_PATTERN}"; then
+      fail "self-test: check 3 lets the profile module write: ${line}"
+    fi
+  done
+  for line in \
+    'use crate::profile::relay_pool::resolve_profile_pool;' \
+    'let metadata = Metadata::new().name(name);' \
+    'use nostr::{EventBuilder, Keys, Kind};'; do
+    if printf '%s\n' "${line}" | grep -qE "${IMPORT_BOUNDARY_PATTERN}"; then
+      fail "self-test: check 3 refuses ordinary profile code: ${line}"
+    fi
+  done
+  log "self-test OK: check 3 refuses every MDK crate and passes ordinary profile code"
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Misconfiguration guards (exit 2). The CORE_PROFILE_DIR guard is the intended
@@ -275,7 +318,7 @@ extract_code() {
 # by construction — Dart/FFI sources have no `#[cfg(test)]` mod so they pass
 # through unchanged.
 strip_test_modules() {
-  awk '
+  awk "${LITERAL_FREE}"'
     {
       match($0, /^[0-9]+/); lineno[NR] = substr($0, 1, RLENGTH)
       code[NR] = substr($0, RLENGTH + 2)
@@ -285,8 +328,8 @@ strip_test_modules() {
       for (j = 1; j <= NR; j++) {
         t = code[j]
         if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
-        tmp = t; o = gsub(/[{]/, "", tmp)
-        tmp = t; c = gsub(/[}]/, "", tmp)
+        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+        tmp = lfree; c = gsub(/[}]/, "", tmp)
         if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
           intest = 1; testdepth = depth; pending = 0
         }
@@ -373,8 +416,8 @@ scan_profile_paths \
 # ---------------------------------------------------------------------------
 log "Scanning haven-core/src/profile for circle/MLS/mdk/discovery import-boundary breaches ..."
 scan_profile_paths \
-  "import-boundary breach in haven-core/src/profile — the profile module must not reach crate::circle / crate::nostr::mls / mdk / exporter_secret (key separation, security review F3), nor the DISCOVERY plane (plane separation: the discovery relay set is a strict superset of the account-seed relays, i.e. exactly the relays that carry this user's kind-445 and kind-1059 traffic — routing kind-0 there is the cross-plane join the profile pool exists to prevent; use crate::profile::relay_pool instead)" \
-  'crate::circle\b|crate::nostr::mls\b|\bcircle::|\bmls::|\bmdk|Mdk|MDK|exporter_secret|discovery_relays|relay::discovery|\bdiscovery\b' \
+  "import-boundary breach in haven-core/src/profile — the profile module must not reach crate::circle / crate::nostr::mls / any MDK crate / exporter_secret (key separation, security review F3), nor the DISCOVERY plane (plane separation: the discovery relay set is a strict superset of the account-seed relays, i.e. exactly the relays that carry this user's kind-445 and kind-1059 traffic — routing kind-0 there is the cross-plane join the profile pool exists to prevent; use crate::profile::relay_pool instead)" \
+  "${IMPORT_BOUNDARY_PATTERN}" \
   'core'
 
 # ---------------------------------------------------------------------------
@@ -481,7 +524,7 @@ log "Checking retraction no-op gate binding at profile retraction call sites ...
 # `//` truncates the rest of that line, which is safe here because none of the
 # check-6 tokens can legitimately share a line with a URL literal.
 code_view() {
-  awk '
+  awk "${LITERAL_FREE}"'
     {
       line = $0; out = ""; i = 1; n = length(line)
       while (i <= n) {
@@ -524,7 +567,7 @@ check_consent_gate() {
     -v file="${file}" -v minline="${minline}" -v maxline="${maxline}" \
     -v retract_gate='has_published_profile' \
     -v footre="${FOOTPRINT_TOKENS_AWK}" \
-    -v allow="${CONSENT_GATE_EXEMPT_FNS[*]}" '
+    -v allow="${CONSENT_GATE_EXEMPT_FNS[*]}" "${LITERAL_FREE}"'
     { lines[NR] = $0 }
     END {
       nallow = split(allow, aw, " ")
@@ -537,8 +580,8 @@ check_consent_gate() {
       for (j = 1; j <= n; j++) {
         t = lines[j]
         if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
-        tmp = t; o = gsub(/[{]/, "", tmp)
-        tmp = t; c = gsub(/[}]/, "", tmp)
+        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+        tmp = lfree; c = gsub(/[}]/, "", tmp)
         if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
           intest = 1; testdepth = depth; pending = 0
         }
@@ -570,8 +613,8 @@ check_consent_gate() {
           gsub(/(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/, " ", st)
           if (!retline && index(t, retract_gate) > 0) retline = j
           if (!publine && st ~ footre) publine = j
-          tmp = t; o = gsub(/[{]/, "", tmp)
-          tmp = t; c = gsub(/[}]/, "", tmp)
+          lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+          tmp = lfree; c = gsub(/[}]/, "", tmp)
           depth += o - c
           if (o > 0) seen = 1
           if (seen && depth <= 0) break
@@ -629,7 +672,7 @@ check_lock_before_gate() {
     -v file="${file}" -v minline="${minline}" -v maxline="${maxline}" \
     -v lock='profile_sync_lock' \
     -v retract_gate='has_published_profile' \
-    -v allow="${CONSENT_GATE_EXEMPT_FNS[*]}" '
+    -v allow="${CONSENT_GATE_EXEMPT_FNS[*]}" "${LITERAL_FREE}"'
     { lines[NR] = $0 }
     END {
       nallow = split(allow, aw, " ")
@@ -641,8 +684,8 @@ check_lock_before_gate() {
       for (j = 1; j <= n; j++) {
         t = lines[j]
         if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
-        tmp = t; o = gsub(/[{]/, "", tmp)
-        tmp = t; c = gsub(/[}]/, "", tmp)
+        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+        tmp = lfree; c = gsub(/[}]/, "", tmp)
         if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
           intest = 1; testdepth = depth; pending = 0
         }
@@ -668,8 +711,8 @@ check_lock_before_gate() {
           t = lines[j]
           if (!gateline && index(t, retract_gate) > 0) gateline = j
           if (!lockline && index(t, lock) > 0) lockline = j
-          tmp = t; o = gsub(/[{]/, "", tmp)
-          tmp = t; c = gsub(/[}]/, "", tmp)
+          lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+          tmp = lfree; c = gsub(/[}]/, "", tmp)
           depth += o - c
           if (o > 0) seen = 1
           if (seen && depth <= 0) break
@@ -998,7 +1041,7 @@ extract_list_entries() {
   local file="$1" marker="$2" start
   start="$(grep -nF "${marker}" "${file}" | head -n1 | cut -d: -f1 || true)"
   [[ -n "${start}" ]] || return 1
-  awk -v s="${start}" '
+  awk -v s="${start}" "${LITERAL_FREE}"'
     NR < s { next }
     /^[[:space:]]*(\/\/|\*)/ { next }
     { line = $0
@@ -1175,7 +1218,7 @@ log "Checking the FFI photo save runs the sanitizer in its own body ..."
 sanitizer_call="$(code_view "${API_FILE}" | awk \
   -v minline="${api_begin_line}" -v maxline="${api_end_line}" \
   -v target='save_my_profile_picture_local' \
-  -v gate='process_own_avatar' '
+  -v gate='process_own_avatar' "${LITERAL_FREE}"'
   { lines[NR] = $0 }
   END {
     n = NR; found_fn = 0
@@ -1192,8 +1235,8 @@ sanitizer_call="$(code_view "${API_FILE}" | awk \
       for (j = i; j <= n; j++) {
         t = lines[j]
         if (!gateline && t ~ ("(^|[^A-Za-z0-9_])" gate "[[:space:]]*[(]")) gateline = j
-        tmp = t; o = gsub(/[{]/, "", tmp)
-        tmp = t; c = gsub(/[}]/, "", tmp)
+        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+        tmp = lfree; c = gsub(/[}]/, "", tmp)
         depth += o - c
         if (o > 0) seen = 1
         if (seen && depth <= 0) break
@@ -1215,6 +1258,14 @@ fi
 production_code() {
   code_view "$1" | grep -nE '.*' | strip_test_modules
 }
+
+# The production view of api.rs still reaches its live-sync bridge near the end
+# of its production code: a brace inside a literal once cut such a walk short
+# at about line 11282, and every check over api.rs below would then see only
+# what came before.
+if ! grep -qE '^[0-9]+:.*fn live_event_to_ffi\(' <<<"$(production_code "${API_FILE}")"; then
+  fail "[view] the production view of api.rs ends before its live-sync bridge (fn live_event_to_ffi): the brace walk was cut short, or the function was renamed."
+fi
 
 # Fails unless every PRODUCTION call of a token lives in one of the allowed
 # files. $1 = identifier, $2 = failure message, $3.. = allowed file paths.
@@ -1255,7 +1306,7 @@ confine_calls() {
 confine_calls_to_fn() {
   local file="$1" token="$2" target="$3" desc="$4" hits
   hits="$(code_view "${file}" | awk -v file="${file}" -v target="${target}" \
-    -v tokre="(^|[^A-Za-z0-9_])${token}[[:space:]]*[(]" '
+    -v tokre="(^|[^A-Za-z0-9_])${token}[[:space:]]*[(]" "${LITERAL_FREE}"'
     { lines[NR] = $0 }
     END {
       n = NR
@@ -1264,8 +1315,8 @@ confine_calls_to_fn() {
       for (j = 1; j <= n; j++) {
         t = lines[j]
         if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
-        tmp = t; o = gsub(/[{]/, "", tmp)
-        tmp = t; c = gsub(/[}]/, "", tmp)
+        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+        tmp = lfree; c = gsub(/[}]/, "", tmp)
         if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
           intest = 1; testdepth = depth; pending = 0
         }
@@ -1284,8 +1335,8 @@ confine_calls_to_fn() {
         depth = 0; seen = 0
         for (j = i; j <= n; j++) {
           t = lines[j]
-          tmp = t; o = gsub(/[{]/, "", tmp)
-          tmp = t; c = gsub(/[}]/, "", tmp)
+          lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+          tmp = lfree; c = gsub(/[}]/, "", tmp)
           depth += o - c
           if (o > 0) seen = 1
           if (seen && depth <= 0) { lo = i; hi = j; break }

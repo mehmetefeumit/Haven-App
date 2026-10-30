@@ -68,14 +68,24 @@
 #
 # # Two relays, and why
 #
-# R2 exists only for the final phase. Adding a relay that does not yet serve
+# R2 exists only for the heal phase. Adding a relay that does not yet serve
 # the account's slot is, to `decide_kp_maintenance`, indistinguishable from a
 # relay that dropped the event: either way a responder does not serve the slot,
-# so the tick republishes the CACHED bytes under a fresh `created_at`. Reading
-# both copies back is direct wire evidence that a heal moves the EVENT
-# timestamp and leaves the material — and therefore `not_before`, and therefore
-# the rotation clock — exactly where it was. The host suite proves that
-# in-process; proving it across a real relay is stronger.
+# so the tick republishes — and what it republishes is the signed event the
+# account froze when it minted the package. Reading both copies back is direct
+# wire evidence that a heal puts the SAME event on the second relay (same id,
+# so the same material, `created_at` and `not_before`): no relay hiccup can
+# re-sign the package, restamp it or restart its Lifetime. The host suite
+# proves that in-process; proving it across a real relay is stronger.
+#
+# # After the Add: a consumed package is replaced
+#
+# The Welcome the peer builds CONSUMES the rotated package. The tick that
+# follows must put new material in the same `d` slot, so the next inviter is
+# not handed a package somebody already used. The tick's action cannot show
+# that on its own (a heal reports the same one), so the verdict is read off the
+# relay by the peer, exactly as the rotation's is. The heal phase runs BEFORE
+# the Add for this reason: afterwards the tick owes a replacement, not a heal.
 #
 # # A ONE-NETWORK guest, and why this lane needs one more than any other
 #
@@ -142,8 +152,10 @@ source "${SCRIPT_DIR}/logscan-gate.sh"
 #
 # Every negative twin is a DISTINCT string rather than a prefix or suffix of
 # its positive, so a substring match can never read one as the other
-# (`[kpr] ROTATED` is not a substring of `[kpr] ROTATION_DECLINED`, and
-# `[kpr] HEALED` is not a substring of `[kpr] HEAL_MATERIAL_ROTATED`).
+# (`[kpr] ROTATED` is not a substring of `[kpr] ROTATION_DECLINED`,
+# `[kpr] HEALED` is not a substring of `[kpr] HEAL_MATERIAL_ROTATED` or of
+# `[kpr] HEAL_EVENT_RESIGNED`, and `[kpr] CONSUMED_REPLACED` shares no more
+# than its first word with `[kpr] CONSUMPTION_IGNORED`).
 # ---------------------------------------------------------------------------
 readonly MARK_REQ_CLOCK='[kpr] REQ_CLOCK'
 readonly MARK_BASELINE_MINTED='[kpr] BASELINE_MINTED'
@@ -165,14 +177,20 @@ readonly MARK_HEALED='[kpr] HEALED'
 readonly MARK_HEAL_DECLINED='[kpr] HEAL_DECLINED'
 readonly MARK_HEAL_MATERIAL_STABLE='[kpr] HEAL_MATERIAL_STABLE'
 readonly MARK_HEAL_MATERIAL_ROTATED='[kpr] HEAL_MATERIAL_ROTATED'
+readonly MARK_HEAL_EVENT_RESIGNED='[kpr] HEAL_EVENT_RESIGNED'
+readonly MARK_CONSUMED_REPLACED='[kpr] CONSUMED_REPLACED'
+readonly MARK_CONSUMPTION_IGNORED='[kpr] CONSUMPTION_IGNORED'
 readonly MARK_COMPLETE='[kpr] SEQUENCE_COMPLETE'
 
 # The one action name that means "the 0.75 threshold fired on readable
 # material". `rotatedUnreadableLifetime` is a DIFFERENT branch (the lifetime
 # could not be parsed) and must not satisfy this lane.
 readonly EXPECTED_ROTATE_ACTION='rotatedExpiringMaterial'
-# The heal branch: cached bytes republished into the tracked slot.
+# The heal branch: the tracked event republished into the tracked slot.
 readonly EXPECTED_HEAL_ACTION='republishedStableD'
+# A consumed package replaced in its slot reports the SAME action as a heal —
+# the slot is stable either way — which is why (12) reads the relay as well.
+readonly EXPECTED_REPLACE_ACTION='republishedStableD'
 
 # ---------------------------------------------------------------------------
 # Protocol arithmetic, mirrored from outside bash. Pinned by --self-test so a
@@ -545,9 +563,9 @@ addressable and live ALONGSIDE the new one instead of replacing it."
         ;;
       material_reused)
         kpr_finding "the 'rotated' event carries byte-identical KeyPackage \
-material (${MARK_SUPERSEDE_FAILED} reason=${reason}). That is a HEAL — cached \
-bytes republished under a new event id — not a re-mint, so the expiring \
-Lifetime is unchanged and the account still ages out."
+material (${MARK_SUPERSEDE_FAILED} reason=${reason}). That is the expiring \
+package signed again, not a re-mint, so its Lifetime is unchanged and the \
+account still ages out."
         ;;
       *)
         kpr_finding "a peer never saw the rotation supersede the old package \
@@ -602,29 +620,37 @@ Add-succeeded check would have passed — and the group is unusable."
 message-decrypt proof, which is this lane's deliverable."
   fi
 
-  # (11) THE HEAL. A relay that does not serve the slot must be re-served with
-  #      the SAME material under a NEWER `created_at` — the pair that shows the
-  #      rotation clock lives in the package, not in the event timestamp.
+  # (11) THE HEAL. A relay that does not serve the slot must be served the
+  #      SAME EVENT the others hold — same material, same id. A heal that
+  #      re-minted would restart the Lifetime on every relay hiccup; one that
+  #      re-signed would leave two events for one package on the wire.
   if kpr_has_marker "${log}" "${MARK_HEAL_MATERIAL_ROTATED}"; then
     kpr_finding "the heal published DIFFERENT material \
-('${MARK_HEAL_MATERIAL_ROTATED}'). A heal must republish the cached bytes; \
-re-minting on an under-served relay would restart the Lifetime on every relay \
-hiccup, which is precisely the reset this phase exists to rule out."
+('${MARK_HEAL_MATERIAL_ROTATED}'). A heal must republish the package it \
+already has; re-minting on an under-served relay would restart the Lifetime \
+on every relay hiccup, which is precisely the reset this phase exists to rule \
+out."
+  elif kpr_has_marker "${log}" "${MARK_HEAL_EVENT_RESIGNED}"; then
+    kpr_finding "the heal published the same material under a DIFFERENT \
+event ('${MARK_HEAL_EVENT_RESIGNED}'). A heal republishes the one signed event \
+the account froze at mint time; a second signature over the same package \
+leaves two relays serving two events for one slot."
   elif kpr_has_marker "${log}" "${MARK_HEAL_DECLINED}"; then
     kpr_finding "the tick did not heal the under-served relay \
 (action=$(kpr_marker_flag "${log}" "${MARK_HEAL_DECLINED}" 'action')). The \
-freshly rotated material is nowhere near its rotation point, so the heal \
-branch is the only correct answer."
+freshly rotated material is nowhere near its rotation point and nobody has \
+used it, so the heal branch is the only correct answer."
   elif ! kpr_has_marker "${log}" "${MARK_HEAL_TARGET_ADDED}"; then
     kpr_finding "no '${MARK_HEAL_TARGET_ADDED}' line — the second relay was \
 never added, so the heal phase never armed."
   else
-    local healed_n heal_material heal_advanced heal_slot
+    local healed_n heal_action heal_material heal_event heal_slot
     healed_n="$(kpr_marker_number "${log}" "${MARK_HEALED}" 'healed')"
+    heal_action="$(kpr_marker_flag "${log}" "${MARK_HEALED}" 'action')"
     heal_material="$(kpr_marker_flag "${log}" "${MARK_HEAL_MATERIAL_STABLE}" \
       'materialSame')"
-    heal_advanced="$(kpr_marker_flag "${log}" "${MARK_HEAL_MATERIAL_STABLE}" \
-      'createdAtAdvanced')"
+    heal_event="$(kpr_marker_flag "${log}" "${MARK_HEAL_MATERIAL_STABLE}" \
+      'eventSame')"
     heal_slot="$(kpr_marker_flag "${log}" "${MARK_HEAL_MATERIAL_STABLE}" \
       'dSame')"
     if [[ -z "${healed_n}" ]]; then
@@ -633,18 +659,83 @@ relay was added but no heal was recorded."
     elif (( healed_n < 1 )); then
       kpr_finding "the tick chose to heal and ${healed_n} relay(s) acked it."
     fi
-    if [[ "${heal_material}" != "true" || "${heal_advanced}" != "true" \
+    if [[ -n "${healed_n}" && "${heal_action}" != "${EXPECTED_HEAL_ACTION}" ]]; then
+      kpr_finding "the heal was recorded under the wrong action \
+(action=${heal_action:-<absent>}, expected ${EXPECTED_HEAL_ACTION})."
+    fi
+    if [[ "${heal_material}" != "true" || "${heal_event}" != "true" \
           || "${heal_slot}" != "true" ]]; then
       kpr_finding "the heal reading is incomplete \
-(materialSame=${heal_material:-<absent>}, \
-createdAtAdvanced=${heal_advanced:-<absent>}, dSame=${heal_slot:-<absent>}). \
-All three must hold, and the pair 'same material, newer created_at' is the \
-whole point: it is the direct wire evidence that a heal moves the EVENT \
-timestamp and leaves the rotation clock alone."
+(materialSame=${heal_material:-<absent>}, eventSame=${heal_event:-<absent>}, \
+dSame=${heal_slot:-<absent>}). All three must hold, and 'the same event' is \
+the whole point: it is the direct wire evidence that a heal republishes what \
+the account already signed instead of signing, stamping or minting anew."
     else
-      kpr_note "heal: identical material re-served into the same slot \
-$(kpr_marker_number "${log}" "${MARK_HEAL_MATERIAL_STABLE}" 'dCreatedAt')s \
-later — the event timestamp advanced, the Lifetime did not."
+      kpr_note "heal: the second relay was served the very event the first \
+one holds — nothing re-signed, nothing re-minted."
+    fi
+  fi
+
+  # (12) CONSUMED => REPLACED. The Add in (9) used the rotated package up. The
+  #      next tick must put NEW material in the SAME slot; read from the relay
+  #      by the peer, because the action is the one a heal reports too.
+  if kpr_has_marker "${log}" "${MARK_CONSUMPTION_IGNORED}"; then
+    local ignored
+    ignored="$(kpr_marker_flag "${log}" "${MARK_CONSUMPTION_IGNORED}" 'reason')"
+    case "${ignored}" in
+      slot_changed)
+        kpr_finding "the package that replaced the consumed one landed in a \
+DIFFERENT addressable slot (${MARK_CONSUMPTION_IGNORED} reason=${ignored}), \
+which leaves the consumed package addressable beside it."
+        ;;
+      declined)
+        kpr_finding "a Welcome consumed the published KeyPackage and the next \
+tick did not replace it (${MARK_CONSUMPTION_IGNORED} reason=${ignored}, \
+action=$(kpr_marker_flag "${log}" "${MARK_CONSUMPTION_IGNORED}" 'action')). \
+The next inviter is handed a package somebody has already used."
+        ;;
+      *)
+        kpr_finding "a Welcome consumed the published KeyPackage and a peer \
+still fetches it afterwards (${MARK_CONSUMPTION_IGNORED} \
+reason=${ignored:-<absent>}). Whatever the tick reported, the consumed \
+package is still the one on offer."
+        ;;
+    esac
+  elif ! kpr_has_marker "${log}" "${MARK_CONSUMED_REPLACED}"; then
+    kpr_finding "neither '${MARK_CONSUMED_REPLACED}' nor \
+'${MARK_CONSUMPTION_IGNORED}' was recorded — the drive never checked what \
+became of the package the Welcome consumed."
+  else
+    local replaced_n replace_action replace_slot replace_material
+    replaced_n="$(kpr_marker_number "${log}" "${MARK_CONSUMED_REPLACED}" \
+      'healed')"
+    replace_action="$(kpr_marker_flag "${log}" "${MARK_CONSUMED_REPLACED}" \
+      'action')"
+    replace_slot="$(kpr_marker_flag "${log}" "${MARK_CONSUMED_REPLACED}" \
+      'dSame')"
+    replace_material="$(kpr_marker_flag "${log}" "${MARK_CONSUMED_REPLACED}" \
+      'materialChanged')"
+    if [[ "${replace_action}" != "${EXPECTED_REPLACE_ACTION}" ]]; then
+      kpr_finding "the consumed package was replaced under the wrong action \
+(action=${replace_action:-<absent>}, expected ${EXPECTED_REPLACE_ACTION})."
+    fi
+    if [[ -z "${replaced_n}" ]]; then
+      kpr_finding "no 'healed=<N>' on the '${MARK_CONSUMED_REPLACED}' line — \
+there is no evidence any relay accepted the replacement."
+    elif (( replaced_n < 1 )); then
+      kpr_finding "the tick replaced the consumed package and ${replaced_n} \
+relay(s) acked the publish — a replacement nobody received."
+    fi
+    if [[ "${replace_slot}" != "true" || "${replace_material}" != "true" ]]; then
+      kpr_finding "the replacement reading is incomplete \
+(dSame=${replace_slot:-<absent>}, \
+materialChanged=${replace_material:-<absent>}). Both must hold: new material, \
+in the slot the consumed package occupied."
+    else
+      kpr_note "consumption: the package the Welcome used was replaced in the \
+same \`d\`, \
+$(kpr_marker_number "${log}" "${MARK_CONSUMED_REPLACED}" 'dCreatedAt')s after \
+the event it superseded."
     fi
   fi
 
@@ -824,7 +915,7 @@ run_self_test() {
   # hard-coded "all 50 fixture groups passed" that no counter backed, so a
   # deleted assertion changed neither the message nor the exit code. Every
   # assertion helper below counts itself.
-  local -r SELF_TEST_ASSERTIONS=89
+  local -r SELF_TEST_ASSERTIONS=105
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -903,11 +994,12 @@ run_self_test() {
       "I/flutter ( 40): ${MARK_BASELINE_FETCHED} elapsedPct=83 ageDays=70 slotStable=true" \
       "I/flutter ( 40): ${MARK_ROTATED} action=${EXPECTED_ROTATE_ACTION} healed=1 probed=1" \
       "I/flutter ( 40): ${MARK_SUPERSEDED} dSame=true idChanged=true materialChanged=true dCreatedAt=6047999" \
-      "I/flutter ( 40): ${MARK_WELCOME_ACCEPTED}" \
-      "I/flutter ( 40): ${MARK_PEER_DECRYPT_MATCH} dLat=0.0 dLon=0.0" \
       "I/flutter ( 40): ${MARK_HEAL_TARGET_ADDED}" \
       "I/flutter ( 40): ${MARK_HEALED} action=${EXPECTED_HEAL_ACTION} healed=1" \
-      "I/flutter ( 40): ${MARK_HEAL_MATERIAL_STABLE} materialSame=true createdAtAdvanced=true dSame=true dCreatedAt=4" \
+      "I/flutter ( 40): ${MARK_HEAL_MATERIAL_STABLE} materialSame=true eventSame=true dSame=true" \
+      "I/flutter ( 40): ${MARK_WELCOME_ACCEPTED}" \
+      "I/flutter ( 40): ${MARK_PEER_DECRYPT_MATCH} withinTolerance=true" \
+      "I/flutter ( 40): ${MARK_CONSUMED_REPLACED} action=${EXPECTED_REPLACE_ACTION} healed=2 dSame=true materialChanged=true dCreatedAt=41" \
       "I/flutter ( 40): ${MARK_COMPLETE}" \
       > "${out}"
     _mutate "${out}" "$@"
@@ -973,6 +1065,20 @@ run_self_test() {
   _case "HEAL_MATERIAL_ROTATED does not satisfy ROTATED" 1 "${rc}"
   rc=0; kpr_has_marker "${tmp}/twin2.log" "${MARK_HEALED}" || rc=1
   _case "HEAL_MATERIAL_ROTATED does not satisfy HEALED" 1 "${rc}"
+  printf '%s\n' "I/flutter ( 40): ${MARK_HEAL_EVENT_RESIGNED}" \
+    > "${tmp}/twin2b.log"
+  rc=0; kpr_has_marker "${tmp}/twin2b.log" "${MARK_HEALED}" || rc=1
+  _case "HEAL_EVENT_RESIGNED does not satisfy HEALED" 1 "${rc}"
+  rc=0
+  kpr_has_marker "${tmp}/twin2b.log" "${MARK_HEAL_MATERIAL_STABLE}" || rc=1
+  _case "HEAL_EVENT_RESIGNED does not satisfy HEAL_MATERIAL_STABLE" 1 "${rc}"
+  # …and on the consumption pair.
+  printf '%s\n' \
+    "I/flutter ( 40): ${MARK_CONSUMPTION_IGNORED} reason=unchanged" \
+    > "${tmp}/twin2c.log"
+  rc=0
+  kpr_has_marker "${tmp}/twin2c.log" "${MARK_CONSUMED_REPLACED}" || rc=1
+  _case "CONSUMPTION_IGNORED does not satisfy CONSUMED_REPLACED" 1 "${rc}"
 
   # (8) …and on the two `BASELINE_` pairs, whose positives are prefixes of
   #     nothing but whose twins are near-anagrams.
@@ -1102,6 +1208,69 @@ run_self_test() {
   kpr_run_oracle "${tmp}/healrotated.log" "${tmp}/ok.servo" >/dev/null || rc=1
   _case "a heal that re-minted fails the lane" 1 "${rc}"
 
+  # (22b) The heal RE-SIGNED the same package: a second event for one slot.
+  _fixture_full "${tmp}/healresigned.log" \
+    "s/HEAL_MATERIAL_STABLE .*/HEAL_EVENT_RESIGNED/"
+  rc=0
+  kpr_run_oracle "${tmp}/healresigned.log" "${tmp}/ok.servo" >/dev/null || rc=1
+  _case "a heal that re-signed the package fails the lane" 1 "${rc}"
+  _names_case "re-signed finding names the second event" "two events"
+
+  # (22c) THE PRE-CHANGE HEAL, which this oracle used to REQUIRE: identical
+  #       material under a newer `created_at`. The drive now reports that
+  #       shape as a re-sign, and a capture that still carries the old flag
+  #       set — no `eventSame` — must not read as a heal either.
+  _fixture_full "${tmp}/healoldshape.log" \
+    "s/materialSame=true eventSame=true dSame=true/materialSame=true createdAtAdvanced=true dSame=true dCreatedAt=4/"
+  rc=0
+  kpr_run_oracle "${tmp}/healoldshape.log" "${tmp}/ok.servo" >/dev/null || rc=1
+  _case "a heal reported without eventSame fails the lane" 1 "${rc}"
+  _names_case "old-shape heal finding names the missing flag" \
+    "eventSame=<absent>"
+
+  # (22d) The Welcome consumed the package and the tick left it up.
+  _fixture_full "${tmp}/consumedkept.log" \
+    "s/CONSUMED_REPLACED .*/CONSUMPTION_IGNORED reason=declined action=alreadyHealthy/"
+  rc=0
+  kpr_run_oracle "${tmp}/consumedkept.log" "${tmp}/ok.servo" >/dev/null || rc=1
+  _case "a consumed package the tick left published fails the lane" 1 "${rc}"
+  _names_case "kept-consumed finding names the next inviter" "next inviter"
+
+  # (22e) The tick published, and a peer still fetches the consumed package.
+  _fixture_full "${tmp}/consumedsame.log" \
+    "s/CONSUMED_REPLACED .*/CONSUMPTION_IGNORED reason=material_reused/"
+  rc=0
+  kpr_run_oracle "${tmp}/consumedsame.log" "${tmp}/ok.servo" >/dev/null || rc=1
+  _case "a consumed package still on offer fails the lane" 1 "${rc}"
+  _names_case "still-on-offer finding says so" "still the one on offer"
+
+  # (22f) Replaced into a DIFFERENT slot: the consumed one stays addressable.
+  _fixture_full "${tmp}/consumedslot.log" \
+    "s/CONSUMED_REPLACED .*/CONSUMPTION_IGNORED reason=slot_changed/"
+  rc=0
+  kpr_run_oracle "${tmp}/consumedslot.log" "${tmp}/ok.servo" >/dev/null || rc=1
+  _case "a replacement in a different d slot fails the lane" 1 "${rc}"
+
+  # (22g) Replaced, acked by NOBODY — parsed, because `healed=0` carries
+  #       the marker.
+  _fixture_full "${tmp}/consumedunacked.log" \
+    "s/CONSUMED_REPLACED action=${EXPECTED_REPLACE_ACTION} healed=2/CONSUMED_REPLACED action=${EXPECTED_REPLACE_ACTION} healed=0/"
+  rc=0
+  kpr_run_oracle "${tmp}/consumedunacked.log" "${tmp}/ok.servo" >/dev/null \
+    || rc=1
+  _case "a replacement no relay acked fails the lane" 1 "${rc}"
+  _names_case "unacked-replacement finding says nobody received it" \
+    "nobody received"
+
+  # (22h) The drive never reached the consumption check at all.
+  _fixture_full "${tmp}/noconsumption.log" "/CONSUMED_REPLACED/d"
+  rc=0
+  kpr_run_oracle "${tmp}/noconsumption.log" "${tmp}/ok.servo" >/dev/null \
+    || rc=1
+  _case "a capture with no consumption verdict fails the lane" 1 "${rc}"
+  _names_case "missing-verdict finding says the drive never checked" \
+    "never checked what"
+
   # (23) The Add itself was rejected — the headline defect.
   _fixture_full "${tmp}/addfail.log" \
     "s/WELCOME_ACCEPTED/WELCOME_FAILED/" \
@@ -1230,7 +1399,8 @@ run_self_test() {
     "${MARK_PEER_DECRYPT_DEAD}" "${MARK_HEAL_TARGET_ADDED}"
     "${MARK_HEALED}" "${MARK_HEAL_DECLINED}"
     "${MARK_HEAL_MATERIAL_STABLE}" "${MARK_HEAL_MATERIAL_ROTATED}"
-    "${MARK_COMPLETE}"
+    "${MARK_HEAL_EVENT_RESIGNED}" "${MARK_CONSUMED_REPLACED}"
+    "${MARK_CONSUMPTION_IGNORED}" "${MARK_COMPLETE}"
   )
   if [[ ! -f "${target_file}" ]]; then
     printf '  \033[1;31mFAIL\033[0m drive target not found at %s\n' \
@@ -1764,8 +1934,9 @@ readonly TARGET="${2:-integration_test/kp_rotation_wire_test.dart}"
 # Sizing: the drive's own budget is bootstrap + first mint (~60s) + the clock
 # rendezvous (bounded at 180s inside the drive) + a peer bootstrap and two
 # discovery-cascade fetches (~60s) + circle creation and the Welcome round trip
-# (~90s) + up to 120s for the peer decrypt + the heal phase (~60s) — roughly
-# 10 min worst case against a 20-minute in-test `Timeout`. 24m stays ABOVE that
+# (~90s) + up to 120s for the peer decrypt + the heal phase (~60s) + the
+# replacement of the consumed package and its re-fetch (~75s) — roughly
+# 11 min worst case against a 20-minute in-test `Timeout`. 24m stays ABOVE that
 # Timeout so a genuine overrun fails with a named test rather than an anonymous
 # kill, and BELOW the step deadline so the attributable message is reachable.
 readonly DRIVE_TIMEOUT="${KPR_DRIVE_TIMEOUT:-24m}"
@@ -2039,7 +2210,7 @@ fail() {
 # ---------------------------------------------------------------------------
 # Phase 0 — two hermetic relays + device readiness.
 #
-# R1 carries the whole scenario. R2 exists only for the final phase: it is a
+# R1 carries the whole scenario. R2 exists only for the heal phase: it is a
 # responder that does not serve Alice's slot, which is what makes the tick take
 # the heal branch.
 # ---------------------------------------------------------------------------
@@ -2240,6 +2411,5 @@ echo "KPR lane PASSED — a KeyPackage minted 70 days ago rotated through the"
 echo "production maintenance decision, superseded itself in the same \`d\` slot"
 echo "from a fetcher's point of view, was used by a SEPARATE participant to add"
 echo "its owner to a circle, and that owner then DECRYPTED a message in the"
-echo "resulting group. A subsequent heal re-served identical material under a"
-echo "newer \`created_at\`, so the rotation clock lives in the package and not"
-echo "in any event timestamp."
+echo "resulting group. A heal served a second relay the very same event, and"
+echo "the package that Welcome consumed was then replaced in the same slot."

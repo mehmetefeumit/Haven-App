@@ -48,11 +48,17 @@ Five more, specific to this tier and listed here so nobody has to infer them:
 * **The KeyPackage plane is DISCOVERY-free.** A world's members are still
   invited from key packages minted in process and handed to `create_circle` as
   values: nothing fetches a kind 30443 and no NIP-65 (kind 10002) list is read.
-  What S12's `kp-rotation-slot` adds is the other half — a real 30443 published
-  into a real slot on a real plane, read back from the plane's own store, and
-  the rotation decision taken against the package's own MLS lifetime. Green
+  What S12's `kp-rotation-slot` adds is the other half — a real 30443 staged
+  through the engine's lifecycle record, published into a real slot on a real
+  plane, read back from the plane's own store, and the rotation decision taken
+  against the package's own MLS lifetime. It opens on the package the
+  world-building join CONSUMED and requires a replacement into the same slot,
+  requires a heal to put the same event on the plane byte for byte, and
+  requires a tracked package whose private bundle is gone to be replaced
+  rather than re-advertised. Green
   therefore says nothing about KeyPackage *discovery*, and it does say that the
-  rotation policy, the stable slot and the monotonic replacement stamp behave
+  rotation policy, the two replacements no clock decides, the stable slot, the
+  frozen event and the monotonic replacement stamp behave
   over a relay — but only where S12 RUNS, which is not the PR lane: it is a
   nightly scenario, so a green PR lane says nothing about it and only a
   scheduled night does. `kp_rotation_e2e` still
@@ -84,9 +90,16 @@ Five more, specific to this tier and listed here so nobody has to infer them:
   `RejectedReason::Expired` and whose bulk import filters expired events out.
   So nothing can SEED one, and S09's expired recipe is written straight onto a
   subscriber's socket by the fault layer instead — which is also why that
-  recipe's evidence is the plane's ledger rather than the client: a conformant
-  `nostr_sdk` drops an already-expired event before it emits any notification.
-  A *stored* event that expires later is a different case and is not graded.
+  recipe's evidence is the plane's ledger rather than the client:
+  `nostr-relay-pool` drops an already-expired event before it emits any
+  notification, which S09's `past-expiration-dropped-by-the-relay-pool` arm
+  records as an expectation. Haven itself does not screen on `expiration`
+  (receivers must not judge validity by it, Marmot `transports/nostr.md:190-192`),
+  so S09's classification half hands the expired forgery to the processor,
+  which refuses it on its content, and `member-commit-past-expiration-applied`
+  hands every co-member a member's genuine commit stamped with a past
+  `expiration`, which each applies. A *stored* event that expires later is a
+  different case and is not graded.
 * **`relay/forge.rs` forges WEBSOCKET FRAMES, and — since S09 — whole events
   under a key belonging to nobody.** It writes `CLOSED`, `NOTICE`, `EOSE` and
   duplicate `EVENT` frames into the client-facing stream, and it mints the four
@@ -123,10 +136,10 @@ knows what it covered:
 |---|---|---|
 | S1 | Single branch (current-epoch cross-decrypt both ways, round-unique payloads) | **GRADED** — oracle O1, round-unique payloads. Both directions where it matters: every scenario's CLOSING round probes each chain pair BOTH ways, with the device that was restarted, reopened or resumed sending FIRST (a rebuilt epoch or exporter is invisible to the device itself and shows only as a peer failing to decrypt what it produced), and the nemesis phase's teardown round sweeps every ordered pair. Intermediate rounds stay one-directional over a spanning chain, which is the cost trade `Reach::These` exists for |
 | S2 | Post-removal unreadability | **GRADED** — oracle O3 (`RemovalUnreadability`), produced by S21's two O3 arms, graded APART because the delivery paths prove different things. `removal-delivered-commit` delivers the commit and asserts every later 445 is `Stale{SelfEvicted}` carrying no token: the BOOKKEEPING gate (MDK's `!is_active()`), and nothing about key material. `removal-withheld-commit` holds the commit back (`DropClass::Handshake` on the evictee's endpoint for the whole arm) so the evictee's group stays active and the peel is genuinely attempted, and asserts every post-removal probe is `Stale{PeelFailed}` carrying no token, with a stored row that NEVER resolves (read terminally after the closing round). O3 does NOT grade the RFC 9420 §12.4 forward-secrecy property (a Remove's `UpdatePath` blanks the leaf): that is openmls's, tested upstream, and is unreachable from Haven's code — an evictee that never received the commit has no epoch-N+1 exporter secret whether or not the `UpdatePath` was correct, so `PeelFailed` on the withheld path cannot distinguish a broken Remove. §12.4 is the basis O3 relies on, never what the soak measures |
-| S3 | Publish-before-apply (Rule 13) | **PARTIAL** — per COMMIT, not per transition. One rung in the rig resolves a pending state (`rig::circle::resolve_one`, reached only through `publish_and_resolve` and the ladder `resolve_ingest` that drains what a resolution's own replay hands back), and it confirms only on an acknowledgement a relay's client-facing ledger really carried; S18's three arms assert the gap from both sides (stored HERE, unacknowledged THERE), assert that a rolled-back commit left the whole circle on one epoch, and assert from the rebind counters that no socket went away while the ack was withheld. Three more arms reach the same rule from other sides: S05's `confirm-err-is-not-a-failure` (an `Err` from `confirm_published` is not a publish failure), and S22's `oversized-commit` and `oversized-removal-wedges-the-circle` (a refusal the publisher hears, rolled back and — for an owed removal — deliberately not). What is NOT graded is the universal form — "every observed epoch transition has a stored, acked commit" — because no oracle walks the ledger against the epoch history. That walk needs a per-transition record the Phase-1 ledger does not keep |
+| S3 | Publish-before-apply (Rule 13) | **PARTIAL** — per COMMIT, not per transition. Every commit the rig makes is staged, sent, confirmed and rolled back by the PRODUCT's durable-fanout driver (`haven_core::relay::fanout::Publishing`, wrapped as `rig::circle::DeviceDriver`; the world's `change`, `resume`, `leave`, `ingest`, `seal_fix` and `publish_location` are its entries), built as the bridge builds its own — the `Claimed` mode a caller's word and the live plane's standing make, under the bridge's `RESUME_BUDGET_MS` budget, every engine claiming the foreground once started (pinned beside the bridge's in `haven-core/tests/security_rule_gates.rs`) — so the soak grades the shipped publish path; the rig resolves no pending state itself (`check_e2e_publish_before_apply.sh` check 2). S18's five arms assert the gap from both sides (stored HERE, unacknowledged THERE): the commit stays pending, the SAME bytes are sent again on the relay's schedule and confirmed on the acknowledgement that reaches the device, the circle converges with its peers paused or online, a location is deferred while the commit is pending and resumes after it, and a location's application fanout ends with its one offer; the rebind counters show no socket went away while the ack was withheld. Three more arms reach the same rule from other sides: S05's `confirm-err-is-not-a-failure` (W9f: a failed confirm of an acknowledged commit is decided by the stored record, never rolled back, and confirmed by the next drive), and S22's `oversized-commit` and `oversized-removal-wedges-the-circle` (a refusal the publisher hears is rolled back by the driver; for a removal the engine re-arms it). What is NOT graded is the universal form — "every observed epoch transition has a stored, acked commit" — because no oracle walks the ledger against the epoch history. That walk needs a per-transition record the Phase-1 ledger does not keep |
 | S4 | Nothing identifying on the wire | **NOT GRADED** — the wire oracles are the e2e lanes' (`check-wire-journal.sh` and friends); the rig still has no wire journal, and Phase 2 adds none |
 | S5 | Retention window (5 past epochs) | **GRADED** — O4, over BOTH edges, produced by S04's `offline-past-retention`: one ciphertext sealed exactly `DEFAULT_MAX_PAST_EPOCHS` advances below the reader's tip still decrypts, and one a single epoch older does not. The window is READ from the engine at runtime, never restated, and each edge's distance is MEASURED from the epochs the run really reached — a world that did not reach the intended shape answers "this proved nothing" (one side of the window fed twice) rather than reporting a violation the arm manufactured. What it adds over `haven-core`'s own `rule5_retention_constants_are_pinned` and `rule5_epoch_n_ciphertext_still_decrypts_at_the_window_edge` is those two edges over a real relay and a real live plane, across a pause and a catch-up — and nothing else |
-| S6 | Cursor integrity | **PARTIAL — the ADVANCE side only.** S09's two arms grade what an adversary can and cannot do to a persisted anchor. The first is a standing outsider forging at the circle's public `#h` every round for the whole arm — three recipes per round, expired, doubled `#h` and undecodable — which moves neither `read_sync_cursor` nor `read_backfill_floor`, while a legitimate fix delivered in the SAME round proves the plane was carrying anything at all, and a catch-up sweep that still advances locally is the control that keeps the whole arm from being satisfied by a build where advance had been deleted. The second injects ONE forgery, after the original it copies has been folded: an observed ciphertext re-signed a day ahead, which applies nothing a second time and moves neither anchor. And the catch-up sweep's own advance is required to land inside a bracket taken from the same wall clock the sweep opens its window with, which is the advance's PROVENANCE rather than its arithmetic and which a forged `created_at` a day ahead could not satisfy. **The HOLD-BACK side is still structural only, and the reason is measured, not assumed:** reading it needs an event that is DELIVERED and un-applied while a subscription generation is open, and at this pin the rig cannot produce one — a message sealed at an epoch the receiver has not reached peel-fails (the kind-445 outer layer is keyed by the sender's epoch exporter), and the buffering outcome the engine does produce (the publish-before-apply transition, which S19's `commit-gap` arm grades) leaves no gating row, its delivery landing only once the transition ENDS, on the confirm's own replay, which is not a window a cursor is read against. `haven-core`'s own anchor tests still cover the hold-back |
+| S6 | Cursor integrity | **PARTIAL — the ADVANCE side only.** S09's first two arms grade what an adversary can and cannot do to a persisted anchor (its other two grade the NIP-40 `expiration`: a member's commit stamped past it is applied, and the relay pool's own drop is recorded). The first is a standing outsider forging at the circle's public `#h` every round for the whole arm — three recipes per round, expired, doubled `#h` and undecodable — which moves neither `read_sync_cursor` nor `read_backfill_floor`, while a legitimate fix delivered in the SAME round proves the plane was carrying anything at all, and a catch-up sweep that still advances locally is the control that keeps the whole arm from being satisfied by a build where advance had been deleted. The second injects ONE forgery, after the original it copies has been folded: an observed ciphertext re-signed a day ahead, which applies nothing a second time and moves neither anchor. And the catch-up sweep's own advance is required to land inside a bracket taken from the same wall clock the sweep opens its window with, which is the advance's PROVENANCE rather than its arithmetic and which a forged `created_at` a day ahead could not satisfy. **The HOLD-BACK side is still structural only, and the reason is measured, not assumed:** reading it needs an event that is DELIVERED and un-applied while a subscription generation is open, and at this pin the rig cannot produce one — a message sealed at an epoch the receiver has not reached peel-fails (the kind-445 outer layer is keyed by the sender's epoch exporter), and the buffering outcome the engine does produce (the publish-before-apply transition, which S19's `commit-gap` arm grades) leaves no gating row, its delivery landing only once the transition ENDS, on the confirm's own replay, which is not a window a cursor is read against. `haven-core`'s own anchor tests still cover the hold-back. S25 grades the advance's other edge, over a dead and an EOSE-silent relay: the cursor advances once the backlog wait is over, never before the silent relay's wait ends, and the fix only the dead relay held still arrives from the floor that relay owes (Rule 12) |
 | S7 | One session per DB (Rule 14) | **GRADED** — every restart asserts `is_session_live` true before and false after, against a bounded poll, on the `session.sqlite` PATH (a directory computes a key nothing is registered under and answers `Ok(false)` for ever) |
 | S8 | Bounded removal-effectiveness lag | **GRADED** — S21's `removal-lag` arm: after the removal is confirmed by ≥ 1 remaining member, every remaining member reaches the post-removal epoch inside `B(S21)` and none is left publishing at the pre-removal epoch over the trailing `location_publish_window()` (`Absence::RemovalPublishTail`), while the evictee's last readable fix is one minted before the removal. In Tier 1 the epoch is the harness ledger's, not a relay-visible wire fact |
 | S9 | Nonce uniqueness (Rule 11) | **NOT GRADED** — nearly free once the relay ledger keeps 445 `content` prefixes, which is Phase 2 |
@@ -142,16 +155,41 @@ cannot peel without the new epoch's exporter secret). **O4 is also in the
 registry**, and S04's `offline-past-retention` is the arm that produces the
 state it grades.
 
+## Circles start settled: the post-join self-update is made at build
+
+Every joiner of a circle the rig builds (`rig/circle.rs` `build_circle`) makes
+the one post-join self-update MDK records at its join, through the product's
+own full resume (`Publishing::resume`, never a direct call — the
+`check_self_update_sites.sh` guard holds that to `Publishing::post_join`) over
+a transport on which every relay accepts and nothing is stored
+(`CircleManager::resume_accepted_for_test`), and every other device takes the
+commit in before the circle's origin epoch is read. No plane therefore holds
+a commit the build made: a live REQ opened at the engines' start replays
+nothing, and an arm that counts the commits on a relay counts only its own.
+A circle an arm builds beside running engines can have a founding Welcome
+taken from its record by the admin's live plane before the create's own drive
+reaches it; the rig then takes that Welcome from the invitee's inbox — the
+one wrap that was not there before the create — and accepts it, and the
+create is reported unacknowledged only when no Welcome reached anyone. MDK's windows (15 s grace, 60 s quiet, up to 30 s jitter) are served on
+the joiner's injectable session clock, set a day ahead for that one drive and
+given back after it; when an earlier circle's post-join on the same device
+still spaces this one, the drive runs at the instant the session names. No scenario's measured phase therefore meets a joiner's
+first caught-up foreground drive making a commit, and no oracle changed for it.
+A circle that stalls (S03's lost commit is the shape) now also exercises the
+epoch-stall detector: an arm owes the circle a walk of its own history, which
+the next foreground sweep makes.
+
 ## Which scenarios have lane execution, and where
 
-Twenty-one scenarios exist: **S01, S02, S03, S04, S05, S06, S08, S09, S10, S11,
-S12, S13, S14, S16, S17, S18, S19, S20, S21, S22, S23**.
+Twenty-three scenarios exist: **S01, S02, S03, S04, S05, S06, S08, S09, S10, S11,
+S12, S13, S14, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25**.
 
 * `pr` (the profile `ci.yml` calls on every push) runs **S01's single-relay
   outage arm, S06, S11 and S13**.
 * `nightly` runs every other nightly arm — **S02, S03, S04, S05, S08, S09, S10,
-  S12, S14, S16, S17, S18, S19, S20, S21 and S22** beside the PR set (S05's
-  three swept arms and S08's `unpacked-control` only) — and has LANE execution
+  S12, S14, S16, S17, S18, S19, S20, S21, S22, S23 and S24** beside the PR set (S05
+  without `kill-receive-auto-commit`, S03 without `lost-commit-unnamed`, S17
+  without `full-intake`) — and has LANE execution
   in `soak-nightly.yml` alone: its schedule, four slots a night Monday to
   Saturday, or a dispatch of it; never on a pull request.
 * `weekly`'s own arms have **NO lane execution** until Phase 4 adds
@@ -159,29 +197,32 @@ S12, S13, S14, S16, S17, S18, S19, S20, S21, S22, S23**.
   something to call, and nothing calls it. They are S03's
   `lost-commit-unnamed` and S17's `full-intake` — outside the crate's own
   sweep, because their bounds start at the 684-second silence window, so they
-  run under `scripts/run_soak_local.sh core --profile weekly` alone — and the
-  three EXPECTED-RED arms (S23 `chained-commit-backlog`, S08
-  `buried-past-the-cap`, S05 `kill-receive-auto-commit`), which
-  `tests/oracles.rs` asserts red on every commit (`cargo test`, the
-  `soak-tooling` job) and which have no scheduled execution at all until then.
-  They are kept out of the nightly on purpose ("When a night goes red").
+  run under `scripts/run_soak_local.sh core --profile weekly` alone — and S05
+  `kill-receive-auto-commit`, swept since MDK v0.10.4 and held out of the
+  nightly until the owner returns it, and S25's `dead-and-silent-relays`,
+  swept by the crate's own tests and out of the nightly by price. None has
+  scheduled execution until then.
 
 A green `soak-core-pr` therefore says nothing about a receiver partitioned
 behind a second publisher (S02), a commit a relay forgot before a paused member
 returned (S03), the member-absence spans and
-the retention window (S04), the publish→confirm window (S05), the live
-plane serving a commit under a page of forgeries (S08's control), the
-cursor-poisoning adversary and the two anchors (S09), the ten-circle roster
+the retention window (S04), the publish→confirm window (S05), a commit
+buried past a relay's replay cap, recovered over NIP-77 and stranded without
+it, and the live plane serving one under a page of forgeries (S08), the
+cursor-poisoning adversary, the two anchors and the `expiration` that is not a
+validity signal (S09), the ten-circle roster
 under one outage (S10), the KeyPackage rotation slot (S12), a same-epoch commit
-race (S14), the three durable stores a flood can grow (S16), the CLOSED-prefix
-behaviour (S17), the three swallowed-OK Rule-13 arms (S18), duplicate/reorder
+race (S14), the three durable stores a flood can grow and the one ordinary
+traffic grows without bound (S16), the CLOSED-prefix
+behaviour (S17), the five swallowed-OK Rule-13 arms (S18), duplicate/reorder
 delivery and the commit-gap fold (S19), the catch-up sweep under clamped,
-refused, cold and forged pages (S20), post-removal unreadability and the
-removal lag (S21) or the oversized commit, Welcome and removal wedge (S22)
-beyond what a unit test proves — those are the nightly's, and only a night's
-verdict speaks for them. The three expected-red defects — the chained-commit
-backlog (S23, C7), the burial past the replay cap (S08, C8) and the
-receive-plane kill (S05, C9) — are spoken for by `cargo test` alone.
+refused, cold and forged pages and a same-second pile-up (S20), post-removal unreadability and the
+removal lag (S21), the oversized commit, Welcome and removal wedge (S22), the
+chained-commit backlog (S23) or two circles sharing one routing id (S24)
+beyond what a unit test proves — those are the
+nightly's, and only a night's verdict speaks for them. No arm is expected red
+since R4's NIP-77 pass fixed the burial past the replay cap on relays that
+speak NIP-77 (S08, C8).
 
 ### The first recorded expectation, and what makes it stale
 
@@ -192,15 +233,16 @@ restated), and neither can converge the other's sibling afterwards. What is left
 is a **twin fork**: both devices report the same epoch, the same roster and a
 healthy send path, and only a bidirectional cross-decrypt says otherwise.
 
-*At this commit Haven raises no per-circle verdict for that state.* The arm
+*At this commit neither `unrecoverable_circles()` nor the bus names that state.* The arm
 asserts the fork AND the silence — `unrecoverable_circles()` empty, no
 `GroupUnrecoverable` on either device's bus — as its expectation, so both
 directions are covered: if the fork stops happening, the canary is unmet and the
 arm is **rc 3**, "the recorded expectation is stale"; if a verdict starts
 appearing, the silence canary is unmet and it is **rc 3** again, which is the
 correct signal — the recorded expectation must be replaced by a graded one in
-the same commit. Changing it in either direction without citing OD-1 (DECIDED, a
-per-circle verdict inside the circle's details sheet; NOT BUILT) is a regression.
+the same commit. Changing it in either direction without citing OD-1 (BUILT in the
+MDK v0.10.4 migration: one per-circle card in the circle's details sheet, read
+from haven-core's `circle_recovery`, which no arm reads yet) is a regression.
 The 684-second form of that silence is asserted by S03's weekly arm
 `lost-commit-unnamed` (below); a second eleven-minute absence here would buy no
 further claim, which is why every arm in that scenario declares no absence
@@ -211,44 +253,55 @@ does not converge is a finding about the subject, reported as
 `branch-diverged` / `epoch-diverged` / `roster-diverged` at rc 1, never as a
 floor that went unmet.
 
-### The second recorded expectation: a removal obligation that can never be discharged
+### The second recorded expectation: a removal commit no relay will take
 
 S22's `oversized-removal-wedges-the-circle` is the same shape for a different
 gap. A peer proposes its own removal, this device's engine stages the eviction
-commit, the plane refuses it for its size — and `publish_failed` deliberately
-does NOT roll it back, because rolling one back is a silent, permanent drop of
-the eviction and would leave the leaver deriving the group's keys until some
-unrelated commit moved the epoch. Parking is therefore correct and is already
-decided. What is undecided is the obligation itself: every retry refuses for the
-same reason the first one did, so it can never be discharged, and the circle
-stays in its publish-before-apply transition for ever.
+commit under its record, and every plane refuses it for its size. Which shape
+the product then takes is a property of the relays, and the arm MEASURES it off
+the rig's own: the relay double answers an oversized frame `OK false invalid:`
+(`relay/policies.rs` `OVERSIZE_PREFIX`), a machine-readable rejection. Measured
+(2026-10-18): every target proved it refused and none may hold the commit, so the
+product's driver ROLLS THE EVICTION BACK; the engine arms the eviction again;
+from the refusal until the eviction lands the circle sends nothing — every
+location is deferred, typed `DepartureDue` inside Haven's refused-eviction wait
+(`RESTAGE_BASE_MS`, doubling to `RETRY_MAX_MS`), and deferred after it — past the wait
+by MDK's preflight making the eviction again, which every plane refuses again;
+the hold alone covers at most the 50 ms of monotonic time before MDK's re-armed
+deadline — while receiving
+goes on; the evictee stays in every remaining member's roster; and the circle
+is never held in a publish-before-apply transition. (A relay that dropped the frame
+with no answer would take the other shape — possibly exposed, so pending with
+paced retries and the circle's sends waiting behind it. The rig's relays do not
+produce it; tracker row T-OQA records which shape was measured.) The removal
+can never land, because every retry is refused for the same reason.
 
-*At this commit Haven raises no verdict for that state either.* The arm asserts
-the whole of it as its expectation: the evictee still in the roster of the member
-that never saw the commit, a send that fails, an inbound fix that is buffered
-before the peel rather than applied, `unrecoverable_circles()` empty with no
-`GroupUnrecoverable` on any bus, a staged COMMIT rather than the stranded
-PROPOSAL a rollback would have left, and the obligation outliving three
-foreground publish passes — paired with its own control, because the arm then
-lifts the cap and lands the same commit, which discharges it. That release is
-what keeps "still owed after three passes" from being satisfied by a world in
-which nothing can be published at all, and it is also what keeps the DEVICE
-gradeable afterwards: an unredeemed eviction obligation is a per-device read, so
-O2 and O6 would otherwise report it — correctly — for every later round. A real
-oversized removal has no such release, and that permanence is the whole of OQ-A.
-Both directions are covered exactly as S14's are: if the wedge stops
-happening the canary is unmet and the arm is **rc 3**, "the recorded expectation
-is stale"; if a verdict starts appearing the silence canary is unmet and it is
-**rc 3** again, because the recorded expectation must then be replaced by a
-graded one in the same commit. Changing it in either direction without citing
-OD-1 (DECIDED — a per-circle verdict in the circle's details sheet — and NOT
-BUILT) and owner decision OQ-A (name the undischargeable obligation as its own
-cause, because its remedy differs: the user cannot retry, and a banner offering
-"retry" would offer something that can never succeed) is a regression.
+*At this commit no terminal verdict names that state either.* The arm asserts
+the whole of it as its expectation — the machine-readable refusal; the rollback,
+with no pending record and no publish-before-apply transition, and the re-armed
+eviction; the evictee still in the roster of the member that never saw a commit;
+a location deferred `DepartureDue` inside the refusal's wait and deferred after
+it (which deferral then depends on whether MDK's 10–50 ms re-arm has passed);
+`unrecoverable_circles()` empty with no `GroupUnrecoverable` on any bus — paired
+with its own control: the arm then lifts the cap, and the product stages the
+re-armed eviction again and lands it. That release is what keeps the canaries
+from being satisfied by a world in which nothing can be published at all. A
+real oversized removal has no such release, and that permanence is the whole of
+OQ-A. Both directions are covered exactly as S14's are: if the shape changes the
+canary is unmet and the arm is **rc 3**, "the recorded expectation is stale"; if
+a verdict starts appearing the silence canary is unmet and it is **rc 3** again,
+because the recorded expectation must then be replaced by a graded one in the
+same commit. Changing it in either direction without citing OD-1 (BUILT — one
+per-circle card in the circle's details sheet, read from `circle_recovery`, which
+no arm reads yet) and owner
+decision OQ-A (name the state as its own cause, because its remedy differs: the
+user cannot retry, and a banner offering "retry" would offer something that can
+never succeed) is a regression. The state keeps its existing neutral wording
+until W9r names it.
 
-The circle it wedges is built with `build_extra_circle` and is deliberately
-outside `world.circles()`: a circle that never sends again may not be one a
-world-wide oracle grades, and that is also why the arm declares
+The circle it uses is built with `build_extra_circle` and is deliberately
+outside `world.circles()`: a circle whose sends wait on a refused eviction may
+not be one a world-wide oracle grades, and that is also why the arm declares
 `epochs_crossed: 0` and carries every epoch claim as a canary instead.
 
 S22's other three arms GRADE their promise: a size refusal is
@@ -275,16 +328,18 @@ member's own fixes keep reaching its peers while theirs never reach it, and its
 send path stays open. That asymmetry is the user-visible shape: everybody
 else's locations stop arriving, with nothing saying so.
 
-*At this commit Haven raises no per-circle verdict for a device stranded behind
-a lost commit. This arm asserts that silence. OD-1 is DECIDED — a per-circle
-verdict inside the circle's details sheet — and is NOT BUILT. When it lands,
-this arm's absence assertion becomes a presence assertion within
-`silence_window()`; changing it in either direction without citing OD-1 is a
-regression.* The silence is read on every surface haven-core has:
-`unrecoverable_circles()` empty on every device, no `GroupUnrecoverable` on any
-bus, and the circle-health row readable and carrying no peer-event stamp — that
-stamp is the app layer's (`CircleManagerFfi::note_peer_event`), so at this tier
-haven-core itself records nothing about the strand at all.
+*At this commit no terminal verdict names a device stranded behind a lost
+commit. This arm asserts that silence. OD-1 is BUILT — one per-circle card
+inside the circle's details sheet, read from `circle_recovery`, whose `Stalled`
+cause is the epoch-stall detector's for this shape — and no arm reads
+`circle_recovery` yet. When one does, this arm's absence assertion becomes a
+presence assertion within `silence_window()`; changing it in either direction
+without citing OD-1 is a regression.* The silence is read on the surfaces the
+rig reads: `unrecoverable_circles()` empty on every device, no
+`GroupUnrecoverable` on any bus, and the circle-health row readable and
+carrying no peer-event stamp — that stamp is the app layer's
+(`CircleManagerFfi::note_peer_event`), so at this tier the health row records
+nothing about the strand.
 
 The arm carries its own control, run FIRST: the same pause, handshake
 partition, commit, heal and resume with the store KEPT converges all three, so
@@ -308,8 +363,9 @@ throughout, the commit never crosses the partitioned endpoint (final, because a
 fix published after it does cross and one connection's frames are written in
 order), and a pause-and-resume recovers the commit from a cursor that never
 went backwards. The catalogue's "the victim recovers no location published
-during the partition" is NOT asserted: it needs the TTL horizon, and the expiry
-screen is a WALL read on the wall side of the rig's clock partition, so no
+during the partition" is NOT asserted: it needs the TTL horizon, and expiry is
+judged on WALL clocks — the relay double and `nostr-relay-pool` — on the wall
+side of the rig's clock partition, so no
 policy step can age an event into it — stepping the policy clock to reach it
 is exactly what `check_soak_clock_partition.sh` catches. The forged-expiry
 vector is S09's. A scenario that partitions an engine endpoint must also run no
@@ -319,8 +375,7 @@ canonical endpoint for every circle and would heal it by the other path.
 ### What the crate's own tests run instead, and how much of it
 
 `tests/oracles.rs` runs **every registered arm** as its own test — all
-fifty-five but five (two excluded, three expected red — S23, S05's
-`kill-receive-auto-commit` and S08's `buried-past-the-cap`, below) — rather
+sixty-six but the two excluded — rather
 than one "smallest arm" per scenario. That
 distinction is the whole point: an ordering over arms tie-breaks positionally,
 and the version that ordered by derived deadline left most of the registry with
@@ -331,7 +386,7 @@ bounds each start at the 684-second delivery-silence window, and
 excluded set is exactly those two arms — so a new arm cannot join it silently.
 
 Beside the sweep there is **one deliberate mis-configuration control per
-scenario**, twenty-one in all, each running the real arm against a world arranged
+scenario**, twenty-three in all, each running the real arm against a world arranged
 so the condition it grades cannot arise — a partition armed on the witness
 instead of the victim, an endpoint that is gone so no commit is ever stored to
 be lost, a second endpoint that never returns, a
@@ -342,7 +397,7 @@ above an absent device, a race in which neither sibling can be confirmed, no
 subscription open for a forgery to land on, no plane serving the KeyPackage slot
 a rotation would be decided for (and, S12's second control, a package minted
 unexpired so the engine has nothing to refuse), nothing reaching a relay to be refused by one,
-a store with no backlog for a catch-up sweep to drain, a seed the relay serves whole so no commit is buried under it, and a closed endpoint with nothing to duplicate — each requiring the verdict to be
+a store with no backlog for a catch-up sweep to drain, a seed the relay serves whole so no commit is buried under it, a closed endpoint with nothing to duplicate, and relays that all answer so nothing holds a circle or is owed — each requiring the verdict to be
 **rc 3**, the world proving nothing, rather than the rc 0 every oracle would
 otherwise hand it.
 
@@ -372,107 +427,226 @@ cannot meet the per-circle bound at ten circles, that is the finding S10 exists
 for, and the bound is never widened to fit it. Measured 2026-09-25 at the PR
 shape (eight circles built by the arm): under 16 s including the world build.
 
-### Expected red: S23, and the promotion rule
+### S23: promoted with C7's fix
 
-One arm is REQUIRED to be red. S23's `chained-commit-backlog`
-grades C7 (`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`): a member paused
-across TWO confirmed commits is served them newest-first on its resume — the
-page order is pinned by waiting the wall second out between the commits, read
-back off the relay's own store, so the strand is the same every night and never
-a coin toss on event-id order — and the newer commit cannot peel until the older
-is applied, is retained as a `PeelDeferred` row, and is retried only by a sweep
-the receive plane never reaches. The device sits one epoch below its peers;
-three further fixes from the committer do not move it. Unlike S03 and S14, whose
-recorded silences are decided and not built (OD-1), this is a PRODUCT DEFECT
-that nobody decided, so it is GRADED rather than recorded: the closing round —
-witness leading, so the victim's first probe is a receive — reports
-`epoch-diverged` (O2) and `probe-not-delivered` towards the victim (O1) at
-**rc 1**. The arm has **no scheduled execution** until Phase 4's weekly: it is
-asserted red on every commit in `cargo test`, and it is NOT in the nightly,
-because `verdict.log` keeps a run's first violation only and a required red
-early in the walk would hide every later finding ("When a night goes red").
-It returns to the nightly in the change that fixes C7.
+S23's `chained-commit-backlog` grades C7 (`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`).
+A member is paused across TWO confirmed commits and served them newest-first
+when it resumes. The page order is pinned: the arm waits out the wall second
+between the commits, reading it back off the relay's own store, so the shape is
+the same every night and never a coin toss on event-id order. The newer commit
+cannot peel until the older one is applied, so the engine retains it as a
+`PeelDeferred` row. MDK v0.9.4 retried such a row only inside an advance, and
+scheduled none for it.
 
-What the arm ALSO measured, 2026-09-25: the stranded device's OWN next seal
-(`encrypt_location`, nothing published) drains the retained commit — the send
-path's settle reaches the deferred-peel sweep the receive path never does — and
-it converges. So the blackout is bounded by the victim's own publish cadence
-while it is sharing, and unbounded only for a device that receives without
-sending; C7's "permanent" reads as "until this device next publishes". The arm
-records that lever as its last canary, after the grade, so the recovery is
-evidence beside the finding rather than a substitute for it.
+Until 2026-09-28 the arm was REQUIRED to be red. The device sat one epoch below
+its peers, three further fixes from the committer did not move it, and the
+closing round reported `epoch-diverged` (O2) and `probe-not-delivered` towards
+the victim (O1) at rc 1. The only thing that drained it was the device's own
+next seal, whose send-path settle reaches the deferred-peel sweep. So a device
+that received without sending stayed stranded indefinitely. Haven's fix drains
+the row without waiting for a send. An epoch change in any engine batch leaves
+its group owing an advance, and the first receive plane of a newly opened
+session advances every circle once. That fix is a Haven-side mitigation of an
+MDK gap, tracked as row C7 of `docs/MDK_UPSTREAM_TRACKER.md`. Upstream, MDK PR
+#1206 (first in v0.9.11) adds deferral- and hydrate-scheduling, which may cover
+C7 — unverified; no upstream issue describes the epoch-change edge. The row's
+removal condition is this arm staying green with the Haven drain removed, and
+an MDK issue is to be filed for the epoch-change edge if it does not.
 
-`tests/oracles.rs` names the arm in `EXPECTED_RED`, beside
-`EXCLUDED_FROM_THE_SWEEP`, with that one reason. Its own test requires rc 1
-with both findings, and its FIRST assertion is the promotion rule: **the day the
-arm grades rc 0, C7 is fixed, and the arm is promoted to `SWEPT` (and deleted
-from `EXPECTED_RED`) in the same change** — never left asserting a defect the
-product no longer has, and never quietly re-listed as a recorded expectation.
-The product fix — a sweep of deferred peels on resume or on a timer,
-independent of whether a peelable event arrived — is not designed in the soak.
-Its mis-configuration control withholds the handshake class from the victim's
-own endpoint, so no backlog is ever served to it: a device that received no
-chain cannot be stranded behind one (that is S03's strand, a partition's), the
-served-backlog canary cannot hold, and the arm reports rc 3.
+Since 2026-10-25 (R2) the second Haven edge is replaced: the first plane of a
+session — the live engine's start or any catch-up sweep, a
+`HAVEN_LIVE_SYNC=false` build's included — drains the engine's own pending set
+in place of advancing every circle (tracker rows C7, T-SCHEDULER), and the
+end-of-migration S23 nightly decides whether that stands — if it is red, the
+edge is restored. The epoch-change edge is kept: with Haven's in-plane serving
+dropped this arm still converged, on the deferred-peel sweep MDK retries inside
+the advance that settled a pass (mdk#1206), so no run shows that edge needed —
+which proves only that no test sees it go, not that removing it is safe.
 
-### Expected red: S05's receive-plane kill (C9, attribution OPEN)
+The arm now grades rc 0 and is `SWEPT` in `tests/oracles.rs`
+(`s23_chained_commit_backlog_holds`). It returned to the nightly in the same
+change, as the promotion rule required. The closing round keeps its shape: the
+witness leads, so the victim's first probe is a receive, and the victim's own
+seal is recorded after the grade, as the last canary. That seal therefore
+cannot stand in for the receive-side drain. If the drain regresses, O2 and O1
+report it at rc 1 again. Its mis-configuration control
+(`s23_one_commit_while_away_is_not_a_chained_backlog`) runs the arm over ONE
+commit. A single commit is redelivered and applied on its own, so the chain the
+floor demands never forms, and the control reports rc 3 with
+`FloorUnmet(EpochsCrossed)`.
 
-A second arm is REQUIRED to be red, for a reason that is measured but not yet
-attributed. S05's `kill-receive-auto-commit` subscribes ONE device's live engine
-to an extra circle, lets that engine fold a peer's published leave inside a
-background burst (the eviction is parked, owed, and nothing is on the wire),
-then publishes it from a foreground open into an `OK` the device's own endpoint
-swallows, and hard-kills and reopens the device. After the reopen the
-obligation is orphaned: the next foreground open publishes nothing,
-`orphaned_removal_deferrals()` names the circle and the device's own verdict
-sweep emits `GroupUnrecoverable` for it (`unrecoverable_circles()` stays empty —
-it is the engine's latch alone). Recorded on the timeline as `after-kill` /
-`removal-reported`, the OD4-c answer for a hard kill in that window.
+### S24: two circles on distinct relays share one routing id
 
-Two findings make it red. **A:** every send on the wedged circle is refused
-with no typed reason at either layer, so the classifier can only call it a
-`Defect` — hydrate marks the group stable at the epoch the staged commit
-projected while `OpenMLS` still holds that removal-bearing commit; the arm
-records the refusal and hands O5 nothing. **B:** a peer's own commit of the
-same removal, acknowledged and confirmed, is answered `Buffered` by the reopened
-device and never heals it, so O2 and O6 report the owed eviction at **rc 1**.
-`haven-core`'s `a_deferral_a_peer_healed_after_a_restart_is_not_reported` heals
-the same shape on a bare processor, and a replica of it still does; the
-difference lies in the live-engine restart path and is not pinned, so **whether
-this is the product's or the rig's is OPEN** (C9 in
-`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`, owner question OQ-U; the
-reproduction and every hypothesis ruled out are in the 2c S05 implementation
-notes of the Phase-2 plan). The promotion rule is S23's: its own test asserts rc
-1 with O2's `removal-owed` for the killed device, and the day it grades rc 0 it
-is promoted to `SWEPT` in the same change. Like S23's, the arm is asserted in
-`cargo test` only and has no scheduled execution until Phase 4's weekly; it
-is not in the nightly, and returns there when C9 is resolved. Its mis-configuration control
-swallows nothing, so the eviction is acknowledged before the kill and nothing is
-left to orphan: rc 3.
+S24's `collided-circles-leave-apart` builds two circles outside the world's
+table, each on a plane of its own (`build_extra_circle_on`), and makes the
+admin commit a routing update that moves one onto the other's routing id, its
+relays unchanged — what another client's admin can do and Haven never does:
+the routing component is encoded in the rig (`cgka-traits`, pinned as
+`cgka-engine` is), staged through the session under its durable record, and
+sent and confirmed by the product's driver; every other member takes the
+commit in through the poll. It grades the promise tracker row
+T-ROUTING-ROTATION records, over real relays: neither circle is sealed for on
+the admin or on a member (`held-circle-sealed`), before the leaves and after
+the admin's hand-over — a commit in one of the two, after which MDK may route
+the shared id to it again — and every event of the member's leave of one
+circle and of the admin's leave of the other (hand-over and proposal) reaches
+that circle's own plane and never the other's (`circle-traffic-crossed`,
+read off each plane's ledger and store, for every event the arm's drivers
+sent, recorded or not), and every handshake either plane holds under the
+shared id is one the arm sent for that plane's own circle — one sent for the
+other circle is `circle-traffic-crossed`, one sent for neither is Haven
+making something for a held circle unasked (`unasked-handshake`). Its canaries are the collision's
+conditions — both devices route the moved circle by the other's id, the two
+circles name no relay in common — and the two leaves' own: the member's
+proposed and on its circle's plane, the admin's handed over (that circle's
+epoch moved) and proposed. Its control makes no routing update, so nothing is
+held: rc 3. It needs two relays, which `nightly` and `weekly` have.
+
+What it does not soak: an eviction made under two rows. The wake sweep makes
+no commit since W9q, and every other plane makes a commit only under a record
+whose targets the circle's routing names, so a collided circle — whose sends
+are all held — has no eviction to make (protocol F8a).
+
+### S25: a relay that never answers and one that never ends its replay
+
+S25's `dead-and-silent-relays` grades the owner's P2 decision over real relays:
+a dead or silent relay does not stall a circle, and Security Rule 12 is kept
+while it does not. Plane 0 is the dead relay, plane 1 the silent one; any
+further plane answers throughout. The receiver pauses and resumes around each
+phase, and each fix is stored on ONE plane through that plane's own store while
+it is paused, so which fix arrives says which relay answered.
+
+1. **The dead relay alone** (`unanswering`: every live connection cut, every
+   later one accepted and its handshake never answered). The resume's backlog
+   wait answers settled — it waits on no relay, group or inbox, that was not
+   connected when it took the REQ — and the circle is caught up with its cursor
+   advanced (`silent-relay-stalled` otherwise); every fix an answering relay
+   held arrives (`held-event-lost`).
+2. **The lookback passes** (`Absence::ResubscribeLookback`) and one more resume
+   re-anchors past it: from then on a REQ's ordinary `since` no longer reaches
+   the fix only the dead relay holds, and only the floor that relay owes
+   (`relay_floors`) does.
+3. **The silent relay too** (`withhold-eose`: every page served, its `EOSE`
+   never sent). It holds the circle until the backlog wait is over — read
+   before the wait, which is the only thing in the arm that can release it —
+   and not after: caught up, advanced, every answering relay's fix arrived.
+4. **Health ticks**: the dead relay is taken `down`, so the receiver's pool
+   holds it dropped, and three claimed ticks re-issue no REQ on any plane
+   (`resubscribe-unbounded`).
+5. **The heal**: inside the pool's reconnect bound the dead relay is asked from
+   its floor, gives up the fix only it held (`held-event-lost` otherwise) and
+   its `EOSE` ends what it owed.
+
+Its canaries are the faults' conditions: the dead plane held a connection
+unanswered, the silent plane kept an `EOSE` from a client and that `EOSE` held
+the circle until the wait, the receiver's pool held the dead relay dropped
+before the ticks, both relays left out owed the circle a floor, and the dead
+relay's floor ended. Its control arms no fault: rc 3. The arm found one gap
+itself on its first run: an inbox REQ the pool only queued for a dead relay
+kept every resume waiting the whole backlog window
+(`a_resume_waits_on_no_inbox_relay_that_is_not_connected`, fixed). Each of
+these is RED under the matching product mutation: no release past the wait, a
+queued relay counted as covering, a dropped relay re-anchoring the session, the
+floor ignored by the next REQ, the inbox's queued relay waited on. It needs two
+relays (three to include an answering one, which the crate's own sweep and
+`weekly` give it), and it is `weekly`-only: its derived deadline pays the
+pool's reconnect ladder and the lookback, which the nightly's slack does not
+hold.
+
+### S05's receive-plane kill: swept since MDK v0.10.4 (C9)
+
+S05's `kill-receive-auto-commit` subscribes ONE device's live engine to an
+extra circle and lets that engine take in a peer's published leave inside a
+background burst, which makes nothing of it: the eviction comes due and stays
+due — nothing staged, nothing owed, nothing on the wire (canary 1). The
+foreground open that follows makes it: the session's own drive records the
+eviction and sends it into an `OK` the device's own endpoint swallows, and the
+device is hard-killed with that call out and reopened (canary 3). The record
+outlives the process: the reopened device holds the commit staged under it,
+is named by no verdict, and a location
+asked for meanwhile is deferred, typed; a BACKGROUND BURST then sends the same
+event again when its relay is next due — thirty seconds after the cut attempt
+— and confirms it on the acknowledgement, in the mode that only finishes
+(canary 2 — which also reads that the device is still in that burst when the
+confirm lands), after which the circle sends (canary 4). The arm is priced
+with `WithheldAcks::FanoutResends(1)`: its bound is derived, the driver's
+own thirty-second wait for a silent relay
+(`bounds::fanout_resend_after_silence`, haven-core's
+`AMBIGUOUS_RETRY_BASE_MS`) and one round trip, not tuned. Two things the arm
+is NOT. Its label is historical: no receive path makes that commit any more
+— the foreground's drive does — and the label stays because the lane's
+guards, profiles and issue keys are written on it. And the burst it opens is
+held open past those thirty seconds, which no real burst is: the arm proves
+what a burst's drive does when its relay is due, not that one burst lasts
+long enough to see it. At MDK `e391adc` it was
+REQUIRED red: the reopened device's sends were refused with no typed reason,
+and a peer's own commit of the same removal was answered `Buffered` and never
+healed it (C9 in `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`); it has been
+`SWEPT` since v0.10.4 (`s05_kill_receive_auto_commit_holds`). It stays in
+`weekly` rather than returning to the nightly: that is the owner's call (O5),
+and its 65.75 s bound no longer fits the nightly's slack, so returning it raises
+the budget (`profiles/nightly.toml`). What
+the arm does not kill at: the two other boundaries of a finish-only confirm —
+after a stored acknowledgement and before the confirm, and after the
+confirm's transaction — which haven-core's `finish_only_e2e` and
+`stranded_input_e2e` hold on the real engine.
+
+S05's `confirm-err-is-not-a-failure` changed shape with the same bump: the
+write fault it plants now aborts an ingest before anything is emitted and
+leaves the object recorded as seen (tracker T-FAULTED-INGEST-SEEN), so there is
+no stranded batch for the failing confirm to fold. Its fourth canary is now a
+RECORDED EXPECTATION that the fix is absent, and its fifth grades the promise
+re-authored around v0.10.4's confirm (W9f): the stored record decides, nothing
+is rolled back, and the next drive confirms it. The fifth OD4-c gate in
+`negative-gates-silent` induces the unprocessable event the same way, because
+an envelope nobody can open is the engine's own terminal verdict at v0.10.4.
 
 S05's other two new arms are swept. `kill-send-plane` kills a device between
 SEND and confirm of its own relay-list commit (a swallowed `OK`, the commit
-stored and unacknowledged, on an extra circle no peer receives), after the same
+stored and unacknowledged, on an extra circle outside the world's table), after the same
 update acknowledged has advanced the circle: the reopened device reports
 nothing unrecoverable, has no gating row, and sends again (recorded as
 `sends-resumed`), and the `Restarted` record carries the C1 release and reopen
 latencies. Its control acknowledges the commit, so the kill has no window to
-land in: rc 3. `negative-gates-silent` holds one staged eviction and reads the
+land in: rc 3. `negative-gates-silent` holds one staged eviction — surfaced
+through the FFI receive plane and owed, never parked by a burst — and reads the
 committer's own live-engine verdict at each of the five OD4-c non-wedge states
 in turn — awaiting its own ack, its endpoint dark, its engine paused, a
 future-epoch fix from a world circle it missed, an unprocessable event — five
 canaries, because one read at the end would pass a verdict that fired and
 cleared; it then lands the eviction on an acknowledged publish. Every restart
 here is a clean cancel, not a SIGKILL, and the kill kind is not what either kill
-arm measures (`Soft` reaches the same outcomes; each doc says why). Measured
+arm measures (each doc says why). Measured
 2026-09-27 in `cargo test`, three runs each: `kill-send-plane` 44.7 s of wall
 (79.75 s of bound; release 21 ms, reopen 174-192 ms), `kill-receive-auto-commit`
-about 38 s (79.75 s; release 20-21 ms, reopen 175-190 ms),
+about 38 s (79.75 s; release 20-21 ms, reopen 175-190 ms) — re-measured
+2026-10-10 as re-authored: about 39 s of wall against a 65.75 s bound —,
 `negative-gates-silent` 0.6 s (35.75 s).
 
-### Expected red: S08's live-plane burial (C8)
+### S05's wake-sweep kill: green since W9q (decision 27)
 
-A third arm is REQUIRED to be red. S08's `buried-past-the-cap`
+The wake sweep (`run_catchup_all_circles`, the sweep every app wake runs)
+makes no commit since W9q: nothing in it can tell a background wake from the
+foreground, so it drives in the mode that only finishes. S05's
+`kill-sweep-eviction` grades that. The wake is modelled as the background
+process it is: the committer's engine is stopped, every other remaining member
+is paused so no live plane takes the leave in, and one sweep takes the leave in
+under a silence on every plane that would swallow the `OK` of anything it sent.
+Canaries are the path's conditions — the sweep left the eviction due, with
+nothing staged, recorded or on the relays; the process dead with no engine to
+bring back; the foreground back, its engine started and the driver's resume
+making the eviction under a record, sent once and acknowledged, and applied —
+and every oracle holds (`s05_kill_sweep_eviction_is_green_on_the_driven_path`).
+Its control runs the sweep under no silence: the fault the floor counts never
+falls, rc 3. Priced `WithheldAcks::None`: the sweep sends nothing into the
+silence. Until W9q the arm was EXPECTED RED — the sweep staged and sent the
+eviction through the receive ladder under a legacy obligation, and a kill in
+that window left it unmade and the committer's next send refused (measured
+2026-10-18); it returned to the nightly with the fix.
+
+### S08's live-plane burial (C8), fixed by the NIP-77 pass
+
+S08's `buried-past-the-cap` was REQUIRED to be red until R4. It
 (`scenarios/s08_live_plane_burial.rs`) grades C8
 (`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`): the victim is paused, the
 admin hands the admin bit to the witness (a confirmed commit, stored on every
@@ -485,18 +659,25 @@ page in any wall second). The victim resumes. Haven's live group REQ sets no
 `limit`, so the relay serves its default 500 (`RELAY_DEFAULT_REPLAY_CAP`, pinned
 on the wire in `tests/relay_faults.rs` because `default_filter_limit` is
 `pub(crate)` with no getter) — every one a forgery — and an `EOSE`; the live
-plane trusts it, the cursor passes the commit, and neither a second REQ nor a
-clean catch-up sweep (every circle swept, nothing truncated, no deadline, no
-relay error) asks for it again. The closing round reports `epoch-diverged` (O2)
-and `probe-not-delivered` towards the victim (O1) at **rc 1**.
+plane trusts it and the cursor passes the commit. Before R4 neither a second
+REQ nor a clean catch-up sweep (every circle swept, nothing truncated, no
+deadline, no relay error) asked for it again, and the closing round reported
+`epoch-diverged` (O2) and `probe-not-delivered` towards the victim (O1) at
+**rc 1**. Since R4 the victim's foreground entry and its sweep reconcile the
+circle's window against each relay over NIP-77
+(`haven-core/src/relay/negentropy.rs`), advertising nothing, learn the commit's
+id the capped page left out and fetch it by id from the relay that reported
+it: the arm grades **rc 0**, is swept, and runs in the nightly.
 
-The five canaries are the burial's CONDITIONS, never its symptoms — the real
+The canaries are the burial's CONDITIONS, never its symptoms — the real
 commit, the lookback waited, every store's newest page all forgeries and a full
 page served to the victim on every plane, a fresh REQ answered on every plane,
-the clean sweep — so a product that serves the buried commit grades **rc 0**,
-not rc 3, and the arm's own test fails its first assertion with the promotion
-rule: C8 is fixed, promote to `SWEPT` in the same change. Measured: feeding the
-buried commit to the victim after the burial fires exactly that assertion; with
+the clean sweep, and (the sixth, since R4) a reconciliation that crossed every
+plane — so a product that serves the buried commit grades **rc 0**, not rc 3.
+That is how the arm's own test saw C8 fixed: it failed its first assertion with
+the promotion rule, and the arm moved to `SWEPT` in the same change. Measured
+before R4: feeding the buried commit to the victim after the burial fired
+exactly that assertion; with
 the seed one second after the commit instead of a lookback after it, the live
 page still lacks the commit and the SWEEP recovers it (rc 0) — which is why the
 lookback is waited; and a seed of 501 forgeries all inside one second left even
@@ -504,18 +685,36 @@ that sweep with two pages of forgeries, no commit and no truncation reported,
 which is the sweep's one-second pile-up residual reaching further than
 `catchup.rs` says, and why the seed is spread. Its mis-configuration control
 runs the arm over a seed BELOW the cap: the commit is on the page, the victim
-converges, and the capped-page canary goes unmet — rc 3. As for S23 and S05's
-kill, the burial is asserted in `cargo test` only, has no scheduled execution
-until Phase 4's weekly, and returns to the nightly when C8 is fixed.
+converges, and the capped-page canary goes unmet — rc 3.
+
+`buried-on-a-relay-without-negentropy` is the strand where the pass cannot
+reach, RECORDED: every plane refuses NIP-77 (`Fault::RefusesNegentropy`, the
+proxy answering a `NEG-OPEN` with strfry's `NOTICE "ERROR: bad msg: unknown
+cmd"` and forwarding nothing; the ledger counts NIP-77 frames per device in
+both directions), the burial is on a circle built outside the world's — so the
+closing round grades the world's circle — and the victim's strand on that
+circle is a canary beside the refusal. The residual is `T-NIP77-FALLBACK` in
+`docs/MDK_UPSTREAM_TRACKER.md`; the day a relay without NIP-77 stops stranding,
+the arm is rc 3 and is re-decided.
 
 `unpacked-control` is the same world with sixteen forgeries: the commit is
 served on every plane, the victim applies it live, its cursor moves past it,
 and `relay_health()` reports every expected REQ live. It is swept, and it runs
 in the NIGHTLY as the burial arm's control — the same world and every step but
 the cap, so a night that holds it says the live plane serves a commit under
-forgeries at all, which is the premise the burial's red rests on. With the
-three expected-red arms out, the priced nightly plus its margin is
-4 670.25 s of 4 800 (`tests/budget.rs` is the gate). Measured 2026-09-27 in `cargo test`: about 78 s of wall for the
+forgeries at all, which is the premise the burial arm rests on. The priced
+nightly plus its margin is 5 082.25 s of 5 100 (`tests/budget.rs` is the gate;
+the budget was raised from 4 800 when S16 `processed-ids-growth` joined, and
+from 4 860 when R4 returned the burial to the nightly beside the recorded arm
+and S20's two pile-ups, with the deadline, the step cap and the job cap that
+move with it: 95 m, 99, 140; W9p's re-pricing onto the driver's own waits
+lowered the run and left the budget, which moves only when the run outgrows
+it).
+Measured 2026-10-26 in `cargo test`, ten runs each, all green: the burial
+86-87 s and the recorded relay-without-NIP-77 arm 80-81 s, each against a
+96.75 s bound; S20's two pile-up arms 24-27 s each, most of it the NIP-77
+spacing they wait out.
+Measured 2026-09-27 in `cargo test`: about 78 s of wall for the
 burial and 71 s for the control, each against a 96.75 s bound — the 61 s
 lookback is most of both, and the burial's failing O1 probe pays its whole
 round-trip bound.
@@ -536,32 +735,40 @@ asserts the core's half; WHEN the app re-anchors — resume, the Dart
 `subscriptionHealthInterval` backstop — is Dart's schedule, which Tier 1 does
 not run and Tier 2 owns. Neither half covers the other.
 
-### Durable-storage growth: S16's three arms are three different stores
+### Durable-storage growth: S16's four arms are four different stores
 
 "The engine bounds its storage" is true of exactly ONE of the three stores an
 inbound kind-445 can land in at the pinned engine, and S16 measures each on its
 own terms (Rule 12; `scenarios/s16_storage_growth.rs`, one arm per store, all
-three nightly). Where an event lands depends on who sealed it and on the group's
+nightly). A fourth arm records a store that ordinary traffic grows. Where an event lands depends on who sealed it and on the group's
 epoch state when it arrives, because the peel runs after the `can_ingest` gate
 and before anything convergence-related:
 
 * **`outsider-flood` — the CAPPED `PeelDeferred` store.** Forgeries an outsider
   can mint from the circle's public `#h` — content that decodes, sealed by no
   member — reach the peel and fail there, and the engine retains them up to
-  `MAX_PEEL_DEFERRED_ROWS_PER_GROUP` (256, read from `cgka-engine` at runtime,
-  never restated; the crate's first and only direct MDK dependency). The arm feeds
-  the store PAST the cap and asserts that exactly `cap` rows were retained and
-  every later one was dropped unpersisted — the drop path held for the whole
-  overflow, not for a boundary — then one more forgery over the live plane, after
-  the cap, which leaves no row either. The classification of those drops,
-  `PeelDeferredCapped`, is set from the ABSENCE of a row: the engine answers a
-  capped drop and an ordinary peel failure with the same `Stale{PeelFailed}`, so
-  only a scenario that flooded the store can tell them apart, and the doc says so.
-  Dropping above the cap is NOT a Rule-12 breach — the input is un-peelable, so
-  it cannot be legitimate backlog for this device at this epoch, and transport
-  redelivery is the recovery path once the backlog drains — and the arm records
-  that tension rather than hiding it. Measured 2026-09-26: 264 feeds in under a
-  second, and neither of the other two stores moved.
+  `MAX_PEEL_DEFERRED_ROWS_PER_GROUP` (2048 at MDK v0.10.4, read from `cgka-engine`
+  at runtime, never restated; the crate's first and only direct MDK dependency).
+  The arm feeds the store PAST the cap and asserts that exactly `cap` rows were
+  retained, that every later feed was REFUSED — MDK v0.10.4 answers
+  `ResourceRefused { TransportDeferredCapacity }`, which the classifier reads
+  positively as `PeelDeferredCapped` — with no row, that the row cap and not the
+  16 MiB byte budget is what bound, then one more forgery over the live plane,
+  after the cap, which leaves no row either. A refusal is never recorded as
+  seen: Haven holds the cursor at it and refetches it
+  (`haven-core/tests/resource_refused_e2e.rs`), which is why refusing above the
+  cap is not a Rule-12 breach. **Red at the bump, fixed in Haven:** each send
+  gives the rows still untried under the current context a foreground peel
+  opportunity of 250 ms or 4 rows (`cgka-engine/src/message_processor/mod.rs:215-222,1208-1230`)
+  and queues the send when it runs out, and every commit re-arms all of them,
+  so after a 2048-row flood the victim's next sends were deferred for about
+  four publish cycles. Haven now gives every untried row its try before the
+  send, as far as the wake has room — a background burst's end cuts the drain,
+  and the send is then held for the next wake (`CircleManager::seal_location_staging`;
+  `docs/MDK_UPSTREAM_TRACKER.md` T-FOREGROUND-PEEL;
+  `haven-core/tests/resource_refused_e2e.rs`
+  `a_full_deferred_peel_store_never_defers_the_next_location_send`), the
+  closing round's sends go out, and the arm is `SWEPT` and back in the nightly.
 * **`member-future-header-flood` — the UNCAPPED convergence buffer (#757).**
   A co-member seals kind-445s whose OUTER layer peels at the receiver's epoch
   and whose cleartext inner header claims a far-future epoch, through
@@ -596,7 +803,27 @@ and before anything convergence-related:
   REPLAYS every raw row the window took — measured 2026-09-26 at roughly a
   quarter of a second per row (85 s for 300), after which 256 have become
   `PeelDeferred` and the rest stay `Retryable` for good; the record is in
-  `MARMOT_PROTOCOL_KNOWLEDGE.md` beside #757.
+  `MARMOT_PROTOCOL_KNOWLEDGE.md` beside #757 (measured at `e391adc`, whose
+  cap was 256).
+* **`processed-ids-growth` — the UNPRUNED processed-transport-id table, a
+  RECORDED EXPECTATION** (`docs/MDK_UPSTREAM_TRACKER.md` T-DEDUPE-GROWTH). MDK
+  v0.10.4 records one `cgka_processed_transport_ids` row per wrapper it peeled
+  and keeps it for the life of the group
+  (`storage-sqlite/src/migrations/0058_processed_transport_ids.rs`); only
+  forgetting the group deletes the rows. No adversary is needed: every
+  location a member receives adds one. The arm sends eight fixes and reads the
+  count after each through `processed_transport_id_count_for_test` (seam 10;
+  one step per fix), hands the first fix to the victim again (a duplicate
+  records nothing, so the count is of wrappers peeled, not of deliveries),
+  then walks the group `DEFAULT_MAX_PAST_EPOCHS + 2` commits forward — one row
+  per commit followed — and reads the count once more: every row is still
+  there, though the engine no longer holds a key for the epoch the fixes were
+  sealed in. That last reading is the expectation. The day MDK prunes the
+  table it is unmet and the arm is **rc 3**, "the recorded expectation is
+  stale", and is replaced by a graded bound in the same change. Its
+  mis-configuration control runs it on a downed plane: nothing is carried,
+  nothing is peeled, rc 3. It says nothing about how fast the table fills on a
+  device; no figure for that has been measured.
 
 **The recording story (decision 0.31).** The bucket policy renders `5+` from a
 flood's third sample and a byte delta as `5+` always, so the growth CURVE is
@@ -616,11 +843,100 @@ an injected `EVENT` on a connection only for the subscriptions that connection
 opened, pinned by `tests/relay_faults.rs`, and every S16 arm's live-plane canary
 reads the injected event's row (or its absence) out of the ENGINE's store.
 
+### Relay addresses no plane serves
+
+Most arms move an epoch by committing a relay list that names one more
+address — `wss://<salt>.example.com` — so the commit is a real change. Since
+the routing follow, the product follows each circle to what it lists, so that
+address is dialled. Dialled as written it would leave the host (a DNS query
+at the least), so the rig's address map (`rig/address_map.rs` `endpoint_map`)
+gives each such address an endpoint of its own: a listener of its own in front
+of the world's FIRST plane's relay, one per address per device (sixteen per
+device, `ALIAS_ENDPOINTS`; a world that names more fails its teardown rather
+than folding two addresses into one relay). Each is therefore a relay of its
+own to the device's pool, to the driver's per-relay gate and to the
+`min(2, n)` count of relays that acknowledged, and it takes every fault aimed
+at its plane or at its device. Before W9p-2 the map made such an address a
+second NAME for the first plane's own endpoint: one relay counted as two, and
+both names shared the driver's per-relay gate, which is keyed on the mapped
+address (`RelayMappedFanout::take`).
+
+Why the address is mapped at all was measured on 2026-10-18 (W9p-1): left
+unmapped, S04's `offline-across-commits` reddened in an A/B run on exactly the
+terms a dead relay then produced — its REQ never live, the burst's backlog
+wait timed out, the cursor advance never redeemed — while S14's red that day
+had a separate cause (its isolation premise; fixed apart). A dead relay no
+longer holds a circle: since W9p-2 the live plane counts a relay toward a
+circle's coverage only if it was connected when it took the REQ, releases one
+that never ends its replay after `EOSE_WAIT`, and records what each relay left
+out owes (`relay_floors`); S25 grades exactly that over real relays. The map
+stays because a hermetic world dials nothing off the machine.
+
+### The MDK v0.10.4 bump: what moved in the rig
+
+* **The classifier** (`oracle/undecryptable.rs`) maps v0.10.4's outcomes:
+  `Ignored` by category (duplicate, own echo, routing, and a new `Invalid` for
+  input the engine proves can never apply), `LocalState` (removed, quarantined,
+  a new `RejoinPending`), `TransportDeferred` → `PeelFailed`, `ResourceRefused`
+  → `PeelDeferredCapped`, `Rejected` → `Invalid`, and the live `Stale` reasons.
+  A same-epoch race's sibling is now HELD for the convergence pass that
+  adjudicates it, so the branch is read off the sibling's stored row once that
+  pass closes (`classify_settled_sibling`: `Processed` adopted,
+  `ConvergenceDeferred` lost). `Quarantined` is now reachable through the rig.
+* **S06** — an unresolvable application row no longer gates the circle at all
+  (it gates only as a branch witness beside competing commit edges), so the arm
+  now asserts the row neither gates nor survives a sweep past the horizon.
+* **S09** — the two forgeries the parse can read are the ENGINE's own verdict
+  (terminal or retained), never an ingest failure; the cursor holds for neither.
+* **S12** — the twin is minted in the Current profile: the proof is LeafNode
+  component 0x8009 in the app-data dictionary.
+* **S14** `race-restart-before-confirm` — the second racer's commit is staged
+  in the core's STAGING MODE, with its durable `OutboundFanout` row written in
+  the same lock hold, and published by the core's fanout driver
+  (`haven-core/src/relay/fanout.rs`) — the path every product commit but one
+  now takes (the exception: the wake sweep's, below). The driver sends into relays that store the commit while the
+  device's endpoint swallows the `OK`: the commit is on the relay, unresolved
+  on the device, and the process is killed there — between the relay's
+  acknowledgement and the local confirm. Canary 2 is now "the send path is
+  STILL shut after the reopen, held by one pending fanout carrying the staged
+  commit's id": MDK's hydrate restores the pending commit from the row instead
+  of clearing it (`cgka-engine/src/engine.rs:1894-1947,2084-2110`). The arm
+  then has the product resume it (`drive_due`), stepping the driver's pacing
+  clock over the wait the driver itself names rather than sitting through it;
+  the relay answers the byte-identical event and the commit applies. Both
+  commits are then delivered both ways and the arm grades one surviving
+  branch, as before. The swallowed acknowledgement costs one call of MDK's
+  relay client — twenty seconds of real time, priced as
+  `WithheldAcks::FanoutDrives(1)` (`bounds::fanout_call_ceiling`).
+  **Why it was red on some seeds:** while the rig published the commit itself
+  and dropped the pending ref, the kill left a staged commit with no row;
+  hydrate cleared it, and the reopened device's first convergence pass then
+  merged that commit's own stored row alone — so whenever the content ordering
+  favoured the peer's commit, each device kept its own branch (a twin fork no
+  later input healed; 35–45 % of runs). A commit staged with its row has no
+  such state. Since W9q no path stages without a row: the wake sweep makes no
+  commit at all, and S05 `kill-sweep-eviction` grades that. Since the routing follow
+  an engine listens to every circle its device holds, the extra circle
+  included, so every S14 arm now stops both racers' engines for the race and
+  starts them after its reads.
+* **S18** `create` (now `swallowed-ok-founding-welcome`) — a founding create
+  is canonical at v0.10.4, so an
+  unacknowledged welcome leaves the circle on the admin's device and nobody
+  else's; the rig reports it unacknowledged rather than rolled back.
+* **S19** `duplicate-replay` — went red at the bump because Haven never
+  acknowledged MDK's durable application outputs, which re-emits every
+  decrypted fix at each session open; fixed in `haven-core`
+  (`SessionManager::note_batch`, `tests/application_output_ack_e2e.rs`).
+* Every rig seam that hands a peer commit to a device now serves the
+  convergence deadline MDK announces, the way a receive plane does
+  (`settle_receive_for_test`).
+
 ### The catch-up sweep under page faults: S20's five arms
 
 RLY-05 was five ways for `run_catchup_all_circles` to call a window finished when
-it was not, or never finished at all. S20 (`scenarios/s20_catchup_sweep.rs`, all
-five arms nightly) rebuilds each against the real relay double. Every arm seeds a
+it was not, or never finished at all. S20 (`scenarios/s20_catchup_sweep.rs`; these
+five arms and the two pile-up arms below, all nightly) rebuilds each against the
+real relay double. Every arm seeds a
 backlog of GENUINE kind-445s — locations members sealed and never published,
 written into every plane's store with `SimRelay::store`, one per circle per wall
 second, none in the second a cursor already names — and a seed reaches no live
@@ -662,7 +978,7 @@ Measured 2026-09-26, `cargo test`, world build included, three runs each:
 against 26.75 s of derived bound each (133.75 s for the five). The two long arms
 are the backlog's one-event-per-second mint.
 
-**Found while building it (owner decision pending):** the page-bound fix closes
+**Found while building it (owner question OQ-V):** the page-bound fix closes
 (b) for a FUTURE-dated page only. A full page of kind-445s dated inside ONE
 second of the window — here, the same rewraps dated at their source's own
 second — is served, keeps the chase alive by page size, repeats at a boundary
@@ -670,7 +986,16 @@ that cannot descend, and halts: measured, three consecutive sweeps held every
 circle and never served the genuine event one second below the pile-up. The
 forgeries carry no `expiration`, so nothing retires them. Recorded as **C10** in
 `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md` (mechanism and `catchup.rs`
-cites); not graded — whether it gets an expected-red arm is owner question OQ-V.
+cites). R4 answers it with the NIP-77 pass and grades it: `same-second-pile-up`
+seeds one genuine location per circle and, in the second above it, a whole page
+of events the screen refuses before authentication, then runs two sweeps on
+relays that speak NIP-77 — a genuine location never taken in is O1's
+`probe-not-delivered`, and a circle whose cursor neither sweep advanced is the
+new `cursor-held` finding (rc 1). `same-second-pile-up-without-negentropy` is
+the same seed on relays that refuse NIP-77, RECORDED: the window stays held and
+the location unreached (`T-NIP77-FALLBACK`). Both wait out the pass spacing
+(`Absence::NegentropySpacing`, `NEG_PASS_SPACING_MS`) before seeding, so a pass
+a wake began at the world's start cannot stand in for the sweep's.
 
 ---
 
@@ -863,7 +1188,7 @@ wrong is still the rig's rc taxonomy, never the deadline.
 sum of its step caps (10 scanner + 25 rig build + 25 drive = 60), so the
 drive's own 23-minute deadline is what reaps a hung run rather than the job's
 anonymous timeout — which is the outcome the ordering rules exist to prevent.
-The other two jobs are the same shape (135 against 129, 355 against 340). What
+The other two jobs are the same shape (140 against 134, 355 against 340). What
 is still missing is C6's other term: job cap ≥ Σ step caps **+ declared
 uncapped minutes**, and that declaration has to be MEASURED. C6 therefore
 deliberately does not cover the soak jobs yet (see "Two decisions inside those
@@ -969,8 +1294,8 @@ an rc-3 run — "the faults never fired" — still has its seed on record.
 ```
 haven-soak profile=pr seed=0x…  commit=<short sha, <=12 hex> rustc=<version> schedule=<8 hex>
   rc_names=0clean/1violation-or-leak/2rig/3unusable/4meta
-  measured: wall=<s>s peak_rss=<MiB>MiB
   S07 amplification factor: not measured (Phase 2)
+  measured: wall=<s>s peak_rss=<MiB>MiB peak_session_store=<quarter of the ceiling>
 ```
 
 **Why the seed and the schedule tag are printable.** Every preimage of a
@@ -1020,9 +1345,9 @@ than resolved silently (owner decision Q4).
   step in `audit.yml`, the row in `haven-core/SECURITY.md`, and this line. What
   lifts it: `nostr-sdk` ≥ 0.45 subsumes the crate, and the tree is pinned to
   0.44 against MDK's `nostr` types, so lifting it is a graph-wide bump.
-  `check_mdk_supply_chain.sh` reads `haven-core/Cargo.lock` only, so this
-  lockfile is outside its scope; `soak-tooling`'s own one-version step is the
-  only other control over what this crate resolves.
+  What this crate resolves is also held by `check_mdk_supply_chain.sh` and
+  `check_lockfile_universe.sh`, which read this lockfile next to haven-core's
+  and rust_builder's.
 * **`nostr::Keys` cannot be zeroized.** Every raw secret byte the harness
   materialises is `Zeroizing`, and `SimDevice`'s secret-bearing fields derive
   `ZeroizeOnDrop`, but `nostr::Keys` holds a `ConversationKey` shape the
@@ -1060,7 +1385,7 @@ than resolved silently (owner decision Q4).
 | `check_no_identifier_logging.sh`, `check_no_key_logging.sh` | `tooling/soak` as its own root with its own floor in each |
 | `check_logscan_policy.sh` | `DECLARED_PLANTS_OFF['soak']` — the rig has no Dart channel, so a declared Dart plant would be a control nothing could satisfy; its `rust` shape plant is what proves the sink was reached |
 | `check_logscan_wired_everywhere.sh` | `run-soak-core.sh` in `RUNNER_PINS`, paired with the fixture in its own `--self-test` that pins the gate |
-| `check_e2e_publish_before_apply.sh` | `tooling/soak` as a second root beside the Dart harnesses: a file that calls `confirm_published` or `finalize_relay_update` must also CALL a witness (`publish_witnessed`, `publish_and_resolve`, `publish_and_confirm`, `witnessed_ok`). Definitions and comments do not count — a test that implements `fn witnessed_ok` for its own relay double has witnessed nothing |
+| `check_e2e_publish_before_apply.sh` | `tooling/soak` as a second root beside the Dart harnesses (check 2): no file resolves a staged commit itself — none calls `confirm_published(`, `finalize_relay_update(`, `publish_failed(` or `decrypt_location_collecting_commits(` — and the rig's publish path (`src/rig/circle.rs`) builds the product's driver (`Publishing { … }`). Comments do not count either way |
 
 ### Two decisions inside those guards, recorded
 
@@ -1100,7 +1425,7 @@ exactly that (`lane-red`, below). The artifact is
 |---|---|---|
 | 1 | A **violation** (`VIOLATION.marker`: an invariant broke; the first-violation snapshot is uploaded) or a **leak** (`LEAK.marker`: a capture carried a declared identifier; the tree was emptied and only the fact of containment is published) | A violation is a finding about `haven-core`: reproduce it from the seed. A leak is a Rule-15 breach in the product or the rig, and outranks everything else in the night |
 | 2 | **The rig is broken**, not the subject | A rig bug. Fix the rig; a night with an rc 2 slot proves nothing about the product |
-| 3 | **The night proves nothing**: a scheduled fault never fired, an expectation floor was unmet, or a recorded expectation (S03, S14, S22) went stale | Read the banner and the schedule, not the app. A stale recorded expectation is replaced by a graded one in the same commit (see "The first recorded expectation") |
+| 3 | **The night proves nothing**: a scheduled fault never fired, an expectation floor was unmet, or a recorded expectation (S03, S14 and S22; S08's, S16's and S20's recorded arms; S05's and S09's recorded canaries) went stale | Read the banner and the schedule, not the app. A stale recorded expectation is replaced by a graded one in the same commit (see "The first recorded expectation") |
 | 4 | **Proves too little**: an intact run with an ungraded verdict — typically reaped before its first world was built | Treat as infrastructure until shown otherwise |
 | — | **No verdict**: the slot uploaded nothing (the build failed, so the drive never started) or its artifact is empty | Read the job log; a runner loss is re-run once by `rerun-runner-losses.yml` |
 | — | **Lane red** (`lane-red`): the rig said rc 0 but the slot's job is red — the lane's own scan (a leak is rc 1, an unusable or ungraded capture 3 or 4) or a step after the drive reddened it | Read that slot's scan step and job log; the verdict has nothing to say about it |
@@ -1153,19 +1478,18 @@ that scenario (an rc 3 reds its slot, so a green night already has none).
 PR-gated ⊆ nightly-gated stays enforced by L5; nothing from Phase 2 moves to
 the PR lane before then.
 
-**The expected-red arms are not in the nightly.** Three arms are REQUIRED to
-be red until their product fixes land — S23 `chained-commit-backlog` (C7), S08
-`buried-past-the-cap` (C8) and S05 `kill-receive-auto-commit` (C9, attribution
-open) — and `verdict.log` records a run's FIRST violation only. In the nightly,
-one of them early in the walk would be the violation every night reported:
-every later defect would be masked from the issue path and the monitor, no
-night could be all-slot green, and the fourteen-night count could never start.
-So they run in `weekly` (no scheduled execution until Phase 4) and are
-asserted red on every commit by `tests/oracles.rs` `EXPECTED_RED` in
-`cargo test` (the `soak-tooling` job). A red night is therefore a finding.
-Each arm's own test fails its first assertion the day it grades rc 0, which is
-the commit that promotes it to `SWEPT`, removes it from `EXPECTED_RED` and
-returns it to the nightly.
+**No expected-red arm is in the nightly.** `verdict.log` records a run's
+FIRST violation only, so in the nightly an expected-red arm would be the
+violation every night reported: every later defect would be masked from the
+issue path and the monitor, no night could be all-slot green, and the
+fourteen-night count could never start. An arm required red runs in `weekly`
+(no scheduled execution until Phase 4) and is asserted red on every commit by
+`tests/oracles.rs` `EXPECTED_RED` in `cargo test` (the `soak-tooling` job),
+which is empty today. A red night is therefore a finding. An expected-red arm's
+own test fails its first assertion the day it grades rc 0, which is the commit
+that promotes it to `SWEPT`, removes it from `EXPECTED_RED` and returns it to
+the nightly — as S23 `chained-commit-backlog` (C7), S16 `outsider-flood`, S05
+`kill-sweep-eviction` (W9q) and S08 `buried-past-the-cap` (C8, R4) did.
 
 **Owner items for the commit that closes the fourteen-night gate** (none is
 done yet, because each needs measured runs):

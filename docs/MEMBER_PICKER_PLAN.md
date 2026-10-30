@@ -823,26 +823,29 @@ literals. All eight now source from `NpubValidator.shortenForDisplay`
 after the audit no caller wanted anything else. There is now no argument a future
 call site can pass to shorten it.
 
-**[P3] The eight, as they stand** — `circle_member_tile.dart:138`, `:330`,
+**[P3] The eight, as they stood at P3** — `circle_member_tile.dart:138`, `:330`,
 `:483`; `member_detail_sheet.dart:91`; `remove_member_action.dart:119`;
 `selected_members_list.dart:85`; `invitation_card.dart:288`; and P2's new
-`member_picker.dart:277`. A lint test fails if a ninth format appears
+`member_picker.dart:277`. Those lines have since moved, and four more call sites
+joined them (two more in `invitation_card.dart`, one more in `member_picker.dart`,
+and `missed_invitations_dialog.dart:125`), all through `shortenForDisplay`. A
+lint test fails if a caller-settable length reappears
 (`test/lints/single_npub_display_format_test.dart`).
 
-**The three related surfaces P0 found — two are now CLOSED:**
+**The three related surfaces P0 found — all three are now resolved:**
 
 - ~~**`invitation_card.dart:86`** renders the *inviter's* pubkey as **hex at 8/4
   = 48 bits**~~ — **CLOSED.** The card now renders `invitation.inviterNpub`
-  (bech32) through `shortenForDisplay` at 12/6 (`invitation_card.dart:288`), so
+  (bech32) through `shortenForDisplay` at 12/6 (`invitation_card.dart:392`), so
   the join screen carries the same 2⁶⁵ grind cost as the roster. The conversion
   step the draft said was needed is the `inviterNpub` field itself
-  (`circle_service.dart:334`), which the FFI already supplies.
-- **`SelectedMembersSummary` is still fed hex, not an npub**
-  (`name_circle_page.dart:166-169` maps `memberKeyPackages` to `kp.pubkey`), so
-  the create-circle confirmation renders a hex fragment through an npub helper.
-  Not a downgrade (12+6 hex chars pin 72 bits vs the old 6/3's 36), but a user
-  cannot cross-check a hex fragment against the npub they were handed. **Still
-  open** — P2 rebuilt the picker, not this summary.
+  (`circle_service.dart:592`), which the FFI already supplies.
+- ~~**`SelectedMembersSummary` is still fed hex, not an npub**~~ — **CLOSED.**
+  `name_circle_page.dart` maps `memberKeyPackages` to `kp.pubkey`, which is the
+  KeyPackage's verified author as an npub (`MemberKeyPackageFfi.author_npub`,
+  set by `fetch_member_keypackage` from the signed event, never from the
+  request), so the confirmation renders the same bech32 form the user was
+  handed, through `shortenForDisplay` at 12/6.
 - ~~`key_display.dart`'s two widgets~~ — **DELETED**, not "left alone": §3's D7
   orphan sweep removed the file along with its public `truncateLength`
   parameter. There is no `key_display.dart` in the tree.

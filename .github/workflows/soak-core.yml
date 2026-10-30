@@ -13,12 +13,13 @@
 # `nightly` is called by soak-nightly.yml, once per matrix slot with that
 # slot's `slot` and `seed`; the nightly scenarios have LANE execution only
 # there, never on a pull request, so a green PR lane is not coverage of them.
-# `weekly` has no scheduler until Phase 4 (`soak-weekly.yml`), so its five
-# weekly-only arms have no lane execution: the three expected-red arms are
-# asserted red by `tests/oracles.rs` on every commit, and the two whose bounds
-# start at the 684-second silence window are outside the crate's sweep and run
-# under `scripts/run_soak_local.sh` alone. docs/SOAK_LANE.md says so in those
-# words.
+# `weekly` has no scheduler until Phase 4 (`soak-weekly.yml`), so its four
+# weekly-only arms have no lane execution: S05 `kill-receive-auto-commit` and
+# S25 `dead-and-silent-relays` are swept by `tests/oracles.rs` on every
+# commit, and the two whose bounds start at the 684-second silence window
+# (S03 `lost-commit-unnamed`, S17 `full-intake`) are outside the crate's
+# sweep and run under `scripts/run_soak_local.sh` alone. No arm is expected
+# red: `EXPECTED_RED` in `tests/oracles.rs` is empty.
 #
 # # The bounds, innermost first (check_e2e_step_timeout_ordering.sh)
 #
@@ -28,7 +29,7 @@
 #                priced run fits. It is a ceiling of worst-case product
 #                constants, not an expectation: a healthy pr run measures about
 #                twenty seconds.
-#   deadline     run-with-deadline.sh 23m / 90m / 300m — above the run budget
+#   deadline     run-with-deadline.sh 23m / 95m / 300m — above the run budget
 #                so a hung run is killed with time left to finalise, and
 #                ATTRIBUTABLE where a bare 124 would not be.
 #   step cap     above the deadline + the 1 min SIGTERM→SIGKILL grace.
@@ -202,24 +203,21 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # nightly — pr plus the all-relay and rolling S01 arms, S02, S03's nightly
-  # arm, S04, S05's three swept arms, S08's `unpacked-control`, S09, S10, S12,
-  # S14, S16, S17's two ClosedKind arms, S18, S19, S20, S21 and S22. The three
-  # EXPECTED-RED arms (S23 `chained-commit-backlog` C7, S08
-  # `buried-past-the-cap` C8, S05 `kill-receive-auto-commit` C9) are NOT here:
-  # verdict.log keeps a run's first violation only, so one of them would mask
-  # every later defect. tests/oracles.rs asserts them red on every commit.
+  # arm, S04, S05's four swept arms, S08's three arms (`buried-past-the-cap`
+  # among them since its C8 fix), S09, S10, S12, S14, S16, S17's two ClosedKind
+  # arms, S18, S19, S20, S21, S22, S23 and S24. No arm is expected red.
   # Dispatched by soak-nightly.yml, once per matrix slot.
   # ---------------------------------------------------------------------------
   e2e_soak_core_nightly:
     name: e2e_soak_core_nightly
     if: ${{ inputs.profile == 'nightly' }}
     runs-on: ubuntu-latest
-    # Deadline 90m (the profile's `deadline_secs`, L6-tied), drive step cap 94
-    # (budget 90 + 1 kill grace + 0 boot = 91, and C2 fails on budget >= cap);
-    # job cap 135 is above the step-cap sum (10 + 25 + 94 = 129) so the drive
+    # Deadline 95m (the profile's `deadline_secs`, L6-tied), drive step cap 99
+    # (budget 95 + 1 kill grace + 0 boot = 96, and C2 fails on budget >= cap);
+    # job cap 140 is above the step-cap sum (10 + 25 + 99 = 134) so the drive
     # reaps before the job. The four move together: a raise of the profile's
     # budget is a raise of all of them.
-    timeout-minutes: 135
+    timeout-minutes: 140
     env:
       HAVEN_LOGSCAN: "true"
       HAVEN_LOGSCAN_PROFILE: host
@@ -256,8 +254,8 @@ jobs:
 
       - name: Run the soak (nightly profile)
         id: soak
-        timeout-minutes: 94
-        run: bash tooling/e2e/ci/run-with-deadline.sh 90m "soak-core nightly" -- bash tooling/e2e/ci/run-soak-core.sh nightly
+        timeout-minutes: 99
+        run: bash tooling/e2e/ci/run-with-deadline.sh 95m "soak-core nightly" -- bash tooling/e2e/ci/run-soak-core.sh nightly
 
       # The pr job's comment says why this step exists and why it is gated on
       # the checkout rather than on the drive.

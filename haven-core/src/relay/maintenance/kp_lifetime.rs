@@ -30,27 +30,24 @@
 //! window, leaving ~21 days of slack for a device that is offline, backgrounded,
 //! or simply not opened.
 //!
-//! # Why the clock must come off the PACKAGE, never off the event
+//! # Why the clock comes off the PACKAGE, never off the event
 //!
 //! The reference app (White Noise) ages `KeyPackages` off the Nostr event's
-//! `created_at` (`KEY_PACKAGE_MAX_AGE`, 30 days). That is honest **for it**,
-//! because every publish there mints fresh material. It would be a silent bug
-//! **here**: Haven's heal path
-//! ([`build_kp_maintenance_events_reusing`](super::key_package::build_kp_maintenance_events_reusing))
-//! re-publishes *cached bytes* under a *fresh* `created_at`, so an event-age
-//! timer would reset on every relay heal while the real `not_after` kept
-//! ticking. A device that heals a flaky relay once a week would never rotate and
-//! would sail straight past day 84.
+//! `created_at` (`KEY_PACKAGE_MAX_AGE`, 30 days). What expires is the package:
+//! `not_after` is the bound every inviter validates, and an event's stamp is
+//! not its package's mint time — moving a package into another slot signs a
+//! NEW event for OLD material
+//! ([`build_kp_slot_repoint_event`](super::key_package::build_kp_slot_repoint_event)),
+//! so an event-age timer would run behind the package it carries.
 //!
 //! Everything here therefore reads `not_before` / `not_after` off the MLS
-//! `KeyPackage` itself. `heal_does_not_reset_the_rotation_clock` in
+//! `KeyPackage` itself. `a_repoint_does_not_reset_the_rotation_clock` in
 //! `tests/kp_rotation_e2e.rs` is the regression proof.
 
-use openmls::prelude::tls_codec::Deserialize as _;
-use openmls::prelude::{
-    KeyPackageVerifyError, Lifetime as MlsLifetime, MlsMessageBodyIn, MlsMessageIn, ProtocolVersion,
-};
-use openmls_rust_crypto::RustCrypto;
+use cgka_engine::key_package_metadata;
+use cgka_traits::engine::KeyPackage;
+use cgka_traits::error::EngineError;
+use cgka_traits::group::ProtocolProfile;
 
 /// Fraction of a `KeyPackage`'s **own** lifetime after which it must be
 /// re-minted.
@@ -147,8 +144,8 @@ impl KeyPackageLifetime {
     }
 
     /// Whether `now` is at or past `not_after` — the package is dead, and the
-    /// spec's second deletion bound has fired (see
-    /// [`kp_init_key_purge_due`]).
+    /// spec's second deletion bound has fired
+    /// ([`SessionManager::sweep_expired_key_packages`](crate::nostr::mls::SessionManager::sweep_expired_key_packages)).
     #[must_use]
     pub const fn is_past_not_after(&self, now_secs: u64) -> bool {
         now_secs >= self.not_after
@@ -224,50 +221,17 @@ impl TrackedKpLifetime {
     }
 }
 
-/// Whether the tracked package's private `init_key` material MUST be deleted
-/// **now**, independently of whether any replacement can be published.
-///
-/// `foundation/key-packages.md`: a last-resort `KeyPackage` "MUST delete that
-/// material at the earlier of: confirmed publication of a replacement under the
-/// active transport binding; the `KeyPackage` `Lifetime.not_after` time." The
-/// first bound is handled by the publish-then-delete step in the maintenance
-/// orchestration. **This is the second bound**, and it is unconditional: it must
-/// fire even on a tick where no relay responded, because it does not depend on
-/// the transport at all. Local retention policy "MUST NOT extend either bound".
-///
-/// The stated risk if it does not fire: compromising a retained `init_key` lets
-/// an attacker decrypt *every recorded Welcome* encrypted to that `KeyPackage`
-/// and recover the join secrets those Welcomes carried — and for a last-resort
-/// package that exposure spans every join it ever served.
-///
-/// [`TrackedKpLifetime::Unreadable`] is deliberately NOT a purge trigger: with
-/// no readable `not_after` we cannot claim the bound has fired, and deleting on
-/// a mere parse failure would destroy live material a peer may be mid-Welcome
-/// against. That case is covered by the *first* bound instead — it rotates, and
-/// the superseded bytes are deleted once the replacement is confirmed published.
-#[must_use]
-pub const fn kp_init_key_purge_due(tracked: TrackedKpLifetime, now_secs: u64) -> bool {
-    match tracked {
-        TrackedKpLifetime::Absent | TrackedKpLifetime::Unreadable => false,
-        // Defensive: a validated package is current by construction, so this
-        // arm is unreachable through `read_tracked_kp_lifetime`. It is kept so
-        // the predicate is correct for any caller-constructed lifetime.
-        TrackedKpLifetime::Known(l) => l.is_past_not_after(now_secs),
-        TrackedKpLifetime::NotCurrent => true,
-    }
-}
-
 /// Reads the MLS `Lifetime` out of raw `KeyPackage` wire bytes.
 ///
-/// `bytes` are the framed `MLSMessage` (`wire_format = mls_key_package`) Haven
-/// tracks in `published_key_packages` and base64s into the 30443 content — the
-/// same bytes `cgka_engine::key_package::key_package_metadata` consumes.
-///
-/// Validation is deliberate, not incidental: reading the lifetime off an
-/// unverified structure would let a corrupt row dictate rotation timing. The
-/// cost is that a package MLS considers not-current cannot yield its numbers —
-/// which is exactly why that case gets its own [`TrackedKpLifetime::NotCurrent`]
-/// answer instead of collapsing into [`TrackedKpLifetime::Unreadable`].
+/// `bytes` are the framed `MLSMessage` (`wire_format = mls_key_package`) the
+/// lifecycle record tracks and a 30443 carries as base64. They
+/// are read through MDK's own parser, `cgka_engine::key_package_metadata`
+/// (MDK v0.10.4 `cgka-engine/src/key_package.rs:127-163`), which validates the
+/// package, its lifetime and its account-identity proof before reporting
+/// `not_before` / `not_after` — so a corrupt row cannot dictate rotation
+/// timing, and Haven carries no MLS parser of its own. Every package Haven
+/// mints is the Current profile (the reset left no Legacy bundle behind), so
+/// bytes that do not decode as Current are unreadable, and rotate.
 ///
 /// Never returns an error string: every failure is classified into the enum, so
 /// no MLS error text (which can carry key-package internals) can reach a log or
@@ -277,28 +241,17 @@ pub fn read_kp_lifetime(bytes: &[u8]) -> TrackedKpLifetime {
     if bytes.is_empty() {
         return TrackedKpLifetime::Absent;
     }
-    let Ok(msg) = MlsMessageIn::tls_deserialize_exact(bytes) else {
-        return TrackedKpLifetime::Unreadable;
-    };
-    let MlsMessageBodyIn::KeyPackage(kp_in) = msg.extract() else {
-        return TrackedKpLifetime::Unreadable;
-    };
-    match kp_in.validate(&RustCrypto::default(), ProtocolVersion::Mls10) {
-        Ok(kp) => TrackedKpLifetime::Known(from_mls_lifetime(kp.life_time())),
-        // MLS says the window does not contain "now". Positive knowledge that
-        // this package is unusable — NOT merely unparseable.
-        Err(KeyPackageVerifyError::InvalidLifetime | KeyPackageVerifyError::MissingLifetime) => {
-            TrackedKpLifetime::NotCurrent
-        }
+    let package = KeyPackage::new(bytes.to_vec()).with_protocol_profile(ProtocolProfile::Current);
+    match key_package_metadata(&package) {
+        Ok(meta) => TrackedKpLifetime::Known(KeyPackageLifetime {
+            not_before: meta.not_before,
+            not_after: meta.not_after,
+        }),
+        // MLS says the window does not contain "now" (or is out of the accepted
+        // range). Positive knowledge that this package is unusable — NOT merely
+        // unparseable.
+        Err(EngineError::InvalidKeyPackageLifetime { .. }) => TrackedKpLifetime::NotCurrent,
         Err(_) => TrackedKpLifetime::Unreadable,
-    }
-}
-
-/// Converts an `OpenMLS` `Lifetime` into Haven's leak-free value type.
-fn from_mls_lifetime(l: &MlsLifetime) -> KeyPackageLifetime {
-    KeyPackageLifetime {
-        not_before: l.not_before(),
-        not_after: l.not_after(),
     }
 }
 
@@ -444,49 +397,6 @@ mod tests {
     fn not_current_rotates_at_any_clock() {
         assert!(TrackedKpLifetime::NotCurrent.is_rotation_due(0));
         assert!(TrackedKpLifetime::NotCurrent.is_rotation_due(u64::MAX));
-    }
-
-    // ── The `not_after` deletion bound ───────────────────────────────────────
-
-    #[test]
-    fn purge_fires_for_a_not_current_package() {
-        assert!(kp_init_key_purge_due(TrackedKpLifetime::NotCurrent, 0));
-    }
-
-    #[test]
-    fn purge_does_not_fire_for_a_live_package_even_past_its_threshold() {
-        let l = lifetime(SPAN);
-        // Past rotation, but still inside `not_after`: the material is still
-        // usable and a peer may be mid-Welcome against it.
-        assert!(TrackedKpLifetime::Known(l).is_rotation_due(l.rotate_at()));
-        assert!(!kp_init_key_purge_due(
-            TrackedKpLifetime::Known(l),
-            l.rotate_at()
-        ));
-    }
-
-    #[test]
-    fn purge_fires_at_exactly_not_after() {
-        let l = lifetime(SPAN);
-        assert!(!kp_init_key_purge_due(
-            TrackedKpLifetime::Known(l),
-            l.not_after - 1
-        ));
-        assert!(kp_init_key_purge_due(
-            TrackedKpLifetime::Known(l),
-            l.not_after
-        ));
-    }
-
-    #[test]
-    fn purge_never_fires_on_absent_or_unreadable() {
-        // Unreadable gives no `not_after`, so the second bound cannot be said to
-        // have fired; the FIRST bound (confirmed replacement) covers it instead.
-        assert!(!kp_init_key_purge_due(
-            TrackedKpLifetime::Unreadable,
-            u64::MAX
-        ));
-        assert!(!kp_init_key_purge_due(TrackedKpLifetime::Absent, u64::MAX));
     }
 
     // ── Reading real bytes ───────────────────────────────────────────────────

@@ -185,7 +185,8 @@ import 'package:haven/src/providers/onboarding_provider.dart'
         onboardingControllerProvider;
 import 'package:haven/src/providers/service_providers.dart'
     show circleServiceProvider, locationServiceProvider;
-import 'package:haven/src/rust/api.dart' show MemberKeyPackageFfi;
+import 'package:haven/src/rust/api.dart'
+    show MemberKeyPackageFfi, RelayManagerFfi;
 import 'package:haven/src/services/fresh_secret.dart' show withFreshSecret;
 import 'package:haven/src/services/location_service.dart'
     show LocationPermissionStatus, LocationServiceException, Position;
@@ -195,7 +196,7 @@ import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
+import 'e2e/_lib/circle_creation.dart' show createCircleDelivered;
 import 'e2e/_lib/pump_helpers.dart' show pumpUntilFound, waitUntilAsync;
 import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
 import 'e2e/_lib/test_relay.dart' show defaultStrfryUrl;
@@ -627,21 +628,27 @@ void main() {
       // (haven-core/src/circle/manager.rs). `publishLocation` resolves only
       // once a relay OK-acked (Security Rule 13), so the baseline is a
       // DELIVERY claim without needing a second party.
-      await withFreshSecret(
-        () =>
-            container.read(identityNotifierProvider.notifier).getSecretBytes(),
-        (aliceSecret) => createCircleConfirmed(
-          manager: manager,
-          relay: relay,
-          identitySecretBytes: aliceSecret,
-          members: const <MemberKeyPackageFfi>[],
-          name: 'B5 Permission Revocation Circle',
-          circleType: 'location_sharing',
-          relays: <String>[defaultStrfryUrl],
-          creatorFallbackRelays: <String>[defaultStrfryUrl],
-          scenario: 'b5',
-        ),
-      );
+      final relayManager = await RelayManagerFfi.newInstance();
+      try {
+        await withFreshSecret(
+          () =>
+              container
+                  .read(identityNotifierProvider.notifier)
+                  .getSecretBytes(),
+          (aliceSecret) => createCircleDelivered(
+            manager: manager,
+            relayManager: relayManager,
+            identitySecretBytes: aliceSecret,
+            members: const <MemberKeyPackageFfi>[],
+            name: 'B5 Permission Revocation Circle',
+            circleType: 'location_sharing',
+            relays: <String>[defaultStrfryUrl],
+            scenario: 'b5',
+          ),
+        );
+      } finally {
+        await relayManager.shutdown();
+      }
 
       /// Cycles that exceeded [_publishCycleTimeout]. Read by ACT 2.
       var wedgedCycles = 0;
@@ -682,7 +689,7 @@ void main() {
       /// How many circles a still-working publisher would publish to.
       Future<int> eligibleCircleCount() async {
         final circles = await circleService.getVisibleCircles();
-        return filterPublishEligibleCircles(circles, circleService).length;
+        return filterPublishEligibleCircles(circles).length;
       }
 
       // Release the probe socket before either act's observation window: any

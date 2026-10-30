@@ -10,10 +10,9 @@
 # KINDS of seam, and only one of them may see that offset:
 #
 #   POLICY seams decide whether something has aged out — `sweep_unresolvable_
-#   inputs`, `decide_kp_maintenance`, `repair_epoch_rotation`,
-#   `rotation_decision`, `prune_expired_last_known`,
-#   `prune_processed_gift_wraps`, `complete_leave`. Stepping this clock is the
-#   whole mechanism.
+#   inputs`, `decide_kp_maintenance`, `rotation_decision`,
+#   `prune_expired_last_known`, `prune_processed_gift_wraps`, `complete_leave`.
+#   Stepping this clock is the whole mechanism.
 #
 #   WALL seams decide where a relay cursor sits and when a delivery or
 #   subscription window opened — `cap_timestamp_to_now`, `cursor_ms_for_event`,
@@ -114,7 +113,6 @@ readonly WALL_SEAMS=(
 readonly POLICY_SEAMS=(
   'sweep_unresolvable_inputs'
   'decide_kp_maintenance'
-  'repair_epoch_rotation'
   'rotation_decision'
   'prune_expired_last_known'
   'prune_processed_gift_wraps'
@@ -374,7 +372,7 @@ RS
   _case "a wall instant at a policy sweep seam fails" 1 check_seam_partition "${c3a}"
 
   local c3b="${tmp}/c3b"; _mk "${c3b}"
-  printf 'fn f(w: WallNow) { circle.repair_epoch_rotation(WallNow::now().secs()); }\n' \
+  printf 'fn f(w: WallNow) { circle.rotation_decision(WallNow::now().secs()); }\n' \
     >> "${c3b}/${SOAK_SRC}/rig/mod.rs"
   _case "a wall instant at the rotation seam fails" 1 check_seam_partition "${c3b}"
 

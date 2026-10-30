@@ -44,10 +44,16 @@
 //! (`Restarted { release_ms, reopen_ms }` — the C1 measurement); the reopen is a
 //! bounded retry.
 //!
-//! `kill-receive-auto-commit` kills a device while it owes the publish of a
-//! peer's eviction its own live engine staged. It is EXPECTED RED (C9): the
-//! reopened device is left owing an eviction that neither it nor a peer's
-//! identical commit can land — see [`kill_receive`].
+//! `kill-receive-auto-commit` kills a device between the SEND and the `OK` of
+//! a peer's eviction its own live engine made in the foreground — after a
+//! background burst received the leave and made nothing of it — and reads
+//! what the reopened device does with the record: see [`kill_receive`]. The
+//! label is historical: no receive path makes that commit any more, the
+//! foreground's drive does. (At MDK `e391adc` the arm was EXPECTED RED, C9.)
+//!
+//! `kill-sweep-eviction` kills a device after a wake sweep took a departure in
+//! — the sweep makes no commit, so there is no window to kill it in — and
+//! reads the foreground's drive making the eviction: see [`kill_sweep`].
 //!
 //! # The OD4-c verdict must stay silent where nothing is wedged
 //!
@@ -58,12 +64,15 @@
 
 use std::time::Duration;
 
-use haven_core::circle::{CircleError, CommitToPublish};
-use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
+use haven_core::circle::CircleError;
 use haven_core::nostr::mls::storage::{set_stored_message_write_fault_for_test, StorageConfig};
-use haven_core::nostr::mls::types::GroupId;
-use haven_core::relay::live_sync::{GroupProcessOutcome, LiveSyncEvent, SyncStatusReason};
-use nostr::{Event, EventBuilder, Keys, Kind, Tag, TagKind};
+use haven_core::nostr::mls::types::{EpochState, GroupId};
+use haven_core::relay::catchup::run_catchup_all_circles;
+use haven_core::relay::fanout::{FanoutClock as _, WallClock};
+use haven_core::relay::live_sync::{
+    GroupProcessOutcome, Lifecycle, LiveSyncEvent, StopOutcome, SyncStatusReason,
+};
+use nostr::{Event, Kind};
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::broadcast::Receiver;
 use tokio::time::Instant;
@@ -73,17 +82,19 @@ use crate::oracle::undecryptable::{classify_send, Verdict as Classification};
 use crate::oracle::vacuity::{ExpectationFloor, Observed};
 use crate::oracle::{bounds, Invariant, ProbeToken, Reach, Recovery};
 use crate::rig::{
-    kill_and_reopen, DeviceTag, KillKind, LogDrain, PublishVerdict, RelayPlane, ReopenReport,
-    RigError, SimCircle, Step, TimelineRecord, TimelineSink, AFTER_KILL_REMOVAL_PUBLISHED,
-    AFTER_KILL_REMOVAL_REPORTED, AFTER_KILL_SENDS_RESUMED, AFTER_KILL_SEND_CLASSIFIED,
+    kill_and_reopen, DeviceTag, KillKind, LogDrain, PacingClock, PublishVerdict, RelayPlane,
+    ReopenReport, RigError, SimCircle, Step, TimelineRecord, TimelineSink,
+    AFTER_KILL_REMOVAL_PUBLISHED, AFTER_KILL_REMOVAL_REPORTED, AFTER_KILL_SENDS_RESUMED,
+    AFTER_KILL_SEND_CLASSIFIED,
 };
 use crate::scenarios::{
-    await_condition, closing_pairs, grade_round, relay_update, round, Absence, Arm, ArmOutcome,
-    Scenario, ScenarioReport, ScenarioWorld, WithheldAcks, NO_GATING_ROWS,
+    await_condition, closing_pairs, drive_until_settled, grade_round, pending_record, relay_update,
+    round, surface_eviction, Absence, Arm, ArmOutcome, Scenario, ScenarioReport, ScenarioWorld,
+    WithheldAcks, NO_GATING_ROWS,
 };
 
 /// The arms this scenario offers.
-pub const ARMS: [Arm; 4] = [
+pub const ARMS: [Arm; 5] = [
     Arm {
         label: "confirm-err-is-not-a-failure",
         recovery: Recovery::Undisturbed,
@@ -130,8 +141,9 @@ pub const ARMS: [Arm; 4] = [
         probe_rounds: 1,
         resubscribes: true,
         absence: Absence::None,
-        // The one foreground publish of the eviction the kill lands behind.
-        withheld_acks: WithheldAcks::Fixed(1),
+        // The one send of the eviction the kill cuts: its record is sent
+        // again when its relay is next due.
+        withheld_acks: WithheldAcks::FanoutResends(1),
         floor: ExpectationFloor {
             faults_applied: 1,
             // The acked twin: a world circle's commit the reopened device
@@ -158,6 +170,23 @@ pub const ARMS: [Arm; 4] = [
             epochs_crossed: 1,
             deliveries_observed: 1,
             canaries_caught: 5,
+        },
+    },
+    Arm {
+        label: "kill-sweep-eviction",
+        recovery: Recovery::Undisturbed,
+        probe_rounds: 1,
+        // The committer's engine starts again and the paused member resumes.
+        resubscribes: true,
+        absence: Absence::None,
+        // The sweep sends nothing into the silence: it makes no commit.
+        withheld_acks: WithheldAcks::None,
+        floor: ExpectationFloor {
+            faults_applied: 1,
+            // The circle is outside the world's table (see [`kill_sweep`]).
+            epochs_crossed: 0,
+            deliveries_observed: 1,
+            canaries_caught: 3,
         },
     },
 ];
@@ -196,6 +225,10 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
             let committer = tags.get(2).copied().ok_or(RigError::ShapeMismatch)?;
             negative_gates(world, admin, peer, committer, tick).await
         }
+        "kill-sweep-eviction" => {
+            let committer = tags.get(2).copied().ok_or(RigError::ShapeMismatch)?;
+            kill_sweep(world, peer, committer, tick, true).await
+        }
         // A label this scenario does not offer means the dispatch table and the
         // registry disagree, which is the rig being wrong about itself.
         _ => Err(RigError::UnknownTarget),
@@ -228,6 +261,13 @@ pub async fn acked_kill_control<T: TimelineSink, L: LogDrain>(
             (
                 &ARMS[2],
                 kill_receive(world, admin, peer, committer, tick, false).await?,
+            )
+        }
+        "kill-sweep-eviction" => {
+            let committer = tags.get(2).copied().ok_or(RigError::ShapeMismatch)?;
+            (
+                &ARMS[4],
+                kill_sweep(world, peer, committer, tick, false).await?,
             )
         }
         _ => return Err(RigError::UnknownTarget),
@@ -287,28 +327,28 @@ async fn close<T: TimelineSink, L: LogDrain>(
 /// joined (decision 0.2).
 const KILL: KillKind = KillKind::Hard;
 
+/// How many paced drives a pending record gets to be confirmed in: the first
+/// may find its relay not yet due again (a wait an earlier attempt earned),
+/// the clock is stepped past it, and the next sends it; the third is the
+/// margin for one more unanswered re-send.
+const SETTLE_DRIVES: usize = 3;
+
 /// Kills `victim` between SEND and confirm of its own relay-list commit.
 ///
 /// # The kill kind is not what this arm measures
 ///
-/// Measured: the arm holds with [`KillKind::Soft`] too. The commit was
-/// published by the rig's own publish plane and its circle has no engine
-/// subscription, so a soft stop has nothing of the victim circle's to drain —
-/// what dies either way is the process's one `PendingStateRef`, and the staged
-/// commit outlives it on disk. The kind is `Hard` because that is the shape of
-/// the background kill C1 names, and because the release latency it records is
-/// the undrained one.
+/// The commit is staged under its durable record, so what dies either way is
+/// the process; the staged commit and its record outlive it on disk, and the
+/// reopen restores the commit as it was. The kind is `Hard` because that is
+/// the shape of the background kill C1 names, and because the release latency
+/// it records is the undrained one.
 ///
 /// # The victim circle is not one of the world's
 ///
-/// A relay under a swallowed acknowledgement still stores and delivers what it
-/// was sent. A peer that applied the commit would then sit on a branch the
-/// restarted device has discarded — the reopen rewinds an unconfirmed staged
-/// commit — and which branch a later merge keeps is a coin toss per run (S14's
-/// `race-restart-before-confirm` records the same). So the commit is staged on
-/// a circle built with `build_extra_circle`: no engine subscribes to it, nobody
-/// is handed the commit, and the world's own circles are what the closing round
-/// grades, with the restarted device sending first.
+/// The circle is built with `build_extra_circle`, so no world-wide oracle
+/// grades a circle whose commit the arm leaves pending on purpose, and the
+/// world's own circles are what the closing round grades, with the restarted
+/// device sending first.
 ///
 /// # The acked twin comes first
 ///
@@ -341,40 +381,20 @@ async fn kill_send_plane<T: TimelineSink, L: LogDrain>(
     if swallow {
         swallow_every_plane(world, Fault::SwallowOk).await?;
     }
-    let guard = world.note_pending_staged();
-    let staged = world
-        .device(victim)?
-        .manager()?
-        .update_circle_relays(&group, &extended_relays(world, "s05-kill-send"))
-        .await
-        .map_err(|_| RigError::Core(Step::StageCommit))?;
-    let window = if world
-        .publish_witnessed(victim, std::slice::from_ref(&staged.commit_event))
-        .await?
-        .is_some()
-    {
-        // Acked means confirmed (Rule 13), so the kill below has no
-        // publish→confirm window left to land in.
-        let ingest = world
-            .device(victim)?
-            .manager()?
-            .finalize_relay_update(staged.pending, &group)
-            .await
-            .map_err(|_| RigError::Core(Step::ConfirmPublished))?;
-        world.resolve_ingest(victim, ingest).await?;
-        false
-    } else {
-        stored_but_unacked(world, &staged.commit_event).await?
-    };
+    let (commit, verdict) = relay_update(
+        world,
+        victim,
+        &circle,
+        &extended_relays(world, "s05-kill-send"),
+    )
+    .await?;
+    // Acked means confirmed (Rule 13), so the kill below has no window left to
+    // land in. Unacknowledged, the driver keeps the commit pending under its
+    // record: the relay holds it and the device never heard so.
+    let window =
+        verdict == PublishVerdict::Unresolved && stored_but_unacked(world, &commit).await?;
 
     let report = kill_and_reopen(world.device_mut(victim)?, KILL).await?;
-    // The kill IS the resolution, in the only honest sense there is: the
-    // process that staged the commit is gone, and with it the one ref that could
-    // have confirmed or rolled it back. The rig's count cannot see a kill, so it
-    // is released here, explicitly, once the reopen has returned — held any
-    // longer, the closing round could never settle and the arm would report a
-    // violation it manufactured.
-    drop(guard);
     record_restart(world, victim, KILL, report);
     if swallow {
         swallow_every_plane(world, Fault::Heal).await?;
@@ -395,19 +415,28 @@ async fn kill_send_plane<T: TimelineSink, L: LogDrain>(
         .device(victim)?
         .manager()?
         .unrecoverable_circles()
+        .await
         .is_empty()
     {
         canaries += 1;
     }
-    // 3. …and nothing it left behind gates the circle.
-    if world
+    // 3. …nothing it left behind gates the circle, and the record outlived
+    //    the process: a later drive sends the SAME event again and it is
+    //    confirmed — the commit was never rolled back, and never re-staged.
+    let ungated = world
         .device(victim)?
         .session()?
         .gating_input_count(&group)
         .await
         .map_err(|_| RigError::Core(Step::ReadGatingRows))?
-        == 0
-    {
+        == 0;
+    let clock = PacingClock::default();
+    let landed = drive_until_settled(world, victim, &group, &clock, SETTLE_DRIVES).await?
+        && world
+            .relays()
+            .iter()
+            .any(|plane| plane.witnessed_ok(&commit.id));
+    if ungated && (!swallow || landed) {
         canaries += 1;
     }
     // 4. Sends either resume or the refusal is one the classifier accounts for,
@@ -449,23 +478,21 @@ async fn kill_send_plane<T: TimelineSink, L: LogDrain>(
 /// # Where the soak's inductions differ from the unit tests', and why
 ///
 /// Both no-ack gates there hand a processor a publisher that answers `false`.
-/// Here nothing is published into a silence: every publish path the rig has
-/// pays an unpriced wait on a relay that never answers (the commit ladder, or a
-/// pool's ten-second wait for an `OK`), and this arm is priced with no withheld
-/// acknowledgement. So "awaiting its own ack" is the state before that publish
-/// — the eviction surfaced through the FFI plane and held live, owed in this
-/// session, nothing yet published or acknowledged — and "a relay outage" is the
-/// committer's own endpoint going dark while its engine is connected, observed
-/// by that engine.
+/// Here nothing is published into a silence: this arm is priced with no
+/// withheld acknowledgement. So "awaiting its own ack" is the eviction staged
+/// under its record by the app's poll while the committer's own endpoint is
+/// dark — its drive reached no relay, so nothing a relay could hold, nothing
+/// acknowledged — and "a relay outage" is that endpoint staying dark while
+/// the committer's engine is connected to nothing, observed by that engine.
 ///
 /// # The staged eviction is released, and the committer paused, in a set order
 ///
-/// The obligation is a property of the DEVICE, so O2 and O6 would report it for
-/// every later round; the arm lands it on an acked publish once every gate has
-/// been read (S22's release, for S22's reason). It does so while the committer
-/// is still paused, BEFORE the resume, so the foreground open that resume
-/// performs finds nothing owed and redeems nothing: the release is the rig's
-/// own Rule-13 resolution of the ref it holds, never a race with the product's.
+/// The pending record is a property of the DEVICE, so O2 and O6 would report
+/// it for every later round; once every gate has been read the arm lets the
+/// product's driver send it, paced, until it is confirmed (S22's release, for
+/// S22's reason). It does so while the committer is still paused, BEFORE the
+/// resume.
+#[allow(clippy::too_many_lines)]
 async fn negative_gates<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     admin: DeviceTag,
@@ -474,35 +501,36 @@ async fn negative_gates<T: TimelineSink, L: LogDrain>(
     tick: Duration,
 ) -> Result<ArmOutcome, RigError> {
     let circle = world.build_extra_circle().await?;
-    let owing = *circle.nostr_group_id();
     let shared = world.circles().first().ok_or(RigError::ShapeMismatch)?;
     let (shared_tag, shared_routing) = (shared.tag, *shared.nostr_group_id());
     let bound = bounds::round_trip(Recovery::Undisturbed);
 
-    let guard = world.note_pending_staged();
-    let eviction = surface_eviction(world, committer, leaver, admin, &circle).await?;
-    let mut bus = world.device(committer)?.engine()?.bus().subscribe();
-    let mut canaries = 0_usize;
-
-    // 1. Awaiting its own ack: the eviction is surfaced through the FFI plane
-    //    and held live (nothing is published yet), the obligation is owed and
-    //    live in THIS session — so redeemable, not orphaned — and the sweep
-    //    names nothing.
-    let owed = world.device(committer)?.manager()?.owed_removal_commits() == vec![owing];
-    let live = world
-        .device(committer)?
-        .manager()?
-        .orphaned_removal_deferrals()
-        .is_empty();
-    if owed && live && sweep(world, committer, &mut bus)?.silent {
-        canaries += 1;
-    }
-
-    // 2. A relay outage: the committer's endpoint goes dark, its engine sees no
-    //    relay at all, and the sweep still names nothing.
+    // The committer's endpoint goes dark before the eviction is staged: its
+    // drive reaches no relay, so the commit waits under its record.
     for plane in world.relays_mut() {
         plane.apply_for(committer, Fault::Down).await?;
     }
+    let eviction = surface_eviction(world, committer, leaver, (admin, 105), &circle).await?;
+    let group = circle.mls_group_id().clone();
+    let mut bus = world.device(committer)?.engine()?.bus().subscribe();
+    let mut canaries = 0_usize;
+
+    // 1. Awaiting its own ack: the eviction is staged under its record, no
+    //    relay holds it or acknowledged it, and the sweep names nothing.
+    let awaiting = !published_anywhere(world, &eviction.commit.id).await?;
+    let recorded = !world
+        .device(committer)?
+        .session()?
+        .fanout_ids_for_test(&group)
+        .await
+        .map_err(|_| RigError::Core(Step::ReadConvergenceState))?
+        .is_empty();
+    if awaiting && recorded && sweep(world, committer, &mut bus).await?.silent {
+        canaries += 1;
+    }
+
+    // 2. A relay outage: the committer's endpoint is dark, its engine sees no
+    //    relay at all, and the sweep still names nothing.
     let dark = await_condition(bound, || async {
         Ok(world
             .device(committer)?
@@ -513,7 +541,7 @@ async fn negative_gates<T: TimelineSink, L: LogDrain>(
             == 0)
     })
     .await?;
-    if dark && sweep(world, committer, &mut bus)?.silent {
+    if dark && sweep(world, committer, &mut bus).await?.silent {
         canaries += 1;
     }
 
@@ -522,7 +550,7 @@ async fn negative_gates<T: TimelineSink, L: LogDrain>(
     //    below is a fresh connect rather than the pool's reconnect ladder.
     world.device_mut(committer)?.go_offline().await?;
     let paused = world.device(committer)?.engine()?.is_paused();
-    if paused && sweep(world, committer, &mut bus)?.silent {
+    if paused && sweep(world, committer, &mut bus).await?.silent {
         canaries += 1;
     }
     for plane in world.relays_mut() {
@@ -549,38 +577,49 @@ async fn negative_gates<T: TimelineSink, L: LogDrain>(
         .processor()
         .process_group_event(&ahead, &shared_routing)
         .await;
-    let still_owed = world.device(committer)?.manager()?.owed_removal_commits() == vec![owing];
+    let still_owed = pending_record(world.device(committer)?, &group)
+        .await?
+        .is_some_and(|record| record.id == eviction.id);
     if outcome != GroupProcessOutcome::Applied
         && still_owed
-        && sweep(world, committer, &mut bus)?.silent
+        && sweep(world, committer, &mut bus).await?.silent
     {
         canaries += 1;
     }
 
     // 5. An unprocessable event: reported as the per-event status it is, never
-    //    as a circle verdict.
-    let junk = EventBuilder::new(Kind::Custom(445), "not-ciphertext")
-        .tag(Tag::custom(
-            TagKind::custom("h"),
-            [hex::encode(shared_routing)],
-        ))
-        .sign_with_keys(&Keys::generate())
-        .map_err(|_| RigError::Core(Step::Publish))?;
-    world
+    //    as a circle verdict. At MDK v0.10.4 an envelope nobody can open is the
+    //    engine's own terminal verdict, not a failure, so the one ingest that
+    //    still fails is induced: a storage write fault under a genuine fix, in a
+    //    circle of its own so the fix it costs (tracker T-FAULTED-INGEST-SEEN)
+    //    is in no graded circle.
+    let faulted = world.build_extra_circle().await?;
+    let genuine = seal(world, admin, &faulted, 12).await?;
+    let db = world.device(committer)?.session_db_path();
+    let key = StorageConfig::test_sqlcipher_key().map_err(|_| RigError::Core(Step::OpenStore))?;
+    set_stored_message_write_fault_for_test(&db, &key, true)
+        .map_err(|_| RigError::Core(Step::OpenStore))?;
+    let failed = world
         .device(committer)?
         .engine()?
         .processor()
-        .process_group_event(&junk, &shared_routing)
+        .process_group_event(&genuine, faulted.nostr_group_id())
         .await;
-    let after_junk = sweep(world, committer, &mut bus)?;
-    if after_junk.unprocessable && after_junk.silent {
+    set_stored_message_write_fault_for_test(&db, &key, false)
+        .map_err(|_| RigError::Core(Step::OpenStore))?;
+    let after_junk = sweep(world, committer, &mut bus).await?;
+    if failed == GroupProcessOutcome::Unprocessable && after_junk.unprocessable && after_junk.silent
+    {
         canaries += 1;
     }
 
-    release(world, committer, &eviction).await?;
-    drop(guard);
-
+    // Back in the foreground first: a driver sends a commit only in the full
+    // mode a claimed foreground gives it, as the bridge's does.
     world.device_mut(committer)?.come_online().await?;
+    let clock = PacingClock::default();
+    if !drive_until_settled(world, committer, &group, &clock, SETTLE_DRIVES).await? {
+        return Err(RigError::PublishNeverAcked);
+    }
     let shared_group = world.circle(shared_tag)?.mls_group_id().clone();
     // The resumed committer takes the commit it missed before the closing round
     // grades the circle; the round itself is what says whether it did.
@@ -593,8 +632,8 @@ async fn negative_gates<T: TimelineSink, L: LogDrain>(
     close(world, committer, tick, &[], canaries).await
 }
 
-/// Kills `committer` while it owes the publish of a peer's eviction its own
-/// live engine staged, and reads what the reopened device does with it.
+/// Kills `committer` between the SEND and the `OK` of a peer's eviction its
+/// own live engine made, and reads what the reopened device does with it.
 ///
 /// A restart here is a clean cancel, not a SIGKILL — the worker's
 /// panic-isolation spawn runs to completion and no WAL is torn; torn-storage
@@ -603,57 +642,40 @@ async fn negative_gates<T: TimelineSink, L: LogDrain>(
 ///
 /// # The engine does the work, and only the committer's engine sees the circle
 ///
-/// `leaver`'s `propose_leave` is PUBLISHED, and `committer`'s live engine folds
-/// it and stages the auto-commit itself — the product's receive path, over the
-/// device's own endpoint. The circle is an extra one and only the committer's
-/// engine is subscribed to it: a second remaining engine would commit the same
-/// eviction and there would be no single committer to kill, and a leave on one
-/// of the world's circles would leave the leaver in a roster every world-wide
-/// oracle reads.
+/// `leaver`'s `propose_leave` is PUBLISHED, and `committer`'s live engine takes
+/// it in — the product's receive path, over the device's own endpoint. The
+/// circle is an extra one and only the committer's engine is subscribed to it:
+/// a second remaining engine would commit the same eviction and there would be
+/// no single committer to kill, and a leave on one of the world's circles
+/// would leave the leaver in a roster every world-wide oracle reads.
 ///
-/// # Burst, then the foreground publish, then the kill
+/// # A burst makes nothing of it, the foreground makes it, then the kill
 ///
-/// The fold happens inside a background burst (`open_background_burst`), which
-/// parks the commit as a durable obligation without publishing it (OD4-c (iv))
-/// — which is what lets canary 1 read the obligation BEFORE any publish. The
-/// foreground open that follows publishes it into a swallowed `OK` on the
-/// committer's own endpoint (device-scoped: the claim is that THIS device never
-/// hears its acknowledgement, and the leaver's and the admin's planes stay
-/// whole), and the process is killed with the commit stored, unacknowledged and
-/// owed.
+/// The leave arrives inside a background burst (`open_background_burst`), which
+/// makes no commit (OD4-c (iv)): the eviction comes due in the engine and stays
+/// due, with nothing staged, nothing owed and nothing on the wire — canary 1.
+/// The foreground open that follows makes it: its drive stages the eviction
+/// under a durable record and sends it into an `OK` the committer's own
+/// endpoint swallows (device-scoped: the claim is that THIS device never hears
+/// its acknowledgement, and the leaver's and the admin's planes stay whole).
+/// The process is killed with that call out: the commit stored on a relay,
+/// unacknowledged, and staged under its record.
 ///
 /// # The kill kind is not what this arm measures either
 ///
-/// Measured: `KillKind::Soft` reaches the same outcome. The publish has already
-/// returned unacknowledged when the process goes, so a soft stop has nothing in
-/// flight to drain; what dies is the in-memory obligation, and the durable row
-/// outlives it either way.
+/// What survives the process is the stored record and the commit staged under
+/// it, whichever way the process goes; a soft stop gives the call up and stores
+/// the same attempt that never returned.
 ///
-/// # Expected red: what the product does after the kill (C9, measured 2026-09-27)
+/// # What the product does after the kill
 ///
-/// The obligation survives and is ORPHANED: the next foreground pass publishes
-/// nothing, `orphaned_removal_deferrals()` names the circle and the device's
-/// own verdict sweep emits `GroupUnrecoverable` for it (`unrecoverable_circles()`
-/// stays empty — it is the engine's latch alone). That is the branch recorded.
-///
-/// Two findings follow, and they are why this arm is `EXPECTED_RED` rather than
-/// swept:
-///
-/// * **A** — the wedged circle's send is refused with NO typed reason at either
-///   layer (`CircleError::Mls`, and the session's own send likewise), so the
-///   classifier can only call it a `Defect`: hydrate marks the group stable at
-///   the epoch the staged commit projected while `OpenMLS` still holds that
-///   removal-bearing commit. Canary 4 records the refusal (a refusal iff the
-///   eviction was not published) and hands O5 nothing.
-/// * **B** — the peer's heal does not heal. `admin` commits the same eviction on
-///   its own, acknowledged, and the reopened committer answers it `Buffered`
-///   and keeps refusing sends, so O2 and O6 report the owed eviction in the
-///   closing round: rc 1. `od4c_removal_deferral_e2e.rs`'s
-///   `a_deferral_a_peer_healed_after_a_restart_is_not_reported` heals on a bare
-///   processor over a reborn manager, and a replica of it still does; the
-///   difference lies in the live-engine restart path and is NOT pinned, so
-///   whether this is the product's or the rig's is OPEN (PLAN §8 OQ-U; the
-///   reproduction is in `PLAN_PHASE2`'s 2c S05 implementation notes).
+/// The record outlived the process. The reopened device holds the commit
+/// staged under it and is not wedged —
+/// its own sweep names nothing — and a location asked for meanwhile is
+/// deferred, typed. When the record's relay is next due the SAME event is sent
+/// again — from a background burst, whose drive only finishes — acknowledged
+/// this time, and confirmed there; the circle then sends. (At
+/// MDK `e391adc` this arm was `EXPECTED_RED` with C9's wedge.)
 async fn kill_receive<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     admin: DeviceTag,
@@ -663,7 +685,6 @@ async fn kill_receive<T: TimelineSink, L: LogDrain>(
     swallow: bool,
 ) -> Result<ArmOutcome, RigError> {
     let circle = world.build_extra_circle().await?;
-    let owing = *circle.nostr_group_id();
     let spec = circle.spec_for(committer, world.relays());
     world.device_mut(committer)?.subscribe_circle(spec).await?;
     let bound = bounds::round_trip(Recovery::Undisturbed);
@@ -675,29 +696,30 @@ async fn kill_receive<T: TimelineSink, L: LogDrain>(
         .open_background_burst()
         .await
         .map_err(|_| RigError::Core(Step::ResumeEngine))?;
-    let proposal = world
-        .device(leaver)?
-        .manager()?
-        .propose_leave(circle.mls_group_id())
-        .await
-        .map_err(|_| RigError::Core(Step::StageCommit))?;
-    if world
-        .publish_witnessed(leaver, std::slice::from_ref(&proposal))
-        .await?
-        .is_none()
+    let (_, sent, _) = world.leave(leaver, circle.mls_group_id()).await?;
+    let proposal = sent
+        .into_iter()
+        .find(|event| DropClass::of(event) == Some(DropClass::Handshake))
+        .ok_or(RigError::Core(Step::StageCommit))?;
+    if !world
+        .relays()
+        .iter()
+        .any(|plane| plane.witnessed_ok(&proposal.id))
     {
         return Err(RigError::PublishNeverAcked);
     }
 
     let mut canaries = 0_usize;
-    // 1. The obligation is durable BEFORE any publish: the burst parked the
-    //    eviction its engine staged, and nothing is on the wire for it.
-    let parked = await_condition(bound, || async {
-        Ok(owes(world, committer, owing)?
+    // 1. The burst makes nothing of the departure: the eviction is due on the
+    //    committer, and nothing is staged, recorded, or on the wire for it.
+    let left_due = await_condition(bound, || async {
+        Ok(eviction_due(world, committer, &circle).await?
+            && !staged(world, committer, &circle).await?
+            && unrecorded(world, committer, &circle).await?
             && commits_besides(world, &circle, &proposal).await?.is_empty())
     })
     .await?;
-    if parked {
+    if left_due {
         canaries += 1;
     }
 
@@ -706,8 +728,13 @@ async fn kill_receive<T: TimelineSink, L: LogDrain>(
             plane.apply_for(committer, Fault::SwallowOk).await?;
         }
     }
-    // The foreground open publishes the parked commit, inline.
+    // The foreground open's drive makes the eviction, under a record, and
+    // sends it.
     world.device_mut(committer)?.come_online().await?;
+    await_condition(bound, || async {
+        Ok(!commits_besides(world, &circle, &proposal).await?.is_empty())
+    })
+    .await?;
     let commits = commits_besides(world, &circle, &proposal).await?;
     let [commit] = *commits.as_slice() else {
         return Err(RigError::Core(Step::Publish));
@@ -716,7 +743,7 @@ async fn kill_receive<T: TimelineSink, L: LogDrain>(
         .relays()
         .iter()
         .any(|plane| plane.witnessed_ok(&commit));
-    let still_owed = owes(world, committer, owing)?;
+    let still_staged = staged(world, committer, &circle).await?;
 
     let report = kill_and_reopen(world.device_mut(committer)?, KILL).await?;
     record_restart(world, committer, KILL, report);
@@ -725,35 +752,31 @@ async fn kill_receive<T: TimelineSink, L: LogDrain>(
             plane.apply_for(committer, Fault::Heal).await?;
         }
     }
-    // 3. The kill landed inside the window with the removal still owed — never
-    //    rolled back — and the process really died: held, released, retaken.
-    if unacked && still_owed && report.engine_restarted {
+    // 3. The kill landed between the send and its `OK`, with the removal
+    //    staged under its record — never rolled back — and the process really
+    //    died: held, released, retaken.
+    if unacked && still_staged && report.engine_restarted {
         canaries += 1;
     }
 
-    // 2. The row survived the process, and the next foreground pass EITHER
-    //    publishes that same commit and discharges it, OR the obligation is
-    //    orphaned and the device's own verdict sweep names the circle.
-    //    Recorded which: that is the OD4-c answer for a hard kill here.
+    // 4, first half: a location asked for while the record still awaits its
+    //    relay is deferred, and the deferral is typed.
+    let held_typed = matches!(
+        try_seal(world, committer, &circle, 21).await?,
+        Err(ref error) if !matches!(classify_send(error), Classification::Defect(_))
+    );
+
+    // 2. The record survived the process and the device is not wedged; a
+    //    burst sends the same event again when its relay is due, and confirms
+    //    it.
     let (published, taken) = after_reopen(world, committer, &circle, commit).await?;
     if taken {
         canaries += 1;
     }
 
-    // 4. The send on that circle is refused exactly when canary 2 took the
-    //    orphaned branch: a wedge refuses it, a redeemed eviction must not. Read
-    //    against `published` so a product fix that redeems the eviction lands
-    //    here met and reaches the STALE promotion pin, rather than going unmet
-    //    and reporting rc 3 about the wrong thing. Deliberately NOT handed to O5:
-    //    the refusal has no typed classification at either layer (Finding A in
-    //    the docs above), so `classify_send` could only call it a `Defect` —
-    //    which would be the classifier's gap, not this arm's grade.
-    if try_seal(world, committer, &circle, 21).await?.is_err() != published {
+    // 4, second half: once the eviction is confirmed the circle sends.
+    if held_typed && published && try_seal(world, committer, &circle, 22).await?.is_ok() {
         canaries += 1;
-    }
-
-    if !published {
-        heal_by_peer(world, admin, committer, &circle, &proposal).await?;
     }
 
     // The acked twin: a commit the reopened device takes like any other.
@@ -777,12 +800,190 @@ async fn kill_receive<T: TimelineSink, L: LogDrain>(
     close(world, committer, tick, &[], canaries).await
 }
 
-/// Canary 2's reading, and the record of which branch the product took: the
-/// row survived the process, and the next foreground pass EITHER publishes that
-/// same commit and discharges it, OR the obligation is orphaned and the
-/// device's own verdict sweep names the circle.
+/// Kills `committer` after a wake sweep took a departure in, and reads what
+/// the foreground that follows makes of it.
 ///
-/// Returns whether it published, and whether the canary holds.
+/// # The path this arm grades (decision 27)
+///
+/// The sweep a background wake runs (`run_catchup_all_circles`) makes no
+/// commit: nothing in it can tell a background wake from the foreground, so it
+/// drives in the mode that only finishes. The eviction of a member who left
+/// comes due in the engine and stays due, under no record and on no relay, and
+/// a kill then has no publish→confirm window to land in. The foreground's
+/// drive makes the eviction under a durable record and sends it.
+///
+/// # The shape of the wake
+///
+/// A background wake runs where no engine does: the committer's engine is
+/// stopped, and every other remaining member is paused so no live plane takes
+/// the leave in. The sweep takes the leave in itself, under a silence on every
+/// plane that would swallow the `OK` of anything it sent, and the process
+/// dies. The foreground then comes back: the engine starts and the product's
+/// driver resumes.
+async fn kill_sweep<T: TimelineSink, L: LogDrain>(
+    world: &mut ScenarioWorld<T, L>,
+    leaver: DeviceTag,
+    committer: DeviceTag,
+    tick: Duration,
+    swallow: bool,
+) -> Result<ArmOutcome, RigError> {
+    let swept = sweep_over_a_departure(world, leaver, committer, swallow).await?;
+    let (circle, proposal, others) = (swept.circle, swept.proposal, swept.others);
+    let mut canaries = 0_usize;
+    // 1. The sweep made nothing of the departure: the eviction is due on the
+    //    committer, and nothing is staged, recorded, or on the wire for it.
+    if eviction_due(world, committer, &circle).await?
+        && !staged(world, committer, &circle).await?
+        && unrecorded(world, committer, &circle).await?
+        && commits_besides(world, &circle, &proposal).await?.is_empty()
+    {
+        canaries += 1;
+    }
+
+    let report = kill_and_reopen(world.device_mut(committer)?, KILL).await?;
+    record_restart(world, committer, KILL, report);
+    if swallow {
+        swallow_every_plane(world, Fault::Heal).await?;
+    }
+    // 2. The wake's process died — held, released and retaken — with no
+    //    engine to bring back.
+    if !report.engine_restarted {
+        canaries += 1;
+    }
+
+    // 3. The foreground came back: the engine starts, and the driver's resume
+    //    makes the eviction under a record, sends it once, and applies it on
+    //    the relay's acknowledgement.
+    {
+        let device = world.device_mut(committer)?;
+        let specs = device.specs().to_vec();
+        device.start_engine(specs).await?;
+    }
+    let clock = PacingClock::default();
+    // The circle has no engine subscription (it is outside the world's
+    // table): the mark stands for the end of stored events the foreground's
+    // REQ would have brought, without which no drive stages an eviction.
+    world
+        .device(committer)?
+        .session()?
+        .mark_caught_up_for_test(circle.mls_group_id());
+    let resumed = world.resume_paced(committer, &clock).await?;
+    // The started engine's own drive may hold the record the resume just
+    // staged — one that only finishes, so it sends nothing new — and the
+    // resume then finds it busy: the next drive takes it up once that drive
+    // lets go (`drive_until_settled`), the product's own order, never a
+    // margin of the rig's.
+    if pending_record(world.device(committer)?, circle.mls_group_id())
+        .await?
+        .is_some()
+    {
+        let _ = drive_until_settled(
+            world,
+            committer,
+            circle.mls_group_id(),
+            &clock,
+            SETTLE_DRIVES,
+        )
+        .await?;
+    }
+    let commits = commits_besides(world, &circle, &proposal).await?;
+    if !resumed.errored
+        && matches!(commits.as_slice(), [commit] if world
+            .relays()
+            .iter()
+            .any(|plane| plane.witnessed_ok(commit)))
+        && !staged(world, committer, &circle).await?
+    {
+        canaries += 1;
+    }
+    for &other in &others {
+        world.device_mut(other)?.come_online().await?;
+    }
+
+    let classified: Vec<Classification> = match try_seal(world, committer, &circle, 23).await? {
+        Ok(_) => Vec::new(),
+        Err(error) => vec![classify_send(&error)],
+    };
+    close(world, committer, tick, &classified, canaries).await
+}
+
+/// How long one wake sweep may run.
+const SWEEP_SECS: u64 = 30;
+
+/// What [`sweep_over_a_departure`] left.
+struct Swept {
+    /// The circle the leaver left, outside the world's table.
+    circle: SimCircle,
+    /// The leaver's proposal, acknowledged.
+    proposal: Event,
+    /// The devices paused for the sweep.
+    others: Vec<DeviceTag>,
+}
+
+/// A wake sweep over a departure, in a circle of its own.
+///
+/// `leaver` proposes its leave with every other member but `committer` paused
+/// and `committer`'s engine stopped (a background wake has none), and ONE
+/// sweep on `committer` takes the leave in — every plane swallowing the `OK`
+/// of anything sent meanwhile when `swallow`.
+///
+/// # Errors
+///
+/// [`RigError::PublishNeverAcked`] if the proposal was never acknowledged,
+/// otherwise [`RigError`] naming the step that failed.
+async fn sweep_over_a_departure<T: TimelineSink, L: LogDrain>(
+    world: &mut ScenarioWorld<T, L>,
+    leaver: DeviceTag,
+    committer: DeviceTag,
+    swallow: bool,
+) -> Result<Swept, RigError> {
+    let circle = world.build_extra_circle().await?;
+    let others: Vec<DeviceTag> = world
+        .devices()
+        .iter()
+        .map(|device| device.tag)
+        .filter(|tag| *tag != leaver && *tag != committer)
+        .collect();
+    for &other in &others {
+        world.device_mut(other)?.go_offline().await?;
+    }
+    if let Some(core) = world.device_mut(committer)?.take_engine() {
+        if core.stop().await == StopOutcome::TimedOut {
+            return Err(RigError::StopTimedOut);
+        }
+    }
+    let (_, sent, _) = world.leave(leaver, circle.mls_group_id()).await?;
+    let proposal = sent
+        .into_iter()
+        .find(|event| DropClass::of(event) == Some(DropClass::Handshake))
+        .ok_or(RigError::Core(Step::StageCommit))?;
+    if !world
+        .relays()
+        .iter()
+        .any(|plane| plane.witnessed_ok(&proposal.id))
+    {
+        return Err(RigError::PublishNeverAcked);
+    }
+    if swallow {
+        swallow_every_plane(world, Fault::SwallowOk).await?;
+    }
+    let device = world.device(committer)?;
+    let _ = run_catchup_all_circles(device.manager()?, &device.relays, SWEEP_SECS).await;
+    Ok(Swept {
+        circle,
+        proposal,
+        others,
+    })
+}
+
+/// Canary 2's reading: the record survived the process — the reopened device
+/// holds the commit staged under it, and its own verdict sweep names nothing —
+/// and the next background burst sends the
+/// same event again when its relay is due and confirms it on the
+/// acknowledgement, in the mode that only finishes: the device is still in
+/// that burst when the confirm is read.
+///
+/// Returns whether it was confirmed, and whether the canary holds.
 async fn after_reopen<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     committer: DeviceTag,
@@ -790,25 +991,36 @@ async fn after_reopen<T: TimelineSink, L: LogDrain>(
     commit: nostr::EventId,
 ) -> Result<(bool, bool), RigError> {
     let owing = *circle.nostr_group_id();
-    let survived = owes(world, committer, owing)?;
+    let survived =
+        staged(world, committer, circle).await? && !unrecorded(world, committer, circle).await?;
     let mut bus = world.device(committer)?.engine()?.bus().subscribe();
+    // A background burst, not the foreground: its drive only finishes, and
+    // finishing this record is all that is left to do.
     world.device_mut(committer)?.go_offline().await?;
-    world.device_mut(committer)?.come_online().await?;
-    let published = !owes(world, committer, owing)?
-        && world
-            .relays()
-            .iter()
-            .any(|plane| plane.witnessed_ok(&commit));
-    let orphaned = world
+    world
         .device(committer)?
-        .manager()?
-        .orphaned_removal_deferrals()
-        == vec![owing];
+        .engine()?
+        .open_background_burst()
+        .await
+        .map_err(|_| RigError::Core(Step::ResumeEngine))?;
+    let resent = bounds::fanout_resend_after_silence() + bounds::round_trip(Recovery::Undisturbed);
+    let published = await_condition(resent, || async {
+        Ok(!staged(world, committer, circle).await?
+            && world
+                .relays()
+                .iter()
+                .any(|plane| plane.witnessed_ok(&commit)))
+    })
+    .await?;
+    // Read before anything of this arm changes the lifecycle again: the
+    // confirm was a burst's, not the foreground's.
+    let in_burst = world.device(committer)?.engine()?.processor().lifecycle() == Lifecycle::Burst;
+    world.device_mut(committer)?.come_online().await?;
     let named = names(&mut bus, owing);
-    let (branch, taken) = if published {
-        (AFTER_KILL_REMOVAL_PUBLISHED, true)
+    let branch = if published {
+        AFTER_KILL_REMOVAL_PUBLISHED
     } else {
-        (AFTER_KILL_REMOVAL_REPORTED, orphaned && named)
+        AFTER_KILL_REMOVAL_REPORTED
     };
     world.timeline().record(TimelineRecord::AfterKill {
         tick: world.current_tick(),
@@ -816,45 +1028,53 @@ async fn after_reopen<T: TimelineSink, L: LogDrain>(
         circle: circle.tag,
         outcome: branch,
     });
-    Ok((published, survived && taken))
+    Ok((published, survived && published && in_burst && !named))
 }
 
-/// `admin` commits `leaver`'s eviction on its own, acknowledged, and the
-/// wedged `committer` takes it and sends again — which discharges its row.
-async fn heal_by_peer<T: TimelineSink, L: LogDrain>(
-    world: &ScenarioWorld<T, L>,
-    admin: DeviceTag,
-    committer: DeviceTag,
-    circle: &SimCircle,
-    proposal: &Event,
-) -> Result<(), RigError> {
-    let ingest = world
-        .device(admin)?
-        .manager()?
-        .decrypt_location_collecting_commits(proposal)
-        .await
-        .map_err(|_| RigError::Core(Step::StageCommit))?;
-    let Some(eviction) = ingest.auto_commits.into_iter().next() else {
-        return Err(RigError::Core(Step::StageCommit));
-    };
-    release(world, admin, &eviction).await?;
-    let bound = bounds::round_trip(Recovery::Undisturbed);
-    // The committer's engine is subscribed to the circle and takes the
-    // admin's commit live; a send it accepts is what clears the row.
-    await_condition(bound, || async {
-        Ok(try_seal(world, committer, circle, 22).await?.is_ok())
-    })
-    .await?;
-    Ok(())
-}
-
-/// Whether `device` owes exactly the eviction for `owing`.
-fn owes<T: TimelineSink, L: LogDrain>(
+/// Whether `device`'s engine announces the eviction of a member who left
+/// `circle` as due now.
+async fn eviction_due<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     device: DeviceTag,
-    owing: [u8; 32],
+    circle: &SimCircle,
 ) -> Result<bool, RigError> {
-    Ok(world.device(device)?.manager()?.owed_removal_commits() == vec![owing])
+    Ok(world
+        .device(device)?
+        .session()?
+        .eviction_due_after_for_test(circle.mls_group_id())
+        .await
+        .is_some_and(|wait| wait.is_zero()))
+}
+
+/// Whether `device`'s engine holds a commit of its own staged for `circle`.
+async fn staged<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    device: DeviceTag,
+    circle: &SimCircle,
+) -> Result<bool, RigError> {
+    Ok(matches!(
+        world
+            .device(device)?
+            .session()?
+            .epoch_state(circle.mls_group_id())
+            .await,
+        Some(EpochState::PendingPublish(_))
+    ))
+}
+
+/// Whether `device` stores no fanout record for `circle`.
+async fn unrecorded<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    device: DeviceTag,
+    circle: &SimCircle,
+) -> Result<bool, RigError> {
+    Ok(world
+        .device(device)?
+        .session()?
+        .fanout_ids_for_test(circle.mls_group_id())
+        .await
+        .map_err(|_| RigError::Core(Step::ReadConvergenceState))?
+        .is_empty())
 }
 
 /// Every commit on the planes for `circle` other than `proposal`: its
@@ -900,32 +1120,6 @@ fn names(bus: &mut Receiver<LiveSyncEvent>, owing: [u8; 32]) -> bool {
     named
 }
 
-/// Lands the eviction every gate held, on an acknowledged publish — which is
-/// also what proves the obligation was real.
-///
-/// The rig's own Rule-13 resolution of the ref it was handed: confirmed only on
-/// an acknowledgement a relay's client-facing stream carried.
-async fn release<T: TimelineSink, L: LogDrain>(
-    world: &ScenarioWorld<T, L>,
-    committer: DeviceTag,
-    eviction: &CommitToPublish,
-) -> Result<(), RigError> {
-    if world
-        .publish_witnessed(committer, std::slice::from_ref(&eviction.commit_event))
-        .await?
-        .is_none()
-    {
-        return Err(RigError::PublishNeverAcked);
-    }
-    let ingest = world
-        .device(committer)?
-        .manager()?
-        .confirm_published(eviction.pending)
-        .await
-        .map_err(|_| RigError::Core(Step::ConfirmPublished))?;
-    world.resolve_ingest(committer, ingest).await
-}
-
 /// What one reading of the OD4-c verdict saw.
 struct Sweep {
     /// No circle was named, on the bus or by the engine latch, and no bus event
@@ -935,14 +1129,14 @@ struct Sweep {
     unprocessable: bool,
 }
 
-/// Runs `device`'s own live engine's verdict sweep and reads what it said.
-fn sweep<T: TimelineSink, L: LogDrain>(
+/// Reads what `device`'s own live engine said on its bus, and MDK's durable
+/// verdict on every circle of the device.
+async fn sweep<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     device: DeviceTag,
     bus: &mut Receiver<LiveSyncEvent>,
 ) -> Result<Sweep, RigError> {
     let sim = world.device(device)?;
-    sim.engine()?.processor().report_unrecoverable_circles();
     let mut named = false;
     let mut unprocessable = false;
     loop {
@@ -959,57 +1153,9 @@ fn sweep<T: TimelineSink, L: LogDrain>(
         }
     }
     Ok(Sweep {
-        silent: !named && sim.manager()?.unrecoverable_circles().is_empty(),
+        silent: !named && sim.manager()?.unrecoverable_circles().await.is_empty(),
         unprocessable,
     })
-}
-
-/// Drives `leaver`'s `SelfRemove` through `committer`'s FFI receive plane
-/// until the eviction surfaces with its obligation recorded.
-///
-/// S22's surfacing, for S22's reason: the engine schedules the auto-commit
-/// behind a short jitter and surfaces it on the next convergence tick, so the
-/// loop re-ticks with a fresh fix from `ticker` rather than waiting on a clock.
-async fn surface_eviction<T: TimelineSink, L: LogDrain>(
-    world: &ScenarioWorld<T, L>,
-    committer: DeviceTag,
-    leaver: DeviceTag,
-    ticker: DeviceTag,
-    circle: &SimCircle,
-) -> Result<CommitToPublish, RigError> {
-    let proposal = world
-        .device(leaver)?
-        .manager()?
-        .propose_leave(circle.mls_group_id())
-        .await
-        .map_err(|_| RigError::Core(Step::StageCommit))?;
-    let mut ingest = world
-        .device(committer)?
-        .manager()?
-        .decrypt_location_collecting_commits(&proposal)
-        .await
-        .map_err(|_| RigError::Core(Step::StageCommit))?;
-    let bound = bounds::round_trip(Recovery::Undisturbed);
-    let started = Instant::now();
-    let mut index = 100_u32;
-    loop {
-        if let Some(commit) = ingest.auto_commits.pop() {
-            return Ok(commit);
-        }
-        if started.elapsed() >= bound {
-            // The eviction never surfaced, so no gate below could be induced:
-            // "this proved nothing", not a finding.
-            return Err(RigError::Core(Step::StageCommit));
-        }
-        index = index.wrapping_add(1);
-        let tick = seal(world, ticker, circle, index).await?;
-        ingest = world
-            .device(committer)?
-            .manager()?
-            .decrypt_location_collecting_commits(&tick)
-            .await
-            .map_err(|_| RigError::Core(Step::StageCommit))?;
-    }
 }
 
 /// Records a restart with the two latencies that ARE the Rule-14 measurement.
@@ -1055,6 +1201,19 @@ async fn swallow_every_plane<T: TimelineSink, L: LogDrain>(
     Ok(())
 }
 
+/// Whether any plane holds `id` or acknowledged it.
+async fn published_anywhere<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    id: &nostr::EventId,
+) -> Result<bool, RigError> {
+    for plane in world.relays() {
+        if plane.stored(id).await? || plane.witnessed_ok(id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Whether some plane holds `event` while none acknowledged it client-ward.
 async fn stored_but_unacked<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
@@ -1086,24 +1245,18 @@ async fn epoch_of<T: TimelineSink, L: LogDrain>(
         .map_err(|_| RigError::Core(Step::ReadEpoch))
 }
 
-/// Forces one `confirm_published` to fail after the engine has already
-/// delivered, and reads what the product did with the wreckage.
+/// Forces the driver's confirm of an ACKNOWLEDGED commit to fail, and reads
+/// what the product does with it (W9f): the stored record decides, the commit
+/// is never rolled back, and the next drive confirms it.
 ///
 /// # How the failure is induced, and why it is the honest shape
 ///
-/// The engine writes each replayed message's terminal state through its stored
-/// message table AFTER it has pushed that message's decrypted content into its
-/// own effect buffer. An abort trigger on that table therefore reproduces
-/// exactly the state a mid-replay fork abort produces — a caller that gets an
-/// `Err` and no effects, with a peer's fix already delivered into a buffer only
-/// the next drain will ever see — without having to build two sibling commits to
-/// get there.
-///
-/// The stranded fix is minted for a SECOND circle on purpose. The engine's
-/// effect buffers are global, so one failing resolution drains every circle's
-/// work; keying the assertion on a circle other than the one whose commit is
-/// staged is what makes "the batch was folded" a claim about the drain rather
-/// than about the commit.
+/// A write fault on the engine's stored message table makes the confirm's
+/// transaction fail after the relay has acknowledged the commit — a caller
+/// that gets an `Err` with the acknowledgement already stored on the record.
+/// The same fault aborts an ingest first, which is the strand: a peer's fix,
+/// minted for a SECOND circle on purpose, so "the batch was folded" is a claim
+/// about the drain and not about the commit.
 async fn confirm_err<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     admin: DeviceTag,
@@ -1117,46 +1270,36 @@ async fn confirm_err<T: TimelineSink, L: LogDrain>(
 
     let mut relays = world.relay_urls();
     relays.push("wss://s05-confirm-err.example.com".to_string());
-    let guard = world.note_pending_staged();
     let staged = world
         .device(admin)?
         .manager()?
-        .update_circle_relays(victim.mls_group_id(), &relays)
+        .update_circle_relays_staging(victim.mls_group_id(), &relays, WallClock.now_ms())
         .await
         .map_err(|_| RigError::Core(Step::StageCommit))?;
+    let id = staged.commit.ok_or(RigError::Core(Step::StageCommit))?;
+    let commit = world
+        .device(admin)?
+        .session()?
+        .fanout_probe_for_test(&id)
+        .await
+        .ok()
+        .flatten()
+        .ok_or(RigError::Core(Step::StageCommit))?
+        .event_id;
 
-    // 1. The window is real: with the commit staged and unresolved, the
-    //    circle's own outbound path is held shut until Rule 13 says what
-    //    happened to the publish.
+    // 1. The window is real: with the commit staged under its record and not
+    //    yet sent, the circle's own outbound path is held shut.
     if seal(world, admin, &victim, 1).await.is_err() {
         canaries += 1;
-    }
-
-    // Rule 13: only an acknowledgement a relay's own client-facing stream
-    // carried licenses a confirm.
-    if world
-        .publish_witnessed(admin, std::slice::from_ref(&staged.commit_event))
-        .await?
-        .is_none()
-    {
-        let ingest = world
-            .device(admin)?
-            .manager()?
-            .publish_failed(staged.pending)
-            .await
-            .map_err(|_| RigError::Core(Step::RollBackPublish))?;
-        world.resolve_ingest(admin, ingest).await?;
-        drop(guard);
-        return Err(RigError::PublishNeverAcked);
     }
 
     set_stored_message_write_fault_for_test(&db, &key, true)
         .map_err(|_| RigError::Core(Step::OpenStore))?;
     // A peer's fix for the OTHER circle, ingested while the fault stands: the
-    // ingest aborts on the state write with the content already in the engine's
-    // buffer. Deliberately NOT classified — a storage fault this arm induced is
-    // not an ingest disposition, and feeding it to O5 would report the harness's
-    // own plant as an outcome the product could not account for.
+    // ingest aborts on the state write. Deliberately NOT classified — a
+    // storage fault this arm induced is not an ingest disposition, and feeding
+    // it to O5 would report the harness's own plant as an outcome the product
+    // could not account for.
     let stranded = seal(world, peer, &sibling, 2).await?;
     let refused = world
         .device(admin)?
@@ -1169,41 +1312,46 @@ async fn confirm_err<T: TimelineSink, L: LogDrain>(
         canaries += 1;
     }
 
-    let outcome = world
-        .device(admin)?
-        .manager()?
-        .confirm_published(staged.pending)
-        .await;
+    // The driver sends the commit, a relay acknowledges it, and the confirm
+    // fails on the fault.
+    let before = epoch_of(world, admin, victim.mls_group_id()).await?;
+    let failed = world.resume(admin).await?;
+    let acked = world
+        .relays()
+        .iter()
+        .any(|plane| plane.witnessed_ok(&commit));
     set_stored_message_write_fault_for_test(&db, &key, false)
         .map_err(|_| RigError::Core(Step::OpenStore))?;
-    // The pending state is NOT resolved, and that is the point of the arm: Rule
-    // 13 forbids turning this error into a `publish_failed`. The rig's own
-    // staged-commit count may not outlive the call, or the closing round could
-    // never settle — so the guard goes here and the engine's staged commit
-    // stays, which canary 5 reads back.
-    drop(guard);
 
-    // 3. The confirm really failed.
-    if outcome.is_err() {
+    // 3. The confirm really failed, on an acknowledged commit.
+    if failed.errored && acked {
         canaries += 1;
     }
-    // 4. …and the fix the engine had already delivered is in the durable store
-    //    anyway, written by the failing call's own drain. Nothing will ever
-    //    deliver it again: the engine hands a replayed message back exactly
-    //    once.
-    if folded(world, admin, peer, &sibling)? {
+    // 4. RECORDED EXPECTATION, not a graded promise. At MDK `e391adc` the
+    //    faulted ingest had already pushed the fix into the effect buffer, and
+    //    the failing confirm's drain folded it. At v0.10.4 the engine writes
+    //    before it emits, so a faulted ingest delivers nothing — and records the
+    //    object as seen, so no redelivery brings it back (tracker
+    //    T-FAULTED-INGEST-SEEN). The fix is therefore absent; the day it is
+    //    present again, this canary is unmet and the arm goes rc 3, the signal
+    //    that the expectation is stale.
+    if !folded(world, admin, peer, &sibling)? {
         canaries += 1;
     }
-    // 5. …and nothing was rolled back or retried: the commit is still staged,
-    //    which is precisely what a `publish_failed` would have undone, and the
-    //    device reports no circle unrecoverable over it.
-    let still_staged = seal(world, admin, &victim, 3).await.is_err();
+    // 5. W9f: the stored record decided, and the commit was neither rolled
+    //    back nor stranded — the next drive confirms it, the epoch moves, the
+    //    circle sends again, and no circle is reported unrecoverable over it.
+    let clock = PacingClock::default();
+    let settled =
+        drive_until_settled(world, admin, victim.mls_group_id(), &clock, SETTLE_DRIVES).await?;
+    let applied = epoch_of(world, admin, victim.mls_group_id()).await? > before;
     let quiet = world
         .device(admin)?
         .manager()?
         .unrecoverable_circles()
+        .await
         .is_empty();
-    if still_staged && quiet {
+    if settled && applied && quiet && seal(world, admin, &victim, 3).await.is_ok() {
         canaries += 1;
     }
     Ok(canaries)
@@ -1250,11 +1398,9 @@ async fn try_seal<T: TimelineSink, L: LogDrain>(
     let sender = world.device(device)?;
     Ok(sender
         .manager()?
-        .encrypt_location(
+        .seal_location_for_test(
             circle.mls_group_id(),
-            &sender.keys.public_key(),
             &ProbeToken::mint(5, index).as_location(),
-            LOCATION_MESSAGE_RETENTION_SECS,
         )
         .await
         .map(|(event, _, _)| event))
@@ -1331,8 +1477,8 @@ mod tests {
             "the receive-plane kill"
         );
         assert!(
-            arm.withheld_acks == WithheldAcks::Fixed(1),
-            "the one foreground publish of the eviction burns the whole ladder"
+            arm.withheld_acks == WithheldAcks::FanoutResends(1),
+            "the one send the kill cuts is made again when its relay is next due"
         );
         assert!(
             arm.floor
@@ -1342,9 +1488,9 @@ mod tests {
                     deliveries_observed: 1,
                     canaries_caught: 4,
                 },
-            "the swallowed acknowledgement, the twin's world epoch, and the \
-             obligation before the publish, after the reopen, across the kill, \
-             and the send"
+            "the swallowed acknowledgement, the twin's world epoch, and what a \
+             burst made of the departure, the kill inside the window, the \
+             record after the reopen, and the send held and then made"
         );
     }
 
@@ -1371,6 +1517,28 @@ mod tests {
     }
 
     #[test]
+    fn the_sweep_kill_arm_withholds_nothing() {
+        let arm = ARMS[4];
+        assert!(arm.label == "kill-sweep-eviction", "the wake sweep's kill");
+        assert!(
+            arm.withheld_acks == WithheldAcks::None,
+            "the sweep makes no commit, so it sends nothing into the silence"
+        );
+        assert!(
+            arm.floor
+                == ExpectationFloor {
+                    faults_applied: 1,
+                    epochs_crossed: 0,
+                    deliveries_observed: 1,
+                    canaries_caught: 3,
+                },
+            "the swallowed acknowledgement, a circle outside the world's table, \
+             and the sweep that made nothing, the engine-less death and the \
+             foreground's drive making the eviction"
+        );
+    }
+
+    #[test]
     fn the_derived_bounds_are_the_plans() {
         let tick = Duration::from_millis(250);
         let shape = MINIMAL_SHAPE;
@@ -1379,8 +1547,8 @@ mod tests {
             "13.75 + 9 + 13 + (34 + 10)"
         );
         assert!(
-            ARMS[2].deadline(tick, &shape) == Duration::from_millis(79_750),
-            "13.75 + 9 + 13 + (34 + 10)"
+            ARMS[2].deadline(tick, &shape) == Duration::from_millis(65_750),
+            "13.75 + 9 + 13 + 30"
         );
         assert!(
             ARMS[3].deadline(tick, &shape) == Duration::from_millis(35_750),

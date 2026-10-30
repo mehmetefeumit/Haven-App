@@ -33,6 +33,10 @@
 #                        the container (default: /tmp/strfry-data).
 #   STRFRY_CONTAINER     Container name (default: strfry).
 #   STRFRY_PORT          Host port to publish 7777 on (default: 7777).
+#   STRFRY_CONFIG        Config file name under tooling/e2e (default:
+#                        strfry.conf, NIP-77 off). `strfry-negentropy.conf`
+#                        is the same with NIP-77 on, for the
+#                        relay-customization lane's second relay.
 #   STRFRY_READY_TIMEOUT Seconds to wait for the relay to come up
 #                        (default: 60).
 #   STRFRY_PULL_ATTEMPTS Number of `docker pull` attempts (with linear
@@ -58,7 +62,7 @@ readonly READY_CONFIRM_SECS=2
 readonly PULL_ATTEMPTS="${STRFRY_PULL_ATTEMPTS:-5}"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly CONFIG_FILE="${script_dir}/../strfry.conf"
+readonly CONFIG_FILE="${script_dir}/../${STRFRY_CONFIG:-strfry.conf}"
 
 if [[ ! -f "${CONFIG_FILE}" ]]; then
   echo "ERROR: strfry config not found at ${CONFIG_FILE}" >&2
@@ -224,7 +228,23 @@ run_self_test() {
     printf '  \033[1;32mPASS\033[0m the startup wait actually consults the fatal-line check\n'
   fi
 
-  local -r expected=9
+  # The NIP-77 variant is the default config with ONE line flipped, so the two
+  # relays of the mixed-routing lane differ in nothing else. Comment lines are
+  # stripped: only the header says why the file exists.
+  ran=$((ran + 1))
+  local conf_dir="${script_dir}/.."
+  if [[ "$(grep -v '^#' "${conf_dir}/strfry.conf" \
+           | sed 's/^        enabled = false$/        enabled = true/')" \
+        != "$(grep -v '^#' "${conf_dir}/strfry-negentropy.conf")" ]] \
+     || [[ "$(grep -c '^        enabled = false$' "${conf_dir}/strfry.conf")" != 1 ]]; then
+    printf '  \033[1;31mFAIL\033[0m %s\n' \
+      'strfry-negentropy.conf differs from strfry.conf in more than negentropy.enabled' >&2
+    fail=1
+  else
+    printf '  \033[1;32mPASS\033[0m the NIP-77 config differs from the default in negentropy.enabled alone\n'
+  fi
+
+  local -r expected=10
   if (( ran != expected )); then
     printf '  \033[1;31mFAIL\033[0m ran %s fixtures, expected exactly %s\n' \
       "${ran}" "${expected}" >&2

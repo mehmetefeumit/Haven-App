@@ -7,6 +7,8 @@ library;
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/rust/api.dart'
+    show LocationPublishFfi, SealedLocationFfi;
 import 'package:haven/src/services/circle_service.dart';
 
 /// A test pubkey in hex, paired with [kTestNpub].
@@ -62,27 +64,22 @@ class MockCircleService implements CircleService {
   /// Tracks method calls for verification in tests.
   final List<String> methodCalls = [];
 
-  /// Encrypted location results to return.
-  List<EncryptedLocation> encryptLocationResults = [];
-  int _encryptIndex = 0;
-
   /// Decrypted location results to return (empty = no results this call).
   List<List<LocationEventResult>> decryptLocationResults = [];
   int _decryptIndex = 0;
 
-  /// Resets the sequential-result indices for [decryptLocationResults],
-  /// [encryptLocationResults], and [getMembersResults].
+  /// Resets the sequential-result indices for [decryptLocationResults] and
+  /// [getMembersResults].
   ///
   /// Call this before Phase 2 of a two-phase test that reuses the same
   /// [MockCircleService] instance with a new result list, so the new list
   /// is consumed from index 0 rather than wherever Phase 1 left the cursor.
   void resetResultIndices() {
     _decryptIndex = 0;
-    _encryptIndex = 0;
     _getMembersIndex = 0;
   }
 
-  /// Event JSONs passed to [decryptLocation], in call order.
+  /// Event JSONs passed to [ingestEvent], in call order.
   ///
   /// Exposed so tests can assert the order in which events were
   /// decrypted — notably that the service sorts events ascending by
@@ -102,10 +99,15 @@ class MockCircleService implements CircleService {
   @override
   Future<Circle?> getCircle(List<int> mlsGroupId) async {
     methodCalls.add('getCircle');
+    final boom = getCircleThrows;
+    if (boom != null) throw boom;
     return _circles
         .where((c) => _listEquals(c.mlsGroupId, mlsGroupId))
         .firstOrNull;
   }
+
+  /// When set, [getCircle] throws it.
+  Exception? getCircleThrows;
 
   /// Optional override for [getMembers].
   ///
@@ -155,7 +157,6 @@ class MockCircleService implements CircleService {
     required CircleType circleType,
     String? description,
     List<String>? relays,
-    List<String> creatorFallbackRelays = const [],
   }) async {
     methodCalls.add('createCircle');
     return createCircleResult ??
@@ -181,6 +182,51 @@ class MockCircleService implements CircleService {
   @override
   Future<void> declineInvitation(List<int> mlsGroupId) async {
     methodCalls.add('declineInvitation');
+  }
+
+  /// What [rejoinOffersForInvitation] answers, in turn; once spent, the last.
+  List<List<RejoinOffer>> rejoinOffers = const [[]];
+  int _rejoinReads = 0;
+
+  /// The offers [confirmGroupRejoin] was handed, in order.
+  final List<RejoinOffer> confirmedOffers = [];
+
+  /// What [confirmGroupRejoin] answers, in turn: a [Circle] or an exception
+  /// to throw; once spent, the last.
+  List<Object> rejoinConfirms = const [];
+  int _rejoinConfirmsMade = 0;
+
+  @override
+  Future<List<RejoinOffer>> rejoinOffersForInvitation(
+    List<int> invitationId,
+  ) async {
+    methodCalls.add('rejoinOffersForInvitation');
+    final i = _rejoinReads < rejoinOffers.length
+        ? _rejoinReads
+        : rejoinOffers.length - 1;
+    _rejoinReads++;
+    return rejoinOffers[i];
+  }
+
+  @override
+  Future<Circle> confirmGroupRejoin(
+    List<int> invitationId,
+    RejoinOffer offer,
+  ) async {
+    methodCalls.add('confirmGroupRejoin');
+    confirmedOffers.add(offer);
+    final i = _rejoinConfirmsMade < rejoinConfirms.length
+        ? _rejoinConfirmsMade
+        : rejoinConfirms.length - 1;
+    _rejoinConfirmsMade++;
+    final answer = rejoinConfirms[i];
+    if (answer is Circle) return answer;
+    throw answer as Exception;
+  }
+
+  @override
+  Future<void> declineGroupRejoin(List<int> invitationId) async {
+    methodCalls.add('declineGroupRejoin');
   }
 
   /// A REFERENCE (not a copy) to the last `identitySecretBytes` passed to
@@ -217,74 +263,41 @@ class MockCircleService implements CircleService {
   // (see `NostrCircleService`'s `_publishAndConfirm`), so there is nothing
   // left for the receiver-side decrypt path to publish or finalize.
 
-  /// Hex-encoded `mlsGroupId`s marked via [markCircleBlocked], for test
-  /// assertions.
-  final Set<String> blockedCircleIdsForTest = {};
-
-  static String _hexGroupId(List<int> mlsGroupId) {
-    return mlsGroupId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  }
-
-  @override
-  void markCircleBlocked(List<int> mlsGroupId) {
-    methodCalls.add('markCircleBlocked');
-    blockedCircleIdsForTest.add(_hexGroupId(mlsGroupId));
-  }
-
-  @override
-  bool isCircleBlocked(List<int> mlsGroupId) {
-    methodCalls.add('isCircleBlocked');
-    return blockedCircleIdsForTest.contains(_hexGroupId(mlsGroupId));
-  }
-
   // NOTE: `groupsNeedingSelfUpdate` / `selfUpdate` were removed from
   // `CircleService` — MIP-02/03 leaf-key rotation is now engine-internal
   // under Dark Matter (see `self_update_provider.dart`).
 
-  /// Args captured from each [leaveCircle] call, in order.
-  final List<({List<int> mlsGroupId, String selfPubkeyHex})>
-  leaveCircleCalledWith = [];
+  /// Group ids passed to [leaveCircle], in order.
+  final List<List<int>> leaveCircleCalledWith = [];
 
   @override
-  Future<void> leaveCircle({
-    required List<int> mlsGroupId,
-    required String selfPubkeyHex,
-  }) async {
+  Future<LeaveDelivery> leaveCircle({required List<int> mlsGroupId}) async {
     methodCalls.add('leaveCircle');
-    leaveCircleCalledWith.add((
-      mlsGroupId: List<int>.of(mlsGroupId),
-      selfPubkeyHex: selfPubkeyHex,
-    ));
+    await leaveCircleGate?.future;
+    leaveCircleCalledWith.add(List<int>.of(mlsGroupId));
+    if (shouldThrowOnLeaveCircle) {
+      throw CircleServiceException(errorMessage);
+    }
+    return leaveCircleDelivery;
+  }
+
+  /// When set, [leaveCircle] answers only once it completes.
+  Completer<void>? leaveCircleGate;
+
+  /// Group ids passed to [leaveDisbandedCircle], in order.
+  final List<List<int>> leaveDisbandedCalledWith = [];
+
+  @override
+  Future<void> leaveDisbandedCircle({required List<int> mlsGroupId}) async {
+    methodCalls.add('leaveDisbandedCircle');
+    leaveDisbandedCalledWith.add(List<int>.of(mlsGroupId));
     if (shouldThrowOnLeaveCircle) {
       throw CircleServiceException(errorMessage);
     }
   }
 
-  /// Return value for [stillAMember] (the leaver-backstop liveness predicate).
-  bool stillAMemberResult = true;
-
-  /// Whether [stillAMember] should throw.
-  bool shouldThrowOnStillAMember = false;
-
-  /// Args captured from each [stillAMember] call, in order.
-  final List<({List<int> mlsGroupId, String ownPubkeyHex})> stillAMemberCalls =
-      [];
-
-  @override
-  Future<bool> stillAMember({
-    required List<int> mlsGroupId,
-    required String ownPubkeyHex,
-  }) async {
-    methodCalls.add('stillAMember');
-    stillAMemberCalls.add((
-      mlsGroupId: List<int>.of(mlsGroupId),
-      ownPubkeyHex: ownPubkeyHex,
-    ));
-    if (shouldThrowOnStillAMember) {
-      throw const CircleServiceException('Mock stillAMember error');
-    }
-    return stillAMemberResult;
-  }
+  /// What [leaveCircle] returns when it does not throw.
+  LeaveDelivery leaveCircleDelivery = LeaveDelivery.left;
 
   /// Pubkeys passed to [removeMember], in call order, paired with the group id.
   final List<({List<int> mlsGroupId, String memberPubkeyHex})>
@@ -304,7 +317,7 @@ class MockCircleService implements CircleService {
   Future<void>? removeMemberGate;
 
   @override
-  Future<void> removeMember({
+  Future<ChangeDelivery> removeMember({
     required List<int> mlsGroupId,
     required String memberPubkeyHex,
   }) async {
@@ -318,6 +331,9 @@ class MockCircleService implements CircleService {
     if (gate != null) await gate;
     if (shouldThrowOnRemoveMember) {
       throw const CircleServiceException('Mock removeMember error');
+    }
+    if (removeMemberDelivery != ChangeDelivery.applied) {
+      return removeMemberDelivery;
     }
     // Mirrors the real service: a subsequent getVisibleCircles() is a fresh
     // read of the (now-changed) engine state, not a cache of the pre-removal
@@ -341,21 +357,47 @@ class MockCircleService implements CircleService {
             .toList(),
         createdAt: circle.createdAt,
         updatedAt: circle.updatedAt,
+        engineState: circle.engineState,
       );
     }
+    return ChangeDelivery.applied;
   }
+
+  /// Gives the circle [mlsGroupId] the engine [state] every later read
+  /// carries, as the core's persisted state does (for example MDK halting
+  /// it: [CircleEngineState.unrecoverable]).
+  void setEngineState(List<int> mlsGroupId, CircleEngineState state) {
+    final index = _circles.indexWhere(
+      (c) => _listEquals(c.mlsGroupId, mlsGroupId),
+    );
+    final circle = _circles[index];
+    _circles[index] = Circle(
+      mlsGroupId: circle.mlsGroupId,
+      nostrGroupId: circle.nostrGroupId,
+      displayName: circle.displayName,
+      circleType: circle.circleType,
+      relays: circle.relays,
+      membershipStatus: circle.membershipStatus,
+      members: circle.members,
+      createdAt: circle.createdAt,
+      updatedAt: circle.updatedAt,
+      engineState: state,
+    );
+  }
+
+  /// What [removeMember] returns when it does not throw; only `applied`
+  /// changes the roster.
+  ChangeDelivery removeMemberDelivery = ChangeDelivery.applied;
 
   /// Calls to [addMember], in order.
   ///
   /// Each entry captures the mlsGroupId, the member pubkeys (parsed from
-  /// each [KeyPackageData.pubkey]), the raw [KeyPackageData] list, and
-  /// the creatorFallbackRelays passed to the call.
+  /// each [KeyPackageData.pubkey]) and the raw [KeyPackageData] list.
   final List<
     ({
       List<int> mlsGroupId,
       List<String> memberPubkeys,
       List<KeyPackageData> memberKeyPackages,
-      List<String> creatorFallbackRelays,
     })
   >
   addMemberCalls = [];
@@ -365,48 +407,46 @@ class MockCircleService implements CircleService {
 
   /// Configurable return value for [addMember].
   ///
-  /// When non-null, [addMember] returns this value. When null, returns a
-  /// default [AddMemberResult] with welcomesSent = 1 and welcomesTotal = 1.
+  /// When non-null, [addMember] returns this value. When null, returns an
+  /// applied [AddMemberResult] with one Welcome of one delivered.
   AddMemberResult? addMemberResult;
 
   @override
   Future<AddMemberResult> addMember({
-    required Future<List<int>> Function() secretProvider,
     required List<int> mlsGroupId,
     required List<KeyPackageData> memberKeyPackages,
-    List<String> creatorFallbackRelays = const [],
   }) async {
     methodCalls.add('addMember');
     addMemberCalls.add((
       mlsGroupId: List<int>.of(mlsGroupId),
       memberPubkeys: memberKeyPackages.map((kp) => kp.pubkey).toList(),
       memberKeyPackages: List<KeyPackageData>.of(memberKeyPackages),
-      creatorFallbackRelays: List<String>.of(creatorFallbackRelays),
     ));
     if (shouldThrowOnAddMember) {
       throw const CircleServiceException('Mock addMember error');
     }
     return addMemberResult ??
-        const AddMemberResult(welcomesSent: 1, welcomesTotal: 1);
+        const AddMemberResult(
+          delivery: ChangeDelivery.applied,
+          welcomesDelivered: 1,
+          welcomesTotal: 1,
+        );
   }
 
-  /// The update-interval hint captured from the last [encryptLocation] call.
-  int? capturedUpdateIntervalSecs;
-
-  /// `mlsGroupId`s passed to [encryptLocation], in call order — lets a test
+  /// `mlsGroupId`s passed to [sealLocation], in call order — lets a test
   /// assert exactly WHICH circle(s) were published to (e.g. per-circle
   /// scheduling).
   final List<List<int>> encryptedMlsGroupIds = [];
 
-  /// Optional gate awaited at the START of every [encryptLocation] call (after
+  /// Optional gate awaited at the START of every [sealLocation] call (after
   /// recording the call). Set it to an incomplete `Completer` to hold publishes
   /// open and prove serialization; complete it to release them.
   Completer<void>? encryptGate;
 
-  /// Wall-clock instant at which each [encryptLocation] call was entered, in
+  /// Wall-clock instant at which each [sealLocation] call was entered, in
   /// call order.
   ///
-  /// The kind-445 `created_at` is stamped inside `encryptLocation` (the engine
+  /// The kind-445 `created_at` is stamped inside the seal (the engine
   /// binds the outer event's timestamp to the inner app event's whole-second
   /// clock), so the separation between these instants IS the separation
   /// between two circles' published `created_at` values. Tests assert on it
@@ -415,13 +455,13 @@ class MockCircleService implements CircleService {
   /// what the source looks like.
   final List<DateTime> encryptCallTimes = [];
 
-  /// Number of [encryptLocation] calls currently in flight, and the high-water
+  /// Number of [sealLocation] calls currently in flight, and the high-water
   /// mark across the test. A peak above 1 means the caller dispatched
   /// concurrently.
   int _encryptInFlight = 0;
   int encryptConcurrencyPeak = 0;
 
-  /// Makes [encryptLocation] yield to the event loop once while it is counted
+  /// Makes [sealLocation] yield to the event loop once while it is counted
   /// as in flight.
   ///
   /// Off by default so existing tests keep their synchronous-completion
@@ -429,33 +469,39 @@ class MockCircleService implements CircleService {
   /// without a real suspension the mock's whole body runs to completion at
   /// call time, so even a `Future.wait` over every circle records a peak of 1
   /// and the concurrency observation silently proves nothing. The real
-  /// `encryptLocation` is an FFI round trip and always suspends.
+  /// seal is an FFI round trip and always suspends.
   bool encryptSuspends = false;
 
-  /// Hex-encoded `mlsGroupId`s whose [encryptLocation] must fail.
+  /// Hex-encoded `mlsGroupId`s whose [sealLocation] must fail.
   ///
   /// Lets a test prove that one failing circle does not abort a sequential
   /// multi-circle burst — the isolation `Future.wait` used to provide per
   /// element and a naive `for` loop would lose.
   final Set<String> encryptLocationThrowKeys = {};
 
-  /// When set, the NEXT [encryptLocation] call returns this deferral instead
-  /// of an encrypted event, and the field is cleared. Models the MLS engine
-  /// queueing an update instead of encrypting it.
-  LocationSendDeferred? deferNextEncrypt;
+  /// When set, the NEXT [sealLocation] call answers held instead of sealing,
+  /// and the field is cleared: the core holding the circle's sends.
+  bool holdNextSeal = false;
+
+  /// What the next [sealLocation] call's drives hand back, then cleared.
+  List<LocationEventResult> sealReplays = const [];
+
+  /// What the next [publishSealedLocation] calls answer, each consumed in
+  /// order; once spent, a send is accepted.
+  List<LocationPublishFfi> publishAnswers = [];
+
+  /// When set, [publishSealedLocation] throws it.
+  Exception? publishSealedThrows;
 
   @override
-  Future<EncryptLocationOutcome> encryptLocation({
+  Future<LocationSeal> sealLocation({
     required List<int> mlsGroupId,
-    required String senderPubkeyHex,
     required double latitude,
     required double longitude,
-    required int updateIntervalSecs,
   }) async {
-    capturedUpdateIntervalSecs = updateIntervalSecs;
     encryptedMlsGroupIds.add(mlsGroupId);
     encryptCallTimes.add(DateTime.now());
-    methodCalls.add('encryptLocation');
+    methodCalls.add('sealLocation');
     _encryptInFlight++;
     if (_encryptInFlight > encryptConcurrencyPeak) {
       encryptConcurrencyPeak = _encryptInFlight;
@@ -471,28 +517,31 @@ class MockCircleService implements CircleService {
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
       if (encryptLocationThrowKeys.contains(key)) {
-        throw const CircleServiceException('simulated encryptLocation failure');
+        throw const CircleServiceException('Failed to seal location');
       }
-      // A queued deferral takes precedence and is consumed once, so a test
-      // can make exactly one publish cycle defer and the next succeed.
-      final deferral = deferNextEncrypt;
-      if (deferral != null) {
-        deferNextEncrypt = null;
-        return deferral;
+      final replayed = sealReplays;
+      sealReplays = const [];
+      // Consumed once, so a test can make exactly one publish cycle held and
+      // the next seal.
+      if (holdNextSeal) {
+        holdNextSeal = false;
+        return LocationSendHeld(replayed: replayed);
       }
-      if (_encryptIndex < encryptLocationResults.length) {
-        return LocationEncrypted(encryptLocationResults[_encryptIndex++]);
-      }
-      return LocationEncrypted(
-        EncryptedLocation(
-          eventJson: '{"id":"mock-event-${_encryptIndex++}","kind":445}',
-          nostrGroupId: List.generate(32, (i) => i),
-          relays: const ['wss://relay.example.com'],
-        ),
-      );
+      return LocationSealed(_MockSealed(), replayed: replayed);
     } finally {
       _encryptInFlight--;
     }
+  }
+
+  @override
+  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async {
+    methodCalls.add('publishSealedLocation');
+    final boom = publishSealedThrows;
+    if (boom != null) throw boom;
+    if (publishAnswers.isEmpty) return LocationPublishFfi.accepted;
+    final answer = publishAnswers.first;
+    publishAnswers = publishAnswers.sublist(1);
+    return answer;
   }
 
   /// Last-known location rows stored in the mock — at most one per
@@ -643,9 +692,68 @@ class MockCircleService implements CircleService {
     methodCalls.add('wipeAllMlsState');
   }
 
+  /// When true, [acknowledgeStorageReset] throws.
+  bool shouldThrowOnAcknowledgeStorageReset = false;
+
   @override
-  Future<void> destroyLegacyMlsState() async {
-    methodCalls.add('destroyLegacyMlsState');
+  Future<void> acknowledgeStorageReset() async {
+    methodCalls.add('acknowledgeStorageReset');
+    if (shouldThrowOnAcknowledgeStorageReset) {
+      throw CircleServiceException(errorMessage);
+    }
+  }
+
+  /// What [retryQuarantinedCircle] answers.
+  bool retryQuarantinedCircleResult = false;
+
+  @override
+  Future<bool> retryQuarantinedCircle(List<int> mlsGroupId) async {
+    methodCalls.add('retryQuarantinedCircle');
+    return retryQuarantinedCircleResult;
+  }
+
+  /// What [circleRecovery] answers.
+  CircleRecoveryCause? recoveryCause;
+
+  /// When set, [circleRecovery] throws it.
+  Object? recoveryError;
+
+  /// The circles [circleRecovery] was asked about, in order.
+  final List<Circle> recoveryReads = [];
+
+  @override
+  Future<CircleRecoveryCause?> circleRecovery(Circle circle) async {
+    methodCalls.add('circleRecovery');
+    recoveryReads.add(circle);
+    final error = recoveryError;
+    if (error != null) return Future.error(error);
+    return recoveryCause;
+  }
+
+  /// What [unmadeRemovalMembers] answers.
+  List<String> unmadeRemoval = const [];
+
+  /// When set, [unmadeRemovalMembers] throws it.
+  Object? unmadeRemovalError;
+
+  @override
+  Future<List<String>> unmadeRemovalMembers(List<int> mlsGroupId) async {
+    methodCalls.add('unmadeRemovalMembers');
+    final error = unmadeRemovalError;
+    if (error != null) return Future.error(error);
+    return unmadeRemoval;
+  }
+
+  /// What [checkMemberKeyPackage] answers.
+  KeyPackageAdmission keyPackageAdmission = KeyPackageAdmission.admissible;
+
+  @override
+  Future<KeyPackageAdmission> checkMemberKeyPackage({
+    required String keyPackageJson,
+    List<int>? mlsGroupId,
+  }) async {
+    methodCalls.add('checkMemberKeyPackage');
+    return keyPackageAdmission;
   }
 
   @override
@@ -722,110 +830,32 @@ class MockCircleService implements CircleService {
     return Map<String, String>.of(contactDisplayNames);
   }
 
-  @override
-  Future<List<LocationEventResult>> decryptLocation({
-    required String eventJson,
-  }) async {
-    methodCalls.add('decryptLocation');
-    decryptCallEventJsons.add(eventJson);
-    if (_decryptIndex < decryptLocationResults.length) {
-      return decryptLocationResults[_decryptIndex++];
-    }
-    return const [];
-  }
+  /// The (0-based) [decryptLocationResults] indices whose [ingestEvent]
+  /// call answers held: the engine took the event in later.
+  final Set<int> ingestHeld = {};
 
-  /// Auto-commits to attach to a [decryptLocationCollectingCommits] call,
-  /// keyed by the (0-based) index into [decryptLocationResults] that call
-  /// consumes — i.e. set `decryptLocationAutoCommits[0]` to attach
-  /// auto-commits to whichever call consumes `decryptLocationResults[0]`.
-  /// Unset indices attach no auto-commits, so existing tests that only
-  /// populate [decryptLocationResults] are unaffected.
-  final Map<int, List<PendingAutoCommit>> decryptLocationAutoCommits = {};
-
-  /// Pending tokens passed to [confirmPendingCommit], in call order.
-  final List<PendingCommitToken> confirmPendingCommitCalls = [];
-
-  /// Pending tokens passed to [failPendingCommit], in call order.
-  final List<PendingCommitToken> failPendingCommitCalls = [];
+  /// The (0-based) [decryptLocationResults] indices whose [ingestEvent]
+  /// call throws instead of answering.
+  final Set<int> ingestThrowsAt = {};
 
   @override
-  Future<DecryptLocationOutcome> decryptLocationCollectingCommits({
-    required String eventJson,
-  }) async {
-    // Shares `decryptLocationResults`/`_decryptIndex`/`decryptCallEventJsons`
-    // with [decryptLocation] (and records the SAME `methodCalls` entry) so
-    // every existing test that only sets `decryptLocationResults` keeps
-    // working unchanged against this richer method.
+  Future<IngestResult> ingestEvent({required String eventJson}) async {
+    // Recorded as 'decryptLocation', the name every test that reads
+    // `methodCalls` for a received event already uses.
     methodCalls.add('decryptLocation');
     decryptCallEventJsons.add(eventJson);
     if (_decryptIndex < decryptLocationResults.length) {
       final index = _decryptIndex;
-      final results = decryptLocationResults[_decryptIndex++];
-      return DecryptLocationOutcome(
-        results: results,
-        autoCommits: decryptLocationAutoCommits[index] ?? const [],
-        proposals: const [],
+      if (ingestThrowsAt.contains(index)) {
+        _decryptIndex++;
+        throw const CircleServiceException('Failed to decrypt location');
+      }
+      return IngestResult(
+        results: decryptLocationResults[_decryptIndex++],
+        held: ingestHeld.contains(index),
       );
     }
-    return const DecryptLocationOutcome(
-      results: [],
-      autoCommits: [],
-      proposals: [],
-    );
-  }
-
-  /// What a [confirmPendingCommit] replays, keyed by the (0-based) index of
-  /// that call — i.e. `confirmPendingCommitOutcomes[0]` is what the FIRST
-  /// confirm hands back. Mirrors [decryptLocationAutoCommits]: unset indices
-  /// replay nothing, so existing tests are unaffected.
-  ///
-  /// This is the commit-gap surface: resolving a staged commit makes the
-  /// engine replay everything it buffered while that commit was in flight.
-  final Map<int, DecryptLocationOutcome> confirmPendingCommitOutcomes = {};
-
-  /// The [failPendingCommit] twin of [confirmPendingCommitOutcomes] — the
-  /// engine replays its buffer on a no-ack too.
-  final Map<int, DecryptLocationOutcome> failPendingCommitOutcomes = {};
-
-  /// When set, [confirmPendingCommit] throws it (the Rule-8 path: the FFI
-  /// failed and the service must surface a generic exception).
-  Exception? confirmPendingCommitThrows;
-
-  /// When set, [failPendingCommit] throws it.
-  Exception? failPendingCommitThrows;
-
-  @override
-  Future<DecryptLocationOutcome> confirmPendingCommit(
-    PendingCommitToken pending,
-  ) async {
-    methodCalls.add('confirmPendingCommit');
-    final index = confirmPendingCommitCalls.length;
-    confirmPendingCommitCalls.add(pending);
-    final boom = confirmPendingCommitThrows;
-    if (boom != null) throw boom;
-    return confirmPendingCommitOutcomes[index] ??
-        const DecryptLocationOutcome(
-          results: [],
-          autoCommits: [],
-          proposals: [],
-        );
-  }
-
-  @override
-  Future<DecryptLocationOutcome> failPendingCommit(
-    PendingCommitToken pending,
-  ) async {
-    methodCalls.add('failPendingCommit');
-    final index = failPendingCommitCalls.length;
-    failPendingCommitCalls.add(pending);
-    final boom = failPendingCommitThrows;
-    if (boom != null) throw boom;
-    return failPendingCommitOutcomes[index] ??
-        const DecryptLocationOutcome(
-          results: [],
-          autoCommits: [],
-          proposals: [],
-        );
+    return const IngestResult(results: [], held: false);
   }
 
   // NOTE: `signKeyPackageEvent` / `recordPublishedKeyPackages` were removed
@@ -911,7 +941,7 @@ class MockCircleService implements CircleService {
   }
 
   @override
-  Future<void> updateCircleRelays({
+  Future<ChangeDelivery> updateCircleRelays({
     required List<int> mlsGroupId,
     required List<String> newRelays,
   }) async {
@@ -923,6 +953,7 @@ class MockCircleService implements CircleService {
     if (shouldThrowOnUpdateCircleRelays) {
       throw const CircleServiceException('Mock updateCircleRelays error');
     }
+    return ChangeDelivery.applied;
   }
 
   bool _listEquals(List<int> a, List<int> b) {
@@ -944,6 +975,7 @@ class TestCircleFactory {
     List<CircleMember>? members,
     MembershipStatus membershipStatus = MembershipStatus.accepted,
     List<String>? relays,
+    CircleEngineState engineState = CircleEngineState.live,
   }) {
     return Circle(
       mlsGroupId: mlsGroupId ?? [1, 2, 3, 4],
@@ -955,6 +987,7 @@ class TestCircleFactory {
       members: members ?? const [],
       createdAt: DateTime(2024),
       updatedAt: DateTime(2024),
+      engineState: engineState,
     );
   }
 
@@ -972,4 +1005,13 @@ class TestCircleFactory {
       isAdmin: isAdmin,
     );
   }
+}
+
+/// A sealed location the mock hands round; it holds nothing.
+class _MockSealed implements SealedLocationFfi {
+  @override
+  void dispose() {}
+
+  @override
+  bool get isDisposed => false;
 }

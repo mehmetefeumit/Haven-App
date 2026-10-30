@@ -112,7 +112,6 @@
 
 use std::time::Duration;
 
-use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
 use haven_core::nostr::mls::types::{
     ConvergedRoster, GroupId, LocationMessageResult, MessageId, MessageState, ScreenedIngest,
 };
@@ -370,8 +369,16 @@ async fn unreadable_arm<T: TimelineSink, L: LogDrain>(
         }
         RemovalPath::Delivered => {
             // Deliver the removal commit through the seam, exactly once, so the
-            // evictee's leaf goes inactive deterministically.
+            // evictee's leaf goes inactive deterministically. MDK v0.10.4 holds a
+            // peer commit for its quiescence window, so the deadline it announces
+            // is served the way a receive plane serves it.
             feed_probe(world, evictee, &commit, before_token).await?;
+            world
+                .device(evictee)?
+                .session()?
+                .settle_receive_for_test(&group)
+                .await
+                .map_err(|_| RigError::Core(Step::ServeConvergence))?;
         }
     }
 
@@ -688,12 +695,7 @@ async fn seal<T: TimelineSink, L: LogDrain>(
     let sender = world.device(device)?;
     sender
         .manager()?
-        .encrypt_location(
-            group,
-            &sender.keys.public_key(),
-            &token.as_location(),
-            LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(group, &token.as_location())
         .await
         .map(|(event, _, _)| event)
         .map_err(|_| RigError::Core(Step::Publish))

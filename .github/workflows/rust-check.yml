@@ -50,6 +50,14 @@ jobs:
             haven-core
             tooling/logscan
 
+      # `--locked` refuses to resolve if Cargo.lock no longer satisfies the
+      # manifests, so the lock the repo guards read (check_mdk_supply_chain.sh,
+      # check_lockfile_universe.sh, check_no_tracing_sink.sh) is the lock every
+      # later step builds. Without it a build silently re-resolves and the
+      # guards vouch for a graph nothing compiles.
+      - name: Resolve from the committed lockfile
+        run: cargo metadata --locked --format-version 1 >/dev/null
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -144,6 +152,10 @@ jobs:
             tooling/logscan
           key: rust-builder
 
+      # As in haven-core: the guarded lock is the built lock.
+      - name: Resolve from the committed lockfile
+        run: cargo metadata --locked --format-version 1 >/dev/null
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -228,6 +240,10 @@ jobs:
             tooling/logscan
           key: e2e-tooling
 
+      # As in haven-core: the guarded lock is the built lock.
+      - name: Resolve from the committed lockfile
+        run: cargo metadata --locked --format-version 1 >/dev/null
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -296,6 +312,10 @@ jobs:
         with:
           workspaces: tooling/logscan
           key: logscan-tooling
+
+      # As in haven-core: the guarded lock is the built lock.
+      - name: Resolve from the committed lockfile
+        run: cargo metadata --locked --format-version 1 >/dev/null
 
       - name: Check formatting
         run: cargo fmt --check
@@ -472,6 +492,10 @@ jobs:
           # `target/soak` is pruned like any other.
           shared-key: soak-crate
 
+      # As in haven-core: the guarded lock is the built lock.
+      - name: Resolve from the committed lockfile
+        run: cargo metadata --locked --format-version 1 >/dev/null
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -481,51 +505,17 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      # ONE VERSION, ONE SOURCE — and the same version haven-core resolved.
-      #
-      # The soak crate has its own Cargo.lock, so nothing but this step stops it
-      # resolving a second `openmls` or a drifted sibling (`openmls_rust_crypto`,
-      # `openmls_basic_credential`, `openmls_traits` — S12 names all three, and
-      # a `cargo update` inside tooling/soak alone could move one), the
-      # two-universes trap: two openmls versions in one binary are two
-      # incompatible type graphs that still compile, or a `nostr` 0.44.x different from the one MDK's pinned rev
-      # was built against — which would split the nostr type graph between
-      # haven-core's events and the rig's relay.
-      - name: One version, one source, and equal to haven-core's
-        run: |
-          set -euo pipefail
-          status=0
-          for crate in openmls openmls_rust_crypto openmls_basic_credential openmls_traits \
-                       cgka-traits cgka-engine libsqlite3-sys \
-                       nostr nostr-sdk nostr-relay-pool nostr-database; do
-            versions="$(cargo tree -i "${crate}" --prefix none --no-dedupe 2>/dev/null \
-                          | awk -v c="${crate}" '$1 == c { print $2 }' | sort -u)"
-            n="$(printf '%s\n' "${versions}" | grep -c . || true)"
-            if [[ "${n}" != 1 ]]; then
-              # Zero lines means either the crate is not in this graph at all or
-              # `cargo tree -i` refused an ambiguous spec — which is what it does
-              # when SEVERAL versions of it are present, i.e. the two-universes
-              # trap itself. Both are this step failing, and the printed tree
-              # says which.
-              echo "::error::${crate} does not resolve to exactly one version in tooling/soak (parsed ${n}): ${versions//$'\n'/ }"
-              cargo tree -i "${crate}" --prefix none --no-dedupe || true
-              status=1
-              continue
-            fi
-            want="$(awk -v c="${crate}" '
-              /^name = / { name = $3 }
-              /^version = / { if (name == "\"" c "\"") { print $3; exit } }
-            ' ../../haven-core/Cargo.lock | tr -d '"')"
-            got="${versions#v}"
-            if [[ -z "${want}" ]]; then
-              echo "::error::${crate} is not in haven-core/Cargo.lock, so there is nothing to agree with. Either the dependency left haven-core (drop it from this list in the same change) or this parser has rotted."
-              status=1
-            elif [[ "${want}" != "${got}" ]]; then
-              echo "::error::${crate} is ${got} here and ${want} in haven-core/Cargo.lock. The soak is the one crate where haven-core's types and the relay's must be one universe; pin it."
-              status=1
-            fi
-          done
-          exit "${status}"
+      # ONE UNIVERSE: the soak crate has its own Cargo.lock, so without this a
+      # `cargo update` inside tooling/soak alone could resolve a second
+      # `openmls` (two type graphs that still compile), a drifted sibling S12
+      # names, or a `nostr` other than the one MDK's pinned rev was built
+      # against. The guard compares (version, source) pairs against
+      # haven-core's lock and the pins in scripts/ci/mdk_pins.env; version
+      # alone cannot tell a git fork from the registry release. It also runs in
+      # repo-guards.yml; here it sits next to the build it protects.
+      - name: One MLS universe with haven-core, from the pinned sources
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/ci/check_lockfile_universe.sh
 
       # `test-utils` MUST NOT reach a shipped build. `rust_builder` names it as
       # a DEV-dependency on purpose (its own tests need the seams), and a bare
@@ -539,10 +529,21 @@ jobs:
           set -euo pipefail
           tree="$(cargo tree -e features,no-dev -p haven-core)"
           if grep -qE '(^|[^a-z-])feature "test-utils"' <<<"${tree}"; then
-            echo '::error::haven-core is built with the test-utils feature on the non-dev graph of rust_builder. That feature gates the nine soak seams and re-exports types whose Debug prints a real MLS group id.'
+            echo '::error::haven-core is built with the test-utils feature on the non-dev graph of rust_builder. That feature gates the ten soak seams and re-exports types whose Debug prints a real MLS group id.'
             exit 1
           fi
           echo "test-utils is absent from rust_builder's non-dev haven-core graph"
+
+      # MDK's Nostr adapter has ONE feature, `sdk`: its relay client, which
+      # Haven's fanout hands the publish client. A lockfile shows a feature only
+      # through the dependency it adds, so the guard job's lockfile check cannot
+      # see one that merely gates code; cargo can. In each of the three roots the
+      # adapter's enabled features must be exactly `default` and `sdk`. The
+      # judgement's fixtures (the relay client off, a feature nobody reviewed, a
+      # tree that names none) run in repo-guards.yml with the guard's self-test.
+      - name: MDK's Nostr adapter is built with its relay client and nothing else
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/ci/check_mdk_supply_chain.sh --adapter-features
 
       # The rig derives S01's and S17's liveness bounds from nostr-relay-pool's
       # own reconnect constants. They are private to that crate, so the rig

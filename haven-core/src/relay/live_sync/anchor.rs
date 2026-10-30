@@ -53,6 +53,8 @@ struct CircleAnchor {
     /// Whether this generation's one EOSE advance is spent — issued, or burned
     /// unissued by a delivery skip this generation cannot see past.
     eose_consumed: bool,
+    /// Whether every relay this generation's REQ went to has sent its `EOSE`.
+    answered: bool,
     /// Oldest `created_at` of an event this generation delivered but could not
     /// apply. The only remotely-written value here, and it can only lower the
     /// advance.
@@ -66,6 +68,7 @@ impl CircleAnchor {
         Self {
             opened_at_secs,
             eose_consumed: false,
+            answered: false,
             hold_back_secs: carried_hold_back,
         }
     }
@@ -231,7 +234,32 @@ impl CursorAnchors {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get_mut(group_id_hex)
-            .and_then(|anchor| anchor.consume_eose(now_secs))
+            .and_then(|anchor| {
+                anchor.answered = true;
+                anchor.consume_eose(now_secs)
+            })
+    }
+
+    /// Whether `group_id_hex` has a REQ open that has been answered to its
+    /// end of stored events.
+    #[must_use]
+    pub fn answered(&self, group_id_hex: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(group_id_hex)
+            .is_some_and(|anchor| anchor.answered)
+    }
+
+    /// Whether `group_id_hex` has a REQ open that has not been answered to
+    /// its end of stored events — burned or not, a skip is no end.
+    #[must_use]
+    pub fn awaits_eose(&self, group_id_hex: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(group_id_hex)
+            .is_some_and(|anchor| !anchor.answered)
     }
 
     /// Whether EVERY open generation has spent its advance — nothing is still
@@ -291,7 +319,7 @@ impl CursorAnchors {
 /// for the whole duration of the skew. And NIP-59 deliberately backdates every
 /// gift wrap by up to 48h, so with the floor at `now` even a wrap published
 /// *this second* fails the `since` filter: invitation delivery stops entirely,
-/// permanently, and across restarts. The inbox lookback (7 days cold, 49 hours
+/// permanently, and across restarts. The inbox lookback (7 days cold, 96 hours
 /// on a re-subscribe) bounds the backward direction but does nothing here — it
 /// is subtracted from a cursor that is already ahead of the clock.
 ///
@@ -311,7 +339,7 @@ impl CursorAnchors {
 /// a local storage failure, which no remote party caused. Case (b) is covered
 /// instead by the stream's lookback: a stream with no persisted cursor subtracts
 /// a full week ([`INBOX_GIFTWRAP_LOOKBACK_SECS`]) and every REQ derived from one
-/// subtracts 49 hours ([`INBOX_RESUBSCRIBE_LOOKBACK_SECS`]), so a wrap delivered
+/// subtracts 96 hours ([`INBOX_RESUBSCRIBE_LOOKBACK_SECS`]), so a wrap delivered
 /// in this window is re-requested for that long — the recovery window narrowed
 /// with the bound, which is the cost that constant's doc records.
 ///
@@ -392,7 +420,7 @@ impl InboxAnchor {
     /// so a skip on it can have swallowed a gift wrap as easily as a `kind:445`.
     ///
     /// Cheap here in particular: the inbox REQ already re-requests a whole
-    /// lookback window (7 days cold, 49 hours on a re-subscribe), so a
+    /// lookback window (7 days cold, 96 hours on a re-subscribe), so a
     /// suppressed generation widens that window by the length of one generation
     /// rather than adding a fetch.
     pub fn suppress_open_generation(&self) {

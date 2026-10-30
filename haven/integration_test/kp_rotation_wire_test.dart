@@ -32,14 +32,23 @@
 ///   5. Bob re-fetches and gets DIFFERENT material in the SAME `d` slot — the
 ///      transport binding makes slot reuse a MUST, and the addressable
 ///      replacement rule means the old package is gone from a fetcher's view.
-///   6. Bob adds Alice to a circle USING THE ROTATED PACKAGE, Alice accepts,
+///   6. A relay that does not yet serve the slot is added. The tick HEALS —
+///      and what reaches that relay is the VERY EVENT the first one serves:
+///      same id, same material, same `created_at`. A heal publishes the
+///      signed event the account froze when it minted the package, so no
+///      relay hiccup can re-sign it, restamp it or restart its `Lifetime`.
+///   7. Bob adds Alice to a circle USING THE ROTATED PACKAGE, Alice accepts,
 ///      Bob publishes a location, and ALICE DECRYPTS IT. That last step is the
 ///      point: a Welcome that is accepted but yields an unusable group is
 ///      exactly what a "did the Add succeed" check would miss.
-///   7. A relay that does not yet serve the slot is added. The tick HEALS —
-///      republishing the SAME material under a NEW `created_at`. That pair is
-///      the direct wire evidence that the rotation clock lives in the
-///      package's `not_before` and not in any event timestamp.
+///   8. That Welcome CONSUMED Alice's package. The next tick replaces it —
+///      new material, the SAME `d` slot — so the next inviter is not handed
+///      a package somebody has already used (Marmot
+///      `foundation/key-packages.md`: a consumed package is replaced).
+///
+/// Every kind-30443 read off a relay along the way is also held to the tag
+/// VALUES a peer validates before it will invite the author — the drive-side
+/// twin of `check-wire-correlation.sh` C5.11.
 ///
 /// # Why the device clock, and not a shorter lifetime or a test-only knob
 ///
@@ -82,7 +91,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart'
     show
-        CircleCreationResultFfi,
+        CircleManagerFfi,
         CircleWithMembersFfi,
         KpMaintenanceActionFfi,
         KpMaintenanceOutcomeFfi,
@@ -92,7 +101,8 @@ import 'package:haven/src/rust/api.dart'
 import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 
-import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
+import 'e2e/_lib/circle_creation.dart'
+    show DeliveredCircle, createCircleDelivered;
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
 import 'e2e/_lib/fake_location_service.dart'
     show bobFakeLatitude, bobFakeLongitude;
@@ -170,11 +180,20 @@ const String kHealedMarker = '[kpr] HEALED';
 /// The tick did not heal the under-served relay.
 const String kHealDeclinedMarker = '[kpr] HEAL_DECLINED';
 
-/// The heal republished IDENTICAL material under a NEWER `created_at`.
+/// The heal served the under-served relay the SAME event, byte for byte.
 const String kHealMaterialStableMarker = '[kpr] HEAL_MATERIAL_STABLE';
 
 /// The heal re-minted instead of republishing — the rotation clock moved.
 const String kHealMaterialRotatedMarker = '[kpr] HEAL_MATERIAL_ROTATED';
+
+/// The heal re-signed the same material into a second event.
+const String kHealEventResignedMarker = '[kpr] HEAL_EVENT_RESIGNED';
+
+/// The package a Welcome consumed was replaced in the same slot.
+const String kConsumedReplacedMarker = '[kpr] CONSUMED_REPLACED';
+
+/// The package a Welcome consumed is still the one on offer.
+const String kConsumptionIgnoredMarker = '[kpr] CONSUMPTION_IGNORED';
 
 /// The drive reached the end of its own sequence.
 const String kSequenceCompleteMarker = '[kpr] SEQUENCE_COMPLETE';
@@ -236,6 +255,7 @@ class _WirePackage {
     if (content.isEmpty) {
       throw StateError('[kpr] $phase: KeyPackage event carries no material.');
     }
+    _requireKeyPackageTagValues(decoded['tags'], phase);
     return _WirePackage(
       eventId: id,
       dSlot: _dTagOf(decoded['tags'], phase),
@@ -254,6 +274,7 @@ class _WirePackage {
     if (d == null || d.length < 2 || d[1].isEmpty) {
       throw StateError('[kpr] $phase: on-relay KeyPackage has no `d` tag.');
     }
+    _requireKeyPackageTagValues(event.raw['tags'], phase);
     return _WirePackage(
       eventId: event.id,
       dSlot: d[1],
@@ -291,6 +312,110 @@ class _WirePackage {
 
   /// The event's `created_at`, in Unix seconds.
   final int createdAt;
+}
+
+/// The seven tags a kind-30443 carries, each exactly once.
+const List<String> _kKeyPackageTagNames = <String>[
+  'd',
+  'mls_protocol_version',
+  'i',
+  'mls_ciphersuite',
+  'mls_extensions',
+  'mls_proposals',
+  'app_components',
+];
+
+final RegExp _kSlotId = RegExp(r'^[0-9a-f]{64}$');
+final RegExp _kKeyPackageRef = RegExp(r'^[0-9a-f]{64}$');
+final RegExp _kIdListValue = RegExp(r'^0x[0-9a-f]{4}$');
+
+/// Holds a kind-30443's tag VALUES to what a peer validates before it will
+/// invite the author (Marmot `transports/nostr.md`, "KeyPackage publication";
+/// the receive half is `KeyPackageCandidate::validate` in
+/// `haven-core/src/relay/maintenance/key_package.rs`).
+///
+/// Throws a [StateError] naming the rule that broke and never the value: a
+/// slot id and a KeyPackage ref are identifiers, and the drive log is
+/// uploaded.
+void _requireKeyPackageTagValues(Object? tags, String phase) {
+  Never broken(String rule) =>
+      throw StateError('[kpr] $phase: the KeyPackage event $rule.');
+
+  if (tags is! List) broken('has no tag array');
+  final byName = <String, List<List<String>>>{};
+  for (final Object? tag in tags) {
+    if (tag is! List || tag.isEmpty || tag.any((v) => v is! String)) {
+      broken('carries a tag that is not a list of strings');
+    }
+    final values = tag.cast<String>();
+    byName.putIfAbsent(values.first, () => <List<String>>[]).add(values);
+  }
+
+  List<String> only(String name) {
+    final found = byName[name] ?? const <List<String>>[];
+    if (found.length != 1) {
+      broken('carries the `$name` tag ${found.length} times, not once');
+    }
+    return found.single.sublist(1);
+  }
+
+  String single(String name) {
+    final values = only(name);
+    if (values.length != 1) broken('has a `$name` tag that is not one value');
+    return values.single;
+  }
+
+  Set<String> idList(String name) {
+    final values = only(name);
+    final unique = values.toSet();
+    if (values.isEmpty || unique.length != values.length) {
+      broken('has an empty or repeating `$name` list');
+    }
+    if (!values.every(_kIdListValue.hasMatch)) {
+      broken('has a `$name` value that is not a 0x-prefixed 16-bit id');
+    }
+    return unique;
+  }
+
+  for (final name in _kKeyPackageTagNames) {
+    only(name);
+  }
+  // A `client` tag would name the app on a public, identity-signed event.
+  for (final name in const <String>['client', 'encoding']) {
+    if (byName.containsKey(name)) broken('carries a `$name` tag');
+  }
+  if (!_kSlotId.hasMatch(single('d'))) {
+    broken('has a `d` slot id that is not 32 bytes of lowercase hex');
+  }
+  if (single('mls_protocol_version') != '1.0') {
+    broken('does not declare MLS protocol version 1.0');
+  }
+  if (!_kKeyPackageRef.hasMatch(single('i'))) {
+    broken('has an `i` KeyPackage ref that is not 32 bytes of lowercase hex');
+  }
+  idList('mls_ciphersuite');
+  // The default and retired extension types a current-profile package never
+  // advertises: required-capabilities, last-resort, and the legacy identity
+  // proof.
+  final extensions = idList('mls_extensions');
+  for (final id in const <String>['0x0003', '0x000a', '0xf2f1']) {
+    if (extensions.contains(id)) broken('advertises extension $id');
+  }
+  // app_data_update and self_remove — a circle needs both.
+  final proposals = idList('mls_proposals');
+  if (proposals.length != 2 ||
+      !proposals.containsAll(const <String>['0x0008', '0x000a'])) {
+    broken('does not advertise exactly the two proposal types');
+  }
+  // The identity proof and disband, which every Haven circle requires; and
+  // nothing below the private-use range, which the tag does not carry.
+  final components = idList('app_components');
+  for (final id in const <String>['0x8009', '0x800c']) {
+    if (!components.contains(id)) broken('does not advertise component $id');
+  }
+  if (components.any((id) => id.compareTo('0x8000') < 0)) {
+    broken('lists an app component below the private-use range');
+  }
 }
 
 void main() {
@@ -411,6 +536,7 @@ void main() {
 
         final fetchedBaseline = await relayManager.fetchMemberKeypackage(
           pubkey: alice.pubkeyHex,
+          circle: bob.user.circleManager,
         );
         if (fetchedBaseline == null) {
           debugPrint(kBaselineUnfetchableMarker);
@@ -501,6 +627,7 @@ void main() {
         // -------------------------------------------------------------------
         final rotated = await _awaitDifferentPackage(
           relayManager: relayManager,
+          inviter: bob.user.circleManager,
           pubkey: alice.pubkeyHex,
           previousEventId: baseline.eventId,
           timeout: const Duration(seconds: 60),
@@ -526,9 +653,9 @@ void main() {
           debugPrint('$kSupersedeFailedMarker reason=material_reused');
           throw StateError(
             '[kpr] the "rotated" event carries byte-identical KeyPackage '
-            'material. That is a HEAL — cached bytes republished under a new '
-            'event id — not a re-mint, so the expiring `Lifetime` is '
-            'unchanged and the account still ages out.',
+            'material. That is the expiring package signed again, not a '
+            're-mint, so its `Lifetime` is unchanged and the account still '
+            'ages out.',
           );
         }
         // harness-log-ok: dCreatedAt= parsed by kpr_marker_number.
@@ -539,7 +666,112 @@ void main() {
         );
 
         // -------------------------------------------------------------------
-        // Phase 6 — THE DELIVERABLE. Bob adds Alice with the ROTATED package,
+        // Phase 6 — a heal publishes the SAME EVENT, not a new one.
+        //
+        // Adding a relay that does not yet serve Alice's slot is, to
+        // `decide_kp_maintenance`, indistinguishable from a relay that
+        // dropped the event: either way a responder does not serve the slot,
+        // so the tick republishes. What it republishes is the signed event
+        // the account froze when it minted the package — so the copy read
+        // back off the second relay must be the one Bob fetched off the
+        // first, id for id. A heal that re-signed would put two events for
+        // one package on the wire; one that re-minted would restart the
+        // `Lifetime` on every relay hiccup.
+        //
+        // It runs BEFORE the Add on purpose: the Welcome consumes this
+        // package, and from then on the tick owes a replacement rather than
+        // a heal (phase 8).
+        //
+        // `add_user_relay` is a local DB write with no publish of its own, so
+        // the tick below is genuinely the first thing to see the new relay.
+        // -------------------------------------------------------------------
+        await alice.user.circleManager.addUserRelay(
+          url: secondStrfryUrl,
+          relayType: RelayTypeFfi.nip65,
+        );
+        debugPrint(kHealTargetAddedMarker);
+
+        final heal = await _runMaintenance(alice, relayManager);
+        if (heal.action != KpMaintenanceActionFfi.republishedStableD) {
+          debugPrint('$kHealDeclinedMarker action=${heal.action.name}');
+          throw StateError(
+            "[kpr] a relay that does not serve Alice's slot was added and "
+            'the tick returned ${heal.action.name} instead of '
+            'republishedStableD. The freshly rotated material is nowhere '
+            'near its rotation point and nobody has used it, so the heal '
+            'branch is the only correct answer.',
+          );
+        }
+        debugPrint(
+          '$kHealedMarker action=${heal.action.name} '
+          // harness-log-ok: parsed by kpr_marker_number
+          'healed=${heal.relaysHealed}',
+        );
+        expect(
+          heal.relaysHealed,
+          greaterThanOrEqualTo(1),
+          reason:
+              '[kpr] the tick chose to heal but no relay acked the publish.',
+        );
+
+        healRelay = await TestRelay.connect(url: secondStrfryUrl);
+        final healedEvents = await healRelay.collectN(
+          count: 1,
+          filter: <String, dynamic>{
+            'kinds': const <int>[30443],
+            'authors': <String>[alice.pubkeyHex],
+          },
+          timeout: const Duration(seconds: 45),
+        );
+        if (healedEvents.isEmpty) {
+          debugPrint('$kHealDeclinedMarker action=nothing_on_second_relay');
+          throw StateError(
+            '[kpr] the tick reported a heal but the second relay serves no '
+            'KeyPackage for Alice.',
+          );
+        }
+        final healed = _WirePackage.fromRelayEvent(
+          healedEvents.first,
+          'healed',
+        );
+        if (healed.material != rotated.material) {
+          debugPrint(kHealMaterialRotatedMarker);
+          throw StateError(
+            '[kpr] the heal published DIFFERENT material. A heal must '
+            'republish the package it already has; re-minting here would '
+            'restart the Lifetime on every relay hiccup, which is precisely '
+            'the reset this lane exists to rule out.',
+          );
+        }
+        if (healed.eventId != rotated.eventId) {
+          debugPrint(kHealEventResignedMarker);
+          throw StateError(
+            '[kpr] the heal published the same material under a DIFFERENT '
+            'event. A heal republishes the one signed event the account '
+            'froze at mint time; a second signature over the same package '
+            'leaves two relays serving two events for one slot, and which '
+            'of them a fetcher sees then depends on the relay it asks.',
+          );
+        }
+        expect(
+          healed.dSlot,
+          rotated.dSlot,
+          reason: '[kpr] the heal republished into a different `d` slot.',
+        );
+        expect(
+          healed.createdAt,
+          rotated.createdAt,
+          reason:
+              '[kpr] the healed event carries the same id and a different '
+              '`created_at`, which no signed event can.',
+        );
+        debugPrint(
+          '$kHealMaterialStableMarker materialSame=true eventSame=true '
+          'dSame=true',
+        );
+
+        // -------------------------------------------------------------------
+        // Phase 7 — THE DELIVERABLE. Bob adds Alice with the ROTATED package,
         // and Alice decrypts what follows.
         //
         // Bob is the inviter, so it is BOB's engine that validates Alice's
@@ -548,6 +780,7 @@ void main() {
         // -------------------------------------------------------------------
         final rotatedKp = await relayManager.fetchMemberKeypackage(
           pubkey: alice.pubkeyHex,
+          circle: bob.user.circleManager,
         );
         if (rotatedKp == null) {
           debugPrint('$kSupersedeFailedMarker reason=refetch_null');
@@ -557,21 +790,20 @@ void main() {
           );
         }
 
-        final CircleCreationResultFfi creation;
+        final DeliveredCircle creation;
         final bobSecret = await bob.user.getSecretBytes();
         try {
-          // Rule 13: publishes Alice's Welcome and CONFIRMS the staged
-          // create. An unconfirmed create pins the group in MDK
-          // PendingPublish, where every inbound kind-445 buffers forever.
-          creation = await createCircleConfirmed(
+          // Publishes Alice's Welcome and requires every relay ack: an invitee
+          // whose Welcome never landed never joins. See
+          // `createCircleDelivered`'s doc.
+          creation = await createCircleDelivered(
             manager: bob.user.circleManager,
-            relay: relay,
+            relayManager: relayManager,
             identitySecretBytes: bobSecret,
             members: <MemberKeyPackageFfi>[rotatedKp],
             name: 'KPR Rotation Circle',
             circleType: 'location_sharing',
             relays: <String>[defaultStrfryUrl],
-            creatorFallbackRelays: <String>[defaultStrfryUrl],
             scenario: 'kpr',
           );
         } on Object {
@@ -639,96 +871,78 @@ void main() {
         debugPrint('$kPeerDecryptMatchMarker withinTolerance=$withinTolerance');
 
         // -------------------------------------------------------------------
-        // Phase 7 — a heal moves the EVENT timestamp and nothing else.
+        // Phase 8 — the Welcome CONSUMED that package, so the tick replaces
+        // it.
         //
-        // Adding a relay that does not yet serve Alice's slot is, to
-        // `decide_kp_maintenance`, indistinguishable from a relay that
-        // dropped the event: either way a responder does not serve the slot,
-        // so the tick republishes the CACHED bytes under a fresh
-        // `created_at`. Reading both back off the second relay is the direct
-        // wire evidence that a heal advances the event timestamp while
-        // leaving the material — and therefore `not_before`, and therefore
-        // the rotation clock — exactly where it was.
-        //
-        // `add_user_relay` is a local DB write with no publish of its own, so
-        // the tick below is genuinely the first thing to see the new relay.
+        // Nothing about the relays changed since the heal: both serve the
+        // tracked event, the material is days from its rotation point. The
+        // only new fact is that somebody used the package. `republishedStableD`
+        // alone would not prove a replacement — a heal reports the same
+        // action — so the verdict is read off the relay, as in phase 5: new
+        // material, in the same slot.
         // -------------------------------------------------------------------
-        await alice.user.circleManager.addUserRelay(
-          url: secondStrfryUrl,
-          relayType: RelayTypeFfi.nip65,
-        );
-        debugPrint(kHealTargetAddedMarker);
-
-        final heal = await _runMaintenance(alice, relayManager);
-        if (heal.action != KpMaintenanceActionFfi.republishedStableD) {
-          debugPrint('$kHealDeclinedMarker action=${heal.action.name}');
+        final replacement = await _runMaintenance(alice, relayManager);
+        if (replacement.action != KpMaintenanceActionFfi.republishedStableD) {
+          debugPrint(
+            '$kConsumptionIgnoredMarker reason=declined '
+            'action=${replacement.action.name}',
+          );
           throw StateError(
-            "[kpr] a relay that does not serve Alice's slot was added and "
-            'the tick returned ${heal.action.name} instead of '
-            'republishedStableD. The freshly rotated material is nowhere '
-            'near its rotation point, so the heal branch is the only correct '
-            'answer.',
+            '[kpr] Alice joined a circle through her published KeyPackage '
+            'and the next tick returned ${replacement.action.name}. A '
+            'package somebody has consumed is replaced in its slot; leaving '
+            'it up hands the next inviter one that was already used.',
           );
         }
-        debugPrint(
-          '$kHealedMarker action=${heal.action.name} '
-          // harness-log-ok: parsed by kpr_marker_number
-          'healed=${heal.relaysHealed}',
-        );
         expect(
-          heal.relaysHealed,
+          replacement.relaysHealed,
           greaterThanOrEqualTo(1),
           reason:
-              '[kpr] the tick chose to heal but no relay acked the publish.',
+              '[kpr] the tick chose to replace the consumed package but no '
+              'relay acked the publish.',
         );
-
-        healRelay = await TestRelay.connect(url: secondStrfryUrl);
-        final healedEvents = await healRelay.collectN(
-          count: 1,
-          filter: <String, dynamic>{
-            'kinds': const <int>[30443],
-            'authors': <String>[alice.pubkeyHex],
-          },
-          timeout: const Duration(seconds: 45),
+        final replaced = await _awaitDifferentPackage(
+          relayManager: relayManager,
+          inviter: bob.user.circleManager,
+          pubkey: alice.pubkeyHex,
+          previousEventId: rotated.eventId,
+          timeout: const Duration(seconds: 60),
         );
-        if (healedEvents.isEmpty) {
-          debugPrint('$kHealDeclinedMarker action=nothing_on_second_relay');
+        if (replaced == null) {
+          debugPrint('$kConsumptionIgnoredMarker reason=unchanged');
           throw StateError(
-            '[kpr] the tick reported a heal but the second relay serves no '
-            'KeyPackage for Alice.',
+            '[kpr] the tick reported a publish after the Welcome but Bob '
+            'keeps fetching the package he already used.',
           );
         }
-        final healed = _WirePackage.fromRelayEvent(
-          healedEvents.first,
-          'healed',
-        );
-        if (healed.material != rotated.material) {
-          debugPrint(kHealMaterialRotatedMarker);
+        if (replaced.dSlot != rotated.dSlot) {
+          debugPrint('$kConsumptionIgnoredMarker reason=slot_changed');
           throw StateError(
-            '[kpr] the heal published DIFFERENT material. A heal must reuse '
-            'the cached bytes; re-minting here would restart the Lifetime on '
-            'every relay hiccup, which is precisely the reset this lane '
-            'exists to rule out.',
+            '[kpr] the replacement landed in a DIFFERENT addressable slot, '
+            'which leaves the consumed package addressable beside it.',
+          );
+        }
+        if (replaced.material == rotated.material) {
+          debugPrint('$kConsumptionIgnoredMarker reason=material_reused');
+          throw StateError(
+            '[kpr] the event that followed the Welcome carries the consumed '
+            'package again.',
           );
         }
         expect(
-          healed.createdAt,
+          replaced.createdAt,
           greaterThan(rotated.createdAt),
           reason:
-              '[kpr] the healed event does not carry a newer `created_at`. '
-              'Without that the pair proves nothing: the whole point is that '
-              'the EVENT timestamp moves while the material does not.',
+              '[kpr] the replacement is not newer than the event it has to '
+              'supersede in the slot.',
         );
-        expect(
-          healed.dSlot,
-          rotated.dSlot,
-          reason: '[kpr] the heal republished into a different `d` slot.',
-        );
-        // harness-log-ok: dCreatedAt= parsed by kpr_marker_number.
         debugPrint(
-          '$kHealMaterialStableMarker materialSame=true '
-          'createdAtAdvanced=true dSame=true '
-          'dCreatedAt=${healed.createdAt - rotated.createdAt}',
+          '$kConsumedReplacedMarker action=${replacement.action.name} '
+          // harness-log-ok: parsed by kpr_marker_number
+          'healed=${replacement.relaysHealed} '
+          'dSame=true materialChanged=true '
+          // harness-log-ok: dCreatedAt= parsed by kpr_marker_number.
+          'dCreatedAt=${replaced.createdAt - rotated.createdAt}',
         );
 
         // harness-log-ok: runner-grepped marker constant
@@ -828,13 +1042,17 @@ Future<Duration?> _awaitClockJump({
 /// distinguishable from a fetch that failed outright.
 Future<_WirePackage?> _awaitDifferentPackage({
   required RelayManagerFfi relayManager,
+  required CircleManagerFfi inviter,
   required String pubkey,
   required String previousEventId,
   required Duration timeout,
 }) async {
   final sw = Stopwatch()..start();
   while (sw.elapsed < timeout) {
-    final fetched = await relayManager.fetchMemberKeypackage(pubkey: pubkey);
+    final fetched = await relayManager.fetchMemberKeypackage(
+      pubkey: pubkey,
+      circle: inviter,
+    );
     if (fetched != null) {
       final pkg = _WirePackage.fromEventJson(
         fetched.keyPackageJson,

@@ -62,6 +62,10 @@ pub enum SyncStatusReason {
     /// `Reconnecting`/`Connected` churn each burst produces is harmless and
     /// expected.
     Paused,
+    /// The engine refused a kind-445 for a local resource bound and recorded
+    /// it for a refetch by id, which only the catch-up sweep performs; the
+    /// consumer runs one rather than leaving the object to the next resume.
+    RefetchOwed,
 }
 
 /// An event emitted by the engine onto its internal broadcast bus.
@@ -82,16 +86,11 @@ pub enum LiveSyncEvent {
         event_created_at_secs: i64,
     },
     /// A group membership / epoch update — the roster changed and the change is
-    /// already applied locally. A UI-only signal: the consumer just refreshes; it
-    /// owes NO publish/merge (since M6-2 the engine converges an auto-committed
-    /// peer `SelfRemove` itself in-Rust and emits this with `None`).
+    /// already applied locally. A UI-only signal: the consumer just refreshes;
+    /// it owes no publish (every commit is the fanout driver's to send).
     GroupUpdate {
         /// The circle's pseudonymous `nostr_group_id`.
         nostr_group_id: Vec<u8>,
-        /// Always `None` from the engine path (an auto-commit is converged
-        /// internally, not surfaced here). Retained as an `Option` only for the
-        /// M3a unit fixtures + the legacy FFI mapping.
-        evolution_event_json: Option<String>,
     },
     /// A raw gift-wrapped invitation (kind 1059). The engine never unwraps it;
     /// the consumer unwraps via `process_gift_wrapped_invitation`.
@@ -115,16 +114,10 @@ pub enum LiveSyncEvent {
     /// re-created. A consumer may therefore offer a destructive repair on it,
     /// which is exactly why nothing transient may ever be spelled this way.
     ///
-    /// Two things produce it, and they are the same verdict from opposite ends:
-    ///
-    /// * the ENGINE reported the group `Unrecoverable` (`GroupUnrecoverable` →
-    ///   [`crate::nostr::mls::types::LocationMessageResult::Unrecoverable`]);
-    ///   its one legal exit has no caller at the pinned rev, so it never clears;
-    /// * a DURABLE removal deferral outlived the session that staged it
-    ///   ([`crate::circle::CircleManager::orphaned_removal_deferrals`]): a
-    ///   departing peer's eviction commit is staged in the engine with its
-    ///   `PendingStateRef` gone, which nothing can publish and hydrate will not
-    ///   clear.
+    /// One thing produces it: the ENGINE reported the group `Unrecoverable`
+    /// (`GroupUnrecoverable` →
+    /// [`crate::nostr::mls::types::LocationMessageResult::Unrecoverable`]); it
+    /// clears only when this device joins a replacement Welcome (a re-invite).
     ///
     /// # What it is NOT
     ///
@@ -141,9 +134,10 @@ pub enum LiveSyncEvent {
     /// counting it: the engine-reported source emits once per inbound event that
     /// carries the verdict, and the deferral source re-emits on every FOREGROUND
     /// re-anchor that still finds the state — so a consumer that missed the first
-    /// one is not left blind. There is no paired clearing event: the state's only
-    /// exit is the circle being re-created or left, and both remove the circle
-    /// this names.
+    /// one is not left blind. There is no paired clearing event: the state ends
+    /// only when the circle is re-created or left, which removes the circle this
+    /// names, or when a re-invite's Welcome is joined, which the circle's next
+    /// read shows.
     GroupUnrecoverable {
         /// The circle's pseudonymous `nostr_group_id` (NOT the MLS group id).
         nostr_group_id: Vec<u8>,
@@ -152,6 +146,13 @@ pub enum LiveSyncEvent {
     Status {
         /// The closed status reason.
         reason: SyncStatusReason,
+    },
+    /// A drive of the live plane's own met a refusal every relay that
+    /// answered blamed on this device's clock, and none took the commit: the
+    /// evidence the clock check reads, never the relays' words.
+    ClockRejected {
+        /// Which way the relays said the clock is off.
+        complaint: crate::relay::clock_skew::DeviceClockComplaint,
     },
 }
 
@@ -168,13 +169,9 @@ impl std::fmt::Debug for LiveSyncEvent {
                 .field("content", &"<redacted>")
                 .field("event_created_at_secs", &"<redacted>")
                 .finish(),
-            Self::GroupUpdate {
-                evolution_event_json,
-                ..
-            } => f
+            Self::GroupUpdate { .. } => f
                 .debug_struct("GroupUpdate")
                 .field("nostr_group_id", &"<redacted>")
-                .field("has_evolution_event", &evolution_event_json.is_some())
                 .finish(),
             Self::Welcome { .. } => f
                 .debug_struct("Welcome")
@@ -185,6 +182,10 @@ impl std::fmt::Debug for LiveSyncEvent {
                 .field("nostr_group_id", &"<redacted>")
                 .finish(),
             Self::Status { reason } => f.debug_struct("Status").field("reason", reason).finish(),
+            Self::ClockRejected { complaint } => f
+                .debug_struct("ClockRejected")
+                .field("complaint", complaint)
+                .finish(),
         }
     }
 }
@@ -196,7 +197,6 @@ mod tests {
     // Sentinels that MUST NOT appear in any Debug output (Security Rule 8).
     const SECRET_CONTENT: &str = "SECRET_COORDS_48.0N_11.0E";
     const SENDER_PK: &str = "deadbeefcafef00d";
-    const EVOLUTION_JSON: &str = "SECRET_EVOLUTION_COMMIT_JSON";
     const GIFTWRAP_JSON: &str = "SECRET_GIFTWRAP_JSON";
 
     #[test]
@@ -211,7 +211,6 @@ mod tests {
         };
         let group_update = LiveSyncEvent::GroupUpdate {
             nostr_group_id: group_id.clone(),
-            evolution_event_json: Some(EVOLUTION_JSON.to_string()),
         };
         let unrecoverable = LiveSyncEvent::GroupUnrecoverable {
             nostr_group_id: group_id,
@@ -227,23 +226,19 @@ mod tests {
             let dbg = format!("{ev:?}");
             assert!(!dbg.contains(SECRET_CONTENT), "leaked content: {dbg}");
             assert!(!dbg.contains(SENDER_PK), "leaked sender pubkey: {dbg}");
-            assert!(
-                !dbg.contains(EVOLUTION_JSON),
-                "leaked evolution json: {dbg}"
-            );
             assert!(!dbg.contains(GIFTWRAP_JSON), "leaked gift-wrap json: {dbg}");
             assert!(!dbg.contains("abcdef"), "leaked group id bytes: {dbg}");
             assert!(!dbg.contains("ABCDEF"), "leaked group id bytes: {dbg}");
         }
 
         // The receive instant goes with the rest: a per-location arrival time is
-        // a position in the sender's day (Rule 15). Only the presence flag and
-        // the closed status enum still render.
+        // a position in the sender's day (Rule 15). Only the variant and the
+        // closed status enum still render.
         assert!(
             !format!("{location:?}").contains("1234"),
             "the event's `created_at` must not render"
         );
-        assert!(format!("{group_update:?}").contains("has_evolution_event: true"));
+        assert!(format!("{group_update:?}").starts_with("GroupUpdate"));
         assert!(format!("{status:?}").contains("Connected"));
         crate::assert_debug_redacted!(
             location,

@@ -112,4 +112,20 @@ class CatchupService {
       return const CatchupResult.empty();
     }
   }
+
+  /// Runs only the redelivery of objects the engine refused, for only the
+  /// circles that owe one ([RelayService.runRefusedRefetch]) — no window
+  /// sweep. Returns [CatchupResult.empty] on any failure; never throws.
+  Future<CatchupResult> runRefusedRefetch({int maxDurationSecs = 20}) async {
+    try {
+      final circle = await _circleManagerFactory();
+      return await _relayService.runRefusedRefetch(
+        circle: circle,
+        maxDurationSecs: maxDurationSecs,
+      );
+    } on Object catch (e) {
+      debugPrint('[Catchup] refetch failed: ${e.runtimeType}');
+      return const CatchupResult.empty();
+    }
+  }
 }

@@ -6,10 +6,13 @@
 //! and calling that a case. One exception is deliberate and named — the engine
 //! raises `EngineError::ForkedEpoch` only when a same-epoch race finds no
 //! retained recovery snapshot, and at MDK `e391adc` the snapshot map and the
-//! `committed_from` set are pruned and cleared TOGETHER, so no sequence of
-//! public calls separates them. That arm is therefore driven through the pure
-//! [`classify_ingest`] with the engine's own error value, which is what the
-//! classifier would receive.
+//! `committed_from` set were pruned and cleared TOGETHER, so no sequence of
+//! public calls separated them (measured there; v0.10.4 still raises it from
+//! the same seam, `cgka-engine/src/message_processor/mod.rs:2810,3685`). That
+//! arm is therefore driven through the pure [`classify_ingest`] with the
+//! engine's own error value, which is what the classifier would receive. The
+//! MDK v0.10.4 outcome-to-verdict table is pinned the same way, one constructed
+//! outcome per variant, beside the rig cases.
 //!
 //! # The arms with no case here, and why
 //!
@@ -25,20 +28,13 @@
 //!   engine's own retry tick.
 //! * **`SelfEvicted`** — this device's own leaf removed. It needs a removal
 //!   commit, which is scenario S02/S21's machinery and not in this phase.
-//! * **`Quarantined`** — measured, not assumed: the only induction the rig has
-//!   is deleting a group's `OpenMLS` rows, and the engine resolves the
-//!   transport group id BEFORE it consults the quarantine gate, so an event for
-//!   a group with no hydrated state answers `Routing` instead. The test below
-//!   pins both halves — the quarantine really is set, and the ingest really
-//!   says routing — so the day the gate moves in front, it goes red and this
-//!   bullet comes out.
-//! * **`PeelDeferredCapped`** — the engine drops an event unpersisted when the
-//!   per-group `PeelDeferred` store is at its cap, and it answers that drop with
-//!   the SAME `Stale { PeelFailed }` as an ordinary peel failure. The two differ
-//!   only in whether a row was left behind, so a scenario that flooded the store
-//!   to its cap sets this from the ABSENCE of a row; [`classify_ingest`], which
-//!   sees one ingest, cannot. S16's `outsider-flood` (`scenarios/s16_storage_growth.rs`)
-//!   is its producer: it feeds the store past the cap and records the drops.
+//! * **`PeelDeferredCapped`** — `ResourceRefused` once the per-group
+//!   `PeelDeferred` store holds `MAX_PEEL_DEFERRED_ROWS_PER_GROUP` (2048) rows.
+//!   Reaching it costs a flood of that size, which S16's `outsider-flood`
+//!   (`scenarios/s16_storage_growth.rs`) already feeds through this same
+//!   [`classify`]; it is not repeated here.
+//! * **`RejoinPending`** — a validated replacement Welcome awaiting the user's
+//!   consent. The rig drives no re-join.
 //!
 //! Everything else in [`Verdict`] has a case below, and the enumeration test at
 //! the bottom is what keeps that sentence true.
@@ -54,7 +50,6 @@
 
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use haven_core::circle::{CircleError, CircleManager};
@@ -64,16 +59,19 @@ use haven_core::nostr::mls::storage::{
     StorageConfig,
 };
 use haven_core::nostr::mls::types::{
-    EngineError, EpochId, GroupId, IngestEffects, IngestOutcome, MessageState, OpenMlsContentKind,
-    ScreenedIngest, SessionEffects, SessionError, StaleReason,
+    DeferralLineage, EngineError, EpochId, GroupId, InboundResourceLimit, IngestEffects,
+    IngestOutcome, InputRejectionCategory, LocalIngestState, MessageState, OpenMlsContentKind,
+    ProposalRejectionCategory, ScreenedIngest, SessionEffects, SessionError, StaleReason,
 };
 use haven_core::nostr::NostrError;
+use haven_core::relay::fanout::{FanoutClock as _, WallClock};
+use haven_soak::nemesis::types::DropClass;
 use haven_soak::nemesis::types::Fault;
 use haven_soak::oracle::undecryptable::{
-    classify, classify_ingest, classify_send, classify_session_send, Cause, Probe, StoredRow,
-    Verdict,
+    classify, classify_ingest, classify_send, classify_session_send, classify_settled_sibling,
+    Cause, Probe, StoredRow, Verdict,
 };
-use haven_soak::rig::circle::{build_circle, publish_and_resolve};
+use haven_soak::rig::circle::{build_circle, DeviceDriver};
 use haven_soak::rig::{
     install_process_globals, poll_until, CircleTag, DeviceTag, PublishVerdict, RelayPlane,
     RelayTag, RigError, SimCircle, SimDevice, Step,
@@ -175,7 +173,8 @@ impl RelayPlane for PlainRelay {
 struct World {
     devices: Vec<SimDevice>,
     circle: SimCircle,
-    relays: Vec<PlainRelay>,
+    /// Kept for the world's life: a dropped relay stops serving.
+    _relays: Vec<PlainRelay>,
 }
 
 impl World {
@@ -192,16 +191,13 @@ impl World {
                 .expect("open a device")
             })
             .collect();
-        // The rig's staged-commit counter. Nothing in this file reads it: the
-        // quiescence predicate is the only consumer, and no oracle runs here.
-        let outstanding = Arc::new(AtomicUsize::new(0));
-        let circle = build_circle(CircleTag::new(0), &devices, &relays, &urls, &outstanding)
+        let circle = build_circle(CircleTag::new(0), &devices, &urls)
             .await
             .expect("build a circle");
         Self {
             devices,
             circle,
-            relays,
+            _relays: relays,
         }
     }
 
@@ -227,26 +223,23 @@ async fn location(device: &SimDevice, group: &GroupId) -> Event {
     device
         .manager()
         .expect("manager")
-        .encrypt_location(
-            group,
-            &device.keys.public_key(),
-            &LocationMessage::new(48.85, 2.35),
-            60,
-        )
+        .seal_location_for_test(group, &LocationMessage::new(48.85, 2.35))
         .await
         .expect("encrypt")
         .0
 }
 
-// ── Haven's own pre-authentication screens ──────────────────────────────────
+// ── Haven's own pre-authentication screen ───────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_expired_event_is_screened_before_the_engine() {
-    // Fed to the seam directly, and that is not a shortcut: a relay drops an
-    // expired event before it ever notifies a client, so no delivery path can
-    // produce this arm.
+async fn an_expired_location_is_not_screened_and_applies() {
+    // Fed to the seam directly, and that is not a shortcut: `nostr-relay-pool`
+    // drops an expired event before it notifies a client, so no delivery path
+    // carries one. Haven's own judgement is the subject: the NIP-40 tag is not
+    // a validity signal (Marmot `transports/nostr.md:190-192`).
     let world = World::build(2).await;
-    let expired = EventBuilder::new(Kind::Custom(445), "never read: the screen runs first")
+    let sent = location(world.admin(), world.group()).await;
+    let expired = EventBuilder::new(Kind::Custom(445), sent.content.clone())
         .tags([
             Tag::custom(
                 TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
@@ -261,8 +254,8 @@ async fn an_expired_event_is_screened_before_the_engine() {
         classify(world.peer(), &expired, StoredRow::Unknown)
             .await
             .expect("classify")
-            == Verdict::Expired,
-        "an event past its NIP-40 expiration is screened before the engine"
+            == Verdict::Applied,
+        "a co-member's location past its NIP-40 expiration reaches the engine and applies"
     );
 }
 
@@ -353,13 +346,19 @@ async fn an_event_ingested_during_a_publish_before_apply_transition_is_a_commit_
     // group is about to apply.
     let world = World::build(2).await;
     let sent = location(world.peer(), world.group()).await;
+    // Staged under its record by the product's staging call, and not yet sent.
     let staged = world
         .admin()
         .manager()
         .expect("manager")
-        .update_circle_relays(world.group(), &["wss://gap.invalid".to_string()])
+        .update_circle_relays_staging(
+            world.group(),
+            &["wss://gap.invalid".to_string()],
+            WallClock.now_ms(),
+        )
         .await
         .expect("stage a commit");
+    assert!(staged.commit.is_some(), "premise: a commit was staged");
 
     let got = classify(world.admin(), &sent, StoredRow::Unknown)
         .await
@@ -369,37 +368,32 @@ async fn an_event_ingested_during_a_publish_before_apply_transition_is_a_commit_
         "an event the engine may not apply yet is a named gap, never a drop"
     );
 
-    // Left staged on purpose until here, and resolved now: a pending state that
-    // is neither confirmed nor rolled back forks the group.
-    let ingest = world
-        .admin()
-        .manager()
-        .expect("manager")
-        .publish_failed(staged.pending)
-        .await
-        .expect("the staged commit rolls back");
-    // The rollback replays what the window buffered — here one location and
-    // nothing else. Asserted rather than discarded: publish work coming back
-    // from THIS rollback would be a staged commit with nobody to resolve it.
+    // Left staged on purpose until here, and resolved now by the product's
+    // driver: a relay acknowledges it and it is confirmed, so no record is
+    // left pending.
+    let driver = DeviceDriver::new(world.admin(), &WallClock).expect("a driver");
+    let resumed = driver
+        .publishing()
+        .resume(world.admin().manager().expect("manager"))
+        .await;
     assert!(
-        ingest.auto_commits.is_empty() && ingest.proposals.is_empty(),
-        "a rollback of a bare relay-list commit stages nothing further"
+        !resumed.errored
+            && haven_soak::rig::no_pending_fanout(world.admin())
+                .await
+                .expect("the records are read"),
+        "the window's commit was not driven to its confirm"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_group_whose_state_was_deleted_quarantines_and_then_answers_routing() {
+async fn a_group_whose_state_was_deleted_quarantines_and_answers_quarantined() {
     // The induction S13 uses, at unit scale: the store is CLOSED, the group's
     // OpenMLS rows are removed, and the session is reopened. The quarantine IS
-    // set — and an inbound event for that group still classifies as ROUTING,
-    // not as `Quarantined`, because the engine resolves the transport group id
-    // before it consults the quarantine gate and a group with no hydrated state
-    // resolves to nothing (measured at this pin; `ingest.rs`'s gate sits after
-    // `group_id_for_transport_group_id`).
-    //
-    // Both halves are asserted. The day the engine consults the gate first,
-    // this test goes red and `Verdict::Quarantined` becomes reachable — which
-    // is exactly when the module header above must stop listing it.
+    // set — and at MDK v0.10.4 an inbound event for that group says so
+    // (`LocalState { Quarantined }`). At `e391adc` the engine resolved the
+    // transport group id before it consulted the gate and answered ROUTING;
+    // this test pinned that, and flipped when the gate moved in front. Both
+    // halves are asserted: the quarantine really is set, and the ingest says so.
     let mut world = World::build(2).await;
     let sealed = location(world.admin(), world.group()).await;
 
@@ -439,9 +433,9 @@ async fn a_group_whose_state_was_deleted_quarantines_and_then_answers_routing() 
         .await
         .expect("classify");
     assert!(
-        got == Verdict::Routing,
-        "a group whose state was deleted resolves to nothing before the \
-         quarantine gate is consulted, so the honest answer is a routing outcome"
+        got == Verdict::Quarantined,
+        "a group frozen at hydration answers as quarantined, which is what tells \
+         a scenario its input is retained rather than misrouted"
     );
 }
 
@@ -473,6 +467,122 @@ async fn a_forged_kind_445_for_a_held_group_fails_to_peel() {
          is what tells a scenario the ciphertext was foreign rather than the \
          envelope malformed"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_envelope_that_is_not_base64_is_invalid() {
+    // MDK v0.10.4 proves non-base64 content invalid before any key is tried
+    // (`Ignored { InvalidEncoding }`): a terminal verdict, unlike a payload
+    // that decodes and then fails the AEAD.
+    let world = World::build(2).await;
+    let invalid = EventBuilder::new(Kind::Custom(445), "not base64!")
+        .tags([Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+            [hex::encode(world.circle.nostr_group_id())],
+        )])
+        .sign_with_keys(&Keys::generate())
+        .expect("sign");
+
+    assert!(
+        classify(world.peer(), &invalid, StoredRow::Unknown)
+            .await
+            .expect("classify")
+            == Verdict::Invalid,
+        "content no key could ever open is the engine's terminal verdict"
+    );
+}
+
+/// The MDK v0.10.4 outcome-to-verdict table, one constructed outcome per row.
+fn assert_classified(cases: &[(IngestOutcome, Verdict)]) {
+    for (outcome, expected) in cases {
+        let got = classify_ingest(&Ok(ingested(outcome.clone())), Probe::Unnamed);
+        assert!(
+            got == *expected,
+            "an outcome classified as the wrong verdict"
+        );
+    }
+}
+
+#[test]
+fn every_pre_convergence_exclusion_has_its_verdict() {
+    use InputRejectionCategory as C;
+    let ignored = |category| IngestOutcome::Ignored { category };
+    assert_classified(&[
+        (IngestOutcome::Processed, Verdict::Applied),
+        (ignored(C::Duplicate), Verdict::Duplicate),
+        (ignored(C::OwnEcho), Verdict::OwnEcho),
+        (ignored(C::WrongRecipient), Verdict::Routing),
+        (ignored(C::UnknownGroup), Verdict::Routing),
+        (ignored(C::InvalidEncoding), Verdict::Invalid),
+        (ignored(C::InvalidSignature), Verdict::Invalid),
+        (ignored(C::UnsupportedRequiredFeature), Verdict::Invalid),
+        (ignored(C::AuthorizationFailed), Verdict::Invalid),
+        (ignored(C::MissingWelcomeKeyPackage), Verdict::Invalid),
+        (
+            IngestOutcome::Rejected {
+                category: ProposalRejectionCategory::InvalidSelfRemove,
+            },
+            Verdict::Invalid,
+        ),
+    ]);
+}
+
+#[test]
+fn every_local_state_deferral_and_refusal_has_its_verdict() {
+    let group = || GroupId::new(vec![0x5A; 32]);
+    let local = |state| IngestOutcome::LocalState { state };
+    assert_classified(&[
+        (local(LocalIngestState::Removed), Verdict::SelfEvicted),
+        (local(LocalIngestState::Quarantined), Verdict::Quarantined),
+        (
+            local(LocalIngestState::RejoinConfirmationRequired),
+            Verdict::RejoinPending,
+        ),
+        (
+            IngestOutcome::TransportDeferred {
+                group_id: group(),
+                lineage: DeferralLineage::Uncontested,
+            },
+            Verdict::PeelFailed,
+        ),
+        (
+            IngestOutcome::TransportDeferred {
+                group_id: group(),
+                lineage: DeferralLineage::ContestedFork,
+            },
+            Verdict::PeelFailed,
+        ),
+        (
+            IngestOutcome::ResourceRefused {
+                group_id: group(),
+                resource: InboundResourceLimit::TransportDeferredCapacity,
+            },
+            Verdict::PeelDeferredCapped,
+        ),
+    ]);
+}
+
+#[test]
+fn every_convergence_exclusion_has_its_verdict() {
+    let stale = |reason| IngestOutcome::Stale { reason };
+    assert_classified(&[
+        (
+            stale(StaleReason::LosingBranch),
+            Verdict::PastEpochOrBranchLoss { branch_loss: true },
+        ),
+        (
+            stale(StaleReason::BeyondAppRetention),
+            Verdict::PastEpochOrBranchLoss { branch_loss: false },
+        ),
+        (
+            stale(StaleReason::PredatesLocalCopy),
+            Verdict::PastEpochOrBranchLoss { branch_loss: false },
+        ),
+        (
+            stale(StaleReason::InvalidAgainstCanonicalState),
+            Verdict::Invalid,
+        ),
+    ]);
 }
 
 /// 44 base64 characters — 33 bytes, enough for a 12-byte nonce, a 16-byte tag
@@ -516,39 +626,33 @@ async fn a_same_epoch_race_is_classified_as_a_branch_loss() {
 
     let mut verdicts = Vec::new();
     for (device, commit) in [(world.admin(), &peer_commit), (world.peer(), &admin_commit)] {
+        // MDK v0.10.4 holds both siblings for the convergence pass that
+        // adjudicates them; the branch is decided when it closes.
+        let held = classify(device, commit, StoredRow::Unknown)
+            .await
+            .expect("classify");
+        assert!(
+            held == Verdict::CommitGap,
+            "a race's sibling is held, not judged"
+        );
+        let session = device.session().expect("session");
+        session
+            .settle_receive_for_test(world.group())
+            .await
+            .expect("the pass closes");
         // The row is LOCATED, not guessed: the engine keys it on the peeled MLS
         // content, which no holder of the signed event can compute.
-        let verdict = {
-            let before = classify(device, commit, StoredRow::Unknown)
+        let record = session
+            .stored_convergence_input_for_test(world.group(), OpenMlsContentKind::Commit, 1)
+            .await
+            .expect("the device holds the row its ingest wrote");
+        let probe = Probe::Read(
+            session
+                .stored_message_record_for_test(&record.id)
                 .await
-                .expect("classify");
-            if before == Verdict::Applied {
-                // The winner applied the peer's branch; there is no stale row.
-                Verdict::Applied
-            } else {
-                // The loser's row is the one the locator finds.
-                let record = device
-                    .session()
-                    .expect("session")
-                    .stored_convergence_input_for_test(world.group(), OpenMlsContentKind::Commit, 1)
-                    .await
-                    .expect("the losing device holds the row its ingest wrote");
-                let probe = Probe::Read(
-                    device
-                        .session()
-                        .expect("session")
-                        .stored_message_record_for_test(&record.id)
-                        .await
-                        .expect("read the row"),
-                );
-                // Re-classified from the SAME outcome shape, with the row named.
-                // `classify` already consumed the one ingest this event gets, so
-                // the outcome is re-stated rather than re-ingested — a second
-                // ingest would answer AlreadySeen.
-                classify_ingest(&Ok(stale_at_epoch()), probe)
-            }
-        };
-        verdicts.push(verdict);
+                .expect("read the row"),
+        );
+        verdicts.push(classify_settled_sibling(probe));
     }
 
     assert!(
@@ -641,7 +745,7 @@ fn fork_classification_leaks_no_identifier() {
     let panicked = std::panic::catch_unwind(|| {
         assert_eq!(
             verdict,
-            Verdict::Expired,
+            Verdict::PreAuth,
             "deliberate: capture the panic text"
         );
     })
@@ -690,12 +794,7 @@ async fn a_gated_send_is_classified_as_deferred() {
         .admin()
         .manager()
         .expect("manager")
-        .encrypt_location(
-            world.group(),
-            &world.admin().keys.public_key(),
-            &LocationMessage::new(51.5, -0.12),
-            60,
-        )
+        .seal_location_for_test(world.group(), &LocationMessage::new(51.5, -0.12))
         .await
         .expect_err("a gating row must stop the engine encrypting");
     assert!(
@@ -742,8 +841,7 @@ enum Coverage {
 /// header's account of this file cannot go stale in silence.
 const fn coverage(verdict: Verdict) -> Coverage {
     match verdict {
-        Verdict::Expired
-        | Verdict::PreAuth
+        Verdict::PreAuth
         | Verdict::Applied
         | Verdict::CommitGap
         | Verdict::Duplicate
@@ -755,11 +853,13 @@ const fn coverage(verdict: Verdict) -> Coverage {
         | Verdict::SendDeferred
         | Verdict::EpochNotStable
         | Verdict::EpochUnrecoverable
+        | Verdict::Invalid
+        | Verdict::Quarantined
         | Verdict::Defect(_) => Coverage::Produced,
         Verdict::ForwardDistance
         | Verdict::SelfEvicted
-        | Verdict::Quarantined
-        | Verdict::PeelDeferredCapped => Coverage::DeclaredUnreachable,
+        | Verdict::PeelDeferredCapped
+        | Verdict::RejoinPending => Coverage::DeclaredUnreachable,
     }
 }
 
@@ -769,8 +869,7 @@ fn every_verdict_arm_is_produced_above_or_named_unreachable_in_the_header() {
     // and the set the header EXPLAINS are compared rather than assumed to
     // agree. The match above is what stops an arm being forgotten; this is
     // what stops one joining the unreachable side without its paragraph.
-    const EVERY_ARM: [Verdict; 18] = [
-        Verdict::Expired,
+    const EVERY_ARM: [Verdict; 19] = [
         Verdict::PreAuth,
         Verdict::Applied,
         Verdict::CommitGap,
@@ -781,6 +880,8 @@ fn every_verdict_arm_is_produced_above_or_named_unreachable_in_the_header() {
         Verdict::SelfEvicted,
         Verdict::Quarantined,
         Verdict::PeelDeferredCapped,
+        Verdict::Invalid,
+        Verdict::RejoinPending,
         Verdict::Routing,
         Verdict::PeelFailed,
         Verdict::Fork,
@@ -792,8 +893,8 @@ fn every_verdict_arm_is_produced_above_or_named_unreachable_in_the_header() {
     const NAMED_IN_THE_HEADER: [Verdict; 4] = [
         Verdict::ForwardDistance,
         Verdict::SelfEvicted,
-        Verdict::Quarantined,
         Verdict::PeelDeferredCapped,
+        Verdict::RejoinPending,
     ];
 
     let unreachable: Vec<Verdict> = EVERY_ARM
@@ -819,19 +920,26 @@ fn every_verdict_arm_is_produced_above_or_named_unreachable_in_the_header() {
 
 /// The engine's own "you are past this epoch" outcome, restated.
 const fn stale_at_epoch() -> ScreenedIngest {
-    ScreenedIngest::Ingested(IngestEffects {
-        outcome: IngestOutcome::Stale {
-            reason: StaleReason::AlreadyAtEpoch {
-                current: EpochId(0),
-                msg_epoch: EpochId(0),
-            },
+    ingested(IngestOutcome::Stale {
+        reason: StaleReason::AlreadyAtEpoch {
+            current: EpochId(0),
+            msg_epoch: EpochId(0),
         },
+    })
+}
+
+/// `outcome` as an ingest that emitted nothing else.
+const fn ingested(outcome: IngestOutcome) -> ScreenedIngest {
+    ScreenedIngest::Ingested(IngestEffects {
+        outcome,
         effects: SessionEffects {
             events: Vec::new(),
             publish: Vec::new(),
             queued: Vec::new(),
             pending_convergence: Vec::new(),
         },
+        left_object_unpersisted: false,
+        valid_proposal_groups: Vec::new(),
     })
 }
 
@@ -847,57 +955,62 @@ fn forked_epoch(group: &[u8], last_stable: u64, conflicting: u64) -> SessionErro
 
 /// Makes the second device an admin so both can commit from one epoch.
 ///
-/// Published and resolved on a WITNESSED acknowledgement, never confirmed
-/// outright: Rule 13 says "acked" means a relay's `OK` reached the publisher,
-/// and a fixture that confirmed a commit nobody acked would be teaching the
-/// thing this tree forbids.
+/// Made through the product's driver, confirmed only on a relay's `OK`: Rule
+/// 13 says "acked" means a relay's `OK` reached the publisher, and a fixture
+/// that confirmed a commit nobody acked would be teaching the thing this tree
+/// forbids.
 async fn promote_to_admin(world: &World) {
-    let handoff = world
-        .admin()
-        .manager()
-        .expect("manager")
-        .propose_admin_handoff(world.group(), &world.peer().keys.public_key())
+    let driver = DeviceDriver::new(world.admin(), &WallClock).expect("a driver");
+    let outcome = driver
+        .publishing()
+        .admin_handoff(
+            world.admin().manager().expect("manager"),
+            world.group(),
+            &world.peer().keys.public_key(),
+        )
         .await
         .expect("hand over the admin bit");
-    let (verdict, _) = publish_and_resolve(
-        world.admin(),
-        &world.relays,
-        handoff.pending,
-        std::slice::from_ref(&handoff.commit_event),
-    )
-    .await
-    .expect("the handoff publishes");
     assert!(
-        verdict == PublishVerdict::Confirmed,
+        PublishVerdict::from(outcome.status) == PublishVerdict::Confirmed,
         "a commit is confirmed only on an acknowledgement that reached us"
     );
+    let commit = sent_commit(&driver);
     world
         .peer()
         .manager()
         .expect("manager")
-        .decrypt_location(&handoff.commit_event)
+        .ingest_for_test(&commit)
         .await
         .expect("the peer applies the handoff");
 }
 
-/// A relay-list commit staged by `device` and resolved on a witnessed `OK`.
+/// The one commit `driver` sent.
+fn sent_commit(driver: &DeviceDriver<'_>) -> Event {
+    let commits: Vec<Event> = driver
+        .recorded()
+        .into_iter()
+        .filter(|event| DropClass::of(event) == Some(DropClass::Handshake))
+        .collect();
+    let [commit] = <[Event; 1]>::try_from(commits).unwrap_or_else(|_| panic!("one commit"));
+    commit
+}
+
+/// A relay-list commit `device` makes through the product's driver, confirmed
+/// on a relay's `OK`.
 async fn commit_relay_update(world: &World, device: &SimDevice, relay: &str) -> Event {
-    let manager = device.manager().expect("manager");
-    let staged = manager
-        .update_circle_relays(world.group(), &[relay.to_string()])
+    let driver = DeviceDriver::new(device, &WallClock).expect("a driver");
+    let outcome = driver
+        .publishing()
+        .update_relays(
+            device.manager().expect("manager"),
+            world.group(),
+            &[relay.to_string()],
+        )
         .await
-        .expect("stage a commit");
-    let (verdict, _) = publish_and_resolve(
-        device,
-        &world.relays,
-        staged.pending,
-        std::slice::from_ref(&staged.commit_event),
-    )
-    .await
-    .expect("the commit publishes");
+        .expect("the commit is made");
     assert!(
-        verdict == PublishVerdict::Confirmed,
+        PublishVerdict::from(outcome.status) == PublishVerdict::Confirmed,
         "Rule 13: a commit is merged only after a relay acknowledged it"
     );
-    staged.commit_event
+    sent_commit(&driver)
 }

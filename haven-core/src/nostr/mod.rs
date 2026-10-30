@@ -13,8 +13,9 @@
 //!                   Event (kind 445, ready for relay)
 //! ```
 //!
-//! The single send path is [`CircleManager::encrypt_location`] →
-//! [`mls::SessionManager::send_location`]: it stamps the inner `pubkey` with
+//! The single send path is the fanout driver's
+//! [`Publishing::seal_location`] → [`mls::SessionManager::send_location`]: it
+//! stamps the inner `pubkey` with
 //! the session's own identity (W9) rather than accepting one from the caller,
 //! and the engine mints the ephemeral key for each kind 445 (Security Rule 2).
 //! A second builder that took a caller-supplied sender pubkey once lived in
@@ -32,7 +33,7 @@
 //! - Ephemeral keypairs ensure no correlation between events
 //! - NIP-40 expiration enables automatic relay cleanup
 //!
-//! [`CircleManager::encrypt_location`]: crate::circle::CircleManager::encrypt_location
+//! [`Publishing::seal_location`]: crate::relay::fanout::Publishing::seal_location
 
 mod error;
 mod event;
@@ -45,9 +46,7 @@ pub mod identity;
 pub mod mls;
 
 pub use error::{NostrError, Result};
-pub use event::{
-    SignedLocationEvent, KIND_GROUP_MESSAGE, KIND_LOCATION_UPDATE, LEGACY_KIND_LOCATION_UPDATE,
-};
+pub use event::{SignedLocationEvent, KIND_GROUP_MESSAGE, KIND_LOCATION_UPDATE};
 pub use identity::{
     IdentityError, IdentityKeypair, IdentityManager, PublicIdentity, SecureKeyStorage,
 };

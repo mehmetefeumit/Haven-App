@@ -7,7 +7,6 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
@@ -35,13 +34,21 @@ final pendingInvitationsProvider = FutureProvider<List<Invitation>>((
   }
 });
 
-/// NIP-59 gift wraps have `created_at` randomized up to 2 days in the past.
-/// We must look back at least that far, plus a buffer for clock skew.
+/// NIP-59 gift wraps have `created_at` randomized up to 2 days in the past,
+/// and a Welcome's exact bytes are re-sent for up to a day after its
+/// hand-over: 96 h covers both, with room for clock skew. The same window as
+/// the engine's inbox REQ (`INBOX_RESUBSCRIBE_LOOKBACK_SECS`).
 ///
 /// This poll's own REQ floor, and it is derived from the wall clock alone —
 /// never from the persisted `inbox_1059` cursor, and never from anything a
 /// fetched wrap carries. See [invitationPollerProvider].
-const _giftWrapLookback = Duration(days: 2, hours: 1);
+const _giftWrapLookback = Duration(hours: 96);
+
+/// Clock the gift-wrap REQ floor is taken from, by the poller and by the
+/// manual refresh. Injectable so the floor can be checked at an exact instant.
+final invitationClockProvider = Provider<DateTime Function()>(
+  (_) => DateTime.now,
+);
 
 /// Polls relays for new gift-wrapped invitations and processes them.
 ///
@@ -82,23 +89,20 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
   // where they advertise as receiving gift wraps. We deliberately do NOT
   // union public defaults/indexers: that would keep a connection open to
   // public relays (revealing our pubkey via the #p filter) even for a user
-  // who configured only private relays. In practice the Inbox list is never
-  // empty here — InboxRelaysNotifier.build() self-heals (it seeds, or on
-  // failure falls back to the compile-time default seed). The isEmpty branch
-  // below is therefore a defensive dead path; if ever reached (a brand-new
-  // account caught mid-seed), fall back to the user's own account-creation
-  // SEED relays — NEVER the read-only discovery indexers, so our own pubkey
-  // is never broadcast to the discovery plane.
-  var pollRelays = await ref.read(inboxRelaysProvider.future);
-  if (pollRelays.isEmpty) {
-    pollRelays = defaultRelays;
-  }
+  // who configured only private relays. An empty list (InboxRelaysNotifier
+  // self-heals, so a brand-new account caught mid-seed at most) polls
+  // nothing: with no 10050 advertised, no inviter sends a Welcome (NIP-17),
+  // and a `#p` REQ elsewhere would only tell those relays this npub.
+  final pollRelays = await ref.read(inboxRelaysProvider.future);
+  if (pollRelays.isEmpty) return 0;
 
   try {
     // NIP-59 randomizes gift wrap `created_at` up to 2 days in the past,
     // so we must always look back beyond that window. Re-fetching old
     // gift wraps is harmless — process_invitation guards against duplicates.
-    final since = DateTime.now().subtract(_giftWrapLookback);
+    final since = ref.read(invitationClockProvider)().subtract(
+      _giftWrapLookback,
+    );
 
     final giftWraps = await relayService.fetchGiftWraps(
       recipientPubkey: identity.pubkeyHex,

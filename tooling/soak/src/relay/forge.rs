@@ -224,7 +224,8 @@ pub enum Forgery {
         group_id: [u8; 32],
     },
     /// A kind-445 whose envelope is well formed and whose content no decoder
-    /// accepts, so the pre-engine parse succeeds and the ENGINE refuses it.
+    /// accepts, so the pre-engine parse succeeds and the ENGINE judges it (MDK
+    /// v0.10.4: `Ignored { InvalidEncoding }`, a terminal verdict).
     Unprocessable {
         /// The circle's public routing id.
         group_id: [u8; 32],
@@ -354,8 +355,26 @@ impl serde::Serialize for Forgery {
 /// without the event it copies, or if the event could not be signed: a fault
 /// that could not be minted did not fire.
 pub fn mint(forgery: Forgery, source: Option<&Event>) -> Result<Event, RigError> {
-    let keys = Keys::generate();
-    let builder = match forgery {
+    sign(recipe(forgery, source)?)
+}
+
+/// [`mint`], dated `created_at` whatever the recipe dates it: a pile a
+/// scenario needs in one second is dated there, never by how fast it is
+/// minted.
+///
+/// # Errors
+///
+/// As [`mint`].
+pub fn mint_dated(
+    forgery: Forgery,
+    source: Option<&Event>,
+    created_at: Timestamp,
+) -> Result<Event, RigError> {
+    sign(recipe(forgery, source)?.custom_created_at(created_at))
+}
+
+fn recipe(forgery: Forgery, source: Option<&Event>) -> Result<EventBuilder, RigError> {
+    Ok(match forgery {
         Forgery::Expired { group_id } => EventBuilder::new(kind(), OPAQUE_CONTENT).tags(vec![
             routing_tag(&group_id)?,
             Tag::expiration(Timestamp::from(
@@ -365,9 +384,9 @@ pub fn mint(forgery: Forgery, source: Option<&Event>) -> Result<Event, RigError>
         Forgery::Rewrap { offset_secs, .. } => {
             let observed = source.ok_or(RigError::Core(Step::ApplyFault))?;
             // The expiration is dropped rather than copied: a rewrap's whole
-            // subject is the SIGNATURE and the date, and carrying the
-            // original's expiry would let Haven's own expiry screen answer
-            // before the authentication boundary the arm is aiming at.
+            // subject is the SIGNATURE and the date, and an expiry would add a
+            // second clock — `nostr-relay-pool` drops an event once its
+            // expiration passes, before any subscriber sees it.
             let tags: Vec<Tag> = observed
                 .tags
                 .iter()
@@ -406,9 +425,13 @@ pub fn mint(forgery: Forgery, source: Option<&Event>) -> Result<Event, RigError>
                 .tags(observed.tags.iter().cloned().collect::<Vec<Tag>>())
                 .custom_created_at(observed.created_at)
         }
-    };
+    })
+}
+
+/// Signs `builder` with a key generated for it alone, belonging to nobody.
+fn sign(builder: EventBuilder) -> Result<Event, RigError> {
     builder
-        .sign_with_keys(&keys)
+        .sign_with_keys(&Keys::generate())
         .map_err(|_| RigError::Core(Step::ApplyFault))
 }
 
@@ -418,6 +441,33 @@ const fn kind() -> Kind {
 }
 
 /// The `#h` tag for a routing id.
+/// `observed` re-signed by a key belonging to nobody, with an `expiration`
+/// [`EXPIRED_BY_SECS`] in the past beside its own tags.
+///
+/// Not a plane recipe: the relay double refuses to store it and
+/// `nostr-relay-pool` drops it before notifying, so a scenario hands it to a
+/// processor directly.
+///
+/// # Errors
+///
+/// [`RigError::Core`] with [`Step::ApplyFault`] if the event could not be
+/// signed.
+pub fn past_expiration(observed: &Event) -> Result<Event, RigError> {
+    let mut tags: Vec<Tag> = observed
+        .tags
+        .iter()
+        .filter(|tag| !matches!(tag.as_standardized(), Some(TagStandard::Expiration(_))))
+        .cloned()
+        .collect();
+    tags.push(Tag::expiration(Timestamp::from(
+        Timestamp::now().as_secs().saturating_sub(EXPIRED_BY_SECS),
+    )));
+    EventBuilder::new(observed.kind, observed.content.clone())
+        .tags(tags)
+        .sign_with_keys(&Keys::generate())
+        .map_err(|_| RigError::Core(Step::ApplyFault))
+}
+
 fn routing_tag(group_id: &[u8; 32]) -> Result<Tag, RigError> {
     Tag::parse(["h", &hex::encode(group_id)]).map_err(|_| RigError::Core(Step::ApplyFault))
 }

@@ -70,7 +70,6 @@ import 'package:haven/src/providers/live_sync_provider.dart'
     show backgroundCatchupEnabled;
 import 'package:haven/src/rust/api.dart'
     show
-        CircleCreationResultFfi,
         CircleManagerFfi,
         MemberKeyPackageFfi,
         NostrIdentityManager,
@@ -83,7 +82,7 @@ import 'package:haven/src/services/data_directory_provider.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
+import 'e2e/_lib/circle_creation.dart' show createCircleDelivered;
 import 'e2e/_lib/coordination.dart';
 import 'e2e/_lib/m7_worker_ci_oneoff.dart' show registerM7CiOneOffCatchup;
 import 'e2e/_lib/scenario_harness.dart';
@@ -160,8 +159,10 @@ void main() {
       // Alice fetches Bob's KeyPackage (RelayManagerFfi, not CircleManagerFfi)
       // and creates a 2-member circle whose stored relay is the CI relay.
       final relayManager = await RelayManagerFfi.newInstance();
-      final bobKp =
-          await relayManager.fetchMemberKeypackage(pubkey: bob.pubkeyHex);
+      final bobKp = await relayManager.fetchMemberKeypackage(
+        pubkey: bob.pubkeyHex,
+        circle: aliceManager,
+      );
       if (bobKp == null) {
         throw StateError(
           '[m7-setup] fetchMemberKeypackage returned null for Bob — his '
@@ -170,15 +171,12 @@ void main() {
       }
 
       final aliceSecret = await aliceIdentity.getSecretBytes();
-      // Publishes Bob's gift-wrapped Welcome so he can accept over the relay,
-      // then CONFIRMS the staged create (Security Rule 13) — an unconfirmed
-      // create pins the group in MDK's `PendingPublish`, where every inbound
-      // kind-445 buffers forever. See `createCircleConfirmed`'s doc.
-      final CircleCreationResultFfi creation;
+      // Publishes the Welcomes and requires every relay ack: an invitee whose
+      // Welcome never landed never joins. See `createCircleDelivered`'s doc.
       try {
-        creation = await createCircleConfirmed(
+        await createCircleDelivered(
           manager: aliceManager,
-          relay: relay,
+          relayManager: relayManager,
           identitySecretBytes: aliceSecret,
           members: <MemberKeyPackageFfi>[bobKp],
           name: 'M7 Catch-up Circle',
@@ -187,7 +185,6 @@ void main() {
           // Bob (a SyntheticUser) advertises no inbox relays, so the
           // Welcome-delivery cascade needs the admin's own relay as a fallback
           // (mirrors the production admin flow / the FE-2 scenario).
-          creatorFallbackRelays: <String>[defaultStrfryUrl],
           scenario: 'm7-setup',
         );
       } finally {
@@ -196,13 +193,6 @@ void main() {
         }
       }
 
-      if (!creation.welcomeEvents.any(
-        (e) => e.recipientPubkey.toLowerCase() == bob.pubkeyHex.toLowerCase(),
-      )) {
-        throw StateError(
-          '[m7-setup] createCircle produced no gift-wrap for Bob.',
-        );
-      }
 
       // Bob accepts (Welcome → MDK state) — now at the shared MLS epoch.
       final bobCircle = await bob.acceptInvitationViaRelay(relay: relay);

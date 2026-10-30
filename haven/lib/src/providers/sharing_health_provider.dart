@@ -25,8 +25,13 @@
 ///   receive plane is dead — the peer may simply not be sharing. Only a
 ///   timestamp that once existed and has since gone stale is evidence.
 /// * A circle with no other members has nothing to receive.
-/// * A momentary relay disconnect is normal on mobile. Every named cause must
-///   stand for [kSharingFaultConfirmationWindow] before it reaches the user.
+/// * A momentary relay disconnect is normal on mobile. Every transient cause
+///   must stand for [kSharingFaultConfirmationWindow] before it reaches the
+///   user, unless the user's own action just made it.
+///
+/// What the core knows holds the circle — a disband, a halt, a pending change,
+/// a removal not made — is READ from it ([CircleService.circleRecovery]) and
+/// outranks everything inferred here; it is never re-derived on this side.
 ///
 /// ## Thresholds
 ///
@@ -41,12 +46,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/clock_skew_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
+import 'package:haven/src/providers/location_access_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/rust/api.dart' show ChangeNoteFfi;
 import 'package:haven/src/services/circle_health_service.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/subscription_service.dart'
+    show LiveSyncStopOutcome;
 import 'package:haven/src/utils/log_alias.dart';
 
 /// The NIP-40 window Haven stamps on every kind-445 location message.
@@ -59,7 +69,7 @@ final Duration kLocationMessageRetention = Duration(
   seconds: kLocationPublishMaxInterval.inSeconds + 2 * kTtlNetworkBufferSeconds,
 );
 
-/// How long a NAMED cause must stand before it is shown to the user.
+/// How long a transient cause must stand before it is shown to the user.
 ///
 /// One worst-case publish interval: a cause that clears inside it cost the user
 /// nothing (no update was due), and a relay socket that drops and reconnects
@@ -94,28 +104,140 @@ final Duration kReceiveSilenceThreshold =
 /// magnitude cheaper than the thresholds it is measuring against.
 const Duration kSharingHealthTick = kLocationPublishMinInterval;
 
-/// Encodes a circle's public `nostrGroupId` as the key every sharing-health
-/// input uses.
-///
-/// Lowercase hex of the `#h` value — the same convention as
-/// `LocationSharingService`'s cache keys and the live-sync resubscriber, and
-/// never the real MLS group id (Security Rule 4).
-String sharingCircleKey(List<int> nostrGroupId) =>
-    nostrGroupId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+/// The key every sharing-health input uses for [circle]: lowercase hex of its
+/// `mlsGroupId`, the one id a routing rotation leaves alone (its
+/// `nostrGroupId` moves, and a key on it would orphan the circle's health
+/// under the prior id). An in-memory key only: never logged, never sent.
+String sharingCircleKey(Circle circle) =>
+    circle.mlsGroupId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
 /// Why sharing is paused, when the cause is KNOWN rather than inferred.
+///
+/// The causes after the first three are the core's, read in its worst-first
+/// order ([CircleService.circleRecovery]) and never re-derived here.
 enum SharingPausedReason {
   /// The relay connection dropped and has not come back
   /// ([SyncConnectionPhase.disconnected]).
   relayDisconnected,
 
-  /// The MLS engine deferred an outbound send instead of encrypting it
-  /// (a queued outbound intent — Unit B).
-  sendDeferred,
-
   /// A relay dropped this device's group subscription (Unit C).
   receiveSubscriptionLost,
+
+  /// A previous live-sync session still holds the one-session guard, so no
+  /// new one can start (Rule 14).
+  sessionStillHeld,
+
+  /// The circle's encrypted state failed to load on this device
+  /// ([Circle.isQuarantined]), so it neither sends nor receives until a retry
+  /// loads it.
+  circleQuarantined,
+
+  /// An admin disbanded the circle ([Circle.isDisbanded]): nothing is sent or
+  /// received for it again.
+  circleDisbanded,
+
+  /// MDK halted the circle on this device ([Circle.isUnrecoverable]).
+  circleUnrecoverable,
+
+  /// The circle's routing collision is recorded: it stands until the circle
+  /// itself is left.
+  routingCollision,
+
+  /// The core reads the circle as collided but no collision is recorded: the
+  /// store did not answer, and the next read checks again.
+  routingUnchecked,
+
+  /// This device asked to leave the circle.
+  leaving,
+
+  /// This device cannot read its peers' updates.
+  stalled,
+
+  /// A removal the user asked for was dropped unmade; its notice says so.
+  removalUnmade,
+
+  /// As [removalUnmade], with no notice saying so.
+  removalUnmadeUntold,
+
+  /// The removal of a member who left is due and not made yet.
+  departureDue,
+
+  /// A relay change waits for the app's foreground.
+  awaitsForeground,
+
+  /// A change of the circle awaits a relay's acknowledgement.
+  awaitingRelays,
+
+  /// A change a relay acknowledged awaits its confirm.
+  acknowledged,
+
+  /// A commit is staged with no record.
+  stagedWithoutRecord,
+
+  /// Stored input still holds the circle's sends.
+  storedInput,
 }
+
+/// The [SharingPausedReason] of a core recovery cause. The two the circle's
+/// notice refines ([CircleRecoveryCause.routingCollision],
+/// [CircleRecoveryCause.removalUnmade]) take their notice-backed reading.
+SharingPausedReason pausedReasonOf(CircleRecoveryCause cause) =>
+    switch (cause) {
+      CircleRecoveryCause.disbanded => SharingPausedReason.circleDisbanded,
+      CircleRecoveryCause.unrecoverable =>
+        SharingPausedReason.circleUnrecoverable,
+      CircleRecoveryCause.quarantined => SharingPausedReason.circleQuarantined,
+      CircleRecoveryCause.routingCollision =>
+        SharingPausedReason.routingCollision,
+      CircleRecoveryCause.leaving => SharingPausedReason.leaving,
+      CircleRecoveryCause.stalled => SharingPausedReason.stalled,
+      CircleRecoveryCause.removalUnmade => SharingPausedReason.removalUnmade,
+      CircleRecoveryCause.departureDue => SharingPausedReason.departureDue,
+      CircleRecoveryCause.awaitsForeground =>
+        SharingPausedReason.awaitsForeground,
+      CircleRecoveryCause.awaitingRelays => SharingPausedReason.awaitingRelays,
+      CircleRecoveryCause.acknowledged => SharingPausedReason.acknowledged,
+      CircleRecoveryCause.stagedWithoutRecord =>
+        SharingPausedReason.stagedWithoutRecord,
+      CircleRecoveryCause.storedInput => SharingPausedReason.storedInput,
+    };
+
+/// Whether [reason] stands until something changes the circle itself, so it
+/// is shown the moment it is read. Every other core cause clears in the
+/// course of ordinary work and waits out [kSharingFaultConfirmationWindow].
+bool isDurablePausedReason(SharingPausedReason reason) => switch (reason) {
+  SharingPausedReason.circleDisbanded ||
+  SharingPausedReason.circleUnrecoverable ||
+  SharingPausedReason.circleQuarantined ||
+  SharingPausedReason.routingCollision ||
+  SharingPausedReason.routingUnchecked ||
+  SharingPausedReason.leaving ||
+  SharingPausedReason.stalled ||
+  SharingPausedReason.removalUnmade ||
+  SharingPausedReason.removalUnmadeUntold => true,
+  SharingPausedReason.departureDue ||
+  SharingPausedReason.awaitsForeground ||
+  SharingPausedReason.awaitingRelays ||
+  SharingPausedReason.acknowledged ||
+  SharingPausedReason.stagedWithoutRecord ||
+  SharingPausedReason.storedInput ||
+  SharingPausedReason.relayDisconnected ||
+  SharingPausedReason.receiveSubscriptionLost ||
+  SharingPausedReason.sessionStillHeld => false,
+};
+
+/// Whether [health] is inferred by this side from delivery evidence and the
+/// connection, rather than read from the core: only such a verdict, or
+/// healthy, may stand behind a device-level banner.
+bool isInferredSharingHealth(SharingHealth health) =>
+    switch (health.state) {
+      SharingHealthState.healthy ||
+      SharingHealthState.publishFailing ||
+      SharingHealthState.receiveSilent => true,
+      SharingHealthState.paused =>
+        health.pausedReason == SharingPausedReason.relayDisconnected ||
+            health.pausedReason == SharingPausedReason.receiveSubscriptionLost,
+    };
 
 /// What the sharing pipeline is doing.
 enum SharingHealthState {
@@ -136,19 +258,38 @@ enum SharingHealthState {
 /// One verdict about the selected circle's sharing pipeline.
 @immutable
 class SharingHealth {
-  const SharingHealth._(this.state, this.since, this.pausedReason);
+  const SharingHealth._(
+    this.state,
+    this.since,
+    this.pausedReason, {
+    this.ageProvable = true,
+    this.circleKey,
+  });
 
   /// No relay has kept a publish since [since].
-  const SharingHealth.publishFailing(DateTime since)
-    : this._(SharingHealthState.publishFailing, since, null);
+  const SharingHealth.publishFailing(DateTime since, {bool ageProvable = true})
+    : this._(
+        SharingHealthState.publishFailing,
+        since,
+        null,
+        ageProvable: ageProvable,
+      );
 
   /// No peer location has arrived since [since].
   const SharingHealth.receiveSilent(DateTime since)
     : this._(SharingHealthState.receiveSilent, since, null);
 
   /// A known [reason] has held the pipeline since [since].
-  const SharingHealth.paused(SharingPausedReason reason, DateTime since)
-    : this._(SharingHealthState.paused, since, reason);
+  const SharingHealth.paused(
+    SharingPausedReason reason,
+    DateTime since, {
+    bool ageProvable = true,
+  }) : this._(
+         SharingHealthState.paused,
+         since,
+         reason,
+         ageProvable: ageProvable,
+       );
 
   /// Nothing measurably wrong.
   static const healthy =
@@ -163,6 +304,24 @@ class SharingHealth {
   /// The named cause. Non-null only for [SharingHealthState.paused].
   final SharingPausedReason? pausedReason;
 
+  /// Whether a delivery proves how old the silence is. When none does,
+  /// [since] is only when this process noticed the fault — it restarts with
+  /// the process — so no age may be shown from it.
+  final bool ageProvable;
+
+  /// The [sharingCircleKey] of the circle this verdict was derived for;
+  /// `null` when it is about no circle. Never logged.
+  final String? circleKey;
+
+  /// This verdict, about the circle keyed [key].
+  SharingHealth about(String? key) => SharingHealth._(
+    state,
+    since,
+    pausedReason,
+    ageProvable: ageProvable,
+    circleKey: key,
+  );
+
   /// Whether the user should be told sharing has stopped.
   bool get isStopped => state != SharingHealthState.healthy;
 
@@ -173,10 +332,13 @@ class SharingHealth {
           runtimeType == other.runtimeType &&
           state == other.state &&
           since == other.since &&
-          pausedReason == other.pausedReason;
+          pausedReason == other.pausedReason &&
+          ageProvable == other.ageProvable &&
+          circleKey == other.circleKey;
 
   @override
-  int get hashCode => Object.hash(state, since, pausedReason);
+  int get hashCode =>
+      Object.hash(state, since, pausedReason, ageProvable, circleKey);
 
   /// [since] as an offset from now, never a wall-clock instant (Rule 15) —
   /// `-` when there is no fault to date.
@@ -191,7 +353,7 @@ class SharingHealth {
   // log-scan-ok: pausedReason is a closed enum variant, never remote prose
   String toString() =>
       'SharingHealth(${state.name}, since: $_sinceOffset, '
-      'reason: $pausedReason)';
+      'reason: $pausedReason, ageProvable: $ageProvable)';
 }
 
 /// Injectable clock, so every transition is provable without waiting.
@@ -265,6 +427,62 @@ final sharingHealthProvider =
       SharingHealthNotifier.new,
     );
 
+/// What the circle details sheet shows of [health]: the verdict itself, or
+/// [suppressed] while a device-level banner names an upstream cause.
+@immutable
+class SharingHealthShown {
+  /// Creates the shown verdict.
+  const SharingHealthShown(this.health, {this.suppressed = false});
+
+  /// The model's verdict.
+  final SharingHealth health;
+
+  /// Whether a device-level banner stands above an inferred verdict.
+  final bool suppressed;
+
+  /// Whether a fault is shown.
+  bool get isStopped => !suppressed && health.isStopped;
+
+  /// Whether this is the end of a shown fault: an unsuppressed healthy
+  /// verdict. A verdict going suppressed is never a recovery.
+  bool get isRecovered => !suppressed && !health.isStopped;
+
+  @override
+  bool operator ==(Object other) =>
+      other is SharingHealthShown &&
+      other.health == health &&
+      other.suppressed == suppressed;
+
+  @override
+  int get hashCode => Object.hash(health, suppressed);
+}
+
+/// The selected circle's verdict as Circle details shows it.
+///
+/// A verdict derived for another circle is suppressed until the selected
+/// circle's own lands. An inferred verdict — and healthy — is suppressed while
+/// location access is blocked or the clock is skewed: those banners name the
+/// upstream cause, and Repair would be the wrong remedy under either
+/// (`map_status_banners.dart`).
+/// A cause the core reads is never suppressed: it is true whatever the device.
+final sharingHealthShownProvider = Provider<SharingHealthShown>((ref) {
+  final health = ref.watch(sharingHealthProvider);
+  final selected = ref.watch(selectedCircleProvider);
+  // A verdict about another circle (the selection moved before the new read
+  // landed) is not known for this one: nothing is shown and no edge fires.
+  final selectedKey = selected == null ? null : sharingCircleKey(selected);
+  final aboutAnother =
+      health.circleKey != null && health.circleKey != selectedKey;
+  final deviceBanner =
+      ref.watch(locationAccessProvider).isBlocked ||
+      ref.watch(clockSkewProvider).isSkewed;
+  return SharingHealthShown(
+    health,
+    suppressed:
+        aboutAnother || (deviceBanner && isInferredSharingHealth(health)),
+  );
+});
+
 /// Derives [SharingHealth] from delivery evidence.
 class SharingHealthNotifier extends Notifier<SharingHealth> {
   /// When the current run of unacked publishes began, per circle key. Cleared
@@ -272,8 +490,22 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   /// service via the persisted ack timestamp (see [_evaluate]).
   final Map<String, DateTime> _publishFailingSince = {};
 
-  /// When the engine first deferred a send, per circle key (Unit B).
-  final Map<String, DateTime> _deferredSendSince = {};
+  /// When a send was first held for a circle, per circle key: the earliest
+  /// proof of a transient core cause, older than the first read naming it.
+  final Map<String, DateTime> _heldSince = {};
+
+  /// The circle keys whose hold the user's own action just made: their
+  /// transient cause shows at once, not after the window.
+  final Set<String> _userHeld = {};
+
+  /// The transient core cause last read for each circle key, and the instant
+  /// the first read naming it returned.
+  final Map<String, ({SharingPausedReason reason, DateTime since})>
+  _transientSince = {};
+
+  /// When a stop last left a previous live-sync session holding the guard.
+  /// Process-wide, like [_subscriptionLostSince].
+  DateTime? _sessionHeldSince;
 
   /// When a relay last dropped this device's group subscription (Unit C).
   /// Process-wide rather than per-circle: the engine holds one socket set, and
@@ -290,6 +522,12 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   /// a newer one started must not publish its older verdict — the same
   /// generation-fence shape `LocationPublishSchedulerNotifier` uses.
   int _generation = 0;
+
+  /// The derivation in flight, which a [refresh] asked meanwhile joins; one
+  /// more runs after it ([_again]), so a burst of publish outcomes costs at
+  /// most two recovery reads, never one per outcome.
+  Future<void>? _inFlight;
+  bool _again = false;
 
   /// Set once the notifier is disposed, so a late async completion cannot
   /// resurrect it.
@@ -353,6 +591,14 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     });
     syncTick();
 
+    // The verdict is about the circle on screen: another circle selected, or
+    // none, is re-derived now, not at the next tick. `Circle` equality is its
+    // id alone, so the selection does not notify when only the selected
+    // circle's state changed; the circle list does.
+    ref
+      ..listen<Circle?>(selectedCircleProvider, (_, _) => unawaited(refresh()))
+      ..listen(circlesProvider, (_, _) => unawaited(refresh()));
+
     return SharingHealth.healthy;
   }
 
@@ -363,24 +609,46 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   void recordPublishOutcome(String circleKey, {required bool acked}) {
     if (acked) {
       _publishFailingSince.remove(circleKey);
-      // An acknowledged publish is proof the engine encrypted and a relay kept
-      // it, which is exactly the condition a deferred send says did not hold.
-      // Unit B's repair therefore clears itself here rather than needing its
-      // own "all better now" call that a caller could forget to make.
-      _deferredSendSince.remove(circleKey);
+      // An acknowledged publish is proof nothing held the circle's sends, so
+      // a held send clears itself here rather than needing its own "all
+      // better now" call that a caller could forget to make.
+      _clearHeld(circleKey);
     } else {
       _publishFailingSince[circleKey] ??= _now();
     }
     unawaited(refresh());
   }
 
-  /// Records that the MLS engine deferred an outbound send for a circle
-  /// instead of encrypting it (Unit B's `EncryptOutcome::Deferred`).
+  /// Records that something held a send for a circle instead of sealing it.
   ///
-  /// Cleared by the next acknowledged publish for the same circle, so a repair
-  /// that works clears the banner without anyone having to remember to.
-  void recordDeferredSend(String circleKey) {
-    _deferredSendSince[circleKey] ??= _now();
+  /// It names no cause: the core's recovery read does. It dates the hold, so
+  /// a transient cause is shown from the first held send rather than from the
+  /// first read that named it, and [byUser] marks a hold the user's own
+  /// action made, whose cause shows at once. Cleared by the next acknowledged
+  /// publish for the same circle, or a read naming no cause.
+  void recordDeferredSend(String circleKey, {bool byUser = false}) {
+    _heldSince[circleKey] ??= _now();
+    if (byUser) _userHeld.add(circleKey);
+    unawaited(refresh());
+  }
+
+  void _clearHeld(String circleKey) {
+    _heldSince.remove(circleKey);
+    _userHeld.remove(circleKey);
+    _transientSince.remove(circleKey);
+  }
+
+  /// Records how a live-sync stop ended. [LiveSyncStopOutcome.stillHolding]
+  /// dates the held session; any other outcome — a stop that released it, or
+  /// a start, which proves the previous session drained — clears it.
+  void recordStopOutcome(LiveSyncStopOutcome outcome) {
+    switch (outcome) {
+      case LiveSyncStopOutcome.stillHolding:
+        _sessionHeldSince ??= _now();
+      case LiveSyncStopOutcome.stopped:
+      case LiveSyncStopOutcome.idle:
+        _sessionHeldSince = null;
+    }
     unawaited(refresh());
   }
 
@@ -404,9 +672,9 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
 
   /// Re-derives the verdict now.
   ///
-  /// Safe to call concurrently: the verdict comes from an async storage read,
-  /// so two overlapping calls can complete out of order, and the older one
-  /// would otherwise overwrite the newer with a stale answer.
+  /// Safe to call concurrently: a call made while a derivation is in flight
+  /// joins it, and one more derivation runs after it, so the verdict always
+  /// follows the newest call and never an older one.
   ///
   /// A PAUSED engine derives nothing and the last verdict stands. Between
   /// background bursts there is no REQ and no socket: the app is not looking,
@@ -418,33 +686,165 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   /// cannot land its answer either. The status listener above refreshes on
   /// every phase change, so the verdict is re-derived the moment the next
   /// burst opens.
-  Future<void> refresh() async {
-    final generation = ++_generation;
+  Future<void> refresh() {
     if (ref.read(syncStatusProvider).phase == SyncConnectionPhase.paused) {
-      return;
+      ++_generation;
+      return Future<void>.value();
     }
-    final next = await _evaluate();
-    // Riverpod disposes the notifier on logout / identity change; a late async
-    // completion must not resurrect it, nor overtake a newer derivation.
-    if (_disposed || generation != _generation) return;
-    state = next;
+    final inFlight = _inFlight;
+    if (inFlight != null) {
+      _again = true;
+      return inFlight;
+    }
+    return _inFlight = _derive().whenComplete(() => _inFlight = null);
+  }
+
+  Future<void> _derive() async {
+    do {
+      _again = false;
+      if (ref.read(syncStatusProvider).phase == SyncConnectionPhase.paused) {
+        ++_generation;
+        return;
+      }
+      final generation = ++_generation;
+      // Tagged with the circle it was derived for: a verdict that lands after
+      // another circle was selected must not be shown as that circle's.
+      final circle = ref.read(selectedCircleProvider);
+      final next = (await _evaluate()).about(
+        circle == null ? null : sharingCircleKey(circle),
+      );
+      // Riverpod disposes the notifier on logout / identity change; a late
+      // async completion must not resurrect it, nor overtake a newer
+      // derivation.
+      if (_disposed) return;
+      // A refresh asked meanwhile reads newer evidence: only its answer lands.
+      if (generation == _generation && !_again) state = next;
+    } while (_again);
   }
 
   Future<SharingHealth> _evaluate() async {
     final circle = ref.read(selectedCircleProvider);
     if (circle == null ||
-        circle.membershipStatus != MembershipStatus.accepted ||
-        circle.isLegacyOrphaned) {
+        circle.membershipStatus != MembershipStatus.accepted) {
       return SharingHealth.healthy;
     }
 
     final now = _now();
-    final key = sharingCircleKey(circle.nostrGroupId);
+    final key = sharingCircleKey(circle);
     final health = await ref
         .read(circleHealthServiceProvider)
         .read(nostrGroupId: circle.nostrGroupId);
     final ackedAt = health.lastPublishAckedAt;
 
+    // The core's causes outrank everything inferred here: each says something
+    // true and specific, and the core reads them in its own worst-first order.
+    final SharingPausedReason? cause;
+    try {
+      cause = await _coreCause(circle);
+    } on Object catch (_) {
+      // The read failed: what the circle list says about the engine is the
+      // best evidence left, then inference.
+      return _engineStateVerdict(circle, now, health) ??
+          _inferred(circle, key, now, health, ackedAt);
+    }
+    if (cause == null) {
+      _clearHeld(key);
+    } else if (isDurablePausedReason(cause)) {
+      return _paused(cause, now, health);
+    } else {
+      final shown = _transientVerdict(key, cause, now, health);
+      if (shown != null) return shown;
+    }
+    return _inferred(circle, key, now, health, ackedAt);
+  }
+
+  /// The core's cause for [circle], refined by its notice where the notice
+  /// decides what is true to say. Throws when the recovery read fails.
+  Future<SharingPausedReason?> _coreCause(Circle circle) async {
+    final cause = await ref.read(circleServiceProvider).circleRecovery(circle);
+    if (cause == null) return null;
+    final reason = pausedReasonOf(cause);
+    // A store that cannot answer reads as collided, and that reading is not
+    // persisted: without the recorded note, no destructive remedy is named.
+    if (reason == SharingPausedReason.routingCollision &&
+        !await _noticeHolds(circle, ChangeNoteFfi.routingCollision)) {
+      return SharingPausedReason.routingUnchecked;
+    }
+    if (reason == SharingPausedReason.removalUnmade &&
+        !await _noticeHolds(circle, ChangeNoteFfi.queuedRemovalDropped)) {
+      return SharingPausedReason.removalUnmadeUntold;
+    }
+    return reason;
+  }
+
+  /// Whether the circle's notice holds [note]; `false` when it cannot be
+  /// read, the reading that offers nothing destructive.
+  Future<bool> _noticeHolds(Circle circle, ChangeNoteFfi note) async {
+    try {
+      final read = await ref
+          .read(changeNoticesProvider)
+          .read(circle.mlsGroupId);
+      return read?.notes.contains(note) ?? false;
+    } on Object catch (e) {
+      debugPrint('[SharingHealth] notice read failed: ${e.runtimeType}');
+      return false;
+    }
+  }
+
+  /// A transient core cause, shown once it has stood for the confirmation
+  /// window — from the first read naming it, or the first held send if that
+  /// is older — or at once when the user's own action made the hold.
+  SharingHealth? _transientVerdict(
+    String key,
+    SharingPausedReason reason,
+    DateTime now,
+    CircleHealthTimestamps health,
+  ) {
+    final seen = _transientSince[key];
+    final readSince = seen != null && seen.reason == reason ? seen.since : now;
+    _transientSince[key] = (reason: reason, since: readSince);
+    final held = _heldSince[key];
+    final onset = held != null && held.isBefore(readSince) ? held : readSince;
+    if (_userHeld.contains(key) ||
+        now.difference(onset) > kSharingFaultConfirmationWindow) {
+      return _paused(reason, onset, health);
+    }
+    return null;
+  }
+
+  /// The verdict the circle list's engine state alone supports, used only
+  /// when the core's read failed.
+  SharingHealth? _engineStateVerdict(
+    Circle circle,
+    DateTime now,
+    CircleHealthTimestamps health,
+  ) => switch (circle.engineState) {
+    CircleEngineState.live => null,
+    CircleEngineState.quarantined => _paused(
+      SharingPausedReason.circleQuarantined,
+      now,
+      health,
+    ),
+    CircleEngineState.disbanded => _paused(
+      SharingPausedReason.circleDisbanded,
+      now,
+      health,
+    ),
+    CircleEngineState.unrecoverable => _paused(
+      SharingPausedReason.circleUnrecoverable,
+      now,
+      health,
+    ),
+  };
+
+  /// Dart's own named causes, then the inferred verdicts.
+  SharingHealth _inferred(
+    Circle circle,
+    String key,
+    DateTime now,
+    CircleHealthTimestamps health,
+    DateTime? ackedAt,
+  ) {
     // An ACK recorded by the OTHER isolate (the Android foreground service,
     // which has no Riverpod container and can only leave a persisted stamp)
     // clears this isolate's in-memory failure run. Without this, a foreground
@@ -457,9 +857,7 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
       _publishFailingSince.remove(key);
     }
 
-    // A named cause outranks an inferred one: it says something true and
-    // specific, and it is what Units A/B/C repair.
-    final paused = _pausedVerdict(key, now, health);
+    final paused = _pausedVerdict(now, health);
     if (paused != null) return paused;
 
     final publishing = _publishVerdict(key, now, ackedAt);
@@ -468,49 +866,81 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     return _receiveVerdict(circle, now, health) ?? SharingHealth.healthy;
   }
 
-  SharingHealth? _pausedVerdict(
-    String key,
-    DateTime now,
-    CircleHealthTimestamps health,
-  ) {
+  SharingHealth? _pausedVerdict(DateTime now, CircleHealthTimestamps health) {
     final candidates = <SharingPausedReason, DateTime?>{
-      SharingPausedReason.sendDeferred: _deferredSendSince[key],
       SharingPausedReason.receiveSubscriptionLost: _subscriptionLostSince,
       SharingPausedReason.relayDisconnected: _disconnectedSince,
+      SharingPausedReason.sessionStillHeld: _sessionHeldSince,
     };
     for (final entry in candidates.entries) {
       final onset = entry.value;
       if (onset != null &&
           now.difference(onset) > kSharingFaultConfirmationWindow) {
-        return SharingHealth.paused(entry.key, _lastKnownGood(onset, health));
+        return _paused(entry.key, onset, health);
       }
     }
     return null;
   }
 
-  /// The last instant at which SOMETHING is known to have been delivered.
+  SharingHealth _paused(
+    SharingPausedReason reason,
+    DateTime onset,
+    CircleHealthTimestamps health,
+  ) {
+    final delivered = _lastKnownGood(reason, health);
+    return SharingHealth.paused(
+      reason,
+      delivered != null && delivered.isBefore(onset) ? delivered : onset,
+      ageProvable: delivered != null,
+    );
+  }
+
+  /// The last instant the direction [reason] stopped is known to have
+  /// delivered, or `null` when nothing proves one.
   ///
   /// The fault ONSET is not that instant, and reporting it as one understates
-  /// the outage. A dropped subscription noticed three minutes ago on a circle
-  /// whose last peer location arrived forty minutes ago would have been dated
-  /// "three minutes" — telling the user their map is nearly fresh when it is
-  /// two thirds of an hour old, on a surface whose entire job is to stop the
-  /// app from looking healthier than it is.
-  ///
-  /// So the answer is the EARLIER of the onset and the newest delivery either
-  /// plane can still prove. That is never later than the true last delivery, so
-  /// the banner can under-state freshness but never over-state it — the only
-  /// direction an error may safely go here.
-  DateTime _lastKnownGood(DateTime onset, CircleHealthTimestamps health) {
+  /// the outage: a dropped subscription noticed three minutes ago on a circle
+  /// whose last peer location arrived forty minutes ago would read "three
+  /// minutes". So the verdict is dated by the EARLIER of the onset and this
+  /// instant, and the instant comes only from the direction that failed — a
+  /// held send by the stored publish ack, a cause that stops receiving by the
+  /// stored peer instant, one that holds both directions by the older of the
+  /// two, and only when both exist — because peers' locations arriving say
+  /// nothing about this device's going out. That is never later than the true
+  /// last delivery, so the banner can under-state freshness but never
+  /// over-state it — the only direction an error may safely go here. With no
+  /// such instant the onset proves nothing, and the verdict carries no
+  /// provable age: the banner then shows none. A circle that ended, halted or
+  /// is being left is no fault in the pipeline, and has no age at all.
+  DateTime? _lastKnownGood(
+    SharingPausedReason reason,
+    CircleHealthTimestamps health,
+  ) {
     final acked = health.lastPublishAckedAt;
     final peer = health.lastPeerEventAt;
-    var newestDelivery = acked;
-    if (peer != null &&
-        (newestDelivery == null || peer.isAfter(newestDelivery))) {
-      newestDelivery = peer;
-    }
-    if (newestDelivery == null) return onset;
-    return newestDelivery.isBefore(onset) ? newestDelivery : onset;
+    final older = acked == null || peer == null
+        ? null
+        : (acked.isBefore(peer) ? acked : peer);
+    return switch (reason) {
+      SharingPausedReason.removalUnmade ||
+      SharingPausedReason.removalUnmadeUntold ||
+      SharingPausedReason.departureDue ||
+      SharingPausedReason.storedInput ||
+      SharingPausedReason.awaitsForeground => acked,
+      SharingPausedReason.receiveSubscriptionLost ||
+      SharingPausedReason.stalled => peer,
+      SharingPausedReason.relayDisconnected ||
+      SharingPausedReason.circleQuarantined ||
+      SharingPausedReason.awaitingRelays ||
+      SharingPausedReason.acknowledged ||
+      SharingPausedReason.stagedWithoutRecord ||
+      SharingPausedReason.routingCollision ||
+      SharingPausedReason.routingUnchecked ||
+      SharingPausedReason.sessionStillHeld => older,
+      SharingPausedReason.circleDisbanded ||
+      SharingPausedReason.circleUnrecoverable ||
+      SharingPausedReason.leaving => null,
+    };
   }
 
   SharingHealth? _publishVerdict(String key, DateTime now, DateTime? ackedAt) {
@@ -519,7 +949,11 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     final failingSince = _publishFailingSince[key];
     if (failingSince != null &&
         now.difference(failingSince) > kSharingFaultConfirmationWindow) {
-      return SharingHealth.publishFailing(ackedAt ?? failingSince);
+      // With no stored ack, the onset is this process's own and proves no age.
+      return SharingHealth.publishFailing(
+        ackedAt ?? failingSince,
+        ageProvable: ackedAt != null,
+      );
     }
 
     // Route 2 — whoever was publishing (either isolate), nothing has been kept
@@ -643,6 +1077,35 @@ final sharingRepairProvider = Provider<SharingRepair>((ref) {
   };
 });
 
+/// The remedy behind the banner's "Try Again" for a quarantined circle.
+///
+/// Retries loading the selected circle's encrypted state, then re-reads the
+/// circle list so the verdict follows what the engine now holds. Never throws:
+/// a retry that fails leaves the circle quarantined, and the banner says so.
+final sharingQuarantineRetryProvider = Provider<Future<void> Function()>((
+  ref,
+) {
+  return () async {
+    final circle = ref.read(selectedCircleProvider);
+    if (circle == null) return;
+    try {
+      await ref
+          .read(circleServiceProvider)
+          .retryQuarantinedCircle(circle.mlsGroupId);
+    } on Object catch (e) {
+      // Rule 8: the type only.
+      debugPrint('[SharingHealth] quarantine retry failed: ${e.runtimeType}');
+    }
+    ref.invalidate(circlesProvider);
+    try {
+      await ref.read(circlesProvider.future);
+      await ref.read(sharingHealthProvider.notifier).refresh();
+    } on Object catch (e) {
+      debugPrint('[SharingHealth] retry refresh failed: ${e.runtimeType}');
+    }
+  };
+});
+
 /// Runs the epoch-rotation repair for the selected circle, or returns `null`
 /// when there is nothing to run it against.
 ///
@@ -659,9 +1122,17 @@ Future<EpochRepairResult?> repairSelectedCircleEpoch(Ref ref) async {
   final selfPubkey = ref.read(identityProvider).valueOrNull?.pubkeyHex;
   if (circle == null || selfPubkey == null) return null;
   try {
-    return await ref
+    final result = await ref
         .read(circleServiceProvider)
         .repairCircleEpoch(circle, selfPubkeyHex: selfPubkey);
+    // Awaiting its relays shows as every change awaiting them does, at once:
+    // the user's own action made the hold.
+    if (result is EpochRepairAwaitingRelays) {
+      ref
+          .read(sharingHealthProvider.notifier)
+          .recordDeferredSend(sharingCircleKey(circle), byUser: true);
+    }
+    return result;
   } on Object catch (e) {
     // Rule 8 again: a failed epoch repair must not put engine text on screen,
     // and must not mask the other legs' work.

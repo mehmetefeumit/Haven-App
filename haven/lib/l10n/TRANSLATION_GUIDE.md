@@ -91,6 +91,12 @@ Two consequences, both previously stated wrongly here:
   the parity tool counts `=1` as satisfying `one`, `=0` as `zero` and `=2` as
   `two`. `few` and `many` have no explicit form, so those must be keyword
   branches.
+- **Never `=1` and `one` in the same plural.** gen-l10n maps both to the same
+  CLDR `one` branch, so a plural carrying both warns "overridden by a later
+  plural part" and fails the warning-free gate: use one or the other. Whichever
+  you use, its text must hold for every value your locale's `one` covers (21,
+  31… in `ru`; 0 in `hi`, `pt` and `fa`), so write `{total}`, never a typed
+  "1", wherever `one` covers more than 1.
 
 ### Never let a placeholder govern inflection
 
@@ -117,8 +123,8 @@ already use for the reader.
 Recorded honestly, because the next translator will meet it: **the shipped copy
 already gets this wrong in older strings.** The `hi`, `ur` and `ar` reviewers in
 the roster-bound wave each independently found masculine defaults addressing the
-reader in existing keys — `locationDisclosureManage`, `leaveCircleDialogBody`
-and `circleBlockedBannerBody` among them. New or edited copy must not propagate
+reader in existing keys — `locationDisclosureManage` and
+`leaveCircleDialogBody` among them (a third they named has since been retired). New or edited copy must not propagate
 the pattern by matching its neighbours. Fixing the existing strings is a
 separate task, and **nobody has taken it** — so do not read their phrasing as
 precedent, and do not silently repair them as a side effect of another change

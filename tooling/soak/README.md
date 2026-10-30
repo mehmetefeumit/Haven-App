@@ -85,13 +85,14 @@ Security Rule 15 applies to the rig's own output, so:
 
 ## Rule 13 is structural
 
-`create_circle` stages a group and hands back gift-wrapped welcomes plus a
-`PendingStateRef`; the group becomes real only when that ref is confirmed, and
-haven-core's own doc is unambiguous that "acked" means a relay returned `OK` —
-never merely "sent". So there is exactly **one** function in this crate that
-resolves a pending state (`rig::circle::publish_and_resolve`): it publishes,
-waits — bounded — for a relay plane to witness the ack, and confirms or rolls
-back. `witnessed_ok` asks about the plane's **client-facing** frame stream,
+Every commit the rig makes — a create's included — is staged and sent by
+haven-core's durable-fanout driver (`haven_core::relay::fanout::Publishing`),
+built per device as the bridge builds its own (`rig::circle::DeviceDriver`): the
+commit is recorded before a byte leaves the device, confirmed on a relay's `OK`
+— never merely "sent" — rolled back only when every relay proved it refused, and
+otherwise kept pending and sent again byte for byte. The rig resolves no
+pending state itself (`check_e2e_publish_before_apply.sh` check 2).
+`witnessed_ok` asks about the plane's **client-facing** frame stream,
 because under a swallowed-`OK` fault the relay stores the event and the client
 never hears so, and "the relay has it" is emphatically not an ack.
 

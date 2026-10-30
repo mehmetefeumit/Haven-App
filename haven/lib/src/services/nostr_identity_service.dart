@@ -49,6 +49,15 @@ const String _storageKey = 'haven.nostr.identity';
 @visibleForTesting
 const String identityStorageKeyForTesting = _storageKey;
 
+/// Prefix of the SharedPreferences key holding the user's display name, one
+/// key per identity pubkey.
+const kDisplayNamePrefPrefix = 'haven.display_name.';
+
+/// Set while the user's own name, dropped by the storage reset's preferences
+/// clear, is still to be taken from their published profile. Removed with
+/// the display name when the identity is deleted.
+const kOwnNameReseedOwedKey = 'haven.storage_reset.own_name_reseed_owed';
+
 /// Production implementation of [IdentityService].
 ///
 /// Uses the Rust core for cryptographic operations and flutter_secure_storage
@@ -356,7 +365,7 @@ class NostrIdentityService implements IdentityService {
   /// Centralised because it is built in three places; a drifting literal here
   /// would silently orphan the value on delete.
   static String _displayNameKey(String pubkeyHex) =>
-      'haven.display_name.$pubkeyHex';
+      '$kDisplayNamePrefPrefix$pubkeyHex';
 
   @override
   Future<void> deleteIdentity() async {
@@ -384,13 +393,15 @@ class NostrIdentityService implements IdentityService {
       // outlives "delete identity" as a plaintext record of who the user was,
       // alongside their pubkey in the key itself. Best-effort and isolated so
       // a preferences failure can neither block nor fail the deletion.
-      if (pubkeyHex != null) {
-        try {
-          final prefs = await SharedPreferences.getInstance();
-          await prefs.remove(_displayNameKey(pubkeyHex));
-        } on Object catch (e) {
-          debugPrint('[Identity] display-name purge failed: ${e.runtimeType}');
-        }
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        if (pubkeyHex != null) await prefs.remove(_displayNameKey(pubkeyHex));
+        // Not keyed by the pubkey, so it goes even when that read failed: left
+        // behind, the next identity's profile is fetched for a reset it never
+        // had.
+        await prefs.remove(kOwnNameReseedOwedKey);
+      } on Object catch (e) {
+        debugPrint('[Identity] display-name purge failed: ${e.runtimeType}');
       }
 
       // Ensure the keyring backend is installed before the tile-cache wipe:

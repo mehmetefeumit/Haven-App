@@ -24,9 +24,12 @@
 /// everything here stops at that loop's front door.
 library;
 
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
-import 'package:haven/src/rust/api.dart' show ForceReleaseOutcomeFfi;
+import 'package:haven/src/rust/api.dart'
+    show CircleEngineStateFfi, CircleManagerFfi, ForceReleaseOutcomeFfi;
 import 'package:haven/src/services/background_location_task.dart';
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -97,7 +100,7 @@ void main() {
           reason: 'there is no sender to encrypt for, so a fix would be '
               'location collected for nothing',
         );
-        expect(harness.manager.encryptCalls, isEmpty);
+        expect(harness.manager.sealCalls, isEmpty);
         expect(harness.relay.published, isEmpty);
         expect(
           await BackgroundTaskHarness.readIdleFlag(),
@@ -133,7 +136,7 @@ void main() {
           reason: 'nothing yet says the UI isolate is gone, and two isolates '
               'publishing to one MLS group is a fork, not a duplicate',
         );
-        expect(harness.manager.encryptCalls, isEmpty);
+        expect(harness.manager.sealCalls, isEmpty);
         expect(
           harness.location.streamListeners,
           0,
@@ -185,7 +188,7 @@ void main() {
               'live requests coalesce at the provider to the tighter one',
         );
         expect(
-          harness.manager.encryptCalls,
+          harness.manager.sealCalls,
           hasLength(1),
           reason: 'the first publish re-armed the circle due-now, so a second '
               'encrypt here is exactly what a missing gate would produce: two '
@@ -211,9 +214,9 @@ void main() {
 
         await harness.tick(DateTime.now());
 
-        expect(harness.manager.encryptCalls, hasLength(1));
+        expect(harness.manager.sealCalls, hasLength(1));
         expect(
-          harness.manager.encryptCalls.single.mlsGroupId,
+          harness.manager.sealCalls.single.mlsGroupId,
           circle.circle.mlsGroupId,
         );
         expect(harness.relay.published, hasLength(1));
@@ -244,7 +247,7 @@ void main() {
             'it, so arming one is the collection this gate has to precede',
       );
       expect(harness.location.fixRequests, 0);
-      expect(harness.manager.encryptCalls, isEmpty);
+      expect(harness.manager.sealCalls, isEmpty);
       expect(harness.relay.published, isEmpty);
     });
 
@@ -274,7 +277,7 @@ void main() {
             'toggle exists to remove',
       );
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         hasLength(1),
         reason: 'nothing was published after the opt-out',
       );
@@ -330,7 +333,7 @@ void main() {
               'and then declined to publish it would already have broken the '
               'promise the disclosure makes',
         );
-        expect(harness.manager.encryptCalls, isEmpty);
+        expect(harness.manager.sealCalls, isEmpty);
         expect(
           harness.relay.published,
           isEmpty,
@@ -368,7 +371,7 @@ void main() {
             'gates',
       );
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         hasLength(1),
         reason: 'and nothing was published after the withdrawal',
       );
@@ -384,7 +387,7 @@ void main() {
       await harness.tick(DateTime.now());
 
       expect(harness.location.fixRequests, 1);
-      expect(harness.manager.encryptCalls, hasLength(1));
+      expect(harness.manager.sealCalls, hasLength(1));
       expect(harness.relay.published, hasLength(1));
     });
   });
@@ -396,9 +399,12 @@ void main() {
         final harness = await BackgroundTaskHarness.start(
           circles: [
             circleFixture(seed: 2, membershipStatus: 'pending'),
-            // Accepted with an empty roster: a pre-cutover orphan whose MLS
-            // group no longer exists, so every encrypt against it fails.
-            circleFixture(seed: 3, members: const []),
+            // Quarantined: its encrypted state failed to load, so there is no
+            // live group to encrypt against.
+            circleFixture(
+              seed: 3,
+              engineState: CircleEngineStateFfi.quarantined,
+            ),
           ],
         );
 
@@ -410,11 +416,70 @@ void main() {
           reason: 'nothing can be published, so the wake cost of a fix buys '
               'the user only battery drain',
         );
-        expect(harness.manager.encryptCalls, isEmpty);
+        expect(harness.manager.sealCalls, isEmpty);
         expect(
           harness.handler.dueTrackerForTest.nextDueForTest,
           isEmpty,
           reason: 'an ineligible circle must never occupy a publish slot',
+        );
+      },
+    );
+
+    test(
+      'a disbanded circle is never published to, while its sibling is',
+      () async {
+        final eligible = circleFixture(seed: 1);
+        final harness = await BackgroundTaskHarness.start(
+          circles: [
+            circleFixture(
+              seed: 4,
+              engineState: CircleEngineStateFfi.disbanded,
+            ),
+            eligible,
+          ],
+        );
+
+        await harness.tick(DateTime.now());
+
+        expect(
+          harness.manager.sealCalls.map((c) => c.mlsGroupId),
+          [eligible.circle.mlsGroupId],
+          reason: 'nothing is sent for a disbanded circle again, on the '
+              'background plane as on the foreground one',
+        );
+        expect(
+          harness.handler.dueTrackerForTest.nextDueForTest.keys,
+          [scheduleKeyOf(eligible)],
+        );
+      },
+    );
+
+    test(
+      'a circle MDK halted is never published to, while its sibling is',
+      () async {
+        // Read from the circle row on every cycle: MDK persists the halt, so
+        // a background isolate that never saw the verdict arrive still
+        // skips it.
+        final eligible = circleFixture(seed: 1);
+        final harness = await BackgroundTaskHarness.start(
+          circles: [
+            circleFixture(
+              seed: 5,
+              engineState: CircleEngineStateFfi.unrecoverable,
+            ),
+            eligible,
+          ],
+        );
+
+        await harness.tick(DateTime.now());
+
+        expect(
+          harness.manager.sealCalls.map((c) => c.mlsGroupId),
+          [eligible.circle.mlsGroupId],
+        );
+        expect(
+          harness.handler.dueTrackerForTest.nextDueForTest.keys,
+          [scheduleKeyOf(eligible)],
         );
       },
     );
@@ -426,7 +491,10 @@ void main() {
         final harness = await BackgroundTaskHarness.start(
           circles: [
             circleFixture(seed: 2, membershipStatus: 'pending'),
-            circleFixture(seed: 3, members: const []),
+            circleFixture(
+              seed: 3,
+              engineState: CircleEngineStateFfi.quarantined,
+            ),
             eligible,
           ],
         );
@@ -435,7 +503,7 @@ void main() {
 
         expect(harness.location.fixRequests, 1);
         expect(
-          harness.manager.encryptCalls.map((c) => c.mlsGroupId),
+          harness.manager.sealCalls.map((c) => c.mlsGroupId),
           [eligible.circle.mlsGroupId],
           reason: 'the background applies the SAME eligibility filter as the '
               'foreground publisher; a pending invitation is not consent to '
@@ -470,7 +538,7 @@ void main() {
         await cycle;
 
         expect(
-          harness.manager.encryptCalls,
+          harness.manager.sealCalls,
           hasLength(1),
           reason: 'two cycles in flight are two writers on one MLS group — the '
               'single-writer invariant this isolate exists to keep',
@@ -497,7 +565,7 @@ void main() {
       await harness.tick(DateTime.now());
 
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         hasLength(2),
         reason: 'a guard that failed to clear on completion would stop '
             'background sharing permanently after one cycle',
@@ -566,7 +634,7 @@ void main() {
               'publish loop',
         );
         expect(
-          harness.manager.encryptCalls,
+          harness.manager.sealCalls,
           hasLength(1),
           reason: 'the post-handoff steady state is a FREE guard: an '
               'acquisition that only knew how to reclaim would decline here '
@@ -657,7 +725,7 @@ void main() {
               'half-initialised one',
         );
         expect(
-          isolate.manager.encryptCalls,
+          isolate.manager.sealCalls,
           hasLength(1),
           reason: 'without this repair the isolate would hold the Rule-14 '
               'guard forever while publishing nothing',
@@ -678,7 +746,7 @@ void main() {
         reason: 'no relay service means nothing can be delivered, so taking a '
             'fix would collect a location the cycle cannot use',
       );
-      expect(isolate.manager.encryptCalls, isEmpty);
+      expect(isolate.manager.sealCalls, isEmpty);
       expect(
         isolate.relay.initializeCalls,
         2,
@@ -730,7 +798,7 @@ void main() {
               'silences',
         );
         expect(
-          harness.manager.encryptCalls,
+          harness.manager.sealCalls,
           hasLength(1),
           reason: 'a reclaim that recovers the session but does not go on to '
               'publish in the same cycle costs a full 72 s tick for nothing — '
@@ -771,7 +839,7 @@ void main() {
           reason: 'the decision must have reached the release — otherwise the '
               'absent publish below would prove nothing about its outcome',
         );
-        expect(harness.manager.encryptCalls, isEmpty);
+        expect(harness.manager.sealCalls, isEmpty);
         expect(harness.relay.published, isEmpty);
         expect(harness.location.fixRequests, 0);
       },
@@ -793,7 +861,7 @@ void main() {
 
       await harness.tick(DateTime.now());
 
-      expect(harness.manager.encryptCalls, isEmpty);
+      expect(harness.manager.sealCalls, isEmpty);
       expect(harness.relay.published, isEmpty);
       expect(harness.location.fixRequests, 0);
       // `onDestroy` also drops the identity, so the tick above stops at the
@@ -812,6 +880,120 @@ void main() {
             'confirmation probes behind that question would spend the stop '
             'window Android gives it on a session about to be released again',
       );
+    });
+  });
+
+  group('nothing is opened or built after the stop', () {
+    // A step the teardown already passed hands nothing back: a session it
+    // opened would hold the Rule-14 slot against the foreground, and a relay
+    // service it built would be one the latch never saw.
+    test('the free branch opens no session once the stop landed during its '
+        'guard query', () async {
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1)],
+        injectManager: false,
+      );
+      Future<void>? teardown;
+      var opens = 0;
+      harness.handler
+        ..overrideIsSessionLive = (({required dataDir}) async {
+          teardown ??= harness.handler.onDestroy(DateTime.now(), false);
+          return false;
+        })
+        ..overrideOpenCircleManager = () async {
+          opens++;
+          return harness.manager;
+        };
+
+      final acquired = await harness.handler.ensureSessionForTest(
+        dataDir: 'test-data-dir',
+      );
+      await teardown;
+
+      expect(acquired, isFalse);
+      expect(opens, 0);
+      expect(harness.handler.circleManagerForTest, isNull);
+    });
+
+    test('a session whose open outlived the teardown is handed back, never '
+        'kept (Rule 14)', () async {
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1)],
+        injectManager: false,
+      );
+      final opening = Completer<CircleManagerFfi>();
+      Future<void>? teardown;
+      harness.handler.overrideOpenCircleManager = () {
+        teardown ??= harness.handler.onDestroy(DateTime.now(), false);
+        return opening.future;
+      };
+
+      final acquiring = harness.handler.ensureSessionForTest(
+        dataDir: 'test-data-dir',
+      );
+      await pumpEventQueue();
+      await teardown;
+      opening.complete(harness.manager);
+
+      expect(await acquiring, isFalse);
+      expect(harness.manager.disposed, isTrue);
+      expect(harness.handler.circleManagerForTest, isNull);
+    });
+
+    test('a repair whose relay open outlived the teardown installs nothing '
+        'and shuts what it opened', () async {
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1)],
+      );
+      harness.handler.relayServiceForTest = null;
+      final shutsBefore = harness.relay.shutdownCalls;
+      final initializesBefore = harness.relay.initializeCalls;
+      harness.relay.initializeGate = Completer<void>();
+
+      final acquiring = harness.handler.ensureSessionForTest(
+        dataDir: 'test-data-dir',
+      );
+      await pumpEventQueue();
+      expect(
+        harness.relay.initializeCalls,
+        initializesBefore + 1,
+        reason: 'premise: the repair is opening its relay service',
+      );
+      await harness.handler.onDestroy(DateTime.now(), false);
+      harness.relay.initializeGate!.complete();
+
+      expect(await acquiring, isFalse);
+      expect(harness.handler.relayServiceForTest, isNull);
+      expect(harness.relay.shutdownCalls, shutsBefore + 1);
+    });
+
+    test('a bring-up the stop overtook keeps no session and builds no relay '
+        'service', () async {
+      final manager = FakeCircleManager(circles: [circleFixture(seed: 1)]);
+      final relay = FakeNostrRelayService();
+      final opening = Completer<CircleManagerFfi>();
+      final handler = BackgroundLocationTaskHandler(
+        stagger: PublishStagger.none(),
+      )
+        ..overrideRelayService = relay
+        ..overrideLocationSharingService = FakeLocationSharingService()
+        ..overrideLocationService = FakeLocationService()
+        ..overrideLocationEventService = FakeLocationEventService()
+        ..overrideOpenCircleManager = (() => opening.future);
+
+      final starting = handler.startWithoutBridgeForTest(
+        identityManager: FakeIdentityManager(pubkey: kHarnessPubkeyHex),
+        dataDir: 'test-data-dir',
+      );
+      await pumpEventQueue();
+      await handler.onDestroy(DateTime.now(), false);
+      opening.complete(manager);
+      await starting;
+
+      expect(manager.disposed, isTrue);
+      expect(handler.circleManagerForTest, isNull);
+      expect(relay.initializeCalls, 0);
+      expect(handler.relayServiceForTest, isNull);
     });
   });
 }

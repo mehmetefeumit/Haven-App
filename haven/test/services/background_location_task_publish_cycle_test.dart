@@ -44,7 +44,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/background_location_manager.dart';
-import 'package:haven/src/services/location_auto_commit.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -52,47 +51,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../helpers/log_capture.dart';
 import '../mocks/background_task_fakes.dart';
 
-/// The retention a receiver reads off a kind-445 location: the widest publish
-/// interval plus the network-propagation buffer.
-final BigInt expectedTtlSecs = BigInt.from(
-  kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
-);
-
 /// The schedule entry the cycle keeps for [circle], if any.
 DateTime? dueOf(BackgroundTaskHarness harness, CircleWithMembersFfi circle) =>
     harness.handler.dueTrackerForTest.nextDueForTest[scheduleKeyOf(circle)];
 
-/// A deferral carrying [commits] / [proposals], as the engine hands one back
-/// when a stored convergence input still gates the circle or when it has just
-/// staged a peer's eviction.
-EncryptLocationOutcomeFfi deferralWith({
-  List<CommitToPublishFfi> commits = const [],
-  List<String> proposals = const [],
-}) => EncryptLocationOutcomeFfi(
-  deferredSend: DeferredSendFfi(
-    unresolvedInputs: 1,
-    discardedIntents: 0,
-    repaired: false,
-    commits: commits,
-    proposals: proposals,
-  ),
-);
-
-/// [circleFixture(seed: 1)]'s `nostrGroupId` — the ambient circle nearly
-/// every `stagedCommit` fixture in this file resolves against by default.
-final List<int> _seed1NostrGroupId = Uint8List(32)..fillRange(0, 32, 101);
-
-/// A staged commit whose `h` names [nostrGroupId] (default:
-/// `circleFixture(seed: 1)`'s own).
-CommitToPublishFfi stagedCommit(int token, {List<int>? nostrGroupId}) {
-  final h = hexOf(nostrGroupId ?? _seed1NostrGroupId);
-  return CommitToPublishFfi(
-    commitEventJson: '{"id":"staged-$token","kind":445,"tags":[["h","$h"]]}',
-    pending: PendingStateRefFfi(token: BigInt.from(token)),
-  );
-}
-
-/// The kind-445 payload [FakeCircleManager.sentOutcomeFor] produces for
+/// The kind-445 payload [FakeCircleManager.sealedOutcomeFor] produces for
 /// [circle], so a published event can be tied back to the circle it came from.
 String locationEventOf(CircleWithMembersFfi circle) =>
     '{"kind":445,"h":"${hexOf(circle.circle.nostrGroupId)}"}';
@@ -130,7 +93,269 @@ void main() {
         SharedPreferences.setMockInitialValues(backgroundOwnsPublishingPrefs()),
   );
 
-  group('a due circle is encrypted, published and stamped', () {
+  group('the cycle carries every leave on', () {
+    // Nothing calls the core's leave on a timer, so each cycle is one of its
+    // wakes; the core alone holds the circle's sends from the intent on, on
+    // every plane (`haven-core/tests/leave_fanout_e2e.rs`
+    // `a_pending_leave_stops_location_publishing_on_every_plane_immediately`,
+    // the full and the finish-only drives and the legacy seal).
+    test('once per circle per cycle, claiming no foreground', () async {
+      final a = circleFixture(seed: 1);
+      final b = circleFixture(seed: 2);
+      final harness = await BackgroundTaskHarness.start(circles: [a, b]);
+
+      await harness.tick(DateTime.now());
+
+      expect(harness.relay.leaveCarryOns, [
+        (groupId: hexOf(a.circle.mlsGroupId), foreground: false),
+        (groupId: hexOf(b.circle.mlsGroupId), foreground: false),
+      ]);
+    });
+
+    test('a circle whose leave named a wait is not asked again inside it',
+        () async {
+      final circle = circleFixture(seed: 1);
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circle],
+        events: FakeLocationEventService(jitteredSecs: 100),
+      );
+      harness.relay.leaveOutcomes[hexOf(circle.circle.mlsGroupId)] =
+          LeaveOutcomeFfi(
+            status: LeaveStatusFfi.proposed,
+            retryAfterMs: BigInt.from(600000),
+          );
+      final at = DateTime.now();
+      var now = at;
+      harness.handler.clockForTest = () => now;
+
+      await harness.tick(at);
+      now = at.add(const Duration(minutes: 9));
+      await harness.tick(now);
+      expect(harness.relay.leaveCarryOns, hasLength(1), reason: 'inside it');
+
+      now = at.add(const Duration(minutes: 20));
+      await harness.tick(now);
+      expect(harness.relay.leaveCarryOns, hasLength(2));
+    });
+
+    test('a cycle the stop overtook mid-drive carries no leave on after it',
+        () async {
+      // Every step checks the stop: what the teardown's unbounded wait reads
+      // is the drive in flight, not a chain the abandoned cycle keeps adding
+      // to.
+      final circle = circleFixture(seed: 1);
+      final harness = await BackgroundTaskHarness.start(circles: [circle]);
+      final inFlight = Completer<void>();
+      harness.relay
+        ..driveGate = Completer<void>()
+        ..inFlightNonLocationDrives = inFlight.future;
+      harness.handler.teardownDrainBudget = Duration.zero;
+
+      final cycle = harness.tick(DateTime.now());
+      await pumpEventQueue();
+      expect(harness.relay.drives, hasLength(1), reason: 'premise: driving');
+      // The teardown waits on the drives in flight, its services still up.
+      final teardown = harness.handler.onDestroy(DateTime.now(), false);
+      await pumpEventQueue();
+      harness.relay.driveGate!.complete();
+      await cycle;
+
+      expect(harness.relay.leaveCarryOns, isEmpty);
+      inFlight.complete();
+      await teardown;
+    });
+
+    test('a stop that lands inside the cycle starts no drive and no '
+        'carry-on', () async {
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1)],
+      );
+      // The teardown is held on a drive in flight, its services still up:
+      // only the stop itself can keep the cycle from starting another.
+      final inFlight = Completer<void>();
+      harness.relay.inFlightNonLocationDrives = inFlight.future;
+      harness.handler.teardownDrainBudget = Duration.zero;
+      // The stop lands inside the cycle's own hold, past its first stop read.
+      Future<void>? teardown;
+      FakeWakeLockChannel().onAcquire = () {
+        teardown ??= harness.handler.onDestroy(DateTime.now(), false);
+      };
+
+      final cycle = harness.tick(DateTime.now());
+      await cycle;
+
+      expect(teardown, isNotNull, reason: 'premise: the stop landed');
+      expect(harness.relay.drives, isEmpty);
+      expect(harness.relay.leaveCarryOns, isEmpty);
+      inFlight.complete();
+      await teardown;
+    });
+
+    test('a stop landing mid-carry-on asks no further circle', () async {
+      final a = circleFixture(seed: 1);
+      final b = circleFixture(seed: 2);
+      final harness = await BackgroundTaskHarness.start(circles: [a, b]);
+      harness.handler.teardownDrainBudget = Duration.zero;
+      Future<void>? teardown;
+      harness.relay.onResumeLeave = () {
+        teardown ??= harness.handler.onDestroy(DateTime.now(), false);
+      };
+
+      await harness.tick(DateTime.now());
+      await teardown;
+
+      expect(
+        harness.relay.leaveCarryOns,
+        hasLength(1),
+        reason: "the second circle's leave started after the stop",
+      );
+    });
+
+    test('a circle a leave ended for is forgotten', () async {
+      final left = circleFixture(seed: 1);
+      final harness = await BackgroundTaskHarness.start(circles: [left]);
+      harness.relay.leaveOutcomes[hexOf(left.circle.mlsGroupId)] =
+          const LeaveOutcomeFfi(status: LeaveStatusFfi.completed);
+
+      await harness.tick(DateTime.now());
+
+      expect(harness.sharing.removed, [left.circle.mlsGroupId]);
+    });
+  });
+
+  group("the cycle drives this isolate's stored records", () {
+    // No live plane runs in the Android service's isolate, so nothing else
+    // sends a change a relay has not taken yet while it holds the session.
+    test('once per cycle, claiming no foreground', () async {
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1)],
+      );
+
+      await harness.tick(DateTime.utc(2026, 10, 16, 12));
+
+      expect(harness.relay.drives, [false]);
+    });
+
+    test('a cycle that drove and then published nothing still shuts the '
+        'pool', () async {
+      // Before: only the tail's 9b closed it, and every early return after
+      // the drive left its sockets open until the next cycle that published.
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1, membershipStatus: 'pending')],
+      );
+
+      await harness.tick(DateTime.now());
+
+      expect(harness.relay.drives, [false], reason: 'premise: it drove');
+      expect(harness.manager.sealCalls, isEmpty, reason: 'premise');
+      expect(harness.relay.shutdownCalls, 1);
+    });
+
+    test('never sooner than the wait the last drive named', () async {
+      // A cycle runs when a circle is due; each tick below lands on one.
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1)],
+        events: FakeLocationEventService(jitteredSecs: 100),
+      );
+      harness.relay.driveOutcome = ResumeOutcomeFfi(
+        withdrawn: const [],
+        requeued: const [],
+        replayed: const [],
+        retryAfterMs: BigInt.from(600000),
+        errored: false,
+      );
+      // The cycle's schedule is kept on the wall clock, as every cycle test
+      // here keeps it; the drive's wait is read against each tick's instant.
+      final at = DateTime.now();
+
+      await harness.tick(at);
+      await harness.tick(at.add(const Duration(minutes: 9)));
+      expect(harness.relay.drives, hasLength(1), reason: 'asked inside it');
+
+      await harness.tick(at.add(const Duration(minutes: 20)));
+      expect(harness.relay.drives, hasLength(2));
+    });
+
+    test('no drive log line names a circle, a relay or a group', () async {
+      final logs = LogCapture.install();
+      final circle = circleFixture(seed: 1);
+      final planted = 'circle ${hexOf(circle.circle.mlsGroupId)} at '
+          'wss://planted.relay.example';
+      final errored = await BackgroundTaskHarness.start(circles: [circle]);
+      errored.relay.driveOutcome = ResumeOutcomeFfi(
+        withdrawn: const [],
+        requeued: const [],
+        replayed: [
+          LocationMessageResultFfi(
+            kind: LocationMessageResultKindFfi.location,
+            location: const DecryptedLocationFfi(
+              senderPubkey: 'cc',
+              latitude: 1,
+              longitude: 2,
+              geohash: 'u0',
+              timestamp: 1,
+              expiresAt: 2,
+            ),
+            mlsGroupId: Uint8List.fromList(List.filled(32, 0xdd)),
+            epoch: BigInt.zero,
+          ),
+        ],
+        errored: true,
+      );
+      // The replayed fix's circle lookup fails.
+      errored.manager.circleLookupThrows = StateError(planted);
+      await errored.tick(DateTime.now());
+      final failing = await BackgroundTaskHarness.start(circles: [circle]);
+      failing.relay.driveThrows = StateError(planted);
+      await failing.tick(DateTime.now());
+
+      logs
+        ..assertContains('[BackgroundTask] drive ended on an error')
+        ..assertContains('[BackgroundTask] drive failed')
+        ..assertContains('[BackgroundTask] replayed fix circle lookup failed')
+        ..assertNoNeedles([
+          hexOf(circle.circle.mlsGroupId),
+          hexOf(circle.circle.nostrGroupId),
+          'dd' * 32,
+          'wss://planted.relay.example',
+        ]);
+    });
+
+    test('a fix the drive replays is filed under its own circle', () async {
+      final circle = circleFixture(seed: 1);
+      final harness = await BackgroundTaskHarness.start(circles: [circle]);
+      harness.relay.driveOutcome = ResumeOutcomeFfi(
+        withdrawn: const [],
+        requeued: const [],
+        replayed: [
+          LocationMessageResultFfi(
+            kind: LocationMessageResultKindFfi.location,
+            location: DecryptedLocationFfi(
+              senderPubkey: 'cc' * 32,
+              latitude: 48.8566,
+              longitude: 2.3522,
+              geohash: 'u09tvw',
+              timestamp: 1700000000,
+              expiresAt: 1700000228,
+            ),
+            mlsGroupId: circle.circle.mlsGroupId,
+            epoch: BigInt.zero,
+          ),
+        ],
+        errored: false,
+      );
+
+      await harness.tick(DateTime.utc(2026, 10, 16, 12));
+
+      expect(
+        harness.sharing.ingested.map((i) => hexOf(i.circle.nostrGroupId)),
+        [hexOf(circle.circle.nostrGroupId)],
+      );
+      expect(harness.sharing.ingested.single.decrypted.senderPubkey, 'cc' * 32);
+    });
+  });
+
+  group('a due circle is sealed, sent and stamped', () {
     test(
       'publishes to the engine-supplied relays and stamps one ack',
       () async {
@@ -150,19 +375,15 @@ void main() {
           reason: 'one wake-up buys one GPS fix, shared by every due circle',
         );
 
-        final encrypt = harness.manager.encryptCalls.single;
-        expect(hexOf(encrypt.mlsGroupId), hexOf(circle.circle.mlsGroupId));
-        expect(encrypt.senderPubkeyHex, kHarnessPubkeyHex);
-        expect(encrypt.latitude, FakeLocationService.defaultFix.latitude);
-        expect(encrypt.longitude, FakeLocationService.defaultFix.longitude);
-        expect(
-          encrypt.updateIntervalSecs,
-          expectedTtlSecs,
-          reason:
-              'the retention a receiver trusts is the widest publish '
-              'interval plus the network buffer; anything shorter expires a '
-              'live location before its successor can arrive',
-        );
+        // Before: the cycle sealed with its own identity and an update
+        // interval; the core now seals with the account's identity and stamps
+        // the retention from the group's component (Rust's), and this isolate
+        // claims no foreground.
+        final seal = harness.manager.sealCalls.single;
+        expect(hexOf(seal.mlsGroupId), hexOf(circle.circle.mlsGroupId));
+        expect(seal.latitude, FakeLocationService.defaultFix.latitude);
+        expect(seal.longitude, FakeLocationService.defaultFix.longitude);
+        expect(seal.foreground, isFalse);
 
         final published = harness.relay.published.single;
         expect(published.eventJson, locationEventOf(circle));
@@ -170,9 +391,9 @@ void main() {
           published.relays,
           const ['wss://payload.relay.example'],
           reason:
-              'routing comes from the engine outcome, never from the '
-              'circle relay list — the fixture keeps the two different so a '
-              'swap cannot pass',
+              "routing comes from the sealed record, never from the circle's "
+              'relay list — the fixture keeps the two different so a swap '
+              'cannot pass',
         );
 
         final ack = harness.manager.acks.single;
@@ -200,7 +421,7 @@ void main() {
       },
     );
 
-    test('stamps no ack when no relay accepted the event', () async {
+    test('stamps no ack when every relay refused the event', () async {
       final circle = circleFixture(seed: 1);
       final harness = await BackgroundTaskHarness.start(
         circles: [circle],
@@ -252,7 +473,7 @@ void main() {
       final base = DateTime.now();
       await harness.tick(base);
 
-      expect(harness.manager.encryptCalls, hasLength(2));
+      expect(harness.manager.sealCalls, hasLength(2));
       expect(harness.relay.published, hasLength(2));
       expect(
         hexOf(harness.manager.acks.single.nostrGroupId),
@@ -308,530 +529,102 @@ void main() {
     });
   });
 
-  group('a deferred send runs the Rule-13 ladder instead of publishing', () {
-    test('publishes a staged commit to the circle relays and confirms it on '
-        'an ack', () async {
-      final circle = circleFixture(seed: 1);
-      final harness = await BackgroundTaskHarness.start(
-        circles: [circle],
-        events: FakeLocationEventService(jitteredSecs: 100),
-      );
-      harness.manager.encryptOutcome = (_) =>
-          deferralWith(commits: [stagedCommit(7)]);
-
-      final base = DateTime.now();
-      await harness.tick(base);
-
-      final published = harness.relay.published.single;
-      expect(published.eventJson, stagedCommit(7).commitEventJson);
-      expect(
-        published.relays,
-        circle.circle.relays,
-        reason:
-            'a commit is routed by the circle, not by a location payload '
-            'the engine never produced',
-      );
-      expect(harness.manager.confirmedTokens, [BigInt.from(7)]);
-      expect(harness.manager.rolledBackTokens, isEmpty);
-      expect(
-        harness.manager.acks,
-        isEmpty,
-        reason: 'no location reached a relay, so nothing may report delivery',
-      );
-      expect(
-        dueOf(harness, circle),
-        base,
-        reason: 'the circle is left due so the next tick retries the send',
-      );
-      expect(
-        harness.events.sampledNominals,
-        [BigInt.from(kLocationUpdateInterval.inSeconds)],
-        reason: 'the interval is pre-sampled once per BURST, before the engine '
-            'has answered — around the nominal cadence, never around '
-            'anything derived from the outcome. What proves the deferral did '
-            'not RE-ARM the circle is the untouched schedule asserted above, '
-            'not whether the CSPRNG was consulted',
-      );
-    });
-
-    test('leaves a staged commit owed when no relay accepted it', () async {
-      final circle = circleFixture(seed: 1);
-      final harness = await BackgroundTaskHarness.start(
-        circles: [circle],
-        relay: FakeNostrRelayService()..acceptedBy = const [],
-      );
-      harness.manager.encryptOutcome = (_) =>
-          deferralWith(commits: [stagedCommit(7)]);
-
-      await harness.tick(DateTime.now());
-
-      expect(harness.relay.published, hasLength(1));
-      expect(
-        harness.manager.rolledBackTokens,
-        [BigInt.from(7)],
-        reason:
-            'confirming a commit no relay took applies state the group '
-            'never agreed to; dropping it pins the group in PendingPublish. '
-            'The fail rung is not a rollback for a peer eviction — Rust keeps '
-            'the removal owed for a foreground pass to publish',
-      );
-      expect(harness.manager.confirmedTokens, isEmpty);
-    });
-
-    test('leaves a staged commit owed when the relay throws', () async {
-      final circle = circleFixture(seed: 1);
-      final harness = await BackgroundTaskHarness.start(
-        circles: [circle],
-        relay: FakeNostrRelayService()..publishError = Exception('relay down'),
-      );
-      harness.manager.encryptOutcome = (_) =>
-          deferralWith(commits: [stagedCommit(7)]);
-
-      await harness.tick(DateTime.now());
-
-      expect(harness.relay.published, hasLength(1));
-      expect(harness.manager.rolledBackTokens, [BigInt.from(7)]);
-      expect(harness.manager.confirmedTokens, isEmpty);
-    });
-
-    test('leaves a staged commit owed without a publish when the circle has '
-        'no relays', () async {
-      final circle = circleFixture(seed: 1, relays: const []);
-      final harness = await BackgroundTaskHarness.start(circles: [circle]);
-      harness.manager.encryptOutcome = (_) =>
-          deferralWith(commits: [stagedCommit(7)]);
-
-      await harness.tick(DateTime.now());
-
-      expect(
-        harness.relay.published,
-        isEmpty,
-        reason: 'there is nowhere to send it, so no publish is attempted',
-      );
-      expect(
-        harness.manager.rolledBackTokens,
-        [BigInt.from(7)],
-        reason:
-            'an unsendable commit must still leave the ladder, or the '
-            'group stays wedged with a commit that is neither confirmed nor '
-            'rolled back',
-      );
-      expect(harness.manager.confirmedTokens, isEmpty);
-    });
-
-    test(
-      'publishes bare proposals to the circle relays and confirms nothing',
-      () async {
-        final circle = circleFixture(seed: 1);
-        final harness = await BackgroundTaskHarness.start(
-          circles: [circle],
-          events: FakeLocationEventService(jitteredSecs: 100),
-        );
-        harness.manager.encryptOutcome = (_) =>
-            deferralWith(proposals: const ['p1', 'p2']);
+  group('a seal the core held', () {
+    // The core alone holds a circle's sends — a leave, a change awaiting its
+    // relays, a departure owed — and this isolate claims no foreground, so a
+    // removal owed is left to a foreground and the seal answers
+    // `Deferred(DepartureDue)` until then (in FinishOnly mode, the mode
+    // `foreground: false` gives; `haven-core/tests/poll_send_drive_e2e.rs`
+    // `the_fgs_cycles_finish_only_calls_leave_an_owed_removal_to_a_foreground_and_hold_sends`). Before: the
+    // legacy seal staged the eviction itself and the cycle ran the Rule-13
+    // ladder over it here; what a seal stages is now driven in Rust.
+    // Every hold the core can name, `routingCollision` included: a circle
+    // whose routing id another circle on this device holds is held until IT
+    // is left, and nothing here retries it sooner.
+    for (final cause in SendHeldFfi.values.where(
+      (cause) => cause != SendHeldFfi.nothing,
+    )) {
+      test('${cause.name}: sends nothing for that circle, raises no failure '
+          'and pulls no retry forward, while its sibling is sent', () async {
+        final held = circleFixture(seed: 1);
+        final sibling = circleFixture(seed: 2);
+        Future<BackgroundTaskHarness> run({required bool hold}) async {
+          final harness = await BackgroundTaskHarness.start(
+            circles: [held, sibling],
+            events: FakeLocationEventService(jitteredSecs: 100),
+          );
+          final heldHex = hexOf(held.circle.mlsGroupId);
+          harness.manager.sealOutcome = (id) => hold && hexOf(id) == heldHex
+              ? SealOutcomeFfi(
+                  heldBy: cause,
+                  replayed: const [],
+                  errored: false,
+                )
+              : harness.manager.sealedOutcomeFor(id);
+          return harness;
+        }
 
         final base = DateTime.now();
+        final unheld = await run(hold: false);
+        await unheld.tick(base);
+        final harness = await run(hold: true);
         await harness.tick(base);
 
-        expect(harness.relay.published.map((e) => e.eventJson).toList(), [
-          'p1',
-          'p2',
-        ]);
-        for (final event in harness.relay.published) {
-          expect(event.relays, circle.circle.relays);
-        }
         expect(
-          harness.manager.confirmedTokens,
-          isEmpty,
-          reason:
-              'a proposal carries no staged state, so there is nothing to '
-              'apply and nothing to undo',
+          harness.manager.sealCalls.map((c) => c.foreground),
+          everyElement(isFalse),
+          reason: 'the cycle asked the core as the Android service does',
         );
-        expect(harness.manager.rolledBackTokens, isEmpty);
-        expect(harness.manager.acks, isEmpty);
-        expect(dueOf(harness, circle), base, reason: 'still due');
-      },
-    );
-
-    test('a proposal no relay accepted still lets the cycle finish', () async {
-      final circle = circleFixture(seed: 1);
-      final harness = await BackgroundTaskHarness.start(
-        circles: [circle],
-        relay: FakeNostrRelayService()..acceptedBy = const [],
-      );
-      harness.manager.encryptOutcome = (_) =>
-          deferralWith(proposals: const ['p1', 'p2']);
-
-      await harness.tick(DateTime.now());
-
-      expect(harness.relay.published, hasLength(2));
-      expect(harness.manager.rolledBackTokens, isEmpty);
-      expect(harness.manager.confirmedTokens, isEmpty);
-      expect(
-        await readLastPublishMs(),
-        isNotNull,
-        reason: 'losing a proposal costs a cycle, so it must not abort one',
-      );
-    });
-
-    test(
-      "a peer fix the confirm REPLAYED reaches this isolate's own sharing "
-      'service',
-      () async {
-        // Resolving the staged commit makes the engine replay everything it
-        // buffered while that commit was in flight. The engine delivers a
-        // buffered message exactly once and writes it `Processed` in the same
-        // breath, so a replay this isolate drops is a fix nobody ever sees.
-        final circle = circleFixture(seed: 1);
-        final harness = await BackgroundTaskHarness.start(circles: [circle]);
-        harness.manager.encryptOutcome = (_) =>
-            deferralWith(commits: [stagedCommit(7)]);
-        harness.manager.replayOnResolve[BigInt.from(7)] =
-            DecryptLocationOutcomeFfi(
-            results: [
-              LocationMessageResultFfi(
-                kind: LocationMessageResultKindFfi.location,
-                location: DecryptedLocationFfi(
-                  senderPubkey: 'dd' * 32,
-                  latitude: 52.37,
-                  longitude: 4.89,
-                  geohash: 'u173',
-                  timestamp: 1800000000,
-                  expiresAt: 1800000228,
-                ),
-                mlsGroupId: Uint8List.fromList(circle.circle.mlsGroupId),
-                epoch: BigInt.from(9),
-              ),
-            ],
-            autoCommits: const [],
-            proposals: const [],
-          );
-
-        await harness.tick(DateTime.now());
-
-        expect(harness.manager.confirmedTokens, [BigInt.from(7)]);
-        expect(
-          harness.sharing.ingested.map((i) => i.decrypted.senderPubkey),
-          ['dd' * 32],
-          reason: 'the store row is already written Rust-side, but the '
-              'isolate-local cache and the receive-liveness stamp are this '
-              "side's — and `ingestStreamedLocation` is the one funnel that "
-              'reaches both',
-        );
-        expect(
-          harness.sharing.ingested.single.decrypted.latitude,
-          52.37,
-        );
-      },
-    );
-
-    test('a commit the confirm surfaced takes the same ladder', () async {
-      // The second leaver's eviction, staged by the replay of the first one's
-      // resolution. It carries the identical Rule-13 obligation, so it is
-      // published and confirmed rather than left staged.
-      final circle = circleFixture(seed: 1);
-      final harness = await BackgroundTaskHarness.start(circles: [circle]);
-      harness.manager.encryptOutcome = (_) =>
-          deferralWith(commits: [stagedCommit(7)]);
-      harness.manager.replayOnResolve[BigInt.from(7)] =
-          DecryptLocationOutcomeFfi(
-            results: const [],
-            autoCommits: [stagedCommit(8)],
-            proposals: const [],
-          );
-
-      await harness.tick(DateTime.now());
-
-      expect(
-        harness.relay.published.map((e) => e.eventJson).toList(),
-        [stagedCommit(7).commitEventJson, stagedCommit(8).commitEventJson],
-      );
-      expect(harness.manager.confirmedTokens, [
-        BigInt.from(7),
-        BigInt.from(8),
-      ]);
-      expect(harness.manager.rolledBackTokens, isEmpty);
-    });
-
-    test('a proposal the confirm replayed is published', () async {
-      final circle = circleFixture(seed: 1);
-      final h = hexOf(circle.circle.nostrGroupId);
-      final proposal = '{"id":"replayedLeave","kind":445,"tags":[["h","$h"]]}';
-      final harness = await BackgroundTaskHarness.start(circles: [circle]);
-      harness.manager.encryptOutcome = (_) =>
-          deferralWith(commits: [stagedCommit(7)]);
-      harness.manager.replayOnResolve[BigInt.from(7)] =
-          DecryptLocationOutcomeFfi(
-            results: const [],
-            autoCommits: const [],
-            proposals: [proposal],
-          );
-
-      await harness.tick(DateTime.now());
-
-      expect(
-        harness.relay.published.map((e) => e.eventJson).toList(),
-        [stagedCommit(7).commitEventJson, proposal],
-        reason: "a replayed proposal is the user's own re-proposed leave; "
-            'nothing else in the system notices it being dropped',
-      );
-    });
-
-    test(
-      'a replayed fix for ANOTHER circle is ingested under THAT circle',
-      () async {
-        // The engine's buffers are global, so the batch a confirm replays is
-        // not one circle's. Filing it under the circle whose commit was being
-        // resolved puts one circle's member on another circle's map.
-        final circle = circleFixture(seed: 1);
-        final other = circleFixture(seed: 2);
-        final harness = await BackgroundTaskHarness.start(
-          circles: [circle, other],
-        );
-        harness.manager.encryptOutcome = (_) =>
-            deferralWith(commits: [stagedCommit(7)]);
-        harness.manager.replayOnResolve[BigInt.from(7)] =
-            DecryptLocationOutcomeFfi(
-              results: [
-                LocationMessageResultFfi(
-                  kind: LocationMessageResultKindFfi.location,
-                  location: DecryptedLocationFfi(
-                    senderPubkey: 'dd' * 32,
-                    latitude: 52.37,
-                    longitude: 4.89,
-                    geohash: 'u173',
-                    timestamp: 1800000000,
-                    expiresAt: 1800000228,
-                  ),
-                  mlsGroupId: Uint8List.fromList(other.circle.mlsGroupId),
-                  epoch: BigInt.from(9),
-                ),
-              ],
-              autoCommits: const [],
-              proposals: const [],
-            );
-
-        await harness.tick(DateTime.now());
-
-        expect(harness.sharing.ingested, hasLength(1));
-        expect(
-          hexOf(harness.sharing.ingested.single.circle.nostrGroupId),
-          hexOf(other.circle.nostrGroupId),
-          reason: 'the fix belongs to the circle its own result names',
-        );
-      },
-    );
-
-    test('a replayed fix for a circle this device does not hold is dropped',
-        () async {
-      final circle = circleFixture(seed: 1);
-      final harness = await BackgroundTaskHarness.start(circles: [circle]);
-      harness.manager.encryptOutcome = (_) =>
-          deferralWith(commits: [stagedCommit(7)]);
-      harness.manager.replayOnResolve[BigInt.from(7)] =
-          DecryptLocationOutcomeFfi(
-            results: [
-              LocationMessageResultFfi(
-                kind: LocationMessageResultKindFfi.location,
-                location: DecryptedLocationFfi(
-                  senderPubkey: 'dd' * 32,
-                  latitude: 52.37,
-                  longitude: 4.89,
-                  geohash: 'u173',
-                  timestamp: 1800000000,
-                  expiresAt: 1800000228,
-                ),
-                mlsGroupId: Uint8List(32)..fillRange(0, 32, 9),
-                epoch: BigInt.from(9),
-              ),
-            ],
-            autoCommits: const [],
-            proposals: const [],
-          );
-
-      await harness.tick(DateTime.now());
-
-      expect(
-        harness.sharing.ingested,
-        isEmpty,
-        reason: 'an unknown group is skipped, never filed under the ambient '
-            'circle as a fallback',
-      );
-      expect(
-        harness.manager.confirmedTokens,
-        [BigInt.from(7)],
-        reason: 'anti-vacuity: the resolution DID run and DID replay',
-      );
-    });
-
-    test('a replayed proposal goes to the relays its own `h` tag names',
-        () async {
-      final circle = circleFixture(seed: 1);
-      final other = circleFixture(
-        seed: 2,
-        relays: const ['wss://other.relay.example'],
-      );
-      final otherH = hexOf(other.circle.nostrGroupId);
-      final proposal = '{"id":"leave","kind":445,"tags":[["h","$otherH"]]}';
-      const orphan = '{"id":"orphan","kind":445,"tags":[["h","beef"]]}';
-      final harness = await BackgroundTaskHarness.start(
-        circles: [circle, other],
-      );
-      harness.manager.encryptOutcome = (_) =>
-          deferralWith(commits: [stagedCommit(7)]);
-      harness.manager.replayOnResolve[BigInt.from(7)] =
-          DecryptLocationOutcomeFfi(
-            results: const [],
-            autoCommits: const [],
-            proposals: [proposal, orphan],
-          );
-
-      await harness.tick(DateTime.now());
-
-      final sent = harness.relay.published
-          .where((e) => e.eventJson == proposal)
-          .toList();
-      expect(sent, hasLength(1));
-      expect(
-        sent.single.relays,
-        other.circle.relays,
-        reason: "a replayed leave goes to ITS group's relays; the resolving "
-            "circle's operators must not learn of the other group",
-      );
-      expect(
-        harness.relay.published.map((e) => e.eventJson),
-        isNot(contains(orphan)),
-        reason: 'fail closed: an `h` naming no circle we hold publishes '
-            'nowhere',
-      );
-    });
-
-    test(
-      'a resolution-surfaced commit for ANOTHER circle is published to that '
-      "circle's relays and confirmed only on its own ack",
-      () async {
-        final circle = circleFixture(seed: 1);
-        final other = circleFixture(
-          seed: 2,
-          relays: const ['wss://other.relay.example'],
-        );
-        final foreignCommit = stagedCommit(
-          9,
-          nostrGroupId: other.circle.nostrGroupId,
-        );
-        final harness = await BackgroundTaskHarness.start(
-          circles: [circle, other],
-        );
-        harness.manager.encryptOutcome = (_) =>
-            deferralWith(commits: [stagedCommit(7)]);
-        harness.manager.replayOnResolve[BigInt.from(7)] =
-            DecryptLocationOutcomeFfi(
-              results: const [],
-              autoCommits: [foreignCommit],
-              proposals: const [],
-            );
-
-        await harness.tick(DateTime.now());
-
-        final sent = harness.relay.published
-            .where((e) => e.eventJson == foreignCommit.commitEventJson)
-            .toList();
-        expect(
-          sent,
-          hasLength(1),
-          reason: 'anti-vacuity: the ladder really ran',
-        );
-        expect(sent.single.relays, other.circle.relays);
-        expect(
-          sent.single.relays,
-          isNot(contains(circle.circle.relays.first)),
-          reason: "circle X's relay operators must not learn of circle Y's "
-              'eviction',
-        );
-        expect(harness.manager.confirmedTokens, contains(BigInt.from(9)));
-      },
-    );
-
-    test(
-      'a resolution-surfaced commit whose `h` names no held circle is '
-      'published nowhere and never confirmed',
-      () async {
-        final circle = circleFixture(seed: 1);
-        final orphanCommit = CommitToPublishFfi(
-          commitEventJson: '{"id":"orphan","kind":445,"tags":[["h","beef"]]}',
-          pending: PendingStateRefFfi(token: BigInt.from(9)),
-        );
-        final harness = await BackgroundTaskHarness.start(circles: [circle]);
-        harness.manager.encryptOutcome = (_) =>
-            deferralWith(commits: [stagedCommit(7)]);
-        harness.manager.replayOnResolve[BigInt.from(7)] =
-            DecryptLocationOutcomeFfi(
-              results: const [],
-              autoCommits: [orphanCommit],
-              proposals: const [],
-            );
-
-        await harness.tick(DateTime.now());
-
         expect(
           harness.relay.published.map((e) => e.eventJson),
-          isNot(contains(orphanCommit.commitEventJson)),
-          reason: 'fail closed: an `h` naming no held circle publishes '
-              'nowhere',
+          [locationEventOf(sibling)],
+          reason: 'a location was sent for a circle whose sends are held',
         );
         expect(
-          harness.relay.published,
-          isNotEmpty,
-          reason: 'anti-vacuity: the ladder DID publish this cycle (the '
-              "deferral's own generation-0 commit)",
+          harness.manager.acks.map((a) => hexOf(a.nostrGroupId)),
+          [hexOf(sibling.circle.nostrGroupId)],
         );
         expect(
-          harness.manager.confirmedTokens,
-          isNot(contains(BigInt.from(9))),
+          dueOf(harness, held),
+          base,
+          reason: 'a held circle stays due and is not re-armed as published',
         );
-        expect(harness.manager.rolledBackTokens, contains(BigInt.from(9)));
-      },
-    );
+        expect(
+          harness.location.capturedProfiles,
+          hasLength(unheld.location.capturedProfiles.length),
+          reason: 'a hold is no failure: the retry is not pulled forward, so '
+              'a hold that lasts until a foreground costs no extra wake',
+        );
+      });
+    }
 
-    test('the ladder stops at the runaway cap and REPORTS what it did not run',
+    test("an ack is stamped at the task's own clock, which a test drives",
         () async {
-      // Each resolution surfaces the next commit, forever — the runaway the
-      // cap exists for. The un-run one takes the fail-report rung rather than
-      // being abandoned: this isolate dies at the end of the cycle, and the
-      // report both drains that resolution's replay and leaves the removal
-      // owed exactly as walking away would.
       final circle = circleFixture(seed: 1);
       final harness = await BackgroundTaskHarness.start(circles: [circle]);
-      harness.manager.encryptOutcome = (_) =>
-          deferralWith(commits: [stagedCommit(7)]);
-      for (var token = 7; token < 7 + resolveRunawayCap + 1; token++) {
-        harness.manager.replayOnResolve[BigInt.from(token)] =
-            DecryptLocationOutcomeFfi(
-              results: const [],
-              autoCommits: [stagedCommit(token + 1)],
-              proposals: const [],
-            );
-      }
+      final at = DateTime.utc(2026, 10, 18, 9, 30);
+      harness.handler.clockForTest = () => at;
 
-      await harness.tick(DateTime.now());
+      await harness.tick(at);
 
-      expect(
-        harness.manager.confirmedTokens,
-        hasLength(resolveRunawayCap),
-        reason: 'the cap bounds generations; each one here resolves one '
-            'commit',
-      );
-      expect(
-        harness.manager.rolledBackTokens,
-        [BigInt.from(7 + resolveRunawayCap)],
-        reason: 'the commit the cap stopped short of is REPORTED, not '
-            'silently abandoned — the same rung the foreground ladder takes',
-      );
+      expect(harness.manager.acks.single.atMs, at.millisecondsSinceEpoch);
+    });
+
+    test('the task reads no clock but its own', () {
+      // One clock for every decision, so a test that moves it moves them all.
+      final code = File('lib/src/services/background_location_task.dart')
+          .readAsStringSync()
+          .split('\n')
+          .where((line) => !line.trimLeft().startsWith('//'))
+          .join('\n');
+      expect('DateTime.now()'.allMatches(code), isEmpty);
+      expect(code, isNot(contains('Stopwatch')));
     });
 
     test('the isolate routes a replay through NO provider', () {
-      // The behavioural half above proves the replay lands on the injected
-      // service. This is the isolate half: `background_location_task.dart`
+      // "a fix the drive replays is filed under its own circle" proves a
+      // replay lands on the injected service. This is the isolate half:
+      // `background_location_task.dart`
       // runs in a separate Dart isolate with its own service instances, where
       // a Riverpod container does not exist — reaching for one would crash the
       // wake rather than refresh a map nobody is looking at.
@@ -858,53 +651,90 @@ void main() {
     });
   });
 
-  group('Rule 15', () {
-    test(
-      'the fail-closed cross-circle commit rung puts no identifier in any '
-      'log line',
-      () async {
-        // Exercises the new routing this same file's "a resolution-surfaced
-        // commit whose `h` names no held circle" test proves behaviourally —
-        // this one proves the fail-closed rung it takes never names the
-        // circle, the relay, or the unresolvable `h` it declined to route to.
-        final circle = circleFixture(
-          seed: 1,
-          relays: const ['wss://circle.needlehost.example'],
+  group('every send outcome by variant', () {
+    test('a send a relay answered is re-armed as published; one no relay '
+        'took, or not made, stays due', () async {
+      final base = DateTime.now();
+      for (final answer in LocationPublishFfi.values) {
+        final circle = circleFixture(seed: 1);
+        final harness = await BackgroundTaskHarness.start(
+          circles: [circle],
+          events: FakeLocationEventService(jitteredSecs: 100),
         );
-        final harness = await BackgroundTaskHarness.start(circles: [circle]);
-        harness.manager.encryptOutcome = (_) =>
-            deferralWith(commits: [stagedCommit(7)]);
-        harness.manager.replayOnResolve[BigInt.from(7)] =
-            DecryptLocationOutcomeFfi(
-              results: const [],
-              autoCommits: [
-                CommitToPublishFfi(
-                  commitEventJson:
-                      '{"id":"orphan","kind":445,"tags":[["h","cafe1234"]]}',
-                  pending: PendingStateRefFfi(token: BigInt.from(9)),
-                ),
-              ],
-              proposals: const [],
-            );
+        harness.relay.publishAnswer = answer;
 
-        final capture = LogCapture.install();
+        await harness.tick(base);
+
+        final answered = answer == LocationPublishFfi.accepted ||
+            answer == LocationPublishFfi.refused;
+        expect(
+          dueOf(harness, circle) == base,
+          !answered,
+          reason: '$answer',
+        );
+      }
+    });
+
+    test('an accepted send is stamped; every other one is not', () async {
+      for (final answer in LocationPublishFfi.values) {
+        final circle = circleFixture(seed: 1);
+        final harness = await BackgroundTaskHarness.start(circles: [circle]);
+        harness.relay.publishAnswer = answer;
+
         await harness.tick(DateTime.now());
 
-        capture
-          ..restore()
-          ..assertContains('[BackgroundTask]')
-          ..assertNoNeedles([
-            'wss://circle.needlehost.example',
-            'cafe1234',
-            hexOf(circle.circle.mlsGroupId),
-            hexOf(circle.circle.nostrGroupId),
-          ]);
-      },
-    );
+        expect(
+          harness.manager.acks,
+          answer == LocationPublishFfi.accepted ? hasLength(1) : isEmpty,
+          reason: '$answer',
+        );
+      }
+    });
   });
 
-  group('the two publish planes take different ladders', () {
-    test('a location takes the one-shot ladder', () async {
+  group('Rule 15', () {
+    test('no seal or send log line names a circle, a relay or a group',
+        () async {
+      final circle = circleFixture(
+        seed: 1,
+        relays: const ['wss://circle.needlehost.example'],
+      );
+      final capture = LogCapture.install();
+      for (final (seal, answer) in [
+        (
+          const SealOutcomeFfi(
+            heldBy: SendHeldFfi.departureDue,
+            replayed: [],
+            errored: true,
+          ),
+          null,
+        ),
+        (null, LocationPublishFfi.clockAhead),
+        (null, LocationPublishFfi.superseded),
+      ]) {
+        final harness = await BackgroundTaskHarness.start(circles: [circle]);
+        if (seal != null) harness.manager.sealOutcome = (_) => seal;
+        harness.relay.publishAnswer = answer;
+        await harness.tick(DateTime.now());
+      }
+
+      capture
+        ..restore()
+        ..assertContains('[BackgroundTask] seal drive ended on an error')
+        ..assertContains('[BackgroundTask] send held by the core')
+        ..assertContains('[BackgroundTask] publish reached no relay')
+        ..assertContains('[BackgroundTask] sealed location not sent')
+        ..assertNoNeedles([
+          'wss://circle.needlehost.example',
+          'wss://payload.relay.example',
+          hexOf(circle.circle.mlsGroupId),
+          hexOf(circle.circle.nostrGroupId),
+        ]);
+    });
+  });
+
+  group("a location takes the driver's one send", () {
+    test('and never a commit ladder', () async {
       final circle = circleFixture(seed: 1);
       final harness = await BackgroundTaskHarness.start(circles: [circle]);
 
@@ -915,8 +745,7 @@ void main() {
         [locationEventOf(circle)],
         reason:
             'a location nobody acked is superseded by the next tick within '
-            'kLocationPublishMaxInterval, so it gets ONE bounded attempt — '
-            'and the radio sleeps instead of climbing a 49 s retry ladder',
+            'kLocationPublishMaxInterval, so it gets ONE send',
       );
       expect(
         harness.relay.publishedOnLadder,
@@ -924,37 +753,11 @@ void main() {
         reason: 'nothing on this path is a commit',
       );
     });
-
-    test('a staged commit keeps the retry ladder', () async {
-      final circle = circleFixture(seed: 1);
-      final harness = await BackgroundTaskHarness.start(circles: [circle]);
-      harness.manager.encryptOutcome = (_) =>
-          deferralWith(commits: [stagedCommit(7)], proposals: const ['p1']);
-
-      await harness.tick(DateTime.now());
-
-      expect(
-        harness.relay.publishedOnLadder.map((e) => e.eventJson).toList(),
-        [stagedCommit(7).commitEventJson, 'p1'],
-        reason:
-            'a commit that is neither confirmed nor rolled back forks the '
-            'group (Rule 13); no later tick supersedes it, so it keeps the '
-            '3-attempt ladder — as does the proposal that rides with it',
-      );
-      expect(
-        harness.relay.publishedLocations,
-        isEmpty,
-        reason:
-            'the one-shot ladder must never carry an event whose outcome '
-            'resolves a PendingStateRef',
-      );
-      expect(harness.manager.confirmedTokens, [BigInt.from(7)]);
-    });
   });
 
   group('an outcome the cycle cannot use costs one circle', () {
-    test('an outcome with neither arm set skips its circle while the sibling '
-        'publishes', () async {
+    test('a seal with neither a sealed location nor a hold skips its circle '
+        'while the sibling publishes', () async {
       final one = circleFixture(seed: 1);
       final two = circleFixture(seed: 2);
       final harness = await BackgroundTaskHarness.start(
@@ -962,9 +765,9 @@ void main() {
         events: FakeLocationEventService(jitteredSecs: 100),
       );
       final oneHex = hexOf(one.circle.mlsGroupId);
-      harness.manager.encryptOutcome = (id) => hexOf(id) == oneHex
-          ? const EncryptLocationOutcomeFfi()
-          : harness.manager.sentOutcomeFor(id);
+      harness.manager.sealOutcome = (id) => hexOf(id) == oneHex
+          ? const SealOutcomeFfi(replayed: [], errored: false)
+          : harness.manager.sealedOutcomeFor(id);
 
       final base = DateTime.now();
       await harness.tick(base);
@@ -988,7 +791,7 @@ void main() {
       );
     });
 
-    test('an encrypt that throws leaves the sibling publishing', () async {
+    test('a seal that throws leaves the sibling publishing', () async {
       final one = circleFixture(seed: 1);
       final two = circleFixture(seed: 2);
       final harness = await BackgroundTaskHarness.start(
@@ -996,15 +799,15 @@ void main() {
         events: FakeLocationEventService(jitteredSecs: 100),
       );
       final oneHex = hexOf(one.circle.mlsGroupId);
-      harness.manager.encryptOutcome = (id) {
+      harness.manager.sealOutcome = (id) {
         if (hexOf(id) == oneHex) throw StateError('engine unavailable');
-        return harness.manager.sentOutcomeFor(id);
+        return harness.manager.sealedOutcomeFor(id);
       };
 
       final base = DateTime.now();
       await harness.tick(base);
 
-      expect(harness.manager.encryptCalls, hasLength(2));
+      expect(harness.manager.sealCalls, hasLength(2));
       expect(harness.relay.published.single.eventJson, locationEventOf(two));
       expect(dueOf(harness, one), base, reason: 'not re-armed');
       expect(await readLastPublishMs(), isNotNull);
@@ -1023,7 +826,7 @@ void main() {
       await harness.tick(DateTime.now());
 
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         hasLength(1),
         reason:
             'the queued circle must not advance an MLS epoch while the '
@@ -1077,7 +880,7 @@ void main() {
       await harness.tick(DateTime.now());
 
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         hasLength(1),
         reason: 'the only due circle published before the resume landed',
       );
@@ -1159,7 +962,7 @@ void main() {
       expect(teardown, isNotNull);
       await teardown!;
 
-      expect(harness.manager.encryptCalls, hasLength(1));
+      expect(harness.manager.sealCalls, hasLength(1));
       expect(
         harness.sharing.fetched,
         isEmpty,
@@ -1176,6 +979,121 @@ void main() {
             'of its own database (Rule 14)',
       );
       expect(harness.relay.shutdownCalled, isTrue);
+    });
+
+    test('the stop latches the relay service before the teardown drains, '
+        'so nothing the abandoned cycle starts reaches a relay', () async {
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1)],
+      );
+      // Read before the teardown's first await, which every drain follows.
+      final teardown = harness.handler.onDestroy(DateTime.now(), false);
+
+      expect(harness.relay.latched, isTrue);
+      await teardown;
+    });
+
+    test("each fetch is handed the service's stop, so a fetch under way "
+        'takes in no further event after it', () async {
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1)],
+      );
+
+      await harness.tick(DateTime.now());
+      final stopped = harness.sharing.fetchStops.single;
+      expect(stopped?.call(), isFalse);
+      await harness.handler.onDestroy(DateTime.now(), false);
+
+      expect(stopped?.call(), isTrue);
+    });
+
+    group('a stop landing past every earlier stop read', () {
+      // Each test holds the teardown on a drive in flight, its services
+      // still up: only the cycle's own stop read keeps the next step from
+      // running.
+      late BackgroundTaskHarness harness;
+      late Completer<void> inFlight;
+      Future<void>? teardown;
+      // A block body: an arrow would hand the teardown's future back to a
+      // fake that awaits its hook, and the cycle would wait on the teardown
+      // that is draining it.
+      void stop() {
+        teardown ??= harness.handler.onDestroy(DateTime.now(), false);
+      }
+
+      setUp(() async {
+        harness = await BackgroundTaskHarness.start(
+          circles: [circleFixture(seed: 1)],
+        );
+        inFlight = Completer<void>();
+        harness.relay.inFlightNonLocationDrives = inFlight.future;
+        harness.handler.teardownDrainBudget = Duration.zero;
+        teardown = null;
+      });
+
+      Future<void> finish() async {
+        expect(teardown, isNotNull, reason: 'premise: the stop landed');
+        inFlight.complete();
+        await teardown;
+      }
+
+      test('inside the last leave carry-on: the roster is not read again, no '
+          'registration is listened to and no fix is asked', () async {
+        int? rosterAtStop;
+        harness.relay.onResumeLeave = () {
+          stop();
+          rosterAtStop ??= harness.manager.rosterReads;
+        };
+
+        await harness.tick(DateTime.now());
+
+        expect(harness.manager.rosterReads, rosterAtStop);
+        expect(harness.location.streamListeners, 0);
+        expect(harness.location.fixRequests, 0);
+        await finish();
+      });
+
+      test("inside the cycle's roster read: no registration is listened to "
+          'and no fix is asked', () async {
+        // The carry-on reads the roster first; the cycle's own read is next.
+        final readsBefore = harness.manager.rosterReads;
+        harness.manager.onRosterRead = () {
+          if (harness.manager.rosterReads == readsBefore + 2) stop();
+        };
+
+        await harness.tick(DateTime.now());
+
+        expect(harness.location.streamListeners, 0);
+        expect(harness.location.fixRequests, 0);
+        await finish();
+      });
+
+      test("in the hold taken before a circle's seal: nothing is sealed",
+          () async {
+        var acquires = 0;
+        FakeWakeLockChannel().onAcquire = () {
+          if (++acquires == 2) stop();
+        };
+
+        await harness.tick(DateTime.now());
+
+        expect(harness.location.fixRequests, 1, reason: 'premise: fixed');
+        expect(harness.manager.sealCalls, isEmpty);
+        await finish();
+      });
+
+      test('between the seal and the send: nothing is sent', () async {
+        harness.manager.sealOutcome = (mlsGroupId) {
+          stop();
+          return harness.manager.sealedOutcomeFor(mlsGroupId);
+        };
+
+        await harness.tick(DateTime.now());
+
+        expect(harness.manager.sealCalls, hasLength(1), reason: 'premise');
+        expect(harness.relay.publishedLocations, isEmpty);
+        await finish();
+      });
     });
 
     test('a stop while the GPS fix is outstanding abandons the fix', () async {
@@ -1214,7 +1132,7 @@ void main() {
       await cycle;
       expect(harness.location.fixRequests, 1);
       expect(fix.isCompleted, isFalse);
-      expect(harness.manager.encryptCalls, isEmpty);
+      expect(harness.manager.sealCalls, isEmpty);
       expect(harness.relay.published, isEmpty);
     });
   });
@@ -1238,12 +1156,12 @@ void main() {
 
         final base = DateTime.now();
         await harness.tick(base);
-        expect(harness.manager.encryptCalls, hasLength(1));
+        expect(harness.manager.sealCalls, hasLength(1));
         expect(harness.sharing.fetched, hasLength(1));
 
         dueNow();
         await harness.tick(base.add(const Duration(seconds: 60)));
-        expect(harness.manager.encryptCalls, hasLength(2));
+        expect(harness.manager.sealCalls, hasLength(2));
         expect(
           harness.sharing.fetched,
           hasLength(1),
@@ -1256,7 +1174,7 @@ void main() {
 
         dueNow();
         await harness.tick(base.add(kLocationUpdateInterval));
-        expect(harness.manager.encryptCalls, hasLength(3));
+        expect(harness.manager.sealCalls, hasLength(3));
         expect(
           harness.sharing.fetched,
           hasLength(2),
@@ -1467,14 +1385,14 @@ void main() {
           [one, two].map(scheduleKeyOf).toList(),
           DateTime.now(),
         );
-        final before = harness.manager.encryptCalls.length;
+        final before = harness.manager.sealCalls.length;
         await harness.tick(DateTime.now());
         expect(
-          harness.manager.encryptCalls.length,
+          harness.manager.sealCalls.length,
           before + 2,
           reason: 'burst $burst must still publish both circles',
         );
-        leaders.add(hexOf(harness.manager.encryptCalls[before].mlsGroupId));
+        leaders.add(hexOf(harness.manager.sealCalls[before].mlsGroupId));
       }
 
       expect(
@@ -1518,7 +1436,7 @@ void main() {
 
       await harness.tick(DateTime.now());
 
-      expect(harness.manager.encryptCalls, hasLength(2));
+      expect(harness.manager.sealCalls, hasLength(2));
       expect(
         harness.events.sampledNominals,
         [BigInt.from(kLocationUpdateInterval.inSeconds)],
@@ -1562,14 +1480,11 @@ void main() {
       );
     });
 
-    test('a circle flagged Unrecoverable MID-burst is not published by it',
-        () async {
-      // The roster is snapshotted at the top of the cycle — BEFORE the GPS
-      // acquisition and before the whole stagger spread — so without a
-      // re-read a circle the engine flags inside either is still sent to,
-      // which is the one thing `CircleService` says must never happen
-      // (Rule 8). Every other eligibility test here blocks the circle before
-      // the cycle starts, where the snapshot already answers correctly.
+    test('a circle MDK halts MID-burst publishes nothing', () async {
+      // The roster is snapshotted at the top of the cycle, so a circle MDK
+      // halts inside the GPS acquisition or the stagger spread is still asked
+      // for a seal. MDK refuses a send to a halted group, and the refusal must
+      // send nothing (Rule 8): the circle already in flight still goes out.
       const gap = Duration(milliseconds: 300);
       final one = circleFixture(seed: 1);
       final two = circleFixture(seed: 2);
@@ -1577,22 +1492,26 @@ void main() {
         circles: [one, two],
         stagger: PublishStagger(rng: Random(9), minGap: gap, maxGap: gap),
       );
-      // Whichever circle the CSPRNG puts first, the OTHER is flagged while
+      String? haltedHex;
+      harness.manager.sealOutcome = (id) {
+        if (hexOf(id) == haltedHex) throw StateError('group unrecoverable');
+        return harness.manager.sealedOutcomeFor(id);
+      };
+      // Whichever circle the CSPRNG puts first, the OTHER is halted while
       // that publish is in flight.
       harness.relay.onPublish = (_) async {
-        final firstOut = hexOf(harness.manager.encryptCalls.first.mlsGroupId);
-        final blocked = firstOut == hexOf(one.circle.mlsGroupId) ? two : one;
-        harness.handler.circleServiceForTest!
-            .markCircleBlocked(blocked.circle.mlsGroupId);
+        final firstOut = hexOf(harness.manager.sealCalls.first.mlsGroupId);
+        final oneHex = hexOf(one.circle.mlsGroupId);
+        haltedHex = firstOut == oneHex ? hexOf(two.circle.mlsGroupId) : oneHex;
       };
 
       await harness.tick(DateTime.now());
 
       expect(
-        harness.manager.encryptCalls,
+        harness.relay.published,
         hasLength(1),
-        reason: 'only the circle already in flight may go out; the one '
-            'flagged mid-burst must be skipped',
+        reason: 'only the circle already in flight may go out; the seal MDK '
+            'refused for the halted one sends nothing',
       );
     });
 
@@ -1607,7 +1526,7 @@ void main() {
       );
       final base = DateTime.now();
       await harness.tick(base);
-      expect(harness.manager.encryptCalls, hasLength(2));
+      expect(harness.manager.sealCalls, hasLength(2));
 
       // A gap wider than the whole burst budget. No single production draw
       // is this wide (`maxGapFor` caps one at 9 s); it stands in for a burst
@@ -1635,14 +1554,14 @@ void main() {
       await harness.tick(base.add(const Duration(seconds: 1)));
 
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         hasLength(3),
         reason: 'only the first due circle fits inside the budget',
       );
       // WHICH circle takes the slot is a CSPRNG permutation — both circles are
       // due in the same instant, so asserting an identity here would pin the
       // stable burst order the shuffle exists to prevent.
-      final served = hexOf(harness.manager.encryptCalls.last.mlsGroupId);
+      final served = hexOf(harness.manager.sealCalls.last.mlsGroupId);
       final deferred = [one, two]
           .map((c) => hexOf(c.circle.mlsGroupId))
           .firstWhere((hex) => hex != served);
@@ -1661,9 +1580,9 @@ void main() {
 
       await harness.tick(base.add(const Duration(seconds: 2)));
 
-      expect(harness.manager.encryptCalls, hasLength(4));
+      expect(harness.manager.sealCalls, hasLength(4));
       expect(
-        hexOf(harness.manager.encryptCalls.last.mlsGroupId),
+        hexOf(harness.manager.sealCalls.last.mlsGroupId),
         deferred,
         reason: 'most-overdue-first, so a deferred circle is never starved',
       );

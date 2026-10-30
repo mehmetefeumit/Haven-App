@@ -665,9 +665,6 @@ class AppLocalizationsJa extends AppLocalizations {
   String get nameCircleStageCreatingGroup => '安全なグループを作成しています...';
 
   @override
-  String get nameCircleStageSendingInvites => '招待を送信しています...';
-
-  @override
   String get nameCircleStageComplete => '完了しました！';
 
   @override
@@ -685,7 +682,7 @@ class AppLocalizationsJa extends AppLocalizations {
   }
 
   @override
-  String nameCircleCreatedPartialSnack(String name, int sent, int total) {
+  String nameCircleCreatedSentSoFarSnack(String name, int sent, int total) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -694,7 +691,15 @@ class AppLocalizationsJa extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'サークル「$name」を作成しました。招待を送信しました（$totalString件中$sentString件）。残りは配信待ちです。';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          'サークル「$name」を作成しました。招待$totalString件のうち、これまでに$sentString件を送信しました。Haven はアプリを開いている間、最長で一日、残りの招待の送信を続けます。',
+      one:
+          'サークル「$name」を作成しました。招待$totalString件のうち、これまでに$sentString件を送信しました。Haven はアプリを開いている間、最長で一日、その招待の送信を続けます。',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -769,7 +774,7 @@ class AppLocalizationsJa extends AppLocalizations {
   }
 
   @override
-  String addMemberPartialDelivery(int sent, int total) {
+  String addMemberSentSoFar(int sent, int total, String circleName) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -778,7 +783,37 @@ class AppLocalizationsJa extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '招待を送信しました（$totalString件中$sentString件）。残りは配信待ちです。';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          '$circleName への招待$totalString件のうち、これまでに$sentString件を送信しました。Haven はアプリを開いている間、最長で一日、残りの招待の送信を続けます。',
+      one:
+          '$circleName への招待$totalString件のうち、これまでに$sentString件を送信しました。Haven はアプリを開いている間、最長で一日、その招待の送信を続けます。',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String addMemberReinviteNeeded(String circleName) {
+    return 'Haven はその人に $circleName への招待を送信できません。その人をいったん削除してから、もう一度追加してください。';
+  }
+
+  @override
+  String get memberCannotReceiveInvitations =>
+      '選んだ人の中に招待の送信先が見つからない人がいたため、Haven は全員を招待できません。招待を受け取れる状態になっているか、選んだ人たちにアプリを確認してもらってから、もう一度お試しください。';
+
+  @override
+  String get missedInvitationsShowWho => '相手を表示';
+
+  @override
+  String missedInvitationsTitle(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '送信できなかった招待',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -833,6 +868,11 @@ class AppLocalizationsJa extends AppLocalizations {
   }
 
   @override
+  String circleMemberRemoveAwaitingAnnouncement(String name) {
+    return '$name の削除を引き続き進めています。リレーの確認を待っているところです。完了するまで、このサークルとは何も共有されません。';
+  }
+
+  @override
   String get circleMemberAdmin => '管理者';
 
   @override
@@ -866,7 +906,11 @@ class AppLocalizationsJa extends AppLocalizations {
   String get pendingMemberReadyToInvite => '招待できます';
 
   @override
-  String get pendingMemberNeedsUpdate => 'Haven のアップデートが必要です';
+  String get pendingMemberNeedsUpdate => '相手が Haven をアップデートするか、開く必要があります';
+
+  @override
+  String get memberKeyPackageStale =>
+      'Haven は現在この人を招待できません。Haven を開いてもらってから、もう一度お試しください。';
 
   @override
   String get memberSearchHint => 'メンバーIDを入力...';
@@ -1013,6 +1057,27 @@ class AppLocalizationsJa extends AppLocalizations {
   String get invitationAcceptError => '招待を承認できませんでした。もう一度お試しください。';
 
   @override
+  String invitationNeedsNewInviteError(String name) {
+    return 'この招待はもう使用できません。$name に改めて招待してもらってください。その前に、相手が Haven をアップデートする必要があるかもしれません。';
+  }
+
+  @override
+  String get rejoinDialogTitle => 'このサークルに再参加しますか？';
+
+  @override
+  String rejoinDialogBody(String inviterName, String circleName) {
+    return '$inviterName から「$circleName」に招待されましたが、このサークルはすでにこの端末にあります。サークルから外されたあとで再び招待された場合に起こることがあります。再参加すると、この端末にあるサークルのデータが置き換えられます。「辞退」を選ぶとこの招待は終了し、元に戻せません。「キャンセル」を選ぶと、招待はあとで使えるように残ります。';
+  }
+
+  @override
+  String rejoinDialogBodyUnnamed(String circleName) {
+    return '「$circleName」に招待されましたが、このサークルはすでにこの端末にあります。サークルから外されたあとで再び招待された場合に起こることがあります。再参加すると、この端末にあるサークルのデータが置き換えられます。「辞退」を選ぶとこの招待は終了し、元に戻せません。「キャンセル」を選ぶと、招待はあとで使えるように残ります。';
+  }
+
+  @override
+  String get rejoinDialogConfirm => '再参加する';
+
+  @override
   String invitationRosterFullError(int limit) {
     final intl.NumberFormat limitNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1140,11 +1205,22 @@ class AppLocalizationsJa extends AppLocalizations {
   String get circleDetailsLeaveCircle => 'サークルを退出';
 
   @override
+  String get circleDetailsLeavingInProgress => 'サークルを退出しています…';
+
+  @override
   String get leaveCircleDialogTitle => 'サークルを退出';
 
   @override
   String get leaveCircleDialogBody =>
       'このサークルを退出しますか？メンバーへの位置情報の送信は止まり、メンバーの位置情報も見えなくなります。最後に送った位置は、最大で1日ほど相手の端末に残ります。この操作は元に戻せません: 再び参加するには、新しい招待が必要になります。';
+
+  @override
+  String get leaveDisbandedCircleDialogBody =>
+      'このサークルは終了したため、今後は何も共有されません。退出すると、このサークルはこの端末から削除されます。';
+
+  @override
+  String get leaveCircleDialogAdminNote =>
+      'あなたはこのサークルの管理者です。あなたが退出する前に、サークルが引き続き機能するよう、Haven はほかのメンバーを管理者にしようと試みます。';
 
   @override
   String get leaveCircleConfirm => '退出';
@@ -1159,52 +1235,31 @@ class AppLocalizationsJa extends AppLocalizations {
   String get leaveCircleError => 'サークルを退出できませんでした';
 
   @override
-  String get circleBlockedBannerTitle => 'このサークルは更新できません';
-
-  @override
-  String get circleBlockedBannerBody =>
-      'このサークルの暗号化で問題が発生したため、Haven はこのサークルで更新を送受信できなくなりました。以下で最後に確認できた情報は引き続き見られますが、サークルを退出することもできます。';
-
-  @override
-  String get legacyCircleBannerTitle => 'このサークルは再作成が必要です';
-
-  @override
-  String get legacyCircleBannerBody =>
-      'Haven の暗号化エンジンがアップグレードされたため、このサークルは使用できなくなりました。同じメンバーと引き続き位置情報を共有するには、サークルを再作成してください。メンバーを改めて招待する必要があります。';
-
-  @override
   String get legacyCircleRecreateCta => 'サークルを再作成';
 
   @override
-  String get legacyCircleRemoveCta => '削除';
+  String get storageResetTitle => 'Haven がアップデートされました';
 
   @override
-  String get legacyCircleRemoveDialogTitle => 'サークルを削除しますか？';
+  String get storageResetKept => 'あなたの識別情報は変わっていません。すでに公開したプロフィールもそのまま残ります。';
 
   @override
-  String get legacyCircleRemoveDialogBody =>
-      'このサークルはもう使用できないため、リストから削除されます。これは、代わりに作成する新しいサークルには影響しません。';
+  String get storageResetLost =>
+      'Haven の新しい暗号化エンジンに移行するため、このアップデートより前に作成されたサークルは削除されました。サークルを再作成し、メンバーを改めて招待してください。このアップデートより前に相手に付けたニックネームと、その時点で保存が完了していなかったプロフィールの変更も削除されました。';
 
   @override
-  String get legacyCircleRemoveConfirm => '削除';
+  String get storageResetRelays =>
+      'このアップデートで、リレーの設定は Haven のデフォルトにリセットされました。続けるか、リレー設定から戻るまでこの設定は公開されないので、先に自分のリレーを追加できます。';
 
   @override
-  String get legacyCutoverExplainerTitle => 'Haven がアップデートされました';
+  String get storageResetContinue => '続ける';
 
   @override
-  String get legacyCutoverExplainerIdentityUnchanged =>
-      'あなたの識別情報と公開プロフィールは変更されていません。これらについて何かをする必要はありません。';
+  String get storageResetOpenRelaySettings => 'リレー設定';
 
   @override
-  String get legacyCutoverExplainerCirclesNeedRecreation =>
-      'セキュリティ向上のため、位置情報を再び共有するには、サークルを再作成し、メンバーを改めて招待する必要があります。';
-
-  @override
-  String get legacyCutoverExplainerAcknowledge => 'わかりました';
-
-  @override
-  String get relaySettingsLegacyRetractionPending =>
-      'Haven は、最近のセキュリティアップデートに伴う一部の古いデータを破棄するよう、まだリレーに求めています。';
+  String get storageResetAcknowledgeFailed =>
+      'Haven は回答を保存できませんでした。保存されるまで、Haven はリレーの設定も招待用の鍵も公開しないため、まだ誰もあなたを招待できません。もう一度お試しください。そのままにすると、次に Haven を開いたときに改めて確認されます。';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'サークルパネルを閉じました';
@@ -1416,6 +1471,9 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteError => '識別情報を削除できませんでした。もう一度お試しください。';
+
+  @override
+  String get identityAdvancedDeletingProgress => '識別情報を削除しています…';
 
   @override
   String identityAdvancedCopiedToClipboard(String label) {
@@ -1690,7 +1748,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get clockSkewBodyBehind =>
-      'この端末の時刻がサークルのほかのメンバーより遅れているため、送信された位置情報は誰にも見られないまま有効期限が切れています。端末の設定で日付と時刻の自動設定をオンにしてください。';
+      'この端末の時刻がサークルのほかのメンバーより遅れているため、送信した位置情報の有効期限が早く切れ、サークルのメンバーがその一部またはすべてを見逃すことがあります。端末の設定で日付と時刻の自動設定をオンにしてください。';
 
   @override
   String get clockSkewResolvedAnnouncement =>
@@ -1761,23 +1819,8 @@ class AppLocalizationsJa extends AppLocalizations {
   String get sharingHealthRepairAction => '修復';
 
   @override
-  String get sharingHealthRepairUnavailableHint => 'このサークルでは修復を利用できません';
-
-  @override
-  String get sharingHealthRepairHint =>
-      'リレーに接続し直して、位置情報の送信をやり直し、あなたがこのサークルの管理者の場合は、新しい鍵に切り替えることがあります';
-
-  @override
   String get sharingHealthRepairSent =>
       '修復を送信しました。ほかのメンバーには、それぞれの端末が受け取ってから反映されます。';
-
-  @override
-  String get sharingHealthRepairNotOwner =>
-      'このサークルを修復できるのは管理者だけです。あなたを削除して、もう一度追加するよう管理者に頼んでください。';
-
-  @override
-  String get sharingHealthRepairNeedsNewCircle =>
-      'このサークルはこの端末では修復できません。同じメンバーで新しいサークルを作成してください。';
 
   @override
   String get sharingHealthRepairNothingToDo =>
@@ -1788,6 +1831,185 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get sharingHealthResumedAnnouncement => '位置情報の共有が復旧しました';
+
+  @override
+  String get sharingHealthTitleQuarantined => 'Haven は現在このサークルを開くことができません';
+
+  @override
+  String get sharingHealthBodyQuarantined =>
+      'この端末でサークルを読み込む際に問題が発生しました。サークルは削除されていません。';
+
+  @override
+  String get sharingHealthTitleDisbanded => 'このサークルは終了しました';
+
+  @override
+  String get sharingHealthBodyDisbanded =>
+      '管理者がこのサークルを終了したため、今後は何も共有されません。この端末から削除するには、サークルを退出してください。';
+
+  @override
+  String get sharingHealthQuarantineRetryHint => 'このサークルの読み込みを再試行します';
+
+  @override
+  String get sharingHealthQuarantineRetryFailedAnnouncement =>
+      'Haven はまだこのサークルを開くことができません。';
+
+  @override
+  String get sharingHealthTitleUnrecoverable => 'このサークルは、この端末では動作しなくなりました';
+
+  @override
+  String get sharingHealthBodyUnrecoverable =>
+      'この端末では、Haven はこのサークルで更新を送受信できなくなりました。このサークルの管理者の誰かに、あなたをいったん削除してから、もう一度追加してもらってください。誰にもできない場合は、同じメンバーで新しいサークルを作成してください。';
+
+  @override
+  String get sharingHealthTitleStalled => 'Haven はこのサークルの更新を読み取れません';
+
+  @override
+  String get sharingHealthBodyStalled =>
+      'この端末はサークルへの変更を見逃したようで、リレー上でもそれを見つけられませんでした。このサークルの管理者の誰かに、あなたをいったん削除してから、もう一度追加してもらってください。誰にもできない場合は、同じメンバーで新しいサークルを作成してください。';
+
+  @override
+  String get sharingHealthTitlePaused => 'Haven はこのサークルを一時停止しました';
+
+  @override
+  String get sharingHealthBodyCollision =>
+      'Haven はこの端末でこのサークルに問題を見つけたため、あなたの位置情報のプライバシーを守るために、このサークルとの共有を停止しました。これを解決するには、サークルを退出するしかありません。再び参加するには、新しい招待が必要になります。';
+
+  @override
+  String get sharingHealthBodyCannotCheck =>
+      'Haven はこの端末でこのサークルを確認できなかったため、あなたの位置情報のプライバシーを守るために、このサークルとの共有を一時停止しました。確認は Haven が自動的にやり直します。';
+
+  @override
+  String get sharingHealthTitleLeaving => 'このサークルを退出しています';
+
+  @override
+  String get sharingHealthBodyLeaving =>
+      'Haven が退出を完了するまで、このサークルとは何も共有されません。完了までに一日ほどかかることがあります。完了すると、サークルはこの端末から消えます。';
+
+  @override
+  String get sharingHealthBodyRemovalUnmade =>
+      'あなたが指示した削除が行われなかったため、削除しようとした相手に位置情報が見られないよう、Haven はこのサークルへのあなたの位置情報の共有を一時停止しました。';
+
+  @override
+  String get sharingHealthBodyRemovalUnmadeNoNotice =>
+      'あなたが指示した削除が行われなかったため、削除しようとした相手に位置情報が見られないよう、Haven はこのサークルへのあなたの位置情報の共有を一時停止しました。誰がまだサークルにいるかは、メンバーの一覧を開くと確認できます。';
+
+  @override
+  String get sharingHealthBodyDepartureDue =>
+      'このサークルを退出した人がいますが、その退出の処理がまだ完了していません。完了するまで、Haven はこのサークルにあなたの位置情報を共有しません。';
+
+  @override
+  String get sharingHealthTitleBackgroundPaused => 'このサークルのバックグラウンド共有は一時停止中です';
+
+  @override
+  String get sharingHealthBodyAwaitsForeground =>
+      'Haven がバックグラウンドにある間に、このサークルのリレーが変わりました。切り替えは Haven を開いている間に完了します。それまでは、このサークルとの共有はバックグラウンドでは行われません。';
+
+  @override
+  String get sharingHealthBodyAwaitingRelays =>
+      'このサークルへの変更が、リレーによる確認を待っています。それまでの間、Haven はこのサークルにあなたの位置情報を送信せず、このサークルからの新しい位置情報も表示しません。アプリを開いている間、Haven は試み続けます。';
+
+  @override
+  String get sharingHealthBodyAcknowledged =>
+      'このサークルへの変更をリレーが受け付け、Haven がその反映を仕上げているところです。それまで、このサークルの更新は保留されます。';
+
+  @override
+  String get sharingHealthBodyStagedWithoutRecord =>
+      'このサークルへの変更を保存できなかったため、送信されませんでした。Haven は遅くとも次回の起動時にこれを解消します。それまで、このサークルの更新は保留されます。';
+
+  @override
+  String get sharingHealthBodyStoredInput =>
+      'この端末には、このサークルの更新で処理できていないものがあります。処理が済むまで、Haven はこのサークルにあなたの位置情報を共有しません。';
+
+  @override
+  String get sharingHealthBodySessionHeld =>
+      'Haven の前回の接続の終了処理がまだ続いているため、位置情報の共有を一時停止しています。終了すると再開します。端末を再起動すれば、必ず解消します。';
+
+  @override
+  String get sharingHealthRepairHintAnyMember =>
+      'リレーに接続し直して位置情報の送信をやり直し、このサークルの暗号鍵を新しくすることがあります';
+
+  @override
+  String get sharingHealthAttentionAnnouncement =>
+      'このサークルの位置情報の共有に確認が必要です。サークルの詳細を開いて理由を確認してください。';
+
+  @override
+  String changeNoticeArrivedAnnouncement(String circleName) {
+    return 'サークル $circleName の最近の変更について、確認が必要なお知らせがあります。そのサークルの詳細を開いて内容を確認してください。';
+  }
+
+  @override
+  String get circleDetailsAttentionTooltip => 'サークルの詳細、確認が必要です';
+
+  @override
+  String circleRowAttentionSemantics(String circleName) {
+    return '$circleName、確認が必要です';
+  }
+
+  @override
+  String get changeNoticeHeading => 'このサークルの変更';
+
+  @override
+  String get changeNoteRemovalUndone =>
+      'このサークルへの変更が反映されませんでした。それが誰かを削除する変更だった場合、削除されるはずだった人はまだサークルにいて、このサークルで共有されるものを見ることができます。';
+
+  @override
+  String get changeNoteChangeUndone =>
+      'このサークルへの変更が反映されなかったため、何も変わっていません。それがあなたの変更で、まだ必要な場合は、もう一度行ってください。';
+
+  @override
+  String get changeNoteMayBeOutOfStep =>
+      'このサークルへの変更が、この端末の知らないうちにほかのメンバーに届いている可能性があるため、この端末がほかのメンバーと食い違っている可能性があります。';
+
+  @override
+  String get changeNoteReinviteOwed =>
+      'あなたが招待した人がこのサークルのメンバーとして表示されていますが、Haven がその人への招待を送信できないため、参加できません。その人を削除してから、もう一度追加してください。';
+
+  @override
+  String get changeNoteChangeUnrecorded => 'このサークルへの変更を保存できなかったため、送信されませんでした。';
+
+  @override
+  String get changeNoteQueuedChangeDropped =>
+      'このサークルで実行待ちだった変更は、指示どおりに実行できなくなったため取り消されました。すでに別の方法で行われている可能性があります。';
+
+  @override
+  String get changeNoteQueuedChangesHeld => 'このサークルには、まだ実行待ちの変更があります。';
+
+  @override
+  String get changeNoteQueuedRemovalDropped =>
+      'このサークルであなたが指示した削除は行われませんでした。削除しようとした相手が、まだサークルにいる可能性があります。';
+
+  @override
+  String get changeNoteChangeWithdrawn =>
+      'ほかのメンバーによるこのサークルへの変更が、あなたの変更のひとつに代わって採用されたため、あなたの変更は行われませんでした。まだ必要な場合は、もう一度行ってください。';
+
+  @override
+  String get changeNoteWelcomeOwed =>
+      'このサークルへの招待を送信できていません。Haven は、招待してから最長で一日、アプリを開いている間は送信を続けます。それまでに相手が参加しなければ、その人を削除してから、もう一度追加してください。';
+
+  @override
+  String get changeNoteUnreadLocation => 'このサークルに最近送られた更新の一部を、この端末で開けませんでした。';
+
+  @override
+  String get changeNoticeStillInCircleLabel => 'まだサークルにいる人:';
+
+  @override
+  String get changeNoticeRemoveAgain => 'もう一度削除';
+
+  @override
+  String get changeNoticeReviewMembers => 'メンバーを確認';
+
+  @override
+  String get changeNoticeKeepMembers => 'サークルに残す';
+
+  @override
+  String get changeNoticeKeepConfirmTitle => 'サークルに残しますか？';
+
+  @override
+  String get changeNoticeKeepConfirmBody =>
+      'この削除を理由に、Haven がこのサークルとの共有を一時停止することはなくなります。削除しようとした相手のうち、まだサークルにいる人はそのまま残り、Haven がこのサークルに位置情報を共有するときはいつでも、あなたの位置情報を見ることができます。';
+
+  @override
+  String get changeNoticeKeepConfirmAction => '残す';
 
   @override
   String circleMemberLastSeenMinutes(int count) {

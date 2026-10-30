@@ -16,8 +16,10 @@ default = []
 # feature no longer forwards to any upstream crate feature (the old
 # `mdk-sqlite-storage/test-utils` is gone) — it is now a Haven-local marker that
 # gates `StorageConfig::in_memory_storage()` and the two-party in-memory session
-# fixtures the integration tests build on it.
-test-utils = []
+# fixtures the integration tests build on it. It also builds the scripted
+# relay the forged-event tests of this crate, the FFI crate and the soak rig
+# share (`relay::scripted_relay`), which is the one thing it pulls in.
+test-utils = ["dep:tokio-tungstenite"]
 
 [dependencies]
 # Serialization
@@ -41,59 +43,39 @@ thiserror = "2.0"
 # Nostr protocol
 nostr = { version = "0.44", features = ["std", "nip44"] }
 
-# Marmot "Dark Matter" MLS stack (MDK v0.9.4, marmot-protocol/mdk).
+# Marmot "Dark Matter" MLS stack (MDK v0.10.4, marmot-protocol/mdk).
 #
-# The old single-crate `mdk-core` was replaced upstream by a crate topology with
-# no `mdk-core`: the CGKA engine (`cgka-engine`) drives an `AccountDeviceSession`
+# The CGKA engine (`cgka-engine`) drives an `AccountDeviceSession`
 # (`cgka-session`) over SQLCipher storage (`storage-sqlite`); shared value types
 # and traits live in `cgka-traits` (package `cgka-traits`, directory
 # `crates/traits`); the Nostr kind-445/1059 outer-layer crypto and welcome
-# gift-wrap live in `transport-nostr-peeler`. Haven keeps its own relay /
-# subscription / cursor plane, so `transport-nostr-adapter` is deliberately NOT
-# adopted, and `marmot-account` / `marmot-app` / `marmot-uniffi` are rejected
-# (keyring / full-runtime / FFI overlap). `marmot-forensics` still enters the
-# audit graph transitively — `cgka-session` imports it unconditionally — even
-# though no `ForensicRecorder` is installed by default.
+# gift-wrap live in `transport-nostr-peeler`; the kind-30443 KeyPackage event
+# template and the classified one-relay publish (`NostrSdkRelayClient`) live in
+# `transport-nostr-adapter`. Haven keeps its own relay /
+# subscription / cursor plane, and `marmot-account` / `marmot-app` /
+# `marmot-uniffi` are rejected (keyring / full-runtime / FFI overlap).
+# `marmot-forensics` enters the graph because `cgka-session` and `cgka-engine`
+# require it; no recorder is ever installed (`check_no_forensic_recorder.sh`).
 #
-# Pinned to the RELEASED tag v0.9.4 (`e391adc…`), never a master HEAD: the
+# Pinned to the RELEASED tag v0.10.4 (`fcc85edd…`), never a master HEAD: the
 # monorepo is `publish = false` and self-describes as "not semver-stable", so a
-# released tag is the only acceptable supply-chain anchor. All five crates share
-# ONE rev so the workspace resolves as a unit. A `cargo tree` supply-chain gate
-# asserts the uniffi / quic / agent crates stay OUT of Haven's graph.
-cgka-session = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
-cgka-engine = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
-cgka-traits = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
-storage-sqlite = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
-transport-nostr-peeler = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
-
-# OpenMLS — declared directly for EXACTLY ONE reason: reading a KeyPackage's own
-# MLS `Lifetime` (`not_before` / `not_after`) so KeyPackage rotation can be timed
-# off the package's real expiry instead of a Nostr event timestamp
-# (`relay::maintenance::kp_lifetime`). The Dark Matter crates parse the lifetime
-# internally (`cgka_engine::key_package::validate_key_package_lifetime_policy`)
-# but expose it on NO public API: `KeyPackageMetadata` carries only the
-# KeyPackageRef + credential identity, and `EngineError::InvalidKeyPackageLifetime`
-# surfaces the timestamps only for a package that FAILED the range check. So
-# naming OpenMLS here is the smallest change that makes the lifetime reachable —
-# the alternative (hand-rolling TLS parsing of LeafNode → Lifetime) would put a
-# fragile, unversioned MLS wire parser in the crypto path.
-#
-# This adds ZERO crates to the graph: openmls 0.8.1 + openmls_rust_crypto 0.5.1
-# already resolve from crates.io via cgka-engine / storage-sqlite. The version
-# and the `extensions-draft-08` feature MUST keep matching the mdk workspace
-# (`~0.8.1`, same feature) so the graph unifies to ONE instance — `cargo tree -i
-# openmls` must still show a single version, or two MLS type universes coexist.
-# `openmls_rust_crypto` supplies the `OpenMlsCrypto` impl `KeyPackageIn::validate`
-# requires; it is the same provider cgka-engine uses (`RustCrypto::default()`).
-#
-# The pre-Dark-Matter direct deps were dropped because their only consumer (the
-# M8-2 `has_live_key_material` gate) was deleted. This is NOT that gate coming
-# back: nothing here touches the OpenMLS `StorageProvider`, and the engine
-# remains the sole owner of MLS state.
-openmls = { version = "~0.8.1", default-features = false, features = [
-  "extensions-draft-08",
-] }
-openmls_rust_crypto = "~0.5"
+# released tag is the only acceptable supply-chain anchor. All six crates share
+# ONE rev so the workspace resolves as a unit; the rev lives in
+# `scripts/ci/mdk_pins.env` and `check_mdk_supply_chain.sh` /
+# `check_lockfile_universe.sh` hold every Cargo root to it. OpenMLS is NOT
+# declared as a production dependency: MDK pins a fork
+# (`erskingardner/openmls@59e7d3b…`), and a registry openmls beside it would be
+# a second MLS type universe. KeyPackage lifetimes are read from MDK's
+# `KeyPackageMetadata` (`relay::maintenance::kp_lifetime`).
+cgka-session = { git = "https://github.com/marmot-protocol/mdk", rev = "fcc85edd8dbd07c8293c899ee52230f72c54c897" }
+cgka-engine = { git = "https://github.com/marmot-protocol/mdk", rev = "fcc85edd8dbd07c8293c899ee52230f72c54c897" }
+cgka-traits = { git = "https://github.com/marmot-protocol/mdk", rev = "fcc85edd8dbd07c8293c899ee52230f72c54c897" }
+storage-sqlite = { git = "https://github.com/marmot-protocol/mdk", rev = "fcc85edd8dbd07c8293c899ee52230f72c54c897" }
+transport-nostr-peeler = { git = "https://github.com/marmot-protocol/mdk", rev = "fcc85edd8dbd07c8293c899ee52230f72c54c897" }
+# `sdk` is the adapter's only feature: `NostrSdkRelayClient`, MDK's classified
+# publish over a `nostr_sdk::Client` it is handed and never builds. Haven hands
+# it the publish client (`RelayManager::fanout_transport`, Security Rule 16).
+transport-nostr-adapter = { git = "https://github.com/marmot-protocol/mdk", rev = "fcc85edd8dbd07c8293c899ee52230f72c54c897", features = ["sdk"] }
 
 # Keyring (system credential store) — declared directly so `keyring_policy` and
 # the MLS storage layer (`nostr::mls::storage`) can provision the SQLCipher
@@ -105,18 +87,20 @@ openmls_rust_crypto = "~0.5"
 # confirms a single version.
 keyring-core = "0.7"
 
-# SQLite for local storage (circles.db, tiles.db, and — via storage-sqlite — the
-# MLS session.sqlite). Version MUST match the Dark Matter workspace's rusqlite
-# (0.32 / libsqlite3-sys 0.30): libsqlite3-sys is a `links = "sqlite3"` crate, so
-# exactly ONE version may exist in the dependency graph. The SQLCipher build is
-# shared across all three databases.
-rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
+# SQLite for local storage (circles-v2.db, tiles-v2.db, and — via
+# storage-sqlite — the MLS session-v2.sqlite). libsqlite3-sys is a
+# `links = "sqlite3"` crate, so exactly ONE version may exist in the graph; it
+# comes from MDK's `[patch.crates-io]` git rev (SQLCipher 4.17, tracked
+# exception T-LIBSQLITE-PATCH). The patch below only applies when this crate's
+# requirements name the exact patched versions, hence the `=` pins; every
+# Cargo root that builds haven-core repeats the `[patch]` (the roots are listed
+# in scripts/ci/mdk_pins.env), because a patch is never inherited through a
+# path dependency.
+rusqlite = { version = "=0.40.1", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # SQLCipher requires OpenSSL. For Android cross-compilation, we must bundle OpenSSL
-# since Android NDK doesn't include OpenSSL headers. Pinned to 0.30 to unify with
-# storage-sqlite's libsqlite3-sys (one `links = "sqlite3"` version per graph);
-# `cargo tree -i libsqlite3-sys` must show a single 0.30.x.
-libsqlite3-sys = { version = "0.30", features = ["bundled-sqlcipher-vendored-openssl"] }
+# since Android NDK doesn't include OpenSSL headers.
+libsqlite3-sys = { version = "=0.38.1", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # Async runtime (required by MDK)
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "net", "time"] }
@@ -156,6 +140,12 @@ url = "2"
 
 # Async utilities
 futures = "0.3"
+
+# The server half of `relay::scripted_relay`, compiled only with `test-utils`
+# (never in a shipped build: that feature is a compile error without debug
+# assertions). Already in the graph at 0.26 through nostr-relay-pool's
+# async-wsocket: zero new crates.
+tokio-tungstenite = { version = "0.26", optional = true, default-features = false, features = ["handshake"] }
 
 # Unicode text handling for the member directory (`src/directory`): NFKD +
 # combining-mark detection for the search fold, grapheme-cluster segmentation
@@ -218,6 +208,16 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 [dev-dependencies]
 # HTTP mocking for the Blossom upload/download unit tests (M6, next wave).
 mockito = "1.2"
+# A loopback TLS server for the one Blossom test that proves no TLS session
+# of one request is resumed by the next (`no_tls_session_outlives_its_request`).
+# The versions and the ring provider haven-core already ships through reqwest;
+# no default features, so no `aws-lc-*` enters the lockfile. Dev-only.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+# The key that server's certificate is signed with, made when the test runs:
+# no private key is committed (`check_no_committed_secrets.sh`). The ring
+# rustls already locks. Dev-only.
+ring = { version = "0.17", default-features = false, features = ["alloc"] }
 # Property-based testing
 proptest = "1.5"
 # Temporary directories for tests
@@ -249,15 +249,32 @@ tokio = { version = "1", features = [
     "test-util",
 ] }
 nostr-sdk = { version = "0.44", default-features = false, features = ["nip44", "nip59"] }
-# Basic MLS credential + signer, for the ONE test that drives OpenMLS directly
-# (`ratchet_forward_distance_e2e`): the sender-ratchet exhaustion boundary cannot
-# be walked through the engine's send path (which re-scans every retained message
-# per send, so 1000 sends is quadratic), and no MDK API exposes a signer. Already
-# in the graph at 0.5.0 via cgka-engine, so this adds ZERO crates; dev-only, so it
-# never ships.
-openmls_basic_credential = "0.5"
+# OpenMLS itself, for the tests that need what no MDK API exposes:
+# `ratchet_forward_distance_e2e` drives a group directly (the sender-ratchet
+# exhaustion boundary cannot be walked through the engine's send path, which
+# re-scans every retained message per send, so 1000 sends is quadratic, and no
+# MDK API exposes a signer), and the KeyPackage tests build packages off the
+# engine's path (`kp_pre_migration_profile`, `kp_lifecycle_e2e`,
+# `helpers/twin_key_packages.rs`). The exact fork rev and features MDK's
+# workspace pins, so the dev graph stays ONE MLS universe with the engine's
+# (`check_lockfile_universe.sh`); dev-only, so it never ships.
+openmls = { git = "https://github.com/erskingardner/openmls.git", rev = "59e7d3b27a7e95237879dd5478de1fd90eff7ada", features = ["extensions-draft"] }
+openmls_rust_crypto = { git = "https://github.com/erskingardner/openmls.git", rev = "59e7d3b27a7e95237879dd5478de1fd90eff7ada" }
+openmls_basic_credential = { git = "https://github.com/erskingardner/openmls.git", rev = "59e7d3b27a7e95237879dd5478de1fd90eff7ada" }
+# A bare WebSocket relay for `relay_pool_expiry_drop_point`, which must serve an
+# expired event (NIP-40 relays and `nostr-relay-builder` refuse to). Already in
+# the graph at 0.26 via `nostr-relay-pool`'s async-wsocket: zero new crates.
+# `handshake` is the server-side accept, declared rather than inherited.
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 # Enable test-utils feature for integration tests
 haven-core = { path = ".", features = ["test-utils"] }
+
+# MDK's SQLCipher 4.17 amalgamation (`mdk/Cargo.toml` `[patch.crates-io]`),
+# repeated here because a git dependent never inherits its patches. Tracked
+# exception T-LIBSQLITE-PATCH; removed when a crates.io libsqlite3-sys carries
+# SQLCipher >= 4.17 and MDK drops its patch.
+[patch.crates-io]
+libsqlite3-sys = { git = "https://github.com/rusqlite/rusqlite.git", rev = "5ae7fdf83085c595fd54f977b3a56ccacabaf16b" }
 
 [lints.rust]
 unsafe_code = "deny"

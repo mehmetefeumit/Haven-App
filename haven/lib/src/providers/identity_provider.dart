@@ -8,6 +8,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/providers/identity_scope.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
@@ -17,6 +18,9 @@ import 'package:haven/src/providers/tile_prefetch_provider.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/live_sync_resubscriber.dart'
+    show kLiveSyncRestartBudget;
+import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
 import 'package:haven/src/utils/log_alias.dart';
@@ -104,11 +108,16 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
       ref.invalidate(identityProvider);
       return;
     }
+    // Whatever the last identity left on the publish pool, this one's first
+    // publish or fetch opens a pool of its own.
+    await _shutDownPublishPool();
     // Retire the circle service now that the slate is confirmed clean. The
     // logout deliberately left it as the wiped, `_wiped`-latched instance (so
     // every logged-out read failed closed and could not re-create circles.db);
-    // this new identity must provision onto a FRESH instance.
+    // this new identity must provision onto a FRESH instance — and so must
+    // everything that was built from the last one.
     ref.invalidate(circleServiceProvider);
+    invalidateIdentityScope(ref);
     state = const AsyncLoading();
     state = await AsyncValue.guard(() async {
       final service = ref.read(identityServiceProvider);
@@ -143,10 +152,11 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
       ref.invalidate(identityProvider);
       return;
     }
-    // Retire the circle service now that the slate is confirmed clean (see
-    // createIdentity) so the imported identity provisions onto a FRESH instance
-    // rather than the wiped, `_wiped`-latched one the logout left in place.
+    // A pool of its own, and a FRESH circle service rather than the wiped,
+    // `_wiped`-latched one the logout left in place (see createIdentity).
+    await _shutDownPublishPool();
     ref.invalidate(circleServiceProvider);
+    invalidateIdentityScope(ref);
     state = const AsyncLoading();
     state = await AsyncValue.guard(() async {
       final service = ref.read(identityServiceProvider);
@@ -235,18 +245,19 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     // Cancel any in-flight tile prefetch burst first so no further
     // member-area tile writes occur after the identity is wiped.
     ref.read(tilePrefetchServiceProvider).cancel();
+    // One deadline for both stops: a second stop issued while the first is
+    // still out joins it (`stop()` coalesces), so a budget of its own would
+    // only keep the key longer. A first stop that returns late leaves the
+    // second only what is left of the deadline, possibly nothing; it is still
+    // issued.
+    final stopsGivenUp = Completer<void>();
+    final stopBudget = liveSyncEnabled
+        ? Timer(kLiveSyncRestartBudget, stopsGivenUp.complete)
+        : null;
     // Stop the live-sync engine before wiping state, so its standing
-    // subscriptions tear down before the identity is removed. Best-effort +
-    // idempotent (MapShell dispose also stops it).
-    if (liveSyncEnabled) {
-      try {
-        await ref.read(subscriptionServiceProvider).stop();
-      } on Object catch (e) {
-        debugPrint(
-          '[IdentityNotifier] subscription stop failed: ${e.runtimeType}',
-        );
-      }
-    }
+    // subscriptions tear down before the identity is removed. Not the last
+    // word: see the second stop, behind the latch.
+    await _stopLiveSync(stopsGivenUp.future);
     // Wipe all persisted last-known locations BEFORE deleting the
     // identity, so any failure leaves no orphaned location rows behind.
     // Best-effort: swallow errors so a storage hiccup cannot block the
@@ -297,8 +308,8 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     // circles.db (which would SQLite-create a fresh decryptable DB + keyring
     // key, defeating the wipe). An already-in-flight tick is additionally
     // refused a re-open by the circle service's `_wiped` latch (set in
-    // `closeAndInvalidate` below). The engine's own subscription was already
-    // stopped above.
+    // `closeAndInvalidate` below). The engine's own subscription was stopped
+    // above, and is stopped again behind that latch.
     ref
       ..invalidate(maintenanceSchedulerProvider)
       // Same H1 ordering for the per-circle location-publish scheduler: cancel
@@ -320,7 +331,7 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     // session is already open on this database" — and it latches the service so
     // no in-flight caller can re-open the DB mid-wipe. (The release is explicit,
     // not GC-timed; see `NostrCircleService.closeAndInvalidate`. It is why the
-    // engine stop above must come first — the engine holds its own
+    // engine is stopped on both sides of it — the engine holds its own
     // `Arc<CircleManager>` clone.) Best-effort — a storage failure must never
     // block the primary objective of deleting the identity key.
     final circleServiceForWipe = ref.read(circleServiceProvider);
@@ -331,6 +342,20 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         '[SECURITY][IdentityNotifier] M10 MLS close failed: ${e.runtimeType}',
       );
     }
+    // The stop that is final. MapShell stays mounted across a logout, the
+    // app is in front, and until the latch above the identity was present and
+    // the manager open — so a leg queued behind the start the first stop
+    // ended (the resume's heal, a debounced delta, a heal tick) was free to
+    // build a NEW engine during the awaited wipes in between. Left up, it
+    // holds standing REQs — the inbox `#p` REQ on the deleted npub among
+    // them — and MLS state on unlinked files until the process dies. Now
+    // that the latch holds, no factory can obtain a manager, so nothing can
+    // start behind this one.
+    //
+    // Its outcome is deliberately not read: a session Rust would not let go
+    // must not keep the key on the device.
+    await _stopLiveSync(stopsGivenUp.future);
+    stopBudget?.cancel();
     // (The M10.1 pending-wipe marker was already set as the FIRST action of
     // this method — see the top of deleteIdentity — so it covers the whole
     // logout, not just the wipe call.)
@@ -368,22 +393,6 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
           '${e.runtimeType}',
         );
       }
-    }
-    // Destroy any stranded PRE-Dark-Matter legacy MLS state (haven_mdk.db +
-    // its keyring key). Independent of the M10.1 marker above (a different
-    // file, a different keyring key) — a previously-FAILED one-time cutover
-    // (`LegacyCutoverService`) retries only while an identity is present, so
-    // once this delete completes that retry can never fire again. This is the
-    // last chance to remove it. Idempotent and a no-op when nothing legacy
-    // exists. Best-effort — a failure here must not block the primary
-    // objective of removing the identity's secret key.
-    try {
-      await circleServiceForWipe.destroyLegacyMlsState();
-    } on Object catch (e) {
-      debugPrint(
-        '[SECURITY][IdentityNotifier] legacy MLS state destroy failed during '
-        'identity deletion: ${e.runtimeType}',
-      );
     }
     // Clear every durable "leave in progress" marker (public nostr_group_ids
     // of circles this identity was leaving). Must run AFTER wipeAllMlsState:
@@ -447,6 +456,13 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     // own already-scrubbed secret buffer and fails closed via the null-secret
     // guard in `MaintenanceService` once the identity is gone.)
     await service.deleteIdentity();
+    // The publish pool is process-lifetime, and its sockets live 60-70 s past
+    // their last send: left open, the next identity's first publishes would
+    // ride them, linking the two identities at those relays. Every stop has
+    // returned or been given up on, and the latch refuses every MLS operation,
+    // so nothing of this identity can start on the pool now; what is still out
+    // is cut. The next use opens a pool of its own.
+    await _shutDownPublishPool();
     // Rule 15: no per-process log handle minted this session may still
     // resolve after logout. Re-mints the salt (so a fresh call for the same
     // value hashes differently) and drops the memo (so a stale pre-rotation
@@ -455,12 +471,57 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     // succeeding.
     rotateLogAliasSaltNow();
     clearLogAliasMemo();
+    // Evidence gathered under this identity is not the next one's: the
+    // locations still in a handler, its peers' clock samples, and the waits
+    // its circles' leaves and drives named.
+    ref.read(liveEventRouterProvider).forgetIdentity();
+    ref.read(clockSkewDetectorProvider).reset();
+    ref.read(maintenanceServiceProvider).forget();
     state = const AsyncData(null);
     // Invalidate ONLY the read-only identity provider so watchers see the
     // logout. circleServiceProvider is intentionally left as the wiped,
     // `_wiped`-latched instance (see the comment above the background teardown)
     // so every logged-out read fails closed; it is retired on the next login.
+    // Everything else that was built from this identity goes now: its relay
+    // lists, its circles, its cached pubkey. Rebuilt while logged out, each
+    // reads the latched circle service and fails closed.
+    invalidateIdentityScope(ref);
     ref.invalidate(identityProvider);
+  }
+
+  /// Shuts the process-lifetime publish pool: the next publish or fetch opens
+  /// one of its own.
+  Future<void> _shutDownPublishPool() async {
+    final relay = ref.read(relayServiceProvider);
+    if (relay is NostrRelayService) await relay.shutdown();
+  }
+
+  /// Stops the live-sync engine, or ends its start in flight. Never throws,
+  /// and never waits past [givenUp], the logout's one [kLiveSyncRestartBudget]
+  /// for both its stops: nothing here may block the removal of the secret
+  /// key, or hold it up.
+  ///
+  /// The engine bounds its own teardown, but first takes its lifecycle lock,
+  /// and that wait has no bound — a pause draining a publish holds it for as
+  /// long as the relays take. A user who kills the app during such a wait
+  /// would keep the key. One stop can also be two engine stops (one retry),
+  /// so the deadline can cut short a teardown that had no lock to wait for.
+  /// A stop still out at the deadline is treated as one that left the engine
+  /// holding: the wipe proceeds.
+  Future<void> _stopLiveSync(Future<void> givenUp) async {
+    if (!liveSyncEnabled) return;
+    try {
+      // The service tears its Dart side down when [givenUp] completes; the
+      // race keeps the key's wait from depending on that.
+      await Future.any([
+        ref.read(subscriptionServiceProvider).stop(givenUp: givenUp),
+        givenUp,
+      ]);
+    } on Object catch (e) {
+      debugPrint(
+        '[IdentityNotifier] subscription stop failed: ${e.runtimeType}',
+      );
+    }
   }
 
   /// Exports the identity as nsec for backup.

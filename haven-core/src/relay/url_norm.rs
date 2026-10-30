@@ -17,6 +17,34 @@
 
 use nostr::RelayUrl;
 
+/// Whether Haven may open a socket to `url`, or name it to another client:
+/// `wss`, or — in a debug build with the loopback opt-in armed — plaintext `ws`
+/// to a loopback host.
+///
+/// THE relay-scheme policy, and the only place it is decided. It takes the
+/// PARSED URL because the text does not say what the scheme is: `WS://host`,
+/// `ws:host`, `ws:/host` and a URL with a tab inside its scheme all parse as
+/// plaintext `ws`, and a prefix test on the raw string passes every one. A
+/// parsed URL always renders its scheme lowercase and followed by `://`.
+#[must_use]
+pub fn may_dial(url: &RelayUrl) -> bool {
+    is_encrypted(url) || crate::relay::ws_loopback_allowed_for_test(url.as_str())
+}
+
+/// [`may_dial`] for a relay as a routing component or a stored list spells it:
+/// a string that is not a relay URL at all is not dialled either.
+#[must_use]
+pub fn may_dial_str(relay: &str) -> bool {
+    RelayUrl::parse(relay).is_ok_and(|url| may_dial(&url))
+}
+
+/// Whether `url`'s scheme is `wss` (the only other one a [`RelayUrl`] can have
+/// is plaintext `ws`).
+#[must_use]
+pub fn is_encrypted(url: &RelayUrl) -> bool {
+    url.as_str().starts_with("wss://")
+}
+
 /// Canonicalizes an already-parsed relay URL to Haven's normal form.
 ///
 /// Lowercases the scheme and authority while preserving path/query/fragment
@@ -42,25 +70,16 @@ pub fn normalize_relay_url(input: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    // Reject plaintext ws:// unless the debug-only hermetic-test opt-in is
-    // armed for this host. In release builds `ws_loopback_allowed_for_test` is
-    // a `const fn` returning false, so this collapses to an unconditional
-    // rejection — identical to the storage path.
-    let lower_prefix = trimmed
-        .chars()
-        .take(5)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    if lower_prefix.starts_with("ws://") && !crate::relay::ws_loopback_allowed_for_test(trimmed) {
-        return None;
-    }
     // `RelayUrl::parse` accepts `user:pass@host`; reject so credentials never
     // reach storage, logs, or a comparison key.
     if trimmed.contains('@') {
         return None;
     }
-    let parsed = RelayUrl::parse(trimmed).ok()?.to_string();
-    Some(canonicalize(&parsed))
+    let parsed = RelayUrl::parse(trimmed).ok()?;
+    if !may_dial(&parsed) {
+        return None;
+    }
+    Some(canonicalize(&parsed.to_string()))
 }
 
 /// Lowercases the scheme and host of a URL, preserving path/query/fragment case.
@@ -139,6 +158,54 @@ mod tests {
         // ws:// is rejected in release; in debug it needs the loopback opt-in,
         // which this test never arms.
         assert!(normalize_relay_url("ws://relay.example").is_none());
+    }
+
+    /// The scheme a URL HAS decides, not how its text begins: each of these
+    /// parses as plaintext `ws` and would be stored, and advertised, as
+    /// `ws://relay.example`.
+    #[test]
+    fn a_plaintext_relay_is_never_normalized_however_its_scheme_is_spelled() {
+        for spelling in [
+            "ws://relay.example",
+            "WS://relay.example",
+            "ws:relay.example",
+            "ws:/relay.example",
+            "w\ts://relay.example",
+        ] {
+            assert!(
+                normalize_relay_url(spelling).is_none(),
+                "a plaintext relay was normalized into a stored form",
+            );
+            assert!(
+                crate::circle::storage_relay_prefs::normalize_url(spelling).is_err(),
+                "the storage path accepted a plaintext relay",
+            );
+        }
+    }
+
+    #[test]
+    fn may_dial_is_wss_whatever_the_spelling_and_never_plaintext() {
+        let parsed = |url: &str| RelayUrl::parse(url).expect("a relay url");
+        for encrypted in [
+            "wss://relay.example",
+            "WSS://Relay.Example:7777/v1",
+            "wss://[2001:db8::1]",
+        ] {
+            assert!(
+                may_dial(&parsed(encrypted)),
+                "an encrypted relay was refused"
+            );
+        }
+        for plaintext in [
+            "ws://relay.example",
+            "WS://relay.example",
+            "ws:relay.example",
+        ] {
+            assert!(
+                !may_dial(&parsed(plaintext)),
+                "a plaintext relay may be dialled"
+            );
+        }
     }
 
     #[test]

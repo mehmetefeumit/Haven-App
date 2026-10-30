@@ -1,7 +1,7 @@
-//! At-rest verification for the six sync/relay-state tables (M10, N4).
+//! At-rest verification for the sync/relay-state tables (M10, N4).
 //!
 //! Proves that the rows the WN relay+epoch-sync migration adds to `circles.db`
-//! are SQLCipher-encrypted at rest. Each of the six tables is seeded with a
+//! are SQLCipher-encrypted at rest. Each table is seeded with a
 //! long, high-entropy ASCII sentinel in a TEXT column and/or a distinctive
 //! ≥16-byte BLOB needle. Every value is first round-tripped back THROUGH the
 //! cipher (proving the row actually landed), then the raw `circles.db` file and
@@ -15,27 +15,21 @@
 use std::io::Read;
 use std::path::PathBuf;
 
-use haven_core::circle::{
-    Circle, CircleStorage, CircleType, LastKnownLocation, PublishedKeyPackageRow,
-};
+use haven_core::circle::{Circle, CircleStorage, CircleType, LastKnownLocation};
 use haven_core::nostr::mls::types::GroupId;
-use haven_core::nostr::mls::GroupIdExt as _;
+use haven_core::nostr::mls::{ChangeNote, CommitNotes as _, GroupIdExt as _, RestageWait};
 use nostr::{EventId, Keys};
 
 /// Long, high-entropy ASCII sentinel written into a TEXT column. Unlikely to
 /// appear verbatim in an encrypted (high-entropy) page by chance.
 const SENTINEL_CURSOR_STREAM: &str = "M10_AT_REST_SYNC_CURSOR_STREAM_SENTINEL_DO_NOT_LEAK_XY";
 const SENTINEL_PUB_EVENT_DTAG: &str = "M10_AT_REST_PUBLISHED_EVENT_DTAG_SENTINEL_DO_NOT_LEAK_XY";
-const SENTINEL_PKP_EVENT_ID: &str = "M10_AT_REST_PUBLISHED_KEY_PACKAGE_EVENT_ID_SENTINEL_XY";
-const SENTINEL_PKP_DTAG: &str = "M10_AT_REST_PUBLISHED_KEY_PACKAGE_DTAG_SENTINEL_DO_NOT_LEAK";
 const SENTINEL_LKL_SENDER: &str = "M10_AT_REST_LAST_KNOWN_LOCATION_SENDER_SENTINEL_DO_NOT_LEAK";
 
 /// Distinctive ≥16-byte BLOB needles written into BLOB columns.
 const NEEDLE_WRAPPER_ID: [u8; 32] = *b"M10_AT_REST_GIFTWRAP_WRAP_ID_XYZ";
 const NEEDLE_PUB_EVENT_ID: [u8; 32] = *b"M10_AT_REST_PUBLISHED_EVENT_IDXY";
-/// The DM `published_key_packages` BLOB column is the cached last-resort
-/// `key_package` bytes (the old `key_package_hash_ref` column is dropped).
-const NEEDLE_PKP_KEY_PACKAGE: &[u8] = b"M10_AT_REST_KEY_PACKAGE_BYTES_NEEDLE_16B+++";
+const NEEDLE_NOTED_CIRCLE: [u8; 32] = *b"M10_AT_REST_COMMIT_NOTES_CIRCLEX";
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty()
@@ -48,14 +42,12 @@ fn assert_no_plaintext_at_rest(db_path: &std::path::Path, phase: &str) {
     let text_sentinels: &[&str] = &[
         SENTINEL_CURSOR_STREAM,
         SENTINEL_PUB_EVENT_DTAG,
-        SENTINEL_PKP_EVENT_ID,
-        SENTINEL_PKP_DTAG,
         SENTINEL_LKL_SENDER,
     ];
     let blob_needles: &[&[u8]] = &[
         &NEEDLE_WRAPPER_ID,
         &NEEDLE_PUB_EVENT_ID,
-        NEEDLE_PKP_KEY_PACKAGE,
+        &NEEDLE_NOTED_CIRCLE,
     ];
 
     let mut scanned_any = false;
@@ -135,33 +127,30 @@ fn seed_and_verify_roundtrip(storage: &CircleStorage, now: i64) {
     );
     assert_eq!(rec.d_tag, SENTINEL_PUB_EVENT_DTAG);
 
-    // --- 4. published_key_packages (event_id hex TEXT + d_tag TEXT + key_package BLOB) ---
-    // DM 4-field shape: `(event_id, d_tag NOT NULL, key_package BLOB, created_at)`
-    // — the old `key_package_hash_ref`/`kind` columns are dropped (DM-2b).
-    let pkp = PublishedKeyPackageRow {
-        event_id: SENTINEL_PKP_EVENT_ID.to_string(),
-        d_tag: SENTINEL_PKP_DTAG.to_string(),
-        key_package: NEEDLE_PKP_KEY_PACKAGE.to_vec(),
-        created_at: now,
+    // --- 4. commit_notes (mls_group_id BLOB needle) ---
+    let noted = GroupId::from_slice(&NEEDLE_NOTED_CIRCLE);
+    assert!(storage.set_removes_nobody(&noted, true));
+    assert!(storage.note(&noted, ChangeNote::RemovalUndone));
+    assert!(
+        storage.removes_nobody(&noted) && storage.peek(&noted) == [ChangeNote::RemovalUndone],
+        "a circle's commit notes must round-trip through the cipher"
+    );
+    // The same circle's re-staging wait (`restage_waits`, the same needle).
+    let wait = RestageWait {
+        rollbacks: 2,
+        not_before_ms: 1_700_000_120_000,
     };
-    storage
-        .record_published_key_package(&pkp)
-        .expect("write published_key_packages");
+    storage.set_restage_wait(&noted, Some(wait));
     assert_eq!(
-        storage.latest_canonical_d_tag().expect("read latest d_tag"),
-        Some(SENTINEL_PKP_DTAG.to_string()),
-        "published_key_package d_tag must round-trip through the cipher"
+        storage.restage_wait(&noted),
+        Some(wait),
+        "a circle's re-staging wait must round-trip through the cipher"
     );
-    // The cached KeyPackage bytes also round-trip through the cipher.
-    assert_eq!(
-        storage
-            .latest_published_key_package()
-            .expect("read latest kp")
-            .expect("kp row exists")
-            .key_package,
-        NEEDLE_PKP_KEY_PACKAGE.to_vec(),
-        "published_key_package bytes must round-trip through the cipher"
-    );
+
+    // DELETED-WITH-SUBJECT: the former table #4 (published_key_packages). The
+    // tracked KeyPackage lives in MDK's lifecycle record in the MLS database;
+    // `kp_lifecycle_e2e.rs` `the_tracked_key_package_is_encrypted_at_rest`
+    // scans that file.
 
     // DELETED-WITH-SUBJECT: the former table #5 (staged_commits) — the M7
     // staged-commit marker + its table are removed (the engine owns
@@ -291,10 +280,6 @@ fn wiped_sync_state_leaves_nothing_decryptable_at_rest() {
         storage
             .wipe_all_last_known_locations()
             .expect("wipe locations");
-        // DM: published_key_packages now HAS a bulk wipe primitive (DM-2b).
-        storage
-            .wipe_published_key_packages()
-            .expect("wipe published key packages");
 
         // The reset tables read empty through the cipher.
         assert_eq!(
@@ -348,11 +333,6 @@ fn wiped_sync_state_leaves_nothing_decryptable_at_rest() {
             .unwrap()
             .is_empty(),
         "last_known_locations must not survive the wipe"
-    );
-    assert_eq!(
-        reopened.latest_canonical_d_tag().unwrap(),
-        None,
-        "published_key_packages must not survive the wipe"
     );
 
     // Byte-scan the freshly-minted file (defense-in-depth): the AUTHORITATIVE

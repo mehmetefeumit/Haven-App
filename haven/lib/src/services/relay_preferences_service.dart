@@ -122,6 +122,7 @@ class BuiltRelayListPublish {
   /// Creates a [BuiltRelayListPublish].
   const BuiltRelayListPublish({
     required this.suppressed,
+    this.awaitingResetAcknowledgement = false,
     this.eventJson,
     this.eventIdHex,
     this.targets = const [],
@@ -132,8 +133,12 @@ class BuiltRelayListPublish {
   /// `true` when the privacy toggle is OFF — caller must not publish.
   final bool suppressed;
 
+  /// `true` while the storage-reset notice is unanswered: nothing is built,
+  /// and the caller must not publish.
+  final bool awaitingResetAcknowledgement;
+
   /// Signed event JSON, ready for `RelayService.publishEvent`. Non-null
-  /// only when [`suppressed`] is `false`.
+  /// only when neither [`suppressed`] nor [`awaitingResetAcknowledgement`].
   final String? eventJson;
 
   /// Hex-encoded event id; pass to [`recordPublishedRelayList`] after

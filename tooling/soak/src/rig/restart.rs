@@ -22,6 +22,7 @@ use std::time::Duration;
 use haven_core::circle::CircleManager;
 use haven_core::nostr::mls::storage::is_session_live;
 use haven_core::relay::live_sync::StopOutcome;
+use haven_core::relay::RelayManager;
 use serde::Serialize;
 use tokio::time::{Instant, MissedTickBehavior};
 
@@ -152,6 +153,10 @@ pub async fn kill_and_reopen(
     };
     let reopen = started.elapsed();
     device.restore_manager(std::sync::Arc::new(manager));
+    // The dead process's publish client goes with it: the reopened one dials
+    // its relays afresh, never through a pool whose relays the dead one's
+    // unanswered sends had cut.
+    device.relays = RelayManager::new();
 
     if engine_restarted {
         device.start_engine(specs).await?;

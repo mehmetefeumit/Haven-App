@@ -3,10 +3,11 @@
 # Superset of `nightly`. Two of the arms that appear only here — S17's full
 # intake and S03's unnamed strand — each wait out the 684-second
 # delivery-silence window as an absence, and an absence cannot share a run
-# with anything shorter. The other three — S23 `chained-commit-backlog`, S08
-# `buried-past-the-cap` and S05 `kill-receive-auto-commit` — are the
-# expected-red arms (C7, C8, C9), kept out of the nightly because
-# `verdict.log` records a run's first violation only (nightly.toml says why).
+# with anything shorter. S08 `buried-past-the-cap` was the expected-red arm
+# (C8) until R4's NIP-77 pass; it runs in the nightly too now. S05
+# `kill-receive-auto-commit` was expected red (C9) until MDK v0.10.4 made it
+# grade rc 0; it stays here until the owner returns it to the nightly
+# (nightly.toml).
 name = "weekly"
 run_budget_secs = 16200
 deadline_secs = 18000
@@ -39,7 +40,7 @@ arms = ["offline-quiet", "offline-across-commits", "offline-past-retention",
 [[scenarios]]
 id = "S05"
 arms = ["confirm-err-is-not-a-failure", "kill-send-plane", "kill-receive-auto-commit",
-        "negative-gates-silent"]
+        "negative-gates-silent", "kill-sweep-eviction"]
 
 [[scenarios]]
 id = "S06"
@@ -47,11 +48,12 @@ arms = ["stuck-row-sweep"]
 
 [[scenarios]]
 id = "S08"
-arms = ["buried-past-the-cap", "unpacked-control"]
+arms = ["buried-past-the-cap", "unpacked-control", "buried-on-a-relay-without-negentropy"]
 
 [[scenarios]]
 id = "S09"
-arms = ["standing-adversary", "rewrap-created-at-binding"]
+arms = ["standing-adversary", "rewrap-created-at-binding", "member-commit-past-expiration-applied",
+        "past-expiration-dropped-by-the-relay-pool"]
 
 [[scenarios]]
 id = "S11"
@@ -76,7 +78,13 @@ arms = ["closed-prefixes", "notice", "full-intake"]
 
 [[scenarios]]
 id = "S18"
-arms = ["swallowed-ok-create", "swallowed-ok-relay-update", "swallowed-ok-location-send"]
+arms = [
+    "swallowed-ok-founding-welcome",
+    "swallowed-ok-relay-update",
+    "swallowed-ok-peers-online-converge",
+    "swallowed-ok-location-send",
+    "location-resumes-after-the-ack",
+]
 
 [[scenarios]]
 id = "S19"
@@ -93,17 +101,26 @@ arms = ["ten-circle-roster"]
 
 [[scenarios]]
 id = "S23"
-arms = ["chained-commit-backlog"]  # EXPECTED RED (C7) until the deferred-peel sweep lands
+arms = ["chained-commit-backlog"]
 
 [[scenarios]]
 id = "S16"
-arms = ["outsider-flood", "member-future-header-flood", "pending-window-flood"]
+arms = ["outsider-flood", "member-future-header-flood", "pending-window-flood",
+        "processed-ids-growth"]
 
 [[scenarios]]
 id = "S20"
 arms = ["healthy-drain", "clamped-limit", "refused-page", "cold-first-connect",
-        "future-dated-page"]
+        "future-dated-page", "same-second-pile-up", "same-second-pile-up-without-negentropy"]
 
 [[scenarios]]
 id = "S21"
 arms = ["removal-withheld-commit", "removal-delivered-commit", "removal-lag"]
+
+[[scenarios]]
+id = "S24"
+arms = ["collided-circles-leave-apart"]
+
+[[scenarios]]
+id = "S25"
+arms = ["dead-and-silent-relays"]

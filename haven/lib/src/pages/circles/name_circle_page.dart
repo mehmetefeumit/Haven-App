@@ -3,7 +3,10 @@
 /// Second step of circle creation where users name their circle.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/l10n/app_localizations.dart';
@@ -13,7 +16,6 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/join_watcher_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
-import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/fresh_secret.dart';
@@ -22,6 +24,7 @@ import 'package:haven/src/services/publish_stagger.dart'
     show kMaxCirclesPerAccount;
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/bidi_isolate.dart';
 import 'package:haven/src/widgets/circles/selected_members_list.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -70,188 +73,202 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
     final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
 
-    return Scaffold(
-      appBar: AppBar(title: Text(l10n.nameCircleTitle)),
-      // The form below uses a `Spacer` to push the Create button to the
-      // bottom of the viewport. Without a scrollable wrapper, that flex
-      // layout overflows the moment the soft keyboard appears (autofocus
-      // on the name input means it pops up immediately on this page).
-      // The LayoutBuilder + ConstrainedBox(minHeight:) + IntrinsicHeight
-      // pattern gives the Column at least the available viewport height —
-      // so Spacer keeps its design intent when there is room — while
-      // allowing it to grow and scroll once the keyboard reduces the
-      // viewport below the natural content size. SafeArea handles
-      // notches/gesture insets so the bottom inset measurement is
-      // accurate on all form factors.
-      body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) => SingleChildScrollView(
-            padding: const EdgeInsets.all(HavenSpacing.base),
-            child: ConstrainedBox(
-              constraints: BoxConstraints(
-                minHeight: constraints.maxHeight - 2 * HavenSpacing.base,
-              ),
-              child: IntrinsicHeight(
-                child: Form(
-                  key: _formKey,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      // Circle icon preview
-                      Center(
-                        child: Container(
-                          width: 80,
-                          height: 80,
-                          decoration: BoxDecoration(
-                            color: colorScheme.primaryContainer,
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(
-                            LucideIcons.users,
-                            size: 40,
-                            color: colorScheme.onPrimaryContainer,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: HavenSpacing.lg),
-
-                      // Circle name input
-                      TextFormField(
-                        key: WidgetKeys.circleNameInput,
-                        controller: _nameController,
-                        // Grapheme clusters (Flutter's own `maxLength`
-                        // counts via the `characters` package, never
-                        // splitting a cluster) — matches the real cap
-                        // `sanitize_circle_name` enforces at rest, so
-                        // nothing typed here is ever silently truncated
-                        // after Create is tapped.
-                        maxLength: kCircleNameMaxGraphemes,
-                        decoration: InputDecoration(
-                          labelText: l10n.nameCircleNameLabel,
-                          hintText: l10n.nameCircleNameHint,
-                          border: const OutlineInputBorder(),
-                        ),
-                        validator: (value) {
-                          if (value == null || value.trim().isEmpty) {
-                            return l10n.nameCircleNameEmptyError;
-                          }
-                          if (value.length > kCircleNameMaxLength) {
-                            return l10n.nameCircleNameTooLongError;
-                          }
-                          return null;
-                        },
-                        textCapitalization: TextCapitalization.words,
-                        autofocus: true,
-                        enabled: !_isCreating,
-                        // A circle name names a social grouping; the keyboard
-                        // learned-word dictionary is outside Haven's storage
-                        // and its logout wipe.
-                        enableIMEPersonalizedLearning: false,
-                      ),
-                      const SizedBox(height: HavenSpacing.lg),
-
-                      // Member summary
-                      Card(
-                        child: Padding(
-                          padding: const EdgeInsets.all(HavenSpacing.base),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  const Icon(LucideIcons.users, size: 20),
-                                  const SizedBox(width: HavenSpacing.sm),
-                                  Text(
-                                    l10n.nameCircleMembersToInvite(
-                                      widget.memberKeyPackages.length,
-                                    ),
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.titleSmall,
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: HavenSpacing.sm),
-                              SelectedMembersSummary(
-                                members: widget.memberKeyPackages
-                                    .map((kp) => kp.pubkey)
-                                    .toList(),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: HavenSpacing.base),
-
-                      // What sharing in this circle means
-                      Container(
-                        padding: const EdgeInsets.all(HavenSpacing.base),
-                        decoration: BoxDecoration(
-                          color: colorScheme.surfaceContainerHighest,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Text(
-                          l10n.nameCircleSharingInfo,
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(color: colorScheme.onSurfaceVariant),
-                        ),
-                      ),
-
-                      const Spacer(),
-
-                      // Creation progress
-                      if (_isCreating) _buildProgress(),
-
-                      // Error message. `liveRegion` is what makes a refusal
-                      // AUDIBLE (WCAG 2.1 SC 4.1.3): the same setState that
-                      // sets `_errorMessage` clears `_isCreating`, which
-                      // takes `_buildProgress` — the page's only other live
-                      // region — out of the tree, so without this the
-                      // message appears in silence. It is an INSERTED node
-                      // carrying its label, the shape Flutter's own SnackBar
-                      // uses, and never a mounted node whose text changes:
-                      // `_createCircle` clears the message before every
-                      // retry, so each refusal is a fresh insertion.
-                      if (_errorMessage != null)
-                        Padding(
-                          padding: const EdgeInsets.only(
-                            bottom: HavenSpacing.base,
-                          ),
-                          child: Semantics(
-                            liveRegion: true,
-                            child: Text(
-                              _errorMessage!,
-                              style: TextStyle(color: colorScheme.error),
+    // Leaving while the circle is being created would drop the outcome — a
+    // created circle and who was not invited — with nowhere left to say it.
+    // The back arrow goes with it, and a back gesture hears why it waits.
+    return PopScope(
+      canPop: !_isCreating,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _announceProgress(l10n);
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          automaticallyImplyLeading: !_isCreating,
+          title: Text(l10n.nameCircleTitle),
+        ),
+        // The form below uses a `Spacer` to push the Create button to the
+        // bottom of the viewport. Without a scrollable wrapper, that flex
+        // layout overflows the moment the soft keyboard appears (autofocus
+        // on the name input means it pops up immediately on this page).
+        // The LayoutBuilder + ConstrainedBox(minHeight:) + IntrinsicHeight
+        // pattern gives the Column at least the available viewport height —
+        // so Spacer keeps its design intent when there is room — while
+        // allowing it to grow and scroll once the keyboard reduces the
+        // viewport below the natural content size. SafeArea handles
+        // notches/gesture insets so the bottom inset measurement is
+        // accurate on all form factors.
+        body: SafeArea(
+          child: LayoutBuilder(
+            builder: (context, constraints) => SingleChildScrollView(
+              padding: const EdgeInsets.all(HavenSpacing.base),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  minHeight: constraints.maxHeight - 2 * HavenSpacing.base,
+                ),
+                child: IntrinsicHeight(
+                  child: Form(
+                    key: _formKey,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        // Circle icon preview
+                        Center(
+                          child: Container(
+                            width: 80,
+                            height: 80,
+                            decoration: BoxDecoration(
+                              color: colorScheme.primaryContainer,
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              LucideIcons.users,
+                              size: 40,
+                              color: colorScheme.onPrimaryContainer,
                             ),
                           ),
                         ),
+                        const SizedBox(height: HavenSpacing.lg),
 
-                      // Create button
-                      FilledButton(
-                        key: WidgetKeys.createCircleConfirm,
-                        onPressed: _isCreating ? null : _createCircle,
-                        child: _isCreating
-                            ? Row(
-                                mainAxisSize: MainAxisSize.min,
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      valueColor: AlwaysStoppedAnimation(
-                                        colorScheme.onPrimary,
+                        // Circle name input
+                        TextFormField(
+                          key: WidgetKeys.circleNameInput,
+                          controller: _nameController,
+                          // Grapheme clusters (Flutter's own `maxLength`
+                          // counts via the `characters` package, never
+                          // splitting a cluster) — matches the real cap
+                          // `sanitize_circle_name` enforces at rest, so
+                          // nothing typed here is ever silently truncated
+                          // after Create is tapped.
+                          maxLength: kCircleNameMaxGraphemes,
+                          decoration: InputDecoration(
+                            labelText: l10n.nameCircleNameLabel,
+                            hintText: l10n.nameCircleNameHint,
+                            border: const OutlineInputBorder(),
+                          ),
+                          validator: (value) {
+                            if (value == null || value.trim().isEmpty) {
+                              return l10n.nameCircleNameEmptyError;
+                            }
+                            if (value.length > kCircleNameMaxLength) {
+                              return l10n.nameCircleNameTooLongError;
+                            }
+                            return null;
+                          },
+                          textCapitalization: TextCapitalization.words,
+                          autofocus: true,
+                          enabled: !_isCreating,
+                          // A circle name names a social grouping; the keyboard
+                          // learned-word dictionary is outside Haven's storage
+                          // and its logout wipe.
+                          enableIMEPersonalizedLearning: false,
+                        ),
+                        const SizedBox(height: HavenSpacing.lg),
+
+                        // Member summary
+                        Card(
+                          child: Padding(
+                            padding: const EdgeInsets.all(HavenSpacing.base),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    const Icon(LucideIcons.users, size: 20),
+                                    const SizedBox(width: HavenSpacing.sm),
+                                    Expanded(
+                                      child: Text(
+                                        l10n.nameCircleMembersToInvite(
+                                          widget.memberKeyPackages.length,
+                                        ),
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.titleSmall,
                                       ),
                                     ),
-                                  ),
-                                  const SizedBox(width: HavenSpacing.sm),
-                                  Text(_stage.label(l10n)),
-                                ],
-                              )
-                            : Text(l10n.nameCircleCreateCta),
-                      ),
-                    ],
+                                  ],
+                                ),
+                                const SizedBox(height: HavenSpacing.sm),
+                                SelectedMembersSummary(
+                                  members: widget.memberKeyPackages
+                                      .map((kp) => kp.pubkey)
+                                      .toList(),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: HavenSpacing.base),
+
+                        // What sharing in this circle means
+                        Container(
+                          padding: const EdgeInsets.all(HavenSpacing.base),
+                          decoration: BoxDecoration(
+                            color: colorScheme.surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            l10n.nameCircleSharingInfo,
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: colorScheme.onSurfaceVariant),
+                          ),
+                        ),
+
+                        const Spacer(),
+
+                        // Creation progress
+                        if (_isCreating) _buildProgress(),
+
+                        // Error message. `liveRegion` is what makes a refusal
+                        // AUDIBLE (WCAG 2.1 SC 4.1.3): the same setState that
+                        // sets `_errorMessage` clears `_isCreating`, which
+                        // takes `_buildProgress` — the page's only other live
+                        // region — out of the tree, so without this the
+                        // message appears in silence. It is an INSERTED node
+                        // carrying its label, the shape Flutter's own SnackBar
+                        // uses, and never a mounted node whose text changes:
+                        // `_createCircle` clears the message before every
+                        // retry, so each refusal is a fresh insertion.
+                        if (_errorMessage != null)
+                          Padding(
+                            padding: const EdgeInsets.only(
+                              bottom: HavenSpacing.base,
+                            ),
+                            child: Semantics(
+                              liveRegion: true,
+                              child: Text(
+                                _errorMessage!,
+                                style: TextStyle(color: colorScheme.error),
+                              ),
+                            ),
+                          ),
+
+                        // Create button
+                        FilledButton(
+                          key: WidgetKeys.createCircleConfirm,
+                          onPressed: _isCreating ? null : _createCircle,
+                          child: _isCreating
+                              ? Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        valueColor: AlwaysStoppedAnimation(
+                                          colorScheme.onPrimary,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: HavenSpacing.sm),
+                                    Text(_stage.label(l10n)),
+                                  ],
+                                )
+                              : Text(l10n.nameCircleCreateCta),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -288,6 +305,16 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
     );
   }
 
+  void _announceProgress(AppLocalizations l10n) {
+    unawaited(
+      SemanticsService.sendAnnouncement(
+        View.of(context),
+        l10n.nameCircleProgressSemantics(_stage.label(l10n)),
+        Directionality.of(context),
+      ),
+    );
+  }
+
   Future<void> _createCircle() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -303,14 +330,6 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
       final circleService = ref.read(circleServiceProvider);
       final identityNotifier = ref.read(identityNotifierProvider.notifier);
 
-      // Two-plane model: the creator's tier-3 Welcome-delivery fallback is
-      // their OWN inbox relays (kind 10050), read locally. Best-effort — a
-      // failure here must not block circle creation. If this and the
-      // invitee's own relays are all empty, the Rust layer FAILS CLOSED
-      // (no public-default fallback) rather than leaking the recipient's
-      // pubkey to public relays.
-      final creatorFallbackRelays = await _fetchCreatorFallbackRelays(ref);
-
       // Create the circle using the CircleService. `createCircle` takes raw
       // bytes (not a `secretProvider`), so fetch fresh via `withFreshSecret`
       // and let it scrub the copy the instant the call returns — Security
@@ -322,15 +341,13 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
           memberKeyPackages: widget.memberKeyPackages,
           name: _nameController.text.trim(),
           circleType: CircleType.locationSharing,
-          creatorFallbackRelays: creatorFallbackRelays,
         ),
       );
 
-      // `CircleService.createCircle` already published the gift-wrapped
-      // Welcome events and confirmed (or rolled back) the engine's pending
-      // group-creation state internally (publish-before-apply, Rule 13) —
+      // The driver recorded each founding Welcome and sends it from that
+      // record; the circle it founded is canonical whatever reached a relay —
       // nothing further to publish here.
-      setState(() => _stage = CreationStage.sendingInvites);
+      if (!mounted) return;
 
       final total = result.welcomesTotal;
       final sentCount = result.welcomesSent;
@@ -362,31 +379,73 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
       setState(() => _stage = CreationStage.complete);
 
       if (mounted) {
-        final name = _nameController.text.trim();
+        // Isolated: a right-to-left name must not reorder the sentence.
+        final name = bidiIsolate(_nameController.text.trim());
 
-        // Report delivery truthfully: sentCount is the number of Welcomes
-        // that actually reached a relay, which can be less than `total` (the
-        // number of invitees) — `nostr_circle_service.dart` confirms the
-        // circle as long as at least one Welcome landed. The partial message
-        // still leads with the circle being created: this screen pops twice on
-        // success, so a snackbar reporting only delivery would leave the user
-        // without confirmation of the thing they just did.
-        final String message;
+        // Report sending truthfully: sentCount is the number of Welcomes a
+        // relay acked, which can be less than `total` (the number of
+        // invitees), down to none — the circle exists either way, and the
+        // rest are sent again while the app is open, for up to a day. The
+        // message still leads with the circle being created: this screen
+        // pops twice on success, so a snackbar reporting only the invitations
+        // would leave the user without confirmation of the thing they just
+        // did.
         if (sentCount < total) {
           debugPrint('[CircleCreate] partial invitation send');
-          message = l10n.nameCircleCreatedPartialSnack(name, sentCount, total);
+          // It stays up to be read; "Show who" names whose are still owed.
+          final message = l10n.nameCircleCreatedSentSoFarSnack(
+            name,
+            sentCount,
+            total,
+          );
+          ScaffoldMessenger.of(context).showSnackBar(
+            longMessageSnackBar(
+              context,
+              message,
+              action: missedInvitationsAction(
+                navigator: Navigator.of(context),
+                l10n: l10n,
+                message: message,
+                unsent: result.unsentNpubs,
+                sent: sentCount,
+                total: total,
+              ),
+            ),
+          );
+          // A SnackBar is not a live region; spoken with the name raw.
+          unawaited(
+            SemanticsService.sendAnnouncement(
+              View.of(context),
+              l10n.nameCircleCreatedSentSoFarSnack(
+                _nameController.text.trim(),
+                sentCount,
+                total,
+              ),
+              Directionality.of(context),
+            ),
+          );
         } else {
-          message = l10n.nameCircleCreatedSnack(name, total);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(l10n.nameCircleCreatedSnack(name, total))),
+          );
         }
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(message)),
-        );
 
         // Pop back to circles page (pop twice: NameCircle and CreateCircle)
         Navigator.of(context)
           ..pop() // Pop NameCirclePage
           ..pop(); // Pop CreateCirclePage
+      }
+    } on CircleInviteesUnreachableException catch (_) {
+      // Nothing was made, and the remedy is the invitee's: the generic
+      // "please try again" copy would point at a button that fails the same
+      // way. Precedes the CircleServiceException clause — it is a subtype.
+      debugPrint('[CircleCreate] invitee unreachable');
+      if (mounted) {
+        setState(() {
+          _errorMessage = l10n.memberCannotReceiveInvitations;
+          _isCreating = false;
+          _stage = CreationStage.idle;
+        });
       }
     } on CircleRosterFullException catch (_) {
       // A refusal, not a failure: the generic "please try again" copy below
@@ -430,30 +489,6 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
     }
   }
 
-  /// Best-effort lookup of the creator's own inbox (kind 10050) relays.
-  ///
-  /// Used as the third-tier fallback in the Welcome-delivery cascade
-  /// (member inbox → member NIP-65 → creator inbox → FAIL CLOSED). A failure
-  /// here must never block circle creation — if the relay read throws we
-  /// return an empty list. NOTE: an empty return does NOT fall through to
-  /// public defaults; the Rust cascade now fails closed with
-  /// `MissingWelcomeRelays` rather than leaking the recipient's pubkey. Do
-  /// NOT re-introduce a default-relay fallback here.
-  Future<List<String>> _fetchCreatorFallbackRelays(WidgetRef ref) async {
-    // The creator's own inbox relays (kind 10050), read locally from
-    // preferences. Haven never publishes a creator NIP-65 (kind 10002), so
-    // fetching that from the network would always be empty; the creator's
-    // configured inbox list is the correct, non-empty third-tier fallback.
-    try {
-      return await ref.read(inboxRelaysProvider.future);
-    } on Object catch (e) {
-      debugPrint(
-        '[CircleCreate] creator inbox fallback fetch failed: ${e.runtimeType}',
-      );
-      return const [];
-    }
-  }
-
   @override
   void dispose() {
     _nameController.dispose();
@@ -466,11 +501,8 @@ enum CreationStage {
   /// Not started.
   idle,
 
-  /// Creating the MLS group.
+  /// Creating the circle and sending its invitations: one call does both.
   creatingGroup,
-
-  /// Sending invitations.
-  sendingInvites,
 
   /// Creation complete.
   complete;
@@ -479,15 +511,13 @@ enum CreationStage {
   String label(AppLocalizations l10n) => switch (this) {
     CreationStage.idle => '',
     CreationStage.creatingGroup => l10n.nameCircleStageCreatingGroup,
-    CreationStage.sendingInvites => l10n.nameCircleStageSendingInvites,
     CreationStage.complete => l10n.nameCircleStageComplete,
   };
 
   /// Progress value (0.0 to 1.0) for this stage.
   double get progress => switch (this) {
     CreationStage.idle => 0.0,
-    CreationStage.creatingGroup => 0.33,
-    CreationStage.sendingInvites => 0.66,
+    CreationStage.creatingGroup => 0.5,
     CreationStage.complete => 1.0,
   };
 }

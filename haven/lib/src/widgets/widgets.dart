@@ -10,6 +10,7 @@ export 'circles/circle_selector.dart';
 export 'circles/circles_bottom_sheet.dart';
 export 'circles/invitation_card.dart';
 export 'circles/member_search_field.dart';
+export 'circles/missed_invitations_dialog.dart';
 export 'circles/selected_members_list.dart';
 
 // Common widgets
@@ -19,6 +20,7 @@ export 'common/error_display.dart';
 export 'common/info_note.dart';
 export 'common/invitations_button.dart';
 export 'common/loading_indicator.dart';
+export 'common/long_message_snack_bar.dart';
 export 'common/scroll_fill.dart';
 export 'common/section_header.dart';
 export 'common/settings_button.dart';

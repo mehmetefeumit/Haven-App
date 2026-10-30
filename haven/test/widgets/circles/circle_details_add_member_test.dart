@@ -241,6 +241,44 @@ void main() {
     );
 
     // -----------------------------------------------------------------------
+    // 5b. What the page hands back decides whether Circle details stays
+    // -----------------------------------------------------------------------
+    for (final (result, staysOpen) in const [
+      (AddMemberPageResult.done, false),
+      (AddMemberPageResult.awaiting, true),
+      (AddMemberPageResult.partial, true),
+      (null, true),
+    ]) {
+      testWidgets(
+        '5b. an add that comes back ${result?.name ?? 'cancelled'} '
+        '${staysOpen ? 'lands back on' : 'closes'} Circle details',
+        (tester) async {
+          // Awaiting or partly sent, the rest is said by the sheet's own
+          // cards (OD-1: no snack for awaiting), so the user lands on them.
+          final circle = _makeCircle();
+          await _pumpAndOpenDetails(
+            tester,
+            circle: circle,
+            selfPubkeyHex: _adminPubkey,
+            mockService: MockCircleService(circles: [circle]),
+          );
+          await tester.tap(find.byKey(WidgetKeys.addMemberCta));
+          await tester.pumpAndSettle();
+
+          Navigator.of(
+            tester.element(find.byType(AddMemberPage)),
+          ).pop(result);
+          await tester.pumpAndSettle();
+
+          expect(
+            find.byKey(WidgetKeys.leaveCircleCta),
+            staysOpen ? findsOneWidget : findsNothing,
+          );
+        },
+      );
+    }
+
+    // -----------------------------------------------------------------------
     // 6. No identity: CTA absent
     // -----------------------------------------------------------------------
     testWidgets(

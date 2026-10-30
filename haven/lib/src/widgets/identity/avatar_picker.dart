@@ -188,6 +188,12 @@ Future<CroppedFile?> _cropToSquare(BuildContext context, String sourcePath) {
 /// Unlike [pickAndSetOwnAvatar], this stays a single blocking service call —
 /// retraction already publishes synchronously on the Rust side (now fast),
 /// so there is no local-then-sync split and no [triggerProfileSync] call.
+/// The removal can publish a name that was still waiting, and one a relay did
+/// not take is left waiting itself, so the sync status is re-read afterwards
+/// ([triggerProfileSyncRetry]) rather than left on what it said before: the
+/// status line is what says the removal has not reached every relay yet. A
+/// removal that fails has still cancelled a photo
+/// waiting to upload, so the own profile is re-read then too.
 /// Deliberately NOT consent-gated (retraction is always allowed, D1); the
 /// Rust core no-ops if nothing was actually published, so this can never
 /// mint a first public event for a pubkey that never opted in.
@@ -199,11 +205,13 @@ Future<void> removeOwnAvatar(BuildContext context, WidgetRef ref) async {
     await ref.read(profileServiceProvider).removeOwnAvatar();
     if (!context.mounted) return;
     ref.invalidate(ownProfileProvider);
+    triggerProfileSyncRetry(ref);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(l10n.avatarPickerPhotoRemoved)),
     );
   } on Object {
     if (!context.mounted) return;
+    ref.invalidate(ownProfileProvider);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(l10n.avatarPickerRemoveError)),
     );

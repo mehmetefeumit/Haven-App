@@ -52,11 +52,12 @@ use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::{GroupId, LocationMessageResult};
 use haven_core::relay::live_sync::{
-    group_cursor_stream, BacklogOutcome, CircleSpec, LiveSyncCore, LiveSyncEvent, SyncStatusReason,
+    group_cursor_stream, BacklogOutcome, CircleSpec, Claim, LiveSyncCore, LiveSyncEvent,
+    SyncStatusReason,
 };
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use nostr::util::BoxedFuture;
-use nostr::{Alphabet, Event, Filter, Keys, PublicKey, SingleLetterTag, Timestamp};
+use nostr::{Alphabet, Event, Filter, Keys, SingleLetterTag, Timestamp};
 use nostr_relay_builder::builder::{PolicyResult, QueryPolicy, WritePolicy};
 use nostr_relay_builder::{LocalRelay, MockRelay, RelayBuilder};
 use nostr_sdk::Client;
@@ -222,8 +223,30 @@ impl QueryPolicy for GatedQueries {
             let mut open = self.open.clone();
             // Bounded only so a broken test can never hang; the verdict is
             // always an outcome, never this wait.
-            let _ =
-                tokio::time::timeout(Duration::from_secs(60), open.wait_for(|open| *open)).await;
+            let _ = tokio::time::timeout(Duration::from_mins(1), open.wait_for(|open| *open)).await;
+            PolicyResult::Accept
+        })
+    }
+}
+
+/// [`GatedQueries`] that also records every REQ filter it is asked.
+#[derive(Debug)]
+struct GatedRecordingQueries {
+    open: tokio::sync::watch::Receiver<bool>,
+    seen: Arc<Mutex<Vec<Filter>>>,
+}
+
+impl QueryPolicy for GatedRecordingQueries {
+    fn admit_query<'a>(
+        &'a self,
+        query: &'a Filter,
+        _addr: &'a std::net::SocketAddr,
+    ) -> BoxedFuture<'a, PolicyResult> {
+        Box::pin(async move {
+            self.seen.lock().expect("record a REQ").push(query.clone());
+            let mut open = self.open.clone();
+            // Bounded only so a broken test can never hang.
+            let _ = tokio::time::timeout(Duration::from_mins(1), open.wait_for(|open| *open)).await;
             PolicyResult::Accept
         })
     }
@@ -311,15 +334,14 @@ async fn build_circle(group_relays: Vec<String>, with_carol: bool) -> Circle {
         Arc::new(CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).expect("alice"));
     let config = CircleConfig::new("Burst Circle").with_relays(group_relays.clone());
     let result = alice
-        .create_circle(&alice_keys, members, &config, &group_relays)
+        .create_circle(&alice_keys, members, &config)
         .await
         .expect("create circle");
+    // As the app's driven create leaves it: the founding Welcomes sent from
+    // their records and acknowledged, so no later drive sends them.
+    let _ = alice.land_staged_for_test().await;
     let mls_group_id = result.circle.mls_group_id.clone();
     let nostr_group_id = result.circle.nostr_group_id;
-    alice
-        .confirm_published(result.pending)
-        .await
-        .expect("alice confirms creation");
 
     let mut joiners: Vec<(&Arc<CircleManager>, &Keys)> = vec![(&bob, &bob_keys)];
     if let Some((carol, carol_keys)) = carol_pair.as_ref() {
@@ -355,7 +377,11 @@ async fn build_circle(group_relays: Vec<String>, with_carol: bool) -> Circle {
 /// Starts Alice's engine over `relays` for the circle, and settles its first
 /// backlog so the test starts from a known state.
 async fn start_engine(fx: &Circle, relays: &[String]) -> LiveSyncCore {
-    let core = LiveSyncCore::new_local(Arc::clone(&fx.alice), fx.alice_keys.public_key());
+    let core = LiveSyncCore::new_local(
+        Arc::clone(&fx.alice),
+        fx.alice_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     core.start(
         &[CircleSpec {
             group_id_hex: fx.hex(),
@@ -385,19 +411,15 @@ async fn roster(mgr: &CircleManager, gid: &GroupId) -> Vec<String> {
 /// reliable detector of a twin fork (equal epoch NUMBER, different exporter).
 async fn cross_decrypts(
     encryptor: &CircleManager,
-    encryptor_pubkey: &PublicKey,
     decryptor: &CircleManager,
     gid: &GroupId,
 ) -> bool {
     let location = LocationMessage::new(40.12, -74.34);
-    let Ok((event, _, _)) = encryptor
-        .encrypt_location(gid, encryptor_pubkey, &location, 300)
-        .await
-    else {
+    let Ok((event, _, _)) = encryptor.seal_location_for_test(gid, &location).await else {
         return false;
     };
     matches!(
-        decryptor.decrypt_location(&event).await,
+        decryptor.ingest_for_test(&event).await,
         Ok(ref results) if results.iter().any(|r| matches!(r, LocationMessageResult::Location { .. }))
     )
 }
@@ -615,19 +637,18 @@ async fn a_hold_back_survives_pause_and_is_re_requested_by_the_next_burst() {
     //    message comes back `Buffered`, i.e. un-applied.
     let staged = fx
         .alice
-        .update_circle_relays(&fx.mls_group_id, &["wss://group3.example.com".to_string()])
+        .session()
+        .update_relays(
+            &fx.mls_group_id,
+            vec!["wss://group3.example.com".to_string()],
+        )
         .await
         .expect("alice stages a commit she will not confirm");
     drop(staged);
 
     let (buffered_event, _, _) = fx
         .bob
-        .encrypt_location(
-            &fx.mls_group_id,
-            &fx.bob_keys.public_key(),
-            &LocationMessage::new(3.0, 4.0),
-            600,
-        )
+        .seal_location_for_test(&fx.mls_group_id, &LocationMessage::new(3.0, 4.0))
         .await
         .expect("bob encrypts");
     let held_at = i64::try_from(buffered_event.created_at.as_secs()).expect("created_at");
@@ -698,7 +719,11 @@ async fn a_closed_queued_before_pause_does_not_reopen_a_req_while_paused() {
     let url = closer.url().await.to_string();
     let fx = build_circle(vec![url.clone()], false).await;
 
-    let core = LiveSyncCore::new_local(Arc::clone(&fx.alice), fx.alice_keys.public_key());
+    let core = LiveSyncCore::new_local(
+        Arc::clone(&fx.alice),
+        fx.alice_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     core.start(
         &[CircleSpec {
             group_id_hex: fx.hex(),
@@ -804,6 +829,8 @@ async fn a_circle_added_while_paused_is_live_after_the_next_burst() {
     let core = start_engine(&fx, std::slice::from_ref(&first_url)).await;
 
     let added = "5a".repeat(32);
+    // A session lists the ids of circles its manager holds.
+    fx.alice.keep_circle_row_for_test([0x5a; 32]);
     core.pause_subscriptions().await.expect("pause");
     core.subscribe_circle(&CircleSpec {
         group_id_hex: added.clone(),
@@ -938,6 +965,7 @@ async fn a_burst_open_that_fails_to_subscribe_leaves_the_session_paused_and_sile
     // the pool does not hold. `add_relay` refuses the url, `subscribe_with_id_to`
     // answers `RelayNotFound`, and the whole open short-circuits — the same exit
     // an unusable persisted relay list takes in the field.
+    fx.alice.keep_circle_row_for_test([0x3f; 32]);
     core.subscribe_circle(&CircleSpec {
         group_id_hex: "3f".repeat(32),
         relays: vec!["wss://relay.invalid:99999".to_string()],
@@ -1046,7 +1074,11 @@ async fn burst_ingests_a_peer_commit_before_the_location_is_encrypted() {
     let fx = build_circle(vec![fast_url.clone(), slow_url.clone()], false).await;
     // BOB runs the burst engine; ALICE is the circle's admin, so she is the one
     // who can stage a routing commit.
-    let core = LiveSyncCore::new_local(Arc::clone(&fx.bob), fx.bob_keys.public_key());
+    let core = LiveSyncCore::new_local(
+        Arc::clone(&fx.bob),
+        fx.bob_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     core.start(
         &[CircleSpec {
             group_id_hex: fx.hex(),
@@ -1062,17 +1094,16 @@ async fn burst_ingests_a_peer_commit_before_the_location_is_encrypted() {
     core.pause_subscriptions().await.expect("pause");
 
     // Alice commits while Bob is paused, and publishes ONLY to the slow relay —
-    // so the burst settles only if it waited on THAT endpoint.
+    // so the burst settles only if it waited on THAT endpoint. The commit
+    // keeps the circle on a relay it already listens at: the follow it sets
+    // off in the burst moves no REQ, so the burst's endpoints are the two it
+    // opened.
     let commit = fx
         .alice
-        .update_circle_relays(&fx.mls_group_id, &["wss://group2.example.com".to_string()])
+        .update_relays_for_test(&fx.mls_group_id, std::slice::from_ref(&slow_url))
         .await
         .expect("alice stages a routing commit");
-    fx.alice
-        .finalize_relay_update(commit.pending, &fx.mls_group_id)
-        .await
-        .expect("alice finalizes");
-    publish_to(&slow_url, &commit.commit_event).await;
+    publish_to(&slow_url, &commit).await;
 
     core.open_background_burst().await.expect("burst opens");
     assert_eq!(
@@ -1089,13 +1120,7 @@ async fn burst_ingests_a_peer_commit_before_the_location_is_encrypted() {
          keys"
     );
     assert!(
-        cross_decrypts(
-            &fx.bob,
-            &fx.bob_keys.public_key(),
-            &fx.alice,
-            &fx.mls_group_id
-        )
-        .await,
+        cross_decrypts(&fx.bob, &fx.alice, &fx.mls_group_id,).await,
         "and the location encrypted after that settle must decrypt for the committer at \
          the epoch she committed to"
     );
@@ -1103,29 +1128,117 @@ async fn burst_ingests_a_peer_commit_before_the_location_is_encrypted() {
     let _ = core.stop().await;
 }
 
-/// A peer `SelfRemove` auto-commit is NOT published inside a background burst —
-/// and the FOREGROUND pass that follows does publish it, so a third member
+/// A chained pair of commits that lands while the member is paused is served
+/// in one background burst: the commit that could not peel until its
+/// predecessor was applied is retried on the engine's own deadline inside
+/// the burst, and the admin's fix at the chain's tip is delivered before the
+/// burst says its backlog is settled — with no come-back and no foreground.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deferred_peel_drains_on_its_cutoff_inside_one_burst() {
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+    let relay = MockRelay::run().await.expect("mock relay");
+    let url = relay.url().await.to_string();
+    let other = "wss://group-b.example.com".to_string();
+    let fx = build_circle(vec![url.clone()], false).await;
+    let core = LiveSyncCore::new_local(
+        Arc::clone(&fx.bob),
+        fx.bob_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
+    core.start(
+        &[CircleSpec {
+            group_id_hex: fx.hex(),
+            relays: vec![url.clone()],
+        }],
+        &[],
+    )
+    .await
+    .expect("bob's engine starts");
+    assert_eq!(core.wait_backlog_settled().await, BacklogOutcome::Settled);
+    core.pause_subscriptions().await.expect("pause");
+    let mut bus = core.bus().subscribe();
+
+    let older = fx
+        .alice
+        .update_relays_for_test(&fx.mls_group_id, &[url.clone(), other])
+        .await
+        .expect("alice's first commit");
+    let newer = fx
+        .alice
+        .update_relays_for_test(&fx.mls_group_id, std::slice::from_ref(&url))
+        .await
+        .expect("alice's second commit");
+    let (fix, _, _) = fx
+        .alice
+        .seal_location_for_test(&fx.mls_group_id, &LocationMessage::new(52.3712, 4.89))
+        .await
+        .expect("alice seals at the chain's tip");
+    for event in [&newer, &older, &fix] {
+        publish_to(&url, event).await;
+    }
+
+    core.open_background_burst().await.expect("burst opens");
+    assert_eq!(core.wait_backlog_settled().await, BacklogOutcome::Settled);
+
+    assert_eq!(
+        epoch(&fx.bob, &fx.mls_group_id).await,
+        epoch(&fx.alice, &fx.mls_group_id).await,
+        "the burst said its backlog was settled with the chain unapplied",
+    );
+    let mut delivered = false;
+    while let Ok(event) = bus.try_recv() {
+        if let LiveSyncEvent::Location { content, .. } = event {
+            delivered |= content.contains("52.3712");
+        }
+    }
+    assert!(
+        delivered,
+        "the fix at the chain's tip was not delivered in the burst that fetched it",
+    );
+    let _ = core.stop().await;
+}
+
+/// Whether Alice's engine announces the eviction of a member who left as due
+/// now.
+async fn eviction_is_due(fx: &Circle) -> bool {
+    fx.alice
+        .session()
+        .eviction_due_after_for_test(&fx.mls_group_id)
+        .await
+        .is_some_and(|wait| wait.is_zero())
+}
+
+/// Whether Alice's engine holds a commit of her own staged.
+async fn holds_a_staged_commit(fx: &Circle) -> bool {
+    matches!(
+        fx.alice.session().epoch_state(&fx.mls_group_id).await,
+        Some(haven_core::nostr::mls::types::EpochState::PendingPublish(_))
+    )
+}
+
+/// A peer `SelfRemove` auto-commit is NOT made inside a background burst —
+/// and the FOREGROUND that follows makes and publishes it, so a third member
 /// converges off the relay.
 ///
-/// # Why the burst does not publish it (owner decision OD4-c, option (iv))
+/// # Why the burst does not make it (owner decision OD4-c, option (iv))
 ///
 /// A receive-side auto-commit always removes a member, and MDK's hydrate
 /// deliberately refuses to recover a removal-bearing staged commit
-/// (`cgka-engine/src/engine.rs:820-828` at the pinned rev `e391adc`
+/// (`cgka-engine/src/engine.rs:1962-1983` at the pinned rev `fcc85edd`
 /// short-circuits on `staged_removes_member`). So a burst cut between SEND and OK
 /// — the premise of the whole phase is a process the OS may end between bursts —
-/// leaves the group with a staged commit nothing will ever publish or clear: no
-/// `PendingCommitRecovered`, and every later send refused. The burst therefore
-/// PARKS the commit as a durable per-circle obligation.
+/// would leave the group with a staged commit nothing will ever publish or
+/// clear: no `PendingCommitRecovered`, and every later send refused. The burst
+/// therefore receives in the mode that makes no commit: the eviction comes due
+/// in the engine and stays due, with nothing staged, owed or parked.
 ///
-/// This test used to assert the opposite (published + confirmed inside the
-/// burst), which is the behaviour the decision reverses. Both invariants it
-/// protected are kept and two are added: the eviction must NOT be on the relay
-/// after the burst NOR after a second one (bursts repeat, and a later background
-/// open must not redeem what an earlier one parked), it MUST be on the relay after
-/// the foreground pass, and a third member reading the relay converges only then.
+/// The eviction must NOT be on the relay after the burst NOR after a second one
+/// (bursts repeat, and a later background open must not make what an earlier
+/// one left due), it MUST be on the relay after the foreground has it, and a
+/// third member reading the relay converges only then.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_self_remove_auto_commit_is_deferred_by_the_burst_and_published_by_the_foreground() {
+#[allow(clippy::too_many_lines)]
+async fn a_self_remove_auto_commit_is_not_made_by_a_burst_and_is_made_by_the_foreground() {
     let _ = haven_core::relay::allow_ws_loopback_for_test();
     let relay = MockRelay::run().await.expect("mock relay");
     let url = relay.url().await.to_string();
@@ -1140,17 +1253,28 @@ async fn a_self_remove_auto_commit_is_deferred_by_the_burst_and_published_by_the
         .bob
         .propose_leave(&fx.mls_group_id)
         .await
-        .expect("bob proposes leave");
+        .expect("bob proposes leave")
+        .expect("a first leave in this epoch proposes");
     publish_to(&url, &proposal).await;
 
     core.open_background_burst().await.expect("burst opens");
     assert_eq!(core.wait_backlog_settled().await, BacklogOutcome::Settled);
 
-    // The burst ingested the proposal and the engine staged the eviction — but the
-    // burst published nothing, and the obligation is on disk.
+    // The burst ingested the proposal and the eviction came due — and the
+    // burst made nothing of it.
     assert!(
-        poll_until_async(|| async { !fx.alice.owed_removal_commits().is_empty() }).await,
-        "the burst must PARK the eviction commit as a durable obligation"
+        poll_until_async(|| eviction_is_due(&fx)).await,
+        "premise: the burst ingested the leave, and its eviction came due"
+    );
+    assert!(
+        !holds_a_staged_commit(&fx).await
+            && fx
+                .alice
+                .session()
+                .fanout_ids_for_test(&fx.mls_group_id)
+                .await
+                .is_ok_and(|ids| ids.is_empty()),
+        "a burst staged or parked the eviction commit"
     );
     let reader = Client::builder().build();
     reader.add_relay(url.as_str()).await.expect("add relay");
@@ -1190,15 +1314,15 @@ async fn a_self_remove_auto_commit_is_deferred_by_the_burst_and_published_by_the
     );
 
     // Nor can a LATER burst. Bursts repeat every few minutes, so a background open
-    // that redeemed what an earlier one parked would re-open the exact window (iv)
+    // that made what an earlier one left due would re-open the exact window (iv)
     // removes — just one burst later, and with no test between them.
     core.open_background_burst()
         .await
         .expect("second burst opens");
     assert_eq!(core.wait_backlog_settled().await, BacklogOutcome::Settled);
     assert!(
-        !fx.alice.owed_removal_commits().is_empty(),
-        "a background open must never redeem a parked eviction commit"
+        eviction_is_due(&fx).await && !holds_a_staged_commit(&fx).await,
+        "a background open must never make the eviction an earlier one left due"
     );
     assert_eq!(
         ids_on_relay(feed_after_burst(&reader).await),
@@ -1206,21 +1330,21 @@ async fn a_self_remove_auto_commit_is_deferred_by_the_burst_and_published_by_the
         "and a second burst adds nothing to the wire either"
     );
 
-    // The FOREGROUND pass redeems it: published over the engine's own sockets and
-    // confirmed on the relay's OK.
-    core.resume_after_background()
+    // The FOREGROUND makes it: recorded, sent through the session's own drive
+    // and confirmed on the relay's OK.
+    core.resume_after_background(Claim::Foreground)
         .await
         .expect("foreground re-anchor");
 
     assert!(
         poll_until_async(|| async {
             !roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex)
-                && fx.alice.owed_removal_commits().is_empty()
+                && !holds_a_staged_commit(&fx).await
         })
         .await,
-        "the foreground pass must publish the parked commit, confirm it on the relay's \
-         OK and discharge the obligation — a deferred removal that never lands leaves \
-         a member who asked to leave still in the circle"
+        "the foreground must make the eviction a burst left due and confirm it on the \
+         relay's OK — a removal that never lands leaves a member who asked to leave \
+         still in the circle"
     );
     assert_eq!(
         epoch(&fx.alice, &fx.mls_group_id).await,
@@ -1235,10 +1359,13 @@ async fn a_self_remove_auto_commit_is_deferred_by_the_burst_and_published_by_the
         2,
         "the eviction commit must be ON the relay, not merely applied locally"
     );
-    for event in feed_after_burst(&reader).await {
-        let _ = carol.session().process_event(&event).await;
-        let _ = carol.session().advance_convergence(&fx.mls_group_id).await;
-    }
+    // In the order they were published. In the relay's newest-first order
+    // the commit would reach Carol ahead of its proposal, and MDK drops such
+    // a commit for good: pinned by
+    // `mdk_drops_for_good_a_commit_taken_in_before_the_proposal_it_commits`.
+    let mut feed: Vec<Event> = feed_after_burst(&reader).await.into_iter().collect();
+    feed.sort_by_key(|event| event.id != proposal.id);
+    ingest_then_settle(&carol, feed, &fx.mls_group_id).await;
     assert!(
         !roster(&carol, &fx.mls_group_id).await.contains(&bob_hex),
         "the eviction commit must be ON THE RELAY, not merely applied locally: a third \
@@ -1246,6 +1373,110 @@ async fn a_self_remove_auto_commit_is_deferred_by_the_burst_and_published_by_the
     );
 
     let _ = core.stop().await;
+}
+
+/// A commit a member takes in before the proposal it commits — what a relay
+/// serving stored events newest-first hands a member catching up after a
+/// `SelfRemove` — is dropped by MDK for good, and its redelivery is a
+/// duplicate: the member stays at the old epoch with the eviction due.
+///
+/// Pinned because nothing on Haven's side can revive it: MDK drops the commit
+/// as invalid against the candidate state at its pass's close, whether or not
+/// the proposal was taken in before that close, and keeps its transport id as
+/// processed (`docs/MDK_UPSTREAM_TRACKER.md` T-COMMIT-BEFORE-PROPOSAL). When
+/// MDK retains such a commit until its proposal arrives, this test fails and
+/// the row ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mdk_drops_for_good_a_commit_taken_in_before_the_proposal_it_commits() {
+    use haven_core::nostr::mls::types::{IngestOutcome, ScreenedIngest};
+
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+    let relay = MockRelay::run().await.expect("mock relay");
+    let url = relay.url().await.to_string();
+    let fx = build_circle(vec![url.clone()], true).await;
+    let carol = fx.carol.clone().expect("carol joined");
+    let core = start_engine(&fx, std::slice::from_ref(&url)).await;
+    core.claim_foreground(Claim::Foreground).await;
+    let bob_hex = fx.bob_keys.public_key().to_hex();
+    let before = epoch(&carol, &fx.mls_group_id).await;
+
+    let proposal = fx
+        .bob
+        .propose_leave(&fx.mls_group_id)
+        .await
+        .expect("bob proposes leave")
+        .expect("a first leave in this epoch proposes");
+    publish_to(&url, &proposal).await;
+    assert!(
+        poll_until_async(|| async {
+            !roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex)
+                && !holds_a_staged_commit(&fx).await
+        })
+        .await,
+        "premise: alice's foreground made the eviction and a relay acknowledged it"
+    );
+    let reader = Client::builder().build();
+    reader.add_relay(url.as_str()).await.expect("add relay");
+    reader.connect().await;
+    let commit = reader
+        .fetch_events(
+            Filter::new()
+                .kind(nostr::Kind::Custom(445))
+                .custom_tag(SingleLetterTag::lowercase(Alphabet::H), fx.hex()),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("read the circle's events back off the relay")
+        .into_iter()
+        .find(|event| event.id != proposal.id)
+        .expect("premise: the eviction commit is on the relay");
+
+    let outcome = |screened: ScreenedIngest| match screened {
+        ScreenedIngest::Ingested(ingest) => Some(ingest.outcome),
+        ScreenedIngest::RejectedBeforeAuth(_) => None,
+    };
+    for event in [&commit, &proposal] {
+        let taken = carol.session().process_event(event).await.expect("ingest");
+        assert!(outcome(taken).is_some(), "premise: both reach the engine");
+        let _ = carol
+            .session()
+            .settle_receive_for_test(&fx.mls_group_id)
+            .await;
+    }
+    assert!(
+        epoch(&carol, &fx.mls_group_id).await == before
+            && roster(&carol, &fx.mls_group_id).await.contains(&bob_hex)
+            && carol
+                .session()
+                .eviction_due_after_for_test(&fx.mls_group_id)
+                .await
+                .is_some(),
+        "MDK applied a commit that reached the member before its proposal"
+    );
+    let again = carol
+        .session()
+        .process_event(&commit)
+        .await
+        .expect("ingest");
+    assert!(
+        matches!(outcome(again), Some(IngestOutcome::Ignored { .. })),
+        "MDK took in again a commit it had dropped"
+    );
+    let _ = core.stop().await;
+}
+
+/// Ingests every one of `events`, then serves `group_id`'s deadlines: all of
+/// them land in one convergence pass, so a commit among them consumes a
+/// proposal before the receiver's own auto-commit for it could fall due.
+async fn ingest_then_settle(
+    member: &CircleManager,
+    events: impl IntoIterator<Item = Event>,
+    group_id: &GroupId,
+) {
+    for event in events {
+        let _ = member.session().process_event(&event).await;
+    }
+    let _ = member.session().settle_receive_for_test(group_id).await;
 }
 
 /// Rule 13, driven THROUGH the intake: a pause never disconnects while an
@@ -1271,6 +1502,7 @@ async fn pause_never_disconnects_while_an_auto_commit_awaits_its_ok() {
     let core = Arc::new(LiveSyncCore::new_local(
         Arc::clone(&fx.alice),
         fx.alice_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
     ));
     core.start(
         &[CircleSpec {
@@ -1281,6 +1513,9 @@ async fn pause_never_disconnects_while_an_auto_commit_awaits_its_ok() {
     )
     .await
     .expect("alice's engine starts");
+    // As the app does once a start returns: a session only started makes no
+    // commit, so the eviction is the claimed foreground's to make.
+    core.claim_foreground(Claim::Foreground).await;
     assert_eq!(core.wait_backlog_settled().await, BacklogOutcome::Settled);
     let bob_hex = fx.bob_keys.public_key().to_hex();
     let before = epoch(&fx.alice, &fx.mls_group_id).await;
@@ -1290,7 +1525,8 @@ async fn pause_never_disconnects_while_an_auto_commit_awaits_its_ok() {
         .bob
         .propose_leave(&fx.mls_group_id)
         .await
-        .expect("bob proposes leave");
+        .expect("bob proposes leave")
+        .expect("a first leave in this epoch proposes");
     publish_to(&url, &proposal).await;
 
     // Wait until the engine's auto-commit is genuinely on the wire with its OK
@@ -1362,6 +1598,7 @@ async fn a_commit_arriving_between_settle_and_pause_is_still_confirmed() {
     let core = Arc::new(LiveSyncCore::new_local(
         Arc::clone(&fx.alice),
         fx.alice_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
     ));
     core.start(
         &[CircleSpec {
@@ -1372,6 +1609,9 @@ async fn a_commit_arriving_between_settle_and_pause_is_still_confirmed() {
     )
     .await
     .expect("alice's engine starts");
+    // As the app does once a start returns: a session only started makes no
+    // commit, so the eviction is the claimed foreground's to make.
+    core.claim_foreground(Claim::Foreground).await;
     assert_eq!(core.wait_backlog_settled().await, BacklogOutcome::Settled);
     let bob_hex = fx.bob_keys.public_key().to_hex();
     let before = epoch(&fx.alice, &fx.mls_group_id).await;
@@ -1391,7 +1631,8 @@ async fn a_commit_arriving_between_settle_and_pause_is_still_confirmed() {
         .bob
         .propose_leave(&fx.mls_group_id)
         .await
-        .expect("bob proposes leave");
+        .expect("bob proposes leave")
+        .expect("a first leave in this epoch proposes");
     publish_to(&url, &proposal).await;
     assert!(
         poll_until(|| held.load(Ordering::Acquire) > 0).await,
@@ -1422,26 +1663,22 @@ async fn a_commit_arriving_between_settle_and_pause_is_still_confirmed() {
     let _ = core.stop().await;
 }
 
-/// A burst that did not settle every endpoint leaves NO cursor advance standing.
+/// A burst that did not settle every endpoint advances the circle past the
+/// silent relay only with that relay's debt kept (P2, Security Rule 12).
 ///
-/// The cursor-safety hole per-endpoint SETTLING alone does not close. A bucket
-/// REQ is one filter over several relays while the circle holds ONE anchor
-/// generation, so the FAST relay's `EOSE` redeems that generation and writes the
-/// persisted cursor at the burst's open time — even though the slow relay, here
-/// the only one holding the peer's commit, never served its window. The burst
-/// then reports `TimedOut`, publishes, and disconnects seconds later with the
-/// cursor already moved; the next burst's floor on that relay is
-/// `cursor − GROUP_RESUBSCRIBE_BUFFER_SECS`, so anything more than a minute below
-/// it is never requested again, by any burst or catch-up sweep.
+/// A bucket REQ is one filter over several relays while the circle holds ONE
+/// anchor generation. Once the burst's backlog wait is over, the relay still
+/// silent is left out of the coverage, the fast relay's `EOSE` advances the
+/// cursor — and the silent relay is recorded as owing the circle its history
+/// from the `since` it was asked, so the next REQ to it asks from there, and
+/// nothing only it holds is skipped by the advance.
 ///
-/// Three arms, in order: the cursor must NOT move on a burst that timed out; the
-/// event must still be deliverable (the control the reviewer's probe used —
-/// holding the socket open DOES deliver the late replay, which is what makes the
-/// first arm about the CURSOR and not about a fixture that published nothing);
-/// and once every endpoint has answered the cursor must move after all, or "safe"
-/// would just mean "never advances".
+/// Three arms, in order: the cursor moves, and the silent relay owes a floor
+/// that reaches back past the commit only it holds; the commit is really
+/// there and a held-open socket delivers it; and once that relay has answered
+/// a REQ that reached back to its floor, the floor is gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_burst_that_did_not_settle_every_endpoint_leaves_no_advance_standing() {
+async fn a_burst_that_did_not_settle_every_endpoint_advances_only_with_the_silent_relays_floor() {
     let _ = haven_core::relay::allow_ws_loopback_for_test();
     let fast = MockRelay::run().await.expect("mock relay");
     let fast_url = fast.url().await.to_string();
@@ -1450,7 +1687,11 @@ async fn a_burst_that_did_not_settle_every_endpoint_leaves_no_advance_standing()
     let fx = build_circle(vec![fast_url.clone(), slow_url.clone()], false).await;
     // BOB runs the burst engine; ALICE is the admin, so she is the one who can
     // stage a routing commit.
-    let core = LiveSyncCore::new_local(Arc::clone(&fx.bob), fx.bob_keys.public_key());
+    let core = LiveSyncCore::new_local(
+        Arc::clone(&fx.bob),
+        fx.bob_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     core.start(
         &[CircleSpec {
             group_id_hex: fx.hex(),
@@ -1467,6 +1708,7 @@ async fn a_burst_that_did_not_settle_every_endpoint_leaves_no_advance_standing()
     );
     let stream = group_cursor_stream(&fx.hex());
     let before_epoch = epoch(&fx.bob, &fx.mls_group_id).await;
+    let slow = nostr::RelayUrl::parse(&slow_url).expect("a relay url");
 
     core.pause_subscriptions().await.expect("pause");
     let anchored = fx
@@ -1475,21 +1717,18 @@ async fn a_burst_that_did_not_settle_every_endpoint_leaves_no_advance_standing()
         .expect("cursor read")
         .expect("the settled start advanced the cursor");
     // Cursor values are second-granular, so the burst below has to open in a
-    // LATER second for an over-advance to be visible at all.
+    // LATER second for an advance to be visible at all.
     wait_for_next_second().await;
 
     // The peer's commit is stored on the SLOW relay alone, and that relay stops
-    // answering REQs before the burst opens.
+    // answering REQs before the burst opens. It keeps the circle on a relay it
+    // already listens at, so the follow it sets off moves no REQ.
     let commit = fx
         .alice
-        .update_circle_relays(&fx.mls_group_id, &["wss://group2.example.com".to_string()])
+        .update_relays_for_test(&fx.mls_group_id, std::slice::from_ref(&slow_url))
         .await
         .expect("alice stages a routing commit");
-    fx.alice
-        .finalize_relay_update(commit.pending, &fx.mls_group_id)
-        .await
-        .expect("alice finalizes");
-    publish_to(&slow_url, &commit.commit_event).await;
+    publish_to(&slow_url, &commit).await;
     gate.send_replace(false);
 
     core.open_background_burst().await.expect("burst opens");
@@ -1499,14 +1738,20 @@ async fn a_burst_that_did_not_settle_every_endpoint_leaves_no_advance_standing()
         "precondition: with one endpoint silent the burst cannot settle"
     );
 
-    // ── Arm 1: the advance.
-    assert_eq!(
-        fx.bob.read_sync_cursor(&stream).expect("cursor read"),
-        Some(anchored),
-        "a burst whose endpoints did not all answer must leave no advance standing. \
-         The fast relay's EOSE is ITS completeness claim; taking it for the circle's \
-         moves the cursor past a window the slow relay never served, and the next \
-         burst's floor is only 60 s below that"
+    // ── Arm 1: the advance, and the silent relay's debt.
+    assert!(
+        fx.bob
+            .read_sync_cursor(&stream)
+            .expect("cursor read")
+            .is_some_and(|ms| ms > anchored),
+        "a relay silent past the burst's wait held the circle's advance"
+    );
+    let owed = fx.bob.relay_floor_for_test(&fx.hex(), slow.as_str());
+    let created = i64::try_from(commit.created_at.as_secs()).expect("fits");
+    assert!(
+        owed.is_some_and(|floor| floor <= created),
+        "the relay left out of the coverage owes no floor reaching back past the commit only \
+         it holds: the advance would skip it"
     );
 
     // ── Arm 2: the event was really there, and a held-open socket delivers it.
@@ -1517,24 +1762,390 @@ async fn a_burst_that_did_not_settle_every_endpoint_leaves_no_advance_standing()
          arm 1 would pass for a fixture that never published anything"
     );
 
-    // ── Arm 3: and then the cursor DOES advance, or "cursor-safe" would only
-    //    mean "never advances again".
-    assert_eq!(
-        core.wait_backlog_settled().await,
-        BacklogOutcome::Settled,
-        "every endpoint has now answered"
+    // ── Arm 3: its answer to the end of a REQ that reached back to the floor
+    //    ends the floor.
+    assert!(
+        poll_until(|| fx
+            .bob
+            .relay_floor_for_test(&fx.hex(), slow.as_str())
+            .is_none())
+        .await,
+        "a relay that answered a REQ reaching back to its floor still owes it"
     );
+
+    let _ = core.stop().await;
+}
+
+/// A relay left out of a circle's coverage is asked, by the next REQ any
+/// later session sends it, from the floor it owes — never from the cursor
+/// the other relays advanced (Security Rule 12). The first session's REQ to
+/// the silent relay is released by a foreground health tick once the EOSE
+/// wait is over; the second session's REQ to it asks from the floor, and its
+/// answer ends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_left_out_of_coverage_is_asked_from_its_floor_by_the_next_session() {
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+    let fast = MockRelay::run().await.expect("mock relay");
+    let fast_url = fast.url().await.to_string();
+    let (gate, open) = tokio::sync::watch::channel(false);
+    let asked: Arc<Mutex<Vec<Filter>>> = Arc::default();
+    let slow_relay = LocalRelay::new(RelayBuilder::default().query_policy(GatedRecordingQueries {
+        open,
+        seen: Arc::clone(&asked),
+    }));
+    slow_relay.run().await.expect("local relay runs");
+    let slow_url = slow_relay.url().await.to_string();
+    let slow = nostr::RelayUrl::parse(&slow_url).expect("a relay url");
+    let fx = build_circle(vec![fast_url.clone(), slow_url.clone()], false).await;
+    let specs = [CircleSpec {
+        group_id_hex: fx.hex(),
+        relays: vec![fast_url.clone(), slow_url.clone()],
+    }];
+    let stream = group_cursor_stream(&fx.hex());
+
+    let first = LiveSyncCore::new_local(
+        Arc::clone(&fx.bob),
+        fx.bob_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
+    first
+        .start(&specs, &[])
+        .await
+        .expect("the first session starts");
+    assert!(
+        poll_until(|| asked.lock().expect("the asks read").len() == 1).await,
+        "premise: the silent relay was asked"
+    );
+    first.pass_the_eose_wait_for_test();
+    let _ = first
+        .maintain_subscription_health(Claim::Foreground)
+        .await
+        .expect("the tick answers");
+    let floor = fx
+        .bob
+        .relay_floor_for_test(&fx.hex(), slow.as_str())
+        .expect("the silent relay owes a floor once the wait is over");
     assert!(
         poll_until(|| fx
             .bob
             .read_sync_cursor(&stream)
             .expect("cursor read")
-            .is_some_and(|ms| ms > anchored))
+            .is_some())
         .await,
-        "once every relay that accepted the REQ has finished its replay, the \
-         generation's advance must be redeemed"
+        "the fast relay's EOSE did not advance the circle once the silent one was left out"
+    );
+    let _ = first.stop().await;
+    wait_for_next_second().await;
+
+    gate.send_replace(true);
+    let second = LiveSyncCore::new_local(
+        Arc::clone(&fx.bob),
+        fx.bob_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
+    second
+        .start(&specs, &[])
+        .await
+        .expect("the second session starts");
+    assert!(
+        poll_until(|| asked.lock().expect("the asks read").len() >= 2).await,
+        "premise: the second session asked the relay"
+    );
+    let since = asked.lock().expect("the asks read")[1]
+        .since
+        .map(|at| i64::try_from(at.as_secs()).expect("fits"));
+    assert_eq!(
+        since,
+        Some(floor),
+        "the next REQ to a relay that owes a floor asked from somewhere else"
+    );
+    assert!(
+        poll_until(|| fx
+            .bob
+            .relay_floor_for_test(&fx.hex(), slow.as_str())
+            .is_none())
+        .await,
+        "a relay that answered a REQ reaching back to its floor still owes it"
+    );
+    let _ = second.stop().await;
+}
+
+/// A relay that ends the first REQ it is given and serves every later one.
+#[derive(Debug)]
+struct CloseTheFirst {
+    asked: Arc<AtomicUsize>,
+}
+
+impl QueryPolicy for CloseTheFirst {
+    fn admit_query<'a>(
+        &'a self,
+        _query: &'a Filter,
+        _addr: &'a std::net::SocketAddr,
+    ) -> BoxedFuture<'a, PolicyResult> {
+        Box::pin(async move {
+            if self.asked.fetch_add(1, Ordering::SeqCst) == 0 {
+                PolicyResult::Reject("closed by policy".to_string())
+            } else {
+                PolicyResult::Accept
+            }
+        })
+    }
+}
+
+/// Whether `rx` delivers a location of `circle` whose content carries
+/// `marker` within the poll bound.
+async fn location_arrives(
+    rx: &mut tokio::sync::broadcast::Receiver<LiveSyncEvent>,
+    marker: &str,
+) -> bool {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match rx.recv().await {
+                Ok(LiveSyncEvent::Location { content, .. }) if content.contains(marker) => {
+                    return true;
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Security Rule 12 across a single relay's re-issue: one relay of a
+/// two-relay bucket ends the circle's REQ and is re-issued alone while the
+/// other is still replaying. The re-issued relay's end of stored events
+/// completes nothing: the replaying relay stays in the REQ's coverage, so
+/// past the wait it is released owing the circle a floor, and the next
+/// session asks it from there and gets the event only it held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_single_relays_reissue_keeps_the_buckets_other_relays_in_coverage() {
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+    let closer = LocalRelay::new(RelayBuilder::default().query_policy(CloseTheFirst {
+        asked: Arc::new(AtomicUsize::new(0)),
+    }));
+    closer.run().await.expect("local relay runs");
+    let closer_url = closer.url().await.to_string();
+    let (gate, open) = tokio::sync::watch::channel(false);
+    let asked: Arc<Mutex<Vec<Filter>>> = Arc::default();
+    let slow_relay = LocalRelay::new(RelayBuilder::default().query_policy(GatedRecordingQueries {
+        open,
+        seen: Arc::clone(&asked),
+    }));
+    slow_relay.run().await.expect("local relay runs");
+    let slow_url = slow_relay.url().await.to_string();
+    let slow = nostr::RelayUrl::parse(&slow_url).expect("a relay url");
+    let fx = build_circle(vec![closer_url.clone(), slow_url.clone()], false).await;
+    let fix = |latitude: f64| {
+        let (alice, group) = (Arc::clone(&fx.alice), fx.mls_group_id.clone());
+        async move {
+            alice
+                .seal_location_for_test(&group, &LocationMessage::new(latitude, 2.0))
+                .await
+                .expect("alice seals a location")
+                .0
+        }
+    };
+    // The event only the replaying relay holds, and one the re-issued relay
+    // serves on its replay.
+    publish_to(&slow_url, &fix(61.25).await).await;
+    publish_to(&closer_url, &fix(62.25).await).await;
+    let specs = [CircleSpec {
+        group_id_hex: fx.hex(),
+        relays: vec![closer_url.clone(), slow_url.clone()],
+    }];
+
+    let first = LiveSyncCore::new_local(
+        Arc::clone(&fx.bob),
+        fx.bob_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
+    let mut bus = first.bus().subscribe();
+    first
+        .start(&specs, &[])
+        .await
+        .expect("the first session starts");
+    assert!(
+        location_arrives(&mut bus, "62.25").await,
+        "premise: the closing relay was re-issued and replayed"
+    );
+    // A live event after that replay: one connection's frames are ingested in
+    // order, so once it is delivered the re-issued REQ's end of stored events
+    // has been processed.
+    publish_to(&closer_url, &fix(63.25).await).await;
+    assert!(
+        location_arrives(&mut bus, "63.25").await,
+        "premise: the re-issued REQ's end of stored events was taken in"
     );
 
+    first.pass_the_eose_wait_for_test();
+    let _ = first
+        .maintain_subscription_health(Claim::Foreground)
+        .await
+        .expect("the tick answers");
+    let floor = fx
+        .bob
+        .relay_floor_for_test(&fx.hex(), slow.as_str())
+        .expect("a relay still replaying when another was re-issued owes no floor: it was dropped from the coverage");
+    let _ = first.stop().await;
+
+    gate.send_replace(true);
+    let second = LiveSyncCore::new_local(
+        Arc::clone(&fx.bob),
+        fx.bob_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
+    let mut bus = second.bus().subscribe();
+    second
+        .start(&specs, &[])
+        .await
+        .expect("the second session starts");
+    assert!(
+        location_arrives(&mut bus, "61.25").await,
+        "the event only the replaying relay held never arrived"
+    );
+    let since = asked
+        .lock()
+        .expect("the asks read")
+        .last()
+        .and_then(|filter| filter.since)
+        .map(|at| i64::try_from(at.as_secs()).expect("fits"));
+    assert_eq!(
+        since,
+        Some(floor),
+        "the next REQ to the relay that owes a floor asked from somewhere else"
+    );
+    let _ = second.stop().await;
+}
+
+/// The foreground releases a connected relay that never ends its replay
+/// `EOSE_WAIT` after the REQ, with no burst and no health tick: the circle
+/// advances and the relay owes it a floor (Security Rule 12), instead of the
+/// silent relay holding the circle until the next tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_foreground_releases_a_silent_relay_after_the_eose_wait_without_a_tick() {
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+    let fast = MockRelay::run().await.expect("mock relay");
+    let fast_url = fast.url().await.to_string();
+    let (_gate, open) = tokio::sync::watch::channel(false);
+    let asked: Arc<Mutex<Vec<Filter>>> = Arc::default();
+    let slow_relay = LocalRelay::new(RelayBuilder::default().query_policy(GatedRecordingQueries {
+        open,
+        seen: Arc::clone(&asked),
+    }));
+    slow_relay.run().await.expect("local relay runs");
+    let slow_url = slow_relay.url().await.to_string();
+    let slow = nostr::RelayUrl::parse(&slow_url).expect("a relay url");
+    let fx = build_circle(vec![fast_url.clone(), slow_url.clone()], false).await;
+    let core = LiveSyncCore::new_local(
+        Arc::clone(&fx.bob),
+        fx.bob_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
+    core.start(
+        &[CircleSpec {
+            group_id_hex: fx.hex(),
+            relays: vec![fast_url.clone(), slow_url.clone()],
+        }],
+        &[],
+    )
+    .await
+    .expect("the engine starts");
+    core.claim_foreground(Claim::Foreground).await;
+    assert!(
+        poll_until(|| !asked.lock().expect("the asks read").is_empty()).await,
+        "premise: the silent relay was asked"
+    );
+    assert!(
+        poll_until(|| fx
+            .bob
+            .relay_floor_for_test(&fx.hex(), slow.as_str())
+            .is_some())
+        .await,
+        "a silent relay held the foreground past the EOSE wait: nothing released it"
+    );
+    assert!(
+        poll_until(|| fx
+            .bob
+            .read_sync_cursor(&group_cursor_stream(&fx.hex()))
+            .expect("cursor read")
+            .is_some())
+        .await,
+        "the circle did not advance once the silent relay was released"
+    );
+    let _ = core.stop().await;
+}
+
+/// A background burst after a pause waits on no relay that is not connected:
+/// with one live relay and one refused loopback port in the circle's list,
+/// its backlog wait settles on the live relay's answer instead of running out
+/// its whole budget on the other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_burst_waits_on_no_relay_that_is_not_connected() {
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+    let live = MockRelay::run().await.expect("mock relay");
+    let live_url = live.url().await.to_string();
+    let dead_url = "ws://127.0.0.1:1".to_string();
+    let fx = build_circle(vec![live_url.clone(), dead_url.clone()], false).await;
+    let core = LiveSyncCore::new_local(
+        Arc::clone(&fx.bob),
+        fx.bob_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
+    core.start(
+        &[CircleSpec {
+            group_id_hex: fx.hex(),
+            relays: vec![live_url.clone(), dead_url.clone()],
+        }],
+        &[],
+    )
+    .await
+    .expect("the engine starts");
+    core.pause_subscriptions().await.expect("pause");
+
+    core.open_background_burst().await.expect("burst opens");
+    assert_eq!(
+        core.wait_backlog_settled().await,
+        BacklogOutcome::Settled,
+        "a burst waited on a relay that is not connected"
+    );
+    let _ = core.stop().await;
+}
+
+/// Nor on an inbox relay that is not connected: the inbox REQ a re-anchor
+/// issues to a relay the pool only queued it for is waited on by nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resume_waits_on_no_inbox_relay_that_is_not_connected() {
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+    let live = MockRelay::run().await.expect("mock relay");
+    let live_url = live.url().await.to_string();
+    let dead_url = "ws://127.0.0.1:1".to_string();
+    let fx = build_circle(vec![live_url.clone()], false).await;
+    let core = LiveSyncCore::new_local(
+        Arc::clone(&fx.bob),
+        fx.bob_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
+    core.start(
+        &[CircleSpec {
+            group_id_hex: fx.hex(),
+            relays: vec![live_url.clone()],
+        }],
+        &[live_url.clone(), dead_url.clone()],
+    )
+    .await
+    .expect("the engine starts");
+    core.pause_subscriptions().await.expect("pause");
+
+    core.resume_after_background(Claim::Foreground)
+        .await
+        .expect("the re-anchor opens");
+    assert_eq!(
+        core.wait_backlog_settled().await,
+        BacklogOutcome::Settled,
+        "a re-anchor waited on an inbox relay that is not connected"
+    );
     let _ = core.stop().await;
 }
 
@@ -1584,12 +2195,7 @@ async fn a_burst_open_racing_a_draining_pause_waits_for_the_clear() {
     let mut bus = core.bus().subscribe();
     let (event, _, _) = fx
         .bob
-        .encrypt_location(
-            &fx.mls_group_id,
-            &fx.bob_keys.public_key(),
-            &LocationMessage::new(7.0, 8.0),
-            600,
-        )
+        .seal_location_for_test(&fx.mls_group_id, &LocationMessage::new(7.0, 8.0))
         .await
         .expect("bob encrypts");
     publish_to(&url, &event).await;

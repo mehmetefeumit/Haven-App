@@ -12,11 +12,13 @@
 # itself with `test-utils` on, so an advisory against any of them is still a
 # finding this repository must see.
 #
-# Every step runs from `haven-core` so cargo-audit picks up the single
+# Every audit step runs from `haven-core` so cargo-audit picks up the single
 # `haven-core/.cargo/audit.toml` policy: that file reads relative to the working
 # directory, and it is where every ignored advisory is justified. Running the
 # second scan from `haven/rust_builder` instead would silently apply NO ignore
 # list, turning the documented-unreachable libcrux findings into hard failures.
+# The last step applies no ignore list on purpose: it proves each ignore still
+# matches something.
 
 name: Dependency Audit
 
@@ -70,10 +72,18 @@ jobs:
       # list has no expiry field, so an ignore is a silencing change with no
       # end date.
       #
-      # scripts/ci/check_mdk_supply_chain.sh reads haven-core/Cargo.lock only,
-      # so this lockfile is outside its scope; the soak job's own one-version
-      # step in rust-check.yml is the only other control over what this crate
-      # resolves.
+      # What this crate resolves is also held by check_mdk_supply_chain.sh and
+      # check_lockfile_universe.sh (repo-guards.yml), which read this lockfile
+      # next to haven-core's and rust_builder's.
       - name: Run cargo audit (haven-soak — the Tier-1 soak rig)
         if: always()
         run: cargo audit --file ../tooling/soak/Cargo.lock
+
+      # cargo-audit is silent about an ignore that matches nothing, so a stale
+      # entry in haven-core/.cargo/audit.toml would silence the advisory if it
+      # ever came back. Every lockfile above is re-audited with no ignore list
+      # and each ignore must still match a live advisory in one of them.
+      - name: Every audit.toml ignore still matches an advisory
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/ci/check_audit_ignores_live.sh

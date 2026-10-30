@@ -17,6 +17,7 @@ use haven_core::location::LocationMessage;
 use haven_core::nostr::giftwrap::unwrap_welcome;
 use haven_core::nostr::mls::types::{
     GroupId, LocationGroupConfig, LocationMessageResult, PublishWork, SessionEffects,
+    WelcomeAcceptance,
 };
 use haven_core::nostr::mls::{redact_hex_sequences, SessionManager};
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Timestamp};
@@ -47,7 +48,7 @@ async fn send_445(sender: &SessionManager, gid: &GroupId, content: &str) -> Even
         .publish
         .iter()
         .find_map(|w| match w {
-            PublishWork::ApplicationMessage { msg } => Some(msg.clone()),
+            PublishWork::ApplicationMessage { msg, .. } => Some(msg.clone()),
             _ => None,
         })
         .expect("application message publish work");
@@ -56,11 +57,10 @@ async fn send_445(sender: &SessionManager, gid: &GroupId, content: &str) -> Even
 
 /// The inner location content a receiver recovers from a 445, or `None`.
 ///
-/// Every event these gates feed here is freshly built, so its NIP-40 expiration
-/// (`created_at + 228 s`) is comfortably in the future and the receiver-side
-/// screen must let it through to the engine. Asserted rather than folded into
-/// the `None` return: a silent pre-auth rejection would make each "must not
-/// yield plaintext" gate below pass for the wrong reason.
+/// Every event these gates feed here is a well-formed envelope, so the
+/// receiver-side screen must let it through to the engine. Asserted rather than
+/// folded into the `None` return: a silent pre-auth rejection would make each
+/// "must not yield plaintext" gate below pass for the wrong reason.
 async fn decrypt_445_content(receiver: &SessionManager, event: &Event) -> Option<String> {
     let ingest = receiver
         .process_event(event)
@@ -137,18 +137,16 @@ async fn advance_both(g: &TwoPartyGroup, count: usize) {
             .await
             .expect("alice confirms");
         let commit_event = SessionManager::transport_message_to_event(&commit).unwrap();
-        let ingest = g
-            .bob
-            .process_event(&commit_event)
+        // Served through its convergence window, as a receive plane does.
+        g.bob
+            .process_event_settled_for_test(&commit_event)
             .await
             .expect("bob ingests commit")
             .ingested()
-            // Commits carry no `expiration` tag at all (group history must
-            // outlive any TTL), so the receiver-side screen can never fire here.
+            // A well-formed commit passes the only pre-auth screen left (the
+            // structural one), and it carries no `expiration` for the relay
+            // pool to judge (group history must outlive any TTL).
             .expect("a commit must reach the engine, not Haven's pre-auth screen");
-        for gid in &ingest.effects.pending_convergence {
-            let _ = g.bob.advance_convergence(gid).await;
-        }
     }
 }
 
@@ -182,21 +180,16 @@ async fn advance_and_collect_released(
         .await
         .expect("alice confirms");
     let commit_event = SessionManager::transport_message_to_event(&commit).unwrap();
-    let ingest = member
-        .process_event(&commit_event)
+    // Served through its convergence window, as a receive plane does: the
+    // settled effects carry everything the apply and the drains released.
+    let screened = member
+        .process_event_settled_for_test(&commit_event)
         .await
-        .expect("member ingests the commit")
+        .expect("member ingests the commit");
+    let ingest = screened
         .ingested()
         .expect("a commit must reach the engine, not Haven's pre-auth screen");
-    let mut released = location_contents(&ingest.effects);
-    for gid in &ingest.effects.pending_convergence {
-        let more = member
-            .advance_convergence(gid)
-            .await
-            .expect("member drains their own live group");
-        released.extend(location_contents(&more));
-    }
-    released
+    location_contents(&ingest.effects)
 }
 
 // ============================================================================
@@ -599,10 +592,13 @@ async fn new_member_cannot_decrypt_location_sent_before_the_add() {
          exactly the material L0 was sealed under"
     );
 
-    let joined = carol
+    let WelcomeAcceptance::Ingested(joined) = carol
         .accept_welcome(&welcomes[0])
         .await
-        .expect("carol accepts the welcome");
+        .expect("carol accepts the welcome")
+    else {
+        panic!("a fresh welcome is ingested");
+    };
     // The welcome is the one channel that could smuggle history in alongside the
     // keys — it must deliver the join and the epoch, never a past location.
     assert!(
@@ -787,7 +783,8 @@ fn rm_welcome_gift_wrap_privacy_sweep() {
 
 /// Publishable welcome gift wraps carried by `effects`, confirming each pending
 /// state they ride on (publish-before-apply, Rule 13) so the caller may keep
-/// driving the group afterwards.
+/// driving the group afterwards. A founding create's Welcomes ride on no
+/// pending state: the group is canonical already.
 async fn confirm_and_take_welcomes(
     session: &SessionManager,
     effects: &SessionEffects,
@@ -795,10 +792,10 @@ async fn confirm_and_take_welcomes(
     let mut wraps = Vec::new();
     for work in &effects.publish {
         let (welcomes, pending) = match work {
-            PublishWork::GroupCreated { welcomes, pending }
-            | PublishWork::GroupEvolution {
+            PublishWork::FoundingGroupCreated { welcomes } => (welcomes, None),
+            PublishWork::GroupEvolution {
                 welcomes, pending, ..
-            } => (welcomes, *pending),
+            } => (welcomes, Some(*pending)),
             _ => continue,
         };
         wraps.extend(
@@ -806,10 +803,12 @@ async fn confirm_and_take_welcomes(
                 .iter()
                 .map(|w| SessionManager::transport_message_to_event(w).expect("welcome → event")),
         );
-        session
-            .confirm_published(pending)
-            .await
-            .expect("confirm the published welcome");
+        if let Some(pending) = pending {
+            session
+                .confirm_published(pending)
+                .await
+                .expect("confirm the published welcome");
+        }
     }
     wraps
 }

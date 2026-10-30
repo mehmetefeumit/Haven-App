@@ -14,12 +14,16 @@
 //! * **Clock ahead** — every event carries a future `created_at`, and a
 //!   spec-conformant relay bounds that (strfry's `rejectEventsNewerThanSeconds`,
 //!   and every mainstream relay has an equivalent). The publish is refused, so
-//!   location sharing is dead for the session.
+//!   location sharing is dead for the session. Inside the relay's window the
+//!   publish is accepted instead, and the device goes deaf: past
+//!   [`TOTAL_LOSS_SKEW_SECS`] its own relay pool discards every peer location
+//!   as already expired, and neither signal below can see it (the relay took
+//!   the event; the peer timestamps are in the events the pool dropped).
 //! * **Clock behind** — `expiration = created_at + 228` is computed from the
-//!   same skewed clock, so the event is born already expired. The relay still
-//!   ACKs it (the publisher sees success!) but a NIP-40-honouring relay may
-//!   drop it and a correctly-clocked peer discards it in
-//!   [`crate::nostr::mls::SessionManager::process_event`] before decryption.
+//!   same skewed clock, so the event expires early, or is born expired. The
+//!   relay still ACKs it (the publisher sees success!) but a NIP-40-honouring
+//!   relay may drop it and a correctly-clocked peer's relay pool
+//!   (`nostr-relay-pool`) discards it on receipt, before Haven sees it.
 //!
 //! # The time reference, and what it deliberately is NOT
 //!
@@ -54,61 +58,60 @@
 //! only a [`DeviceClockComplaint`] — a closed enum. The relay's own words are
 //! never propagated upward, never stored, and never rendered (Security Rule 8).
 
-use crate::location::ttl::{LOCATION_MESSAGE_RETENTION_SECS, RECEIVER_EXPIRATION_GRACE_SECS};
+use crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS;
 
-/// Stable, Haven-authored prefix used as the `Display` form of
+/// Haven-authored prefix of the `Display` form of
 /// [`crate::relay::RelayError::DeviceClockRejected`].
 ///
-/// The FFI boundary flattens every error to a `String`
-/// (`Result<T, String>` — CLAUDE.md, FFI error convention), so this token is
-/// the one channel through which a *classification* — never relay prose —
-/// crosses into Dart. It is matched verbatim by
-/// `haven/lib/src/services/clock_skew_detector.dart`; the pair is pinned by
-/// `scripts/ci/check_clock_skew_policy_parity.sh`.
+/// The rendering names the classification and nothing a relay wrote. Nothing
+/// parses it: the bridge carries the complaint as a typed field
+/// (`PublishFailureFfi.clock_rejected`), and Dart reads that field.
 pub const DEVICE_CLOCK_REJECTED_TOKEN: &str = "haven.clock.device_clock_rejected";
 
-/// Skew magnitude at which every location this device publishes is discarded
-/// by a correctly-clocked peer (seconds).
+/// Clock disagreement past which every location sent across it is lost
+/// (seconds).
 ///
-/// A receiver drops an event whose NIP-40 expiration is more than
-/// [`RECEIVER_EXPIRATION_GRACE_SECS`] into its past, and the expiration is
-/// `created_at + LOCATION_MESSAGE_RETENTION_SECS`. A publisher whose clock lags
-/// by this much therefore loses **100 %** of its updates while still seeing a
-/// successful relay ACK.
-pub const TOTAL_LOSS_SKEW_SECS: u64 =
-    LOCATION_MESSAGE_RETENTION_SECS + RECEIVER_EXPIRATION_GRACE_SECS;
+/// `nostr-relay-pool` drops an event whose NIP-40 expiration is behind the
+/// receiving device's own clock, on receipt and with no grace
+/// (`nostr-relay-pool-0.44.3/src/relay/inner.rs:1193`), and the expiration is
+/// `created_at + LOCATION_MESSAGE_RETENTION_SECS` by the sender's clock. At
+/// this disagreement a location's residency is zero: a publisher lagging by it
+/// loses **100 %** of its updates while still seeing a successful relay ACK,
+/// and a receiver running this far ahead hears no peer at all. Below it the
+/// residency is `LOCATION_MESSAGE_RETENTION_SECS − skew`, not the full window.
+pub const TOTAL_LOSS_SKEW_SECS: u64 = LOCATION_MESSAGE_RETENTION_SECS;
 
 /// Skew magnitude at or above which Haven tells the user their clock is wrong
 /// (seconds).
 ///
 /// # Why 120 and not something else
 ///
-/// The number is derived from the two constants that bound what actually
-/// breaks, not chosen for feel:
+/// Nothing absorbs a disagreement — the pool judges every expiration with no
+/// grace — so a lag of `d` leaves a location `228 − d` seconds of residency.
+/// The number is placed against what that costs:
 ///
-/// * **Lower bound — do not cry wolf.** [`RECEIVER_EXPIRATION_GRACE_SECS`] is
-///   60 s: the band of disagreement the protocol *already absorbs by design*.
-///   Alerting anywhere inside it would fire on skew that costs the user
-///   nothing. `2 × 60 = 120` puts the alarm strictly outside every tolerated
-///   band, with a full grace window of headroom for measurement noise.
+/// * **Lower bound — do not cry wolf.** Until the residency falls below the
+///   median publish interval (the 120 s nominal of the uniform `[72, 168] s`
+///   jitter), i.e. while the lag is under `228 − 120 = 108 s`, a member who is
+///   not connected at the moment of a publish still finds the location on the
+///   relay in most cycles; the holes are the jitter's tail.
 /// * **Upper bound — do not hide real breakage.** At
-///   [`TOTAL_LOSS_SKEW_SECS`] (288 s) delivery is already 100 % lost and
+///   [`TOTAL_LOSS_SKEW_SECS`] (228 s) delivery is already 100 % lost and
 ///   silent. The alarm must fire well before that, so the user still has a
-///   chance to act; 120 s leaves 168 s of margin.
-/// * **It is already a real defect at this value.** The no-gap invariant is
-///   `retention (228 s) > max publish gap (168 s)`, a design margin of 60 s.
-///   A publisher lagging by 120 s has an effective residency of
-///   `228 − 120 = 108 s`, well under the 168 s worst-case inter-publish gap,
-///   so peers are *guaranteed* to see coverage holes. 120 s is therefore the
-///   point where the user is measurably harmed but not yet dark — exactly
-///   where a warning belongs.
+///   chance to act; 120 s leaves 108 s of margin.
+/// * **It is already a real defect at this value.** A publisher lagging by
+///   120 s has a residency of `228 − 120 = 108 s`, under the 168 s worst-case
+///   interval, so most cycles (the 62.5 % of intervals above 108 s) leave a
+///   member who catches up later a coverage hole. 120 s is therefore the point
+///   where the user is measurably harmed but not yet dark — exactly where a
+///   warning belongs.
 ///
 /// Moving this in *either* direction is a behaviour change: widening hides
 /// breakage, narrowing cries wolf. `clock_skew_threshold_is_pinned` fails on
 /// both. Mirrored in Dart as `kClockSkewAlertThreshold`
 /// (`haven/lib/src/constants/location.dart`) and pinned across the two by
 /// `scripts/ci/check_clock_skew_policy_parity.sh`.
-pub const CLOCK_SKEW_ALERT_THRESHOLD_SECS: u64 = 2 * RECEIVER_EXPIRATION_GRACE_SECS;
+pub const CLOCK_SKEW_ALERT_THRESHOLD_SECS: u64 = 120;
 
 /// What a relay's rejection says about this device's clock.
 ///
@@ -225,6 +228,9 @@ const UNSPECIFIED_PHRASES: &[&str] = &[
 /// phrase tables cover the wording used by strfry, `nostr-rs-relay`,
 /// `nostream`, `khatru` and `relayer`; an unrecognised phrasing degrades to
 /// `None`, i.e. to today's behaviour, never to a false clock accusation.
+/// Which prefixes are read at all is [`classify_clock_refusal`]'s rule:
+/// khatru sends its verdict under `blocked:` (`event too much in the future`,
+/// `event too old`).
 #[must_use]
 pub fn classify_relay_rejection(reason: &str) -> Option<DeviceClockComplaint> {
     let lowered = reason.to_ascii_lowercase();
@@ -268,14 +274,56 @@ pub fn classify_publish_outcome(
     }
     rejections
         .iter()
-        .filter_map(|(_, reason)| classify_relay_rejection(reason))
+        .filter_map(|(_, reason)| classify_clock_refusal(reason))
         .reduce(DeviceClockComplaint::merge)
+}
+
+/// What one relay's `OK false` says about this device's clock.
+///
+/// The one rule every publish path keeps: only a refusal with NIP-01's
+/// `invalid:` or `blocked:` prefix, or with none, is read
+/// ([`classify_relay_rejection`]) — `blocked:` because khatru's timestamp
+/// policies answer under it. Under any other prefix (`pow:`,
+/// `rate-limited:`, …) a mention of a timestamp is not a clock complaint.
+#[must_use]
+pub fn classify_clock_refusal(reason: &str) -> Option<DeviceClockComplaint> {
+    use nostr::message::MachineReadablePrefix as Prefix;
+    matches!(
+        Prefix::parse(reason),
+        None | Some(Prefix::Invalid | Prefix::Blocked)
+    )
+    .then(|| classify_relay_rejection(reason))
+    .flatten()
+}
+
+/// `complaint`, about an event this device signed `age_secs` ago by its own
+/// clock, kept only where it can be about that clock.
+///
+/// A relay judges an event's age against its own clock, and Haven sends
+/// events that are old in fact: a recorded commit or proposal is sent again
+/// byte for byte hours after it was signed. Khatru's past window is set by
+/// its operator (`policies.PreventTimestampsInThePast`; its own
+/// getting-started example sets two hours), so a refusal of an older event as
+/// too old, or out of range, says how old the event is, not how slow this
+/// device's clock is. Only an event signed within the alert threshold
+/// ([`CLOCK_SKEW_ALERT_THRESHOLD_SECS`]) is kept: a clock behind by the
+/// threshold makes even a fresh event look that old. A relay whose operator
+/// set its past window under the threshold, 120 s, can still refuse such an
+/// event as too old and raise a false `Behind`. A verdict that the event is
+/// from the future is about this clock whatever the event's age.
+#[must_use]
+pub fn on_this_clock(
+    complaint: DeviceClockComplaint,
+    age_secs: u64,
+) -> Option<DeviceClockComplaint> {
+    (complaint == DeviceClockComplaint::Ahead || age_secs <= CLOCK_SKEW_ALERT_THRESHOLD_SECS)
+        .then_some(complaint)
 }
 
 /// Whether retrying this publish is provably pointless.
 ///
 /// True when every relay that answered rejected the event on timestamp
-/// grounds. The retry re-offers the *same signed event* with the *same*
+/// grounds ([`classify_clock_refusal`]). The retry re-offers the *same signed event* with the *same*
 /// `created_at`, so a relay that already judged that timestamp out of range
 /// will judge it out of range again — the retries buy nothing and cost radio
 /// time on a device that is, by hypothesis, already failing to share location.
@@ -289,12 +337,13 @@ pub fn publish_retry_is_hopeless(any_accepted: bool, rejections: &[(String, Stri
         && !rejections.is_empty()
         && rejections
             .iter()
-            .all(|(_, reason)| classify_relay_rejection(reason).is_some())
+            .all(|(_, reason)| classify_clock_refusal(reason).is_some())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     // ---------------------------------------------------------------------
     // The threshold. Pinned against BOTH bounds it is derived from, so a
@@ -308,8 +357,8 @@ mod tests {
         // directly makes the assertions compile-time-constant, which clippy
         // rejects (`assertions_on_constants`) and which would also turn a
         // mutation into a build error instead of a readable test failure.
+        const MEDIAN_PUBLISH_INTERVAL_SECS: u64 = 120; // kLocationUpdateInterval
         let threshold = CLOCK_SKEW_ALERT_THRESHOLD_SECS;
-        let grace = RECEIVER_EXPIRATION_GRACE_SECS;
         let retention = LOCATION_MESSAGE_RETENTION_SECS;
         let total_loss = TOTAL_LOSS_SKEW_SECS;
 
@@ -320,41 +369,53 @@ mod tests {
              bounds below with it, or not at all."
         );
 
-        // Lower bound: strictly outside the band the protocol absorbs by
-        // design, so ordinary tolerated disagreement can never raise an alarm.
-        // NARROWING the threshold fails here.
+        // Lower bound: past the lag at which the residency left to a lagging
+        // publisher drops under the median publish interval, so a lag whose
+        // holes are only the jitter's tail never raises an alarm.
         assert!(
-            threshold > grace,
-            "an alert inside the receiver grace window fires on skew that \
-             costs the user nothing"
-        );
-        assert_eq!(
-            threshold,
-            2 * grace,
-            "the threshold is defined as two grace windows; if the grace \
-             window moves the threshold must move with it"
+            threshold > retention - MEDIAN_PUBLISH_INTERVAL_SECS,
+            "an alert while the residency still covers most publish intervals \
+             fires on skew that costs the user only the jitter's tail"
         );
 
-        // Upper bound: must fire strictly BEFORE delivery goes to zero, and
-        // before the no-gap invariant is beyond rescue. WIDENING the threshold
-        // fails here.
+        // Upper bound: must fire strictly BEFORE delivery goes to zero.
+        // WIDENING the threshold fails here.
         assert!(
             threshold < total_loss,
             "an alert at or above the total-loss point only ever arrives after \
              every location has already been silently dropped"
         );
-        assert!(
-            threshold < retention,
-            "at a threshold above the retention the residency left to a lagging \
-             publisher is already negative"
-        );
     }
 
     #[test]
-    fn total_loss_point_is_the_receiver_gate() {
-        // Not a restatement of the constant: this is the arithmetic the
-        // receiver actually performs in SessionManager::process_event.
-        assert_eq!(TOTAL_LOSS_SKEW_SECS, 228 + 60);
+    fn total_loss_point_is_the_relay_pools_drop_point() {
+        // `Event::is_expired_at` is the predicate `nostr-relay-pool` applies to
+        // every received event (`relay/inner.rs:1193`, through `is_expired`),
+        // and the expiration is stamped as the engine stamps a location. Fixed
+        // instants make the boundary exact; the real pool is exercised by
+        // `tests/relay_pool_expiry_drop_point.rs`.
+        let receiver_now = Timestamp::from(1_800_000_000);
+        let sent_lagging_by = |lag: u64| {
+            let created_at = Timestamp::from(receiver_now.as_secs() - lag);
+            EventBuilder::new(Kind::Custom(445), "")
+                .tag(Tag::expiration(
+                    created_at + LOCATION_MESSAGE_RETENTION_SECS,
+                ))
+                .custom_created_at(created_at)
+                .sign_with_keys(&Keys::generate())
+                .expect("a locally built event signs")
+        };
+
+        assert!(
+            !sent_lagging_by(TOTAL_LOSS_SKEW_SECS).is_expired_at(&receiver_now),
+            "at the total-loss point the residency is zero, not negative: \
+             the point is past where the pool starts dropping"
+        );
+        assert!(
+            sent_lagging_by(TOTAL_LOSS_SKEW_SECS + 1).is_expired_at(&receiver_now),
+            "one second past the total-loss point the pool must already drop \
+             the location: the point is short of where the pool starts dropping"
+        );
     }
 
     #[test]
@@ -491,6 +552,40 @@ mod tests {
         );
     }
 
+    /// A timestamp mentioned under another prefix is no clock complaint;
+    /// under `invalid:`, `blocked:` or none it is.
+    #[test]
+    fn only_an_invalid_blocked_or_unprefixed_refusal_is_read_for_the_clock() {
+        assert_eq!(
+            classify_publish_outcome(
+                false,
+                &[
+                    rejection("rate-limited: too many events in the future"),
+                    rejection("pow: difficulty too low for an event in the past"),
+                ]
+            ),
+            None
+        );
+        assert_eq!(
+            classify_publish_outcome(false, &[rejection("created_at is in the future")]),
+            Some(DeviceClockComplaint::Ahead)
+        );
+        // khatru's `PreventTimestampsInTheFuture` / `...InThePast`, as its
+        // `handleNormal` sends them: `NormalizeOKMessage(msg, "blocked")`.
+        assert_eq!(
+            classify_publish_outcome(false, &[rejection("blocked: event too much in the future")]),
+            Some(DeviceClockComplaint::Ahead)
+        );
+        assert_eq!(
+            classify_publish_outcome(false, &[rejection("blocked: event too old")]),
+            Some(DeviceClockComplaint::Behind)
+        );
+        assert_eq!(
+            classify_publish_outcome(false, &[rejection("blocked: pubkey not on the allowlist")]),
+            None
+        );
+    }
+
     #[test]
     fn publish_outcome_is_silent_for_non_clock_rejections() {
         assert_eq!(
@@ -551,6 +646,45 @@ mod tests {
                 rejection("rate-limited: slow down"),
             ]
         ));
+    }
+
+    /// The retry rule reads refusals as the verdict does: a timestamp named
+    /// under a prefix the verdict ignores leaves the retry in place, and
+    /// khatru's `blocked:` one ends it.
+    #[test]
+    fn retry_is_hopeless_exactly_when_the_verdict_reads_every_refusal() {
+        assert!(!publish_retry_is_hopeless(
+            false,
+            &[rejection("rate-limited: too many events in the future")]
+        ));
+        assert!(publish_retry_is_hopeless(
+            false,
+            &[rejection("blocked: event too much in the future")]
+        ));
+    }
+
+    /// A complaint about an event older than the alert threshold says how old
+    /// the event is, unless it says the event is from the future; within the
+    /// threshold every direction stands.
+    #[test]
+    fn an_old_events_refusal_is_no_evidence_of_a_slow_clock() {
+        let old = CLOCK_SKEW_ALERT_THRESHOLD_SECS + 1;
+        assert_eq!(on_this_clock(DeviceClockComplaint::Behind, old), None);
+        assert_eq!(on_this_clock(DeviceClockComplaint::Unspecified, old), None);
+        assert_eq!(
+            on_this_clock(DeviceClockComplaint::Ahead, old),
+            Some(DeviceClockComplaint::Ahead)
+        );
+        for complaint in [
+            DeviceClockComplaint::Ahead,
+            DeviceClockComplaint::Behind,
+            DeviceClockComplaint::Unspecified,
+        ] {
+            assert_eq!(
+                on_this_clock(complaint, CLOCK_SKEW_ALERT_THRESHOLD_SECS),
+                Some(complaint)
+            );
+        }
     }
 
     #[test]

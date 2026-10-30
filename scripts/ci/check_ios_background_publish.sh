@@ -91,6 +91,8 @@
 # so prose can never satisfy a rule, and every one of them has a fixture that
 # fails on the shape it forbids.
 set -uo pipefail
+LITERAL_FREE="$(cat "$(dirname "${BASH_SOURCE[0]}")/lib/literal_free.awk")"
+readonly LITERAL_FREE
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -158,11 +160,11 @@ code_has_e() { local v; v="$(code_view "$2")"; grep -qE -- "$1" <<<"$v"; }
 code_count() { local v; v="$(code_view "$2")"; grep -cF -- "$1" <<<"$v"; }
 fn_slice() {
   local v; v="$(code_view "$2")"
-  awk -v sig="$1" '
+  awk -v sig="$1" "${LITERAL_FREE}"'
     index($0, sig) > 0 { inbody = 1 }
     inbody {
       print
-      o = gsub(/[{]/, "&"); c = gsub(/[}]/, "&")
+      lfree = literal_free($0); o = gsub(/[{]/, "&", lfree); c = gsub(/[}]/, "&", lfree)
       depth += o - c
       if (seen && depth <= 0) exit
       if (o > 0) seen = 1
@@ -800,12 +802,12 @@ check_stream_provider() { # <location_provider.dart>
   # frame runs while paused to put it back.
   local paused fg
   paused="$(mktemp)"; fg="$(mktemp)"
-  awk -v pat='if (!ref.read(appForegroundProvider))' -v pf="$paused" -v ff="$fg" '
+  awk -v pat='if (!ref.read(appForegroundProvider))' -v pf="$paused" -v ff="$fg" "${LITERAL_FREE}"'
     !inb && index($0, pat) > 0 { inb = 1; seen = 0; depth = 0 }
     {
       if (inb) {
         print > pf
-        o = gsub(/[{]/, "&"); c = gsub(/[}]/, "&")
+        lfree = literal_free($0); o = gsub(/[{]/, "&", lfree); c = gsub(/[}]/, "&", lfree)
         depth += o - c
         if (seen && depth <= 0) { inb = 0 }
         else if (o > 0) { seen = 1 }
@@ -968,7 +970,7 @@ check_burst_plane_entry() { # <lib dir> <native wake handler>...
   #
   # Generated bindings are excluded. `lib/src/rust/` mirrors the Rust API
   # surface verbatim; it is not a place where anyone decides who may publish.
-  local f view built="" sunk="" installed="" opened=""
+  local f view built="" sunk="" installed="" opened="" started=""
   while IFS= read -r f; do
     case "$f" in */lib/src/rust/*) continue ;; esac
     view="$(code_view "$f")"
@@ -976,10 +978,12 @@ check_burst_plane_entry() { # <lib dir> <native wake handler>...
     grep -qE -- '(implements|extends|with)[^;{]*\bBurstSink\b|extends[^;{]*\bBackgroundBurstCoordinator\b' <<<"$view" &&
       sunk+="${f}"$'\n'
     grep -qE -- '\.setTickSink\(' <<<"$view" && installed+="${f}"$'\n'
-    grep -qE -- '\bopenBackgroundBurst\b' <<<"$view" && opened+="${f}"$'\n'
+    grep -qE -- '\bopenBackgroundBurstWithin\b' <<<"$view" && opened+="${f}"$'\n'
+    grep -qE -- '\bstartIntoBurst\b' <<<"$view" && started+="${f}"$'\n'
   done < <(find "$lib" -name '*.dart' -type f | LC_ALL=C sort)
   built="${built%$'\n'}"; sunk="${sunk%$'\n'}"
   installed="${installed%$'\n'}"; opened="${opened%$'\n'}"
+  started="${started%$'\n'}"
 
   # 1. Construction. The coordinator's own file declares the constructor and is
   #    excluded; every other mention is a call.
@@ -1003,13 +1007,20 @@ check_burst_plane_entry() { # <lib dir> <native wake handler>...
   [[ "$installed" == "$owner" ]] ||
     lfail "the scheduler's tick sink is installed from [${installed:-nowhere}], not from exactly $(basename "$owner") — the install is what routes every due circle's publish through the burst plane, and it belongs to the file that owns the pause and therefore knows the process is still the user's. Nowhere means nothing installs it and the whole plane is dead"
 
-  # 4. The engine's burst API. `openBackgroundBurst()` re-anchors every REQ at
-  #    its persisted cursor; it is the receive half of a burst, and a caller
-  #    outside this triangle is a file opening a burst on its own account.
+  # 4. The engine's burst API. `openBackgroundBurstWithin()` re-anchors every
+  #    REQ at its persisted cursor; it is the receive half of a burst, and a
+  #    caller outside this triangle is a file opening a burst on its own
+  #    account. `startIntoBurst()` starts a session directly into a burst: the
+  #    owner readies it for its coordinator, and nobody else may name it.
   local expect_opened
   expect_opened="$(printf '%s\n%s\n%s\n' "$coordinator" "$engine_impl" "$engine_api" | LC_ALL=C sort)"
   [[ "$opened" == "$expect_opened" ]] ||
-    lfail "openBackgroundBurst is named in [${opened:-nowhere}], not in exactly the declaration, its implementation and the coordinator — a new caller opens a burst outside the one place that closes it, and a missing one means the plane no longer re-anchors its cursors at all. If a caller is legitimately added, add it HERE in the same change"
+    lfail "openBackgroundBurstWithin is named in [${opened:-nowhere}], not in exactly the declaration, its implementation and the coordinator — a new caller opens a burst outside the one place that closes it, and a missing one means the plane no longer re-anchors its cursors at all. If a caller is legitimately added, add it HERE in the same change"
+
+  local expect_started
+  expect_started="$(printf '%s\n%s\n%s\n' "$owner" "$engine_impl" "$engine_api" | LC_ALL=C sort)"
+  [[ "$started" == "$expect_started" ]] ||
+    lfail "startIntoBurst is named in [${started:-nowhere}], not in exactly the declaration, its implementation and $(basename "$owner") — a session started into a burst outside the owner's readied start is a burst nobody closes; a missing one means a burst that finds no session can never start one"
 
   # 5. The native wakes. A Swift handler cannot reach the burst plane by
   #    naming a Dart symbol — it has no Dart symbols. It reaches Dart through
@@ -1434,6 +1445,22 @@ check_bg_publish_drive() { # <ios_bg_publish_test.dart>
     lfail "ios_bg_publish_test.dart prints kBackgroundReceiveMarker at line ${receive_line}, BEFORE the between-bursts assertion it stands for at line ${verdict_line} — a terminal proof printed ahead of its own assertion is the A3b hole the completion gate exists to close: the drive could return early and still satisfy the gate"
   fi
 
+  # P2c's SOCKET half. Every NIP-77 session of a burst runs on the session's
+  # drive pool, and a session cannot outlive its socket, so the drive pool's
+  # connected-relay count read as ZERO between bursts is the lane's one
+  # in-process proof that no reconciliation stands there. Read off the same
+  # string-stripped view, asserted (`sockets.matched`) and printed under the
+  # terminal proof, for the same reasons as the subscription count above.
+  local sockets_line
+  sockets_line="$(code_line_of 'sockets\.matched' <<<"$no_strings")"
+  grep -qF 'drivePoolConnectedRelays(' <<<"$no_strings" ||
+    lfail "ios_bg_publish_test.dart no longer reads drivePoolConnectedRelays — every NIP-77 session of a burst runs on the drive pool, and with no read of its sockets nothing in this lane says a reconciliation did not stand between bursts"
+  if [[ -z "$sockets_line" ]]; then
+    lfail "ios_bg_publish_test.dart no longer ASSERTS the between-bursts drive-pool socket verdict (sockets.matched) — a read that is never expected is not an oracle. If the local was merely renamed, re-point this anchor to the new name"
+  elif [[ -n "$receive_line" ]] && (( receive_line <= sockets_line )); then
+    lfail "ios_bg_publish_test.dart prints kBackgroundReceiveMarker at line ${receive_line}, BEFORE the drive-pool socket assertion it stands for at line ${sockets_line} — the A3b hole again: the drive could return early and still satisfy the completion gate"
+  fi
+
   # P2d's ORACLE — the poll leg's half, and it needs its own pins for exactly
   # the reasons P2c's does. It is the only runtime proof anywhere that the poll
   # path's background receive timer fires at all (OD4-d), it has no wire oracle
@@ -1446,6 +1473,15 @@ check_bg_publish_drive() { # <ios_bg_publish_test.dart>
   # every run. Read off the same string-stripped view, for the same reason.
   grep -qF 'snapshotLastKnownForCircle(' <<<"$no_strings" ||
     lfail "ios_bg_publish_test.dart no longer reads snapshotLastKnownForCircle — that persisted store is P2d's only oracle: on the poll leg the catch-up sweep writes it from Rust and nothing hydrates the in-memory member cache while the app is paused, so the cache would report an absence for a sweep that worked"
+  # P2d's attribution: since decision 244 a flag-off burst writes the same
+  # store before it seals, so the row alone no longer says the TIMER fired.
+  # The timer's own sweep count is asserted beside it, ahead of the marker.
+  local sweeps_line
+  sweeps_line="$(code_line_of 'expect\(MapShell\.backgroundReceiveTimerSweeps, greaterThan\(' \
+    <<<"$no_strings")"
+  if [[ -z "$sweeps_line" ]]; then
+    lfail "ios_bg_publish_test.dart no longer asserts MapShell.backgroundReceiveTimerSweeps advanced in P2d's window — the persisted row is also written by a flag-off burst's receive-first catch-up (decision 244), so without the timer's own count P2d passes with the 90 s receive timer dead"
+  fi
   local catchup_verdict_line catchup_marker_line
   catchup_verdict_line="$(code_line_of 'catchup\.fix' <<<"$no_strings")"
   catchup_marker_line="$(code_line_of 'debugPrint\(kBackgroundCatchupMarker\)' \
@@ -1455,6 +1491,8 @@ check_bg_publish_drive() { # <ios_bg_publish_test.dart>
   fi
   if [[ -z "$catchup_marker_line" ]]; then
     lfail "ios_bg_publish_test.dart no longer prints kBackgroundCatchupMarker — the poll leg's completion gate demands it, so that leg would red with 'the drive exited 0 without its terminal proof' instead of naming the phase that went missing"
+  elif [[ -n "$sweeps_line" ]] && (( catchup_marker_line <= sweeps_line )); then
+    lfail "ios_bg_publish_test.dart prints kBackgroundCatchupMarker at line ${catchup_marker_line}, BEFORE the timer-sweep assertion at line ${sweeps_line} — the terminal proof would stand for an attribution never checked"
   elif [[ -n "$catchup_verdict_line" ]] &&
        (( catchup_marker_line <= catchup_verdict_line )); then
     lfail "ios_bg_publish_test.dart prints kBackgroundCatchupMarker at line ${catchup_marker_line}, BEFORE the catch-up assertion it stands for at line ${catchup_verdict_line} — a terminal proof printed ahead of its own assertion is the A3b hole the completion gate exists to close: the drive could return early and still satisfy the gate"
@@ -1685,6 +1723,14 @@ check_poll_path_background_wake() { # <map_shell.dart>
     lfail "map_shell.dart has no _runBackgroundCatchUp method — that is the poll path's background sweep, the one MapShell._startIosBackgroundReceiveTimer's timer drives and the one P2d of the e2e-ios-background-publish poll leg asserts. If it was renamed, re-point this check and check 16's neighbour in the same commit"
     return "$_lf"
   fi
+  grep -qF 'backgroundReceiveTimerSweeps++' <<<"$body" ||
+    lfail "map_shell.dart's _runBackgroundCatchUp no longer counts its finished sweeps (backgroundReceiveTimerSweeps++) — P2d attributes the poll path's receive timer by that count, since a flag-off burst writes the same persisted row"
+  # Whitespace-flattened, so the count is bound to the condition as its
+  # block's only statement: both lines present with the count hoisted above
+  # the `if` would pass two separate greps.
+  grep -qF 'if(MapShell.catchupCompleted(result)){MapShell.backgroundReceiveTimerSweeps++;}' \
+    <<<"$(tr -d '[:space:]' <<<"$body")" ||
+    lfail "map_shell.dart's _runBackgroundCatchUp counts a sweep that did not complete — the count must be the only statement of 'if (MapShell.catchupCompleted(result)) {': a wake the consent gated out, or one a relay error cut short, may have landed no row, and P2d would credit the timer with one it did not write"
   grep -qF 'runCatchup(isBackgroundWake: true)' <<<"$body" ||
     lfail "map_shell.dart's _runBackgroundCatchUp no longer calls runCatchup(isBackgroundWake: true) — that argument is the ONLY thing that puts this sweep behind the C3 consent chokepoint, and it is the only difference the flag makes: without it the sweep still runs, still persists and still passes P2d, while a wake that outlived the C4 timer cancel now reaches the relay after the user withdrew background sharing (Rule 10). Never pass false here, and never let the sweep reach CatchupService through a helper that drops it"
   return "$_lf"
@@ -2338,7 +2384,7 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=209
+  local -r SELF_TEST_FIXTURES=221
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -3667,7 +3713,7 @@ class BackgroundBurstCoordinator implements BurstSink {
   final SubscriptionService engine;
 
   Future<void> _runBurst() async {
-    await engine.openBackgroundBurst();
+    await engine.openBackgroundBurstWithin();
   }
 }'
   local burst_owner='class _MapShellState {
@@ -3676,6 +3722,9 @@ class BackgroundBurstCoordinator implements BurstSink {
     _scheduler.setTickSink(coordinator);
     return coordinator;
   }
+
+  Future<BurstStart?> _prepareStartIntoBurst(Duration budget) async =>
+      () => _engine.startIntoBurst(budget: budget);
 }'
   local burst_scheduler='class LocationPublishSchedulerNotifier {
   BurstSink? _tickSink;
@@ -3685,13 +3734,17 @@ class BackgroundBurstCoordinator implements BurstSink {
   }
 }'
   local burst_api='abstract class SubscriptionService {
-  Future<void> openBackgroundBurst();
+  Future<void> openBackgroundBurstWithin();
+  Future<void> startIntoBurst({required Duration budget});
 }'
   local burst_impl='class NostrSubscriptionService implements SubscriptionService {
   @override
-  Future<void> openBackgroundBurst() async {
-    await engine.openBackgroundBurst();
+  Future<void> openBackgroundBurstWithin() async {
+    await engine.openBackgroundBurstWithin();
   }
+
+  @override
+  Future<void> startIntoBurst({required Duration budget}) async {}
 }'
   local burst_slc='final class HavenSLCHandler: NSObject {
   private func triggerDartCatchup() {
@@ -3783,12 +3836,26 @@ class BackgroundBurstCoordinator implements BurstSink {
   #    bindings — which mirror the Rust surface and decide nothing.
   _burst_tree
   printf '%s\n' 'Future<void> wakeCatchup(SubscriptionService engine) async {
-  await engine.openBackgroundBurst();
+  await engine.openBackgroundBurstWithin();
 }' >"${tmp}/burst/lib/src/services/ios_background_catchup.dart"
   _burst 'burst plane: a new file opens a burst on the engine' 1
   _burst_tree
+  printf '%s\n' 'Future<void> wakeCatchup(SubscriptionService engine) async {
+  await engine.startIntoBurst(budget: Duration.zero);
+}' >"${tmp}/burst/lib/src/services/ios_background_catchup.dart"
+  _burst 'burst plane: a new file starts a session into a burst' 1
+  _burst_tree
+  printf '%s\n' 'class _MapShellState {
+  BackgroundBurstCoordinator _installBurstCoordinator() {
+    final coordinator = BackgroundBurstCoordinator(engine: _engine);
+    _scheduler.setTickSink(coordinator);
+    return coordinator;
+  }
+}' >"${tmp}/burst/lib/src/pages/map_shell.dart"
+  _burst 'burst plane: nobody readies the start into a burst' 1
+  _burst_tree
   printf '%s\n' 'abstract class RustSubscriptionEngine {
-  Future<void> openBackgroundBurst();
+  Future<void> openBackgroundBurstWithin();
 }' >"${tmp}/burst/lib/src/rust/api.dart"
   _burst 'burst plane: the generated bindings are not a call site' 0
   # 5. The native wakes: one door into Dart, and it is receive-only.
@@ -4554,10 +4621,13 @@ EOF
     await peer.publishLocation(relay: relay);
     final quiet = await _pollPoolSubscriptions(engine, window, wanted: (count) => count == 0);
     expect(quiet.matched, isTrue, reason: "a standing REQ survived the burst");
+    final sockets = await LiveSyncFfi.drivePoolConnectedRelays();
+    expect(sockets.matched, isTrue, reason: "a drive-pool socket survived the burst");
     debugPrint(kBackgroundReceiveMarker);
     final rows = await circleService.snapshotLastKnownForCircle(nostrGroupId: gid);
     final catchup = firstFrom(rows, peer.pubkeyHex);
     expect(catchup.fix, isNotNull, reason: "the sweep landed nothing");
+    expect(MapShell.backgroundReceiveTimerSweeps, greaterThan(swept));
     debugPrint(kBackgroundCatchupMarker);
   });
 }'
@@ -4635,12 +4705,30 @@ EOF
   # before the claim, which is exactly the early return A3b describes.
   _drive 'drive: the receive marker printed between the poll and its assertion' 1 \
     "${drive_good/    expect(quiet.matched, isTrue, reason: \"a standing REQ survived the burst\");
+    final sockets = await LiveSyncFfi.drivePoolConnectedRelays();
+    expect(sockets.matched, isTrue, reason: \"a drive-pool socket survived the burst\");
     debugPrint(kBackgroundReceiveMarker);/    debugPrint(kBackgroundReceiveMarker);
-    expect(quiet.matched, isTrue, reason: \"a standing REQ survived the burst\");}"
+    expect(quiet.matched, isTrue, reason: \"a standing REQ survived the burst\");
+    final sockets = await LiveSyncFfi.drivePoolConnectedRelays();
+    expect(sockets.matched, isTrue, reason: \"a drive-pool socket survived the burst\");}"
   # …and deleted outright, which the wrapper would report as an absent proof
   # without naming the phase that lost it.
   _drive 'drive: the receive marker deleted' 1 \
     "${drive_good/debugPrint(kBackgroundReceiveMarker);/}"
+
+  # --- P2c's socket half. Each mutant leaves every terminal proof in place.
+  _drive 'drive: the drive-pool socket read dropped' 1 \
+    "${drive_good/    final sockets = await LiveSyncFfi.drivePoolConnectedRelays();
+/}"
+  _drive 'drive: the drive-pool socket read survives only inside a reason string' 1 \
+    "${drive_good/final sockets = await LiveSyncFfi.drivePoolConnectedRelays();/final sockets = observation(reason: \"read drivePoolConnectedRelays()\");}"
+  _drive 'drive: the drive-pool socket verdict never asserted' 1 \
+    "${drive_good/    expect(sockets.matched, isTrue, reason: \"a drive-pool socket survived the burst\");
+/}"
+  _drive 'drive: the receive marker printed ahead of the socket verdict' 1 \
+    "${drive_good/    expect(sockets.matched, isTrue, reason: \"a drive-pool socket survived the burst\");
+    debugPrint(kBackgroundReceiveMarker);/    debugPrint(kBackgroundReceiveMarker);
+    expect(sockets.matched, isTrue, reason: \"a drive-pool socket survived the burst\");}"
 
   # --- …and the same three reads, surviving ONLY as prose about themselves.
   #     Each mutant below deletes the real thing and leaves a `reason:` string
@@ -4676,6 +4764,15 @@ EOF
   # with whatever it last read — a null fix included — so a drive that drops the
   # `expect` keeps a bounded wait, loses the oracle, and prints the terminal
   # proof over it.
+  # The row alone, its attribution dropped: a flag-off burst writes the same
+  # row, so P2d would pass with the receive timer dead (decision 244).
+  _drive 'drive: the P2d timer-sweep attribution dropped' 1 \
+    "${drive_good/    expect(MapShell.backgroundReceiveTimerSweeps, greaterThan(swept));
+/}"
+  _drive 'drive: the catchup marker printed above the timer attribution' 1 \
+    "${drive_good/    expect(MapShell.backgroundReceiveTimerSweeps, greaterThan(swept));
+    debugPrint(kBackgroundCatchupMarker);/    debugPrint(kBackgroundCatchupMarker);
+    expect(MapShell.backgroundReceiveTimerSweeps, greaterThan(swept));}"
   _drive 'drive: the P2d catch-up verdict never asserted' 1 \
     "${drive_good/    expect(catchup.fix, isNotNull, reason: \"the sweep landed nothing\");
 /}"
@@ -4683,8 +4780,10 @@ EOF
   # would accept a body that returned early (A3b).
   _drive 'drive: the catchup marker printed above its own assertion' 1 \
     "${drive_good/    expect(catchup.fix, isNotNull, reason: \"the sweep landed nothing\");
+    expect(MapShell.backgroundReceiveTimerSweeps, greaterThan(swept));
     debugPrint(kBackgroundCatchupMarker);/    debugPrint(kBackgroundCatchupMarker);
-    expect(catchup.fix, isNotNull, reason: \"the sweep landed nothing\");}"
+    expect(catchup.fix, isNotNull, reason: \"the sweep landed nothing\");
+    expect(MapShell.backgroundReceiveTimerSweeps, greaterThan(swept));}"
   # …and deleted outright, which the wrapper would report as an absent proof
   # without naming the phase that lost it.
   _drive 'drive: the catchup marker deleted' 1 \
@@ -4955,7 +5054,12 @@ EOF
   }
 
   Future<void> _runBackgroundCatchUp() async {
-    await ref.read(catchupServiceProvider).runCatchup(isBackgroundWake: true);
+    final result = await ref
+        .read(catchupServiceProvider)
+        .runCatchup(isBackgroundWake: true);
+    if (MapShell.catchupCompleted(result)) {
+      MapShell.backgroundReceiveTimerSweeps++;
+    }
   }
 }'
   _wake() { # <label> <want-rc> <map_shell text>
@@ -4973,18 +5077,39 @@ EOF
     "${wake_shell/isBackgroundWake: true/isBackgroundWake: false}"
   _wake 'wake: the method gone is REFUSED' 1 \
     "${wake_shell/  Future<void> _runBackgroundCatchUp() async {
-    await ref.read(catchupServiceProvider).runCatchup(isBackgroundWake: true);
+    final result = await ref
+        .read(catchupServiceProvider)
+        .runCatchup(isBackgroundWake: true);
+    if (MapShell.catchupCompleted(result)) {
+      MapShell.backgroundReceiveTimerSweeps++;
+    \}
   \}
 /}"
+  _wake 'wake: the sweep count dropped is REFUSED' 1 \
+    "${wake_shell/      MapShell.backgroundReceiveTimerSweeps++;
+/}"
+  # A sweep that did not complete (gated out, or cut short by a relay error
+  # or its deadline) may have landed no row: counted, P2d would credit the
+  # timer with one it did not write.
+  _wake 'wake: a sweep counted whether or not it completed is REFUSED' 1 \
+    "${wake_shell/if (MapShell.catchupCompleted(result)) {/if (true) {}"
+  _wake 'wake: a gated-out sweep counted on circles alone is REFUSED' 1 \
+    "${wake_shell/if (MapShell.catchupCompleted(result)) {/if (result.circlesSwept > 0) {}"
+  # Both lines still present, the count no longer under the condition.
+  _wake 'wake: a count hoisted out of the completed-sweep condition is REFUSED' 1 \
+    "${wake_shell/    if (MapShell.catchupCompleted(result)) {
+      MapShell.backgroundReceiveTimerSweeps++;
+    \}/    MapShell.backgroundReceiveTimerSweeps++;
+    if (MapShell.catchupCompleted(result)) {
+      debugPrint('swept');
+    \}}"
   # NON-VACUITY for the slice, and the reason it anchors on the DECLARATION: the
   # method's own name appears at the timer call site ABOVE it, so a slice taken
   # from the first match would read the argument out of the timer's body — where
   # a mutation could park a correct-looking call it never makes.
   local wake_hoisted="${wake_shell/      unawaited(_runBackgroundCatchUp());/      unawaited(ref.read(catchupServiceProvider).runCatchup(isBackgroundWake: true));}"
   _wake 'wake: a call site above the declaration cannot answer for it' 1 \
-    "${wake_hoisted/runCatchup(isBackgroundWake: true);
-  \}/runCatchup();
-  \}}"
+    "${wake_hoisted/.runCatchup(isBackgroundWake: true);/.runCatchup();}"
 
   # --- check_poll_leg_tier ---------------------------------------------------
   #

@@ -1,7 +1,7 @@
 # Background Location Sharing — Field Failure Analysis and Fix Plan
 
 **Status:** analysis COMPLETE (2026-08-28); fix units A–F ALL IMPLEMENTED + REVIEWED
-(2026-08-29; each carries its own status line and review record; nothing is committed yet).
+(2026-08-29; each carries its own status line and review record; committed in `f786356`).
 **AMENDED 2026-09-09: a SIXTH silent wedge was added — C5b, the durable variant of C5 that a process
 restart does not clear (the OD4-c wedge). It was found by the power epic's own review rather than by this
 analysis, which is the point worth keeping: "analysis COMPLETE" was true of the field incident and was
@@ -9,15 +9,22 @@ never a closed-world claim about the wedge set. Every five-wedge phrase below re
 **AMENDED 2026-09-24: a SEVENTH was added — C7, the chained-commit backlog that never drains, measured
 by the Tier-1 soak rig while building S04. Same reading of "COMPLETE": the amendment above is a standing
 one, not a one-off. Every five- or six-wedge phrase below reads as that number plus C7.**
+**AMENDED 2026-09-28: C7 is FIXED Haven-side (its section carries the fix and the MDK tracker row).**
 **AMENDED 2026-09-26: C8 was added — a commit buried on the live plane under more than a relay's
 replay cap of outsider forgeries is never fetched again, measured by the soak's S08
 `buried-past-the-cap`.**
 **AMENDED 2026-09-27: C9 was added — a device hard-killed while owing a peer's eviction stays wedged
 on that circle even after a peer lands the same removal, measured by the soak's S05
 `kill-receive-auto-commit`; whether the product or the rig owns it is OPEN.**
+**AMENDED 2026-10-24: C9 is RESOLVED for a kill after the send or after the staging, and since the MDK
+v0.10.4 migration's W9q the parked state it measured cannot arise: nothing parks an eviction any more
+(its section carries the ledger, and the residual of a kill inside the engine's own staging).**
 **AMENDED 2026-09-27: C10 was added (measured 2026-09-26) — a full catch-up page of forged kind-445s
 dated inside one second freezes the sweep's chase on every sweep, so the genuine event below it never
 drains; found while building the soak's S20, not graded.**
+**AMENDED 2026-10-26: C8 and C10 are FIXED on relays that speak NIP-77 by the MDK v0.10.4 migration's
+R4 (Haven's own advertise-nothing reconciliation pass), and both persist on a relay without NIP-77
+(recorded soak arms); their sections carry the status.**
 This is the canonical reference for every session working on the
 "sharing stops after a few hours and reopening does not help" incident. Update the work-unit
 status lines in place; do not fork this document.
@@ -60,6 +67,12 @@ external crates are the pinned versions in `haven-core/Cargo.toml` / `haven/pubs
   `location_sharing_provider.dart` `locationPublisherProvider`, `background_location_task.dart`
   `_publishCycle`). Kind-445 events carry NIP-40 `expiration = created_at + 228 s`; relays delete
   them, so a receiver that was down cannot replay what it missed.
+  *(AMENDED 2026-10-24 — MDK v0.10.4 migration, W9q: the seal is `relay::fanout::Publishing::seal_location`
+  → `CircleManager::seal_location_staging` → `SessionManager::send_location_staging` → `cgka-engine`
+  `do_send`, which writes the location's durable record in the same engine hold; then
+  `Publishing::publish_location` offers it to each relay once, inside a five-second connect and a
+  five-second acknowledgement window (`RelayManager::send_location`), and deletes the record.
+  `encrypt_location` and the location's `publish_event` ladder are gone.)*
 - **Receive** on the default build (`liveSyncEnabled = true`) is ONLY the live-sync engine's
   WebSocket REQs (`haven-core/src/relay/live_sync/*`); the 30 s / 60 s / 120 s
   poll fallbacks are compiled out (`map_shell.dart` `_startTimers`).
@@ -97,10 +110,10 @@ external crates are the pinned versions in `haven-core/Cargo.toml` / `haven/pubs
   CLOSEs every REQ and terminates every relay — and the health tick is FOREGROUND-ONLY on every
   branch, gated both where it is armed and where it fires, because a tick landing mid-burst repaired a
   pool in the middle of `connect()` through the FOREGROUND re-anchor and left standing REQs, a socket
-  and a 49 h gift-wrap replay behind at an instant that is not a publish. The bounded burst on each
+  and a 96 h gift-wrap replay behind at an instant that is not a publish. The bounded burst on each
   publish tick IS the background healer, at 72-168 s rather than 15 min.)*
-  The self-heal timer `_liveSyncHealTimer` is CANCELLED for the whole background period
-  (`map_shell.dart` `_onPaused`) — unchanged.
+  The self-heal timer (`LiveSyncHealBackstop` since 2026-10-11; `_liveSyncHealTimer` before) is
+  CANCELLED for the whole background period (`map_shell.dart` `_onPaused`) — unchanged.
   SLC relaunch + `BGAppRefreshTask` are receive-only catch-ups.
 - **MLS facts:** epochs advance only on membership changes (`enablePeriodicSelfUpdate = false`,
   M5). OpenMLS `SenderRatchetConfiguration::default()` = `(out_of_order_tolerance 5,
@@ -270,6 +283,22 @@ this document and in `POWER_EFFICIENCY_PLAN.md`. Read the five-wedge framing bel
   `staged_removes_member`, so an obligation the foreground service or the WorkManager worker recorded is
   reported and never published. Those wedges are LOUD AND TERMINAL — repaired by re-creating the circle —
   which is strictly better than the silent permanent drop they replaced, and is not a heal.
+- **Superseded 2026-10-24 by the MDK v0.10.4 migration (W9q; `POWER_EFFICIENCY_PLAN.md` L-136).**
+  Nothing parks any more and no plane has a ladder: a background burst, a session only started and
+  every wake sweep make no commit, so the eviction stays due in the engine until a full drive in a
+  claimed foreground makes it, staged under a durable fanout record in the hold that staged it —
+  unless another member's eviction is applied first. A process killed between SEND and OK leaves
+  that record, which a later drive sends again byte for byte and never rolls back while a relay may
+  hold it, and a removal is never undone for want of a reachable relay; only every relay's proven
+  refusal undoes one, and an eviction undone so is armed again by the engine (tracker T-OQA). The obligation
+  table, its redemption and the two tree-wide guarantees above are
+  gone with the paths they guarded (`CircleManager::publish_failed`, `owe_removal_publish`). What
+  stays: while an eviction is due and unmade its circle's sends are deferred
+  (`SendHeld::DepartureDue`) until a foreground — a real gap on a rarely-foregrounded device; a
+  commit recorded in the foreground that no relay may hold gets no first transmission from a
+  background wake, so its circle is silent and deaf until the app is opened (tracker T-FANOUT (41));
+  and the engine's own `Unrecoverable` verdict is still reported per circle (on the live plane, and
+  through a circle's own decrypt on either plane).
 - Full record: `POWER_EFFICIENCY_PLAN.md` §4 OD4-c and §5.4 (L-121 the decision, L-133 the
   implementation); disclosed as residual 4 of `SECURITY.md`'s "iOS background sharing: presence only at
   publish instants (P4)".
@@ -283,8 +312,13 @@ this document and in `POWER_EFFICIENCY_PLAN.md`. Read the five-wedge framing bel
   permanently (re-armed via `whenComplete`).
 - Worker death is invisible: `supervisor.rs` `run_receiver` matches only
   `TrySendError::Full`; `Closed` has no arm; `is_running()` stays true.
-- Clock skew: a receiver whose clock is >288 s fast drops 100 % of inbound with no log and no
-  cursor hold-back (`nostr/mls/manager.rs` `process_event` expiration screen). The "clock behind"
+- Clock skew: a receiver whose clock is ≥228 s fast drops 100 % of inbound with no log and no
+  cursor hold-back — `nostr-relay-pool` drops every event whose NIP-40 expiration is behind the
+  device's clock, on receipt and with no grace (`relay/inner.rs:1193`). *(Corrected 2026-09-28:
+  this read ">288 s … `process_event` expiration screen"; that Haven screen is deleted (W4) and
+  never applied to pool-delivered events anyway. Haven raises no verdict for a device fast by
+  less than its relays' future window — recorded by the B8 lane as
+  `[b8] EVIDENCE fast-skew-deaf-unsurfaced`.)* The "clock behind"
   detector needs 2 corroborating peers — **structurally unreachable in a 2-member circle**
   (`clock_skew_detector.dart`). A BACKWARD clock jump makes
   `BackgroundLocationManager.isForegroundActive()` true (negative age) and mutes the FGS.
@@ -326,7 +360,11 @@ this document and in `POWER_EFFICIENCY_PLAN.md`. Read the five-wedge framing bel
   guard, and `'the debounced early return carries no repair of its own'` fails if anything
   load-bearing is left trapped below it.
 
-### C7 — a backlog of TWO OR MORE chained commits never drains (added 2026-09-24)
+### C7 — a backlog of TWO OR MORE chained commits never drains (added 2026-09-24; FIXED Haven-side 2026-09-28)
+
+**FIXED 2026-09-28, Haven-side — a mitigation of an MDK gap, tracked as row C7 of
+`docs/MDK_UPSTREAM_TRACKER.md`. Upstream, #1206 (in the v0.10.4 pin) schedules deferrals and the hydrate: since R2 Haven drains that pending set in place of its own once-per-open edge and keeps its epoch-change edge, which no upstream issue describes. The fix is the last bullet below, with its updates; the
+rest of this section is the defect as it was measured.**
 
 **Silent receive blackout, PERMANENT. A SEVENTH silent wedge, and a PRODUCT DEFECT rather than a
 design constraint.** Found by the Tier-1 soak rig while building S04's `offline-across-a-commit` arm,
@@ -362,7 +400,8 @@ which is why it is measured rather than argued.
 - **Status.** Recorded, not fixed. S04 works around it by spanning exactly ONE commit
   (`COMMITS_WHILE_AWAY`, `tooling/soak/src/scenarios/s04_offline_member.rs`), which is stated at the
   constant as a workaround. The scenario that asserts C7 RED is owner question **OQ-T** in
-  `PLAN_PHASE2.md` §8, owed in sub-phase 2b.
+  `PLAN_PHASE2.md` §8, owed in sub-phase 2b. *(Superseded 2026-09-28 by the fix below: S04
+  spans two commits again, and S23 grades the fix.)*
 - **Amended 2026-09-25 — S23 (`tooling/soak/src/scenarios/s23_chained_backlog.rs`) grades it
   RED and measured what DOES drain it.** The stranded device's OWN next seal — `encrypt_location`,
   nothing published — runs the send path's settle, which reaches the deferred-peel sweep the
@@ -374,13 +413,73 @@ which is why it is measured rather than argued.
   recover is not a receive plane — and the fix is unchanged: a drain that does not wait for a
   local send. The page order is not a coin toss when the two commits fall in different wall
   seconds (the store orders by `created_at` descending, ties by id), which is how S23 pins it.
+- **Fixed 2026-09-28 (Haven-side).** Haven now drains the retained rows without waiting for
+  a local send, using two edges. Neither is a timer, and neither publishes anything. (1) Any
+  engine batch that moves a group's epoch leaves that group owing an `advance_convergence`
+  (`SessionManager::groups_owing_advance`, `haven-core/src/nostr/mls/manager.rs`). Every
+  receive plane's drain uses it: live sync, the catch-up sweep, the poll path and the
+  publish-resolution fold. Applying the older commit is such an epoch change, so the newer one
+  peels in the same pass. (2) The first receive plane to run in a newly opened session advances
+  every circle once (`SessionManager::take_open_advance`, since deleted; claimed from `LiveSyncCore::start` and
+  `run_catchup_all_circles`). This is needed because the engine's retry gate is in-memory and its
+  hydrate schedules nothing, so a row retained by an earlier process — killed between the older
+  commit's apply and the drain, or running a pre-fix build — would otherwise wait for an epoch
+  change that never comes. The catch-up sweep claims it per circle inside its deadline and hands
+  it back if the deadline cuts the walk short. The cost is one advance per epoch change and one
+  per circle per open. Known limitation: a `HAVEN_LIVE_SYNC=false` build's poll path never claims
+  edge (2), so there a device holding a retained row stays stranded until some catch-up sweep
+  runs. Edge (1)'s advance is also where the engine re-mints a leaving user's superseded leave.
+  It does that once per epoch, so every receive plane now hands the bare proposal on to be
+  published instead of dropping it (`SessionManager::proposal_events`). Live sync and the
+  catch-up sweep publish it in Rust, and the Dart poll path publishes it from
+  `DecryptLocationOutcome.proposals`. The same advances can release a membership change the user
+  asked for while the circle's sends were gated; its durable queue row is already gone inside
+  MDK, so every plane now publishes it under Rule 13 exactly as the publish-resolution fold does
+  (`CircleManager::surface_released_intent`, since deleted) instead of dropping it (the poll path) or rolling it
+  back (the Rust ladders), pinned by `tests/released_intent_e2e.rs`. Advance output is also routed
+  to the circle each event belongs to, since MDK's effect buffers are global. It is pinned by `haven-core/tests/deferred_peel_drain_e2e.rs` and two catch-up tests in
+  `tests/catchup_sweep_e2e.rs`. The poll path is pinned by
+  `tests/live_sync_out_of_order_commit_e2e.rs`, which no longer needs to re-feed the newer
+  commit. Removing edge (1) reds those three files' edge-1 tests, and removing edge (2) reds both
+  edge-2 tests. The soak's S23 now grades rc 0, is `SWEPT`, and is back in the nightly. Upstream,
+  MDK PR #1206 (first in v0.9.11) makes a deferral and hydrate schedule the group, which may cover
+  C7 — unverified; nothing there re-schedules a group when a LATER commit changes the peel
+  context, and no upstream issue describes that epoch-change edge. The tracker row's removal
+  condition is S23 staying green with both Haven edges removed at a pin that includes #1206; if it
+  goes red, an MDK issue is filed for the epoch-change edge.
+  *(Superseded 2026-10-24 (W9q): no plane publishes through a ladder, and the poll path's
+  `DecryptLocationOutcome.proposals` is gone. A re-minted leave is recorded as a fanout by a plane
+  that drives (tracker T-LEAVE-FANOUT), and a released queued commit comes out of a full advance
+  only, staged under its record in the hold that released it; a plane that makes no commit advances
+  inputs-only and releases nothing (tracker row C7).)*
+  *(Updated 2026-10-25 (R2): edge (2) is replaced. The once-per-open advance of every circle
+  gives way to MDK's host pending set — every batch's names are owed an advance
+  (`SessionManager::owe_advance`), the first plane of a session — the live engine's start or any
+  catch-up sweep, a `HAVEN_LIVE_SYNC=false` build's included — runs the open's recovery and then
+  drains what is owed (`take_owed_advance`; that build's poll fetches take nothing, so there the
+  owed set waits for its next sweep), and a drain owes back what it leaves unfinished — so a
+  quiet circle costs no advance at a reopen; its non-vacuity run went red as required. Edge (1) is
+  kept: the non-vacuity run that dropped Haven's in-plane serving stayed green, because MDK's
+  in-advance deferred-peel retry (#1206) converges the chain alone, so no test shows the edge
+  needed — which proves only that the tests cannot see it go, not that removing it is safe.
+  Tracker row C7 holds both removal conditions; edge (2) is restored if the end-of-migration S23
+  nightly is red.)*
 
 ### C8 — a commit buried past a relay's replay cap on the live plane is never fetched again (added 2026-09-26)
 
+**FIXED on NIP-77 relays (2026-10-26, R4); persists on a relay without NIP-77.** Recovered on a
+relay that speaks NIP-77 within 30 days and 16 384 ids per route: a background burst, a live
+foreground entry and every catch-up sweep reconcile each circle's kind-445 window against each
+relay (`haven-core/src/relay/negentropy.rs`), advertising nothing the device holds, and fetch by id
+from that relay what it reported and the device lacks — the buried commit among it. S08's
+`buried-past-the-cap` grades rc 0 and is swept; on a relay that refuses NIP-77 the strand persists,
+recorded by S08's `buried-on-a-relay-without-negentropy` (`T-NIP77-FALLBACK` in
+`docs/MDK_UPSTREAM_TRACKER.md`). Both were run locally; no nightly has yet run on the migrated code.
+
 **Silent receive blackout, PERMANENT for a buried commit. A PRODUCT DEFECT, measured by the Tier-1
-soak rig (2026-09-26) while re-scoping S08; the product fix is NOT designed here.** Graded by S08's
-`buried-past-the-cap` (`tooling/soak/src/scenarios/s08_live_plane_burial.rs`), which is
-`EXPECTED_RED` at rc 1 until it is fixed.
+soak rig (2026-09-26) while re-scoping S08.** Graded by S08's
+`buried-past-the-cap` (`tooling/soak/src/scenarios/s08_live_plane_burial.rs`), which was
+`EXPECTED_RED` at rc 1 until R4.
 
 - **Consequence, in the user's words.** A device that was paused while a commit landed comes back,
   re-subscribes and is handed a page that does not hold the commit. It stays one epoch behind for
@@ -411,8 +510,9 @@ soak rig (2026-09-26) while re-scoping S08; the product fix is NOT designed here
   pile-up residual (`catchup.rs`'s `Pager::step`, "the residual, which is a DROP") reaching an
   event one second BELOW the pile-up, further than that doc says. Not graded by S08, which spreads
   its seed so the strand is the live plane's alone; recorded for whoever plans the fix.
-- **Status.** Recorded, not fixed. S08 grades it RED; its canaries are the burial's conditions, so a
-  fix grades rc 0 and the arm's own test tells the next reader to promote it.
+- **Status.** Fixed on NIP-77 relays (R4, see the head of this section); S08's canaries are the
+  burial's conditions, so the fix graded rc 0 and the arm was promoted to `SWEPT` in the same
+  change. Persists on a relay without NIP-77 (recorded arm).
 - **Doc-accuracy note — "the next REQ asks for it again" is false within a session.**
   `WORKER_QUEUE_CAP`'s doc (`haven-core/src/relay/live_sync/config.rs:~30-48`) and
   `note_dropped_before_ingest` (`live_sync/processor.rs:584-604`) promise that an intake-dropped
@@ -426,9 +526,29 @@ soak rig (2026-09-26) while re-scoping S08; the product fix is NOT designed here
 
 ### C9 — a hard kill while owing a peer's eviction leaves a wedge a peer cannot heal (added 2026-09-27)
 
+**RESOLVED by the MDK v0.10.4 migration (W7):** at v0.10.4 the arm grades rc 0 — the peer's
+commit of the owed eviction lands on the reopened device and the circle sends again — and it is
+promoted to `SWEPT`. The analysis below is the record at `e391adc`.
+
+**Since W9q (2026-10-24) the parked state this section measured is gone with the code that made
+it.** No plane parks an eviction and the removal-deferral table is dropped: a background burst
+makes nothing of the departure, the eviction stays due, and the live plane's foreground drive makes
+it under a durable fanout record. S05's `kill-receive-auto-commit` was re-authored onto that path
+(the label is historical): it kills the device between the SEND and the `OK` of that commit, and
+grades that the reopened device holds the commit staged under its record, is not wedged, defers a
+location typed, and sends the same event again when its relay is next due — from a background
+burst, whose drive only finishes — where it is acknowledged and confirmed. It is still `SWEPT`.
+Findings A and B concern the parked state, which no path reaches any more. What stays is a kill
+INSIDE the engine's own staging (tracker T-KILL-WINDOW): an admin's removal left staged with no
+record is given one before the engine opens, when the store marks it as a removal, and sent again;
+one with no mark is left as MDK leaves it; and an eviction left half-made refuses every send, typed
+`SendBlockedByDeparture`, until another remaining member's commit for the departure is applied
+(pinned by `haven-core/tests/fanout_restart_e2e.rs` and `fanout_change_e2e.rs`). All of this was run
+locally only: no CI lane or nightly has yet run on the migrated code.
+
 **Measured by the Tier-1 soak rig; attribution between product and rig OPEN; fix not designed here.**
 Graded by S05's `kill-receive-auto-commit` (`tooling/soak/src/scenarios/s05_publish_confirm.rs`),
-which is `EXPECTED_RED` at rc 1 until this is resolved.
+which was `EXPECTED_RED` at rc 1 until the bump.
 
 - **What the arm does.** Three members; an extra circle only the committer's LIVE engine is
   subscribed to. The committer's engine is paused and a background burst opened; a peer's
@@ -466,8 +586,17 @@ which is `EXPECTED_RED` at rc 1 until this is resolved.
 
 ### C10 — a same-second full page of forgeries freezes the catch-up chase on every sweep (added 2026-09-26)
 
+**FIXED on NIP-77 relays (2026-10-26, R4); residual elsewhere.** A routing whose every relay
+speaks NIP-77 completes its window: the sweep's NIP-77 pass learns the genuine event's id under the
+pile-up and fetches it by id, and the window completes when every relay answered the pass whole and
+every id it reported missing was taken in or judged final for that route (an id the screen refuses
+before authentication, an id asked of the relay that reported it and absent from its drained
+answer, or one the pool's expiry screen drops). Graded by S20's `same-second-pile-up`; on a routing
+with a relay without NIP-77 the window stays held, recorded by `same-second-pile-up-without-negentropy`
+(O9, `T-NIP77-FALLBACK`). Both were run locally; no nightly has yet run on the migrated code.
+
 **Measured by the Tier-1 soak rig while building S20 (2026-09-26); a PRODUCT DEFECT in
-`haven-core/src/relay/catchup.rs`; the fix is NOT designed here, and nothing grades it yet.**
+`haven-core/src/relay/catchup.rs`.**
 
 - **What it takes.** The circle's public `#h` and `CATCHUP_MAX_EVENTS_PER_PAGE` (500) signed
   kind-445s carrying it, all dated inside ONE wall second of the sweep's window, stored on a relay the
@@ -495,10 +624,9 @@ which is `EXPECTED_RED` at rc 1 until this is resolved.
   second, one second above the commit) ended with no truncation reported — a COMPLETED window that
   dropped the event below it, `Pager::step`'s "the residual, which is a DROP". C10 ends in a HELD
   window: it drops nothing and never finishes.
-- **Status.** Recorded, not graded. S20 does not seed it (its arms mint one genuine event per
-  circle per second), so an `EXPECTED_RED` arm for it is owed, or the owner records why not — owner
-  question **OQ-V** in `PLAN_PHASE2.md` §8. The measurement is also in `docs/SOAK_LANE.md`'s S20
-  section.
+- **Status.** Fixed on NIP-77 relays (R4, see the head of this section) and graded by S20's two
+  pile-up arms, which answer owner question **OQ-V** (`PLAN_PHASE2.md` §8). The measurement is also
+  in `docs/SOAK_LANE.md`'s S20 section.
 
 ### Downgraded hypotheses (kept so nobody re-investigates them)
 
@@ -624,9 +752,11 @@ FAILS when the promise breaks; no stubs; no weakened tests; stage only, never co
   `NostrSubscriptionService` retries a failed `stopSession()` once (Rust reinstalls the wedged
   core into `SESSION`, so the second call re-joins the same handles) and **latches**
   `stillHolding` until a successful `start()` — otherwise the next stop would answer `idle`
-  while the guard was still held. `_handOffMlsSession` returns whether the handoff happened;
-  on `stillHolding` it declines `releaseForHandoff` entirely AND sets an honest notification
-  ("Haven is paused — open the app to resume sharing") instead of claiming it is sending.
+  while the guard was still held. `_handOffMlsSession` tells its caller whether the handoff
+  happened; on `stillHolding` it declines `releaseForHandoff` entirely AND sets an honest
+  notification ("Haven is paused — open the app to resume sharing") instead of claiming it is
+  sending. (Since 2026-10-10 its decisions are the static `MapShell.handOffMlsSession`, which
+  also does nothing at all for a user who is back before the engine has stopped.)
 - FGS teardown is now TWO drains. The location publish is bounded by
   `kBackgroundTeardownDrainBudget` (15 s = one relay attempt) and may be abandoned — a lost
   sample, no staged commit. The commit-critical window (`fetchMemberLocations`, which can
@@ -639,6 +769,23 @@ FAILS when the promise breaks; no stubs; no weakened tests; stage only, never co
   bounds the WAIT, not the release — an abandoned publish keeps its `Arc<CoreCircleManager>`
   until its ladder ends, which is why a `timedOut` handover leads to the force-release retry
   rather than a dead end.
+  **Superseded 2026-10-17 (W9o-2):** the unbounded drain awaits the FGS pool's
+  `NostrRelayService.inFlightDrives` — every driver entry in flight (seal, ingest, leave carry-on,
+  drive) — and `_inFlightCommitCritical` is deleted; the core keeps a commit no relay acknowledged
+  recorded and awaiting, so a cut drive forks nothing and leaves its sends to the next wake.
+  **Superseded again 2026-10-17 (W9o-3/W9o-4, decision 252):** the unbounded read is
+  `NostrRelayService.inFlightNonLocationDrives` — a location's seal and send stay inside the
+  bounded drain — and the cycle reads its stop before every step (its drive, each leave
+  carry-on, the roster read, the registration, the one-shot fix, each seal, each send, each
+  fetch's relay request, each fetched event), and the stop itself latches the relay service,
+  before the drains (`NostrRelayService.latch`, W9o-6): a step that slips past a read is handed
+  no pool and fails before it reaches a relay, while a call already holding the pool runs on —
+  a location's seal or send only until the bounded drain gives up on it and the pool is shut
+  under it. Nothing after the stop
+  opens a session or builds a relay service (W9p-D): `_ensureAuxServices` (a free guard's
+  acquisition, a wiring repair, the start-up bring-up; a reclaim never calls it) builds none and
+  shuts, never installed, one whose open straddled the stop, and every session open
+  (`_openCircleManager`, a reclaim's included) opens none and hands back one that straddled it.
 - New CI guard `scripts/ci/check_teardown_drain_budget.sh` (+ `--self-test`, wired as two
   steps in `repo-guards.yml`) pins the Dart budget against `CONNECTION_TIMEOUT +
   DEFAULT_TIMEOUT` in `haven-core/src/relay/manager.rs` across the language boundary.
@@ -673,6 +820,15 @@ FAILS when the promise breaks; no stubs; no weakened tests; stage only, never co
 ### Unit B — Handle queued outbound intents and stuck inbound rows (C2, C4-adjacent)
 **Status:** IMPLEMENTED + REVIEWED (both halves APPROVED; fixes applied)
 
+**Superseded 2026-10-24 (MDK v0.10.4 migration, W9q):** the shapes below are gone —
+`CircleError::SendDeferred` and `DeferredWork`, `EncryptLocationOutcomeFfi` and `DeferredSendFfi` with
+its `commits` / `proposals`, and the Dart ladders that published them. A location is sealed through
+the driver's entry (`seal_location_driven` → `SealOutcomeFfi`), a deferral is a typed `SendHeld`
+reason matched by variant, and an eviction the engine's send preflight stages is given its fanout
+record in the same engine hold and driven by `haven-core/src/relay/fanout.rs`: no commit crosses the
+bridge. The repair itself (`CircleManager::repair_deferred_send_staging`, `sweep_unresolvable_inputs`)
+remains.
+
 **Implementation notes (2026-08-28).** Files: `haven-core/src/circle/error.rs`,
 `haven-core/src/circle/manager.rs`, `haven-core/src/nostr/mls/manager.rs`,
 `haven-core/src/nostr/mls/types.rs`, `haven-core/tests/deferred_location_send_repair_e2e.rs`.
@@ -704,8 +860,9 @@ FAILS when the promise breaks; no stubs; no weakened tests; stage only, never co
   exactly, so it is a faithful "the next send will encrypt" signal for Unit D's banner.
 - **Repair entrypoint:** there is no separate one — the repair is what `encrypt_location`
   already does on a deferral: ONE mutating sweep of this circle, then `advance_convergence`,
-  then a READ-ONLY re-read of the gate (`SessionManager::gating_input_count`, `ScanMode::CountOnly`)
-  — a second mutating sweep would retire rows nobody asked about and report a pass the caller
+  then a READ-ONLY re-read of the gate (the engine's own predicate,
+  `SessionManager::send_gated`; the row count `gating_input_count` is a test and soak measure
+  only since 2026-10-25) — a second mutating sweep would retire rows nobody asked about and report a pass the caller
   never requested. Publish work either step surfaces is handed back in `work`, never confirmed
   and never rolled back. A user-facing "repair sharing" button should call
   `CircleManager::sweep_unresolvable_inputs(now)` and read `is_settled()`. The same sweep also
@@ -745,8 +902,10 @@ FAILS when the promise breaks; no stubs; no weakened tests; stage only, never co
   `every_mls_database_open_site_is_sanctioned` (exactly two production
   `SqliteAccountStorage::open_encrypted*` sites, both inside `nostr/mls/`) and
   `the_sweeps_second_connection_touches_only_message_shaped_storage` (the reachable storage
-  surface is an allowlist — group READS, message rows, the intent queue, and the read half of
-  the convergence policy; never `mls_storage()`, a snapshot, a welcome or a group write). The
+  surface is an allowlist — group READS, message rows, the intent queue, the read half of
+  the convergence policy, and (since the MDK v0.10.4 KeyPackage lifecycle) the stored bundle of
+  an expired KeyPackage, deleted by ref from one call site, `T-KP-EXPIRED-DELETE`; never
+  `mls_storage()`, a snapshot, a welcome or a group write). The
   sweep resolves the rewind window exactly as the engine's `convergence_policy_for_group` does
   — the PERSISTED per-group policy (`ConvergencePolicyStorage`) if one is stored, else the
   session's — and deliberately NOT `max(stored, session)`: this window sizes the GATING COUNT as
@@ -1047,9 +1206,11 @@ Dart half wires:
   `SubscribePhase` (`cursor.rs:348-353`), so `Initial` keeps
   `INBOX_GIFTWRAP_LOOKBACK_SECS` (7 days, `cursor.rs:88`) and every `Resubscribe` — which
   is every re-anchor, every `CLOSED` repair and every health-tick re-issue — asks for
-  `INBOX_RESUBSCRIBE_LOOKBACK_SECS` = 2 d + 1 h = 49 h (`cursor.rs:142`), sized to cover
-  NIP-59's 48 h gift-wrap backdating plus an hour of clock skew. The exemption itself is
-  unchanged and still correct: a quiet inbox is still the normal state, and 49 h replayed
+  `INBOX_RESUBSCRIBE_LOOKBACK_SECS` — 2 d + 1 h = 49 h when this was written, sized to
+  cover NIP-59's 48 h gift-wrap backdating plus an hour of clock skew; 96 h since decision
+  231 (2026-10-15), adding a day of the Welcome outbox's retries and a day of slack. The
+  exemption itself is unchanged and still correct: a quiet inbox is still the normal state,
+  and 96 h replayed
   every ~15 min forever would still be the wrong trade. A relay ending the inbox REQ is
   still caught, by the subscription-presence arm. **`HealthAction::Healthy` therefore stays reachable on a
   normal device**, which is what makes the tick's report meaningful to unit D. ~~This
@@ -1067,7 +1228,7 @@ Dart half wires:
   when `paused` is true ON ENTRY, and a burst clears `paused` for its whole duration, so
   a tick landing MID-BURST read a pool in the middle of `connect()` as dropped and
   repaired it through `resume_after_background()` — the FOREGROUND entry, which carries
-  the inbox REQ at any `k` — leaving standing REQs, an open socket and a 49 h gift-wrap
+  the inbox REQ at any `k` — leaving standing REQs, an open socket and a 96 h gift-wrap
   replay keyed on this npub at an instant that is not a publish, persisting to the next
   burst's pause. At a 15-min tick against a 72-168 s burst that is expected roughly one
   to three times per 8-hour background window. The BURST is the background repair now.
@@ -1213,7 +1374,7 @@ No FFI change.
   conclusion still holds.** `_runHealthTick` now DOES have a foreground gate, and the health timer is
   no longer armed while backgrounded on any branch — the carve-out that spared it became a live defect
   once P4 removed the standing subscription it existed to repair (a tick landing mid-burst repaired a
-  mid-`connect()` pool through the FOREGROUND re-anchor and left REQs, a socket and a 49 h gift-wrap
+  mid-`connect()` pool through the FOREGROUND re-anchor and left REQs, a socket and a 96 h gift-wrap
   replay behind). So nothing periodic re-anchors in the background any more; the bounded burst on each
   publish tick is the repair, at 72-168 s. The deleted timer stays deleted, and for a stronger reason
   than the one written above: it would now be a second background wake source in the phase whose whole
@@ -1232,7 +1393,8 @@ No FFI change.
   possibly-empty snapshot that replay just fed the re-subscriber is superseded well inside the
   re-subscriber's own 500 ms debounce. Ahead of the debounce it also needed a throttle of its
   own (review fix): unguarded, ten shade-pull glances became ten pool reconnects and ten inbox
-  replays — 7-day ones when this landed, 49 h ones since P1 bounded the `Resubscribe` phase,
+  replays — 7-day ones when this landed, 49 h ones once P1 bounded the `Resubscribe` phase, 96 h
+  since decision 231,
   which lowers the cost of each glance but not the reason for the throttle. `MapShell.shouldReanchorOnResume` gates it on
   `kLocationPublishOverlapGuard` (60 s) — the app's existing "do not repeat a relay round-trip
   sooner than this" quantum, numerically the resubscribe clock-skew window
@@ -1295,6 +1457,11 @@ No FFI change.
 
 ### Unit D — Make every silent failure visible
 **Status:** IMPLEMENTED + REVIEWED (APPROVED with fixes applied)
+*(Superseded by the MDK v0.10.4 migration, OD-1: the sharing-health card (`SharingHealthBanner`) sits at
+the top of the circle's details sheet only — the map's banner slot holds the location-access and
+clock-skew banners alone (`map_status_banners.dart`) — and `SharingHealthAnnouncer` speaks its onset
+and recovery while the sheet is closed. The `MapStatusBanner` and the map-slot precedence below are
+history.)*
 - Persist per-circle `last_publish_acked_at` and `last_peer_event_at` (presence-only
   timestamps, SQLCipher `circles.db`), written by both isolates.
 - Route `encrypt_location` / publish failures into the health model. **DONE** — the three Dart
@@ -1401,6 +1568,9 @@ No FFI change.
 and §8 (FFI/Dart/guard/l10n). PERIODIC rotation
 REJECTED (cannot protect the sole admin; 1.67× margin; introduces a new permanent blackout).
 Ships a REPAIR-TRIGGERED sole-admin rotation + the upstream ask.
+*(Superseded by the MDK v0.10.4 migration: the repair is a real self-update (`SendIntent::SelfUpdate`)
+that any member may make — no sole-admin gate, and `notSoleAdmin` is gone — behind the same 24-hour
+rate limit and foreground-only isolation (`haven-core/src/circle/rotation.rs`).)*
 
 **What the review round changed, in one line each.** A send-gated repair used to BANK a queued
 rotation per tap (drained later with no gates and no rate limit) — now pre-checked and taken
@@ -1527,17 +1697,22 @@ F above; the Android and clock halves are untouched.**
 - **A sole source cannot support the corroborated copy, so it gets its own.** Two things a
   single peer does NOT establish. (a) *Whose* clock is wrong: A correct + B fast by 150 s makes
   A's detector fire while B's stays silent (negative offsets are structurally uninformative), so
-  the innocent device is the one that gets told. (b) That anything is *lost*: both sides screen
-  the NIP-40 expiration with `LOCATION_MESSAGE_RETENTION_SECS` (228 s) +
-  `RECEIVER_EXPIRATION_GRACE_SECS` (60 s) of tolerance, so nothing is dropped anywhere until the
-  gap passes 288 s — the whole 120–288 s band is a disagreement with no loss. The corroborated
-  copy (`clockSkewTitle` + `clockSkewBodyBehind`: "This phone's clock is wrong… the locations it
-  sends expire before anyone can see them") is therefore factually false across that band, and
-  its remedy could not clear it. `resolveClockSkewCopy` now branches on
+  the innocent device is the one that gets told. (b) That anything is *lost* on this phone: a
+  location keeps `228 s − gap` of residency, so an online member still receives every one until
+  the gap reaches 228 s, and one member cannot say which side lags. The corroborated copy
+  (`clockSkewTitle` + `clockSkewBodyBehind`) asserts a loss on this phone the evidence does not
+  place there, and its remedy could not clear it. *(Corrected 2026-09-28: this bullet read "both
+  sides screen the expiration with 228 + 60 s, so nothing is dropped until the gap passes 288 s —
+  the whole 120–288 s band is a disagreement with no loss". There is no 60 s: the relay pool
+  drops at the expiration with no grace, so the total-loss point is 228 s
+  (`TOTAL_LOSS_SKEW_SECS`, pinned through a real pool by
+  `haven-core/tests/relay_pool_expiry_drop_point.rs`). `clockSkewBodyBehind` now reads "…expire
+  early, and your circles can miss some or all of them", true at every lag the verdict fires on.)* `resolveClockSkewCopy` now branches on
   `corroboratingSources == 1` to a hedged title/body/announcement triple that names neither a
   culprit nor a loss; the corroborated branch is unchanged. An earlier draft of this unit
   claimed the sole-source case "breaks delivery in at least one direction" — that was untrue for
-  120 < d ≤ 288 and has been removed from the code comment and from here.
+  an online member below the total-loss point (then quoted as 288 s, now 228 s) and has been
+  removed from the code comment and from here.
 - **Blast radius outside the owned set, all test/oracle code:** the B8 lane's
   `checkSingleSourceStaysSilent` asserted the *old* rule, so it became
   `checkSoleSourceRaisesVerdict` (both directions still pinned by
@@ -1626,7 +1801,7 @@ F above; the Android and clock halves are untouched.**
 
 ### Unit H — Power (P1–P5)
 **Status:** IMPLEMENTED + REVIEWED — P1 (2026-09-03), P2a and P3 (2026-09-04), P4 (2026-09-05 …
-2026-09-08), P5(a) (2026-09-08); staged, not committed. **P2b is PARKED** (2026-08-30) and ~~**P4 is
+2026-09-08), P5(a) (2026-09-08); committed in `a59d0b9`. **P2b is PARKED** (2026-08-30) and ~~**P4 is
 not "COMPLETE"** until~~ ~~OD4-c is decided~~ **P4's OD4-c precondition is MET: the decision was taken on
 2026-09-09, its Rust half landed the same day, and the Dart consumer that tells the user landed with it
 (C5b above), so nothing about OD4-c holds P4's completion any more**; both are stated at the end of this
@@ -1861,8 +2036,8 @@ row here for battery is not a power change, it is this document's incident with 
 - **C2 — a stuck inbound row silently blocks outbound sends.** *P4* is the only phase that touches
   the ordering, and it fixes it into the mechanism: a burst ingests before it encrypts
   (`burst_ingests_a_peer_commit_before_the_location_is_encrypted`), a burst that did not settle
-  every endpoint advances no cursor
-  (`a_burst_that_did_not_settle_every_endpoint_leaves_no_advance_standing`,
+  every endpoint advances past a silent relay only with that relay's floor kept (since W9p-2;
+  `a_burst_that_did_not_settle_every_endpoint_advances_only_with_the_silent_relays_floor`,
   `a_late_eose_after_pause_never_advances_a_cursor`), and a held-back event survives the pause to be
   re-requested (`a_hold_back_survives_pause_and_is_re_requested_by_the_next_burst`). Unit B's repair
   sweep still runs inside the burst. **This row is honestly incomplete**, and it is the one gap in
@@ -1885,7 +2060,7 @@ row here for battery is not a power change, it is this document's incident with 
   reach a probe while paused, and the Dart health tick is foreground-only at BOTH arming and fire
   time (`maintenance_scheduler_provider_test.dart::the health tick is never armed while the engine
   is paused`) — a tick landing mid-burst would have repaired through the FOREGROUND entry and left
-  standing REQs plus a 49 h `#p` replay at a non-publish instant, which is this phase undoing
+  standing REQs plus a 96 h `#p` replay at a non-publish instant, which is this phase undoing
   itself. P4 also inherits a new instance of C3's shape from the pinned crate:
   `InnerRelay::disconnect` notifies before it stores `Terminated`, so a connection task can re-open
   a real socket over the pause and hold it with 55 s pings. Haven cannot make that impossible; what
@@ -1937,7 +2112,11 @@ row here for battery is not a power change, it is this document's incident with 
   tested, since a park is unredeemable from a background isolate — and redemption ACROSS a session is
   impossible at this rev, so an obligation another session recorded is reported but terminal**, and it is
   disclosed as residual 4 of `SECURITY.md`'s "iOS background sharing: presence only at
-  publish instants (P4)".
+  publish instants (P4)". *(Superseded 2026-10-24 by the MDK v0.10.4 migration (W9q): nothing parks
+  and a burst makes no commit, so the park, its redemption and the obligation table are gone (C5b's
+  last bullet); `od4c_a_background_burst_cannot_publish_a_removal_bearing_auto_commit` now pins that a
+  plane that makes no commit stages none, with the behavioural proofs in `live_plane_drive_e2e` and
+  `live_sync_burst_e2e`.)*
 
 **Two more things this unit owes the reader, because they are wedge-shaped and neither is a C1–C5
 row.** First, **P2a re-created this document's own failure during its review**: two watchdog early

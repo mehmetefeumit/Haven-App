@@ -101,11 +101,11 @@
 //!
 //! # What is deliberately NOT held back
 //!
-//! An `IngestOutcome::Stale` (including `PeelFailed`, which is what a genuine
-//! future-epoch APPLICATION message produces — it is *not* `Buffered`) does not
-//! hold the cursor. The engine persists such a message as a retryable row and
-//! re-peels it once the missing commit lands, so recovery is the engine's, not
-//! the cursor's. Holding on it would freeze the cursor of any client that is
+//! An `IngestOutcome::Stale` does not hold the cursor, and neither does
+//! `IngestOutcome::TransportDeferred`, which is what a genuine future-epoch
+//! APPLICATION message produces — it is *not* `Buffered`. The engine keeps
+//! such a message as a deferred row and re-peels it by itself once the
+//! missing commit lands, so recovery is the engine's, not the cursor's. Holding on it would freeze the cursor of any client that is
 //! temporarily unable to decrypt, growing the fetch window until `saturated`
 //! froze it permanently — a self-inflicted outage in place of the remote one.
 //! Nothing is lost by advancing past it, because the advance no longer takes
@@ -121,10 +121,9 @@
 /// Fieldless (Copy) — carries no coordinates, pubkey, group id, or commit JSON,
 /// so its derived `Debug` cannot leak (Security Rule 4/6).
 ///
-/// Three-valued on purpose: only ONE of the three is a reason to hold the
-/// cursor back, and none of the three is a reason to move it forward — the
-/// advance comes from the fetch window, never from an event (see the module
-/// docs).
+/// Only ONE of them is a reason to hold the cursor back, and none is a
+/// reason to move it forward — the advance comes from the fetch window, never
+/// from an event (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiveOnlyOutcome {
     /// The engine applied the message, or terminally handled it (stale /
@@ -147,8 +146,7 @@ pub enum ReceiveOnlyOutcome {
     Deferred,
     /// Haven's local receiver-side screen rejected the event BEFORE any MLS
     /// authentication ran (see [`crate::nostr::mls::types::ScreenedIngest`]) —
-    /// an expired NIP-40 replay, or an envelope the pure pre-engine transport
-    /// parse could not read at all.
+    /// an envelope the pure pre-engine transport parse could not read at all.
     ///
     /// Contributes nothing in EITHER direction. It is not evidence the sweep
     /// caught up to its `created_at` (nothing authenticated that timestamp), and
@@ -157,6 +155,19 @@ pub enum ReceiveOnlyOutcome {
     /// buy an attacker a permanent stall. Tallied separately as
     /// [`CatchupOutcome::events_rejected_pre_auth`].
     NoEvidence,
+    /// The engine answered from a row it holds STRANDED: the event as it
+    /// arrived, unopened, in a circle that holds no commit of this device's
+    /// own pending, which nothing but the engine's own replay reads again
+    /// (`docs/MDK_UPSTREAM_TRACKER.md` T-PARKED-REPLAY) — and which Haven
+    /// could not take over to hand back (`SessionManager::hand_back_stranded`).
+    ///
+    /// Not applied, and not a hold either: the answer comes from the stored
+    /// row and is the same at every redelivery, so a held cursor would fetch
+    /// the event again for as long as a relay serves it — for good, for a
+    /// commit or a proposal, which carry no expiration. Its circle is told
+    /// ([`crate::nostr::mls::ChangeNote::UnreadChange`]). Tallied as
+    /// [`CatchupOutcome::events_stranded`].
+    Stranded,
 }
 
 /// Presence-only tally of a catch-up sweep. All counters — no group ids,
@@ -171,13 +182,16 @@ pub struct CatchupOutcome {
     /// Events the engine buffered for a future epoch (cursor stopped).
     pub events_deferred: usize,
     /// Events Haven's own receiver-side screen rejected before any MLS
-    /// authentication ran: expired NIP-40 replays, and envelopes the pure
-    /// pre-engine transport parse could not read (forged or genuine). Neither
-    /// applied nor deferred: they contribute no cursor evidence at all. A
-    /// persistently non-zero count on a healthy circle means some relay is
-    /// serving events past their advertised TTL, or something on the wire is
-    /// emitting `kind:445`s Haven cannot parse.
+    /// authentication ran: envelopes the pure pre-engine transport parse could
+    /// not read (forged or genuine). Neither applied nor deferred: they
+    /// contribute no cursor evidence at all. A persistently non-zero count on a
+    /// healthy circle means something on the wire is emitting `kind:445`s Haven
+    /// cannot parse.
     pub events_rejected_pre_auth: usize,
+    /// Events the engine answered from a row it holds stranded
+    /// ([`ReceiveOnlyOutcome::Stranded`]): neither applied nor a reason to
+    /// hold a cursor.
+    pub events_stranded: usize,
     /// Per-circle group cursors advanced.
     pub cursors_advanced: usize,
     /// The deadline was reached before every bucket was swept.
@@ -200,6 +214,15 @@ pub struct CatchupOutcome {
     /// one-second pile-up a relay's own `limit` cap can hide from every request
     /// ([`Pager::step`]). Not an error either way.
     pub windows_truncated: usize,
+    /// How long until there is next something to do for a commit or proposal
+    /// record this sweep drove and left stored — a relay due again, a bound
+    /// reached — when there is. Never less than the driver's own shortest
+    /// wait, so a scheduler that honours it cannot spin. `None` from the sweep
+    /// that drives nothing. Relative, and never logged.
+    pub retry_after_ms: Option<u64>,
+    /// A drive this sweep made ended on an error. What it had done stands,
+    /// and the stored records say where each commit is.
+    pub drive_errored: bool,
 }
 
 /// Max events one REQ may return — a flood-guard (Rule 12) so a malicious relay
@@ -339,14 +362,21 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use nostr::{Event, EventId, Timestamp};
+use nostr::{Event, EventId, Filter, Kind, Timestamp};
 
-use crate::circle::CircleManager;
-use crate::nostr::mls::types::{GroupId, IngestOutcome, PublishWork, ScreenedIngest};
-use crate::relay::auto_commit::{CONVERGENCE_RETICK_DELAY, MAX_CONVERGENCE_RETICKS};
+use crate::circle::{CircleManager, DirectoryReconcile};
+use crate::nostr::mls::types::{
+    EpochState, FanoutId, GroupId, IngestOutcome, PublishWork, ScreenedIngest, SessionEffects,
+};
+use crate::nostr::mls::{IngestClass, RangePass, SessionManager};
 use crate::relay::cursor::{since_for_stream, SubscribePhase};
+use crate::relay::fanout::{
+    DriveMode, FanoutClock, FanoutSend, Publishing, ResumeOutcome, Still, WallClock, BUSY_RETRY_MS,
+};
 use crate::relay::live_sync::group_cursor_stream;
 use crate::relay::live_sync::planes::group::group_filter;
+use crate::relay::negentropy::{self, NegRoute, NegSink, NEG_ROUTE_WAIT};
+use crate::relay::retick::{next_receive_retick, owe_unfinished, MAX_CONVERGENCE_RETICKS};
 use crate::relay::{RelayFetchOutcome, RelayManager};
 
 /// Everything one circle's fetch window learned, in the ONLY terms a cursor
@@ -412,6 +442,11 @@ struct PassResult {
     /// Some relay in this pass handed over events and never signalled
     /// end-of-stored-events ([`RoundSummary::cut_off`]).
     cut_off: bool,
+    /// The pass halted on a FULL page dated entirely at
+    /// [`Self::last_until_secs`]: what that second holds past a relay's page
+    /// limit no `until` can reach (NIP-01's grain is one second), so only a
+    /// walk that steps below it can go further ([`CircleSweep::by_range`]).
+    full_at_until: bool,
 }
 
 /// The lowest instant a pass's own retrieval reaches, contiguously, down from
@@ -853,6 +888,14 @@ fn summarize_round(
 ///
 /// Carries relay URLs, so — like [`RoundSummary`] — it derives no formatter at
 /// all rather than relying on having nothing sensitive to print.
+/// Whether some relay answered a FULL page dated entirely at `until_secs`.
+fn full_at(fetch_outcomes: &[RelayFetchOutcome], until_secs: i64) -> bool {
+    fetch_outcomes.iter().any(|fo| {
+        fo.events.len() >= CATCHUP_MAX_EVENTS_PER_PAGE
+            && fo.events.iter().map(created_secs).min() == Some(until_secs)
+    })
+}
+
 #[derive(Default)]
 struct ChaseState {
     /// Relays still being drained: each is known to hold at least the event at
@@ -949,73 +992,272 @@ pub(crate) fn hold_backs(classified: &[(i64, ReceiveOnlyOutcome)]) -> Vec<i64> {
         .iter()
         .filter_map(|(secs, outcome)| match outcome {
             ReceiveOnlyOutcome::Deferred => Some(*secs),
-            ReceiveOnlyOutcome::Applied | ReceiveOnlyOutcome::NoEvidence => None,
+            ReceiveOnlyOutcome::Applied
+            | ReceiveOnlyOutcome::NoEvidence
+            | ReceiveOnlyOutcome::Stranded => None,
         })
         .collect()
+}
+
+/// What a sweep fetches through, and the driver it stages for: every commit
+/// and proposal the engine hands back is recorded as a durable fanout in the
+/// hold that released it, and sent through the fanout driver alone, in the
+/// mode the sweep's [`Publishing`] gives. In [`DriveMode::FinishOnly`] the
+/// engine makes no commit, so nothing is recorded but a leave it proposes
+/// again.
+///
+/// No derived formatter: it holds a relay manager and a driver.
+struct Plane<'a> {
+    relays: &'a RelayManager,
+    driven: Driven<'a>,
+    /// The end of the sweep's budget: no retick is waited out past it.
+    deadline: Instant,
+    /// How many REQs of refused ids this sweep has sent, per circle
+    /// ([`REFETCH_REQS_PER_SWEEP`]): one share, whether it is asked for at
+    /// the circle's turn or at a new epoch before it.
+    refetch_reqs: std::sync::Mutex<Vec<(GroupId, usize)>>,
+    /// A refetch at a new epoch is under way: what it ingests begins no
+    /// other ([`refetch_at_a_new_epoch`]).
+    refetching: AtomicBool,
+}
+
+/// The driver a sweep stages for, and what its drives have reported.
+struct Driven<'a> {
+    publishing: &'a Publishing<'a, dyn FanoutSend + 'a>,
+    /// The soonest any drive asked to be called again, and whether one ended
+    /// on an error.
+    reported: std::sync::Mutex<(Option<u64>, bool)>,
+}
+
+impl<'a> Plane<'a> {
+    /// Takes one of `group_id`'s REQs of refused ids for this sweep; whether
+    /// one was left.
+    fn take_refetch_req(&self, group_id: &GroupId) -> bool {
+        let mut sent = self
+            .refetch_reqs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let at = sent
+            .iter()
+            .position(|(group, _)| group == group_id)
+            .unwrap_or_else(|| {
+                sent.push((group_id.clone(), 0));
+                sent.len() - 1
+            });
+        let left = sent[at].1 < REFETCH_REQS_PER_SWEEP;
+        if left {
+            sent[at].1 += 1;
+        }
+        left
+    }
+
+    const fn driving(
+        relays: &'a RelayManager,
+        publishing: &'a Publishing<'a, dyn FanoutSend + 'a>,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            relays,
+            driven: Driven {
+                publishing,
+                reported: std::sync::Mutex::new((None, false)),
+            },
+            deadline,
+            refetch_reqs: std::sync::Mutex::new(Vec::new()),
+            refetching: AtomicBool::new(false),
+        }
+    }
+
+    /// Ingests `ev`: every commit and proposal the engine hands back is
+    /// recorded in the hold that takes it.
+    async fn ingest(
+        &self,
+        circle_mgr: &CircleManager,
+        ev: &Event,
+    ) -> crate::nostr::Result<(ScreenedIngest, Vec<FanoutId>)> {
+        let publishing = self.driven.publishing;
+        circle_mgr
+            .session()
+            .process_event_staging(
+                ev,
+                publishing.clock.now_ms(),
+                Still::new(publishing.mode, publishing.mode.mode()),
+            )
+            .await
+    }
+
+    /// Advances `group_id` in the sweep's mode.
+    async fn advance(
+        &self,
+        circle_mgr: &CircleManager,
+        group_id: &GroupId,
+    ) -> crate::nostr::Result<(SessionEffects, Vec<FanoutId>)> {
+        let now_ms = self.driven.publishing.clock.now_ms();
+        let session = circle_mgr.session();
+        let source = self.driven.publishing.mode;
+        let staged = match source.mode() {
+            // Read again with the engine held: the wait for it is where the
+            // mode this was read in can end.
+            DriveMode::Full => {
+                session
+                    .advance_for_drive_while(group_id, now_ms, Still::new(source, DriveMode::Full))
+                    .await
+            }
+            DriveMode::FinishOnly => session.settle_inputs_for_drive(group_id, now_ms).await,
+        };
+        circle_mgr.forget_dropped_removals().await;
+        let staged = staged?;
+        let mut recorded = staged.fanouts;
+        recorded.extend(staged.proposals);
+        Ok((staged.effects, recorded))
+    }
+
+    /// Disposes of what one engine batch left to be published: `recorded` are
+    /// the handles of what the hold recorded, `work` what it did not.
+    ///
+    /// Publish-before-apply (Rule 13): each recorded commit and proposal is
+    /// sent through the fanout driver — confirmed on a relay's
+    /// acknowledgement, left recorded and awaiting relays on anything short
+    /// of one, rolled back only on every relay's proven refusal — and what a
+    /// resolution releases in turn in the same call. What `work` still holds
+    /// is then a proposal no record could be written for, published once in
+    /// the full mode, and a commit that could be neither recorded nor rolled
+    /// back, which is left staged.
+    async fn resolve(
+        &self,
+        circle_mgr: &CircleManager,
+        recorded: Vec<FanoutId>,
+        work: Vec<PublishWork>,
+    ) {
+        let driven = &self.driven;
+        let unrecorded = SessionEffects {
+            events: Vec::new(),
+            publish: work,
+            queued: Vec::new(),
+            pending_convergence: Vec::new(),
+        };
+        let (handed_back, _) = circle_mgr
+            .fold_staged(
+                unrecorded,
+                false,
+                driven.publishing.clock.now_ms(),
+                Still::new(driven.publishing.mode, driven.publishing.mode.mode()),
+            )
+            .await;
+        let outcome = driven
+            .publishing
+            .settle_staged(circle_mgr, recorded, handed_back)
+            .await;
+        driven.report(&outcome);
+    }
+}
+
+impl Driven<'_> {
+    /// Takes in what one of this sweep's drives reported. What it replayed
+    /// is dropped here: every location in it is already in the last-known
+    /// store, stamped as arrived, and this sweep
+    /// has no surface to route it to. What it noted about a change stays in
+    /// the circle's durable notes until the app reads them.
+    fn report(&self, outcome: &ResumeOutcome) {
+        let mut reported = self
+            .reported
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reported.0 = match (reported.0, outcome.retry_after_ms) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        reported.1 |= outcome.errored;
+    }
 }
 
 /// Ingests one fetched event through the process-global engine, persisting any
 /// decrypted location and resolving any auto-commit publish work, then reports
 /// whether the cursor may advance past it.
-#[deny(clippy::wildcard_enum_match_arm)]
+#[cfg(test)]
 async fn ingest_one(
     circle_mgr: &CircleManager,
-    relay_mgr: &RelayManager,
+    plane: &Plane<'_>,
     ev: &Event,
 ) -> ReceiveOnlyOutcome {
+    ingest_judged(circle_mgr, plane, ev).await.0
+}
+
+/// What the engine holds of an event it was handed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Left {
+    /// The event, or its verdict.
+    WithTheEngine,
+    /// Nothing: it had no ROOM for the event — it refused it for a local
+    /// resource bound, or kept no trace of it.
+    NoRoom,
+    /// Nothing: the ingest erred, or a hold of the circle's meant the engine
+    /// was never asked.
+    Unasked,
+}
+
+/// [`ingest_one`], and what the engine holds of the event. Having no room is
+/// kept apart from an error and a hold: the engine was not short of room in
+/// either, and a refetch that read them as "no room" would wait on a store
+/// that was never asked. A parked event is the engine's.
+#[deny(clippy::wildcard_enum_match_arm)]
+async fn ingest_judged(
+    circle_mgr: &CircleManager,
+    plane: &Plane<'_>,
+    ev: &Event,
+) -> (ReceiveOnlyOutcome, Left) {
     // An `Err` is an ENGINE-side ingest failure (the envelope parsed and the
     // engine took the message), so something at this position is genuinely
     // outstanding and the cursor must stop at it. An envelope that would not
     // parse never reaches here — it comes back as a pre-auth rejection below.
-    let Ok(screened) = circle_mgr.session().process_event(ev).await else {
-        return ReceiveOnlyOutcome::Deferred;
+    let Ok((screened, recorded)) = plane.ingest(circle_mgr, ev).await else {
+        // An event the engine recorded before it erred is its own: a refetch
+        // would bring back only the same verdict, for ever.
+        let left = if circle_mgr.session().engine_processed(&ev.id) {
+            Left::WithTheEngine
+        } else {
+            Left::Unasked
+        };
+        return (ReceiveOnlyOutcome::Deferred, left);
     };
 
-    let ingest = match screened {
+    let mut ingest = match screened {
         // Rejected by Haven's local screen BEFORE any MLS authentication (an
-        // expired replay, or an envelope that would not parse). Nothing here is
-        // verified, so persist nothing, publish nothing, drain nothing — and
+        // envelope that would not parse, or any kind but 445). Nothing here is verified, so persist nothing, publish nothing, drain nothing — and
         // report `NoEvidence` so the event's unauthenticated `created_at` can
         // neither become this circle's cursor nor hold it back.
-        ScreenedIngest::RejectedBeforeAuth(_) => return ReceiveOnlyOutcome::NoEvidence,
+        ScreenedIngest::RejectedBeforeAuth(_) => {
+            return (ReceiveOnlyOutcome::NoEvidence, Left::WithTheEngine)
+        }
         ScreenedIngest::Ingested(effects) => effects,
+    };
+    let left = if matches!(ingest.outcome, IngestOutcome::ResourceRefused { .. })
+        || (ingest.left_object_unpersisted
+            && !matches!(ingest.outcome, IngestOutcome::Ignored { .. }))
+    {
+        Left::NoRoom
+    } else {
+        Left::WithTheEngine
     };
 
     circle_mgr
         .persist_replayed_locations(&ingest.effects.events)
         .await;
-    resolve_publish_work(circle_mgr, relay_mgr, &ingest.effects.publish).await;
+    let work = std::mem::take(&mut ingest.effects.publish);
+    plane.resolve(circle_mgr, recorded, work).await;
     // Receive-side observation for the epoch-rotation repair's quiescence gate
     // (`circle::rotation`), on the AUTHENTICATED batch only — see the same call
     // in the live-sync processor.
     circle_mgr.note_inbound_group_events(&ingest.effects.events);
-    let mut directory = circle_mgr.directory_verdict_for_events(&ingest.effects.events);
-
-    // Release any queued convergence work + persist its locations, re-ticking a
-    // group that stays pending until its jitter-delayed `SelfRemove` auto-commit
-    // surfaces (bounded) — a single advance would strand the eviction commit
-    // before its wall-clock due time, so this background sweep would never
-    // re-broadcast it. A quiet group exits immediately (no delay).
-    let mut pending: Vec<GroupId> = ingest.effects.pending_convergence.clone();
-    for _ in 0..MAX_CONVERGENCE_RETICKS {
-        if pending.is_empty() {
-            break;
-        }
-        let mut next: Vec<GroupId> = Vec::new();
-        for gid in &pending {
-            if let Ok(more) = circle_mgr.session().advance_convergence(gid).await {
-                circle_mgr.persist_replayed_locations(&more.events).await;
-                resolve_publish_work(circle_mgr, relay_mgr, &more.publish).await;
-                circle_mgr.note_inbound_group_events(&more.events);
-                directory = directory.max(circle_mgr.directory_verdict_for_events(&more.events));
-                next.extend(more.pending_convergence);
-            }
-        }
-        pending = next;
-        if !pending.is_empty() {
-            tokio::time::sleep(CONVERGENCE_RETICK_DELAY).await;
-        }
-    }
+    let directory = circle_mgr.directory_verdict_for_events(&ingest.effects.events);
+    refetch_at_a_new_epoch(circle_mgr, plane, &ingest.effects.events).await;
+    let drained = drain_convergence(
+        circle_mgr,
+        plane,
+        SessionManager::groups_owing_service(&ingest),
+    )
+    .await;
+    let directory = directory.max(drained);
 
     // A commit that lands in the background isolate is applied state like any
     // other, and its withdrawal is the one signal the directory cannot
@@ -1028,71 +1270,169 @@ async fn ingest_one(
             .await;
     }
 
-    match ingest.outcome {
-        IngestOutcome::Buffered { .. } => ReceiveOnlyOutcome::Deferred,
-        IngestOutcome::Processed | IngestOutcome::Stale { .. } => ReceiveOnlyOutcome::Applied,
+    let verdict = cursor_verdict(
+        circle_mgr,
+        &ev.id,
+        ingest.outcome,
+        ingest.left_object_unpersisted,
+    )
+    .await;
+    (verdict, left)
+}
+
+/// Whether a cursor may pass the event `id`, which the engine answered
+/// `outcome` for, read AFTER the advances that ingest left owing: the one
+/// classification every plane that polls makes (this sweep, and the driver's
+/// poll entry).
+///
+/// Rule 12: an object the engine refused for a local resource bound, or kept
+/// no trace of, has relay redelivery as its only way back, so it holds —
+/// unless the verdict is an `Ignored` exclusion (an unknown route is dropped
+/// without a trace by design, mdk#740), which no redelivery can change here.
+/// `TransportDeferred` is retained and retried by the engine itself.
+#[deny(clippy::wildcard_enum_match_arm)]
+pub(crate) async fn cursor_verdict(
+    circle_mgr: &CircleManager,
+    id: &nostr::EventId,
+    outcome: IngestOutcome,
+    left_object_unpersisted: bool,
+) -> ReceiveOnlyOutcome {
+    if left_object_unpersisted && !matches!(outcome, IngestOutcome::Ignored { .. }) {
+        return ReceiveOnlyOutcome::Deferred;
+    }
+    match outcome {
+        // Answered from a stranded row: the same answer at every
+        // redelivery, whichever epoch the row carries — the circle's own,
+        // after a rollback or the open's clear of a staged commit; an
+        // earlier one, after a confirm. Never a hold.
+        IngestOutcome::Buffered { group_id, .. }
+            if circle_mgr.session().holds_stranded(&group_id, id).await =>
+        {
+            ReceiveOnlyOutcome::Stranded
+        }
+        // The advances may already have carried the group past the buffered
+        // input's epoch (a convergence pass closing inside them); the cursor
+        // then passes.
+        IngestOutcome::Buffered { group_id, epoch }
+            if matches!(
+                circle_mgr.session().epoch_state(&group_id).await,
+                Some(EpochState::Stable { epoch: now }) if now > epoch
+            ) =>
+        {
+            ReceiveOnlyOutcome::Applied
+        }
+        IngestOutcome::Buffered { .. } | IngestOutcome::ResourceRefused { .. } => {
+            ReceiveOnlyOutcome::Deferred
+        }
+        IngestOutcome::Processed
+        | IngestOutcome::Stale { .. }
+        | IngestOutcome::TransportDeferred { .. }
+        | IngestOutcome::Ignored { .. }
+        | IngestOutcome::Rejected { .. }
+        | IngestOutcome::LocalState { .. } => ReceiveOnlyOutcome::Applied,
     }
 }
 
-/// Resolves engine publish work surfaced during a catch-up ingest / convergence.
+/// Advances `pending` and everything the advances leave owing, persisting the
+/// released locations and resolving the released publish work; returns the
+/// strongest member-directory verdict the drained events imply.
 ///
-/// Publish-before-apply (Rule 13 / security F13): a receive-side auto-commit (a
-/// peer `SelfRemove` eviction) is published over the sweep's own [`RelayManager`]
-/// and confirmed ONLY after ≥1 relay OK-acks. This background sweep therefore
-/// re-broadcasts the eviction to the rest of the group instead of optimistically
-/// applying a commit no peer received (the old fork).
+/// Re-ticks a group the engine still owes a deadline — a convergence pass
+/// closing, a due `SelfRemove` auto-commit — once it falls due (bounded, see
+/// [`next_receive_retick`]): a single advance would strand the commit and the
+/// eviction, so this background sweep would never re-broadcast it. A quiet
+/// group exits immediately (no delay).
 ///
-/// # Why this sweep PUBLISHES where a live-sync burst parks (OD4-c)
-///
-/// Not because a foreground service and a wake lock make the window safe. That
-/// argument is wrong on its own terms — in the poll configuration this sweep is
-/// the ONLY receive path, so nothing else has to park a commit first for this
-/// window to be reachable, and the `WorkManager` / `BGTask` wakes that also drive
-/// it are exactly the lifecycle OD4-c is about.
-///
-/// The reason is that a park needs somewhere to be redeemed, and a
-/// `PendingStateRef` is valid only inside the session that staged it. The
-/// redemption pass (`EngineProcessor::redeem_removal_deferrals`) runs on a
-/// FOREGROUND live-sync open; a sweep driven from a background isolate (the
-/// Android foreground service, the catch-up worker) holds its own
-/// [`CircleManager`] over the same DB file, so a commit parked there could never
-/// be published by anyone — parking it would trade a removal that usually LANDS
-/// for a circle that is certainly wedged. Publishing is therefore correct here,
-/// and the sweep pays the two costs that come with it:
-///
-/// * it records the obligation BEFORE the publish
-///   ([`CircleManager::owe_removal_publish`], on the publishing arm of the
-///   ladder [`crate::relay::auto_commit::resolve_receive_publish_work`] runs),
-///   so a wake
-///   window the OS ends mid-publish leaves a durable row and the next foreground
-///   LIVE-SYNC open REPORTS the wedge instead of it being invisible. The
-///   qualifier is load-bearing: both the redeemer and the reporter are reached
-///   only from [`crate::relay::live_sync`]'s foreground burst, so in a
-///   `HAVEN_LIVE_SYNC=false` build the row is written and nothing reads it;
-/// * it never rolls the commit back on a no-ack, because that is a permanent
-///   silent drop of the removal — the obligation simply stands.
-async fn resolve_publish_work(
+/// No deadline is waited out past the sweep's own: a wake's budget is the
+/// operating system's, and a drain that slept through it would be cut off
+/// wherever it stood. The first advance costs no wait and always runs. What a
+/// cut, or a drain out of the deadlines it may wait out, leaves owing is
+/// owed to the next plane that drains ([`SessionManager::owe_advance`]):
+/// nothing else would come back for a commit left buffered here.
+async fn drain_convergence(
     circle_mgr: &CircleManager,
-    relay_mgr: &RelayManager,
-    work: &[PublishWork],
-) {
-    let ingest =
-        crate::relay::auto_commit::resolve_receive_publish_work(circle_mgr, relay_mgr, work).await;
-    // `ingest.results` are DROPPED, and the reason is what makes it safe rather
-    // than convenient: the core persisted every location in them to the
-    // last-known store before it returned, and this sweep has no UI surface to
-    // route them to — the foreground reads the store, not a bus.
-    for proposal in ingest.proposals {
-        let relays = circle_mgr
-            .relays_for_commit_event(&proposal)
-            .unwrap_or_default();
-        if !relays.is_empty() {
-            // A bare proposal opens no publish-before-apply window: nothing to
-            // confirm, nothing to roll back, and an unacked one is re-minted by
-            // the next commit this device applies. Dropping it would leave the
-            // user's own leave wedged behind the engine's send gate.
-            let _ = relay_mgr.publish_event(&proposal, &relays).await;
+    plane: &Plane<'_>,
+    mut pending: Vec<GroupId>,
+) -> Option<DirectoryReconcile> {
+    let mut directory = None;
+    let mut advanced: Vec<GroupId> = Vec::new();
+    for _ in 0..MAX_CONVERGENCE_RETICKS {
+        if pending.is_empty() {
+            break;
         }
+        let mut owing: Vec<GroupId> = Vec::new();
+        for gid in &pending {
+            if !advanced.contains(gid) {
+                advanced.push(gid.clone());
+            }
+            if let Ok((mut more, recorded)) = plane.advance(circle_mgr, gid).await {
+                circle_mgr.persist_replayed_locations(&more.events).await;
+                let work = std::mem::take(&mut more.publish);
+                plane.resolve(circle_mgr, recorded, work).await;
+                circle_mgr.note_inbound_group_events(&more.events);
+                directory = directory.max(circle_mgr.directory_verdict_for_events(&more.events));
+                owing.extend(SessionManager::groups_owing_advance(&more));
+                refetch_at_a_new_epoch(circle_mgr, plane, &more.events).await;
+            }
+        }
+        let (next, wait) = next_receive_retick(circle_mgr.session(), &pending, owing).await;
+        pending = next;
+        if !pending.is_empty() {
+            if Instant::now() + wait > plane.deadline {
+                break;
+            }
+            tokio::time::sleep(wait).await;
+        }
+    }
+    owe_unfinished(circle_mgr.session(), pending, &advanced).await;
+    directory
+}
+
+/// Asks for what a circle owes by id the moment a batch says its epoch has
+/// moved, before that circle is advanced again.
+///
+/// The engine returns from an advance at every new epoch so that its host
+/// can deliver again what it refused before (`cgka-engine/src/
+/// message_processor/mod.rs` 1491-1513): an event it had no room for may be
+/// one the new epoch can open, and the next advance may otherwise settle the
+/// circle past it — a member's leave, overtaken by the commit that evicts
+/// them. Out of the sweep's own share of REQs for the circle
+/// ([`REFETCH_REQS_PER_SWEEP`]), never beside it; and what the refetch
+/// ingests begins no refetch of its own.
+async fn refetch_at_a_new_epoch(
+    circle_mgr: &CircleManager,
+    plane: &Plane<'_>,
+    events: &[crate::nostr::mls::types::GroupEvent],
+) {
+    let mut moved: Vec<&GroupId> = Vec::new();
+    for event in events {
+        if let crate::nostr::mls::types::GroupEvent::EpochChanged { group_id, .. } = event {
+            if !moved.contains(&group_id) {
+                moved.push(group_id);
+            }
+        }
+    }
+    for group_id in moved {
+        if circle_mgr
+            .session()
+            .refused_redeliveries(group_id, 1)
+            .is_empty()
+            || plane.refetching.swap(true, Ordering::SeqCst)
+        {
+            continue;
+        }
+        if let Ok(Some(circle)) = circle_mgr.storage.get_circle(group_id) {
+            let relays = circle_mgr.routing_addresses(group_id, &circle.relays).await;
+            let refetch = Refetch {
+                circle_mgr,
+                plane,
+                group_id,
+                relays: &relays,
+                deadline: plane.deadline,
+            };
+            Box::pin(refetch.by_id()).await;
+        }
+        plane.refetching.store(false, Ordering::SeqCst);
     }
 }
 
@@ -1101,41 +1441,650 @@ async fn resolve_publish_work(
 /// Best-effort and deadline-bounded. Runs through the SAME process-global
 /// session as the foreground (Rule 14 — see the module docs). Fails closed: if
 /// storage is unavailable, returns an empty [`CatchupOutcome`] (no ingest).
+///
+/// This is the sweep every wake the app has runs, in the background as in the
+/// foreground: nothing here can tell which it was called from, so it makes no
+/// commit ([`DriveMode::FinishOnly`]). What it receives is settled, a stored
+/// record a relay has already decided is finished, and an eviction left due
+/// waits for a foreground drive. [`run_catchup_in_foreground`] is the sweep
+/// that makes commits.
 pub async fn run_catchup_all_circles(
     circle_mgr: &CircleManager,
     relay_mgr: &RelayManager,
     max_duration_secs: u64,
 ) -> CatchupOutcome {
+    run_catchup_in(
+        circle_mgr,
+        relay_mgr,
+        max_duration_secs,
+        &DriveMode::FinishOnly,
+    )
+    .await
+}
+
+/// The longest any sweep is given, whatever its caller asks for.
+const MAX_SWEEP_SECS: u64 = 3_600;
+
+/// When a sweep given `max_duration_secs` ends. Clamped: the figure crosses
+/// the FFI, and an instant that far ahead cannot be represented.
+fn sweep_deadline(max_duration_secs: u64) -> Instant {
+    Instant::now() + Duration::from_secs(max_duration_secs.min(MAX_SWEEP_SECS))
+}
+
+/// [`run_catchup_all_circles`] for a caller that knows the app is in front of
+/// its user: the sweep that drives.
+///
+/// It stages what it surfaces under durable fanouts and drives them, and
+/// first drives every stored record that has something due — a commit a kill
+/// interrupted, one the open found staged with no record, a proposal a relay
+/// has not taken.
+///
+/// Call it from the FOREGROUND only: a background wake redeems no stored
+/// removal (privacy invariant `INV-L-WEDGED-CIRCLE-IS-DETECTED-AND-NAMED`).
+///
+/// `max_duration_secs` bounds the whole call, drives included: no record is
+/// begun unless the sweep has a row's longest run left
+/// ([`ROW_BUDGET_MS`](crate::relay::fanout::ROW_BUDGET_MS)),
+/// so a sweep given less than that reads and records and drives nothing, and
+/// says when to come back ([`CatchupOutcome::retry_after_ms`]).
+pub async fn run_catchup_in_foreground(
+    circle_mgr: &CircleManager,
+    relay_mgr: &RelayManager,
+    max_duration_secs: u64,
+) -> CatchupOutcome {
+    run_catchup_in(circle_mgr, relay_mgr, max_duration_secs, &DriveMode::Full).await
+}
+
+/// The product's sweep in `drive_mode`, over `relay_mgr`'s fanout transport
+/// and publish ladder on the device's clock.
+async fn run_catchup_in(
+    circle_mgr: &CircleManager,
+    relay_mgr: &RelayManager,
+    max_duration_secs: u64,
+    drive_mode: &DriveMode,
+) -> CatchupOutcome {
+    let clock = WallClock;
+    let transport = relay_mgr.fanout_transport();
+    let budget_ms = max_duration_secs.min(MAX_SWEEP_SECS) * 1_000;
+    let publishing: Publishing<'_, dyn FanoutSend + '_> = Publishing {
+        fanout: &transport,
+        publisher: relay_mgr,
+        clock: &clock,
+        deadline_ms: Some(clock.now_ms().saturating_add(budget_ms)),
+        mode: drive_mode,
+    };
+    run_catchup_driving(circle_mgr, relay_mgr, &publishing, max_duration_secs).await
+}
+
+/// [`run_catchup_in_foreground`] through `publishing`: the transport, the
+/// publisher of what has no record, the clock and the drive budget are the
+/// caller's.
+pub async fn run_catchup_driving(
+    circle_mgr: &CircleManager,
+    relay_mgr: &RelayManager,
+    publishing: &Publishing<'_, dyn FanoutSend + '_>,
+    max_duration_secs: u64,
+) -> CatchupOutcome {
+    let deadline = sweep_deadline(max_duration_secs);
+    let plane = Plane::driving(relay_mgr, publishing, deadline);
+    // Stored records first: a commit still pending holds its circle's
+    // traffic unread, so sweeping before it is resolved would only buffer.
+    let resumed = publishing.resume(circle_mgr).await;
+    let mut out = sweep_all_circles(circle_mgr, &plane).await;
+    plane.driven.report(&resumed);
+    let (retry_after_ms, errored) = *plane
+        .driven
+        .reported
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    out.retry_after_ms = retry_after_ms.map(|wait| wait.max(BUSY_RETRY_MS));
+    out.drive_errored = errored;
+    out
+}
+
+async fn sweep_all_circles(circle_mgr: &CircleManager, plane: &Plane<'_>) -> CatchupOutcome {
     let mut out = CatchupOutcome::default();
-    let deadline = Instant::now() + Duration::from_secs(max_duration_secs);
+    let deadline = plane.deadline;
+
+    // The first plane in a session takes what the engine handed back at the
+    // open, before the circle list is read: a join recovered there is swept
+    // with the rest. Then the advances the engine named: each drained per
+    // circle inside the deadline, and owed back if the deadline stops the
+    // walk, so a short wake budget is never spent on them up front and never
+    // loses one (MDK's host pending set, T-SCHEDULER).
+    let session = circle_mgr.session();
+    if session.take_open_recovery() {
+        circle_mgr.recover_owed_outputs().await;
+    }
+    let mut owed = session.take_owed_advance();
+    // A follow a kill or an error missed is made before the circles are
+    // read, so each is swept where it now lives.
+    circle_mgr.reconcile_routing().await;
 
     // Fail-closed: storage unavailable (e.g. locked device) ⇒ clean no-op.
-    let Ok(circles) = circle_mgr.get_visible_circles().await else {
+    let Ok(circles) = circle_mgr.routable_circles().await else {
+        session.owe_advance(&owed);
         return out;
     };
+    owed.retain(|group_id| {
+        circles
+            .iter()
+            .any(|cwm| &cwm.circle.mls_group_id == group_id)
+    });
+    let neg_routes = negentropy_routes(circle_mgr, &circles, deadline).await;
+    let mut directory = None;
 
     for cwm in circles {
         if Instant::now() >= deadline {
             out.deadline_hit = true;
             break;
         }
+        if let Some(at) = owed
+            .iter()
+            .position(|group_id| group_id == &cwm.circle.mls_group_id)
+        {
+            let drained = drain_convergence(circle_mgr, plane, vec![owed.remove(at)]).await;
+            directory = directory.max(drained);
+        }
         let relays = cwm.circle.relays;
         if relays.is_empty() {
             continue;
         }
         out.circles_swept += 1;
-        sweep_one_circle(
+        // A routing the circle left within the day — relays, or a routing id
+        // another client's admin rotated — is swept with its current one, as
+        // it keeps its standing REQ (decision 237): a device catching up
+        // across the change finds there what was sent before it. Only this
+        // pass's own sweeps of every one say the circle is caught up.
+        let group_id = &cwm.circle.mls_group_id;
+        circle_mgr.session().forget_caught_up(Some(group_id));
+        let mut caught_up = true;
+        for (routing_id, swept) in circle_mgr
+            .standing_routings(
+                group_id,
+                cwm.circle.nostr_group_id,
+                &relays,
+                chrono::Utc::now().timestamp(),
+            )
+            .await
+        {
+            let neg = neg_routes
+                .iter()
+                .find(|route| route.routing_id == routing_id && &route.group_id == group_id);
+            caught_up &= sweep_one_circle(
+                circle_mgr, plane, group_id, routing_id, &swept, neg, &mut out,
+            )
+            .await;
+        }
+        if caught_up {
+            circle_mgr.session().mark_caught_up(group_id);
+        }
+        let addresses = circle_mgr
+            .routing_addresses(&cwm.circle.mls_group_id, &relays)
+            .await;
+        let refetch = Refetch {
             circle_mgr,
-            relay_mgr,
-            cwm.circle.nostr_group_id,
-            &relays,
+            plane,
+            group_id: &cwm.circle.mls_group_id,
+            relays: &addresses,
             deadline,
-            &mut out,
-        )
-        .await;
+        };
+        refetch.by_id().await;
+        refetch.by_range(&mut out).await;
     }
 
+    session.owe_advance(&owed);
+    if let Some(mode) = directory {
+        circle_mgr
+            .reconcile_member_directory_best_effort(mode)
+            .await;
+    }
     out
+}
+
+/// What a route's NIP-77 session, by-id fetch and a page of ingests need of
+/// a sweep's budget before one is begun.
+const NEG_ROOM: Duration =
+    Duration::from_secs(super::manager::CONNECTION_TIMEOUT.as_secs() + NEG_ROUTE_WAIT.as_secs());
+
+/// The routings this sweep reconciles over NIP-77: every standing routing of
+/// `circles`, taken by [`negentropy::begin_pass`] — none when the sweep has
+/// no room for one or a pass began too recently. Each runs at its circle's
+/// turn, after the pager's passes ([`sweep_one_circle`]).
+async fn negentropy_routes(
+    circle_mgr: &CircleManager,
+    circles: &[crate::circle::CircleWithMembers],
+    deadline: Instant,
+) -> Vec<NegRoute> {
+    if deadline.saturating_duration_since(Instant::now()) < NEG_ROOM {
+        return Vec::new();
+    }
+    let now = chrono::Utc::now().timestamp();
+    let mut routes = Vec::new();
+    for cwm in circles {
+        let circle = &cwm.circle;
+        if circle.relays.is_empty() {
+            continue;
+        }
+        for (routing_id, relays) in circle_mgr
+            .standing_routings(
+                &circle.mls_group_id,
+                circle.nostr_group_id,
+                &circle.relays,
+                now,
+            )
+            .await
+        {
+            routes.push(NegRoute {
+                group_id: circle.mls_group_id.clone(),
+                routing_id,
+                relays,
+            });
+        }
+    }
+    negentropy::begin_pass(circle_mgr.session(), routes).await
+}
+
+/// Takes what a sweep's NIP-77 pass recovered for one circle in, as a page
+/// is ([`CircleSweep::ingest_page`]): each event's verdict is recorded for the
+/// cursor, and what the deadline cuts off holds it.
+struct CatchupSink<'s, 'a> {
+    sweep: &'s CircleSweep<'a>,
+    tally: std::sync::Mutex<(CatchupOutcome, Vec<(i64, ReceiveOnlyOutcome)>)>,
+}
+
+impl CatchupSink<'_, '_> {
+    /// Adds what the sink took in to the sweep's tally and classification.
+    fn drain_into(self, out: &mut CatchupOutcome, classified: &mut Vec<(i64, ReceiveOnlyOutcome)>) {
+        let (took, verdicts) = self
+            .tally
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        out.events_applied += took.events_applied;
+        out.events_deferred += took.events_deferred;
+        out.events_rejected_pre_auth += took.events_rejected_pre_auth;
+        out.events_stranded += took.events_stranded;
+        out.deadline_hit |= took.deadline_hit;
+        classified.extend(verdicts);
+    }
+}
+
+#[async_trait::async_trait]
+impl NegSink for CatchupSink<'_, '_> {
+    #[deny(clippy::wildcard_enum_match_arm)]
+    async fn take_in(&self, route: &NegRoute, events: Vec<(IngestClass, Event)>) -> bool {
+        let group_id = &route.group_id;
+        let sweep = self.sweep;
+        let session = sweep.circle_mgr.session();
+        let mut took = CatchupOutcome::default();
+        let mut verdicts = Vec::with_capacity(events.len());
+        let mut whole = true;
+        for (idx, (_, ev)) in events.iter().enumerate() {
+            if Instant::now() >= sweep.deadline {
+                // Fetched and never taken in: each holds the cursor, and a
+                // current-epoch commit stays held unread until an ingest
+                // takes it in (Security Rule 10).
+                let rest = &events[idx..];
+                session.hold_pager_commits(
+                    group_id,
+                    rest.iter()
+                        .filter(|(class, _)| *class == IngestClass::Commit)
+                        .map(|(_, event)| &event.id),
+                );
+                verdicts.extend(
+                    rest.iter()
+                        .map(|(_, pending)| (created_secs(pending), ReceiveOnlyOutcome::Deferred)),
+                );
+                took.events_deferred += rest.len();
+                took.deadline_hit = true;
+                sweep.owing.store(true, Ordering::Relaxed);
+                whole = false;
+                break;
+            }
+            let (outcome, left) = ingest_judged(sweep.circle_mgr, sweep.plane, ev).await;
+            sweep.ingested_any.store(true, Ordering::Relaxed);
+            let taken = match left {
+                Left::WithTheEngine => true,
+                Left::NoRoom => session.refused_owes(group_id).contains(&ev.id),
+                Left::Unasked => false,
+            };
+            if !taken {
+                whole = false;
+            }
+            if left != Left::WithTheEngine {
+                sweep.owing.store(true, Ordering::Relaxed);
+            }
+            match outcome {
+                ReceiveOnlyOutcome::Applied => took.events_applied += 1,
+                ReceiveOnlyOutcome::Deferred => took.events_deferred += 1,
+                ReceiveOnlyOutcome::NoEvidence => took.events_rejected_pre_auth += 1,
+                ReceiveOnlyOutcome::Stranded => took.events_stranded += 1,
+            }
+            verdicts.push((created_secs(ev), outcome));
+        }
+        *self
+            .tally
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = (took, verdicts);
+        whole
+    }
+}
+
+/// Runs ONLY the refused-object redelivery, for only the circles that owe one.
+///
+/// What the live plane asks for when the engine refuses an object
+/// (`SyncStatusReason::RefetchOwed`). No window is swept and no cursor moves,
+/// so a stranger's refusal flood costs this a bounded share of each owing
+/// circle, never a full catch-up of every circle. It makes no commit
+/// ([`DriveMode::FinishOnly`]): what it ingests is settled.
+pub async fn run_refused_refetch(
+    circle_mgr: &CircleManager,
+    relay_mgr: &RelayManager,
+    max_duration_secs: u64,
+) -> CatchupOutcome {
+    let mut out = CatchupOutcome::default();
+    let deadline = sweep_deadline(max_duration_secs);
+    let clock = WallClock;
+    let transport = relay_mgr.fanout_transport();
+    let publishing: Publishing<'_, dyn FanoutSend + '_> = Publishing {
+        fanout: &transport,
+        publisher: relay_mgr,
+        clock: &clock,
+        deadline_ms: Some(
+            clock
+                .now_ms()
+                .saturating_add(max_duration_secs.min(MAX_SWEEP_SECS) * 1_000),
+        ),
+        mode: &DriveMode::FinishOnly,
+    };
+    let plane = Plane::driving(relay_mgr, &publishing, deadline);
+    let Ok(circles) = circle_mgr.routable_circles().await else {
+        return out;
+    };
+    for cwm in circles {
+        if Instant::now() >= deadline {
+            out.deadline_hit = true;
+            break;
+        }
+        let group_id = &cwm.circle.mls_group_id;
+        let session = circle_mgr.session();
+        let owes = !session.refused_redeliveries(group_id, 1).is_empty()
+            || session.refused_range(group_id).is_some();
+        if !owes || cwm.circle.relays.is_empty() {
+            continue;
+        }
+        let addresses = circle_mgr
+            .routing_addresses(group_id, &cwm.circle.relays)
+            .await;
+        let refetch = Refetch {
+            circle_mgr,
+            plane: &plane,
+            group_id,
+            relays: &addresses,
+            deadline,
+        };
+        refetch.by_id().await;
+        refetch.by_range(&mut out).await;
+    }
+    out
+}
+
+/// Refused ids asked for in one REQ, each REQ capped at as many events as it
+/// names, so no answer can exceed what was asked for.
+///
+/// MDK's own by-id batch (`transport-nostr-adapter/src/sdk_client.rs:66`):
+/// half the number whose REQ outgrows the 16 384 bytes NIP-11 gives as an
+/// example `max_message_length`.
+pub const REFETCH_IDS_PER_REQ: usize = 128;
+
+/// Asks each of `at` for `ids` by id, in one REQ capped at as many events as
+/// it names and carrying `#h` = `routing_hex` when given; what each relay
+/// served of those ids and whether it finished. The one by-id shape, shared
+/// by the refused-object refetch and the NIP-77 pass.
+pub(crate) async fn fetch_ids(
+    relays: &RelayManager,
+    ids: &[EventId],
+    routing_hex: Option<&str>,
+    at: &[String],
+) -> Vec<RelayFetchOutcome> {
+    let mut filter = Filter::new()
+        .ids(ids.iter().copied())
+        .kind(Kind::Custom(445))
+        .limit(ids.len());
+    if let Some(routing_hex) = routing_hex {
+        filter = filter.custom_tag(
+            nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+            routing_hex,
+        );
+    }
+    let mut outcomes = relays
+        .fetch_events_per_relay(filter, at)
+        .await
+        .unwrap_or_default();
+    for outcome in &mut outcomes {
+        outcome.events.retain(|event| ids.contains(&event.id));
+    }
+    outcomes
+}
+
+/// REQs of refused ids one sweep sends per circle: together with
+/// [`REFETCH_IDS_PER_REQ`], a sweep's share of a backlog, which rotates
+/// through the rest on later sweeps.
+pub const REFETCH_REQS_PER_SWEEP: usize = 2;
+
+/// The redelivery Marmot `transports/nostr.md` (`resource_refused`) requires
+/// and Security Rule 12 promises, for ONE circle: every object the engine
+/// deferred and then retired for a local resource bound gets another delivery
+/// opportunity.
+///
+/// The deferral let the cursor pass the object and the engine keeps nothing of
+/// it, so no window brings it back. Up to [`MAX_REFUSED_IDS_PER_GROUP`] are
+/// owed by id; past that, the circle owes its history as a range, walked down a
+/// page budget per sweep — the overlapping range the spec allows
+/// (`transports/nostr.md:168-171`) and the full-history backfill MDK asks for
+/// (`message_processor/store.rs:869-871`).
+///
+/// [`MAX_REFUSED_IDS_PER_GROUP`]: crate::nostr::mls::MAX_REFUSED_IDS_PER_GROUP
+struct Refetch<'a> {
+    circle_mgr: &'a CircleManager,
+    plane: &'a Plane<'a>,
+    group_id: &'a GroupId,
+    relays: &'a [String],
+    deadline: Instant,
+}
+
+impl Refetch<'_> {
+    /// Asks for the owed ids whose wait is over, those that waited longest
+    /// first, a bounded share per sweep ([`REFETCH_REQS_PER_SWEEP`] REQs of
+    /// [`REFETCH_IDS_PER_REQ`] ids, whenever in the sweep they are sent),
+    /// and ingests what comes back. An id
+    /// is discharged only when its object was ingested to a verdict, or when
+    /// EVERY relay asked answered a REQ naming it with no event at all;
+    /// anything less — a relay that never answered, an ingest that failed —
+    /// keeps it owed, behind a wait that doubles each time
+    /// ([`refetch_spacing_secs`](crate::nostr::mls::refetch_spacing_secs)):
+    /// never dropped, and never asked for at every sweep.
+    ///
+    /// An answer that brought some of the ids it was asked for proves
+    /// nothing about the rest: a relay may clamp `limit` below what matches
+    /// and send a subset before its EOSE. Those are asked for again by
+    /// themselves, out of the same share, and keep their turn until then.
+    ///
+    /// When the engine had no room for anything a REQ brought back, the ids
+    /// of the circle that were already asked for since they last became due
+    /// wait too. That is all it does: the sweep's share is asked for in
+    /// full, and an id that has not had its turn keeps it — it may be the
+    /// one event the engine can open, among any number it cannot.
+    async fn by_id(&self) {
+        let session = self.circle_mgr.session();
+        let mut alone: Vec<nostr::EventId> = Vec::new();
+        while Instant::now() < self.deadline && !self.relays.is_empty() {
+            // Read for each REQ: what the last one left waiting is no longer
+            // due, and what a new epoch made due again is.
+            let chunk = if alone.is_empty() {
+                session.refused_redeliveries(self.group_id, REFETCH_IDS_PER_REQ)
+            } else {
+                std::mem::take(&mut alone)
+            };
+            if chunk.is_empty() || !self.plane.take_refetch_req(self.group_id) {
+                break;
+            }
+            let epoch_asked_in = session.epoch_state(self.group_id).await;
+            let outcomes = fetch_ids(self.plane.relays, &chunk, None, self.relays).await;
+            let every_relay_answered = !self.relays.is_empty()
+                && outcomes.len() == self.relays.len()
+                && outcomes.iter().all(|outcome| outcome.drained);
+            let mut events: Vec<Event> = outcomes
+                .into_iter()
+                .flat_map(|outcome| outcome.events)
+                .collect();
+            events.sort_by_key(|event| (event.created_at, event.id));
+            events.dedup_by_key(|event| event.id);
+            let events: Vec<Event> = session
+                .order_for_ingest(self.group_id, events)
+                .await
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect();
+            let mut discharged: Vec<nostr::EventId> = Vec::new();
+            let mut no_room = 0;
+            for event in &events {
+                let (verdict, left) = ingest_judged(self.circle_mgr, self.plane, event).await;
+                no_room += usize::from(left == Left::NoRoom);
+                if !matches!(verdict, ReceiveOnlyOutcome::Deferred) {
+                    discharged.push(event.id);
+                }
+            }
+            if every_relay_answered {
+                let absent = chunk
+                    .iter()
+                    .filter(|id| !events.iter().any(|event| event.id == **id))
+                    .copied();
+                if events.is_empty() {
+                    discharged.extend(absent);
+                } else {
+                    alone = absent.collect();
+                }
+            }
+            session.resolve_refused_redeliveries(self.group_id, &discharged);
+            // An id the engine refused before a later event of the same
+            // answer moved the circle's epoch is due at once, as every owed
+            // id is at a new epoch: it earns no wait here.
+            if session.epoch_state(self.group_id).await != epoch_asked_in {
+                continue;
+            }
+            let still_owed: Vec<_> = chunk
+                .iter()
+                .filter(|id| !discharged.contains(id) && !alone.contains(id))
+                .copied()
+                .collect();
+            let wholesale = no_room > 0 && no_room == events.len();
+            session.refused_redeliveries_tried(self.group_id, &still_owed, wholesale);
+        }
+    }
+
+    /// Walks the owed history range down one pass's page budget, from where
+    /// the walk under way has got to. A halted pass carries the walk down; a
+    /// pass every relay answered in full ends the range only if the engine
+    /// took everything the WHOLE walk brought back, and otherwise the next
+    /// pass begins again at the ceiling ([`RangePass`]). The cursor is
+    /// untouched: it already claims this ground, and a range refetch is a
+    /// redelivery, not a sync.
+    ///
+    /// Past the cap an event is owed as part of the range ONLY, and the
+    /// engine announces nothing when it refuses one at ingest: an event it
+    /// had no room for, erred on or was never asked about is on record
+    /// nowhere else, so a pass that brought one back ends nothing.
+    ///
+    /// On a schedule of its own, whatever the ids beside it are waiting for:
+    /// a range that waited on ids nothing can discharge would never bring
+    /// such an event back. A pass that carries the walk no further doubles
+    /// the wait before the next; a new epoch makes it due at once.
+    async fn by_range(&self, out: &mut CatchupOutcome) {
+        let session = self.circle_mgr.session();
+        if Instant::now() >= self.deadline {
+            return;
+        }
+        let Some(read) = session.refused_range_to_ask(self.group_id) else {
+            return;
+        };
+        // Each routing id the circle's traffic in the window was sent under —
+        // a range reaching back across a rotation spans both — asked for by a
+        // filter of its own at the relays it was used with: a relay set the
+        // circle left with its prior id is never told the new one.
+        let routing_id = self
+            .circle_mgr
+            .nostr_group_id_for(self.group_id)
+            .unwrap_or_default();
+        let current = self
+            .circle_mgr
+            .storage
+            .get_circle(self.group_id)
+            .ok()
+            .flatten()
+            .map(|circle| circle.relays)
+            .unwrap_or_default();
+        let unanswered_before = out.relay_errors;
+        let (mut halted_at, mut whole, mut owing) = (None::<i64>, true, false);
+        for (id, relays) in self
+            .circle_mgr
+            .kept_routings(self.group_id, routing_id, &current)
+            .await
+        {
+            let sweep = CircleSweep {
+                circle_mgr: self.circle_mgr,
+                plane: self.plane,
+                group_id: self.group_id,
+                ngid_hexes: vec![hex::encode(id)],
+                relays: &relays,
+                deadline: self.deadline,
+                started_out_of_time: false,
+                ingested_any: AtomicBool::new(false),
+                owing: AtomicBool::new(false),
+                tolerate_cut_offs: false,
+            };
+            let mut classified = Vec::new();
+            let pass = sweep
+                .fetch_and_ingest(0, read.walk_secs, out, &mut classified)
+                .await;
+            owing |= sweep.owing.load(Ordering::Relaxed);
+            if pass.window.saturated {
+                // A second fuller than a page would otherwise pin the walk
+                // there for as long as relays serve it — and an outsider can
+                // date one just above a genuine event. Below it the walk goes
+                // on; what the second holds past the page stays owed.
+                let at = if pass.full_at_until && pass.last_until_secs > 0 {
+                    owing = true;
+                    pass.last_until_secs - 1
+                } else {
+                    pass.last_until_secs
+                };
+                // The walk is the circle's: it resumes where the id that
+                // got least far down stopped.
+                halted_at = Some(halted_at.map_or(at, |seen| seen.max(at)));
+            }
+            whole &= !pass.cut_off && pass.window.any_relay_drained;
+        }
+        if let Some(at_secs) = halted_at {
+            session.settle_refused_range(self.group_id, read, RangePass::Halted { at_secs, owing });
+        } else if whole && out.relay_errors == unanswered_before {
+            session.settle_refused_range(self.group_id, read, RangePass::Whole { owing });
+            // The relays' verdict on the walk is the stall detector's
+            // evidence (T-EPOCH-STALL).
+            session.history_walk_settled(self.group_id, owing);
+        }
+    }
+}
+
+/// Whether a top-down pass leaves its circle caught up: it finished, a relay
+/// drained, and it held nothing back — an event it fetched and could not
+/// apply may be the commit that matters.
+fn caught_up_by(top: &PassResult, classified: &[(i64, ReceiveOnlyOutcome)]) -> bool {
+    !top.window.saturated
+        && top.window.any_relay_drained
+        && !classified
+            .iter()
+            .any(|(_, outcome)| *outcome == ReceiveOnlyOutcome::Deferred)
 }
 
 /// Sweeps ONE circle: opens the window, fetches, ingests, and advances that
@@ -1179,16 +2128,23 @@ pub async fn run_catchup_all_circles(
 /// Where the two do NOT abut (a floor an earlier sweep drove deeper leaves a
 /// band this sweep asked nobody about), the sweep falls back to the one band it
 /// did finish and the descent carries on next sweep.
+///
+/// Returns whether the top-down pass left the routing id caught up
+/// ([`caught_up_by`]).
+#[allow(clippy::too_many_lines)]
 async fn sweep_one_circle(
     circle_mgr: &CircleManager,
-    relay_mgr: &RelayManager,
+    plane: &Plane<'_>,
+    group_id: &GroupId,
     ngid: [u8; 32],
     relays: &[String],
-    deadline: Instant,
+    neg: Option<&NegRoute>,
     out: &mut CatchupOutcome,
-) {
+) -> bool {
+    let deadline = plane.deadline;
     let ngid_hex = hex::encode(ngid);
     let stream = group_cursor_stream(&ngid_hex);
+    let ngid_hexes = vec![ngid_hex];
     // Rule-12 escape hatch, spent at most once per run of held sweeps: see
     // `CATCHUP_MAX_CUTOFF_HOLDS`. Storage-unavailable reads as "not yet", so a
     // locked device degrades to the strict rule rather than to the lenient one.
@@ -1196,12 +2152,14 @@ async fn sweep_one_circle(
         circle_mgr.storage.read_cutoff_holds(&stream).unwrap_or(0) >= CATCHUP_MAX_CUTOFF_HOLDS;
     let sweep = CircleSweep {
         circle_mgr,
-        relay_mgr,
-        ngid_hex,
+        plane,
+        group_id,
+        ngid_hexes,
         relays,
         deadline,
         started_out_of_time: Instant::now() >= deadline,
         ingested_any: AtomicBool::new(false),
+        owing: AtomicBool::new(false),
         tolerate_cut_offs,
     };
 
@@ -1236,6 +2194,7 @@ async fn sweep_one_circle(
     let top = sweep
         .fetch_and_ingest(since_secs, window_opened_at_secs, out, &mut classified)
         .await;
+    let caught_up = caught_up_by(&top, &classified);
 
     // The band the advance may be taken from if the passes cannot be composed,
     // how far down this sweep's OWN contiguous retrieval reached, and the
@@ -1320,6 +2279,22 @@ async fn sweep_one_circle(
         unfinished_below = None;
     }
 
+    // THE WHOLE WINDOW, reconciled ([`reconciled_window`]), after the
+    // pager's passes and the composition: what they took in is not asked for
+    // again, and a covered window is claimed with the relays that answered.
+    if let Some(window) = reconciled_window(
+        &sweep,
+        neg,
+        (since_secs, window_opened_at_secs),
+        out,
+        &mut classified,
+    )
+    .await
+    {
+        established = window;
+        unfinished_below = None;
+    }
+
     // The clamp reads the clock AGAIN so a long sweep is measured against a
     // current wall clock, never the stale one the window opened with.
     let advance = cursor_advance_ms(
@@ -1365,6 +2340,45 @@ async fn sweep_one_circle(
     } else {
         circle_mgr.storage.bump_cutoff_holds(&stream)
     };
+    caught_up
+}
+
+/// Runs `neg`, the routing's NIP-77 pass, when the sweep has room for it, and
+/// the window `[since, ceiling]` it then establishes, if any.
+///
+/// Every relay of the routing answered a session over a band containing the
+/// window with a set under the limit, everything any of them reported and
+/// this device lacked was asked of the relay that reported it in an answer
+/// it finished, and the engine holds, or the refused ledger owes, everything
+/// that came back ([`negentropy::NegCoverage::whole`]). Both bounds of the band are local
+/// clock readings, so nothing remote enters the comparison, and what the pass
+/// took in joins `classified`, whose hold-backs still bound the advance. A
+/// routing with a relay that does not speak NIP-77 keeps the pager's rule.
+async fn reconciled_window(
+    sweep: &CircleSweep<'_>,
+    neg: Option<&NegRoute>,
+    (since_secs, ceiling_secs): (i64, i64),
+    out: &mut CatchupOutcome,
+    classified: &mut Vec<(i64, ReceiveOnlyOutcome)>,
+) -> Option<FetchWindow> {
+    let route =
+        neg.filter(|_| sweep.deadline.saturating_duration_since(Instant::now()) >= NEG_ROOM)?;
+    let relays = sweep.plane.relays;
+    relays.neg_prepare(&route.relays).await;
+    let sink = CatchupSink {
+        sweep,
+        tally: std::sync::Mutex::new((CatchupOutcome::default(), Vec::new())),
+    };
+    let coverage =
+        negentropy::reconcile_route(relays, sweep.circle_mgr.session(), route, &sink).await;
+    sink.drain_into(out, classified);
+    coverage
+        .covers(since_secs, ceiling_secs)
+        .then_some(FetchWindow {
+            ceiling_secs,
+            saturated: false,
+            any_relay_drained: true,
+        })
 }
 
 /// One circle's sweep: everything the paged fetch-and-ingest loop needs that
@@ -1374,10 +2388,13 @@ async fn sweep_one_circle(
 /// with no derived formatter, because it holds relay URLs and a group id.
 struct CircleSweep<'a> {
     circle_mgr: &'a CircleManager,
-    relay_mgr: &'a RelayManager,
-    /// The PUBLIC `nostr_group_id` in hex, which every page filters `#h` on
+    plane: &'a Plane<'a>,
+    /// The circle whose traffic every page carries: its current epoch is
+    /// what each page is ordered against.
+    group_id: &'a GroupId,
+    /// The PUBLIC `nostr_group_id`s in hex, which every page filters `#h` on
     /// (Security Rule 4 — never the MLS group id).
-    ngid_hex: String,
+    ngid_hexes: Vec<String>,
     relays: &'a [String],
     deadline: Instant,
     /// The wake budget was ALREADY gone when this circle was entered, so this
@@ -1388,6 +2405,9 @@ struct CircleSweep<'a> {
     /// Atomic rather than `Cell` so the sweep stays `Sync` and the futures
     /// holding `&self` across an await stay `Send`.
     ingested_any: AtomicBool,
+    /// Whether the engine holds nothing of an event this sweep fetched: it
+    /// had no room for it, erred on it, or was never handed it.
+    owing: AtomicBool,
     /// This circle has been held on cut-off deliveries alone for
     /// [`CATCHUP_MAX_CUTOFF_HOLDS`] sweeps running, so this one treats a relay
     /// that hands over events without finishing as UNREACHED instead.
@@ -1432,7 +2452,16 @@ impl CircleSweep<'_> {
     /// mid-chase applies NOTHING — then does the same on the next wake, and the
     /// one after, because the cursor is rightly held and the backlog is still
     /// there. Buffering is recoverable; never applying anything is not.
+    ///
+    /// A commit is the exception, because MDK drops for good one it takes in
+    /// before the proposal it commits (`docs/MDK_UPSTREAM_TRACKER.md`
+    /// T-COMMIT-BEFORE-PROPOSAL), and newest-first the proposal can lie a
+    /// page further down. So a page the chase goes on past holds its
+    /// current-epoch commits until a later page has brought something;
+    /// they are taken in at the chase's end, and at a halt they stay unread
+    /// and hold the cursor instead.
     #[deny(clippy::wildcard_enum_match_arm)]
+    #[allow(clippy::too_many_lines)]
     async fn fetch_and_ingest(
         &self,
         since_secs: i64,
@@ -1483,9 +2512,14 @@ impl CircleSweep<'_> {
         // re-bought on every wake. A genuinely future-dated peer event is merely
         // deferred to the next sweep, whose floor sits below it.
         let mut until_secs = ceiling_secs;
+        // The current-epoch commits of a page the chase goes on past, held
+        // until a later page has brought something: the proposal a commit
+        // commits is signed before it, so a newest-first chase can cut
+        // between them.
+        let mut held: Vec<Event> = Vec::new();
 
         loop {
-            let filter = group_filter(std::slice::from_ref(&self.ngid_hex), since_secs)
+            let filter = group_filter(&self.ngid_hexes, since_secs)
                 .limit(CATCHUP_MAX_EVENTS_PER_PAGE)
                 // Only a pre-1970 local clock can put a ceiling out of range
                 // (`Pager::step` floors every boundary at `since_secs`, itself
@@ -1497,17 +2531,23 @@ impl CircleSweep<'_> {
                 .until(Timestamp::from(
                     u64::try_from(until_secs).unwrap_or(u64::MAX),
                 ));
-            let Ok(fetch_outcomes) = self.relay_mgr.fetch_events_per_relay(filter, &active).await
+            let Ok(fetch_outcomes) = self
+                .plane
+                .relays
+                .fetch_events_per_relay(filter, &active)
+                .await
             else {
                 // The primitive documents that it never fails as a whole; should
                 // that ever change, an unanswered page is an unfinished chase,
                 // and an unfinished chase holds the cursor.
                 out.relay_errors += 1;
                 window.saturated = true;
+                self.defer_held(&held, out, classified);
                 return PassResult {
                     window,
                     last_until_secs: until_secs,
                     cut_off,
+                    full_at_until: false,
                 };
             };
             pager.pages += 1;
@@ -1519,6 +2559,7 @@ impl CircleSweep<'_> {
             out.relay_errors += round.unanswered;
             state.chasing = round.chasing;
             state.silent = round.silent;
+            let full_at_until = !round.read_incomplete && full_at(&fetch_outcomes, until_secs);
 
             let mut page: Vec<Event> = Vec::new();
             for fo in fetch_outcomes {
@@ -1529,7 +2570,20 @@ impl CircleSweep<'_> {
                 }
             }
             pager.collected += page.len();
-            self.ingest_page(page, out, classified).await;
+            if !page.is_empty() {
+                let cut = !matches!(
+                    pager.step(
+                        round.boundary_secs,
+                        round.repeat_page,
+                        round.read_incomplete,
+                        false
+                    ),
+                    PageStep::Complete
+                );
+                held = self
+                    .ingest_page(page, std::mem::take(&mut held), cut, out, classified)
+                    .await;
+            }
 
             // The deadline bounds the CHASE too, not just the ingest inside it:
             // a circle whose relays keep answering in full must not eat the
@@ -1542,21 +2596,32 @@ impl CircleSweep<'_> {
                 out_of_time,
             ) {
                 PageStep::Complete => {
+                    if !held.is_empty() {
+                        self.ingest_page(Vec::new(), held, false, out, classified)
+                            .await;
+                    }
                     return PassResult {
                         window,
                         last_until_secs: until_secs,
                         cut_off,
-                    }
+                        full_at_until: false,
+                    };
                 }
+                // A commit still held is never handed over here: the page
+                // that would bring its proposal was not read, and taken in
+                // alone it is dropped for good. It holds the cursor instead,
+                // and the next sweep fetches it again.
                 PageStep::Halt => {
                     if out_of_time {
                         out.deadline_hit = true;
                     }
+                    self.defer_held(&held, out, classified);
                     window.saturated = true;
                     return PassResult {
                         window,
                         last_until_secs: until_secs,
                         cut_off,
+                        full_at_until,
                     };
                 }
                 PageStep::Next(until) => {
@@ -1577,12 +2642,16 @@ impl CircleSweep<'_> {
         }
     }
 
-    /// Ingests ONE page, oldest event first, recording what each says about the
-    /// cursor.
+    /// Ingests ONE page with what an earlier page held, in the order
+    /// [`SessionManager::order_for_ingest`] gives, recording what each says
+    /// about the cursor; a current-epoch commit of a `cut` page is held
+    /// instead, and returned.
     ///
-    /// The sort is ascending `(created_at, id)`: a page arrives in no order this
-    /// code may rely on, and going oldest-first is what makes a deadline landing
-    /// mid-page leave the OLDEST un-ingested events for the hold-back below.
+    /// The batch is first sorted ascending `(created_at, id)`: a page
+    /// arrives in no order this code may rely on, ascending is the order an
+    /// ordering that fails open keeps, and going oldest-first is what makes a
+    /// deadline landing mid-page leave the OLDEST un-ingested events for the
+    /// hold-back below.
     ///
     /// A classification is captured HERE and never revised, so a hold-back
     /// stands for the rest of the sweep even if something later resolves what
@@ -1595,10 +2664,36 @@ impl CircleSweep<'_> {
     async fn ingest_page(
         &self,
         mut page: Vec<Event>,
+        carried: Vec<Event>,
+        cut: bool,
         out: &mut CatchupOutcome,
         classified: &mut Vec<(i64, ReceiveOnlyOutcome)>,
-    ) {
+    ) -> Vec<Event> {
+        let carried_ids: HashSet<EventId> = carried.iter().map(|event| event.id).collect();
+        page.extend(carried);
         page.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        let mut held = Vec::new();
+        let mut taken = Vec::with_capacity(page.len());
+        for (class, event) in self
+            .circle_mgr
+            .session()
+            .order_for_ingest(self.group_id, page)
+            .await
+        {
+            if cut && class == IngestClass::Commit && !carried_ids.contains(&event.id) {
+                held.push(event);
+            } else {
+                taken.push(event);
+            }
+        }
+        // Fetched and not in: no location is sealed for the circle until an
+        // ingest takes each in, on whichever plane (Security Rule 10).
+        if !held.is_empty() {
+            self.circle_mgr
+                .session()
+                .hold_pager_commits(self.group_id, held.iter().map(|event| &event.id));
+        }
+        let page = taken;
         for (idx, ev) in page.iter().enumerate() {
             // THE PROGRESS FLOOR. A sweep that entered with budget must apply
             // at least ONE of the events it spent that budget fetching. Bailing
@@ -1632,28 +2727,97 @@ impl CircleSweep<'_> {
                         .map(|pending| (created_secs(pending), ReceiveOnlyOutcome::Deferred)),
                 );
                 out.events_deferred += page.len() - idx;
-                return;
+                self.owing.store(true, Ordering::Relaxed);
+                return held;
             }
             let secs = created_secs(ev);
-            let outcome = ingest_one(self.circle_mgr, self.relay_mgr, ev).await;
+            let (outcome, left) = ingest_judged(self.circle_mgr, self.plane, ev).await;
             self.ingested_any.store(true, Ordering::Relaxed);
+            if outcome == ReceiveOnlyOutcome::NoEvidence {
+                self.judge_refused(ev);
+            }
+            if left != Left::WithTheEngine {
+                self.owing.store(true, Ordering::Relaxed);
+            }
             match outcome {
                 ReceiveOnlyOutcome::Applied => out.events_applied += 1,
                 ReceiveOnlyOutcome::Deferred => out.events_deferred += 1,
                 ReceiveOnlyOutcome::NoEvidence => out.events_rejected_pre_auth += 1,
+                ReceiveOnlyOutcome::Stranded => out.events_stranded += 1,
             }
             classified.push((secs, outcome));
         }
+        held
+    }
+
+    /// Records `ev`, which Haven's screen refused, as judged under the routing
+    /// this page was asked for, and no other ([`SessionManager::neg_judge_refused`]).
+    fn judge_refused(&self, ev: &Event) {
+        if let [routing_hex] = self.ngid_hexes.as_slice() {
+            if let Some(routing) = hex::decode(routing_hex)
+                .ok()
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+            {
+                self.circle_mgr.session().neg_judge_refused(&routing, ev);
+            }
+        }
+    }
+
+    /// Records each of `held`, never handed to the engine, as deferred: it
+    /// holds the cursor at or below itself, and the sweep is owing.
+    fn defer_held(
+        &self,
+        held: &[Event],
+        out: &mut CatchupOutcome,
+        classified: &mut Vec<(i64, ReceiveOnlyOutcome)>,
+    ) {
+        if held.is_empty() {
+            return;
+        }
+        // Each stays held unread (`ingest_page`) until an ingest takes it in.
+        classified.extend(
+            held.iter()
+                .map(|event| (created_secs(event), ReceiveOnlyOutcome::Deferred)),
+        );
+        out.events_deferred += held.len();
+        self.owing.store(true, Ordering::Relaxed);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        cursor_advance_ms, hold_backs, ingest_one, summarize_round, ChaseState, FetchWindow,
-        HashSet, PageStep, Pager, ReceiveOnlyOutcome, ReceiveOnlyOutcome as O, RelayFetchOutcome,
-        CATCHUP_MAX_EVENTS_PER_CIRCLE, CATCHUP_MAX_EVENTS_PER_PAGE, CATCHUP_MAX_PAGES_PER_CIRCLE,
+        cursor_advance_ms, drain_convergence, hold_backs, ingest_one, summarize_round, ChaseState,
+        FetchWindow, HashSet, PageStep, Pager, ReceiveOnlyOutcome, ReceiveOnlyOutcome as O,
+        RelayFetchOutcome, CATCHUP_MAX_EVENTS_PER_CIRCLE, CATCHUP_MAX_EVENTS_PER_PAGE,
+        CATCHUP_MAX_PAGES_PER_CIRCLE,
     };
+
+    /// The sweep a wake runs — it makes no commit — over a transport that
+    /// takes no relay, with a budget no test here reaches.
+    fn plane(relays: &crate::relay::RelayManager) -> super::Plane<'_> {
+        plane_until(
+            relays,
+            std::time::Instant::now() + std::time::Duration::from_mins(10),
+        )
+    }
+
+    /// [`plane`], ending at `deadline`.
+    fn plane_until(
+        relays: &crate::relay::RelayManager,
+        deadline: std::time::Instant,
+    ) -> super::Plane<'_> {
+        let inert: &'static dyn super::FanoutSend = &crate::relay::fanout::scripted::Inert;
+        let finishing: &'static super::Publishing<'static, dyn super::FanoutSend> =
+            Box::leak(Box::new(super::Publishing {
+                fanout: inert,
+                publisher: &crate::relay::fanout::scripted::Inert,
+                clock: &super::WallClock,
+                deadline_ms: None,
+                mode: &super::DriveMode::FinishOnly,
+            }));
+        super::Plane::driving(relays, finishing, deadline)
+    }
 
     /// A `now` far past every timestamp these batches use, so the clamp is
     /// inert and each test isolates the rule it is actually about.
@@ -1669,6 +2833,54 @@ mod tests {
             ceiling_secs: OPENED,
             saturated: false,
             any_relay_drained: true,
+        }
+    }
+
+    // ---- What holds a cursor (Security Rule 12): one classification, shared
+    // with the driver's poll entry.
+
+    /// Every engine answer, and whether a cursor may pass the event it was
+    /// given for. What the engine refused for a local bound, what it kept no
+    /// trace of and what it only buffered each hold; everything it applied or
+    /// handled for good does not; and an answer of `Ignored` holds nothing
+    /// even with no trace kept, because no redelivery can change it.
+    #[tokio::test]
+    async fn only_what_the_engine_refused_lost_or_buffered_holds_a_cursor() {
+        use crate::nostr::mls::types::{
+            EpochId, GroupId, InboundResourceLimit, IngestOutcome, InputRejectionCategory,
+        };
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let circle =
+            crate::circle::CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate())
+                .expect("circle manager");
+        let group = GroupId::new([0x5a; 32]);
+        let refused = || IngestOutcome::ResourceRefused {
+            group_id: group.clone(),
+            resource: InboundResourceLimit::TransportDeferredCapacity,
+        };
+        let buffered = || IngestOutcome::Buffered {
+            group_id: group.clone(),
+            epoch: EpochId(3),
+        };
+        let ignored = || IngestOutcome::Ignored {
+            category: InputRejectionCategory::UnknownGroup,
+        };
+        for (outcome, unpersisted, verdict) in [
+            (refused(), true, O::Deferred),
+            (refused(), false, O::Deferred),
+            (IngestOutcome::Processed, true, O::Deferred),
+            (buffered(), false, O::Deferred),
+            (IngestOutcome::Processed, false, O::Applied),
+            (ignored(), true, O::Applied),
+            (ignored(), false, O::Applied),
+        ] {
+            assert_eq!(
+                super::cursor_verdict(&circle, &nostr::EventId::all_zeros(), outcome, unpersisted)
+                    .await,
+                verdict,
+                "the cursor's verdict for an engine answer (unpersisted: {unpersisted})",
+            );
         }
     }
 
@@ -1725,14 +2937,15 @@ mod tests {
     }
 
     #[test]
-    fn a_window_of_only_expired_or_undecryptable_events_still_advances() {
+    fn a_window_of_only_screened_or_undecryptable_events_still_advances() {
         // Two shapes that both stalled the contiguous prefix at index 0 and can
         // each be produced remotely for free: a run of pre-auth-screened
-        // (expired) events, and a run of engine-terminal ones (`Stale`, which is
-        // what an undecryptable or future-epoch application message yields).
-        let all_expired = [(1, O::NoEvidence), (2, O::NoEvidence)];
+        // (unparseable) events, and a run of engine-terminal ones (`Stale`,
+        // which is what an undecryptable or future-epoch application message
+        // yields).
+        let all_screened = [(1, O::NoEvidence), (2, O::NoEvidence)];
         let all_stale = [(1, O::Applied), (2, O::Applied)];
-        for batch in [all_expired.as_slice(), all_stale.as_slice()] {
+        for batch in [all_screened.as_slice(), all_stale.as_slice()] {
             assert_eq!(
                 cursor_advance_ms(healthy(), &hold_backs(batch), NOW),
                 Some(OPENED * 1000),
@@ -1788,8 +3001,15 @@ mod tests {
     fn only_deferred_events_hold_the_cursor_back() {
         // `Applied` and `NoEvidence` must contribute NO hold-back: an `Applied`
         // has nothing outstanding, and letting a pre-auth rejection hold would
-        // sell an attacker a permanent stall for one forged event.
-        let batch = [(5, O::Applied), (6, O::NoEvidence), (7, O::Deferred)];
+        // sell an attacker a permanent stall for one forged event. Nor does
+        // `Stranded`: the engine answers every redelivery of that event from
+        // its own row, so a hold would fetch it again at every sweep.
+        let batch = [
+            (4, O::Stranded),
+            (5, O::Applied),
+            (6, O::NoEvidence),
+            (7, O::Deferred),
+        ];
         assert_eq!(hold_backs(&batch), vec![7]);
     }
 
@@ -2626,10 +3846,11 @@ mod tests {
         let mut out = CatchupOutcome::default();
         sweep_one_circle(
             &mgr,
-            &relay_mgr,
+            &plane_until(&relay_mgr, std::time::Instant::now()),
+            &GroupId::new(ngid),
             ngid,
             std::slice::from_ref(&url),
-            std::time::Instant::now(),
+            None,
             &mut out,
         )
         .await;
@@ -2666,8 +3887,6 @@ mod tests {
     // sweep's own end-to-end path cannot carry an already-expired event:
     // `MockRelay` is backed by `nostr-database`, which refuses to save an expired
     // event and filters expired events out of every query (`helper.rs:193,216`).
-    // Being NIP-40-conformant, it will not serve the input this screen exists to
-    // defend against — which is the screen's premise, not a gap in it.
 
     use crate::circle::CircleManager;
     use crate::relay::RelayManager;
@@ -2689,22 +3908,71 @@ mod tests {
             .unwrap()
     }
 
-    #[tokio::test]
-    async fn ingest_one_reports_no_evidence_for_a_pre_auth_rejection() {
-        let dir = TempDir::new().unwrap();
-        let keys = Keys::generate();
-        let mgr = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
-        let relay_mgr = RelayManager::new();
-        let ngid = [0x8Au8; 32];
-        let h = hex::encode(ngid);
-
-        let expired = unauthenticated_445(&h, true);
+    /// What a circle owes by id is asked for the moment a batch says its
+    /// epoch has moved, BEFORE that circle is advanced again: after an
+    /// ingest, ahead of the drain that ingest leaves owing, and inside the
+    /// drain, after each advance's batch and so ahead of the next round. An
+    /// advance made first may settle the circle past an event the new epoch
+    /// could have opened — a member's leave, overtaken by the commit that
+    /// evicts them.
+    #[test]
+    fn the_sweep_asks_for_what_a_circle_owes_before_it_advances_it_past_a_new_epoch() {
+        let source = include_str!("catchup.rs");
+        let production = &source[..source.find("#[cfg(test)]\nmod tests").expect("the tests")];
+        let body = |name: &str| {
+            let from = production
+                .find(&format!("async fn {name}("))
+                .unwrap_or_else(|| panic!("fn {name} exists"));
+            let rest = &production[from..];
+            let to = rest[1..]
+                .find("\nasync fn ")
+                .map_or(rest.len(), |next| next + 1);
+            rest[..to].split_whitespace().collect::<String>()
+        };
+        let asks = "refetch_at_a_new_epoch(circle_mgr,plane,";
+        let judged = body("ingest_judged");
+        assert!(
+            judged
+                .find(&format!("{asks}&ingest.effects.events).await;"))
+                .zip(judged.find("drain_convergence("))
+                .is_some_and(|(asked, drained)| asked < drained),
+            "an ingest that moved its circle's epoch drains it before asking for what it owes",
+        );
+        let drain = body("drain_convergence");
+        let round = drain.find("forgidin&pending{").expect("the round's loop");
+        let next = drain.find("next_receive_retick(").expect("the retick");
+        assert!(
+            drain[round..next].contains(&format!("{asks}&more.events).await;")),
+            "an advance that moved its circle's epoch is followed by the next round before \
+             what the circle owes is asked for",
+        );
         assert_eq!(
-            ingest_one(&mgr, &relay_mgr, &expired).await,
-            ReceiveOnlyOutcome::NoEvidence,
-            "an event screened before authentication must contribute NO cursor \
-             evidence — reporting `Applied` here is the defect, and reporting \
-             `Deferred` would let one forged event stall the sweep forever"
+            production.matches("refetch_at_a_new_epoch(").count(),
+            3,
+            "the refetch at a new epoch is asked for somewhere other than the sweep's ingest \
+             and its drain",
+        );
+    }
+
+    /// The NIP-40 `expiration` tag is not a validity signal (Marmot
+    /// `transports/nostr.md:190-192`), so an already-expired event gets exactly
+    /// the engine verdict the same event without the tag gets — never Haven's
+    /// pre-authentication `NoEvidence`.
+    #[tokio::test]
+    async fn ingest_one_gives_an_expired_445_the_verdict_an_unexpired_one_gets() {
+        let h = hex::encode([0x8Au8; 32]);
+        let mut verdicts = Vec::new();
+        for expired in [true, false] {
+            let dir = TempDir::new().unwrap();
+            let mgr = CircleManager::new_unencrypted(dir.path(), &Keys::generate()).unwrap();
+            let event = unauthenticated_445(&h, expired);
+            let relays = RelayManager::new();
+            verdicts.push(ingest_one(&mgr, &plane(&relays), &event).await);
+        }
+        assert_ne!(verdicts[0], ReceiveOnlyOutcome::NoEvidence);
+        assert_eq!(
+            verdicts[0], verdicts[1],
+            "the expiration tag must not change what the sweep makes of an event"
         );
     }
 
@@ -2737,7 +4005,7 @@ mod tests {
             "precondition: this envelope must really fail the PRE-ENGINE parse"
         );
         assert_eq!(
-            ingest_one(&mgr, &relay_mgr, &malformed).await,
+            ingest_one(&mgr, &plane(&relay_mgr), &malformed).await,
             ReceiveOnlyOutcome::NoEvidence,
             "an unparseable envelope was screened before authentication, so it \
              must contribute no cursor evidence — reporting `Deferred` would sell \
@@ -2747,10 +4015,11 @@ mod tests {
 
     #[tokio::test]
     async fn ingest_one_does_not_report_no_evidence_for_engine_verdicts() {
-        // Anti-vacuity: the same unauthenticated event WITHOUT the expiration
-        // tag reaches the engine, so whatever comes back is an engine verdict —
-        // never `NoEvidence`. Without this, the gate above would pass just as
-        // well if `ingest_one` returned `NoEvidence` unconditionally.
+        // Anti-vacuity: an unauthenticated but PARSEABLE event reaches the
+        // engine, so whatever comes back is an engine verdict — never
+        // `NoEvidence`. Without this, the malformed-envelope gate above would
+        // pass just as well if `ingest_one` returned `NoEvidence`
+        // unconditionally.
         let dir = TempDir::new().unwrap();
         let keys = Keys::generate();
         let mgr = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
@@ -2760,7 +4029,7 @@ mod tests {
 
         let unexpired = unauthenticated_445(&h, false);
         assert_ne!(
-            ingest_one(&mgr, &relay_mgr, &unexpired).await,
+            ingest_one(&mgr, &plane(&relay_mgr), &unexpired).await,
             ReceiveOnlyOutcome::NoEvidence,
             "only Haven's own pre-auth screen may produce `NoEvidence`"
         );
@@ -2779,6 +4048,7 @@ mod tests {
     use crate::circle::{CircleConfig, DirectoryReconcile, DirectoryTier, MemberKeyPackage};
     use crate::location::LocationMessage;
     use crate::nostr::mls::types::GroupId;
+    use crate::nostr::mls::SessionManager;
     use crate::relay::maintenance::build_kp_maintenance_events;
     use nostr::Event;
 
@@ -2839,13 +4109,9 @@ mod tests {
 
         let config = CircleConfig::new("Test Circle").with_relays(relays.clone());
         let creation = alice
-            .create_circle(&alice_keys, vec![bob_member], &config, &relays)
+            .create_circle(&alice_keys, vec![bob_member], &config)
             .await
             .expect("create two-party circle");
-        alice
-            .confirm_published(creation.pending)
-            .await
-            .expect("confirm create");
 
         let mls_group_id = creation.circle.mls_group_id.clone();
 
@@ -2866,6 +4132,123 @@ mod tests {
             mls_group_id,
             relays,
         }
+    }
+
+    /// The drain waits out no deadline past the sweep's own. A commit that
+    /// arrives is buffered until its convergence pass closes, a second or so
+    /// later: a drain whose sweep is out of time makes its first advance —
+    /// which costs no wait — and stops there, owing the circle to the next
+    /// plane that drains. The same drain with time left waits the pass out,
+    /// applies it, and leaves the circle owing nothing.
+    #[tokio::test]
+    async fn the_catchup_convergence_drain_stops_at_the_sweep_deadline() {
+        let fx = setup_alice_bob().await;
+        let relay_mgr = RelayManager::new();
+        let commit = fx
+            .alice
+            .update_relays_for_test(&fx.mls_group_id, &fx.relays)
+            .await
+            .expect("alice makes a commit");
+        let before = fx.bob.group_epoch(&fx.mls_group_id).await.expect("epoch");
+        fx.bob
+            .session()
+            .process_event(&commit)
+            .await
+            .expect("bob's engine takes the commit");
+        assert!(
+            fx.bob
+                .session()
+                .receive_retick_after(&fx.mls_group_id)
+                .await
+                .is_some_and(|wait| !wait.is_zero()),
+            "premise: the commit waits for its convergence pass to close",
+        );
+        let _ = fx.bob.session().take_owed_advance();
+
+        let out_of_time = plane_until(&relay_mgr, std::time::Instant::now());
+        drain_convergence(&fx.bob, &out_of_time, vec![fx.mls_group_id.clone()]).await;
+        assert_eq!(
+            fx.bob.group_epoch(&fx.mls_group_id).await.expect("epoch"),
+            before,
+            "a drain past its sweep's deadline waited a convergence pass out",
+        );
+        assert!(
+            fx.bob
+                .session()
+                .take_owed_advance()
+                .contains(&fx.mls_group_id),
+            "a drain cut short left its circle to nobody",
+        );
+
+        drain_convergence(&fx.bob, &plane(&relay_mgr), vec![fx.mls_group_id.clone()]).await;
+        assert_eq!(
+            fx.bob.group_epoch(&fx.mls_group_id).await.expect("epoch"),
+            before + 1,
+            "a drain with time left did not apply the commit",
+        );
+        assert!(
+            !fx.bob.session().still_owes_advance(&fx.mls_group_id).await,
+            "a drain with time left left its circle owing work",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_receive_advance_never_releases_a_queued_user_intent() {
+        // The catch-up plane's two advance edges — the per-circle open advance
+        // (`drain_convergence`) and the advance after an ingested input
+        // (`ingest_one`) — must leave the user's queued change queued; see the
+        // live plane's twin in `live_sync::processor`.
+        let fx = setup_alice_bob().await;
+        let relay_mgr = RelayManager::new();
+        let bob_key: [u8; 32] = fx
+            .bob
+            .session()
+            .self_id()
+            .await
+            .as_slice()
+            .try_into()
+            .expect("32-byte member id");
+        let payload = SessionManager::admin_policy_payload_for_test(&[
+            fx.alice_keys.public_key().to_bytes(),
+            bob_key,
+        ])
+        .expect("payload");
+        fx.alice
+            .session()
+            .queue_admin_policy_intent_for_test(&fx.mls_group_id, payload)
+            .await
+            .expect("queue the intent");
+        let still_queued = || async {
+            fx.alice
+                .session()
+                .queued_admin_policy_payloads_for_test(&fx.mls_group_id)
+                .await
+                .expect("read the queue")
+                .len()
+                == 1
+                && matches!(
+                    fx.alice.session().epoch_state(&fx.mls_group_id).await,
+                    Some(crate::nostr::mls::types::EpochState::Stable { .. })
+                )
+        };
+
+        drain_convergence(&fx.alice, &plane(&relay_mgr), vec![fx.mls_group_id.clone()]).await;
+        assert!(
+            still_queued().await,
+            "the open advance must neither release nor stage the queued change"
+        );
+
+        let leave = fx
+            .bob
+            .propose_leave(&fx.mls_group_id)
+            .await
+            .expect("bob proposes leave")
+            .expect("a first leave in this epoch proposes");
+        ingest_one(&fx.alice, &plane(&relay_mgr), &leave).await;
+        assert!(
+            still_queued().await,
+            "the ingest advance must neither release nor stage the queued change"
+        );
     }
 
     #[tokio::test]
@@ -2890,15 +4273,11 @@ mod tests {
 
         let add = fx
             .alice
-            .add_members_with_welcomes(&fx.alice_keys, &fx.mls_group_id, vec![carol], &fx.relays)
+            .add_members_for_test(&fx.mls_group_id, &[carol])
             .await
             .expect("alice adds carol");
-        fx.alice
-            .confirm_published(add.pending)
-            .await
-            .expect("confirm add");
 
-        let outcome = ingest_one(&fx.bob, &relay_mgr, &add.commit_event).await;
+        let outcome = ingest_one(&fx.bob, &plane(&relay_mgr), &add.0).await;
         assert_eq!(
             outcome,
             ReceiveOnlyOutcome::Applied,
@@ -2956,11 +4335,11 @@ mod tests {
         let loc = LocationMessage::new(3.0, 4.0);
         let (event, _ngid, _relays) = fx
             .alice
-            .encrypt_location(&fx.mls_group_id, &fx.alice_keys.public_key(), &loc, 60)
+            .seal_location_for_test(&fx.mls_group_id, &loc)
             .await
             .expect("alice encrypts");
 
-        let outcome = ingest_one(&fx.bob, &relay_mgr, &event).await;
+        let outcome = ingest_one(&fx.bob, &plane(&relay_mgr), &event).await;
         assert_eq!(
             outcome,
             ReceiveOnlyOutcome::Applied,

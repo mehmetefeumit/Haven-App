@@ -157,6 +157,13 @@ jobs:
       - name: Build APK (${{ matrix.arch }})
         run: ../scripts/ci/build_apk_with_retry.sh ${{ matrix.flutter-platform }}
 
+      # Security Rule 15: SQLCipher's native logger is compiled out of what we
+      # build, whatever directory cargokit ran cargo from.
+      - name: Probe the APK for SQLCipher's logger
+        run: |
+          unzip -q -o build/app/outputs/flutter-apk/app-debug.apk 'lib/*/librust_lib_haven.so' -d "${RUNNER_TEMP}/apk-lib"
+          bash ../scripts/ci/check_sqlcipher_logger_omitted.sh "${RUNNER_TEMP}/apk-lib/lib"
+
       # Saved ONLY from a successful build: a cache written by a build that died
       # mid-resolution would carry exactly the gaps that made it fail, and every
       # lane restoring it would inherit them. This job is the single writer of
@@ -225,3 +232,7 @@ jobs:
 
       - name: Build iOS
         run: flutter build ios --debug --no-codesign
+
+      # Security Rule 15: see the Android job's probe.
+      - name: Probe the iOS build for SQLCipher's logger
+        run: bash ../scripts/ci/check_sqlcipher_logger_omitted.sh build/ios/iphoneos/Runner.app

@@ -45,8 +45,7 @@ final circlesProvider = FutureProvider<List<Circle>>((ref) async {
 /// decrypting. The circle-details sheet surfaces it for that diagnosis.
 ///
 /// Resolves to `null` — never to an error — when there is no live MLS group
-/// for the circle (legacy/orphaned pre-cutover rows, see
-/// [CircleLegacyStatus.isLegacyOrphaned]) or the manager is unavailable.
+/// for the circle ([Circle.isQuarantined]) or the manager is unavailable.
 /// Callers hide the epoch entirely in that case rather than surfacing a
 /// failure, so the line degrades to a bare member count.
 ///

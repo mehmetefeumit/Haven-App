@@ -59,11 +59,11 @@ mod migration {
     /// readable while the device is locked. A simple boolean would be unreadable
     /// while locked and would cause the migration to re-run on every locked
     /// launch.
-    const MARKER_SUFFIX: &str = ".afu.v1";
+    pub(super) const MARKER_SUFFIX: &str = ".afu.v1";
 
     /// Suffix for the transient backup entry used to make the delete-then-add
     /// window crash-safe (see the module-level "Crash safety" note).
-    const BACKUP_SUFFIX: &str = ".afu.bak";
+    pub(super) const BACKUP_SUFFIX: &str = ".afu.bak";
 
     type RebuildResult = keyring_core::Result<keyring_core::Entry>;
 
@@ -431,6 +431,20 @@ mod migration {
             );
         }
     }
+}
+
+/// The keyring ids the access-policy migration keeps beside `key_id`.
+///
+/// They are the completion marker and the transient backup, which holds a full
+/// copy of the key. A key is gone only when all three are: a surviving backup is
+/// the key at rest, and a surviving marker makes the NEXT key under `key_id` skip
+/// its migration, leaving it unreadable during a locked-device background wake.
+#[must_use]
+pub fn access_policy_companions(key_id: &str) -> [String; 2] {
+    [
+        format!("{key_id}{}", migration::MARKER_SUFFIX),
+        format!("{key_id}{}", migration::BACKUP_SUFFIX),
+    ]
 }
 
 /// Ensures the named DB key is stored `AfterFirstUnlockThisDeviceOnly` on iOS.

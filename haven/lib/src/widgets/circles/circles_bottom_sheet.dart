@@ -6,6 +6,7 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/gestures.dart' show VelocityTracker;
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
@@ -13,22 +14,28 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/circles/add_member_page.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
+import 'package:haven/src/providers/circle_attention_provider.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/map_controller_provider.dart';
 import 'package:haven/src/providers/member_removal_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/map_focus.dart';
 import 'package:haven/src/utils/member_display.dart';
+import 'package:haven/src/widgets/circles/change_notice_card.dart';
 import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/circles/circle_selector.dart';
 import 'package:haven/src/widgets/circles/remove_member_action.dart';
+import 'package:haven/src/widgets/circles/sharing_health_announcer.dart';
 import 'package:haven/src/widgets/common/empty_state.dart';
+import 'package:haven/src/widgets/map/sharing_health_banner.dart';
 import 'package:latlong2/latlong.dart' show LatLng;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -454,6 +461,19 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    // "Review members" in Circle details: show the member list.
+    ref.listen<int>(circleMemberListRequestProvider, (_, _) {
+      if (!_controller.isAttached || _controller.size >= _kMidChildSize) {
+        return;
+      }
+      unawaited(
+        _controller.animateTo(
+          _kMidChildSize,
+          duration: _snapDuration(_controller.size, _kMidChildSize),
+          curve: Curves.easeOutCubic,
+        ),
+      );
+    });
 
     return Listener(
       onPointerDown: _onPointerDown,
@@ -556,6 +576,10 @@ class _SheetContent extends ConsumerWidget {
 
         // Circle selector
         const SliverToBoxAdapter(child: CircleSelector()),
+
+        // Speaks what Circle details would show while it is closed; renders
+        // nothing.
+        const SliverToBoxAdapter(child: SharingHealthAnnouncer()),
 
         // Content stays mounted across dropdown open/close so the empty
         // state and no-selection hint don't pop out abruptly. While the
@@ -685,15 +709,10 @@ class _SheetContent extends ConsumerWidget {
         const <MemberLocation>[];
     final selfPubkey = ref.watch(identityProvider).valueOrNull?.pubkeyHex;
 
-    // Dark Matter cutover (DM-4c, Security Rule 8): a circle the MLS engine
-    // has flagged Unrecoverable must block send/mutate and say so plainly —
-    // never a raw error. Read directly (not via a provider) so this always
-    // reflects the latest state as of this build; the receive path already
-    // triggers a rebuild via `groupUpdated` whenever a group enters this
-    // state (see `LocationSharingService`).
-    final isBlocked = ref
-        .read(circleServiceProvider)
-        .isCircleBlocked(selectedCircle.mlsGroupId);
+    // Security Rule 8: a circle MDK halted is offered no mutation. Its state is
+    // persisted on the circle row, and the receive path refreshes the list
+    // when a group enters it.
+    final isBlocked = selectedCircle.isUnrecoverable;
 
     // Admin eviction. Offered only to an admin of THIS circle, and never on
     // the viewer's own row: removing yourself is the MIP-03 SelfRemove path
@@ -727,22 +746,10 @@ class _SheetContent extends ConsumerWidget {
             // Circle header
             SliverToBoxAdapter(child: _CircleHeader(circle: selectedCircle)),
 
-            // Blocked-circle banner (Rule 8). It offers the one repair that
-            // touches nothing in the broken group — re-create — and no action
-            // that would mutate it.
-            if (isBlocked)
-              SliverToBoxAdapter(
-                child: _BlockedCircleBanner(circle: selectedCircle),
-              ),
-
-            // Members list. A legacy-orphaned circle (DM-4c) also has an
-            // empty member list, but needs a re-create/remove banner
-            // instead of the generic "no members" hint.
+            // Members list.
             if (selectedCircle.members.isEmpty)
               SliverFillRemaining(
-                child: selectedCircle.isLegacyOrphaned
-                    ? _LegacyCircleBanner(circle: selectedCircle)
-                    : Center(child: Text(l10n.circlesNoMembers)),
+                child: Center(child: Text(l10n.circlesNoMembers)),
               )
             else
               SliverList.builder(
@@ -882,339 +889,16 @@ class _DragHandle extends StatelessWidget {
   }
 }
 
-/// Banner shown above the member list for a circle the MLS engine has flagged
-/// `Unrecoverable` (DM-4c, Security Rule 8:
-/// `CircleService.isCircleBlocked`).
-///
-/// Offers the ONE repair that exists: re-create the circle. Rule 8 still
-/// blocks every mutation of the broken group itself — no add, no eviction, no
-/// send — and re-creating touches none of it: it opens the create flow with
-/// this circle's name pre-filled and leaves the old row alone, so the user
-/// chooses when (and whether) to leave it. Without that affordance the wedge
-/// is detected and the user is told only that something is wrong, which for a
-/// location-sharing app is the failure that matters: believing you are sharing
-/// when you are not.
-///
-/// The circle's cached member list and last-known locations remain visible
-/// below (read-only), so the user does not lose access to what they already
-/// knew — which is why this is a banner above them and not a screen in place
-/// of them.
-class _BlockedCircleBanner extends StatelessWidget {
-  const _BlockedCircleBanner({required this.circle});
-
-  /// The blocked circle, for the re-created circle's pre-filled name.
-  final Circle circle;
-
-  void _openRecreateFlow(BuildContext context) {
-    Navigator.push<void>(
-      context,
-      MaterialPageRoute<void>(
-        builder: (_) => CreateCirclePage(initialName: circle.displayName),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    return Semantics(
-      // ONE node carrying the fault and its remedy, spoken the moment the
-      // banner appears (WCAG 2.1 SC 4.1.3). `liveRegion` is load-bearing
-      // rather than polish: this banner is inserted by a PEER's traffic —
-      // `LiveEventRouter._handleUnrecoverable` marks the circle and calls
-      // `onGroupUpdated` to rebuild these surfaces — so no user action leads
-      // here, and it is the only surface that states the fault at all
-      // (`MapStatusBanners` takes no blocked-circle input). Rendered-only, it
-      // announced a wedge to sighted users and nothing to anyone else, which
-      // for a location-sharing app is the failure that matters: believing you
-      // are sharing when you are not.
-      //
-      // Nothing volatile is in the label, so it is spoken once per appearance
-      // rather than on every rebuild.
-      container: true,
-      liveRegion: true,
-      explicitChildNodes: true,
-      label:
-          '${l10n.circleBlockedBannerTitle}\n${l10n.circleBlockedBannerBody}',
-      child: Container(
-        margin: const EdgeInsets.fromLTRB(
-          HavenSpacing.base,
-          0,
-          HavenSpacing.base,
-          HavenSpacing.sm,
-        ),
-        padding: const EdgeInsets.all(HavenSpacing.base),
-        // The error container pair, not the amber `warning` token: this is a
-        // FAULT, styled like the app's other fault banner
-        // (`SharingHealthBanner`). Amber at 10 % was also unreadable —
-        // `#D97706` clears 3:1 against a PLAIN light surface (3.19:1) but only
-        // reaches 2.86:1 once its own tint is under it, below WCAG 2.1
-        // SC 1.4.11. `onErrorContainer` on `errorContainer` measures 8.20:1
-        // light / 5.28:1 dark, so every element here clears its threshold in
-        // both themes (blocked_circle_banner_test.dart).
-        decoration: BoxDecoration(
-          color: scheme.errorContainer,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(
-              LucideIcons.triangleAlert,
-              size: 20,
-              color: scheme.onErrorContainer,
-            ),
-            const SizedBox(width: HavenSpacing.sm),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Both visual copies are excluded: the live label above
-                  // already speaks them, and a second node would have a screen
-                  // reader read the whole banner twice. The button below is
-                  // deliberately OUTSIDE the exclusions — it is the remedy and
-                  // needs its own actionable node.
-                  ExcludeSemantics(
-                    child: Text(
-                      l10n.circleBlockedBannerTitle,
-                      style: theme.textTheme.titleSmall?.copyWith(
-                        color: scheme.onErrorContainer,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  ExcludeSemantics(
-                    child: Text(
-                      // The muted `onSurfaceVariant` is deliberately NOT used
-                      // here: over `errorContainer` it measures 3.97:1 in dark,
-                      // below SC 1.4.3's 4.5:1 for 12sp body text.
-                      l10n.circleBlockedBannerBody,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: scheme.onErrorContainer,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: HavenSpacing.sm),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.icon(
-                      key: WidgetKeys.blockedCircleRecreateCta,
-                      onPressed: () => _openRecreateFlow(context),
-                      icon: const Icon(LucideIcons.plus),
-                      label: Text(l10n.legacyCircleRecreateCta),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Banner shown in place of the member list for an orphaned pre-cutover
-/// circle (DM-4c, [CircleLegacyStatus.isLegacyOrphaned]): the local
-/// `circles.db` row survived the Dark Matter cutover, but the MLS group it
-/// refers to no longer exists, so it cannot be resumed.
-///
-/// Offers:
-/// - **Re-create Circle** — pre-fills the old display name into a brand
-///   NEW circle. Every member must still be re-added and re-invited: the
-///   old roster is not recoverable (that is exactly the information this
-///   circle lost).
-/// - **Remove** — discards the stale local row via the same
-///   [CircleService.leaveCircle] path `_CircleDetailsSheet` uses. The
-///   `LeavePlan::OrphanLocalOnly` classification makes this a pure local
-///   delete (no relay traffic, no MLS operation attempted against the
-///   already-gone group).
-///
-/// There is no reliable way to determine whether the local device was the
-/// original circle's admin — the very roster that would answer that
-/// question is what was lost — so BOTH actions are offered to every member
-/// of a legacy circle rather than gating "Re-create" on an unrecoverable
-/// admin bit. Re-creating never requires having been an admin (creating a
-/// circle is always allowed), so this cannot silently block recovery.
-class _LegacyCircleBanner extends ConsumerStatefulWidget {
-  const _LegacyCircleBanner({required this.circle});
-
-  final Circle circle;
-
-  @override
-  ConsumerState<_LegacyCircleBanner> createState() =>
-      _LegacyCircleBannerState();
-}
-
-class _LegacyCircleBannerState extends ConsumerState<_LegacyCircleBanner> {
-  /// True while the remove-confirmation dialog is open. Disables the remove
-  /// button so a rapid dismiss-and-retap cannot open a second dialog.
-  bool _dialogOpen = false;
-
-  /// True while the local-row removal is running.
-  bool _isRemoving = false;
-
-  void _openRecreateFlow() {
-    Navigator.push<void>(
-      context,
-      MaterialPageRoute<void>(
-        builder: (_) =>
-            CreateCirclePage(initialName: widget.circle.displayName),
-      ),
-    );
-  }
-
-  Future<void> _confirmRemove() async {
-    if (_dialogOpen || _isRemoving) return;
-    final l10n = AppLocalizations.of(context);
-    setState(() => _dialogOpen = true);
-
-    bool confirmed;
-    try {
-      confirmed =
-          await showDialog<bool>(
-            context: context,
-            builder: (context) => AlertDialog(
-              title: Text(l10n.legacyCircleRemoveDialogTitle),
-              content: Text(l10n.legacyCircleRemoveDialogBody),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(false),
-                  child: Text(l10n.commonCancel),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(true),
-                  style: TextButton.styleFrom(
-                    foregroundColor: Theme.of(context).colorScheme.error,
-                  ),
-                  child: Text(l10n.legacyCircleRemoveConfirm),
-                ),
-              ],
-            ),
-          ) ??
-          false;
-    } finally {
-      if (mounted) setState(() => _dialogOpen = false);
-    }
-
-    if (!confirmed || !mounted) return;
-
-    setState(() => _isRemoving = true);
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      final selfPubkey = ref.read(identityProvider).valueOrNull?.pubkeyHex;
-      if (selfPubkey == null) {
-        // log-scan-ok: leaveCircleIdentityUnavailable is fixed l10n copy.
-        throw CircleServiceException(l10n.leaveCircleIdentityUnavailable);
-      }
-      final circleService = ref.read(circleServiceProvider);
-      final locationSharing = ref.read(locationSharingServiceProvider);
-      // `LeavePlan::OrphanLocalOnly` (the classification an orphaned
-      // circle's `plan_leave` always resolves to) short-circuits straight
-      // to a local `complete_leave` — no relay traffic, no MLS op against
-      // the already-gone group. Same call the healthy-circle leave flow
-      // uses; the Rust layer picks the right plan.
-      await circleService.leaveCircle(
-        mlsGroupId: widget.circle.mlsGroupId,
-        selfPubkeyHex: selfPubkey,
-      );
-      await locationSharing.removeCircle(widget.circle.nostrGroupId);
-
-      if (!mounted) return;
-      ref.read(selectedCircleIdProvider.notifier).state = null;
-      ref.invalidate(circlesProvider);
-      messenger.showSnackBar(
-        SnackBar(content: Text(l10n.leaveCircleSuccess)),
-      );
-    } on Object catch (e) {
-      debugPrint('[LegacyCircle] remove UI caught failure: ${e.runtimeType}');
-      if (!mounted) return;
-      messenger.showSnackBar(SnackBar(content: Text(l10n.leaveCircleError)));
-    } finally {
-      if (mounted) setState(() => _isRemoving = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(HavenSpacing.xl),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              LucideIcons.refreshCw,
-              size: 40,
-              color: scheme.onSurfaceVariant,
-            ),
-            const SizedBox(height: HavenSpacing.base),
-            Text(
-              l10n.legacyCircleBannerTitle,
-              style: theme.textTheme.titleMedium,
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: HavenSpacing.sm),
-            Text(
-              l10n.legacyCircleBannerBody,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: HavenSpacing.lg),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                key: WidgetKeys.legacyCircleRecreateCta,
-                onPressed: _isRemoving ? null : _openRecreateFlow,
-                icon: const Icon(LucideIcons.plus),
-                label: Text(l10n.legacyCircleRecreateCta),
-              ),
-            ),
-            const SizedBox(height: HavenSpacing.sm),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                key: WidgetKeys.legacyCircleRemoveCta,
-                onPressed: (_isRemoving || _dialogOpen)
-                    ? null
-                    : _confirmRemove,
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: scheme.error,
-                  side: BorderSide(color: scheme.error.withValues(alpha: 0.5)),
-                ),
-                icon: _isRemoving
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(LucideIcons.trash2),
-                label: Text(l10n.legacyCircleRemoveCta),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Header showing circle member count and an info button that opens the
-/// circle details sheet. The Leave Circle action lives inside that sheet.
-class _CircleHeader extends StatelessWidget {
-  const _CircleHeader({required this.circle});
-
-  final Circle circle;
-
-  Future<void> _showCircleDetails(BuildContext context) {
-    return showModalBottomSheet<void>(
+/// Opens Circle details for [circle] as a modal sheet, recording that it is
+/// open for as long as it is ([circleDetailsOpenProvider]).
+Future<void> showCircleDetails(
+  BuildContext context,
+  WidgetRef ref,
+  Circle circle,
+) async {
+  final open = ref.read(circleDetailsOpenProvider.notifier)..state = true;
+  try {
+    await showModalBottomSheet<void>(
       context: context,
       useSafeArea: true,
       isScrollControlled: true,
@@ -1225,10 +909,20 @@ class _CircleHeader extends StatelessWidget {
       ),
       builder: (sheetCtx) => _CircleDetailsSheet(circle: circle),
     );
+  } finally {
+    open.state = false;
   }
+}
+
+/// Header showing circle member count and an info button that opens the
+/// circle details sheet. The Leave Circle action lives inside that sheet.
+class _CircleHeader extends ConsumerWidget {
+  const _CircleHeader({required this.circle});
+
+  final Circle circle;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
 
@@ -1251,7 +945,7 @@ class _CircleHeader extends StatelessWidget {
             key: WidgetKeys.circleDetailsButton,
             tooltip: l10n.circleDetailsButtonTooltip,
             icon: const Icon(LucideIcons.info),
-            onPressed: () => _showCircleDetails(context),
+            onPressed: () => showCircleDetails(context, ref, circle),
           ),
         ],
       ),
@@ -1347,9 +1041,31 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
   /// for a progress indicator.
   bool _isLeaving = false;
 
+  /// The circle as the list now reads it: a disband, a halt or a roster
+  /// change reaches an open sheet, and every action acts on what is shown.
+  Circle _liveCircle({bool watch = false}) {
+    final circles = watch
+        ? ref.watch(circlesProvider).valueOrNull
+        : ref.read(circlesProvider).valueOrNull;
+    for (final circle in circles ?? const <Circle>[]) {
+      if (listEquals(circle.mlsGroupId, widget.circle.mlsGroupId)) {
+        return circle;
+      }
+    }
+    return widget.circle;
+  }
+
   Future<void> _confirmLeaveCircle() async {
     if (_dialogOpen || _isLeaving) return;
     final l10n = AppLocalizations.of(context);
+    final circle = _liveCircle();
+    final self = ref.read(identityProvider).valueOrNull?.pubkeyHex;
+    // A leaving admin hands the circle on first, which needs someone to hand
+    // it to; alone, nothing is handed over.
+    final handsOver =
+        self != null &&
+        circle.members.any((m) => m.pubkey == self && m.isAdmin) &&
+        circle.members.any((m) => m.pubkey != self);
     setState(() => _dialogOpen = true);
 
     bool confirmed;
@@ -1358,8 +1074,23 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
           await showDialog<bool>(
             context: context,
             builder: (context) => AlertDialog(
+              scrollable: true,
               title: Text(l10n.leaveCircleDialogTitle),
-              content: Text(l10n.leaveCircleDialogBody),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    circle.isDisbanded
+                        ? l10n.leaveDisbandedCircleDialogBody
+                        : l10n.leaveCircleDialogBody,
+                  ),
+                  if (!circle.isDisbanded && handsOver) ...[
+                    const SizedBox(height: HavenSpacing.md),
+                    Text(l10n.leaveCircleDialogAdminNote),
+                  ],
+                ],
+              ),
               actions: [
                 TextButton(
                   onPressed: () => Navigator.of(context).pop(false),
@@ -1387,27 +1118,54 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
     final sheetNavigator = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
     try {
-      final selfPubkey = ref.read(identityProvider).valueOrNull?.pubkeyHex;
-      if (selfPubkey == null) {
+      if (ref.read(identityProvider).valueOrNull?.pubkeyHex == null) {
         // log-scan-ok: leaveCircleIdentityUnavailable is fixed l10n copy.
         throw CircleServiceException(l10n.leaveCircleIdentityUnavailable);
       }
       final circleService = ref.read(circleServiceProvider);
       final locationSharing = ref.read(locationSharingServiceProvider);
-      final nostrGroupId = widget.circle.nostrGroupId;
-      await circleService.leaveCircle(
-        mlsGroupId: widget.circle.mlsGroupId,
-        selfPubkeyHex: selfPubkey,
+      final sharingHealth = ref.read(sharingHealthProvider.notifier);
+      final scheduler = ref.read(maintenanceSchedulerProvider.notifier);
+      // Read again after the dialog: the circle can have ended while it was
+      // open, and only a disbanded circle is left by deleting it here.
+      final leaving = _liveCircle();
+      final key = sharingCircleKey(leaving);
+      // A disbanded circle has no member to tell: only this device's copy
+      // goes, and the leave is over when that returns.
+      final delivery = leaving.isDisbanded
+          ? await circleService
+                .leaveDisbandedCircle(mlsGroupId: leaving.mlsGroupId)
+                .then((_) => LeaveDelivery.left)
+          : await circleService.leaveCircle(mlsGroupId: leaving.mlsGroupId);
+      switch (delivery) {
+        case LeaveDelivery.notMade:
+          throw const CircleServiceException('Failed to leave circle');
+        case LeaveDelivery.leaving:
+          // Asked for, and carried on at every wake until it ends: nothing is
+          // shared with the circle meanwhile. The circle stays, and its
+          // sharing card says so at once — never an error, and never "left".
+          // Captured before the await, so a dismissed sheet records it too.
+          sharingHealth.recordDeferredSend(key, byUser: true);
+          // Carried on again soon, not at the next health tick: the commit
+          // that ends it may already be on its way.
+          scheduler.followUpLeave();
+          return;
+        case LeaveDelivery.left:
+          break;
+      }
+      await locationSharing.removeCircle(
+        mlsGroupId: leaving.mlsGroupId,
+        nostrGroupId: leaving.nostrGroupId,
       );
-      await locationSharing.removeCircle(nostrGroupId);
 
       if (!mounted) return;
 
       ref.read(selectedCircleIdProvider.notifier).state = null;
       ref.invalidate(circlesProvider);
 
-      // Close the details sheet itself — the circle no longer exists.
-      sheetNavigator.pop();
+      // Close the details sheet itself — the circle no longer exists — unless
+      // clearing the selection already did.
+      if (ModalRoute.of(context)?.isCurrent ?? false) sheetNavigator.pop();
       messenger.showSnackBar(
         SnackBar(content: Text(l10n.leaveCircleSuccess)),
       );
@@ -1428,33 +1186,62 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
     // Capture the navigator before the async gap so popping the sheet after
     // the page returns does not reach across an unrelated context check.
     final navigator = Navigator.of(context);
-    final circle = widget.circle;
-    await navigator.push<void>(
-      MaterialPageRoute<void>(
+    final circle = _liveCircle();
+    final result = await navigator.push<AddMemberPageResult>(
+      MaterialPageRoute<AddMemberPageResult>(
         builder: (_) => AddMemberPage(circle: circle),
       ),
     );
-    if (mounted) {
+    // Done: nothing left to read here. Awaiting or partly sent: the user
+    // lands back on this sheet, whose cards say the rest.
+    if (mounted && result == AddMemberPageResult.done) {
       navigator.pop();
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    // A leave that ended away from this sheet (a carry-on) clears the
+    // circle's selection: the circle is gone, and so is its sheet.
+    ref.listen<List<int>?>(selectedCircleIdProvider, (previous, next) {
+      if (next == null &&
+          previous != null &&
+          listEquals(previous, widget.circle.mlsGroupId) &&
+          (ModalRoute.of(context)?.isCurrent ?? false)) {
+        // A leave a carry-on ended: said as the press's snack bar says it
+        // (the press says it there itself), and the pop hands focus back to
+        // the route beneath, which still exists.
+        if (!_isLeaving) {
+          unawaited(
+            SemanticsService.sendAnnouncement(
+              View.of(context),
+              AppLocalizations.of(context).leaveCircleSuccess,
+              Directionality.of(context),
+            ),
+          );
+        }
+        Navigator.of(context).pop();
+      }
+    });
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final circle = widget.circle;
+    final circle = _liveCircle(watch: true);
     final self = ref.read(identityProvider).valueOrNull?.pubkeyHex;
     final isAdmin =
         self != null &&
         circle.members.any((m) => m.pubkey == self && m.isAdmin);
-    // Rule 8 (no send/mutate for a blocked circle): adding a member stages
-    // an MLS commit, so it must never be offered for an Unrecoverable
-    // circle even if the cached roster still shows the caller as admin.
-    final isBlocked = ref
-        .read(circleServiceProvider)
-        .isCircleBlocked(circle.mlsGroupId);
+    final live = circle.engineState == CircleEngineState.live;
+    // Rule 8: adding a member stages an MLS commit, so it is offered only for
+    // a circle the engine holds live, even if the cached roster still shows
+    // the caller as admin.
+    final canAdd = isAdmin && live;
+    // While this device's leave is carried on, Leave is not offered again;
+    // only a verdict derived for this very circle says so.
+    final verdict = ref.watch(sharingHealthProvider);
+    final leaveInProgress =
+        verdict.circleKey == sharingCircleKey(circle) &&
+        verdict.pausedReason == SharingPausedReason.leaving;
     // Discreet sync diagnostic: the member count carries the circle's current
     // MLS epoch as a suffix. Members of a converged circle all report the same
     // number, so comparing two devices reveals the epoch desync that stops
@@ -1464,7 +1251,9 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
     // degrades to a bare member count: no spinner, no error text, no layout
     // shift (Security Rule 8 — never surface a raw FFI failure).
     final memberCount = l10n.commonMemberCount(circle.members.length);
-    final epoch = ref.watch(circleEpochProvider(circle)).valueOrNull;
+    final epoch = live
+        ? ref.watch(circleEpochProvider(circle)).valueOrNull
+        : null;
     final membersLine = epoch == null
         ? memberCount
         : l10n.circleDetailsMembersWithEpoch(memberCount, epoch);
@@ -1473,13 +1262,9 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
     // and therefore noise — but a circle created by another Marmot client can
     // declare a window of seconds, which Haven honours, and without this the
     // user sees sharing that silently does not work.
-    // A blocked circle is skipped outright: it still has an MLS group, so the
-    // accessor answers with Haven's own window — "about four minutes" for a
-    // circle nothing can be sent to (Rule 8, same reason "Add member" is
-    // withheld above).
-    final expirySecs = isBlocked
-        ? null
-        : ref.watch(circleLocationExpiryProvider(circle)).valueOrNull;
+    final expirySecs = live
+        ? ref.watch(circleLocationExpiryProvider(circle)).valueOrNull
+        : null;
     final expiry = expirySecs == null ? null : _expiryUnit(expirySecs);
     final metaLine = expiry == null
         ? membersLine
@@ -1497,13 +1282,11 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
       ),
     );
     // Scrolls rather than clips. This column is the whole modal body, and it
-    // grows with text scale, translation length and relay count — at 1.5x-2.0x
-    // with a few relays it exceeds a short phone's usable height, which
-    // previously overflowed and cut the Leave Circle button off the bottom
-    // (invisible to the suite, because every circles test pumps a 5000px-tall
-    // viewport). `mainAxisSize.min` keeps the sheet content-sized at normal
+    // grows with text scale, translation length, relay count and the cards
+    // at its top — at 1.5x-2.0x it exceeds a short phone's usable height,
+    // which previously overflowed and cut the Leave Circle button off the
+    // bottom. `mainAxisSize.min` keeps the sheet content-sized at normal
     // scale, so this only engages when the content genuinely does not fit.
-    // Same pattern as `_LegacyCircleBannerState.build` above.
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(
         HavenSpacing.base,
@@ -1527,77 +1310,98 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
             ),
           ),
           Text(l10n.circleDetailsTitle, style: theme.textTheme.titleMedium),
-          const SizedBox(height: HavenSpacing.sm),
-          if (expiry == null)
-            subtitle
-          else
-            // "· 4 min" is meaningless spoken aloud, so the whole line is
-            // re-announced as one sentence naming what the number is and whose
-            // messages it governs. The visible text is excluded rather than
-            // merged: a reader hearing both would get the abbreviation twice.
-            Semantics(
-              container: true,
-              excludeSemantics: true,
-              label: l10n.circleDetailsExpirySemantics(
-                membersLine,
-                expiry.minutes
-                    ? l10n.circleDetailsExpiryMinutesLong(expiry.count)
-                    : l10n.circleDetailsExpirySecondsLong(expiry.count),
+          // First after the title, so focus order meets what is wrong before
+          // anything else; each renders nothing when there is nothing to say.
+          const SharingHealthBanner(),
+          ChangeNoticeCard(circle: circle),
+          // A circle the engine does not hold live has no members to count,
+          // no epoch and no window: the cards above say what it is instead.
+          if (live) ...[
+            const SizedBox(height: HavenSpacing.sm),
+            if (expiry == null)
+              subtitle
+            else
+              // "· 4 min" is meaningless spoken aloud, so the whole line is
+              // re-announced as one sentence naming what the number is and
+              // whose messages it governs. The visible text is excluded
+              // rather than merged: a reader hearing both would get the
+              // abbreviation twice.
+              Semantics(
+                container: true,
+                excludeSemantics: true,
+                label: l10n.circleDetailsExpirySemantics(
+                  membersLine,
+                  expiry.minutes
+                      ? l10n.circleDetailsExpiryMinutesLong(expiry.count)
+                      : l10n.circleDetailsExpirySecondsLong(expiry.count),
+                ),
+                child: subtitle,
               ),
-              child: subtitle,
-            ),
-          const SizedBox(height: HavenSpacing.lg),
-          Text(
-            l10n.circleDetailsRelaysHeading,
-            style: theme.textTheme.titleSmall?.copyWith(color: scheme.primary),
-          ),
-          const SizedBox(height: HavenSpacing.sm),
-          if (circle.relays.isEmpty)
-            Text(l10n.circleDetailsNoRelays, style: theme.textTheme.bodySmall)
-          else
-            // Dense and flush on purpose, and load-bearing: these rows are
-            // read-only, so their default 56 dp interactive height and the
-            // card's 4 dp inset buy nothing, while the 32 dp they cost is
-            // more than the whole margin this sheet has on a 360x690 phone
-            // once the status bar is taken off it — at the default density
-            // the body outgrows the modal in six locales, the inner scroll
-            // view then swallows the drag, and the sheet stops being
-            // dismissable by dragging it (circle_details_layout_test.dart).
-            Card(
-              margin: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  for (var i = 0; i < circle.relays.length; i++)
-                    Column(
-                      children: [
-                        ListTile(
-                          visualDensity: VisualDensity.compact,
-                          leading: Icon(
-                            LucideIcons.cloud,
-                            color: scheme.onSurfaceVariant,
-                            size: 20,
-                          ),
-                          title: Text(
-                            circle.relays[i].replaceFirst('wss://', ''),
-                            style: theme.textTheme.bodyMedium,
-                          ),
-                        ),
-                        if (i < circle.relays.length - 1)
-                          const Divider(height: 1, indent: HavenSpacing.base),
-                      ],
-                    ),
-                ],
+          ],
+          // An ended circle relays nothing again: its old relay list is no
+          // fact about it any more.
+          if (!circle.isDisbanded) ...[
+            const SizedBox(height: HavenSpacing.lg),
+            Text(
+              l10n.circleDetailsRelaysHeading,
+              style: theme.textTheme.titleSmall?.copyWith(
+                color: scheme.primary,
               ),
             ),
-          const SizedBox(height: HavenSpacing.md),
-          Text(
-            l10n.circleDetailsRelaysNote,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
+            const SizedBox(height: HavenSpacing.sm),
+            if (circle.relays.isEmpty)
+              Text(
+                l10n.circleDetailsNoRelays,
+                style: theme.textTheme.bodySmall,
+              )
+            else
+              // Dense and flush on purpose, and load-bearing: these rows are
+              // read-only, so their default 56 dp interactive height and the
+              // card's 4 dp inset buy nothing, while the 32 dp they cost is
+              // more than the whole margin this sheet has on a 360x690 phone
+              // once the status bar is taken off it — at the default density
+              // the body outgrows the modal in six locales, the inner scroll
+              // view then swallows the drag, and the sheet stops being
+              // dismissable by dragging it (circle_details_layout_test.dart).
+              Card(
+                margin: EdgeInsets.zero,
+                child: Column(
+                  children: [
+                    for (var i = 0; i < circle.relays.length; i++)
+                      Column(
+                        children: [
+                          ListTile(
+                            visualDensity: VisualDensity.compact,
+                            leading: Icon(
+                              LucideIcons.cloud,
+                              color: scheme.onSurfaceVariant,
+                              size: 20,
+                            ),
+                            title: Text(
+                              circle.relays[i].replaceFirst('wss://', ''),
+                              style: theme.textTheme.bodyMedium,
+                            ),
+                          ),
+                          if (i < circle.relays.length - 1)
+                            const Divider(
+                              height: 1,
+                              indent: HavenSpacing.base,
+                            ),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: HavenSpacing.md),
+            Text(
+              l10n.circleDetailsRelaysNote,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
             ),
-          ),
+          ],
           const SizedBox(height: HavenSpacing.lg),
-          if (isAdmin && !isBlocked) ...[
+          if (canAdd) ...[
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
@@ -1620,7 +1424,7 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
             width: double.infinity,
             child: OutlinedButton.icon(
               key: WidgetKeys.leaveCircleCta,
-              onPressed: (_isLeaving || _dialogOpen)
+              onPressed: (_isLeaving || _dialogOpen || leaveInProgress)
                   ? null
                   : _confirmLeaveCircle,
               style: OutlinedButton.styleFrom(
@@ -1635,7 +1439,11 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(LucideIcons.logOut),
-              label: Text(l10n.circleDetailsLeaveCircle),
+              label: Text(
+                leaveInProgress
+                    ? l10n.circleDetailsLeavingInProgress
+                    : l10n.circleDetailsLeaveCircle,
+              ),
             ),
           ),
         ],

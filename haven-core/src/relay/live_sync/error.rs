@@ -35,6 +35,11 @@ pub enum LiveSyncError {
     /// A bounded operation exceeded its deadline.
     #[error("operation timed out")]
     Timeout,
+
+    /// A foreground open was asked for by a caller that did not claim the
+    /// foreground.
+    #[error("not in the foreground")]
+    NotForeground,
 }
 
 impl LiveSyncError {
@@ -61,6 +66,7 @@ impl LiveSyncError {
             Self::Mls(_) => "mls",
             Self::InvalidCompetitor => "invalid-competitor",
             Self::Timeout => "timeout",
+            Self::NotForeground => "not-foreground",
         }
     }
 }
@@ -161,5 +167,13 @@ mod tests {
             "invalid competitor commit"
         );
         assert_eq!(LiveSyncError::Timeout.to_string(), "operation timed out");
+        assert_eq!(
+            LiveSyncError::NotForeground.to_string(),
+            "not in the foreground"
+        );
+        assert_eq!(
+            format!("{:?}", LiveSyncError::NotForeground),
+            "LiveSyncError(not-foreground)"
+        );
     }
 }

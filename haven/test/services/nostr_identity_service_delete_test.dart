@@ -128,6 +128,34 @@ void main() {
       expect(manager.deleted, isTrue);
     });
 
+    test('purges the storage-reset name reseed it still owes', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        _displayNameKey(_pubkeyHex): 'Quiet Wanderer',
+        kOwnNameReseedOwedKey: true,
+      });
+      await buildService(_FakeIdentityManager()).deleteIdentity();
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.getBool(kOwnNameReseedOwedKey),
+        isNull,
+        reason: 'the next identity would otherwise have its profile fetched '
+            'for a reset it never had',
+      );
+    });
+
+    test('purges that reseed even when the pubkey cannot be read', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        kOwnNameReseedOwedKey: true,
+      });
+      await buildService(
+        _FakeIdentityManager()..pubkeyThrows = true,
+      ).deleteIdentity();
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kOwnNameReseedOwedKey), isNull);
+    });
+
     test('purges it even though the manager is wiped first', () async {
       // The pubkey must be captured BEFORE deletion, or the key cannot be
       // derived and the purge silently does nothing.
@@ -224,12 +252,11 @@ void main() {
           managerFactory: () async => _FakeIdentityManager(),
         );
 
-        // No `NostrCircleService.wipeAllMlsState` / `destroyLegacyMlsState`
-        // ran first in this test — those are what install the backend for
-        // the real `IdentityNotifier.deleteIdentity` caller. If this
-        // service's own `deleteIdentity` relied on that ordering instead of
-        // installing the backend itself, `keyringInitialized` would stay
-        // false here.
+        // No `NostrCircleService.wipeAllMlsState` ran first in this test —
+        // that is what installs the backend for the real
+        // `IdentityNotifier.deleteIdentity` caller. If this service's own
+        // `deleteIdentity` relied on that ordering instead of installing the
+        // backend itself, `keyringInitialized` would stay false here.
         await service.deleteIdentity();
 
         expect(

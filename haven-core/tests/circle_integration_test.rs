@@ -106,7 +106,7 @@ mod circle_manager_lifecycle_tests {
         assert!(dir.is_dir());
 
         // Database file should exist
-        let db_path = dir.join("circles.db");
+        let db_path = dir.join(haven_core::circle::CIRCLES_DB_FILENAME);
         assert!(db_path.exists());
 
         cleanup_dir(&dir);
@@ -123,7 +123,9 @@ mod circle_manager_lifecycle_tests {
             .expect("should create manager");
 
         assert!(nested_dir.exists());
-        assert!(nested_dir.join("circles.db").exists());
+        assert!(nested_dir
+            .join(haven_core::circle::CIRCLES_DB_FILENAME)
+            .exists());
 
         cleanup_dir(&base_dir);
     }
@@ -137,7 +139,7 @@ mod circle_manager_lifecycle_tests {
             .expect("should create manager");
 
         assert!(dir.exists());
-        assert!(dir.join("circles.db").exists());
+        assert!(dir.join(haven_core::circle::CIRCLES_DB_FILENAME).exists());
 
         cleanup_dir(&dir);
     }
@@ -1284,7 +1286,7 @@ mod mls_dependent_tests {
             .with_type(CircleType::LocationSharing)
             .with_relays(relays.clone());
         let result = alice
-            .create_circle(&alice_keys, members, &config, &relays)
+            .create_circle(&alice_keys, members, &config)
             .await
             .expect("create_circle must accept a genuine KeyPackage");
         assert_eq!(result.welcome_events.len(), 1);
@@ -1337,7 +1339,7 @@ mod mls_dependent_tests {
             .with_type(CircleType::LocationSharing)
             .with_relays(relays.clone());
         let result = alice_manager
-            .create_circle(&alice_keys, members, &config, &relays)
+            .create_circle(&alice_keys, members, &config)
             .await
             .expect("create circle");
 
@@ -1375,20 +1377,19 @@ mod mls_dependent_tests {
     /// Encrypts a location and returns the publishable kind-445 event.
     async fn encrypt_location_event(
         manager: &CircleManager,
-        keys: &Keys,
         group_id: &GroupId,
         lat: f64,
         lon: f64,
     ) -> nostr::Event {
         let loc = sentinel_location(lat, lon);
         let (event, _ngid, _relays) = manager
-            .encrypt_location(group_id, &keys.public_key(), &loc, 60)
+            .seal_location_for_test(group_id, &loc)
             .await
             .expect("encrypt location");
         event
     }
 
-    /// Asserts `receiver.decrypt_location(event)` yields a Location from
+    /// Asserts `receiver.ingest_for_test(event)` yields a Location from
     /// `sender_keys` decoding to `(lat, lon)`.
     async fn assert_decrypts_to_location(
         receiver: &CircleManager,
@@ -1398,7 +1399,7 @@ mod mls_dependent_tests {
         lon: f64,
     ) {
         let results = receiver
-            .decrypt_location(event)
+            .ingest_for_test(event)
             .await
             .expect("decrypt location");
         let (sender, content) = results
@@ -1470,14 +1471,10 @@ mod mls_dependent_tests {
             .with_type(CircleType::LocationSharing)
             .with_relays(relays.clone());
         let result = alice_manager
-            .create_circle(&alice_keys, members, &config, &relays)
+            .create_circle(&alice_keys, members, &config)
             .await
             .expect("create three-party circle");
         let group_id = result.circle.mls_group_id.clone();
-        alice_manager
-            .confirm_published(result.pending)
-            .await
-            .expect("alice confirms creation");
 
         for w in &result.welcome_events {
             let (joiner, jkeys) = if w.recipient_pubkey == bob_keys.public_key().to_hex() {
@@ -1508,10 +1505,6 @@ mod mls_dependent_tests {
     async fn create_circle_and_bob_joins() {
         let s = setup_circle_with_invite("create_join").await;
         let group_id = s.result.circle.mls_group_id.clone();
-        s.alice_manager
-            .confirm_published(s.result.pending)
-            .await
-            .expect("alice confirms creation");
         activate_joiner(&s.bob_manager, &s.bob_keys, &s.result.welcome_events[0]).await;
 
         assert_eq!(
@@ -1527,10 +1520,6 @@ mod mls_dependent_tests {
     async fn plan_leave_nonadmin_returns_nonadmin() {
         let s = setup_circle_with_invite("plan_leave_nonadmin").await;
         let group_id = s.result.circle.mls_group_id.clone();
-        s.alice_manager
-            .confirm_published(s.result.pending)
-            .await
-            .unwrap();
         activate_joiner(&s.bob_manager, &s.bob_keys, &s.result.welcome_events[0]).await;
 
         let plan = s
@@ -1546,10 +1535,6 @@ mod mls_dependent_tests {
     async fn plan_leave_sole_admin_with_peer_returns_handoff() {
         let s = setup_circle_with_invite("plan_leave_admin").await;
         let group_id = s.result.circle.mls_group_id.clone();
-        s.alice_manager
-            .confirm_published(s.result.pending)
-            .await
-            .unwrap();
         activate_joiner(&s.bob_manager, &s.bob_keys, &s.result.welcome_events[0]).await;
 
         let plan = s
@@ -1562,107 +1547,66 @@ mod mls_dependent_tests {
     }
 
     /// A peer's bare `SelfRemove` PROPOSAL only becomes a removal once a
-    /// remaining member publishes and confirms the auto-commit the engine
-    /// stages for it — and the ONLY API that hands that commit back is
-    /// [`CircleManager::decrypt_location_collecting_commits`]. The
-    /// `decrypt_location` shim rolls it back instead.
+    /// remaining member's driving plane makes the eviction the engine owes
+    /// for it, sends it through a fanout and applies it on a relay's ack. A
+    /// plane that makes no commit takes the proposal in and leaves the
+    /// eviction due: nothing staged, nothing recorded, the leaver still in the
+    /// roster.
     ///
-    /// This pin exists because getting that wrong is silent and total: an E2E
-    /// synthetic peer ingested leave proposals through the shim, so every
-    /// leave scenario deadlocked with the leaver stuck in every roster and no
-    /// error anywhere. Asserting BOTH paths side by side, on two independent
-    /// receivers of the SAME proposal, makes the difference impossible to
-    /// misread — and catches a regression in seconds instead of a 20-minute
-    /// emulator lane.
+    /// Both side by side, on two independent receivers of the SAME proposal,
+    /// so neither can be misread for the other: an E2E synthetic peer that
+    /// ingested leave proposals in a plane making no commit once deadlocked
+    /// every leave scenario with the leaver stuck in every roster.
     #[tokio::test]
-    async fn peer_self_remove_surfaces_a_receive_side_auto_commit() {
+    async fn peer_self_remove_is_made_by_a_driving_plane_and_left_due_by_one_that_makes_none() {
         let c = setup_three_party_active_circle("self_remove_autocommit").await;
         let bob_hex = c.bob_keys.public_key().to_hex();
 
-        // Bob leaves: a bare proposal, no `PendingStateRef` of his own.
         let proposal = c
             .bob_manager
             .propose_leave(&c.group_id)
             .await
-            .expect("bob proposes leave");
+            .expect("bob proposes leave")
+            .expect("a first leave in this epoch proposes");
 
-        // ── Receiver A (Alice): the production contract. ──
-        let ingest = c
+        // Receiver A (Alice): the foreground poll, every relay accepting.
+        let (_, sent) = c
             .alice_manager
-            .decrypt_location_collecting_commits(&proposal)
+            .ingest_landing_for_test(&proposal)
             .await
             .expect("alice ingests bob's SelfRemove");
         assert_eq!(
-            ingest.auto_commits.len(),
+            sent.len(),
             1,
-            "ingesting a peer's SelfRemove proposal must surface exactly one \
-             receive-side auto-commit for the caller to publish (Rule 13); \
-             got {}",
-            ingest.auto_commits.len()
+            "a driving plane that took in a peer's SelfRemove sent no eviction"
         );
-
-        // NOTE on publish-before-apply, since it is easy to assume otherwise:
-        // the engine's ROSTER projection already reflects the staged eviction
-        // HERE, before any confirm (verified — Bob is absent from
-        // `get_members` at this point). The projection tracks the staged
-        // commit and is reverted by `publish_failed`, which is exactly why
-        // Charlie's roster below still shows Bob after the shim rolls back.
-        // So the roster is NOT a usable "did the caller honour Rule 13" probe
-        // on its own; the load-bearing assertion is the one above — the commit
-        // was HANDED BACK to be published, and a caller that drops it strands
-        // the whole group.
-
-        let auto_commit = ingest.auto_commits.into_iter().next().unwrap();
-        c.alice_manager
-            .confirm_published(auto_commit.pending)
-            .await
-            .expect("alice confirms the eviction commit");
         let alice_members = member_hex_set(&c.alice_manager, &c.group_id).await;
         assert!(
-            !alice_members.contains(&bob_hex),
-            "after publish+confirm, the leaver must be gone from the roster"
+            !alice_members.contains(&bob_hex) && alice_members.len() == 2,
+            "after its eviction landed, the leaver is still in the roster",
         );
-        assert_eq!(alice_members.len(), 2, "alice and charlie remain");
 
-        // ── Receiver B (Charlie): the shim, on the SAME proposal. ──
-        // `decrypt_location` surfaces NOTHING to its caller, and that is the
-        // trap: no error, no result, nothing to publish — a receive path built
-        // on it broadcasts no eviction and the group waits on somebody else.
+        // Receiver B (Charlie): a plane that makes no commit, the SAME proposal.
         c.charlie_manager
-            .decrypt_location(&proposal)
+            .ingest_for_test(&proposal)
             .await
-            .expect("charlie ingests the same proposal via the shim");
-        assert_eq!(
-            c.charlie_manager.owed_removal_commits().len(),
-            1,
-            "what the shim must NOT do is drop the eviction. It reports the \
-             publish failed, and that rung leaves the commit staged and the \
-             publish OWED — a rollback would put the leaver back in Charlie's \
-             roster with nothing able to re-derive the commit, and would record \
-             nothing anywhere"
-        );
+            .expect("charlie ingests the same proposal");
         assert!(
-            c.charlie_manager
-                .encrypt_location(
-                    &c.group_id,
-                    &c.charlie_keys.public_key(),
-                    &sentinel_location(1.0, 2.0),
-                    300,
-                )
+            member_hex_set(&c.charlie_manager, &c.group_id)
                 .await
-                .is_err(),
-            "and the cost of that is visible rather than silent: Charlie's \
-             circle refuses to send while the eviction is owed, which is the \
-             ONLY thing that distinguishes a staged commit from a merged one \
-             (every projected read already shows the post-eviction roster)"
+                .contains(&bob_hex)
+                && !c
+                    .charlie_manager
+                    .session()
+                    .staged_without_fanout_for_test(&c.group_id)
+                    .await
+                && c.charlie_manager
+                    .session()
+                    .fanout_ids_for_test(&c.group_id)
+                    .await
+                    .is_ok_and(|ids| ids.is_empty()),
+            "a plane that makes no commit staged, recorded or applied the eviction",
         );
-
-        // A third member converging on Alice's PUBLISHED eviction is proven in
-        // `selfremove_autopublish_e2e::auto_commit_is_published_then_confirmed_and_a_third_member_converges`,
-        // on a receiver with no staged commit of its own — it cannot be shown
-        // here, because a group holding a staged commit BUFFERS every inbound
-        // commit until that resolves.
-        let _ = alice_members;
 
         c.cleanup();
     }
@@ -1710,15 +1654,11 @@ mod mls_dependent_tests {
         // ── Step 1: promote the successor, both peers apply the commit. ──
         let promote = c
             .alice_manager
-            .propose_admin_handoff(&c.group_id, &successor)
+            .admin_handoff_for_test(&c.group_id, &successor)
             .await
             .expect("promote successor");
-        c.alice_manager
-            .confirm_published(promote.pending)
-            .await
-            .expect("confirm promote");
         for peer in [&c.bob_manager, &c.charlie_manager] {
-            peer.decrypt_location(&promote.commit_event)
+            peer.ingest_for_test(&promote)
                 .await
                 .expect("peer applies the promote commit");
         }
@@ -1726,15 +1666,11 @@ mod mls_dependent_tests {
         // ── Step 2: Alice self-demotes, both peers apply the commit. ──
         let demote = c
             .alice_manager
-            .propose_self_demote(&c.group_id)
+            .self_demote_for_test(&c.group_id)
             .await
             .expect("self demote");
-        c.alice_manager
-            .confirm_published(demote.pending)
-            .await
-            .expect("confirm demote");
         for peer in [&c.bob_manager, &c.charlie_manager] {
-            peer.decrypt_location(&demote.commit_event)
+            peer.ingest_for_test(&demote)
                 .await
                 .expect("peer applies the demote commit");
         }
@@ -1777,7 +1713,7 @@ mod mls_dependent_tests {
             .await
             .expect("epoch");
         c.alice_manager
-            .update_circle_relays(&c.group_id, &["wss://relay-alice.test.com".to_string()])
+            .update_relays_for_test(&c.group_id, &["wss://relay-alice.test.com".to_string()])
             .await
             .expect_err("a demoted admin must not be able to commit an admin-only update");
         assert_eq!(
@@ -1790,15 +1726,11 @@ mod mls_dependent_tests {
         );
 
         let relay_update = successor_manager
-            .update_circle_relays(&c.group_id, &["wss://relay-successor.test.com".to_string()])
+            .update_relays_for_test(&c.group_id, &["wss://relay-successor.test.com".to_string()])
             .await
             .expect("the new admin must be able to commit an admin-only update");
-        successor_manager
-            .finalize_relay_update(relay_update.pending, &c.group_id)
-            .await
-            .expect("new admin confirms the relay update");
         for peer in [&c.alice_manager, other_manager] {
-            peer.decrypt_location(&relay_update.commit_event)
+            peer.ingest_for_test(&relay_update)
                 .await
                 .expect("peer applies the new admin's commit");
         }
@@ -1806,8 +1738,7 @@ mod mls_dependent_tests {
         // ── The group is still usable: location still round-trips, in both
         //    directions, at the post-handoff epoch.
         let from_successor =
-            encrypt_location_event(successor_manager, successor_keys, &c.group_id, 51.0, -0.1)
-                .await;
+            encrypt_location_event(successor_manager, &c.group_id, 51.0, -0.1).await;
         assert_decrypts_to_location(
             &c.alice_manager,
             &from_successor,
@@ -1819,8 +1750,7 @@ mod mls_dependent_tests {
         assert_decrypts_to_location(other_manager, &from_successor, successor_keys, 51.0, -0.1)
             .await;
 
-        let from_alice =
-            encrypt_location_event(&c.alice_manager, &c.alice_keys, &c.group_id, 48.9, 2.4).await;
+        let from_alice = encrypt_location_event(&c.alice_manager, &c.group_id, 48.9, 2.4).await;
         assert_decrypts_to_location(successor_manager, &from_alice, &c.alice_keys, 48.9, 2.4).await;
 
         c.cleanup();
@@ -1830,8 +1760,8 @@ mod mls_dependent_tests {
     // `self_update_produces_evolution_event_*`, `self_update_rollback_*`,
     // `groups_needing_self_update_reflects_rotation_state` — the engine owns
     // convergence; `self_update` is deleted. `manager_finalize_pending_commit` /
-    // `clear_pending_commit_rolls_back_*` — re-expressed as
-    // `confirm_published`/`publish_failed` in the inline suite.
+    // `clear_pending_commit_rolls_back_*` — re-expressed as the fanout
+    // driver's own resolution of a record in the inline suite.
 
     // ── Welcome-delivery cascade (UNIQUE integration coverage) ────────────────
 
@@ -1850,7 +1780,7 @@ mod mls_dependent_tests {
             .with_type(CircleType::LocationSharing)
             .with_relays(relays);
         let result = alice
-            .create_circle(&alice_keys, members, &config, &[])
+            .create_circle(&alice_keys, members, &config)
             .await
             .expect("create circle");
         assert_eq!(result.welcome_events.len(), 1);
@@ -1872,13 +1802,31 @@ mod mls_dependent_tests {
     }
 
     #[tokio::test]
-    async fn cascade_uses_nip65_when_inbox_empty() {
-        let nip65 = vec![
-            "wss://nip65-1.example.com".to_string(),
-            "wss://nip65-2.example.com".to_string(),
-        ];
-        let relays = welcome_relays_for(vec![], nip65.clone()).await;
-        assert_eq!(relays, nip65, "fall back to NIP-65 when inbox is empty");
+    async fn cascade_never_routes_a_welcome_to_nip65_relays() {
+        // Haven listens for gift wraps on its kind-10050 inbox relays alone.
+        let relays = vec!["wss://relay.test.com".to_string()];
+        let (alice, alice_keys, alice_dir) = make_manager("cascade_nip65_alice");
+        let (bob, bob_keys, bob_dir) = make_manager("cascade_nip65_bob");
+        let bob_kp = kp_event(&bob, &bob_keys, &relays).await;
+        let members = vec![member(
+            bob_kp,
+            vec![],
+            vec!["wss://nip65-1.example.com".to_string()],
+        )];
+        let config = CircleConfig::new("No Inbox")
+            .with_type(CircleType::LocationSharing)
+            .with_relays(relays);
+        let err = alice
+            .create_circle(&alice_keys, members, &config)
+            .await
+            .expect_err("a NIP-65 relay is not a Welcome route");
+        assert!(matches!(
+            err,
+            haven_core::circle::CircleError::MissingWelcomeRelays
+        ));
+        assert!(alice.get_circles().await.expect("get_circles").is_empty());
+        cleanup_dir(&alice_dir);
+        cleanup_dir(&bob_dir);
     }
 
     #[tokio::test]
@@ -1894,27 +1842,31 @@ mod mls_dependent_tests {
     }
 
     #[tokio::test]
-    async fn cascade_uses_creator_fallback_when_member_empty() {
+    async fn cascade_never_routes_a_welcome_to_the_creators_inbox() {
+        // The invitee does not read the inviter's inbox.
         let relays = vec!["wss://relay.test.com".to_string()];
         let (alice, alice_keys, alice_dir) = make_manager("cascade_fb_alice");
+        alice
+            .add_user_relay(
+                "wss://creator-inbox.example.com",
+                haven_core::circle::relay_prefs::RelayType::Inbox,
+            )
+            .expect("the creator keeps an inbox relay");
         let (bob, bob_keys, bob_dir) = make_manager("cascade_fb_bob");
         let bob_kp = kp_event(&bob, &bob_keys, &relays).await;
         let members = vec![member(bob_kp, vec![], vec![])];
-        let config = CircleConfig::new("Creator Fallback")
+        let config = CircleConfig::new("Creator Inbox")
             .with_type(CircleType::LocationSharing)
             .with_relays(relays);
-        let creator_inbox = vec!["wss://creator-inbox.example.com".to_string()];
-        let result = alice
-            .create_circle(&alice_keys, members, &config, &creator_inbox)
+        let err = alice
+            .create_circle(&alice_keys, members, &config)
             .await
-            .expect("create via creator fallback");
-        assert_eq!(result.welcome_events[0].recipient_relays, creator_inbox);
-        for d in haven_core::circle::PRODUCTION_DEFAULT_RELAYS {
-            assert!(!result.welcome_events[0]
-                .recipient_relays
-                .iter()
-                .any(|r| r.starts_with(d)));
-        }
+            .expect_err("the creator's inbox is not a Welcome route");
+        assert!(matches!(
+            err,
+            haven_core::circle::CircleError::MissingWelcomeRelays
+        ));
+        assert!(alice.get_circles().await.expect("get_circles").is_empty());
         cleanup_dir(&alice_dir);
         cleanup_dir(&bob_dir);
     }
@@ -1930,7 +1882,7 @@ mod mls_dependent_tests {
             .with_type(CircleType::LocationSharing)
             .with_relays(relays);
         let err = alice
-            .create_circle(&alice_keys, members, &config, &[])
+            .create_circle(&alice_keys, members, &config)
             .await
             .expect_err("must fail closed when no delivery relay exists");
         assert!(matches!(
@@ -1962,16 +1914,20 @@ mod mls_dependent_tests {
         let charlie_kp = kp_event(&charlie, &charlie_keys, &relays).await;
 
         let bob_inbox = vec!["wss://bob-inbox.example.com".to_string()];
-        let charlie_nip65 = vec!["wss://charlie-nip65.example.com".to_string()];
+        let charlie_inbox = vec!["wss://charlie-inbox.example.com".to_string()];
         let members = vec![
             member(bob_kp, bob_inbox.clone(), vec![]),
-            member(charlie_kp, vec![], charlie_nip65.clone()),
+            member(
+                charlie_kp,
+                charlie_inbox.clone(),
+                vec!["wss://charlie-nip65.example.com".to_string()],
+            ),
         ];
         let config = CircleConfig::new("Multi-Member Cascade")
             .with_type(CircleType::LocationSharing)
             .with_relays(relays);
         let result = alice
-            .create_circle(&alice_keys, members, &config, &[])
+            .create_circle(&alice_keys, members, &config)
             .await
             .expect("create circle");
         assert_eq!(result.welcome_events.len(), 2);
@@ -1987,7 +1943,7 @@ mod mls_dependent_tests {
             .iter()
             .find(|w| w.recipient_pubkey == charlie_keys.public_key().to_hex())
             .expect("charlie welcome");
-        assert_eq!(charlie_w.recipient_relays, charlie_nip65);
+        assert_eq!(charlie_w.recipient_relays, charlie_inbox);
 
         cleanup_dir(&alice_dir);
         cleanup_dir(&bob_dir);
@@ -2007,7 +1963,7 @@ mod mls_dependent_tests {
             .with_type(CircleType::LocationSharing)
             .with_relays(kp_relays.clone());
         let result = alice
-            .create_circle(&alice_keys, members, &config, &[])
+            .create_circle(&alice_keys, members, &config)
             .await
             .expect("create circle");
         assert_eq!(result.welcome_events[0].recipient_relays, inbox_relays);
@@ -2045,7 +2001,7 @@ mod mls_dependent_tests {
         assert!(config.relays.is_empty());
 
         let result = alice
-            .create_circle(&alice_keys, members, &config, &[])
+            .create_circle(&alice_keys, members, &config)
             .await
             .expect("create circle");
         let alice_inbox = alice
@@ -2082,7 +2038,7 @@ mod mls_dependent_tests {
         assert!(config.relays.is_empty());
 
         let result = alice
-            .create_circle(&alice_keys, members, &config, &[])
+            .create_circle(&alice_keys, members, &config)
             .await
             .expect("create via defensive fallback");
         let expected: Vec<String> = haven_core::circle::PRODUCTION_DEFAULT_RELAYS
@@ -2114,7 +2070,7 @@ mod mls_dependent_tests {
             .with_type(CircleType::LocationSharing)
             .with_relays(explicit.clone());
         let result = alice
-            .create_circle(&alice_keys, members, &config, &[])
+            .create_circle(&alice_keys, members, &config)
             .await
             .expect("create circle");
         assert_eq!(result.circle.relays, explicit);
@@ -2140,8 +2096,7 @@ mod mls_dependent_tests {
 
         // Baseline: while Bob is a member, both he and Charlie decrypt Alice's
         // location (proving the later failure is caused by the removal).
-        let pre =
-            encrypt_location_event(&c.alice_manager, &c.alice_keys, &c.group_id, 40.0, -70.0).await;
+        let pre = encrypt_location_event(&c.alice_manager, &c.group_id, 40.0, -70.0).await;
         assert_decrypts_to_location(&c.bob_manager, &pre, &c.alice_keys, 40.0, -70.0).await;
         assert_decrypts_to_location(&c.charlie_manager, &pre, &c.alice_keys, 40.0, -70.0).await;
 
@@ -2150,13 +2105,9 @@ mod mls_dependent_tests {
         // Alice removes Bob and confirms — rotates to a new epoch excluding Bob.
         let removal = c
             .alice_manager
-            .remove_members(&c.group_id, &[c.bob_keys.public_key().to_hex()])
+            .remove_members_for_test(&c.group_id, &[c.bob_keys.public_key().to_hex()])
             .await
             .expect("alice removes bob");
-        c.alice_manager
-            .confirm_published(removal.pending)
-            .await
-            .expect("alice confirms removal");
         let epoch_after = c.alice_manager.group_epoch(&c.group_id).await.unwrap();
         assert!(
             epoch_after > epoch_before,
@@ -2165,7 +2116,7 @@ mod mls_dependent_tests {
 
         // Charlie applies the removal commit and converges to the new epoch.
         c.charlie_manager
-            .decrypt_location(&removal.commit_event)
+            .ingest_for_test(&removal)
             .await
             .expect("charlie processes removal");
         assert_eq!(
@@ -2175,12 +2126,11 @@ mod mls_dependent_tests {
         );
 
         // Alice encrypts a FRESH location at the new epoch.
-        let post =
-            encrypt_location_event(&c.alice_manager, &c.alice_keys, &c.group_id, 41.0, -71.0).await;
+        let post = encrypt_location_event(&c.alice_manager, &c.group_id, 41.0, -71.0).await;
 
         // (1) The evicted Bob MUST NOT recover plaintext — any non-Location
         //     outcome (empty/Stale/error) is the correct secure result.
-        let bob_results = c.bob_manager.decrypt_location(&post).await;
+        let bob_results = c.bob_manager.ingest_for_test(&post).await;
         if let Ok(results) = &bob_results {
             assert!(
                 !results
@@ -2208,10 +2158,6 @@ mod mls_dependent_tests {
     async fn peer_converges_on_member_set_and_epoch_after_commits() {
         let s = setup_circle_with_invite("converge").await;
         let group_id = s.result.circle.mls_group_id.clone();
-        s.alice_manager
-            .confirm_published(s.result.pending)
-            .await
-            .unwrap();
         activate_joiner(&s.bob_manager, &s.bob_keys, &s.result.welcome_events[0]).await;
 
         assert_eq!(
@@ -2224,25 +2170,16 @@ mod mls_dependent_tests {
         let (charlie, charlie_keys, charlie_dir) = make_manager("converge_charlie");
         let relays = vec!["wss://relay.test.com".to_string()];
         let charlie_kp = kp_event(&charlie, &charlie_keys, &relays).await;
-        let add = s
+        let (add, _) = s
             .alice_manager
-            .add_members_with_welcomes(
-                &s.alice_keys,
-                &group_id,
-                vec![member(charlie_kp, relays.clone(), vec![])],
-                &relays,
-            )
+            .add_members_for_test(&group_id, &[member(charlie_kp, relays.clone(), vec![])])
             .await
-            .expect("alice adds charlie");
-        assert_eq!(add.commit_event.kind, nostr::Kind::Custom(445));
-        s.alice_manager
-            .confirm_published(add.pending)
-            .await
-            .expect("confirm add");
+            .expect("alice adds charlie, and a relay acks it");
+        assert_eq!(add.kind, nostr::Kind::Custom(445));
 
         let bob_add = s
             .bob_manager
-            .decrypt_location(&add.commit_event)
+            .ingest_for_test(&add)
             .await
             .expect("bob processes add");
         assert!(bob_add
@@ -2262,18 +2199,14 @@ mod mls_dependent_tests {
         // --- REMOVE Charlie ---
         let remove = s
             .alice_manager
-            .remove_members(&group_id, &[charlie_keys.public_key().to_hex()])
+            .remove_members_for_test(&group_id, &[charlie_keys.public_key().to_hex()])
             .await
-            .expect("alice removes charlie");
-        assert_eq!(remove.commit_event.kind, nostr::Kind::Custom(445));
-        s.alice_manager
-            .confirm_published(remove.pending)
-            .await
-            .expect("confirm remove");
+            .expect("alice removes charlie, and a relay acks it");
+        assert_eq!(remove.kind, nostr::Kind::Custom(445));
 
         let bob_remove = s
             .bob_manager
-            .decrypt_location(&remove.commit_event)
+            .ingest_for_test(&remove)
             .await
             .expect("bob processes remove");
         assert!(bob_remove
@@ -2290,8 +2223,7 @@ mod mls_dependent_tests {
         );
 
         // RC-4: Bob decrypts a post-commit location from Alice.
-        let post =
-            encrypt_location_event(&s.alice_manager, &s.alice_keys, &group_id, 12.5, 34.5).await;
+        let post = encrypt_location_event(&s.alice_manager, &group_id, 12.5, 34.5).await;
         assert_decrypts_to_location(&s.bob_manager, &post, &s.alice_keys, 12.5, 34.5).await;
 
         cleanup_dir(&charlie_dir);

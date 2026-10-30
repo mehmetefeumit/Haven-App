@@ -123,7 +123,10 @@ class NostrProfileService implements ProfileService {
       ProfileMetadataFfi? ffi;
       if (forceRefresh) {
         try {
-          ffi = await manager.fetchMyProfile(pubkeyHex: identity.pubkeyHex);
+          ffi = await manager.fetchMyProfile(
+            pubkeyHex: identity.pubkeyHex,
+            force: true,
+          );
         } on Object catch (e) {
           // D7: a network hiccup on an explicit refresh must not clobber an
           // existing cached value — fall back to the cache read instead of
@@ -141,6 +144,44 @@ class NostrProfileService implements ProfileService {
       return await _toProfile(manager, ffi, fullResolution: true);
     } on Object catch (e) {
       debugPrint('[Profile] getOwnProfile: ${e.runtimeType}');
+      throw const ProfileServiceException('Failed to load profile');
+    }
+  }
+
+  @override
+  Future<PublishedOwnProfile> fetchOwnPublishedProfile() async {
+    final Identity? identity;
+    try {
+      identity = await _identityService.getIdentity();
+    } on Object catch (e) {
+      debugPrint('[Profile] fetchOwnPublishedProfile: identity lookup failed: '
+          '${e.runtimeType}');
+      throw const ProfileServiceException('Failed to load profile');
+    }
+    if (identity == null) return const PublishedOwnProfile.unanswered();
+    try {
+      final manager = await _circleManagerFactory();
+      final ffi = await manager.fetchMyProfile(
+        pubkeyHex: identity.pubkeyHex,
+        force: false,
+      );
+      return switch (ffi.relayAnswer) {
+        OwnProfileRelayAnswerFfi.unanswered =>
+          const PublishedOwnProfile.unanswered(),
+        OwnProfileRelayAnswerFfi.absent =>
+          const PublishedOwnProfile.answered(null),
+        OwnProfileRelayAnswerFfi.published => PublishedOwnProfile.answered(
+          Profile(
+            pubkeyHex: ffi.pubkeyHex,
+            name: ffi.name,
+            displayName: ffi.displayName,
+            about: ffi.about,
+            knownAt: DateTime.fromMillisecondsSinceEpoch(ffi.fetchedAt * 1000),
+          ),
+        ),
+      };
+    } on Object catch (e) {
+      debugPrint('[Profile] fetchOwnPublishedProfile: ${e.runtimeType}');
       throw const ProfileServiceException('Failed to load profile');
     }
   }

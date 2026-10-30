@@ -43,18 +43,29 @@
 //! the cursor from ABOVE by the held event instead, which is the only direction
 //! a remote timestamp is allowed to appear in.
 
+mod helpers;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::location::LocationMessage;
-use haven_core::nostr::mls::types::GroupId;
-use haven_core::relay::catchup::run_catchup_all_circles;
+use haven_core::nostr::mls::types::{
+    EpochState, FanoutMls, FanoutProbe, FanoutTargetStatus, GroupId,
+};
+use haven_core::relay::catchup::{
+    run_catchup_all_circles, run_catchup_driving, run_catchup_in_foreground,
+};
+use haven_core::relay::fanout::scripted::{Answer, ScriptedFanout};
+use haven_core::relay::fanout::UnrecordedPublisher;
+use haven_core::relay::fanout::{
+    DriveMode, EvolutionStatus, FanoutClock, FanoutSend, Publishing, BUSY_RETRY_MS,
+};
 use haven_core::relay::live_sync::group_cursor_stream;
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
-use nostr::{Event, EventBuilder, Keys, Kind, Tag, Timestamp};
+use haven_core::relay::{allow_ws_loopback_for_test, RelayError, RelayManager};
+use nostr::{Event, EventBuilder, JsonUtil as _, Keys, Kind, Tag, Timestamp};
 use nostr_relay_builder::prelude::{
     BoxedFuture, MemoryDatabase, MemoryDatabaseOptions, NostrDatabase, PolicyResult, QueryPolicy,
 };
@@ -134,15 +145,14 @@ async fn build_two_member_circle(group_relays: Vec<String>) -> TwoMemberCircle {
     let alice = Arc::new(CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap());
     let config = CircleConfig::new("Catch-up Sweep Circle").with_relays(group_relays.clone());
     let result = alice
-        .create_circle(&alice_keys, vec![bob_member], &config, &group_relays)
+        .create_circle(&alice_keys, vec![bob_member], &config)
         .await
         .expect("create circle");
+    // As the app's driven create leaves it: the founding Welcome sent from
+    // its record and acknowledged, so no later drive sends it.
+    let _ = alice.land_staged_for_test().await;
     let mls_group_id = result.circle.mls_group_id.clone();
     let nostr_group_id = result.circle.nostr_group_id;
-    alice
-        .confirm_published(result.pending)
-        .await
-        .expect("alice confirms creation");
 
     let welcome = result
         .welcome_events
@@ -215,11 +225,9 @@ async fn a_peer_location_is_applied_persisted_and_moves_the_cursor() {
 
     let (loc_event, _, _) = fx
         .bob
-        .encrypt_location(
+        .seal_location_for_test(
             &fx.mls_group_id,
-            &fx.bob_keys.public_key(),
             &LocationMessage::new(52.370_216, 4.895_168),
-            300,
         )
         .await
         .expect("bob encrypts a location");
@@ -331,12 +339,7 @@ async fn an_own_echo_is_never_persisted_as_a_peer_row() {
 
     let (own_event, _, _) = fx
         .alice
-        .encrypt_location(
-            &fx.mls_group_id,
-            &fx.alice_keys.public_key(),
-            &LocationMessage::new(1.0, 2.0),
-            300,
-        )
+        .seal_location_for_test(&fx.mls_group_id, &LocationMessage::new(1.0, 2.0))
         .await
         .expect("alice encrypts her own location");
     relay_mgr
@@ -360,9 +363,11 @@ async fn an_own_echo_is_never_persisted_as_a_peer_row() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unreachable_relay_is_tallied_and_holds_the_cursor() {
     // Port 1 refuses immediately, so this needs no network and cannot hang on a
-    // connect timeout. Still a well-formed `wss://`, so it passes URL validation
-    // and genuinely exercises the fetch path rather than the reject path.
-    let dead = "wss://127.0.0.1:1".to_string();
+    // connect timeout. A loopback relay through the debug-only opt-in, so it
+    // passes URL validation and genuinely exercises the fetch path rather than
+    // the reject path.
+    let _ = allow_ws_loopback_for_test();
+    let dead = "ws://127.0.0.1:1".to_string();
     let fx = build_two_member_circle(vec![dead]).await;
     let relay_mgr = RelayManager::new();
 
@@ -379,6 +384,154 @@ async fn an_unreachable_relay_is_tallied_and_holds_the_cursor() {
         None,
         "nothing was fetched, so nothing may be marked as caught up"
     );
+}
+
+/// A sweep whose top-down pass a relay answered to the end leaves its circle
+/// caught up in this session; one no relay answered does not, and forgets
+/// an earlier mark.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sweep_answered_to_the_end_leaves_its_circle_caught_up() {
+    let _ = allow_ws_loopback_for_test();
+    let dead = build_two_member_circle(vec!["ws://127.0.0.1:1".to_string()]).await;
+    // Caught up once, earlier: a sweep's own pass is what says so now.
+    dead.alice
+        .session()
+        .mark_caught_up_for_test(&dead.mls_group_id);
+    let _ = run_catchup_all_circles(&dead.alice, &RelayManager::new(), 20).await;
+    assert!(
+        !dead.alice.session().caught_up_for_test(&dead.mls_group_id),
+        "a circle no relay answered was taken as caught up, or kept an earlier mark",
+    );
+    let (_relay, url, relay_mgr) = relay_under_test().await;
+    let fx = build_two_member_circle(vec![url]).await;
+    let _ = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
+    assert!(
+        fx.alice.session().caught_up_for_test(&fx.mls_group_id),
+        "a circle whose sweep a relay answered to the end was not taken as caught up",
+    );
+}
+
+/// A sweep that fetched an event it held back — here everything the circle
+/// sends is parked behind a commit of this device's own, still pending —
+/// does not leave its circle caught up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sweep_that_held_an_event_back_leaves_its_circle_not_caught_up() {
+    let (_relay, url, relay_mgr) = relay_under_test().await;
+    let fx = build_two_member_circle(vec![url.clone()]).await;
+    let _pending = fx
+        .alice
+        .session()
+        .send(haven_core::nostr::mls::types::SendIntent::SelfUpdate {
+            group_id: fx.mls_group_id.clone(),
+        })
+        .await
+        .expect("alice stages a commit and leaves it pending");
+    let (fix, _, _) = fx
+        .bob
+        .seal_location_for_test(&fx.mls_group_id, &LocationMessage::new(52.37, 4.89))
+        .await
+        .expect("bob seals a fix");
+    relay_mgr
+        .publish_event(&fix, std::slice::from_ref(&url))
+        .await
+        .expect("the fix reaches the relay");
+    let _ = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
+    assert!(
+        !fx.alice.session().caught_up_for_test(&fx.mls_group_id),
+        "a sweep that held back what it fetched left its circle caught up",
+    );
+}
+
+/// Every relay of the live plane's subscription sending its end of stored
+/// events leaves the circle caught up in this session, until that plane
+/// stops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_live_planes_end_of_stored_events_leaves_its_circle_caught_up() {
+    let (_relay, url, _relay_mgr) = relay_under_test().await;
+    let fx = build_two_member_circle(vec![url.clone()]).await;
+    let spec = haven_core::relay::live_sync::CircleSpec {
+        group_id_hex: hex::encode(fx.nostr_group_id),
+        relays: vec![url],
+    };
+    let core = haven_core::relay::live_sync::LiveSyncCore::new_local(
+        Arc::clone(&fx.alice),
+        fx.alice_keys.public_key(),
+        Arc::new(RelayManager::new()),
+    );
+    assert!(
+        !fx.alice.session().caught_up_for_test(&fx.mls_group_id),
+        "premise: not caught up before the subscription",
+    );
+    core.start(std::slice::from_ref(&spec), &[])
+        .await
+        .expect("the session starts");
+    // The end of stored events arrives when the relay sends it: the wait is
+    // on the mark it makes, never on a clock.
+    fx.alice
+        .session()
+        .until_caught_up_for_test(&fx.mls_group_id)
+        .await;
+    assert!(
+        fx.alice.session().caught_up_for_test(&fx.mls_group_id),
+        "the live plane's end of stored events did not leave its circle caught up",
+    );
+    // A plane that pauses hears nothing more: what it established goes.
+    core.pause_subscriptions()
+        .await
+        .expect("the subscriptions pause");
+    assert!(
+        !fx.alice.session().caught_up_for_test(&fx.mls_group_id),
+        "a circle stayed caught up after the live plane that caught it up paused",
+    );
+    core.resume_after_background(haven_core::relay::live_sync::Claim::Foreground)
+        .await
+        .expect("the plane resumes");
+    fx.alice
+        .session()
+        .until_caught_up_for_test(&fx.mls_group_id)
+        .await;
+    let _ = core.stop().await;
+    assert!(
+        !fx.alice.session().caught_up_for_test(&fx.mls_group_id),
+        "a circle stayed caught up after the live plane that caught it up stopped",
+    );
+}
+
+/// A REQ issued for a circle again — a re-anchor, a reconnect, a change of
+/// its relays — forgets that the circle is caught up until that REQ's own end
+/// of stored events: here the relay sends none, and the mark stays gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_req_issued_again_forgets_the_mark_until_its_own_end_of_stored_events() {
+    let relay = haven_core::relay::scripted_relay::ScriptedRelay::start();
+    let url = relay.url().to_owned();
+    let fx = build_two_member_circle(vec![url.clone()]).await;
+    let spec = haven_core::relay::live_sync::CircleSpec {
+        group_id_hex: hex::encode(fx.nostr_group_id),
+        relays: vec![url],
+    };
+    let core = haven_core::relay::live_sync::LiveSyncCore::new_local(
+        Arc::clone(&fx.alice),
+        fx.alice_keys.public_key(),
+        Arc::new(RelayManager::new()),
+    );
+    core.start(std::slice::from_ref(&spec), &[])
+        .await
+        .expect("the session starts");
+    fx.alice
+        .session()
+        .until_caught_up_for_test(&fx.mls_group_id)
+        .await;
+    // From now on the relay answers every REQ with nothing, not even an end
+    // of stored events.
+    relay.answer(|_| true, Vec::new());
+    core.resume_after_background(haven_core::relay::live_sync::Claim::Foreground)
+        .await
+        .expect("the plane re-anchors");
+    assert!(
+        !fx.alice.session().caught_up_for_test(&fx.mls_group_id),
+        "a circle stayed caught up across a REQ issued for it again that no relay has answered",
+    );
+    let _ = core.stop().await;
 }
 
 /// An already-expired deadline stops the sweep before any circle, and says so.
@@ -415,16 +568,15 @@ async fn no_circles_is_a_clean_no_op() {
     assert_eq!(out, haven_core::relay::CatchupOutcome::default());
 }
 
-/// Rule 13 on the background path: the sweep does not merely READ. Ingesting a
-/// peer's `SelfRemove` proposal surfaces a jitter-delayed auto-commit, which the
-/// sweep must publish to the circle's relays and confirm only on an ack — so the
-/// rest of the group receives the eviction instead of the sweeper forking.
-///
-/// This is what the re-tick loop inside `ingest_one` exists for: the auto-commit
-/// is not due at ingest time, and a single `advance_convergence` would drain the
-/// group out of the pending set and strand the commit unpublished.
+/// Rule 13 on the foreground sweep: it does not merely READ. Ingesting a
+/// peer's `SelfRemove` proposal leaves a jitter-delayed eviction due, which the
+/// sweep run in front of the user makes under a record; the driver sends it
+/// to the circle's relays once the relay the sweep's fetch held is free, and
+/// it is applied only on an ack — so the rest of the group receives the
+/// eviction instead of the sweeper forking. (The wake sweep
+/// makes no commit: `the_wake_sweep_leaves_the_leave_for_the_first_full_advance`.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_peer_leave_is_committed_and_re_broadcast_by_the_sweep() {
+async fn a_peer_leave_is_committed_and_re_broadcast_by_the_foreground_sweep() {
     let (_relay, url, relay_mgr) = relay_under_test().await;
     let fx = build_two_member_circle(vec![url.clone()]).await;
     let bob_hex = fx.bob_keys.public_key().to_hex();
@@ -439,7 +591,8 @@ async fn a_peer_leave_is_committed_and_re_broadcast_by_the_sweep() {
         .bob
         .propose_leave(&fx.mls_group_id)
         .await
-        .expect("bob proposes leave");
+        .expect("bob proposes leave")
+        .expect("a first leave in this epoch proposes");
     relay_mgr
         .publish_event(&proposal, std::slice::from_ref(&url))
         .await
@@ -454,9 +607,28 @@ async fn a_peer_leave_is_committed_and_re_broadcast_by_the_sweep() {
     // costs half a second and makes the count a fact rather than a coin flip.
     wait_until_after(i64::try_from(proposal.created_at.as_secs()).expect("created_at fits")).await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
-
+    let out = run_catchup_in_foreground(&fx.alice, &relay_mgr, 20).await;
     assert_eq!(out.events_applied, 1, "the proposal itself is applied");
+    // The eviction is staged under its record while the sweep's own fetch
+    // holds the relay, so the sweep asks to be resumed once the relay is
+    // free; the driver's resume then sends it and applies it on the ack.
+    let after = out
+        .retry_after_ms
+        .expect("the sweep asks to be resumed for the eviction it recorded");
+    let transport = relay_mgr.fanout_transport();
+    let resumed = Publishing {
+        fanout: &transport,
+        publisher: &relay_mgr,
+        clock: &haven_core::relay::fanout::scripted::FixedClock(
+            haven_core::relay::fanout::WallClock.now_ms() + after,
+        ),
+        deadline_ms: None,
+        mode: &DriveMode::Full,
+    }
+    .resume(&fx.alice)
+    .await;
+    assert!(!resumed.errored, "the resume that sends the eviction erred");
+
     assert!(
         !fx.alice
             .session()
@@ -508,7 +680,7 @@ async fn a_peer_leave_is_committed_and_re_broadcast_by_the_sweep() {
         .epoch(&fx.mls_group_id)
         .await
         .expect("epoch");
-    let again = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
+    let again = run_catchup_in_foreground(&fx.alice, &relay_mgr, 20).await;
     assert_eq!(again.events_deferred, 0, "nothing should be left pending");
     assert_eq!(
         fx.alice
@@ -525,71 +697,55 @@ async fn a_peer_leave_is_committed_and_re_broadcast_by_the_sweep() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
-/// An event the engine cannot ingest at all must be counted as DEFERRED and must
-/// HOLD the cursor at or below itself — never be skipped past.
+/// One envelope no group key can open must not pin the circle's cursor.
 ///
-/// This is the Rule-12 property at the level of a single event: the sweep cannot
-/// tell an un-ingestable event apart from one that will apply once a missing
-/// commit arrives, so it must assume the latter. Advancing over it would push
-/// `since` past an event that was never applied, and if the event were a commit
-/// the epoch chain would be stranded with nothing left to re-fetch it.
+/// MDK v0.10.4 reports it `TransportDeferred` and keeps it for its own re-peel
+/// (the per-group deferred-peel store), so relay redelivery is not its way back
+/// and Rule 12 is met by the engine. Holding the cursor for it instead would let
+/// one hostile or confused relay freeze a circle's catch-up for good, the same
+/// garbage re-fetched on every wake. An object the engine could NOT keep still
+/// holds (`a_resource_refused_445_holds_the_cursor`).
 ///
-/// # What "held" means now, and why the test proves it directly
-///
-/// The sweep's advance is anchored on the FETCH WINDOW's open time, not on any
-/// event, so "held" is no longer the same statement as "the cursor is still
-/// unset" — a deferral caps the advance at that event rather than suppressing it
-/// entirely. That cap is exactly as strong, because `since` is an inclusive
-/// lower bound: a cursor sitting ON the deferred event still re-requests it,
-/// with no reliance on the clock-skew buffer at all.
-///
-/// So this asserts the property the old `cursor == None` was only a proxy for:
-/// a SECOND sweep must see the same event again.
+/// The envelope is dated an hour back, below any clock-skew margin the advance
+/// keeps, so a cursor held at it and one that moved past it cannot coincide.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_uningestable_event_defers_and_holds_the_cursor() {
+async fn one_undecryptable_envelope_cannot_pin_the_cursor() {
     let (_relay, url, relay_mgr) = relay_under_test().await;
     let fx = build_two_member_circle(vec![url.clone()]).await;
     let hex_gid = hex::encode(fx.nostr_group_id);
 
     // A well-formed, correctly-addressed `kind:445` that no group key can open:
     // exactly what a hostile or confused relay can inject into the window.
+    let junk_secs = chrono::Utc::now().timestamp() - 3600;
     let junk = nostr::EventBuilder::new(nostr::Kind::Custom(445), "opaque-ciphertext")
         .tags([nostr::Tag::custom(
             nostr::TagKind::SingleLetter(nostr::SingleLetterTag::lowercase(nostr::Alphabet::H)),
             [hex_gid],
         )])
+        .custom_created_at(Timestamp::from(u64::try_from(junk_secs).unwrap()))
         .sign_with_keys(&Keys::generate())
         .expect("sign junk 445");
     relay_mgr
         .publish_event(&junk, std::slice::from_ref(&url))
         .await
         .expect("the junk event reaches the relay");
-    let junk_secs = i64::try_from(junk.created_at.as_secs()).expect("created_at fits");
 
     let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
 
     assert_eq!(out.circles_swept, 1);
     assert_eq!(
-        out.events_deferred, 1,
-        "an event the engine could not ingest is deferred, not applied"
+        out.events_deferred, 0,
+        "an envelope the engine kept for its own re-peel is not a deferral"
     );
-    assert_eq!(out.events_applied, 0);
-    let cursor = fx
-        .alice_cursor()
-        .expect("the window still advanced somewhere");
+    let cursor = fx.alice_cursor().expect("the window advanced");
     assert!(
-        cursor <= junk_secs * 1000,
-        "the cursor must not move PAST an event that was never applied; got \
-         {cursor} ms for an event dated {junk_secs} s",
+        cursor > junk_secs * 1000,
+        "the cursor must move past an envelope the engine retained; got {cursor} ms \
+         for an event dated {junk_secs} s",
     );
 
-    // The property that actually matters: the next sweep still sees it.
     let again = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
-    assert_eq!(
-        again.events_deferred, 1,
-        "the un-applied event must be re-fetched by the next sweep — that is \
-         what holding the cursor is FOR",
-    );
+    assert_eq!(again.events_deferred, 0, "nor may it hold a later sweep");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -637,6 +793,9 @@ struct SeededRelay {
     _relay: LocalRelay,
     url: String,
     db: MemoryDatabase,
+    /// The endpoint that declines NIP-77 in front of the relay, when
+    /// [`SeededRelay::without_negentropy`] put one there.
+    _declines: Option<helpers::neg_wire::NegWire>,
 }
 
 impl SeededRelay {
@@ -668,6 +827,26 @@ impl SeededRelay {
             _relay: relay,
             url,
             db,
+            _declines: None,
+        }
+    }
+
+    /// This relay as one that does not speak NIP-77, reached through an
+    /// endpoint that answers every session with strfry's refusal: where the
+    /// pager is a circle's only catch-up, which is what the tests that use
+    /// it grade. On a relay that speaks NIP-77 a window the pager cannot
+    /// finish completes by reconciliation instead
+    /// (`same_second_events_across_a_page_boundary_are_all_recovered`).
+    async fn without_negentropy(self) -> Self {
+        let declines = helpers::neg_wire::NegWire::in_front_of(
+            &self.url,
+            helpers::neg_wire::NegPolicy::Notice("ERROR: bad msg: unknown cmd".into()),
+        )
+        .await;
+        Self {
+            url: declines.url.clone(),
+            _declines: Some(declines),
+            ..self
         }
     }
 
@@ -781,7 +960,18 @@ enum Tamper {
     /// a conformant relay — one whose choice must not survive into what a caller
     /// reads.
     ReverseEveryPage,
+    /// Once [`INJECT`] holds an event, answer the next page with it as one
+    /// more `EVENT`, filed under the page's own subscription, just before its
+    /// `EOSE`. A hostile relay is not bound by the REQ's filter.
+    InjectBeforeEose,
 }
+
+/// The event JSON [`Tamper::InjectBeforeEose`] slips in.
+static INJECT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// How many events [`Tamper::InjectBeforeEose`] slipped in, for the test's
+/// anti-vacuity check.
+static INJECTED: AtomicUsize = AtomicUsize::new(0);
 
 /// A TCP endpoint in front of a running relay that forwards every WebSocket
 /// frame verbatim except where [`Tamper`] says otherwise.
@@ -900,6 +1090,26 @@ async fn pipe_tampered(
                 held.push(frame);
                 continue;
             }
+            Tamper::InjectBeforeEose if payload.starts_with(br#"["EOSE""#) => {
+                let Some(json) = INJECT.lock().unwrap().take() else {
+                    if to_client.write_all(&frame).await.is_err() {
+                        return;
+                    }
+                    continue;
+                };
+                let subscription: (String, String) =
+                    serde_json::from_slice(payload).expect("an EOSE names its subscription");
+                let injected = format!(r#"["EVENT",{},{json}]"#, serde_json::json!(subscription.1));
+                tamper = Tamper::Verbatim;
+                if to_client
+                    .write_all(&long_text_frame(injected.as_bytes()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                INJECTED.fetch_add(1, Ordering::Relaxed);
+            }
             Tamper::ReverseEveryPage if payload.starts_with(br#"["EOSE""#) => {
                 for buffered in std::mem::take(&mut held).into_iter().rev() {
                     if to_client.write_all(&buffered).await.is_err() {
@@ -957,6 +1167,15 @@ fn text_frame(payload: &[u8]) -> Vec<u8> {
          write, and a silently malformed frame would prove nothing"
     );
     let mut frame = vec![0x81, u8::try_from(payload.len()).expect("payload fits")];
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// One unmasked text frame carrying `payload`, of any length up to 64 KiB.
+fn long_text_frame(payload: &[u8]) -> Vec<u8> {
+    let len = u16::try_from(payload.len()).expect("payload under 64 KiB");
+    let mut frame = vec![0x81, 126];
+    frame.extend_from_slice(&len.to_be_bytes());
     frame.extend_from_slice(payload);
     frame
 }
@@ -1321,6 +1540,8 @@ async fn a_chase_page_that_is_never_served_holds_the_cursor() {
         // Above every seeded event, so only the un-chased first page passes.
         serve_above: Timestamp::from(u64::try_from(newest_secs).unwrap()),
     }))
+    .await
+    .without_negentropy()
     .await;
     let relay_mgr = RelayManager::new();
     let fx = build_two_member_circle(vec![relay.url.clone()]).await;
@@ -1408,7 +1629,7 @@ async fn a_flood_of_future_dated_events_cannot_freeze_the_cursor() {
 /// window rather than skipping over it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_window_the_pager_cannot_finish_holds_the_cursor_and_says_so() {
-    let relay = SeededRelay::run().await;
+    let relay = SeededRelay::run().await.without_negentropy().await;
     let relay_mgr = RelayManager::new();
     let fx = build_two_member_circle(vec![relay.url.clone()]).await;
 
@@ -1532,8 +1753,8 @@ async fn a_relay_that_caps_below_our_page_size_still_gets_fully_drained() {
 /// rather than asserting against a mock of it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fetch_cut_off_by_its_own_timeout_is_not_read_as_a_complete_window() {
-    let honest = SeededRelay::run().await;
-    let backing = SeededRelay::run().await;
+    let honest = SeededRelay::run().await.without_negentropy().await;
+    let backing = SeededRelay::run().await.without_negentropy().await;
     let stalled = TamperedRelay::in_front_of(&backing.url, Tamper::SwallowEose).await;
     let relay_mgr = RelayManager::new();
     let fx = build_two_member_circle(vec![honest.url.clone(), stalled.url.clone()]).await;
@@ -1886,7 +2107,7 @@ async fn a_read_that_gives_up_early_closes_its_own_req() {
 /// is whether that round's `EOSE` arrived.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_confirming_page_cut_off_before_the_relay_finished_holds_the_cursor() {
-    let relay = SeededRelay::run().await;
+    let relay = SeededRelay::run().await.without_negentropy().await;
     // Round 1 (the page) is confirmed; round 2 (the confirmation) is cut.
     let cut = TamperedRelay::in_front_of(&relay.url, Tamper::CutAtEose { forward_first: 1 }).await;
     let relay_mgr = RelayManager::new();
@@ -1947,8 +2168,8 @@ async fn a_confirming_page_cut_off_before_the_relay_finished_holds_the_cursor() 
 /// let a single flaky entry silently cost the circle whatever only it held.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_relay_that_finished_cannot_vouch_for_one_that_was_cut_off() {
-    let honest = SeededRelay::run().await;
-    let flaky = SeededRelay::run().await;
+    let honest = SeededRelay::run().await.without_negentropy().await;
+    let flaky = SeededRelay::run().await.without_negentropy().await;
     let cut = TamperedRelay::in_front_of(&flaky.url, Tamper::CutAtEose { forward_first: 1 }).await;
     let relay_mgr = RelayManager::new();
     let fx = build_two_member_circle(vec![honest.url.clone(), cut.url.clone()]).await;
@@ -2166,43 +2387,30 @@ async fn alice_adds_then_removes(
         mint_member(&["wss://charlie-inbox.example.com".to_string()]).await;
     let charlie_hex = charlie_keys.public_key().to_hex();
 
-    let add = fx
+    let (add, _) = fx
         .alice
-        .add_members_with_welcomes(
-            &fx.alice_keys,
-            &fx.mls_group_id,
-            vec![charlie_member],
-            &relays,
-        )
+        .add_members_for_test(&fx.mls_group_id, &[charlie_member])
         .await
         .expect("alice adds charlie");
     relay_mgr
-        .publish_event(&add.commit_event, &relays)
+        .publish_event(&add, &relays)
         .await
         .expect("the add commit reaches the relay");
-    fx.alice
-        .confirm_published(add.pending)
-        .await
-        .expect("alice confirms the add");
-    wait_until_after(i64::try_from(add.commit_event.created_at.as_secs()).expect("fits")).await;
+    wait_until_after(i64::try_from(add.created_at.as_secs()).expect("fits")).await;
 
     let remove = fx
         .alice
-        .remove_members(&fx.mls_group_id, std::slice::from_ref(&charlie_hex))
+        .remove_members_for_test(&fx.mls_group_id, std::slice::from_ref(&charlie_hex))
         .await
         .expect("alice removes charlie");
     relay_mgr
-        .publish_event(&remove.commit_event, &relays)
+        .publish_event(&remove, &relays)
         .await
         .expect("the remove commit reaches the relay");
-    fx.alice
-        .confirm_published(remove.pending)
-        .await
-        .expect("alice confirms the removal");
 
     (
         charlie_hex,
-        i64::try_from(remove.commit_event.created_at.as_secs()).expect("created_at fits"),
+        i64::try_from(remove.created_at.as_secs()).expect("created_at fits"),
     )
 }
 
@@ -2221,15 +2429,16 @@ async fn alice_adds_then_removes(
 /// there — it fails to peel, which the engine reports as `Stale` and the sweep
 /// therefore does NOT hold the cursor at (the module's "What is deliberately NOT
 /// held back": the engine keeps it as a retryable row, and holding would freeze
-/// every client temporarily unable to decrypt). Nor does the predecessor landing
-/// a page later release it inside this sweep.
+/// every client temporarily unable to decrypt).
 ///
-/// So the pair converges on the sweep AFTER this one, and the cost of the
-/// descending order is a re-fetch rather than a loss. This test pins that whole
-/// sequence, because every part of it is load-bearing and none of it is the
-/// obvious guess.
+/// MDK v0.9.4 retries that row only inside an advance and schedules none for it,
+/// so the predecessor landing a page later is what has to re-drive it: its epoch
+/// change owes the group an advance, and the pair converges inside the sweep
+/// that fetched it (C7, `docs/MDK_UPSTREAM_TRACKER.md`). Before that edge it
+/// waited for a later sweep's re-fetch — a recovery a device whose window had
+/// moved past the pair never got.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_dependent_commits_split_across_pages_converge_on_the_next_sweep() {
+async fn two_dependent_commits_split_across_pages_converge_in_the_sweep_that_fetched_them() {
     // Two events per page, so the two commits land in pages of their own below
     // two filler events.
     let relay = SeededRelay::with_cap(Some(2)).await;
@@ -2265,20 +2474,19 @@ async fn two_dependent_commits_split_across_pages_converge_on_the_next_sweep() {
     );
     assert_eq!(
         fx.bob.group_epoch(&fx.mls_group_id).await.expect("epoch"),
-        bob_epoch_before + 1,
-        "only the PREDECESSOR can apply on arrival: the later commit's outer \
-         layer is keyed by an epoch Bob had not reached when it was handed to \
-         him, and the predecessor landing a page later does not re-drive it \
-         inside this sweep"
+        bob_epoch_before + 2,
+        "the later commit cannot peel on arrival — its outer layer is keyed by \
+         an epoch Bob had not reached — so the predecessor's epoch change a page \
+         later must re-drive it inside this sweep"
     );
     assert!(
-        fx.bob
+        !fx.bob
             .session()
             .member_pubkeys(&fx.mls_group_id)
             .await
             .expect("roster")
             .contains(&charlie_hex),
-        "which is visible in the roster: the removal has not taken effect yet"
+        "which is visible in the roster: the removal has taken effect"
     );
     assert_eq!(
         out.events_deferred, 0,
@@ -2296,34 +2504,8 @@ async fn two_dependent_commits_split_across_pages_converge_on_the_next_sweep() {
             .read_sync_cursor(&cursor_stream)
             .expect("cursor read")
             .is_some_and(|ms| ms > second_secs * 1000),
-        "so the cursor really does pass the un-applied commit — which is what \
-         makes the next sweep, and not this one, the recovery; got {:?}",
+        "so the cursor passes both commits, both of them applied; got {:?}",
         fx.bob.read_sync_cursor(&cursor_stream),
-    );
-
-    // The recovery, and the reason passing it above is not a loss: the next
-    // sweep's floor is `GROUP_RESUBSCRIBE_BUFFER_SECS` below the cursor, so both
-    // commits are re-requested — and this time the predecessor is already
-    // applied, so the successor peels.
-    let again = run_catchup_all_circles(&fx.bob, &relay_mgr, 60).await;
-    assert_eq!(
-        again.events_applied, 2,
-        "precondition: the pair really was re-fetched rather than resolved out \
-         of thin air"
-    );
-    assert_eq!(
-        fx.bob.group_epoch(&fx.mls_group_id).await.expect("epoch"),
-        bob_epoch_before + 2,
-        "the pair converges on the sweep after the one that fetched it"
-    );
-    assert!(
-        !fx.bob
-            .session()
-            .member_pubkeys(&fx.mls_group_id)
-            .await
-            .expect("roster")
-            .contains(&charlie_hex),
-        "and the removal has taken effect"
     );
 }
 
@@ -2560,11 +2742,9 @@ async fn a_genuine_location_in_a_later_page_is_still_applied_and_persisted() {
 
     let (loc_event, _, _) = fx
         .bob
-        .encrypt_location(
+        .seal_location_for_test(
             &fx.mls_group_id,
-            &fx.bob_keys.public_key(),
             &LocationMessage::new(48.858_37, 2.294_481),
-            300,
         )
         .await
         .expect("bob encrypts a location");
@@ -2674,17 +2854,18 @@ struct BackloggedCircle {
 
 impl BackloggedCircle {
     async fn build() -> Self {
-        let relay = SeededRelay::with_cap(Some(4)).await;
+        let relay = SeededRelay::with_cap(Some(4))
+            .await
+            .without_negentropy()
+            .await;
         let relay_mgr = RelayManager::new();
         let fx = build_two_member_circle(vec![relay.url.clone()]).await;
 
         let (loc_event, _, _) = fx
             .bob
-            .encrypt_location(
+            .seal_location_for_test(
                 &fx.mls_group_id,
-                &fx.bob_keys.public_key(),
                 &LocationMessage::new(-33.856_78, 151.215_28),
-                300,
             )
             .await
             .expect("bob encrypts a location");
@@ -2892,8 +3073,14 @@ async fn the_same_backlog_is_never_reached_when_the_resume_point_is_discarded() 
 /// handed us.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_forged_timestamp_cannot_drag_the_backfill_floor_out_of_our_own_band() {
-    let poisoned = SeededRelay::with_cap(Some(2)).await;
-    let honest = SeededRelay::with_cap(Some(2)).await;
+    let poisoned = SeededRelay::with_cap(Some(2))
+        .await
+        .without_negentropy()
+        .await;
+    let honest = SeededRelay::with_cap(Some(2))
+        .await
+        .without_negentropy()
+        .await;
     let relay_mgr = RelayManager::new();
     let fx = build_two_member_circle(vec![poisoned.url.clone(), honest.url.clone()]).await;
     let h = hex::encode(fx.nostr_group_id);
@@ -2975,7 +3162,10 @@ async fn a_forged_timestamp_cannot_drag_the_backfill_floor_out_of_our_own_band()
 /// never resume a descent again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_resume_point_the_cursor_has_passed_is_refused_and_repaired() {
-    let relay = SeededRelay::with_cap(Some(4)).await;
+    let relay = SeededRelay::with_cap(Some(4))
+        .await
+        .without_negentropy()
+        .await;
     let relay_mgr = RelayManager::new();
     let fx = build_two_member_circle(vec![relay.url.clone()]).await;
     let h = hex::encode(fx.nostr_group_id);
@@ -3055,7 +3245,10 @@ async fn a_resume_point_the_cursor_has_passed_is_refused_and_repaired() {
 /// issued.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_clamped_pile_up_at_the_boundary_cannot_hide_the_backlog_under_it() {
-    let relay = SeededRelay::with_cap(Some(2)).await;
+    let relay = SeededRelay::with_cap(Some(2))
+        .await
+        .without_negentropy()
+        .await;
     let relay_mgr = RelayManager::new();
     let fx = build_two_member_circle(vec![relay.url.clone()]).await;
     let h = hex::encode(fx.nostr_group_id);
@@ -3097,4 +3290,1697 @@ async fn a_clamped_pile_up_at_the_boundary_cannot_hide_the_backlog_under_it() {
         fx.alice_cursor().is_some(),
         "so the circle converges instead of holding forever"
     );
+}
+
+// ============================================================================
+// C7 — a chained commit backlog (`docs/MDK_UPSTREAM_TRACKER.md` row C7)
+// ============================================================================
+
+/// One CONFIRMED admin relay-list commit from Alice (Rule 13).
+async fn alice_confirmed_commit(fx: &TwoMemberCircle, relays: &[&str]) -> Event {
+    let relays: Vec<String> = relays.iter().map(|r| (*r).to_string()).collect();
+    fx.alice
+        .update_relays_for_test(&fx.mls_group_id, &relays)
+        .await
+        .expect("alice makes a relay-list commit")
+}
+
+async fn group_epoch(manager: &CircleManager, gid: &GroupId) -> u64 {
+    manager.group_epoch(gid).await.expect("epoch")
+}
+
+/// Leaves Bob holding the newer of two chained commits unapplied with the
+/// older one applied and nothing advanced since, and returns the epoch he
+/// started at.
+///
+/// Through the bare engine seam: the newer commit cannot peel at Bob's epoch,
+/// and the older one is held for its convergence window (MDK's pinned policy
+/// v1). Exactly one advance, at the older commit's cutoff, applies it; the
+/// newer one, peelable only now, opens a second window that nothing serves.
+/// Every Haven plane serves that too, so only a process killed between the two
+/// advances leaves this state behind.
+async fn strand_bob(fx: &TwoMemberCircle, relay_url: &str) -> u64 {
+    let n = group_epoch(&fx.bob, &fx.mls_group_id).await;
+    let older = alice_confirmed_commit(fx, &[relay_url, "wss://group-b.example.com"]).await;
+    let newer = alice_confirmed_commit(fx, &[relay_url]).await;
+    for commit in [&newer, &older] {
+        fx.bob
+            .session()
+            .process_event(commit)
+            .await
+            .expect("bob's engine takes the commit");
+    }
+    let cutoff = fx
+        .bob
+        .session()
+        .receive_retick_after(&fx.mls_group_id)
+        .await
+        .expect("the older commit owes a convergence cutoff");
+    tokio::time::sleep(cutoff).await;
+    fx.bob
+        .session()
+        .advance_for_receive(&fx.mls_group_id)
+        .await
+        .expect("bob serves the older commit's cutoff");
+    assert_eq!(
+        group_epoch(&fx.bob, &fx.mls_group_id).await,
+        n + 1,
+        "precondition: the older commit applied and the newer one did not"
+    );
+    n
+}
+
+/// Bob's session reopened over the same store, as a restart leaves it.
+fn reopen_bob(fx: TwoMemberCircle) -> (CircleManager, Vec<TempDir>) {
+    let TwoMemberCircle {
+        bob,
+        bob_keys,
+        _dirs: dirs,
+        ..
+    } = fx;
+    drop(bob);
+    let bob = CircleManager::new_unencrypted(dirs[1].path(), &bob_keys).expect("reopen bob");
+    (bob, dirs)
+}
+
+/// The first sweep of a freshly opened session drains a row an earlier process
+/// retained, over a relay holding nothing. (The epoch-change edge is pinned by
+/// `two_dependent_commits_split_across_pages_converge_in_the_sweep_that_fetched_them`.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_first_sweep_of_a_session_drains_a_backlog_an_earlier_process_retained() {
+    let relay = SeededRelay::run().await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+    let gid = fx.mls_group_id.clone();
+    let n = strand_bob(&fx, &relay.url).await;
+    let (bob, _dirs) = reopen_bob(fx);
+    assert_eq!(
+        group_epoch(&bob, &gid).await,
+        n + 1,
+        "precondition: opening the session drains nothing by itself"
+    );
+
+    let out = run_catchup_all_circles(&bob, &relay_mgr, 20).await;
+
+    assert_eq!(
+        (out.events_applied, out.events_deferred),
+        (0, 0),
+        "precondition: the relay holds nothing, so no inbound event moved Bob"
+    );
+    assert_eq!(
+        group_epoch(&bob, &gid).await,
+        n + 2,
+        "the session's first sweep must advance every circle once"
+    );
+}
+
+/// A sweep whose deadline has already passed advances nothing — a short wake
+/// budget is never spent on the open-time advance before any circle is swept —
+/// and hands the advance back, so the next sweep in the session still owes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sweep_out_of_budget_hands_the_open_advance_back() {
+    let relay = SeededRelay::run().await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+    let gid = fx.mls_group_id.clone();
+    let n = strand_bob(&fx, &relay.url).await;
+    let (bob, _dirs) = reopen_bob(fx);
+
+    let spent = run_catchup_all_circles(&bob, &relay_mgr, 0).await;
+    assert!(spent.deadline_hit, "precondition: the budget was spent");
+    assert_eq!(
+        group_epoch(&bob, &gid).await,
+        n + 1,
+        "a sweep with no budget left must not advance anything"
+    );
+
+    let _ = run_catchup_all_circles(&bob, &relay_mgr, 20).await;
+    assert_eq!(
+        group_epoch(&bob, &gid).await,
+        n + 2,
+        "and the next sweep must still owe, and run, the open-time advance"
+    );
+}
+
+/// An advance is owed once per naming: a sweep drains what the engine named,
+/// and the sweep after it advances nothing nobody has named since — which is
+/// what keeps a quiet circle's cost to nothing per sweep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_open_advance_runs_once_per_session() {
+    let relay = SeededRelay::run().await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+    let _ = run_catchup_all_circles(&fx.bob, &relay_mgr, 20).await;
+    let n = strand_bob(&fx, &relay.url).await;
+    let _ = run_catchup_all_circles(&fx.bob, &relay_mgr, 20).await;
+    let (epoch, advances) = (
+        group_epoch(&fx.bob, &fx.mls_group_id).await,
+        fx.bob.session().advances_for_test(&fx.mls_group_id),
+    );
+    assert!(
+        epoch > n,
+        "premise: bob's circle advanced past the stranding"
+    );
+
+    let _ = run_catchup_all_circles(&fx.bob, &relay_mgr, 20).await;
+
+    assert_eq!(
+        (
+            group_epoch(&fx.bob, &fx.mls_group_id).await,
+            fx.bob.session().advances_for_test(&fx.mls_group_id),
+        ),
+        (epoch, advances),
+        "a sweep advanced a circle nobody had named since the last one drained it",
+    );
+}
+
+/// The sweep a wake runs applies the commit and proposes nothing: it makes no
+/// commit, wherever it runs. The engine mints the leave again in its
+/// maintenance, once for an epoch, so the sweep's advance runs none; the
+/// first full advance mints it, under a record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_wake_sweep_leaves_the_leave_for_the_first_full_advance() {
+    let relay = SeededRelay::run().await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+    let _superseded = fx
+        .bob
+        .propose_leave(&fx.mls_group_id)
+        .await
+        .expect("bob proposes to leave")
+        .expect("a first leave in this epoch proposes");
+    let commit = alice_confirmed_commit(&fx, &[&relay.url, "wss://group-b.example.com"]).await;
+    relay.seed(std::slice::from_ref(&commit)).await;
+    let before = group_epoch(&fx.bob, &fx.mls_group_id).await;
+
+    let _ = run_catchup_all_circles(&fx.bob, &relay_mgr, 20).await;
+
+    let stored = relay_mgr
+        .fetch_events(
+            nostr::Filter::new().kind(Kind::Custom(445)),
+            std::slice::from_ref(&relay.url),
+            None,
+        )
+        .await
+        .expect("read the relay back");
+    assert_eq!(
+        group_epoch(&fx.bob, &fx.mls_group_id).await,
+        before + 1,
+        "premise: the sweep applied the commit",
+    );
+    assert!(
+        stored.iter().all(|event| event.id == commit.id),
+        "the wake's sweep published something of its own",
+    );
+
+    let advanced = fx
+        .bob
+        .session()
+        .advance_for_drive(&fx.mls_group_id, 0)
+        .await
+        .expect("the full advance runs");
+    assert_eq!(
+        advanced.proposals.len(),
+        1,
+        "the leave the wake's sweep did not propose was lost: the first full advance \
+         minted none",
+    );
+}
+
+/// A relay can answer a circle's catch-up page with anything: here, a
+/// gift-wrapped Welcome to a group a stranger made with Bob's public
+/// `KeyPackage`, which Bob never accepted. The page is ingested, but the screen
+/// refuses everything that is not group traffic before the engine sees it — so
+/// Bob joins nothing, gains no circle that would be sent his location, and owes
+/// nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_welcome_a_relay_slips_into_a_catchup_page_joins_nothing() {
+    let (_relay, url, relay_mgr) = relay_under_test().await;
+    let (mallory, mallory_keys, _, _mallory_dir) = mint_member(std::slice::from_ref(&url)).await;
+    let hostile = TamperedRelay::in_front_of(&url, Tamper::InjectBeforeEose).await;
+    let fx = build_two_member_circle(vec![hostile.url.clone()]).await;
+
+    let bobs_package = build_kp_maintenance_events(
+        fx.bob.session(),
+        &fx.bob_keys,
+        &["wss://kp.example.com".to_string()],
+        None,
+        None,
+    )
+    .await
+    .expect("bob's public key package")
+    .event;
+    let lure = mallory
+        .create_circle(
+            &mallory_keys,
+            vec![MemberKeyPackage {
+                key_package_event: bobs_package,
+                inbox_relays: vec![url.clone()],
+                nip65_relays: vec![],
+            }],
+            &CircleConfig::new("Lure").with_relays(vec![url.clone()]),
+        )
+        .await
+        .expect("a stranger founds a group with bob in it");
+    *INJECT.lock().unwrap() = Some(lure.welcome_events[0].event.as_json());
+    let before = INJECTED.load(Ordering::Relaxed);
+
+    let _ = run_catchup_all_circles(&fx.bob, &relay_mgr, 20).await;
+
+    assert!(
+        INJECTED.load(Ordering::Relaxed) > before,
+        "anti-vacuity: the Welcome reached bob in a catch-up page"
+    );
+    let lure_group = &lure.circle.mls_group_id;
+    assert!(
+        fx.bob
+            .session()
+            .find_group(lure_group)
+            .await
+            .unwrap()
+            .is_none(),
+        "the engine never saw the Welcome, so bob joined nothing"
+    );
+    assert!(fx.bob.get_circle(lure_group).await.unwrap().is_none());
+    assert_eq!(
+        fx.bob
+            .session()
+            .pending_application_output_count_for_test()
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+// ── The sweep that drives ────────────────────────────────────────────────────
+//
+// `run_catchup_driving` stages what it surfaces under durable fanouts and
+// sends them through the fanout driver. The transport is scripted and the
+// driver's clock is the test's: the relay under test serves the fetches and is
+// never sent a commit.
+
+/// The driver's clock, set by the test.
+struct DriveClock(std::sync::atomic::AtomicU64);
+
+impl DriveClock {
+    const ORIGIN: u64 = 1_700_000_000_000;
+
+    const fn at(offset_ms: u64) -> Self {
+        Self(std::sync::atomic::AtomicU64::new(Self::ORIGIN + offset_ms))
+    }
+
+    fn set(&self, offset_ms: u64) {
+        self.0.store(Self::ORIGIN + offset_ms, Ordering::SeqCst);
+    }
+}
+
+impl FanoutClock for DriveClock {
+    fn now_ms(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// The publisher of whatever has no record. It acknowledges everything and
+/// keeps what it was handed: a sweep that drives hands it nothing it recorded.
+#[derive(Default)]
+struct Ladder(std::sync::Mutex<Vec<Event>>);
+
+impl Ladder {
+    fn handed(&self) -> Vec<Event> {
+        self.0.lock().expect("ladder").clone()
+    }
+}
+
+impl UnrecordedPublisher for Ladder {
+    fn publish_unrecorded<'a>(
+        &'a self,
+        event: &'a Event,
+        _relays: &'a [String],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            self.0.lock().expect("ladder").push(event.clone());
+            true
+        })
+    }
+}
+
+fn driving<'a>(
+    transport: &'a ScriptedFanout,
+    ladder: &'a Ladder,
+    clock: &'a DriveClock,
+) -> Publishing<'a, dyn FanoutSend + 'a> {
+    Publishing {
+        fanout: transport,
+        publisher: ladder,
+        clock,
+        deadline_ms: None,
+        mode: &DriveMode::Full,
+    }
+}
+
+async fn records_of(manager: &CircleManager, group: &GroupId) -> Vec<FanoutProbe> {
+    let mut records = Vec::new();
+    for id in manager
+        .session()
+        .fanout_ids_for_test(group)
+        .await
+        .expect("the store is read")
+    {
+        records.extend(
+            manager
+                .session()
+                .fanout_probe_for_test(&id)
+                .await
+                .expect("the store is read"),
+        );
+    }
+    records
+}
+
+async fn roster(manager: &CircleManager, group: &GroupId) -> Vec<String> {
+    manager
+        .session()
+        .member_pubkeys(group)
+        .await
+        .expect("roster")
+}
+
+/// Bob's leave proposal, on the relay and a second old.
+async fn bob_leaves(fx: &TwoMemberCircle, relay_mgr: &RelayManager, url: &str) -> Event {
+    let proposal = fx
+        .bob
+        .propose_leave(&fx.mls_group_id)
+        .await
+        .expect("bob proposes leave")
+        .expect("a first leave in this epoch proposes");
+    relay_mgr
+        .publish_event(&proposal, &[url.to_string()])
+        .await
+        .expect("the leave proposal reaches the relay");
+    wait_until_after(i64::try_from(proposal.created_at.as_secs()).expect("created_at fits")).await;
+    proposal
+}
+
+/// An owed removal is published from the sweep that surfaces it, and
+/// survives a kill there. The eviction of a member who left is recorded as a
+/// durable fanout in the hold that stages it and sent through the driver: a
+/// relay that never answers leaves it staged and awaiting — never applied,
+/// never rolled back — and the next session's sweep sends the same bytes
+/// again before it fetches anything. While the record stands, no other
+/// publisher of this device will send that event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines)]
+async fn a_removal_owed_after_a_departure_is_published_promptly_from_catchup() {
+    let (_relay, url, relay_mgr) = relay_under_test().await;
+    let fx = build_two_member_circle(vec![url.clone()]).await;
+    let bob_hex = fx.bob_keys.public_key().to_hex();
+    let group = fx.mls_group_id.clone();
+    let epoch_before = group_epoch(&fx.alice, &group).await;
+    let proposal = bob_leaves(&fx, &relay_mgr, &url).await;
+
+    let transport = ScriptedFanout::default();
+    transport.answer(&url, [Answer::Silent]);
+    let ladder = Ladder::default();
+    let clock = DriveClock::at(0);
+    let out = run_catchup_driving(
+        &fx.alice,
+        &relay_mgr,
+        &driving(&transport, &ladder, &clock),
+        20,
+    )
+    .await;
+
+    let calls = transport.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "the eviction was not sent once to its relay"
+    );
+    let eviction = Event::from_json(&calls[0].payload).expect("a signed event");
+    assert!(eviction.kind == Kind::Custom(445) && eviction.id != proposal.id);
+    let [record] = <[FanoutProbe; 1]>::try_from(records_of(&fx.alice, &group).await)
+        .unwrap_or_else(|_| panic!("the eviction has exactly one record"));
+    assert_eq!(
+        (record.event_id, record.mls, record.targets.as_slice()),
+        (eviction.id, FanoutMls::Pending, std::slice::from_ref(&url)),
+    );
+    assert!(
+        ladder.handed().is_empty(),
+        "a recorded eviction was also handed to the publisher of what has no record",
+    );
+    assert!(
+        matches!(
+            fx.alice.session().epoch_state(&group).await,
+            Some(EpochState::PendingPublish(_))
+        ),
+        "an unanswered eviction was applied or rolled back",
+    );
+    assert!(
+        out.retry_after_ms.is_some_and(|wait| wait >= BUSY_RETRY_MS) && !out.drive_errored,
+        "the sweep did not say when its record is next due",
+    );
+    // One sender: the driver.
+    assert!(matches!(
+        relay_mgr
+            .publish_event(&eviction, std::slice::from_ref(&url))
+            .await,
+        Err(RelayError::FanoutOwned)
+    ));
+    assert!(
+        !relay_mgr
+            .publish_unrecorded(&eviction, std::slice::from_ref(&url))
+            .await
+    );
+    let Some(EpochState::PendingPublish(staged)) = fx.alice.session().epoch_state(&group).await
+    else {
+        panic!("premise");
+    };
+    assert!(matches!(
+        fx.alice
+            .session()
+            .confirm_published(staged.pending_ref())
+            .await,
+        Err(haven_core::nostr::NostrError::FanoutOwned)
+    ));
+    assert!(matches!(
+        fx.alice
+            .session()
+            .publish_failed(staged.pending_ref())
+            .await,
+        Err(haven_core::nostr::NostrError::FanoutOwned)
+    ));
+
+    // Killed before any relay answered. The next session resumes the record.
+    let TwoMemberCircle {
+        alice,
+        alice_keys,
+        _dirs: dirs,
+        ..
+    } = fx;
+    drop(alice);
+    let alice = CircleManager::new_unencrypted(dirs[0].path(), &alice_keys).expect("reopen");
+    transport.answer(&url, [Answer::Accepted]);
+    clock.set(31_000);
+    let out = run_catchup_driving(
+        &alice,
+        &relay_mgr,
+        &driving(&transport, &ladder, &clock),
+        20,
+    )
+    .await;
+
+    let again = transport.calls();
+    assert_eq!(again.len(), 1);
+    assert!(
+        again[0].payload == calls[0].payload && again[0].event_id == calls[0].event_id,
+        "the resumed record did not send the same bytes",
+    );
+    assert!(!roster(&alice, &group).await.contains(&bob_hex));
+    assert_eq!(group_epoch(&alice, &group).await, epoch_before + 1);
+    assert!(records_of(&alice, &group).await.is_empty() && !out.drive_errored);
+    assert!(ladder.handed().is_empty());
+}
+
+/// The foreground sweep over the app's own transport: nothing scripted. The
+/// eviction it stages is sent by the fanout driver through the publish
+/// client to the circle's relay, applied on that relay's acknowledgement, and
+/// is on the relay afterwards for the rest of the circle to read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_foreground_sweep_sends_an_owed_removal_through_the_apps_own_transport() {
+    let (_relay, url, relay_mgr) = relay_under_test().await;
+    let fx = build_two_member_circle(vec![url.clone()]).await;
+    let bob_hex = fx.bob_keys.public_key().to_hex();
+    let proposal = bob_leaves(&fx, &relay_mgr, &url).await;
+
+    // The budget bounds the whole sweep, drives included, and a record is
+    // begun only with a row's longest run still left in it: thirty-one
+    // seconds. Nothing here waits that long; the relay answers at once.
+    let out = run_catchup_in_foreground(&fx.alice, &relay_mgr, 45).await;
+
+    assert!(
+        !roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex),
+        "the member who left is still in the circle after a foreground sweep",
+    );
+    assert!(
+        records_of(&fx.alice, &fx.mls_group_id).await.is_empty() && !out.drive_errored,
+        "an eviction its one relay acknowledged left a record or an obligation behind",
+    );
+    let held = relay_mgr
+        .fetch_events(
+            nostr::Filter::new().kind(Kind::Custom(445)),
+            std::slice::from_ref(&url),
+            None,
+        )
+        .await
+        .expect("read the relay back");
+    assert!(
+        held.iter().any(|event| event.id != proposal.id),
+        "the eviction was applied and is not on the relay",
+    );
+}
+
+/// Relay respect: the sweep calls a relay for a record only when that relay's
+/// schedule says so. With nothing recorded it makes no call at all; a relay
+/// that did not answer is left alone by a sweep a second later and by one
+/// just short of its wait, and is called once when the wait is over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sweep_calls_a_relay_for_a_record_only_when_its_schedule_says_so() {
+    let (_relay, url, relay_mgr) = relay_under_test().await;
+    let fx = build_two_member_circle(vec![url.clone()]).await;
+    let transport = ScriptedFanout::default();
+    transport.answer(&url, [Answer::Silent]);
+    let ladder = Ladder::default();
+    let clock = DriveClock::at(0);
+
+    let out = run_catchup_driving(
+        &fx.alice,
+        &relay_mgr,
+        &driving(&transport, &ladder, &clock),
+        20,
+    )
+    .await;
+    assert!(
+        transport.call_count() == 0 && out.retry_after_ms.is_none(),
+        "a sweep with nothing recorded called a relay, or asked to be woken",
+    );
+
+    bob_leaves(&fx, &relay_mgr, &url).await;
+    for (at_ms, calls) in [(0, 1), (1_000, 1), (29_000, 1), (31_000, 2), (32_000, 2)] {
+        clock.set(at_ms);
+        let out = run_catchup_driving(
+            &fx.alice,
+            &relay_mgr,
+            &driving(&transport, &ladder, &clock),
+            20,
+        )
+        .await;
+        assert_eq!(
+            transport.call_count(),
+            calls,
+            "calls to the relay after the sweep at {at_ms} ms",
+        );
+        assert!(
+            out.retry_after_ms.is_some_and(|wait| wait >= BUSY_RETRY_MS),
+            "a sweep that left a record awaiting its relay gave no time to come back, \
+             or one that would have its caller spin",
+        );
+    }
+}
+
+/// A leave the engine proposes again rides a record and is redriven. The
+/// proposal is recorded in the hold that mints it, with nothing to confirm;
+/// a relay that does not answer is sent the same bytes again when its wait is
+/// over, and the record ends once the relay holds it. The ladder is handed
+/// nothing, and no other publisher will send the recorded event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_re_proposed_leave_rides_a_fanout_and_is_redriven() {
+    let _ = allow_ws_loopback_for_test();
+    let relay = SeededRelay::run().await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+    let group = fx.mls_group_id.clone();
+    let superseded = fx
+        .bob
+        .propose_leave(&group)
+        .await
+        .expect("bob proposes to leave")
+        .expect("a first leave in this epoch proposes");
+    // Alice commits without having seen the proposal, which supersedes it.
+    let commit = alice_confirmed_commit(&fx, &[&relay.url]).await;
+    relay.seed(std::slice::from_ref(&commit)).await;
+
+    let transport = ScriptedFanout::default();
+    transport.answer(&relay.url, [Answer::Silent]);
+    let ladder = Ladder::default();
+    let clock = DriveClock::at(0);
+    let _ = run_catchup_driving(
+        &fx.bob,
+        &relay_mgr,
+        &driving(&transport, &ladder, &clock),
+        20,
+    )
+    .await;
+
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 1, "the leave was not sent once to its relay");
+    let leave = Event::from_json(&calls[0].payload).expect("a signed event");
+    assert!(leave.id != superseded.id && leave.id != commit.id);
+    let [record] = <[FanoutProbe; 1]>::try_from(records_of(&fx.bob, &group).await)
+        .unwrap_or_else(|_| panic!("the leave has exactly one record"));
+    assert_eq!(
+        (record.event_id, record.mls, record.required_acks),
+        (leave.id, FanoutMls::NotApplicable, 1),
+    );
+    assert_eq!(record.statuses, [FanoutTargetStatus::PossiblyExposed]);
+    assert!(
+        ladder.handed().is_empty(),
+        "a recorded proposal was also handed to the ladder"
+    );
+    assert!(matches!(
+        relay_mgr
+            .publish_event(&leave, std::slice::from_ref(&relay.url))
+            .await,
+        Err(RelayError::FanoutOwned)
+    ));
+    // Alice's engine stages bob's eviction from it: it is the leave.
+    fx.alice
+        .ingest_staging_for_test(&leave)
+        .await
+        .expect("alice takes the proposal");
+    assert_eq!(
+        records_of(&fx.alice, &group).await.len(),
+        1,
+        "alice's engine did not stage bob's eviction from the leave"
+    );
+
+    // A second later nothing is due; when the relay's wait is over the same
+    // bytes go again, and the relay's word ends the record.
+    clock.set(1_000);
+    let _ = run_catchup_driving(
+        &fx.bob,
+        &relay_mgr,
+        &driving(&transport, &ladder, &clock),
+        20,
+    )
+    .await;
+    assert_eq!(transport.call_count(), 0);
+    transport.answer(&relay.url, [Answer::Accepted]);
+    clock.set(31_000);
+    let out = run_catchup_driving(
+        &fx.bob,
+        &relay_mgr,
+        &driving(&transport, &ladder, &clock),
+        20,
+    )
+    .await;
+    let again = transport.calls();
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].payload, calls[0].payload);
+    assert!(
+        records_of(&fx.bob, &group).await.is_empty() && out.retry_after_ms.is_none(),
+        "a proposal its relay holds kept its record",
+    );
+    assert!(ladder.handed().is_empty());
+}
+
+/// Bob with a leave recorded for the epoch his circle is at, sent once to a
+/// relay that answered nothing: what a record that is still useful looks
+/// like. Returns the relay, Bob's circle, and the recorded leave.
+async fn a_leave_recorded_and_unanswered() -> (SeededRelay, TwoMemberCircle, Event) {
+    let relay = SeededRelay::run().await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+    fx.bob
+        .propose_leave(&fx.mls_group_id)
+        .await
+        .expect("bob proposes to leave")
+        .expect("a first leave in this epoch proposes");
+    let commit = alice_confirmed_commit(&fx, &[&relay.url]).await;
+    relay.seed(std::slice::from_ref(&commit)).await;
+    let transport = ScriptedFanout::default();
+    transport.answer(&relay.url, [Answer::Silent]);
+    let ladder = Ladder::default();
+    let clock = DriveClock::at(0);
+    let _ = run_catchup_driving(
+        &fx.bob,
+        &relay_mgr,
+        &driving(&transport, &ladder, &clock),
+        20,
+    )
+    .await;
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 1, "premise: the leave was sent once");
+    let leave = Event::from_json(&calls[0].payload).expect("a signed event");
+    assert_eq!(
+        records_of(&fx.bob, &fx.mls_group_id).await.len(),
+        1,
+        "premise: recorded"
+    );
+    (relay, fx, leave)
+}
+
+/// A leave is an offer made for one epoch. Once its circle has left that
+/// epoch nothing can act on it: its record makes no further call — a relay
+/// that answers nothing is not shown the leaver's address again for a day —
+/// and goes. Here the circle moves on a plane that records nothing, so no
+/// newer record replaces it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leave_proposed_for_an_epoch_its_circle_has_left_is_not_sent_again() {
+    let _ = allow_ws_loopback_for_test();
+    let (relay, fx, _leave) = a_leave_recorded_and_unanswered().await;
+    let group = fx.mls_group_id.clone();
+    let transport = ScriptedFanout::default();
+    transport.answer(&relay.url, [Answer::Silent]);
+    let ladder = Ladder::default();
+    let clock = DriveClock::at(0);
+
+    // Alice commits again, and Bob takes it on a plane that records nothing.
+    let before = group_epoch(&fx.bob, &group).await;
+    let next = alice_confirmed_commit(&fx, &[&relay.url]).await;
+    fx.bob
+        .session()
+        .process_event_settled_for_test(&next)
+        .await
+        .expect("bob follows alice");
+    assert!(group_epoch(&fx.bob, &group).await > before, "premise");
+    assert_eq!(records_of(&fx.bob, &group).await.len(), 1, "premise");
+
+    // The relay's wait is over: a record still useful would be sent now.
+    clock.set(31_000);
+    let out = driving(&transport, &ladder, &clock).resume(&fx.bob).await;
+    assert!(!out.errored);
+    assert_eq!(
+        transport.call_count(),
+        0,
+        "a leave for an epoch its circle had left was sent again",
+    );
+    assert!(
+        records_of(&fx.bob, &group).await.is_empty(),
+        "the record of a leave nothing can act on was kept",
+    );
+    assert!(ladder.handed().is_empty());
+}
+
+/// A device that has been removed from a circle sends nothing more to it:
+/// the leave it had recorded for that circle makes no further call and its
+/// record goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leave_recorded_for_a_circle_this_device_is_no_longer_in_is_not_sent_again() {
+    let _ = allow_ws_loopback_for_test();
+    let (relay, fx, leave) = a_leave_recorded_and_unanswered().await;
+    let group = fx.mls_group_id.clone();
+    let transport = ScriptedFanout::default();
+    transport.answer(&relay.url, [Answer::Silent]);
+    let ladder = Ladder::default();
+    let clock = DriveClock::at(0);
+
+    // Alice takes the leave and commits the eviction; Bob learns of it.
+    let (_, sent) = fx
+        .alice
+        .ingest_landing_for_test(&leave)
+        .await
+        .expect("alice takes the proposal");
+    let [eviction] = <[_; 1]>::try_from(sent)
+        .unwrap_or_else(|_| panic!("premise: alice commits bob's eviction"));
+    let _ = fx
+        .bob
+        .session()
+        .process_event_settled_for_test(&eviction)
+        .await;
+    assert!(
+        !fx.bob.session().group_is_live(&group).await,
+        "premise: bob's copy of the circle is no longer live",
+    );
+
+    clock.set(31_000);
+    let out = driving(&transport, &ladder, &clock).resume(&fx.bob).await;
+    assert!(!out.errored);
+    assert_eq!(
+        transport.call_count(),
+        0,
+        "a device that was removed from a circle sent its leave to that circle's relay again",
+    );
+    assert!(
+        records_of(&fx.bob, &group).await.is_empty(),
+        "the record of a leave for a circle this device is no longer in was kept",
+    );
+}
+
+/// The same when the copy is marked removed and nothing else says so: the
+/// circle is still at the epoch the leave was proposed for. Written into the
+/// closed store as the engine writes it when a removal is realized.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leave_recorded_for_a_copy_marked_removed_is_not_sent_again_at_its_own_epoch() {
+    use cgka_traits::storage::GroupStorage as _;
+
+    let _ = allow_ws_loopback_for_test();
+    let (relay, fx, _leave) = a_leave_recorded_and_unanswered().await;
+    let group = fx.mls_group_id.clone();
+    let TwoMemberCircle {
+        bob,
+        bob_keys,
+        _dirs: dirs,
+        ..
+    } = fx;
+    drop(Arc::try_unwrap(bob).unwrap_or_else(|_| panic!("bob's manager is still shared")));
+    haven_core::sqlcipher_init::ensure().expect("SQLite initialises");
+    {
+        let config = haven_core::nostr::mls::StorageConfig::new(dirs[1].path());
+        let store = storage_sqlite::SqliteAccountStorage::open_encrypted_with_options(
+            config.database_path(),
+            &haven_core::nostr::mls::StorageConfig::test_sqlcipher_key().expect("test key"),
+            haven_core::nostr::mls::StorageConfig::storage_options(),
+        )
+        .expect("the closed store opens");
+        let mut copy = store.get_group(&group).expect("bob's copy");
+        copy.removed = true;
+        store.put_group(&copy).expect("marked removed");
+    }
+    let bob = CircleManager::new_unencrypted(dirs[1].path(), &bob_keys).expect("reopen bob");
+    assert_eq!(records_of(&bob, &group).await.len(), 1, "premise");
+
+    let transport = ScriptedFanout::default();
+    transport.answer(&relay.url, [Answer::Silent]);
+    let ladder = Ladder::default();
+    let clock = DriveClock::at(31_000);
+    let out = driving(&transport, &ladder, &clock).resume(&bob).await;
+    assert!(!out.errored);
+    assert_eq!(
+        transport.call_count(),
+        0,
+        "a copy marked removed sent its leave to the circle's relay again",
+    );
+    assert!(records_of(&bob, &group).await.is_empty());
+}
+
+/// A leave proposed again for a later epoch replaces the earlier one: only
+/// the newer record is sent, and the older goes once that changes no relay's
+/// wait. A new leave does not jump a relay's wait either — any member who
+/// can move the epoch could otherwise have a backing-off relay called once
+/// per epoch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leave_proposed_again_replaces_the_record_of_the_earlier_one() {
+    let _ = allow_ws_loopback_for_test();
+    let (relay, fx, earlier) = a_leave_recorded_and_unanswered().await;
+    let group = fx.mls_group_id.clone();
+    let relay_mgr = RelayManager::new();
+    let transport = ScriptedFanout::default();
+    transport.answer(&relay.url, [Answer::Silent]);
+    let ladder = Ladder::default();
+    let clock = DriveClock::at(1_000);
+
+    // Alice commits again; the sweep that drives takes it, and the engine
+    // proposes Bob's leave for the new epoch.
+    let next = alice_confirmed_commit(&fx, &[&relay.url]).await;
+    relay.seed(std::slice::from_ref(&next)).await;
+    let _ = run_catchup_driving(
+        &fx.bob,
+        &relay_mgr,
+        &driving(&transport, &ladder, &clock),
+        20,
+    )
+    .await;
+    let records = records_of(&fx.bob, &group).await;
+    assert_eq!(records.len(), 2, "premise: the leave is recorded again");
+    assert_eq!(
+        transport.call_count(),
+        0,
+        "a newly recorded leave was sent to a relay inside its wait",
+    );
+
+    // The relay's wait is over: one call, and it carries the newer leave.
+    transport.answer(&relay.url, [Answer::Accepted]);
+    clock.set(31_000);
+    let out = driving(&transport, &ladder, &clock).resume(&fx.bob).await;
+    assert!(!out.errored);
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 1, "one call when the relay's wait was over");
+    let sent = Event::from_json(&calls[0].payload).expect("a signed event");
+    assert!(
+        sent.id != earlier.id,
+        "the leave for the earlier epoch was sent after a newer one was recorded",
+    );
+    // The relay holds the newer one; nothing waits on that relay any more.
+    let _ = driving(&transport, &ladder, &clock).resume(&fx.bob).await;
+    assert_eq!(transport.call_count(), 0);
+    assert!(
+        records_of(&fx.bob, &group).await.is_empty(),
+        "a replaced leave's record outlived every wait its going could change",
+    );
+}
+
+/// One schedule per relay, whatever is waiting on it — and one circle's
+/// commit never keeps another circle's leave from that relay. A commit of one
+/// circle and a leave proposed in ANOTHER both owe the same relay, which
+/// answers nothing. The leave makes no call of its own inside the relay's
+/// wait. When the wait is over the relay's one call goes to whichever of the
+/// two it was called for least recently: the leave it has never been sent,
+/// then the commit, in turn — so a commit a relay silently drops does not
+/// starve the other circle's leave, which is sent on the schedule. Once the
+/// relay takes one, what it is still owed follows in the same pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_proposal_and_a_commit_owing_one_relay_share_its_schedule() {
+    let _ = allow_ws_loopback_for_test();
+    let relay = SeededRelay::run().await;
+    let elsewhere = SeededRelay::run().await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+    let group = fx.mls_group_id.clone();
+    let relays = vec![relay.url.clone()];
+    let solo = fx
+        .bob
+        .create_circle(
+            &fx.bob_keys,
+            Vec::new(),
+            &CircleConfig::new("Solo").with_relays(relays.clone()),
+        )
+        .await
+        .expect("a second circle on the same relay")
+        .circle
+        .mls_group_id;
+
+    let transport = ScriptedFanout::default();
+    transport.answer(&relay.url, [Answer::Silent]);
+    let ladder = Ladder::default();
+    let clock = DriveClock::at(0);
+    let publishing = driving(&transport, &ladder, &clock);
+    // The commit: a relay change in the second circle, sent to the relay it
+    // leaves and unanswered.
+    let change = publishing
+        .update_relays(&fx.bob, &solo, &[relay.url.clone(), elsewhere.url.clone()])
+        .await
+        .expect("accepted");
+    assert_eq!(change.status, EvolutionStatus::Unresolved);
+    let commit = <[_; 1]>::try_from(transport.calls())
+        .unwrap_or_else(|_| panic!("premise: the commit was sent once"))[0]
+        .event_id;
+
+    // The leave, proposed again by the sweep a second later.
+    fx.bob
+        .propose_leave(&group)
+        .await
+        .expect("bob proposes to leave")
+        .expect("a first leave in this epoch proposes");
+    let moved = alice_confirmed_commit(&fx, &[&relay.url]).await;
+    relay.seed(std::slice::from_ref(&moved)).await;
+    clock.set(1_000);
+    let _ = run_catchup_driving(&fx.bob, &relay_mgr, &publishing, 20).await;
+    assert_eq!(records_of(&fx.bob, &group).await.len(), 1);
+    assert_eq!(
+        transport.call_count(),
+        0,
+        "a newly recorded proposal was sent to a relay inside its wait",
+    );
+
+    // The relay is left alone for thirty seconds from the commit's call, a
+    // minute from the next and two from the one after: one call per wait,
+    // and each goes to the event the relay was called for least recently.
+    let mut sent_the_commit = Vec::new();
+    for (at_ms, calls) in [
+        (29_000, 0),
+        (30_000, 1),
+        (31_000, 0),
+        (89_000, 0),
+        (90_000, 1),
+        (209_000, 0),
+    ] {
+        clock.set(at_ms);
+        let _ = run_catchup_driving(&fx.bob, &relay_mgr, &publishing, 20).await;
+        let made = transport.calls();
+        assert_eq!(
+            made.len(),
+            calls,
+            "calls to the shared relay in the sweep at {at_ms} ms",
+        );
+        assert!(made.iter().all(|call| call.target == relay.url));
+        sent_the_commit.extend(made.iter().map(|call| call.event_id == commit));
+    }
+    assert_eq!(
+        sent_the_commit,
+        [false, true],
+        "the other circle's leave was not sent on the relay's schedule while a commit the \
+         relay drops waited on it, or took the commit's turn as well as its own",
+    );
+
+    // The relay takes the leave when its turn comes; the commit it is still
+    // owed follows at once.
+    transport.answer(&relay.url, [Answer::Accepted]);
+    clock.set(210_000);
+    let _ = run_catchup_driving(&fx.bob, &relay_mgr, &publishing, 20).await;
+    let last = transport.calls();
+    assert_eq!(
+        last.iter()
+            .map(|call| call.event_id == commit)
+            .collect::<Vec<_>>(),
+        [false, true],
+        "the leave, then the commit the relay was still owed, in one pass",
+    );
+    // The leave's record ended while the commit's own failed calls still
+    // counted against the relay, so it was kept, inert, for that pass; the
+    // relay has since taken the commit, and the next drive lets it go
+    // without a call.
+    let _ = publishing.resume(&fx.bob).await;
+    assert_eq!(transport.call_count(), 0);
+    assert!(records_of(&fx.bob, &group).await.is_empty());
+}
+
+/// Every filter a relay was asked with, as JSON.
+#[derive(Debug, Clone, Default)]
+struct AskedFilters(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl AskedFilters {
+    fn any_names(&self, routing_id: &[u8; 32]) -> bool {
+        let hex = hex::encode(routing_id);
+        self.0
+            .lock()
+            .expect("the record of requests")
+            .iter()
+            .any(|filter| filter.contains(&hex))
+    }
+
+    fn forget(&self) {
+        self.0.lock().expect("the record of requests").clear();
+    }
+}
+
+impl QueryPolicy for AskedFilters {
+    fn admit_query<'a>(
+        &'a self,
+        query: &'a nostr::Filter,
+        _addr: &'a std::net::SocketAddr,
+    ) -> BoxedFuture<'a, PolicyResult> {
+        self.0
+            .lock()
+            .expect("the record of requests")
+            .push(query.as_json());
+        Box::pin(async { PolicyResult::Accept })
+    }
+}
+
+/// Alice rotates the circle's routing id to `to` on `relays`, straight on
+/// her engine as another client's admin would — Haven never rotates one
+/// itself — applies it, and returns the commit, sealed under the id it
+/// rotates away from.
+async fn rotate_as_another_client(fx: &TwoMemberCircle, to: [u8; 32], relays: &[String]) -> Event {
+    use cgka_traits::app_components::{
+        encode_nostr_routing_v1, NostrRoutingV1, NOSTR_ROUTING_COMPONENT_ID,
+    };
+    use haven_core::nostr::mls::types::{AppComponentData, PublishWork, SendIntent};
+
+    let session = fx.alice.session();
+    let effects = session
+        .send(SendIntent::UpdateAppComponents {
+            group_id: fx.mls_group_id.clone(),
+            updates: vec![AppComponentData {
+                component_id: NOSTR_ROUTING_COMPONENT_ID,
+                data: encode_nostr_routing_v1(
+                    &NostrRoutingV1::new(to, relays.to_vec()).expect("a routing state"),
+                )
+                .expect("the component encodes"),
+            }],
+        })
+        .await
+        .expect("alice rotates the routing id");
+    let (rotation, pending) = effects
+        .publish
+        .iter()
+        .find_map(|work| match work {
+            PublishWork::GroupEvolution { msg, pending, .. } => Some((msg, *pending)),
+            _ => None,
+        })
+        .expect("the rotation is staged");
+    let rotation = haven_core::nostr::mls::SessionManager::transport_message_to_event(rotation)
+        .expect("a commit event");
+    session
+        .confirm_published(pending)
+        .await
+        .expect("alice applies it");
+    rotation
+}
+
+/// Another client's admin rotates the circle's routing id: the sweep takes
+/// the commit in under the prior id, and from then on asks for the circle
+/// under the new one — a fix sent there alone is delivered — and under the
+/// prior one for a day only: a fix sent under it within the day is
+/// delivered, and past the day the prior id is in no request at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rotated_routing_id_is_swept_and_the_prior_one_for_a_day_only() {
+    let _ = allow_ws_loopback_for_test();
+    let asked = AskedFilters::default();
+    let relay = LocalRelay::new(RelayBuilder::default().query_policy(asked.clone()));
+    relay.run().await.expect("the relay runs");
+    let url = relay.url().await.to_string();
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![url.clone()]).await;
+    let prior = fx.nostr_group_id;
+    let seal = |lat: f64| {
+        let alice = Arc::clone(&fx.alice);
+        let group = fx.mls_group_id.clone();
+        async move {
+            alice
+                .seal_location_for_test(&group, &LocationMessage::new(lat, 1.0))
+                .await
+                .expect("alice seals a fix")
+                .0
+        }
+    };
+    let publish = |event: Event| {
+        let (relay_mgr, url) = (&relay_mgr, url.clone());
+        async move {
+            relay_mgr
+                .publish_event(&event, &[url])
+                .await
+                .expect("the relay takes it");
+        }
+    };
+    let alices_fix = |at: [u8; 32]| {
+        fx.bob
+            .snapshot_last_known_for_circle(&at, chrono::Utc::now().timestamp())
+            .expect("snapshot")
+            .into_iter()
+            .find(|row| row.sender_pubkey == fx.alice_keys.public_key().to_hex())
+            .map(|row| row.latitude)
+    };
+    let within_the_day = seal(10.0).await;
+    let past_the_day = seal(20.0).await;
+
+    let rotated: [u8; 32] = rand::random();
+    let relays = vec![url.clone()];
+    publish(rotate_as_another_client(&fx, rotated, &relays).await).await;
+
+    let _ = run_catchup_all_circles(&fx.bob, &relay_mgr, 20).await;
+    assert_eq!(
+        fx.bob
+            .get_circle(&fx.mls_group_id)
+            .await
+            .expect("read")
+            .expect("the circle")
+            .circle
+            .nostr_group_id,
+        rotated,
+        "premise: the sweep took the rotation in and the row followed",
+    );
+
+    publish(within_the_day).await;
+    let _ = run_catchup_all_circles(&fx.bob, &relay_mgr, 20).await;
+    assert_eq!(
+        alices_fix(rotated),
+        Some(10.0),
+        "a fix sent under the prior routing id within the day was not delivered",
+    );
+
+    fx.bob
+        .date_prior_routing_for_test(&fx.mls_group_id, chrono::Utc::now().timestamp() - 86_401);
+    asked.forget();
+    publish(past_the_day).await;
+    publish(seal(30.0).await).await;
+    let out = run_catchup_all_circles(&fx.bob, &relay_mgr, 20).await;
+    assert_eq!(
+        alices_fix(rotated),
+        Some(30.0),
+        "a fix sent under the new routing id alone was not delivered",
+    );
+    assert!(
+        asked.any_names(&rotated) && !asked.any_names(&prior),
+        "past the day the prior routing id was still asked for",
+    );
+    assert_eq!(
+        out.events_applied, 1,
+        "past the day something sent under the prior routing id was delivered",
+    );
+}
+
+/// A circle whose routing id was rotated, and whose prior routing's relay
+/// no sweep reaches, is not caught up when only its new routing was swept to
+/// the end: a commit sealed under the prior id by a member that had not yet
+/// taken the rotation in is a branch at the circle's epoch like any other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sweep_that_could_not_reach_a_prior_routing_leaves_its_circle_not_caught_up() {
+    let (_relay, url, relay_mgr) = relay_under_test().await;
+    let fx = build_two_member_circle(vec!["ws://127.0.0.1:1".to_string()]).await;
+    let rotation = rotate_as_another_client(&fx, rand::random(), &[url]).await;
+    fx.bob
+        .ingest_for_test(&rotation)
+        .await
+        .expect("bob applies the rotation");
+    let _ = run_catchup_all_circles(&fx.bob, &relay_mgr, 20).await;
+    assert!(
+        !fx.bob.session().caught_up_for_test(&fx.mls_group_id),
+        "a circle was taken as caught up while its prior routing was not swept to the end",
+    );
+}
+
+/// Waits (bounded) until `circle`'s cursor of `stream` stands at or past
+/// `since_ms`: a REQ issued then has ended its stored events.
+async fn cursor_reaches(circle: &CircleManager, stream: &str, since_ms: i64) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while circle
+            .read_sync_cursor(stream)
+            .ok()
+            .flatten()
+            .is_none_or(|ms| ms < since_ms)
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the REQ ends its stored events");
+}
+
+/// The live plane listens for a rotated circle under its prior routing id
+/// for a day as well, and the circle is caught up only once that REQ has
+/// ended its stored events too — not on the new id's end alone, in whichever
+/// order the two REQs were issued.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_circle_listed_under_a_prior_routing_id_is_caught_up_when_both_reqs_end() {
+    let relay = haven_core::relay::scripted_relay::ScriptedRelay::start();
+    let url = relay.url().to_owned();
+    let fx = build_two_member_circle(vec![url.clone()]).await;
+    let prior = hex::encode(fx.nostr_group_id);
+    let rotated: [u8; 32] = rand::random();
+    let rotation = rotate_as_another_client(&fx, rotated, std::slice::from_ref(&url)).await;
+    fx.bob
+        .ingest_for_test(&rotation)
+        .await
+        .expect("bob applies the rotation");
+    let unanswered = prior.clone();
+    relay.answer(
+        move |filter| filter.as_json().contains(&unanswered),
+        Vec::new(),
+    );
+    let core = haven_core::relay::live_sync::LiveSyncCore::new_local(
+        Arc::clone(&fx.bob),
+        fx.bob_keys.public_key(),
+        Arc::new(RelayManager::new()),
+    );
+    let opened_ms = chrono::Utc::now().timestamp() * 1000;
+    let seen = core.follows_for_test();
+    core.start(
+        &[haven_core::relay::live_sync::CircleSpec {
+            group_id_hex: hex::encode(rotated),
+            relays: vec![url],
+        }],
+        &[],
+    )
+    .await
+    .expect("the session starts");
+    tokio::time::timeout(Duration::from_secs(30), core.follows_ended_for_test(seen))
+        .await
+        .expect("the start's follow ends");
+    // The new id's end of stored events anchors its cursor at the REQ's
+    // issue: once it has, its mark has been decided.
+    let new_stream = group_cursor_stream(&hex::encode(rotated));
+    cursor_reaches(&fx.bob, &new_stream, opened_ms).await;
+    assert!(
+        !fx.bob.session().caught_up_for_test(&fx.mls_group_id),
+        "a circle was taken as caught up while its prior routing id's REQ had not ended",
+    );
+    relay.answer(
+        |_| true,
+        vec![haven_core::relay::scripted_relay::Frame::Eose],
+    );
+    core.resume_after_background(haven_core::relay::live_sync::Claim::Foreground)
+        .await
+        .expect("the plane re-issues both REQs");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        fx.bob.session().until_caught_up_for_test(&fx.mls_group_id),
+    )
+    .await
+    .expect("once both REQs ended the circle is caught up");
+
+    // Both REQs issued again at once, and only the new id's ended.
+    let unanswered = prior.clone();
+    relay.answer(
+        move |filter| filter.as_json().contains(&unanswered),
+        Vec::new(),
+    );
+    let cursor = fx
+        .bob
+        .read_sync_cursor(&new_stream)
+        .ok()
+        .flatten()
+        .expect("the new routing id's cursor");
+    // A REQ issued in a later second than the cursor's lifts it at its end.
+    while chrono::Utc::now().timestamp() * 1000 <= cursor {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let reissued_ms = chrono::Utc::now().timestamp() * 1000;
+    core.resume_after_background(haven_core::relay::live_sync::Claim::Foreground)
+        .await
+        .expect("the plane re-issues both REQs");
+    cursor_reaches(&fx.bob, &new_stream, reissued_ms).await;
+    assert!(
+        !fx.bob.session().caught_up_for_test(&fx.mls_group_id),
+        "re-issued together, the circle was taken as caught up on the new routing id's end alone",
+    );
+    let _ = core.stop().await;
+}
+
+/// A history range reaching back across a rotation that moved the circle's
+/// routing id and its relays together asks each id only at the relays it was
+/// used with: the relay the circle left is never told its new id, and the
+/// new relays are asked for the new id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_history_range_never_tells_a_relay_the_circle_left_its_new_id() {
+    use haven_core::nostr::mls::MAX_REFUSED_IDS_PER_GROUP;
+    let _ = allow_ws_loopback_for_test();
+    let (left_asked, new_asked) = (AskedFilters::default(), AskedFilters::default());
+    let left = LocalRelay::new(RelayBuilder::default().query_policy(left_asked.clone()));
+    left.run().await.expect("the relay runs");
+    let fresh = LocalRelay::new(RelayBuilder::default().query_policy(new_asked.clone()));
+    fresh.run().await.expect("the relay runs");
+    let (left_url, new_url) = (left.url().await.to_string(), fresh.url().await.to_string());
+    let fx = build_two_member_circle(vec![left_url]).await;
+    let prior = fx.nostr_group_id;
+    let rotated: [u8; 32] = rand::random();
+    let rotation = rotate_as_another_client(&fx, rotated, std::slice::from_ref(&new_url)).await;
+    fx.bob
+        .ingest_for_test(&rotation)
+        .await
+        .expect("bob applies the rotation");
+    left_asked.forget();
+    new_asked.forget();
+    let refused: Vec<nostr::EventId> = (0..=MAX_REFUSED_IDS_PER_GROUP)
+        .map(|_| nostr::EventId::from_byte_array(rand::random()))
+        .collect();
+    fx.bob
+        .session()
+        .record_refused_for_test(&fx.mls_group_id, &refused);
+    assert!(
+        fx.bob.session().refused_range(&fx.mls_group_id).is_some(),
+        "premise: the circle owes a range of its history",
+    );
+    let _ =
+        haven_core::relay::catchup::run_refused_refetch(&fx.bob, &RelayManager::new(), 20).await;
+    assert!(
+        left_asked.any_names(&prior) && new_asked.any_names(&rotated),
+        "premise: each id's range was asked at its own relays",
+    );
+    assert!(
+        !left_asked.any_names(&rotated),
+        "the relay the circle left with its prior id was told the new one",
+    );
+}
+
+/// A circle that waited on its prior routing id's REQ — which never ended its
+/// stored events — is caught up once that id's day ends and the follow
+/// unlists it: the circle is read again on what is still listed, not left
+/// waiting for its next end of stored events.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_circle_waiting_on_a_prior_id_is_caught_up_when_that_id_is_unlisted() {
+    let relay = haven_core::relay::scripted_relay::ScriptedRelay::start();
+    let url = relay.url().to_owned();
+    let fx = build_two_member_circle(vec![url.clone()]).await;
+    let prior = hex::encode(fx.nostr_group_id);
+    let rotated: [u8; 32] = rand::random();
+    let rotation = rotate_as_another_client(&fx, rotated, std::slice::from_ref(&url)).await;
+    fx.bob
+        .ingest_for_test(&rotation)
+        .await
+        .expect("bob applies the rotation");
+    let unanswered = prior.clone();
+    relay.answer(
+        move |filter| filter.as_json().contains(&unanswered),
+        Vec::new(),
+    );
+    let core = haven_core::relay::live_sync::LiveSyncCore::new_local(
+        Arc::clone(&fx.bob),
+        fx.bob_keys.public_key(),
+        Arc::new(RelayManager::new()),
+    );
+    let opened_ms = chrono::Utc::now().timestamp() * 1000;
+    core.start(
+        &[haven_core::relay::live_sync::CircleSpec {
+            group_id_hex: hex::encode(rotated),
+            relays: vec![url],
+        }],
+        &[],
+    )
+    .await
+    .expect("the session starts");
+    cursor_reaches(
+        &fx.bob,
+        &group_cursor_stream(&hex::encode(rotated)),
+        opened_ms,
+    )
+    .await;
+    assert!(
+        !fx.bob.session().caught_up_for_test(&fx.mls_group_id),
+        "premise: the circle waits on its prior id's REQ",
+    );
+    let before = core.pool_subscription_count().await;
+    fx.bob
+        .date_prior_routing_for_test(&fx.mls_group_id, chrono::Utc::now().timestamp() - 86_401);
+    // This follow, or one the session ran by itself since the dating, has
+    // unlisted the prior id by the time it returns: both hold the lock.
+    let _ = core.follow_routing().await.expect("followed");
+    assert!(
+        core.pool_subscription_count().await < before,
+        "premise: the follow unlisted the prior id",
+    );
+    assert!(
+        fx.bob.session().caught_up_for_test(&fx.mls_group_id),
+        "a circle stayed not caught up after the id it waited on was unlisted",
+    );
+    let _ = core.stop().await;
+}
+
+// ============================================================================
+// NIP-77 — a window the pager cannot finish (`relay::negentropy`)
+// ============================================================================
+
+impl TwoMemberCircle {
+    /// Bob's persisted cursor for this circle, or `None` while unseeded.
+    fn bob_cursor(&self) -> Option<i64> {
+        self.bob
+            .read_sync_cursor(&self.cursor_stream())
+            .expect("cursor read")
+    }
+}
+
+/// A full page of junk in the second above Alice's commit: the pager's first
+/// page is all junk and cannot step below that second (C10). Returns the
+/// commit, which the caller seeds where it wants it.
+async fn pile_above_a_commit(fx: &TwoMemberCircle, relays: &[&SeededRelay]) -> Event {
+    let urls: Vec<&str> = relays.iter().map(|relay| relay.url.as_str()).collect();
+    let commit = alice_confirmed_commit(fx, &urls).await;
+    let above = i64::try_from(commit.created_at.as_secs()).unwrap() + 1;
+    let pile: Vec<Event> = (0..PAGE_LIMIT)
+        .map(|i| {
+            EventBuilder::new(Kind::Custom(445), format!("cGlsZQ-{i}"))
+                .tags(vec![
+                    Tag::parse(["h", &hex::encode(fx.nostr_group_id)]).unwrap(),
+                    Tag::parse(["h", &hex::encode([0x11u8; 32])]).unwrap(),
+                ])
+                .custom_created_at(Timestamp::from(u64::try_from(above).unwrap()))
+                .sign_with_keys(&Keys::generate())
+                .unwrap()
+        })
+        .collect();
+    for relay in relays {
+        relay.seed(&pile).await;
+    }
+    wait_until_after(above).await;
+    commit
+}
+
+/// A page of junk dated in one second fills the pager's page, and a genuine
+/// commit sits one second below it: no `until` reaches it. A relay that speaks
+/// NIP-77 reports it; the first sweep fetches it by id and applies it, and with
+/// every id the relay reported resolved, the window completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_second_events_across_a_page_boundary_are_all_recovered() {
+    let relay = SeededRelay::run().await;
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+    let commit = pile_above_a_commit(&fx, &[&relay]).await;
+    relay.seed(std::slice::from_ref(&commit)).await;
+    let before = group_epoch(&fx.bob, &fx.mls_group_id).await;
+    let relay_mgr = RelayManager::new();
+
+    let first = run_catchup_all_circles(&fx.bob, &relay_mgr, 60).await;
+
+    assert_eq!(
+        group_epoch(&fx.bob, &fx.mls_group_id).await,
+        before + 1,
+        "the first sweep applies the commit under the pile"
+    );
+    let second = run_catchup_all_circles(&fx.bob, &relay_mgr, 60).await;
+    assert!(
+        first.windows_truncated == 0 || second.windows_truncated == 0,
+        "the circle's window completes by that sweep or the next"
+    );
+    assert!(fx.bob_cursor().is_some(), "and its cursor moves");
+}
+
+/// The same pile, on a routing with a second relay that does not speak NIP-77:
+/// the commit is still recovered from the relay that does, and the window
+/// stays held — a relay that cannot say what it holds leaves the pager's rule
+/// in force (the recorded residual, `T-NIP77-FALLBACK`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_routing_with_a_relay_without_negentropy_keeps_the_frozen_window_held() {
+    let speaks = SeededRelay::run().await;
+    let declines_relay = SeededRelay::run().await;
+    let declines = helpers::neg_wire::NegWire::in_front_of(
+        &declines_relay.url,
+        helpers::neg_wire::NegPolicy::Notice("ERROR: bad msg: unknown cmd".into()),
+    )
+    .await;
+    let fx = build_two_member_circle(vec![speaks.url.clone(), declines.url.clone()]).await;
+    let commit = alice_confirmed_commit(&fx, &[&speaks.url, &declines.url]).await;
+    let above = commit.created_at.as_secs() + 1;
+    let pile = stacked_window(
+        &hex::encode(fx.nostr_group_id),
+        1,
+        PAGE_LIMIT,
+        i64::try_from(above).unwrap(),
+    );
+    speaks.seed(&pile).await;
+    declines_relay.seed(&pile).await;
+    speaks.seed(std::slice::from_ref(&commit)).await;
+    wait_until_after(i64::try_from(above).unwrap()).await;
+    let before = group_epoch(&fx.bob, &fx.mls_group_id).await;
+
+    let out = run_catchup_all_circles(&fx.bob, &RelayManager::new(), 60).await;
+
+    assert_eq!(
+        group_epoch(&fx.bob, &fx.mls_group_id).await,
+        before + 1,
+        "the relay that speaks NIP-77 still gives the commit up"
+    );
+    assert_eq!(out.windows_truncated, 1, "and the window stays held");
+    assert_eq!(fx.bob_cursor(), None, "the cursor does not move");
+}
+
+/// A relay that applies the session's `limit` returns the newest ids of a
+/// larger set and says nothing of the rest: here the answer is capped, and
+/// every id in it is one Bob already holds, so nothing is missing from it —
+/// and still the window is held, because the commit under the backlog is in
+/// no capped answer. The pager's own backfill then walks down to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capped_answer_never_completes_the_window() {
+    let relay = SeededRelay::run().await;
+    let capped: Vec<[u8; 32]> = (0..haven_core::relay::negentropy::NEG_SET_LIMIT)
+        .map(|_| rand::random())
+        .collect();
+    let wire = helpers::neg_wire::NegWire::in_front_of(
+        &relay.url,
+        helpers::neg_wire::NegPolicy::Answer(capped.clone()),
+    )
+    .await;
+    let fx = build_two_member_circle(vec![wire.url.clone()]).await;
+    let commit = alice_confirmed_commit(&fx, &[&wire.url]).await;
+    relay.seed(std::slice::from_ref(&commit)).await;
+    // Nine seconds of junk above the commit, a page short of full in each, so
+    // the pager descends a second a page and needs more than one sweep's pages.
+    let base = i64::try_from(commit.created_at.as_secs()).unwrap();
+    for second in 1..=9 {
+        relay
+            .seed(&stacked_window(
+                &hex::encode(fx.nostr_group_id),
+                1,
+                PAGE_LIMIT - 1,
+                base + second,
+            ))
+            .await;
+    }
+    wait_until_after(base + 9).await;
+    let now = u64::try_from(base).unwrap();
+    fx.bob
+        .session()
+        .record_neg_items_for_test(
+            fx.nostr_group_id,
+            &capped
+                .iter()
+                .map(|id| (nostr::EventId::from_byte_array(*id), now))
+                .collect::<Vec<_>>(),
+        )
+        .await;
+    let before = group_epoch(&fx.bob, &fx.mls_group_id).await;
+    let relay_mgr = RelayManager::new();
+
+    let first = run_catchup_all_circles(&fx.bob, &relay_mgr, 60).await;
+
+    assert_eq!(
+        group_epoch(&fx.bob, &fx.mls_group_id).await,
+        before,
+        "premise: one sweep's pages do not reach the commit"
+    );
+    assert_eq!(
+        first.windows_truncated, 1,
+        "a capped answer held nothing back"
+    );
+    assert_eq!(
+        fx.bob_cursor(),
+        None,
+        "the cursor passed a commit it never fetched"
+    );
+    let mut applied = false;
+    for _ in 0..MAX_SWEEPS {
+        let _ = run_catchup_all_circles(&fx.bob, &relay_mgr, 60).await;
+        if group_epoch(&fx.bob, &fx.mls_group_id).await == before + 1 {
+            applied = true;
+            break;
+        }
+    }
+    assert!(applied, "the pager's backfill walks down to the commit");
+}
+
+/// A routing whose second relay never answers its session: the commit is
+/// still recovered from the relay that speaks NIP-77, and the window stays
+/// held — an unanswered session says nothing of what that relay holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_that_never_answers_its_session_keeps_the_window_held() {
+    let speaks = SeededRelay::run().await;
+    let silent_relay = SeededRelay::run().await;
+    let silent = helpers::neg_wire::NegWire::in_front_of(
+        &silent_relay.url,
+        helpers::neg_wire::NegPolicy::Silent,
+    )
+    .await;
+    let fx = build_two_member_circle(vec![speaks.url.clone(), silent.url.clone()]).await;
+    let commit = alice_confirmed_commit(&fx, &[&speaks.url, &silent.url]).await;
+    let above = commit.created_at.as_secs() + 1;
+    let pile = stacked_window(
+        &hex::encode(fx.nostr_group_id),
+        1,
+        PAGE_LIMIT,
+        i64::try_from(above).unwrap(),
+    );
+    speaks.seed(&pile).await;
+    silent_relay.seed(&pile).await;
+    speaks.seed(std::slice::from_ref(&commit)).await;
+    wait_until_after(i64::try_from(above).unwrap()).await;
+    let before = group_epoch(&fx.bob, &fx.mls_group_id).await;
+
+    let out = run_catchup_all_circles(&fx.bob, &RelayManager::new(), 60).await;
+
+    assert_eq!(
+        group_epoch(&fx.bob, &fx.mls_group_id).await,
+        before + 1,
+        "premise: the relay that answered gave the commit up"
+    );
+    assert_eq!(
+        out.windows_truncated, 1,
+        "an unanswered session completed the window"
+    );
+    assert_eq!(fx.bob_cursor(), None, "the cursor does not move");
+}
+
+/// A relay whose by-id answer never finishes: what it reported missing was
+/// asked for and not shown to be all of its answer, so the window stays held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_by_id_answer_cut_before_its_end_keeps_the_window_held() {
+    let relay = SeededRelay::run().await;
+    let wire =
+        helpers::neg_wire::NegWire::in_front_of(&relay.url, helpers::neg_wire::NegPolicy::Forward)
+            .await;
+    wire.leave_by_id_answers_unfinished();
+    let fx = build_two_member_circle(vec![wire.url.clone()]).await;
+    let commit = alice_confirmed_commit(&fx, &[&wire.url]).await;
+    let above = commit.created_at.as_secs() + 1;
+    relay
+        .seed(&stacked_window(
+            &hex::encode(fx.nostr_group_id),
+            1,
+            PAGE_LIMIT,
+            i64::try_from(above).unwrap(),
+        ))
+        .await;
+    relay.seed(std::slice::from_ref(&commit)).await;
+    wait_until_after(i64::try_from(above).unwrap()).await;
+
+    let out = run_catchup_all_circles(&fx.bob, &RelayManager::new(), 60).await;
+
+    assert!(
+        wire.frames_of(helpers::neg_wire::Dir::ToRelay, "REQ")
+            .iter()
+            .any(|frame| frame.text.contains(&commit.id.to_hex())),
+        "premise: the pass asked for the commit by id"
+    );
+    assert_eq!(
+        out.windows_truncated, 1,
+        "an unfinished answer completed the window"
+    );
+    assert_eq!(fx.bob_cursor(), None, "the cursor does not move");
 }

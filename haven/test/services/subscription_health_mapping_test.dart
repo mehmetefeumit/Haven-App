@@ -55,6 +55,29 @@ void main() {
         mapSubscriptionHealthAction(SubscriptionHealthActionFfi.paused),
         SubscriptionHealthAction.paused,
       );
+      expect(
+        mapSubscriptionHealthAction(
+          SubscriptionHealthActionFfi.awaitingForeground,
+        ),
+        SubscriptionHealthAction.awaitingForeground,
+      );
+    });
+
+    test('awaiting the foreground is the opposite of proof', () {
+      // The tick saw a dropped relay or a missing REQ and, carrying no
+      // foreground claim, left it. Folded onto any verdict that proves the
+      // receive plane whole it would clear a real lost-subscription latch on
+      // the strength of a tick that found the plane broken.
+      final awaiting = mapSubscriptionHealthAction(
+        SubscriptionHealthActionFfi.awaitingForeground,
+      );
+      for (final proof in [
+        SubscriptionHealthActionFfi.healthy,
+        SubscriptionHealthActionFfi.resubscribed,
+        SubscriptionHealthActionFfi.targetedReanchor,
+      ]) {
+        expect(awaiting, isNot(mapSubscriptionHealthAction(proof)));
+      }
     });
 
     test('paused is proof of nothing, never a repair verdict', () {

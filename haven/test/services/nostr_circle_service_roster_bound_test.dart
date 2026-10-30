@@ -24,6 +24,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
 
+import '../helpers/fake_change_driver.dart';
 import '../mocks/mock_relay_service.dart';
 
 /// A stored circle row as the core hands it back, at [status].
@@ -39,15 +40,16 @@ CircleWithMembersFfi _row(int index, String status) => CircleWithMembersFfi(
   ),
   membershipStatus: status,
   members: const [],
+  engineState: CircleEngineStateFfi.live,
 );
 
 List<CircleWithMembersFfi> _rows(int count, {required String status}) => [
   for (var i = 0; i < count; i++) _row(i, status),
 ];
 
-/// Thrown by the fake's `createCircle` so a test can tell "the gate let this
-/// through" from "the gate refused it" without needing a constructible
-/// `CircleCreationResultFfi` (its `pending` is an opaque Rust handle).
+/// Thrown by the fake driver's `createCircle` so a test can tell "the gate let
+/// this through" from "the gate refused it" without building a whole
+/// `CircleCreationOutcomeFfi`.
 class _ReachedTheCore implements Exception {}
 
 class _FakeManager implements CircleManagerFfi {
@@ -78,26 +80,12 @@ class _FakeManager implements CircleManagerFfi {
   }
 
   @override
-  Future<CircleCreationResultFfi> createCircle({
-    required List<int> identitySecretBytes,
-    required List<MemberKeyPackageFfi> members,
-    required String name,
-    required String circleType,
-    required List<String> relays,
-    required List<String> creatorFallbackRelays,
-    String? description,
-  }) async {
-    createCircleCalls++;
-    throw _ReachedTheCore();
-  }
-
-  @override
-  Future<CircleWithMembersFfi> acceptInvitation({
+  Future<AcceptInvitationOutcomeFfi> acceptInvitation({
     required List<int> giftWrapId,
   }) async {
     acceptInvitationCalls++;
     if (acceptInvitationCalls == 1) await acceptGate?.future;
-    return _row(99, 'accepted');
+    return AcceptInvitationOutcomeFfi(joined: _row(99, 'accepted'));
   }
 
   @override
@@ -111,15 +99,38 @@ class _FakeManager implements CircleManagerFfi {
       throw UnimplementedError('unexpected call: ${invocation.memberName}');
 }
 
+/// The create reaches the core through the fanout driver; this one counts
+/// the creates on [manager] and refuses to make any.
+class _CreateCountingDriver extends FakeChangeDriver {
+  _CreateCountingDriver(this.manager);
+
+  final _FakeManager manager;
+
+  @override
+  Future<CircleCreationOutcomeFfi> createCircle({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+    required List<MemberKeyPackageFfi> members,
+    required String name,
+    required String circleType,
+    required List<String> relays,
+    required bool foreground,
+    String? description,
+  }) async {
+    manager.createCircleCalls++;
+    throw _ReachedTheCore();
+  }
+}
+
 NostrCircleService _service(_FakeManager manager, {MockRelayService? relay}) =>
     NostrCircleService.withInjectedManager(
       relayService: relay ?? MockRelayService(),
       injectedManager: manager,
+      changeDriver: _CreateCountingDriver(manager),
     );
 
-/// The fake core's own refusal to mint an opaque `PendingStateRefFfi`, as the
-/// service reports it — anything BUT the roster refusal, which is how a test
-/// asserts the gate let the call through.
+/// The fake core's own refusal, as the service reports it — anything BUT the
+/// roster refusal, which is how a test asserts the gate let the call through.
 final Matcher _reachesTheCore = throwsA(
   allOf(
     isA<CircleServiceException>(),

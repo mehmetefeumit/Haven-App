@@ -79,7 +79,7 @@ class _Recorder {
   LiveEventRouter routerWith(
     Future<DecryptedLocation?> Function(String, String) parseLocation,
   ) => LiveEventRouter(
-    circleService: _UnusedCircleService(),
+    circleService: _UnusedCircleService.new,
     circlesSnapshot: () async => <Circle>[_circle],
     secretBytes: () async => const <int>[],
     parseLocation: parseLocation,

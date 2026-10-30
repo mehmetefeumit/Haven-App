@@ -6,7 +6,8 @@
 # ## What this lane GATES
 #
 # That a wrong device clock is DETECTED and SURFACED rather than failing
-# silently. Seven properties, each emitted by the drive as a `[b8] OK <name>`
+# silently, and that the drop point every clock-skew threshold is derived from
+# is real. Nine properties, each emitted by the drive as a `[b8] OK <name>`
 # line and each required by this script:
 #
 #   rejection-classified        a fast clock's relay refusal reaches Dart as a
@@ -26,7 +27,12 @@
 #   surface-behind              the slow-clock fault reaches the user;
 #   surface-distinct            …and the two say different things (one means
 #                               nothing is shared, the other means the send
-#                               succeeded and the data was then discarded).
+#                               succeeded and the data then expired early);
+#   fast-skew-pool-drop         a peer location minted at true time does NOT
+#                               reach a device whose clock runs past the
+#                               total-loss point (228 s) ahead, although the
+#                               relay still holds it: the relay pool drops an
+#                               expired event on receipt, with no grace.
 #
 # ## What this lane RECORDS but does not gate
 #
@@ -46,11 +52,13 @@
 #     with `LOCATION_MESSAGE_RETENTION_SECS = 228`
 #     (haven-core/src/location/ttl.rs:80) — so the TTL rides the SAME skewed
 #     clock as `created_at`, and a backdated event is born already expired;
-#   * `SessionManager::process_event` (haven-core/src/nostr/mls/manager.rs:594)
-#     drops any event whose expiration is more than
-#     `RECEIVER_EXPIRATION_GRACE_SECS = 60` s in the receiver's past, before
-#     decryption. Making it keep such an event means widening a REPLAY
-#     defence, which is not a trade this lane may make;
+#   * the receiver's relay pool drops any event whose expiration is behind the
+#     receiving device's clock, on receipt and with no grace
+#     (nostr-relay-pool-0.44.3/src/relay/inner.rs:1193), before Haven sees it;
+#     Haven itself judges no expiration (Marmot transports/nostr.md:190-192).
+#     So a device running 228 s or more FAST hears no peer, and Haven raises
+#     no verdict for it while the relay still accepts its publishes
+#     (`[b8] EVIDENCE fast-skew-deaf-unsurfaced`);
 #   * `run_catchup_all_circles` advances the persisted cursor to the SENDER's
 #     `created_at` (haven-core/src/relay/catchup.rs:336-348) and
 #     `since_for_stream` re-derives the next REQ floor as
@@ -63,7 +71,7 @@
 #
 # CAVEAT (2026-08-05) on the last two bullets above. They describe RECEIVER-side
 # costs, and a NIP-40-enforcing relay refuses a born-expired event at INGEST —
-# so on this hermetic relay there is no accepted event for the receiver gate or
+# so on this hermetic relay there is no accepted event for the receiver's pool or
 # the cursor window to act on, and those two measurements do not run. The drive
 # says so explicitly via `[b8] EVIDENCE backward-skew-readside` rather than
 # skipping them in silence, which would leave the lane's output looking as
@@ -157,13 +165,15 @@ required_ok_markers() {
     'peer-corroborated' \
     'surface-rejected' \
     'surface-behind' \
-    'surface-distinct'
+    'surface-distinct' \
+    'fast-skew-pool-drop'
 }
 
 # Largest |device - expected| the read-back may show and still count as a
 # fulfilled jump. `date` sets whole seconds and adb round-trips add a beat, so
-# some slop is normal; 60 s is two orders of magnitude below the 21600 s
-# signal, so it can never launder a jump that did not happen.
+# some slop is normal; 60 s is well below the smallest jump the drive makes
+# (phase 5's, at least the 228 s total-loss point) and two orders of magnitude
+# below the 21600 s ones, so it can never launder a jump that did not happen.
 readonly JUMP_DRIFT_TOLERANCE_SECS=60
 
 # ---------------------------------------------------------------------------
@@ -339,15 +349,19 @@ run_self_test() {
     '08-03 04:43:51.001  1234  1300 I flutter : [b8] EVIDENCE backward-skew-readside: retention/receive/catch-up not measurable' \
     '08-03 04:44:03.001  1234  1300 I flutter : [b8] REQ_CLOCK 4 0' \
     '08-03 04:44:33.001  1234  1300 I flutter : [b8] CLOCK_OBSERVED 4 21600' \
+    '08-03 04:44:40.001  1234  1300 I flutter : [b8] REQ_CLOCK 5 318' \
+    '08-03 04:44:45.001  1234  1300 I flutter : [b8] CLOCK_OBSERVED 5 317' \
+    '08-03 04:44:46.001  1234  1300 I flutter : [b8] OK fast-skew-pool-drop' \
+    '08-03 04:44:47.001  1234  1300 I flutter : [b8] EVIDENCE fast-skew-deaf-unsurfaced: a +318s device hears no peer and raises no verdict' \
     '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
     '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=0 evidence=2-4' \
     > "${tmp}/green.log"
 
-  # (1) All four requests are seen, in order, exactly once.
+  # (1) All five requests are seen, in order, exactly once.
   _group
   got="$(req_clock_seqs "${tmp}/green.log" | tr '\n' ',')"
-  if [[ "${got}" != "1,2,3,4," ]]; then
-    echo "SELF-TEST FAIL (1): expected '1,2,3,4,', got '${got}'" >&2
+  if [[ "${got}" != "1,2,3,4,5," ]]; then
+    echo "SELF-TEST FAIL (1): expected '1,2,3,4,5,', got '${got}'" >&2
     fail=1
   fi
 
@@ -364,8 +378,8 @@ run_self_test() {
   # (3) Observations pair up with requests.
   _group
   got="$(observed_clock_seqs "${tmp}/green.log" | tr '\n' ',')"
-  if [[ "${got}" != "1,2,3,4," ]]; then
-    echo "SELF-TEST FAIL (3): expected observations '1,2,3,4,', got '${got}'" >&2
+  if [[ "${got}" != "1,2,3,4,5," ]]; then
+    echo "SELF-TEST FAIL (3): expected observations '1,2,3,4,5,', got '${got}'" >&2
     fail=1
   fi
 
@@ -380,8 +394,8 @@ run_self_test() {
     fail=1
   fi
   got="$(evidence_lines "${tmp}/green.log" | wc -l | tr -d ' ')"
-  if [[ "${got}" != "3" ]]; then
-    echo "SELF-TEST FAIL (4b): expected 3 evidence lines on the healthy log," \
+  if [[ "${got}" != "4" ]]; then
+    echo "SELF-TEST FAIL (4b): expected 4 evidence lines on the healthy log," \
          "got ${got} — the delivery cost this lane RECORDS is not being read" >&2
     fail=1
   fi
@@ -663,6 +677,7 @@ run_self_test() {
     '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
     '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
     '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
+    '08-03 04:44:46.001  1234  1300 I flutter : [b8] OK fast-skew-pool-drop' \
     '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=2-4 evidence=1' \
     > "${tmp}/reverted-classification.log"
   got="$(missing_ok_markers "${tmp}/reverted-classification.log" | tr '\n' ',')"
@@ -691,6 +706,7 @@ run_self_test() {
     '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
     '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
     '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
+    '08-03 04:44:46.001  1234  1300 I flutter : [b8] OK fast-skew-pool-drop' \
     '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=1 evidence=2-4' \
     > "${tmp}/reverted-corroboration.log"
   got="$(missing_ok_markers "${tmp}/reverted-corroboration.log" | tr '\n' ',')"
@@ -713,6 +729,7 @@ run_self_test() {
     '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
     '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
     '08-03 04:44:50.001  1234  1300 I flutter : [b8] FINDING clock-fault-copy: both faults render the SAME body' \
+    '08-03 04:44:46.001  1234  1300 I flutter : [b8] OK fast-skew-pool-drop' \
     '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=1 evidence=2-4' \
     > "${tmp}/reverted-copy.log"
   got="$(missing_ok_markers "${tmp}/reverted-copy.log" | tr '\n' ',')"
@@ -745,7 +762,7 @@ run_self_test() {
   #       missing. Without this the lane would stay green while the banner
   #       told the user their phone's clock is wrong (on one member's word,
   #       and possibly the innocent phone) and that locations are already
-  #       expiring (false anywhere under a 288 s gap).
+  #       expiring early (which one member cannot place on this phone).
   printf '%s\n' \
     '08-03 04:41:41.001  1234  1300 I flutter : [b8] OK rejection-classified' \
     '08-03 04:41:42.001  1234  1300 I flutter : [b8] OK rejection-verdict' \
@@ -755,6 +772,7 @@ run_self_test() {
     '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
     '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
     '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
+    '08-03 04:44:46.001  1234  1300 I flutter : [b8] OK fast-skew-pool-drop' \
     '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=1 evidence=2-4' \
     > "${tmp}/reverted-sole-source-copy.log"
   got="$(missing_ok_markers "${tmp}/reverted-sole-source-copy.log" | tr '\n' ',')"
@@ -762,6 +780,31 @@ run_self_test() {
     echo "SELF-TEST FAIL (16g): a sole-source verdict rendered with the" \
          "corroborated copy must be reported as missing exactly" \
          "'peer-sole-source-hedged,', got '${got}'" >&2
+    fail=1
+  fi
+
+  # (16h) The PREMISE reverted: a relay pool that grew a grace (or stopped
+  #       checking expiration) delivers the peer location to the fast
+  #       device. Every detection oracle still holds, so exactly ONE name goes
+  #       missing — the one that says kClockSkewTotalLossThreshold, and every
+  #       threshold and banner derived from it, no longer describe the drop.
+  printf '%s\n' \
+    '08-03 04:41:41.001  1234  1300 I flutter : [b8] OK rejection-classified' \
+    '08-03 04:41:42.001  1234  1300 I flutter : [b8] OK rejection-verdict' \
+    '08-03 04:41:43.001  1234  1300 I flutter : [b8] OK surface-rejected' \
+    '08-03 04:43:34.001  1234  1300 I flutter : [b8] OK peer-sole-source-raised' \
+    '08-03 04:43:34.501  1234  1300 I flutter : [b8] OK peer-sole-source-hedged' \
+    '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
+    '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
+    '08-03 04:44:46.001  1234  1300 I flutter : [b8] FINDING fast-skew-pool-drop: a peer location reached a device whose clock runs past the total-loss point ahead' \
+    '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
+    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=1 evidence=2-4' \
+    > "${tmp}/reverted-pool-drop.log"
+  got="$(missing_ok_markers "${tmp}/reverted-pool-drop.log" | tr '\n' ',')"
+  if [[ "${got}" != "fast-skew-pool-drop," ]]; then
+    echo "SELF-TEST FAIL (16h): a relay pool that delivers an expired location" \
+         "must be reported as missing exactly 'fast-skew-pool-drop,'," \
+         "got '${got}'" >&2
     fail=1
   fi
 
@@ -954,15 +997,16 @@ readonly LOG_DIR="/tmp/b8-logs"
 readonly APK="${1:-/tmp/integration-apks/b8_clock_skew_test.apk}"
 readonly TARGET="${2:-integration_test/b8_clock_skew_test.dart}"
 
-# The drive owns the whole timeline: a 3-member circle setup, seven publishes
-# (four measured, one through the production publish path, two peer samples),
-# four catch-up sweeps, two banner pumps, and four clock rendezvous (each
-# bounded at 150 s inside the drive). Its own in-test Timeout is 17 min; this
+# The drive owns the whole timeline: a 3-member circle setup, nine publishes
+# (four measured, two through the production publish path, three peer
+# samples), five catch-up sweeps, three banner pumps, and five clock rendezvous
+# (each bounded at 150 s inside the drive). Its own in-test Timeout is 21 min;
+# this
 # is the outer per-drive bound and stays ABOVE it and BELOW the workflow's step
 # deadline, so the attributable message ("flutter drive ... exceeded") is
 # reachable (backlog A8 / guard C4) and an in-test overrun fails with a named
 # test rather than an anonymous kill.
-readonly DRIVE_TIMEOUT="${B8_DRIVE_TIMEOUT:-20m}"
+readonly DRIVE_TIMEOUT="${B8_DRIVE_TIMEOUT:-24m}"
 
 # How long SIGKILL follows the drive's SIGTERM at DRIVE_TIMEOUT: a term in
 # this lane's worst case, which its workflow derives at the drive step.
@@ -1382,14 +1426,14 @@ apply_clock_offset "final" 0
 echo "Phase 5/5 — asserting clock-skew behaviour..."
 
 # (1) The body ran to the end. Every negative below is only meaningful against
-#     a run that reached phase 4 of the drive; a truncated one is silent about
+#     a run that reached the end of the drive; a truncated one is silent about
 #     the phases it never executed.
 if ! grep -aqF -- "${MARK_ALL_PHASES}" "${LOGCAT_FILE}" 2>/dev/null; then
   fail "the drive never printed '${MARK_ALL_PHASES}', so it died before completing its \
-four phases. Nothing below can be read as a product verdict — the absent phases simply \
+phases. Nothing below can be read as a product verdict — the absent phases simply \
 did not run. Check the drive log above for the throw."
 fi
-echo "  [1/6] Drive ran all five phases to completion."
+echo "  [1/6] Drive ran all its phases to completion."
 
 # (2) THE ANTI-VACUITY CHECK. Every requested jump must have LANDED on the
 #     device, proven by an adb read-back, not by an exit code.

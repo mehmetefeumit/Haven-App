@@ -70,7 +70,24 @@ Future<void> confirmAndRemoveMember({
       false;
 
   if (!confirmed || !context.mounted) return;
+  await removeMemberAndReport(
+    context: context,
+    ref: ref,
+    circle: circle,
+    member: member,
+  );
+}
 
+/// Removes [member] from [circle] and reports the outcome in the same words
+/// to the screen and to a screen reader. The confirmation is the caller's.
+Future<void> removeMemberAndReport({
+  required BuildContext context,
+  required WidgetRef ref,
+  required Circle circle,
+  required CircleMember member,
+}) async {
+  final l10n = AppLocalizations.of(context);
+  final name = resolveRemovalDisplayName(ref, member);
   // Captured before the first await: the sheet can be dismissed while the
   // commit is in flight, and the outcome must still reach the user.
   final messenger = ScaffoldMessenger.of(context);
@@ -93,11 +110,23 @@ Future<void> confirmAndRemoveMember({
   // disabled while that is true, so there is nothing to tell the user that
   // the disabled button has not already said.
   if (outcome == MemberRemovalOutcome.busy) return;
+  // Not made yet and not a failure: the circle's sharing card shows it, and a
+  // success snack would claim a removal that has not happened. No visual
+  // message (the card is the one place it is said), but a screen reader is
+  // told, since nothing on screen changes where its user is.
+  if (outcome == MemberRemovalOutcome.awaitingRelays) {
+    await SemanticsService.sendAnnouncement(
+      view,
+      l10n.circleMemberRemoveAwaitingAnnouncement(name),
+      textDirection,
+    );
+    return;
+  }
 
   final message = switch (outcome) {
     MemberRemovalOutcome.removed => l10n.circleMemberRemoveSuccess(name),
     MemberRemovalOutcome.failed => l10n.circleMemberRemoveError(name),
-    MemberRemovalOutcome.busy => '',
+    MemberRemovalOutcome.busy || MemberRemovalOutcome.awaitingRelays => '',
   };
   messenger.showSnackBar(
     SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
@@ -114,7 +143,7 @@ Future<void> confirmAndRemoveMember({
 /// Never the word "member": when nothing better resolves, the truncated
 /// npub is what the row itself is showing, and a confirmation that says
 /// less than the row it came from is a confirmation the user cannot check.
-@visibleForTesting
+/// The change card names the people a dropped removal kept the same way.
 String resolveRemovalDisplayName(WidgetRef ref, CircleMember member) {
   final npubFallback = NpubValidator.shortenForDisplay(member.npub);
   final profile = publicProfilesEnabled

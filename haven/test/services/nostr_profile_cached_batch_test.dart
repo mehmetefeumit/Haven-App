@@ -37,6 +37,7 @@ ProfileMetadataFfi _row(
     hasPicture: hasPicture,
     isKnown: isKnown,
     fetchedAt: 1700000000,
+    relayAnswer: OwnProfileRelayAnswerFfi.unanswered,
     pictureSha256Hex: pictureSha256Hex,
   );
 }

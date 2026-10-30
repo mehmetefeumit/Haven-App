@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/rust/api.dart' show LocationPublishFfi;
 import 'package:haven/src/services/circle_service.dart';
 
 import '../mocks/mock_circle_service.dart';
@@ -174,6 +175,35 @@ void main() {
       expect(selected!.displayName, 'Test');
     });
 
+    test("keeps the selection when the circle's routing id rotates",
+        () async {
+      final circles = [
+        TestCircleFactory.createCircle(
+          mlsGroupId: [10, 20, 30],
+          nostrGroupId: [1, 1],
+        ),
+      ];
+      final container = ProviderContainer(
+        overrides: [
+          circleServiceProvider.overrideWithValue(
+            MockCircleService(circles: circles),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(circlesProvider.future);
+      container.read(selectedCircleIdProvider.notifier).state = [10, 20, 30];
+
+      circles[0] = TestCircleFactory.createCircle(
+        mlsGroupId: [10, 20, 30],
+        nostrGroupId: [2, 2],
+      );
+      container.invalidate(circlesProvider);
+      await container.read(circlesProvider.future);
+
+      expect(container.read(selectedCircleProvider)?.nostrGroupId, [2, 2]);
+    });
+
     test('returns null when selected ID not in circles list', () async {
       final mockService = MockCircleService(
         circles: [
@@ -256,10 +286,11 @@ class _ThrowingCircleService implements CircleService {
   Future<void> resetAllSyncCursors() async {}
 
   @override
-  void markCircleBlocked(List<int> mlsGroupId) {}
+  Future<CircleRecoveryCause?> circleRecovery(Circle circle) async => null;
 
   @override
-  bool isCircleBlocked(List<int> mlsGroupId) => false;
+  Future<List<String>> unmadeRemovalMembers(List<int> mlsGroupId) async =>
+      const [];
 
   @override
   Future<void> closeAndInvalidate() async {}
@@ -268,7 +299,16 @@ class _ThrowingCircleService implements CircleService {
   Future<void> wipeAllMlsState() async {}
 
   @override
-  Future<void> destroyLegacyMlsState() async {}
+  Future<void> acknowledgeStorageReset() async {}
+
+  @override
+  Future<bool> retryQuarantinedCircle(List<int> mlsGroupId) async => false;
+
+  @override
+  Future<KeyPackageAdmission> checkMemberKeyPackage({
+    required String keyPackageJson,
+    List<int>? mlsGroupId,
+  }) async => KeyPackageAdmission.admissible;
 
   @override
   Future<void> pruneProcessedGiftWraps({DateTime? now}) async {}
@@ -287,7 +327,6 @@ class _ThrowingCircleService implements CircleService {
     required CircleType circleType,
     String? description,
     List<String>? relays,
-    List<String> creatorFallbackRelays = const [],
   }) async {
     throw UnimplementedError();
   }
@@ -312,39 +351,48 @@ class _ThrowingCircleService implements CircleService {
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
-  Future<void> leaveCircle({
-    required List<int> mlsGroupId,
-    required String selfPubkeyHex,
-  }) async {}
+  Future<LeaveDelivery> leaveCircle({required List<int> mlsGroupId}) async =>
+      LeaveDelivery.left;
 
   @override
-  Future<bool> stillAMember({
-    required List<int> mlsGroupId,
-    required String ownPubkeyHex,
-  }) async => true;
+  Future<void> leaveDisbandedCircle({required List<int> mlsGroupId}) async {}
 
   @override
-  Future<void> removeMember({
+  Future<List<RejoinOffer>> rejoinOffersForInvitation(
+    List<int> invitationId,
+  ) async => const [];
+
+  @override
+  Future<Circle> confirmGroupRejoin(
+    List<int> invitationId,
+    RejoinOffer offer,
+  ) => throw UnimplementedError();
+
+  @override
+  Future<void> declineGroupRejoin(List<int> invitationId) async {}
+
+  @override
+  Future<ChangeDelivery> removeMember({
     required List<int> mlsGroupId,
     required String memberPubkeyHex,
-  }) async {}
+  }) async => ChangeDelivery.applied;
 
   @override
   Future<AddMemberResult> addMember({
-    required Future<List<int>> Function() secretProvider,
     required List<int> mlsGroupId,
     required List<KeyPackageData> memberKeyPackages,
-    List<String> creatorFallbackRelays = const [],
   }) async => throw UnimplementedError();
 
   @override
-  Future<EncryptLocationOutcome> encryptLocation({
+  Future<LocationSeal> sealLocation({
     required List<int> mlsGroupId,
-    required String senderPubkeyHex,
     required double latitude,
     required double longitude,
-    required int updateIntervalSecs,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async =>
+      throw UnimplementedError();
 
   @override
   Future<void> upsertLastKnownLocation({
@@ -392,26 +440,8 @@ class _ThrowingCircleService implements CircleService {
   Future<Map<String, String>> allContactDisplayNames() async => const {};
 
   @override
-  Future<List<LocationEventResult>> decryptLocation({
-    required String eventJson,
-  }) async => throw UnimplementedError();
-
-  @override
-  Future<DecryptLocationOutcome> decryptLocationCollectingCommits({
-    required String eventJson,
-  }) async => throw UnimplementedError();
-
-  @override
-  Future<DecryptLocationOutcome> confirmPendingCommit(
-    PendingCommitToken pending,
-  ) async =>
-      const DecryptLocationOutcome(results: [], autoCommits: [], proposals: []);
-
-  @override
-  Future<DecryptLocationOutcome> failPendingCommit(
-    PendingCommitToken pending,
-  ) async =>
-      const DecryptLocationOutcome(results: [], autoCommits: [], proposals: []);
+  Future<IngestResult> ingestEvent({required String eventJson}) async =>
+      throw UnimplementedError();
 
   @override
   Future<String> signDeletionEvent({
@@ -436,10 +466,10 @@ class _ThrowingCircleService implements CircleService {
   }) async => const EpochRepairApplied();
 
   @override
-  Future<void> updateCircleRelays({
+  Future<ChangeDelivery> updateCircleRelays({
     required List<int> mlsGroupId,
     required List<String> newRelays,
-  }) async {}
+  }) async => ChangeDelivery.applied;
 }
 
 /// A circle service that throws an Error (not Exception).
@@ -456,10 +486,11 @@ class _ThrowingErrorCircleService implements CircleService {
   Future<void> resetAllSyncCursors() async {}
 
   @override
-  void markCircleBlocked(List<int> mlsGroupId) {}
+  Future<CircleRecoveryCause?> circleRecovery(Circle circle) async => null;
 
   @override
-  bool isCircleBlocked(List<int> mlsGroupId) => false;
+  Future<List<String>> unmadeRemovalMembers(List<int> mlsGroupId) async =>
+      const [];
 
   @override
   Future<void> closeAndInvalidate() async {}
@@ -468,7 +499,16 @@ class _ThrowingErrorCircleService implements CircleService {
   Future<void> wipeAllMlsState() async {}
 
   @override
-  Future<void> destroyLegacyMlsState() async {}
+  Future<void> acknowledgeStorageReset() async {}
+
+  @override
+  Future<bool> retryQuarantinedCircle(List<int> mlsGroupId) async => false;
+
+  @override
+  Future<KeyPackageAdmission> checkMemberKeyPackage({
+    required String keyPackageJson,
+    List<int>? mlsGroupId,
+  }) async => KeyPackageAdmission.admissible;
 
   @override
   Future<void> pruneProcessedGiftWraps({DateTime? now}) async {}
@@ -487,7 +527,6 @@ class _ThrowingErrorCircleService implements CircleService {
     required CircleType circleType,
     String? description,
     List<String>? relays,
-    List<String> creatorFallbackRelays = const [],
   }) async {
     throw UnimplementedError();
   }
@@ -512,39 +551,48 @@ class _ThrowingErrorCircleService implements CircleService {
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
-  Future<void> leaveCircle({
-    required List<int> mlsGroupId,
-    required String selfPubkeyHex,
-  }) async {}
+  Future<LeaveDelivery> leaveCircle({required List<int> mlsGroupId}) async =>
+      LeaveDelivery.left;
 
   @override
-  Future<bool> stillAMember({
-    required List<int> mlsGroupId,
-    required String ownPubkeyHex,
-  }) async => true;
+  Future<void> leaveDisbandedCircle({required List<int> mlsGroupId}) async {}
 
   @override
-  Future<void> removeMember({
+  Future<List<RejoinOffer>> rejoinOffersForInvitation(
+    List<int> invitationId,
+  ) async => const [];
+
+  @override
+  Future<Circle> confirmGroupRejoin(
+    List<int> invitationId,
+    RejoinOffer offer,
+  ) => throw UnimplementedError();
+
+  @override
+  Future<void> declineGroupRejoin(List<int> invitationId) async {}
+
+  @override
+  Future<ChangeDelivery> removeMember({
     required List<int> mlsGroupId,
     required String memberPubkeyHex,
-  }) async {}
+  }) async => ChangeDelivery.applied;
 
   @override
   Future<AddMemberResult> addMember({
-    required Future<List<int>> Function() secretProvider,
     required List<int> mlsGroupId,
     required List<KeyPackageData> memberKeyPackages,
-    List<String> creatorFallbackRelays = const [],
   }) async => throw UnimplementedError();
 
   @override
-  Future<EncryptLocationOutcome> encryptLocation({
+  Future<LocationSeal> sealLocation({
     required List<int> mlsGroupId,
-    required String senderPubkeyHex,
     required double latitude,
     required double longitude,
-    required int updateIntervalSecs,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async =>
+      throw UnimplementedError();
 
   @override
   Future<void> upsertLastKnownLocation({
@@ -592,26 +640,8 @@ class _ThrowingErrorCircleService implements CircleService {
   Future<Map<String, String>> allContactDisplayNames() async => const {};
 
   @override
-  Future<List<LocationEventResult>> decryptLocation({
-    required String eventJson,
-  }) async => throw UnimplementedError();
-
-  @override
-  Future<DecryptLocationOutcome> decryptLocationCollectingCommits({
-    required String eventJson,
-  }) async => throw UnimplementedError();
-
-  @override
-  Future<DecryptLocationOutcome> confirmPendingCommit(
-    PendingCommitToken pending,
-  ) async =>
-      const DecryptLocationOutcome(results: [], autoCommits: [], proposals: []);
-
-  @override
-  Future<DecryptLocationOutcome> failPendingCommit(
-    PendingCommitToken pending,
-  ) async =>
-      const DecryptLocationOutcome(results: [], autoCommits: [], proposals: []);
+  Future<IngestResult> ingestEvent({required String eventJson}) async =>
+      throw UnimplementedError();
 
   @override
   Future<String> signDeletionEvent({
@@ -636,8 +666,8 @@ class _ThrowingErrorCircleService implements CircleService {
   }) async => const EpochRepairApplied();
 
   @override
-  Future<void> updateCircleRelays({
+  Future<ChangeDelivery> updateCircleRelays({
     required List<int> mlsGroupId,
     required List<String> newRelays,
-  }) async {}
+  }) async => ChangeDelivery.applied;
 }

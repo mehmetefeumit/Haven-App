@@ -1,4 +1,4 @@
-//! Seam 9 of `test_utils_seams.rs` — the live engine's auto-commit address map
+//! Seam 9 of `test_utils_seams.rs` — the live engine's address map
 //! (`LiveSyncCore::new_local_with_relay_map_for_test`) — proved over a real
 //! loopback relay.
 //!
@@ -18,20 +18,13 @@ use std::time::Duration;
 
 use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::nostr::mls::types::GroupId;
-use haven_core::relay::live_sync::{CircleSpec, LiveSyncCore};
+use haven_core::relay::live_sync::{CircleSpec, Claim, LiveSyncCore};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use nostr::{Filter, Keys, Kind};
 use tempfile::TempDir;
 
 /// The one address the circle stores; the engine's pool never holds it.
 const GROUP_RELAY: &str = "wss://seams.example.com";
-
-/// A loopback address nothing listens on and no engine pool is given.
-const UNHELD_RELAY: &str = "ws://127.0.0.1:9";
-
-/// Long enough for the engine's jittered auto-commit and one loopback OK; a
-/// loopback relay silent past this is broken, not slow.
-const AUTO_COMMIT_BOUND: Duration = Duration::from_secs(20);
 
 struct Device {
     manager: Arc<CircleManager>,
@@ -90,17 +83,14 @@ async fn two_member_circle(name: &str) -> Circle {
             &alice.keys,
             vec![bob.key_package().await],
             &CircleConfig::new(name).with_relays(relays.clone()),
-            &relays,
         )
         .await
         .expect("create a circle");
+    // As the app's driven create leaves it: the founding Welcomes sent from
+    // their records and acknowledged, so no later drive sends them.
+    let _ = alice.manager.land_staged_for_test().await;
     let mls_group_id = result.circle.mls_group_id.clone();
     let nostr_group_id = result.circle.nostr_group_id;
-    alice
-        .manager
-        .confirm_published(result.pending)
-        .await
-        .expect("confirm the create");
     bob.manager
         .process_gift_wrapped_invitation(&bob.keys, &result.welcome_events[0].event)
         .await
@@ -117,25 +107,16 @@ async fn two_member_circle(name: &str) -> Circle {
     }
 }
 
-/// Resolves once `done` holds, re-reading it on a short interval; `false` at the
-/// bound.
-async fn within(bound: Duration, mut done: impl FnMut() -> bool) -> bool {
-    let deadline = tokio::time::Instant::now() + bound;
-    let mut tick = tokio::time::interval(Duration::from_millis(20));
-    while tokio::time::Instant::now() < deadline {
-        if done() {
-            return true;
-        }
-        tick.tick().await;
-    }
-    done()
-}
-
 /// A mock relay the engine subscribes to under an address the circle never
-/// stored, with Bob's leave already on it.
-async fn leave_on_an_unstored_address(
+/// stored, with Bob's leave already on it, and the leave.
+async fn a_leave_on_an_unstored_address(
     c: &Circle,
-) -> (nostr_relay_builder::MockRelay, String, nostr_sdk::Client) {
+) -> (
+    nostr_relay_builder::MockRelay,
+    String,
+    nostr_sdk::Client,
+    nostr::Event,
+) {
     let _ = haven_core::relay::allow_ws_loopback_for_test();
     let relay = nostr_relay_builder::MockRelay::run()
         .await
@@ -149,12 +130,27 @@ async fn leave_on_an_unstored_address(
         .manager
         .propose_leave(&c.mls_group_id)
         .await
-        .expect("bob proposes to leave");
+        .expect("bob proposes to leave")
+        .expect("a first leave in this epoch proposes");
     observer
         .send_event(&proposal)
         .await
         .expect("the proposal reaches the relay");
-    (relay, url, observer)
+    (relay, url, observer, proposal)
+}
+
+/// Resolves once `done` holds, re-reading it on a short interval; `false` at
+/// `bound`, which a loopback relay silent past is broken, not slow.
+async fn within(bound: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = tokio::time::Instant::now() + bound;
+    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    while tokio::time::Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        tick.tick().await;
+    }
+    done()
 }
 
 async fn stored_445s(observer: &nostr_sdk::Client) -> Vec<nostr::EventId> {
@@ -177,20 +173,22 @@ fn spec_for(c: &Circle, relay: String) -> CircleSpec {
     }
 }
 
-/// The map is asked for the address the circle STORED, and the live engine's
-/// receive-side eviction reaches the relay at the address it returned:
-/// stored beside the proposal, and no longer owed — which only an OK-ack from
-/// that relay can clear (Rule 13).
+/// The live engine's own receive-side eviction, in the claimed foreground:
+/// Bob's leave arrives over the relay, the session's drive makes the
+/// eviction under a record and sends it through the map, which is asked for
+/// the address the circle stored — and the relay holds it, which only that
+/// address could have reached. Nothing is owed through the legacy table.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_engine_publishes_its_auto_commit_to_the_address_the_map_returns() {
-    let c = two_member_circle("mapped publisher").await;
-    let (_relay, url, observer) = leave_on_an_unstored_address(&c).await;
+async fn the_claimed_foregrounds_eviction_goes_to_the_address_the_map_returns() {
+    let c = two_member_circle("claimed mapped publisher").await;
+    let (_relay, url, observer, _leave) = a_leave_on_an_unstored_address(&c).await;
     let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let record = Arc::clone(&asked);
     let dialled = url.clone();
     let core = LiveSyncCore::new_local_with_relay_map_for_test(
         Arc::clone(&c.alice.manager),
         c.alice.keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
         move |relay| {
             record.lock().unwrap().push(relay.to_owned());
             if relay == GROUP_RELAY {
@@ -203,102 +201,27 @@ async fn the_engine_publishes_its_auto_commit_to_the_address_the_map_returns() {
     core.start(&[spec_for(&c, url)], &[])
         .await
         .expect("the engine starts");
-
-    // The obligation is cleared only by an acknowledged publish, so an empty
-    // owed list after the map was consulted is a publish that landed.
+    // The start's follow reads the map too: only what comes after is the
+    // drive's.
+    let before = asked.lock().unwrap().len();
+    core.claim_foreground(Claim::Foreground).await;
+    // The obligation is never written on this path, so the witness is the
+    // map asked for the stored address by the drive's send, with the gauge
+    // that counts the drive back at zero: a send that has returned.
     assert!(
-        within(AUTO_COMMIT_BOUND, || {
-            !asked.lock().unwrap().is_empty()
+        within(Duration::from_secs(20), || {
+            asked.lock().unwrap()[before..]
+                .iter()
+                .any(|relay| relay == GROUP_RELAY)
                 && core.processor().in_flight_publishes() == 0
-                && c.alice.manager.owed_removal_commits().is_empty()
         })
         .await,
-        "the engine consults the map, publishes, and the eviction is no longer owed"
-    );
-    assert!(
-        *asked.lock().unwrap() == vec![GROUP_RELAY.to_string()],
-        "the map is asked exactly once, for the address the circle stored"
+        "the claimed foreground's drive did not send the eviction through the map",
     );
     assert!(
         stored_445s(&observer).await.len() == 2,
-        "the relay holds the proposal and the eviction commit"
-    );
-    let _ = core.stop().await;
-    observer.shutdown().await;
-}
-
-/// The wrapper passes the `Client`'s own verdict through: a map pointing the
-/// stored address at one the pool does not hold gets production's refusal
-/// (`RelayNotFound` ⇒ not acked), so the eviction stays owed. This is what
-/// backs "cannot be substituted" — a wrapper that reported an ack it did not
-/// get would discharge the obligation here.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_map_to_an_address_the_pool_does_not_hold_leaves_the_eviction_owed() {
-    let c = two_member_circle("mapped nowhere").await;
-    let (_relay, url, observer) = leave_on_an_unstored_address(&c).await;
-    let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let record = Arc::clone(&asked);
-    let core = LiveSyncCore::new_local_with_relay_map_for_test(
-        Arc::clone(&c.alice.manager),
-        c.alice.keys.public_key(),
-        move |relay| {
-            record.lock().unwrap().push(relay.to_owned());
-            UNHELD_RELAY.to_owned()
-        },
-    );
-    core.start(&[spec_for(&c, url)], &[])
-        .await
-        .expect("the engine starts");
-
-    assert!(
-        within(AUTO_COMMIT_BOUND, || {
-            !asked.lock().unwrap().is_empty() && core.processor().in_flight_publishes() == 0
-        })
-        .await,
-        "the engine consults the map and the refused publish returns"
-    );
-    assert!(
-        c.alice.manager.owed_removal_commits() == vec![c.nostr_group_id],
-        "a publish the pool refused is not an ack: the eviction stays owed"
-    );
-    assert!(
-        stored_445s(&observer).await.len() == 1,
-        "the relay holds the proposal alone: the commit never left the device"
-    );
-    let _ = core.stop().await;
-    observer.shutdown().await;
-}
-
-/// The measured defect the seam exists for, pinned so nobody cures it by
-/// widening the pool: the production constructor over a pool that lacks the
-/// stored address refuses the publish, and the eviction stays owed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_production_engine_publisher_leaves_the_eviction_owed_when_its_pool_lacks_the_stored_address(
-) {
-    let c = two_member_circle("unmapped publisher").await;
-    let (_relay, url, observer) = leave_on_an_unstored_address(&c).await;
-    let core = LiveSyncCore::new_local(Arc::clone(&c.alice.manager), c.alice.keys.public_key());
-    core.start(&[spec_for(&c, url)], &[])
-        .await
-        .expect("the engine starts");
-
-    // The obligation is written AFTER the in-flight gauge rises, so an owed
-    // row with the gauge back at zero is a publish that has returned.
-    assert!(
-        within(AUTO_COMMIT_BOUND, || {
-            !c.alice.manager.owed_removal_commits().is_empty()
-                && core.processor().in_flight_publishes() == 0
-        })
-        .await,
-        "the engine attempts the auto-commit and the attempt returns"
-    );
-    assert!(
-        c.alice.manager.owed_removal_commits() == vec![c.nostr_group_id],
-        "an eviction the pool could not publish stays owed, never rolled back"
-    );
-    assert!(
-        stored_445s(&observer).await.len() == 1,
-        "the relay holds the proposal alone: the commit never left the device"
+        "the relay at the mapped address does not hold the eviction, or it was owed through \
+         the legacy table",
     );
     let _ = core.stop().await;
     observer.shutdown().await;

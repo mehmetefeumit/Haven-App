@@ -132,7 +132,6 @@ import 'package:haven/src/providers/service_providers.dart'
     show circleServiceProvider;
 import 'package:haven/src/rust/api.dart'
     show
-        CircleCreationResultFfi,
         CircleManagerFfi,
         CircleWithMembersFfi,
         MemberKeyPackageFfi,
@@ -148,7 +147,8 @@ import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
+import 'e2e/_lib/circle_creation.dart'
+    show DeliveredCircle, createCircleDelivered;
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
 import 'e2e/_lib/fake_location_service.dart'
     show aliceFakeLatitude, aliceFakeLongitude;
@@ -394,10 +394,11 @@ void main() {
         await waitForKeyPackage(relay: relay, authorPubkeyHex: bob.pubkeyHex);
 
         final relayManager = await RelayManagerFfi.newInstance();
-        final CircleCreationResultFfi creation;
+        final DeliveredCircle creation;
         try {
           final bobKp = await relayManager.fetchMemberKeypackage(
             pubkey: bob.pubkeyHex,
+            circle: aliceManager,
           );
           if (bobKp == null) {
             throw StateError(
@@ -411,14 +412,12 @@ void main() {
             () => container
                 .read(identityNotifierProvider.notifier)
                 .getSecretBytes(),
-            // Publishes Bob's Welcome AND confirms the staged create
-            // (Security Rule 13). An unconfirmed create pins the group in
-            // MDK's PendingPublish, where Alice's own kind-445 would buffer
-            // forever and this lane would time out in step 5 for a reason that
-            // has nothing to do with GPS.
-            (aliceSecret) => createCircleConfirmed(
+            // Publishes Bob's Welcome and requires every relay ack: an invitee
+            // whose Welcome never landed never joins. See
+            // `createCircleDelivered`'s doc.
+            (aliceSecret) => createCircleDelivered(
               manager: aliceManager,
-              relay: relay,
+              relayManager: relayManager,
               identitySecretBytes: aliceSecret,
               members: <MemberKeyPackageFfi>[bobKp],
               name: 'B4 Real GPS Circle',
@@ -427,7 +426,6 @@ void main() {
               // Bob (a SyntheticUser) advertises no inbox relays, so the
               // Welcome-delivery cascade needs the admin's own relay as a
               // fallback (mirrors the production admin flow).
-              creatorFallbackRelays: <String>[defaultStrfryUrl],
               scenario: 'b4',
             ),
           );

@@ -1,252 +1,192 @@
-/// Tests for [PendingLeaveService] — the REV-1 durable leaver-backstop intent.
+/// Tests for [PendingLeaveService] — the retired leave markers.
 ///
-/// Covers:
-/// - marker set / cleared / survives a simulated crash (re-instantiation)
-/// - the stored value is ONLY the public nostr_group_id hex (never the MLS
-///   group id, a pubkey, or secret material)
-/// - TEST 3: durable intent survives a restart — a leave marked mid-flow and
-///   NOT cleared (crash) is finished by `resumePendingLeaves` on the next
-///   launch (still-present circle → re-run leaveCircle → marker cleared)
-/// - resume clears a stale marker for an already-gone circle without re-leaving
-/// - resume keeps the marker when the re-run leave fails (retry next launch)
+/// Nothing writes a marker any more: the leave's intent lives in the core,
+/// written first and carried on by the leaver backstop
+/// (`leaver_backstop_test.dart`). What is left to promise:
+/// - a marker an older build left on disk is migrated once — its circle, if
+///   still present, is left through the driver (which writes the core's
+///   intent), and the key is removed;
+/// - a circle already gone needs nothing, and a leave that cannot be asked for
+///   keeps the key for the next start-up;
+/// - `clearAll` removes the key entirely (logout and the storage reset).
 library;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../helpers/log_capture.dart';
 import '../mocks/mock_circle_service.dart';
 
-/// Lowercase, 2-digit-per-byte hex — the encoding [PendingLeaveService] uses
-/// for the public nostr_group_id marker. Duplicated here so the privacy
-/// assertion is independent of the implementation.
+bool _inFront() => true;
+
 String _hex(List<int> bytes) =>
     bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  /// Builds a [PendingLeaveService] over fake [SharedPreferences] seeded with
-  /// [prefsValues].
-  Future<({PendingLeaveService service, SharedPreferences prefs})> makeService({
-    Map<String, Object> prefsValues = const {},
-  }) async {
-    SharedPreferences.setMockInitialValues(prefsValues);
+  Future<({PendingLeaveService service, SharedPreferences prefs})> makeService(
+    List<List<int>> markers,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      if (markers.isNotEmpty)
+        kPendingLeaveKey: [for (final m in markers) _hex(m)],
+    });
     final prefs = await SharedPreferences.getInstance();
     return (service: PendingLeaveService(prefs: prefs), prefs: prefs);
   }
 
-  // ---------------------------------------------------------------------------
-  // Marker access
-  // ---------------------------------------------------------------------------
+  final present = TestCircleFactory.createCircle(
+    mlsGroupId: const [10, 20, 30, 40],
+    nostrGroupId: const [50, 60, 70, 80],
+  );
+  final other = TestCircleFactory.createCircle(
+    mlsGroupId: const [11, 21, 31, 41],
+    nostrGroupId: const [51, 61, 71, 81],
+  );
 
-  group('marker access', () {
-    test('pendingLeaves is empty by default', () async {
-      final (:service, prefs: _) = await makeService();
-      expect(service.pendingLeaves, isEmpty);
-    });
+  test('a marker an older build left is moved onto the core once: its circle '
+      'is left through the driver and the key is removed', () async {
+    final mock = MockCircleService(circles: [present, other]);
+    final (:service, :prefs) = await makeService([present.nostrGroupId]);
 
-    test('markLeaving records the circle; clearLeaving removes it', () async {
-      final (:service, prefs: _) = await makeService();
-      const nostrGroupId = [5, 6, 7, 8];
+    await service.migrateToCore(circleService: mock, inFront: _inFront);
 
-      await service.markLeaving(nostrGroupId);
-      expect(service.isLeaving(nostrGroupId), isTrue);
-      expect(service.pendingLeaves, equals({_hex(nostrGroupId)}));
-
-      await service.clearLeaving(nostrGroupId);
-      expect(service.isLeaving(nostrGroupId), isFalse);
-      expect(service.pendingLeaves, isEmpty);
-    });
-
-    test('marking is idempotent — one marker per circle', () async {
-      final (:service, prefs: _) = await makeService();
-      const nostrGroupId = [1, 2, 3, 4];
-      await service.markLeaving(nostrGroupId);
-      await service.markLeaving(nostrGroupId);
-      expect(service.pendingLeaves, equals({_hex(nostrGroupId)}));
-    });
-
-    test('tracks independent markers for multiple circles', () async {
-      final (:service, prefs: _) = await makeService();
-      const a = [1, 1, 1, 1];
-      const b = [2, 2, 2, 2];
-      await service.markLeaving(a);
-      await service.markLeaving(b);
-      expect(service.pendingLeaves, equals({_hex(a), _hex(b)}));
-
-      await service.clearLeaving(a);
-      expect(
-        service.pendingLeaves,
-        equals({_hex(b)}),
-        reason: 'clearing one circle leaves the others pending',
-      );
-    });
-
-    test(
-      'the stored value is ONLY the public nostr_group_id hex '
-      '(no MLS id / pubkey / secret)',
-      () async {
-        final (:service, :prefs) = await makeService();
-        const nostrGroupId = [0xAB, 0xCD, 0xEF, 0x01];
-        await service.markLeaving(nostrGroupId);
-
-        // Exactly one key is written, holding the hex of the PUBLIC group id.
-        final keys = prefs.getKeys();
-        expect(keys, equals({kPendingLeaveKey}));
-        expect(
-          prefs.getStringList(kPendingLeaveKey),
-          equals([_hex(nostrGroupId)]),
-          reason: 'stores the relay-visible nostr_group_id, never the MLS id',
-        );
-      },
+    expect(
+      mock.leaveCircleCalledWith,
+      [present.mlsGroupId],
+      reason: 'the marked circle, and only it, has its leave asked for again',
     );
+    expect(prefs.containsKey(kPendingLeaveKey), isFalse);
+
+    await service.migrateToCore(circleService: mock, inFront: _inFront);
+    expect(mock.leaveCircleCalledWith, hasLength(1), reason: 'once only');
   });
 
-  // ---------------------------------------------------------------------------
-  // Crash survival (mirrors the pending-MLS-wipe durability contract)
-  // ---------------------------------------------------------------------------
-
-  group('durability', () {
-    test('a marker survives re-instantiation (a simulated crash)', () async {
-      final (:service, :prefs) = await makeService();
-      const nostrGroupId = [9, 9, 9, 9];
-
-      await service.markLeaving(nostrGroupId);
-      // No clearLeaving() — simulate a crash mid-backstop.
-
-      final revived = PendingLeaveService(prefs: prefs);
-      expect(
-        revived.isLeaving(nostrGroupId),
-        isTrue,
-        reason: 'a leave marked but not cleared must be visible next launch',
-      );
-    });
-  });
-
-  // ---------------------------------------------------------------------------
-  // TEST 3 — durable intent survives a restart and is FINISHED by resume.
-  // ---------------------------------------------------------------------------
-
-  group('resumePendingLeaves (TEST 3 — durable intent survives restart)', () {
-    test(
-      'crash mid-leave → next-launch resume re-runs leaveCircle and clears '
-      'the marker',
+  test('a migration stops where the app left the front, and keeps the key',
       () async {
-        final circle = TestCircleFactory.createCircle(
-          mlsGroupId: const [10, 20, 30, 40],
-          nostrGroupId: const [50, 60, 70, 80],
-        );
-        final mock = MockCircleService(circles: [circle]);
+    final mock = MockCircleService(circles: [present, other]);
+    final (:service, :prefs) = await makeService([
+      present.nostrGroupId,
+      other.nostrGroupId,
+    ]);
+    var reads = 0;
 
-        // Phase 1: a leave is marked but the process "crashes" before clearing.
-        final (:service, :prefs) = await makeService();
-        await service.markLeaving(circle.nostrGroupId);
-
-        // Phase 2: a FRESH launch reads the durable marker and finishes.
-        final revived = PendingLeaveService(prefs: prefs);
-        expect(
-          revived.isLeaving(circle.nostrGroupId),
-          isTrue,
-          reason: 'precondition: the interrupted leave is still pending',
-        );
-
-        await revived.resumePendingLeaves(
-          circleService: mock,
-          selfPubkeyHex: 'a' * 64,
-        );
-
-        // The resume re-entered the leave for exactly this circle — no separate
-        // membership probe (leaveCircle -> planLeave resolves both cases)...
-        expect(
-          mock.leaveCircleCalledWith,
-          hasLength(1),
-          reason: 'the pending circle is re-left exactly once',
-        );
-        expect(mock.leaveCircleCalledWith.single.mlsGroupId, circle.mlsGroupId);
-        expect(
-          mock.methodCalls,
-          isNot(contains('stillAMember')),
-          reason: 'resume no longer runs a redundant membership probe — '
-              'leaveCircle handles still-member vs already-removed itself',
-        );
-        // ...and, having finished, cleared the durable marker.
-        expect(
-          revived.isLeaving(circle.nostrGroupId),
-          isFalse,
-          reason: 'the marker is cleared once the resumed leave completes',
-        );
-      },
+    await service.migrateToCore(
+      circleService: mock,
+      inFront: () => ++reads < 2,
     );
 
-    test(
-      'a marker for an already-gone circle is cleared without re-leaving',
+    expect(mock.leaveCircleCalledWith, [present.mlsGroupId]);
+    expect(prefs.containsKey(kPendingLeaveKey), isTrue);
+  });
+
+  test('a marker whose circle is gone asks nothing and is removed', () async {
+    final mock = MockCircleService(circles: [other]);
+    final (:service, :prefs) = await makeService([present.nostrGroupId]);
+
+    await service.migrateToCore(circleService: mock, inFront: _inFront);
+
+    expect(mock.leaveCircleCalledWith, isEmpty);
+    expect(prefs.containsKey(kPendingLeaveKey), isFalse);
+  });
+
+  test('a leave that cannot be asked for keeps the marker for the next '
+      'start-up, and its log line names no circle', () async {
+    final capture = LogCapture.install();
+    final mock = MockCircleService(
+      circles: [present],
+      errorMessage: 'circle ${_hex(present.mlsGroupId)} at wss://x.example',
+    )..shouldThrowOnLeaveCircle = true;
+    final (:service, :prefs) = await makeService([present.nostrGroupId]);
+
+    await service.migrateToCore(circleService: mock, inFront: _inFront);
+
+    expect(prefs.getStringList(kPendingLeaveKey), [
+      _hex(present.nostrGroupId),
+    ]);
+    expect(capture.joined, contains('[PendingLeave] migration failed'));
+    capture.assertNoNeedles([
+      _hex(present.mlsGroupId),
+      _hex(present.nostrGroupId),
+      'wss://x.example',
+    ]);
+  });
+
+  test('a roster that cannot be read keeps the marker, and its log line names '
+      'no circle', () async {
+    final capture = LogCapture.install();
+    final mock = MockCircleService(
+      circles: [present],
+      shouldThrowOnGetCircles: true,
+      errorMessage: 'circle ${_hex(present.mlsGroupId)} at wss://x.example',
+    );
+    final (:service, :prefs) = await makeService([present.nostrGroupId]);
+
+    await service.migrateToCore(circleService: mock, inFront: _inFront);
+
+    expect(prefs.getStringList(kPendingLeaveKey), [
+      _hex(present.nostrGroupId),
+    ]);
+    capture
+      ..assertContains('[PendingLeave] migration: could not list circles')
+      ..assertNoNeedles([_hex(present.mlsGroupId), 'wss://x.example']);
+  });
+
+  test('a marker that cannot be removed says so with its type alone',
       () async {
-        // The circle is NOT in the visible set → its leave already completed
-        // (and wiped) before the crash — the resume just clears the marker.
-        final mock = MockCircleService(circles: const []);
-        final (:service, :prefs) = await makeService();
-        const goneNostrGroupId = [7, 7, 7, 7];
-        await service.markLeaving(goneNostrGroupId);
+    final capture = LogCapture.install();
+    final (service: _, :prefs) = await makeService([present.nostrGroupId]);
+    final service = PendingLeaveService(prefs: _RemoveThrows(prefs));
 
-        final revived = PendingLeaveService(prefs: prefs);
-        await revived.resumePendingLeaves(
-          circleService: mock,
-          selfPubkeyHex: 'b' * 64,
-        );
-
-        expect(
-          mock.methodCalls,
-          isNot(contains('leaveCircle')),
-          reason: 'an already-gone circle is not re-left',
-        );
-        expect(
-          revived.isLeaving(goneNostrGroupId),
-          isFalse,
-          reason: 'the stale marker is cleared',
-        );
-      },
+    await service.migrateToCore(
+      circleService: MockCircleService(),
+      inFront: _inFront,
     );
 
-    test('a failed resume keeps the marker set for the next launch', () async {
-      final circle = TestCircleFactory.createCircle(
-        mlsGroupId: const [11, 22, 33, 44],
-        nostrGroupId: const [55, 66, 77, 88],
-      );
-      final mock = MockCircleService(circles: [circle])
-        ..shouldThrowOnLeaveCircle = true; // the resumed leave still fails
-
-      final (:service, :prefs) = await makeService();
-      await service.markLeaving(circle.nostrGroupId);
-
-      final revived = PendingLeaveService(prefs: prefs);
-      await revived.resumePendingLeaves(
-        circleService: mock,
-        selfPubkeyHex: 'c' * 64,
-      );
-
-      expect(mock.methodCalls, contains('leaveCircle'));
-      expect(
-        revived.isLeaving(circle.nostrGroupId),
-        isTrue,
-        reason: 'a leave that still fails keeps the marker for a later retry',
-      );
-    });
-
-    test('resume is a no-op when nothing is pending', () async {
-      final mock = MockCircleService(circles: const []);
-      final (:service, prefs: _) = await makeService();
-
-      await service.resumePendingLeaves(
-        circleService: mock,
-        selfPubkeyHex: 'd' * 64,
-      );
-
-      expect(
-        mock.methodCalls,
-        isEmpty,
-        reason: 'no markers → the resume never touches the circle service',
-      );
-    });
+    capture
+      ..assertContains('[PendingLeave] migration: marker not removed')
+      ..assertNoNeedles([
+        _hex(present.nostrGroupId),
+        _RemoveThrows.planted,
+        'wss://x.example',
+      ]);
   });
+
+  test('no marker: the migration touches nothing', () async {
+    final mock = MockCircleService(circles: [present]);
+    final (:service, prefs: _) = await makeService(const []);
+
+    await service.migrateToCore(circleService: mock, inFront: _inFront);
+
+    expect(mock.methodCalls, isEmpty);
+  });
+
+  test('clearAll removes the key entirely', () async {
+    final (:service, :prefs) = await makeService([present.nostrGroupId]);
+
+    await service.clearAll();
+
+    expect(prefs.containsKey(kPendingLeaveKey), isFalse);
+  });
+}
+
+/// Preferences whose removal fails with identifiers in its error.
+class _RemoveThrows implements SharedPreferences {
+  _RemoveThrows(this._inner);
+
+  final SharedPreferences _inner;
+
+  static const planted = 'key 3c3c3c3c at wss://x.example';
+
+  @override
+  List<String>? getStringList(String key) => _inner.getStringList(key);
+
+  @override
+  Future<bool> remove(String key) async => throw StateError(planted);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('unexpected call: ${invocation.memberName}');
 }

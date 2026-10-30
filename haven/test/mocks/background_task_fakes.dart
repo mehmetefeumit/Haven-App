@@ -28,21 +28,34 @@ import 'package:haven/src/services/publish_wake_lock.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// One `encryptLocation` call as the cycle made it.
-class EncryptCall {
-  const EncryptCall({
+/// One seal as the cycle asked for it.
+class SealCall {
+  const SealCall({
     required this.mlsGroupId,
-    required this.senderPubkeyHex,
     required this.latitude,
     required this.longitude,
-    required this.updateIntervalSecs,
+    required this.foreground,
   });
 
   final List<int> mlsGroupId;
-  final String senderPubkeyHex;
   final double latitude;
   final double longitude;
-  final BigInt updateIntervalSecs;
+  final bool foreground;
+}
+
+/// A sealed location as the fake core made it: its payload carries the
+/// circle's PUBLIC `#h` id, so a test can tie a sent event back to its circle.
+class FakeSealedLocation implements SealedLocationFfi {
+  FakeSealedLocation({required this.eventJson, required this.relays});
+
+  final String eventJson;
+  final List<String> relays;
+
+  @override
+  void dispose() {}
+
+  @override
+  bool get isDisposed => false;
 }
 
 /// One `notePublishAcked` stamp as the cycle recorded it.
@@ -61,7 +74,7 @@ class PublishedEvent {
   final List<String> relays;
 }
 
-/// A [CircleManagerFfi] that serves a fixed roster and scripts each encrypt.
+/// A [CircleManagerFfi] that serves a fixed roster and scripts each seal.
 class FakeCircleManager implements CircleManagerFfi {
   FakeCircleManager({List<CircleWithMembersFfi> circles = const []})
     : circles = List.of(circles);
@@ -69,12 +82,10 @@ class FakeCircleManager implements CircleManagerFfi {
   /// What `getVisibleCircles` returns.
   List<CircleWithMembersFfi> circles;
 
-  /// Decides each encrypt's outcome, given the group it is for. The default
-  /// is a plain `sent` outcome whose event JSON carries the circle's PUBLIC
-  /// `#h` id, so a test can tie a published event back to the circle it came
-  /// from.
-  late EncryptLocationOutcomeFfi Function(List<int> mlsGroupId)
-  encryptOutcome = sentOutcomeFor;
+  /// Decides each seal's outcome, given the group it is for. The default
+  /// seals, with an event JSON carrying the circle's PUBLIC `#h` id.
+  late SealOutcomeFfi Function(List<int> mlsGroupId) sealOutcome =
+      sealedOutcomeFor;
 
   /// How many times the roster was read.
   ///
@@ -83,10 +94,8 @@ class FakeCircleManager implements CircleManagerFfi {
   /// is exactly the difference the historical-re-delivery dedupe makes.
   int rosterReads = 0;
 
-  final List<EncryptCall> encryptCalls = [];
+  final List<SealCall> sealCalls = [];
   final List<AckStamp> acks = [];
-  final List<BigInt> confirmedTokens = [];
-  final List<BigInt> rolledBackTokens = [];
   int pruneExpiredLastKnownCalls = 0;
 
   /// Rows the next prune reports having deleted — the number the FGS renders
@@ -100,63 +109,73 @@ class FakeCircleManager implements CircleManagerFfi {
   /// `onDestroy` does and the one thing no later sample can see.
   void Function()? onDispose;
 
-  /// A `sent` outcome addressed to [relays] for the roster circle whose MLS
-  /// id is [mlsGroupId]. Like the real engine it exposes only the circle's
-  /// public `nostrGroupId` (Rule 4) — in the payload's `#h` and in the
-  /// outcome — never the MLS id it was asked with.
-  EncryptLocationOutcomeFfi sentOutcomeFor(
+  /// A sealed outcome addressed to [relays] for the roster circle whose MLS
+  /// id is [mlsGroupId]. Like the real engine its payload exposes only the
+  /// circle's public `nostrGroupId` (Rule 4), never the MLS id.
+  SealOutcomeFfi sealedOutcomeFor(
     List<int> mlsGroupId, {
     List<String> relays = const ['wss://payload.relay.example'],
   }) {
     final nostrGroupId = circles
         .firstWhere(
           (c) => hexOf(c.circle.mlsGroupId) == hexOf(mlsGroupId),
-          orElse: () => throw StateError('encrypt for a group not in roster'),
+          orElse: () => throw StateError('seal for a group not in roster'),
         )
         .circle
         .nostrGroupId;
-    return EncryptLocationOutcomeFfi(
-      sent: EncryptedLocationFfi(
+    return SealOutcomeFfi(
+      sealed: FakeSealedLocation(
         eventJson: '{"kind":445,"h":"${hexOf(nostrGroupId)}"}',
-        nostrGroupId: nostrGroupId,
         relays: relays,
       ),
+      replayed: const [],
+      errored: false,
     );
   }
+
+  /// What the fake core's seal answers, recorded as the cycle asked for it.
+  SealOutcomeFfi seal({
+    required List<int> mlsGroupId,
+    required double latitude,
+    required double longitude,
+    required bool foreground,
+  }) {
+    sealCalls.add(
+      SealCall(
+        mlsGroupId: mlsGroupId,
+        latitude: latitude,
+        longitude: longitude,
+        foreground: foreground,
+      ),
+    );
+    return sealOutcome(mlsGroupId);
+  }
+
+  /// Runs inside each roster read, after it is counted.
+  void Function()? onRosterRead;
 
   @override
   Future<List<CircleWithMembersFfi>> getVisibleCircles() async {
     rosterReads++;
+    onRosterRead?.call();
     return List.of(circles);
   }
 
   /// The single-circle read `NostrCircleService.getCircle` delegates to — how
   /// the FGS resolves which circle a REPLAYED result belongs to.
+  /// When set, a circle lookup for a group not in the roster throws it.
+  StateError? circleLookupThrows;
+
   @override
   Future<CircleWithMembersFfi?> getCircle({
     required List<int> mlsGroupId,
-  }) async => circles
-      .where((c) => hexOf(c.circle.mlsGroupId) == hexOf(mlsGroupId))
-      .firstOrNull;
-
-  @override
-  Future<EncryptLocationOutcomeFfi> encryptLocation({
-    required List<int> mlsGroupId,
-    required String senderPubkeyHex,
-    required double latitude,
-    required double longitude,
-    required BigInt updateIntervalSecs,
   }) async {
-    encryptCalls.add(
-      EncryptCall(
-        mlsGroupId: mlsGroupId,
-        senderPubkeyHex: senderPubkeyHex,
-        latitude: latitude,
-        longitude: longitude,
-        updateIntervalSecs: updateIntervalSecs,
-      ),
-    );
-    return encryptOutcome(mlsGroupId);
+    final found = circles
+        .where((c) => hexOf(c.circle.mlsGroupId) == hexOf(mlsGroupId))
+        .firstOrNull;
+    final error = circleLookupThrows;
+    if (found == null && error != null) throw error;
+    return found;
   }
 
   @override
@@ -164,37 +183,6 @@ class FakeCircleManager implements CircleManagerFfi {
     required List<int> nostrGroupId,
     required int atMs,
   }) async => acks.add(AckStamp(nostrGroupId: nostrGroupId, atMs: atMs));
-
-  /// What each resolution REPLAYS, keyed by the pending token being resolved:
-  /// resolving a staged commit makes the engine replay everything it buffered
-  /// while that commit was in flight. Unset tokens replay nothing.
-  final Map<BigInt, DecryptLocationOutcomeFfi> replayOnResolve = {};
-
-  @override
-  Future<DecryptLocationOutcomeFfi> confirmPublished({
-    required PendingStateRefFfi pending,
-  }) async {
-    confirmedTokens.add(pending.token);
-    return _replayFor(pending.token);
-  }
-
-  @override
-  Future<DecryptLocationOutcomeFfi> publishFailed({
-    required PendingStateRefFfi pending,
-  }) async {
-    rolledBackTokens.add(pending.token);
-    return _replayFor(pending.token);
-  }
-
-  /// One-shot: a token's replay is handed back by the FIRST resolution of it,
-  /// exactly as the engine's buffer is drained once.
-  DecryptLocationOutcomeFfi _replayFor(BigInt token) =>
-      replayOnResolve.remove(token) ??
-      const DecryptLocationOutcomeFfi(
-        results: [],
-        autoCommits: [],
-        proposals: [],
-      );
 
   @override
   Future<int> pruneExpiredLastKnown({required int nowUnixSecs}) async {
@@ -260,6 +248,16 @@ class FakeNostrRelayService extends Fake implements NostrRelayService {
   /// Thrown by the next `initialize` call, once.
   Exception? initializeErrorOnce;
 
+  /// What `onDestroy` drains, unbounded, before it shuts the pool.
+  @override
+  Future<void>? inFlightNonLocationDrives;
+
+  /// Whether the stop latched this service ([NostrRelayService.latch]).
+  bool latched = false;
+
+  @override
+  void latch() => latched = true;
+
   /// Runs inside each publish, before it returns — the seam through
   /// which a test changes the world mid-cycle (a foreground resume, a stop).
   FutureOr<void> Function(PublishedEvent event)? onPublish;
@@ -289,9 +287,13 @@ class FakeNostrRelayService extends Fake implements NostrRelayService {
 
   bool get shutdownCalled => shutdownCalls > 0;
 
+  /// When set, each `initialize` parks on it after it is counted.
+  Completer<void>? initializeGate;
+
   @override
   Future<void> initialize() async {
     initializeCalls++;
+    await initializeGate?.future;
     final error = initializeErrorOnce;
     if (error != null) {
       initializeErrorOnce = null;
@@ -304,12 +306,6 @@ class FakeNostrRelayService extends Fake implements NostrRelayService {
     required String eventJson,
     required List<String> relays,
   }) => _record(eventJson, relays, publishedOnLadder);
-
-  @override
-  Future<PublishResult> publishLocationEvent({
-    required String eventJson,
-    required List<String> relays,
-  }) => _record(eventJson, relays, publishedLocations);
 
   Future<PublishResult> _record(
     String eventJson,
@@ -343,6 +339,91 @@ class FakeNostrRelayService extends Fake implements NostrRelayService {
     shutdownCalls++;
     await onShutdown?.call();
   }
+
+  /// What each stored-record drive answers.
+  ResumeOutcomeFfi driveOutcome = const ResumeOutcomeFfi(
+    withdrawn: [],
+    requeued: [],
+    replayed: [],
+    errored: false,
+  );
+
+  /// The foreground word each stored-record drive carried, in order.
+  final List<bool> drives = [];
+
+  /// When set, every stored-record drive throws it.
+  StateError? driveThrows;
+
+  /// When set, every stored-record drive parks on it.
+  Completer<void>? driveGate;
+
+  @override
+  Future<ResumeOutcomeFfi> resume({
+    required CircleManagerFfi circle,
+    required bool foreground,
+  }) async {
+    drives.add(foreground);
+    await driveGate?.future;
+    final error = driveThrows;
+    if (error != null) throw error;
+    return driveOutcome;
+  }
+
+  /// What each send answers; unset, a send is accepted unless [acceptedBy]
+  /// is empty, when it is refused.
+  LocationPublishFfi? publishAnswer;
+
+  @override
+  Future<SealOutcomeFfi> sealLocation({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required double latitude,
+    required double longitude,
+    required bool foreground,
+  }) async => (circle as FakeCircleManager).seal(
+    mlsGroupId: mlsGroupId,
+    latitude: latitude,
+    longitude: longitude,
+    foreground: foreground,
+  );
+
+  @override
+  Future<LocationPublishFfi> publishLocation({
+    required CircleManagerFfi circle,
+    required SealedLocationFfi sealed,
+  }) async {
+    final location = sealed as FakeSealedLocation;
+    await _record(location.eventJson, location.relays, publishedLocations);
+    return publishAnswer ??
+        (acceptedBy.isEmpty
+            ? LocationPublishFfi.refused
+            : LocationPublishFfi.accepted);
+  }
+
+  /// What each leave carry-on answers, by MLS group id hex; a circle not
+  /// named has no leave.
+  final Map<String, LeaveOutcomeFfi> leaveOutcomes = {};
+
+  /// Runs inside each leave carry-on, before it answers.
+  FutureOr<void> Function()? onResumeLeave;
+
+  /// Each leave carry-on, in order: its MLS group id hex and foreground word.
+  final List<({String groupId, bool foreground})> leaveCarryOns = [];
+
+  @override
+  Future<LeaveOutcomeFfi> resumeLeave({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required bool foreground,
+  }) async {
+    final groupId = mlsGroupId
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+    leaveCarryOns.add((groupId: groupId, foreground: foreground));
+    await onResumeLeave?.call();
+    return leaveOutcomes[groupId] ??
+        const LeaveOutcomeFfi(status: LeaveStatusFfi.notLeaving);
+  }
 }
 
 /// A [LocationSharingService] whose receive plane is a recorder.
@@ -356,6 +437,9 @@ class FakeLocationSharingService extends Fake
 
   final List<Circle> fetched = [];
 
+  /// The stop each fetch was handed, in order.
+  final List<bool Function()?> fetchStops = [];
+
   /// Every location handed to [ingestStreamedLocation], with the circle it
   /// was routed under.
   ///
@@ -363,6 +447,15 @@ class FakeLocationSharingService extends Fake
   /// place a received fix can land: a replay that never reaches it is a fix
   /// the engine already wrote `Processed` and nobody ever sees.
   final List<({Circle circle, DecryptedLocation decrypted})> ingested = [];
+
+  /// The MLS group id of each circle [removeCircle] forgot, in order.
+  final List<List<int>> removed = [];
+
+  @override
+  Future<void> removeCircle({
+    required List<int> mlsGroupId,
+    required List<int> nostrGroupId,
+  }) async => removed.add(mlsGroupId);
 
   @override
   Future<void> ingestStreamedLocation({
@@ -374,7 +467,9 @@ class FakeLocationSharingService extends Fake
   Future<LocationFetchResult> fetchMemberLocations({
     required Circle circle,
     DateTime? since,
+    bool Function()? stopped,
   }) async {
+    fetchStops.add(stopped);
     fetched.add(circle);
     await onFetch?.call(circle);
     if (failFor.contains(hexOf(circle.nostrGroupId))) {
@@ -647,24 +742,27 @@ class FakeLocationEventService implements LocationEventService {
       throw UnimplementedError('unexpected call: ${invocation.memberName}');
 }
 
-/// Hex-encodes a group id the way the cycle keys its schedule (`_bgCircleKey`).
+/// Hex-encodes a group id (the cycle keys its schedule by the MLS one).
 String hexOf(List<int> bytes) =>
     bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
 /// An accepted, publish-eligible circle whose ids are derived from [seed]
-/// (`mlsGroupId` bytes are `seed`, `nostrGroupId` bytes are `seed + 100`).
+/// (`mlsGroupId` bytes are `seed`, `nostrGroupId` bytes are `seed + 100`, or
+/// [routedAs] for the same circle after a routing rotation).
 ///
 /// [members] defaults to one admin because an accepted circle with NO
 /// members is a pre-cutover orphan that `filterPublishEligibleCircles` drops.
 CircleWithMembersFfi circleFixture({
   required int seed,
+  int? routedAs,
   List<String> relays = const ['wss://circle.relay.example'],
   String membershipStatus = 'accepted',
   List<CircleMemberFfi>? members,
+  CircleEngineStateFfi engineState = CircleEngineStateFfi.live,
 }) => CircleWithMembersFfi(
   circle: CircleFfi(
     mlsGroupId: Uint8List(32)..fillRange(0, 32, seed),
-    nostrGroupId: Uint8List(32)..fillRange(0, 32, seed + 100),
+    nostrGroupId: Uint8List(32)..fillRange(0, 32, routedAs ?? seed + 100),
     displayName: 'Circle $seed',
     circleType: 'location_sharing',
     relays: relays,
@@ -683,11 +781,13 @@ CircleWithMembersFfi circleFixture({
           isAdmin: true,
         ),
       ],
+  engineState: engineState,
 );
 
-/// The schedule key the cycle uses for [fixture].
+/// The schedule key the cycle uses for [fixture]: its MLS group id, which a
+/// routing rotation leaves alone.
 String scheduleKeyOf(CircleWithMembersFfi fixture) =>
-    hexOf(fixture.circle.nostrGroupId);
+    hexOf(fixture.circle.mlsGroupId);
 
 /// The identity the harness publishes as.
 const String kHarnessPubkeyHex =

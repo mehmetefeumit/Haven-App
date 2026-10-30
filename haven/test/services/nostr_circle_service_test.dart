@@ -28,6 +28,9 @@ import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
+import '../helpers/fake_change_driver.dart';
+import '../helpers/log_capture.dart';
+
 // ---------------------------------------------------------------------------
 // Minimal stubs used by NostrCircleService initialization tests
 // ---------------------------------------------------------------------------
@@ -41,6 +44,12 @@ class _StubRelayService implements RelayService {
   Future<CatchupResult> runCatchup({
     required CircleManagerFfi circle,
     required String ownPubkeyHex,
+    int maxDurationSecs = 20,
+  }) async => const CatchupResult.empty();
+
+  @override
+  Future<CatchupResult> runRefusedRefetch({
+    required CircleManagerFfi circle,
     int maxDurationSecs = 20,
   }) async => const CatchupResult.empty();
 
@@ -60,30 +69,19 @@ class _StubRelayService implements RelayService {
   }) async => const RelayListMaintenanceResult.empty();
 
   @override
-  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
-      const SubscriptionHealthResult.empty();
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth({
+    required bool foreground,
+  }) async => const SubscriptionHealthResult.empty();
 
-  @override
-  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
-    required CircleManagerFfi circle,
-    required List<int> identitySecretBytes,
-  }) async => const LegacyRetractionResult.empty();
-
-  @override
-  Future<List<String>> fetchKeyPackageRelays(String pubkey) =>
-      throw UnimplementedError();
 
   @override
   Future<List<String>> fetchNip65Relays(String pubkey) =>
       throw UnimplementedError();
 
   @override
-  Future<KeyPackageData?> fetchKeyPackage(String pubkey) =>
-      throw UnimplementedError();
-
-  @override
-  Future<PublishResult> publishWelcome({
-    required GiftWrappedWelcome welcomeEvent,
+  Future<KeyPackageData?> fetchKeyPackage(
+    String pubkey, {
+    List<int>? mlsGroupId,
   }) => throw UnimplementedError();
 
   @override
@@ -91,18 +89,6 @@ class _StubRelayService implements RelayService {
     required String eventJson,
     required List<String> relays,
   }) => throw UnimplementedError();
-
-  @override
-  Future<PublishResult> publishLocationEvent({
-    required String eventJson,
-    required List<String> relays,
-  }) => throw UnimplementedError();
-
-  @override
-  Future<void> publishEventFireAndForget({
-    required String eventJson,
-    required List<String> relays,
-  }) async {}
 
   @override
   Future<List<String>> fetchGiftWraps({
@@ -146,6 +132,17 @@ class _ThrowingDataDirectoryProvider implements DataDirectoryProvider {
   Future<String> getDataDirectory() async {
     wasCalled = true;
     throw Exception('Stub: stop before FFI');
+  }
+}
+
+/// A manager whose release throws.
+class _ThrowingDisposeManager extends _FakeManager {
+  int disposeCalls = 0;
+
+  @override
+  void dispose() {
+    disposeCalls++;
+    throw StateError('release failed');
   }
 }
 
@@ -399,13 +396,58 @@ void main() {
       });
     });
 
+    group('unsentNpubs', () {
+      KeyPackageData invitee(String hex, String npub) => KeyPackageData(
+        pubkey: npub,
+        eventJson: '{"kind":30443,"pubkey":"$hex"}',
+        relays: const [],
+      );
+
+      test('names, in the order the core gave, each invitee whose founding '
+          'Welcome is still owed, by the npub they were invited under', () {
+        final named = NostrCircleService.unsentNpubs(
+          ['bb' * 32, 'cc' * 32],
+          [
+            invitee('cc' * 32, 'npub1c'),
+            invitee('aa' * 32, 'npub1a'),
+            invitee('bb' * 32, 'npub1b'),
+          ],
+        );
+        expect(named, ['npub1b', 'npub1c']);
+      });
+
+      test('a recipient nobody was invited under names nobody', () {
+        expect(
+          NostrCircleService.unsentNpubs(
+            ['dd' * 32],
+            [invitee('aa' * 32, 'npub1a')],
+          ),
+          isEmpty,
+        );
+      });
+
+      test('a package that does not parse names nobody', () {
+        expect(
+          NostrCircleService.unsentNpubs(
+            ['aa' * 32],
+            [
+              const KeyPackageData(
+                pubkey: 'npub1a',
+                eventJson: 'not json',
+                relays: [],
+              ),
+            ],
+          ),
+          isEmpty,
+        );
+      });
+    });
+
     group('CircleCreationResult', () {
       test('creates with circle and welcome delivery counts', () {
-        // Publish-before-apply (Rule 13): NostrCircleService.createCircle now
-        // publishes the gift-wrapped Welcomes and confirms/rolls back the
-        // engine's pending state internally, so the result carries delivery
-        // counts (mirrors AddMemberResult) rather than the raw welcome
-        // events.
+        // NostrCircleService.createCircle creates through the fanout driver,
+        // which records and sends each founding Welcome, so the result
+        // carries counts (mirrors AddMemberResult), never a Welcome event.
         final circle = Circle(
           mlsGroupId: const [1, 2, 3, 4],
           nostrGroupId: const [5, 6, 7, 8],
@@ -427,33 +469,6 @@ void main() {
         expect(result.circle, equals(circle));
         expect(result.welcomesSent, 1);
         expect(result.welcomesTotal, 1);
-      });
-    });
-
-    group('GiftWrappedWelcome', () {
-      test('creates with all fields', () {
-        const welcome = GiftWrappedWelcome(
-          recipientPubkey:
-              'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          recipientRelays: ['wss://relay1.com', 'wss://relay2.com'],
-          eventJson: '{"kind":1059,"content":"encrypted"}',
-        );
-
-        expect(welcome.recipientPubkey.length, 64);
-        expect(welcome.recipientRelays.length, 2);
-        expect(welcome.eventJson, contains('"kind":1059'));
-      });
-
-      test('event is kind 1059 gift wrap', () {
-        const welcome = GiftWrappedWelcome(
-          recipientPubkey:
-              'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          recipientRelays: ['wss://relay.example.com'],
-          eventJson: '{"kind":1059,"content":"encrypted_seal"}',
-        );
-
-        // Kind 1059 is NIP-59 gift wrap
-        expect(welcome.eventJson, contains('1059'));
       });
     });
 
@@ -616,18 +631,6 @@ void main() {
       // Nostr uses secp256k1 with 32-byte private keys
       final secretBytes = List<int>.filled(32, 0);
       expect(secretBytes.length, 32);
-    });
-
-    test('welcome events use NIP-59 gift wrapping', () {
-      // Kind 444 Welcome events are wrapped in kind 1059
-      const welcome = GiftWrappedWelcome(
-        recipientPubkey:
-            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-        recipientRelays: ['wss://relay.example.com'],
-        eventJson: '{"kind":1059}',
-      );
-
-      expect(welcome.eventJson, contains('1059'));
     });
 
     test('nostrGroupId is exposed, not mlsGroupId', () {
@@ -867,6 +870,31 @@ void main() {
       );
     });
 
+    test('a release that throws still leaves no handle behind the latch',
+        () async {
+      // A handle left in the field would be handed to the next caller,
+      // disposed, in place of the latch's refusal.
+      final manager = _ThrowingDisposeManager();
+      final service = NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: manager,
+      );
+
+      await expectLater(service.closeAndInvalidate(), throwsStateError);
+      expect(manager.disposeCalls, 1, reason: 'premise: the release threw');
+      CircleManagerFfi? handed;
+      try {
+        handed = await service.getCircleManagerFfi();
+      } on Object catch (_) {
+        // The latch's refusal.
+      }
+      expect(
+        handed,
+        isNull,
+        reason: 'the disposed handle was handed out after the logout',
+      );
+    });
+
     test(
         'closeAndInvalidate DISPOSES the manager handle, releasing the '
         'Rule-14 session slot deterministically', () async {
@@ -1007,32 +1035,7 @@ void main() {
     });
 
     test(
-        'destroyLegacyMlsState installs the keyring before the FFI call '
-        '(same prerequisite as wipeAllMlsState)', () async {
-      // destroy_legacy_mls_state destroys a keyring entry, not just files, so
-      // — like wipeAllMlsState — the backend must be installed first; the
-      // Rust function does not install it itself.
-      var keyringCallCount = 0;
-      final service = NostrCircleService(
-        relayService: _StubRelayService(),
-        dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
-        keyringInitializer: () async {
-          keyringCallCount++;
-        },
-      );
-
-      await expectLater(service.destroyLegacyMlsState(), throwsA(anything));
-      expect(
-        keyringCallCount,
-        1,
-        reason:
-            'destroyLegacyMlsState must install the keyring before the FFI '
-            'call, exactly like wipeAllMlsState',
-      );
-    });
-
-    test(
-        'destroyLegacyMlsState surfaces a generic CircleServiceException on '
+        'acknowledgeStorageReset surfaces a generic CircleServiceException on '
         'failure (no internal detail leak)', () async {
       final dataDir = _ThrowingDataDirectoryProvider();
       final service = NostrCircleService(
@@ -1042,11 +1045,11 @@ void main() {
       );
 
       try {
-        await service.destroyLegacyMlsState();
+        await service.acknowledgeStorageReset();
         fail('Expected CircleServiceException');
       } on CircleServiceException catch (e) {
         expect(dataDir.wasCalled, isTrue);
-        expect(e.message, 'Failed to destroy legacy MLS state');
+        expect(e.message, 'Failed to acknowledge the reset');
         expect(e.message, isNot(contains('Stub: stop before FFI')));
       }
     });
@@ -1138,26 +1141,149 @@ void main() {
   });
 
   _publishResolutionTests();
+  _rejoinAndDisbandTests();
+  _recoveryTests();
 }
 
-/// What a publish resolution hands back, and what this service does with it.
-///
-/// Resolving a staged commit replays everything the engine buffered while that
-/// commit was in flight. Two promises live on this side of the boundary: the
-/// results are CONVERTED (which is what records a replayed `Unrecoverable` as
-/// a blocked circle, Rule 8), and a throwing FFI still reaches the caller as a
-/// generic exception rather than as the engine's own error text (Rule 8 again,
-/// and Rule 15 — that text can carry group ids).
-void _publishResolutionTests() {
-  DecryptLocationOutcomeFfi outcome({
-    List<LocationMessageResultFfi> results = const [],
-    List<String> proposals = const [],
-  }) => DecryptLocationOutcomeFfi(
-    results: results,
-    autoCommits: const [],
-    proposals: proposals,
+/// The standing recovery read and the unmade-removal read.
+void _recoveryTests() {
+  const groupId = [4, 4, 4, 4];
+  final circle = Circle(
+    mlsGroupId: groupId,
+    nostrGroupId: groupId,
+    displayName: 'Fixture',
+    circleType: CircleType.locationSharing,
+    relays: const [],
+    membershipStatus: MembershipStatus.accepted,
+    members: const [],
+    createdAt: DateTime.utc(2026),
+    updatedAt: DateTime.utc(2026),
   );
 
+  group('the recovery read', () {
+    test('maps every cause by variant, worst first, and nothing to null',
+        () async {
+      final driver = FakeChangeDriver();
+      final service = NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: _LeaveManager(),
+        changeDriver: driver,
+      );
+      final read = <CircleRecoveryCause?>[];
+      for (final cause in RecoveryCauseFfi.values) {
+        driver.recovery = cause;
+        read.add(await service.circleRecovery(circle));
+      }
+      // Index for index: the core's worst-first order is kept, and each
+      // variant lands on its own Dart cause.
+      expect(
+        read.map((c) => c!.name),
+        RecoveryCauseFfi.values.map((c) => c.name),
+      );
+      expect(
+        CircleRecoveryCause.values,
+        hasLength(RecoveryCauseFfi.values.length),
+      );
+      driver.recovery = null;
+      expect(await service.circleRecovery(circle), isNull);
+      expect(driver.groupIds, everyElement(groupId));
+      expect(
+        driver.foregrounds,
+        everyElement(isFalse),
+        reason: 'the injected-manager service is never the app in front',
+      );
+    });
+
+    test('a failed read throws fixed text and logs only its type', () async {
+      final capture = LogCapture.install();
+      final driver = FakeChangeDriver()
+        ..throws = StateError(
+          'group ${_hexOf(groupId)} at wss://planted.example npub1planted',
+        );
+      final service = NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: _LeaveManager(),
+        changeDriver: driver,
+      );
+      await expectLater(
+        service.circleRecovery(circle),
+        throwsA(
+          isA<CircleServiceException>().having(
+            (e) => e.message,
+            'message',
+            'Failed to read the circle',
+          ),
+        ),
+      );
+      capture
+        ..assertContains('[Recovery] read failed: StateError')
+        ..assertNoNeedles([
+          _hexOf(groupId),
+          'wss://planted.example',
+          'npub1planted',
+        ]);
+    });
+  });
+
+  group('the unmade-removal read', () {
+    test('answers who is still listed; a store fault throws fixed text and '
+        'logs only its type', () async {
+      final manager = _RemovalManager()..kept = ['ab' * 32];
+      final service = NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: manager,
+      );
+      expect(await service.unmadeRemovalMembers(groupId), ['ab' * 32]);
+      expect(manager.askedFor, groupId);
+
+      final capture = LogCapture.install();
+      manager.error = StateError(
+        'group ${_hexOf(groupId)} member ${'ab' * 32} wss://planted.example',
+      );
+      await expectLater(
+        service.unmadeRemovalMembers(groupId),
+        throwsA(isA<CircleServiceException>()),
+        reason: 'an empty answer would hide a member the user tried to remove',
+      );
+      capture
+        ..assertContains('[Recovery] removal read failed: StateError')
+        ..assertNoNeedles([_hexOf(groupId), 'ab' * 32, 'wss://planted']);
+    });
+  });
+}
+
+/// A manager whose unmade-removal read answers [kept], or throws [error].
+class _RemovalManager implements CircleManagerFfi {
+  List<String> kept = const [];
+  Object? error;
+  List<int>? askedFor;
+
+  @override
+  List<String> unmadeRemovalMembers({required List<int> mlsGroupId}) {
+    askedFor = mlsGroupId;
+    final failure = error;
+    if (failure != null) Error.throwWithStackTrace(failure, StackTrace.current);
+    return kept;
+  }
+
+  @override
+  void dispose() {}
+
+  @override
+  bool get isDisposed => false;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('unexpected call: ${invocation.memberName}');
+}
+
+/// What a drive hands back, and what this service does with it.
+///
+/// Two promises live on this side of the boundary: what a drive replayed is
+/// CONVERTED, and a throwing FFI still reaches the caller as a generic
+/// exception rather than as the engine's own error text (Rule 8, and Rule 15 —
+/// that text can carry group ids).
+void _publishResolutionTests() {
   LocationMessageResultFfi unrecoverable(List<int> mlsGroupId) =>
       LocationMessageResultFfi(
         kind: LocationMessageResultKindFfi.unrecoverable,
@@ -1165,304 +1291,556 @@ void _publishResolutionTests() {
         epoch: BigInt.zero,
       );
 
-  LocationMessageResultFfi peerLocation(List<int> mlsGroupId) =>
-      LocationMessageResultFfi(
-        kind: LocationMessageResultKindFfi.location,
-        location: DecryptedLocationFfi(
-          senderPubkey: 'ab' * 32,
-          latitude: 12.5,
-          longitude: -3.25,
-          geohash: 'ezs42',
-          timestamp: 1800000000,
-          expiresAt: 1800000228,
+  group('a circle change goes through the fanout driver', () {
+    // Before: the Dart side published each commit, confirmed it on an ack and
+    // resolved whatever the confirm surfaced. The driver now stages the
+    // commit under a durable record, sends it until a relay takes it and
+    // resolves what it surfaces in Rust; this side maps the answer by variant
+    // and converts what was replayed.
+    const groupId = [4, 4, 4, 4];
+
+    ({
+      NostrCircleService service,
+      FakeChangeDriver driver,
+      _LeaveManager manager,
+    })
+    build() {
+      final driver = FakeChangeDriver();
+      final manager = _LeaveManager();
+      return (
+        service: NostrCircleService.withInjectedManager(
+          relayService: _StubRelayService(),
+          injectedManager: manager,
+          changeDriver: driver,
         ),
-        mlsGroupId: Uint8List.fromList(mlsGroupId),
-        epoch: BigInt.from(4),
+        driver: driver,
+        manager: manager,
+      );
+    }
+
+    Future<CircleCreationResult> create(
+      NostrCircleService service, {
+      List<KeyPackageData> invited = const [],
+    }) => service.createCircle(
+      identitySecretBytes: List<int>.filled(32, 7),
+      memberKeyPackages: invited,
+      name: 'Founded',
+      circleType: CircleType.locationSharing,
+    );
+
+    test("a create is the driver's create: the circle it founded and its "
+        'Welcome counts, the owed invitees named by npub', () async {
+      final t = build();
+      t.driver.creation = CircleCreationOutcomeFfi(
+        circle: _circleWithRelays(const [8, 8], const ['wss://c.example'])
+            .circle,
+        welcomesSent: 1,
+        welcomesTotal: 2,
+        unsentRecipients: ['bb' * 32],
       );
 
-  group('confirmPendingCommit / failPendingCommit', () {
-    const groupId = [9, 8, 7, 6];
+      final result = await create(
+        t.service,
+        invited: [
+          KeyPackageData(
+            pubkey: 'npub1a',
+            eventJson: '{"kind":30443,"pubkey":"${'aa' * 32}"}',
+            relays: const ['wss://inbox-a.example'],
+          ),
+          KeyPackageData(
+            pubkey: 'npub1b',
+            eventJson: '{"kind":30443,"pubkey":"${'bb' * 32}"}',
+            relays: const ['wss://inbox-b.example'],
+          ),
+        ],
+      );
 
-    test('returns the converted outcome, locations and proposals intact',
+      expect(t.driver.calls, ['createCircle']);
+      expect(result.circle.mlsGroupId, const [8, 8]);
+      expect(result.circle.membershipStatus, MembershipStatus.accepted);
+      expect(result.welcomesSent, 1);
+      expect(result.welcomesTotal, 2);
+      expect(result.unsentNpubs, ['npub1b']);
+      expect(t.driver.created?.name, 'Founded');
+      expect(t.driver.created?.circleType, 'location_sharing');
+    });
+
+    test('a create claims the foreground only when the app is resumed',
         () async {
-      final manager = _ResolutionManager(
-        onConfirm: outcome(
-          results: [peerLocation(groupId)],
-          proposals: const ['{"id":"leave","kind":445}'],
+      // The injected-manager service is the background isolate's: never in
+      // front, so it never asks the core to create.
+      final t = build();
+      await create(t.service);
+      expect(t.driver.foregrounds, [false]);
+    });
+
+    test('a create the core refused is no circle: it fails with fixed text, '
+        'and its log line names neither the circle nor an invitee', () async {
+      final capture = LogCapture.install();
+      final t = build();
+      for (final refusal in RefusalFfi.values) {
+        t.driver.creation = CircleCreationOutcomeFfi(
+          refusal: refusal,
+          welcomesSent: 0,
+          welcomesTotal: 1,
+          unsentRecipients: ['cd' * 32],
+        );
+        await expectLater(
+          t.service.createCircle(
+            identitySecretBytes: List<int>.filled(32, 7),
+            memberKeyPackages: [
+              KeyPackageData(
+                pubkey: 'npub1planted',
+                eventJson: '{"kind":30443,"pubkey":"${'cd' * 32}"}',
+                relays: const ['wss://planted.example'],
+              ),
+            ],
+            name: 'Planted Circle Name',
+            circleType: CircleType.locationSharing,
+          ),
+          throwsA(
+            // An invitee no Welcome can reach is its own type, so the page
+            // names the invitee's remedy instead of "try again"; by variant,
+            // never by text (Rule 8).
+            refusal == RefusalFfi.missingWelcomeRelays
+                ? isA<CircleInviteesUnreachableException>()
+                : isA<CircleServiceException>()
+                      .having(
+                        (e) => e.message,
+                        'message',
+                        'Failed to create circle',
+                      )
+                      .having(
+                        (e) => e,
+                        'type',
+                        isNot(isA<CircleInviteesUnreachableException>()),
+                      ),
+          ),
+          reason: refusal.name,
+        );
+      }
+      capture
+        ..assertContains(
+          '[Circle] Create refused: RefusalFfi.missingWelcomeRelays',
+        )
+        ..assertNoNeedles([
+          'cd' * 32,
+          'npub1planted',
+          'wss://planted.example',
+          'Planted Circle Name',
+        ]);
+    });
+
+    test('an invite refused for an invitee no Welcome can reach is its own '
+        'type, by variant', () async {
+      final t = build();
+      t.driver.outcome = evolutionOutcome(
+        PublishStatusFfi.refused,
+        refusal: RefusalFfi.missingWelcomeRelays,
+      );
+      await expectLater(
+        t.service.addMember(
+          mlsGroupId: groupId,
+          memberKeyPackages: const [
+            KeyPackageData(pubkey: 'npub1x', eventJson: '{}', relays: []),
+          ],
         ),
+        throwsA(isA<CircleInviteesUnreachableException>()),
       );
-      final service = NostrCircleService.withInjectedManager(
-        relayService: _StubRelayService(),
-        injectedManager: manager,
+      t.driver.outcome = evolutionOutcome(
+        PublishStatusFfi.refused,
+        refusal: RefusalFfi.foregroundOnly,
       );
-
-      final resolved = await service.confirmPendingCommit(
-        PendingCommitToken(BigInt.from(3)),
+      final other = await t.service.addMember(
+        mlsGroupId: groupId,
+        memberKeyPackages: const [
+          KeyPackageData(pubkey: 'npub1x', eventJson: '{}', relays: []),
+        ],
       );
-
-      expect(resolved.results.single.location?.senderPubkey, 'ab' * 32);
-      expect(resolved.results.single.location?.latitude, 12.5);
-      expect(
-        resolved.results.single.location?.timestamp,
-        DateTime.fromMillisecondsSinceEpoch(1800000000 * 1000),
-        reason: 'the FFI carries seconds; the service type carries a DateTime',
-      );
-      expect(resolved.proposals, ['{"id":"leave","kind":445}']);
-      expect(resolved.autoCommits, isEmpty);
+      expect(other.delivery, ChangeDelivery.rejected);
     });
 
-    test('a replayed Unrecoverable blocks the circle (Rule 8)', () async {
-      final manager = _ResolutionManager(
-        onConfirm: outcome(results: [unrecoverable(groupId)]),
-      );
-      final service = NostrCircleService.withInjectedManager(
-        relayService: _StubRelayService(),
-        injectedManager: manager,
-      );
-
-      expect(service.isCircleBlocked(groupId), isFalse);
-      await service.confirmPendingCommit(PendingCommitToken(BigInt.from(3)));
-      expect(
-        service.isCircleBlocked(groupId),
-        isTrue,
-        reason: 'a resolution that hands back the raw FFI results without '
-            'converting them loses the blocked-circle marker, and the UI goes '
-            'on offering send/mutate on a group MLS cannot recover',
-      );
-    });
-
-    test('a throwing confirm surfaces a generic exception, never the engine '
-        'text', () async {
-      const engineText = 'mls group 0xdeadbeef is unrecoverable';
-      final manager = _ResolutionManager(confirmThrows: engineText);
-      final service = NostrCircleService.withInjectedManager(
-        relayService: _StubRelayService(),
-        injectedManager: manager,
-      );
+    test('a create the driver errors on fails with fixed text', () async {
+      final capture = LogCapture.install();
+      final t = build()
+        ..driver.throws = 'group ${'ab' * 32} at wss://x refused';
 
       await expectLater(
-        service.confirmPendingCommit(PendingCommitToken(BigInt.from(3))),
+        create(t.service),
         throwsA(
           isA<CircleServiceException>().having(
             (e) => e.message,
             'message',
-            'Failed to confirm auto-commit',
+            'Failed to create circle',
           ),
         ),
       );
+      capture.assertNoNeedles(['ab' * 32, 'wss://x']);
     });
 
-    test('a throwing fail-report is swallowed and reports an empty outcome',
+    test("a polled event is the driver's ingest: held only when the engine "
+        'defers it, its replay converted', () async {
+      final t = build();
+      IngestOutcomeFfi answer(ReceiveVerdictFfi verdict) => IngestOutcomeFfi(
+        verdict: verdict,
+        replayed: [unrecoverable(groupId)],
+        errored: false,
+      );
+      t.driver.ingests = [
+        for (final v in ReceiveVerdictFfi.values) answer(v),
+      ];
+
+      final held = <ReceiveVerdictFfi, bool>{};
+      for (final v in ReceiveVerdictFfi.values) {
+        final ingested = await t.service.ingestEvent(eventJson: '{"id":"e"}');
+        held[v] = ingested.held;
+        expect(ingested.results.single.kind, LocationEventKind.unrecoverable);
+      }
+
+      expect(held, {
+        ReceiveVerdictFfi.applied: false,
+        ReceiveVerdictFfi.deferred_: true,
+        ReceiveVerdictFfi.noEvidence: false,
+        ReceiveVerdictFfi.stranded: false,
+      });
+      expect(t.driver.foregrounds, everyElement(isFalse));
+    });
+
+    test('an ingest whose drive erred says so with fixed text', () async {
+      final capture = LogCapture.install();
+      final t = build()
+        ..driver.ingests = [
+          IngestOutcomeFfi(
+            verdict: ReceiveVerdictFfi.applied,
+            replayed: [unrecoverable(groupId)],
+            errored: true,
+          ),
+        ];
+
+      await t.service.ingestEvent(eventJson: '{"id":"${'ef' * 32}"}');
+
+      capture
+        ..assertContains('[Circle] ingest drive ended on an error')
+        ..assertNoNeedles([_hexOf(groupId), 'ef' * 32]);
+    });
+
+    test('an ingest the driver answers with an error fails with fixed text',
         () async {
-      final manager = _ResolutionManager(failThrows: 'boom');
-      final service = NostrCircleService.withInjectedManager(
-        relayService: _StubRelayService(),
-        injectedManager: manager,
-      );
+      final capture = LogCapture.install();
+      final t = build()
+        ..driver.throws = 'mls group ${_hexOf(groupId)} at wss://x refused';
 
-      final resolved = await service.failPendingCommit(
-        PendingCommitToken(BigInt.from(3)),
+      await expectLater(
+        t.service.ingestEvent(eventJson: '{"id":"e"}'),
+        throwsA(
+          isA<CircleServiceException>().having(
+            (e) => e.message,
+            'message',
+            'Failed to decrypt location',
+          ),
+        ),
       );
+      capture.assertNoNeedles([_hexOf(groupId), 'wss://x']);
+    });
 
-      expect(resolved.results, isEmpty);
-      expect(resolved.autoCommits, isEmpty);
+    test("a seal is the driver's seal: sealed, held or refused by its typed "
+        'fields, its replay converted', () async {
+      final t = build();
+      final sealed = FakeSealedLocation();
+      t.driver.sealOutcome = SealOutcomeFfi(
+        sealed: sealed,
+        replayed: [unrecoverable(groupId)],
+        errored: false,
+      );
+      final made = await t.service.sealLocation(
+        mlsGroupId: groupId,
+        latitude: 1.5,
+        longitude: -2.5,
+      );
+      expect(made, isA<LocationSealed>());
+      expect((made as LocationSealed).sealed, same(sealed));
+      expect(made.replayed.single.kind, LocationEventKind.unrecoverable);
+      expect(t.driver.sealedFixes.single, (latitude: 1.5, longitude: -2.5));
+
+      // Every hold, a routing collision included, is a hold: nothing sealed,
+      // and every plane treats it as a deferral.
+      for (final cause in SendHeldFfi.values.where(
+        (cause) => cause != SendHeldFfi.nothing,
+      )) {
+        t.driver.sealOutcome = SealOutcomeFfi(
+          heldBy: cause,
+          replayed: const [],
+          errored: false,
+        );
+        final held = await t.service.sealLocation(
+          mlsGroupId: groupId,
+          latitude: 1,
+          longitude: 2,
+        );
+        expect(held, isA<LocationSendHeld>(), reason: cause.name);
+      }
+
+      t.driver.sealOutcome = const SealOutcomeFfi(
+        refusal: RefusalFfi.leaveInProgress,
+        replayed: [],
+        errored: false,
+      );
+      final refused = await t.service.sealLocation(
+        mlsGroupId: groupId,
+        latitude: 1,
+        longitude: 2,
+      );
+      expect(refused, isA<LocationSendHeld>());
+      expect(t.driver.groupIds, everyElement(groupId));
+    });
+
+    test('a seal or send the driver errors on fails with fixed text, and no '
+        'seal log line names the circle', () async {
+      final capture = LogCapture.install();
+      final t = build()
+        ..driver.sealOutcome = const SealOutcomeFfi(
+          heldBy: SendHeldFfi.awaitingRelays,
+          replayed: [],
+          errored: true,
+        );
+      await t.service.sealLocation(
+        mlsGroupId: groupId,
+        latitude: 1,
+        longitude: 2,
+      );
+      t.driver.throws = 'mls group ${_hexOf(groupId)} at wss://x refused';
+
+      await expectLater(
+        t.service.sealLocation(
+          mlsGroupId: groupId,
+          latitude: 1,
+          longitude: 2,
+        ),
+        throwsA(
+          isA<CircleServiceException>().having(
+            (e) => e.message,
+            'message',
+            'Failed to seal location',
+          ),
+        ),
+      );
+      await expectLater(
+        t.service.publishSealedLocation(
+          LocationSealed(FakeSealedLocation(), replayed: const []),
+        ),
+        throwsA(
+          isA<CircleServiceException>().having(
+            (e) => e.message,
+            'message',
+            'Failed to publish location',
+          ),
+        ),
+      );
+      capture
+        ..assertContains('[Circle] seal drive ended on an error')
+        ..assertContains('[Circle] location seal failed')
+        ..assertContains('[Circle] location publish failed')
+        ..assertNoNeedles([_hexOf(groupId), 'wss://x']);
+    });
+
+    test("a sealed location's one send is the driver's answer", () async {
+      final t = build()..driver.publishAnswer = LocationPublishFfi.clockBehind;
+
       expect(
-        resolved.proposals,
-        isEmpty,
-        reason: 'the caller already knows the publish failed; a rollback that '
-            'itself failed replayed nothing, and an empty outcome says so',
+        await t.service.publishSealedLocation(
+          LocationSealed(FakeSealedLocation(), replayed: const []),
+        ),
+        LocationPublishFfi.clockBehind,
+      );
+      expect(t.driver.calls, ['publishLocation']);
+    });
+
+    test('every leave status maps to the delivery it means', () {
+      expect({for (final s in LeaveStatusFfi.values) s: leaveDeliveryOf(s)}, {
+        LeaveStatusFfi.completed: LeaveDelivery.left,
+        // The circle is not on this device: nothing of it is left to leave.
+        LeaveStatusFfi.circleNotFound: LeaveDelivery.left,
+        // The intent stands, and the next wake carries it on.
+        LeaveStatusFfi.proposed: LeaveDelivery.leaving,
+        LeaveStatusFfi.pending: LeaveDelivery.leaving,
+        LeaveStatusFfi.foregroundOnly: LeaveDelivery.leaving,
+        LeaveStatusFfi.engineHeld: LeaveDelivery.leaving,
+        // Refused for good, the intent ended.
+        LeaveStatusFfi.adminMustStepDown: LeaveDelivery.notMade,
+        LeaveStatusFfi.notLeaving: LeaveDelivery.notMade,
+      });
+    });
+
+    test('a leave the driver answers with an error fails with fixed text, and '
+        'no leave or repair log line names the circle', () async {
+      final capture = LogCapture.install();
+      final t = build()
+        ..driver.throws = 'mls group ${_hexOf(groupId)}: relay wss://x refused';
+
+      await expectLater(
+        t.service.leaveCircle(mlsGroupId: groupId),
+        throwsA(
+          isA<CircleServiceException>().having(
+            (e) => e.message,
+            'message',
+            'Failed to leave circle',
+          ),
+        ),
+      );
+      t.driver
+        ..throws = null
+        ..leaveOutcome = const LeaveOutcomeFfi(status: LeaveStatusFfi.proposed)
+        ..repair = const RepairOutcomeFfi(
+          kind: RepairKindFfi.refused,
+          refusal: RefusalFfi.foregroundOnly,
+        );
+      await t.service.leaveCircle(mlsGroupId: groupId);
+      await expectLater(
+        t.service.repairCircleEpoch(_circleOf(groupId), selfPubkeyHex: 'aa'),
+        throwsA(isA<CircleServiceException>()),
+      );
+
+      expect(capture.joined, contains('[Leave] failed'));
+      expect(capture.joined, contains('[Leave] proposed'));
+      expect(capture.joined, contains('[EpochRepair] not made'));
+      capture.assertNoNeedles([_hexOf(groupId), 'wss://x', 'wss://circle']);
+    });
+
+    test("a leave's log line names its status from the closed vocabulary "
+        'and nothing else', () async {
+      final capture = LogCapture.install();
+      final t = build();
+      for (final status in LeaveStatusFfi.values) {
+        t.driver.leaveOutcome = LeaveOutcomeFfi(status: status);
+        await t.service.leaveCircle(mlsGroupId: groupId);
+      }
+
+      expect(
+        capture.joined
+            .split('\n')
+            .where((line) => line.startsWith('[Leave] '))
+            .toList(),
+        [for (final status in LeaveStatusFfi.values) '[Leave] ${status.name}'],
       );
     });
-  });
 
-  group('a modal flow RESOLVES the work its resolution surfaced', () {
-    // A peer leaving while the user taps Update Relays lands inside that
-    // confirm's fold (it drains convergence for up to ~120 ms; the engine's
-    // SelfRemove jitter is ≤50 ms), so the confirm hands back a STAGED,
-    // OWED eviction commit. Discarding it leaves the circle unsendable, and
-    // in a HAVEN_LIVE_SYNC=false build nothing else ever redeems or reports
-    // it — `redeem_removal_deferrals`' only driver is the live-sync burst.
-    // Nothing on this path reads `liveSyncEnabled` (grep-verified), so one
-    // run proves both configurations; the suite is also run flag-off.
-    const groupId = [4, 4, 4, 4];
-    final held = _circleWithRelays(groupId, const ['wss://circle.example']);
-    final surfacedCommit = CommitToPublishFfi(
-      commitEventJson: '{"id":"eviction","kind":445,"tags":[["h","04040404"]]}',
-      pending: PendingStateRefFfi(token: BigInt.from(77)),
-    );
-
-    ({NostrCircleService service, _ResolutionManager manager,
-      _AcceptingRelayService relay}) build({
-      required DecryptLocationOutcomeFfi onFinalize,
-      int acceptsFirst = 1 << 20,
-      List<CircleWithMembersFfi> alsoHeld = const [],
-    }) {
-      final order = <String>[];
-      final manager = _ResolutionManager(
-        circle: held,
-        alsoHeld: alsoHeld,
-        stagedCommit: CommitToPublishFfi(
-          commitEventJson: '{"id":"relayRotation","kind":445}',
-          pending: PendingStateRefFfi(token: BigInt.from(11)),
-        ),
-        onFinalize: onFinalize,
-        order: order,
-      );
-      final relay = _AcceptingRelayService(
-        acceptsFirst: acceptsFirst,
-        order: order,
-      );
-      return (
-        service: NostrCircleService.withInjectedManager(
-          relayService: relay,
-          injectedManager: manager,
-        ),
-        manager: manager,
-        relay: relay,
-      );
-    }
-
-    test('publishes then confirms an auto-commit the confirm handed back',
+    test('a repair maps each kind it can answer, none awaiting as made',
         () async {
-      final t = build(
-        onFinalize: DecryptLocationOutcomeFfi(
-          results: const [],
-          autoCommits: [surfacedCommit],
-          proposals: const [],
+      final t = build();
+      Future<EpochRepairResult> repairWith(RepairOutcomeFfi outcome) {
+        t.driver.repair = outcome;
+        return t.service.repairCircleEpoch(
+          _circleOf(groupId),
+          selfPubkeyHex: 'aa',
+        );
+      }
+
+      expect(
+        await repairWith(
+          RepairOutcomeFfi(
+            kind: RepairKindFfi.rotated,
+            rotated: evolutionOutcome(PublishStatusFfi.confirmed),
+          ),
         ),
+        isA<EpochRepairApplied>(),
       );
-
-      await t.service.updateCircleRelays(
-        mlsGroupId: groupId,
-        newRelays: const ['wss://new.example'],
-      );
-
-      expect(t.manager.order, [
-        'publish:{"id":"relayRotation","kind":445}',
-        'finalize:11',
-        'publish:{"id":"eviction","kind":445,"tags":[["h","04040404"]]}',
-        'confirm:77',
-      ], reason: 'Rule 13 in order: the surfaced eviction is published FIRST '
-          'and confirmed only after a relay acked it — never confirmed '
-          'blind, never left staged');
       expect(
-        t.relay.publishedTo.last,
-        held.circle.relays,
-        reason: "routed by the commit's own `h`, like every Rust plane",
-      );
-    });
-
-    test('reports an unacked surfaced auto-commit instead of confirming it',
-        () async {
-      // The rotation itself is acked; only the surfaced eviction's publish
-      // is rejected, which is the rung under test.
-      final t = build(
-        acceptsFirst: 1,
-        onFinalize: DecryptLocationOutcomeFfi(
-          results: const [],
-          autoCommits: [surfacedCommit],
-          proposals: const [],
+        await repairWith(
+          RepairOutcomeFfi(
+            kind: RepairKindFfi.rotated,
+            rotated: evolutionOutcome(PublishStatusFfi.unresolved),
+          ),
         ),
-      );
-
-      await t.service.updateCircleRelays(
-        mlsGroupId: groupId,
-        newRelays: const ['wss://new.example'],
-      );
-
-      expect(
-        t.relay.published,
-        contains(surfacedCommit.commitEventJson),
-        reason: 'Rule 13: the commit is ALWAYS published — only the '
-            'confirm/report branch depends on the outcome',
+        isA<EpochRepairAwaitingRelays>(),
       );
       expect(
-        t.manager.rolledBackTokens,
-        contains(BigInt.from(77)),
-        reason: 'no ack ⇒ the fail-report rung, which for a removal-bearing '
-            'commit leaves it owed rather than discarding it',
-      );
-      expect(t.manager.confirmedTokens, isNot(contains(BigInt.from(77))));
-    });
-
-    test('publishes a surfaced proposal to the circle its own `h` names',
-        () async {
-      final other = _circleWithRelays(const [
-        5,
-        5,
-      ], const ['wss://other.example']);
-      final t = build(
-        alsoHeld: [other],
-        onFinalize: const DecryptLocationOutcomeFfi(
-          results: [],
-          autoCommits: [],
-          proposals: [
-            '{"id":"leave","kind":445,"tags":[["h","0505"]]}',
-            '{"id":"orphan","kind":445,"tags":[["h","beef"]]}',
-          ],
+        await repairWith(
+          const RepairOutcomeFfi(
+            kind: RepairKindFfi.skipped,
+            skipped: SkipReasonFfi.pendingProposal,
+          ),
         ),
-      );
-
-      await t.service.updateCircleRelays(
-        mlsGroupId: groupId,
-        newRelays: const ['wss://new.example'],
-      );
-
-      final leaveAt = t.relay.published.indexOf(
-        '{"id":"leave","kind":445,"tags":[["h","0505"]]}',
-      );
-      expect(leaveAt, isNonNegative);
-      expect(
-        t.relay.publishedTo[leaveAt],
-        other.circle.relays,
-        reason: "a replayed leave goes to ITS group's relays — sending it "
-            "to the resolving circle's relays tells those operators about a "
-            'second group and may never reach the members it is addressed to',
+        isA<EpochRepairSkipped>(),
       );
       expect(
-        t.relay.published,
-        isNot(contains('{"id":"orphan","kind":445,"tags":[["h","beef"]]}')),
-        reason: 'fail closed: an `h` naming no circle we hold publishes '
-            'nowhere',
-      );
-    });
-  });
-
-  group('a modal flow absorbs its resolution', () {
-    test('updateCircleRelays converts the results it discards, so a replayed '
-        'Unrecoverable still blocks the circle', () async {
-      const groupId = [4, 4, 4, 4];
-      final manager = _ResolutionManager(
-        circle: _circleWithRelays(groupId, const ['wss://old.example']),
-        stagedCommit: CommitToPublishFfi(
-          commitEventJson: '{"id":"relayRotation","kind":445}',
-          pending: PendingStateRefFfi(token: BigInt.from(11)),
+        await repairWith(
+          const RepairOutcomeFfi(
+            kind: RepairKindFfi.refused,
+            refusal: RefusalFfi.routingCollision,
+          ),
         ),
-        onFinalize: outcome(results: [unrecoverable(groupId)]),
+        isA<EpochRepairDeferred>(),
+        reason: 'a collided circle is held, as its sends are',
       );
-      final relay = _AcceptingRelayService();
-      final service = NostrCircleService.withInjectedManager(
-        relayService: relay,
-        injectedManager: manager,
-      );
-
-      await service.updateCircleRelays(
-        mlsGroupId: groupId,
-        newRelays: const ['wss://new.example'],
-      );
-
-      expect(relay.published, ['{"id":"relayRotation","kind":445}']);
-      expect(manager.finalizedTokens, [BigInt.from(11)]);
       expect(
-        service.isCircleBlocked(groupId),
-        isTrue,
-        reason: 'these modal flows discard the replayed locations on purpose '
-            '(the core persisted them), but the conversion that fires '
-            'markCircleBlocked is not optional',
+        await repairWith(const RepairOutcomeFfi(kind: RepairKindFfi.deferred_)),
+        isA<EpochRepairDeferred>(),
       );
+      for (final notMade in [
+        RepairOutcomeFfi(
+          kind: RepairKindFfi.rotated,
+          rotated: evolutionOutcome(PublishStatusFfi.rolledBack),
+        ),
+        const RepairOutcomeFfi(
+          kind: RepairKindFfi.refused,
+          refusal: RefusalFfi.foregroundOnly,
+        ),
+        const RepairOutcomeFfi(kind: RepairKindFfi.rotated),
+      ]) {
+        await expectLater(
+          repairWith(notMade),
+          throwsA(isA<CircleServiceException>()),
+          reason: '$notMade was answered as a repair',
+        );
+      }
     });
   });
 }
+
+Circle _circleOf(List<int> groupId) => Circle(
+  mlsGroupId: groupId,
+  nostrGroupId: groupId,
+  displayName: 'Fixture',
+  circleType: CircleType.locationSharing,
+  relays: const ['wss://circle.example'],
+  membershipStatus: MembershipStatus.accepted,
+  members: const [],
+  createdAt: DateTime.utc(2026),
+  updatedAt: DateTime.utc(2026),
+);
+
+/// A [CircleManagerFfi] holding the circle a change reads.
+class _LeaveManager implements CircleManagerFfi {
+  bool circleReadFails = false;
+
+  static const planted = 'circle 0xdeadbeefcafe at wss://planted.example';
+
+  @override
+  Future<CircleWithMembersFfi?> getCircle({
+    required List<int> mlsGroupId,
+  }) async {
+    if (circleReadFails) throw StateError(planted);
+    return _circleWithRelays(mlsGroupId, const ['wss://circle.example']);
+  }
+
+  @override
+  Future<List<CircleWithMembersFfi>> getVisibleCircles() async => [
+    _circleWithRelays(const [4, 4, 4, 4], const ['wss://circle.example']),
+  ];
+
+  @override
+  void dispose() {}
+
+  @override
+  bool get isDisposed => false;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('unexpected call: ${invocation.memberName}');
+}
+
+String _hexOf(List<int> bytes) =>
+    bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
 CircleWithMembersFfi _circleWithRelays(
   List<int> groupId,
@@ -1479,145 +1857,8 @@ CircleWithMembersFfi _circleWithRelays(
       ),
       membershipStatus: 'accepted',
       members: const [],
+      engineState: CircleEngineStateFfi.live,
     );
-
-/// A [CircleManagerFfi] that answers only the publish-resolution surface.
-///
-/// Every other member goes through `noSuchMethod`, so an unexpected dependency
-/// fails loudly rather than returning a default this test would then assert on.
-class _ResolutionManager implements CircleManagerFfi {
-  _ResolutionManager({
-    this.onConfirm,
-    this.onFinalize,
-    this.confirmThrows,
-    this.failThrows,
-    this.circle,
-    this.stagedCommit,
-    this.alsoHeld = const [],
-    List<String>? order,
-  }) : order = order ?? [];
-
-  final DecryptLocationOutcomeFfi? onConfirm;
-  final DecryptLocationOutcomeFfi? onFinalize;
-  final String? confirmThrows;
-  final String? failThrows;
-  final CircleWithMembersFfi? circle;
-  final CommitToPublishFfi? stagedCommit;
-
-  /// Other circles this device holds — what the `h` router reads.
-  final List<CircleWithMembersFfi> alsoHeld;
-
-  /// Shared publish/confirm call log, so a test can assert the ORDER across
-  /// this fake and the relay one.
-  final List<String> order;
-
-  final List<BigInt> finalizedTokens = [];
-  final List<BigInt> confirmedTokens = [];
-  final List<BigInt> rolledBackTokens = [];
-
-  static const _empty = DecryptLocationOutcomeFfi(
-    results: [],
-    autoCommits: [],
-    proposals: [],
-  );
-
-  @override
-  Future<DecryptLocationOutcomeFfi> confirmPublished({
-    required PendingStateRefFfi pending,
-  }) async {
-    final boom = confirmThrows;
-    if (boom != null) throw StateError(boom);
-    order.add('confirm:${pending.token}');
-    confirmedTokens.add(pending.token);
-    return onConfirm ?? _empty;
-  }
-
-  @override
-  Future<DecryptLocationOutcomeFfi> publishFailed({
-    required PendingStateRefFfi pending,
-  }) async {
-    final boom = failThrows;
-    if (boom != null) throw StateError(boom);
-    order.add('fail:${pending.token}');
-    rolledBackTokens.add(pending.token);
-    return _empty;
-  }
-
-  @override
-  Future<DecryptLocationOutcomeFfi> finalizeRelayUpdate({
-    required PendingStateRefFfi pending,
-    required List<int> mlsGroupId,
-  }) async {
-    order.add('finalize:${pending.token}');
-    finalizedTokens.add(pending.token);
-    return onFinalize ?? _empty;
-  }
-
-  @override
-  Future<CircleWithMembersFfi?> getCircle({
-    required List<int> mlsGroupId,
-  }) async => circle;
-
-  @override
-  Future<List<CircleWithMembersFfi>> getVisibleCircles() async => [
-    if (circle != null) circle!,
-    ...alsoHeld,
-  ];
-
-  @override
-  Future<CommitToPublishFfi> updateCircleRelays({
-    required List<int> mlsGroupId,
-    required List<String> newRelays,
-  }) async =>
-      stagedCommit ??
-      (throw StateError('no staged commit scripted'));
-
-  @override
-  bool get isDisposed => false;
-
-  @override
-  void dispose() {}
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) =>
-      throw UnimplementedError('unexpected call: ${invocation.memberName}');
-}
-
-/// A relay service whose publish is accepted by one relay, recording what it
-/// was asked to send.
-class _AcceptingRelayService extends _StubRelayService {
-  _AcceptingRelayService({this.acceptsFirst = 1 << 20, List<String>? order})
-    : order = order ?? [];
-
-  /// How many publishes the relay acks before it starts rejecting — so a test
-  /// can ack the flow's own commit and reject only the one the resolution
-  /// surfaced, which is the no-ack rung this fake exists to reach.
-  final int acceptsFirst;
-
-  /// The shared call log — see [_ResolutionManager.order].
-  final List<String> order;
-
-  final List<String> published = [];
-  final List<List<String>> publishedTo = [];
-
-  @override
-  Future<PublishResult> publishEvent({
-    required String eventJson,
-    required List<String> relays,
-  }) async {
-    order.add('publish:$eventJson');
-    published.add(eventJson);
-    publishedTo.add(List.of(relays));
-    return PublishResult(
-      eventId: 'accepted',
-      acceptedBy: published.length <= acceptsFirst
-          ? relays.take(1).toList()
-          : const <String>[],
-      rejectedBy: const [],
-      failed: const [],
-    );
-  }
-}
 
 void _handoffTests() {
   group('releaseForHandoff', () {
@@ -2084,4 +2325,242 @@ void _orphanedGuardRecoveryTests() {
       );
     });
   });
+}
+
+
+/// The rejoin consent and the disbanded leave, at the FFI boundary: classified
+/// by typed fields only, and failing with fixed text (Rules 8 and 15).
+void _rejoinAndDisbandTests() {
+  const wrapId = [7, 7, 7, 7];
+  const groupId = [9, 9, 9];
+
+  NostrCircleService serviceOver(_RejoinManager manager) =>
+      NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: manager,
+      );
+
+  RejoinOfferFfi offerFfi(List<int> token) => RejoinOfferFfi(
+    mlsGroupId: Uint8List.fromList(groupId),
+    welcomerPubkey: 'ab' * 32,
+    localStateToken: Uint8List.fromList(token),
+  );
+
+  group('rejoin consent and the disbanded leave', () {
+    test("an offer is shown with the held circle's own name, and its token "
+        'is handed back unchanged', () async {
+      final manager = _RejoinManager()
+        ..offers = RejoinOffersOutcomeFfi(offers: [offerFfi(const [3, 3])])
+        ..confirm = AcceptInvitationOutcomeFfi(
+          joined: _circleWithRelays(groupId, const ['wss://c.example']),
+        );
+      final service = serviceOver(manager);
+
+      final offers = await service.rejoinOffersForInvitation(wrapId);
+      expect(offers.single.mlsGroupId, groupId);
+      expect(offers.single.circleName, 'Fixture');
+      expect(manager.askedWrap, wrapId);
+
+      final joined = await service.confirmGroupRejoin(wrapId, offers.single);
+      expect(joined.mlsGroupId, groupId);
+      expect(manager.confirmedToken, const [3, 3]);
+      expect(manager.askedWrap, wrapId);
+    });
+
+    test('a circle the engine reports disbanded is read as disbanded',
+        () async {
+      final manager = _RejoinManager()
+        ..visible = [
+          CircleWithMembersFfi(
+            circle: _circleWithRelays(groupId, const ['wss://c.example'])
+                .circle,
+            membershipStatus: 'accepted',
+            members: const [],
+            engineState: CircleEngineStateFfi.disbanded,
+          ),
+        ];
+
+      final circles = await serviceOver(manager).getVisibleCircles();
+
+      expect(circles.single.isDisbanded, isTrue);
+      expect(circles.single.isQuarantined, isFalse);
+    });
+
+    test('every engine state the core reports is read as itself', () async {
+      // MDK's halt is persisted and read on every circle read: the circle
+      // list, not a session flag, is what blocks send and mutate (Rule 8).
+      for (final state in CircleEngineStateFfi.values) {
+        final manager = _RejoinManager()
+          ..visible = [
+            CircleWithMembersFfi(
+              circle: _circleWithRelays(groupId, const ['wss://c.example'])
+                  .circle,
+              membershipStatus: 'accepted',
+              members: const [],
+              engineState: state,
+            ),
+          ];
+        final circle = (await serviceOver(manager).getVisibleCircles()).single;
+        expect(circle.engineState.name, state.name);
+        expect(
+          circle.isUnrecoverable,
+          state == CircleEngineStateFfi.unrecoverable,
+        );
+      }
+    });
+
+    test('each failure is classified by its typed field', () async {
+      final manager = _RejoinManager()
+        ..offers = const RejoinOffersOutcomeFfi(
+          offers: [],
+          failure: AcceptFailureFfi.needsNewInvite,
+        );
+      final service = serviceOver(manager);
+      const offer = RejoinOffer(
+        mlsGroupId: groupId,
+        circleName: 'x',
+        localStateToken: [1],
+      );
+
+      await expectLater(
+        service.rejoinOffersForInvitation(wrapId),
+        throwsA(isA<InvitationNeedsNewInviteException>()),
+      );
+
+      manager.confirm = const AcceptInvitationOutcomeFfi(
+        failure: AcceptFailureFfi.rejoinConfirmationRequired,
+      );
+      await expectLater(
+        service.confirmGroupRejoin(wrapId, offer),
+        throwsA(isA<InvitationRejoinConfirmationRequiredException>()),
+      );
+
+      manager.confirm = const AcceptInvitationOutcomeFfi(
+        failure: AcceptFailureFfi.needsNewInvite,
+      );
+      await expectLater(
+        service.confirmGroupRejoin(wrapId, offer),
+        throwsA(isA<InvitationNeedsNewInviteException>()),
+      );
+    });
+
+    test('a decline declines through the core, and the disbanded leave '
+        "deletes this device's copy through the core", () async {
+      final manager = _RejoinManager();
+      final service = serviceOver(manager);
+
+      await service.declineGroupRejoin(wrapId);
+      expect(manager.declinedWrap, wrapId);
+
+      await service.leaveDisbandedCircle(mlsGroupId: groupId);
+      expect(manager.completedLeave, groupId);
+    });
+
+    test('an engine error on any of them fails with fixed text, and no log '
+        'line names the circle, the welcomer or a relay', () async {
+      final capture = LogCapture.install();
+      final manager = _RejoinManager()..throws = true;
+      final service = serviceOver(manager);
+      const offer = RejoinOffer(
+        mlsGroupId: groupId,
+        circleName: 'x',
+        localStateToken: [1],
+      );
+
+      Matcher fixed(String message) => throwsA(
+        isA<CircleServiceException>().having(
+          (e) => e.message,
+          'message',
+          message,
+        ),
+      );
+      await expectLater(
+        service.rejoinOffersForInvitation(wrapId),
+        fixed('Failed to read the rejoin offers'),
+      );
+      await expectLater(
+        service.confirmGroupRejoin(wrapId, offer),
+        fixed('Failed to accept invitation'),
+      );
+      await expectLater(
+        service.declineGroupRejoin(wrapId),
+        fixed('Failed to decline invitation'),
+      );
+      await expectLater(
+        service.leaveDisbandedCircle(mlsGroupId: groupId),
+        fixed('Failed to leave circle'),
+      );
+      capture.assertNoNeedles([
+        _hexOf(groupId),
+        'ab' * 32,
+        'wss://planted.example',
+      ]);
+    });
+  });
+}
+
+class _RejoinManager implements CircleManagerFfi {
+  RejoinOffersOutcomeFfi offers = const RejoinOffersOutcomeFfi(offers: []);
+  AcceptInvitationOutcomeFfi confirm = const AcceptInvitationOutcomeFfi();
+  List<CircleWithMembersFfi> visible = const [];
+  bool throws = false;
+
+  @override
+  Future<List<CircleWithMembersFfi>> getVisibleCircles() async => visible;
+
+  List<int>? askedWrap;
+  List<int>? confirmedToken;
+  List<int>? declinedWrap;
+  List<int>? completedLeave;
+
+  static final planted = StateError(
+    'group ${'09' * 3} welcomer ${'ab' * 32} at wss://planted.example',
+  );
+
+  @override
+  Future<RejoinOffersOutcomeFfi> rejoinOffersForInvitation({
+    required List<int> giftWrapId,
+  }) async {
+    if (throws) throw planted;
+    askedWrap = giftWrapId.toList();
+    return offers;
+  }
+
+  @override
+  Future<CircleWithMembersFfi?> getCircle({
+    required List<int> mlsGroupId,
+  }) async => _circleWithRelays(mlsGroupId, const ['wss://circle.example']);
+
+  @override
+  Future<AcceptInvitationOutcomeFfi> confirmGroupRejoin({
+    required List<int> giftWrapId,
+    required List<int> localStateToken,
+  }) async {
+    if (throws) throw planted;
+    askedWrap = giftWrapId.toList();
+    confirmedToken = localStateToken.toList();
+    return confirm;
+  }
+
+  @override
+  Future<void> declineGroupRejoin({required List<int> giftWrapId}) async {
+    if (throws) throw planted;
+    declinedWrap = giftWrapId.toList();
+  }
+
+  @override
+  Future<void> completeLeave({required List<int> mlsGroupId}) async {
+    if (throws) throw planted;
+    completedLeave = mlsGroupId.toList();
+  }
+
+  @override
+  void dispose() {}
+
+  @override
+  bool get isDisposed => false;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('unexpected call: ${invocation.memberName}');
 }

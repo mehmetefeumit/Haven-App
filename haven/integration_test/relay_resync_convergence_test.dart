@@ -3,13 +3,14 @@
 ///
 /// ## What is under test
 ///
-/// When an admin calls `NostrCircleService.updateCircleRelays`, the
-/// implementation must:
+/// When an admin changes a circle's relays through the fanout driver
+/// (`updateCircleRelaysDriven`, claiming the foreground), the implementation
+/// must:
 ///
 ///  1. Publish the `kind:445` relay-update commit to the UNION of the
 ///     circle's old relay list and the new one (so members on a relay
 ///     being dropped still receive the commit).
-///  2. Finalize the commit on the admin side via `finalizeRelayUpdate`
+///  2. Confirm the commit on the admin side once a relay acknowledged it
 ///     (which also re-syncs the admin's `circle.relays` row).
 ///  3. Allow a member to converge: when the member's MDK processes the
 ///     relay-update commit via `decryptLocation`, it applies the
@@ -45,14 +46,16 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/rust/api.dart';
-import 'package:haven/src/services/nostr_circle_service.dart';
+import 'package:haven/src/services/circle_service.dart'
+    show ChangeDelivery, changeDeliveryOf;
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/utils/log_alias.dart'
     show LogAliasClass, logAliasHandle, magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 
+import 'e2e/_lib/circle_creation.dart' show createCircleDelivered;
+import 'e2e/_lib/driven_location.dart';
 import 'e2e/_lib/synthetic_user.dart';
 import 'e2e/_lib/test_relay.dart';
 import 'e2e/_lib/test_user.dart';
@@ -168,12 +171,13 @@ void main() {
             identitySecretBytes: aliceSecretBytesForManager,
           );
 
-          // Build a real NostrCircleService backed by aliceManager. This is
-          // the production code path under test — not the FFI directly.
-          final relayService = NostrRelayService();
-          final aliceService = NostrCircleService.withInjectedManager(
-            relayService: relayService,
-            injectedManager: aliceManager,
+          // The fanout driver backed by aliceManager: the production path a
+          // relay change takes. A NostrCircleService over an injected manager
+          // is a background isolate's and claims no foreground, so its change
+          // is refused `ForegroundOnly`; the test calls the driver itself, as
+          // the app in front of its user.
+          final relayService = NostrRelayService(
+            circleManagerFactory: () async => aliceManager,
           );
 
           final aliceSecretBytes = await alice.getSecretBytes();
@@ -190,11 +194,14 @@ void main() {
               // -----------------------------------------------------------
               // Step 1: Alice creates a circle on [R1] only.
               // -----------------------------------------------------------
-              final creation = await aliceManager.createCircle(
+              final creation = await createCircleDelivered(
+                manager: aliceManager,
+                relayManager: await RelayManagerFfi.newInstance(),
                 identitySecretBytes: aliceSecretBytes,
                 members: [
                   MemberKeyPackageFfi(
                     keyPackageJson: bobKpJson!.eventJson,
+                    authorNpub: bob.npub,
                     inboxRelays: <String>[defaultStrfryUrl],
                     nip65Relays: <String>[defaultStrfryUrl],
                   ),
@@ -202,19 +209,12 @@ void main() {
                 name: 'Relay-Update Circle',
                 circleType: 'location_sharing',
                 relays: <String>[defaultStrfryUrl],
-                creatorFallbackRelays: <String>[defaultStrfryUrl],
+                scenario: 'resync',
               );
               final mlsGroupId = creation.circle.mlsGroupId;
               final nostrGroupIdHex = _hex(
                 creation.circle.nostrGroupId,
               );
-
-              // Publish the Welcome to R1 and confirm the pending
-              // group-creation state (publish-before-apply, Rule 13).
-              for (final w in creation.welcomeEvents) {
-                await r1.publishAndAwaitOk(w.eventJson);
-              }
-              await aliceManager.confirmPublished(pending: creation.pending);
 
               // ORACLE: Alice's initial circle must have exactly [R1].
               final aliceInitial = await aliceManager.getCircle(
@@ -257,8 +257,8 @@ void main() {
               );
 
               // -----------------------------------------------------------
-              // Step 3: Alice calls updateCircleRelays via
-              // NostrCircleService — the production service path under test.
+              // Step 3: Alice changes the circle's relays through the fanout
+              // driver, claiming the foreground.
               //
               // Register relay observers on BOTH relays BEFORE calling the
               // service so we do not race the relay's ingestion.
@@ -278,12 +278,17 @@ void main() {
                 timeout: const Duration(seconds: 60),
               );
 
-              await aliceService.updateCircleRelays(
+              final change = await relayService.updateCircleRelays(
+                circle: aliceManager,
                 mlsGroupId: mlsGroupId,
-                newRelays: <String>[
-                  defaultStrfryUrl,
-                  secondStrfryUrl,
-                ],
+                relays: <String>[defaultStrfryUrl, secondStrfryUrl],
+                foreground: true,
+              );
+              expect(
+                changeDeliveryOf(change.status),
+                ChangeDelivery.applied,
+                reason: '[CONV-1] the relay change was not acknowledged and '
+                    'applied (${change.status.name})',
               );
 
               // -----------------------------------------------------------
@@ -314,8 +319,8 @@ void main() {
               // Step 5: Alice's circle.relays must have converged to
               // [R1, R2].
               //
-              // finalizeRelayUpdate (called inside aliceService) re-syncs
-              // the admin's local circle row. We read it back to confirm.
+              // The driver's confirm re-syncs the admin's local circle row.
+              // We read it back to confirm.
               // -----------------------------------------------------------
               final aliceAfter = await aliceManager.getCircle(
                 mlsGroupId: mlsGroupId,
@@ -335,8 +340,8 @@ void main() {
                 ]),
                 reason:
                     "Alice's circle.relays must be exactly [R1, R2] after "
-                    'finalizeRelayUpdate re-syncs the admin row to '
-                    'newRelays. A spurious extra relay would also fail '
+                    'the acknowledged relay change re-syncs the admin row '
+                    'to the new relays. A spurious extra relay would also fail '
                     'this assertion (tighter than separate contains checks).',
               );
 
@@ -437,22 +442,13 @@ void main() {
                 timeout: const Duration(seconds: 60),
               );
 
-              final enc = (await aliceManager.encryptLocation(
+              // The driver sends to the relays the updated routing names.
+              await publishLocationForTest(
+                relay: await RelayManagerFfi.newInstance(),
+                circle: aliceManager,
                 mlsGroupId: mlsGroupId,
-                senderPubkeyHex: alice.pubkeyHex,
                 latitude: 51.5,
                 longitude: -0.1,
-                updateIntervalSecs: BigInt.from(
-                  kLocationPublishMaxInterval.inSeconds +
-                      kTtlNetworkBufferSeconds,
-                ),
-              )).sent!;
-
-              // Publish to the now-updated relay set: [R1, R2].
-              final relayMgr = await RelayManagerFfi.newInstance();
-              await relayMgr.publishEvent(
-                eventJson: enc.eventJson,
-                relays: aliceRelaysAfter,
               );
 
               final postUpdateOnR2 = await r2PostUpdateFuture;
@@ -562,7 +558,9 @@ void main() {
             dataDir: aliceDir.path,
             identitySecretBytes: aliceSecretBytesForManager,
           );
-          final relayServiceForKp = NostrRelayService();
+          final relayServiceForKp = NostrRelayService(
+            circleManagerFactory: () async => aliceManager,
+          );
 
           final aliceSecretBytes = await alice.getSecretBytes();
           try {
@@ -576,11 +574,14 @@ void main() {
             );
             try {
               // Alice creates a circle on [R1] with Bob as a member.
-              final creation = await aliceManager.createCircle(
+              final creation = await createCircleDelivered(
+                manager: aliceManager,
+                relayManager: await RelayManagerFfi.newInstance(),
                 identitySecretBytes: aliceSecretBytes,
                 members: [
                   MemberKeyPackageFfi(
                     keyPackageJson: bobKpJson!.eventJson,
+                    authorNpub: bob.npub,
                     inboxRelays: <String>[defaultStrfryUrl],
                     nip65Relays: <String>[defaultStrfryUrl],
                   ),
@@ -588,18 +589,11 @@ void main() {
                 name: 'Auth-Check Circle',
                 circleType: 'location_sharing',
                 relays: <String>[defaultStrfryUrl],
-                creatorFallbackRelays: <String>[defaultStrfryUrl],
+                scenario: 'resync',
               );
               final nostrGroupIdHex = _hex(
                 creation.circle.nostrGroupId,
               );
-
-              // Publish Welcome to R1 and confirm the pending group-creation
-              // state (publish-before-apply, Rule 13).
-              for (final w in creation.welcomeEvents) {
-                await r1.publishAndAwaitOk(w.eventJson);
-              }
-              await aliceManager.confirmPublished(pending: creation.pending);
 
               // Bob accepts the invitation so he is a full MLS member (and
               // therefore provably non-admin in Haven's single-admin model).
@@ -612,9 +606,9 @@ void main() {
               );
 
               // -----------------------------------------------------------
-              // Negative assertion: Bob (non-admin) calling
-              // updateCircleRelays via the FFI directly must throw. We
-              // drive this at the FFI level because:
+              // Negative assertion: Bob (non-admin) asking the driver for a
+              // relay change directly must throw. We drive this below the
+              // service because:
               //
               // (a) NostrCircleService wraps FFI errors into a generic
               //     CircleServiceException — we would lose the admin-gate
@@ -627,13 +621,16 @@ void main() {
               // -----------------------------------------------------------
               Object? updateError;
               try {
-                await bob.user.circleManager.updateCircleRelays(
-                  mlsGroupId: bobCircle.circle.mlsGroupId,
-                  newRelays: <String>[
-                    defaultStrfryUrl,
-                    secondStrfryUrl,
-                  ],
-                );
+                await (await RelayManagerFfi.newInstance())
+                    .updateCircleRelaysDriven(
+                      circle: bob.user.circleManager,
+                      mlsGroupId: bobCircle.circle.mlsGroupId,
+                      relays: <String>[
+                        defaultStrfryUrl,
+                        secondStrfryUrl,
+                      ],
+                      foreground: true,
+                    );
               } on Object catch (e) {
                 updateError = e;
               }
@@ -780,10 +777,8 @@ void main() {
             identitySecretBytes: aliceSecretBytesForManager,
           );
 
-          final relayService = NostrRelayService();
-          final aliceService = NostrCircleService.withInjectedManager(
-            relayService: relayService,
-            injectedManager: aliceManager,
+          final relayService = NostrRelayService(
+            circleManagerFactory: () async => aliceManager,
           );
 
           final aliceSecretBytes = await alice.getSecretBytes();
@@ -800,11 +795,14 @@ void main() {
               // -----------------------------------------------------------
               // Step 1: Alice creates a circle on [R1] only.
               // -----------------------------------------------------------
-              final creation = await aliceManager.createCircle(
+              final creation = await createCircleDelivered(
+                manager: aliceManager,
+                relayManager: await RelayManagerFfi.newInstance(),
                 identitySecretBytes: aliceSecretBytes,
                 members: [
                   MemberKeyPackageFfi(
                     keyPackageJson: bobKpJson!.eventJson,
+                    authorNpub: bob.npub,
                     inboxRelays: <String>[defaultStrfryUrl],
                     nip65Relays: <String>[defaultStrfryUrl],
                   ),
@@ -812,19 +810,12 @@ void main() {
                 name: 'Relay-Removal Circle',
                 circleType: 'location_sharing',
                 relays: <String>[defaultStrfryUrl],
-                creatorFallbackRelays: <String>[defaultStrfryUrl],
+                scenario: 'resync',
               );
               final mlsGroupId = creation.circle.mlsGroupId;
               final nostrGroupIdHex = _hex(
                 creation.circle.nostrGroupId,
               );
-
-              // Publish Welcome to R1 and confirm the pending group-creation
-              // state (publish-before-apply, Rule 13).
-              for (final w in creation.welcomeEvents) {
-                await r1.publishAndAwaitOk(w.eventJson);
-              }
-              await aliceManager.confirmPublished(pending: creation.pending);
 
               // ORACLE: initial circle must have exactly [R1].
               final aliceInitial = await aliceManager.getCircle(
@@ -877,9 +868,17 @@ void main() {
               );
 
               // Alice replaces R1 with R2 only (R1 is DROPPED).
-              await aliceService.updateCircleRelays(
+              final change = await relayService.updateCircleRelays(
+                circle: aliceManager,
                 mlsGroupId: mlsGroupId,
-                newRelays: <String>[secondStrfryUrl],
+                relays: <String>[secondStrfryUrl],
+                foreground: true,
+              );
+              expect(
+                changeDeliveryOf(change.status),
+                ChangeDelivery.applied,
+                reason: '[CONV-3] the relay change was not acknowledged and '
+                    'applied (${change.status.name})',
               );
 
               // -----------------------------------------------------------
@@ -995,22 +994,13 @@ void main() {
               final beforeLocationPublishTs =
                   DateTime.now().millisecondsSinceEpoch ~/ 1000 - 1;
 
-              final enc = (await aliceManager.encryptLocation(
+              // The driver sends to the relays the new routing names: [R2].
+              await publishLocationForTest(
+                relay: await RelayManagerFfi.newInstance(),
+                circle: aliceManager,
                 mlsGroupId: mlsGroupId,
-                senderPubkeyHex: alice.pubkeyHex,
                 latitude: 48.8566,
                 longitude: 2.3522,
-                updateIntervalSecs: BigInt.from(
-                  kLocationPublishMaxInterval.inSeconds +
-                      kTtlNetworkBufferSeconds,
-                ),
-              )).sent!;
-
-              // Publish ONLY to the new relay set [R2].
-              final relayMgr = await RelayManagerFfi.newInstance();
-              await relayMgr.publishEvent(
-                eventJson: enc.eventJson,
-                relays: aliceRelaysAfter,
               );
 
               // -----------------------------------------------------------

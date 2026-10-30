@@ -27,7 +27,7 @@
 //!   endpoints that went quiet, never the whole session.
 //!
 //! The inbox plane is deliberately exempt from the silence arm. A silent inbox
-//! is the NORMAL state — invitations are rare — and its REQ carries a 49-hour
+//! is the NORMAL state — invitations are rare — and its REQ carries a 96-hour
 //! gift-wrap lookback, so treating that silence as a reason to act would have
 //! this device ask its relays to replay two days of wraps keyed on its own `#p`
 //! on every tick, forever: battery, relay load, and a standing re-advertisement of
@@ -93,6 +93,16 @@ pub enum HealthAction {
     /// — the pool reconnected and every subscription re-issued at its persisted
     /// cursor. Sockets are involved, so nothing narrower would do.
     Resubscribed,
+    /// A relay had dropped, or a REQ the session expects was missing from the
+    /// pool, and the caller did not claim the foreground: NOTHING was
+    /// re-anchored. The whole-session repair is a foreground open — it leaves
+    /// the session in the foreground lifecycle and carries the inbox REQ —
+    /// so it waits for a caller that can claim it: the app's resume, or the
+    /// next tick that does.
+    ///
+    /// Not [`Self::Healthy`], and never to be read as it: the counters say
+    /// what the tick saw.
+    AwaitingForeground,
     /// Delivery silence alone: every socket was up and every REQ registered, so
     /// only the `(relay, sub)` endpoints that had gone quiet were re-issued.
     /// Nothing was reconnected and no other REQ was touched.
@@ -156,18 +166,22 @@ pub struct RelayHealthSnapshot {
 
 /// Pure decision: does a [`RelayHealthSnapshot`] warrant a re-anchor?
 ///
-/// Two independent reasons, either sufficient:
+/// One reason: the pool holds **fewer subscriptions than the session
+/// expects** — a REQ a relay ended and nothing upstream will re-issue.
 ///
-/// 1. at least one relay has **dropped** (`Disconnected` / `Terminated` /
-///    `Banned`). Transient states (`Initialized` / `Pending` / `Connecting`) are
-///    deliberately NOT counted as dropped — see [`RelayHealthSnapshot`] — so a
-///    mid-connect relay does not trigger a connection-thrashing resubscribe;
-/// 2. the pool holds **fewer subscriptions than the session expects** — a REQ a
-///    relay ended and nothing upstream will re-issue.
-///
-/// (2) is why this is not `disconnected > 0`. That predicate reads a relay that
-/// keeps its socket open but deleted our REQ as perfectly healthy, which is
-/// exactly the shape of a silent receive blackout.
+/// A dropped relay (`Disconnected` / `Terminated` / `Banned`) is NOT a reason.
+/// The pool keeps its registrations and retries that relay alone on its own
+/// schedule (`calculate_retry_interval`, about 10 to 60 s, longer the more
+/// attempts fail), replaying its REQs when it reconnects; and what it holds is
+/// asked of it from the floor it owes (`relay_floors`, Security Rule 12). A REQ
+/// the pool refused outright for a relay it does not hold connected — once
+/// that relay has made more than one connection attempt, fewer than nine in
+/// ten of them succeeded and its wake-up grace has passed, the pool registers
+/// nothing — is not counted as expected either: the session re-issues it
+/// alone, a group REQ from the floor, when the relay reconnects.
+/// Re-anchoring the whole session for it would reconnect every relay and
+/// replay every REQ on every claimed tick for as long as one relay in any
+/// circle's list stays down.
 ///
 /// Delivery silence is deliberately NOT here: it warrants re-issuing the quiet
 /// endpoints, not the whole session, and has its own predicate
@@ -186,18 +200,14 @@ pub struct RelayHealthSnapshot {
 ///     subscriptions_live: 3,
 ///     ..Default::default()
 /// }));
-/// // Some still connecting, none dropped → no resubscribe (transient).
+/// // A dropped relay whose REQs the pool still holds → no resubscribe: the
+/// // pool retries that relay alone.
 /// assert!(!health_needs_resubscribe(RelayHealthSnapshot {
-///     total: 3,
-///     connected: 1,
-///     still_connecting: 2,
-///     ..Default::default()
-/// }));
-/// // A dropped relay → resubscribe.
-/// assert!(health_needs_resubscribe(RelayHealthSnapshot {
 ///     total: 3,
 ///     connected: 2,
 ///     disconnected: 1,
+///     subscriptions_expected: 3,
+///     subscriptions_live: 3,
 ///     ..Default::default()
 /// }));
 /// // Every relay connected, but a REQ the session expects is gone from the
@@ -212,7 +222,7 @@ pub struct RelayHealthSnapshot {
 /// ```
 #[must_use]
 pub const fn health_needs_resubscribe(snapshot: RelayHealthSnapshot) -> bool {
-    snapshot.disconnected > 0 || snapshot.subscriptions_live < snapshot.subscriptions_expected
+    snapshot.subscriptions_live < snapshot.subscriptions_expected
 }
 
 /// Pure decision: does a [`RelayHealthSnapshot`] warrant re-issuing just the
@@ -423,21 +433,20 @@ mod tests {
     }
 
     #[test]
-    fn any_dropped_relay_warrants_resubscribe() {
-        assert!(health_needs_resubscribe(snap(4, 3, 0, 1)));
-        assert!(health_needs_resubscribe(snap(2, 0, 0, 2)));
+    fn a_dropped_relay_whose_reqs_the_pool_holds_does_not_reanchor_the_session() {
+        // The pool retries the dropped relay alone and replays its REQs when
+        // it is back; re-anchoring every relay for it on every tick is the
+        // cost the owner ruled out (P2).
+        assert!(!health_needs_resubscribe(snap(4, 3, 0, 1)));
+        assert!(!health_needs_resubscribe(snap(2, 0, 0, 2)));
     }
 
     #[test]
-    fn dropped_takes_precedence_over_still_connecting() {
-        // Mixed: a relay is still connecting AND another has dropped. The drop
-        // must win — a resubscribe is warranted and the connecting one does not
-        // mask it. And "still connecting" reports false because a drop is not a
-        // benign not-yet-ready state.
+    fn a_dropped_relay_beside_one_still_connecting_is_not_merely_still_connecting() {
         let s = snap(3, 1, 1, 1);
         assert!(
-            health_needs_resubscribe(s),
-            "a dropped relay must trigger a resubscribe even with one still connecting"
+            !health_needs_resubscribe(s),
+            "a dropped relay whose REQs the pool holds re-anchored the session"
         );
         assert!(
             !health_still_connecting(s),
@@ -508,7 +517,7 @@ mod tests {
         );
         assert!(
             !health_needs_resubscribe(s),
-            "silence must not escalate to a whole-session re-anchor: every socket is up and every REQ is registered, so replaying every REQ (the inbox's 49-hour gift-wrap lookback included) is pure cost on a signal indistinguishable from a circle where nobody is sharing"
+            "silence must not escalate to a whole-session re-anchor: every socket is up and every REQ is registered, so replaying every REQ (the inbox's 96-hour gift-wrap lookback included) is pure cost on a signal indistinguishable from a circle where nobody is sharing"
         );
     }
 

@@ -25,6 +25,8 @@
 
 use std::time::Duration;
 
+use haven_core::relay::live_sync::Claim;
+
 use crate::nemesis::types::{ClosedPrefix, Fault};
 use crate::oracle::bounds;
 use crate::oracle::vacuity::{ExpectationFloor, Observed};
@@ -253,7 +255,7 @@ async fn full_intake<T: TimelineSink, L: LogDrain>(
         let _ = world
             .device(device)?
             .engine()?
-            .maintain_subscription_health()
+            .maintain_subscription_health(Claim::Foreground)
             .await;
         Ok(reqs(world, plane)? > before)
     })
@@ -266,7 +268,7 @@ async fn full_intake<T: TimelineSink, L: LogDrain>(
     let _ = world
         .device(device)?
         .engine()?
-        .maintain_subscription_health()
+        .maintain_subscription_health(Claim::Foreground)
         .await;
     if await_condition(bounds::subscribe_ladder() + bounds::settle(), || async {
         Ok(reqs(world, plane)? > before)

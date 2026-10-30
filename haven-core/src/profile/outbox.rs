@@ -96,9 +96,22 @@ pub struct PendingSnapshot {
 ///
 /// `fetched` is the newest kind-0 any relay answered with during this sync;
 /// `local` is the cached row (which already carries the pending edits applied
-/// optimistically). The base is `fetched` when the relays answered with a
-/// profile and `local` otherwise, so fields written by ANOTHER client are
-/// preserved whenever they are reachable.
+/// optimistically). The callers cache `fetched` into that row first when it
+/// is newer, so a publish that fails after this still leaves the row at the
+/// newest copy read. The base is `fetched` when it is at least as new as the
+/// local row, so fields written by ANOTHER client are preserved whenever they
+/// are reachable, and `local` otherwise.
+///
+/// # Why an older answer is not the base
+///
+/// A relay may serve a superseded copy of our own profile — genuinely signed,
+/// so nothing about the event refuses it — while the relays holding the newest
+/// are slow or down. Merging onto it would sign back, under the identity key,
+/// every field removed since: a payment address, a photo, a name. The local
+/// row is the record of the newer own event: its whole metadata object, the
+/// fields Haven does not model included, as this device published or fetched
+/// it, with the edits being synced already on top (pinned by
+/// `the_cached_own_row_keeps_every_field_of_the_event_it_records`).
 ///
 /// The returned floor is `max(fetched.created_at, local.created_at)` in BOTH
 /// branches — never just the chosen base's. Falling back to a local row while
@@ -137,7 +150,11 @@ pub fn merge_base(
         // republish.
         .filter_map(|cp| u64::try_from(cp.event_created_at).ok())
         .max();
+    let stale = |fetched: &CachedProfile| {
+        local.is_some_and(|local| fetched.event_created_at < local.event_created_at)
+    };
     let base = fetched
+        .filter(|fetched| !stale(fetched))
         .or(local)
         .map_or_else(ProfileMetadata::default, |cp| cp.metadata.clone());
     (base, floor)
@@ -277,18 +294,59 @@ mod tests {
         // only the CHOSEN base's `created_at` would let a fallback republish
         // tie the newer event we already knew about, and the edit would
         // silently not take effect.
+        let newer_fetch = row(r#"{"display_name":"Fetched"}"#, 900);
+        let older_local = row(r#"{"display_name":"Local"}"#, 100);
+        let (_, floor) = merge_base(Some(&newer_fetch), Some(&older_local));
+        assert_eq!(floor, Some(900));
+
         let older_fetch = row(r#"{"display_name":"Fetched"}"#, 100);
         let newer_local = row(r#"{"display_name":"Local"}"#, 900);
-        let (base, floor) = merge_base(Some(&older_fetch), Some(&newer_local));
-        assert_eq!(
-            base.display_name(),
-            Some("Fetched"),
-            "the relay answer is still the base",
-        );
-        assert_eq!(floor, Some(900), "but the floor is the newest of the two");
+        let (_, floor) = merge_base(Some(&older_fetch), Some(&newer_local));
+        assert_eq!(floor, Some(900), "the floor is the newest of the two");
 
         let (_, floor_local_branch) = merge_base(None, Some(&newer_local));
         assert_eq!(floor_local_branch, Some(900));
+    }
+
+    #[test]
+    fn merge_base_takes_a_newer_local_row_over_a_stale_fetched_one() {
+        // A relay may answer with an OLD copy of our own profile: genuinely
+        // signed, and superseded. The local row records a newer own event, so
+        // merging onto the relay's copy would sign back every field removed
+        // since — a payment address, a photo, a field another client dropped.
+        let stale = row(
+            r#"{"display_name":"Old","lud16":"old@wallet","picture":"https://old.example/a.jpg","gone":true}"#,
+            100,
+        );
+        let local = row(r#"{"display_name":"Me"}"#, 900);
+        let (base, floor) = merge_base(Some(&stale), Some(&local));
+        let republished = merge_edits(&base, &edits(None, Some("bio")).to_edits(None));
+        let published = republished.as_metadata();
+        assert_eq!(republished.display_name(), Some("Me"));
+        assert_eq!(published.about.as_deref(), Some("bio"));
+        assert_eq!(published.lud16, None);
+        assert_eq!(published.picture, None);
+        assert!(!published.custom.contains_key("gone"));
+        assert_eq!(floor, Some(900));
+    }
+
+    #[test]
+    fn merge_base_takes_the_fetched_row_on_a_tie_and_when_nothing_is_cached() {
+        // Equal `created_at` is the same event, or one we cannot order: the
+        // relay's copy carries the name as typed and anything another client
+        // wrote in that second.
+        let fetched = row(
+            r#"{"display_name":"Fetched","website":"https://w.example"}"#,
+            500,
+        );
+        let local = row(r#"{"display_name":"Local"}"#, 500);
+        let (base, floor) = merge_base(Some(&fetched), Some(&local));
+        assert_eq!(base.display_name(), Some("Fetched"));
+        assert_eq!(floor, Some(500));
+
+        let (base, floor) = merge_base(Some(&fetched), None);
+        assert_eq!(base.display_name(), Some("Fetched"));
+        assert_eq!(floor, Some(500));
     }
 
     #[test]

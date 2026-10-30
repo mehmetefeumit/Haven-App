@@ -139,15 +139,14 @@ async fn build_two_member_circle(relays: &[String]) -> TwoMemberCircle {
     let alice = CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap();
     let config = CircleConfig::new(CIRCLE_NAME).with_relays(relays.to_vec());
     let result = alice
-        .create_circle(&alice_keys, vec![bob_member], &config, relays)
+        .create_circle(&alice_keys, vec![bob_member], &config)
         .await
         .expect("create circle");
+    // As the app's driven create leaves it: the founding Welcomes sent from
+    // their records and acknowledged, so no later drive sends them.
+    let _ = alice.land_staged_for_test().await;
     let mls_group_id = result.circle.mls_group_id.clone();
     let nostr_group_id = result.circle.nostr_group_id;
-    alice
-        .confirm_published(result.pending)
-        .await
-        .expect("alice confirms creation");
 
     let welcome = &result.welcome_events[0];
     bob.process_gift_wrapped_invitation(&bob_keys, &welcome.event)
@@ -265,12 +264,7 @@ async fn a_two_engine_receive_path_logs_no_identifier() {
     let location = LocationMessage::new(NEEDLE_LAT, NEEDLE_LON);
     let (location_event, _, _) = fx
         .alice
-        .encrypt_location(
-            &fx.mls_group_id,
-            &fx.alice_keys.public_key(),
-            &location,
-            300,
-        )
+        .seal_location_for_test(&fx.mls_group_id, &location)
         .await
         .expect("alice encrypts a location for the circle");
 
@@ -278,8 +272,16 @@ async fn a_two_engine_receive_path_logs_no_identifier() {
         group_id_hex: group_hex.clone(),
         relays: relays.clone(),
     };
-    let alice_engine = LiveSyncCore::new_local(Arc::clone(&fx.alice), fx.alice_keys.public_key());
-    let bob_engine = LiveSyncCore::new_local(Arc::clone(&fx.bob), fx.bob_keys.public_key());
+    let alice_engine = LiveSyncCore::new_local(
+        Arc::clone(&fx.alice),
+        fx.alice_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
+    let bob_engine = LiveSyncCore::new_local(
+        Arc::clone(&fx.bob),
+        fx.bob_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     let mut bob_bus = bob_engine.bus().subscribe();
 
     let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));

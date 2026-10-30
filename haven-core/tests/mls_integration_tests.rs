@@ -180,23 +180,18 @@ mod mls_group_context_tests {
 }
 
 // ============================================================================
-// StorageConfig Tests (path derivation → session.sqlite)
+// StorageConfig Tests (path derivation → session-v2.sqlite)
 // ============================================================================
 
 mod storage_config_tests {
     use super::*;
 
     #[test]
-    fn storage_config_database_path_is_session_sqlite() {
+    fn storage_config_database_path_is_session_v2_sqlite() {
         let config = StorageConfig::new("/some/path");
         assert_eq!(
             config.database_path(),
-            PathBuf::from("/some/path/session.sqlite")
-        );
-        // The legacy pre-migration path is still derivable for the cutover wipe.
-        assert_eq!(
-            config.legacy_database_path(),
-            PathBuf::from("/some/path/haven_mdk.db")
+            PathBuf::from("/some/path/session-v2.sqlite")
         );
     }
 
@@ -206,7 +201,7 @@ mod storage_config_tests {
         assert_eq!(config.data_dir, PathBuf::from("relative/path"));
         assert_eq!(
             config.database_path(),
-            PathBuf::from("relative/path/session.sqlite")
+            PathBuf::from("relative/path/session-v2.sqlite")
         );
     }
 
@@ -214,7 +209,7 @@ mod storage_config_tests {
     fn storage_config_empty_path() {
         let config = StorageConfig::new("");
         assert_eq!(config.data_dir, PathBuf::from(""));
-        assert_eq!(config.database_path(), PathBuf::from("session.sqlite"));
+        assert_eq!(config.database_path(), PathBuf::from("session-v2.sqlite"));
     }
 
     #[test]
@@ -469,12 +464,17 @@ mod selfremove_eviction_tests {
         assert_eq!(g.alice.member_pubkeys(&g.group_id).await.unwrap().len(), 2);
 
         // Bob (non-admin) proposes SelfRemove.
-        let leave = g.bob.leave_group(&g.group_id).await.expect("bob leaves");
+        let leave = g
+            .bob
+            .leave_group(&g.group_id)
+            .await
+            .expect("bob leaves")
+            .expect("a first leave in this epoch proposes");
         let proposal = leave
             .publish
             .iter()
             .find_map(|w| match w {
-                PublishWork::Proposal { msg } => Some(msg.clone()),
+                PublishWork::Proposal { msg, .. } => Some(msg.clone()),
                 _ => None,
             })
             .expect("SelfRemove proposal");
@@ -497,16 +497,16 @@ mod selfremove_eviction_tests {
             "the removal must not apply on the bare proposal (jitter-delayed auto-commit)"
         );
 
-        // Poll advance_convergence past the jitter window; when the auto-commit
+        // Advance at each engine deadline; when the auto-commit
         // surfaces as AutoPublish, CAPTURE its commit (the wire artifact that MUST
         // reach peers before applying — Rule 13/F13; the DM-3 stopgap confirmed it
         // without ever publishing it, forking remaining members) and confirm it.
         let mut evicted = false;
         let mut captured_commit: Option<haven_core::nostr::mls::types::Event> = None;
-        for _ in 0..40 {
+        for _ in 0..8 {
             let eff = g
                 .alice
-                .advance_convergence(&g.group_id)
+                .stage_unrecorded_for_test(&g.group_id)
                 .await
                 .expect("advance convergence");
             for w in &eff.publish {
@@ -531,7 +531,12 @@ mod selfremove_eviction_tests {
                 evicted = true;
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // The proposal's convergence window, then the auto-commit's jitter:
+            // each advance waits for the deadline the engine announces.
+            let Some(wait) = g.alice.receive_retick_after(&g.group_id).await else {
+                break;
+            };
+            tokio::time::sleep(wait).await;
         }
 
         assert!(

@@ -69,6 +69,8 @@
 #   2  expected paths missing / self-test failed (the guard itself is broken)
 
 set -uo pipefail
+LITERAL_FREE="$(cat "$(dirname "${BASH_SOURCE[0]}")/lib/literal_free.awk")"
+readonly LITERAL_FREE
 
 SCRIPT_NAME="check_location_access_gate"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -122,11 +124,11 @@ code_view() {
 fn_slice() {
   local sig="$1" file="$2" v
   v="$(code_view "${file}")"
-  awk -v sig="${sig}" '
+  awk -v sig="${sig}" "${LITERAL_FREE}"'
     !inbody && index($0, sig) > 0 { inbody = 1 }
     inbody {
       print
-      o = gsub(/[{]/, "&"); c = gsub(/[}]/, "&")
+      lfree = literal_free($0); o = gsub(/[{]/, "&", lfree); c = gsub(/[}]/, "&", lfree)
       depth += o - c
       if (seen && depth <= 0) exit
       if (o > 0) seen = 1

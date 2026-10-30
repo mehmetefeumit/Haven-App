@@ -3,6 +3,7 @@
 /// Shows invitation details with accept/decline actions.
 library;
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
@@ -21,10 +22,13 @@ import 'package:haven/src/services/publish_stagger.dart'
     show kMaxCirclesPerAccount;
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/bidi_isolate.dart';
 import 'package:haven/src/utils/log_alias.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/utils/profile_refresh_trigger.dart';
+import 'package:haven/src/widgets/circles/rejoin_circle_dialog.dart';
+import 'package:haven/src/widgets/common/long_message_snack_bar.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A card widget that displays a pending circle invitation.
@@ -49,37 +53,6 @@ class InvitationCard extends ConsumerStatefulWidget {
 /// Which action the user triggered, for showing the correct loading spinner.
 enum _LoadingAction { none, accepting, declining }
 
-/// Wraps [text] in U+2068 FIRST STRONG ISOLATE / U+2069 POP DIRECTIONAL
-/// ISOLATE.
-///
-/// Applied to a kind-0 display name — attacker-chosen, anyone can publish any
-/// name — wherever it is interpolated into a RENDERED paragraph beside app
-/// text. The bidirectional algorithm resolves run boundaries across a whole
-/// paragraph, so an unisolated strong-RTL name (or one carrying an
-/// unterminated U+202E override) reorders the words around it; the isolate
-/// confines both effects to the name. Every locale happens to put this
-/// placeholder last today, but a translation that moves it is an ARB edit
-/// away, so the defence is structural rather than positional.
-///
-/// On a semantics LABEL the calculus is different, not exempt: TTS and
-/// braille both read a label's codepoints in logical order, so an override
-/// embedded in it cannot visually reorder anything for either — there is no
-/// paragraph layout for it to escape. This card's own "Invited by" label
-/// (below) is left un-isolated, and correctly so: the name is the LAST thing
-/// in that joined string, so even where a label's raw text IS instead
-/// rendered visibly — by an accessibility inspector, a semantics-tree dump,
-/// or screenshot tooling, all of which do lay text out — there is nothing
-/// after the name in this particular string left to reorder. Where a label
-/// instead JOINS the untrusted text with OTHER label content that follows it
-/// in the same string, isolate it there too: it is free (never spoken, never
-/// a braille cell) and keeps that trailing content from being swallowed by
-/// an unterminated override under those visual consumers.
-/// `MemberCandidateTile._semanticsLabel` in member_picker.dart is exactly
-/// that case — its identity is followed by the tier, the nickname note, the
-/// collision note and any refusal reason in one joined string, so it stays
-/// isolated there. The npub needs neither treatment — bech32 is ASCII by
-/// construction and cannot carry a direction control.
-String _bidiIsolate(String text) => '\u2068$text\u2069';
 
 class _InvitationCardState extends ConsumerState<InvitationCard> {
   _LoadingAction _loadingAction = _LoadingAction.none;
@@ -129,16 +102,34 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
   /// Handles accepting the invitation.
   Future<void> _handleAccept() async {
     final l10n = AppLocalizations.of(context);
+    // Read before the await: everything after it must work even when this
+    // card has already left the tree — the user navigated away, or the list
+    // refreshed — and a disposed card's `ref` and `context` cannot be used.
+    // The messenger outlives the card, and so does its context.
+    final container = ProviderScope.containerOf(context, listen: false);
+    final messenger = ScaffoldMessenger.of(context);
+    final errorColor = Theme.of(context).colorScheme.error;
+    final inviter = _inviterLabel();
+    final needsNewInvite = longMessageSnackBar(
+      context,
+      l10n.invitationNeedsNewInviteError(inviter),
+      error: true,
+    );
     setState(() {
       _loadingAction = _LoadingAction.accepting;
     });
 
     try {
       debugPrint('[Accept] starting acceptInvitation');
-      final circleService = ref.read(circleServiceProvider);
-      final acceptedCircle = await circleService.acceptInvitation(
-        widget.invitation.mlsGroupId,
+      final acceptedCircle = await _acceptOrRejoin(
+        container,
+        messenger,
+        l10n,
+        inviter,
+        errorColor,
       );
+      // Nothing joined: the user kept the invitation for later, or declined.
+      if (acceptedCircle == null) return;
       debugPrint(
         '[Accept] acceptInvitation OK '
         '(members=${magnitudeBucket(acceptedCircle.members.length)}, '
@@ -147,14 +138,14 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
       // Auto-select the accepted circle so the map immediately shows
       // member locations without requiring a manual tap.
-      ref.read(selectedCircleIdProvider.notifier).state =
+      container.read(selectedCircleIdProvider.notifier).state =
           acceptedCircle.mlsGroupId;
 
       // Invalidate providers to refresh UI and republish a fresh KeyPackage.
       // read() after invalidate() triggers execution for fire-and-forget
       // providers that nothing watches.
       debugPrint('[Accept] triggering keyPackagePublisher + locationPublisher');
-      ref
+      container
         ..invalidate(pendingInvitationsProvider)
         ..invalidate(circlesProvider)
         ..invalidate(keyPackagePublisherProvider)
@@ -171,85 +162,53 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       // the union of every circle (§1.7). Sending just this circle's roster
       // would hand the relay an exact co-membership cluster. `circlesProvider`
       // was invalidated above, so resolving it here picks up the new circle.
-      triggerProfileRefresh(ref, maxAge: profileInteractiveMaxAge);
+      triggerProfileRefreshIn(container, maxAge: profileInteractiveMaxAge);
 
       // Kick off the joiner-side burst-poll window so existing members'
       // locations land within seconds. Self-terminates after a jittered
       // 50–80 s window.
       debugPrint('[Accept] starting joiner burst watcher');
-      ref
+      container
           .read(joinWatcherProvider.notifier)
           .startJoinerWatch(acceptedCircle.mlsGroupId);
 
-      // Post-welcome self-update is intentionally NOT issued here.
-      //
-      // Haven issues no periodic or post-join self-update at all: leaderless
-      // self-update is the dominant MLS fork generator (the MIP-02 deviation
-      // is documented/accepted in SECURITY.md). The only epoch change a user
-      // can trigger is the explicit Repair action
-      // (`docs/EPOCH_ROTATION_REPAIR_PLAN.md`), which is admin-only and
-      // rate-limited. Historical reasons it was never issued inline anyway:
-      //
-      // 1. Single-joiner race: an immediate `selfUpdate` here advances
-      //    the joiner's local epoch to N+1 while the just-fired
-      //    `locationPublisher` is still racing to encrypt at epoch N.
-      //    If `selfUpdate` finalizes first, the location is encrypted
-      //    at N+1, but the admin is still at N — admin returns
-      //    `Unprocessable`, the `since` cursor advances, and the first
-      //    location event is lost permanently.
-      //
-      // 2. Multi-joiner fork: when several invitees accept within
-      //    seconds, each independently creates a commit at the same
-      //    epoch. MLS allows only one commit per epoch; the losers'
-      //    commits become `Unprocessable` for everyone else while the
-      //    losers' own MDK has already finalized them locally. The
-      //    losers are silently forked off the group.
-      //
-      // M5 removes the periodic/post-join self-update driver entirely, so
-      // both failure modes above are moot (there is simply no self-update
-      // to race or fork). Concurrent MEMBERSHIP commits remain a residual
-      // fork risk until M3 wires the M4 adopt-winner convergence primitive
-      // into the commit paths (see SECURITY.md "Residual fork surface").
-      //
-      // White Noise reached the same conclusion — see
-      // `whitenoise-rs/src/whitenoise/event_processor/event_handlers/
-      // handle_giftwrap.rs` finalize_welcome_with_instance, where the
-      // post-welcome `perform_self_update` call is commented out with
-      // the same motivation.
+      // The post-join self-update MDK owes is not issued here: haven-core
+      // makes it from a full drive once the circle is caught up and quiet
+      // (`SessionManager::post_join_due`), through the fanout driver like
+      // every commit.
 
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(l10n.invitationAcceptedSnack)));
-      }
+      messenger.showSnackBar(
+        SnackBar(content: Text(l10n.invitationAcceptedSnack)),
+      );
+    } on InvitationNeedsNewInviteException catch (_) {
+      // Made for keys this phone no longer holds, so no retry can work. The
+      // core has already resolved it like a decline; the snack is shown before
+      // the list refresh removes this card.
+      debugPrint('[Accept] invitation needs a new invite');
+      messenger.showSnackBar(needsNewInvite);
+      container.invalidate(pendingInvitationsProvider);
     } on CircleRosterFullException catch (_) {
       // A refusal, not a failure: the generic message below tells the user to
       // try again, which can never work here. The held Welcome is untouched, so
       // the invitation is still waiting once they leave a circle.
       debugPrint('[Accept] roster full');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              l10n.invitationRosterFullError(kMaxCirclesPerAccount),
-            ),
-            backgroundColor: Theme.of(context).colorScheme.error,
-          ),
-        );
-      }
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(l10n.invitationRosterFullError(kMaxCirclesPerAccount)),
+          backgroundColor: errorColor,
+        ),
+      );
     } on Object catch (e) {
       // Catch all throwables including FFI errors (which throw Error, not
       // Exception). Secret details are logged via debugPrint (stripped in
       // release) while the user sees a generic message.
       debugPrint('Failed to accept invitation: ${e.runtimeType}');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(l10n.invitationAcceptError),
-            backgroundColor: Theme.of(context).colorScheme.error,
-          ),
-        );
-      }
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(l10n.invitationAcceptError),
+          backgroundColor: errorColor,
+        ),
+      );
     } finally {
       if (mounted) {
         setState(() {
@@ -259,36 +218,131 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
     }
   }
 
+  /// Accepts the invitation, asking for the consent one that would replace a
+  /// circle already on this phone needs; `null` when nothing was joined.
+  ///
+  /// Every exception but that one reaches [_handleAccept], whose handling of
+  /// each is the same as for a plain accept.
+  Future<Circle?> _acceptOrRejoin(
+    ProviderContainer container,
+    ScaffoldMessengerState messenger,
+    AppLocalizations l10n,
+    String inviter,
+    Color errorColor,
+  ) async {
+    final service = container.read(circleServiceProvider);
+    final id = widget.invitation.mlsGroupId;
+    try {
+      return await service.acceptInvitation(id);
+    } on InvitationRejoinConfirmationRequiredException catch (_) {
+      debugPrint('[Accept] invitation would replace a held circle');
+    }
+    final offers = await service.rejoinOffersForInvitation(id);
+    // None held any more: the copy it would replace may be gone, so the
+    // invitation is accepted again, which joins directly or asks again.
+    if (offers.isEmpty) return service.acceptInvitation(id);
+    final offer = offers.first;
+    if (!mounted) return null;
+    final choice = await showRejoinCircleDialog(
+      context,
+      circleName: offer.circleName,
+      inviterName: _inviterName(),
+    );
+    switch (choice) {
+      case null:
+        // Cancelled: nothing changes, and the invitation stays in the list.
+        return null;
+      case RejoinChoice.decline:
+        try {
+          await service.declineGroupRejoin(id);
+        } on Object catch (e) {
+          debugPrint('[Accept] rejoin decline failed: ${e.runtimeType}');
+          messenger.showSnackBar(
+            SnackBar(
+              content: Text(l10n.invitationDeclineError),
+              backgroundColor: errorColor,
+            ),
+          );
+          return null;
+        }
+        container.invalidate(pendingInvitationsProvider);
+        messenger.showSnackBar(
+          SnackBar(content: Text(l10n.invitationDeclinedSnack)),
+        );
+        return null;
+      case RejoinChoice.join:
+        try {
+          return await service.confirmGroupRejoin(id, offer);
+        } on InvitationRejoinConfirmationRequiredException catch (_) {
+          // This phone's copy moved after the offer was read. The consent is
+          // to join this circle again, so the same circle's offer is read
+          // once more and confirmed; a second move fails the accept.
+          final again = (await service.rejoinOffersForInvitation(id))
+              .where((o) => listEquals(o.mlsGroupId, offer.mlsGroupId))
+              .firstOrNull;
+          if (again == null) rethrow;
+          return service.confirmGroupRejoin(id, again);
+        }
+    }
+  }
+
+  /// The inviter as the card names them, for copy composed outside `build`.
+  String _inviterLabel() {
+    final name = _inviterName();
+    return name == null
+        ? NpubValidator.shortenForDisplay(widget.invitation.inviterNpub)
+        : bidiIsolate(name);
+  }
+
+  /// The inviter's resolved name, raw; `null` when only their key is known.
+  String? _inviterName() {
+    final npub = NpubValidator.shortenForDisplay(widget.invitation.inviterNpub);
+    final pubkey = widget.invitation.inviterPubkey;
+    final profile = publicProfilesEnabled
+        ? ref.read(memberProfileProvider(pubkey)).valueOrNull
+        : null;
+    final nickname = ref
+        .read(contactNicknameProvider(pubkey))
+        .valueOrNull
+        ?.trim();
+    final name = resolveEffectiveMemberName(
+      localOverride: nickname,
+      profile: profile,
+      npubFallback: npub,
+    );
+    return name == npub ? null : name;
+  }
+
   /// Handles declining the invitation.
   Future<void> _handleDecline() async {
     final l10n = AppLocalizations.of(context);
+    // As in `_handleAccept`: nothing after the await may need this card.
+    final container = ProviderScope.containerOf(context, listen: false);
+    final messenger = ScaffoldMessenger.of(context);
+    final errorColor = Theme.of(context).colorScheme.error;
     setState(() {
       _loadingAction = _LoadingAction.declining;
     });
 
     try {
-      final circleService = ref.read(circleServiceProvider);
+      final circleService = container.read(circleServiceProvider);
       await circleService.declineInvitation(widget.invitation.mlsGroupId);
 
       // Invalidate provider to refresh UI
-      ref.invalidate(pendingInvitationsProvider);
+      container.invalidate(pendingInvitationsProvider);
 
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(l10n.invitationDeclinedSnack)));
-      }
+      messenger.showSnackBar(
+        SnackBar(content: Text(l10n.invitationDeclinedSnack)),
+      );
       // Catch all throwables including FFI errors.
     } on Object catch (e) {
       debugPrint('Failed to decline invitation: ${e.runtimeType}');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(l10n.invitationDeclineError),
-            backgroundColor: Theme.of(context).colorScheme.error,
-          ),
-        );
-      }
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(l10n.invitationDeclineError),
+          backgroundColor: errorColor,
+        ),
+      );
     } finally {
       if (mounted) {
         setState(() {
@@ -382,7 +436,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
                       excludeSemantics: true,
                       child: Text(
                         l10n.invitationCardInvitedBy(
-                          hasName ? _bidiIsolate(inviterName) : npub,
+                          hasName ? bidiIsolate(inviterName) : npub,
                         ),
                         style: theme.textTheme.bodyMedium?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,

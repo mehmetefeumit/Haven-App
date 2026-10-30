@@ -6,9 +6,9 @@
 /// far more common: a correct policy object that nothing ever calls. Both of
 /// the wire-ups below were absent before this change —
 ///
-///  * `publishLocation` returned its [PublishResult] to callers that dropped
-///    it on the floor (`catch`-and-`debugPrint` in both the per-circle
-///    scheduler and the publisher provider), and threw away a total rejection
+///  * `publishLocation` returned its outcome to callers that dropped it on
+///    the floor (`catch`-and-`debugPrint` in both the per-circle scheduler
+///    and the publisher provider), and threw away a total rejection
 ///    entirely;
 ///  * `_persistDecryptedLocation` — the single funnel every receive plane
 ///    reaches — read the sender's timestamp only to store it.
@@ -17,10 +17,10 @@
 library;
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/rust/api.dart' show LocationPublishFfi;
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
-import 'package:haven/src/services/relay_service.dart';
 
 import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_relay_service.dart';
@@ -62,76 +62,78 @@ void main() {
   Future<void> publish() => service.publishLocation(
     mlsGroupId: const [9, 9, 9],
     nostrGroupId: const [1, 2, 3],
-    senderPubkeyHex: 'ff' * 32,
     latitude: 1,
     longitude: 2,
   );
 
   group('publish path', () {
-    test('a relay rejection is propagated, not swallowed', () {
-      // The bar: a rejection must reach something that can act on it. Before
-      // this change the only witness was a debugPrint.
-      relayService
-        ..shouldRejectPublish = true
-        ..publishRejectionReason = 'invalid: '
-            'event too far off from the current time';
+    test('a send the relays refused for its time raises the verdict in its '
+        'direction', () async {
+      // The bar: a refusal must reach something that can act on it — every
+      // caller drops the outcome once it has fed the health model.
+      for (final (answer, complaint) in [
+        (LocationPublishFfi.clockAhead, DeviceClockComplaint.ahead),
+        (LocationPublishFfi.clockBehind, DeviceClockComplaint.behind),
+        (LocationPublishFfi.clockUnspecified, DeviceClockComplaint.unspecified),
+      ]) {
+        circleService.publishAnswers = [answer];
 
-      return publish().then((_) {
+        await publish();
+        circleService.publishAnswers = [];
+
         expect(
           detector.status.signal,
           ClockSkewSignal.relayRejectedTimestamp,
-          reason:
-              'publishLocation must report the relay verdict itself — every '
-              'caller discards the returned PublishResult',
+          reason: '$answer',
         );
-      });
+        expect(detector.status.complaint, complaint, reason: '$answer');
+      }
     });
 
-    test('a fast-clock rejection is distinguished from an ordinary one', () {
-      // Same shape of failure, different cause. If these two produced the same
-      // state the user would be told "sharing is failing" in both cases, which
-      // is exactly the unactionable message this work exists to replace.
-      relayService
-        ..shouldRejectPublish = true
-        ..publishRejectionReason = 'rate-limited: slow down';
+    test('a refusal for anything else is distinguished from a clock one',
+        () async {
+      // Same shape of failure, different cause: the user must not be told
+      // their clock is wrong when the relays blamed something else.
+      circleService.publishAnswers = [LocationPublishFfi.refused];
 
-      return publish().then((_) {
-        expect(detector.status.signal, ClockSkewSignal.none);
-      });
-    });
-
-    test(
-      'a total rejection that surfaces as a THROW still reaches the detector',
-      () async {
-        // The production shape: when no relay accepts, Rust returns `Err`, so
-        // Dart gets an exception and never a PublishResult. Before the Rust
-        // change the exception carried no cause at all.
-        relayService.publishThrows = const RelayClockRejectionException(
-          'ahead',
-        );
-
-        await expectLater(
-          publish(),
-          throwsA(isA<RelayClockRejectionException>()),
-        );
-
-        expect(detector.status.signal, ClockSkewSignal.relayRejectedTimestamp);
-        expect(detector.status.complaint, DeviceClockComplaint.ahead);
-      },
-    );
-
-    test('an ordinary publish throw does not blame the clock', () async {
-      relayService.publishThrows = const RelayServiceException(
-        'Failed to publish event',
-      );
-
-      await expectLater(publish(), throwsA(isA<RelayServiceException>()));
+      await publish();
 
       expect(detector.status.signal, ClockSkewSignal.none);
     });
 
+    test('a send no relay was reached for, or not made, leaves the verdict '
+        'alone', () async {
+      // An ordinary transport failure says nothing either way about the
+      // clock: clearing the verdict there would let one dropped connection
+      // hide a clock that is still wrong.
+      detector.recordLocationPublish(LocationPublishFfi.clockAhead);
+      for (final answer in [
+        LocationPublishFfi.unreachable,
+        LocationPublishFfi.expired,
+        LocationPublishFfi.superseded,
+        LocationPublishFfi.ended,
+        LocationPublishFfi.inFlight,
+      ]) {
+        circleService.publishAnswers = [answer];
+
+        await publish();
+        circleService.publishAnswers = [];
+
+        expect(detector.status.isSkewed, isTrue, reason: '$answer');
+      }
+    });
+
+    test('a held send tells the detector nothing', () async {
+      detector.recordLocationPublish(LocationPublishFfi.clockAhead);
+      circleService.holdNextSeal = true;
+
+      await publish();
+
+      expect(detector.status.isSkewed, isTrue);
+    });
+
     test('a successful publish clears a previously raised signal', () async {
-      detector.recordPublishClockRejection('ahead');
+      detector.recordLocationPublish(LocationPublishFfi.clockAhead);
       expect(detector.status.isSkewed, isTrue);
 
       await publish();
@@ -229,11 +231,10 @@ void main() {
     final result = await bare.publishLocation(
       mlsGroupId: const [9, 9, 9],
       nostrGroupId: const [1, 2, 3],
-      senderPubkeyHex: 'ff' * 32,
       latitude: 1,
       longitude: 2,
     );
     expect(result, isA<LocationPublishSent>());
-    expect((result as LocationPublishSent).result.isSuccess, isTrue);
+    expect((result as LocationPublishSent).acked, isTrue);
   });
 }

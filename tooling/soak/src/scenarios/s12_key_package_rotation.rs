@@ -18,14 +18,24 @@
 //! or narrowed moves this arm with it rather than breaking it; an arm that
 //! spelled a day count would go on grading a window the package no longer has.
 //!
-//! # Why the heal half is the load-bearing one
+//! # A heal is the same event
 //!
-//! Haven's heal path re-publishes CACHED bytes under a FRESH `created_at`. Any
-//! rotation clock read off the event's timestamp would therefore reset on every
-//! relay heal while the real `not_after` kept ticking, and a device that healed
-//! a flaky relay once a week would sail straight past the cliff. The arm drives
-//! a heal and then asks the same question at the same instant: the answer must
-//! not have changed.
+//! A heal re-publishes the tracked package's signed event byte for byte: the
+//! same id, the same `created_at`. The arm drives one and requires exactly
+//! that, then asks the rotation question again at the same instant: the
+//! answer must not have changed, because the clock is the package's own
+//! lifetime and nothing about a heal touches it.
+//!
+//! # The two replacements no clock decides
+//!
+//! `foundation/key-packages.md:86-87`: a package a Welcome consumed is
+//! replaced. Every joiner in a soak world was invited through a package its
+//! own session staged, so the arm opens on real engine state: the owner's
+//! last staged package, consumed by the join that built the world. Once a
+//! relay has acknowledged it the decision must be a replacement into that
+//! same slot — however fresh the package's lifetime. The second: a tracked
+//! package whose private bundle is gone can open no Welcome, so it is
+//! replaced rather than re-advertised.
 //!
 //! # The clock the arm steps, and the one it does not
 //!
@@ -47,17 +57,19 @@
 //! subject.
 //!
 //! `OpenMLS` checks the lifetime LAST inside `KeyPackageIn::validate`
-//! (`openmls-0.8.1/src/key_packages/key_package_in.rs:136-207`): a package whose
+//! (`key_packages/key_package_in.rs:136-204` in the `OpenMLS` fork MDK v0.10.4
+//! pins, `erskingardner/openmls@59e7d3b`): a package whose
 //! capability list does not cover every extension it carries fails with
-//! `UnsupportedExtension` (`:185-193`) before the lifetime gate (`:196-204`) is
+//! `UnsupportedExtension` (`:185-192`) before the lifetime gate (`:195-202`) is
 //! reached — measured: an expired package missing one capability reports
 //! `UnsupportedExtension`, never the lifetime. The engine's capability helpers
 //! are `pub(crate)`, so rather than restate them this arm copies the leaf
 //! capabilities, leaf extensions and package extensions of a package the
 //! device's own session just minted, and re-signs the account-identity proof
-//! over a fresh MLS signer with the device's Nostr keys. The twin passing the
-//! whole chain is what proves the copy conformant, and what isolates the
-//! lifetime as the only reason its sibling was refused. The MLS signer is a
+//! (the Current-profile component 0x8009) over a fresh MLS signer with the
+//! device's Nostr keys. The twin passing the whole chain is what proves the
+//! copy conformant, and what isolates the lifetime as the only reason its
+//! sibling was refused. The MLS signer is a
 //! fresh Ed25519 pair and the proof is signed by the secp256k1 identity, so
 //! the two keys differ by construction (Security Rule 1), and nothing here
 //! goes through a production signing seam.
@@ -82,11 +94,11 @@
 //! `create_group_rejects_invitee_keypackage_with_excessive_lifetime_range`
 //! (`:730`). And two constants must not be conflated:
 //! `DEFAULT_KEY_PACKAGE_LIFETIME_SECONDS` is **84 days**
-//! (`openmls-0.8.1/src/key_packages/lifetime.rs:11`), while **7 261 200 s
+//! (the fork's `key_packages/lifetime.rs:13`), while **7 261 200 s
 //! (84 d + 1 h) is the MAX RANGE**, as
 //! `haven-core/src/relay/maintenance/kp_lifetime.rs:6-13` states.
-//! `has_acceptable_range()` is **`OpenMLS`'s** policy (`lifetime.rs:20-21`,
-//! `:100-103`), not a Marmot one — MDK merely calls it.
+//! `has_acceptable_range()` is **`OpenMLS`'s** policy (`lifetime.rs:22-23`,
+//! `:116`), not a Marmot one — MDK merely calls it.
 //!
 //! # Rule 15
 //!
@@ -100,21 +112,25 @@
 use std::time::Duration;
 
 use cgka_engine::account_identity_proof::{
-    account_identity_proof_extension, AccountIdentityProofRequest, AccountIdentityProofSigner,
+    account_identity_proof_component, AccountIdentityProofRequest, AccountIdentityProofSigner,
 };
 use cgka_engine::key_package_metadata;
-use haven_core::nostr::mls::types::{EngineError, KeyPackage};
-use haven_core::relay::maintenance::{
-    build_kp_maintenance_events, build_kp_maintenance_events_reusing, decide_kp_maintenance,
-    is_conformant_slot_id, monotonic_kp_created_at, read_kp_lifetime, KeyPackageLifetime,
-    KpMaintenanceDecision, KpMaintenanceEvents, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
-    TrackedKpLifetime, KIND_MARMOT_KEY_PACKAGE,
+use haven_core::nostr::mls::types::{
+    EngineError, KeyPackage, ProtocolProfile, ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
 };
-use nostr::{Filter, Keys, Kind};
+use haven_core::nostr::mls::TrackedKeyPackage;
+use haven_core::relay::maintenance::{
+    build_kp_maintenance_events, decide_kp_maintenance, is_conformant_slot_id,
+    monotonic_kp_created_at, read_kp_lifetime, KeyPackageLifetime, KpMaintenanceDecision,
+    KpMaintenanceEvents, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot, TrackedKpLifetime,
+    TrackedKpSlot, KIND_MARMOT_KEY_PACKAGE,
+};
+use nostr::{Event, Filter, JsonUtil as _, Keys, Kind};
 use openmls::prelude::tls_codec::Deserialize as _;
 use openmls::prelude::{
-    BasicCredential, CredentialWithKey, KeyPackage as MlsKeyPackage, Lifetime, MlsMessageBodyIn,
-    MlsMessageIn, MlsMessageOut, OpenMlsProvider as _, ProtocolVersion,
+    AppDataDictionaryExtension, BasicCredential, CredentialWithKey, Extension,
+    KeyPackage as MlsKeyPackage, Lifetime, MlsMessageBodyIn, MlsMessageIn, MlsMessageOut,
+    OpenMlsProvider as _, ProtocolVersion,
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
@@ -145,7 +161,7 @@ pub const ARMS: [Arm; 2] = [
             // A key package is not a group operation; no epoch moves.
             epochs_crossed: 0,
             deliveries_observed: 1,
-            canaries_caught: 6,
+            canaries_caught: 8,
         },
     },
     Arm {
@@ -275,31 +291,78 @@ async fn close<T: TimelineSink, L: LogDrain>(
     })
 }
 
-/// The whole arm: publish a slot, read its own lifetime, and walk the policy.
+/// The whole arm: pay the replacement the world's own join left owed, then
+/// publish a slot, read its own lifetime, and walk the policy.
+#[allow(clippy::too_many_lines)]
 async fn rotation_slot<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     owner: DeviceTag,
 ) -> Result<usize, RigError> {
     let mut canaries = 0_usize;
 
-    let first = publish_slot(world, owner, None, None).await?;
-    let slot = first.d_tag.clone();
+    // The package the owner was invited through: staged by its own session,
+    // consumed by the Welcome that built the world, never yet acknowledged.
+    let invited = tracked_package(world, owner)
+        .await?
+        .and_then(|tracked| tracked.pending.map(|event| (tracked.slot, event)));
+    let Some((slot, invited)) = invited else {
+        // An owner no Welcome ever invited has consumed nothing, and the arm
+        // would be grading a replacement nobody owes.
+        return Err(RigError::ShapeMismatch);
+    };
+    acknowledged(world, owner, &invited).await?;
+    let consumed = tracked_package(world, owner)
+        .await?
+        .ok_or(RigError::Core(Step::MintKeyPackage))?;
+    // 1. A consumed package is REPLACED, into its own slot, on every plane —
+    //    at an instant far short of its rotation point, with every plane
+    //    already serving it.
+    if consumed.replacement_owed
+        && decide_kp_maintenance(
+            &snapshot_from_planes(world, owner, &slot).await?,
+            Some(TrackedKpSlot {
+                replacement_owed: consumed.replacement_owed,
+                ..tracked(&slot)
+            }),
+            read_kp_lifetime(&consumed.package),
+            fresh_instant(&consumed.package)?,
+        ) == (KpMaintenanceDecision::Replace {
+            existing_d: slot.clone(),
+            targets: world.relay_urls(),
+        })
+    {
+        canaries += 1;
+    }
+
+    let first = publish_slot(
+        world,
+        owner,
+        Some(&slot),
+        i64::try_from(invited.created_at.as_secs()).ok(),
+    )
+    .await?;
     let original = first.event.content.clone();
-    // 1. The OLD bytes really are on every plane. Without this the rotation
-    //    below would be a publish into a slot nothing was serving, and
-    //    "the bytes changed" would be a comparison against nothing.
-    if served_everywhere(world, owner, &slot, &original).await? {
+    // 2. The replacement really is on every plane, in the same slot, and
+    //    nothing more is owed. Without this the rotation below would be a
+    //    publish into a slot nothing was serving, and "the bytes changed"
+    //    would be a comparison against nothing.
+    if first.d_tag == slot
+        && served_everywhere(world, owner, &slot, &original).await?
+        && tracked_package(world, owner)
+            .await?
+            .is_some_and(|tracked| !tracked.replacement_owed)
+    {
         canaries += 1;
     }
 
     let lifetime = lifetime_of(&first)?;
     let rotate_at = lifetime.rotate_at();
     let snapshot = snapshot_from_planes(world, owner, &slot).await?;
-    // 2. At the package's OWN rotation point — a fraction of its OWN lifetime,
+    // 3. At the package's OWN rotation point — a fraction of its OWN lifetime,
     //    never a day count — the decision is to re-mint into the same slot.
     if rotates_into(&decide_kp_maintenance(
         &snapshot,
-        Some(&slot),
+        Some(tracked(&slot)),
         TrackedKpLifetime::Known(lifetime),
         rotate_at,
     )) == Some(slot.clone())
@@ -307,24 +370,29 @@ async fn rotation_slot<T: TimelineSink, L: LogDrain>(
         canaries += 1;
     }
 
-    let healed = heal_slot(world, owner, &first).await?;
-    // 3. A heal re-publishes CACHED bytes under a FRESH `created_at`, and the
-    //    rotation clock does not move: the same lifetime, the same answer, at
-    //    the same instant. This is the whole reason the clock is read off the
-    //    package rather than off the event.
-    if lifetime_of(&healed)? == lifetime
-        && rotates_into(&decide_kp_maintenance(
-            &snapshot_from_planes(world, owner, &slot).await?,
-            Some(&slot),
-            TrackedKpLifetime::Known(lifetime_of(&healed)?),
-            rotate_at,
-        )) == Some(slot.clone())
-    {
-        canaries += 1;
+    // 4. A heal is the tracked event itself, byte for byte: every plane goes on
+    //    serving the one event, and the rotation clock gives the same answer at
+    //    the same instant.
+    let healed = tracked_package(world, owner)
+        .await?
+        .and_then(|tracked| tracked.published);
+    if let Some(healed) = healed {
+        witnessed(world, owner, &healed).await?;
+        if healed.as_json() == first.event.as_json()
+            && served_everywhere(world, owner, &slot, &original).await?
+            && rotates_into(&decide_kp_maintenance(
+                &snapshot_from_planes(world, owner, &slot).await?,
+                Some(tracked(&slot)),
+                read_kp_lifetime(first.key_package.bytes()),
+                rotate_at,
+            )) == Some(slot.clone())
+        {
+            canaries += 1;
+        }
     }
 
-    let rotated = publish_slot(world, owner, Some(&slot), created_at_of(&healed)).await?;
-    // 4. The rotation lands in the SAME slot — still the binding's 64 lowercase
+    let rotated = publish_slot(world, owner, Some(&slot), created_at_of(&first)).await?;
+    // 5. The rotation lands in the SAME slot — still the binding's 64 lowercase
     //    hex — and the bytes on every plane are new ones.
     if rotated.d_tag == slot
         && is_conformant_slot_id(&slot)
@@ -334,7 +402,7 @@ async fn rotation_slot<T: TimelineSink, L: LogDrain>(
         canaries += 1;
     }
 
-    // 5. A replacement minted in the same wall-clock second still wins the slot:
+    // 6. A replacement minted in the same wall-clock second still wins the slot:
     //    NIP-01 breaks a `created_at` tie by event id, which the publisher does
     //    not control, so the stamp is floored at one above its predecessor —
     //    asserted as the pure rule AND as the bytes a plane really serves.
@@ -351,7 +419,42 @@ async fn rotation_slot<T: TimelineSink, L: LogDrain>(
         canaries += 1;
     }
 
-    // 6. The cliff itself, as a DECISION: below the package's own `not_after`
+    // 7. A tracked package whose private bundle is gone is REPLACED, never
+    //    healed: every plane serves it and its lifetime is fresh, and it can
+    //    open no Welcome.
+    world
+        .device(owner)?
+        .session()?
+        .delete_key_package(&replacement.key_package)
+        .await
+        .map_err(|_| RigError::Core(Step::DeleteKeyPackage))?;
+    let lost = tracked_package(world, owner)
+        .await?
+        .ok_or(RigError::Core(Step::MintKeyPackage))?;
+    let owed = lost.replacement_owed
+        && decide_kp_maintenance(
+            &snapshot_from_planes(world, owner, &slot).await?,
+            Some(TrackedKpSlot {
+                replacement_owed: lost.replacement_owed,
+                ..tracked(&slot)
+            }),
+            read_kp_lifetime(&lost.package),
+            fresh_instant(&lost.package)?,
+        ) == (KpMaintenanceDecision::Replace {
+            existing_d: slot.clone(),
+            targets: world.relay_urls(),
+        });
+    let restored = publish_slot(world, owner, Some(&slot), created_at_of(&replacement)).await?;
+    if owed
+        && served_everywhere(world, owner, &slot, &restored.event.content).await?
+        && tracked_package(world, owner)
+            .await?
+            .is_some_and(|tracked| !tracked.replacement_owed)
+    {
+        canaries += 1;
+    }
+
+    // 8. The cliff itself, as a DECISION: below the package's own `not_after`
     //    it is not past it, and above it, it is. The policy clock is stepped
     //    exactly once, here, between two quiescent phases and sized from the
     //    package's own upper bound.
@@ -359,6 +462,30 @@ async fn rotation_slot<T: TimelineSink, L: LogDrain>(
         canaries += 1;
     }
     Ok(canaries)
+}
+
+/// An instant at which `package` is nowhere near its rotation point: one
+/// second into its own lifetime, read off the package and no clock.
+fn fresh_instant(package: &[u8]) -> Result<u64, RigError> {
+    match read_kp_lifetime(package) {
+        TrackedKpLifetime::Known(lifetime) => Ok(lifetime.not_before.saturating_add(1)),
+        TrackedKpLifetime::Absent
+        | TrackedKpLifetime::NotCurrent
+        | TrackedKpLifetime::Unreadable => Err(RigError::InductionMechanismMoved),
+    }
+}
+
+/// What `owner`'s lifecycle record tracks, if anything.
+async fn tracked_package<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    owner: DeviceTag,
+) -> Result<Option<TrackedKeyPackage>, RigError> {
+    world
+        .device(owner)?
+        .session()?
+        .tracked_key_package()
+        .await
+        .map_err(|_| RigError::Core(Step::MintKeyPackage))
 }
 
 /// The second arm: an expired package and its unexpired twin, both minted in
@@ -472,17 +599,28 @@ fn mint_like(
     let ciphersuite = template.ciphersuite();
     let signer = SignatureKeyPair::new(ciphersuite.signature_algorithm()).map_err(|_| minting())?;
     let identity = keys.public_key().to_bytes().to_vec();
-    let proof = account_identity_proof_extension(
+    // Current profile (MDK v0.10.4): the proof is LeafNode app component
+    // 0x8009, inside the leaf's app-data dictionary, signed at minting time.
+    let proof = account_identity_proof_component(
         &identity,
         &signer.to_public_vec(),
         ciphersuite,
         ciphersuite.signature_algorithm(),
+        u64::try_from(WallNow::now().secs()).map_err(|_| minting())?,
         &ProofSigner(keys),
     )
     .map_err(|_| minting())?;
     let mut leaf_extensions = template.leaf_node().extensions().clone();
+    let mut dictionary = leaf_extensions
+        .app_data_dictionary()
+        .ok_or_else(minting)?
+        .dictionary()
+        .clone();
+    dictionary.insert(ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, proof);
     leaf_extensions
-        .add_or_replace(proof)
+        .add_or_replace(Extension::AppDataDictionary(
+            AppDataDictionaryExtension::new(dictionary),
+        ))
         .map_err(|_| minting())?;
     let bundle = MlsKeyPackage::builder()
         .leaf_node_capabilities(template.leaf_node().capabilities().clone())
@@ -501,7 +639,7 @@ fn mint_like(
         .map_err(|_| minting())?;
     MlsMessageOut::from(bundle.key_package().clone())
         .to_bytes()
-        .map(KeyPackage::new)
+        .map(|bytes| KeyPackage::new(bytes).with_protocol_profile(ProtocolProfile::Current))
         .map_err(|_| minting())
 }
 
@@ -522,7 +660,8 @@ impl AccountIdentityProofSigner for ProofSigner<'_> {
     }
 }
 
-/// Mints a fresh package into `existing_d` (or a new slot) and publishes it.
+/// Mints a fresh package into `existing_d` (or a new slot), publishes it, and
+/// promotes it on the acknowledgement — the order a maintenance tick keeps.
 async fn publish_slot<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     owner: DeviceTag,
@@ -540,37 +679,40 @@ async fn publish_slot<T: TimelineSink, L: LogDrain>(
     )
     .await
     .map_err(|_| RigError::Core(Step::MintKeyPackage))?;
-    publish(world, owner, built).await
+    acknowledged(world, owner, &built.event).await?;
+    Ok(built)
 }
 
-/// Re-publishes the CACHED bytes of `built` into its own slot — the heal path,
-/// with no re-mint.
-async fn heal_slot<T: TimelineSink, L: LogDrain>(
+/// Publishes a staged package's event and, on a relay's acknowledgement,
+/// promotes it.
+async fn acknowledged<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     owner: DeviceTag,
-    built: &KpMaintenanceEvents,
-) -> Result<KpMaintenanceEvents, RigError> {
-    let urls = world.relay_urls();
-    let device = world.device(owner)?;
-    let healed = build_kp_maintenance_events_reusing(
-        &device.keys,
-        built.key_package.bytes(),
-        &urls,
-        &built.d_tag,
-        created_at_of(built),
-    )
-    .map_err(|_| RigError::Core(Step::MintKeyPackage))?;
-    publish(world, owner, healed).await
+    staged: &Event,
+) -> Result<(), RigError> {
+    witnessed(world, owner, staged).await?;
+    let promoted = world
+        .device(owner)?
+        .session()?
+        .promote_key_package(&staged.id)
+        .await
+        .map_err(|_| RigError::Core(Step::MintKeyPackage))?;
+    if promoted {
+        Ok(())
+    } else {
+        // The record no longer stages this event: the arm's premise moved.
+        Err(RigError::InductionMechanismMoved)
+    }
 }
 
 /// Publishes one key-package event and requires a relay's own acknowledgement.
-async fn publish<T: TimelineSink, L: LogDrain>(
+async fn witnessed<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     owner: DeviceTag,
-    built: KpMaintenanceEvents,
-) -> Result<KpMaintenanceEvents, RigError> {
+    event: &Event,
+) -> Result<(), RigError> {
     if world
-        .publish_witnessed(owner, std::slice::from_ref(&built.event))
+        .publish_witnessed(owner, std::slice::from_ref(event))
         .await?
         .is_none()
     {
@@ -578,7 +720,7 @@ async fn publish<T: TimelineSink, L: LogDrain>(
         // absence the arm created rather than the policy it grades.
         return Err(RigError::PublishNeverAcked);
     }
-    Ok(built)
+    Ok(())
 }
 
 /// The lifetime the package inside `built` carries, read from its own bytes.
@@ -611,7 +753,8 @@ fn rotates_into(decision: &KpMaintenanceDecision) -> Option<String> {
         // a slot id, and this scenario's canaries are booleans.
         KpMaintenanceDecision::NoOp
         | KpMaintenanceDecision::SeedD { .. }
-        | KpMaintenanceDecision::Republish { .. } => None,
+        | KpMaintenanceDecision::Republish { .. }
+        | KpMaintenanceDecision::Replace { .. } => None,
     }
 }
 
@@ -688,6 +831,8 @@ async fn snapshot_from_planes<T: TimelineSink, L: LogDrain>(
                 .map(|event| RelayKpEntry {
                     d_tag: slot.to_owned(),
                     event_id: event.id.to_hex(),
+                    created_at: event.created_at.as_secs(),
+                    pre_migration: false,
                 })
                 .collect(),
         });
@@ -715,6 +860,18 @@ fn past_not_after_only_after_the_step<T: TimelineSink, L: LogDrain>(
 
     let after = world.device(owner)?.policy_now(wall)?;
     Ok(fresh && lifetime.is_past_not_after(after.secs()))
+}
+
+/// A tracked slot whose last event any served event in the slot is at least
+/// as new as: the slot-presence view these tests pin.
+const fn tracked(d: &str) -> TrackedKpSlot<'_> {
+    TrackedKpSlot {
+        d_tag: d,
+        event_id: "",
+        created_at: 0,
+        adopted: false,
+        replacement_owed: false,
+    }
 }
 
 #[cfg(test)]
@@ -764,12 +921,13 @@ mod tests {
     }
 
     #[test]
-    fn the_arm_demands_all_six_steps_of_the_policy() {
+    fn the_arm_demands_all_eight_steps_of_the_policy() {
         assert!(
-            ARMS[0].floor.canaries_caught == 6,
-            "the old bytes on the plane, the rotation decision at the package's own \
-             threshold, the heal that does not reset it, the re-mint into the same \
-             slot, the same-second replacement that still wins it, and the cliff"
+            ARMS[0].floor.canaries_caught == 8,
+            "the consumed package replaced, its replacement on the plane, the \
+             rotation decision at the package's own threshold, the heal that is the \
+             same event, the re-mint into the same slot, the same-second replacement \
+             that still wins it, the lost bundle replaced, and the cliff"
         );
         assert!(
             ARMS[0].floor.deliveries_observed == 1,

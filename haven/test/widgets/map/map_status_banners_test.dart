@@ -13,6 +13,7 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/location_access_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/sharing_health_provider.dart';
+import 'package:haven/src/rust/api.dart' show LocationPublishFfi;
 import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/location_settings_launcher.dart';
 import 'package:haven/src/test_keys.dart';
@@ -75,7 +76,9 @@ void main() {
     access = _StubAccessNotifier(status);
     detector = ClockSkewDetector();
     addTearDown(detector.dispose);
-    if (clockSkewed) detector.recordPublishClockRejection('ahead');
+    if (clockSkewed) {
+      detector.recordLocationPublish(LocationPublishFfi.clockAhead);
+    }
 
     await pumpLocalized(
       tester,
@@ -169,20 +172,21 @@ void main() {
       expect(find.text(l10n.clockSkewTitle), findsOneWidget);
     });
 
-    testWidgets('shows the sharing-health banner when only delivery is dead', (
+    testWidgets('the sharing-health banner is never in the map slot', (
       tester,
     ) async {
-      // The case the field incident produced: access is fine, the clock is
-      // fine, and nothing is being delivered. Before this banner the map said
-      // nothing at all.
+      // OD-1: a circle's sharing fault is said in one place — that circle's
+      // details — and never over the map. Access and the clock are fine and
+      // nothing is delivered: the slot stays empty.
       await pumpSlot(
         tester,
         status: LocationAccessStatus.available,
         sharingHealth: SharingHealth.receiveSilent(stoppedAt),
       );
 
-      expect(find.byKey(WidgetKeys.sharingHealthBanner), findsOneWidget);
-      expect(find.text(l10n.sharingHealthTitleNotReceiving), findsOneWidget);
+      expect(find.byKey(WidgetKeys.sharingHealthBanner), findsNothing);
+      expect(find.text(l10n.sharingHealthTitleNotReceiving), findsNothing);
+      expect(find.byType(Card), findsNothing);
     });
 
     testWidgets('location access WINS over sharing health', (tester) async {
@@ -217,11 +221,8 @@ void main() {
       expect(find.byType(Card), findsOneWidget);
     });
 
-    testWidgets('sharing health takes over when the clock is corrected', (
-      tester,
-    ) async {
-      // The still-true condition must not be swallowed by the one that
-      // cleared.
+    testWidgets('a corrected clock does not bring the sharing-health banner '
+        'onto the map', (tester) async {
       await pumpSlot(
         tester,
         status: LocationAccessStatus.available,
@@ -233,8 +234,8 @@ void main() {
       detector.reset();
       await tester.pumpAndSettle();
 
-      expect(find.byKey(WidgetKeys.sharingHealthBanner), findsOneWidget);
-      expect(find.byType(Card), findsOneWidget);
+      expect(find.byKey(WidgetKeys.sharingHealthBanner), findsNothing);
+      expect(find.byType(Card), findsNothing);
     });
 
     testWidgets('all three at once still renders exactly one card', (

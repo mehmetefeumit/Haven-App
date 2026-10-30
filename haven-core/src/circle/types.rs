@@ -494,8 +494,33 @@ pub struct CircleWithMembers {
     pub circle: Circle,
     /// User's membership in this circle.
     pub membership: CircleMembership,
-    /// Members with resolved contact info.
+    /// Members with resolved contact info. Empty for a quarantined circle,
+    /// whose roster the engine does not hold live.
     pub members: Vec<CircleMember>,
+    /// Whether the engine holds this circle's MLS state live.
+    pub engine_state: CircleEngineState,
+}
+
+/// Whether the engine holds a circle's MLS state live.
+///
+/// `Quarantined`: the stored group failed validation when the session opened
+/// (MDK `AccountDeviceSession::quarantined_groups`), so the circle can neither
+/// send nor receive until a retry re-hydrates it. Nothing about the circle is
+/// lost — which is why it is never offered a destructive remedy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircleEngineState {
+    /// The engine holds the group live.
+    Live,
+    /// The group failed session-open hydration and awaits a retry.
+    Quarantined,
+    /// An admin disbanded the circle: nothing is sent to it or received for
+    /// it any more, and it can only be left (MDK's tombstone, read every
+    /// time).
+    Disbanded,
+    /// MDK halted the circle at its last stable epoch and applies nothing it
+    /// receives (its persisted `unrecoverable`, read every time): it is
+    /// repaired in place when an admin adds this device again, or left.
+    Unrecoverable,
 }
 
 /// Pending invitation to join a circle.
@@ -529,18 +554,17 @@ impl std::fmt::Debug for Invitation {
 
 /// A member's key package with relay lists for Welcome delivery.
 ///
-/// Used when adding members to a circle. Welcome delivery follows a
-/// cascading fallback matching the Marmot Protocol reference implementation:
-/// inbox relays (kind 10050) → NIP-65 relays (kind 10002) → default relays.
+/// Used when adding members to a circle. The Welcome goes to the member's
+/// inbox relays alone (`CircleManager`'s `welcome_route`).
 #[derive(Clone)]
 pub struct MemberKeyPackage {
     /// The key package event (kind 30443 or legacy kind 443).
     pub key_package_event: nostr::Event,
-    /// Relay URLs from the member's inbox relay list (kind 10050).
-    /// First tier in the Welcome delivery cascade.
+    /// Relay URLs from the member's inbox relay list (kind 10050): where
+    /// their Welcome goes.
     pub inbox_relays: Vec<String>,
-    /// Relay URLs from the member's NIP-65 relay list (kind 10002).
-    /// Second tier, used when `inbox_relays` is empty.
+    /// Relay URLs from the member's NIP-65 relay list (kind 10002). Not a
+    /// Welcome route: a Haven invitee does not read gift wraps there.
     pub nip65_relays: Vec<String>,
 }
 
@@ -951,6 +975,7 @@ mod tests {
     #[test]
     fn circle_with_members_debug() {
         let cwm = CircleWithMembers {
+            engine_state: CircleEngineState::Live,
             circle: Circle {
                 mls_group_id: GroupId::from_slice(&[1]),
                 nostr_group_id: [0; 32],

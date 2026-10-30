@@ -1,4 +1,5 @@
-//! Structural rules S1–S13 and the allowlist that can forgive one.
+//! Structural rules S1–S13, S-SQLC, and the allowlist that can forgive one of
+//! S1–S13.
 //!
 //! A needle rule catches the values this run declared. The structural rules
 //! catch the ones it did not: a pubkey minted by a peer, an event id the relay
@@ -219,6 +220,46 @@ const CARGO_STATUS: &str = concat!(
 /// reported exactly as it would be anywhere else.
 const CARGO_STATUS_RULES: &[&str] = &["S2", "S6"];
 
+/// S-SQLC: a record `SQLCipher`'s own logger wrote from inside Haven's process.
+///
+/// That logger is compiled out (`-DSQLCIPHER_OMIT_LOG`, proved on every built
+/// artifact by `scripts/ci/check_sqlcipher_logger_omitted.sh`); it writes page
+/// numbers, pointers and database filenames beneath every Haven log filter, so
+/// one of its records in a capture means the flag did not reach that build. Not
+/// in [`RULES`] because neither record is a Haven-owned line: the logcat tag is
+/// `SQLCipher`'s and the Apple record carries no subsystem. No allowlist entry can
+/// name it.
+///
+/// The logcat arm fires only when the capture also holds a Haven-owned line from
+/// the SAME pid (either order): the tag alone cannot tell Haven's process from
+/// another app that links `SQLCipher`, so a capture in which Haven's process wrote
+/// nothing of its own reports no `sqlcipher` line at all.
+pub const SQLCIPHER_RULE: &str = "S-SQLC";
+
+/// The logcat tag `SQLCipher`'s Android device log writes under
+/// (`__android_log_write`, libsqlite3-sys `5ae7fdf` sqlcipher/sqlite3.c:113396).
+const SQLCIPHER_LOGCAT_TAG: &str = "sqlcipher";
+
+/// How a `SQLCipher` record opens. On Apple it writes through `OS_LOG_DEFAULT`,
+/// so its opening words are the record's only mark, and they differ by version:
+///
+/// * 4.17 (libsqlite3-sys `5ae7fdf`) prefixes the level and source words
+///   (`"%s %s "`, sqlite3.c:113388, from the tables at :113294-113326);
+/// * 4.5.7 (libsqlite3-sys 0.30.1, the pin before MDK v0.10.4) logs the bare
+///   message (`os_log(OS_LOG_DEFAULT, "%{public}s", formatted)`,
+///   sqlite3.c:109863-109873).
+///   217 of its 246 `sqlcipher_log` formats (:106913-110979) open with the
+///   logging function's name and a colon, and every such name is one of the
+///   alternatives below. The other 29 come from `PRAGMA cipher_migrate`
+///   (:109560-109730), the refusal of an invalid `cipher_page_size` (:108964)
+///   and the fault-injection hooks (:107628, :107662), none of which Haven or
+///   MDK's storage issues.
+///
+/// Either opening suffices. The 4.17 prefix still matches alone, because not
+/// every 4.17 message names its function after it. A function name elsewhere in
+/// a message, or a bare `sqlcipher` word, is not a record.
+const SQLCIPHER_RECORD: &str = r"^(?:(?:ERROR|WARN|INFO|DEBUG|TRACE|ANY) (?:NONE|CORE|MEMORY|MUTEX|PROVIDER|ANY) |(?:sqlcipher_\w+|sqlcipherCodec(?:Attach|GetKey)|sqlite3Codec|sqlite3_(?:re)?key(?:_v2)?|codec_(?:ctx_free|set_btree_to_codec_pagesize|set_pass_key)|cipher_ctx_(?:free|key_derive)):)";
+
 /// Placeholders S10 must not fire on: the redactions and alias handles the tree
 /// prints deliberately.
 const PLACEHOLDERS: &[&str] = &[
@@ -294,6 +335,7 @@ pub struct RuleSet {
     set: RegexSet,
     cargo_status: Regex,
     dial_failure: Regex,
+    sqlcipher_record: Regex,
     entropy_bits: f64,
     epoch_window: (u64, u64),
     exempt: BTreeSet<String>,
@@ -347,6 +389,8 @@ impl RuleSet {
                 .map_err(|e| format!("the cargo status shape does not compile: {e}"))?,
             dial_failure: Regex::new(DIAL_FAILURE)
                 .map_err(|e| format!("the dial-failure markers do not compile: {e}"))?,
+            sqlcipher_record: Regex::new(SQLCIPHER_RECORD)
+                .map_err(|e| format!("the SQLCipher record prefix does not compile: {e}"))?,
             entropy_bits,
             // Floor: 2020-01-01. Ceiling: a year out, so a fixture's fixed
             // timestamp stays inside the window forever while a future stamp
@@ -382,6 +426,27 @@ impl RuleSet {
     #[must_use]
     pub fn is_cargo_furniture(&self, rule: &str, line: &str) -> bool {
         CARGO_STATUS_RULES.contains(&rule) && self.is_cargo_status(line)
+    }
+
+    /// Whether a logcat record's tag is `SQLCipher`'s ([`SQLCIPHER_RULE`]).
+    #[must_use]
+    pub fn is_sqlcipher_tag(&self, tag: &str) -> bool {
+        #[cfg(test)]
+        if self.disabled == Some(SQLCIPHER_RULE) {
+            return false;
+        }
+        tag == SQLCIPHER_LOGCAT_TAG
+    }
+
+    /// Whether an Apple record's message is one `SQLCipher`'s logger wrote
+    /// ([`SQLCIPHER_RULE`]).
+    #[must_use]
+    pub fn is_sqlcipher_record(&self, body: &str) -> bool {
+        #[cfg(test)]
+        if self.disabled == Some(SQLCIPHER_RULE) {
+            return false;
+        }
+        self.sqlcipher_record.is_match(body)
     }
 
     /// Evaluates one Haven-owned line.

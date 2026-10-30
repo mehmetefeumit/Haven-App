@@ -16,6 +16,7 @@
 #   integration_test/circle_service_remove_member_test.dart
 #   integration_test/circle_admin_leave_ghost_test.dart
 #   integration_test/session_guard_contention_test.dart  (Rule-14 contention)
+#   integration_test/welcome_redelivery_test.dart  (an owed Welcome resent)
 #
 # # Honest skips, not failures
 #
@@ -51,7 +52,7 @@ jobs:
   e2e_integration:
     name: e2e_integration
     runs-on: ubuntu-latest
-    # Seven targets (smoke pre-flight + six), each: relay reset + install +
+    # Eight targets (smoke pre-flight + seven), each: relay reset + install +
     # grant + drive. The job cap must clear the SUM of the step caps: below it,
     # a run whose every step is still inside its own cap can die here, and a
     # job-cap death skips every `if: failure()` step (e2e-android.yml states
@@ -203,7 +204,9 @@ jobs:
         # builds seven APKs in p95 14.7 / max 15.4 min. 35 is ~2.3x the
         # observed max and sits strictly under the job cap, which is sized to
         # clear it plus the drive step (see the job header), so it can actually
-        # fire.
+        # fire. The eighth APK (welcome_redelivery_test, 2026-10-25) is not in
+        # that sample yet: at the measured max per APK (2.2 min) the step is
+        # ESTIMATED at 17.6 min, still ~2x under 35, so the cap is unchanged.
         timeout-minutes: 35
         run: bash ../tooling/e2e/ci/build-integration-apks.sh
 
@@ -296,14 +299,14 @@ jobs:
       #   10m  per-target `flutter drive` (run-integration-tests.sh's
       #        HAVEN_DRIVE_TIMEOUT) — names the target that hung.
       #   25m  this step's inner deadline (run-with-deadline.sh below) — the
-      #        AGGREGATE bound across all seven targets, and the one that
+      #        AGGREGATE bound across all eight targets, and the one that
       #        actually reaps. Each target's own worst case is
       #        run-single-avd-scenario.sh's sum (stated at its
       #        CONNECT_WATCHDOG_SECS) at this lane's 10m drive and 120 s
       #        watchdog, each retry restoring the app its failed attempt's
       #        teardown uninstalled: 2 x (120 + 5 + 120 + 5) + 600 + 30 + 120
-      #        barrier + 20 Wi-Fi + 120 route = 1390 s = 23m10s, so seven are
-      #        ~162 minutes of bounded waits before any relay reset or adb
+      #        barrier + 20 Wi-Fi + 120 route = 1390 s = 23m10s, so eight are
+      #        ~185 minutes of bounded waits before any relay reset or adb
       #        work. Without an aggregate bound a degraded run could not finish
       #        before the step cap killed it anonymously; that was the real
       #        shape of CI_HARDENING_BACKLOG.md A8's "35m vs ~84m" note.
@@ -314,7 +317,11 @@ jobs:
       # Sizing evidence: 31 successful runs (ci.yml, 2026-07/08) put the whole
       # step at p50 4.3 / p95 4.8 / max 4.9 min. 25m is ~5x the observed max —
       # it cannot cut a healthy run, and it still leaves room for one target to
-      # burn its full 10m per-drive bound and the rest to complete.
+      # burn its full 10m per-drive bound and the rest to complete. The eighth
+      # target (welcome_redelivery_test) is not measured yet; its own bounds
+      # hold it under 8 min (two tests at 4 min each, inside the 10m drive),
+      # and it is ESTIMATED at 2-5 min healthy, so a healthy step is ~10 min
+      # and one 10m burn still completes inside 25m: the deadline is unchanged.
       # The step cap remains GitHub's belt: on this action it does not reliably
       # reap the backgrounded emulator/adb/drive subtree (see e2e-android.yml).
       - name: Run integration tests on the emulator
@@ -340,7 +347,7 @@ jobs:
           # multi-line script: in its own sh -c, which would drop the
           # loop's shell state. All real logic is in the checked-in
           # script.
-          script: bash tooling/e2e/ci/run-with-deadline.sh 25m "e2e-integration drive (7 targets)" -- bash tooling/e2e/ci/run-integration-tests.sh integration_test/e2e/smoke_test.dart=/tmp/integration-apks/smoke_test.apk integration_test/app_test.dart=/tmp/integration-apks/app_test.apk integration_test/keyring_test.dart=/tmp/integration-apks/keyring_test.apk integration_test/encryption_pipeline_test.dart=/tmp/integration-apks/encryption_pipeline_test.apk integration_test/circle_service_remove_member_test.dart=/tmp/integration-apks/circle_service_remove_member_test.apk integration_test/circle_admin_leave_ghost_test.dart=/tmp/integration-apks/circle_admin_leave_ghost_test.apk integration_test/session_guard_contention_test.dart=/tmp/integration-apks/session_guard_contention_test.apk
+          script: bash tooling/e2e/ci/run-with-deadline.sh 25m "e2e-integration drive (8 targets)" -- bash tooling/e2e/ci/run-integration-tests.sh integration_test/e2e/smoke_test.dart=/tmp/integration-apks/smoke_test.apk integration_test/app_test.dart=/tmp/integration-apks/app_test.apk integration_test/keyring_test.dart=/tmp/integration-apks/keyring_test.apk integration_test/encryption_pipeline_test.dart=/tmp/integration-apks/encryption_pipeline_test.apk integration_test/circle_service_remove_member_test.dart=/tmp/integration-apks/circle_service_remove_member_test.apk integration_test/circle_admin_leave_ghost_test.dart=/tmp/integration-apks/circle_admin_leave_ghost_test.apk integration_test/session_guard_contention_test.dart=/tmp/integration-apks/session_guard_contention_test.apk integration_test/welcome_redelivery_test.dart=/tmp/integration-apks/welcome_redelivery_test.apk
 
       # `if: always()` and `.log`, not `.txt`: the upload below runs on every
       # outcome, so the scan step between them must too, and it refuses an

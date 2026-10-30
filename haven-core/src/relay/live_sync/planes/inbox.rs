@@ -9,7 +9,7 @@ use nostr::{Filter, Kind, PublicKey, Timestamp};
 /// author — gift wraps are authored by ephemeral keys. `since_secs` already
 /// incorporates that subscribe phase's NIP-59 backdating lookback via
 /// [`crate::relay::cursor::since_for_stream`] — 7 days while no inbox cursor is
-/// persisted, 2 days + 1 hour once one is.
+/// persisted, 4 days once one is.
 ///
 /// # Examples
 ///

@@ -73,6 +73,8 @@
 #      matched nothing, or a self-test fixture failed)
 
 set -euo pipefail
+LITERAL_FREE="$(cat "$(dirname "${BASH_SOURCE[0]}")/lib/literal_free.awk")"
+readonly LITERAL_FREE
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly REPO_ROOT
@@ -218,15 +220,15 @@ code_view() { # <file>
 # tests legitimately open temp files, name `std::fs` and run SELECTs that a
 # production rule forbids; blanking rather than deleting keeps line numbers.
 prod_view() { # <rust file>
-  code_view "$1" | awk '
+  code_view "$1" | awk "${LITERAL_FREE}"'
     { lines[NR] = $0 }
     END {
       depth = 0; intest = 0; pending = 0; testdepth = 0
       for (j = 1; j <= NR; j++) {
         t = lines[j]
         if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
-        tmp = t; o = gsub(/[{]/, "", tmp)
-        tmp = t; c = gsub(/[}]/, "", tmp)
+        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+        tmp = lfree; c = gsub(/[}]/, "", tmp)
         if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
           intest = 1; testdepth = depth; pending = 0
         }
@@ -979,6 +981,14 @@ main() {
   (( $# == 0 )) || { misconfig "usage: ${SCRIPT_NAME}.sh [--self-test]"; exit 2; }
 
   preflight || exit 2
+
+  # The production view of api.rs still reaches its live-sync bridge near the
+  # end of its production code: a brace inside a literal once cut such a walk
+  # short at about line 11282, and every statement after it went unread.
+  log "Verifying the production view reaches the end of api.rs ..."
+  if [[ "$(prod_view "${FFI_SRC}/api.rs")" != *"fn live_event_to_ffi("* ]]; then
+    violation "[view] the production view of api.rs ends before its live-sync bridge (fn live_event_to_ffi): the brace walk was cut short, or the function was renamed."
+  fi
 
   log "Scanning statements naming member_directory for circle/group/MLS identifiers ..."
   check_no_circle_identifier "${CORE_SRC}" "${FFI_SRC}"

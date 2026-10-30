@@ -31,6 +31,7 @@ import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 
+import '../../helpers/accessibility_announcements.dart';
 import '../../helpers/localized_app_harness.dart';
 import '../../mocks/mock_circle_service.dart';
 
@@ -157,10 +158,13 @@ void main() {
       );
     });
 
-    testWidgets('a blocked circle offers it to nobody', (tester) async {
-      final circle = _circle(selfIsAdmin: true);
-      final service = MockCircleService(circles: [circle])
-        ..markCircleBlocked(circle.mlsGroupId);
+    testWidgets('a halted circle offers it to nobody', (tester) async {
+      final live = _circle(selfIsAdmin: true);
+      final circle = TestCircleFactory.createCircle(
+        members: live.members,
+        engineState: CircleEngineState.unrecoverable,
+      );
+      final service = MockCircleService(circles: [circle]);
 
       await pumpSheet(tester, circle: circle, service: service);
 
@@ -330,6 +334,34 @@ void main() {
             'selectedCircleProvider must actually propagate that to the '
             'widget tree',
       );
+    });
+
+    testWidgets('a removal awaiting its relays is spoken once, with no snack',
+        (tester) async {
+      // V2-43: nothing visual repeats what the sharing card says; a screen
+      // reader is still told, since nothing on screen changes where its user
+      // is (O-D2-9, audio only).
+      final said = captureAccessibilityAnnouncements(tester);
+      final circle = _circle(selfIsAdmin: true);
+      final service = MockCircleService(circles: [circle])
+        ..removeMemberDelivery = ChangeDelivery.awaitingRelays;
+      await pumpSheet(tester, circle: circle, service: service);
+
+      await tester.tap(find.byKey(WidgetKeys.memberRemoveButton(_otherPubkey)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(WidgetKeys.memberRemoveConfirm));
+      await tester.pumpAndSettle();
+
+      final l10n = AppLocalizations.of(
+        tester.element(find.byType(CirclesBottomSheet)),
+      );
+      expect(
+        said.where(
+          (s) => s == l10n.circleMemberRemoveAwaitingAnnouncement('Bob'),
+        ),
+        hasLength(1),
+      );
+      expect(find.byType(SnackBar), findsNothing);
     });
 
     testWidgets('a failure says nothing changed, and the member stays',

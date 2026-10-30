@@ -34,8 +34,11 @@
 ///   5. **`CatchupService` chokepoint (C3):** `runCatchup(isBackground
 ///      Wake:true)` re-checks the sharing flag again inside Dart before
 ///      any FFI call, then runs the receive-only Rust sweep
-///      (`run_catchup_all_circles` — never authors; yields `Skipped` to any
-///      authoring writer via `try_acquire_background`).
+///      (`run_catchup_all_circles`, which authors no MLS state; a wake that
+///      races a live session fails closed at the Rule-14 guard), and then,
+///      under the same consent read, carries on each leave this device asked
+///      for, claiming no foreground: that may send the leave's proposal and
+///      end the leave on this device, and it makes no commit.
 ///
 /// ## LIVE since M7-E
 ///
@@ -87,6 +90,7 @@ import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/catchup_service.dart';
+import 'package:haven/src/services/leaver_backstop.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
 import 'package:haven/src/utils/log_alias.dart';
@@ -407,7 +411,7 @@ void callbackDispatcher() {
 /// The production wake body: the gate chain of [runBackgroundCatchupTask]
 /// wired to its **production** readers (SharedPreferences, the foreground-task
 /// plugin, the D4 foreground flag) and terminating in the receive-only Rust
-/// sweep.
+/// sweep and the leave carry-on that follows it.
 ///
 /// [callbackDispatcher] is nothing more than "prepare the isolate, then run
 /// this". The two are split so a caller that must prepare the isolate
@@ -457,7 +461,9 @@ Future<bool> runBackgroundCatchupWake() {
 }
 
 /// Boots the minimal service set in the WorkManager isolate and runs one
-/// receive-only catch-up sweep (D1, as amended by A2/A10/A11).
+/// receive-only catch-up sweep (D1, as amended by A2/A10/A11), then carries
+/// each leave this device asked for on, claiming no foreground — which may
+/// send a leave's proposal and makes no commit.
 ///
 /// The WorkManager isolate never ran `main()`, so it bootstraps the bridge
 /// itself — by DIRECT construction of exactly what [CatchupService] needs
@@ -581,24 +587,35 @@ Future<void> _runCatchupViaWorkerBootstrap() async {
   try {
     await relayService.initialize();
     debugPrint(kCatchupWorkerBootstrapOkMarker);
-    // 7. Terminate in the M7 chokepoint — receive-only sweep, NOT the FGS
+    // 7. The M7 chokepoint — receive-only sweep, NOT the FGS
     //    authoring cycle. isBackgroundWake:true re-checks consent inside
     //    (C3). maxDurationSecs: 25 per D3 (bounds the Rust sweep only).
+    // L1: RELOAD the consent pref at the C3 chokepoint so an opt-out that
+    // lands DURING this bootstrap (between the step-3b reload above and here
+    // — the DB-open + relay-init gap) is seen, instead of the default
+    // reader's cached snapshot. Closes the sub-second post-opt-out window in
+    // which a receive-only sweep could still connect to a relay.
+    Future<bool> consented() async {
+      final p = await SharedPreferences.getInstance();
+      await p.reload();
+      return p.getBool(kBackgroundSharingKey) ?? false;
+    }
+
     final sweep = await CatchupService(
       circleManagerFactory: () async => circleManager,
       ownPubkeyHex: () async => pubkeyHex,
       relayService: relayService,
-      // L1: RELOAD the consent pref at the C3 chokepoint so an opt-out that
-      // lands DURING this bootstrap (between the step-3b reload above and here
-      // — the DB-open + relay-init gap) is seen, instead of the default
-      // reader's cached snapshot. Closes the sub-second post-opt-out window in
-      // which a receive-only sweep could still connect to a relay.
-      isBackgroundSharingEnabled: () async {
-        final p = await SharedPreferences.getInstance();
-        await p.reload();
-        return p.getBool(kBackgroundSharingKey) ?? false;
-      },
+      isBackgroundSharingEnabled: consented,
     ).runCatchup(isBackgroundWake: true, maxDurationSecs: 25);
+    // 8. Carry every leave this device asked for on, claiming no foreground:
+    //    nothing calls the core's leave on a timer, so this wake is one of
+    //    its wakes — under the same consent read as the sweep.
+    if (await consented()) {
+      await LeaverBackstop().carryOn(
+        manager: circleManager,
+        driver: relayService,
+      );
+    }
     // Every counter is bucketed, never dropped (Rule 15 forbids an exact
     // circle/event count in a log at any level, this line included) — the
     // exact line Phase A of the CI lane parses via

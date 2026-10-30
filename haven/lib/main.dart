@@ -19,11 +19,11 @@ import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/licenses/map_licenses.dart';
 import 'package:haven/src/network/pinned_tile_client.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
-import 'package:haven/src/providers/legacy_cutover_provider.dart';
 import 'package:haven/src/providers/locale_provider.dart';
 import 'package:haven/src/providers/map_style_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/storage_reset_notice_provider.dart';
 import 'package:haven/src/providers/theme_mode_provider.dart';
 import 'package:haven/src/providers/tile_cache_provider.dart';
 import 'package:haven/src/providers/tile_http_client_provider.dart';
@@ -34,7 +34,6 @@ import 'package:haven/src/services/data_directory_provider.dart';
 import 'package:haven/src/services/foreground_liveness_probe.dart';
 import 'package:haven/src/services/image_cache_guard.dart';
 import 'package:haven/src/services/ios_background_catchup.dart';
-import 'package:haven/src/services/legacy_cutover_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
@@ -172,44 +171,19 @@ Future<void> main() async {
     );
   }
 
-  // DM-4c: Dark Matter first-launch cutover guard. Runs AFTER the M10.1
-  // retry above (so a pending logout wipe from the OLD stack completes
-  // first) and BEFORE any `CircleManagerFfi` is ever constructed — the
-  // first construction happens lazily via `circleServiceProvider`, only
-  // after `runApp` returns and a widget reads it. Destroys legacy
-  // pre-Dark-Matter MLS state (`haven_mdk.db` + its keyring key) exactly
-  // once per install, gated on both a persisted marker and the presence of
-  // an existing identity (see `LegacyCutoverService`). The identity probe
-  // is computed once here and reused by `_loadInitialOnboardingFlags` below
-  // so secure storage is read only once at startup.
+  // MDK v0.10.4 storage reset (owner decision D1): deletes every
+  // pre-migration store and its keyring key, BEFORE any store is opened —
+  // `tileCacheInit` below and, lazily after `runApp`, `circleServiceProvider`.
+  // Runs AFTER the M10.1 retry above so a pending logout wipe completes first.
+  // Every Rust store opener runs the same idempotent reset, because a
+  // background isolate may open a store first; the answer here says whether
+  // any isolate's reset still owes the user its notice.
+  final showStorageResetNotice = decideStorageResetNotice(dataDir);
+  await clearCircleScopedPrefsIfResetOwes(prefs, dataDir);
+
+  // Computed once and reused by `loadInitialOnboardingFlags` below, so secure
+  // storage is read only once at startup.
   final hasExistingIdentity = await _probeHasNostrIdentity();
-  var showLegacyCutoverExplainer = false;
-  try {
-    // A dedicated NostrCircleService (own instance, mirrors launchWipeCircle
-    // above) so the cutover reuses CircleService.destroyLegacyMlsState() —
-    // which installs the keyring backend BEFORE the FFI call — rather than
-    // invoking the raw FFI directly. Without that prerequisite the Rust side
-    // treats "no store installed" as a no-op success, so the destroy would
-    // always report success while never actually removing the legacy
-    // SQLCipher key (see LegacyCutoverService's doc comment).
-    final cutoverCircle = NostrCircleService(
-      relayService: NostrRelayService(),
-      dataDirectoryProvider: FixedDataDirectoryProvider(dataDir),
-    );
-    final cutoverService = LegacyCutoverService(
-      prefs: prefs,
-      destroyLegacyMls: destroyLegacyMlsViaCircleService(cutoverCircle),
-    );
-    showLegacyCutoverExplainer = await cutoverService.runIfNeeded(
-      dataDir: dataDir,
-      hasIdentity: hasExistingIdentity,
-    );
-  } on Object catch (e) {
-    debugPrint(
-      '[SECURITY][Haven] DM-4c legacy-cutover guard setup failed: '
-      '${e.runtimeType}',
-    );
-  }
 
   // One-time migration: destroy the legacy BuiltInMapCachingProvider plaintext
   // cache so its unencrypted tile files are removed from disk. Gated by a
@@ -315,11 +289,9 @@ Future<void> main() async {
     ),
     tileHttpClientProvider.overrideWithValue(tileHttpClient),
     tileCacheEnabledProvider.overrideWithValue(tileCacheEnabled),
-    // DM-4c: seeds whether MapShell owes the one-time Dark Matter cutover
-    // explainer this launch (computed above, before any DB/manager touch).
-    legacyCutoverExplainerProvider.overrideWith(
-      (ref) => showLegacyCutoverExplainer,
-    ),
+    // Seeds whether MapShell owes the storage-reset notice this launch
+    // (decided above, before any store was opened).
+    storageResetNoticeProvider.overrideWith((ref) => showStorageResetNotice),
   ];
 
   // Always create an explicit ProviderContainer so the iOS background
@@ -384,11 +356,9 @@ Future<void> main() async {
 ///
 /// Duplicated from `NostrIdentityService`'s private storage-key constant
 /// (exported there only as `@visibleForTesting identityStorageKeyForTesting`,
-/// so production code must not import it): this file needs the literal at
-/// two points that both run BEFORE any Riverpod container exists — the
-/// pre-onboarding-era migration check below and the DM-4c legacy-cutover
-/// guard in [main] — so both share the one [_probeHasNostrIdentity] probe
-/// rather than reading secure storage twice.
+/// so production code must not import it): the pre-onboarding-era migration
+/// check below reads it BEFORE any Riverpod container exists, through the one
+/// [_probeHasNostrIdentity] probe [main] makes.
 const String _identityStorageKey = 'haven.nostr.identity';
 
 /// Probes secure storage directly for the presence of a saved Nostr

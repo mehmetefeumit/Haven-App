@@ -40,7 +40,7 @@
 #   Public-profile privacy boundaries scripts/ci/check_profile_privacy_boundaries.sh
 #     The public Nostr profile module (kind-0 + Blossom) must stay inside its
 #     privacy boundary: global Image.network ban, no circle/group tokens in
-#     profile paths, no circle/MLS/mdk imports inside the profile module (key
+#     profile paths, no circle/MLS/MDK imports inside the profile module (key
 #     separation), kind-0 construction confined to the profile module,
 #     HTTPS-only Blossom, the retraction no-op gate, the §1.7 fetch-union
 #     invariant, no batched kind-0 filter, CSPRNG-only inside the module, no
@@ -216,6 +216,13 @@
 #     keys change on a membership change or an explicit repair, never
 #     periodically.
 #
+#   Self-update sites stay reviewed   scripts/ci/check_self_update_sites.sh
+#     A self-update is authored only by the user's repair (reached from the
+#     bridge alone) and by the one post-join self-update MDK records at a
+#     join, made in a full drive after catch-up: one construction, two
+#     callers, no timer, no periodic or manual maintenance, and no queued
+#     self-update surviving a hold (V2-22, INV-E-NO-PERIODIC-REKEY).
+#
 #   No exporter-label override        scripts/ci/check_no_exporter_label_override.sh
 #     The transport-nostr-peeler's with_exporter_label hook is the only local
 #     lever that can downgrade the kind-445 exporter derivation away from
@@ -224,6 +231,22 @@
 #   No KeyPackage lifetime override   scripts/ci/check_no_kp_lifetime_override.sh
 #     openmls's KeyPackage lifetime setter could lengthen not_after past the
 #     rotation Haven promises; no shipped Rust path may name it (soak OD-8).
+#
+#   KeyPackages assert their profile  scripts/ci/check_key_package_wire_shape.sh
+#     MDK v0.10.4's `KeyPackage::new` / `with_source_event_id` default to the
+#     Legacy protocol profile, which every Current create, invite and metadata
+#     read refuses — a trap that compiles. K1: every construction in production
+#     Rust chains `.with_protocol_profile(...)` in the same expression; K1b/K1c:
+#     the 30443 capability tags are read off the package's decoded metadata,
+#     never written as literals.
+#
+#   Draining advance stays reviewed   scripts/ci/check_advance_convergence_sites.sh
+#     MDK's `advance_convergence` also releases queued user intents; a receive
+#     plane that called it could publish a queued Invite without its Welcomes.
+#     A1: production calls only at the reviewed sites; A2: each still makes
+#     it; A3: the drive's step records in its hold and drains once; A4: the
+#     drive advance is named only by the planes reviewed to keep its handles
+#     (the fold, the sweep that drives, the live plane), whatever the spelling.
 #
 #   Inner location kind is pinned     scripts/ci/check_inner_location_kind.sh
 #     The inner MLS-tunnelled location rumor's kind is the dispatch token every
@@ -273,6 +296,33 @@
 #     and carry no panic token, because a sync FFI read unwinds into Dart and
 #     `unwrap_used`/`expect_used` are restriction lints this repo does not
 #     enable.
+#     And it holds the one thing that makes a relay event trustworthy at all:
+#     every relay client is built by `relay/verified.rs`'s `verified_client`,
+#     whose policy verifies each event's id AND signature before the pool acts
+#     on it (nostr-relay-pool 0.44.3 skips the check for an id it has seen, so a
+#     relay holding no key can forge under one). No other source file of
+#     haven-core, the FFI crate or the soak rig may name a `Client` or
+#     `RelayPool` construction — wrapped, qualified or renamed — except the
+#     marked test witnesses, each in the file and test module listed for it;
+#     the constructor names `admit_policy` once and gives the client no gossip
+#     store (the SDK feeds each event to one before it asks the policy); the
+#     policy must call `verify()`, not half of it, and say nothing. A client
+#     built without it passes every test, because an honest relay never
+#     forges. MDK's relay client builds no client and acts on the one it is
+#     handed, so it is handed the publish client and nothing else: named in
+#     `relay/manager.rs` alone, constructed there once, in `fanout_transport`,
+#     over `self.client`, which every `Self { client … }` in that file spells
+#     as `verified_client(…)`. And no relay client holds a signer or is told
+#     to authenticate — the words `set_signer` / `unset_signer`, a
+#     `.signer(` / `::signer(` call, a bare method reference to a builder's
+#     `signer` and a write to its `signer` field appear nowhere in the three
+#     trees, and
+#     every `automatic_authentication(` is `automatic_authentication(false)`:
+#     with a signer the pool answers a relay's NIP-42 challenge, binding the
+#     identity key to group traffic on that socket, and MDK's relay client
+#     signs an unsigned non-445 event it is handed. A text scan: it does not
+#     read `tests/`, and does not see a construction it cannot spell (a
+#     `Default` the compiler infers).
 #
 #   Generated bridge pinned           scripts/ci/check_generated_bridge_pinned.sh
 #     The flutter_rust_bridge-generated files are the one place a value's Rust
@@ -314,9 +364,63 @@
 #     matches the code.
 #
 #   MDK supply-chain shape            scripts/ci/check_mdk_supply_chain.sh
-#     haven-core/Cargo.lock must hold exactly the five Dark Matter crates —
-#     no forbidden uniffi/app/account/QUIC/agent crates, no legacy mdk-*
-#     crates, and a single libsqlite3-sys version.
+#     Every lockfile that builds haven-core (haven-core, rust_builder, soak)
+#     must hold exactly the six Dark Matter crates, on the rev pinned in
+#     scripts/ci/mdk_pins.env — no forbidden uniffi/app/account/QUIC/agent
+#     crates, no legacy mdk-* crates, one libsqlite3-sys from the pinned
+#     source, and the Nostr adapter depending on exactly what its relay
+#     client (feature `sdk`) links. Its fixtures plant each direction in a
+#     lockfile other than haven-core's, so a guard that went back to reading
+#     one lockfile fails. The feature set itself is asked of cargo in
+#     rust-check.yml (`--adapter-features`); its judgement's fixtures run here.
+#
+#   One MLS universe                  scripts/ci/check_lockfile_universe.sh
+#     Those three lockfiles must resolve the same (version, source) for every
+#     openmls, MDK, SQLite and nostr crate, from the pinned sources. Version
+#     alone cannot tell a git fork from the crates.io release of the same
+#     number, which is the hole the soak job's old one-version step had.
+#
+#   No tracing sink                   scripts/ci/check_no_tracing_sink.sh
+#     MDK logs through `tracing` with values Rule 15 forbids in a log. No
+#     lockfile may resolve `tracing` with its `log` bridge or any subscriber
+#     crate, and no Haven source may install a subscriber or the SQLite log
+#     hook. Today nothing sinks those events only by accident of the graph.
+#
+#   No forensic recorder              scripts/ci/check_no_forensic_recorder.sh
+#     MDK's audit-trail recorder writes raw group ids and relay URLs; no Haven
+#     source may name one or any of its install paths.
+#
+#   No subscription on the publish client
+#                                     scripts/ci/check_publish_client_no_subscription.sh
+#     The durable fanout runs MDK's relay client over Haven's publish client,
+#     whose relays keep the READ flag for targeted fetches — so a pool-wide
+#     subscribe there would send its filter to every relay Haven publishes
+#     to. No source may name the adapter's activation plane, call the relay
+#     client's subscription plane, subscribe in a file that names the relay
+#     client (bar the one marked per-relay page), or subscribe pool-wide in
+#     `relay/manager.rs`, marked or not.
+#
+#   SQLCipher logger omitted          scripts/ci/check_sqlcipher_logger_omitted.sh
+#     SQLCipher's own logger writes page numbers, pointers and database
+#     filenames beneath every Haven log filter. The root cargo config and
+#     cargokit.yaml must both force -DSQLCIPHER_OMIT_LOG into every build, and
+#     the device lanes must keep making the wrong-key open the runtime
+#     scanner's S-SQLC rule scans for. The built-artifact probe runs in
+#     build-check.yml and release-build.yml.
+#
+#   SQLCipher first-use gate          scripts/ci/check_sqlcipher_first_use_gate.sh
+#     SQLCipher finishes its own start-up after SQLite has told every other
+#     thread the library is ready, and `PRAGMA key` fails until it has. Every
+#     isolate shares the one loaded library, so two stores opened at process
+#     start could lose one open. Every direct SQLite open, tests included, must
+#     call `sqlcipher_init::ensure()` first in the same function.
+#
+#   Audit ignores are live            scripts/ci/check_audit_ignores_live.sh
+#     Only the self-test runs here: the check re-audits every lockfile without
+#     the ignore list, which needs cargo-audit and the advisory database, so it
+#     runs in audit.yml. The fixtures are real cargo-audit JSON, and pin that a
+#     stale ignore, an id seen only as an alias, and a filtered or unreadable
+#     report each fail rather than pass.
 #
 #   Session-busy marker is log-only   scripts/ci/check_session_busy_marker_not_routed.sh
 #     The Rule-14 "an MLS session is already open" marker must never drive a
@@ -413,11 +517,12 @@
 #     and makes the foreground service reclaim a healthy session.
 #
 #   E2E publish-before-apply          scripts/ci/check_e2e_publish_before_apply.sh
-#     An integration test that calls createCircle() must also resolve the
-#     staged create (confirmPublished / publishFailed, Security Rule 13).
-#     Skipping it pins the group in MDK's PendingPublish, where every inbound
-#     kind-445 buffers forever and the scenario fails on the receive path with
-#     nothing pointing back at the create.
+#     An integration test that calls createCircle() must deliver the Welcomes
+#     it founds (createCircleDelivered, or the result's welcomeEvents handed
+#     over in process): a founded circle is canonical on return, but an invitee
+#     whose Welcome never landed never joins, and the scenario fails on the
+#     receive path with nothing pointing back at the create. The soak rig's
+#     staged commits must be resolved on a witnessed ack (Security Rule 13).
 #
 #   Handoff convergence sees a fork   scripts/ci/check_e2e_handoff_convergence_oracle.sh
 #     When the admin leaves a 3-member circle both remaining peers auto-commit
@@ -833,6 +938,10 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_profile_privacy_boundaries.sh
 
+      - name: Public-profile privacy boundaries (self-test)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_profile_privacy_boundaries.sh --self-test
+
       - name: Member-directory privacy boundaries
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_member_directory_privacy.sh
@@ -1028,6 +1137,14 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_epoch_repair_isolation.sh --self-test
 
+      - name: Self-update sites stay reviewed
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_self_update_sites.sh
+
+      - name: Self-update sites guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_self_update_sites.sh --self-test
+
       - name: No exporter-label override
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_exporter_label_override.sh
@@ -1052,6 +1169,33 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_inner_location_kind.sh --self-test
 
+      - name: KeyPackages assert their protocol profile
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_key_package_wire_shape.sh
+
+      # Fixtures: a bare construction on one line, split across lines, as a call
+      # argument, and "fixed" in a later statement; the passing shapes rustfmt
+      # produces; a decoy in #[cfg(test)]; the two vacuous trees; and K1b/K1c's
+      # literal tag value, derived and underived app_components, test decoy.
+      - name: KeyPackage profile guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_key_package_wire_shape.sh --self-test
+
+      - name: The intent-draining advance stays at its reviewed sites
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_advance_convergence_sites.sh
+
+      # Fixtures: the reviewed sites, a receive plane calling the draining
+      # advance, the inputs-only twin, a decoy in #[cfg(test)], a reviewed
+      # site that stopped calling it; for the drive's step, one that does not
+      # record in its hold, one with a second caller, a comment that only
+      # mentions it, and one that drains twice; and a caller of the drive
+      # advance outside the reviewed planes — by method call, by a
+      # path-qualified call, as a function value, and inside a closure.
+      - name: Draining-advance guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_advance_convergence_sites.sh --self-test
+
       - name: No cursor advance from an event timestamp
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_event_timestamp_cursor_advance.sh
@@ -1060,7 +1204,7 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_engine_client_options.sh
 
-      # Fixtures for both directions of all TEN checks, driven through the same
+      # Fixtures for both directions of all ELEVEN checks, driven through the same
       # `run_all_checks` list the enforcing run above uses — so a check unwired
       # from the production path is unwired from these fixtures too and its
       # fixtures go red, instead of certifying a check that no longer runs.
@@ -1076,10 +1220,32 @@ jobs:
       # second call through, a `forget_*`/`shutdown()` in the burst close path,
       # a standing REQ from the burst entry point, each of the seven bridge
       # forwardings swapped, gutted to a constant, bypassed by a guarded early
-      # return or given a second core call, and the two sync session reads made
-      # panicky, stale or constant. One fixture is structural rather than a tree
-      # mutation: every `check_*` function must be invoked by `run_all_checks`,
-      # so a check written and wired nowhere cannot look like coverage.
+      # return or given a second core call, the two sync session reads made
+      # panicky, stale or constant, and the verifying constructor undone: the
+      # policy removed, swapped or halved to `verify_signature()`, given a field,
+      # a log line or a reason, replaced by a second `admit_policy` or an
+      # assignment, or undone by a gossip store given by call or by field; a
+      # second construction in the constructor's own file, above its tests or
+      # below them; a client built in another file in each spelling (wrapped
+      # across lines, fully qualified, a `RelayPool`, a `Relay`, behind an
+      # alias); a `.database()` read; and the witness marker missing, in a
+      # file that has no witnesses, on a line that builds nothing, moved onto
+      # a product client with the count unchanged, behind a test module that
+      # exists only inside a comment, or in a module after a `#[cfg(test)]`
+      # spent on another item — while a test module under an attribute
+      # rustfmt wrapped is still one; and MDK's relay client handed some
+      # other client, handed one a second time, handed one outside
+      # `fanout_transport`, named in another file, or riding a client the
+      # manager was given rather than built with; and a signer set on a
+      # client, given to a builder or taken off one — through a turbofish, a
+      # path-qualified call, a method reference or a write to the builder's
+      # field too — while a comment naming the call, a `designer(` and a
+      # comparison of two such fields still pass; and a relay client built to
+      # authenticate, or switched to it after the build, while a second
+      # `automatic_authentication(false)` passes. One fixture is structural rather
+      # than a tree mutation: every `check_*` function must be invoked by
+      # `run_all_checks`, so a check written and wired nowhere cannot look
+      # like coverage.
       - name: Relay pool options guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_engine_client_options.sh --self-test
@@ -1142,6 +1308,89 @@ jobs:
       - name: MDK supply-chain shape
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mdk_supply_chain.sh
+
+      - name: MDK supply-chain guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mdk_supply_chain.sh --self-test
+
+      - name: One MLS universe across the Cargo roots
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_lockfile_universe.sh
+
+      # Plants (a)-(d) are the four ways the soak job's retired version-only
+      # step passed while its title said "one source": a registry openmls
+      # against a fork of the same number, a shipped root that lost its
+      # libsqlite3-sys [patch], one MDK crate on another rev, and two
+      # libsqlite3-sys builds.
+      - name: Lockfile universe guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_lockfile_universe.sh --self-test
+
+      - name: No tracing sink
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_tracing_sink.sh
+
+      # The L1 fixtures are real lockfile blocks from a `cargo generate-lockfile`
+      # probe of `tracing` with and without its `log` feature — the claim that
+      # the feature shows up as a `log` dependency is measured, not assumed.
+      - name: Tracing sink guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_tracing_sink.sh --self-test
+
+      - name: No forensic recorder
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_forensic_recorder.sh
+
+      - name: Forensic recorder guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_forensic_recorder.sh --self-test
+
+      - name: No subscription on the publish client
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_publish_client_no_subscription.sh
+
+      # Plants the adapter and its activation in each crate, each call of the
+      # relay client's subscription plane, a subscribe on the relay client by
+      # method and by path, a pool-wide subscribe on the publish client with
+      # and without the auto-closing marker, and the per-relay page without
+      # its marker — while a test double's definitions, the engine client's own
+      # REQs and a comment naming every banned call still pass.
+      - name: Publish client subscription guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_publish_client_no_subscription.sh --self-test
+
+      - name: SQLCipher logger omitted
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_sqlcipher_logger_omitted.sh
+
+      # Plants a drifted, unforced or flagless source, a build configuration
+      # without the flag, a commented-out wrong-key open, a lane that stopped
+      # driving it or scanning its logs, and each logger literal in an artifact.
+      - name: SQLCipher logger guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_sqlcipher_logger_omitted.sh --self-test
+
+      # A store opened while another thread is still inside SQLCipher's start-up
+      # fails its `PRAGMA key`: seven tests of one binary did at once, and the
+      # UI isolate's tile cache can meet a background isolate's circle manager
+      # the same way. The gate only helps an open that goes through it.
+      - name: SQLCipher first-use gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_sqlcipher_first_use_gate.sh
+
+      # Plants an open with no gate call, one whose call comes after it, one
+      # commented out (line or block) or quoted, a second session open, each
+      # other MDK constructor, an open passed as a value, one through a
+      # qualified path, one outside any function (also after a declaration
+      # without a body), an ungated open in a test and in the soak rig, and a
+      # gate that no longer opens anything.
+      - name: SQLCipher first-use gate self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_sqlcipher_first_use_gate.sh --self-test
+
+      - name: Audit-ignore liveness guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_audit_ignores_live.sh --self-test
 
       # The Rule-14 busy marker is a LOG token. Routing on it would be
       # remotely influenceable: a circle admin controls the group's routing
@@ -1298,7 +1547,7 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_secret_fields_zeroized.sh --self-test
 
-      - name: E2E publish-before-apply (staged creates resolved)
+      - name: E2E publish-before-apply (founded circles delivered, commits witnessed)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_e2e_publish_before_apply.sh
 

@@ -6,11 +6,11 @@
 //! [`classify`] calls exactly one ingest entry point —
 //! `SessionManager::process_event_typed_for_test` — and never
 //! `process_event` as well. The engine records every message's disposition and
-//! answers a second ingest of the same MLS content with `Stale { AlreadySeen }`,
+//! answers a second ingest of the same MLS content with `Ignored { Duplicate }`,
 //! so a classifier that looked twice would report the SECOND look: a fork would
 //! silently read as a duplicate. The seam is production's own body with one
 //! substitution (the ingest error is not flattened through `map_mls_err`), so
-//! both pre-authentication screens still run and the verdicts below are the ones
+//! the pre-authentication screen still runs and the verdicts below are the ones
 //! production would have produced.
 //!
 //! # Matched, never formatted (Security Rule 15)
@@ -43,8 +43,8 @@
 
 use haven_core::circle::CircleError;
 use haven_core::nostr::mls::types::{
-    EngineError, IngestOutcome, MessageId, MessageState, ScreenedIngest, SessionError, StaleReason,
-    StoredMessageProbe,
+    EngineError, IngestOutcome, InputRejectionCategory, LocalIngestState, MessageId, MessageState,
+    ScreenedIngest, SessionError, StaleReason, StoredMessageProbe,
 };
 use haven_core::nostr::NostrError;
 use nostr::Event;
@@ -59,11 +59,8 @@ use crate::rig::{RigError, SimDevice};
 /// would be the leak this whole taxonomy exists to avoid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// The event's NIP-40 expiration, plus the receiver's clock-skew grace, is
-    /// in the past. Haven's own screen, run before the engine.
-    Expired,
-    /// The pure pre-engine transport parse rejected the envelope. Also Haven's
-    /// own screen, and equally pre-authentication.
+    /// The pure pre-engine transport parse rejected the envelope: Haven's own
+    /// screen, run before the engine and before any authentication.
     PreAuth,
     /// The engine applied it. Not an undecryptable outcome at all; carried so a
     /// caller never has to invent a verdict for the happy path.
@@ -89,19 +86,23 @@ pub enum Verdict {
     /// This device's own leaf was removed.
     SelfEvicted,
     /// The engine dropped this event unpersisted because the per-group
-    /// `PeelDeferred` store was already at its cap.
-    ///
-    /// Not distinguishable from [`Self::PeelFailed`] by the engine's outcome
-    /// alone — both answer `Stale { PeelFailed }` — so it is set by a scenario
-    /// that observed the cap (the drop leaves NO row where a normal peel failure
-    /// leaves a `PeelDeferred` one), never by [`classify_ingest`]. S16(a) is its
-    /// producer.
+    /// `PeelDeferred` store was already at its cap: `ResourceRefused`, which
+    /// MDK v0.10.4 reports positively and never as a duplicate on redelivery.
     PeelDeferredCapped,
+    /// The engine proved this input can never apply here: an invalid encoding
+    /// or signature, a missing required feature, a failed authorization, a
+    /// proposal Marmot's semantic admission rejects, or input invalid against
+    /// the selected canonical state. Terminal; no redelivery changes it.
+    Invalid,
+    /// A validated replacement Welcome awaits the user's consent; nothing was
+    /// applied.
+    RejoinPending,
     /// The group is frozen by hydration quarantine for the life of this session.
     Quarantined,
     /// Addressed to another client, or to a group this device does not hold.
     Routing,
-    /// The outer transport layer would not peel.
+    /// The outer transport layer would not peel, and the engine kept the
+    /// object for its own re-peel (`TransportDeferred`).
     PeelFailed,
     /// The engine detected a fork it could not resolve.
     Fork,
@@ -250,15 +251,62 @@ pub fn classify_ingest(ingested: &Result<ScreenedIngest, SessionError>, probe: P
                 Verdict::CommitGap
             }
         }
+        IngestOutcome::Ignored { category } => ignored(*category),
+        IngestOutcome::LocalState { state } => match state {
+            LocalIngestState::Removed => Verdict::SelfEvicted,
+            LocalIngestState::Quarantined => Verdict::Quarantined,
+            LocalIngestState::RejoinConfirmationRequired => Verdict::RejoinPending,
+        },
+        IngestOutcome::TransportDeferred { .. } => Verdict::PeelFailed,
+        IngestOutcome::ResourceRefused { .. } => Verdict::PeelDeferredCapped,
+        IngestOutcome::Rejected { .. } => Verdict::Invalid,
         IngestOutcome::Stale { reason } => stale(reason, probe),
     }
 }
 
-/// Haven's own pre-authentication screens.
+/// What became of a same-epoch sibling commit once the convergence pass that
+/// adjudicates it closed.
+///
+/// MDK v0.10.4 holds both siblings of a race for its quiescence window, so the
+/// ingest itself only says `Buffered`; the branch is decided when the pass
+/// closes, and the sibling's stored row is what says which way: `Processed`
+/// when this device adopted it, `ConvergenceDeferred` when this device's own
+/// branch won and the sibling's was lost (measured: the race in
+/// `tests/classifier.rs`). Without the row the loss is undetermined, never
+/// "no branch was lost".
+#[must_use]
+pub const fn classify_settled_sibling(probe: Probe) -> Verdict {
+    match probe.state() {
+        Some(MessageState::Processed) => Verdict::Applied,
+        Some(
+            MessageState::ConvergenceDeferred
+            | MessageState::EpochInvalidated
+            | MessageState::Failed,
+        ) => Verdict::PastEpochOrBranchLoss { branch_loss: true },
+        _ => Verdict::Defect(Cause::branch_loss_undetermined(probe)),
+    }
+}
+
+/// The engine's pre-convergence exclusions.
+const fn ignored(category: InputRejectionCategory) -> Verdict {
+    match category {
+        InputRejectionCategory::Duplicate => Verdict::Duplicate,
+        InputRejectionCategory::OwnEcho => Verdict::OwnEcho,
+        InputRejectionCategory::WrongRecipient | InputRejectionCategory::UnknownGroup => {
+            Verdict::Routing
+        }
+        InputRejectionCategory::InvalidEncoding
+        | InputRejectionCategory::InvalidSignature
+        | InputRejectionCategory::UnsupportedRequiredFeature
+        | InputRejectionCategory::AuthorizationFailed
+        | InputRejectionCategory::MissingWelcomeKeyPackage => Verdict::Invalid,
+    }
+}
+
+/// Haven's own pre-authentication screen.
 const fn pre_auth(reason: haven_core::nostr::mls::types::PreAuthRejection) -> Verdict {
     use haven_core::nostr::mls::types::PreAuthRejection;
     match reason {
-        PreAuthRejection::Expired => Verdict::Expired,
         PreAuthRejection::Malformed => Verdict::PreAuth,
         // `PreAuthRejection` is `#[non_exhaustive]`: a screen Haven adds later
         // is a real classification this module has not learned yet, and saying
@@ -267,7 +315,12 @@ const fn pre_auth(reason: haven_core::nostr::mls::types::PreAuthRejection) -> Ve
     }
 }
 
-/// The engine's stale taxonomy.
+/// The engine's convergence exclusions.
+///
+/// The deprecated variants are matched because the enum still carries them;
+/// MDK v0.10.4 reports each through its replacement (`Ignored` / `LocalState`),
+/// and they classify the same way.
+#[allow(deprecated)]
 const fn stale(reason: &StaleReason, probe: Probe) -> Verdict {
     match reason {
         StaleReason::AlreadySeen => Verdict::Duplicate,
@@ -282,9 +335,15 @@ const fn stale(reason: &StaleReason, probe: Probe) -> Verdict {
         },
         StaleReason::NotForThisClient | StaleReason::UnknownGroup => Verdict::Routing,
         StaleReason::OwnEcho => Verdict::OwnEcho,
-        StaleReason::PeelFailed => Verdict::PeelFailed,
         StaleReason::SelfEvicted => Verdict::SelfEvicted,
         StaleReason::Quarantined => Verdict::Quarantined,
+        StaleReason::LosingBranch => Verdict::PastEpochOrBranchLoss { branch_loss: true },
+        StaleReason::PreMembership
+        | StaleReason::PredatesLocalCopy
+        | StaleReason::BeyondAnchor
+        | StaleReason::BeyondRollbackHorizon
+        | StaleReason::BeyondAppRetention => Verdict::PastEpochOrBranchLoss { branch_loss: false },
+        StaleReason::InvalidAgainstCanonicalState => Verdict::Invalid,
     }
 }
 
@@ -300,8 +359,9 @@ impl Cause {
 
 /// The send side, as a circle-level caller sees it.
 ///
-/// Only [`CircleError::SendDeferred`] is typed at this layer; every other send
-/// failure arrives as `CircleError::Mls`, whose payload is redacted prose that
+/// Only a deferral is typed at this layer — a seal held back is answered
+/// [`CircleError::EngineHeld`]; every other send failure arrives as
+/// `CircleError::Mls`, whose payload is redacted prose that
 /// Haven forbids classifying (an error string interpolates remote-authored text,
 /// so a substring match is a remotely-influenceable control channel). Use
 /// [`classify_session_send`] where the session layer's typed errors are
@@ -309,7 +369,7 @@ impl Cause {
 #[must_use]
 pub const fn classify_send(error: &CircleError) -> Verdict {
     match error {
-        CircleError::SendDeferred { .. } => Verdict::SendDeferred,
+        CircleError::EngineHeld => Verdict::SendDeferred,
         _ => Verdict::Defect(Cause::OpaqueSendError),
     }
 }

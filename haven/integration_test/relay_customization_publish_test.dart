@@ -21,6 +21,13 @@
 /// observing events on `r2` is therefore a definitive proof that the
 /// production add-relay path works end-to-end.
 ///
+/// ## Host cues
+///
+/// FFI-OD2 needs R2 down and then back. This harness prints
+/// [_kStopR2Cue] and [_kStartR2Cue]; `run-relay-customization.sh`
+/// stops and restarts R2 when it reads them in logcat. Product code never
+/// prints a cue.
+///
 /// ## Platform requirements
 ///
 /// `CircleManagerFfi.newInstance` calls `init_keyring_store()` internally;
@@ -28,15 +35,18 @@
 /// [markTestSkipped] when the keyring is unavailable.
 library;
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/utils/log_alias.dart' show LogAliasClass, logAliasHandle;
 import 'package:integration_test/integration_test.dart';
 
+import 'e2e/_lib/circle_creation.dart';
+import 'e2e/_lib/driven_location.dart';
+import 'e2e/_lib/pump_helpers.dart' show pumpUntilCondition;
 import 'e2e/_lib/synthetic_user.dart';
 import 'e2e/_lib/test_relay.dart';
 import 'e2e/_lib/test_user.dart';
@@ -53,6 +63,69 @@ String _hex(List<int> bytes) =>
 /// Returns `true` iff [hex] is exactly 64 lowercase hex characters.
 bool _is64LowerHex(String hex) =>
     hex.length == 64 && RegExp(r'^[0-9a-f]{64}$').hasMatch(hex);
+
+/// Asks the host to stop R2. MUST match `R2_STOP_CUE` in
+/// `tooling/e2e/ci/run-relay-customization.sh`, whose self-test reads it here.
+const String _kStopR2Cue = '[od2-cue] stop R2';
+
+/// Asks the host to start R2 again. MUST match `R2_START_CUE`.
+const String _kStartR2Cue = '[od2-cue] start R2';
+
+/// How long the host may take to act on a cue: a one-second logcat poll and
+/// one strfry stop or start.
+const Duration _r2CueWait = Duration(seconds: 90);
+
+/// How long the driver may take to send a commit again to a relay that is
+/// back: the longest wait it can owe a relay after one failed call is 30 s.
+const Duration _reSendWait = Duration(seconds: 120);
+
+/// Whether [url] accepts a WebSocket now.
+Future<bool> _relayAnswers(String url) async {
+  TestRelay? probe;
+  try {
+    probe = await TestRelay.connect(url: url).timeout(
+      const Duration(seconds: 5),
+    );
+    return true;
+  } on Object catch (_) {
+    return false;
+  } finally {
+    await probe?.dispose();
+  }
+}
+
+/// Pumps frames until [probe] answers `true`, with one probe in flight at a
+/// time; [description] is a fixed phrase (see `pumpUntilCondition`).
+Future<void> _pumpUntilAnswered(
+  WidgetTester tester,
+  Future<bool> Function() probe, {
+  required String description,
+  required Duration timeout,
+}) async {
+  var answered = false;
+  var inFlight = false;
+  await pumpUntilCondition(
+    tester,
+    () {
+      if (!answered && !inFlight) {
+        inFlight = true;
+        unawaited(
+          probe()
+              .then((ok) => answered = ok)
+              .catchError((Object e) {
+                debugPrint('[FFI-OD2] probe failed: ${e.runtimeType}');
+                return false;
+              })
+              .whenComplete(() => inFlight = false),
+        );
+      }
+      return answered;
+    },
+    description: description,
+    timeout: timeout,
+    pumpInterval: const Duration(milliseconds: 250),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Test entry-point
@@ -568,9 +641,10 @@ void main() {
           final bob = await SyntheticUser.bob(r1);
           try {
             final relayMgrForKp = await RelayManagerFfi.newInstance();
-            final bobKpJson = await relayMgrForKp.fetchKeypackage(
+            final bobKpJson = (await relayMgrForKp.fetchMemberKeypackage(
               pubkey: bob.pubkeyHex,
-            );
+              circle: aliceManager,
+            ))?.keyPackageJson;
             expect(
               bobKpJson,
               isNotNull,
@@ -585,11 +659,14 @@ void main() {
                 defaultStrfryUrl,
                 secondStrfryUrl,
               ];
-              final creation = await aliceManager.createCircle(
+              final creation = await createCircleDelivered(
+                manager: aliceManager,
+                relayManager: relayMgrForKp,
                 identitySecretBytes: secretBytes,
                 members: [
                   MemberKeyPackageFfi(
                     keyPackageJson: bobKpJson!,
+                    authorNpub: bob.npub,
                     inboxRelays: <String>[defaultStrfryUrl],
                     nip65Relays: <String>[defaultStrfryUrl],
                   ),
@@ -597,12 +674,7 @@ void main() {
                 name: 'Dual-Relay Circle',
                 circleType: 'location_sharing',
                 relays: circleRelays,
-                creatorFallbackRelays: <String>[defaultStrfryUrl],
               );
-
-              // Confirm the pending group-creation state Alice staged when
-              // creating the circle (publish-before-apply, Rule 13).
-              await aliceManager.confirmPublished(pending: creation.pending);
 
               // ORACLE: the stored circle.relays must exactly match the
               // explicit list.  If createCircle ignores the caller's relay
@@ -669,22 +741,14 @@ void main() {
                 timeout: const Duration(seconds: 40),
               );
 
-              // Encrypt and publish a location to the circle's relays.
-              final enc = (await aliceManager.encryptLocation(
+              // Seal a location and send it through the driver, which picks
+              // the relays the circle's routing names.
+              await publishLocationForTest(
+                relay: await RelayManagerFfi.newInstance(),
+                circle: aliceManager,
                 mlsGroupId: creation.circle.mlsGroupId,
-                senderPubkeyHex: alice.pubkeyHex,
                 latitude: 51.5,
                 longitude: -0.1,
-                updateIntervalSecs: BigInt.from(
-                  kLocationPublishMaxInterval.inSeconds +
-                      kTtlNetworkBufferSeconds,
-                ),
-              )).sent!;
-
-              final relayMgr = await RelayManagerFfi.newInstance();
-              await relayMgr.publishEvent(
-                eventJson: enc.eventJson,
-                relays: creation.circle.relays,
               );
 
               // Await both relay observations.
@@ -841,9 +905,10 @@ void main() {
           );
           try {
             final relayMgrForKp = await RelayManagerFfi.newInstance();
-            final bobKpJson = await relayMgrForKp.fetchKeypackage(
+            final bobKpJson = (await relayMgrForKp.fetchMemberKeypackage(
               pubkey: bob.pubkeyHex,
-            );
+              circle: aliceManager,
+            ))?.keyPackageJson;
             expect(
               bobKpJson,
               isNotNull,
@@ -851,11 +916,14 @@ void main() {
             );
             try {
               // Create the circle with R1 ONLY.
-              final creation = await aliceManager.createCircle(
+              final creation = await createCircleDelivered(
+                manager: aliceManager,
+                relayManager: relayMgrForKp,
                 identitySecretBytes: secretBytes,
                 members: [
                   MemberKeyPackageFfi(
                     keyPackageJson: bobKpJson!,
+                    authorNpub: bob.npub,
                     inboxRelays: <String>[defaultStrfryUrl],
                     nip65Relays: <String>[defaultStrfryUrl],
                   ),
@@ -863,10 +931,7 @@ void main() {
                 name: 'Single-Relay Circle (NEG)',
                 circleType: 'location_sharing',
                 relays: <String>[defaultStrfryUrl],
-                creatorFallbackRelays: <String>[defaultStrfryUrl],
               );
-
-              await aliceManager.confirmPublished(pending: creation.pending);
 
               // ORACLE: circle.relays must be [R1] only.
               expect(
@@ -878,17 +943,6 @@ void main() {
               );
 
               final nostrGroupIdHex = _hex(creation.circle.nostrGroupId);
-
-              final enc = (await aliceManager.encryptLocation(
-                mlsGroupId: creation.circle.mlsGroupId,
-                senderPubkeyHex: alice.pubkeyHex,
-                latitude: 48.85,
-                longitude: 2.35,
-                updateIntervalSecs: BigInt.from(
-                  kLocationPublishMaxInterval.inSeconds +
-                      kTtlNetworkBufferSeconds,
-                ),
-              )).sent!;
 
               // Capture a `since` timestamp immediately before publishing
               // so the R2 negative-control query uses a tightly bounded
@@ -911,9 +965,12 @@ void main() {
                 timeout: const Duration(seconds: 40),
               );
 
-              await relayMgr.publishEvent(
-                eventJson: enc.eventJson,
-                relays: creation.circle.relays,
+              await publishLocationForTest(
+                relay: relayMgr,
+                circle: aliceManager,
+                mlsGroupId: creation.circle.mlsGroupId,
+                latitude: 48.85,
+                longitude: 2.35,
               );
 
               // R1 MUST receive the 445 — this is the positive baseline.
@@ -1037,9 +1094,10 @@ void main() {
           );
           try {
             final relayMgrForKp = await RelayManagerFfi.newInstance();
-            final bobKpJson = await relayMgrForKp.fetchKeypackage(
+            final bobKpJson = (await relayMgrForKp.fetchMemberKeypackage(
               pubkey: bob.pubkeyHex,
-            );
+              circle: aliceManager,
+            ))?.keyPackageJson;
             expect(
               bobKpJson,
               isNotNull,
@@ -1047,11 +1105,14 @@ void main() {
             );
             try {
               // Step 1: Create a circle with R1 only.
-              final creation = await aliceManager.createCircle(
+              final creation = await createCircleDelivered(
+                manager: aliceManager,
+                relayManager: relayMgrForKp,
                 identitySecretBytes: secretBytes,
                 members: [
                   MemberKeyPackageFfi(
                     keyPackageJson: bobKpJson!,
+                    authorNpub: bob.npub,
                     inboxRelays: <String>[defaultStrfryUrl],
                     nip65Relays: <String>[defaultStrfryUrl],
                   ),
@@ -1059,9 +1120,7 @@ void main() {
                 name: 'Snapshot Circle',
                 circleType: 'location_sharing',
                 relays: <String>[defaultStrfryUrl],
-                creatorFallbackRelays: <String>[defaultStrfryUrl],
               );
-              await aliceManager.confirmPublished(pending: creation.pending);
 
               // Step 2: Add R2 to BOTH personal relay lists.
               await aliceManager.addUserRelay(
@@ -1103,25 +1162,16 @@ void main() {
 
               final nostrGroupIdHex = _hex(refreshed.circle.nostrGroupId);
 
-              // Step 4: Publish a fresh 445 to circle.relays.
-              final enc = (await aliceManager.encryptLocation(
-                mlsGroupId: refreshed.circle.mlsGroupId,
-                senderPubkeyHex: alice.pubkeyHex,
-                latitude: 35.68,
-                longitude: 139.69,
-                updateIntervalSecs: BigInt.from(
-                  kLocationPublishMaxInterval.inSeconds +
-                      kTtlNetworkBufferSeconds,
-                ),
-              )).sent!;
-
+              // Step 4: Seal a fresh 445 and send it through the driver.
               final sinceTs =
                   DateTime.now().millisecondsSinceEpoch ~/ 1000 - 2;
 
-              final relayMgr = await RelayManagerFfi.newInstance();
-              await relayMgr.publishEvent(
-                eventJson: enc.eventJson,
-                relays: refreshed.circle.relays,
+              await publishLocationForTest(
+                relay: await RelayManagerFfi.newInstance(),
+                circle: aliceManager,
+                mlsGroupId: refreshed.circle.mlsGroupId,
+                latitude: 35.68,
+                longitude: 139.69,
               );
 
               // Step 5: R2 must NOT receive the 445.
@@ -1176,5 +1226,173 @@ void main() {
       }
     },
     timeout: const Timeout(Duration(minutes: 3)),
+  );
+
+  // =========================================================================
+  // FFI-OD2 — owner decision OD-2 against two real relays: a commit R1
+  // acknowledged while R2 was down is sent to R2 again, the same signed
+  // event, once R2 is back, because min(2, n) = 2 acknowledgements are owed.
+  //
+  // Last in the file: it takes R2 down, and the shared `r2` probe does not
+  // survive that. `stop-strfry.sh` wipes R2's store, so the commit is on R2
+  // afterwards only because the driver sent it there.
+  // =========================================================================
+  testWidgets(
+    'FFI-OD2: a confirmed commit is sent again, byte-identical, to the frozen '
+    'relay that was down when the first relay acknowledged it',
+    (tester) async {
+      installThrowTimeErrorLogging();
+      // No skip hatch: without a keyring this proof cannot run, which is a
+      // red, never a pass.
+      await initKeyringStore();
+
+      final aliceDir = await Directory.systemTemp.createTemp(
+        'haven_relay_od2_alice_',
+      );
+      try {
+        final secretBytes = await alice.getSecretBytes();
+        final aliceManager = await CircleManagerFfi.newInstance(
+          dataDir: aliceDir.path,
+          identitySecretBytes: secretBytes,
+        );
+
+        try {
+          // seedOffset 3: offsets 0-2 are the tests above.
+          final bob = await SyntheticUser.bootstrap(
+            role: 'bob_od2',
+            seed: bobSeed,
+            relay: r1,
+            seedOffset: 3,
+          );
+          try {
+            final relayMgr = await RelayManagerFfi.newInstance();
+            final bobKpJson = (await relayMgr.fetchMemberKeypackage(
+              pubkey: bob.pubkeyHex,
+              circle: aliceManager,
+            ))?.keyPackageJson;
+            expect(
+              bobKpJson,
+              isNotNull,
+              reason: 'Bob must have a discoverable KeyPackage on R1',
+            );
+            final creation = await createCircleDelivered(
+              manager: aliceManager,
+              relayManager: relayMgr,
+              identitySecretBytes: secretBytes,
+              members: [
+                MemberKeyPackageFfi(
+                  keyPackageJson: bobKpJson!,
+                  authorNpub: bob.npub,
+                  inboxRelays: <String>[defaultStrfryUrl],
+                  nip65Relays: <String>[defaultStrfryUrl],
+                ),
+              ],
+              name: 'OD-2 Circle',
+              circleType: 'location_sharing',
+              relays: <String>[defaultStrfryUrl, secondStrfryUrl],
+              scenario: 'FFI-OD2',
+            );
+            final mlsGroupId = creation.circle.mlsGroupId;
+            final nostrGroupIdHex = _hex(creation.circle.nostrGroupId);
+
+            debugPrint(_kStopR2Cue);
+            await _pumpUntilAnswered(
+              tester,
+              () async => !await _relayAnswers(secondStrfryUrl),
+              description: 'HARNESS: the host stopping R2 on its cue',
+              timeout: _r2CueWait,
+            );
+
+            // A commit carries `h` alone; a location also carries
+            // `expiration`.
+            final commitOnR1Future = r1.firstWhere(
+              filter: <String, dynamic>{
+                'kinds': <int>[445],
+                '#h': <String>[nostrGroupIdHex],
+              },
+              matcher: (event) => !event.tags.any(
+                (t) => t.isNotEmpty && t.first == 'expiration',
+              ),
+              timeout: const Duration(seconds: 60),
+            );
+            final removal = await relayMgr.removeMembersDriven(
+              circle: aliceManager,
+              mlsGroupId: mlsGroupId,
+              memberPubkeys: [bob.pubkeyHex],
+              foreground: true,
+            );
+            expect(
+              removal.status,
+              PublishStatusFfi.confirmed,
+              reason:
+                  'R1 acknowledged the removal, so it must be applied while '
+                  'R2 is down: one acknowledgement confirms (Rule 13).',
+            );
+            final commitOnR1 = await commitOnR1Future;
+
+            debugPrint(_kStartR2Cue);
+            await _pumpUntilAnswered(
+              tester,
+              () => _relayAnswers(secondStrfryUrl),
+              description: 'HARNESS: the host starting R2 on its cue',
+              timeout: _r2CueWait,
+            );
+
+            // The drive a process with no live plane runs; each probe drives
+            // once and then looks for the commit on R2 for two seconds.
+            final probeB = await connectProbeRelay(secondStrfryUrl);
+            try {
+              final onB = <TestRelayEvent>[];
+              await _pumpUntilAnswered(
+                tester,
+                () async {
+                  await relayMgr.resumeDriven(
+                    circle: aliceManager,
+                    foreground: true,
+                  );
+                  onB.addAll(
+                    await probeB.collectN(
+                      count: 1,
+                      filter: <String, dynamic>{
+                        'ids': <String>[commitOnR1.id],
+                      },
+                      timeout: const Duration(seconds: 2),
+                    ),
+                  );
+                  return onB.isNotEmpty;
+                },
+                description: 'the confirmed commit sent again to R2',
+                timeout: _reSendWait,
+              );
+              // Compared as a boolean so a failure prints no signature.
+              expect(
+                onB.first.raw['sig'] == commitOnR1.raw['sig'],
+                isTrue,
+                reason:
+                    'R2 must hold the very event R1 acknowledged: OD-2 sends '
+                    'the stored bytes again, never a re-signed commit.',
+              );
+              debugPrint(
+                '[FFI-OD2] PASS: commit on R2 after its restart id='
+                '${logAliasHandle(LogAliasClass.event, commitOnR1.id)}',
+              );
+            } finally {
+              await probeB.dispose();
+            }
+          } finally {
+            await bob.dispose();
+          }
+        } finally {
+          for (var i = 0; i < secretBytes.length; i++) {
+            secretBytes[i] = 0;
+          }
+        }
+      } finally {
+        try {
+          await aliceDir.delete(recursive: true);
+        } on Object catch (_) {}
+      }
+    },
+    timeout: const Timeout(Duration(minutes: 6)),
   );
 }

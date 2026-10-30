@@ -218,6 +218,52 @@ void main() {
         expect(_syncCalls(svc), 0);
       },
     );
+
+    test(
+      'neither starts nor queues a sync while one is in flight',
+      () async {
+        final svc = MockProfileService()
+          ..nextPendingState = _cleanState
+          ..nextSyncResult = _partialResult;
+        final container = _makeContainer(svc);
+        addTearDown(container.dispose);
+        final notifier = await _anchor(container);
+
+        final gate = Completer<void>();
+        svc.syncOwnProfileGate = gate;
+        unawaited(notifier.sync());
+        await _settle();
+        expect(_syncCalls(svc), 1, reason: 'anti-vacuity: a sync is in flight');
+
+        // A resume lands while that sync is publishing, and the outbox
+        // still says a retry is due.
+        svc.nextPendingState = const ProfilePendingState(
+          pending: true,
+          partial: true,
+          retryDue: true,
+        );
+        await notifier.retryIfPending();
+        expect(
+          container.read(ownProfileSyncProvider),
+          ProfileSyncStatus.syncing,
+          reason: 'the in-flight sync resolves the status itself',
+        );
+
+        gate.complete();
+        await _settle();
+
+        expect(
+          _syncCalls(svc),
+          1,
+          reason: 'a follow-up queued here would publish again at once, '
+              'past the backoff the in-flight sync has just recorded',
+        );
+        expect(
+          container.read(ownProfileSyncProvider),
+          ProfileSyncStatus.partial,
+        );
+      },
+    );
   });
 
   group('sync() coalescing', () {

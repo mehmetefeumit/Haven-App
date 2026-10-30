@@ -82,8 +82,8 @@
 # `print`. The name must start with an (optionally `_`-prefixed) UPPERCASE
 # letter — Dart's own class-naming convention — or be the bare word
 # `Exception`; this is what keeps an ordinary camelCase method or function
-# DECLARATION that happens to end in `Error` (`recordPublishError(Object
-# error) {`, `_setError(String? message) {`, a `flutter gen-l10n` string
+# DECLARATION that happens to end in `Error` (`_setError(String? message)
+# {`, a `flutter gen-l10n` string
 # builder like `circleMemberRemoveError(String name)`) from being misread as
 # a constructor call — the regex sees only `NAME(` shape and cannot tell a
 # declaration from a call any other way. Only the bare (unnamed) constructor
@@ -203,7 +203,7 @@ readonly MIN_DART_WRAPDEFS=5
 # The vocabulary. Whole decamelled identifiers and every `_`-part of them.
 # STRONG words identify on their own; WEAK words are magnitudes and instants,
 # which a delta/bucket/duration part may relativise.
-readonly STRONG_WORDS='nostr_group_id group_hex group_id gid group circle circle_id h_tag npub nsec pubkey pub_key public_key pk author sender recipient inviter event_id evt evt_id evt_tag evt_prefix d_tag slot sub_id subscription_id relay relays relay_url url urls host domain endpoint uri ip ssid display_name petname nickname circle_name name title label about notes blossom picture avatar sha256 digest hash hex bech32 hash_code lat latitude lon longitude geohash altitude speed heading accuracy device_id locale tz timezone id ids peer peers member members contact contacts owner admin admins index idx ordinal seq sequence serial'
+readonly STRONG_WORDS='nostr_group_id group_hex group_id gid group circle circle_id h_tag npub nsec pubkey pub_key public_key pk author sender recipient inviter event_id evt evt_id evt_tag evt_prefix d_tag slot sub_id subscription_id relay relays relay_url url urls host domain endpoint uri ip ssid display_name petname nickname circle_name name title label about notes blossom picture avatar sha256 digest hash hex bech32 hash_code lat latitude lon longitude geohash altitude speed heading accuracy device_id locale tz timezone id ids peer peers member members contact contacts owner admin admins index idx ordinal seq sequence serial fanout targets transport_id into_mdk_failure'
 readonly WEAK_WORDS='epoch since until created_at timestamp at_ms instant count size total len responders canonical acked inputs sources'
 # The INSTANT subset of WEAK_WORDS. A unit part says how a magnitude is
 # measured, so `totalMs` is a span rather than a count — but it says nothing
@@ -846,7 +846,7 @@ camelize() { awk -F_ '{ out = $1; for (i = 2; i <= NF; i++) out = out toupper(su
 # pair and the `relaysAcked`/`wasAcked` pair. An equality pin: a fixture
 # added or lost without this line changing is a self-test that no longer
 # says what it runs.
-readonly DECLARED_CASES=408
+readonly DECLARED_CASES=418
 
 self_test() {
   local tmp fails=0 checked=0
@@ -898,6 +898,11 @@ self_test() {
   _case "Rust base64 FAILS" rust 1 rs 'fn f() { log::info!("{}", base64::encode(v)); }' 'shape(base64)'
   _case "Rust typed PublicKey:: value FAILS" rust 1 rs 'fn f() { log::info!("{}", PublicKey::from_hex(v)?); }' 'shape(typed identifier value)'
   _case "Rust serde_json::to_string FAILS" rust 1 rs 'fn f() { log::info!("{}", serde_json::to_string(&v)?); }' 'shape(serialised object)'
+  # MDK's transport values print a relay URL and free text. Their one way out
+  # of Haven's wrapper is `into_mdk_failure()`, a vocabulary word; a `{:?}` on
+  # any value is a hit whatever it is called.
+  _case "Rust {:?} on an MDK endpoint failure FAILS" rust 1 rs 'fn f() { log::warn!("{:?}", outcome.into_mdk_failure()); }' 'debug-format'
+  _case "Rust a field of an MDK endpoint failure FAILS" rust 1 rs 'fn f() { log::warn!("{}", outcome.into_mdk_failure().endpoint); }' 'identifier('
   _case "Dart toRadixString( FAILS" dart 1 dart "void f() { debugPrint('\${v.toRadixString(16)}'); }" 'shape(toRadixString()'
   _case "Dart substring( FAILS" dart 1 dart "void f() { debugPrint('\${v.substring(0, 8)}'); }" 'shape(substring()'
   _case "Dart .take( FAILS" dart 1 dart "void f() { debugPrint('\${v.characters.take(4)}'); }" 'shape(.take()'

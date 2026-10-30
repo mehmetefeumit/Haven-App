@@ -260,7 +260,7 @@ backgrounded state changed, and both are properties of the UI isolate rather tha
    resume. Before P1 that pause path stopped only publishing, so a backgrounded Android device with
    sharing off went on holding a standing engine socket until the OS froze the process. The restart
    is cheap because P4-1's bounded inbox lookback landed in the same phase: a re-anchor asks the
-   inbox for ≤ 49 h, never 7 days.
+   inbox for ≤ 96 h (4 days since decision 231), never 7 days.
 
    **The `!isIOS` form missed the iOS sharing-OFF arm, which P4 closed.** It made the rule false
    there, so an iPhone whose owner had explicitly turned background sharing off still held every
@@ -278,7 +278,7 @@ backgrounded state changed, and both are properties of the UI isolate rather tha
    subscription-health timer used to be spared on the iOS background-sharing branch, because a
    standing subscription was exactly what it existed to repair; it is now foreground-only on every
    branch, gated at arming AND at fire time, since a tick landing mid-burst repaired a mid-`connect()`
-   pool through the FOREGROUND re-anchor and left standing REQs, a socket and a 49 h gift-wrap replay
+   pool through the FOREGROUND re-anchor and left standing REQs, a socket and a 96 h gift-wrap replay
    behind at an instant that is not a publish.
 
 ### iOS
@@ -302,8 +302,9 @@ registered) so `flutter analyze` / `flutter test` / `android-build` / `ios-build
 
 ## §E. Rust / FFI changes (MDK stays PRISTINE — pin superseded, see below)
 
-> **The PIN this heading carried is history (noted 2026-09-09):** it read "at v0.7.1, rev 93ae324", and the tree has
-> pinned MDK v0.9.4, rev `e391adc133a9…`, since the Dark Matter migration of 2026-07-18 (`haven-core/Cargo.toml`).
+> **The PIN this heading carried is history (noted 2026-09-09):** it read "at v0.7.1, rev 93ae324"; the Dark Matter
+> migration of 2026-07-18 moved the tree to MDK v0.9.4, rev `e391adc133a9…`, and it now pins v0.10.4, rev `fcc85edd…`
+> (`haven-core/Cargo.toml`).
 > "Pristine" — no fork, no patch — is still the rule, and Part III's note carries the rest.
 
 1. **`static WRITER_LOCK` (the main change, §B):** process-global `std::sync::Mutex<()>` /
@@ -522,7 +523,7 @@ xmllint checks:
 | # | Pin |
 |---|-----|
 | 14a | `const bool backgroundCatchupEnabled = true;` in `live_sync_provider.dart` |
-| 14b | `liveSyncEnabled` defaults to `true`: `defaultValue: true` within 3 lines of the `bool.fromEnvironment` declaration (`check_m7_native_wake_guards.sh:1239-1257`). At M7-E this pinned `= false`; M11 Phase B flipped the flag and updated the check with it |
+| 14b | `liveSyncEnabled` defaults to `true`: `defaultValue: true` within 3 lines of the `bool.fromEnvironment` declaration (`check_m7_native_wake_guards.sh`, check 14b). At M7-E this pinned `= false`; M11 Phase B flipped the flag and updated the check with it |
 | 14c | RebootReceiver `android:enabled="true"` |
 | 14d | RestartReceiver STILL `android:enabled="false"` AND carries `tools:node="replace"` |
 | 14e | `autoRunOnBoot: true` present in executable code of `background_location_manager.dart` |
@@ -673,7 +674,10 @@ milestone banner marks M7-E DONE; in-file docs describing the inert state are up
 SECURITY.md` gains a **"Scheduled background wakes (M7)"** subsection (receive-only by construction,
 triple consent gating, presence-only logging, M10.1 pending-wipe interaction; wording per A9 — the
 wake holds a full `CircleManagerFfi` but invokes only `run_catchup_all_circles`, which never authors,
-`try_acquire_background` yielding to any authoring writer; per-platform triggers). The
+`try_acquire_background` yielding to any authoring writer; per-platform triggers — all as first written:
+the yield went at Dark Matter, replaced by the Rule-14 session guard that fails a racing wake closed, and
+since W9o-1b the wake also carries a leave on, claiming no foreground, and makes no commit; see that
+subsection). The
 persistent-connection disclosure remains an M11 item. Owner checklist = §6 (canonical; no separate
 file).
 
@@ -1133,7 +1137,7 @@ opt-out remains enforced even on stale builds.
 | Flag flip is complete & stays flipped | guard 14a + flipped unit pin |
 | Registration actually registers (flag ON) | Phase A dumpsys assert |
 | Worker isolate boots Rust+keyring+SQLCipher cold | Phase A `bootstrap ok` marker |
-| Worker terminates in receive-only chokepoint, not authoring | guard 14f + code review + Phase A counters |
+| Worker terminates in receive-only chokepoint, not authoring (since W9o-1b: the receive, then a leave's carry-on claiming no foreground, which makes no commit — SECURITY.md "Scheduled background wakes (M7)") | guard 14f + code review + Phase A counters |
 | Sweep decrypts real peer MLS traffic | Phase A `locations>=1` (pinned locally first) |
 | Consent gate blocks a leaked wake w/ zero network | Phase C2 marker + strfry-silence |
 | NEW pending-wipe gate blocks w/ zero network | unit order tests + Phase C1 |
@@ -1197,13 +1201,13 @@ here as current truth.*
 
 ## ~~MDK stays PRISTINE at v0.7.1 (rev 93ae324)~~ — the research that forces the Haven-owned marker
 
-> **The PIN in this heading is history, the CONCLUSION is not (noted 2026-09-09).** Haven left v0.7.1 on
-> 2026-07-18: the tree pins the five Dark Matter crates at MDK v0.9.4, rev `e391adc133a9…`
-> (`haven-core/Cargo.toml`; `docs/MDK_DARKMATTER_MIGRATION_PLAN.md`), and §E's heading in Part II carries the same
-> stale pin for the same reason. What survives unchanged is why the Haven-owned marker exists — the pinned rev still
-> exposes no public read accessor for a staged commit (`relay/live_sync/processor.rs` says so at `e391adc`, and
-> OD4-c's whole shape follows from it) — and the no-fork rule. Read the version numbers in this section as the
-> state of the research when it was done.
+> **The PIN in this heading is history, and so is the marker (noted 2026-09-09, corrected at the v0.10.4
+> migration).** Haven left v0.7.1 on 2026-07-18 for MDK v0.9.4, rev `e391adc133a9…`
+> (`docs/MDK_DARKMATTER_MIGRATION_PLAN.md`), and now pins v0.10.4, rev `fcc85edd…` (`haven-core/Cargo.toml`); §E's
+> heading in Part II carries the same stale pin for the same reason. The Haven-owned staged-commit marker this
+> section argues for went at the Dark Matter cutover: the engine owns convergence and publish-before-apply, so the
+> catch-up sweep needs no marker (`haven-core/src/relay/catchup.rs`). What survives is the no-fork rule. Read the
+> version numbers and the marker design in this section as the state of the research when it was done.
 
 C-NOFORK-2's ideal primitive would be MDK's `load_mls_group(id)?.pending_commit()`, but it is
 **inaccessible in the pinned MDK**: `load_mls_group()` is `#[cfg(feature="debug-examples")]` pub /

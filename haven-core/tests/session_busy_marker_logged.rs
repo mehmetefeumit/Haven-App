@@ -76,7 +76,7 @@ async fn session_busy_refusal_is_logged_once_with_no_identifier() {
         &[
             db_display.as_str(),
             NEEDLE_STEM,
-            "session.sqlite",
+            "session-v2.sqlite",
             dir.path()
                 .file_name()
                 .and_then(std::ffi::OsStr::to_str)

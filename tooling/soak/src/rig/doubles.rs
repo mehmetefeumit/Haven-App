@@ -54,7 +54,7 @@ impl TestRelay {
         let relay = MockRelay::run().await.expect("mock relay runs");
         let url = relay.url().await.to_string();
 
-        let witness = Client::builder().build();
+        let witness = Client::builder().build(); // test witness
         witness.add_relay(&url).await.expect("witness adds relay");
         witness.connect().await;
         witness
@@ -86,13 +86,6 @@ impl TestRelay {
             _relay: relay,
             _witness: witness,
         }
-    }
-
-    /// Starts a relay whose acknowledgements never reach a client.
-    pub async fn start_swallowing_acks(tag: RelayTag) -> Self {
-        let relay = Self::start(tag).await;
-        relay.swallow_ok.store(true, Ordering::Release);
-        relay
     }
 
     /// Starts a relay that samples `counter` whenever it is asked whether it

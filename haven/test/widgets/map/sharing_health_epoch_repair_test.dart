@@ -1,12 +1,12 @@
-/// Routing and copy accuracy for the epoch-repair leg of the sharing-health
-/// banner.
+/// Routing and copy accuracy for the epoch-repair leg of the sharing card.
 ///
-/// The repair has three user-visible outcomes and they need DIFFERENT words.
-/// Collapsing them is not a cosmetic slip: `notSoleAdmin` and
-/// `epochUnrecoverable` never clear by waiting, so presenting either as a retry
-/// puts the user in a loop that cannot succeed, and a success that promises
-/// instant recovery claims something the protocol does not deliver: peers
-/// apply the commit on their own next epoch pass.
+/// The repair is a self-update any member may make. Its outcomes need
+/// DIFFERENT words: a success that promised instant recovery would claim what
+/// the protocol does not deliver (peers apply the commit when they next
+/// receive it), and the engine's own `epochUnrecoverable` refusal is no
+/// terminal verdict of its own — it reads a store that did not answer as
+/// halted — so whether the circle is halted is the standing cause's to say,
+/// read from the core first (decision 313).
 library;
 
 import 'package:flutter/material.dart';
@@ -21,6 +21,7 @@ import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/map/sharing_health_banner.dart';
 
 import '../../helpers/localized_app_harness.dart';
+import '../../helpers/sheet_health_overrides.dart';
 
 /// A health notifier parked in a caller-chosen state.
 ///
@@ -115,6 +116,7 @@ void main() {
       tester,
       Scaffold(body: SharingHealthBanner(key: ValueKey(pumpSeq))),
       overrides: [
+        ...deviceBannerOverrides(),
         sharingHealthProvider.overrideWith(() => notifier),
         sharingHealthClockProvider.overrideWithValue(
           () => DateTime.utc(2026, 8, 28, 12, 30),
@@ -133,39 +135,64 @@ void main() {
   }
 
   group('epoch-repair outcome routing', () {
-    testWidgets('a non-owner is told who can repair, not to try again', (
+    testWidgets('Repair is offered to every member: no role is read', (
       tester,
     ) async {
-      await pumpWith(
-        tester,
-        const EpochRepairSkipped(SkipReasonFfi.notSoleAdmin),
-      );
-      expect(find.text(l10n.sharingHealthRepairNotOwner), findsOneWidget);
-      // Never the other two: one would invite a retry that cannot succeed, the
-      // other would claim a repair that did not happen.
-      expect(find.text(l10n.sharingHealthRepairNeedsNewCircle), findsNothing);
-      expect(find.text(l10n.sharingHealthRepairSent), findsNothing);
+      // `_circle` lists no member at all, so no admin flag exists to read.
+      await pumpWith(tester, null, tap: false);
+      expect(find.byKey(WidgetKeys.sharingHealthRepairButton), findsOneWidget);
     });
 
-    testWidgets('an unrecoverable circle is told to be re-created', (
-      tester,
-    ) async {
+    testWidgets('an engine refusal of a QUARANTINED circle shows the '
+        'quarantined cause, never the terminal copy', (tester) async {
+      await pumpWith(
+        tester,
+        const EpochRepairSkipped(SkipReasonFfi.epochUnrecoverable),
+        healthAfterRepair: SharingHealth.paused(
+          SharingPausedReason.circleQuarantined,
+          DateTime.utc(2026, 8, 28, 12),
+        ),
+      );
+      expect(find.text(l10n.sharingHealthTitleQuarantined), findsOneWidget);
+      expect(find.text(l10n.sharingHealthBodyQuarantined), findsOneWidget);
+      expect(find.text(l10n.sharingHealthTitleUnrecoverable), findsNothing);
+      expect(find.text(l10n.sharingHealthBodyUnrecoverable), findsNothing);
+      expect(_remedy, findsNothing);
+    });
+
+    testWidgets('an engine refusal with no standing cause claims nothing '
+        'terminal, and Repair stays live', (tester) async {
       await pumpWith(
         tester,
         const EpochRepairSkipped(SkipReasonFfi.epochUnrecoverable),
       );
-      expect(find.text(l10n.sharingHealthRepairNeedsNewCircle), findsOneWidget);
-      expect(find.text(l10n.sharingHealthRepairNotOwner), findsNothing);
+      expect(_remedy, findsNothing);
+      expect(find.text(l10n.sharingHealthBodyUnrecoverable), findsNothing);
+      final repair = find.byKey(WidgetKeys.sharingHealthRepairButton);
+      expect(tester.widget<TextButton>(repair).onPressed, isNotNull);
+    });
+
+    testWidgets('a circle the core reads as halted offers Re-create, and no '
+        'Repair', (tester) async {
+      await pumpWith(
+        tester,
+        const EpochRepairSkipped(SkipReasonFfi.epochUnrecoverable),
+        healthAfterRepair: SharingHealth.paused(
+          SharingPausedReason.circleUnrecoverable,
+          DateTime.utc(2026, 8, 28, 12),
+          ageProvable: false,
+        ),
+      );
+      expect(find.text(l10n.sharingHealthBodyUnrecoverable), findsOneWidget);
+      expect(find.byKey(WidgetKeys.sharingHealthRecreateCta), findsOneWidget);
+      expect(find.byKey(WidgetKeys.sharingHealthRepairButton), findsNothing);
     });
 
     testWidgets('a successful repair says it was sent, not that it worked', (
       tester,
     ) async {
       await pumpWith(tester, const EpochRepairApplied());
-      expect(
-        find.text(l10n.sharingHealthRepairSent),
-        findsOneWidget,
-      );
+      expect(find.text(l10n.sharingHealthRepairSent), findsOneWidget);
     });
 
     testWidgets('a retryable skip still says something', (tester) async {
@@ -186,7 +213,7 @@ void main() {
           reason: '$reason declines for a reason that clears on its own',
         );
         expect(
-          find.text(l10n.sharingHealthRepairNeedsNewCircle),
+          find.text(l10n.sharingHealthBodyUnrecoverable),
           findsNothing,
           reason: '$reason is not terminal',
         );
@@ -200,26 +227,15 @@ void main() {
   });
 
   group('copy accuracy', () {
-    testWidgets('no new string claims key rotation or forward secrecy', (
-      tester,
-    ) async {
+    testWidgets('no repair string claims forward secrecy', (tester) async {
       await pumpWith(tester, const EpochRepairApplied());
-      // The repair carries no `UpdatePath`: it resets sender ratchets and
-      // provides no post-compromise security. Copy that called it key rotation,
-      // or claimed forward secrecy, would be false — the same discipline the
-      // Rust side enforces in `circle::rotation`.
-      const forbidden = [
-        'key rotation',
-        'rotate',
-        'rotating',
-        'forward secrecy',
-        'perfect forward',
-      ];
+      // The repair gives this circle new keys, and promises nothing about
+      // what was sent before.
+      const forbidden = ['forward secrecy', 'perfect forward'];
       final strings = [
         l10n.sharingHealthRepairSent,
-        l10n.sharingHealthRepairNotOwner,
-        l10n.sharingHealthRepairNeedsNewCircle,
-        l10n.sharingHealthRepairHint,
+        l10n.sharingHealthBodyUnrecoverable,
+        l10n.sharingHealthRepairHintAnyMember,
       ];
       for (final s in strings) {
         for (final needle in forbidden) {
@@ -232,33 +248,27 @@ void main() {
       }
     });
 
-    testWidgets('the Repair hint keeps BOTH of its hedges', (tester) async {
+    testWidgets('the Repair hint names no role and keeps its "may"', (
+      tester,
+    ) async {
       await pumpWith(tester, const EpochRepairApplied(), tap: false);
-      final hint = l10n.sharingHealthRepairHint;
-      // (1) ROLE-conditional. Only this circle's sole admin can commit the key,
-      // so an unconditional hint promises every user something most of them
-      // cannot get.
+      final hint = l10n.sharingHealthRepairHintAnyMember;
       expect(
-        hint,
-        contains('if you are'),
-        reason: 'the key clause must stay conditional on being the admin',
+        hint.toLowerCase(),
+        isNot(contains('admin')),
+        reason: 'any member can repair',
       );
-      expect(hint.toLowerCase(), contains('admin'));
-      // (2) MODAL. Five further gates decline silently even FOR the admin
-      // (epoch too recent, circle too busy, a departure pending, already
-      // repaired today, engine state unsettled), so a flat indicative would be
-      // wrong most of the times the admin presses it.
+      expect(hint, isNot(contains('if you are')));
+      // Several checks decline the key step silently, so a flat indicative
+      // would be wrong most of the times it is pressed.
       expect(
         hint,
         contains('may give'),
-        reason: 'five gates can decline; this is a possibility, not a promise',
+        reason: 'the key step is a possibility, not a promise',
       );
-      // And the thing the hedges must not be traded for: a security claim. The
-      // commit carries no `UpdatePath`.
       for (final overclaim in const [
         'secure again',
         'locks out',
-        'fresh key',
         'no longer read',
       ]) {
         expect(hint.toLowerCase(), isNot(contains(overclaim)));
@@ -269,7 +279,7 @@ void main() {
       tester,
     ) async {
       await pumpWith(tester, const EpochRepairApplied());
-      // Peers apply the commit on their own next epoch pass, so delivery does
+      // Peers apply the commit when they next receive it, so delivery does
       // not resume the moment this returns.
       const overclaims = [
         'is working again',
@@ -287,13 +297,7 @@ void main() {
       }
     });
 
-    test('the two terminal skips are not offered as retryable', () {
-      // What the banner branches on. If this classification drifts, the UI
-      // starts inviting retries that can never succeed.
-      expect(
-        const EpochRepairSkipped(SkipReasonFfi.notSoleAdmin).isRetryable,
-        isFalse,
-      );
+    test('the terminal skip is not offered as retryable', () {
       expect(
         const EpochRepairSkipped(SkipReasonFfi.epochUnrecoverable).isRetryable,
         isFalse,
@@ -314,29 +318,20 @@ void main() {
     });
   });
 
-  group('the remedy is scoped to what a ratchet reset can actually fix', () {
+  group('the remedy is scoped to what a key update can actually fix', () {
     testWidgets('a repair that CLEARED the fault shows no remedy', (
       tester,
     ) async {
-      // The defect this pins: the epoch copy used to be routed before the
-      // health model was consulted, so a non-admin whose relay fault the
-      // earlier legs had just fixed was still told to ask the admin to re-add
-      // them — advice about a problem they no longer had.
       await pumpWith(
         tester,
-        const EpochRepairSkipped(SkipReasonFfi.notSoleAdmin),
+        const EpochRepairSkipped(SkipReasonFfi.rotatedRecently),
         healthAfterRepair: SharingHealth.healthy,
       );
       expect(_remedy, findsNothing);
     });
 
     testWidgets('a SEND-side fault gets no epoch copy at all', (tester) async {
-      // A ratchet reset repairs a RECEIVE fault. Offering "ask the admin to
-      // re-add you" against a failing publish sends the user after the wrong
-      // problem entirely — and so does "nothing to repair right now", which
-      // reads as the verdict on the whole tap.
       for (final outcome in const [
-        EpochRepairSkipped(SkipReasonFfi.notSoleAdmin),
         EpochRepairSkipped(SkipReasonFfi.epochUnrecoverable),
         EpochRepairSkipped(SkipReasonFfi.rotatedRecently),
         EpochRepairApplied(),
@@ -346,15 +341,7 @@ void main() {
       }
     });
 
-    testWidgets('a SEND-side fault keeps Repair alive and reasoned', (
-      tester,
-    ) async {
-      // The terminal outcomes disable the button, and that disable has to be
-      // gated on the same condition as the copy. Otherwise a send-side fault —
-      // where the epoch leg is silent by design — ends with a dead Repair
-      // button whose only spoken explanation is "Repair is unavailable for this
-      // circle": a verdict the user was never shown, about a fault a ratchet
-      // reset was never going to fix.
+    testWidgets('a SEND-side fault keeps Repair alive', (tester) async {
       for (final health in [_publishFailing, _relayDisconnected]) {
         await pumpWith(
           tester,
@@ -369,11 +356,6 @@ void main() {
           isNotNull,
           reason: 'the epoch verdict does not speak for $health',
         );
-        expect(
-          find.bySemanticsLabel(l10n.sharingHealthRepairUnavailableHint),
-          findsNothing,
-          reason: 'and must not explain a disable that did not happen',
-        );
       }
     });
 
@@ -382,13 +364,13 @@ void main() {
     ) async {
       await pumpWith(
         tester,
-        const EpochRepairSkipped(SkipReasonFfi.epochUnrecoverable),
+        const EpochRepairSkipped(SkipReasonFfi.rotatedRecently),
         health: SharingHealth.paused(
           SharingPausedReason.receiveSubscriptionLost,
           DateTime.utc(2026, 8, 28, 12),
         ),
       );
-      expect(find.text(l10n.sharingHealthRepairNeedsNewCircle), findsOneWidget);
+      expect(find.text(l10n.sharingHealthRepairNothingToDo), findsOneWidget);
     });
   });
 
@@ -396,11 +378,11 @@ void main() {
     testWidgets('it clears when the fault clears', (tester) async {
       await pumpWith(
         tester,
-        const EpochRepairSkipped(SkipReasonFfi.notSoleAdmin),
+        const EpochRepairSkipped(SkipReasonFfi.rotatedRecently),
       );
       expect(_remedy, findsOneWidget);
 
-      // The banner disappears but its `State` does not: `build` returns
+      // The card disappears but its `State` does not: `build` returns
       // `SizedBox.shrink()`, it is not unmounted. Without an explicit clear the
       // next unrelated fault re-surfaces this advice.
       notifier.moveTo(SharingHealth.healthy);
@@ -418,13 +400,10 @@ void main() {
     testWidgets('it clears when the selected circle changes', (tester) async {
       await pumpWith(
         tester,
-        const EpochRepairSkipped(SkipReasonFfi.notSoleAdmin),
+        const EpochRepairSkipped(SkipReasonFfi.rotatedRecently),
       );
       expect(_remedy, findsOneWidget);
 
-      // The banner is `const` with no per-circle key, so switching circles
-      // keeps this `State`. "Only this circle's admin can repair it" would then
-      // name the wrong person's circle.
       final container = ProviderScope.containerOf(
         tester.element(find.byType(SharingHealthBanner)),
       );
@@ -439,72 +418,24 @@ void main() {
     });
   });
 
-  group('a terminal outcome does not offer a retry', () {
-    testWidgets('Repair is disabled and says why', (tester) async {
-      await pumpWith(
-        tester,
-        const EpochRepairSkipped(SkipReasonFfi.epochUnrecoverable),
-      );
-      final button = tester.widget<TextButton>(
-        find.byKey(WidgetKeys.sharingHealthRepairButton),
-      );
-      expect(
-        button.onPressed,
-        isNull,
-        reason:
-            'the copy says the circle cannot be repaired here; leaving the '
-            'control live invites a loop that cannot succeed',
-      );
-      // WCAG 2.1 SC 4.1.2: a disabled control still has to say why.
-      expect(
-        tester
-            .widget<Semantics>(
-              find
-                  .ancestor(
-                    of: find.byKey(WidgetKeys.sharingHealthRepairButton),
-                    matching: find.byType(Semantics),
-                  )
-                  .first,
-            )
-            .properties
-            .hint,
-        l10n.sharingHealthRepairUnavailableHint,
-      );
-    });
-
-    testWidgets('a retryable outcome leaves Repair live', (tester) async {
-      await pumpWith(
-        tester,
-        const EpochRepairSkipped(SkipReasonFfi.rotatedRecently),
-      );
-      final button = tester.widget<TextButton>(
-        find.byKey(WidgetKeys.sharingHealthRepairButton),
-      );
-      expect(button.onPressed, isNotNull);
-    });
-  });
-
   group('the outcome reaches a screen reader', () {
     testWidgets('it is part of the live-region label, not only spoken', (
       tester,
     ) async {
       // Everything under the status node is inside `ExcludeSemantics`, so a
-      // remedy rendered there and announced once is unreachable afterwards: a
-      // screen-reader user who swipes back over the banner hears the fault and
-      // not what to do about it.
+      // remedy rendered there and announced once is unreachable afterwards.
       await pumpWith(
         tester,
-        const EpochRepairSkipped(SkipReasonFfi.notSoleAdmin),
+        const EpochRepairSkipped(SkipReasonFfi.rotatedRecently),
       );
       final handle = tester.ensureSemantics();
       expect(
         find.bySemanticsLabel(
-          RegExp(RegExp.escape(l10n.sharingHealthRepairNotOwner)),
+          RegExp(RegExp.escape(l10n.sharingHealthRepairNothingToDo)),
         ),
         findsOneWidget,
       );
       handle.dispose();
     });
   });
-
 }

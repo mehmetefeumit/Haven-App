@@ -8,29 +8,43 @@
 //! - **WSS Only**: Plaintext ws:// connections are rejected
 
 use std::borrow::Cow;
-use std::collections::HashSet;
-#[cfg(debug_assertions)]
-use std::sync::OnceLock;
+use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use cgka_traits::app_components::{is_loopback_host, is_public_ip};
+use cgka_traits::TransportEndpoint;
+use nostr::filter::MatchEventOptions;
 #[cfg(debug_assertions)]
 use nostr::Url;
 use nostr::{
     ClientMessage, Event, EventId, Filter, Kind, PublicKey, RelayMessage, RelayUrl, SubscriptionId,
 };
-use nostr_sdk::pool::relay::{RelayNotification, ReqExitPolicy};
+use nostr_sdk::pool::relay::{RelayNotification, RelayServiceFlags, ReqExitPolicy};
 // The pool's own per-socket status, aliased because `super::types` exports a
 // Haven `RelayStatus` of its own (the UI-facing one).
 use nostr_sdk::RelayStatus as PoolRelayStatus;
-use nostr_sdk::{Client, Relay, RelayOptions, SubscribeAutoCloseOptions, SubscribeOptions};
+use nostr_sdk::{
+    Client, ClientOptions, Relay, RelayOptions, SubscribeAutoCloseOptions, SubscribeOptions,
+};
+use transport_nostr_adapter::{NostrRelayClient, NostrSdkRelayClient};
+use url::Host;
 
 use super::clock_skew;
 use super::discovery::discovery_relays;
 use super::error::{InvalidUrlReason, RelayError, RelayResult};
+use super::fanout::{self, FanoutTargetOutcome};
+use super::maintenance::key_package::{
+    is_pre_migration_key_package_of, kp_event_d_tag, KeyPackageCandidate,
+};
 use super::types::{
     PublishResult, RelayConnectionStatus, RelayEventCheck, RelayFetchOutcome, RelayStatus,
 };
+use super::url_norm;
+use super::verified::verified_client;
 use crate::log_alias::{self, bucket, RelayUrl as AliasRelayUrl};
+use crate::nostr::mls::types::{KeyPackageAdmissionRule, TransportMessage};
 
 /// Default timeout for relay operations.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -83,8 +97,28 @@ static ALLOW_WS_LOOPBACK_FOR_TEST: OnceLock<()> = OnceLock::new();
 #[cfg(debug_assertions)]
 const TEST_LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1", "10.0.2.2"];
 
+/// A user's NIP-65 relay list (kind 10002), split by marker.
+///
+/// No `Debug`: every field is a relay URL (Security Rule 15).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Nip65Relays {
+    /// Where the user reads: unmarked and `read` entries.
+    pub read: Vec<String>,
+    /// Where the user writes, so where others fetch the user's events —
+    /// `KeyPackage`s included: unmarked and `write` entries.
+    pub write: Vec<String>,
+}
+
+/// Most relays Haven takes from ONE other account's relay list (10002 or 10050).
+///
+/// The list is that account's to write and every entry is a socket this device
+/// opens. MDK bounds a relay route at the same number (`marmot-app`
+/// `relay_plane/safety.rs:12` @v0.10.4; `transport-nostr-peeler`
+/// `MAX_WELCOME_RELAYS`).
+const MAX_FOREIGN_LIST_RELAYS: usize = 16;
+
 /// Timeout for waiting for relay WebSocket connections to establish.
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Maximum number of attempts (initial try + retries) for [`RelayManager::publish_event`].
 ///
@@ -92,22 +126,30 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 /// previous WebSocket was closed on background — races the 5 s connection
 /// handshake against the per-event `OK` acknowledgement. When the handshake
 /// loses that race the relay never acknowledges in time, `accepted_by` comes
-/// back empty, and the event (an MLS commit, a welcome, a key package) is
+/// back empty, and the event (a welcome, a key package, a relay list) is
 /// silently dropped. Retrying re-drives
 /// [`RelayManager::add_relays_and_connect`] — a fast no-op once the socket is
 /// warm — and republishes the **same** event id, which relays dedupe by id, so
 /// the retry is idempotent and lands on the now-established connection.
 ///
-/// This ladder is worth its cost precisely for what it carries: a commit that
-/// is neither confirmed nor rolled back forks the group (Security Rule 13), and
-/// nothing later re-sends it. A LOCATION is the opposite — the next tick
-/// carries a fresher one — so it takes
-/// [`RelayManager::publish_location_event`]'s single bounded attempt instead.
+/// This ladder is worth its cost precisely for what it carries: an event no
+/// fanout record holds, which nothing re-sends once this call gives up. A
+/// commit never comes here — it leaves only through the fanout driver
+/// (Security Rule 13) — and a location, superseded by the next tick, is sent
+/// once by the driver.
 ///
 /// Worst case (a genuinely unreachable relay): ~3 × (`CONNECTION_TIMEOUT` +
 /// `DEFAULT_TIMEOUT`) + 2 × `PUBLISH_RETRY_BACKOFF` ≈ 49 s before
 /// `AllRelaysFailed` surfaces.
 const MAX_PUBLISH_ATTEMPTS: u32 = 3;
+
+/// The longest [`RelayManager::publish_event`] takes with relays that never
+/// answer, in milliseconds: every attempt's connect and wait, and the pauses
+/// between them. The wait for a relay another send holds is not in it.
+pub const PUBLISH_LADDER_MS: u64 = (MAX_PUBLISH_ATTEMPTS as u64
+    * (CONNECTION_TIMEOUT.as_secs() + DEFAULT_TIMEOUT.as_secs())
+    + (MAX_PUBLISH_ATTEMPTS as u64 - 1) * PUBLISH_RETRY_BACKOFF.as_secs())
+    * 1_000;
 
 /// Backoff between [`RelayManager::publish_event`] attempts.
 ///
@@ -163,6 +205,12 @@ const PROFILE_PUBLISH_ACK_TIMEOUT: Duration = Duration::from_secs(6);
 /// acked, the circle stays due and the next tick sends a fresh event; if one
 /// did, the late relay's copy is an extra archive.
 const LOCATION_ACK_WINDOW: Duration = Duration::from_secs(5);
+
+/// The longest one location send holds the radio: the connect and the
+/// acknowledgement window, once. What a location's record must have left
+/// before its expiration for a send to be begun.
+pub const LOCATION_SEND_MS: u64 =
+    (CONNECTION_TIMEOUT.as_secs() + LOCATION_ACK_WINDOW.as_secs()) * 1_000;
 /// `DEFAULT_TIMEOUT` stands in for the pool's own `WAIT_FOR_OK_TIMEOUT`
 /// (`nostr-relay-pool-0.44.3 relay/constants.rs:10`), which is `pub(super)` and
 /// so unreachable from here; the two are both 10 s, and a crate bump that
@@ -231,8 +279,9 @@ const PUBLISH_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// on every tick (`inner.rs:982-994`), so one such call silently restores the
 /// keepalive on every socket. `RelayPool::add_relay` returns `Ok(false)` and
 /// leaves an existing relay untouched (`pool/mod.rs:281-284`). Pinned by
-/// `a_second_add_of_the_same_url_never_restores_ping`, which re-runs all three
-/// registration sites against a relay the pool already holds.
+/// `a_second_add_of_the_same_url_never_restores_ping`, which re-runs every
+/// path that registers a relay against one the pool already holds. They all
+/// register through [`RelayManager::register_publish_relays`].
 ///
 /// The ENGINE pool (`live_sync::session::build_engine_client`) deliberately does
 /// NOT get these options: it holds standing REQs, so its socket carries no other
@@ -375,10 +424,14 @@ async fn recover_wedged_publish_sockets(client: &Client, relay_urls: &[RelayUrl]
 /// When *every* relay that answered blamed the clock the loop also stops
 /// early: a retry re-offers the same signed event with the same `created_at`,
 /// so it is provably hopeless, and spending two more radio round trips on it
-/// only drains a device that is already failing to share location.
+/// only drains a device that is already failing to share location. That
+/// holds however old the event is; `age_secs` — how long ago it was signed,
+/// read when a refusal is classified — decides only whether the refusal is
+/// said to be about this device's clock ([`clock_skew::on_this_clock`]).
 async fn publish_with_retry<F, Fut>(
     max_attempts: u32,
     backoff: Duration,
+    age_secs: impl Fn() -> u64,
     mut attempt: F,
 ) -> RelayResult<PublishResult>
 where
@@ -394,25 +447,23 @@ where
             // so the one actionable diagnosis the relays offered survives.
             Ok(result) => {
                 let accepted = result.is_success();
+                let hopeless = clock_skew::publish_retry_is_hopeless(accepted, &result.rejected_by);
+                // Preserve the historical contract that a fully unacknowledged
+                // publish with no stated cause is `AllRelaysFailed`.
+                last_err = RelayError::AllRelaysFailed;
                 if let Some(complaint) =
                     clock_skew::classify_publish_outcome(accepted, &result.rejected_by)
+                        .and_then(|complaint| clock_skew::on_this_clock(complaint, age_secs()))
                 {
-                    // log-scan-ok: rejected_by only feeds publish_retry_is_hopeless, a bool.
                     log::warn!(
                         "[RelayManager] publish rejected on timestamp grounds \
-                         (device clock {}); not retrying={}",
+                         (device clock {}); not retrying={hopeless}",
                         complaint.wire_token(),
-                        clock_skew::publish_retry_is_hopeless(accepted, &result.rejected_by)
                     );
-                    if clock_skew::publish_retry_is_hopeless(accepted, &result.rejected_by) {
-                        return Err(RelayError::DeviceClockRejected { complaint });
-                    }
                     last_err = RelayError::DeviceClockRejected { complaint };
-                } else {
-                    // Preserve the historical contract that a fully
-                    // unacknowledged publish with no stated cause is
-                    // `AllRelaysFailed`.
-                    last_err = RelayError::AllRelaysFailed;
+                }
+                if hopeless {
+                    return Err(last_err);
                 }
             }
             Err(e) => last_err = e,
@@ -520,30 +571,127 @@ fn profile_attempt_outcome(result: PublishResult) -> RelayResult<PublishResult> 
 pub struct RelayManager {
     /// The nostr-sdk client.
     client: Client,
+    /// What a publish reads an event's age off ([`SecondsClock`]).
+    clock: SecondsClock,
+    /// MDK's relay client over [`Self::client`], built on first use
+    /// ([`Self::fanout_transport`]).
+    relay_client: OnceLock<Arc<dyn NostrRelayClient>>,
+    /// One fanout call per relay at a time on this pool — see
+    /// [`FanoutTransport::publish`].
+    fanout_gates: FanoutGates,
 }
+
+/// Unix seconds now, as a publish reads off it how long ago an event was
+/// signed ([`clock_skew::on_this_clock`]): the device's clock, or one a test
+/// sets.
+type SecondsClock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+fn device_clock() -> SecondsClock {
+    Arc::new(|| nostr::Timestamp::now().as_secs())
+}
+
+/// How long ago `event` was signed by `clock`, read each time it is asked.
+fn age_on<'a>(clock: &'a SecondsClock, event: &Event) -> impl Fn() -> u64 + 'a {
+    let signed_at = event.created_at.as_secs();
+    move || clock().saturating_sub(signed_at)
+}
+
+/// A lock per relay a fanout has been sent to, shared by every
+/// [`FanoutTransport`] of one manager.
+type FanoutGates = Arc<std::sync::Mutex<HashMap<RelayUrl, Arc<tokio::sync::Mutex<()>>>>>;
 
 impl RelayManager {
     /// Creates a new relay manager.
+    ///
+    /// The client holds no signer and is told never to answer a NIP-42
+    /// challenge: an answer would be the identity key's signature over a
+    /// relay's challenge, on a socket that carries a circle's routing id. The
+    /// two facts are pinned apart (`the_publish_client_holds_no_signer_and_never_authenticates`,
+    /// and no source may install a signer:
+    /// `scripts/ci/check_engine_client_options.sh` check 11).
     #[must_use]
     pub fn new() -> Self {
         Self {
-            client: Client::builder().build(),
+            client: verified_client(
+                ClientOptions::default().automatic_authentication(false),
+                None,
+            ),
+            clock: device_clock(),
+            relay_client: OnceLock::new(),
+            fanout_gates: FanoutGates::default(),
         }
     }
 
-    /// Adds relays and connects only to the specified ones.
+    /// [`Self::new`] reading every event's age off a clock that always says
+    /// `now_secs`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn at_for_test(now_secs: u64) -> Self {
+        Self {
+            clock: Arc::new(move || now_secs),
+            ..Self::new()
+        }
+    }
+
+    /// The durable fanout's transport, on this manager's own publish client.
     ///
-    /// Uses `try_connect_relay` per URL to avoid reconnecting to every
-    /// previously-added relay in the pool, which would leak connection
-    /// metadata to unrelated relay operators.
+    /// MDK's relay client is handed that client and builds none of its own
+    /// (v0.10.4 `transport-nostr-adapter/src/sdk_client.rs` 258), so what it
+    /// reads from a relay passes the same admission policy (Security Rule 16)
+    /// and what it sends rides the sockets this pool already holds. One per
+    /// manager: its publish-relay bookkeeping is per instance.
+    #[must_use]
+    pub fn fanout_transport(&self) -> FanoutTransport {
+        let relay_client = self
+            .relay_client
+            .get_or_init(|| Arc::new(NostrSdkRelayClient::new(self.client.clone())));
+        FanoutTransport {
+            client: self.client.clone(),
+            relay_client: Arc::clone(relay_client),
+            gates: Arc::clone(&self.fanout_gates),
+            clock: Arc::clone(&self.clock),
+        }
+    }
+
+    /// [`Self::fanout_transport`] with `relay_client` in the place of MDK's:
+    /// the real classifier and the real pool, under a relay client a test
+    /// scripts. It dials nothing itself.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn fanout_transport_over_for_test(
+        &self,
+        relay_client: Arc<dyn NostrRelayClient>,
+    ) -> FanoutTransport {
+        FanoutTransport {
+            client: self.client.clone(),
+            relay_client,
+            gates: Arc::clone(&self.fanout_gates),
+            clock: Arc::clone(&self.clock),
+        }
+    }
+
+    /// Refuses an event that has a durable fanout row: the fanout driver is
+    /// its only sender on any publish pool ([`fanout::is_owned`]).
+    fn refuse_fanout_owned(event: &Event) -> RelayResult<()> {
+        if fanout::is_owned(&event.id) {
+            return Err(RelayError::FanoutOwned);
+        }
+        Ok(())
+    }
+
+    /// Registers `relay_urls` in the publish pool with
+    /// [`publish_relay_options`], dialling nothing.
     ///
-    /// Takes the [`Client`] by reference (rather than `&self`) so the
-    /// publish retry path can drive it from a closure that owns a cheap
-    /// `Client` clone without borrowing the manager across `await` points.
-    async fn add_relays_and_connect(client: &Client, relay_urls: &[RelayUrl]) {
-        // Register relays sequentially (cheap metadata operation). Through the
-        // POOL, never `Client::add_relay` — see `publish_relay_options`.
+    /// Sequential: a cheap metadata operation. Through the POOL, never
+    /// `Client::add_relay` — see `publish_relay_options`.
+    async fn register_publish_relays(client: &Client, relay_urls: &[RelayUrl]) {
         for url in relay_urls {
+            // A relay the pool holds is found under its read lock. Adding it
+            // again would take the write lock, which queues behind every send
+            // still waiting for an `OK` and holds up every reader behind it.
+            if client.relay(url.as_str()).await.is_ok() {
+                continue;
+            }
             match client
                 .pool()
                 .add_relay(url.as_str(), publish_relay_options())
@@ -565,6 +713,19 @@ impl RelayManager {
                 }
             }
         }
+    }
+
+    /// Adds relays and connects only to the specified ones.
+    ///
+    /// Uses `try_connect_relay` per URL to avoid reconnecting to every
+    /// previously-added relay in the pool, which would leak connection
+    /// metadata to unrelated relay operators.
+    ///
+    /// Takes the [`Client`] by reference (rather than `&self`) so the
+    /// publish retry path can drive it from a closure that owns a cheap
+    /// `Client` clone without borrowing the manager across `await` points.
+    async fn add_relays_and_connect(client: &Client, relay_urls: &[RelayUrl]) {
+        Self::register_publish_relays(client, relay_urls).await;
 
         // Connect to all relays in parallel (each has CONNECTION_TIMEOUT)
         let connect_futures = relay_urls.iter().map(|url| async move {
@@ -592,11 +753,13 @@ impl RelayManager {
 
     /// Publishes an event to the specified relays, with a retry ladder.
     ///
-    /// The path for everything that is NOT a location: MLS commits, welcomes,
-    /// proposals, key packages and relay lists. Each is lost for good if this
-    /// call gives up — and a commit that is neither confirmed nor rolled back
-    /// forks the group (Security Rule 13) — so they pay
-    /// [`MAX_PUBLISH_ATTEMPTS`]. Locations take
+    /// The path for a signed event no fanout record holds: a founding
+    /// circle's Welcome gift wraps, the relay-removal scrub, key packages,
+    /// relay lists, and the one send of a proposal no record could be written
+    /// for. Each is lost for good if this call gives up, so they pay
+    /// [`MAX_PUBLISH_ATTEMPTS`]. A commit never comes here: it leaves only
+    /// through the fanout driver, and an event a record holds is refused
+    /// (Security Rule 13). Locations take
     /// [`publish_location_event`](Self::publish_location_event).
     ///
     /// Returns a [`PublishResult`] indicating which relays accepted or
@@ -615,6 +778,7 @@ impl RelayManager {
         event: &Event,
         relays: &[String],
     ) -> RelayResult<PublishResult> {
+        Self::refuse_fanout_owned(event)?;
         // Validate relay URLs (must be wss://)
         let relay_urls = Self::validate_relay_urls(relays)?;
 
@@ -632,17 +796,26 @@ impl RelayManager {
         // does not borrow `self` across `await` points. Republishing the
         // same event id is idempotent — relays dedupe by id.
         let client = self.client.clone();
+        let gates = Arc::clone(&self.fanout_gates);
         publish_with_retry(
             MAX_PUBLISH_ATTEMPTS,
             PUBLISH_RETRY_BACKOFF,
+            age_on(&self.clock, event),
             move |attempt| {
                 let client = client.clone();
+                let gates = Arc::clone(&gates);
                 let relay_urls = relay_urls.clone();
                 let event = event.clone();
                 async move {
                     if attempt > 0 {
                         log::debug!("[RelayManager] publish_event: retry attempt {attempt}");
                     }
+                    // A fanout call under way to one of these relays can end
+                    // in MDK's client disconnecting it (`sdk_client.rs`
+                    // 1254-1274), which this send would read as that relay
+                    // failing, and a send here can cut a fanout call's answer
+                    // the same way. So neither runs while the other does.
+                    let _no_fanout_call = hold_fanout_gates(&gates, &relay_urls).await;
                     Self::try_publish_once(&client, &relay_urls, &event).await
                 }
             },
@@ -755,6 +928,7 @@ impl RelayManager {
         event: &Event,
         relays: &[String],
     ) -> RelayResult<PublishResult> {
+        Self::refuse_fanout_owned(event)?;
         let relay_urls = Self::validate_relay_urls(relays)?;
 
         log::debug!(
@@ -767,6 +941,7 @@ impl RelayManager {
         publish_with_retry(
             PROFILE_PUBLISH_MAX_ATTEMPTS,
             PROFILE_PUBLISH_RETRY_BACKOFF,
+            age_on(&self.clock, event),
             move |attempt| {
                 let client = client.clone();
                 let relay_urls = relay_urls.clone();
@@ -821,11 +996,25 @@ impl RelayManager {
     /// The same contract [`publish_event`](Self::publish_event) has, minus the
     /// retries: [`RelayError::AllRelaysFailed`] when no relay acknowledged, and
     /// [`RelayError::DeviceClockRejected`] when every relay that answered
-    /// blamed the timestamp (the one publish failure a user can act on, mapped
-    /// in Dart to `RelayClockRejectionException`). Also errors when a relay URL
-    /// is not `wss://`.
+    /// blamed the timestamp (the one publish failure a user can act on, which
+    /// reaches the caller as a typed clock complaint). Also errors when a
+    /// relay URL is not `wss://`.
     pub async fn publish_location_event(
         &self,
+        event: &Event,
+        relays: &[String],
+    ) -> RelayResult<PublishResult> {
+        Self::refuse_fanout_owned(event)?;
+        Self::send_location(&self.client, &self.clock, event, relays).await
+    }
+
+    /// [`Self::publish_location_event`] without the refusal of an event that
+    /// has a fanout record: the one send the record's own driver makes
+    /// ([`FanoutTransport`]), on the same pool, in the same window, read by
+    /// the same classifier.
+    async fn send_location(
+        client: &Client,
+        clock: &SecondsClock,
         event: &Event,
         relays: &[String],
     ) -> RelayResult<PublishResult> {
@@ -837,25 +1026,30 @@ impl RelayManager {
             bucket(relay_urls.len())
         );
 
-        let client = self.client.clone();
-        publish_with_retry(LOCATION_PUBLISH_ATTEMPTS, Duration::ZERO, move |_| {
-            let client = client.clone();
-            let relay_urls = relay_urls.clone();
-            let event = event.clone();
-            // Always `Ok`: a relay that refused or stayed silent is that
-            // relay's outcome, and the ladder reads the fan-out's own
-            // partition — one ack is a success, no ack is classified for a
-            // clock verdict before it collapses to `AllRelaysFailed`.
-            async move {
-                Ok(Self::try_publish_once_harvesting(
-                    &client,
-                    &relay_urls,
-                    &event,
-                    LOCATION_ACK_WINDOW,
-                )
-                .await)
-            }
-        })
+        let client = client.clone();
+        publish_with_retry(
+            LOCATION_PUBLISH_ATTEMPTS,
+            Duration::ZERO,
+            age_on(clock, event),
+            move |_| {
+                let client = client.clone();
+                let relay_urls = relay_urls.clone();
+                let event = event.clone();
+                // Always `Ok`: a relay that refused or stayed silent is that
+                // relay's outcome, and the ladder reads the fan-out's own
+                // partition — one ack is a success, no ack is classified for a
+                // clock verdict before it collapses to `AllRelaysFailed`.
+                async move {
+                    Ok(Self::try_publish_once_harvesting(
+                        &client,
+                        &relay_urls,
+                        &event,
+                        LOCATION_ACK_WINDOW,
+                    )
+                    .await)
+                }
+            },
+        )
         .await
     }
 
@@ -939,18 +1133,12 @@ impl RelayManager {
     ///
     /// Returns an error only if relay URL validation fails (before spawning).
     pub fn publish_event_background(&self, event: Event, relays: &[String]) -> RelayResult<()> {
+        Self::refuse_fanout_owned(&event)?;
         let relay_urls = Self::validate_relay_urls(relays)?;
         let client = self.client.clone();
 
         tokio::spawn(async move {
-            // Register and connect. Through the POOL, never `Client::add_relay`
-            // — see `publish_relay_options`.
-            for url in &relay_urls {
-                let _ = client
-                    .pool()
-                    .add_relay(url.as_str(), publish_relay_options())
-                    .await;
-            }
+            Self::register_publish_relays(&client, &relay_urls).await;
             let connect_futures = relay_urls.iter().map(|url| async {
                 let _ = client
                     .try_connect_relay(url.as_str(), CONNECTION_TIMEOUT)
@@ -1054,21 +1242,14 @@ impl RelayManager {
         Ok(fetch_result.into_iter().collect())
     }
 
-    /// Extracts `wss://` relay URLs from `"relay"` tags.
-    ///
-    /// Used for kind 10050 (inbox) and kind 10051 (`KeyPackage`) events,
-    /// which both use `["relay", "<url>"]` tag format.
+    /// Extracts the dialable relay URLs from `"relay"` tags — the
+    /// `["relay", "<url>"]` format of the kind-10050 inbox list — capped: see
+    /// [`retain_dialable_foreign_relays`].
     fn extract_relay_tag_urls(tags: &nostr::Tags) -> Vec<String> {
-        tags.iter()
-            .filter_map(|tag| {
-                let values = tag.as_slice();
-                if values.len() >= 2 && values[0] == "relay" && values[1].starts_with("wss://") {
-                    Some(values[1].clone())
-                } else {
-                    None
-                }
-            })
-            .collect()
+        retain_dialable_foreign_relays(tags.iter().filter_map(|tag| {
+            let values = tag.as_slice();
+            (values.len() >= 2 && values[0] == "relay").then(|| values[1].as_str())
+        }))
     }
 
     /// Fetches a user's relay list for the given event kind.
@@ -1076,8 +1257,7 @@ impl RelayManager {
     /// Queries the read-only discovery plane
     /// ([`discovery_relays`][crate::relay::discovery::discovery_relays]) for
     /// the user's replaceable relay list event and extracts `wss://` URLs
-    /// from `"relay"` tags. Works for both kind 10050 (inbox) and kind 10051
-    /// (`KeyPackage`) events. This resolves *another* user's relays by bare
+    /// from `"relay"` tags. This resolves *another* user's relays by bare
     /// pubkey without ever publishing the local user's own list.
     ///
     /// # Errors
@@ -1090,11 +1270,8 @@ impl RelayManager {
         let discovery = discovery_relays();
         let events = self.fetch_events(filter, &discovery, None).await?;
 
-        if events.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        Ok(Self::extract_relay_tag_urls(&events[0].tags))
+        Ok(Self::newest_authored(events, &pk, kind, |_| true)
+            .map_or_else(Vec::new, |list| Self::extract_relay_tag_urls(&list.tags)))
     }
 
     /// Fetches a user's inbox relay list (kind 10050).
@@ -1110,19 +1287,6 @@ impl RelayManager {
         self.fetch_relay_list(pubkey, Kind::InboxRelays).await
     }
 
-    /// Fetches a user's `KeyPackage` relay list (kind 10051).
-    ///
-    /// Returns the relay URLs where the user publishes MLS `KeyPackages`.
-    /// Used for `KeyPackage` discovery, not for Welcome delivery.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the pubkey is invalid or fetching fails.
-    pub async fn fetch_keypackage_relays(&self, pubkey: &str) -> RelayResult<Vec<String>> {
-        self.fetch_relay_list(pubkey, Kind::MlsKeyPackageRelays)
-            .await
-    }
-
     /// Extracts read-capable relay URLs from NIP-65 "r" tags.
     ///
     /// Filters for relays the recipient reads from:
@@ -1130,28 +1294,13 @@ impl RelayManager {
     /// - "read" → include (recipient fetches here)
     /// - "write" only → exclude (recipient doesn't read here)
     ///
-    /// Also filters to `wss://` scheme only for security.
+    /// Kept only if dialable, and capped: see [`retain_dialable_foreign_relays`].
     fn extract_nip65_read_relays(tags: &nostr::Tags) -> Vec<String> {
-        tags.iter()
-            .filter_map(|tag| {
-                let values = tag.as_slice();
-                if values.len() >= 2 && values[0] == "r" {
-                    // Exclude write-only relays
-                    if values.len() >= 3 && values[2] == "write" {
-                        return None;
-                    }
-                    let url = &values[1];
-                    // Only accept wss:// URLs
-                    if url.starts_with("wss://") {
-                        Some(url.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect()
+        retain_dialable_foreign_relays(tags.iter().filter_map(|tag| {
+            let values = tag.as_slice();
+            let write_only = values.len() >= 3 && values[2] == "write";
+            (values.len() >= 2 && values[0] == "r" && !write_only).then(|| values[1].as_str())
+        }))
     }
 
     /// Extracts write-capable relay URLs from NIP-65 "r" tags.
@@ -1162,45 +1311,23 @@ impl RelayManager {
     /// - "write" → include (author publishes here)
     /// - "read" only → exclude (author doesn't publish here)
     ///
-    /// Also filters to `wss://` scheme only for security. Used by the
-    /// public-profile publish path to target the user's own write relays.
-    #[allow(
-        dead_code,
-        reason = "consumed by the profile publish path (M5, next wave); exercised now by unit tests"
-    )]
+    /// Kept only if dialable, and capped: see [`retain_dialable_foreign_relays`].
+    /// This is the set another user's `KeyPackage` is fetched from (Marmot
+    /// `transports/nostr.md:297-302`).
     pub(crate) fn extract_nip65_write_relays(tags: &nostr::Tags) -> Vec<String> {
-        tags.iter()
-            .filter_map(|tag| {
-                let values = tag.as_slice();
-                if values.len() >= 2 && values[0] == "r" {
-                    // Exclude read-only relays.
-                    if values.len() >= 3 && values[2] == "read" {
-                        return None;
-                    }
-                    let url = &values[1];
-                    // Only accept wss:// URLs.
-                    if url.starts_with("wss://") {
-                        Some(url.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect()
+        retain_dialable_foreign_relays(tags.iter().filter_map(|tag| {
+            let values = tag.as_slice();
+            let read_only = values.len() >= 3 && values[2] == "read";
+            (values.len() >= 2 && values[0] == "r" && !read_only).then(|| values[1].as_str())
+        }))
     }
 
-    /// Fetches a user's NIP-65 relay list (kind 10002).
-    ///
-    /// Returns read-capable relay URLs from the user's general-purpose relay
-    /// list. Used as the second tier in the Welcome delivery cascade when
-    /// inbox relays (kind 10050) are unavailable.
+    /// Fetches a user's NIP-65 relay list (kind 10002) once, split by marker.
     ///
     /// # Errors
     ///
     /// Returns an error if the pubkey is invalid or fetching fails.
-    pub async fn fetch_nip65_relays(&self, pubkey: &str) -> RelayResult<Vec<String>> {
+    pub async fn fetch_nip65_relay_list(&self, pubkey: &str) -> RelayResult<Nip65Relays> {
         let pk = PublicKey::parse(pubkey).map_err(|_| RelayError::InvalidPubkey)?;
 
         let filter = Filter::new().kind(Kind::RelayList).author(pk).limit(1);
@@ -1208,25 +1335,41 @@ impl RelayManager {
         let discovery = discovery_relays();
         let events = self.fetch_events(filter, &discovery, None).await?;
 
-        if events.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let relays = Self::extract_nip65_read_relays(&events[0].tags);
-
-        Ok(relays)
+        Ok(
+            Self::newest_authored(events, &pk, Kind::RelayList, |_| true).map_or_else(
+                Nip65Relays::default,
+                |list| Nip65Relays {
+                    read: Self::extract_nip65_read_relays(&list.tags),
+                    write: Self::extract_nip65_write_relays(&list.tags),
+                },
+            ),
+        )
     }
 
-    /// Fetches a user's key package (kind 30443 or legacy kind 443).
+    /// Fetches a user's NIP-65 read-capable relays (kind 10002).
     ///
-    /// Performs a three-tier discovery cascade:
-    /// 1. Kind 10051 relays (`KeyPackage` relay list) — preferred, purpose-built.
-    /// 2. Kind 10002 relays (NIP-65) — general-purpose fallback.
-    /// 3. [`discovery_relays`][crate::relay::discovery::discovery_relays] —
-    ///    last resort (read-only discovery plane).
+    /// Used as the second tier in the Welcome delivery cascade when inbox
+    /// relays (kind 10050) are unavailable.
     ///
-    /// Each tier is tried in order; the cascade stops as soon as a `KeyPackage`
-    /// is found. Empty tiers are skipped without issuing a redundant query.
+    /// # Errors
+    ///
+    /// Returns an error if the pubkey is invalid or fetching fails.
+    pub async fn fetch_nip65_relays(&self, pubkey: &str) -> RelayResult<Vec<String>> {
+        Ok(self.fetch_nip65_relay_list(pubkey).await?.read)
+    }
+
+    /// Fetches a user's key package (kind 30443) with no target in mind: every
+    /// valid candidate is eligible.
+    ///
+    /// Test-only, as the two no-target fetches below are: an invite always has
+    /// a target, and [`Self::fetch_keypackage_for_invite`] is the one fetch a
+    /// shipped build can reach. The tests of author binding, slot supersession
+    /// and discovery use these to read selection without a session.
+    ///
+    /// Resolves the user's NIP-65 write-capable relays (kind 10002) and fetches
+    /// from them, falling back to the read-only discovery plane
+    /// ([`discovery_relays`][crate::relay::discovery::discovery_relays]) when
+    /// that set is empty or holds no usable `KeyPackage`.
     ///
     /// # Arguments
     ///
@@ -1234,79 +1377,99 @@ impl RelayManager {
     ///
     /// # Returns
     ///
-    /// The most recent valid `KeyPackage` event, or `None` if no tier returned
-    /// an event.
+    /// The selected `KeyPackage` event ([`Self::pick_keypackage_from_events`]),
+    /// or `None` if no tier returned one.
     ///
     /// # Errors
     ///
     /// Returns an error if the pubkey is invalid or fetching fails.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn fetch_keypackage(&self, pubkey: &str) -> RelayResult<Option<Event>> {
-        // Fetch both relay lists once, then delegate to the shared cascade.
-        // Either fetch may fail transiently; treat a failed list as empty so
-        // the cascade can fall through to the next tier instead of aborting.
-        let kp_relays = self
-            .fetch_keypackage_relays(pubkey)
+        // A failed list is treated as empty so the cascade still reaches the
+        // discovery plane instead of aborting.
+        let write = self
+            .fetch_nip65_relay_list(pubkey)
             .await
+            .map(|list| list.write)
             .unwrap_or_default();
-        let nip65_relays = self.fetch_nip65_relays(pubkey).await.unwrap_or_default();
 
-        self.fetch_keypackage_with_cascade(pubkey, &kp_relays, &nip65_relays)
-            .await
+        self.fetch_keypackage_with_cascade(pubkey, &write).await
     }
 
-    /// Runs the `KeyPackage` discovery cascade with pre-fetched relay lists.
-    ///
-    /// Tiers, in order: `keypackage_relays` (kind 10051) → `nip65_relays`
-    /// (kind 10002) →
-    /// [`discovery_relays`][crate::relay::discovery::discovery_relays].
-    /// Empty tiers are skipped. The cascade stops as soon as a
-    /// `KeyPackage` is found.
-    ///
-    /// Callers that have already resolved the user's relay lists (e.g., the
-    /// FFI layer, which fetches 10051 and 10002 concurrently alongside 10050)
-    /// can use this directly to avoid re-fetching.
+    /// Fetches the `KeyPackage` to invite `pubkey` with into the target whose
+    /// admission rule is `admit`
+    /// ([`SessionManager::key_package_admission_rule`](crate::nostr::mls::SessionManager::key_package_admission_rule)),
+    /// through the discovery cascade over the user's pre-fetched NIP-65
+    /// write-capable relays. The rule is applied to every valid candidate
+    /// BEFORE they are ranked. When no tier holds an admissible one, the best
+    /// valid candidate is returned so the caller's admission check can say
+    /// why, and failing that a pre-migration one.
     ///
     /// # Errors
     ///
     /// Returns an error if the pubkey is invalid or any tier's fetch fails.
+    pub async fn fetch_keypackage_for_invite(
+        &self,
+        pubkey: &str,
+        write_relays: &[String],
+        admit: &KeyPackageAdmissionRule,
+    ) -> RelayResult<Option<Event>> {
+        self.key_package_cascade(pubkey, write_relays, Some(admit))
+            .await
+    }
+
+    /// Runs the `KeyPackage` discovery cascade with no target in mind: every
+    /// valid candidate is eligible.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pubkey is invalid or any tier's fetch fails.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn fetch_keypackage_with_cascade(
         &self,
         pubkey: &str,
-        keypackage_relays: &[String],
-        nip65_relays: &[String],
+        write_relays: &[String],
     ) -> RelayResult<Option<Event>> {
-        if !keypackage_relays.is_empty() {
-            let result = self
-                .fetch_keypackage_from_relays(pubkey, keypackage_relays)
-                .await?;
-            if result.is_some() {
-                return Ok(result);
-            }
-        }
-
-        if !nip65_relays.is_empty() {
-            let result = self
-                .fetch_keypackage_from_relays(pubkey, nip65_relays)
-                .await?;
-            if result.is_some() {
-                return Ok(result);
-            }
-        }
-
-        // Final fallback: fetch_keypackage_from_relays queries the read-only
-        // discovery plane internally when given an empty slice.
-        self.fetch_keypackage_from_relays(pubkey, &[]).await
+        self.key_package_cascade(pubkey, write_relays, None).await
     }
 
-    /// Fetches a user's key package (kind 30443 or legacy kind 443) from the
-    /// given relay list.
+    /// The cascade: the user's write-capable relays first, then
+    /// [`discovery_relays`][crate::relay::discovery::discovery_relays]. An
+    /// empty set is skipped, and the cascade stops as soon as a package
+    /// `admit` admits is found (`None` admits every valid candidate).
     ///
-    /// Issues a **single** REQ for both kinds (`kinds([30443, 443])`) so a
-    /// legacy 443 stays visible for un-migrated-member detection (migration plan
-    /// §6 step 4 / F11) without a second round-trip. **Selection is 30443-only**
-    /// ([`Self::pick_keypackage_from_events`]): a 443 is never usable under the
-    /// Dark Matter engine, so it is fetched for detection but never returned as a
-    /// `KeyPackage`. Returns the latest kind-30443, or `None` if none is present.
+    /// The second tier is judged together with what the first returned: a
+    /// slot's newest event stands for the slot across tiers, so a relay that
+    /// still serves a superseded event cannot revive it.
+    async fn key_package_cascade(
+        &self,
+        pubkey: &str,
+        write_relays: &[String],
+        admit: Option<&KeyPackageAdmissionRule>,
+    ) -> RelayResult<Option<Event>> {
+        let pk = PublicKey::parse(pubkey).map_err(|_| RelayError::InvalidPubkey)?;
+        let mut seen = Vec::new();
+        if !write_relays.is_empty() {
+            // Another account's relays: dialled for this lookup on a client of
+            // its own, so the shared pool never collects every invitee's relays.
+            let lookup = Self::new();
+            let result = lookup.key_package_events_on(&pk, write_relays).await;
+            lookup.shutdown().await;
+            seen = result?;
+            if let Some(PickedKeyPackage::Invitable(event)) =
+                Self::pick_keypackage_from_events(&pk, seen.clone(), admit)
+            {
+                return Ok(Some(event));
+            }
+        }
+
+        // Final fallback: the read-only discovery plane.
+        seen.extend(self.key_package_events_on(&pk, &[]).await?);
+        Ok(Self::pick_keypackage_from_events(&pk, seen, admit).map(PickedKeyPackage::into_event))
+    }
+
+    /// Fetches a user's key package (kind 30443) from the given relay list,
+    /// with no target in mind.
     ///
     /// Uses the provided relay list directly, falling back to the read-only
     /// discovery plane
@@ -1316,23 +1479,35 @@ impl RelayManager {
     /// # Arguments
     ///
     /// * `pubkey` - The user's public key (hex or npub)
-    /// * `keypackage_relays` - Pre-fetched relay list (kind 10051 result)
+    /// * `keypackage_relays` - The relays to query (the user's NIP-65
+    ///   write-capable set)
     ///
     /// # Returns
     ///
-    /// The most recent valid key package event, or `None` if not found.
+    /// The selected key package event
+    /// ([`Self::pick_keypackage_from_events`]), or `None` if not found.
     ///
     /// # Errors
     ///
     /// Returns an error if the pubkey is invalid or fetching fails.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn fetch_keypackage_from_relays(
         &self,
         pubkey: &str,
         keypackage_relays: &[String],
     ) -> RelayResult<Option<Event>> {
         let pk = PublicKey::parse(pubkey).map_err(|_| RelayError::InvalidPubkey)?;
+        let events = self.key_package_events_on(&pk, keypackage_relays).await?;
+        Ok(Self::pick_keypackage_from_events(&pk, events, None).map(PickedKeyPackage::into_event))
+    }
 
-        // If no relay list, fall back to the read-only discovery plane.
+    /// Every kind-30443 the given relays return for `account` — the discovery
+    /// plane's when the list is empty.
+    async fn key_package_events_on(
+        &self,
+        account: &PublicKey,
+        keypackage_relays: &[String],
+    ) -> RelayResult<Vec<Event>> {
         let discovery: Vec<String>;
         let relays = if keypackage_relays.is_empty() {
             discovery = discovery_relays();
@@ -1341,40 +1516,99 @@ impl RelayManager {
             keypackage_relays
         };
 
-        // Single REQ for both kinds. `limit(10)` lets the relay return up to
-        // 10 events covering both the canonical and legacy variants — well
-        // above any reasonable account's published count.
+        // `limit(10)`: well above any reasonable account's published slots.
         let filter = Filter::new()
-            .kinds([Kind::Custom(30443), Kind::MlsKeyPackage])
-            .author(pk)
+            .kind(Kind::Custom(30443))
+            .author(*account)
             .limit(10);
-        let events = self.fetch_events(filter, relays, None).await?;
-
-        Ok(Self::pick_keypackage_from_events(events))
+        self.fetch_events(filter, relays, None).await
     }
 
-    /// Selects the usable key package event — the most recent kind-30443 —
-    /// from a combined-kind result set.
+    /// Selects `account`'s key package from what the relays returned, or
+    /// `None`: nothing `account` published a `KeyPackage` in.
     ///
-    /// **30443-only (Dark Matter):** a legacy kind-443 `KeyPackage` carries the
-    /// old MLS wire format the new engine cannot parse
-    /// ([`SessionManager::key_package_from_event`] would decode it but the engine
-    /// rejects it on invite), so a 443 is NEVER usable and is ignored here. An
-    /// un-migrated member (443-only, no 30443) therefore resolves to `None`; the
-    /// "needs to update" detection UX is layered at the FFI over the same
-    /// combined-kind REQ (migration plan §6 step 4 / F11), never by returning a
-    /// `KeyPackage` the engine will reject. When multiple 30443 events are present
-    /// (multiple slots / relays), the latest by `created_at` wins.
+    /// The relay chooses what it answers, so only a kind-30443 `account`
+    /// signed is looked at. Within one `d` slot the newest event stands for
+    /// the slot (lower id on a tie, `transports/nostr.md:304-307`) even when
+    /// it is invalid: an older one may name material its owner has deleted.
+    /// Each slot's event is then validated ([`KeyPackageCandidate::validate`]:
+    /// the Welcome goes to the event's author and the leaf joins under the
+    /// package's credential, so both must be the account asked for), the
+    /// valid ones are filtered by the target's admission rule `admit`, and
+    /// only then ranked ([`KeyPackageCandidate::rank`]) — the order
+    /// `foundation/key-packages.md:65-66,72-75` requires, and MDK's own
+    /// (`marmot-app/src/key_package_records.rs:225-230`). Freshness therefore
+    /// never puts a package the target cannot admit ahead of one it can.
     ///
-    /// Kept separate from [`Self::fetch_keypackage_from_relays`] so the
-    /// selection logic can be unit-tested without a relay round-trip.
+    /// When nothing is admissible the best valid candidate is handed back, and
+    /// when nothing is valid the newest pre-migration package of `account`, so
+    /// the caller can say "cannot be invited" or "needs to update" instead of
+    /// "not found". Neither is ever invited: the caller's admission check
+    /// refuses both.
     ///
-    /// [`SessionManager::key_package_from_event`]: crate::nostr::mls::SessionManager::key_package_from_event
-    fn pick_keypackage_from_events(events: Vec<Event>) -> Option<Event> {
+    /// Kept separate from the fetch so the selection logic can be unit-tested
+    /// without a relay round-trip.
+    fn pick_keypackage_from_events(
+        account: &PublicKey,
+        mut events: Vec<Event>,
+        admit: Option<&KeyPackageAdmissionRule>,
+    ) -> Option<PickedKeyPackage> {
+        events.retain(|e| e.pubkey == *account && e.kind == Kind::Custom(30443));
+        events.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let mut slots = HashSet::new();
+        events.retain(|e| kp_event_d_tag(e).is_none_or(|d| d.is_empty() || slots.insert(d)));
+
+        let valid: Vec<KeyPackageCandidate> = events
+            .iter()
+            .filter_map(|e| KeyPackageCandidate::validate(e, account))
+            .collect();
+        let admitted = valid
+            .iter()
+            .filter(|candidate| admit.is_none_or(|rule| rule.admits(&candidate.key_package)))
+            .max_by(|a, b| a.rank(b));
+        if let Some(best) = admitted {
+            return Some(PickedKeyPackage::Invitable(best.event.clone()));
+        }
+        if let Some(best) = valid.iter().max_by(|a, b| a.rank(b)) {
+            return Some(PickedKeyPackage::Inadmissible(best.event.clone()));
+        }
         events
             .into_iter()
-            .filter(|e| e.kind == Kind::Custom(30443))
-            .max_by_key(|e| e.created_at)
+            .find(|e| is_pre_migration_key_package_of(e, account))
+            .map(PickedKeyPackage::PreMigration)
+    }
+
+    /// The newest event `author` signed as `kind` that also passes `valid` —
+    /// the only one a per-author fetch may act on.
+    ///
+    /// The relay chooses what it answers and this client does not hold it to
+    /// the filter (`verify_subscriptions` is off), so a relay can hand back
+    /// another account's validly signed event, or the right account's event of
+    /// another kind (Marmot `transports/nostr.md:331-333`). Turning that option
+    /// on would not replace this check, and is not done: its `limit` half drops
+    /// a relay's over-limit events before [`Self::read_one_relays_answer`]
+    /// counts them (`nostr-relay-pool-0.44.3 inner.rs:1152-1171`), so a
+    /// flooding relay's page would read as drained (Rule 12). Ties go to the lower
+    /// event id (`transports/nostr.md:306-307`, NIP-01), so arrival order — the
+    /// relay's choice — decides nothing.
+    fn newest_authored(
+        events: Vec<Event>,
+        author: &PublicKey,
+        kind: Kind,
+        valid: impl Fn(&Event) -> bool,
+    ) -> Option<Event> {
+        events
+            .into_iter()
+            .filter(|e| e.pubkey == *author && e.kind == kind && valid(e))
+            .max_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| b.id.cmp(&a.id))
+            })
     }
 
     /// Checks whether events matching a filter exist on a specific relay.
@@ -1400,7 +1634,7 @@ impl RelayManager {
             .client
             .fetch_events_from(
                 relay_urls.iter().map(nostr::RelayUrl::as_str),
-                filter,
+                filter.clone(),
                 DEFAULT_TIMEOUT,
             )
             .await
@@ -1409,6 +1643,13 @@ impl RelayManager {
                 RelayError::Fetch(e.to_string())
             })?;
 
+        // The relay answers with whatever it likes and this client does not
+        // hold it to the filter, so only an event matching what was asked for —
+        // this author, this kind — is evidence the event is published here.
+        let events: Vec<Event> = events
+            .into_iter()
+            .filter(|e| filter.match_event(e, MatchEventOptions::new()))
+            .collect();
         let event_count = events.len();
         let newest_timestamp = events
             .iter()
@@ -1504,16 +1745,11 @@ impl RelayManager {
                 };
                 let relay_url = url.as_str().to_string();
 
-                // Register the relay (cheap; through the POOL, never
-                // `Client::add_relay` — see `publish_relay_options`) then
-                // attempt a bounded handshake. `try_connect_relay` returns Ok if
-                // the socket is (or becomes) connected within CONNECTION_TIMEOUT
-                // — the transport-level equivalent of the relay answering our
-                // knock.
-                let _ = client
-                    .pool()
-                    .add_relay(url.as_str(), publish_relay_options())
-                    .await;
+                // Register the relay, then attempt a bounded handshake.
+                // `try_connect_relay` returns Ok if the socket is (or becomes)
+                // connected within CONNECTION_TIMEOUT — the transport-level
+                // equivalent of the relay answering our knock.
+                Self::register_publish_relays(client, std::slice::from_ref(&url)).await;
                 let responded = client
                     .try_connect_relay(url.as_str(), CONNECTION_TIMEOUT)
                     .await
@@ -1554,6 +1790,77 @@ impl RelayManager {
         });
 
         Ok(futures::future::join_all(fetch_futures).await)
+    }
+
+    /// Registers and dials every relay of `relays` that may be dialled, for a
+    /// NIP-77 pass, before any session of it opens: `sync_targeted` holds the
+    /// pool's relay read lock for a whole session, and a registration queued
+    /// behind it would hold up every reader after it.
+    pub(crate) async fn neg_prepare(&self, relays: &[String]) {
+        let urls: Vec<RelayUrl> = relays
+            .iter()
+            .filter_map(|relay| Self::validate_single_relay_url(relay).ok())
+            .collect();
+        Self::add_relays_and_connect(&self.client, &urls).await;
+    }
+
+    /// One NIP-77 session with `relay`, already dialled by
+    /// [`Self::neg_prepare`], over `routing_id`'s `kind:445` window
+    /// `[since, until]`, ending by `ends`.
+    ///
+    /// The session advertises nothing the device holds: its local set is
+    /// empty (`Vec::new()`), so the opening message is `6100000200` and every
+    /// later client message an empty `IdList` or a `Skip`. As a dry run in
+    /// the download direction it sends no REQ and no EVENT
+    /// (`nostr-relay-pool` 0.44.3 `relay/options.rs` 331-338), only NEG-OPEN,
+    /// NEG-MSG and NEG-CLOSE. One relay per call: an answer is that relay's
+    /// alone. The filter is MDK's (`sdk_client.rs` 292-298). Logs nothing,
+    /// and keeps no relay text (Security Rule 15).
+    pub(crate) async fn neg_remote_ids(
+        &self,
+        routing_id: &[u8; 32],
+        relay: &str,
+        since: u64,
+        until: u64,
+        ends: tokio::time::Instant,
+    ) -> super::negentropy::NegAnswer {
+        use super::negentropy::{NegAnswer, NEG_NEGOTIATION_WAIT, NEG_SET_LIMIT};
+        let Ok(url) = Self::validate_single_relay_url(relay) else {
+            return NegAnswer::Failed;
+        };
+        let Ok(handle) = self.client.relay(url.as_str()).await else {
+            return NegAnswer::Failed;
+        };
+        if !handle.is_connected() {
+            return NegAnswer::Failed;
+        }
+        let filter = super::live_sync::planes::group::group_filter(
+            &[hex::encode(routing_id)],
+            i64::try_from(since).unwrap_or(0),
+        )
+        .until(nostr::Timestamp::from(until))
+        .limit(NEG_SET_LIMIT);
+        let options = nostr_sdk::SyncOptions::new()
+            .initial_timeout(NEG_NEGOTIATION_WAIT)
+            .direction(nostr_sdk::SyncDirection::Down)
+            .dry_run();
+        let synced = tokio::time::timeout_at(
+            ends,
+            self.client
+                .pool()
+                .sync_targeted([(url.clone(), (filter, Vec::new()))], &options),
+        )
+        .await;
+        let Ok(Ok(output)) = synced else {
+            return NegAnswer::Failed;
+        };
+        if let Some(failure) = output.failed.get(&url) {
+            return NegAnswer::from_failure(failure);
+        }
+        if !output.success.contains(&url) {
+            return NegAnswer::Failed;
+        }
+        NegAnswer::from_remote(output.val.remote)
     }
 
     /// Issues ONE REQ to ONE relay and reads that relay's own answer, reporting
@@ -1617,8 +1924,10 @@ impl RelayManager {
     /// ambiguity positionally (the `KeyPackage` probe's first entry for a `d`
     /// slot), so leaving it unsorted hands a relay a lever over which of two
     /// events a maintenance decision reads. Newest-first by `created_at`, then
-    /// by id, is a total order this device computes, and it is the order the
-    /// pooled `Events` collection this replaced already had.
+    /// the LOWER id first, is a total order this device computes: the first
+    /// event of a replaceable coordinate is the one NIP-01 keeps (Marmot
+    /// `transports/nostr.md:304-307`), and it is the order of the pooled
+    /// `Events` collection this replaced.
     async fn read_one_relays_answer(relay: &Relay, filter: Filter) -> (bool, Vec<Event>) {
         let intake_cap = filter.limit.unwrap_or(MAX_EVENTS_PER_UNLIMITED_REQ);
         let id = SubscriptionId::generate();
@@ -1702,7 +2011,7 @@ impl RelayManager {
         events.sort_unstable_by(|a, b| {
             b.created_at
                 .cmp(&a.created_at)
-                .then_with(|| b.id.cmp(&a.id))
+                .then_with(|| a.id.cmp(&b.id))
         });
         (drained, events)
     }
@@ -1740,13 +2049,14 @@ impl RelayManager {
     /// Returns [`RelayError::InvalidUrl`] for a plaintext `ws://` URL (outside
     /// the debug loopback opt-in) or an unparseable URL.
     fn validate_single_relay_url(relay: &str) -> RelayResult<RelayUrl> {
-        if relay.starts_with("ws://") && !Self::is_allowed_ws_loopback(relay) {
-            return Err(RelayError::InvalidUrl(InvalidUrlReason::PlaintextWs));
-        }
-
         // The rejected URL is deliberately not carried: this error crosses the
         // FFI and reaches a log line (Security Rule 15).
-        RelayUrl::parse(relay).map_err(|_| RelayError::InvalidUrl(InvalidUrlReason::Unparseable))
+        let url = RelayUrl::parse(relay)
+            .map_err(|_| RelayError::InvalidUrl(InvalidUrlReason::Unparseable))?;
+        if !url_norm::may_dial(&url) {
+            return Err(RelayError::InvalidUrl(InvalidUrlReason::PlaintextWs));
+        }
+        Ok(url)
     }
 
     /// Returns `true` iff `relay` is a `ws://` URL targeting a known
@@ -1840,6 +2150,226 @@ impl Default for RelayManager {
     }
 }
 
+/// Takes the fanout gate of each of `relay_urls`, waiting for whoever holds
+/// one: held until the guards drop. In URL order, so two callers that name
+/// the same relays can never each hold one the other waits for.
+async fn hold_fanout_gates(
+    gates: &FanoutGates,
+    relay_urls: &[RelayUrl],
+) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+    let mut wanted: Vec<&RelayUrl> = relay_urls.iter().collect();
+    wanted.sort();
+    wanted.dedup();
+    let mut held = Vec::with_capacity(wanted.len());
+    for url in wanted {
+        let gate = Arc::clone(
+            gates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(url.clone())
+                .or_default(),
+        );
+        held.push(gate.lock_owned().await);
+    }
+    held
+}
+
+/// Publishes one fanout event to one relay through MDK's relay client, on
+/// Haven's publish pool ([`RelayManager::fanout_transport`]).
+///
+/// No `Debug`: it holds the publish client, whose own names every relay.
+pub struct FanoutTransport {
+    client: Client,
+    relay_client: Arc<dyn NostrRelayClient>,
+    gates: FanoutGates,
+    clock: SecondsClock,
+}
+
+#[async_trait::async_trait]
+impl fanout::FanoutSend for FanoutTransport {
+    async fn take(&self, target: &str) -> Option<fanout::Taken> {
+        Self::take(self, target).await
+    }
+
+    async fn publish(
+        &self,
+        target: &str,
+        message: &TransportMessage,
+        taken: fanout::Taken,
+    ) -> FanoutTargetOutcome {
+        Self::publish(self, target, message, taken).await
+    }
+
+    async fn publish_location(
+        &self,
+        event: &Event,
+        targets: &[String],
+    ) -> RelayResult<PublishResult> {
+        RelayManager::send_location(&self.client, &self.clock, event, targets).await
+    }
+}
+
+impl FanoutTransport {
+    /// Takes `target`'s relay for one fanout call, or `None` when another
+    /// send held it for the whole of [`fanout::GATE_WAIT_SECS`].
+    ///
+    /// One fanout call per relay at a time, whichever rows they are for, and
+    /// none beside a legacy commit publish to it: after an ambiguous answer
+    /// MDK's client disconnects the relay (`sdk_client.rs` 1254-1274), which
+    /// would cut the other send short — a second fanout call left possibly
+    /// exposed for good, a legacy publish read as a failure it then rolls
+    /// its commit back on.
+    ///
+    /// Bounded, so a drive's budget is a true one: behind a legacy publish's
+    /// whole ladder the wait could outlast the wake. The gate is a FIFO
+    /// lock, so a waiter is served ahead of every later one — but a waiter
+    /// that gives up here gives up its place.
+    ///
+    /// A target the relay policy refuses has no gate: it is never handed
+    /// over ([`Self::publish`]).
+    pub async fn take(&self, target: &str) -> Option<fanout::Taken> {
+        let Ok(url) = RelayManager::validate_single_relay_url(target) else {
+            return Some(fanout::Taken::nothing());
+        };
+        tokio::time::timeout(
+            Duration::from_secs(fanout::GATE_WAIT_SECS),
+            hold_fanout_gates(&self.gates, &[url]),
+        )
+        .await
+        .ok()
+        .map(fanout::Taken::holding)
+    }
+
+    /// Sends `message`'s signed event to `target` and returns MDK's
+    /// classification of that relay's answer ([`fanout::publish_to_target`]).
+    ///
+    /// MDK's client adds a relay it does not know as a write relay with the
+    /// SDK's defaults and takes no options (`sdk_client.rs` 1165-1190), and
+    /// leaves one the pool already holds alone (1161-1163). So the target is
+    /// registered here first, with [`publish_relay_options`].
+    ///
+    /// A target Haven's relay policy refuses is never handed over: MDK's client
+    /// dials any `ws://` URL, and a routing entry is another client's to write.
+    /// It comes back not exposed.
+    ///
+    /// `target` is the relay URL exactly as the fanout froze it; a failure is
+    /// returned under that spelling. `taken` is that relay, held for this
+    /// call ([`Self::take`]) until it has returned.
+    pub async fn publish(
+        &self,
+        target: &str,
+        message: &TransportMessage,
+        taken: fanout::Taken,
+    ) -> FanoutTargetOutcome {
+        let _one_call = taken;
+        let target = TransportEndpoint(target.to_owned());
+        let Ok(url) = RelayManager::validate_single_relay_url(target.as_str()) else {
+            return fanout::not_exposed(&target);
+        };
+        let relay_urls = [url];
+        RelayManager::register_publish_relays(&self.client, &relay_urls).await;
+        // Taken before the hand-over, so no answer to any attempt precedes it.
+        let heard = self
+            .client
+            .relay(relay_urls[0].as_str())
+            .await
+            .ok()
+            .map(|relay| relay.notifications());
+        let outcome = fanout::publish_to_target(
+            self.relay_client.as_ref(),
+            &target,
+            message,
+            heard,
+            (self.clock)(),
+        )
+        .await;
+        // MDK's client adds a target it does not find in the pool through the
+        // SDK, which ORs the keepalive onto a relay that appeared in between
+        // (`sdk_client.rs` 1161-1169) — for that relay's life, unless taken
+        // back off here. Only when set: the pool's `remove` is an XOR, so on a
+        // relay without the flag it would turn the keepalive ON
+        // (`nostr-relay-pool-0.44.3/src/relay/flags.rs` 58-61).
+        if let Ok(relay) = self.client.relay(relay_urls[0].as_str()).await {
+            if relay.flags().has_ping() {
+                relay.flags().remove(RelayServiceFlags::PING);
+            }
+        }
+        recover_wedged_publish_sockets(&self.client, &relay_urls).await;
+        outcome
+    }
+}
+
+/// Keeps the entries of ANOTHER account's relay list (10002 / 10050) that this
+/// device may dial, without repeats, up to [`MAX_FOREIGN_LIST_RELAYS`].
+///
+/// Entries are dropped, never the list: rejecting all of it over one bad entry
+/// would let an account make itself unresolvable (MDK draws the same line,
+/// `marmot-app` `RelaySafetyPolicy::retain_safe_endpoints` @v0.10.4).
+pub fn retain_dialable_foreign_relays<'a>(
+    candidates: impl Iterator<Item = &'a str>,
+) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    for url in candidates {
+        if kept.len() == MAX_FOREIGN_LIST_RELAYS {
+            break;
+        }
+        if foreign_relay_dialable(url) && !kept.iter().any(|k| k == url) {
+            kept.push(url.to_owned());
+        }
+    }
+    kept
+}
+
+/// Whether an entry of another account's relay list, or of a circle's routing
+/// component, may be dialled: `wss://` to a host that is neither loopback nor a
+/// non-public address, by MDK's canonical set
+/// (`cgka_traits::app_components::{is_loopback_host, is_public_ip}`, Marmot
+/// `implementation-model.md` "Network destination safety").
+///
+/// Another client chose the URL, not this device's user, so without this a
+/// published list or an admin's routing steers Haven's sockets at the user's
+/// own network, and a routing Haven wrote would steer every other member's. A
+/// domain is accepted unresolved: the relay pool resolves it and owns the
+/// socket, so a name resolving to a private address stays a residual, as it is
+/// for MDK (`marmot-app` `reject_unsafe_relay_host`). A `ws://` URL is
+/// [`url_norm::may_dial`]'s to decide, so the debug-only hermetic-test loopback
+/// opt-in ([`ws_loopback_allowed_for_test`]) is the one exception; it names
+/// hosts, not schemes, so it is asked about `ws://` only.
+pub fn foreign_relay_dialable(url: &str) -> bool {
+    let Ok(url) = RelayUrl::parse(url) else {
+        return false;
+    };
+    if !url_norm::is_encrypted(&url) {
+        return url_norm::may_dial(&url);
+    }
+    match url.host() {
+        Some(host @ Host::Domain(_)) => !is_loopback_host(host),
+        Some(Host::Ipv4(ip)) => is_public_ip(IpAddr::V4(ip)),
+        Some(Host::Ipv6(ip)) => is_public_ip(IpAddr::V6(ip)),
+        None => false,
+    }
+}
+
+/// What [`RelayManager::pick_keypackage_from_events`] selected.
+enum PickedKeyPackage {
+    /// A valid, current package the target admits: the one to invite with.
+    Invitable(Event),
+    /// The account has valid packages and the target admits none of them: it
+    /// cannot be invited there, and the caller says so.
+    Inadmissible(Event),
+    /// The account's only package is a pre-migration one: it cannot be
+    /// invited, and the caller says so.
+    PreMigration(Event),
+}
+
+impl PickedKeyPackage {
+    fn into_event(self) -> Event {
+        match self {
+            Self::Invitable(event) | Self::Inadmissible(event) | Self::PreMigration(event) => event,
+        }
+    }
+}
+
 /// Opt in to plaintext `ws://` URLs targeting loopback / emulator-host
 /// aliases for hermetic E2E tests.
 ///
@@ -1922,6 +2452,10 @@ mod tests {
     use nostr_relay_builder::{LocalRelay, RelayBuilder};
 
     use super::*;
+    use crate::nostr::mls::types::TransportEndpointFailureKind;
+    use crate::nostr::mls::SessionManager;
+    use crate::nostr::KIND_GROUP_MESSAGE;
+    use crate::relay::scripted_relay::{ScriptedRelay, Verdict};
 
     #[test]
     fn validate_relay_urls_rejects_plaintext() {
@@ -1932,6 +2466,32 @@ mod tests {
             result,
             Err(RelayError::InvalidUrl(InvalidUrlReason::PlaintextWs))
         ));
+    }
+
+    /// The policy is about the scheme a URL HAS, not about how its text
+    /// begins: each of these parses as plaintext `ws`.
+    #[test]
+    fn a_plaintext_relay_is_refused_however_its_scheme_is_spelled() {
+        for spelling in [
+            "ws://relay.example",
+            "WS://relay.example",
+            "wS://relay.example",
+            "ws:relay.example",
+            " ws://relay.example",
+        ] {
+            assert!(
+                matches!(
+                    RelayManager::validate_single_relay_url(spelling),
+                    Err(RelayError::InvalidUrl(InvalidUrlReason::PlaintextWs))
+                ),
+                "a plaintext relay passed the wss-only policy under another \
+                 spelling of its scheme",
+            );
+        }
+        assert!(
+            RelayManager::validate_single_relay_url("WSS://Relay.Example").is_ok(),
+            "an encrypted relay is accepted however its scheme is spelled",
+        );
     }
 
     #[test]
@@ -2227,10 +2787,15 @@ mod tests {
     #[tokio::test]
     async fn publish_with_retry_returns_on_first_success() {
         let calls = std::cell::Cell::new(0u32);
-        let result = publish_with_retry(3, Duration::ZERO, |_| {
-            calls.set(calls.get() + 1);
-            async { Ok(dummy_publish_result(true)) }
-        })
+        let result = publish_with_retry(
+            3,
+            Duration::ZERO,
+            || 0,
+            |_| {
+                calls.set(calls.get() + 1);
+                async { Ok(dummy_publish_result(true)) }
+            },
+        )
         .await;
         assert!(result.expect("success").is_success());
         assert_eq!(calls.get(), 1, "must not retry after the first acceptance");
@@ -2240,37 +2805,82 @@ mod tests {
     async fn publish_with_retry_recovers_from_cold_connection() {
         // First two attempts reach the relays but get no OK (empty
         // accepted_by) — the cold-connect race — then the third lands.
-        let result = publish_with_retry(3, Duration::ZERO, |attempt| async move {
-            if attempt < 2 {
-                Ok(dummy_publish_result(false))
-            } else {
-                Ok(dummy_publish_result(true))
-            }
-        })
+        let result = publish_with_retry(
+            3,
+            Duration::ZERO,
+            || 0,
+            |attempt| async move {
+                if attempt < 2 {
+                    Ok(dummy_publish_result(false))
+                } else {
+                    Ok(dummy_publish_result(true))
+                }
+            },
+        )
         .await;
         assert!(result.expect("eventual success").is_success());
     }
 
     #[tokio::test]
     async fn publish_with_retry_recovers_from_transport_error() {
-        let result = publish_with_retry(3, Duration::ZERO, |attempt| async move {
-            if attempt == 0 {
-                Err(RelayError::Timeout("cold socket".to_string()))
-            } else {
-                Ok(dummy_publish_result(true))
-            }
-        })
+        let result = publish_with_retry(
+            3,
+            Duration::ZERO,
+            || 0,
+            |attempt| async move {
+                if attempt == 0 {
+                    Err(RelayError::Timeout("cold socket".to_string()))
+                } else {
+                    Ok(dummy_publish_result(true))
+                }
+            },
+        )
         .await;
         assert!(result.expect("recovered").is_success());
+    }
+
+    /// A publish every relay refused on timestamp grounds is not offered
+    /// again however old the event is — the retry would carry the same
+    /// timestamp — though for an event signed hours ago the refusal is no
+    /// verdict on this device's clock.
+    #[tokio::test]
+    async fn an_old_event_every_relay_refused_on_timestamp_grounds_is_not_retried() {
+        let calls = std::cell::Cell::new(0u32);
+        let result = publish_with_retry(
+            3,
+            Duration::ZERO,
+            || 3 * 3600,
+            |_| {
+                calls.set(calls.get() + 1);
+                async {
+                    Ok(rejected_publish_result(&[
+                        "blocked: event too old",
+                        "invalid: created_at too old",
+                    ]))
+                }
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(RelayError::AllRelaysFailed)) && calls.get() == 1,
+            "an event every relay refused on timestamp grounds was offered again, or its age \
+             was read as this clock ({result:?}, {} attempt(s))",
+            calls.get(),
+        );
     }
 
     #[tokio::test]
     async fn publish_with_retry_exhausts_then_returns_all_relays_failed() {
         let calls = std::cell::Cell::new(0u32);
-        let result = publish_with_retry(3, Duration::ZERO, |_| {
-            calls.set(calls.get() + 1);
-            async { Ok(dummy_publish_result(false)) }
-        })
+        let result = publish_with_retry(
+            3,
+            Duration::ZERO,
+            || 0,
+            |_| {
+                calls.set(calls.get() + 1);
+                async { Ok(dummy_publish_result(false)) }
+            },
+        )
         .await;
         assert!(matches!(result, Err(RelayError::AllRelaysFailed)));
         assert_eq!(calls.get(), 3, "must use the full attempt budget");
@@ -2303,11 +2913,16 @@ mod tests {
         // Before the fix this returned a bare `AllRelaysFailed` and the
         // relay's stated reason never left this function — the fast-clock
         // failure mode was invisible to every layer above.
-        let result = publish_with_retry(3, Duration::ZERO, |_| async {
-            Ok(rejected_publish_result(&[
-                "invalid: event too far off from the current time",
-            ]))
-        })
+        let result = publish_with_retry(
+            3,
+            Duration::ZERO,
+            || 0,
+            |_| async {
+                Ok(rejected_publish_result(&[
+                    "invalid: event too far off from the current time",
+                ]))
+            },
+        )
         .await;
         assert!(
             matches!(
@@ -2324,14 +2939,19 @@ mod tests {
     #[tokio::test]
     async fn publish_with_retry_stops_retrying_a_hopeless_clock_rejection() {
         let calls = std::cell::Cell::new(0u32);
-        let result = publish_with_retry(3, Duration::ZERO, |_| {
-            calls.set(calls.get() + 1);
-            async {
-                Ok(rejected_publish_result(&[
-                    "invalid: created_at is in the future",
-                ]))
-            }
-        })
+        let result = publish_with_retry(
+            3,
+            Duration::ZERO,
+            || 0,
+            |_| {
+                calls.set(calls.get() + 1);
+                async {
+                    Ok(rejected_publish_result(&[
+                        "invalid: created_at is in the future",
+                    ]))
+                }
+            },
+        )
         .await;
         assert!(matches!(
             result,
@@ -2353,15 +2973,20 @@ mod tests {
         // accept next time, so the normal retry budget must stand — and the
         // clock diagnosis must still be the reported cause when it does not.
         let calls = std::cell::Cell::new(0u32);
-        let result = publish_with_retry(3, Duration::ZERO, |_| {
-            calls.set(calls.get() + 1);
-            async {
-                Ok(rejected_publish_result(&[
-                    "invalid: event too far off from the current time",
-                    "rate-limited: slow down",
-                ]))
-            }
-        })
+        let result = publish_with_retry(
+            3,
+            Duration::ZERO,
+            || 0,
+            |_| {
+                calls.set(calls.get() + 1);
+                async {
+                    Ok(rejected_publish_result(&[
+                        "invalid: event too far off from the current time",
+                        "rate-limited: slow down",
+                    ]))
+                }
+            },
+        )
         .await;
         assert!(matches!(
             result,
@@ -2377,9 +3002,12 @@ mod tests {
         // The negative control for the whole mechanism: a non-timestamp
         // rejection must keep producing the historical error, or every
         // ordinary outage would be misreported to the user as a broken clock.
-        let result = publish_with_retry(2, Duration::ZERO, |_| async {
-            Ok(rejected_publish_result(&["blocked: pubkey not allowed"]))
-        })
+        let result = publish_with_retry(
+            2,
+            Duration::ZERO,
+            || 0,
+            |_| async { Ok(rejected_publish_result(&["blocked: pubkey not allowed"])) },
+        )
         .await;
         assert!(matches!(result, Err(RelayError::AllRelaysFailed)));
     }
@@ -2389,25 +3017,33 @@ mod tests {
         // A transient clock complaint from one attempt must not mask a
         // subsequent success (e.g. the user fixed the clock, or a second relay
         // came up).
-        let result = publish_with_retry(3, Duration::ZERO, |attempt| async move {
-            if attempt == 0 {
-                Ok(rejected_publish_result(&[
-                    "invalid: event too far off from the current time",
-                    "rate-limited: slow down",
-                ]))
-            } else {
-                Ok(dummy_publish_result(true))
-            }
-        })
+        let result = publish_with_retry(
+            3,
+            Duration::ZERO,
+            || 0,
+            |attempt| async move {
+                if attempt == 0 {
+                    Ok(rejected_publish_result(&[
+                        "invalid: event too far off from the current time",
+                        "rate-limited: slow down",
+                    ]))
+                } else {
+                    Ok(dummy_publish_result(true))
+                }
+            },
+        )
         .await;
         assert!(result.expect("later acceptance wins").is_success());
     }
 
     #[tokio::test]
     async fn publish_with_retry_surfaces_last_transport_error() {
-        let result = publish_with_retry(2, Duration::ZERO, |_| async {
-            Err(RelayError::Timeout("still cold".to_string()))
-        })
+        let result = publish_with_retry(
+            2,
+            Duration::ZERO,
+            || 0,
+            |_| async { Err(RelayError::Timeout("still cold".to_string())) },
+        )
         .await;
         assert!(matches!(result, Err(RelayError::Timeout(_))));
     }
@@ -2415,10 +3051,15 @@ mod tests {
     #[tokio::test]
     async fn publish_with_retry_honours_single_attempt() {
         let calls = std::cell::Cell::new(0u32);
-        let result = publish_with_retry(1, Duration::ZERO, |_| {
-            calls.set(calls.get() + 1);
-            async { Ok(dummy_publish_result(false)) }
-        })
+        let result = publish_with_retry(
+            1,
+            Duration::ZERO,
+            || 0,
+            |_| {
+                calls.set(calls.get() + 1);
+                async { Ok(dummy_publish_result(false)) }
+            },
+        )
         .await;
         assert!(matches!(result, Err(RelayError::AllRelaysFailed)));
         assert_eq!(calls.get(), 1, "max_attempts=1 must not retry");
@@ -2438,8 +3079,13 @@ mod tests {
         let backoff = Duration::from_secs(7);
 
         let started = tokio::time::Instant::now();
-        let exhausted =
-            publish_with_retry(3, backoff, |_| async { Ok(dummy_publish_result(false)) }).await;
+        let exhausted = publish_with_retry(
+            3,
+            backoff,
+            || 0,
+            |_| async { Ok(dummy_publish_result(false)) },
+        )
+        .await;
         assert!(matches!(exhausted, Err(RelayError::AllRelaysFailed)));
         assert_eq!(
             started.elapsed(),
@@ -2448,9 +3094,14 @@ mod tests {
         );
 
         let started = tokio::time::Instant::now();
-        publish_with_retry(3, backoff, |_| async { Ok(dummy_publish_result(true)) })
-            .await
-            .expect("first attempt accepted");
+        publish_with_retry(
+            3,
+            backoff,
+            || 0,
+            |_| async { Ok(dummy_publish_result(true)) },
+        )
+        .await
+        .expect("first attempt accepted");
         assert_eq!(
             started.elapsed(),
             Duration::ZERO,
@@ -2461,10 +3112,15 @@ mod tests {
     #[tokio::test]
     async fn publish_with_retry_clamps_zero_attempts_to_one() {
         let calls = std::cell::Cell::new(0u32);
-        let _ = publish_with_retry(0, Duration::ZERO, |_| {
-            calls.set(calls.get() + 1);
-            async { Ok(dummy_publish_result(false)) }
-        })
+        let _ = publish_with_retry(
+            0,
+            Duration::ZERO,
+            || 0,
+            |_| {
+                calls.set(calls.get() + 1);
+                async { Ok(dummy_publish_result(false)) }
+            },
+        )
         .await;
         assert_eq!(calls.get(), 1, "zero attempts clamps to a single try");
     }
@@ -2549,10 +3205,15 @@ mod tests {
             )],
             failed: vec!["wss://silent.example.com".to_string()],
         };
-        let result = publish_with_retry(PROFILE_PUBLISH_MAX_ATTEMPTS, Duration::ZERO, |_| {
-            let harvest = harvest.clone();
-            async move { profile_attempt_outcome(harvest) }
-        })
+        let result = publish_with_retry(
+            PROFILE_PUBLISH_MAX_ATTEMPTS,
+            Duration::ZERO,
+            || 0,
+            |_| {
+                let harvest = harvest.clone();
+                async move { profile_attempt_outcome(harvest) }
+            },
+        )
         .await
         .expect("one acceptance is a successful publish");
 
@@ -2578,10 +3239,15 @@ mod tests {
             )],
             failed: vec![],
         };
-        let result = publish_with_retry(PROFILE_PUBLISH_MAX_ATTEMPTS, Duration::ZERO, |_| {
-            let harvest = harvest.clone();
-            async move { profile_attempt_outcome(harvest) }
-        })
+        let result = publish_with_retry(
+            PROFILE_PUBLISH_MAX_ATTEMPTS,
+            Duration::ZERO,
+            || 0,
+            |_| {
+                let harvest = harvest.clone();
+                async move { profile_attempt_outcome(harvest) }
+            },
+        )
         .await;
         assert!(matches!(result, Err(RelayError::AllRelaysFailed)));
     }
@@ -2594,10 +3260,15 @@ mod tests {
         // has, by definition, no opinion about our timestamp. Abandoning the
         // publish after one attempt on that basis would strand the edit.
         let calls = std::cell::Cell::new(0u32);
-        let result = publish_with_retry(PROFILE_PUBLISH_MAX_ATTEMPTS, Duration::ZERO, |_| {
-            calls.set(calls.get() + 1);
-            async { profile_attempt_outcome(clock_rejection_harvest(true)) }
-        })
+        let result = publish_with_retry(
+            PROFILE_PUBLISH_MAX_ATTEMPTS,
+            Duration::ZERO,
+            || 0,
+            |_| {
+                calls.set(calls.get() + 1);
+                async { profile_attempt_outcome(clock_rejection_harvest(true)) }
+            },
+        )
         .await;
 
         assert!(result.is_err(), "nothing was accepted");
@@ -2614,10 +3285,15 @@ mod tests {
         // the clock verdict IS the whole truth about this event, and re-offering
         // the same `created_at` cannot succeed. The early exit must survive.
         let calls = std::cell::Cell::new(0u32);
-        let result = publish_with_retry(PROFILE_PUBLISH_MAX_ATTEMPTS, Duration::ZERO, |_| {
-            calls.set(calls.get() + 1);
-            async { profile_attempt_outcome(clock_rejection_harvest(false)) }
-        })
+        let result = publish_with_retry(
+            PROFILE_PUBLISH_MAX_ATTEMPTS,
+            Duration::ZERO,
+            || 0,
+            |_| {
+                calls.set(calls.get() + 1);
+                async { profile_attempt_outcome(clock_rejection_harvest(false)) }
+            },
+        )
         .await;
 
         assert!(matches!(
@@ -2918,92 +3594,337 @@ mod tests {
         assert_eq!(relays, vec!["wss://valid.example.com"]);
     }
 
+    /// Every extractor of another account's list, as the fetches apply them.
+    fn foreign_extractions(url: &str) -> [Vec<String>; 3] {
+        let tags = make_tags(vec![vec!["r", url], vec!["relay", url]]);
+        [
+            RelayManager::extract_nip65_read_relays(&tags),
+            RelayManager::extract_nip65_write_relays(&tags),
+            RelayManager::extract_relay_tag_urls(&tags),
+        ]
+    }
+
+    /// Another account's list naming a host on the user's own network would
+    /// otherwise point this device's sockets at it. Every host here is `wss://`,
+    /// so the debug-only `ws://` loopback opt-in cannot excuse one.
+    #[test]
+    fn a_foreign_list_never_yields_a_loopback_or_non_public_host() {
+        for refused in [
+            "wss://127.0.0.1",
+            "wss://127.8.9.10:7777",
+            "wss://2130706433",
+            "wss://0x7f.1",
+            "wss://10.1.2.3",
+            "wss://172.16.0.1",
+            "wss://192.168.1.20",
+            "wss://169.254.169.254",
+            "wss://100.64.0.1",
+            "wss://0.0.0.0",
+            "wss://[::1]",
+            "wss://[fe80::1]",
+            "wss://[fd12:3456::1]",
+            "wss://[::ffff:192.168.0.1]",
+            "wss://localhost",
+            "wss://LOCALHOST.",
+            "wss://relay.localhost",
+        ] {
+            for extracted in foreign_extractions(refused) {
+                assert!(extracted.is_empty(), "{refused} was kept");
+            }
+        }
+        for kept in [
+            "wss://relay.example.com",
+            "wss://8.8.8.8",
+            "wss://[2606:4700::1111]",
+        ] {
+            for extracted in foreign_extractions(kept) {
+                assert_eq!(extracted, [kept]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_foreign_list_yields_at_most_the_cap_and_a_repeat_does_not_spend_it() {
+        let distinct: Vec<String> = (0..MAX_FOREIGN_LIST_RELAYS + 4)
+            .map(|i| format!("wss://r{i}.example.com"))
+            .collect();
+        let mut listed = vec!["wss://r0.example.com".to_owned(); 3];
+        listed.extend(distinct.iter().cloned());
+        let tags = make_tags(listed.iter().map(|url| vec!["r", url.as_str()]).collect());
+        let relay_tags = make_tags(
+            listed
+                .iter()
+                .map(|url| vec!["relay", url.as_str()])
+                .collect(),
+        );
+
+        let expected = &distinct[..MAX_FOREIGN_LIST_RELAYS];
+        assert_eq!(RelayManager::extract_nip65_read_relays(&tags), expected);
+        assert_eq!(RelayManager::extract_nip65_write_relays(&tags), expected);
+        assert_eq!(RelayManager::extract_relay_tag_urls(&relay_tags), expected);
+    }
+
     // ------------------------------------------------------------------
-    // KeyPackage selection tests (combined-kind fetch result handling)
+    // KeyPackage selection tests
     // ------------------------------------------------------------------
 
-    /// Builds a signed key package event of the given kind and `created_at`,
-    /// using `keys` so the returned events share a single author. Used by
-    /// the `pick_keypackage_from_events` tests below.
-    fn make_kp_event(keys: &nostr::Keys, kind: Kind, created_at_secs: u64) -> Event {
-        let timestamp = nostr::Timestamp::from_secs(created_at_secs);
-        nostr::EventBuilder::new(kind, "")
-            .custom_created_at(timestamp)
+    /// A real, valid kind-30443 of `keys`'s account in slot `d`: a package its
+    /// own session minted, tagged by the production builder.
+    async fn published_key_package(keys: &nostr::Keys, d: &str) -> Event {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session = SessionManager::new_unencrypted(dir.path(), keys).expect("session");
+        crate::relay::maintenance::build_kp_maintenance_events(
+            &session,
+            keys,
+            &["wss://own.example.com".to_string()],
+            Some(d),
+            None,
+        )
+        .await
+        .expect("build")
+        .event
+    }
+
+    /// `event` re-signed by `keys` as `kind` at `created_at_secs`, tags and
+    /// content untouched.
+    fn restamped(keys: &nostr::Keys, event: &Event, kind: Kind, created_at_secs: u64) -> Event {
+        nostr::EventBuilder::new(kind, event.content.clone())
+            .tags(event.tags.clone())
+            .custom_created_at(nostr::Timestamp::from_secs(created_at_secs))
             .sign_with_keys(keys)
             .expect("event signing must succeed for tests")
     }
 
-    #[test]
-    fn pick_keypackage_returns_none_for_empty_input() {
-        assert!(RelayManager::pick_keypackage_from_events(vec![]).is_none());
+    fn slot(seed: u8) -> String {
+        hex::encode([seed; 32])
+    }
+
+    fn invitable(account: &PublicKey, events: Vec<Event>) -> Option<Event> {
+        match RelayManager::pick_keypackage_from_events(account, events, None) {
+            Some(PickedKeyPackage::Invitable(event)) => Some(event),
+            Some(PickedKeyPackage::Inadmissible(_) | PickedKeyPackage::PreMigration(_)) | None => {
+                None
+            }
+        }
     }
 
     #[test]
-    fn pick_keypackage_prefers_30443_over_443_even_when_443_is_newer() {
+    fn pick_keypackage_returns_none_for_empty_input() {
+        let account = nostr::Keys::generate().public_key();
+        assert!(RelayManager::pick_keypackage_from_events(&account, vec![], None).is_none());
+    }
+
+    #[tokio::test]
+    async fn pick_keypackage_prefers_30443_over_443_even_when_443_is_newer() {
         let keys = nostr::Keys::generate();
-        let canonical_old = make_kp_event(&keys, Kind::Custom(30443), 1_000);
-        let legacy_new = make_kp_event(&keys, Kind::MlsKeyPackage, 9_000);
+        let kp = published_key_package(&keys, &slot(1)).await;
+        let canonical_old = restamped(&keys, &kp, Kind::Custom(30443), 1_000);
+        let legacy_new = restamped(&keys, &kp, Kind::MlsKeyPackage, 9_000);
 
-        let picked =
-            RelayManager::pick_keypackage_from_events(vec![legacy_new, canonical_old.clone()])
-                .expect("should pick a key package");
+        let picked = invitable(&keys.public_key(), vec![legacy_new, canonical_old.clone()])
+            .expect("should pick a key package");
 
-        assert_eq!(
-            picked.kind,
-            Kind::Custom(30443),
-            "must prefer canonical 30443 over legacy 443 even when 443 is newer"
-        );
         assert_eq!(picked.id, canonical_old.id);
     }
 
-    #[test]
-    fn pick_keypackage_picks_newest_30443_when_multiple_present() {
+    /// Within one slot the newest event is the slot (`transports/nostr.md:304-307`).
+    #[tokio::test]
+    async fn pick_keypackage_picks_the_newest_event_of_a_slot() {
         let keys = nostr::Keys::generate();
-        let old_canonical = make_kp_event(&keys, Kind::Custom(30443), 1_000);
-        let new_canonical = make_kp_event(&keys, Kind::Custom(30443), 5_000);
+        let kp = published_key_package(&keys, &slot(1)).await;
+        let old = restamped(&keys, &kp, Kind::Custom(30443), 1_000);
+        let new = restamped(&keys, &kp, Kind::Custom(30443), 5_000);
 
         let picked =
-            RelayManager::pick_keypackage_from_events(vec![old_canonical, new_canonical.clone()])
-                .expect("should pick a key package");
+            invitable(&keys.public_key(), vec![old, new.clone()]).expect("should pick a package");
 
-        assert_eq!(picked.id, new_canonical.id);
+        assert_eq!(picked.id, new.id);
     }
 
-    #[test]
-    fn pick_keypackage_ignores_legacy_443_returns_none() {
-        // Dark Matter: a 443-only result (un-migrated member) is NOT usable — a
-        // 443 KeyPackage cannot be processed by the new engine, so selection
-        // must resolve to None rather than return an unprocessable KP.
+    /// A slot's newest event stands for the slot even when it is invalid: the
+    /// older one may name material its owner already deleted.
+    #[tokio::test]
+    async fn an_invalid_newest_event_never_revives_the_one_it_replaced() {
         let keys = nostr::Keys::generate();
-        let legacy = make_kp_event(&keys, Kind::MlsKeyPackage, 1_000);
+        let kp = published_key_package(&keys, &slot(1)).await;
+        let valid_old = restamped(&keys, &kp, Kind::Custom(30443), 1_000);
+        let mut hollow = kp;
+        hollow.content = String::new();
+        let invalid_new = restamped(&keys, &hollow, Kind::Custom(30443), 5_000);
+
+        assert!(invitable(&keys.public_key(), vec![valid_old, invalid_new]).is_none());
+    }
+
+    /// Relays choose the order they answer in; a timestamp tie must not hand
+    /// them the choice of package.
+    #[tokio::test]
+    async fn pick_keypackage_breaks_a_timestamp_tie_by_the_lower_id_in_any_order() {
+        let keys = nostr::Keys::generate();
+        let (first, second) = (
+            published_key_package(&keys, &slot(1)).await,
+            published_key_package(&keys, &slot(1)).await,
+        );
+        let a = restamped(&keys, &first, Kind::Custom(30443), 5_000);
+        let b = restamped(&keys, &second, Kind::Custom(30443), 5_000);
+        let lower = if a.id < b.id { a.id } else { b.id };
+
+        for order in [vec![a.clone(), b.clone()], vec![b, a]] {
+            let picked = invitable(&keys.public_key(), order).expect("should pick a key package");
+            assert_eq!(picked.id, lower);
+        }
+    }
+
+    #[tokio::test]
+    async fn pick_keypackage_ignores_legacy_443_returns_none() {
+        // A 443-only result (un-migrated member) is NOT usable — a 443
+        // KeyPackage cannot be processed by the engine, so selection must
+        // resolve to None rather than return an unprocessable KP.
+        let keys = nostr::Keys::generate();
+        let kp = published_key_package(&keys, &slot(1)).await;
+        let legacy = restamped(&keys, &kp, Kind::MlsKeyPackage, 1_000);
 
         assert!(
-            RelayManager::pick_keypackage_from_events(vec![legacy]).is_none(),
+            RelayManager::pick_keypackage_from_events(&keys.public_key(), vec![legacy], None)
+                .is_none(),
             "a legacy 443 must never be selected as a usable key package"
         );
     }
 
-    #[test]
-    fn pick_keypackage_ignores_all_legacy_443() {
+    #[tokio::test]
+    async fn pick_keypackage_ignores_unrelated_kinds() {
         let keys = nostr::Keys::generate();
-        let old_legacy = make_kp_event(&keys, Kind::MlsKeyPackage, 1_000);
-        let new_legacy = make_kp_event(&keys, Kind::MlsKeyPackage, 7_000);
+        let kp = published_key_package(&keys, &slot(1)).await;
+        let unrelated = restamped(&keys, &kp, Kind::TextNote, 9_000);
 
         assert!(
-            RelayManager::pick_keypackage_from_events(vec![old_legacy, new_legacy]).is_none(),
-            "multiple legacy 443s still yield no usable key package"
+            RelayManager::pick_keypackage_from_events(&keys.public_key(), vec![unrelated], None)
+                .is_none(),
+            "unrelated kinds must not be returned"
         );
     }
 
-    #[test]
-    fn pick_keypackage_ignores_unrelated_kinds() {
+    /// Content that is no `KeyPackage` is no candidate, however it is signed.
+    #[tokio::test]
+    async fn pick_keypackage_ignores_a_30443_that_carries_no_key_package() {
         let keys = nostr::Keys::generate();
-        let unrelated = make_kp_event(&keys, Kind::TextNote, 9_000);
+        let mut hollow = published_key_package(&keys, &slot(1)).await;
+        hollow.content = String::new();
+        let hollow = restamped(&keys, &hollow, Kind::Custom(30443), 9_000);
 
         assert!(
-            RelayManager::pick_keypackage_from_events(vec![unrelated]).is_none(),
-            "unrelated kinds must not be returned"
+            RelayManager::pick_keypackage_from_events(&keys.public_key(), vec![hollow], None)
+                .is_none()
         );
+    }
+
+    /// Two valid last-resort packages in two slots: the more recently
+    /// published wins, and on a tie the lower decoded `KeyPackageRef` does —
+    /// in any arrival order.
+    #[tokio::test]
+    async fn across_slots_the_fresher_package_wins_then_the_lower_ref() {
+        let keys = nostr::Keys::generate();
+        let one = published_key_package(&keys, &slot(1)).await;
+        let two = published_key_package(&keys, &slot(2)).await;
+
+        let older = restamped(&keys, &one, Kind::Custom(30443), 1_000);
+        let newer = restamped(&keys, &two, Kind::Custom(30443), 2_000);
+        for order in [
+            vec![older.clone(), newer.clone()],
+            vec![newer.clone(), older],
+        ] {
+            assert_eq!(
+                invitable(&keys.public_key(), order).map(|e| e.id),
+                Some(newer.id)
+            );
+        }
+
+        let a = restamped(&keys, &one, Kind::Custom(30443), 5_000);
+        let b = restamped(&keys, &two, Kind::Custom(30443), 5_000);
+        let key_package_ref = |event: &Event| -> String {
+            event
+                .tags
+                .iter()
+                .find(|t| t.as_slice()[0] == "i")
+                .map(|t| t.as_slice()[1].clone())
+                .expect("i tag")
+        };
+        let lower = if key_package_ref(&a) < key_package_ref(&b) {
+            a.id
+        } else {
+            b.id
+        };
+        for order in [vec![a.clone(), b.clone()], vec![b, a]] {
+            assert_eq!(
+                invitable(&keys.public_key(), order).map(|e| e.id),
+                Some(lower)
+            );
+        }
+    }
+
+    /// `event` as another app would have published it: the same package and
+    /// tags plus that app's `client` label, signed at `created_at_secs`.
+    fn client_tagged(keys: &nostr::Keys, event: &Event, created_at_secs: u64) -> Event {
+        let mut labelled = event.clone();
+        labelled
+            .tags
+            .push(nostr::Tag::parse(["client", "another-app"]).expect("tag"));
+        restamped(keys, &labelled, Kind::Custom(30443), created_at_secs)
+    }
+
+    /// A Welcome built on another app's package reaches that app, so a package
+    /// published without a `client` label is taken first — however much
+    /// fresher the labelled one is, and whichever the relay answers first.
+    #[tokio::test]
+    async fn an_unlabelled_package_is_preferred_to_a_fresher_one_another_app_labelled() {
+        let keys = nostr::Keys::generate();
+        let own = published_key_package(&keys, &slot(1)).await;
+        let foreign = published_key_package(&keys, &slot(2)).await;
+
+        let unlabelled = restamped(&keys, &own, Kind::Custom(30443), 1_000);
+        let labelled = client_tagged(&keys, &foreign, 9_000);
+        for order in [
+            vec![unlabelled.clone(), labelled.clone()],
+            vec![labelled, unlabelled.clone()],
+        ] {
+            assert_eq!(
+                invitable(&keys.public_key(), order).map(|e| e.id),
+                Some(unlabelled.id)
+            );
+        }
+    }
+
+    /// An account that only uses another app stays invitable.
+    #[tokio::test]
+    async fn a_labelled_package_is_selected_when_it_is_the_only_one() {
+        let keys = nostr::Keys::generate();
+        let foreign = published_key_package(&keys, &slot(1)).await;
+        let labelled = client_tagged(&keys, &foreign, 9_000);
+        assert_eq!(
+            invitable(&keys.public_key(), vec![labelled.clone()]).map(|e| e.id),
+            Some(labelled.id)
+        );
+    }
+
+    /// Between two labelled packages, and between two unlabelled ones, the
+    /// spec's order decides — the label tier is the same for both.
+    #[tokio::test]
+    async fn the_label_tier_leaves_equals_to_the_spec_order_in_any_arrival_order() {
+        let keys = nostr::Keys::generate();
+        let one = published_key_package(&keys, &slot(1)).await;
+        let two = published_key_package(&keys, &slot(2)).await;
+
+        let older = client_tagged(&keys, &one, 1_000);
+        let newer = client_tagged(&keys, &two, 2_000);
+        for order in [
+            vec![older.clone(), newer.clone()],
+            vec![newer.clone(), older],
+        ] {
+            assert_eq!(
+                invitable(&keys.public_key(), order).map(|e| e.id),
+                Some(newer.id),
+                "two labelled packages: the fresher"
+            );
+        }
     }
 
     // ------------------------------------------------------------------
@@ -3110,6 +4031,18 @@ mod tests {
             !relay.flags().has_ping(),
             "nor may the per-relay fetch, which registers its relays itself",
         );
+
+        let outcome = fanned_out(&manager.fanout_transport(), &url).await;
+        assert!(
+            matches!(outcome, FanoutTargetOutcome::Accepted),
+            "the fanout publish has to reach the relay before its registration \
+             can be judged",
+        );
+        assert!(
+            !relay.flags().has_ping(),
+            "nor may a fanout publish: it registers its target here, and MDK's \
+             client behind it must find the relay already held",
+        );
     }
 
     /// `true` once the relay has acknowledged `event_id`, which is the earliest
@@ -3167,6 +4100,677 @@ mod tests {
              the pool-level call is no longer load-bearing, and this is how we \
              find out",
         );
+    }
+
+    // ------------------------------------------------------------------
+    // The fanout transport: MDK's relay client on this pool.
+    //
+    // MDK's client takes no relay options and dials whatever it is named, so
+    // these pin what Haven keeps around each call: the target registered with
+    // the pool's own options, on the pool's own client, under Haven's relay
+    // policy, with the wedge check after.
+    // ------------------------------------------------------------------
+
+    /// A signed kind-445 event in the shape the engine's are, as the transport
+    /// message a fanout row freezes.
+    fn fanout_message() -> TransportMessage {
+        let event = nostr::EventBuilder::new(Kind::Custom(KIND_GROUP_MESSAGE), "ciphertext")
+            .tag(nostr::Tag::parse(["h", &"ab".repeat(32)]).expect("an h tag"))
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign");
+        SessionManager::event_to_transport_message(&event).expect("a kind-445 event converts")
+    }
+
+    impl FanoutTransport {
+        /// One call as the driver makes it: the relay taken, then sent to.
+        pub(crate) async fn call(
+            &self,
+            target: &str,
+            message: &TransportMessage,
+        ) -> FanoutTargetOutcome {
+            let taken = self
+                .take(target)
+                .await
+                .expect("the relay could not be had within the gate's wait");
+            self.publish(target, message, taken).await
+        }
+    }
+
+    /// One fanout call to `target` over `transport`.
+    async fn fanned_out(transport: &FanoutTransport, target: &str) -> FanoutTargetOutcome {
+        transport.call(target, &fanout_message()).await
+    }
+
+    /// One fanout publish through `manager`'s transport.
+    async fn fanout_publish(
+        manager: &RelayManager,
+        url: &str,
+        message: &TransportMessage,
+    ) -> FanoutTargetOutcome {
+        manager.fanout_transport().call(url, message).await
+    }
+
+    /// The relay as the publish pool holds it now, which must be as Haven
+    /// registered it: MDK's client replaces a relay it added itself with a
+    /// re-configured one, so a handle taken earlier would prove nothing.
+    async fn assert_registered_with_haven_options(manager: &RelayManager, url: &str, after: &str) {
+        let relays = manager.client.relays().await;
+        assert!(
+            relays.len() == 1,
+            "{after}: the pool holds something other than the one target",
+        );
+        let relay = manager
+            .client
+            .relay(url)
+            .await
+            .unwrap_or_else(|_| panic!("{after}: the target is gone from the publish pool"));
+        let flags = relay.flags();
+        assert!(
+            flags.has_read() && flags.has_write() && !flags.has_ping(),
+            "{after}: the target's flags are no longer the publish pool's",
+        );
+        assert!(
+            format!("{:?}", relay.opts()) == format!("{:?}", publish_relay_options()),
+            "{after}: the target's options are no longer publish_relay_options()",
+        );
+    }
+
+    /// Whatever MDK's client does with a target — accepts on it, is refused on
+    /// it, tears its socket down after an ambiguous answer, dials it again — the
+    /// relay stays in the publish pool with the options Haven registered.
+    ///
+    /// Pays three 600 ms adapter backoffs twice over (the refused and the
+    /// ambiguous call each make three attempts); every answer is immediate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn fanout_client_relays_keep_haven_options_across_every_adapter_call() {
+        let relay = ScriptedRelay::start();
+        let answer = std::sync::Arc::new(std::sync::Mutex::new(""));
+        let scripted = std::sync::Arc::clone(&answer);
+        relay.on_publish(move |_| match *scripted.lock().expect("script lock") {
+            "" => Verdict::Keep,
+            text => Verdict::Refuse(text.to_string()),
+        });
+        let manager = RelayManager::new();
+        let transport = manager.fanout_transport();
+        let target = relay.url();
+
+        let accepted = fanned_out(&transport, target).await;
+        assert!(matches!(accepted, FanoutTargetOutcome::Accepted));
+        assert_registered_with_haven_options(&manager, relay.url(), "after an accepted publish")
+            .await;
+
+        *answer.lock().expect("script lock") = "blocked: not here";
+        let refused = fanned_out(&transport, target).await;
+        assert!(matches!(
+            refused,
+            FanoutTargetOutcome::Failed(failure)
+                if failure.kind() == TransportEndpointFailureKind::TerminalRejected
+        ));
+        assert_registered_with_haven_options(&manager, relay.url(), "after a refused publish")
+            .await;
+
+        *answer.lock().expect("script lock") = "error: could not say";
+        let ambiguous = fanned_out(&transport, target).await;
+        assert!(matches!(
+            ambiguous,
+            FanoutTargetOutcome::Failed(failure)
+                if failure.kind() == TransportEndpointFailureKind::PossiblyExposed
+        ));
+        assert_eq!(
+            manager
+                .client
+                .relay(relay.url())
+                .await
+                .expect("still registered")
+                .status(),
+            PoolRelayStatus::Terminated,
+            "MDK's client resets a relay after an ambiguous publish; if it no \
+             longer does, the case below stops covering a re-dial",
+        );
+        assert_registered_with_haven_options(&manager, relay.url(), "after MDK's disconnect").await;
+
+        *answer.lock().expect("script lock") = "";
+        let redialled = fanned_out(&transport, target).await;
+        assert!(
+            matches!(redialled, FanoutTargetOutcome::Accepted),
+            "the publish after the disconnect has to dial the relay again",
+        );
+        assert_registered_with_haven_options(&manager, relay.url(), "after the re-dial").await;
+    }
+
+    /// MDK's client publishes on the publish pool's OWN client — the one
+    /// `verified_client` built — not on one of its own: a relay the pool is
+    /// already connected to sees no second socket (Security Rule 16).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_fanout_transport_rides_the_publish_clients_own_socket() {
+        let relay = ScriptedRelay::start();
+        let manager = RelayManager::new();
+        manager
+            .publish_event(
+                &throwaway_note("opens the socket"),
+                &[relay.url().to_string()],
+            )
+            .await
+            .expect("the relay is up");
+        assert!(relay.connections() == 1, "one publish, one socket");
+
+        let outcome = fanned_out(&manager.fanout_transport(), relay.url()).await;
+        assert!(matches!(outcome, FanoutTargetOutcome::Accepted));
+        assert!(
+            relay.published().len() == 2,
+            "both events reached the relay"
+        );
+        assert!(
+            relay.connections() == 1,
+            "the fanout publish opened a socket of its own: MDK's client was \
+             handed some other client than the publish pool's",
+        );
+    }
+
+    /// A fanout publish reaches its target and no other relay the pool holds:
+    /// which relays a device connects to, and when, is what an observer of
+    /// those relays learns. MDK's client connects every relay in the pool
+    /// when it subscribes; its publish must not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_fanout_publish_dials_its_target_alone() {
+        let bystander = ScriptedRelay::start();
+        let target = ScriptedRelay::start();
+        let manager = RelayManager::new();
+        manager
+            .client
+            .pool()
+            .add_relay(bystander.url(), publish_relay_options())
+            .await
+            .expect("register a relay the pool holds and has not dialled");
+
+        let outcome = fanned_out(&manager.fanout_transport(), target.url()).await;
+        assert!(matches!(outcome, FanoutTargetOutcome::Accepted));
+        assert!(target.connections() == 1, "the target was dialled once");
+        // The pool's own status, which a dial changes before any socket opens:
+        // the relay's connection count alone would miss a dial still in flight.
+        let held = manager
+            .client
+            .relay(bystander.url())
+            .await
+            .expect("still registered");
+        assert_eq!(
+            held.status(),
+            PoolRelayStatus::Initialized,
+            "a fanout publish dialled a relay it was not sent to",
+        );
+        assert!(
+            bystander.connections() == 0 && bystander.offers() == 0,
+            "a fanout publish reached a relay it was not sent to",
+        );
+    }
+
+    /// Why a fanout target is registered `READ | WRITE` here rather than left
+    /// to MDK's client, which would add it write-only: this same client runs
+    /// Haven's targeted fetches, and the pool skips a relay without the read
+    /// flag — the fetch comes back empty, with no error to notice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_targeted_fetch_on_the_publish_client_needs_the_read_flag() {
+        let relay = ScriptedRelay::start();
+        let stored = throwaway_note("stored on the relay");
+        relay.answer(
+            |_| true,
+            vec![
+                crate::relay::scripted_relay::Frame::Event(stored.clone()),
+                crate::relay::scripted_relay::Frame::Eose,
+            ],
+        );
+        let filter = Filter::new().kind(Kind::TextNote);
+        let relays = [relay.url().to_string()];
+
+        // The control: a relay registered as MDK's client registers one.
+        let write_only = RelayManager::new();
+        write_only
+            .client
+            .add_write_relay(relay.url())
+            .await
+            .expect("register write-only");
+        write_only.client.connect().await;
+        let unread = write_only
+            .client
+            .fetch_events_from(relays.clone(), filter.clone(), Duration::from_secs(30))
+            .await
+            .expect("the pool skips a relay it may not read, without an error");
+        assert!(
+            unread.is_empty(),
+            "the pool read from a write-only relay: the read flag is no longer \
+             what a targeted fetch needs, and this registration's reason is gone",
+        );
+
+        let manager = RelayManager::new();
+        let outcome = fanned_out(&manager.fanout_transport(), relay.url()).await;
+        assert!(matches!(outcome, FanoutTargetOutcome::Accepted));
+        let fetched = manager
+            .fetch_events(filter, &relays, Some(Duration::from_secs(30)))
+            .await
+            .expect("a fetch from a relay the fanout registered");
+        assert!(
+            fetched == [stored],
+            "a targeted fetch after a fanout publish did not return the \
+             relay's event",
+        );
+    }
+
+    /// A relay client that hands the relay one event nobody reads, the reading
+    /// a wedged socket gives, and answers as if it had been accepted.
+    struct LeavesAnEventUnread(Relay);
+
+    #[async_trait::async_trait]
+    impl NostrRelayClient for LeavesAnEventUnread {
+        async fn subscribe(
+            &self,
+            _subscription: transport_nostr_adapter::NostrSubscription,
+        ) -> Result<(), cgka_traits::TransportAdapterError> {
+            Err(cgka_traits::TransportAdapterError::Closed)
+        }
+
+        async fn unsubscribe(
+            &self,
+            _subscription: transport_nostr_adapter::NostrSubscription,
+        ) -> Result<(), cgka_traits::TransportAdapterError> {
+            Err(cgka_traits::TransportAdapterError::Closed)
+        }
+
+        async fn unsubscribe_account(
+            &self,
+            _account_id: &cgka_traits::MemberId,
+        ) -> Result<(), cgka_traits::TransportAdapterError> {
+            Err(cgka_traits::TransportAdapterError::Closed)
+        }
+
+        async fn publish_event(
+            &self,
+            endpoints: &[TransportEndpoint],
+            _event: &transport_nostr_peeler::NostrTransportEvent,
+            _required_acks: usize,
+        ) -> Result<transport_nostr_adapter::NostrPublishOutcome, cgka_traits::TransportAdapterError>
+        {
+            // The connection task gets an empty channel and a fresh
+            // cooperative budget here; nothing after this yields before the
+            // transport's wedge check reads the queue.
+            tokio::task::yield_now().await;
+            self.0
+                .batch_msg(vec![ClientMessage::event(throwaway_note("unread"))])
+                .expect("the pool accepts the send");
+            Ok(transport_nostr_adapter::NostrPublishOutcome::accepted(
+                endpoints.iter().cloned(),
+            ))
+        }
+    }
+
+    /// The wedge check runs after a fanout publish as it does after every
+    /// other send: a target left `Connected` with an event unread is freed, so
+    /// the next publish dials a live socket.
+    ///
+    /// Single-threaded, for the reason
+    /// `the_recovery_terminates_a_real_socket_that_holds_an_unread_message`
+    /// gives: the unread reading is the one the relay client created, not a
+    /// lucky sample.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_wedged_target_is_freed_after_a_fanout_publish() {
+        let _ = allow_ws_loopback_for_test();
+        let server = LocalRelay::new(RelayBuilder::default());
+        server.run().await.expect("local relay runs");
+        let url = server.url().await.to_string();
+        let target = url.as_str();
+
+        let manager = RelayManager::new();
+        assert!(matches!(
+            fanned_out(&manager.fanout_transport(), target).await,
+            FanoutTargetOutcome::Accepted
+        ));
+        let relay = manager
+            .client
+            .relay(url.as_str())
+            .await
+            .expect("the publish registered the relay");
+        assert_eq!(relay.status(), PoolRelayStatus::Connected);
+
+        let wedging = FanoutTransport {
+            client: manager.client.clone(),
+            relay_client: Arc::new(LeavesAnEventUnread(relay.clone())),
+            gates: FanoutGates::default(),
+            clock: device_clock(),
+        };
+        let _ = fanned_out(&wedging, target).await;
+        assert_eq!(
+            relay.status(),
+            PoolRelayStatus::Terminated,
+            "a fanout publish left its target connected with an event unread: \
+             nothing re-dials that socket, and every later publish to the \
+             relay queues behind it",
+        );
+
+        assert!(
+            matches!(
+                fanned_out(&manager.fanout_transport(), target).await,
+                FanoutTargetOutcome::Accepted
+            ),
+            "and the freed target must be one the very next publish reaches",
+        );
+    }
+
+    /// The fast shape of the masking the transport closes. Another publish
+    /// path's socket repair ends the first attempt with no answer while the
+    /// relay holds the event; that path re-dials; MDK's later attempts are
+    /// refused and MDK reports the refusal. No attempt count and no elapsed
+    /// time tells this from three clean refusals — only the relay's own
+    /// answers do.
+    ///
+    /// Possibly exposed in every interleaving: the first attempt is never
+    /// answered, whether or not the re-dial lands before MDK's next attempt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refusal_that_follows_a_concurrent_disconnect_is_possibly_exposed() {
+        let relay = ScriptedRelay::start();
+        let stored = Arc::new(tokio::sync::Notify::new());
+        let first = Arc::clone(&stored);
+        let offered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&offered);
+        relay.on_publish(move |_| {
+            if counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                first.notify_one();
+                Verdict::KeepSilently
+            } else {
+                Verdict::Refuse("blocked: not any more".to_string())
+            }
+        });
+        let manager = RelayManager::new();
+        manager
+            .client
+            .pool()
+            .add_relay(relay.url(), publish_relay_options())
+            .await
+            .expect("register the target");
+        let socket = manager
+            .client
+            .relay(relay.url())
+            .await
+            .expect("the target was just registered");
+        let message = fanout_message();
+
+        let (outcome, ()) = tokio::join!(fanout_publish(&manager, relay.url(), &message), async {
+            // Bounded: a relay that never sees the event must fail the test,
+            // not hang it.
+            tokio::time::timeout(wait_budget(30), stored.notified())
+                .await
+                .expect("the relay stores the first attempt");
+            socket.disconnect();
+            let _ = manager
+                .client
+                .try_connect_relay(relay.url(), wait_budget(30))
+                .await;
+        });
+
+        assert!(
+            relay.published().len() == 1,
+            "the relay stored the first attempt: that is the case",
+        );
+        assert!(
+            matches!(
+                &outcome,
+                FanoutTargetOutcome::Failed(failure)
+                    if failure.kind() == TransportEndpointFailureKind::PossiblyExposed
+            ),
+            "a refusal that followed an unanswered attempt was returned as \
+             proof the relay does not hold the event",
+        );
+    }
+
+    /// "Can never authenticate" is two facts, either of which is enough and
+    /// both of which hold: the publish client has no signer to answer a NIP-42
+    /// challenge with, and is told not to answer one. An answer would sign a
+    /// relay's challenge with the identity key on a socket that carries a
+    /// circle's routing id.
+    #[tokio::test]
+    async fn the_publish_client_holds_no_signer_and_never_authenticates() {
+        let manager = RelayManager::new();
+        assert!(
+            !manager.client.has_signer().await,
+            "the publish client holds a signer: MDK's relay client signs an \
+             unsigned event with it, and the pool answers AUTH with it",
+        );
+        assert!(
+            !manager
+                .client
+                .pool()
+                .state()
+                .is_auto_authentication_enabled(),
+            "the publish client would answer a NIP-42 challenge the day it \
+             held a signer",
+        );
+    }
+
+    /// One MDK relay client per manager, however many transports are taken:
+    /// its publish-relay bookkeeping and its lifecycle lock are per instance.
+    #[tokio::test]
+    async fn every_fanout_transport_of_a_manager_shares_one_mdk_relay_client() {
+        let manager = RelayManager::new();
+        let (first, second) = (manager.fanout_transport(), manager.fanout_transport());
+        assert!(
+            Arc::ptr_eq(&first.relay_client, &second.relay_client),
+            "each fanout_transport() built an MDK relay client of its own",
+        );
+    }
+
+    /// A relay the pool already holds is found, not registered again: the
+    /// registration takes the pool's write lock, which waits behind a publish
+    /// that is still waiting for its `OK`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_relay_the_pool_already_holds_is_not_registered_again() {
+        let relay = ScriptedRelay::start();
+        let relays = [relay.url().to_string()];
+        let manager = RelayManager::new();
+        let registrations = |lines: Vec<String>| {
+            lines
+                .iter()
+                .filter(|line| line.starts_with("[RelayManager] add_relay "))
+                .count()
+        };
+
+        let first = crate::test_log::capture_log_lines(async {
+            manager
+                .publish_event(&throwaway_note("registers the relay"), &relays)
+                .await
+                .expect("the relay is up");
+        })
+        .await;
+        assert!(registrations(first) == 1, "the first publish registers it");
+
+        let second = crate::test_log::capture_log_lines(async {
+            manager
+                .publish_event(&throwaway_note("finds it registered"), &relays)
+                .await
+                .expect("the relay is still up");
+        })
+        .await;
+        assert!(
+            registrations(second) == 0,
+            "a relay the pool already held was registered again",
+        );
+    }
+
+    /// The same holds for the two other paths that register relays: a
+    /// catch-up page or a fire-and-forget publish to a relay the pool holds
+    /// takes no write lock, so it never waits behind a send that is waiting
+    /// for its `OK` — and never makes the readers behind it wait either, MDK's
+    /// next fanout attempt among them.
+    ///
+    /// The silent send holds the pool's read lock for the pool's whole `OK`
+    /// wait (10 s). Each path must finish while it is still waiting; the red
+    /// outcome is the send finishing first, so the wait is only paid then.
+    #[tokio::test(flavor = "current_thread")]
+    async fn no_path_registers_a_held_relay_behind_a_send_awaiting_its_ok() {
+        let _ = allow_ws_loopback_for_test();
+        let relay = ScriptedRelay::start();
+        relay.on_publish(|event| {
+            if event.content == "never answered" {
+                Verdict::KeepSilently
+            } else {
+                Verdict::Keep
+            }
+        });
+        let relays = [relay.url().to_string()];
+        let manager = RelayManager::new();
+        manager
+            .publish_event(&throwaway_note("registers the relay"), &relays)
+            .await
+            .expect("the relay is up");
+        let held = manager
+            .client
+            .relay(relay.url())
+            .await
+            .expect("the publish registered the relay");
+
+        let silent = throwaway_note("never answered");
+        let waiting = manager.client.send_event_to([relay.url()], &silent);
+        tokio::pin!(waiting);
+
+        let fetched = tokio::select! {
+            biased;
+            _ = &mut waiting => None,
+            page = manager.fetch_events_per_relay(
+                Filter::new().kind(Kind::TextNote).limit(1),
+                &relays,
+            ) => Some(page),
+        };
+        assert!(
+            fetched.is_some_and(|page| page.is_ok_and(|outcomes| outcomes[0].responded)),
+            "a per-relay fetch from a relay the pool holds waited behind a send \
+             that was waiting for its OK",
+        );
+
+        let mut notifications = held.notifications();
+        let backgrounded = throwaway_note("sent from the background path");
+        let backgrounded_id = backgrounded.id;
+        manager
+            .publish_event_background(backgrounded, &relays)
+            .expect("the fire-and-forget path validates its urls");
+        let acked = tokio::select! {
+            biased;
+            _ = &mut waiting => false,
+            acked = await_ok_for(&mut notifications, backgrounded_id, wait_budget(30)) => acked,
+        };
+        assert!(
+            acked,
+            "a background publish to a relay the pool holds waited behind a \
+             send that was waiting for its OK",
+        );
+    }
+
+    /// A relay client that does to the pool what MDK's does when the target
+    /// appears between its check and its add (`sdk_client.rs` 1161-1169): adds
+    /// it as a write relay through the SDK, which ORs `PING` onto the relay
+    /// the pool already holds.
+    struct AddsItsTargetAgain(Client);
+
+    #[async_trait::async_trait]
+    impl NostrRelayClient for AddsItsTargetAgain {
+        async fn subscribe(
+            &self,
+            _: transport_nostr_adapter::NostrSubscription,
+        ) -> Result<(), cgka_traits::TransportAdapterError> {
+            Err(cgka_traits::TransportAdapterError::Closed)
+        }
+
+        async fn unsubscribe(
+            &self,
+            _: transport_nostr_adapter::NostrSubscription,
+        ) -> Result<(), cgka_traits::TransportAdapterError> {
+            Err(cgka_traits::TransportAdapterError::Closed)
+        }
+
+        async fn unsubscribe_account(
+            &self,
+            _: &cgka_traits::MemberId,
+        ) -> Result<(), cgka_traits::TransportAdapterError> {
+            Err(cgka_traits::TransportAdapterError::Closed)
+        }
+
+        async fn publish_event(
+            &self,
+            endpoints: &[TransportEndpoint],
+            _event: &transport_nostr_peeler::NostrTransportEvent,
+            _required_acks: usize,
+        ) -> Result<transport_nostr_adapter::NostrPublishOutcome, cgka_traits::TransportAdapterError>
+        {
+            for endpoint in endpoints {
+                self.0
+                    .add_write_relay(endpoint.as_str())
+                    .await
+                    .expect("the SDK takes a second add of a held relay");
+            }
+            Ok(transport_nostr_adapter::NostrPublishOutcome::accepted(
+                endpoints.iter().cloned(),
+            ))
+        }
+    }
+
+    /// No fanout call leaves its target with the keepalive: a publish-pool
+    /// relay that pings holds a NAT binding and the radio for nothing.
+    #[tokio::test]
+    async fn a_fanout_publish_never_leaves_its_target_pinging() {
+        let _ = allow_ws_loopback_for_test();
+        let relay = ScriptedRelay::start();
+        let manager = RelayManager::new();
+        let racing = FanoutTransport {
+            client: manager.client.clone(),
+            relay_client: Arc::new(AddsItsTargetAgain(manager.client.clone())),
+            gates: FanoutGates::default(),
+            clock: device_clock(),
+        };
+        let _ = fanned_out(&racing, relay.url()).await;
+        let held = manager
+            .client
+            .relay(relay.url())
+            .await
+            .expect("the publish registered the relay");
+        assert!(
+            held.flags().has_write() && held.flags().has_read(),
+            "premise: the target is still a relay this pool reads and writes",
+        );
+        assert!(
+            !held.flags().has_ping(),
+            "a fanout publish left its target with the keepalive on",
+        );
+    }
+
+    /// A target Haven's relay policy refuses is never registered, so never
+    /// dialled, however its scheme is spelled; the publish comes back not
+    /// exposed. The routing entry it comes from is another client's to write.
+    #[tokio::test]
+    async fn a_plaintext_fanout_target_is_never_dialled_however_it_is_spelled() {
+        let manager = RelayManager::new();
+        let transport = manager.fanout_transport();
+        for target in [
+            "ws://relay.example",
+            "WS://relay.example",
+            "ws:relay.example",
+            " ws://relay.example",
+            "https://relay.example",
+            "not a relay",
+        ] {
+            let outcome = fanned_out(&transport, target).await;
+            assert!(
+                matches!(
+                    &outcome,
+                    FanoutTargetOutcome::Failed(failure)
+                        if failure.kind() == TransportEndpointFailureKind::NotExposed
+                            && failure.rejection_category().is_none()
+                ),
+                "a target Haven refused to dial has to come back as not exposed: \
+                 nothing left the device, and a row that could only say \
+                 \"possibly exposed\" could never end",
+            );
+            assert!(
+                manager.client.relays().await.is_empty(),
+                "a target Haven refuses was registered in the publish pool, \
+                 which is what gets it dialled",
+            );
+        }
     }
 
     /// Scales the wall-clock budget of the relay-backed waits below, as the
@@ -3637,10 +5241,15 @@ mod tests {
     async fn a_wedged_publish_target_is_freed_so_the_next_attempt_lands() {
         let socket = FakeSocket::wedged();
 
-        let result = publish_with_retry(MAX_PUBLISH_ATTEMPTS, Duration::ZERO, |_| {
-            let outcome = socket.publish_attempt();
-            async move { Ok(outcome) }
-        })
+        let result = publish_with_retry(
+            MAX_PUBLISH_ATTEMPTS,
+            Duration::ZERO,
+            || 0,
+            |_| {
+                let outcome = socket.publish_attempt();
+                async move { Ok(outcome) }
+            },
+        )
         .await;
 
         assert!(
@@ -3675,10 +5284,15 @@ mod tests {
     async fn a_silent_target_that_took_the_publish_keeps_its_socket() {
         let socket = FakeSocket::silent();
 
-        let result = publish_with_retry(MAX_PUBLISH_ATTEMPTS, Duration::ZERO, |_| {
-            let outcome = socket.publish_attempt();
-            async move { Ok(outcome) }
-        })
+        let result = publish_with_retry(
+            MAX_PUBLISH_ATTEMPTS,
+            Duration::ZERO,
+            || 0,
+            |_| {
+                let outcome = socket.publish_attempt();
+                async move { Ok(outcome) }
+            },
+        )
         .await;
 
         assert!(
@@ -3711,10 +5325,15 @@ mod tests {
     async fn a_wedged_location_target_costs_one_sample_and_the_next_lands() {
         let socket = FakeSocket::wedged();
         let sample = || {
-            publish_with_retry(LOCATION_PUBLISH_ATTEMPTS, Duration::ZERO, |_| {
-                let outcome = socket.publish_attempt();
-                async move { Ok(outcome) }
-            })
+            publish_with_retry(
+                LOCATION_PUBLISH_ATTEMPTS,
+                Duration::ZERO,
+                || 0,
+                |_| {
+                    let outcome = socket.publish_attempt();
+                    async move { Ok(outcome) }
+                },
+            )
         };
 
         let lost = sample().await;
@@ -4029,15 +5648,17 @@ mod tests {
         );
     }
 
-    /// The call every send path owes, and the three ways this file hands an
-    /// event to a relay: the pooled fan-out, the harvest's per-relay unit, and
-    /// the `Relay` handle's own send — which is what that unit uses, and what a
-    /// new function written against a relay handle directly would use.
+    /// The call every send path owes, and the four ways this file hands an
+    /// event to a relay: the pooled fan-out, the harvest's per-relay unit, the
+    /// `Relay` handle's own send — which is what that unit uses, and what a
+    /// new function written against a relay handle directly would use — and
+    /// the fanout transport's hand-over to MDK's relay client.
     const WEDGE_CHECK: &str = "recover_wedged_publish_sockets(";
-    const SENDS: [&str; 3] = [
+    const SENDS: [&str; 4] = [
         "client.send_event_to(",
         "send_to_one(client,",
         "relay.send_event(",
+        "fanout::publish_to_target(",
     ];
 
     /// One production function, comment-free and whitespace-free.
@@ -4219,6 +5840,7 @@ mod tests {
             "try_publish_once_harvesting",
             "publish_event_background",
             "send_to_one",
+            "publish",
         ] {
             assert!(
                 senders.iter().any(|name| name == expected),
@@ -4226,6 +5848,259 @@ mod tests {
                  {senders:?}",
             );
         }
+    }
+
+    /// Every method that publishes an event a CALLER hands it refuses one
+    /// that has a durable fanout row, before anything else: the fanout driver
+    /// is such an event's only sender on any publish pool. The driver's own
+    /// transport is the one sender that does not: its `publish_location` is
+    /// how a recorded location is sent at all, and it reaches the pool
+    /// through `send_location`, which is private to this module.
+    #[test]
+    fn every_method_that_publishes_a_callers_event_refuses_a_fanout_owned_one_first() {
+        let takes_an_event = |function: &ScannedFn| {
+            function.code.contains("(&self,event:&Event,")
+                || function.code.contains("(&self,event:Event,")
+        };
+        let publishers: Vec<ScannedFn> = scan_production_functions(include_str!("manager.rs"))
+            .into_iter()
+            .filter(takes_an_event)
+            .collect();
+        let names: Vec<&str> = publishers.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "publish_event",
+                "publish_profile_event",
+                "publish_location_event",
+                "publish_event_background",
+                "publish_location"
+            ],
+            "the scan reads the publish entry points, or it is reading nothing",
+        );
+        let source: String = include_str!("manager.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            source.contains("implfanout::FanoutSendforFanoutTransport{")
+                && source.matches("Self::send_location(").count() == 1
+                && source.matches("RelayManager::send_location(").count() == 1
+                && source.contains("asyncfnsend_location(client:&Client,"),
+            "the send that refuses no fanout-owned event has a caller besides the legacy \
+             entry, which refuses first, and the driver's transport — or is no longer private",
+        );
+        for function in publishers.iter().filter(|f| f.name != "publish_location") {
+            let body = function.code.split_once('{').map_or("", |(_, body)| body);
+            assert!(
+                body.starts_with("Self::refuse_fanout_owned(event)?;")
+                    || body.starts_with("Self::refuse_fanout_owned(&event)?;"),
+                "`{}` can send an event that has a fanout row: a second sender's \
+                 relay answers would be counted as the fanout's own",
+                function.name,
+            );
+        }
+    }
+
+    /// One fanout call per relay at a time on a pool, whichever events they
+    /// carry: the relay sees one call's three attempts, then the other's.
+    ///
+    /// Two calls, each refused three times 600 ms apart by MDK's own loop
+    /// (about 2.5 s in all). Not a race: without the gate both calls send
+    /// their first attempt at once, so the order is interleaved from the
+    /// first frame.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_fanout_call_per_relay_at_a_time() {
+        let _ = allow_ws_loopback_for_test();
+        let relay = ScriptedRelay::start();
+        let offered = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&offered);
+        relay.on_publish(move |event| {
+            seen.lock().expect("offers").push(event.id);
+            Verdict::Refuse("blocked: not here".to_string())
+        });
+        let manager = RelayManager::new();
+        let (first, second) = (fanout_message(), fanout_message());
+        // Two transports of one manager share the gate.
+        let (a, b) = (manager.fanout_transport(), manager.fanout_transport());
+
+        let outcomes: [FanoutTargetOutcome; 2] =
+            tokio::join!(a.call(relay.url(), &first), b.call(relay.url(), &second)).into();
+        for outcome in outcomes {
+            assert!(
+                matches!(
+                    &outcome,
+                    FanoutTargetOutcome::Failed(failure)
+                        if failure.kind() == TransportEndpointFailureKind::TerminalRejected
+                ),
+                "premise: each call was refused on every attempt, and proved it",
+            );
+        }
+        let order = offered.lock().expect("offers").clone();
+        assert_eq!(order.len(), 6, "premise: three attempts per call");
+        assert!(
+            order[..3].iter().all(|id| *id == order[0])
+                && order[3..].iter().all(|id| *id == order[3])
+                && order[0] != order[3],
+            "two fanout calls were under way to one relay at once",
+        );
+    }
+
+    /// Waits, without sleeping, until some task other than this test stands
+    /// at `gate`: a caller takes a handle on a relay's gate before it waits
+    /// for it.
+    async fn someone_waits_at(gate: &Arc<tokio::sync::Mutex<()>>, handles_before: usize) {
+        while Arc::strong_count(gate) <= handles_before {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// A fanout call that ends ambiguously makes MDK's client disconnect its
+    /// relay, and a legacy commit publish under way to that relay would read
+    /// a failure and roll its commit back. So neither is under way to a relay
+    /// while the other is: each waits at that relay's gate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_legacy_publish_and_a_fanout_call_never_run_to_one_relay_at_once() {
+        let _ = allow_ws_loopback_for_test();
+        let relay = ScriptedRelay::start();
+        let bystander = ScriptedRelay::start();
+        let manager = RelayManager::new();
+        let url = RelayManager::validate_single_relay_url(relay.url()).expect("a relay url");
+        let gate_of = |manager: &RelayManager| {
+            Arc::clone(
+                manager
+                    .fanout_gates
+                    .lock()
+                    .expect("gates")
+                    .get(&url)
+                    .expect("the relay has a gate"),
+            )
+        };
+
+        // A fanout call to the relay is under way: it holds the relay's gate.
+        let fanout_call =
+            hold_fanout_gates(&manager.fanout_gates, std::slice::from_ref(&url)).await;
+        let gate = gate_of(&manager);
+        let handles = Arc::strong_count(&gate);
+        let note = throwaway_note("a commit published the legacy way");
+        let targets = [relay.url().to_string(), bystander.url().to_string()];
+        let legacy = manager.publish_event(&note, &targets);
+        tokio::pin!(legacy);
+        tokio::select! {
+            biased;
+            _ = &mut legacy => panic!(
+                "a legacy publish ran to a relay while a fanout call to it was under way",
+            ),
+            () = someone_waits_at(&gate, handles) => {}
+        }
+        assert!(
+            relay.connections() == 0 && bystander.published().is_empty(),
+            "the legacy publish sent before it had the relay to itself",
+        );
+        drop(fanout_call);
+        assert!(legacy.await.expect("the relays are up").is_success());
+        assert!(relay.published().iter().any(|event| event.id == note.id));
+
+        // And the other way round: a legacy publish under way holds it.
+        let legacy_publish =
+            hold_fanout_gates(&manager.fanout_gates, std::slice::from_ref(&url)).await;
+        let handles = Arc::strong_count(&gate);
+        let message = fanout_message();
+        let transport = manager.fanout_transport();
+        let call = transport.call(relay.url(), &message);
+        tokio::pin!(call);
+        let before = relay.published().len();
+        tokio::select! {
+            biased;
+            _ = &mut call => panic!(
+                "a fanout call ran to a relay while a legacy publish to it was under way",
+            ),
+            () = someone_waits_at(&gate, handles) => {}
+        }
+        assert_eq!(relay.published().len(), before);
+        drop(legacy_publish);
+        assert!(matches!(call.await, FanoutTargetOutcome::Accepted));
+    }
+
+    /// A drive waits for a relay another send holds for a bounded time and
+    /// no longer: the relay is then not taken — nothing is registered,
+    /// dialled or handed over — and a drive's budget stays a true one. Once
+    /// the other send is done the relay is taken at once. On a paused clock,
+    /// which only the wait itself can move.
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_another_send_holds_is_not_taken_for_a_fanout_call_until_it_is_free() {
+        let manager = RelayManager::new();
+        let target = "wss://busy.gate-canary4e7a.example.com";
+        let url = RelayManager::validate_single_relay_url(target).expect("a relay url");
+        let held = hold_fanout_gates(&manager.fanout_gates, std::slice::from_ref(&url)).await;
+        let transport = manager.fanout_transport();
+        let began = tokio::time::Instant::now();
+
+        let taken = transport.take(target).await.is_some();
+
+        assert_eq!(
+            began.elapsed(),
+            Duration::from_secs(fanout::GATE_WAIT_SECS),
+            "the call did not wait exactly its bound for the relay",
+        );
+        assert!(
+            !taken,
+            "a relay another send held was taken for a fanout call",
+        );
+        assert!(
+            manager.client.relay(target).await.is_err(),
+            "a relay was registered, or dialled, for a call that never had it",
+        );
+        drop(held);
+        let began = tokio::time::Instant::now();
+        assert!(transport.take(target).await.is_some());
+        assert_eq!(
+            began.elapsed(),
+            Duration::ZERO,
+            "a free relay was waited for"
+        );
+    }
+
+    /// The relay's gate serves whoever waits for it in the order they came:
+    /// a fanout call waiting for a relay is let in ahead of every send that
+    /// asked after it, and that send waits until the call is done.
+    // What each task holds, and for how long, is what is being shown.
+    #[allow(clippy::significant_drop_tightening)]
+    #[tokio::test(start_paused = true)]
+    async fn a_fanout_call_waiting_for_a_relay_goes_ahead_of_every_later_send() {
+        let manager = RelayManager::new();
+        let target = "wss://queued.gate-canary4e7a.example.com";
+        let url = RelayManager::validate_single_relay_url(target).expect("a relay url");
+        let held = hold_fanout_gates(&manager.fanout_gates, std::slice::from_ref(&url)).await;
+        let transport = Arc::new(manager.fanout_transport());
+
+        let waiting = tokio::spawn({
+            let transport = Arc::clone(&transport);
+            async move { transport.take(target).await }
+        });
+        tokio::task::yield_now().await;
+        let later = tokio::spawn({
+            let gates = Arc::clone(&manager.fanout_gates);
+            async move { hold_fanout_gates(&gates, std::slice::from_ref(&url)).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished() && !later.is_finished(), "premise");
+
+        drop(held);
+        let taken = waiting
+            .await
+            .expect("the task ran")
+            .expect("the waiting call was not let in when the relay came free");
+        tokio::task::yield_now().await;
+        assert!(
+            !later.is_finished(),
+            "a later send was let in beside the fanout call that was waiting first",
+        );
+        drop(taken);
+        assert_eq!(later.await.expect("the task ran").len(), 1);
     }
 
     /// Wraps a fixture as a whole production half, so the scan treats it the
@@ -4502,18 +6377,24 @@ mod tests {
         let attempts = std::cell::Cell::new(0u32);
 
         let started = tokio::time::Instant::now();
-        let result = publish_with_retry(LOCATION_PUBLISH_ATTEMPTS, Duration::ZERO, |_| {
-            attempts.set(attempts.get() + 1);
-            async {
-                // The worst one attempt can cost: a full handshake against a
-                // relay that never completes it, then a fan-out that returns
-                // at its own window because nothing answered.
-                tokio::time::sleep(CONNECTION_TIMEOUT).await;
-                let _ = tokio::time::timeout(LOCATION_ACK_WINDOW, futures::future::pending::<()>())
-                    .await;
-                Ok(dummy_publish_result(false))
-            }
-        })
+        let result = publish_with_retry(
+            LOCATION_PUBLISH_ATTEMPTS,
+            Duration::ZERO,
+            || 0,
+            |_| {
+                attempts.set(attempts.get() + 1);
+                async {
+                    // The worst one attempt can cost: a full handshake against a
+                    // relay that never completes it, then a fan-out that returns
+                    // at its own window because nothing answered.
+                    tokio::time::sleep(CONNECTION_TIMEOUT).await;
+                    let _ =
+                        tokio::time::timeout(LOCATION_ACK_WINDOW, futures::future::pending::<()>())
+                            .await;
+                    Ok(dummy_publish_result(false))
+                }
+            },
+        )
         .await;
 
         assert!(
@@ -4719,21 +6600,28 @@ mod tests {
         assert!(result.failed.is_empty(), "both relays answered: {result:?}");
     }
 
-    /// The one error contract Dart acts on rather than merely reports.
-    ///
-    /// `nostr_relay_service.dart` maps this variant's token to
-    /// `RelayClockRejectionException`, which drives the clock-skew banner
-    /// (`b8_clock_skew_test.dart` pins the branch on the production service).
+    /// The one error contract the user is told of rather than merely shown a
+    /// failure: the clock complaint, carried typed to the clock-skew check.
     /// Dropping the ladder around the fan-out would silently flatten it to
     /// `AllRelaysFailed` and the fast-clock outage would go quiet again.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn publish_location_event_reports_a_clock_rejection_without_retrying() {
-        let _ = allow_ws_loopback_for_test();
-        let (_server, url, seen) = refusing_relay("created_at is in the future").await;
+        // NIP-01's `invalid:` prefix, as a relay refusing a timestamp sends it:
+        // under a prefix other than `invalid:` or `blocked:` a timestamp
+        // mention is no clock complaint (`clock_skew::classify_clock_refusal`).
+        let relay = crate::relay::scripted_relay::ScriptedRelay::start();
+        relay.on_publish(|_| {
+            crate::relay::scripted_relay::Verdict::Refuse(
+                "invalid: created_at is in the future".to_string(),
+            )
+        });
 
         let manager = RelayManager::new();
         let result = manager
-            .publish_location_event(&throwaway_note("too new for this relay"), &[url])
+            .publish_location_event(
+                &throwaway_note("too new for this relay"),
+                &[relay.url().to_string()],
+            )
             .await;
 
         assert!(
@@ -4747,81 +6635,91 @@ mod tests {
              is the one publish failure the user can act on: {result:?}",
         );
         assert_eq!(
-            seen.load(std::sync::atomic::Ordering::SeqCst),
+            relay.offers(),
             1,
             "a hopeless clock rejection is not retried either",
         );
     }
 
-    /// Captures `log` records emitted on the CURRENT thread while armed.
-    ///
-    /// Thread-local, so a test that arms it sees only its own records however
-    /// many other tests run beside it; the publish under test runs on a
-    /// current-thread runtime, so every line it emits lands here.
-    struct ThreadLocalCapture;
-
-    thread_local! {
-        static CAPTURED: std::cell::RefCell<Option<Vec<String>>> =
-            const { std::cell::RefCell::new(None) };
-    }
-
-    impl log::Log for ThreadLocalCapture {
-        fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn log(&self, record: &log::Record<'_>) {
-            // Haven's own lines only. Everything else on this thread belongs to
-            // the in-process relay and the WebSocket stack, which log whole
-            // frames at trace — including the relay's own refusal prose. What
-            // this app promises about its diagnostics is what THIS crate
-            // writes.
-            if !record.target().starts_with("haven_core") {
-                return;
-            }
-            CAPTURED.with_borrow_mut(|captured| {
-                if let Some(lines) = captured.as_mut() {
-                    lines.push(record.args().to_string());
-                }
-            });
-        }
-
-        fn flush(&self) {}
-    }
-
-    /// Runs `body` with capture armed on this thread and returns what it
-    /// logged.
-    async fn capture_log_lines(body: impl std::future::Future<Output = ()>) -> Vec<String> {
-        static INSTALL: std::sync::Once = std::sync::Once::new();
-        /// Whether OUR logger won the process-wide slot. `log` allows exactly
-        /// one logger per process and reports the loser only as an `Err` from
-        /// `set_boxed_logger` — a value a `let _ =` throws away. Any future
-        /// helper that installs its own logger would therefore make this one
-        /// capture NOTHING, and the anti-vacuity assertions below would be the
-        /// only thing standing between that and a silently green test. Record
-        /// the verdict and fail on it directly instead.
-        static OWNS_LOGGER: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        INSTALL.call_once(|| {
-            OWNS_LOGGER.store(
-                log::set_boxed_logger(Box::new(ThreadLocalCapture)).is_ok(),
-                std::sync::atomic::Ordering::SeqCst,
-            );
-            log::set_max_level(log::LevelFilter::Trace);
+    /// khatru answers a timestamp out of its window under `blocked:`, not
+    /// `invalid:` (its `handleNormal` prefixes every policy verdict so): the
+    /// clock verdict and the no-retry rule read it all the same.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_khatru_relay_refusing_the_timestamp_is_a_clock_rejection_without_a_retry() {
+        let relay = crate::relay::scripted_relay::ScriptedRelay::start();
+        relay.on_publish(|_| {
+            crate::relay::scripted_relay::Verdict::Refuse(
+                "blocked: event too much in the future".to_string(),
+            )
         });
+
+        let result = RelayManager::new()
+            .publish_location_event(
+                &throwaway_note("too new for a khatru relay"),
+                &[relay.url().to_string()],
+            )
+            .await;
+
         assert!(
-            OWNS_LOGGER.load(std::sync::atomic::Ordering::SeqCst),
-            "another logger already owns this process, so this capture sees \
-             nothing at all. `log` permits exactly one; whoever installed the \
-             other one has to route through ThreadLocalCapture instead.",
+            matches!(
+                result,
+                Err(RelayError::DeviceClockRejected {
+                    complaint: clock_skew::DeviceClockComplaint::Ahead,
+                }),
+            ),
+            "khatru's timestamp refusal was not read as the clock verdict: {result:?}",
+        );
+        assert_eq!(
+            relay.offers(),
+            1,
+            "a hopeless clock rejection is not retried"
+        );
+    }
+
+    /// An event signed hours ago and refused as too old is refused for its
+    /// age: the publish fails as any unacknowledged one does, with no clock
+    /// verdict, where the same refusal of a fresh event is one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_old_event_refused_as_too_old_is_no_clock_rejection() {
+        // The event's age is read off the manager's clock alone, never the
+        // wall clock, so no stall of the test can change it.
+        const NOW: u64 = 1_700_000_000;
+        let relay = crate::relay::scripted_relay::ScriptedRelay::start();
+        relay.on_publish(|_| {
+            crate::relay::scripted_relay::Verdict::Refuse("blocked: event too old".to_string())
+        });
+        let signed_at = |secs: u64, content: &str| {
+            nostr::EventBuilder::new(Kind::TextNote, content)
+                .custom_created_at(nostr::Timestamp::from(secs))
+                .sign_with_keys(&nostr::Keys::generate())
+                .expect("sign")
+        };
+        let result = RelayManager::at_for_test(NOW)
+            .publish_location_event(
+                &signed_at(NOW - 3 * 3600, "signed hours ago"),
+                &[relay.url().to_string()],
+            )
+            .await;
+        assert!(
+            !matches!(result, Err(RelayError::DeviceClockRejected { .. })),
+            "a refusal of an event for its age was read as this device's clock: {result:?}",
         );
 
-        CAPTURED.with_borrow_mut(|captured| *captured = Some(Vec::new()));
-        body.await;
-        CAPTURED
-            .with_borrow_mut(Option::take)
-            .expect("capture was armed above")
+        let fresh = RelayManager::at_for_test(NOW)
+            .publish_location_event(&signed_at(NOW, "fresh"), &[relay.url().to_string()])
+            .await;
+        assert!(
+            matches!(
+                fresh,
+                Err(RelayError::DeviceClockRejected {
+                    complaint: clock_skew::DeviceClockComplaint::Behind,
+                })
+            ),
+            "a fresh event refused as too old is no longer a clock rejection: {fresh:?}",
+        );
     }
+
+    use crate::test_log::capture_log_lines;
 
     /// The location publish names no relay in its own log lines: the relay set
     /// a device publishes to is linkable metadata, and a relay's refusal text

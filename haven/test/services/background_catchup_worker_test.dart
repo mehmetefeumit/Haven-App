@@ -8,7 +8,7 @@
 ///   gate 2 — pending-MLS-wipe marker (M10.1, fail-CLOSED)
 ///   gate 3 — FGS alive (battery fast-path, fail-OPEN)
 ///   gate 4 — foreground active (battery fast-path, fail-OPEN)
-///   then the receive-only sweep.
+///   then the receive-only sweep, and the leave carry-on after it.
 ///
 /// (0) **Flag off → no-op before anything**: `catchupEnabled: false` returns
 ///     true with ZERO closure calls — the rollback story (plan §7/A1) depends
@@ -611,6 +611,42 @@ void main() {
         kCatchupWorkerPendingWipePostBootstrapMarker,
         isNot(contains(kCatchupWorkerBootstrapOkMarker)),
       );
+    });
+
+    test('a wake seals and sends no location: it receives, and carries a '
+        'leave on', () {
+      // The WorkManager plane's publish exclusion: it has no seal at all, so
+      // a circle the core holds — a leave among them — is sent nothing here.
+      final source = File(
+        'lib/src/services/background_catchup_worker.dart',
+      ).readAsStringSync();
+      for (final call in const [
+        'sealLocation(',
+        'publishLocation(',
+        'publishLocationEvent(',
+        'encryptLocation(',
+      ]) {
+        expect(source, isNot(contains(call)), reason: '$call on this plane');
+      }
+    });
+
+    test('a wake carries every leave on after its sweep, under the same '
+        'consent read and claiming no foreground', () {
+      // The worker's bootstrap opens the real FFI, so the order is pinned on
+      // the source: the carry-on behaviour itself is LeaverBackstop's
+      // (leaver_backstop_test.dart).
+      final source = File(
+        'lib/src/services/background_catchup_worker.dart',
+      ).readAsStringSync().replaceAll(RegExp(r'\s+'), ' ');
+      final sweep = source.indexOf(
+        '.runCatchup(isBackgroundWake: true, maxDurationSecs: 25);',
+      );
+      final carryOn = source.indexOf(
+        'if (await consented()) { await LeaverBackstop().carryOn( '
+        'manager: circleManager, driver: relayService, ); }',
+      );
+      expect(sweep, isNonNegative, reason: 'the sweep is gone');
+      expect(carryOn, greaterThan(sweep));
     });
 
     test('the sweep-completion doc names the counters the line emits', () {

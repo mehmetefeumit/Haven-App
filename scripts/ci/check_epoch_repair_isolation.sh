@@ -51,8 +51,9 @@
 #
 # Checks:
 #   1. Every allowlisted path exists (a typo must not silently disable a check).
-#   2. `repairEpochRotation` / `repairCircleEpoch` appear ONLY in allowlisted
-#      files, anywhere under `haven/lib`.
+#   2. Every name in REPAIR_TOKENS — the FFI calls, the driven entry
+#      `repairRotationDriven` and every Dart wrapper that reaches them —
+#      appears ONLY in allowlisted files, anywhere under `haven/lib`.
 #
 # Exit codes:
 #   0  all checks pass
@@ -70,6 +71,8 @@ readonly -a ALLOWED_FILES=(
   "haven/lib/src/services/nostr_circle_service.dart"
   "haven/lib/src/providers/sharing_health_provider.dart"
   "haven/lib/src/widgets/map/sharing_health_banner.dart"
+  "haven/lib/src/services/nostr_relay_service.dart"
+  "haven/lib/src/services/circle_change_driver.dart"
 )
 readonly ALLOWED_PREFIX="haven/lib/src/rust/"
 
@@ -83,6 +86,9 @@ readonly -a REPAIR_TOKENS=(
   'repairCircleEpoch'
   'repairSelectedCircleEpoch'
   'sharingRepairProvider'
+  # The driven entry the app calls since W9n, and the driver method over it.
+  'repairRotationDriven'
+  'repairRotation('
 )
 
 log() {
@@ -132,7 +138,9 @@ if [[ "${1:-}" == "--self-test" ]]; then
   # this guard was escaped: neither name is the FFI call, and both reach it.
   for probe in \
     'void x(WidgetRef ref) { ref.read(sharingRepairProvider)(); }' \
-    'void x(Ref ref) { repairSelectedCircleEpoch(ref); }'
+    'void x(Ref ref) { repairSelectedCircleEpoch(ref); }' \
+    'Future<void> x(RelayManagerFfi m) => m.repairRotationDriven(circle: c);' \
+    'Future<void> x(CircleChangeDriver d) => d.repairRotation(circle: c);'
   do
     printf '%s\n' "${probe}" \
       > "${tmp}/haven/lib/src/services/background_location_task.dart"

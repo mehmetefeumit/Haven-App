@@ -2,31 +2,21 @@
 ///
 /// A peer's `SelfRemove` (RFC 9420 §12.1.2) is a bare PROPOSAL. It only
 /// becomes a removal once a remaining member publishes the commit their
-/// engine stages for it. The Dark Matter engine owns publish-before-apply
-/// for every SEND-side commit internally, but it cannot publish this one:
-/// the Rust `CircleManagerFfi` holds no relay handle, so it hands the
-/// commit back to the caller as `DecryptLocationOutcomeFfi.autoCommits`.
+/// engine stages for it. Every receive path — the app's polls and the E2E
+/// synthetic peer alike — ingests through the fanout driver
+/// (`ingest_driven`), which records and drives that auto-commit in Rust.
 ///
-/// There are two Dart-visible ingest APIs and only one of them is safe on a
-/// receive path:
-///
-///   * `decryptLocationCollectingCommits` — SURFACES the auto-commit for the
-///     caller to publish, then confirm on a ≥1-relay ack.
-///   * `decryptLocation` — a shim that ROLLS THE AUTO-COMMIT BACK. Safe only
-///     where a `SelfRemove` can never arrive (e.g. a fixture that only ever
-///     feeds admin-authored removal commits or location messages).
-///
-/// Picking the shim on a real receive path fails **silently and totally**:
-/// no error, no result, no removal — the departing member simply stays in
-/// everyone's roster forever. That is exactly what happened when the E2E
-/// synthetic peer's drain used it; every leave scenario deadlocked and the
-/// only symptom was a 60s convergence timeout, 20 minutes into an emulator
-/// lane.
+/// The older ingest calls are retired: one rolled the auto-commit back, and
+/// picking it on a real receive path failed **silently and totally** — no
+/// error, no removal, the departing member in everyone's roster forever.
+/// That is exactly what happened when the E2E synthetic peer's drain used
+/// it; every leave scenario deadlocked and the only symptom was a 60s
+/// convergence timeout, 20 minutes into an emulator lane.
 ///
 /// These scans are the cheap tripwire for that. The behavioural proof lives
-/// in `haven-core/tests/circle_integration_test.rs`
-/// (`peer_self_remove_surfaces_a_receive_side_auto_commit`), which pins both
-/// APIs side by side on the same proposal.
+/// in `haven-core/tests/circle_integration_test.rs`, in the test whose name
+/// begins `peer_self_remove_is_made_by_a_driving_plane`: it pins a plane that
+/// makes the commit and one that makes none side by side on the same proposal.
 library;
 
 import 'dart:io';
@@ -50,11 +40,11 @@ Iterable<({String path, String src})> _dartSources(String root) sync* {
 
 void main() {
   group('receive-side auto-commit (Rule 13)', () {
-    test('the E2E synthetic peer drains via the commit-collecting API', () {
+    test('the E2E synthetic peer ingests through the fanout driver', () {
       // `synthetic_user.dart` is the stand-in for a real remaining member in
       // every multi-party E2E scenario, including all three leave paths
-      // (non-admin leave, admin handoff, abandon). Its drain MUST use the
-      // collecting API, or a peer's SelfRemove is discarded on arrival.
+      // (non-admin leave, admin handoff, abandon). Its drain MUST ingest
+      // through the driver, or a peer's SelfRemove is never committed.
       final harness = File(
         'integration_test/e2e/_lib/synthetic_user.dart',
       );
@@ -67,65 +57,61 @@ void main() {
       );
       final src = harness.readAsStringSync();
 
-      // Scan for the CALL, not merely a mention: the file also documents the
-      // contract in prose and defines the publish helper, so a substring
-      // search for the safe name passes even after the drain is switched back
-      // to the shim. `\bdecryptLocation\s*\(` matches the shim call and NOT
-      // `decryptLocationCollectingCommits(` (the next char there is `C`).
-      final shimCall = RegExp(r'\bdecryptLocation\s*\(');
-      expect(
-        shimCall.hasMatch(src),
-        isFalse,
-        reason:
-            'the synthetic peer calls the rolling-back `decryptLocation` '
-            'shim. It must ingest via `decryptLocationCollectingCommits`: '
-            'the shim rolls back the eviction commit the engine stages for a '
-            "peer's SelfRemove, so the leaver never leaves any roster and "
-            'every leave scenario deadlocks with no error surfaced.',
-      );
-      expect(
-        src.contains('decryptLocationCollectingCommits('),
-        isTrue,
-        reason:
-            'the synthetic peer no longer calls '
-            '`decryptLocationCollectingCommits` — a receive path that never '
-            'collects auto-commits cannot converge a peer SelfRemove.',
-      );
-
-      // The publish-then-confirm half of the contract: surfacing the commit
-      // and then not publishing it is just as broken as never surfacing it.
-      for (final required in const [
-        'publishAndAwaitOk',
-        'confirmPublished',
-        'publishFailed',
+      for (final retired in [
+        RegExp(r'\bdecryptLocation\s*\('),
+        RegExp(r'\bdecryptLocationCollectingCommits\s*\('),
+        RegExp(r'\bconfirmPublished\s*\('),
       ]) {
         expect(
-          src.contains(required),
-          isTrue,
-          reason:
-              'the synthetic peer surfaces receive-side auto-commits but no '
-              'longer calls `$required`. Rule 13 needs the full dance: '
-              'publish once, confirm on a ≥1-relay ack, roll back otherwise '
-              '— never confirm before an ack, never drop the pending ref.',
+          retired.hasMatch(src),
+          isFalse,
+          reason: 'the synthetic peer calls a retired ingest or confirm '
+              '(${retired.pattern}): a receive-side auto-commit must be '
+              'recorded and driven in Rust, never handled in Dart.',
         );
       }
+      expect(src, contains('ingestForTest('));
+      expect(
+        File('integration_test/e2e/_lib/driven_location.dart')
+            .readAsStringSync(),
+        contains('.ingestDriven('),
+        reason: "the synthetic peer's ingest goes through the driver",
+      );
+    });
+
+    test('production receive paths ingest through the fanout driver', () {
+      // Both polls hand a received kind-445 to the driver's ingest, which
+      // records and drives a receive-side auto-commit in Rust
+      // (`haven-core/tests/poll_send_drive_e2e.rs`, the test whose name
+      // begins `a_removal_owed_after_a_departure_is_published_promptly`).
+      // A Dart receive path that collected the commit itself would run it
+      // outside any record again.
+      final collecting = <String>[];
+      for (final file in _dartSources('lib')) {
+        if (file.src.contains('decryptLocationCollectingCommits(')) {
+          collecting.add(file.path);
+        }
+      }
+      expect(collecting, isEmpty);
+      final sharing = File(
+        'lib/src/services/location_sharing_service.dart',
+      ).readAsStringSync();
+      expect(
+        RegExp(r'\.ingestEvent\(').allMatches(sharing),
+        hasLength(2),
+        reason: 'the location poll and the evolution poll each ingest '
+            'through the driver',
+      );
     });
 
     test('production receive paths never use the roll-back shim', () {
-      // The foreground poll owns a relay handle and must publish the
-      // auto-commit itself; live-sync and background catch-up publish it
-      // in-Rust and therefore never surface one. No production path has a
-      // legitimate reason to call the rolling-back shim.
+      // Every plane makes a receive-side auto-commit in Rust: the polls
+      // through the driver's ingest, live-sync and background catch-up in
+      // their own planes. No production path has a legitimate reason to call
+      // the rolling-back shim.
       final offenders = <String>[];
       final callPattern = RegExp(r'\bdecryptLocation\s*\(');
       for (final file in _dartSources('lib')) {
-        // The service interface declares both APIs, and the Nostr
-        // implementation forwards both to the FFI; those declarations are
-        // the definitions, not receive-path call sites.
-        if (file.path.endsWith('circle_service.dart') ||
-            file.path.endsWith('nostr_circle_service.dart')) {
-          continue;
-        }
         if (callPattern.hasMatch(file.src)) {
           offenders.add(file.path);
         }
@@ -135,10 +121,8 @@ void main() {
         isEmpty,
         reason:
             'these production files call the rolling-back `decryptLocation` '
-            'shim on what looks like a receive path: $offenders. Use '
-            '`decryptLocationCollectingCommits` and publish + confirm each '
-            'surfaced auto-commit (see `resolveAutoCommits` in '
-            'lib/src/services/location_auto_commit.dart).',
+            'shim on what looks like a receive path: $offenders. Ingest '
+            'through the fanout driver (`CircleService.ingestEvent`).',
       );
     });
   });

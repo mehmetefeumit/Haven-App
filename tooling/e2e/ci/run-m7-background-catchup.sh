@@ -50,11 +50,11 @@
 #     the opt-in reached the cold process, a leaked wake could not have reached
 #     the relay even with every gate open, so the silence was over-determined.
 #   * The seeded kind-445 carries a NIP-40 expiration of 228 s
-#     (LOCATION_MESSAGE_RETENTION_SECS) and the engine treats an event past
-#     expiry + RECEIVER_EXPIRATION_GRACE_SECS (60 s) as terminally `Stale`,
-#     which counts as APPLIED with nothing decrypted. `M7_DECRYPT_FRESHNESS_S`
-#     bounds seed→sweep so that short-circuit cannot masquerade as delivery
-#     (observed seed→sweep across six 2026-08 runs: 11-63 s).
+#     (LOCATION_MESSAGE_RETENTION_SECS), and the worker's relay pool drops an
+#     event past it on receipt, with no grace — the sweep then sees nothing
+#     and `locations` reads 0. `M7_DECRYPT_FRESHNESS_S` bounds seed→sweep so
+#     an aged-out seed is reported as lane timing, never as a delivery
+#     regression (observed seed→sweep across six 2026-08 runs: 11-63 s).
 #
 # Set M7_REQUIRE_DECRYPT=0 only for a local run against a relay the cold worker
 # genuinely cannot reach; CI pins it to 1 and
@@ -95,8 +95,8 @@
 #   M7_DECRYPT_FRESHNESS_S  Max seconds between the setup drive finishing (peer
 #                           kind-445 seeded) and the sweep, above which the
 #                           seeded event may have aged past its NIP-40 window
-#                           and a `Stale` short-circuit could pass as delivery
-#                           (default 240; the engine's hard limit is 228+60).
+#                           and been dropped by the relay pool (default 180;
+#                           the pool's hard limit is 228, with no grace).
 #   HAVEN_DRIVE_TIMEOUT     per-drive `timeout` (default 10m).
 #   M7_BOOT_TIMEOUT         reboot boot-completed bound in s (default 300).
 #   M7_JOB_REARM_TIMEOUT    post-boot job re-schedule bound in s (default 60, A6).
@@ -195,11 +195,12 @@ readonly FORCE_RUN_ROUND_POLL="${M7_FORCE_RUN_ROUND_POLL:-4}"
 # the assertion to evidence-only for a local run against an unreachable relay.
 readonly REQUIRE_DECRYPT="${M7_REQUIRE_DECRYPT:-1}"
 # Upper bound on seed→sweep wall clock for the Phase-A delivery assertion. The
-# seeded kind-445 expires 228 s after `created_at` and the engine short-circuits
-# an event past expiry+60 s to `Stale`, which the sweep counts as APPLIED with
-# nothing decrypted. Bounding the window keeps `locations>=1` an honest decrypt
-# oracle rather than one a slow run could satisfy vacuously.
-readonly DECRYPT_FRESHNESS_S="${M7_DECRYPT_FRESHNESS_S:-240}"
+# seeded kind-445 expires 228 s after `created_at`, and the relay pool drops it
+# on receipt from then on, so a slow run's `locations=0` would read as a
+# delivery regression. `seed_at` is the setup drive's exit, AFTER `created_at`,
+# and `elapsed` is read after the sweep: 180 leaves 48 s for the drive's tail
+# past the publish, so every run under the bound fetched a live event.
+readonly DECRYPT_FRESHNESS_S="${M7_DECRYPT_FRESHNESS_S:-180}"
 # If adb marks the emulator 'offline' (a transport drop under this lane's memory
 # pressure, or right after the Phase-B guest reboot), how long to try recovering
 # it before declaring an infrastructure failure. Bounded so a genuinely-wedged
@@ -1030,11 +1031,10 @@ phase_a() {
   fi
   echo "[phase-a] cold worker armed the ws:// loopback opt-in (relay reachable)."
 
-  # Freshness: past 228s (NIP-40 expiration) + 60s receiver grace the engine
-  # short-circuits the seeded event to `Stale`, which the sweep counts as
-  # APPLIED with nothing decrypted. Refuse to call that delivery.
+  # Freshness: past 228 s (NIP-40 expiration) the relay pool drops the seeded
+  # event on receipt, so a zero below would be lane timing, not delivery.
   if (( elapsed > DECRYPT_FRESHNESS_S )); then
-    fail "seed→sweep took ${elapsed}s (> ${DECRYPT_FRESHNESS_S}s): the seeded kind-445 may have aged past its NIP-40 window, where a terminal 'Stale' outcome counts as APPLIED without decrypting anything. This is a LANE-TIMING failure, not proof of a delivery regression — re-run, and if it persists shorten the force-run path rather than raising M7_DECRYPT_FRESHNESS_S past 228+60."
+    fail "seed→sweep took ${elapsed}s (> ${DECRYPT_FRESHNESS_S}s): the seeded kind-445 may have aged past its 228 s NIP-40 window, where the relay pool drops it on receipt. This is a LANE-TIMING failure, not proof of a delivery regression — re-run, and if it persists shorten the force-run path rather than raising M7_DECRYPT_FRESHNESS_S toward 228."
   fi
 
   if [[ -z "${locations}" ]] || (( locations < 1 )) \

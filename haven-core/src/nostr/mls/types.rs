@@ -15,18 +15,26 @@
 
 // ── Dark Matter re-exports (the DM-3 consumer surface) ───────────────────────
 pub use cgka_engine::openmls_projection::OpenMlsContentKind;
-pub use cgka_session::{CreateGroupEffects, IngestEffects, PublishWork, SessionEffects};
-pub use cgka_traits::app_components::AppComponentData;
+pub use cgka_session::{
+    CreateGroupEffects, IngestEffects, PublishWork, QueuedIntentRef, SessionEffects,
+};
+pub use cgka_traits::app_components::{AppComponentData, ACCOUNT_IDENTITY_PROOF_COMPONENT_ID};
 pub use cgka_traits::engine::{
     CreateGroupRequest, GroupEvent, GroupStateChange, KeyPackage, KeyPackageSource, SendIntent,
     WelcomeMetadata,
 };
-pub use cgka_traits::engine_state::PendingStateRef;
-pub use cgka_traits::group::{Group as MlsGroup, Member as MlsMember};
-pub use cgka_traits::ingest::{IngestOutcome, StaleReason};
+pub use cgka_traits::engine_state::{EpochState, PendingStateRef};
+pub use cgka_traits::group::{Group as MlsGroup, Member as MlsMember, ProtocolProfile};
+pub use cgka_traits::ingest::{
+    DeferralLineage, InboundResourceLimit, IngestOutcome, InputRejectionCategory, LocalIngestState,
+    ProposalRejectionCategory, StaleReason,
+};
 pub use cgka_traits::message::{MessageRecord, MessageState};
 pub use cgka_traits::transport::TransportMessage;
 pub use cgka_traits::types::{EpochId, GroupId, MemberId, MessageId};
+pub use cgka_traits::{
+    FanoutTargetStatus, TransportEndpointFailureKind, TransportEndpointRejectionCategory,
+};
 pub use nostr::Event;
 
 // ── Typed engine errors — MATCHED, NEVER FORMATTED ───────────────────────────
@@ -47,7 +55,10 @@ pub use cgka_session::SessionError;
 #[cfg(any(test, feature = "test-utils"))]
 pub use cgka_traits::error::EngineError;
 
+use cgka_traits::{FanoutMlsState, OutboundFanout, TransportEndpointFailure};
+
 use crate::log_alias::{self, LogAliasClass};
+use crate::nostr::NostrError;
 
 // ── Haven-local ingest screening ─────────────────────────────────────────────
 
@@ -59,24 +70,20 @@ use crate::log_alias::{self, LogAliasClass};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PreAuthRejection {
-    /// The event's NIP-40 `expiration` tag, plus
-    /// [`crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS`] of clock-skew
-    /// grace, is in the past.
-    Expired,
-    /// The event could not be converted into a transport message by the PURE,
-    /// pre-engine parse
+    /// The PURE, pre-engine screen refused the event: it is not group traffic
+    /// (any kind but 445 — a Welcome enters only through `accept_welcome`), or
+    /// it could not be converted into a transport message
     /// ([`SessionManager::event_to_transport_message`](crate::nostr::mls::SessionManager::event_to_transport_message)):
     /// a missing, duplicated, valueless or wrong-width `h`/`p` routing tag, an
     /// unsupported kind, or a self-reported id that does not match the event's
     /// own hash.
     ///
-    /// That parse reads only already-materialized envelope fields. It never
+    /// That screen reads only already-materialized envelope fields. It never
     /// touches key material, never looks at the base64 `content`, and never
     /// reaches the engine — so a failure here says how the event was *signed*,
-    /// decided before anything authenticated anything. Substantively the same
-    /// class of judgement as [`Self::Expired`], and classified the same way.
+    /// decided before anything authenticated anything.
     ///
-    /// **Only that one parse may produce this.** An engine-side or
+    /// **Only that screen may produce this.** An engine-side or
     /// decryption-side failure MUST stay an `Err`: reclassifying it here would
     /// convert a hold into a skip for input that has already touched secrets,
     /// which is precisely the primitive the cursor design exists to deny (see
@@ -142,6 +149,89 @@ impl ScreenedIngest {
 
 // Presence-only: never prints the drained `GroupEvent`s (decrypted inner
 // locations) or the publish work (whose `h` tag carries the `nostr_group_id`).
+/// Whether a fetched `KeyPackage` event can be invited
+/// ([`SessionManager::key_package_admission`](crate::nostr::mls::SessionManager::key_package_admission)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPackageAdmission {
+    /// It passes MDK's admission check for the target (a new circle, or the
+    /// named existing one).
+    Admissible,
+    /// It is a pre-migration package — a kind-443, or a Legacy-profile 30443:
+    /// the person needs to update Haven before they can be invited.
+    NeedsUpdate,
+    /// It fails admission for any other reason (expired, missing a required
+    /// capability, malformed).
+    Unusable,
+}
+
+/// What a `KeyPackage` must be to be invited into one target: a new Haven
+/// circle, or one existing circle.
+///
+/// MDK's own admission snapshot (`KeyPackageRequirements`, v0.10.4
+/// `cgka-engine/src/key_package.rs:192-221`, "used to filter discovery
+/// candidates before ranking"), read once by
+/// [`SessionManager::key_package_admission_rule`](crate::nostr::mls::SessionManager::key_package_admission_rule).
+///
+/// `Debug` is hand-written: no MDK value is formatted (Security Rule 15).
+#[derive(Clone)]
+pub struct KeyPackageAdmissionRule(pub(crate) cgka_engine::key_package::KeyPackageRequirements);
+
+impl KeyPackageAdmissionRule {
+    /// Whether `package` passes MDK's admission check for the target:
+    /// identity, lifetime, profile, ciphersuite and every capability the
+    /// target requires. MDK's refusal carries a capability list and free
+    /// text, so only the verdict leaves here.
+    #[must_use]
+    pub fn admits(&self, package: &KeyPackage) -> bool {
+        self.0.validate(package).is_ok()
+    }
+}
+
+impl std::fmt::Debug for KeyPackageAdmissionRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyPackageAdmissionRule")
+            .finish_non_exhaustive()
+    }
+}
+
+/// What accepting a held Welcome did
+/// ([`SessionManager::accept_welcome`](crate::nostr::mls::SessionManager::accept_welcome)).
+pub enum WelcomeAcceptance {
+    /// The engine ingested it; the effects carry `GroupJoined` when it joined.
+    Ingested(IngestEffects),
+    /// The Welcome can never be processed on this device — its `KeyPackage`'s
+    /// private bundle is gone, it is invalid, misaddressed or already
+    /// processed: every `IngestOutcome::Ignored` MDK answers a Welcome with.
+    /// Only a new invitation can add this device.
+    NeedsNewInvite,
+    /// The Welcome would replace a group this device still holds — a removal
+    /// it never saw, or a fork — which MDK applies only on the user's explicit
+    /// confirmation (`LocalIngestState::RejoinConfirmationRequired`).
+    RejoinConfirmationRequired,
+    /// This device already processed this Welcome and still holds the group it
+    /// joined live: an earlier accept whose circle rows never committed. The
+    /// effects carry whatever the engine handed back with the answer.
+    AlreadyJoined {
+        /// The group the earlier accept joined.
+        group_id: GroupId,
+        /// The batch the answer came with.
+        effects: SessionEffects,
+    },
+}
+
+/// The effects carry the joined group's id and its first events, so they never
+/// render (Rule 15).
+impl std::fmt::Debug for WelcomeAcceptance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ingested(_) => f.debug_tuple("Ingested").field(&"<redacted>").finish(),
+            Self::NeedsNewInvite => f.write_str("NeedsNewInvite"),
+            Self::RejoinConfirmationRequired => f.write_str("RejoinConfirmationRequired"),
+            Self::AlreadyJoined { .. } => f.write_str("AlreadyJoined { .. }"),
+        }
+    }
+}
+
 impl std::fmt::Debug for ScreenedIngest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -439,6 +529,35 @@ pub struct StoredMessageProbe {
     pub state: MessageState,
 }
 
+/// One stored row of a circle the engine still means to try again, as a test
+/// may read it: [`StoredMessageProbe`]'s two fields and what the row keeps.
+///
+/// **No `Debug`**, for [`StoredMessageProbe`]'s reason.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct HeldRowProbe {
+    /// The epoch column the engine stamped on the row.
+    pub epoch: EpochId,
+    /// The row's disposition.
+    pub state: MessageState,
+    /// What the row keeps.
+    pub keeps: HeldRowKind,
+}
+
+/// What a stored row the engine still means to try again keeps.
+///
+/// **No `Debug`**: one variant carries an MDK value.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HeldRowKind {
+    /// The transport bytes as they arrived: nobody opened them.
+    Unopened,
+    /// An MLS message the engine opened, of this content kind.
+    Opened(OpenMlsContentKind),
+    /// Anything else: a Welcome, or a payload this build cannot read.
+    Other,
+}
+
 // ── Stuck convergence inputs (the outbound send gate) ────────────────────────
 
 /// How old a stored convergence input must be before re-delivery can no longer
@@ -446,16 +565,16 @@ pub struct StoredMessageProbe {
 ///
 /// A kind-445 application message published by a current Haven build carries a
 /// NIP-40 `expiration` of `created_at + LOCATION_MESSAGE_RETENTION_SECS`, so a
-/// conformant relay has deleted the event by then and no receive plane can
-/// fetch it again; [`RECEIVER_EXPIRATION_GRACE_SECS`] adds the same clock-skew
-/// slack the receiver-side screen in
-/// [`SessionManager::process_event`](crate::nostr::mls::SessionManager::process_event)
-/// allows before it drops a replay.
+/// conformant relay has deleted the event by then, and `nostr-relay-pool` drops
+/// a copy that is still served before any subscriber sees it; both judge by
+/// their own clock, and [`RECEIVER_EXPIRATION_GRACE_SECS`] is the slack Haven
+/// adds on top for a relay whose clock runs behind (the pool itself allows
+/// none).
 ///
 /// # This is a heuristic about the relay, not a proof about the event
 ///
-/// The screen reads each event's OWN `expiration` tag; this constant reasons
-/// from a message's `created_at` and Haven's own retention policy. Another
+/// A relay reads each event's OWN `expiration` tag; this constant reasons from
+/// a message's `created_at` and Haven's own retention policy. Another
 /// Marmot client in the same circle may declare a LONGER
 /// `message-retention.v1` (0x8005), so its 445s can outlive
 /// `created_at + 228 s` on a relay and still be redeliverable when this rule
@@ -475,10 +594,9 @@ pub const UNRESOLVABLE_INPUT_MAX_AGE_SECS: u64 =
 /// Whether an event stamped `created_at_secs` is past the point where a relay
 /// still holds it, as judged at `now_secs`.
 ///
-/// STRICTLY greater, matching `process_event`'s `Timestamp::now() > grace`
-/// comparison exactly: at precisely [`UNRESOLVABLE_INPUT_MAX_AGE_SECS`] the
-/// receive screen still ACCEPTS the event, so the sweep must not have disposed
-/// of it yet. Saturating, so a `created_at` in the future is simply never old.
+/// STRICTLY greater: at precisely [`UNRESOLVABLE_INPUT_MAX_AGE_SECS`] the row is
+/// still inside the slack, so the sweep must not have disposed of it yet.
+/// Saturating, so a `created_at` in the future is simply never old.
 #[must_use]
 pub const fn beyond_relay_retention(created_at_secs: u64, now_secs: u64) -> bool {
     now_secs.saturating_sub(created_at_secs) > UNRESOLVABLE_INPUT_MAX_AGE_SECS
@@ -528,26 +646,1000 @@ impl ConvergenceSweep {
     }
 }
 
+// ── Fanout transport values — HELD, NEVER FORMATTED ──────────────────────────
+//
+// MDK's own `Debug` on these prints a relay URL, free text or a transport
+// event id, so each is held behind a wrapper whose `Debug` is hand-written and
+// names a closed vocabulary only (Security Rule 15). The matches below carry
+// no wildcard arm: a variant MDK adds has to be decided here before it builds.
+
+/// One relay's failure to take a fanout publish, as MDK classified it.
+///
+/// Wraps `TransportEndpointFailure`: its `endpoint` is a relay URL and its
+/// `reason` is free text, so neither is readable through this type. What the
+/// relay's own `OK false` blamed on this device's clock is kept beside it,
+/// classified, the words gone.
+pub struct FanoutEndpointFailure(
+    TransportEndpointFailure,
+    Option<crate::relay::clock_skew::DeviceClockComplaint>,
+);
+
+impl FanoutEndpointFailure {
+    pub(crate) const fn new(failure: TransportEndpointFailure) -> Self {
+        Self(failure, None)
+    }
+
+    /// The same failure, with what the relay blamed on this device's clock.
+    pub(crate) fn blaming_the_clock(
+        self,
+        complaint: Option<crate::relay::clock_skew::DeviceClockComplaint>,
+    ) -> Self {
+        Self(self.0, complaint)
+    }
+
+    /// What the relay's refusal blamed on this device's clock, when it did.
+    #[must_use]
+    pub const fn clock_blamed(&self) -> Option<crate::relay::clock_skew::DeviceClockComplaint> {
+        self.1
+    }
+
+    /// MDK's own value, for the stored fanout record that takes nothing else
+    /// (`OutboundFanout::record_target_failure`). The ONE way out of the
+    /// wrapper: what it returns prints a relay URL and free text, so it goes
+    /// to that record and is never formatted.
+    pub(crate) fn into_mdk_failure(self) -> TransportEndpointFailure {
+        self.0
+    }
+
+    /// MDK's exposure-and-retry class: the one field a fanout decision reads.
+    #[must_use]
+    pub const fn kind(&self) -> TransportEndpointFailureKind {
+        self.0.kind
+    }
+
+    /// The machine-readable prefix of the relay's `OK false`, when it sent one.
+    #[must_use]
+    pub const fn rejection_category(&self) -> Option<TransportEndpointRejectionCategory> {
+        self.0.rejection_category
+    }
+}
+
+impl std::fmt::Debug for FanoutEndpointFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self.0.kind {
+            TransportEndpointFailureKind::TerminalRejected => "TerminalRejected",
+            TransportEndpointFailureKind::NotExposed => "NotExposed",
+            TransportEndpointFailureKind::PossiblyExposed => "PossiblyExposed",
+            TransportEndpointFailureKind::RetryableUnavailable => "RetryableUnavailable",
+        };
+        let category = self.0.rejection_category.map(|category| match category {
+            TransportEndpointRejectionCategory::Duplicate => "duplicate",
+            TransportEndpointRejectionCategory::Pow => "pow",
+            TransportEndpointRejectionCategory::Blocked => "blocked",
+            TransportEndpointRejectionCategory::RateLimited => "rate-limited",
+            TransportEndpointRejectionCategory::Invalid => "invalid",
+            TransportEndpointRejectionCategory::Error => "error",
+            TransportEndpointRejectionCategory::Unsupported => "unsupported",
+            TransportEndpointRejectionCategory::AuthRequired => "auth-required",
+            TransportEndpointRejectionCategory::Restricted => "restricted",
+        });
+        f.debug_struct("FanoutEndpointFailure")
+            .field("kind", &kind)
+            .field("category", &category)
+            .finish_non_exhaustive()
+    }
+}
+
+// ── Durable fanout records — HELD, NEVER FORMATTED ───────────────────────────
+
+/// A handle to one durable fanout row.
+///
+/// Wraps the MLS group id and the transport message id the row is stored
+/// under — the second is the relay-visible event id — so neither is readable
+/// or printable through it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FanoutId {
+    group: GroupId,
+    message: MessageId,
+}
+
+impl FanoutId {
+    pub(crate) const fn new(group: GroupId, message: MessageId) -> Self {
+        Self { group, message }
+    }
+
+    pub(crate) const fn group(&self) -> &GroupId {
+        &self.group
+    }
+
+    pub(crate) const fn message(&self) -> &MessageId {
+        &self.message
+    }
+}
+
+impl std::fmt::Debug for FanoutId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FanoutId(..)")
+    }
+}
+
+/// One durable fanout: an exact signed event, the relays it was frozen for and
+/// where each of them stands.
+///
+/// Wraps `OutboundFanout`, whose `Debug` prints the event, every relay URL, the
+/// group id and each relay's failure text; only its lifecycle renders here.
+pub struct StoredFanout(OutboundFanout);
+
+impl StoredFanout {
+    pub(crate) const fn new(fanout: OutboundFanout) -> Self {
+        Self(fanout)
+    }
+
+    /// MDK's own record, for the engine and storage calls that take nothing
+    /// else. What it returns prints relay URLs and the signed event, so it is
+    /// never formatted.
+    pub(crate) const fn as_mdk_fanout(&self) -> &OutboundFanout {
+        &self.0
+    }
+
+    /// [`Self::as_mdk_fanout`], to record an attempt or an answer.
+    pub(crate) const fn as_mdk_fanout_mut(&mut self) -> &mut OutboundFanout {
+        &mut self.0
+    }
+
+    /// Whether the record says its commit was applied.
+    pub(crate) fn applied(&self) -> bool {
+        self.0.mls_state() == FanoutMlsState::Confirmed
+    }
+
+    /// Whether the record says the engine rolled its commit back.
+    pub(crate) fn rolled_back(&self) -> bool {
+        self.0.mls_state() == FanoutMlsState::RolledBack
+    }
+}
+
+impl std::fmt::Debug for StoredFanout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mls = match self.0.mls_state() {
+            FanoutMlsState::NotApplicable => "NotApplicable",
+            FanoutMlsState::Pending(_) => "Pending",
+            FanoutMlsState::Confirmed => "Confirmed",
+            FanoutMlsState::RolledBack => "RolledBack",
+        };
+        f.debug_struct("StoredFanout")
+            .field("mls", &mls)
+            .field("complete", &self.0.outcome().fanout_complete)
+            .field("possibly_exposed", &self.0.possible_exposure())
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a session call made in staging mode hands back.
+///
+/// The engine's effects with every commit and every bare proposal taken out
+/// of the publish work, and the durable fanout each of them became before the
+/// session lock was released.
+///
+/// **No `Debug`, deliberately**: [`SessionEffects`] is MDK's, and its own
+/// rendering prints group ids and events.
+/// Which kind of change of this device's branch selection withdrew
+/// (MDK's `SupersededIntentKind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WithdrawnKind {
+    /// The circle's name or description.
+    GroupProfile,
+    /// An app component: the relays, the admins, a disband.
+    AppComponents,
+    /// A removal of members.
+    RemoveMembers,
+    /// An invite.
+    Invite,
+}
+
+/// What became of a withdrawn change (MDK's `SupersededIntentOutcome`, and
+/// one of Haven's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WithdrawnOutcome {
+    /// Still valid against the circle as it now is: queued again by MDK and
+    /// staged under a record by the drive that found it — awaiting its
+    /// relays, not yet made.
+    Reissued,
+    /// Queued again by MDK, and not staged by the drive that found it: the
+    /// circle's next full advance makes it, or the queue's retirement says
+    /// it was dropped (`ChangeNote::QueuedChangeDropped`).
+    Queued,
+    /// The winning change touched the same thing; its value stands. The
+    /// user has to ask again (`ChangeNote::ChangeWithdrawn`).
+    Conflict,
+    /// What it asked for is already so — the members it removed are gone.
+    AlreadySatisfied,
+    /// An invite whose key packages are spent: invite again
+    /// (`ChangeNote::ReinviteOwed`).
+    ReinviteRequired,
+    /// It lost more races than the engine retries, or the queue was full:
+    /// the user has to ask again (`ChangeNote::ChangeWithdrawn`; a removal's
+    /// targets are kept and hold the circle's sends).
+    Abandoned,
+    /// This device is no longer in the circle.
+    NotMember,
+    /// The circle is being left, and the engine sends nothing of it but the
+    /// leave: the copy MDK queued again is taken back — not made, and not a
+    /// failure.
+    RetiredForLeave,
+}
+
+/// What a full drive did with a removal set aside unmade (decision 180).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequeueOutcome {
+    /// Asked for again for the members still listed, and made.
+    Made,
+    /// Asked for again, staged under a record, and awaiting its relays: its
+    /// record drives it.
+    Pending,
+    /// Asked for again under a record, and undone before it took effect:
+    /// every relay refused it, or the engine set it aside. The ask is spent.
+    Undone,
+    /// Not staged under a record — the engine would have queued it (taken
+    /// back), or the call failed: nothing was sent and no ask is spent.
+    NotMade,
+    /// Nobody it named is listed any more: already made, the note taken back.
+    AlreadyMade,
+    /// Asked for again as often as Haven's bound allows
+    /// (`MAX_REQUEUE_ATTEMPTS`): not again. Its members stay held and the
+    /// note stays for the user.
+    Abandoned,
+    /// The circle has moved past MDK's rewind horizon since the removal was
+    /// set aside: not asked for again, since a removal made that late could
+    /// remove someone the circle chose to keep. Its members stay held and
+    /// the note stays for the user.
+    Expired,
+}
+
+/// A removal set aside unmade, and what a full drive did with it. **No
+/// `Debug`**: it names its circle.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RequeuedRemoval {
+    /// The circle.
+    pub group_id: GroupId,
+    /// What became of the removal.
+    pub outcome: RequeueOutcome,
+}
+
+/// An invite of this device's that MDK holds owed a re-invite.
+///
+/// Branch selection withdrew it and the key packages it spent cannot be used
+/// again (`cgka-engine/src/own_commit_intent.rs` 372-395). **No `Debug`**: it
+/// names its circle and its invitees.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OwedReinvite {
+    /// The withdrawn invite's commit: MDK's key for the re-invite.
+    pub commit_id: MessageId,
+    /// The circle.
+    pub group_id: GroupId,
+    /// The identities, in hex, it invited and the circle does not list.
+    pub invitees: Vec<String>,
+    /// Where its circle stands for a re-invite.
+    pub standing: ReinviteStanding,
+}
+
+/// Where a re-invite's circle stands ([`OwedReinvite`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReinviteStanding {
+    /// Caught up in this session, stable, with no input unresolved: an
+    /// invite made now is made from the epoch the circle stands on.
+    Settled,
+    /// Not settled yet: an invite made now could fork the circle, and lose
+    /// its fresh key packages if it loses.
+    Unsettled,
+    /// Nothing is left to invite: this device is no member, or every
+    /// invitee is in. MDK ends it on an empty set of key packages.
+    Ends,
+}
+
+/// Why MDK refused a re-invite's fresh key packages
+/// ([`crate::nostr::mls::SessionManager::reissue_invite`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReinviteRefusal {
+    /// A package is one the withdrawn invite already spent, or names nobody
+    /// it invited: MDK still owes the re-invite.
+    KeyPackage,
+    /// MDK or its store failed: it still owes the re-invite.
+    Failed,
+}
+
+/// Whether MDK lets a re-invite look for fresh key packages now
+/// (`reserve_reinvite_lookup`): its own budget and pacing, kept durably.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReinviteReservation {
+    /// A lookup is reserved: look now.
+    Reserved,
+    /// Its next lookup is not due yet.
+    NotDue,
+    /// MDK has spent its lookups on it: the invite is the user's to make
+    /// again.
+    GaveUp,
+}
+
+/// A change of this device's that branch selection withdrew, and what
+/// became of it. **No `Debug`**: it names its circle.
+#[derive(Clone, PartialEq, Eq)]
+pub struct WithdrawnChange {
+    /// The circle.
+    pub group_id: GroupId,
+    /// What the change was.
+    pub kind: WithdrawnKind,
+    /// What became of it.
+    pub outcome: WithdrawnOutcome,
+}
+
+pub struct Staged {
+    /// The engine's effects. Its publish work carries no group evolution and
+    /// no auto-commit — each is one of [`Self::fanouts`] — and a proposal
+    /// only when its record could not be written.
+    pub effects: SessionEffects,
+    /// The fanouts written, in the order the engine handed the commits back.
+    pub fanouts: Vec<FanoutId>,
+    /// The Welcomes each group evolution among [`Self::fanouts`] carries, by
+    /// transport id — an invite's: their records are written at its confirm,
+    /// by whichever drive makes it, so only these say which Welcomes are its.
+    pub welcomes: Vec<(FanoutId, Vec<MessageId>)>,
+    /// The fanouts written for bare proposals, in the order the engine
+    /// handed them back. Kept apart: a proposal is never the commit a caller
+    /// asked for.
+    pub proposals: Vec<FanoutId>,
+    /// The circles in which this hold left a commit staged that it could
+    /// neither record nor roll back: unsent, and told to its circle.
+    pub unrecorded: Vec<GroupId>,
+    /// The circles whose engine-made removal of a member who left this hold
+    /// found staged and undid unsent, because it was not this hold's to
+    /// make: the wait a refusal earned is still running, or the hold's mode
+    /// makes no new commit. The engine stages it again at its next pass.
+    /// And the circle a send was not made for at all, because the foreground
+    /// that asked for it had ended and the circle was left waiting for one.
+    pub waiting: Vec<GroupId>,
+}
+
+/// What the fanout driver finds when it takes up a row.
+pub(crate) enum FanoutStanding {
+    /// No row the engine will show: it has ended, or its group is not live.
+    Absent,
+    /// Its group is finished on this device — this copy removed or
+    /// disbanded, or not held at all: the row ends as a finished one does,
+    /// and nothing of it is sent.
+    GroupGone(StoredFanout),
+    /// The engine holds the row's own commit staged under the row's pending
+    /// ref.
+    Staged(StoredFanout),
+    /// The row's commit was applied. `unfinished` is the engine's pending
+    /// ref when it still holds this commit staged: it merged the commit and
+    /// stored the row, and its own transition out of `PendingPublish` failed.
+    Confirmed {
+        fanout: StoredFanout,
+        unfinished: Option<PendingStateRef>,
+        /// Where the commit itself stands now.
+        commit: AppliedCommit,
+    },
+    /// The row is a bare proposal's: nothing to confirm and nothing to roll
+    /// back, only relays still owed its event. `spent` when nothing can act
+    /// on that event any more, and no relay is to be sent it again.
+    Proposal {
+        /// The record.
+        fanout: StoredFanout,
+        /// Its circle has left the epoch it was proposed for, or this
+        /// device's copy of the circle is marked removed.
+        spent: bool,
+    },
+    /// The row is an application message's: not this driver's.
+    NoCommit,
+    /// A proposal's record whose circle's row cannot be read: nothing is
+    /// done with it this pass — no send, no end.
+    Unread,
+    /// The engine rolled the commit back; the commit's own stored row may not
+    /// be retired yet.
+    RolledBack(StoredFanout),
+    /// The row is still pending and its commit was resolved by some other
+    /// path, so the row says nothing about what is staged now. `bound` when
+    /// the engine holds the row's pending ref — around a commit that is
+    /// therefore not the row's, and of which nothing here knows whether a
+    /// relay holds it.
+    Stale { bound: bool },
+    /// The commit's stored row is still `Sent` and the engine does not hold
+    /// it staged under this row. `unsent` when no attempt was ever begun
+    /// under the row, so nothing was sent; otherwise a relay may hold a commit
+    /// this device can no longer confirm or discard.
+    Unheld { unsent: bool },
+}
+
+/// Where a commit this device applied stands now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppliedCommit {
+    /// It is this device's canonical commit.
+    Canonical,
+    /// Branch selection has set it aside and may take it up again.
+    Provisional,
+    /// It was set aside for good.
+    Lost,
+}
+
+/// What a test may read of one Welcome's delivery record.
+#[cfg(any(test, feature = "test-utils"))]
+pub struct WelcomeRecordProbe {
+    /// The invite commit it belongs to; `None` for a founding Welcome.
+    pub commit: Option<MessageId>,
+    /// Its circle.
+    pub group: Option<GroupId>,
+    /// Its invitee, as lowercase hex.
+    pub recipient: String,
+    /// The relays it is owed to.
+    pub endpoints: Vec<String>,
+    /// How often each was attempted.
+    pub attempts: Vec<u32>,
+    /// How many acknowledgements complete it.
+    pub required_acks: usize,
+    /// When it stops being sent, in seconds.
+    pub bounded_until_secs: Option<u64>,
+    /// The exact bytes it sends.
+    pub payload: Vec<u8>,
+}
+
+/// A replacement Welcome MDK holds for the user's consent: it would discard
+/// this device's still-active copy of its group.
+///
+/// **No `Debug`, deliberately**: it names a group, a Welcome and its author,
+/// and carries the token.
+#[derive(Clone)]
+pub struct RejoinOffer {
+    /// The Welcome's transport id, which MDK keys the offer by: the first
+    /// gift wrap it arrived in.
+    pub welcome_id: MessageId,
+    /// The group it would join again.
+    pub group_id: GroupId,
+    /// Its MLS-authenticated author.
+    pub welcomer: MemberId,
+    /// The token of the local branch a consent discards.
+    pub local_state_token: Vec<u8>,
+}
+
+/// What a consent to a replacement Welcome came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RejoinConfirmation {
+    /// The group was joined again.
+    Joined,
+    /// The local branch moved since the token was read: nothing changed.
+    Stale,
+    /// MDK no longer holds the offer.
+    Gone,
+}
+
+/// A founding Welcome and where it goes, for the delivery record a create
+/// writes for it.
+///
+/// **No `Debug`, deliberately**, as [`WelcomeRecord`].
+pub(crate) struct FoundingWelcome {
+    /// The engine's exact gift-wrapped Welcome.
+    pub message: TransportMessage,
+    /// Its invitee, as lowercase hex.
+    pub recipient: String,
+    /// The invitee's inbox relays.
+    pub relays: Vec<String>,
+    /// The `not_after` of the invitee's `KeyPackage`, when it could be read.
+    pub not_after: Option<u64>,
+}
+
+/// Where a group whose circle has ended stands, for the forget that ends
+/// its MLS state.
+///
+/// **No `Debug`, deliberately**: it names members.
+pub(crate) enum LeftGroup {
+    /// The engine holds nothing of it.
+    Gone,
+    /// It was disbanded: its tombstone must outlive the circle (MDK's forget
+    /// deletes it, `storage-sqlite/src/account_projection.rs` 1510-1516).
+    Disbanded,
+    /// The engine holds it, with these members on its last roster.
+    Held(Vec<MemberId>),
+    /// The engine could not say: quarantined, not yet hydrated, or the store
+    /// did not answer.
+    Unread,
+}
+
+/// A join the engine still holds unacknowledged.
+///
+/// **No `Debug`, deliberately**: it names a group, a Welcome and its author.
+pub(crate) struct OwedJoin {
+    /// The group joined.
+    pub group_id: GroupId,
+    /// The Welcome's transport id: its gift wrap's event id.
+    pub via_welcome: MessageId,
+    /// The MLS-authenticated author of the Welcome.
+    pub welcomer: Option<MemberId>,
+}
+
+/// One Welcome's delivery record: MDK's own durable record for an exact
+/// signed event and the relays it is owed to (`DurableTransportFanout`),
+/// kept beside the commit the Welcome belongs to (`evolution_id`), whose
+/// target is the invitee's inbox (`TransportPublishTarget::Inbox`).
+///
+/// **No `Debug`, deliberately**: it holds the gift-wrapped event, the
+/// invitee's id and relay URLs.
+pub(crate) struct WelcomeRecord(pub(crate) cgka_traits::maintenance::DurableTransportFanout);
+
+/// How long a Welcome's record is driven: MDK's host keeps one for a day
+/// (`marmot-account/src/runtime.rs` 70, 4212-4216).
+pub(crate) const WELCOME_RECORD_BOUND_SECS: u64 = 24 * 60 * 60;
+
+impl WelcomeRecord {
+    /// The Welcome's group.
+    pub(crate) const fn group(&self) -> Option<&GroupId> {
+        self.0.group_id.as_ref()
+    }
+
+    /// Whether it reached its bound unsent and was kept, inert, for the
+    /// circle's note: every target stopped by Haven's policy
+    /// ([`WelcomeEnd::Expired`]).
+    pub(crate) fn inert(&self) -> bool {
+        use cgka_traits::maintenance::TransportFanoutAttemptState as State;
+        !self.0.targets.is_empty()
+            && self
+                .0
+                .targets
+                .iter()
+                .all(|target| target.state == State::PolicyProhibited)
+    }
+
+    /// Whether an inbox relay's acknowledgement of it is stored: its
+    /// delivery is completed without a send.
+    pub(crate) fn acknowledged(&self) -> bool {
+        use cgka_traits::maintenance::TransportFanoutAttemptState as State;
+        self.0
+            .targets
+            .iter()
+            .any(|target| target.state == State::Accepted)
+    }
+
+    /// Whether its bound has passed at `now_ms`.
+    pub(crate) fn expired(&self, now_ms: u64) -> bool {
+        self.0
+            .bounded_until
+            .is_some_and(|until| now_ms / 1_000 >= until.0)
+    }
+
+    /// The index and URL of each relay due a send at `now_ms`, by MDK's own
+    /// rule for such a record (`marmot-account/src/runtime.rs` 4755-4767): a
+    /// relay not yet acknowledging is due 30 seconds after its first attempt,
+    /// the wait doubling to an hour.
+    pub(crate) fn due(&self, now_ms: u64) -> Vec<(usize, String)> {
+        let now = now_ms / 1_000;
+        self.0
+            .targets
+            .iter()
+            .enumerate()
+            .filter(|(_, target)| {
+                use cgka_traits::maintenance::TransportFanoutAttemptState as State;
+                if matches!(target.state, State::Accepted | State::PolicyProhibited) {
+                    return false;
+                }
+                let shift = target.attempt_count.saturating_sub(1).min(7);
+                let wait = 30_u64.saturating_mul(1_u64 << shift).min(60 * 60);
+                target
+                    .last_attempt_at
+                    .is_none_or(|last| now >= last.0.saturating_add(wait))
+            })
+            .map(|(index, target)| (index, target.endpoint.0.clone()))
+            .collect()
+    }
+
+    /// The exact Welcome, as it is sent every time.
+    pub(crate) const fn welcome(&self) -> &TransportMessage {
+        &self.0.exact_message
+    }
+}
+
+/// Where a Welcome's record stands, read immediately before a send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WelcomeFate {
+    /// Its commit is canonical and the engine owes the Welcome: send it.
+    Owed,
+    /// Its commit is provisionally set aside, or the store cannot say: wait.
+    Waiting,
+    /// The engine no longer owes it: delivered.
+    Done,
+    /// Its commit is canonical and the engine neither owes it nor has seen
+    /// it delivered: its invitee is on the roster with no way in.
+    Undeliverable,
+    /// Its commit lost for good: the Welcome ends as failed.
+    Lost,
+}
+
+/// How a Welcome's record ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WelcomeEnd {
+    /// An inbox relay acknowledged it.
+    Delivered,
+    /// The engine no longer owes it.
+    Done,
+    /// The engine neither owes it nor saw it delivered under a canonical
+    /// commit: its invitee must be invited again.
+    Undeliverable,
+    /// Its commit lost for good.
+    Lost,
+    /// Its bound passed with no inbox relay acknowledging it: kept, inert,
+    /// so the circle's note that a Welcome is owed stands.
+    Expired,
+    /// An inert record whose note the user has been shown.
+    Shown,
+}
+
+/// What an applied invite's record handed over in one drive.
+///
+/// **No `Debug`, deliberately**, as [`WelcomeRecord`].
+#[derive(Default)]
+pub(crate) struct WelcomeHandOver {
+    /// A delivery record was opened for at least one Welcome.
+    pub opened: bool,
+    /// The invite's commit is provisionally set aside: its Welcomes wait.
+    pub withheld: bool,
+    /// The invite was applied with a Welcome that cannot be delivered — the
+    /// engine never held it, or its invitee has no kept route: its invitee
+    /// must be invited again.
+    pub reinvite: bool,
+}
+
+/// What one of the fanout driver's own engine calls left behind, whether or
+/// not the call succeeded.
+///
+/// **No `Debug`, deliberately**, as [`Staged`].
+pub(crate) struct FanoutSettlement {
+    /// What the engine handed back — after a failure, what it had already
+    /// emitted — with every commit in it recorded in the hold that made the
+    /// call.
+    pub staged: Staged,
+    /// The engine's error. It does not say whether the commit was applied or
+    /// discarded: the stored row does.
+    pub error: Option<NostrError>,
+    /// A rolled-back commit's own row is still stored as sent. No convergence
+    /// pass may run for its group until a drive, or the next open, retires it.
+    pub unretired: bool,
+}
+
+impl FanoutSettlement {
+    /// A call that was never made, for the reason `error` gives.
+    pub(crate) const fn refused(error: NostrError) -> Self {
+        Self {
+            staged: Staged {
+                effects: SessionEffects {
+                    events: Vec::new(),
+                    publish: Vec::new(),
+                    queued: Vec::new(),
+                    pending_convergence: Vec::new(),
+                },
+                fanouts: Vec::new(),
+                welcomes: Vec::new(),
+                proposals: Vec::new(),
+                unrecorded: Vec::new(),
+                waiting: Vec::new(),
+            },
+            error: Some(error),
+            unretired: false,
+        }
+    }
+}
+
+/// What a test may read of a stored fanout row.
+///
+/// **No `Debug`, deliberately**: `targets` are relay URLs and `event_id` is a
+/// relay-visible id.
+#[cfg(any(test, feature = "test-utils"))]
+pub struct FanoutProbe {
+    /// The frozen relay URLs, exactly as spelled in the routing component.
+    pub targets: Vec<String>,
+    /// Each target's stored status, aligned with [`Self::targets`].
+    pub statuses: Vec<FanoutTargetStatus>,
+    /// The acknowledgement count frozen at staging.
+    pub required_acks: usize,
+    /// The frozen event's id.
+    pub event_id: nostr::EventId,
+    /// The frozen signed event's exact transport bytes.
+    pub payload: Vec<u8>,
+    /// How many Welcomes the row holds for release on its confirm.
+    pub held_welcomes: usize,
+    /// The ids of those Welcomes.
+    pub welcome_ids: Vec<MessageId>,
+    /// How many times each target has been attempted, aligned with
+    /// [`Self::targets`].
+    pub attempts: Vec<u32>,
+    /// Where the row's MLS half stands.
+    pub mls: FanoutMls,
+    /// When it was staged, on the staging call's clock.
+    pub created_at_ms: u64,
+}
+
+/// A stored fanout's MLS half, without its pending ref.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanoutMls {
+    /// It carries no MLS change (a proposal or an application message).
+    NotApplicable,
+    /// Its commit is staged and unresolved.
+    Pending,
+    /// Its commit was applied.
+    Confirmed,
+    /// Its commit was discarded.
+    RolledBack,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl FanoutProbe {
+    pub(crate) fn of(fanout: &OutboundFanout) -> Option<Self> {
+        Some(Self {
+            targets: fanout
+                .request()
+                .target
+                .endpoints()
+                .iter()
+                .map(|endpoint| endpoint.as_str().to_owned())
+                .collect(),
+            statuses: fanout.target_statuses().to_vec(),
+            required_acks: fanout.request().required_acks,
+            event_id: nostr::EventId::from_slice(fanout.message_id().as_slice()).ok()?,
+            payload: fanout.request().message.payload.clone(),
+            held_welcomes: fanout.pending_post_confirmation_welcomes().len(),
+            welcome_ids: fanout
+                .pending_post_confirmation_welcomes()
+                .iter()
+                .map(|welcome| welcome.id.clone())
+                .collect(),
+            attempts: (0..fanout.target_statuses().len())
+                .map(|index| fanout.target_attempt_count(index))
+                .collect(),
+            mls: match fanout.mls_state() {
+                FanoutMlsState::NotApplicable => FanoutMls::NotApplicable,
+                FanoutMlsState::Pending(_) => FanoutMls::Pending,
+                FanoutMlsState::Confirmed => FanoutMls::Confirmed,
+                FanoutMlsState::RolledBack => FanoutMls::RolledBack,
+            },
+            created_at_ms: fanout.created_at_ms(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_pre_auth_rejection_carries_no_engine_effects() {
-        // The fail-safe accessor, over EVERY reason. A future variant added
-        // without an `ingested()` arm would not compile; this pins that no
-        // existing one can hand back a synthetic engine result, which is what a
-        // defaulting accessor would do and what the cursor planes would then
-        // read as "advance past this".
-        for reason in [PreAuthRejection::Expired, PreAuthRejection::Malformed] {
-            let screened = ScreenedIngest::RejectedBeforeAuth(reason);
-            let rendered = format!("{screened:?}");
-            assert!(
-                screened.ingested().is_none(),
-                "{reason:?} must carry no engine effects"
-            );
-            assert!(rendered.contains("RejectedBeforeAuth"));
+    /// The rule wraps an MDK value whose derived `Debug` prints the profile,
+    /// the ciphersuite and every required capability id.
+    #[tokio::test]
+    async fn key_package_admission_rule_debug_redacts_the_requirements() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session = crate::nostr::mls::SessionManager::new_unencrypted(
+            dir.path(),
+            &nostr::Keys::generate(),
+        )
+        .expect("session");
+        let rule = session
+            .key_package_admission_rule(None)
+            .await
+            .expect("the rule for a new circle");
+        crate::assert_debug_redacted!(
+            &rule,
+            "KeyPackageAdmissionRule",
+            &["GroupCapabilities", "ciphersuite", "required", "Current"]
+        );
+    }
+
+    /// A relay URL, the text a relay answered with, and an id, as MDK's
+    /// transport values carry them.
+    const RELAY: &str = "wss://relay-canary7f3a.example.com/inbox";
+    const RELAY_TEXT: &str = "blocked: canary7f3a said no";
+
+    fn endpoint_failure(kind: TransportEndpointFailureKind) -> TransportEndpointFailure {
+        TransportEndpointFailure {
+            endpoint: cgka_traits::TransportEndpoint(RELAY.to_string()),
+            reason: RELAY_TEXT.to_string(),
+            kind,
+            rejection_category: Some(TransportEndpointRejectionCategory::Blocked),
         }
+    }
+
+    /// Every kind and every category MDK can hand over, each rendered as its
+    /// own fixed name beside nothing of the relay's.
+    #[test]
+    fn fanout_endpoint_failure_debug_redacts_the_relay_and_its_words() {
+        use TransportEndpointFailureKind as Kind;
+        use TransportEndpointRejectionCategory as Category;
+        let kinds = [
+            (Kind::TerminalRejected, "TerminalRejected"),
+            (Kind::NotExposed, "NotExposed"),
+            (Kind::PossiblyExposed, "PossiblyExposed"),
+            (Kind::RetryableUnavailable, "RetryableUnavailable"),
+        ];
+        let categories = [
+            (Category::Duplicate, "\"duplicate\""),
+            (Category::Pow, "\"pow\""),
+            (Category::Blocked, "\"blocked\""),
+            (Category::RateLimited, "\"rate-limited\""),
+            (Category::Invalid, "\"invalid\""),
+            (Category::Error, "\"error\""),
+            (Category::Unsupported, "\"unsupported\""),
+            (Category::AuthRequired, "\"auth-required\""),
+            (Category::Restricted, "\"restricted\""),
+        ];
+        let needles = [RELAY, "relay-canary7f3a.example.com", RELAY_TEXT, "said no"];
+        for (kind, name) in kinds {
+            crate::assert_debug_redacted!(
+                FanoutEndpointFailure::new(endpoint_failure(kind)),
+                "FanoutEndpointFailure",
+                marker = name,
+                &needles
+            );
+        }
+        for (category, name) in categories {
+            let mut failure = endpoint_failure(Kind::TerminalRejected);
+            failure.rejection_category = Some(category);
+            crate::assert_debug_redacted!(
+                FanoutEndpointFailure::new(failure),
+                "FanoutEndpointFailure",
+                marker = name,
+                &needles
+            );
+        }
+    }
+
+    /// A stored fanout in MDK's own shape: a signed-event-sized payload, two
+    /// relay targets, a group and a pending ref.
+    fn stored_fanout() -> (OutboundFanout, GroupId, MessageId) {
+        let group = GroupId::new(vec![0xAB; 16]);
+        let id = MessageId::new(vec![0xC7; 32]);
+        let request = cgka_traits::TransportPublishRequest {
+            account_id: MemberId::new(vec![0x5E; 32]),
+            message: TransportMessage {
+                id: id.clone(),
+                payload: RELAY_TEXT.as_bytes().to_vec(),
+                timestamp: cgka_traits::transport::Timestamp(1_700_007_341),
+                causal_deps: Vec::new(),
+                source: cgka_traits::transport::TransportSource("nostr".to_owned()),
+                envelope: cgka_traits::transport::TransportEnvelope::GroupMessage {
+                    transport_group_id: vec![0x4D; 32],
+                },
+            },
+            target: cgka_traits::TransportPublishTarget::Group {
+                group_id: group.clone(),
+                transport_group_id: vec![0x4D; 32],
+                endpoints: vec![
+                    cgka_traits::TransportEndpoint(RELAY.to_string()),
+                    cgka_traits::TransportEndpoint("wss://second-canary7f3a.example.com".into()),
+                ],
+            },
+            required_acks: 2,
+        };
+        let fanout = OutboundFanout::stage(
+            request,
+            Some(PendingStateRef::new(7341)),
+            Some(group.clone()),
+            1_700_007_341_000,
+        )
+        .expect("a commit's fanout stages");
+        (fanout, group, id)
+    }
+
+    #[test]
+    fn fanout_id_debug_redacts_the_group_and_the_event() {
+        let (_, group, id) = stored_fanout();
+        crate::assert_debug_redacted!(
+            FanoutId::new(group.clone(), id.clone()),
+            "FanoutId",
+            &[
+                hex::encode(group.as_slice()).as_str(),
+                hex::encode(id.as_slice()).as_str()
+            ]
+        );
+    }
+
+    /// Every MLS state the record can be in, each beside nothing of the event,
+    /// the relays, the group or the pending ref.
+    #[test]
+    fn stored_fanout_debug_redacts_the_event_the_relays_and_the_group() {
+        let (pending, group, id) = stored_fanout();
+        let mut exposed = pending.clone();
+        exposed.mark_attempt_started(0).expect("first attempt");
+        exposed
+            .record_target_failure(
+                0,
+                endpoint_failure(TransportEndpointFailureKind::PossiblyExposed),
+            )
+            .expect("the failure is recorded");
+        let mut confirmed = pending.clone();
+        confirmed.mark_mls_confirmed().expect("confirm");
+        let mut rolled_back = pending.clone();
+        rolled_back.mark_mls_rolled_back().expect("roll back");
+        let bare = OutboundFanout::stage(pending.request().clone(), None, None, 7)
+            .expect("a proposal's fanout stages");
+        let needles = [
+            RELAY.to_string(),
+            "canary7f3a".to_string(),
+            RELAY_TEXT.to_string(),
+            "said no".to_string(),
+            hex::encode(group.as_slice()),
+            hex::encode(id.as_slice()),
+            hex::encode([0x4D; 32]),
+            hex::encode([0x5E; 32]),
+            "7341".to_string(),
+            "1700007341".to_string(),
+        ];
+        let needles: Vec<&str> = needles.iter().map(String::as_str).collect();
+        for (fanout, mls) in [
+            (pending, "\"Pending\""),
+            (exposed, "possibly_exposed: true"),
+            (confirmed, "\"Confirmed\""),
+            (rolled_back, "\"RolledBack\""),
+            (bare, "\"NotApplicable\""),
+        ] {
+            crate::assert_debug_redacted!(
+                StoredFanout::new(fanout),
+                "StoredFanout",
+                marker = mls,
+                &needles
+            );
+        }
+    }
+
+    #[test]
+    fn welcome_acceptance_debug_redacts_the_joined_group() {
+        let group = GroupId::new(vec![0xAB; 32]);
+        let accepted = WelcomeAcceptance::Ingested(IngestEffects {
+            outcome: IngestOutcome::Processed,
+            effects: SessionEffects {
+                events: vec![GroupEvent::GroupCreated {
+                    group_id: group.clone(),
+                }],
+                publish: Vec::new(),
+                queued: Vec::new(),
+                pending_convergence: vec![group.clone()],
+            },
+            left_object_unpersisted: false,
+            valid_proposal_groups: vec![group.clone()],
+        });
+        crate::assert_debug_redacted!(
+            accepted,
+            "WelcomeAcceptance",
+            marker = "Ingested",
+            &[hex::encode(group.as_slice()).as_str()]
+        );
+        crate::assert_debug_redacted!(
+            WelcomeAcceptance::NeedsNewInvite,
+            "WelcomeAcceptance",
+            marker = "NeedsNewInvite",
+            &[hex::encode(group.as_slice()).as_str()]
+        );
+        crate::assert_debug_redacted!(
+            WelcomeAcceptance::AlreadyJoined {
+                group_id: group.clone(),
+                effects: SessionEffects {
+                    events: Vec::new(),
+                    publish: Vec::new(),
+                    queued: Vec::new(),
+                    pending_convergence: vec![group.clone()],
+                },
+            },
+            "WelcomeAcceptance",
+            marker = "AlreadyJoined",
+            &[hex::encode(group.as_slice()).as_str()]
+        );
+    }
+
+    #[test]
+    fn a_pre_auth_rejection_carries_no_engine_effects() {
+        // The fail-safe accessor: a rejection cannot hand back a synthetic
+        // engine result, which is what a defaulting accessor would do and what
+        // the cursor planes would then read as "advance past this".
+        let screened = ScreenedIngest::RejectedBeforeAuth(PreAuthRejection::Malformed);
+        let rendered = format!("{screened:?}");
+        assert!(
+            screened.ingested().is_none(),
+            "a pre-auth rejection must carry no engine effects"
+        );
+        assert!(rendered.contains("RejectedBeforeAuth"));
     }
 
     /// The `Ingested` arm carries the engine's drained `GroupEvent`s (decrypted
@@ -556,26 +1648,31 @@ mod tests {
     /// a fieldless reason, which may.
     #[test]
     fn screened_ingest_debug_redacts_the_ingest_effects() {
-        let screened = ScreenedIngest::RejectedBeforeAuth(PreAuthRejection::Expired);
+        let screened = ScreenedIngest::RejectedBeforeAuth(PreAuthRejection::Malformed);
         let rendered = format!("{screened:?}");
         assert!(rendered.contains("RejectedBeforeAuth"));
-        assert!(rendered.contains("Expired"));
+        assert!(rendered.contains("Malformed"));
 
         // A POPULATED `Ingested`: a drained location payload and the group id
         // and sender it arrived under. None of the three may render.
         let ingested = ScreenedIngest::Ingested(IngestEffects {
             outcome: IngestOutcome::Processed,
+            left_object_unpersisted: false,
             effects: SessionEffects {
                 events: vec![GroupEvent::MessageReceived {
                     group_id: GroupId::from_slice(&[0xAB; 32]),
+                    message_id: MessageId::new(vec![0xEF; 32]),
                     sender: MemberId::new(vec![0xCD; 32]),
                     epoch: EpochId(1_234_567),
                     payload: b"SECRET_COORDS_12.3456789".to_vec(),
+                    retention: None,
+                    authority: None,
                 }],
                 publish: Vec::new(),
                 queued: Vec::new(),
                 pending_convergence: Vec::new(),
             },
+            valid_proposal_groups: vec![GroupId::from_slice(&[0xAB; 32])],
         });
         crate::assert_debug_redacted!(
             ingested,
@@ -585,6 +1682,7 @@ mod tests {
                 "SECRET_COORDS_12.3456789",
                 &"ab".repeat(32),
                 &"cd".repeat(32),
+                &"ef".repeat(32),
                 "1234567"
             ]
         );
@@ -676,13 +1774,11 @@ mod tests {
         let created = 1_000_000_u64;
         let boundary = created + UNRESOLVABLE_INPUT_MAX_AGE_SECS;
 
-        // One second before the boundary and AT it, the receiver-side screen in
-        // `process_event` still accepts a replay of this event, so the sweep
-        // must not have disposed of it.
+        // One second before the boundary and AT it, the row is still inside the
+        // clock-skew slack, so the sweep must not have disposed of it.
         assert!(!beyond_relay_retention(created, boundary - 1));
         assert!(!beyond_relay_retention(created, boundary));
-        // One second past it, `Timestamp::now() > expires_at + grace` holds and
-        // the row can never be resolved by re-delivery.
+        // One second past it, the row can never be resolved by re-delivery.
         assert!(beyond_relay_retention(created, boundary + 1));
     }
 
@@ -695,13 +1791,14 @@ mod tests {
     }
 
     #[test]
-    fn unresolvable_input_max_age_is_the_receive_screen_window() {
+    fn unresolvable_input_max_age_is_relay_retention_plus_clock_skew_slack() {
         assert_eq!(
             UNRESOLVABLE_INPUT_MAX_AGE_SECS,
             crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS
                 + crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS,
-            "the sweep's horizon must equal the receiver-side expiration screen's, \
-             or the sweep disposes of rows the receive path would still accept"
+            "the sweep's horizon is how long a relay may still serve the event, \
+             plus clock-skew slack; shorter disposes of rows a redelivery could \
+             still resolve"
         );
     }
 

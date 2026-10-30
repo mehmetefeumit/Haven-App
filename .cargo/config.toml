@@ -22,3 +22,15 @@ retry = 10
 
 [http]
 multiplexing = false
+
+# SQLCipher's native logger and its `cipher_profile` statement tracer write to
+# logcat / os_log / stderr beneath every Haven log filter, so both are compiled
+# out rather than filtered (Security Rule 15): SQLCIPHER_OMIT_LOG removes the
+# logger, SQLITE_OMIT_TRACE the tracer. `force` stops a stray LIBSQLITE3_FLAGS
+# in the environment from dropping either flag. Cargo finds this file from the
+# working directory, which cargokit does not guarantee is inside this
+# repository, so haven/rust_builder/cargokit.yaml passes the same value on the
+# command line (scripts/ci/check_sqlcipher_logger_omitted.sh keeps the two
+# equal).
+[env]
+LIBSQLITE3_FLAGS = { value = "-DSQLCIPHER_OMIT_LOG -DSQLCIPHER_OMIT_DEFAULT_LOGGING -DSQLITE_OMIT_TRACE", force = true }

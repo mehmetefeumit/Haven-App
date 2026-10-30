@@ -43,8 +43,10 @@ ProviderContainer _container({
   required MockCircleService service,
   Circle? selected,
   bool withIdentity = true,
+  SharingHealthNotifier Function()? health,
 }) => ProviderContainer(
   overrides: [
+    if (health != null) sharingHealthProvider.overrideWith(health),
     circleServiceProvider.overrideWithValue(service),
     selectedCircleProvider.overrideWithValue(selected),
     identityProvider.overrideWith(
@@ -53,8 +55,65 @@ ProviderContainer _container({
   ],
 );
 
+class _RecordingHealth extends SharingHealthNotifier {
+  final List<String> deferred = [];
+
+  /// Whether each recorded hold was the user's own action, in order.
+  final List<bool> byUser = [];
+
+  @override
+  SharingHealth build() => SharingHealth.healthy;
+
+  @override
+  void recordDeferredSend(String circleKey, {bool byUser = false}) {
+    deferred.add(circleKey);
+    this.byUser.add(byUser);
+  }
+}
+
 void main() {
   group('the epoch-repair leg', () {
+    test('a repair awaiting its relays shows through the deferred-send cause, '
+        'as every change awaiting them does', () async {
+      // Before: `EpochRepairAwaitingRelays` recorded no cause, so the banner
+      // said nothing while the rotation waited.
+      final health = _RecordingHealth();
+      final selected = _circle('picked');
+      final service = MockCircleService()
+        ..repairCircleEpochResult = const EpochRepairAwaitingRelays();
+      final container = _container(
+        service: service,
+        selected: selected,
+        health: () => health,
+      );
+      addTearDown(container.dispose);
+      await container.read(identityProvider.future);
+
+      final result =
+          await repairSelectedCircleEpoch(container.read(Provider((r) => r)));
+
+      expect(result, isA<EpochRepairAwaitingRelays>());
+      expect(health.deferred, [sharingCircleKey(selected)]);
+      expect(health.byUser, [true], reason: "the user's own action");
+    });
+
+    test('a repair made records no deferred send', () async {
+      final health = _RecordingHealth();
+      final service = MockCircleService()
+        ..repairCircleEpochResult = const EpochRepairApplied();
+      final container = _container(
+        service: service,
+        selected: _circle('picked'),
+        health: () => health,
+      );
+      addTearDown(container.dispose);
+      await container.read(identityProvider.future);
+
+      await repairSelectedCircleEpoch(container.read(Provider((r) => r)));
+
+      expect(health.deferred, isEmpty);
+    });
+
     test('runs against the SELECTED circle, with this device identity',
         () async {
       final service = MockCircleService()
@@ -114,7 +173,7 @@ void main() {
     test('surfaces a skip reason unchanged', () async {
       final service = MockCircleService()
         ..repairCircleEpochResult =
-            const EpochRepairSkipped(SkipReasonFfi.notSoleAdmin);
+            const EpochRepairSkipped(SkipReasonFfi.epochUnrecoverable);
       final container = _container(service: service, selected: _circle('c'));
       addTearDown(container.dispose);
       await container.read(identityProvider.future);
@@ -129,7 +188,7 @@ void main() {
         isA<EpochRepairSkipped>().having(
           (r) => r.reason,
           'reason',
-          SkipReasonFfi.notSoleAdmin,
+          SkipReasonFfi.epochUnrecoverable,
         ),
       );
     });

@@ -28,7 +28,7 @@ use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::{GroupId, LocationMessageResult};
 use haven_core::relay::live_sync::{CircleSpec, LiveSyncCore};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::{Event, Keys, PublicKey};
+use nostr::{Event, Keys};
 use nostr_relay_builder::MockRelay;
 use nostr_sdk::Client;
 use tempfile::TempDir;
@@ -49,8 +49,10 @@ struct TwoMemberCircle {
 /// Builds Alice + Bob as real co-members via the PUBLIC circle API (create →
 /// confirm → welcome → accept), so Bob is a genuine member whose location Alice
 /// can cross-decrypt.
-async fn build_two_member_circle() -> TwoMemberCircle {
-    let relays = vec!["wss://group.example.com".to_string()];
+/// A two-member circle whose routing names `group_relay`, the relay each
+/// engine is started on: a session lists a circle where its routing sends it.
+async fn build_two_member_circle(group_relay: &str) -> TwoMemberCircle {
+    let relays = vec![group_relay.to_string()];
 
     // Bob: a real manager whose own KeyPackage lets him join.
     let bob_dir = TempDir::new().unwrap();
@@ -78,15 +80,14 @@ async fn build_two_member_circle() -> TwoMemberCircle {
     let alice = CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap();
     let config = CircleConfig::new("Two Engine Converge Circle").with_relays(relays.clone());
     let result = alice
-        .create_circle(&alice_keys, vec![bob_member], &config, &relays)
+        .create_circle(&alice_keys, vec![bob_member], &config)
         .await
         .expect("create circle");
+    // As the app's driven create leaves it: the founding Welcomes sent from
+    // their records and acknowledged, so no later drive sends them.
+    let _ = alice.land_staged_for_test().await;
     let mls_group_id = result.circle.mls_group_id.clone();
     let nostr_group_id = result.circle.nostr_group_id;
-    alice
-        .confirm_published(result.pending)
-        .await
-        .expect("alice confirms creation");
 
     // Bob joins from the gift-wrapped welcome.
     let welcome = &result.welcome_events[0];
@@ -114,19 +115,15 @@ async fn build_two_member_circle() -> TwoMemberCircle {
 /// different exporter secret).
 async fn cross_decrypts(
     encryptor: &CircleManager,
-    encryptor_pubkey: &PublicKey,
     decryptor: &CircleManager,
     gid: &GroupId,
 ) -> bool {
     let location = LocationMessage::new(40.12, -74.34);
-    let Ok((event, _, _)) = encryptor
-        .encrypt_location(gid, encryptor_pubkey, &location, 300)
-        .await
-    else {
+    let Ok((event, _, _)) = encryptor.seal_location_for_test(gid, &location).await else {
         return false;
     };
     matches!(
-        decryptor.decrypt_location(&event).await,
+        decryptor.ingest_for_test(&event).await,
         Ok(ref results) if results.iter().any(|r| matches!(r, LocationMessageResult::Location { .. }))
     )
 }
@@ -149,12 +146,20 @@ async fn two_engines_converge_over_one_relay_via_the_engine_loop() {
     let relay = MockRelay::run().await.expect("mock relay");
     let url = relay.url().await.to_string();
 
-    let fx = build_two_member_circle().await;
+    let fx = build_two_member_circle(&url).await;
     let hex = hex::encode(fx.nostr_group_id);
 
     // One engine per member, both over the SAME relay, both subscribed to #h.
-    let alice_engine = LiveSyncCore::new_local(Arc::clone(&fx.alice), fx.alice_keys.public_key());
-    let bob_engine = LiveSyncCore::new_local(Arc::clone(&fx.bob), fx.bob_keys.public_key());
+    let alice_engine = LiveSyncCore::new_local(
+        Arc::clone(&fx.alice),
+        fx.alice_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
+    let bob_engine = LiveSyncCore::new_local(
+        Arc::clone(&fx.bob),
+        fx.bob_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     let spec = CircleSpec {
         group_id_hex: hex.clone(),
         relays: vec![url.clone()],
@@ -180,13 +185,9 @@ async fn two_engines_converge_over_one_relay_via_the_engine_loop() {
     // apply) → her epoch advances to N+1.
     let commit = fx
         .alice
-        .update_circle_relays(&fx.mls_group_id, &["wss://group2.example.com".to_string()])
+        .update_relays_for_test(&fx.mls_group_id, &["wss://group2.example.com".to_string()])
         .await
         .expect("alice stages a routing commit");
-    fx.alice
-        .finalize_relay_update(commit.pending, &fx.mls_group_id)
-        .await
-        .expect("alice finalizes");
     assert_eq!(
         fx.alice.group_epoch(&fx.mls_group_id).await.unwrap(),
         n + 1,
@@ -195,7 +196,7 @@ async fn two_engines_converge_over_one_relay_via_the_engine_loop() {
 
     // Publish the commit to the shared relay; Bob's engine must receive it via the
     // live-sync loop and converge (ingest → advance_convergence, quiescence=0).
-    publish_event(&url, &commit.commit_event).await;
+    publish_event(&url, &commit).await;
 
     let mut converged = false;
     for _ in 0..100 {
@@ -218,23 +219,11 @@ async fn two_engines_converge_over_one_relay_via_the_engine_loop() {
         "no split-brain: both converge to the same epoch"
     );
     assert!(
-        cross_decrypts(
-            &fx.alice,
-            &fx.alice_keys.public_key(),
-            &fx.bob,
-            &fx.mls_group_id,
-        )
-        .await,
+        cross_decrypts(&fx.alice, &fx.bob, &fx.mls_group_id,).await,
         "Bob must decrypt a fresh location Alice sends at the converged epoch"
     );
     assert!(
-        cross_decrypts(
-            &fx.bob,
-            &fx.bob_keys.public_key(),
-            &fx.alice,
-            &fx.mls_group_id,
-        )
-        .await,
+        cross_decrypts(&fx.bob, &fx.alice, &fx.mls_group_id,).await,
         "Alice must decrypt a fresh location Bob sends at the converged epoch (bilateral)"
     );
 

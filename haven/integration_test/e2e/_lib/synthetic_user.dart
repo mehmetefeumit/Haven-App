@@ -63,6 +63,7 @@ import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/utils/log_alias.dart'
     show LogAliasClass, logAliasHandle, magnitudeBucket;
 
+import 'driven_location.dart';
 import 'test_relay.dart';
 import 'test_user.dart';
 
@@ -93,17 +94,6 @@ typedef DecryptedCoords = ({double latitude, double longitude});
 /// future refactor — keeping them out of CI artifacts is cheap
 /// forward defence.
 ///
-/// `publishedCommitEventIds` carries the kind-445 event id of every
-/// RECEIVE-SIDE auto-commit this drain published and confirmed — in
-/// practice, the commit that evicts a peer who published a `SelfRemove`
-/// proposal. The Dark Matter engine owns publish-before-apply for every
-/// SEND-side commit internally, but a receive-side auto-commit is the one
-/// case it hands back to the caller (the Rust `CircleManagerFfi` holds no
-/// relay handle), exactly as it does for the production foreground poll
-/// path. A drain that ingests a peer's `SelfRemove` and publishes nothing
-/// here has silently dropped the eviction — see [SyntheticUser
-/// .applyArrivalOrdered]'s `finalizeAutoCommit` doc.
-///
 /// `withheldPendingCommit` is VESTIGIAL under Dark Matter — always
 /// `false`. It backed the pre-migration single-committer election, which
 /// the engine's own commit-ordering/convergence replaces.
@@ -113,7 +103,6 @@ typedef ApplyEventsSummary = ({
   int decryptFailed,
   Set<String> decryptedLocationSenders,
   Map<String, DecryptedCoords> decryptedLocations,
-  List<String> publishedCommitEventIds,
   bool withheldPendingCommit,
 });
 
@@ -413,9 +402,19 @@ class SyntheticUser {
       // `invitation.mlsGroupId` is the pre-join stand-in id — actually the
       // gift-wrap event id the invitation was keyed by; `acceptInvitation`
       // accepts by that same id.
-      final accepted = await user.circleManager.acceptInvitation(
+      final outcome = await user.circleManager.acceptInvitation(
         giftWrapId: invitation.mlsGroupId,
       );
+      final accepted = outcome.joined;
+      if (accepted == null) {
+        // A gift wrap for a KeyPackage this peer no longer holds; the core
+        // has declined it. Another gift wrap may still apply.
+        debugPrint(
+          '[SyntheticUser:$role] acceptInvitation: this invitation needs a '
+          'new invite; trying another gift-wrap',
+        );
+        return null;
+      }
       final circleHandle = logAliasHandle(
         LogAliasClass.circle,
         invitation.circleName,
@@ -440,47 +439,46 @@ class SyntheticUser {
   // Phase B — publish a peer location
   // ===========================================================================
 
-  /// Encrypts a location into a kind-445 event via the production FFI
-  /// and publishes it to [relay].
+  /// Seals a location into a kind-445 event through this peer's driver and
+  /// sends nothing: the signed event, for a scenario that puts it on a relay
+  /// itself. Never print it.
+  Future<String> sealLocationEvent({
+    required CircleWithMembersFfi circle,
+    required double latitude,
+    required double longitude,
+  }) async => (await sealLocationForTest(
+    relay: await _driverPool(),
+    circle: user.circleManager,
+    mlsGroupId: circle.circle.mlsGroupId,
+    latitude: latitude,
+    longitude: longitude,
+  )).eventJson;
+
+  /// Seals a location into a kind-445 event through this peer's driver and
+  /// sends it once to the relays the circle's routing names, which the
+  /// scenario points at [relay]; returns once [relay] holds the event.
   ///
-  /// Returns the published event id (from the OK frame match), so
-  /// scenarios can correlate the publish with later assertions.
-  ///
-  /// [updateInterval] is the publish-cadence hint the receiver-side
-  /// MLS state uses to compute the location's TTL. Must lie within
-  /// `[60, 3600]` seconds — the Rust FFI rejects anything outside
-  /// that range with `update_interval_secs out of range`. The
-  /// default matches the production app
-  /// (`kLocationPublishMaxInterval` 168 s + `kTtlNetworkBufferSeconds`
-  /// 30 s = 198 s; see `haven/lib/src/constants/location.dart`).
+  /// Returns the published event id, so scenarios can correlate the publish
+  /// with later assertions.
   Future<String> publishLocation({
     required CircleWithMembersFfi circle,
     required double latitude,
     required double longitude,
     required TestRelay relay,
-    Duration updateInterval = const Duration(seconds: 198),
   }) async {
-    final encrypted = (await user.circleManager.encryptLocation(
+    final sealed = await publishLocationForTest(
+      relay: await _driverPool(),
+      circle: user.circleManager,
       mlsGroupId: circle.circle.mlsGroupId,
-      senderPubkeyHex: pubkeyHex,
       latitude: latitude,
       longitude: longitude,
-      updateIntervalSecs: BigInt.from(updateInterval.inSeconds),
-    )).sent!;
-    final (accepted, _) = await relay.publishAndAwaitOk(
-      encrypted.eventJson,
     );
-    if (!accepted) {
-      // Never the relay's OK reason text (remote-authored prose, Security
-      // Rule 15) — the boolean rejection is the whole diagnostic here.
-      throw StateError(
-        '[SyntheticUser:$role] relay rejected location event',
-      );
-    }
-    final decoded = jsonDecode(encrypted.eventJson);
-    final id = decoded is Map<String, dynamic>
-        ? decoded['id'] as String?
-        : null;
+    final id = sealed.eventId;
+    await relay.firstWhere(
+      filter: <String, dynamic>{
+        'ids': <String>[id],
+      },
+    );
     // Coordinates are intentionally NOT logged here. The kind-445
     // published to strfry is encrypted at MLS; the surrounding
     // logcat is uploaded as a CI failure artifact and printing
@@ -488,9 +486,9 @@ class SyntheticUser {
     // performed. Sentinel coords are not personally identifying
     // today, but a future change that wires a real geofix into
     // this helper would silently regress the privacy posture.
-    final evtHandle = id == null ? '?' : _eventHandle(id);
-    debugPrint('[SyntheticUser:$role] published location evt=$evtHandle');
-    return id ?? '<unknown>';
+    debugPrint('[SyntheticUser:$role] published location '
+        'evt=${_eventHandle(id)}');
+    return id;
   }
 
   // ===========================================================================
@@ -576,7 +574,6 @@ class SyntheticUser {
 
     return _applyEventsInOrder(
       [for (final entry in ordered) entry.event],
-      relay: relay,
       context: 'drainPendingCommits',
     );
   }
@@ -611,28 +608,16 @@ class SyntheticUser {
   /// commit-ordering and convergence internally, so there is no fork left
   /// for Dart to referee and nothing to withhold.
   ///
-  /// What the engine does NOT own is the last hop for a RECEIVE-side
-  /// auto-commit. When a peer's `SelfRemove` proposal is ingested, the
-  /// engine stages the eviction commit and hands it back as
-  /// `DecryptLocationOutcomeFfi.autoCommits`, because the Rust
-  /// `CircleManagerFfi` holds no relay handle of its own. Somebody has to
-  /// publish it and confirm on a ≥1-relay ack (Rule 13) or the proposal
-  /// never becomes a commit and the leaver stays in everyone's roster
-  /// forever. Production does this in
-  /// `LocationSharingService._publishAutoCommits`; this drain is its
-  /// synthetic-peer mirror, so a scenario driving a leave through
-  /// synthetic peers exercises the same contract instead of quietly
-  /// diverging from it.
+  /// A RECEIVE-side auto-commit (the eviction a peer's `SelfRemove`
+  /// proposal calls for) is recorded and driven by the fanout driver inside
+  /// the ingest, to the circle's relays, applied only on an
+  /// acknowledgement (Rule 13) — the same path production's poll takes.
   Future<ApplyEventsSummary> applyArrivalOrdered(
     List<TestRelayEvent> events, {
     required TestRelay relay,
     bool finalizeAutoCommit = true,
   }) {
-    return _applyEventsInOrder(
-      events,
-      relay: relay,
-      context: 'applyArrivalOrdered',
-    );
+    return _applyEventsInOrder(events, context: 'applyArrivalOrdered');
   }
 
   /// Shared decrypt-and-apply loop for [drainPendingCommits] and
@@ -641,7 +626,6 @@ class SyntheticUser {
   /// resulting group state change internally.
   Future<ApplyEventsSummary> _applyEventsInOrder(
     List<TestRelayEvent> events, {
-    required TestRelay relay,
     required String context,
   }) async {
     var locationsProcessed = 0;
@@ -654,32 +638,17 @@ class SyntheticUser {
     // the same event return an empty result, so callers must accumulate
     // across drain rounds.
     final decryptedLocations = <String, DecryptedCoords>{};
-    // Receive-side auto-commits this drain published + confirmed (a peer's
-    // `SelfRemove` eviction). See [ApplyEventsSummary]'s field docs.
-    final publishedCommitEventIds = <String>[];
     // Vestigial under Dark Matter — the engine owns commit ordering, so
     // there is no Dart-side election left to withhold a commit for.
     const withheldPendingCommit = false;
     for (final event in events) {
       final eventJson = jsonEncode(event.raw);
       try {
-        // `decryptLocationCollectingCommits`, NOT `decryptLocation`: the
-        // latter is a shim that surfaces no receive-side auto-commit to its
-        // caller — it reports each as failed, which now PARKS the eviction as
-        // an owed publish rather than discarding it. Using it here made a
-        // synthetic peer publish nothing, leaving the circle owing the
-        // eviction for a peer's `SelfRemove`, so the leaver never left
-        // anyone's roster and every leave scenario deadlocked (Rule 13 —
-        // publish, then confirm on an ack).
-        final outcome = await user.circleManager
-            .decryptLocationCollectingCommits(eventJson: eventJson);
-        await _publishAutoCommits(
-          outcome.autoCommits,
-          relay: relay,
-          context: context,
-          publishedIds: publishedCommitEventIds,
+        final results = await ingestForTest(
+          relay: await _driverPool(),
+          circle: user.circleManager,
+          eventJson: eventJson,
         );
-        final results = outcome.results;
         for (final result in results) {
           switch (result.kind) {
             case LocationMessageResultKindFfi.location:
@@ -721,7 +690,6 @@ class SyntheticUser {
       'groupUpdates=${magnitudeBucket(groupUpdatesProcessed)} '
       'decryptFailed=${magnitudeBucket(decryptFailed)} '
       'distinctSenders=${magnitudeBucket(decryptedSenders.length)} '
-      'publishedCommits=${magnitudeBucket(publishedCommitEventIds.length)} '
       'withheldPendingCommit=$withheldPendingCommit',
     );
     return (
@@ -730,78 +698,8 @@ class SyntheticUser {
       decryptFailed: decryptFailed,
       decryptedLocationSenders: decryptedSenders,
       decryptedLocations: decryptedLocations,
-      publishedCommitEventIds: publishedCommitEventIds,
       withheldPendingCommit: withheldPendingCommit,
     );
-  }
-
-  /// Publishes every receive-side auto-commit the engine surfaced during a
-  /// decrypt, then confirms it on a ≥1-relay OK-ack or rolls it back.
-  ///
-  /// This is the synthetic-peer mirror of
-  /// `LocationSharingService._publishAutoCommits` and, one level down, of
-  /// `haven_core::relay::auto_commit::resolve_receive_publish_work` (the
-  /// in-Rust publisher the live-sync and background-catch-up planes use).
-  /// ONE publish attempt per entry, matching both references — this drain
-  /// is itself re-run by the polling callers, and that cadence is the
-  /// retry.
-  ///
-  /// Rule 13 is the whole point: NEVER confirm before an ack (that would
-  /// apply an epoch no peer can reach), and NEVER drop an entry silently
-  /// (that would strand the pending ref and leave the departing peer in
-  /// the roster). A failure is logged, not thrown, so one bad commit
-  /// cannot abort the surrounding decrypt loop — the pending ref is rolled
-  /// back and the engine re-surfaces a fresh attempt on the next drain.
-  Future<void> _publishAutoCommits(
-    List<CommitToPublishFfi> autoCommits, {
-    required TestRelay relay,
-    required String context,
-    required List<String> publishedIds,
-  }) async {
-    for (final commit in autoCommits) {
-      var published = false;
-      try {
-        final (accepted, _) = await relay.publishAndAwaitOk(
-          commit.commitEventJson,
-        );
-        published = accepted;
-        if (!accepted) {
-          // Never the relay's OK reason text (remote-authored prose, Security
-          // Rule 15) — the boolean rejection is the whole diagnostic here.
-          debugPrint(
-            '[SyntheticUser:$role] $context: relay rejected '
-            'receive-side auto-commit',
-          );
-        }
-      } on Object catch (e) {
-        debugPrint(
-          '[SyntheticUser:$role] $context: auto-commit publish '
-          'failed: ${e.runtimeType}',
-        );
-      }
-
-      try {
-        if (published) {
-          await user.circleManager.confirmPublished(pending: commit.pending);
-          final decoded = jsonDecode(commit.commitEventJson);
-          final id = decoded is Map<String, dynamic>
-              ? decoded['id'] as String?
-              : null;
-          if (id != null) publishedIds.add(id);
-          debugPrint(
-            '[SyntheticUser:$role] $context: published + confirmed '
-            'receive-side auto-commit evt=${_eventHandle(id ?? "?")}',
-          );
-        } else {
-          await user.circleManager.publishFailed(pending: commit.pending);
-        }
-      } on Object catch (e) {
-        debugPrint(
-          '[SyntheticUser:$role] $context: auto-commit '
-          '${published ? "confirm" : "fail-report"} failed: ${e.runtimeType}',
-        );
-      }
-    }
   }
 
   // ===========================================================================
@@ -856,6 +754,13 @@ class SyntheticUser {
     final proposalEventJson = await user.circleManager.proposeLeave(
       mlsGroupId: circle.circle.mlsGroupId,
     );
+    // A fresh peer's first leave is always a new proposal; `null` (already
+    // requested this epoch) would mean the scenario left it twice.
+    if (proposalEventJson == null) {
+      throw StateError(
+        '[SyntheticUser:$role] leaveAsNonAdmin: leave already requested',
+      );
+    }
     final (accepted, _) = await relay.publishAndAwaitOk(proposalEventJson);
     if (!accepted) {
       // Never the relay's OK reason text (remote-authored prose, Security
@@ -939,8 +844,26 @@ class SyntheticUser {
   // migration plan calls for (`MDK_DARKMATTER_MIGRATION_PLAN.md` §5.7),
   // not a mechanical Dart port.
 
-  /// Releases the underlying [TestUser].
-  Future<void> dispose() => user.dispose();
+  /// Releases the underlying [TestUser] and this peer's driver pool.
+  Future<void> dispose() async {
+    await _driver?.shutdown();
+    await user.dispose();
+  }
+
+  /// This peer's fanout driver pool, opened on first use: every location it
+  /// seals and every event it takes in goes through it, as in production.
+  RelayManagerFfi? _driver;
+  Future<RelayManagerFfi> _driverPool() async =>
+      _driver ??= await RelayManagerFfi.newInstance();
+
+  /// Takes [eventJson] in through this peer's driver, as production's poll
+  /// does, and answers what it handed back.
+  Future<List<LocationMessageResultFfi>> ingest(String eventJson) async =>
+      ingestForTest(
+        relay: await _driverPool(),
+        circle: user.circleManager,
+        eventJson: eventJson,
+      );
 
   // ===========================================================================
   // Internal helpers

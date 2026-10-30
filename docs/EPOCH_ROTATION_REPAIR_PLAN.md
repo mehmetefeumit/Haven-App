@@ -3,10 +3,23 @@
 **Status:** IMPLEMENTED + REVIEWED (all phases; both final re-checks APPROVED; minors applied).
 Plan confirmed 2026-08-28 (drafted by a marmot-expert agent, independently confirmed
 APPROVE-WITH-FIXES by a security-reviewer agent; every fix is folded in below). Line
-citations are to the pinned MDK `e391adc` / OpenMLS `04c50d7` checkouts and the current tree;
+citations are to the then-pinned MDK `e391adc` / OpenMLS `04c50d7` checkouts and the current tree;
 re-verify before relying on them. See "Implementation notes (core phase)" at the end for the
 exact API the FFI phase must expose, the mutation evidence, and the places the shipped core
 deviates from this plan's sketch.
+
+> **Superseded mechanism (W13, 2026-10-25).** The repair is now a real
+> self-update (`SendIntent::SelfUpdate`, `SessionManager::repair_self_update_staging`),
+> not the byte-identical `UpdateAppComponents(admin-policy.v1)` this plan
+> describes: it rotates the repairer's leaf through an `UpdatePath`, and any
+> member may make it, because a self-update needs no admin
+> (`protocol-core/group-setup.md` 92). Gate 1 is gone, with its
+> divergence-safety proofs: two members repairing at once converge through the
+> engine's branch selection (`self_update_e2e::two_members_repairing_at_once_converge_on_one_branch`).
+> Gates 2-6 stand. Gate 7 is now the retirement of a queued self-update inside
+> the hold that queued it, and again before every full advance. The "admin-stuck
+> only" limit below no longer holds. Everything else in this document is the
+> record of the original unit.
 
 > **Historical note (2026-08-29).** The Settings → Privacy page and every
 > `privacy*` ARB string were removed by owner directive. Where this document
@@ -100,7 +113,8 @@ disclosure + "ask this circle's admin to remove and re-add you" — until upstre
 self-update intent (§6).
 
 ### Gates (all necessary; evaluated in a pure, property-tested function)
-1. `admins == [self]` (divergence-safe by construction; self-suspends during a handoff).
+1. ~~`admins == [self]`~~ — deleted at W13: the repair is a self-update, which
+   any member may make.
 2. Engine epoch state `Stable`. Preferred: an upstream `AccountDeviceSession::epoch_state(gid)`
    getter and a pre-send gate. Interim: match `SessionError::Engine(EngineError::InvalidTransition
    { from, .. })` BEFORE `map_mls_err` stringifies it (the `AdminCannotSelfRemove` precedent in
@@ -292,8 +306,8 @@ guard and l10n phase.
 |---|---|---|
 | SEC-M1 / M4a | guard rewritten from a denylist of background entrypoints to a positive allowlist | a caller outside the allowlist passes the denylist, fails the allowlist (guard `--self-test` fixture) |
 | SEC-M1 (re-check) | `sharingRepairProvider` / `repairSelectedCircleEpoch` dropped from `REPAIR_TOKENS` | guard `--self-test` fails on both wrapper probes |
-| SEC-M3 | `rotated` arm stops reaching `_publishAndConfirm` | `publish_before_apply_dart_sites_test.dart` red |
-| SEC-M3 | `runCatchup` moved after `repairEpochRotation` | same file red |
+| SEC-M3 | `rotated` arm stops reaching `_publishAndConfirm` (superseded 2026-10-16: the repair goes through the fanout driver) | `publish_before_apply_dart_sites_test.dart` red |
+| SEC-M3 | `runCatchup` moved after `repairEpochRotation` (now after the driver's `repairRotation`) | same file red |
 | S-MIN-3 | the pre-fetch left un-awaited in the same position | same file red (the pin is on the `await`, not the index) |
 | S-MIN-4 | `map_err(redact_storage_error)` dropped from `circle_rotation_state` | `a_storage_failure_on_the_repair_surface_arrives_redacted_not_raw` red |
 | M4b | a repair scheduled on a `Timer.periodic` | `self_update_disabled_test.dart` red |
@@ -401,12 +415,14 @@ than refusing to repair. What it buys is converting a same-epoch race into a cle
    outside the ARB, which is exactly the class of stale non-ARB claim Workstream F exists to
    catch. Corrected.
 
-`sharing_health_epoch_repair_test.dart` enforces the English copy: no new string may say "key
-rotation", "rotate", or "forward secrecy" (the commit carries no `UpdatePath`), and the success
-copy may not say "restored"/"fixed"/"working again" — peers apply the commit when they next
-RECEIVE it.
+`sharing_health_epoch_repair_test.dart` enforces the English copy: no repair string may claim
+forward secrecy, and the success copy may not say "restored"/"fixed"/"working again" — peers apply
+the commit when they next RECEIVE it. (It also banned "key rotation" and "rotate" while the commit
+carried no `UpdatePath`; the W13 self-update carries one, and the hint now says the repair may give
+the circle new encryption keys.)
 
-English alone was not enough. `test/l10n/repair_copy_accuracy_test.dart` runs the same four claims
+English alone was not enough. `test/l10n/repair_copy_accuracy_test.dart` runs the same claims (five
+now, four when written)
 across **every** `supportedLocale`, each with its own forbidden vocabulary, because a guard that
 only knows the English words passes every translation unconditionally — which is exactly how the
 creator-vs-admin error survived twelve locales at once, and how all twelve came to say the others
@@ -442,11 +458,14 @@ it re-readable and re-announces it on Android — so the explicit `sendAnnouncem
 whenever the label carries it, or it would be spoken twice. The unresolved announcement remains
 for the case where the leg earned no line at all.
 
-Two smaller ones from the same round: the two TERMINAL outcomes now disable the Repair button and
-give it a reason (`sharingHealthRepairUnavailableHint`) rather than leaving a live control that
+Two smaller ones from the same round: the two TERMINAL outcomes disabled the Repair button and
+gave it a reason (`sharingHealthRepairUnavailableHint`) rather than leaving a live control that
 cannot succeed — WCAG 2.1 SC 4.1.2 requires the disabled state to still say why — and the five
 retryable gates gained `sharingHealthRepairNothingToDo`, because a tap that produced no visible
-change reads as a broken button.
+change reads as a broken button. (Both terminal outcomes went at W13, with that hint and the
+not-the-admin and needs-a-new-circle lines: any member may repair, and an unrecoverable circle's
+card offers no Repair button at all, only Re-create Circle, so the rounds below describe a key
+that no longer exists.)
 
 ### The l10n rounds and what the reviewers actually caught
 
@@ -553,7 +572,7 @@ copy defect.
 **Round 6** was three strings, and all three were the same class of error: a nominalisation
 standing where a control should be named.
 
-`sharingHealthRepairUnavailableHint` is spoken while the Repair button is DISABLED, and it covers
+`sharingHealthRepairUnavailableHint` was spoken while the Repair button was DISABLED, and it covered
 two outcomes — the circle is unrecoverable here, OR this user is simply not its admin. In French
 ("La réparation est indisponible…") and Russian ("Исправление недоступно…") the subject was the
 ACT, so aloud both said *repairing this circle is impossible*, which is false in the second case
@@ -594,9 +613,11 @@ one now followed throughout this feature: rendered prose takes 。, spoken-only 
 ### Rule 14 / gate 5
 
 `scripts/ci/check_epoch_repair_isolation.sh` (with `--self-test`, both wired into
-`repo-guards.yml`) is a positive **allowlist**: exactly four Dart files plus the FRB output may
-name `repairEpochRotation`/`repairCircleEpoch`, and it fails if any of the four stops existing, so
-a rename cannot silently empty the allowlist. A denylist of background entrypoints was the first
+`repo-guards.yml`) is a positive **allowlist**: exactly six Dart files plus the FRB output may
+name the repair (four at first; `nostr_relay_service.dart` and `circle_change_driver.dart` joined
+when the repair moved to the fanout driver, with `repairRotationDriven`/`repairRotation(` added to
+the tokens), and it fails if any of them stops existing, so a rename cannot silently empty the
+allowlist. A denylist of background entrypoints was the first
 shape and was wrong — it passes by default for any file nobody thought to list.
 
 Its token list names the Dart WRAPPERS as well as the two FFI methods. That was the re-check's
@@ -654,6 +675,14 @@ the ladder's SHAPE — the `rotated` arm reaches `_publishAndConfirm`, the `defe
 positioned before the `repairEpochRotation` call (the fetch-first ordering below, which is
 otherwise only a comment). Those are structural, not behavioural — they prove the wiring exists,
 not that it behaves — and that distinction is why the paragraph above stays.
+
+**Superseded 2026-10-16 (W9n).** The repair now goes through the fanout driver
+(`repair_rotation_driven`), which stages, records and drives both arms in Rust and confirms
+nothing without an acknowledgement; `_publishAndConfirm` and `_resolveDeferredWork` are gone.
+The Dart side keeps the awaited pre-fetch and one driver call, mapped by variant
+(`EpochRepairApplied`, `EpochRepairAwaitingRelays`, `EpochRepairSkipped`, `EpochRepairDeferred`;
+anything not made throws). `publish_before_apply_dart_sites_test.dart` pins the fetch before the
+driver call, and `nostr_circle_service_test.dart` runs the mapping against a fake driver.
 
 What IS tested behaviourally in Dart: the epoch leg's gates and error containment, the outcome
 routing, the copy in every locale, and the composition of the four repair legs

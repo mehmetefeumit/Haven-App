@@ -80,7 +80,7 @@ Streams: `'group_445'`, `'inbox_1059'`. Single-identity Haven (an `account_pubke
 - **T2:** Foreground = live stream; background = `run_catchup_all_circles(receive_only=true)`; resume = same primitive re-anchored at cursor. Dedup via `event_id` + Dart `_seenEventIds` + MDK processed-message gate.
 - **T3:** ONE standing multiplexed `#h` REQ per relay-set REPLACES three jittered poll loops (30/60/3600s) → net fewer REQ ops + no connect/disconnect churn. Scope to own relay set + `nostr_group_id` only (never real MLS group id); sub-ids HMAC-hashed with a **per-session ephemeral salt (not persisted)**. Honest delta in SECURITY.md: a persistent socket creates a continuous online-presence signal + a long-lived (socket ↔ set-of-nostr_group_ids) correlation for the session — a metadata change vs short polls that cannot be eliminated while holding a live connection. **Amended P1/P4: that is now a FOREGROUND cost.** Android stops the engine at every pause; iOS with background sharing off stops it too, and iOS with sharing on PAUSES it between publishes, so backgrounded there the standing REQ becomes one bounded burst per publish tick — presence at EVERY burst instant, not only at publish instants: `LiveSyncCore::resume_burst` re-anchors every circle's REQ and dials the whole relay union while `BackgroundBurstCoordinator._publishPass` sends only to the circles whose own decorrelated tick came due, so a circle relay's REQ/CLOSE pair carries this device's `kind:445` for its circle on a fraction of bursts, and on none at all when the publish window refuses (no identity, disclosure unaccepted, permission revoked, GPS timeout) or consent flips inside the pass; an inbox-only relay sees the same shape one plane over (`INV-R-BACKGROUND-PRESENCE-ONLY-AT-PUBLISH`); mitigations = own-relays-only + Tor/VPN (Mullvad) onboarding guidance.
 - **T4:** SQLCipher-persisted, atomic-conditional-max, advance-only-on-success; inbox advances on the decrypted RUMOR timestamp with the 7d subtract on every REQ; capped to now.
-- **T5:** See M5 — periodic AND post-join self-update both disabled; deviation scoped as MIP-02 (post-join MUST) + MIP-03 (rotation), documented with the joiner-leaf-key exposure window.
+- **T5:** See M5 — periodic AND post-join self-update both disabled (post-join made again since W13; see D2); deviation scoped as MIP-02 (post-join MUST) + MIP-03 (rotation), documented with the joiner-leaf-key exposure window.
 - **T6:** `publish_and_merge_commit_converging` with DETERMINISTIC MIP-03 winner `(min created_at, then lexicographically min id)`; tolerant of all three MDK outcomes (`Err` / `Unprocessable` / silent-advance). NOT a WN port (see M4).
 - **T7:** Additive schema; seed `now-24h`; phased + flag-gated; FRB regen clean; e2e lanes extended; coverage held.
 - **T8:** See the background-delivery matrix.
@@ -189,6 +189,8 @@ CONTENT-FREE wakes: the gateway sees only opaque per-group-ephemeral-encrypted d
 ---
 
 ## Self-update deviation (D2) — documented, accepted, correctly scoped
+
+*(Superseded at the v0.10.4 migration, W13: a joiner now makes the post-join self-update MDK owes it, and any member may make the epoch-rotation repair, itself a self-update; only periodic self-update stays disabled — `haven-core/SECURITY.md`, "Self-update: post-join performed, periodic disabled (M5)". This section records the M5 decision.)*
 
 Periodic **AND post-join (MIP-02)** self-update DISABLED (M5). Epochs advance only on real membership churn. **This abandons a MIP-02 MUST (post-join self-update within 24h of joining), not merely a MIP-03 rotation** — the original framing under-disclosed this and is corrected. MIP-03's concurrent-commit rule is honored by M4's deterministic winner; MIP-03 self-update is "MAY" (any member) and Commits MUST NOT combine self-update with other proposals (verified verbatim).
 
@@ -1032,7 +1034,7 @@ The highest-value fix (audit #4: the "damus never sees my KeyPackage" reachabili
   subscription_health` short-circuits only when `paused` is true ON ENTRY, and a burst clears `paused`
   for its whole duration, so a tick landing MID-BURST read a pool in the middle of `connect()` as
   dropped and repaired it through `resume_after_background()` — the FOREGROUND entry, which carries
-  the inbox REQ at any `k`. One such tick leaves standing REQs, an open socket and a 49 h gift-wrap
+  the inbox REQ at any `k`. One such tick leaves standing REQs, an open socket and a 96 h gift-wrap
   replay keyed on this npub at an instant that is not a publish, and it persists to the next burst's
   pause. The fix gates it where it is ARMED (the single arming site refuses while backgrounded, and
   the pause cancels the three timers gated at arming time — the fourth, the public-profile sweep,

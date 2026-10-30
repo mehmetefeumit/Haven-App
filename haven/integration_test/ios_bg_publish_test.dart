@@ -43,8 +43,9 @@
 /// actually has:
 ///
 ///   * live-sync build -> **P2c**, the burst: a peer's kind-445 is decrypted
-///     into the in-memory member cache and the engine's pool holds no
-///     subscription once the burst is over.
+///     into the in-memory member cache, and once the burst is over the
+///     engine's pool holds no subscription and its drive pool — where every
+///     NIP-77 session of a burst runs — no connected relay.
 ///   * poll build -> **P2d**, the timer:
 ///     `MapShell._startIosBackgroundReceiveTimer`'s `Timer.periodic(90 s)`
 ///     reaches `CatchupService.runCatchup(isBackgroundWake: true)` from the
@@ -316,8 +317,8 @@ import 'package:haven/src/providers/service_providers.dart'
         subscriptionServiceProvider;
 import 'package:haven/src/rust/api.dart'
     show
-        CircleCreationResultFfi,
         CircleManagerFfi,
+        LiveSyncFfi,
         MemberKeyPackageFfi,
         RelayManagerFfi;
 import 'package:haven/src/services/background_burst_coordinator.dart'
@@ -350,7 +351,9 @@ import 'package:haven/src/utils/log_alias.dart'
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
+import 'e2e/_lib/app_lifecycle.dart';
+import 'e2e/_lib/circle_creation.dart'
+    show DeliveredCircle, createCircleDelivered;
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
 import 'e2e/_lib/pump_helpers.dart' show pumpUntilCondition, pumpUntilFound;
 import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
@@ -1067,6 +1070,43 @@ Future<_PoolObservation> _pollPoolSubscriptions(
   );
 }
 
+/// Reads how many of the live session's drive-pool relays are connected,
+/// taking the engine's FIRST answer as the verdict; [budget] is what a read
+/// that THROWS is given.
+///
+/// Every NIP-77 session of a burst runs on the drive pool, and a session
+/// cannot outlive its socket (NIP-77), so zero here says no reconciliation —
+/// and no drive socket — stands between bursts. The first answer decides, for
+/// [_pollPoolSubscriptions]'s reason: a later burst opens sockets of its own.
+/// The read throws, and never answers zero, when there is no session or the
+/// session holds no drive pool.
+Future<_PoolObservation> _pollDrivePoolSockets(Duration budget) async {
+  final startedAt = DateTime.now();
+  final deadline = startedAt.add(budget);
+  var polls = 0;
+  int? last;
+  while (true) {
+    final remaining = deadline.difference(DateTime.now());
+    if (remaining <= Duration.zero) break;
+    try {
+      last = await LiveSyncFfi.drivePoolConnectedRelays().timeout(remaining);
+      polls += 1;
+      break;
+    } on Object catch (e) {
+      // Rule 8: the type only. No session, or no drive pool: neither is an
+      // answer, and both must keep polling.
+      debugPrint('[bg-publish] drive socket read failed: ${e.runtimeType}');
+    }
+    await Future<void>.delayed(_statusPollInterval);
+  }
+  return _PoolObservation(
+    matched: last == 0,
+    polls: polls,
+    last: last,
+    wall: DateTime.now().difference(startedAt),
+  );
+}
+
 /// Polls the app's member-location cache for [senderPubkeyHex]'s fix in
 /// [circle], until it lands or [budget] expires.
 ///
@@ -1210,6 +1250,12 @@ class _LifecycleRecorder with WidgetsBindingObserver {
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  // The binding forgets the lifecycle after every test and never reads it
+  // back from the platform, so without this the launch session's foreground
+  // claim rests on whether the engine's own lifecycle message has arrived.
+  // The REAL `paused` this test waits for still arrives over it. See
+  // `e2e/_lib/app_lifecycle.dart`.
+  resumeAppBeforeEachTest();
 
   testWidgets(
     'iOS bg-publish: native session arms, publishes continue across a REAL '
@@ -1278,6 +1324,7 @@ void main() {
       // default factory yields `OnboardingFlags.none`, and production only
       // pre-loads it from SharedPreferences inside `main.dart`'s bootstrap,
       // which pumping `HavenApp` directly bypasses.
+      expectAppResumed();
       await tester.pumpWidget(
         ProviderScope(
           overrides: <Override>[
@@ -1344,10 +1391,11 @@ void main() {
       await waitForKeyPackage(relay: relay, authorPubkeyHex: bob.pubkeyHex);
 
       final relayManager = await RelayManagerFfi.newInstance();
-      final CircleCreationResultFfi creation;
+      final DeliveredCircle creation;
       try {
         final bobKp = await relayManager.fetchMemberKeypackage(
           pubkey: bob.pubkeyHex,
+          circle: aliceManager,
         );
         if (bobKp == null) {
           throw StateError(
@@ -1361,13 +1409,12 @@ void main() {
           () => container
               .read(identityNotifierProvider.notifier)
               .getSecretBytes(),
-          // Publishes Bob's gift-wrapped Welcome and CONFIRMS the staged
-          // create (Security Rule 13) — an unconfirmed create pins the group
-          // in MDK's PendingPublish, where every inbound kind-445 buffers
-          // forever.
-          (aliceSecret) => createCircleConfirmed(
+          // Publishes Bob's gift-wrapped Welcome and requires every relay ack:
+          // an invitee whose Welcome never landed never joins. See
+          // `createCircleDelivered`'s doc.
+          (aliceSecret) => createCircleDelivered(
             manager: aliceManager,
-            relay: relay,
+            relayManager: relayManager,
             identitySecretBytes: aliceSecret,
             members: <MemberKeyPackageFfi>[bobKp],
             name: 'iOS BG Publish Circle',
@@ -1375,7 +1422,6 @@ void main() {
             relays: <String>[defaultStrfryUrl],
             // Bob advertises no inbox relays, so the Welcome-delivery cascade
             // needs the admin's own relay as a fallback.
-            creatorFallbackRelays: <String>[defaultStrfryUrl],
             scenario: 'bg-publish',
           ),
         );
@@ -1383,13 +1429,6 @@ void main() {
         await relayManager.shutdown();
       }
 
-      if (!creation.welcomeEvents.any(
-        (e) => e.recipientPubkey.toLowerCase() == bob.pubkeyHex.toLowerCase(),
-      )) {
-        throw StateError(
-          '[bg-publish] createCircle produced no gift-wrap for Bob.',
-        );
-      }
 
       final bobCircle = await bob.acceptInvitationViaRelay(relay: relay);
       expect(
@@ -2309,13 +2348,14 @@ void main() {
           //     that anything was dropped. It would have read `true` for every
           //     one of the states this assertion exists to catch.
           //
-          // What P2c does NOT prove: that no SOCKET is open between bursts.
-          // There is no in-process oracle for that — the count is
-          // subscriptions, not connections — and this lane's relay logs no
-          // REQ/CLOSE frames, so there is no relay-side oracle either. The
-          // socket half is pinned in Rust (`live_sync_burst_e2e.rs`, on relay
-          // health), and the honest reading of a green here is "no standing
-          // REQ", nothing wider.
+          // What P2c does NOT prove: that no ENGINE socket is open between
+          // bursts. The subscription count is subscriptions, not connections,
+          // and this lane's relay logs no REQ/CLOSE frames, so there is no
+          // relay-side oracle either. That half is pinned in Rust
+          // (`live_sync_burst_e2e.rs`, on relay health). The DRIVE pool's
+          // sockets are read below — every NIP-77 session of a burst runs
+          // there — so a green here reads "no standing REQ and no drive
+          // socket", nothing wider.
           // =================================================================
           //
           // Bob publishes FIRST and the publish is ACKED before the tick is
@@ -2520,6 +2560,51 @@ void main() {
             'read #${magnitudeBucket(quiet.polls)}, '
             '${quiet.wall.inSeconds}s after the burst.',
           );
+
+          // ...and no socket of the drive pool. Every NIP-77 session a burst
+          // runs is on that pool and cannot outlive its socket, so this is the
+          // read that says no reconciliation stands between bursts.
+          var draining = true;
+          final socketsFuture = _pollDrivePoolSockets(
+            betweenBurstsWindow,
+          ).whenComplete(() => draining = false);
+          final socketsHeartbeat = _heartbeatWhile(
+            () => draining,
+            betweenBurstsWindow,
+            'the engine to ANSWER how many drive-pool relays are connected',
+          );
+          final sockets = await socketsFuture;
+          await socketsHeartbeat;
+
+          _failIfSuspended(
+            sockets.wall,
+            betweenBurstsWindow,
+            'P2c (the between-bursts drive-pool sockets)',
+          );
+          final socketsDetail = sockets.last == null
+              ? 'every read of the drive-pool socket count FAILED across '
+                    '${betweenBurstsWindow.inSeconds}s — there is no live '
+                    'session to ask, or it holds no drive pool'
+              : 'the engine answered ${magnitudeBucket(sockets.last!)} '
+                    'connected drive-pool relay(s) on the first read taken '
+                    'after the burst';
+          expect(
+            sockets.matched,
+            isTrue,
+            reason:
+                '$socketsDetail, so a socket the burst opened for its NIP-77 '
+                'pass or a drive outlived its pause: a reconciliation on it '
+                'may still stand, and the relay keeps seeing this device '
+                'online between publish ticks. The pause closes the drive '
+                'pool once its in-flight gauge drains; read the tick wall '
+                '(${receiveTickWall.inSeconds}s) against the chain watchdog '
+                '(${kPublishLinkTimeout.inSeconds}s) as for the count above.',
+          );
+          debugPrint(
+            '[bg-publish] between bursts: the engine answered '
+            '${magnitudeBucket(sockets.last ?? 0)} connected drive-pool '
+            'relay(s) on read #${magnitudeBucket(sockets.polls)}.',
+          );
           debugPrint(kBackgroundReceiveMarker);
         } else {
           // =================================================================
@@ -2540,15 +2625,18 @@ void main() {
           // deleted outright (mutation-verified). OD4-d recorded that gap;
           // this phase is what closes it.
           //
-          // The oracle is the sweep's OWN side effect in the PERSISTED
-          // last-known store: Rust's `persist_locations` upserts one row per
-          // decrypted location application message. On this leg nothing else
-          // can write that row — the publish tick's burst open fails without
-          // an engine (asserted in the foreground above, where the pool-count
-          // read had to THROW), the foreground 30 s fetch timer was cancelled
-          // at the pause, and no provider can recompute while frames are off.
-          // So a row carrying the peer's sentinel coordinates is the timer,
-          // its sweep and the MLS decrypt, all three at once.
+          // Two oracles, because one no longer attributes. The row is the
+          // sweeps' side effect in the PERSISTED last-known store: Rust's
+          // `persist_locations` upserts one row per decrypted location
+          // application message. It is no longer the timer's alone — since
+          // decision 244 a publish tick's burst on this leg receives through
+          // the same catch-up before it seals, and writes the same row. So
+          // the TIMER is attributed by its own count of finished sweeps
+          // (`MapShell.backgroundReceiveTimerSweeps`, which only its tick's
+          // `_runBackgroundCatchUp` advances), and the row says that a sweep
+          // decrypted the peer's fix. The foreground 30 s fetch timer was
+          // cancelled at the pause, and no provider recomputes while frames
+          // are off, so those two are the only writers.
           //
           // A FOURTH premise, and the fragile one, because it is not a fact
           // about Dart: `registerIosBackgroundCatchupHandler` (main.dart,
@@ -2594,6 +2682,7 @@ void main() {
                 'with the receive timer never having fired.',
           );
 
+          final swept = MapShell.backgroundReceiveTimerSweeps;
           final peerEventId = await bob.publishLocation(
             circle: bobCircle,
             latitude: _peerLatitude,
@@ -2667,6 +2756,11 @@ void main() {
                 'ingest',
           );
           expect(catchup.fix!.longitude, closeTo(_peerLongitude, 1e-6));
+          expect(MapShell.backgroundReceiveTimerSweeps, greaterThan(swept),
+              reason: "the peer's fix reached the store, but the poll path's "
+                  'background receive timer finished no sweep in the window: '
+                  "a burst's receive-first catch-up wrote it, and the timer "
+                  'this phase exists for is dead');
           debugPrint(
             "[bg-publish] poll-path catch-up: the peer's location reached the "
             'persisted store on read #${magnitudeBucket(catchup.polls)}, '

@@ -700,9 +700,6 @@ class AppLocalizationsTr extends AppLocalizations {
   String get nameCircleStageCreatingGroup => 'Güvenli grup oluşturuluyor...';
 
   @override
-  String get nameCircleStageSendingInvites => 'Davetler gönderiliyor...';
-
-  @override
   String get nameCircleStageComplete => 'Tamamlandı!';
 
   @override
@@ -720,7 +717,7 @@ class AppLocalizationsTr extends AppLocalizations {
   }
 
   @override
-  String nameCircleCreatedPartialSnack(String name, int sent, int total) {
+  String nameCircleCreatedSentSoFarSnack(String name, int sent, int total) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -729,7 +726,15 @@ class AppLocalizationsTr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '\"$name\" çevresi oluşturuldu. Davetler gönderildi ($totalString davetten $sentString tanesi); geri kalanın iletimi bekleniyor.';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          '\"$name\" çevresi oluşturuldu. Şu ana kadar $totalString davetten $sentString tanesi gönderildi. Haven, uygulama açıkken kalan davetleri en fazla bir gün boyunca göndermeye devam eder.',
+      one:
+          '\"$name\" çevresi oluşturuldu. Şu ana kadar 1 davetten $sentString tanesi gönderildi. Haven, uygulama açıkken daveti en fazla bir gün boyunca göndermeye devam eder.',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -810,7 +815,7 @@ class AppLocalizationsTr extends AppLocalizations {
   }
 
   @override
-  String addMemberPartialDelivery(int sent, int total) {
+  String addMemberSentSoFar(int sent, int total, String circleName) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -819,7 +824,38 @@ class AppLocalizationsTr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Davetler gönderildi ($totalString davetten $sentString tanesi). Geri kalanın iletimi bekleniyor.';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          '$circleName çevresi için şu ana kadar $totalString davetten $sentString tanesi gönderildi. Haven, uygulama açıkken kalan davetleri en fazla bir gün boyunca göndermeye devam eder.',
+      one:
+          '$circleName çevresi için şu ana kadar 1 davetten $sentString tanesi gönderildi. Haven, uygulama açıkken daveti en fazla bir gün boyunca göndermeye devam eder.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String addMemberReinviteNeeded(String circleName) {
+    return 'Haven, $circleName çevresi için daveti gönderemiyor. Bu kişiyi çıkarıp yeniden ekleyin.';
+  }
+
+  @override
+  String get memberCannotReceiveInvitations =>
+      'Haven seçtiğiniz herkesi davet edemiyor, çünkü davetlerden en az birinin nereye gönderileceğini bulamadı. Seçtiğiniz kişilerden, uygulamalarının davet alabildiğini kontrol etmelerini isteyin, ardından tekrar deneyin.';
+
+  @override
+  String get missedInvitationsShowWho => 'Kişileri göster';
+
+  @override
+  String missedInvitationsTitle(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Davetler gönderilemedi',
+      one: 'Davet gönderilemedi',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -874,6 +910,11 @@ class AppLocalizationsTr extends AppLocalizations {
   }
 
   @override
+  String circleMemberRemoveAwaitingAnnouncement(String name) {
+    return '$name hâlâ çıkarılıyor: aktarıcılar bekleniyor. Bu tamamlanana kadar bu çevreyle hiçbir şey paylaşılmaz.';
+  }
+
+  @override
   String get circleMemberAdmin => 'Yönetici';
 
   @override
@@ -908,7 +949,12 @@ class AppLocalizationsTr extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'Davet edilmeye hazır';
 
   @override
-  String get pendingMemberNeedsUpdate => 'Haven güncellemesi gerekiyor';
+  String get pendingMemberNeedsUpdate =>
+      'Haven\'ı güncellemesi veya açması gerekiyor';
+
+  @override
+  String get memberKeyPackageStale =>
+      'Haven şu anda bu kişiyi davet edemiyor. Haven\'ı açmasını isteyin, ardından tekrar deneyin.';
 
   @override
   String get memberSearchHint => 'Üye kimliğini girin...';
@@ -1061,6 +1107,28 @@ class AppLocalizationsTr extends AppLocalizations {
       'Davet kabul edilemedi. Lütfen tekrar deneyin.';
 
   @override
+  String invitationNeedsNewInviteError(String name) {
+    return 'Bu davet artık kullanılamaz. $name adlı kişiden sizi tekrar davet etmesini isteyin. Önce Haven\'ı güncellemesi gerekebilir.';
+  }
+
+  @override
+  String get rejoinDialogTitle =>
+      'Bu çevreye yeniden katılmak istiyor musunuz?';
+
+  @override
+  String rejoinDialogBody(String inviterName, String circleName) {
+    return '$inviterName sizi zaten bu telefonda bulunan “$circleName” çevresine davet etti. Bu durum, çevreden çıkarılıp yeniden davet edildiyseniz yaşanabilir. Yeniden katılırsanız bu telefondaki çevre kopyası yenisiyle değiştirilir. “Reddet” bu daveti kalıcı olarak sonlandırır; “İptal” ise daveti daha sonrası için saklar.';
+  }
+
+  @override
+  String rejoinDialogBodyUnnamed(String circleName) {
+    return 'Zaten bu telefonda bulunan “$circleName” çevresine davet edildiniz. Bu durum, çevreden çıkarılıp yeniden davet edildiyseniz yaşanabilir. Yeniden katılırsanız bu telefondaki çevre kopyası yenisiyle değiştirilir. “Reddet” bu daveti kalıcı olarak sonlandırır; “İptal” ise daveti daha sonrası için saklar.';
+  }
+
+  @override
+  String get rejoinDialogConfirm => 'Yeniden katıl';
+
+  @override
   String invitationRosterFullError(int limit) {
     final intl.NumberFormat limitNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1193,11 +1261,22 @@ class AppLocalizationsTr extends AppLocalizations {
   String get circleDetailsLeaveCircle => 'Çevreden Ayrıl';
 
   @override
+  String get circleDetailsLeavingInProgress => 'Çevreden ayrılınıyor…';
+
+  @override
   String get leaveCircleDialogTitle => 'Çevreden Ayrıl';
 
   @override
   String get leaveCircleDialogBody =>
       'Bu çevreden ayrılmak istiyor musunuz? Konumunuzu üyelerine göndermeyi ve onlarınkini görmeyi bırakacaksınız. Gönderdiğiniz son konum, bir güne kadar onların telefonlarında kalır. Bu işlem geri alınamaz: yeniden katılmak için yeni bir davet gerekir.';
+
+  @override
+  String get leaveDisbandedCircleDialogBody =>
+      'Bu çevre sona erdi, bu yüzden artık onunla hiçbir şey paylaşılmıyor. Çevreden ayrılmak onu bu telefondan kaldırır.';
+
+  @override
+  String get leaveCircleDialogAdminNote =>
+      'Bu çevrenin yöneticisisiniz. Siz ayrılmadan önce Haven, çevrenin çalışmaya devam edebilmesi için başka bir üyeyi yönetici yapmaya çalışır.';
 
   @override
   String get leaveCircleConfirm => 'Ayrıl';
@@ -1212,53 +1291,32 @@ class AppLocalizationsTr extends AppLocalizations {
   String get leaveCircleError => 'Çevreden ayrılınamadı';
 
   @override
-  String get circleBlockedBannerTitle => 'Bu çevre güncellenemiyor';
-
-  @override
-  String get circleBlockedBannerBody =>
-      'Bu çevrenin şifrelemesinde bir sorun oluştu, bu yüzden Haven bu çevrede artık güncelleme gönderemiyor ya da alamıyor. Aşağıda en son bildiklerinizi görmeye devam edebilir ya da çevreden ayrılabilirsiniz.';
-
-  @override
-  String get legacyCircleBannerTitle =>
-      'Bu çevrenin yeniden oluşturulması gerekiyor';
-
-  @override
-  String get legacyCircleBannerBody =>
-      'Haven\'ın şifreleme motoru güncellendi, bu yüzden bu çevre artık kullanılamıyor. Aynı kişilerle konum paylaşmaya devam etmek için çevreyi yeniden oluşturun. Onları tekrar davet etmeniz gerekecek.';
-
-  @override
   String get legacyCircleRecreateCta => 'Çevreyi Yeniden Oluştur';
 
   @override
-  String get legacyCircleRemoveCta => 'Kaldır';
+  String get storageResetTitle => 'Haven güncellendi';
 
   @override
-  String get legacyCircleRemoveDialogTitle => 'Çevre kaldırılsın mı?';
+  String get storageResetKept =>
+      'Kimliğiniz değişmedi ve daha önce yayımladığınız herkese açık profil olduğu gibi kalıyor.';
 
   @override
-  String get legacyCircleRemoveDialogBody =>
-      'Bu çevre artık kullanılamıyor ve listenizden kaldırılacak. Bu işlem, onun yerine oluşturacağınız yeni bir çevreyi etkilemez.';
+  String get storageResetLost =>
+      'Haven\'ın yeni şifreleme motoruna geçmek için bu güncellemeden önce oluşturulan çevreler kaldırıldı. Onları yeniden oluşturun ve üyelerini tekrar davet edin. Bu güncellemeden önce kişilere verdiğiniz takma adlar ve o zamana kadar kaydedilmesi tamamlanmamış profil değişiklikleri de kaldırıldı.';
 
   @override
-  String get legacyCircleRemoveConfirm => 'Kaldır';
+  String get storageResetRelays =>
+      'Bu güncelleme aktarıcı ayarlarınızı Haven\'ın varsayılanlarına sıfırladı. Siz devam edene ya da Aktarıcı ayarları\'ndan dönene kadar bu ayarlar yayımlanmaz; bu yüzden önce kendi aktarıcılarınızı ekleyebilirsiniz.';
 
   @override
-  String get legacyCutoverExplainerTitle => 'Haven güncellendi';
+  String get storageResetContinue => 'Devam Et';
 
   @override
-  String get legacyCutoverExplainerIdentityUnchanged =>
-      'Kimliğiniz ve herkese açık profiliniz değişmedi. Bunlar için yapmanız gereken bir şey yok.';
+  String get storageResetOpenRelaySettings => 'Aktarıcı ayarları';
 
   @override
-  String get legacyCutoverExplainerCirclesNeedRecreation =>
-      'Güvenliği artırmak için, bu çevrelerde tekrar konum paylaşabilmenizden önce çevrelerinizin yeniden oluşturulması ve üyelerinin yeniden davet edilmesi gerekiyor.';
-
-  @override
-  String get legacyCutoverExplainerAcknowledge => 'Anladım';
-
-  @override
-  String get relaySettingsLegacyRetractionPending =>
-      'Haven hâlâ aktarıcılardan, son güvenlik güncellemesinden kalan bazı eski verileri silmelerini istiyor.';
+  String get storageResetAcknowledgeFailed =>
+      'Haven yanıtınızı kaydedemedi. Yanıtınız kaydedilene kadar Haven aktarıcı ayarlarınızı ve davet anahtarınızı yayımlamaz; bu yüzden henüz kimse sizi davet edemez. Tekrar deneyin; yoksa Haven bir dahaki açılışta yeniden soracak.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'Çevreler paneli daraltıldı';
@@ -1483,6 +1541,9 @@ class AppLocalizationsTr extends AppLocalizations {
   @override
   String get identityAdvancedDeleteError =>
       'Kimlik silinemedi. Lütfen tekrar deneyin.';
+
+  @override
+  String get identityAdvancedDeletingProgress => 'Kimliğiniz siliniyor…';
 
   @override
   String identityAdvancedCopiedToClipboard(String label) {
@@ -1768,7 +1829,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get clockSkewBodyBehind =>
-      'Bu telefonun saati çevrelerinizdekilere göre geri kalıyor. Konumlarınız gönderiliyor ama kimse görmeden geçerliliğini yitiriyor. Bunu düzeltmek için sistem ayarlarından tarih ve saatin otomatik ayarlanmasını açın.';
+      'Bu telefonun saati çevrelerinizdekilere göre geri kalıyor. Konumlarınız gönderiliyor ama erken geçerliliğini yitiriyor; çevreleriniz bunların bir kısmını ya da tamamını kaçırabilir. Bunu düzeltmek için sistem ayarlarından tarih ve saatin otomatik ayarlanmasını açın.';
 
   @override
   String get clockSkewResolvedAnnouncement =>
@@ -1845,24 +1906,8 @@ class AppLocalizationsTr extends AppLocalizations {
   String get sharingHealthRepairAction => 'Onar';
 
   @override
-  String get sharingHealthRepairUnavailableHint =>
-      'Onarım bu çevre için kullanılamaz';
-
-  @override
-  String get sharingHealthRepairHint =>
-      'Aktarıcılara yeniden bağlanır, konumunuzu göndermeyi tekrar dener ve bu çevrenin yöneticisiyseniz ona yeni bir anahtar verebilir';
-
-  @override
   String get sharingHealthRepairSent =>
       'Onarım gönderildi. Diğer üyelerin telefonları onu aldığında konumları yeniden gelmeye başlayacak.';
-
-  @override
-  String get sharingHealthRepairNotOwner =>
-      'Bu çevreyi yalnızca yöneticisi onarabilir. Ondan sizi çıkarıp yeniden eklemesini isteyin.';
-
-  @override
-  String get sharingHealthRepairNeedsNewCircle =>
-      'Bu çevre bu telefonda onarılamaz. Aynı kişilerle yeni bir çevre oluşturun.';
 
   @override
   String get sharingHealthRepairNothingToDo =>
@@ -1875,6 +1920,194 @@ class AppLocalizationsTr extends AppLocalizations {
   @override
   String get sharingHealthResumedAnnouncement =>
       'Konum paylaşımı yeniden çalışıyor.';
+
+  @override
+  String get sharingHealthTitleQuarantined =>
+      'Haven şu anda bu çevreyi açamıyor';
+
+  @override
+  String get sharingHealthBodyQuarantined =>
+      'Bu çevre bu telefonda yüklenirken bir sorun oluştu. Çevre hâlâ burada.';
+
+  @override
+  String get sharingHealthTitleDisbanded => 'Bu çevre sona erdi';
+
+  @override
+  String get sharingHealthBodyDisbanded =>
+      'Bir yönetici bu çevreyi sona erdirdi, bu yüzden artık onunla hiçbir şey paylaşılmıyor. Bu telefondan kaldırmak için çevreden ayrılın.';
+
+  @override
+  String get sharingHealthQuarantineRetryHint =>
+      'Bu çevreyi yeniden yüklemeyi dener';
+
+  @override
+  String get sharingHealthQuarantineRetryFailedAnnouncement =>
+      'Haven bu çevreyi hâlâ açamıyor.';
+
+  @override
+  String get sharingHealthTitleUnrecoverable =>
+      'Bu çevre bu telefonda çalışmayı durdurdu';
+
+  @override
+  String get sharingHealthBodyUnrecoverable =>
+      'Haven, bu telefonda bu çevrede artık güncelleme gönderemiyor ya da alamıyor. Çevrenin yöneticilerinden birinden sizi çıkarıp yeniden eklemesini isteyin. Bunu yapabilecek kimse yoksa aynı kişilerle yeni bir çevre oluşturun.';
+
+  @override
+  String get sharingHealthTitleStalled =>
+      'Haven bu çevrenin güncellemelerini okuyamıyor';
+
+  @override
+  String get sharingHealthBodyStalled =>
+      'Bu telefon, çevrede yapılan bir değişikliği kaçırmış gibi görünüyor ve bu değişikliği aktarıcılarda bulamadı. Çevrenin yöneticilerinden birinden sizi çıkarıp yeniden eklemesini isteyin. Bunu yapabilecek kimse yoksa aynı kişilerle yeni bir çevre oluşturun.';
+
+  @override
+  String get sharingHealthTitlePaused => 'Haven bu çevreyi duraklattı';
+
+  @override
+  String get sharingHealthBodyCollision =>
+      'Haven, bu telefonda bu çevreyle ilgili bir sorun buldu ve konumunuzu gizli tutmak için bu çevreyle paylaşımı durdurdu. Bunu düzeltmenin tek yolu çevreden ayrılmaktır. Yeniden katılmak için yeni bir davet gerekir.';
+
+  @override
+  String get sharingHealthBodyCannotCheck =>
+      'Haven bu telefonda bu çevreyi denetleyemedi, bu yüzden konumunuzu gizli tutmak için bu çevreyle paylaşımı duraklattı. Haven bunu kendiliğinden yeniden denetler.';
+
+  @override
+  String get sharingHealthTitleLeaving => 'Bu çevreden ayrılıyorsunuz';
+
+  @override
+  String get sharingHealthBodyLeaving =>
+      'Haven bu çevreden ayrılmayı tamamlarken çevreyle hiçbir şey paylaşılmaz. Bu, yaklaşık bir gün sürebilir. Tamamlandığında çevre bu telefondan kaybolur.';
+
+  @override
+  String get sharingHealthBodyRemovalUnmade =>
+      'İstediğiniz bir çıkarma işlemi yapılmadığı için Haven, konumunuzu çıkarmaya çalıştığınız herkesten uzak tutmak amacıyla bu çevreyle paylaşmayı duraklattı.';
+
+  @override
+  String get sharingHealthBodyRemovalUnmadeNoNotice =>
+      'İstediğiniz bir çıkarma işlemi yapılmadığı için Haven, konumunuzu çıkarmaya çalıştığınız herkesten uzak tutmak amacıyla bu çevreyle paylaşmayı duraklattı. Çevrede hâlâ kimlerin bulunduğunu görmek için üye listesini açın.';
+
+  @override
+  String get sharingHealthBodyDepartureDue =>
+      'Biri bu çevreden ayrıldı, ancak ayrılma işlemi henüz tamamlanmadı. Tamamlanana kadar Haven konumunuzu bu çevreyle paylaşmaz.';
+
+  @override
+  String get sharingHealthTitleBackgroundPaused =>
+      'Bu çevre için arka planda paylaşım duraklatıldı';
+
+  @override
+  String get sharingHealthBodyAwaitsForeground =>
+      'Bu çevrenin aktarıcıları, Haven arka plandayken değişti. Haven geçişi açıkken tamamlar; o zamana kadar bu çevreyle arka planda paylaşım yapılmaz.';
+
+  @override
+  String get sharingHealthBodyAwaitingRelays =>
+      'Bu çevredeki bir değişiklik, bir aktarıcının onaylamasını bekliyor. O zamana kadar Haven konumunuzu bu çevreye göndermiyor ve bu çevreden gelen yeni konumları göstermiyor. Haven, uygulama açıkken denemeye devam eder.';
+
+  @override
+  String get sharingHealthBodyAcknowledged =>
+      'Bir aktarıcı bu çevredeki bir değişikliği kabul etti ve Haven değişikliği tamamlıyor. Tamamlanana kadar bu çevrenin güncellemeleri bekler.';
+
+  @override
+  String get sharingHealthBodyStagedWithoutRecord =>
+      'Bu çevredeki bir değişiklik kaydedilemedi, bu yüzden gönderilmedi. Haven bunu en geç bir dahaki açılışında çözer; o zamana kadar bu çevrenin güncellemeleri bekler.';
+
+  @override
+  String get sharingHealthBodyStoredInput =>
+      'Bu telefonun, bu çevre için henüz işleyemediği güncellemeler var. Bunlar işlenene kadar Haven konumunuzu bu çevreyle paylaşmaz.';
+
+  @override
+  String get sharingHealthBodySessionHeld =>
+      'Haven son bağlantısını hâlâ kapatıyor, bu yüzden konum paylaşımı duraklatıldı. Bu tamamlanınca paylaşım kaldığı yerden devam eder. Telefonunuzu yeniden başlatmak bu durumu her zaman giderir.';
+
+  @override
+  String get sharingHealthRepairHintAnyMember =>
+      'Aktarıcılara yeniden bağlanır, konumunuzu göndermeyi tekrar dener ve bu çevreye yeni şifreleme anahtarları verebilir';
+
+  @override
+  String get sharingHealthAttentionAnnouncement =>
+      'Bu çevrede konum paylaşımı dikkatinizi gerektiriyor. Nedenini görmek için Çevre ayrıntıları bölümünü açın.';
+
+  @override
+  String changeNoticeArrivedAnnouncement(String circleName) {
+    return '$circleName çevresinde yapılan son değişikliklerle ilgili bir konu dikkatinizi gerektiriyor. Bunu okumak için o çevrenin ayrıntılarını açın.';
+  }
+
+  @override
+  String get circleDetailsAttentionTooltip =>
+      'Çevre ayrıntıları, dikkat gerektiriyor';
+
+  @override
+  String circleRowAttentionSemantics(String circleName) {
+    return '$circleName, dikkat gerektiriyor';
+  }
+
+  @override
+  String get changeNoticeHeading => 'Bu çevredeki değişiklikler';
+
+  @override
+  String get changeNoteRemovalUndone =>
+      'Bu çevredeki bir değişiklik gerçekleşmedi. Bu değişiklik çevreden birini çıkarıyorduysa, çıkaracağı herkes hâlâ çevrede ve çevreyle paylaşılanları görebilir.';
+
+  @override
+  String get changeNoteChangeUndone =>
+      'Bu çevredeki bir değişiklik gerçekleşmedi, bu yüzden hiçbir şey değişmedi. Değişiklik sizinse ve hâlâ istiyorsanız yeniden yapın.';
+
+  @override
+  String get changeNoteMayBeOutOfStep =>
+      'Bu çevredeki bir değişiklik, bu telefonun haberi olmadan diğerlerine ulaşmış olabilir; bu yüzden bu telefon onlarla aynı noktada olmayabilir.';
+
+  @override
+  String get changeNoteReinviteOwed =>
+      'Davet ettiğiniz biri bu çevrede listeleniyor ama katılamıyor, çünkü Haven bu kişinin davetini gönderemiyor. Bu kişiyi çıkarıp yeniden ekleyin.';
+
+  @override
+  String get changeNoteChangeUnrecorded =>
+      'Bu çevredeki bir değişiklik kaydedilemedi, bu yüzden gönderilmedi.';
+
+  @override
+  String get changeNoteQueuedChangeDropped =>
+      'Bu çevrede yapılmayı bekleyen bir değişiklik, artık istendiği gibi yapılamadığı için iptal edildi. Başka bir yolla zaten yapılmış olabilir.';
+
+  @override
+  String get changeNoteQueuedChangesHeld =>
+      'Bu çevredeki bazı değişiklikler hâlâ yapılmayı bekliyor.';
+
+  @override
+  String get changeNoteQueuedRemovalDropped =>
+      'Bu çevrede istediğiniz bir çıkarma işlemi yapılmadı. Çıkarmaya çalıştığınız herkes hâlâ çevrede olabilir.';
+
+  @override
+  String get changeNoteChangeWithdrawn =>
+      'Başka bir üyenin bu çevredeki değişikliği sizinkilerden birinin yerini aldı, bu yüzden sizinki yapılmadı. Hâlâ istiyorsanız yeniden yapın.';
+
+  @override
+  String get changeNoteWelcomeOwed =>
+      'Bu çevre için bir davet henüz gönderilemedi. Haven, davet ettiğiniz andan itibaren en fazla bir gün boyunca, uygulama açıkken bu daveti göndermeye devam eder. Kişi o zamana kadar katılmadıysa onu çıkarıp yeniden ekleyin.';
+
+  @override
+  String get changeNoteUnreadLocation =>
+      'Bu çevreye son gönderilen bazı güncellemeler bu telefonda açılamadı.';
+
+  @override
+  String get changeNoticeStillInCircleLabel => 'Hâlâ çevrede:';
+
+  @override
+  String get changeNoticeRemoveAgain => 'Yeniden çıkar';
+
+  @override
+  String get changeNoticeReviewMembers => 'Üyeleri incele';
+
+  @override
+  String get changeNoticeKeepMembers => 'Çevrede tut';
+
+  @override
+  String get changeNoticeKeepConfirmTitle => 'Çevrede tutulsun mu?';
+
+  @override
+  String get changeNoticeKeepConfirmBody =>
+      'Haven, bu çıkarma işlemi yüzünden bu çevreyle paylaşımı artık duraklatmayacak. Çıkarmaya çalıştığınız ve hâlâ çevrede olan herkes çevrede kalır ve Haven konumunuzu bu çevreyle her paylaştığında onu görebilir.';
+
+  @override
+  String get changeNoticeKeepConfirmAction => 'Çevrede tut';
 
   @override
   String circleMemberLastSeenMinutes(int count) {

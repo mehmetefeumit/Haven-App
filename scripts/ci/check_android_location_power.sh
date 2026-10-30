@@ -47,6 +47,8 @@
 # outside the e2e lanes. Deleting a check here does not weaken a proof, it
 # removes the last one.
 set -uo pipefail
+LITERAL_FREE="$(cat "$(dirname "${BASH_SOURCE[0]}")/lib/literal_free.awk")"
+readonly LITERAL_FREE
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MAP_SHELL="${REPO_ROOT}/haven/lib/src/pages/map_shell.dart"
@@ -91,11 +93,11 @@ code_view() {
 
 fn_slice() {
   local v; v="$(code_view "$2")"
-  awk -v sig="$1" '
+  awk -v sig="$1" "${LITERAL_FREE}"'
     index($0, sig) > 0 { inbody = 1 }
     inbody {
       print
-      o = gsub(/[{]/, "&"); c = gsub(/[}]/, "&")
+      lfree = literal_free($0); o = gsub(/[{]/, "&", lfree); c = gsub(/[}]/, "&", lfree)
       depth += o - c
       if (seen && depth <= 0) exit
       if (o > 0) seen = 1
@@ -208,11 +210,11 @@ call_slice() { # <name> <file>
 # per source line. Shared by checks (5) and (5b), which police opposite halves
 # of the same method and must never disagree about where it ends.
 publish_cycle_body() { # <background_location_task.dart>
-  awk '
+  awk "${LITERAL_FREE}"'
     index($0, "Future<void> _publishCycle(") > 0 { inbody = 1 }
     inbody {
       print
-      o = gsub(/[{]/, "&"); c = gsub(/[}]/, "&")
+      lfree = literal_free($0); o = gsub(/[{]/, "&", lfree); c = gsub(/[}]/, "&", lfree)
       depth += o - c
       if (seen && depth <= 0) exit
       if (o > 0) seen = 1
@@ -496,11 +498,11 @@ check_registration_is_gated() { # <background_location_task.dart>
   # delivering into an isolate that is tearing down is a fix nobody can
   # publish and a receiver nobody turns off.
   local destroy
-  destroy="$(awk '
+  destroy="$(awk "${LITERAL_FREE}"'
     index($0, "Future<void> onDestroy(") > 0 { inbody = 1 }
     inbody {
       print
-      o = gsub(/[{]/, "&"); c = gsub(/[}]/, "&")
+      lfree = literal_free($0); o = gsub(/[{]/, "&", lfree); c = gsub(/[}]/, "&", lfree)
       depth += o - c
       if (seen && depth <= 0) exit
       if (o > 0) seen = 1

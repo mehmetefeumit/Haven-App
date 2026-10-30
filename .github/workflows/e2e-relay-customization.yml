@@ -335,10 +335,13 @@ jobs:
         run: bash tooling/e2e/ci/start-strfry.sh
 
       # The second (custom) relay. Distinct container/port/data-dir so
-      # this start can't `docker rm -f` R1 or `rm -rf` R1's data dir.
+      # this start can't `docker rm -f` R1 or `rm -rf` R1's data dir. It
+      # speaks NIP-77 and R1 does not, so a circle routed over both is the
+      # one mixed routing CI runs (run-relay-customization.sh's start_r2).
       - name: Start strfry relay (R2)
         env:
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+          STRFRY_CONFIG: strfry-negentropy.conf
           STRFRY_CONTAINER: strfry2
           STRFRY_PORT: "7778"
           STRFRY_DATA_DIR: /tmp/strfry2-data

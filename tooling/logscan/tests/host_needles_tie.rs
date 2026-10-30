@@ -26,7 +26,7 @@ fn read(rel: &str) -> String {
 /// literal it carries or [`None`] where the value is DERIVED at source time.
 ///
 /// Literals must stay single-quoted: an unquoted or double-quoted literal would
-/// be a value a shell expansion could change between here and the lane. The two
+/// be a value a shell expansion could change between here and the lane. The
 /// offset seeds are the deliberate exception — their value is computed from
 /// another constant, which is the whole point of them — so they come back as
 /// `None` and [`library_values`] reads what the library actually evaluates to.
@@ -292,12 +292,16 @@ fn the_library_defines_exactly_the_tied_constants() {
             "SEED_BOB",
             "SEED_BOB_OFFSET1",
             "SEED_BOB_OFFSET2",
+            "SEED_BOB_OFFSET3",
+            "SEED_BOB_OFFSET31",
+            "SEED_BOB_OFFSET32",
             "SEED_CAROL",
+            "SEED_CAROL_OFFSET32",
             "SEED_DAVE",
         ],
         "a new HN_ constant needs a tie to its source here"
     );
-    // …and exactly these two are derived rather than written down. A literal
+    // …and exactly these are derived rather than written down. A literal
     // that became derived, or a derived value quietly replaced by typed hex,
     // changes which half of this file ties it.
     let derived: Vec<&str> = lines
@@ -305,7 +309,17 @@ fn the_library_defines_exactly_the_tied_constants() {
         .filter(|(_, literal)| literal.is_none())
         .map(|(name, _)| name.as_str())
         .collect();
-    assert_eq!(derived, ["SEED_BOB_OFFSET1", "SEED_BOB_OFFSET2"]);
+    assert_eq!(
+        derived,
+        [
+            "SEED_BOB_OFFSET1",
+            "SEED_BOB_OFFSET2",
+            "SEED_BOB_OFFSET3",
+            "SEED_BOB_OFFSET31",
+            "SEED_BOB_OFFSET32",
+            "SEED_CAROL_OFFSET32",
+        ]
+    );
 }
 
 /// Every literal copy of a role pair is that role's pair.
@@ -423,10 +437,11 @@ fn the_band_exemption_is_pinned_and_names_live_constants() {
 /// Three things have to agree, and this test fails if any one of them moves:
 /// the Dart arithmetic (`synthetic_user.dart`'s `_seedWithOffset`), the bash
 /// derivation (`host-needles.sh`'s `hn_seed_with_offset`, read by sourcing it),
-/// and the set of offsets the host-profile scenario actually mints
-/// (`relay_customization_publish_test.dart`'s `seedOffset:` arguments). A new
-/// offset there fails here until the library declares a seed for it — which is
-/// the point: an undeclared offset pubkey is searched for by no needle.
+/// and the set of role/offset pairs the host-profile scenarios actually mint
+/// (the `seedOffset:` arguments of `relay_customization_publish_test.dart` and
+/// `welcome_redelivery_test.dart`, each read with the role seed it shifts). A
+/// new pair there fails here until the library declares a seed for it — which
+/// is the point: an undeclared offset pubkey is searched for by no needle.
 #[test]
 fn the_offset_seeds_follow_the_dart_offset_rule() {
     // 1. The Dart rule, asserted as the statement it is rather than assumed.
@@ -441,50 +456,79 @@ fn the_offset_seeds_follow_the_dart_offset_rule() {
         "offset 0 must still be the base seed unchanged"
     );
 
-    // 2. The offsets the HOST-profile scenario mints, read from it.
-    let scenario = read("haven/integration_test/relay_customization_publish_test.dart");
-    let mut offsets: Vec<u16> = scenario
-        .split("seedOffset: ")
-        .skip(1)
-        .map(|tail| {
-            tail.chars()
+    // 2. The role/offset pairs the HOST-profile scenarios mint, read from
+    //    them. Each `seedOffset:` is attributed to the role seed named between
+    //    it and the `SyntheticUser.` call it belongs to: `.bob(` / `bobSeed`,
+    //    or `.carol(` / `carolSeed`.
+    let mut pairs: Vec<(&str, u16)> = Vec::new();
+    for file in [
+        "haven/integration_test/relay_customization_publish_test.dart",
+        "haven/integration_test/welcome_redelivery_test.dart",
+    ] {
+        let scenario = read(file);
+        let mut parts = scenario.split("seedOffset: ");
+        let mut before = parts.next().expect("text before the first offset");
+        for tail in parts {
+            let call = &before[before
+                .rfind("SyntheticUser.")
+                .unwrap_or_else(|| panic!("{file}: a seedOffset outside a SyntheticUser call"))..];
+            let role = match (
+                call.contains(".bob(") || call.contains("bobSeed"),
+                call.contains(".carol(") || call.contains("carolSeed"),
+            ) {
+                (true, false) => "BOB",
+                (false, true) => "CAROL",
+                _ => panic!("{file}: a seedOffset whose role seed is not Bob's or Carol's"),
+            };
+            let offset = tail
+                .chars()
                 .take_while(char::is_ascii_digit)
                 .collect::<String>()
                 .parse()
-                .expect("a numeric seedOffset")
-        })
-        .collect();
-    offsets.sort_unstable();
-    offsets.dedup();
+                .expect("a numeric seedOffset");
+            pairs.push((role, offset));
+            before = tail;
+        }
+    }
+    pairs.sort_unstable();
+    pairs.dedup();
     assert_eq!(
-        offsets,
-        [1, 2],
-        "the host-profile scenario's offsets changed; host-needles.sh must \
+        pairs,
+        [
+            ("BOB", 1),
+            ("BOB", 2),
+            ("BOB", 3),
+            ("BOB", 31),
+            ("BOB", 32),
+            ("CAROL", 32)
+        ],
+        "the host-profile scenarios' offsets changed; host-needles.sh must \
          declare a seed for each one"
     );
 
     // 3. The library's evaluated values equal the base seed with its trailing
-    //    byte shifted — computed here from HN_SEED_BOB, never transcribed.
-    let base = library_constants()["SEED_BOB"].clone();
-    let mut bytes = hex::decode(&base).expect("HN_SEED_BOB is hex");
-    assert_eq!(bytes.len(), 32, "a seed is 32 bytes");
-    let last = *bytes.last().expect("32 bytes");
-    let names: Vec<String> = offsets
+    //    byte shifted — computed here from HN_SEED_<ROLE>, never transcribed.
+    let constants = library_constants();
+    let names: Vec<String> = pairs
         .iter()
-        .map(|o| format!("SEED_BOB_OFFSET{o}"))
+        .map(|(role, o)| format!("SEED_{role}_OFFSET{o}"))
         .collect();
     let got = library_values(&names.iter().map(String::as_str).collect::<Vec<_>>());
-    for (i, offset) in offsets.iter().enumerate() {
+    for (i, (role, offset)) in pairs.iter().enumerate() {
+        let base = constants[&format!("SEED_{role}")].clone();
+        let mut bytes = hex::decode(&base).expect("a role seed is hex");
+        assert_eq!(bytes.len(), 32, "a seed is 32 bytes");
+        let last = *bytes.last().expect("32 bytes");
         let shifted = u8::try_from(u16::from(last).wrapping_add(*offset) & 0xFF).expect("a byte");
         *bytes.last_mut().expect("32 bytes") = shifted;
         assert_eq!(
             got[i],
             hex::encode(&bytes),
-            "HN_{} must be HN_SEED_BOB with its last byte +{offset}",
+            "HN_{} must be HN_SEED_{role} with its last byte +{offset}",
             names[i]
         );
         // The leading 31 bytes are untouched, which is what keeps the seed
-        // recognisably Bob's family and the derivation auditable by eye.
+        // recognisably its role's family and the derivation auditable by eye.
         assert_eq!(got[i][..62], base[..62], "HN_{}", names[i]);
         assert_ne!(got[i], base, "HN_{} must differ from the base", names[i]);
     }
@@ -501,11 +545,12 @@ fn the_offset_seeds_follow_the_dart_offset_rule() {
 /// carry is searched for by no needle, and only the structural rules (a 64-hex
 /// run, an `npub`) stand between that pubkey and an uploaded log.
 ///
-/// Pinned by equality rather than forbidden outright, because one host lane
-/// does it today and pretending otherwise would be the vacuous half of a guard.
-/// That lane's two offsets ARE declared now — `HN_SEED_BOB_OFFSET1/2`, tied to
-/// the Dart rule by [`the_offset_seeds_follow_the_dart_offset_rule`], which also
-/// fails if the scenario reaches for a THIRD offset. This test is the other
+/// Pinned by equality rather than forbidden outright, because two host lanes
+/// do it today and pretending otherwise would be the vacuous half of a guard.
+/// Their offsets ARE declared now — `HN_SEED_BOB_OFFSET{1,2,3,31,32}` and
+/// `HN_SEED_CAROL_OFFSET32`, tied to the Dart rule by
+/// [`the_offset_seeds_follow_the_dart_offset_rule`], which also fails if a
+/// scenario reaches for another offset. This test is the other
 /// half: a NEW host-profile FILE reaching for `seedOffset` fails here, and has
 /// two honest ways out — use the base identity, or declare the offset seed in
 /// the library so the value is searched like any other.
@@ -574,11 +619,14 @@ fn only_a_declaring_lane_mints_an_offset_identity() {
             // Proxy profile (e2e-android.yml, e2e-ios.yml): every identity this
             // drive mints is declared over the channel, offset included.
             "e2e/e2e_combined.dart",
-            // HOST profile (e2e-relay-customization.yml). Its two offset Bobs
-            // (`seedOffset: 1`, `seedOffset: 2`) are derived from the canonical
+            // HOST profile (e2e-relay-customization.yml). Its three offset
+            // Bobs (`seedOffset: 1`, `2`, `3`) are derived from the canonical
             // Bob seed by a rule the host knows, so host-needles.sh declares
-            // them and that lane's logs ARE searched for both pubkeys.
+            // them and that lane's logs ARE searched for each pubkey.
             "relay_customization_publish_test.dart",
+            // HOST profile (e2e-integration.yml). Its offset Bobs (`31`, `32`)
+            // and Carol (`32`) are declared the same way.
+            "welcome_redelivery_test.dart",
         ],
         "a host-profile FILE minting an offset identity must declare its seeds"
     );

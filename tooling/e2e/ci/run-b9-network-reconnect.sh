@@ -129,9 +129,9 @@
 #   9. BACKLOG_REPLAYED ms=<N>          THE HEADLINE: the event imported
 #                                       while the device was in airplane mode
 #                                       was decrypted after the reconnect
-#  10. PUBLISH_AFTER_IDLE_OK accepted=<N>  the PUBLISH plane came back too: a
+#  10. PUBLISH_AFTER_IDLE_OK accepted=1   the PUBLISH plane came back too: a
 #                                       location sent through the production
-#                                       one-shot ladder was acked by a relay
+#                                       driver's one send was acked by a relay
 #
 # Step 10 is about the other pool. The two now differ deliberately: the
 # ENGINE's client keeps `RelayOptions::default()` (ping on, reconnect on,
@@ -689,9 +689,8 @@ backlog replay either way."
   #     stopped sharing, silently, which is the failure this whole packet is
   #     about.
   if b9_has_marker "${log}" "${MARK_PUBLISH_IDLE}"; then
-    b9_note "publish plane: a location was acked by \
-$(b9_marker_number "${log}" "${MARK_PUBLISH_IDLE}" 'accepted') relay(s) after \
-the outage, so the ping-less publish pool woke from its idle socket."
+    b9_note "publish plane: a location was acked by a relay after the outage, \
+so the ping-less publish pool woke from its idle socket."
   else
     local pub_reason
     pub_reason="$(b9_marker_flag "${log}" "${MARK_PUBLISH_IDLE_DEAD}" 'reason')"
@@ -699,7 +698,7 @@ the outage, so the ping-less publish pool woke from its idle socket."
       b9_finding "THE PUBLISH POOL DID NOT COME BACK \
 (${MARK_PUBLISH_IDLE_DEAD} reason=${pub_reason}). Live receive recovered, so \
 the network is not the explanation: a location offered through the production \
-one-shot ladder never reached a relay. Do NOT add a retry to make this pass — \
+driver's one send never reached a relay. Do NOT add a retry to make this pass — \
 the single attempt is the contract, and re-driving the connect inside it is \
 what must work."
     else

@@ -1109,11 +1109,14 @@ fn glob_matches(pattern: &str, value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    /// What a test waits for the capture lease: the product's own settle
-    /// window, derived rather than invented, and longer than any lease this
-    /// binary holds — so a leaked one fails instead of hanging.
+    /// What a test waits for the capture lease: the product's own
+    /// delivery-silence window, derived rather than invented. A holder can be a
+    /// whole world another test in this binary is running — at MDK v0.10.4 one
+    /// pays the quiescence window on every commit it applies, which outlasted
+    /// the settle window this used to be — so the bound fails a leaked lease
+    /// rather than a slow neighbour.
     fn lease_bound() -> Duration {
-        crate::oracle::bounds::settle()
+        crate::oracle::bounds::silence_window()
     }
 
     use super::{

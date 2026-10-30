@@ -4,6 +4,7 @@
 /// platform-specific guidance on keeping the service reliable.
 library;
 
+import 'dart:async';
 import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
@@ -38,6 +39,15 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
   /// Whether an async toggle operation is in progress.
   bool _busy = false;
 
+  /// This page's own snackbar while it is the one on screen.
+  Object? _ownSnackShowing;
+
+  /// The text of this page's plain snackbar while it waits behind another.
+  ValueNotifier<String>? _queued;
+
+  /// This page's one snackbar with an action while it waits behind another.
+  Object? _queuedAction;
+
   @override
   void initState() {
     super.initState();
@@ -66,6 +76,62 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
       ..invalidate(iosIndicatorSentenceProvider);
   }
 
+  /// Shows this page's outcome, replacing only its own previous one: the
+  /// messenger may be holding a snackbar from elsewhere that the user has not
+  /// answered yet (a Try Again, a Show who), and clearing the queue would
+  /// throw that away. Behind one, this waits its turn — and while it waits,
+  /// a later outcome without an action rewrites it instead of queueing behind
+  /// it, so the user is told the latest outcome once, not every toggle in
+  /// turn. Those plain outcomes all stay up 8 s: a waiting one may end up
+  /// saying the longest of them. The one outcome with an action (the
+  /// notification remedy) waits at most once, and a plain outcome after it
+  /// queues behind it rather than rewriting one shown before it.
+  void _say(
+    ScaffoldMessengerState messenger,
+    String message, {
+    SnackBarAction? action,
+  }) {
+    final queued = _queued;
+    if (action == null && queued != null) {
+      queued.value = message;
+      return;
+    }
+    if (action != null && _queuedAction != null) return;
+    if (_ownSnackShowing != null) messenger.hideCurrentSnackBar();
+    final text = ValueNotifier(message);
+    final token = Object();
+    if (action == null) {
+      _queued = text;
+    } else {
+      _queued = null;
+      _queuedAction = token;
+    }
+    unawaited(
+      messenger
+          .showSnackBar(
+            SnackBar(
+              content: ValueListenableBuilder<String>(
+                valueListenable: text,
+                builder: (_, latest, _) => Text(latest),
+              ),
+              duration: const Duration(seconds: 8),
+              action: action,
+              onVisible: () {
+                if (identical(_queued, text)) _queued = null;
+                if (_queuedAction == token) _queuedAction = null;
+                _ownSnackShowing = token;
+              },
+            ),
+          )
+          .closed
+          .then((_) {
+            if (identical(_queued, text)) _queued = null;
+            if (_queuedAction == token) _queuedAction = null;
+            if (_ownSnackShowing == token) _ownSnackShowing = null;
+          }),
+    );
+  }
+
   Future<void> _onToggle(bool value) async {
     if (_busy) return;
     if (mounted) setState(() => _busy = true);
@@ -92,11 +158,7 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
         // inside `setEnabled`) is already queued on the same channel this
         // re-read travels.
         ref.invalidate(iosIndicatorSentenceProvider);
-        messenger
-          ..clearSnackBars()
-          ..showSnackBar(
-            SnackBar(content: Text(l10n.locationSettingsDisabledSnack)),
-          );
+        _say(messenger, l10n.locationSettingsDisabledSnack);
       } else {
         // ENABLE — disclosure gate first, then permission gate.
         final disclosed = await ref
@@ -112,36 +174,21 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
 
         switch (result) {
           case EnsurePermissionsNotificationDenied():
-            messenger
-              ..clearSnackBars()
-              ..showSnackBar(
-                SnackBar(
-                  content: Text(l10n.locationSettingsNotificationDeniedSnack),
-                  duration: const Duration(seconds: 8),
-                  action: SnackBarAction(
-                    label: l10n.commonOpenSettings,
-                    onPressed: geo.Geolocator.openAppSettings,
-                  ),
-                ),
-              );
+            _say(
+              messenger,
+              l10n.locationSettingsNotificationDeniedSnack,
+              action: SnackBarAction(
+                label: l10n.commonOpenSettings,
+                onPressed: geo.Geolocator.openAppSettings,
+              ),
+            );
 
           case EnsurePermissionsBatteryOptDenied():
-            messenger
-              ..clearSnackBars()
-              ..showSnackBar(
-                SnackBar(
-                  content: Text(l10n.locationSettingsBatteryOptSnack),
-                  duration: const Duration(seconds: 8),
-                ),
-              );
+            _say(messenger, l10n.locationSettingsBatteryOptSnack);
 
           case EnsurePermissionsGranted():
           case null:
-            messenger
-              ..clearSnackBars()
-              ..showSnackBar(
-                SnackBar(content: Text(l10n.locationSettingsEnabledSnack)),
-              );
+            _say(messenger, l10n.locationSettingsEnabledSnack);
             // Refresh the iOS authorization reading now that the Always
             // escalation prompt (triggered inside setEnabled) has resolved,
             // and the indicator reading now that `arm()` has run: enabling is
@@ -162,11 +209,7 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage>
     } on Object catch (e) {
       debugPrint('[LocationSettings] ${e.runtimeType}');
       if (mounted) {
-        messenger
-          ..clearSnackBars()
-          ..showSnackBar(
-            SnackBar(content: Text(l10n.locationSettingsErrorSnack)),
-          );
+        _say(messenger, l10n.locationSettingsErrorSnack);
       }
     } finally {
       if (mounted) setState(() => _busy = false);

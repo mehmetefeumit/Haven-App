@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/mls_session_handover.dart'
+    show appIsResumed;
 import 'package:haven/src/services/subscription_service.dart';
 
 /// The Rust-backed [SubscriptionService]: builds a [LiveSyncFfi] engine, starts
@@ -28,17 +30,57 @@ class NostrSubscriptionService implements SubscriptionService {
   final LiveEventRouter _router;
   final Future<LiveSyncFfi> Function() _engineFactory;
 
-  /// Notified with the result of every [stop].
+  /// Notified with the result of every [stop] — twice for one given up on:
+  /// `stillHolding` at the give-up, then the engine's own answer when its stop
+  /// returns.
   ///
   /// [stop] already RETURNS the outcome, so this exists for the stops no caller
   /// awaits: the failed-start cleanup and `_onStreamClosed`'s
   /// `unawaited(stop())`. A stop that leaves the guard held is exactly as
-  /// serious there as on the pause path, and without this it would be visible
-  /// only in a debug log.
+  /// serious there as on the pause path.
+  ///
+  /// A start that succeeds is reported as [LiveSyncStopOutcome.stopped]: a
+  /// session that started proves the previous one drained. The app hands it
+  /// to the sharing-health model (`subscriptionServiceProvider`).
   final void Function(LiveSyncStopOutcome)? onStopOutcome;
 
   LiveSyncFfi? _engine;
   StreamSubscription<FfiRelayEvent>? _sub;
+
+  /// The start in flight, from the call of [start] until its session has been
+  /// handed the app's foreground claim, or it has ended without one.
+  ///
+  /// `_engine` is assigned only once `startSession` resolves, which is seconds
+  /// after it was asked, so three things read this instead. A second [start]
+  /// joins it: a second engine built over one still starting would leave a
+  /// stop that waited on the first ending neither. A [pauseSubscriptions]
+  /// waits for it and then pauses the session it produced — the engine's
+  /// pause takes the lock the start holds and can end nothing early. A [stop]
+  /// ends it ([_stop]).
+  ///
+  /// It covers the start's own claim, which is awaited so that whoever awaits
+  /// a start finds its session already told whether the app is resumed. The
+  /// claim waits for no relay, only for the engine's lifecycle lock, and a
+  /// pause waits for it. A [stop] does not wait HERE — by then the engine is
+  /// this service's to stop ([_startAdopted]) — and the start it lands under
+  /// then fails as ended. The engine's own stop still takes that same lock:
+  /// it raises its shutdown flag first, so a start or a burst's open holding
+  /// the lock ends at its next check, and anything else holding it is waited
+  /// for.
+  Future<void>? _starting;
+
+  /// The engine of the start in flight while its `startSession` is out, until
+  /// a [stop] takes it: that stop then releases it, not the start.
+  LiveSyncFfi? _built;
+
+  /// Whether the start in flight has already made its engine [_engine]: it can
+  /// adopt nothing further, so a [stop] has nothing of it left to wait for.
+  bool _startAdopted = false;
+
+  /// The stop in flight. A second [stop] joins it rather than answering for
+  /// an engine it cannot see, and a start ends rather than bring a session up
+  /// across it ([_startEngine]).
+  Future<LiveSyncStopOutcome>? _stopping;
 
   /// Whether the last [stop] left the engine still holding the Rule-14 guard.
   ///
@@ -69,6 +111,15 @@ class NostrSubscriptionService implements SubscriptionService {
   }
 
   @override
+  LiveLifecycleFfi lifecycle() {
+    try {
+      return _engine?.lifecycle() ?? LiveLifecycleFfi.noSession;
+    } on Object catch (_) {
+      return LiveLifecycleFfi.noSession;
+    }
+  }
+
+  @override
   bool get isPaused {
     try {
       return _engine?.isPaused() ?? false;
@@ -89,8 +140,72 @@ class NostrSubscriptionService implements SubscriptionService {
   Future<void> start({
     required List<FfiGroupSpec> groups,
     required List<String> inboxRelays,
+  }) => _start(groups, inboxRelays, _stopsAsked);
+
+  @override
+  Future<void> startIntoBurst({
+    required List<FfiGroupSpec> groups,
+    required List<String> inboxRelays,
+    required Duration budget,
+  }) => _start(groups, inboxRelays, _stopsAsked, burstBudget: budget);
+
+  /// [start], or — where a stop has ended the start in flight — a wait for
+  /// that one to end, then a start. A stop that stops an adopted engine
+  /// returns while that start is still in its claim; a start asked for after
+  /// it is not that start's to answer. One asked for BEFORE a stop is that
+  /// stop's to end: [stopsAsked] is the count when it was asked.
+  Future<void> _start(
+    List<FfiGroupSpec> groups,
+    List<String> inboxRelays,
+    int stopsAsked, {
+    Duration? burstBudget,
+  }) {
+    final ended = _starting;
+    if (ended != null && _startEnded) {
+      return ended.then<void>((_) {}, onError: (Object _) {}).then((_) {
+        if (_stopsAsked != stopsAsked) throw const SubscriptionStartEnded();
+        return _start(
+          groups,
+          inboxRelays,
+          stopsAsked,
+          burstBudget: burstBudget,
+        );
+      });
+    }
+    return _starting ??= _startEngine(
+      groups: groups,
+      inboxRelays: inboxRelays,
+      burstBudget: burstBudget,
+    ).whenComplete(() {
+      _starting = null;
+      _startAdopted = false;
+      _startEnded = false;
+    });
+  }
+
+  /// Whether a stop has ended the start in flight ([_starting]).
+  bool _startEnded = false;
+
+  /// How many stops have been asked for.
+  int _stopsAsked = 0;
+
+  /// The body of [start].
+  ///
+  /// It never brings a session up across a [stop]: after each of its awaits
+  /// it ends, adopting nothing, if one is in flight. That is what lets a stop
+  /// end a start instead of waiting it out, and what keeps a second session
+  /// from being started on the MLS state of one still being torn down.
+  Future<void> _startEngine({
+    required List<FfiGroupSpec> groups,
+    required List<String> inboxRelays,
+    Duration? burstBudget,
   }) async {
     if (_engine != null) return; // idempotent
+    final callerStopsAtStart = _stopsAskedByCallers;
+    // Whether the stop that ends this start, if one does, is a caller's: one
+    // already in flight when the start began is counted above as asked before
+    // it, and is no engine death.
+    var endedByCaller = false;
     // Held outside the try so the failure path can release it. Until this
     // handle is disposed it keeps an `Arc<CircleManager>` alive, and with it the
     // MLS database's Rule-14 `LiveSessionGuard` — so a leak here does not just
@@ -101,11 +216,39 @@ class NostrSubscriptionService implements SubscriptionService {
     try {
       final engine = await _engineFactory();
       built = engine;
-      await engine.startSession(groups: groups, inboxRelays: inboxRelays);
-      _engine = engine;
+      _built = engine;
+      // A stop asked for while the factory ran found no engine to stop.
+      if (_stopping != null) {
+        endedByCaller = _stoppingByCaller;
+        throw const _EndedByStop();
+      }
+      if (burstBudget == null) {
+        await engine.startSession(groups: groups, inboxRelays: inboxRelays);
+      } else {
+        await engine.startSessionIntoBurst(
+          groups: groups,
+          inboxRelays: inboxRelays,
+          budgetMs: BigInt.from(burstBudget.inMilliseconds),
+        );
+      }
       // A session that started is proof the previous core drained (Rust refuses
       // to install a second over a live one), so the wedge latch is discharged.
       _stopLeftGuardHeld = false;
+      _reportStopOutcome(LiveSyncStopOutcome.stopped);
+      if (_stopping != null) {
+        endedByCaller = _stoppingByCaller;
+        // The stop's own call is no proof this session is down: issued while
+        // the start was out, it can reach the engine before the engine has
+        // installed the session it was asked to end.
+        final outcome = await _stopEngineWithRetry(engine);
+        if (outcome == LiveSyncStopOutcome.stillHolding) {
+          _stopLeftGuardHeld = true;
+        }
+        throw const _EndedByStop();
+      }
+      _built = null;
+      _engine = engine;
+      _startAdopted = true;
       // Ownership has transferred to `_engine`; `stop()` disposes it from here
       // on, so the failure path below must NOT also dispose it.
       built = null;
@@ -119,25 +262,51 @@ class NostrSubscriptionService implements SubscriptionService {
         onDone: _onStreamClosed,
         cancelOnError: false,
       );
+      // The start itself claims nothing: it began seconds ago, and the app
+      // may have left the foreground since. The claim is made now that the
+      // handle is held — so a pause or a stop from here on reaches the engine
+      // — and from a fresh read. A start into a burst claims nothing at all:
+      // the burst that asked for it pauses it.
+      if (burstBudget == null) await claimForeground();
+      // A stop that landed during the claim took the engine: this start has
+      // ended, and its caller must not read it as a session that came up.
+      if (!identical(_engine, engine)) throw const _EndedByStop();
     } on Object catch (e) {
-      // Type only, in every build: `redact_hex_sequences` only collapses long
-      // hex runs, so an MLS group id embedded at a shorter width — or an
-      // npub, relay URL or display name — would pass through a raw `$e'
-      // untouched (Security Rule 8/15). No debug/e2e-only detail line either;
-      // a debug capture is still a capture.
-      debugPrint('[Subscription] start failed: ${e.runtimeType}');
-      await stop();
-      // `stop()` cannot reach this handle: `_engine` is only assigned once
+      // A handle a stop took is that stop's to release: its retry may still
+      // be out on it.
+      if (!identical(_built, built)) built = null;
+      _built = null;
+      // A start a stop ended has not failed, and the stop reports for itself.
+      final ended = e is _EndedByStop || _stopping != null;
+      if (_stopping != null && _stoppingByCaller) endedByCaller = true;
+      if (!ended) {
+        // Type only, in every build: `redact_hex_sequences` only collapses long
+        // hex runs, so an MLS group id embedded at a shorter width — or an
+        // npub, relay URL or display name — would pass through a raw `$e'
+        // untouched (Security Rule 8/15). No debug/e2e-only detail line either;
+        // a debug capture is still a capture.
+        debugPrint('[Subscription] start failed: ${e.runtimeType}');
+        // Not [stop]: that waits for the start in flight, which is this one.
+        await _stopNow();
+      }
+      // Nothing else will release this handle: `_engine` is only assigned once
       // `startSession` has resolved, so a throw before that leaves the engine
-      // referenced by nothing but this local. Dropping it here is what keeps a
-      // failing start from stranding the guard — and the self-heal retries
-      // every couple of minutes, so a persistent failure would otherwise
-      // accumulate one guard holder per attempt and permanently block both the
-      // foreground service's reclaim and its own next retry.
+      // referenced by nothing but this local, unless a stop took it (above).
+      // Dropping it here is what keeps a failing start from stranding the
+      // guard — and the self-heal retries every couple of minutes, so a
+      // persistent failure would otherwise accumulate one guard holder per
+      // attempt and permanently block both the foreground service's reclaim
+      // and its own next retry.
       try {
         built?.dispose();
       } on Object catch (e) {
         debugPrint('[Subscription] failed-start dispose: ${e.runtimeType}');
+      }
+      if (ended) {
+        throw SubscriptionStartEnded(
+          endedByEngine:
+              _stopsAskedByCallers == callerStopsAtStart && !endedByCaller,
+        );
       }
       throw const SubscriptionServiceException('failed to start live session');
     }
@@ -162,25 +331,31 @@ class NostrSubscriptionService implements SubscriptionService {
   /// set or whether a session is still wanted. Recovery is the owner's job (see
   /// `LiveSyncResubscriber.ensureRunning`).
   void _onStreamClosed() {
-    // A null `_engine` means WE are the ones closing the bus. [stop] clears the
-    // field synchronously, before the `await engine.stopSession()` that ends the
-    // stream, so its own `onDone` always observes null and this returns — no
+    // A null `_engine` means WE are the ones closing the bus. A [stop] that
+    // finds an engine clears the field in the call that asked for it, before
+    // anything is awaited, and so before the `engine.stopSession()` that ends
+    // the stream: its own `onDone` always observes null and this returns — no
     // re-entrant teardown, and no separate "am I stopping" flag to keep in step.
     //
     // That ordering is therefore load-bearing, not incidental: moving the clear
-    // after `stopSession()` would make every deliberate stop re-enter itself.
-    // `a deliberate stop is not mistaken for a death` pins it.
+    // after `stopSession()`, or putting an await ahead of it, would make every
+    // deliberate stop re-enter itself. `a deliberate stop is not mistaken for a
+    // death` and `a deliberate stop still clears the engine in the call that
+    // asked` pin it.
     if (_engine == null) return;
     debugPrint('[Subscription] event stream closed unexpectedly — releasing');
-    unawaited(stop());
+    unawaited(_stopFor());
   }
 
   /// Chains the next event's handler after the in-flight one (serialized). The
   /// router never throws (every side effect is guarded), but the `catchError`
   /// is a defensive backstop so a stray error can never break the chain.
   void _enqueue(FfiRelayEvent event) {
+    final identityEnded = _router.identityEndedSince();
     _processing = _processing
-        .then((_) => _router.handleEvent(event))
+        .then(
+          (_) => _router.handleEvent(event, identityEnded: identityEnded),
+        )
         .catchError((Object e) {
           debugPrint('[Subscription] event handler error: ${e.runtimeType}');
         });
@@ -191,9 +366,24 @@ class NostrSubscriptionService implements SubscriptionService {
     final engine = _engine;
     if (engine == null) return;
     try {
-      await engine.resumeAfterBackground();
+      await engine.resumeAfterBackground(foreground: appIsResumed());
     } on Object catch (e) {
       debugPrint('[Subscription] resume failed: ${e.runtimeType}');
+    }
+  }
+
+  @override
+  Future<void> claimForeground() async {
+    final engine = _engine;
+    // Nothing to claim is nothing to ask: the engine does nothing with a
+    // claim that is not made, and asking still waits on its lifecycle lock,
+    // which a pause holds for as long as its publishes take to drain.
+    if (engine == null || !appIsResumed()) return;
+    try {
+      await engine.claimForeground(foreground: appIsResumed());
+    } on Object catch (e) {
+      // Type only (Rule 8). Nothing is lost: the next heal claims again.
+      debugPrint('[Subscription] foreground claim failed: ${e.runtimeType}');
     }
   }
 
@@ -205,13 +395,17 @@ class NostrSubscriptionService implements SubscriptionService {
   /// subscription, and a caller that went on to wait for a backlog nobody
   /// requested would spend the whole wait budget to learn nothing.
   @override
-  Future<void> openBackgroundBurst() async {
+  Future<BurstOpenFfi> openBackgroundBurstWithin(Duration budget) async {
+    // As the pause does: a session still coming up is not a missing one, and
+    // reporting it as a failed open would stamp a receive fault that is not
+    // there and send this burst's publish out with no backlog wait.
+    await _startInFlight();
     final engine = _engine;
-    if (engine == null) {
-      throw const SubscriptionServiceException('no active live session');
-    }
+    if (engine == null) return BurstOpenFfi.noSession;
     try {
-      await engine.openBackgroundBurst();
+      return await engine.openBackgroundBurstWithin(
+        budgetMs: BigInt.from(budget.inMilliseconds),
+      );
     } on Object catch (e) {
       debugPrint('[Subscription] burst open failed: ${e.runtimeType}');
       throw const SubscriptionServiceException('failed to open burst');
@@ -239,7 +433,7 @@ class NostrSubscriptionService implements SubscriptionService {
   /// this type to prove the production path was not bypassed.
   ///
   /// Test-only, so annotated — but deliberately NOT renamed to the repo's
-  /// `…ForTest` convention (`LocationSharingService.trackCommitCriticalForTest`
+  /// `…ForTest` convention (`NostrRelayService.hearClockEvidenceForTest`
   /// carries both). Two things pin this spelling: it is the FFI method's own
   /// name one layer down, and `check_ios_background_publish.sh` requires the
   /// drive to read `poolSubscriptionCount(` verbatim — the guard that stops
@@ -303,6 +497,7 @@ class NostrSubscriptionService implements SubscriptionService {
   /// whatever state this left behind.
   @override
   Future<void> pauseSubscriptions() async {
+    await _startInFlight();
     final engine = _engine;
     if (engine == null) return;
     try {
@@ -370,8 +565,118 @@ class NostrSubscriptionService implements SubscriptionService {
     return LiveSyncStopOutcome.stillHolding;
   }
 
+  /// Waits for a start in flight to have ended, with an engine or without. Its
+  /// failure is its caller's to hear, not this waiter's.
+  Future<void> _startInFlight() async {
+    final starting = _starting;
+    if (starting == null) return;
+    try {
+      await starting;
+    } on Object catch (_) {
+      // The start cleaned up after itself.
+    }
+  }
+
   @override
-  Future<LiveSyncStopOutcome> stop() async {
+  Future<LiveSyncStopOutcome> stop({Future<void>? givenUp}) {
+    _stopsAskedByCallers++;
+    return _stopFor(givenUp: givenUp, byCaller: true);
+  }
+
+  /// How many stops a caller asked for: every stop but the one the service
+  /// makes when the engine's stream closes under it.
+  int _stopsAskedByCallers = 0;
+
+  /// Whether a caller asked for the stop in flight ([_stopping]), alone or
+  /// beside the service's own.
+  bool _stoppingByCaller = false;
+
+  Future<LiveSyncStopOutcome> _stopFor({
+    Future<void>? givenUp,
+    bool byCaller = false,
+  }) {
+    _stopsAsked++;
+    _stoppingByCaller = (_stopping != null && _stoppingByCaller) || byCaller;
+    final stopping = _stopping ??= _stop().whenComplete(
+      () => _stopping = null,
+    );
+    if (givenUp == null) return stopping;
+    return Future.any([stopping, givenUp.then((_) => _giveUp(stopping))]);
+  }
+
+  /// The stop a caller gave up on, once its Dart side has been torn down.
+  Future<LiveSyncStopOutcome>? _givenUp;
+
+  /// Tears down, Dart-side, the session of [stopping] — a stop still waiting
+  /// on the engine — as a stop the engine answered `stillHolding` does: its
+  /// stream delivers nothing more and the outcome is reported. Handlers
+  /// already queued still run; the identity fence drops their locations once
+  /// a logout has ended the identity. Two things wait for the engine's stop to
+  /// return: the handle's dispose (a call is out on it) and the end of
+  /// [_stopping], so no
+  /// start adopts a session across it, and its late teardown has no new
+  /// session to reach. A stop that has already returned is not touched.
+  LiveSyncStopOutcome _giveUp(Future<LiveSyncStopOutcome> stopping) {
+    if (identical(_stopping, stopping) && !identical(_givenUp, stopping)) {
+      _givenUp = stopping;
+      final sub = _sub;
+      _sub = null;
+      // Not awaited: the stream's native task ends with the engine's stop,
+      // which is what is not returning. Cancelling stops delivery at once.
+      if (sub != null) unawaited(_cancelQuietly(sub));
+      _reportStopOutcome(LiveSyncStopOutcome.stillHolding);
+    }
+    return LiveSyncStopOutcome.stillHolding;
+  }
+
+  /// Hands [outcome] to [onStopOutcome]. Guarded: a stop is reached from
+  /// `unawaited(stop())`, where a throw has no caller to catch it.
+  void _reportStopOutcome(LiveSyncStopOutcome outcome) {
+    try {
+      onStopOutcome?.call(outcome);
+    } on Object catch (e) {
+      debugPrint('[Subscription] stop-outcome callback: ${e.runtimeType}');
+    }
+  }
+
+  Future<void> _cancelQuietly(StreamSubscription<FfiRelayEvent> sub) async {
+    try {
+      await sub.cancel().timeout(_cancelTimeout);
+    } on Object catch (_) {
+      // ignore — tearing down anyway
+    }
+  }
+
+  /// The body of [stop].
+  ///
+  /// A start in flight that holds no engine yet is ENDED, not waited out: no
+  /// caller of a stop has a deadline — the pause-time handoff, a detach, a
+  /// logout ahead of its wipe — and a start takes seconds. While this stop is
+  /// in flight the start adopts nothing ([_startEngine]). If its
+  /// `startSession` is out, the engine's stop is issued on its handle at
+  /// once: the engine raises its shutdown flag before it waits for the start,
+  /// which then fails at its next check. If its engine is not built yet there
+  /// is nothing to stop, and this waits only for the factory.
+  Future<LiveSyncStopOutcome> _stop() async {
+    if (_starting != null) _startEnded = true;
+    if (_starting == null || _startAdopted) return _stopNow();
+    final built = _built;
+    _built = null;
+    final interrupted = built == null
+        ? null
+        : await _stopEngineWithRetry(built);
+    await _startInFlight();
+    return _stopNow(built: built, interrupted: interrupted);
+  }
+
+  /// The teardown of [stop], for the engine this service holds — or, when
+  /// this stop ended a start, for [built], the handle it took from that
+  /// start, with [interrupted] the outcome of the engine stop already issued
+  /// on it.
+  Future<LiveSyncStopOutcome> _stopNow({
+    LiveSyncFfi? built,
+    LiveSyncStopOutcome? interrupted,
+  }) async {
     // Reset the serialized chain so a subsequent start() begins clean: any old
     // in-flight handlers still run to completion on their own reference, but the
     // NEXT session's events do not chain behind the previous session's.
@@ -389,15 +694,13 @@ class NostrSubscriptionService implements SubscriptionService {
     // Calling stopSession() first lets the native task end (and the Dart
     // stream complete) BEFORE we ever cancel, so the cancel below becomes a
     // trivial no-op on an already-closed stream.
-    var outcome = LiveSyncStopOutcome.idle;
-    if (engine != null) {
-      outcome = await _stopEngineWithRetry(engine);
-      if (outcome == LiveSyncStopOutcome.stillHolding) {
-        _stopLeftGuardHeld = true;
-      }
-    } else if (_stopLeftGuardHeld) {
-      // No handle left to stop, but the guard was never released — report the
-      // state, not the absence of work.
+    var outcome = interrupted ?? LiveSyncStopOutcome.idle;
+    if (engine != null) outcome = await _stopEngineWithRetry(engine);
+    if (outcome == LiveSyncStopOutcome.stillHolding) {
+      _stopLeftGuardHeld = true;
+    } else if (engine == null && _stopLeftGuardHeld) {
+      // No session of this service's was stopped, but the guard was never
+      // released — report the state, not the absence of work.
       outcome = LiveSyncStopOutcome.stillHolding;
     }
     try {
@@ -423,19 +726,18 @@ class NostrSubscriptionService implements SubscriptionService {
     // `_onStreamClosed` — so an escape would surface as an unhandled async
     // error with no caller able to catch it.
     try {
-      engine?.dispose();
+      (engine ?? built)?.dispose();
     } on Object catch (e) {
       debugPrint('[Subscription] engine dispose failed: ${e.runtimeType}');
     }
     // Reported AFTER the dispose so an observer never sees "stopped" while the
-    // handle is still alive. Guarded like every other step: this method is
-    // reached from `unawaited(stop())`, where a throw has no caller to catch
-    // it.
-    try {
-      onStopOutcome?.call(outcome);
-    } on Object catch (e) {
-      debugPrint('[Subscription] stop-outcome callback: ${e.runtimeType}');
-    }
+    // handle is still alive.
+    _reportStopOutcome(outcome);
     return outcome;
   }
+}
+
+/// Ends a start for a stop in flight; never leaves [NostrSubscriptionService].
+class _EndedByStop implements Exception {
+  const _EndedByStop();
 }

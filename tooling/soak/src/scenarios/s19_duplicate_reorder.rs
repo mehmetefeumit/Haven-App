@@ -27,6 +27,7 @@
 
 use std::time::Duration;
 
+use haven_core::relay::fanout::{FanoutClock as _, WallClock};
 use haven_core::relay::live_sync::LiveSyncEvent;
 use nostr::{Event, EventId};
 use tokio::sync::broadcast::error::TryRecvError;
@@ -251,6 +252,11 @@ async fn duplicate<T: TimelineSink, L: LogDrain>(
 /// serve the page in, and then requires the device to have been delivered
 /// exactly its reverse: a property of the fault rather than of the draw.
 ///
+/// The delivery is read where the device takes it in, never off the bus:
+/// the live plane orders each stored batch itself before the engine sees
+/// it (`docs/MDK_UPSTREAM_TRACKER.md` T-COMMIT-BEFORE-PROPOSAL), so the bus
+/// shows the device's order, not the relay's.
+///
 /// The plane holds a page per SUBSCRIPTION and releases it at that
 /// subscription's own `EOSE`, which is what makes "the page" a well-defined
 /// thing here: a device runs several subscriptions over one socket, and a hold
@@ -295,13 +301,26 @@ async fn reordered<T: TimelineSink, L: LogDrain>(
     )
     .await;
 
+    let mut arrived: Vec<usize> = Vec::new();
+    for id in world
+        .device(receiver)?
+        .engine()?
+        .group_events_taken_in_for_test()
+    {
+        if let Some(index) = published.iter().position(|sent| *sent == id) {
+            if !arrived.contains(&index) {
+                arrived.push(index);
+            }
+        }
+    }
+
     let mut canaries = 0_usize;
     // 1. The page really arrived backwards — the reverse of the order this
     //    plane's own store would have served. Without this the arm would be a
     //    plain catch-up test wearing a reordering label.
     let mut backwards = served.clone();
     backwards.reverse();
-    if served.len() == published.len() && order == backwards {
+    if served.len() == published.len() && arrived == backwards {
         canaries += 1;
     }
     // 2. …and both locations were applied all the same.
@@ -402,7 +421,7 @@ async fn cross_eose<T: TimelineSink, L: LogDrain>(
 ///
 /// # Where the held message goes
 ///
-/// It is RELEASED by the resolution itself. `confirm_published` ends in the
+/// It is RELEASED by the resolution itself. The driver's confirm ends in the
 /// engine's replay, which re-ingests everything the window buffered — and the
 /// engine delivers that at most once, writing the content row terminal in the
 /// same breath, so a resolution that folded the batch without persisting would
@@ -426,22 +445,25 @@ async fn commit_gap<T: TimelineSink, L: LogDrain>(
 ) -> Result<usize, RigError> {
     let circle_tag = world.circles().first().ok_or(RigError::ShapeMismatch)?.tag;
     let group = world.circle(circle_tag)?.mls_group_id().clone();
-    let urls = world.relay_urls();
+    let mut urls = world.relay_urls();
+    urls.push("wss://s19-commit-gap.example.com".to_owned());
     let mut canaries = 0_usize;
 
-    // The gap: the ADMIN stages a commit and leaves it unresolved — the admin
-    // because a relay-list commit is an admin operation, so the device that can
-    // be put into a publish-before-apply transition is the one that can commit.
-    // Staged through the manager rather than through `relay_update`, because
-    // that helper resolves the pending in the same call and the whole point
-    // here is the window in which it is not yet resolved.
-    let outstanding = world.note_pending_staged();
-    let pending = world
+    // The gap: the ADMIN stages a commit under its record and sends nothing
+    // yet — the admin because a relay-list commit is an admin operation, so
+    // the device that can be put into a publish-before-apply transition is the
+    // one that can commit. Staged by the product's staging call rather than
+    // through `relay_update`, because that drives the commit in the same call
+    // and the whole point here is the window in which it is not yet resolved.
+    let change = world
         .device(stager)?
         .manager()?
-        .update_circle_relays(&group, &urls)
+        .update_circle_relays_staging(&group, &urls, WallClock.now_ms())
         .await
         .map_err(|_| RigError::Core(Step::StageCommit))?;
+    if change.commit.is_none() {
+        return Err(RigError::Core(Step::StageCommit));
+    }
 
     // Never published: an event the engine has already ingested cannot be
     // classified afterwards, because the store answers a second look with a
@@ -466,34 +488,18 @@ async fn commit_gap<T: TimelineSink, L: LogDrain>(
         canaries += 1;
     }
 
-    // The transition ends the only way Rule 13 allows: on an acknowledgement
-    // that reached us.
-    let witnessed = world
-        .publish_witnessed(stager, std::slice::from_ref(&pending.commit_event))
-        .await?;
-    if witnessed.is_none() {
-        // Nothing was acked, so the commit rolls back and the transition never
-        // ends — the arm would be grading a world it did not reach.
-        let ingest = world
-            .device(stager)?
-            .manager()?
-            .publish_failed(pending.pending)
-            .await
-            .map_err(|_| RigError::Core(Step::RollBackPublish))?;
-        // Abandoning the arm does not abandon the group: a rollback replays too,
-        // and anything it stages is resolved before this returns.
-        world.resolve_ingest(stager, ingest).await?;
-        drop(outstanding);
-        return Err(RigError::WelcomeNeverAcked);
+    // The transition ends the only way Rule 13 allows: the product's driver
+    // sends the recorded commit and confirms it on an acknowledgement that
+    // reached us.
+    let epoch_staged = epoch_of(world, stager, &group).await?;
+    let _ = world.resume(stager).await?;
+    if epoch_of(world, stager, &group).await? <= epoch_staged
+        || !crate::rig::no_pending_fanout(world.device(stager)?).await?
+    {
+        // Nothing was acked, so the transition never ended — the arm would be
+        // grading a world it did not reach.
+        return Err(RigError::PublishNeverAcked);
     }
-    let ingest = world
-        .device(stager)?
-        .manager()?
-        .finalize_relay_update(pending.pending, &group)
-        .await
-        .map_err(|_| RigError::Core(Step::ConfirmPublished))?;
-    world.resolve_ingest(stager, ingest).await?;
-    drop(outstanding);
 
     // 4. The held message is RELEASED by the resolution, and it is released to
     //    the surface a caller reads a peer's position from. The engine hands a
@@ -512,21 +518,30 @@ async fn commit_gap<T: TimelineSink, L: LogDrain>(
         canaries += 1;
     }
 
-    // 5. …and the resolution left nobody owing a removal publish. An obligation
-    //    a dead session cannot redeem is reported as an unrecoverable circle, so
-    //    an arm that manufactured one would be handing the user a rebuild it
-    //    does not need.
-    if world.devices().iter().all(|device| {
-        device
-            .manager()
-            .is_ok_and(|m| m.orphaned_removal_deferrals().is_empty())
-    }) {
+    // 5. …and the resolution left no device with a commit still pending on its
+    //    relays: a record a duplicate or a reorder left standing would hold
+    //    that circle's sends for as long as it stood.
+    let mut settled = true;
+    for device in world.devices() {
+        settled &= crate::rig::no_pending_fanout(device).await?;
+    }
+    if settled {
         canaries += 1;
     }
 
     // 3. The control: the same sender, the same shape, once the transition is
     //    over. This one must APPLY, or the gap above said nothing about the
-    //    transition and everything about the message.
+    //    transition and everything about the message. The speaker first follows
+    //    the commit off its own live plane — MDK v0.10.4 holds a peer commit for
+    //    its quiescence window, and a send inside it is deferred.
+    let target = epoch_of(world, stager, &group).await?;
+    if !await_condition(bounds::round_trip(Recovery::Undisturbed), || async {
+        Ok(epoch_of(world, speaker, &group).await? == target)
+    })
+    .await?
+    {
+        return Err(RigError::Unhealable);
+    }
     let after = mint_probe(world, speaker, circle_tag, ProbeToken::mint(19, 6)).await?;
     let applied =
         undecryptable::classify(world.device(stager)?, &after, StoredRow::Unknown).await?;
@@ -535,6 +550,20 @@ async fn commit_gap<T: TimelineSink, L: LogDrain>(
         canaries += 1;
     }
     Ok(canaries)
+}
+
+/// One device's epoch for `group`.
+async fn epoch_of<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    device: DeviceTag,
+    group: &haven_core::nostr::mls::types::GroupId,
+) -> Result<u64, RigError> {
+    world
+        .device(device)?
+        .manager()?
+        .group_epoch(group)
+        .await
+        .map_err(|_| RigError::Core(Step::ReadEpoch))
 }
 
 /// Encrypts one probe WITHOUT publishing it.
@@ -548,12 +577,7 @@ async fn mint_probe<T: TimelineSink, L: LogDrain>(
     let device = world.device(sender)?;
     device
         .manager()?
-        .encrypt_location(
-            &group,
-            &device.keys.public_key(),
-            &probe.as_location(),
-            haven_core::location::LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(&group, &probe.as_location())
         .await
         .map(|(event, _, _)| event)
         .map_err(|_| RigError::Core(Step::Publish))
@@ -570,12 +594,7 @@ async fn publish_probe<T: TimelineSink, L: LogDrain>(
     let device = world.device(sender)?;
     let (event, _, _) = device
         .manager()?
-        .encrypt_location(
-            &group,
-            &device.keys.public_key(),
-            &probe.as_location(),
-            haven_core::location::LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(&group, &probe.as_location())
         .await
         .map_err(|_| RigError::Core(Step::Publish))?;
     if world

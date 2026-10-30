@@ -208,6 +208,15 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then export BUILD_NAME="${GITHUB_REF_NAME#v}"; fi
           bash ../scripts/build_release.sh apk
 
+      # Security Rule 15: no APK ships with SQLCipher's native logger compiled in.
+      - name: Probe each APK for SQLCipher's logger
+        run: |
+          for apk in build/app/outputs/flutter-apk/app-*-release.apk; do
+            out="${RUNNER_TEMP}/apk-lib/$(basename "${apk}" .apk)"
+            unzip -q -o "${apk}" 'lib/*/librust_lib_haven.so' -d "${out}"
+            bash ../scripts/ci/check_sqlcipher_logger_omitted.sh "${out}/lib"
+          done
+
       # SHA-256 sidecars so sideload users can verify integrity (the signing-cert
       # fingerprint published in the README verifies authenticity; these verify the
       # download). One per split APK, named <apk>.sha256.
@@ -348,6 +357,11 @@ jobs:
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then export BUILD_NAME="${GITHUB_REF_NAME#v}"; fi
           bash ../scripts/build_release.sh ipa
+
+      # Security Rule 15: nothing reaches TestFlight with SQLCipher's native
+      # logger compiled in.
+      - name: Probe the archive for SQLCipher's logger
+        run: bash ../scripts/ci/check_sqlcipher_logger_omitted.sh build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app
 
       - name: Upload to TestFlight
         working-directory: haven/ios

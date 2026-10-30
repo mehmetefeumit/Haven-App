@@ -40,6 +40,10 @@ class _RecordingEngine implements SubscriptionService {
     this.throwOnIsRunning = false,
   });
 
+  @override
+  LiveLifecycleFfi lifecycle() =>
+      isRunning ? LiveLifecycleFfi.launched : LiveLifecycleFfi.noSession;
+
   /// When set, [stop] awaits this before completing, so a test can hold a
   /// full restart in-flight (suspended on `stop()`) while it drives
   /// `dispose()`.
@@ -61,6 +65,12 @@ class _RecordingEngine implements SubscriptionService {
   /// When true, [stop] throws an exception whose message embeds a fake group
   /// id (to prove the full-restart error path never leaks it).
   final bool throwOnStop;
+
+  /// When true, [start] throws as a start does that a stop ended.
+  bool endStartByStop = false;
+
+  /// Whether that stop was the engine's own death rather than a caller's.
+  bool endedByEngine = false;
 
   /// When true, [start] throws — models `engineFactory` REFUSING to open the
   /// circle manager (e.g. after a logout wipe, when there is no identity). The
@@ -107,6 +117,9 @@ class _RecordingEngine implements SubscriptionService {
   }) async {
     startCalls.add(_StartCall(groups, inboxRelays));
     if (startGate != null) await startGate;
+    if (endStartByStop) {
+      throw SubscriptionStartEnded(endedByEngine: endedByEngine);
+    }
     if (throwOnStart) {
       throw Exception('boom for nostr group ${'ab' * 16}');
     }
@@ -114,7 +127,7 @@ class _RecordingEngine implements SubscriptionService {
   }
 
   @override
-  Future<LiveSyncStopOutcome> stop() async {
+  Future<LiveSyncStopOutcome> stop({Future<void>? givenUp}) async {
     stopCalls++;
     _running = false;
     if (throwOnStop) {
@@ -126,6 +139,28 @@ class _RecordingEngine implements SubscriptionService {
 
   @override
   Future<void> resumeAfterBackground() async {}
+
+  /// Whether the engine was running when each foreground claim was made, in
+  /// call order. A claim made ahead of the start it was queued behind would
+  /// find no session to claim for.
+  final List<bool> claimsWhileRunning = [];
+
+  /// When set, a foreground claim does not return until it completes: the
+  /// engine's lifecycle lock held by a pause that is draining its publishes.
+  Future<void>? claimGate;
+
+  /// When true, a foreground claim throws, which the real service's never
+  /// does. The message embeds a fake group id.
+  bool throwOnClaim = false;
+
+  @override
+  Future<void> claimForeground() async {
+    claimsWhileRunning.add(_running);
+    if (claimGate != null) await claimGate;
+    if (throwOnClaim) {
+      throw Exception('boom for nostr group ${'ab' * 16}');
+    }
+  }
 
   @override
   Future<void> subscribeCircle(FfiGroupSpec spec) async {
@@ -165,7 +200,15 @@ class _RecordingEngine implements SubscriptionService {
   // silently instead of failing loudly, and every "does this path respect a
   // paused engine" question answered itself in the negative.
   @override
-  Future<void> openBackgroundBurst() => throw UnimplementedError();
+  Future<BurstOpenFfi> openBackgroundBurstWithin(Duration budget) =>
+      throw UnimplementedError();
+
+  @override
+  Future<void> startIntoBurst({
+    required List<FfiGroupSpec> groups,
+    required List<String> inboxRelays,
+    required Duration budget,
+  }) => throw UnimplementedError();
 
   @override
   Future<BacklogOutcomeFfi> waitBacklogSettled() => throw UnimplementedError();
@@ -184,15 +227,19 @@ CircleMember _member(String pubkey) => CircleMember(
 );
 
 /// Builds a circle with a deterministic [tag]-derived `nostrGroupId`
-/// (`List.filled(32, tag)`) so `groups.first.nostrGroupId.first == tag`.
+/// (`List.filled(32, tag)`) so `groups.first.nostrGroupId.first == tag`;
+/// [routedAs] gives the same circle (same `mlsGroupId`) another routing id.
 Circle _circle({
   required int tag,
+  int? routedAs,
   MembershipStatus status = MembershipStatus.accepted,
   List<String> relays = const ['wss://relay.test'],
   List<CircleMember> members = const [],
+  CircleEngineState engineState = CircleEngineState.live,
 }) => Circle(
+  engineState: engineState,
   mlsGroupId: [tag, tag, tag],
-  nostrGroupId: List<int>.filled(32, tag),
+  nostrGroupId: List<int>.filled(32, routedAs ?? tag),
   displayName: 'Circle $tag',
   circleType: CircleType.locationSharing,
   relays: relays,
@@ -219,23 +266,30 @@ String _sigOf(List<Circle> circles) => LiveSyncResubscriber.signatureForGroups(
 String _hexOf(Uint8List bytes) =>
     bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
-/// The `computeDelta` "running" map for [circles], keyed by hex
-/// `nostr_group_id` — mirrors what the resubscriber's constructor seeds
-/// `_running` with from `initialGroups`.
-Map<String, FfiGroupSpec> _runningMap(List<Circle> circles) => {
+/// The hex `nostr_group_id`s a start for [circles] subscribes.
+Set<String> _idsOf(List<Circle> circles) => {
   for (final g in LiveSyncResubscriber.groupsForCircles(circles))
-    _hexOf(g.nostrGroupId): g,
+    _hexOf(g.nostrGroupId),
 };
+
+/// The `computeDelta` map for [circles], keyed by hex `mls_group_id` — what
+/// the resubscriber's constructor seeds `_running` with.
+Map<String, FfiGroupSpec> _runningMap(List<Circle> circles) =>
+    LiveSyncResubscriber.specsByCircle(circles);
+
+bool _wanted() => true;
 
 LiveSyncResubscriber _resub(
   _RecordingEngine engine,
   List<Circle> initial, {
   Duration debounce = const Duration(milliseconds: 500),
+  bool Function() sessionWanted = _wanted,
+  Future<List<String>> Function()? inboxRelays,
 }) => LiveSyncResubscriber(
   engine: engine,
-  inboxRelays: () async => const ['wss://inbox'],
-  initialSignature: _sigOf(initial),
-  initialGroups: LiveSyncResubscriber.groupsForCircles(initial),
+  inboxRelays: inboxRelays ?? () async => const ['wss://inbox'],
+  initialCircles: initial,
+  sessionWanted: sessionWanted,
   debounce: debounce,
 );
 
@@ -294,6 +348,15 @@ void main() {
       expect(_tagsOf(groups), [1]);
     });
 
+    test('a disbanded circle is excluded from the group set: its routing id '
+        'is listened to no more', () {
+      final groups = LiveSyncResubscriber.groupsForCircles([
+        _circle(tag: 1),
+        _circle(tag: 2, engineState: CircleEngineState.disbanded),
+      ]);
+      expect(_tagsOf(groups), [1]);
+    });
+
     test('a relay rotation on an existing circle is a change', () {
       final running = _sigOf([
         _circle(tag: 1, relays: const ['wss://old']),
@@ -334,51 +397,60 @@ void main() {
     test('an added circle appears only in added', () {
       final delta = LiveSyncResubscriber.computeDelta(
         _runningMap([_circle(tag: 1)]),
-        LiveSyncResubscriber.groupsForCircles([
+        _runningMap([
           _circle(tag: 1),
           _circle(tag: 2),
         ]),
       );
       expect(_tagsOf(delta.added), [2]);
       expect(delta.removed, isEmpty);
-      expect(delta.relayChanged, isEmpty);
       expect(delta.isEmpty, isFalse);
     });
 
     test('a removed circle appears only in removed', () {
       final delta = LiveSyncResubscriber.computeDelta(
         _runningMap([_circle(tag: 1), _circle(tag: 2)]),
-        LiveSyncResubscriber.groupsForCircles([_circle(tag: 1)]),
+        _runningMap([_circle(tag: 1)]),
       );
       expect(delta.added, isEmpty);
       expect(delta.removed, hasLength(1));
       expect(delta.removed.single.first, 2);
-      expect(delta.relayChanged, isEmpty);
       expect(delta.isEmpty, isFalse);
     });
 
-    test(
-      'a relay rotation on an existing circle appears only in relayChanged',
-      () {
-        final delta = LiveSyncResubscriber.computeDelta(
-          _runningMap([_circle(tag: 1, relays: const ['wss://old'])]),
-          LiveSyncResubscriber.groupsForCircles([
-            _circle(tag: 1, relays: const ['wss://new']),
-          ]),
-        );
-        expect(delta.added, isEmpty);
-        expect(delta.removed, isEmpty);
-        expect(_tagsOf(delta.relayChanged), [1]);
-        expect(delta.isEmpty, isFalse);
-      },
-    );
+    // The session follows a circle onto its new relays or routing id by
+    // itself and keeps the prior routing listed for a day; that is Rust's
+    // (haven-core `relay/live_sync`:
+    // `the_receiver_of_a_peers_relay_change_listens_where_the_circle_now_lives`
+    // and the receiver-of-a-routing-rotation test SECURITY.md names beside it).
+    test('a circle on new relays or a new routing id is no op, and the next '
+        'running set carries its new spec', () {
+      final delta = LiveSyncResubscriber.computeDelta(
+        _runningMap([_circle(tag: 1, relays: const ['wss://old'])]),
+        _runningMap([
+          _circle(tag: 1, routedAs: 9, relays: const ['wss://new']),
+        ]),
+      );
+      expect(delta.isEmpty, isTrue);
+      expect(delta.removed, isEmpty, reason: 'the prior id was dropped');
+      final next = delta.nextRunning.values.single;
+      expect(next.nostrGroupId.first, 9);
+      expect(next.relays, const ['wss://new']);
+    });
+
+    test('a removed circle is unsubscribed under the id it was last known by',
+        () {
+      final running = _runningMap([_circle(tag: 1, routedAs: 9)]);
+      final delta = LiveSyncResubscriber.computeDelta(running, const {});
+      expect(delta.removed.single.first, 9);
+    });
 
     test('a roster/member change to an existing circle is NOT a delta op', () {
       // Same nostrGroupId + relays, only the member roster differs — matches
       // `decide`'s no-op semantics; computeDelta must agree.
       final delta = LiveSyncResubscriber.computeDelta(
         _runningMap([_circle(tag: 1)]),
-        LiveSyncResubscriber.groupsForCircles([
+        _runningMap([
           _circle(tag: 1, members: [_member('peer')]),
         ]),
       );
@@ -389,18 +461,17 @@ void main() {
       final circles = [_circle(tag: 1), _circle(tag: 2)];
       final delta = LiveSyncResubscriber.computeDelta(
         _runningMap(circles),
-        LiveSyncResubscriber.groupsForCircles(circles),
+        _runningMap(circles),
       );
       expect(delta.isEmpty, isTrue);
       expect(delta.added, isEmpty);
       expect(delta.removed, isEmpty);
-      expect(delta.relayChanged, isEmpty);
     });
 
     test('nextRunning always reflects the full next set', () {
       final delta = LiveSyncResubscriber.computeDelta(
         _runningMap([_circle(tag: 1)]),
-        LiveSyncResubscriber.groupsForCircles([
+        _runningMap([
           _circle(tag: 1),
           _circle(tag: 2),
         ]),
@@ -414,6 +485,32 @@ void main() {
   // lifecycle, via a mock engine.
   // -------------------------------------------------------------------------
   group('LiveSyncResubscriber orchestration', () {
+    test('the delta line names no circle, id or relay', () {
+      FakeAsync().run((async) {
+        final logs = LogCapture.install();
+        final engine = _RecordingEngine();
+        final planted = _circle(
+          tag: 0xab,
+          relays: const ['wss://planted.example'],
+        );
+        final resub = _resub(engine, [_circle(tag: 1)])
+          ..onCirclesChanged([_circle(tag: 1), planted]);
+        async
+          ..elapse(const Duration(milliseconds: 500))
+          ..flushMicrotasks();
+
+        logs
+          ..assertContains('[LiveSyncResubscriber] delta')
+          ..assertNoNeedles([
+            'ab' * 32,
+            'ababab',
+            'wss://planted.example',
+          ]);
+        resub.dispose();
+        logs.restore();
+      });
+    });
+
     test('adding an accepted circle subscribes only the new circle', () {
       FakeAsync().run((async) {
         final engine = _RecordingEngine();
@@ -456,13 +553,19 @@ void main() {
       });
     });
 
-    test('a relay rotation drops then re-subscribes just that circle', () {
+    // Before: a relay rotation dropped the circle's REQ and re-subscribed it
+    // under the new relays. After: a circle whose relays or routing id moved
+    // is followed by the session itself (see computeDelta above), so the
+    // engine is asked nothing; a later start, and a later leave, use the new
+    // spec.
+    test('a circle whose routing moved is asked nothing of the engine, and '
+        'later starts and leaves use where it moved to', () {
       FakeAsync().run((async) {
         final engine = _RecordingEngine();
         final resub =
             _resub(engine, [_circle(tag: 1, relays: const ['wss://old'])])
               ..onCirclesChanged([
-                _circle(tag: 1, relays: const ['wss://new']),
+                _circle(tag: 1, routedAs: 9, relays: const ['wss://new']),
               ]);
         async
           ..elapse(const Duration(milliseconds: 500))
@@ -470,10 +573,25 @@ void main() {
 
         expect(engine.stopCalls, 0);
         expect(engine.startCalls, isEmpty);
-        expect(engine.unsubscribeCalls, hasLength(1));
-        expect(engine.unsubscribeCalls.single.first, 1);
-        expect(engine.subscribeCalls, hasLength(1));
-        expect(engine.subscribeCalls.single.relays, const ['wss://new']);
+        expect(
+          engine.unsubscribeCalls,
+          isEmpty,
+          reason: 'the prior routing id the session still lists was dropped',
+        );
+        expect(engine.subscribeCalls, isEmpty);
+
+        unawaited(engine.stop());
+        unawaited(resub.ensureRunning());
+        async.flushMicrotasks();
+        final started = engine.startCalls.single.groups.single;
+        expect(started.nostrGroupId.first, 9);
+        expect(started.relays, const ['wss://new']);
+
+        resub.onCirclesChanged(const []);
+        async
+          ..elapse(const Duration(milliseconds: 500))
+          ..flushMicrotasks();
+        expect(engine.unsubscribeCalls.single.first, 9);
         resub.dispose();
       });
     });
@@ -1042,7 +1160,7 @@ void main() {
 
       final healthy = await resub.ensureRunning();
 
-      expect(healthy, isTrue);
+      expect(healthy, LiveSyncHealOutcome.running);
       expect(
         engine.startCalls,
         hasLength(1),
@@ -1050,7 +1168,7 @@ void main() {
       );
       expect(
         engine.startCalls.single.groups.map((g) => _hexOf(g.nostrGroupId)).toSet(),
-        _runningMap(circles).keys.toSet(),
+        _idsOf(circles),
         reason: 'it must come back with the SAME groups, or the heal silently '
             'drops circles from receive',
       );
@@ -1062,13 +1180,121 @@ void main() {
       final resub = _resub(engine, [_circle(tag: 1)]);
       engine.startCalls.clear();
 
-      expect(await resub.ensureRunning(), isTrue);
+      expect(await resub.ensureRunning(), LiveSyncHealOutcome.running);
       expect(
         engine.startCalls,
         isEmpty,
         reason: 'this runs on a timer; restarting a healthy engine would tear '
             'down a working session on every tick',
       );
+      resub.dispose();
+    });
+
+    test('a heal tells a running engine the app may be resumed', () async {
+      // The heal is the one hook every app resume runs, and the one that
+      // queues behind a start still in flight. So it is what carries the
+      // foreground claim to a session whose own start was made before the
+      // app was resumed — a cold launch behind a system dialog, a return
+      // through the app switcher. Whether the claim is TRUE is the engine
+      // service's strict read (`appIsResumed`), not this class's: what is
+      // pinned here is that the heal asks.
+      final engine = _RecordingEngine();
+      final resub = _resub(engine, [_circle(tag: 1)]);
+
+      expect(await resub.ensureRunning(), LiveSyncHealOutcome.running);
+      await pumpEventQueue();
+
+      expect(
+        engine.claimsWhileRunning,
+        [true],
+        reason: 'a session started before the app was resumed would wait for '
+            'the next subscription-health tick — 11 to 19 minutes out, and '
+            're-armed by every resume — to stage and drive its commits',
+      );
+      resub.dispose();
+    });
+
+    test('the claim is made behind the start the heal itself had to make',
+        () async {
+      final startGate = Completer<void>();
+      final engine = _RecordingEngine(startGate: startGate.future);
+      final resub = _resub(engine, [_circle(tag: 1)]);
+      await engine.stop();
+
+      final healing = resub.ensureRunning();
+      await pumpEventQueue();
+      expect(
+        engine.claimsWhileRunning,
+        isEmpty,
+        reason: 'a claim made while the start is still in flight finds no '
+            'session, and is lost',
+      );
+
+      startGate.complete();
+      expect(await healing, LiveSyncHealOutcome.running);
+      await pumpEventQueue();
+      expect(engine.claimsWhileRunning, [true]);
+      resub.dispose();
+    });
+
+    test('a claim the engine is slow to take holds up no later heal', () async {
+      // The engine takes its lifecycle lock for a claim, and a pause holds
+      // that lock for as long as its publishes take to drain. A heal that
+      // waited for its claim on the chain would hold every heal and every
+      // delta behind it; they would time out as "not running" over an engine
+      // that is, and the caller would back off.
+      final claimGate = Completer<void>();
+      final engine = _RecordingEngine()..claimGate = claimGate.future;
+      final resub = _resub(engine, [_circle(tag: 1)]);
+
+      expect(await resub.ensureRunning(), LiveSyncHealOutcome.running);
+      await pumpEventQueue();
+      expect(engine.claimsWhileRunning, [true], reason: 'premise: parked');
+
+      var answered = false;
+      final second = resub.ensureRunning().then((running) {
+        answered = true;
+        return running;
+      });
+      await pumpEventQueue();
+      expect(
+        answered,
+        isTrue,
+        reason: 'a heal queued behind a claim the engine has not taken yet '
+            'got no answer',
+      );
+      expect(await second, LiveSyncHealOutcome.running);
+
+      claimGate.complete();
+      await pumpEventQueue();
+      resub.dispose();
+    });
+
+    test('a claim that throws is absorbed, and the next heal claims again',
+        () async {
+      // The real service's claim never throws; a double's must not become
+      // the unhandled error of a future nobody awaits.
+      final engine = _RecordingEngine()..throwOnClaim = true;
+      final resub = _resub(engine, [_circle(tag: 1)]);
+
+      expect(await resub.ensureRunning(), LiveSyncHealOutcome.running);
+      await pumpEventQueue();
+      expect(await resub.ensureRunning(), LiveSyncHealOutcome.running);
+      await pumpEventQueue();
+
+      expect(engine.claimsWhileRunning, [true, true]);
+      resub.dispose();
+    });
+
+    test('an engine that would not start is claimed nothing for', () async {
+      final engine = _RecordingEngine(throwOnStart: true);
+      final resub = _resub(engine, [_circle(tag: 1)]);
+      await engine.stop();
+
+      expect(await resub.ensureRunning(), LiveSyncHealOutcome.failed);
+      await pumpEventQueue();
+
+      expect(engine.claimsWhileRunning, isEmpty);
       resub.dispose();
     });
 
@@ -1104,7 +1330,7 @@ void main() {
       await engine.stop();
       engine.startCalls.clear();
 
-      expect(await resub.ensureRunning(), isTrue);
+      expect(await resub.ensureRunning(), LiveSyncHealOutcome.running);
       expect(
         engine.startCalls,
         hasLength(1),
@@ -1130,7 +1356,7 @@ void main() {
       await engine.stop();
       engine.startCalls.clear();
 
-      expect(await resub.ensureRunning(), isFalse);
+      expect(await resub.ensureRunning(), LiveSyncHealOutcome.stoodDown);
       expect(engine.startCalls, isEmpty);
     });
 
@@ -1177,7 +1403,7 @@ void main() {
         engine.startCalls.first.groups
             .map((g) => _hexOf(g.nostrGroupId))
             .toSet(),
-        _runningMap(after).keys.toSet(),
+        _idsOf(after),
       );
       expect(
         LiveSyncResubscriber.signatureForGroups(
@@ -1197,12 +1423,12 @@ void main() {
       await engine.stop();
       engine.startCalls.clear();
 
-      final results = await Future.wait<bool>([
+      final results = await Future.wait<LiveSyncHealOutcome>([
         resub.ensureRunning(),
         resub.ensureRunning(),
       ]);
 
-      expect(results, everyElement(isTrue));
+      expect(results, everyElement(LiveSyncHealOutcome.running));
       expect(
         engine.startCalls,
         hasLength(1),
@@ -1219,7 +1445,247 @@ void main() {
       final resub = _resub(engine, [_circle(tag: 1)]);
       await engine.stop();
 
-      expect(await resub.ensureRunning(), isFalse);
+      expect(await resub.ensureRunning(), LiveSyncHealOutcome.failed);
+      resub.dispose();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // No session behind a pause.
+  //
+  // The app's pause stops the engine directly, off this class's chain. A leg
+  // already queued here — a heal, a delta that falls back to a full restart,
+  // a restart between its own stop and its start — used to find no engine
+  // and start one: a session nobody claimed, in a backgrounded process, with
+  // standing REQs and the MLS database's single-session guard. Such a
+  // session publishes what it receives through the legacy ladder and drives
+  // its stored commits once; on Android it holds the guard the foreground
+  // service was just handed.
+  // -------------------------------------------------------------------------
+  group('no session is brought up while none is wanted', () {
+    test('a heal that runs after the app left starts nothing', () async {
+      final logs = LogCapture.install();
+      final engine = _RecordingEngine();
+      final resub = _resub(
+        engine,
+        [_circle(tag: 1)],
+        sessionWanted: () => false,
+      );
+      await engine.stop();
+      engine
+        ..stopCalls = 0
+        ..startCalls.clear();
+
+      expect(await resub.ensureRunning(), LiveSyncHealOutcome.stoodDown);
+
+      expect(engine.startCalls, isEmpty);
+      expect(engine.stopCalls, 0, reason: 'a declined restart touches nothing');
+      logs
+        ..assertContains('no session is wanted')
+        ..assertNoNeedles(['01' * 32, 'wss://relay.test', 'wss://inbox']);
+      resub.dispose();
+    });
+
+    test('a restart between its own stop and its start starts nothing',
+        () async {
+      final stopGate = Completer<void>();
+      var wanted = true;
+      var relayReads = 0;
+      final engine = _RecordingEngine(stopGate: stopGate.future);
+      final resub = _resub(
+        engine,
+        [_circle(tag: 1)],
+        sessionWanted: () => wanted,
+        inboxRelays: () async {
+          relayReads++;
+          return const ['wss://inbox'];
+        },
+      );
+      engine._running = false;
+
+      final healing = resub.ensureRunning();
+      await pumpEventQueue();
+      expect(engine.stopCalls, 1, reason: 'premise: parked on its own stop');
+
+      // The app leaves here. Its own stop finds nothing to stop.
+      wanted = false;
+      stopGate.complete();
+
+      expect(await healing, LiveSyncHealOutcome.stoodDown);
+      expect(
+        engine.startCalls,
+        isEmpty,
+        reason: 'a session was started behind the pause that had just ended '
+            'the one before it',
+      );
+      expect(
+        relayReads,
+        0,
+        reason: "it went on to read the user's relay list, through the "
+            'circle store, in a process that had already left',
+      );
+      resub.dispose();
+    });
+
+    test('a restart that has read its relays starts nothing', () async {
+      final inboxGate = Completer<List<String>>();
+      var wanted = true;
+      final engine = _RecordingEngine();
+      final resub = _resub(
+        engine,
+        [_circle(tag: 1)],
+        sessionWanted: () => wanted,
+        inboxRelays: () => inboxGate.future,
+      );
+      engine._running = false;
+
+      final healing = resub.ensureRunning();
+      await pumpEventQueue();
+      wanted = false;
+      inboxGate.complete(const ['wss://inbox']);
+
+      expect(await healing, LiveSyncHealOutcome.stoodDown);
+      expect(engine.startCalls, isEmpty);
+      resub.dispose();
+    });
+
+    test('a session that came up after the app left is stopped, and its '
+        'groups are not adopted', () async {
+      final startGate = Completer<void>();
+      var wanted = true;
+      final engine = _RecordingEngine(startGate: startGate.future);
+      final before = [_circle(tag: 1)];
+      final after = [_circle(tag: 1), _circle(tag: 2)];
+      final resub = _resub(
+        engine,
+        before,
+        debounce: Duration.zero,
+        sessionWanted: () => wanted,
+      );
+      engine._running = false;
+
+      resub.onCirclesChanged(after);
+      await pumpEventQueue();
+      expect(engine.startCalls, hasLength(1), reason: 'premise: start parked');
+      final stopsBefore = engine.stopCalls;
+
+      wanted = false;
+      startGate.complete();
+      await pumpEventQueue();
+
+      expect(
+        engine.stopCalls,
+        stopsBefore + 1,
+        reason: 'the session is up in a process whose pause has already run',
+      );
+      expect(engine.isRunning, isFalse);
+
+      // Back in front: the change is still owed, so it is applied now.
+      wanted = true;
+      engine.startCalls.clear();
+      resub.onCirclesChanged(after);
+      await pumpEventQueue();
+      expect(
+        engine.startCalls.single.groups
+            .map((g) => _hexOf(g.nostrGroupId))
+            .toSet(),
+        _idsOf(after),
+        reason: 'the set it never ran was adopted as running, so the change '
+            'read as already applied',
+      );
+      resub.dispose();
+    });
+
+    test('a delta for a stopped engine starts nothing', () async {
+      final engine = _RecordingEngine();
+      final resub = _resub(
+        engine,
+        [_circle(tag: 1)],
+        debounce: Duration.zero,
+        sessionWanted: () => false,
+      );
+      await engine.stop();
+      engine.startCalls.clear();
+
+      resub.onCirclesChanged([_circle(tag: 1), _circle(tag: 2)]);
+      await pumpEventQueue();
+
+      expect(engine.startCalls, isEmpty);
+      resub.dispose();
+    });
+
+    test('a delta whose op fails starts nothing', () async {
+      final engine = _RecordingEngine(throwOnSubscribe: true);
+      final resub = _resub(
+        engine,
+        [_circle(tag: 1)],
+        debounce: Duration.zero,
+        sessionWanted: () => false,
+      );
+      engine.startCalls.clear();
+
+      resub.onCirclesChanged([_circle(tag: 1), _circle(tag: 2)]);
+      await pumpEventQueue();
+
+      expect(engine.subscribeCalls, hasLength(1), reason: 'premise: it failed');
+      expect(engine.startCalls, isEmpty);
+      expect(engine.stopCalls, 0);
+      resub.dispose();
+    });
+
+    test('a restart a stop ended is not a failed one', () async {
+      // The user's own pause ends the start. Counted as a failure it widens
+      // the heal backstop; three quick visits put it twenty minutes out.
+      final logs = LogCapture.install();
+      final engine = _RecordingEngine()..endStartByStop = true;
+      final resub = _resub(engine, [_circle(tag: 1)]);
+      await engine.stop();
+
+      expect(await resub.ensureRunning(), LiveSyncHealOutcome.stoodDown);
+
+      logs
+        ..assertContains('full restart ended by a stop')
+        ..assertNoNeedles(['01' * 32, 'wss://relay.test', 'wss://inbox']);
+      expect(logs.joined, isNot(contains('full restart failed')));
+      resub.dispose();
+    });
+
+    test("a start the engine's own death ended is a failed one, so the heal "
+        'backs off from an engine that dies in its own claim', () async {
+      // Nobody asked for no session: the engine's stream closed under the
+      // start, and a restart at the base cadence every time would hammer the
+      // relays (decision 241). `failed` is what the backstop backs off from,
+      // and a healthy start resets it.
+      final logs = LogCapture.install();
+      final engine = _RecordingEngine()
+        ..endStartByStop = true
+        ..endedByEngine = true;
+      final resub = _resub(engine, [_circle(tag: 1)]);
+      await engine.stop();
+
+      expect(await resub.ensureRunning(), LiveSyncHealOutcome.failed);
+
+      logs
+        ..assertContains('full restart ended by a stop')
+        ..assertNoNeedles(['01' * 32, 'wss://relay.test', 'wss://inbox']);
+      resub.dispose();
+    });
+
+    test('the next heal after the app is back starts it', () async {
+      var wanted = false;
+      final engine = _RecordingEngine();
+      final resub = _resub(
+        engine,
+        [_circle(tag: 1)],
+        sessionWanted: () => wanted,
+      );
+      await engine.stop();
+      engine.startCalls.clear();
+      expect(await resub.ensureRunning(), LiveSyncHealOutcome.stoodDown);
+
+      wanted = true;
+      expect(await resub.ensureRunning(), LiveSyncHealOutcome.running);
+      expect(engine.startCalls, hasLength(1));
       resub.dispose();
     });
   });
@@ -1238,13 +1704,13 @@ void main() {
         final engine = _RecordingEngine(throwOnIsRunning: true);
         final resub = _resub(engine, [_circle(tag: 1)]);
 
-        bool? answer;
+        LiveSyncHealOutcome? answer;
         unawaited(resub.ensureRunning().then((v) => answer = v));
         async.flushMicrotasks();
 
         expect(
           answer,
-          isFalse,
+          LiveSyncHealOutcome.failed,
           reason: 'no time has elapsed, so this can only have come from the '
               'error path — waiting out kLiveSyncRestartBudget instead would '
               'leave the heal timer un-armed for over a minute, and before '
@@ -1293,7 +1759,7 @@ void main() {
         async.flushMicrotasks();
         engine.startCalls.clear();
 
-        bool? answer;
+        LiveSyncHealOutcome? answer;
         unawaited(resub.ensureRunning().then((v) => answer = v));
 
         async.elapse(kLiveSyncRestartBudget - const Duration(seconds: 1));
@@ -1305,7 +1771,7 @@ void main() {
         );
 
         async.elapse(const Duration(seconds: 2));
-        expect(answer, isFalse);
+        expect(answer, LiveSyncHealOutcome.failed);
         expect(
           engine.startCalls,
           hasLength(1),

@@ -1,7 +1,7 @@
 # CI Hardening Backlog
 
 Tracking document for the CI/privacy-verification audit of 2026-08-01.
-**Last updated 2026-09-22.** Items are open unless marked DONE, FIXED,
+**Last updated 2026-10-26.** Items are open unless marked DONE, FIXED,
 IMPLEMENTED or RESOLVED. Each carries evidence so it can be picked up cold.
 
 > **Historical note (2026-08-29).** The Settings → Privacy page and every
@@ -334,6 +334,19 @@ timer would silently reset on every relay heal while the real `not_after` kept
 ticking: a green timer over an expired package. `heal_does_not_reset_the
 _rotation_clock` is the test that exists for exactly this.
 
+*Since the MDK v0.10.4 lifecycle (2026-10-04).* A heal no longer signs
+anything: it republishes the signed event the account froze when it minted the
+package (the `SignedPublicationArtifact` on MDK's durable
+`KeyPackageLifecycleState`), byte for byte, so a healed relay holds the same
+event id and the same `created_at` as every other. The clock still comes off
+the package and not the event, because one path does still sign a second event
+over an existing package — a slot repoint (`build_kp_slot_repoint_event`). The
+test named above became two in `haven-core/tests/kp_rotation_e2e.rs`:
+`a_heal_republishes_the_tracked_event_and_the_rotation_clock_does_not_move` and
+`a_repoint_does_not_reset_the_rotation_clock`. The wire lane follows: its heal
+phase requires the SAME event on the second relay, and a further phase requires
+the package a Welcome consumed to be replaced in its slot.
+
 *Reading the lifetime needed a dependency.* `not_before`/`not_after` are not
 reachable through the pinned Dark Matter crates — the engine parses them but
 surfaces the numbers only inside the error for a package that already FAILED
@@ -341,6 +354,9 @@ validation. `haven-core` now names `openmls` directly, which adds **zero
 crates** (both already resolved transitively; `Cargo.lock` grew two lines) and
 avoids putting a hand-rolled MLS wire parser in the crypto path. The reader
 validates before reading, so a corrupt row cannot dictate rotation timing.
+*(Since the MDK v0.10.4 migration the lifetime is read through MDK's own
+`cgka_engine::key_package_metadata`, and `openmls` is a dev-dependency only, for
+tests.)*
 
 *Design points worth keeping:*
 
@@ -367,7 +383,9 @@ Haven satisfied the first bound (the delete sits inside `if published`, and
 `publish_event` returns `Ok` only on ≥1 relay ack) but **not** the second, so an
 offline or relay-less device retained dead private keys indefinitely — the same
 leak the reference app has. `purge_key_package_past_not_after` now runs before
-any relay probe, since that bound is transport-independent. The spec's stated
+any relay probe, since that bound is transport-independent. *(Since the MDK
+v0.10.4 migration that step is `SessionManager::sweep_expired_key_packages`,
+still first in the tick, over MDK's durable key-package lifecycle.)* The spec's stated
 risk: compromising one lets an attacker decrypt every recorded Welcome to it.
 
 *Failure surfacing, the amplifier that hid all of this.* The bigger conflation
@@ -1624,9 +1642,12 @@ never outlive the freshness window it publishes into.
 fails the build if any sync-cursor advance is derived from an inbound event's
 `created_at`, or if any FFI entry point raises a cursor at all;
 `scripts/ci/check_clock_skew_policy_parity.sh` pins the Dart mirrors
-`kClockSkewAlertThreshold` 120 s and `kClockSkewTotalLossThreshold` 288 s
-(`constants/location.dart:231`, `:207`) against `CLOCK_SKEW_ALERT_THRESHOLD_SECS`
-/ `TOTAL_LOSS_SKEW_SECS` (`relay/clock_skew.rs:111`, `:78`). The user-facing
+`kClockSkewAlertThreshold` 120 s and `kClockSkewTotalLossThreshold` 228 s
+(`constants/location.dart`) against `CLOCK_SKEW_ALERT_THRESHOLD_SECS`
+/ `TOTAL_LOSS_SKEW_SECS` (`relay/clock_skew.rs`). *(Corrected 2026-09-28: the
+total-loss point was 288 s = retention + a 60 s receiver grace; the relay pool
+drops at the expiration with no grace, so it is the retention itself, and the
+guard now requires Rust to define it as `LOCATION_MESSAGE_RETENTION_SECS`.)* The user-facing
 surface for the slow-clock verdict is
 `widgets/location/clock_skew_banner.dart`, rendered from
 `widgets/map/map_status_banners.dart:82` behind `LocationAccessBanner` so the
@@ -1674,7 +1695,7 @@ magnitude:
    stays executable — and once P4 replaced the standing background subscription
    with one bounded burst per publish tick, a tick landing MID-BURST read a pool
    in the middle of `connect()` as dropped and repaired it through the FOREGROUND
-   re-anchor, leaving standing REQs, an open socket and a 49 h `#p` gift-wrap
+   re-anchor, leaving standing REQs, an open socket and a 96 h `#p` gift-wrap
    replay behind at an instant that is not a publish. So for a backgrounded
    device this list is now two mechanisms plus the burst: on iOS with sharing on
    the burst on each publish tick is the repair (72-168 s, faster than this tick
@@ -1754,12 +1775,15 @@ Two things came out of it beyond the assertion itself:
   silence proved the harness. The dispatcher now arms the opt-in for all three
   targets and both phases require the armed marker, so the silence proves the
   GATE.
-* **`locations>=1` is only an honest decrypt oracle inside the TTL.** The
-  engine short-circuits an event past `expiration` + `RECEIVER_EXPIRATION_GRACE_SECS`
-  (228 + 60 s) to `Stale`, which the sweep counts as APPLIED with nothing
-  decrypted. Phase A therefore also bounds seed→sweep (`M7_DECRYPT_FRESHNESS_S`,
-  default 240 s; measured 11–63 s across six 2026-08 runs) and fails with that
-  reason named, so a slow run can never pass as a delivered one.
+* **`locations>=1` is only an honest decrypt oracle inside the TTL.** Past its
+  228 s `expiration` the worker's relay pool drops the seeded event on receipt,
+  with no grace, and the sweep reads `locations=0`. Phase A therefore also
+  bounds seed→sweep (`M7_DECRYPT_FRESHNESS_S`, default 180 s — 48 s under the
+  drop point for the drive's tail past the publish; measured 11–63 s across six
+  2026-08 runs) and fails with that reason named, so a slow run is never read as
+  a delivery regression. *(Corrected 2026-09-28: this read "the engine
+  short-circuits an event past expiration + 60 s to `Stale`" with a 240 s
+  default — that screen is deleted (W4), and 240 s was past the real drop point.)*
 
 First observed green 2026-08-05 (CI 30980908814) with `M7_REQUIRE_DECRYPT=1`,
 and green on every run since (31075503390, 31216078806).
@@ -2257,11 +2281,13 @@ each rather than documenting the current one:
 2. **Slow clock ⇒ every location is born already expired.** `expiration =
    created_at + 228`, both from the skewed clock, so an event published 6 h
    behind carries an expiration ~6 h in the past *at the moment it is written*.
-   A NIP-40-honouring relay may drop it, and a correctly-clocked peer's
-   `SessionManager::process_event` (`manager.rs:633-641`) discards it before
-   decryption on `RECEIVER_EXPIRATION_GRACE_SECS = 60`. The publisher still
-   sees a successful OK-ack and reports success: the loss is total and
-   indistinguishable from working.
+   A NIP-40-honouring relay may drop it, and a correctly-clocked peer's relay
+   pool discards it on receipt, with no grace (`nostr-relay-pool`
+   `relay/inner.rs:1193`). The publisher still sees a successful OK-ack and
+   reports success: the loss is total and indistinguishable from working.
+   *(Corrected 2026-09-28: this cited Haven's `process_event` screen with a 60 s
+   grace; the screen is deleted (W4) and the pool, which applies none, was
+   always the first to drop.)*
 3. **A backdated event was below the `since` floor forever — RESOLVED by the
    P0-5 cursor fix.** The cursor then sat at the newest applied `created_at`
    and the next window opened only 60 s below it, so anything minted further
@@ -2325,18 +2351,21 @@ Only the positive direction is inferred, and that asymmetry is principled: a
 correctly-clocked peer never stamps a future time and every source of delay
 pushes the observed offset more negative, so a consistently positive offset
 can only be clock disagreement. The negative direction is structurally
-unobservable here — `process_event` already dropped anything older than
-`retention + grace`, so every surviving sample satisfies `offset > −288 s`.
+unobservable here — the relay pool already dropped anything older than the
+retention, so every surviving sample satisfies `offset ≥ −228 s`.
 
-*Threshold* `CLOCK_SKEW_ALERT_THRESHOLD_SECS = 2 * RECEIVER_EXPIRATION_GRACE_SECS`
-= 120 s. Lower bound: 60 s is the band the protocol absorbs by design, so
-alerting inside it fires on skew that costs the user nothing. Upper bound: at
-`228 + 60 = 288 s` a correctly-clocked peer discards 100 % of this device's
-locations. And it is already a real defect at 120: the no-gap invariant is
-`retention (228) > max publish gap (168)`, so a publisher lagging 120 s has
-effective residency 108 s and peers are *guaranteed* coverage holes — asserted
-as arithmetic, not prose. Pinned in both directions on both sides; widening
-past 228 does not even compile.
+*Threshold* `CLOCK_SKEW_ALERT_THRESHOLD_SECS` = 120 s. *(Re-derived 2026-09-28:
+it was `2 × RECEIVER_EXPIRATION_GRACE_SECS`, "60 s is the band the protocol
+absorbs by design", against a 288 s total-loss point. Nothing absorbs a
+disagreement — the pool judges the expiration with no grace — so the total-loss
+point is 228 s and a lag of `d` leaves `228 − d` s of residency.)* Lower bound:
+below a 108 s lag the residency still exceeds the median (120 s) publish
+interval, so the holes are the jitter's tail. Upper bound: at 228 s a
+correctly-clocked peer discards 100 % of this device's locations. And it is
+already a real defect at 120: a publisher lagging 120 s has effective residency
+108 s, under the 168 s interval ceiling, so most cycles leave a peer who catches
+up later a hole — asserted as arithmetic, not prose. Pinned in both directions
+on both sides.
 
 *`created_at` is never rewritten.* Correction would need its own analysis —
 the TTL, the `since` cursor and the peeler's inner/outer binding all ride that
@@ -2355,8 +2384,9 @@ asserted that a ±6 h jump leaves *delivery* intact. That is unachievable
 without clock correction: `forward-skew-publish` can only be cleared by not
 signing a future `created_at`; `backward-skew-retention` / `-receive` follow
 mechanically from `expiration = created_at + 228` on the same skewed clock, and
-making a peer accept them would mean weakening
-`RECEIVER_EXPIRATION_GRACE_SECS`, a replay defence; `backward-skew-catchup` is
+a peer's relay pool drops them on receipt with no local lever
+(`nostr-relay-pool` `relay/inner.rs:1193`; the replay-defence grace this cited
+is gone with Haven's screen, W4); `backward-skew-catchup` is
 a cursor-window property no detection change touches.
 
 A permanently-red lane is worse than no lane — it trains people to ignore it
@@ -2384,7 +2414,10 @@ is accepted and a refusal there would be a real, fixable regression.
 > a refusal that classifies as `DeviceClockComplaint.behind` (the born-expired
 > one) is recorded as EVIDENCE; every other refusal reason — including an
 > unrecognised one, which classifies as null — still emits `[b8] FINDING` and
-> fails the lane. This keeps the regression-detecting power the decision above
+> fails the lane. *(Since W9q-D1 the slow-side publish goes through the
+> driver's own send and the classification is the core's typed answer,
+> `LocationPublishFfi.clockBehind`; anything else is the FINDING. The Dart
+> copy of the phrase tables is gone.)* This keeps the regression-detecting power the decision above
 > wanted while removing the part that could never pass. It is a re-scope on new
 > evidence, not a relaxation to quiet a red lane; `run-b8-clock-skew.sh:104-105`
 > and CLAUDE.md Testing Requirement #5 both forbid the latter.
@@ -2420,9 +2453,10 @@ fails if either can be read as the other, so "convert a FINDING to EVIDENCE to
 quiet the lane" cannot happen silently.
 
 *Kept true by* `scripts/ci/check_clock_skew_policy_parity.sh` (repo-guards),
-which fails if the Rust and Dart thresholds drift apart, if the classifier
-token drifts, or if the Rust declaration is renamed such that the guard would
-scan nothing — that last one being the vacuity case.
+which fails if the Rust and Dart thresholds drift apart, or if the Rust
+declaration is renamed such that the guard would scan nothing — that last one
+being the vacuity case. (The classifier token it also pinned is no longer read
+by Dart: the clock verdict crosses the FFI as a typed field.)
 
 *What was built.* `.github/workflows/e2e-clock-skew.yml` +
 `tooling/e2e/ci/run-b8-clock-skew.sh` + `haven/integration_test/
@@ -2602,12 +2636,12 @@ allow-list, linted by both consumers.
 | Item | Artefact | Self-test |
 |---|---|---|
 | C1 | `tooling/e2e/local-relay/src/{proxy,frame,journal,summarize,loopback}.rs`, `bin/wire_proxy.rs` — listens on 7788, forwards to 7777; a non-loopback listen is refused at the bind with no override | `cargo test` in that crate — the suite count is NOT carried here: it read "120" and the tree holds 119 `#[test]`/`#[tokio::test]` functions, 87 of them in the six files this row names and the rest in `config.rs` and `tests/wire_proxy_*.rs`, which is exactly how a prose count of a suite goes stale. The two oracles below carry counts because theirs are PINNED by `MIN_CASES` |
-| C2–C4 | `tooling/e2e/ci/check-wire-journal.sh` | **128 fixtures**, `MIN_CASES` pinned exactly |
-| C5.1–C5.9 | `tooling/e2e/ci/check-wire-correlation.sh` | **157 fixtures**, `MIN_CASES=157` (pinned exactly) |
+| C2–C4 | `tooling/e2e/ci/check-wire-journal.sh` | **150 fixtures** (128 before the MDK v0.10.4 migration added C-NEG's NIP-77 cases and others), `MIN_CASES` pinned exactly |
+| C5.1–C5.9 | `tooling/e2e/ci/check-wire-correlation.sh` | **210 fixtures**, `MIN_CASES=210` (pinned exactly; 157 before the MDK v0.10.4 migration) |
 | C6 | `haven/integration_test/e2e/_lib/wire_canaries.dart`, CLI `tooling/e2e/ci/check-wire-canaries.dart` | 85 Dart tests (`haven/test/e2e/wire_canaries_test.dart`, counted 2026-09-09); the live-term total is a PER-RUN property printed in that run's own canary manifest, so no fixed figure for it belongs here |
 | C7 | `tooling/e2e/ci/setup-network-guard.sh` + `egress-allowlist.txt`, **observe mode** | wired on e2e-android, e2e-profile, e2e-location-provider-toggle |
 | — | `scripts/ci/check_wire_proxy_test_only.sh` — the proxy may never be reachable from app code (NEGATIVE half) | green |
-| — | `scripts/ci/check_wire_oracle_lane_reachable.sh` — the oracles must be REACHED by a lane (POSITIVE half) | **39 fixtures**, `SELF_TEST_CASES=39` pinned by equality (added 2026-09-09; until then this figure lived only in this cell, so a deleted fixture would still have printed `self-test: OK`) |
+| — | `scripts/ci/check_wire_oracle_lane_reachable.sh` — the oracles must be REACHED by a lane (POSITIVE half) | **45 fixtures**, `SELF_TEST_CASES=45` pinned by equality (39 when added 2026-09-09; until then this figure lived only in this cell, so a deleted fixture would still have printed `self-test: OK`) |
 
 **The harness itself carried a flaky test, found 2026-08-17** while verifying
 the work above — and found only because a full-crate run happened to be made
@@ -2977,7 +3011,7 @@ plus a self-declaration — not argued away in a header comment.
 | 14 single session | **COVERED (static half)** — `check_mls_session_single_owner.sh` (a `repo-guards.yml` step) pins the three-opener set, the `releaseForHandoff` latch and `initialize`'s consultation of it, and now check 3: each opener file must release at least as many SESSION handles as it opens, counted over handle-shaped receivers on a comment-stripped view, so an unrelated `.dispose()` can no longer stand in for a session release | Residual: a count is a FLOOR, not a matching. `nostr_circle_service.dart` releases its one handle on three exit paths (`:282`, `:394`, `:1755`), so two further undisposed opens there would still pass, and the guard states that slack at the check rather than implying a matching. Tracing the handle is out of a grep's reach: the open is a closure result inside `withFreshSecret`. Its fixtures (`--self-test`, five cases, mutation-proved against a receiver-blind counter, an unstripped comment view and a dropped drift branch) run as their own `repo-guards.yml` step beside the guard. Runtime proof is B1. **The Dart lint beside it was crediting a real leak shape, fixed 2026-08-17**: it read the guarded body's END state, which is the state of the path that did NOT throw, so `try { await risky(m); m.dispose(); } on Object catch (_) {}` read as released on every path. A `catch` now MOVES the obligation rather than discharging it — the clause is entered in the state the raise left behind, probed by re-walking the body for throw-site leaks. The best-effort `try { handle.dispose(); } on Object catch (_) {}` idiom is still credited, because its clause is genuinely unreachable. New honest residual in its place: `rethrow` reads as an ordinary statement, so a clause that rethrows while live leaks along its own outward edge unreported unless it also falls out of the function live |
 | 5 retention | **COVERED** — `security_rule_gates.rs::rule5_retention_constants_are_pinned` pins `app_message_past_epoch_limit() == 5` **and** `DEFAULT_MAX_PAST_EPOCHS == 5` in both directions (widening keeps stale exporter secrets alive, narrowing drops legitimate offline backlog), plus their mutual agreement — an accept window outrunning the epochs whose keys still exist accepts what it can never decrypt. `rule5_epoch_n_ciphertext_still_decrypts_at_the_window_edge` supplies the positive edge, driven off the pinned bound, against the existing N+6 negative in `mls_e2e_security_tests` | Deliberately **not** an at-rest byte scan: SQLCipher always encrypts and no past-epoch exporter secret is persisted, so that check would be doubly vacuous |
 | 3 444 unsigned | **COVERED** — `security_rule_gates.rs::rule3_welcome_rumor_json_carries_no_signature` peels the 1059 by hand (two `nip44::decrypt` layers, asserting the kind-13 seal itself IS signed) rather than through `unwrap_welcome`, whose `UnsignedEvent` serde shape has no `sig` field and would therefore report a signature the sender really put on the wire as absent, then asserts the raw rumor JSON object carries no `"sig"` key | — |
-| 13 publish-before-apply | **COVERED** — `publish_before_apply_send_e2e.rs`, two tiers, because the halves fail differently. The production `RelayManager` plane is driven against in-process relays that ack, answer `OK: false`, accept-and-never-answer, or break the transport, pinning the boolean each yields — the third is the whole rule, since onto the socket is not acked. Those outcomes are then crossed with the four publish-bearing ops (`create_circle`, `add_members_with_welcomes`, `remove_members`, `update_circle_relays`), asserting the engine consequence: an epoch/roster/relay-set that moved only on an ack, the commit handed to the transport exactly when the transport was usable, and the staged reference spent either way so a stray confirm cannot resurrect a commit the relays never took | Residual: the SHIPPED send path is Dart calling `confirmPublished` / `publishFailed` directly (`nostr_circle_service.dart:600/602`, `:1162/1170`, `:1260/1300/1302`, `:1507/1520`). `publish_then_resolve` is production code for the RECEIVE path only — its one non-test caller is `resolve_receive_publish_work` — so this pins the decision and its engine consequences, not those Dart call sites |
+| 13 publish-before-apply | **COVERED** — `publish_before_apply_send_e2e.rs`, two tiers, because the halves fail differently. The production `RelayManager` plane, which publishes what has no fanout record (Welcomes and proposals), is driven against in-process relays that ack, answer `OK: false`, accept-and-never-answer, or break the transport, pinning the boolean each yields — the third is the whole rule, since onto the socket is not acked. The fanout driver's three commit-bearing changes (add, remove, relay update) are then crossed with those outcomes, asserting the engine consequence: an epoch, roster or relay list that moved only on an ack, a commit discarded only when its relay proved it refused it, and one that may have landed kept; the founding create, which has no commit to confirm, is never rolled back (`create_never_rolls_back`). *(Rewritten 2026-10-26: this read four ops resolved through a staged reference that Dart confirmed or rolled back; the MDK v0.10.4 migration deleted that path.)* | Residual of 2026-08-12 closed: the shipped send path was Dart calling `confirmPublished` / `publishFailed` directly. The bridge now carries no confirm, rollback or pending ref, `publish_then_resolve` and `resolve_receive_publish_work` are deleted, and the fanout driver is the only way a commit leaves the device (`security_rule_gates.rs::a_fanout_is_the_only_way_a_commit_leaves_the_device`) |
 | 6 no key logging | **COVERED** — `check_no_key_logging.sh` (a `repo-guards.yml` step, its `--self-test` fixtures a second one) reads Rust and Dart SOURCE, so it reaches every path, build profile and encoding the runtime scanner cannot: `scan-logs-for-secrets.sh` matches seven secret shapes over captured device logs, and a `Zeroizing<[u8; 32]>` rendered `[171, 205, …]` by a `{:?}` on a path no lane drives is none of them. It analyses ONLY the interpolated placeholders and argument expressions — never the message prose, which is what lets it be aggressive about the word "key" without drowning in `"…key migration deferred: {e}"` — and classifies whole identifiers, so `wire_token()` is not a token and `pubkey` is not a key. String state carries ACROSS lines, so a multi-line literal cannot leak prose into the analysed text. Reviewed sites take an inline `// log-scan-ok:` with a reason, unhoistable to the top of a file. It also pins the `keyring_core` → Off filter on EVERY backend `init_app` installs, and their install ORDER: both are first-call-wins, so a filtered backend installed after FRB's pair silently no-ops | Anti-vacuity floors of 70 Rust / 380 Dart call sites (measured 92 / 479) and ≥2 backends. Blind by construction to a secret bound to a name that says nothing (`canonical`, `buf`); banning `{:?}` outright would ban the redacting `Debug` impls this codebase writes on purpose |
 | 7 zeroize | **COVERED** — `check_secret_fields_zeroized.sh` (a `repo-guards.yml` step, its `--self-test` fixtures a second one) flags any raw byte/string field (`[u8; N]`, `Vec<u8>`, `String`, `Box<[u8]>`, `&[u8]`, `&str`) whose name — or whose enclosing STRUCT's name — reads as secret material and which is neither `Zeroizing`-wrapped nor inside a `ZeroizeOnDrop` struct. The struct-name half is load-bearing: `ProfileRelaySalt`'s field is called `bytes`. Composed fields are covered by induction (the inner type is scanned by the same guard) rather than by a type whitelist, which is what rotted the compile-time list — never grown past two entries while the tree reached five secret-bearing types, one of the two dead since Dark Matter | Anti-vacuity floors: ≥110 structs scanned, ≥3 secret-shaped fields found. A secret whose field name says nothing (`ProcessedAvatar.canonical`) stays covered by the RM-Z2 projection witnesses in `zeroization_security.rs`, whose return type is the wrapper — so demoting one is a build error, not a change the scan cannot see |
 | 9 Dart secret lifetime | **COVERED 2026-08-16 — held, not ratcheted: the allowlist is EMPTY.** — `haven/test/lints/secret_bytes_scrub_test.dart` walks every `getSecretBytes()` call in `lib/`, follows `await` / parens / the `Uint8List.fromList` repackaging idiom to the local it binds, and requires a `fillRange` on THAT local in the SAME enclosing function; a sibling-method fixture proves it is not a whole-file substring match that would launder an unrelated scrub. Pass-through shapes bind no name and need none: the `withFreshSecret` tear-off (never a `MethodInvocation`), an arrow-closure provider, a direct return, an argument handed straight on | All four sites are scrubbed and `knownOpenViolations` is now `<String>{}`, the same empty steady state `announcement_keys_reachable_test.dart` keeps. **The two `base64Encode` sites were the reason this could not simply be ratcheted shut**: a `fillRange` on the captured local would have satisfied the lint mechanically while leaving the byte buffer live. The encoding moved INSIDE `withFreshSecret`'s callback, which shortens the raw buffer's life to the callback. **It does NOT remove the immutable Dart `String`** — `flutter_secure_storage` accepts only `String` values, so a base64 copy of the nsec still reaches the heap and is collected rather than erased. That is an irreducible residual of the plugin's API, and an earlier version of this entry wrongly described it as closed. Two further residuals were found by review rather than by the lint, and **both are now FIXED (2026-08-17)**: `withFreshSecret` itself copied its input (`Uint8List.fromList`) and scrubbed only the copy, leaving the FFI-owned source live at every call site — two live 32-byte keys per call, one wiped — and neither guard could see it, because the AST lint climbed THROUGH `Uint8List.fromList` and credited a scrub of the wrapper (a self-test named "permits the `Uint8List.fromList` wrapper shape WITH a scrub" had enshrined that as correct), while `identity_secret_scrub_test.dart` matched `fillRange(0, <ident>.length, 0)` with `\w+`, establishing nothing about WHICH buffer was wiped. A new `takeSecretOwnership` returns the FFI buffer itself when it is already a `Uint8List` — so production now mints **zero** copies — and wipes the source before returning when a copy is unavoidable; the wipe happens BEFORE the callback runs, never from the `finally`, because six call sites pass `const []` and an unmodifiable list's `fillRange` throws unconditionally, which from a `finally` would have masked the real exception. The lint now flags the `Uint8List.fromList` shape unconditionally (it has no correct variant: the fetched buffer is an unnamed temporary no `fillRange` can reach), its name key was widened from the single literal `getSecretBytes` — which had left two of seven call sites invisible — and the source-substring check was replaced by behavioural tests. Eight mutations, each reddening exactly one assertion. A **third** site was found one layer down and had been invisible to every guard: `nostr_circle_service.dart` copied the secret again and handed the copy to the FFI unscrubbed, defeating `withFreshSecret` from inside its own callback, on the `createCircle` onboarding path. Deleting the copy was the fix, not scrubbing it — those FFI methods take `List<int>` and flutter_rust_bridge already converts; scrubbing it would have been a live bug, since the buffer is caller-owned and shared across a parallel batch, and a callee-side wipe zeroes it while siblings are still decrypting. The other two took the same helper (`name_circle_page`) and a `try/finally` around a deliberately-shared batch fetch (`invitation_provider`). Each of the four was individually reintroduced, shown to redden the lint by name, and reverted byte-identically. One citation in this document was stale by a line — `name_circle_page.dart:290` was really `:291` — in the prose only; the lint had it right. |
@@ -4228,7 +4262,10 @@ mutation-tested one at a time, each removal turning its own fixture red.
 | e2e-profile (Android) | 1904 s | 2084 s | 35m | 16 s |
 
 No lane is too short; KeyPackage rotation's 3 s is the thinnest margin, and any
-wait it gains will red it here. The derivations at the drive steps carry the
+wait it gains will red it here. *(These are 2026-09-10's figures; the MDK v0.10.4
+migration has since changed several of these lanes and the manifest — the
+integration lane now runs eight targets — so read the check's own output for
+today's.)* The derivations at the drive steps carry the
 same numbers. The four aggregate lanes are declared `reaper` and accepted only
 because what makes them so is still true: each runs several drives, counted as
 unconditional drive sites per target (integration 7, relay customization 4 —
@@ -4298,7 +4335,7 @@ internal contradiction in `haven-core` that is not a shipped leak.
 | CI-R7 | `check_android_location_power.sh` self-test fixtures assert the RETURN CODE only, never the failure message — and two of them trip the same message, so a check-numbering regression is invisible | **OPEN** |
 | CI-R8 | `check_location_access_gate.sh` counts its self-test fixtures and prints the count, but never pins it by equality — a deleted fixture is invisible | **OPEN** |
 | CI-R9 | The OWED per-file coverage floor for `background_deferred_send.dart` exists only as prose in `coverage_floors.txt`; `check_coverage_floors.sh` has no PENDING/OWED concept, so nothing fails if the row is never added | **OPEN** |
-| SEC-F6 | `relay/manager.rs` logs relay URLs at `log::debug!` three hundred lines above a policy comment stating that neither a URL nor a reason is logged. Not a shipped leak (release caps the level at `Warn`); an internal contradiction that will mislead the next reader | **OPEN** |
+| SEC-F6 | `relay/manager.rs` logs relay URLs at `log::debug!` three hundred lines above a policy comment stating that neither a URL nor a reason is logged. Not a shipped leak (release caps the level at `Warn`); an internal contradiction that will mislead the next reader | **CLOSED** — fix (1) below: every relay is now logged as a per-process `log_alias` handle (Security Rule 15) |
 
 **CI-R7 — a fixture that asserts only `rc` cannot see a check swapping places
 with its neighbour.** `scripts/ci/check_android_location_power.sh`'s
@@ -4395,6 +4432,9 @@ at DEBUG, which release builds do not emit" — which costs nothing and is
 truthful, but leaves the two precedents side by side. (1) is the better outcome
 and is a contained change; (2) is the minimum that removes the contradiction.
 Whichever is chosen, the invariant should end up stated once, not twice.
+*(Closed: (1) was taken, as the salted `log_alias` relay handle rather than an
+index — `add_relay` and the connect path log `log_alias::relay(…)`, never the
+URL.)*
 
 ### Test-matcher trap: `lessThan`/`lessThanOrEqualTo` do not order `DateTime` (recorded 2026-08-31)
 

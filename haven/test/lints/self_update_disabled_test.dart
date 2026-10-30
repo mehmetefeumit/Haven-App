@@ -1,10 +1,12 @@
-/// Regression guard for the M5 self-update disable.
+/// Regression guard: no self-update is ever driven by a timer from Dart.
 ///
-/// Leaderless periodic + post-join self-update is the DOMINANT generator of
-/// MLS epoch forks (two members rotating from the same epoch and each eagerly
-/// merging their own commit diverge permanently). M5 disables it via the
-/// `enablePeriodicSelfUpdate` kill switch. These tests fail loudly if a future
-/// change re-introduces an ungated self-update driver — re-opening the fork.
+/// Leaderless PERIODIC self-update is the dominant generator of MLS epoch
+/// forks (two members rotating from the same epoch and each eagerly merging
+/// their own commit diverge permanently), so M5 removed it. The two
+/// self-updates Haven does make are the core's, never a schedule's: the one
+/// after a join, made at the end of a foreground drive, and the repair the
+/// user asks for. These tests fail loudly if a future change re-introduces a
+/// scheduled self-update driver in Dart — re-opening the fork.
 library;
 
 import 'dart:io';

@@ -23,6 +23,22 @@
 //! be driven exactly, `catchup.rs`'s
 //! `the_boundary_is_the_maximum_across_truncating_relays`.
 //!
+//! # The same-second pile-up (C10)
+//!
+//! The pager's own residual: a whole page dated in ONE second is a page no
+//! `until` steps below, so a genuine event under it is never reached and the
+//! window never completes (`catchup.rs`'s `Pager::step`). The pile is events
+//! the screen refuses before authentication, a page of them in the second above
+//! one genuine location per circle. `same-second-pile-up` runs two sweeps on
+//! relays that speak NIP-77 and GRADES the pass's answer: a genuine location
+//! never taken in is O1's undelivered probe, and a circle whose cursor neither
+//! sweep advanced is [`Finding::CursorHeld`]. `same-second-pile-up-without-negentropy`
+//! is the same seed on relays that refuse NIP-77, RECORDED: the window stays
+//! held and the location unreached, the residual `T-NIP77-FALLBACK` tracks, so
+//! the day it stops happening the arm is rc 3 and is re-decided. Both seeds
+//! first wait out the NIP-77 pass spacing ([`Absence::NegentropySpacing`]), so
+//! a pass a wake began at the world's start cannot stand in for the sweep's.
+//!
 //! # The backlog, and why the sweep is its only way in
 //!
 //! Every event the arms seed is a GENUINE kind-445: a location a member sealed
@@ -80,20 +96,20 @@
 
 use std::time::Duration;
 
-use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
 use haven_core::relay::catchup::{
     run_catchup_all_circles, CatchupOutcome, CATCHUP_MAX_EVENTS_PER_PAGE,
     CATCHUP_MAX_PAGES_PER_CIRCLE,
 };
 use haven_core::relay::live_sync::group_cursor_stream;
-use nostr::Event;
+use haven_core::relay::negentropy::NEG_ROUTES_PER_PASS;
+use nostr::{Event, Timestamp};
 use tokio::time::Instant;
 
 use crate::clock::WallNow;
 use crate::nemesis::types::{Fault, RigCount};
 use crate::oracle::vacuity::{ExpectationFloor, Observed};
-use crate::oracle::{bounds, Invariant, ProbeToken, Reach, Recovery};
-use crate::relay::{mint, Forgery};
+use crate::oracle::{bounds, Finding, Invariant, ProbeToken, Reach, Recovery, Verdict};
+use crate::relay::{mint, mint_dated, Forgery, NegFrame};
 use crate::rig::{DeviceTag, LogDrain, RelayPlane, RigError, Step, TimelineSink};
 use crate::scenarios::{
     await_condition, closing_pairs, grade_round, round, Absence, Arm, ArmOutcome, Scenario,
@@ -146,7 +162,7 @@ const FORGED_AHEAD_SECS: i64 = 86_400;
 const BACKLOG_ROUND: u32 = 20;
 
 /// The arms this scenario offers.
-pub const ARMS: [Arm; 5] = [
+pub const ARMS: [Arm; 7] = [
     Arm {
         label: "healthy-drain",
         recovery: Recovery::Undisturbed,
@@ -220,6 +236,36 @@ pub const ARMS: [Arm; 5] = [
             canaries_caught: 3,
         },
     },
+    Arm {
+        label: "same-second-pile-up",
+        recovery: Recovery::Undisturbed,
+        probe_rounds: 1,
+        resubscribes: false,
+        absence: Absence::NegentropySpacing,
+        withheld_acks: WithheldAcks::None,
+        floor: ExpectationFloor {
+            // The pile is WRITTEN, as `future-dated-page`'s page is.
+            faults_applied: 0,
+            epochs_crossed: 0,
+            deliveries_observed: 1,
+            canaries_caught: 3,
+        },
+    },
+    Arm {
+        label: "same-second-pile-up-without-negentropy",
+        recovery: Recovery::Undisturbed,
+        probe_rounds: 1,
+        resubscribes: false,
+        absence: Absence::NegentropySpacing,
+        withheld_acks: WithheldAcks::None,
+        floor: ExpectationFloor {
+            // `RefusesNegentropy`, once per plane.
+            faults_applied: 1,
+            epochs_crossed: 0,
+            deliveries_observed: 1,
+            canaries_caught: 5,
+        },
+    },
 ];
 
 /// Runs one arm.
@@ -230,7 +276,8 @@ pub const ARMS: [Arm; 5] = [
 /// [`RigError::ShapeMismatch`] if the world has fewer than two devices, or —
 /// for `cold-first-connect` — fewer than two relay planes, since a relay that
 /// missed page one can only be contradicted by a page some OTHER relay made
-/// necessary; [`RigError::Core`] if the backlog could not be minted or stored,
+/// necessary, or — for `same-second-pile-up` — more circles than one NIP-77
+/// pass has routes; [`RigError::Core`] if the backlog could not be minted or stored,
 /// otherwise [`RigError`] naming the step that failed.
 pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
@@ -238,15 +285,22 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
     tick: Duration,
 ) -> Result<ArmOutcome, RigError> {
     let sweeper = sweeper(world)?;
+    let mut extra = Vec::new();
     let canaries = match arm.label {
         "healthy-drain" => healthy(world, sweeper, CLAMPED_BACKLOG).await?,
         "clamped-limit" => clamped(world, sweeper).await?,
         "refused-page" => refused(world, sweeper).await?,
         "cold-first-connect" => cold(world, sweeper).await?,
         "future-dated-page" => future_dated(world, sweeper).await?,
+        "same-second-pile-up" => pile_up(world, sweeper, &mut extra).await?,
+        "same-second-pile-up-without-negentropy" => {
+            pile_up_without_negentropy(world, sweeper).await?
+        }
         _ => return Err(RigError::UnknownTarget),
     };
-    close(world, sweeper, tick, canaries).await
+    let mut outcome = close(world, sweeper, tick, canaries).await?;
+    outcome.graded.extend(extra);
+    Ok(outcome)
 }
 
 /// `healthy-drain` over an EMPTY store.
@@ -538,6 +592,219 @@ async fn future_dated<T: TimelineSink, L: LogDrain>(
     Ok(canaries)
 }
 
+/// What a same-second pile-up arm seeded: per circle, the genuine location
+/// and the page of junk dated in the second above it.
+struct PileUp {
+    genuine: Vec<Event>,
+    piles: Vec<Vec<Event>>,
+}
+
+impl PileUp {
+    /// Every circle's pile is a whole page, all of it in ONE second.
+    fn in_one_second(&self) -> bool {
+        self.piles.iter().all(|pile| {
+            pile.len() == CATCHUP_MAX_EVENTS_PER_PAGE
+                && pile.iter().all(|event| secs_of(event) == secs_of(&pile[0]))
+        })
+    }
+
+    /// Every circle's genuine location sits exactly one second below its pile.
+    fn genuine_one_second_below(&self) -> bool {
+        self.genuine.iter().zip(&self.piles).all(|(genuine, pile)| {
+            pile.first()
+                .is_some_and(|junk| secs_of(junk) == secs_of(genuine) + 1)
+        })
+    }
+}
+
+/// One genuine location per circle and, in the second above it, a page of
+/// events the screen refuses before authentication, written into every
+/// plane's store. A page dated in one second is the one no `until` steps
+/// below (`catchup.rs`'s residual, C10): the pager cannot reach the genuine
+/// location under it.
+async fn seed_pile_up<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    sweeper: DeviceTag,
+) -> Result<PileUp, RigError> {
+    // A pass an earlier wake began must not stand in for the sweep's own.
+    let spacing = Absence::NegentropySpacing.window();
+    let since = Instant::now();
+    await_condition(spacing + bounds::wall_second_turnover(), || async {
+        Ok(since.elapsed() >= spacing)
+    })
+    .await?;
+    let genuine: Vec<Event> = seed(world, sweeper, 1)
+        .await?
+        .into_iter()
+        .flatten()
+        .collect();
+    let mut piles = Vec::with_capacity(genuine.len());
+    for (event, circle) in genuine.iter().zip(world.circles()) {
+        let above = Timestamp::from(event.created_at.as_secs() + 1);
+        let mut pile = Vec::with_capacity(CATCHUP_MAX_EVENTS_PER_PAGE);
+        for _ in 0..CATCHUP_MAX_EVENTS_PER_PAGE {
+            pile.push(mint_dated(
+                Forgery::MalformedDoubleH {
+                    group_id: *circle.nostr_group_id(),
+                },
+                None,
+                above,
+            )?);
+        }
+        piles.push(pile);
+    }
+    let all: Vec<Event> = piles.iter().flatten().cloned().collect();
+    for plane in world.relays() {
+        if plane.store(&all).await? != all.len() {
+            return Err(RigError::Core(Step::ApplyFault));
+        }
+    }
+    let newest = all.iter().map(secs_of).max().unwrap_or(i64::MAX);
+    await_condition(bounds::wall_second_turnover(), || async {
+        Ok(WallNow::now().secs() > newest)
+    })
+    .await?;
+    Ok(PileUp { genuine, piles })
+}
+
+/// C10 on relays that speak NIP-77: two sweeps over a same-second pile-up.
+/// The pass finds the genuine location under it and the window completes.
+/// GRADED: a genuine location never taken in is O1's undelivered probe, and a
+/// circle whose cursor the second sweep still holds is
+/// [`Finding::CursorHeld`]: C10's frozen window.
+async fn pile_up<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    sweeper: DeviceTag,
+    extra: &mut Vec<(Invariant, Verdict)>,
+) -> Result<usize, RigError> {
+    // One pass runs at most this many routes: a circle past it would be
+    // graded as a held cursor for a pass that never ran for it.
+    if world.circles().len() > NEG_ROUTES_PER_PASS {
+        return Err(RigError::ShapeMismatch);
+    }
+    let seeded = seed_pile_up(world, sweeper).await?;
+    let closes_before = negentropy_closes(world);
+    let first = sweep(world, sweeper).await?;
+    let second = sweep(world, sweeper).await?;
+    let closes_after = negentropy_closes(world);
+
+    let mut canaries = 0_usize;
+    // 1. Every circle's pile is a whole page in one second.
+    if seeded.in_one_second() {
+        canaries += 1;
+    }
+    // 2. …and the genuine location is exactly one second below it.
+    if seeded.genuine_one_second_below() {
+        canaries += 1;
+    }
+    // 3. Every plane ran NIP-77 sessions to their end for the sweeps.
+    if closes_before
+        .iter()
+        .zip(&closes_after)
+        .all(|(before, after)| after > before)
+    {
+        canaries += 1;
+    }
+    let manager = world.device(sweeper)?.manager()?;
+    let senders = senders(world, sweeper);
+    for (index, (genuine, circle)) in seeded.genuine.iter().zip(world.circles()).enumerate() {
+        if !manager.session().engine_processed(&genuine.id) {
+            extra.push((
+                Invariant::LocationRoundTrip,
+                Verdict::Failed(Finding::ProbeNotDelivered {
+                    from: senders[index % senders.len()],
+                    to: sweeper,
+                    circle: circle.tag,
+                }),
+            ));
+        }
+        if !first.landed_by_either(&second, index) {
+            extra.push((
+                Invariant::Quiescence,
+                Verdict::Failed(Finding::CursorHeld {
+                    device: sweeper,
+                    circle: circle.tag,
+                }),
+            ));
+        }
+    }
+    Ok(canaries)
+}
+
+/// O9: the same pile-up on relays that do not speak NIP-77 — the recorded
+/// residual (`T-NIP77-FALLBACK`). The window stays held over both sweeps and
+/// the genuine location stays unreached. Asserted as the EXPECTED outcome, so
+/// the day it stops happening the arm is rc 3: the recorded expectation is
+/// stale.
+async fn pile_up_without_negentropy<T: TimelineSink, L: LogDrain>(
+    world: &mut ScenarioWorld<T, L>,
+    sweeper: DeviceTag,
+) -> Result<usize, RigError> {
+    for plane in world.relays_mut() {
+        plane.apply(Fault::RefusesNegentropy).await?;
+    }
+    let seeded = seed_pile_up(world, sweeper).await?;
+    let circles = world.circles().len();
+    let first = sweep(world, sweeper).await?;
+    let second = sweep(world, sweeper).await?;
+    let manager = world.device(sweeper)?.manager()?;
+
+    let mut canaries = 0_usize;
+    if seeded.in_one_second() {
+        canaries += 1;
+    }
+    if seeded.genuine_one_second_below() {
+        canaries += 1;
+    }
+    // 3. Every plane answered the sweeper's NIP-77 opening as a relay that
+    //    does not speak it.
+    if world
+        .relays()
+        .iter()
+        .all(|plane| plane.ledger().neg(None, NegFrame::Refused) > 0)
+    {
+        canaries += 1;
+    }
+    // 4. The window stays held, both sweeps, every circle.
+    if (0..circles).all(|circle| {
+        first.held(circle, std::slice::from_ref(&seeded.genuine[circle]))
+            && second.held(circle, std::slice::from_ref(&seeded.genuine[circle]))
+    }) {
+        canaries += 1;
+    }
+    // 5. …and no genuine location under the pile was taken in.
+    if seeded
+        .genuine
+        .iter()
+        .all(|genuine| !manager.session().engine_processed(&genuine.id))
+    {
+        canaries += 1;
+    }
+    Ok(canaries)
+}
+
+/// Per plane, the NIP-77 sessions the sweeps' endpoint finished.
+fn negentropy_closes<T: TimelineSink, L: LogDrain>(world: &ScenarioWorld<T, L>) -> Vec<usize> {
+    world
+        .relays()
+        .iter()
+        .map(|plane| plane.ledger().neg(None, NegFrame::Close))
+        .collect()
+}
+
+/// The devices that seal the backlog, in the order [`seed`] rotates them.
+fn senders<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    sweeper: DeviceTag,
+) -> Vec<DeviceTag> {
+    world
+        .devices()
+        .iter()
+        .map(|device| device.tag)
+        .filter(|tag| *tag != sweeper)
+        .collect()
+}
+
 /// Seals `per_circle` locations into every circle, one per circle per wall
 /// second, from every device but `sweeper` in turn, and writes them into every
 /// plane's store. Returned per circle, oldest first.
@@ -619,12 +886,7 @@ async fn seal<T: TimelineSink, L: LogDrain>(
     let token = ProbeToken::mint(BACKLOG_ROUND, u32::try_from(index).unwrap_or(u32::MAX));
     device
         .manager()?
-        .encrypt_location(
-            &group,
-            &device.keys.public_key(),
-            &token.as_location(),
-            LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(&group, &token.as_location())
         .await
         .map(|(event, _, _)| event)
         .map_err(|_| RigError::Core(Step::Publish))
@@ -651,6 +913,19 @@ impl Sweep {
         before.is_none_or(|before| *after > before)
             && *after >= self.opened.saturating_mul(1_000)
             && *after <= self.closed.saturating_mul(1_000)
+    }
+
+    /// Whether the `circle`-th circle's cursor moved strictly up between the
+    /// start of this sweep and the end of `later`, to an instant inside the
+    /// bracket the two sweeps opened their windows in: an advance by either.
+    fn landed_by_either(&self, later: &Self, circle: usize) -> bool {
+        let (Some(before), Some(Some(after))) = (self.before.get(circle), later.after.get(circle))
+        else {
+            return false;
+        };
+        before.is_none_or(|before| *after > before)
+            && *after >= self.opened.saturating_mul(1_000)
+            && *after <= later.closed.saturating_mul(1_000)
     }
 
     /// Whether the `circle`-th circle's cursor did not move, and sits at or
@@ -766,9 +1041,12 @@ fn secs_of(event: &Event) -> i64 {
 mod tests {
     use haven_core::relay::catchup::CATCHUP_MAX_EVENTS_PER_PAGE;
 
+    use haven_core::relay::negentropy::NEG_ROUTES_PER_PASS;
+
     use super::{ARMS, CLAMP, CLAMPED_BACKLOG, SHORT_BACKLOG};
     use crate::oracle::vacuity::ExpectationFloor;
     use crate::oracle::Recovery;
+    use crate::profiles::{ProfileName, ProfileSpec};
     use crate::scenarios::{Absence, WithheldAcks};
 
     const fn floor(faults: usize, canaries: usize) -> ExpectationFloor {
@@ -781,6 +1059,25 @@ mod tests {
     }
 
     #[test]
+    fn no_checked_in_profile_runs_the_pile_up_over_more_circles_than_a_pass_has_routes() {
+        for name in [ProfileName::Pr, ProfileName::Nightly, ProfileName::Weekly] {
+            let spec = ProfileSpec::embedded(name).expect("a checked-in profile parses");
+            let runs_it = spec.scenarios.iter().any(|selection| {
+                selection.id == "S20"
+                    && selection
+                        .arms
+                        .iter()
+                        .any(|arm| arm == "same-second-pile-up")
+            });
+            assert!(
+                !runs_it || spec.world.circles <= NEG_ROUTES_PER_PASS,
+                "a profile runs the pile-up over circles no single pass can cover: the arm \
+                 would refuse its shape"
+            );
+        }
+    }
+
+    #[test]
     fn every_arm_is_one_undisturbed_round_and_nothing_else() {
         for arm in &ARMS {
             assert!(
@@ -789,7 +1086,15 @@ mod tests {
             );
             assert!(arm.probe_rounds == 1, "one closing round");
             assert!(!arm.resubscribes, "no live REQ is re-issued");
-            assert!(arm.absence == Absence::None, "nothing is waited out");
+            assert!(
+                arm.absence
+                    == if arm.label.starts_with("same-second-pile-up") {
+                        Absence::NegentropySpacing
+                    } else {
+                        Absence::None
+                    },
+                "nothing is waited out but the pile-ups' NIP-77 spacing"
+            );
             assert!(
                 arm.withheld_acks == WithheldAcks::None,
                 "the backlog is stored, never published"
@@ -798,13 +1103,15 @@ mod tests {
     }
 
     #[test]
-    fn the_floors_are_the_five_sub_defects_and_their_control() {
+    fn the_floors_are_the_five_sub_defects_their_control_and_the_two_pile_ups() {
         let expected = [
             ("healthy-drain", floor(0, 2)),
             ("clamped-limit", floor(1, 3)),
             ("refused-page", floor(1, 3)),
             ("cold-first-connect", floor(1, 2)),
             ("future-dated-page", floor(0, 3)),
+            ("same-second-pile-up", floor(0, 3)),
+            ("same-second-pile-up-without-negentropy", floor(1, 5)),
         ];
         for (arm, (label, floor)) in ARMS.iter().zip(expected) {
             assert!(

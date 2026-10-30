@@ -66,9 +66,11 @@ pub enum NostrError {
     #[error("Hex encoding error")]
     HexError(String),
 
-    /// MDK operation failed.
+    /// MDK operation failed. The payload is a fixed code — MDK's
+    /// `privacy_safe_kind` or a Haven-authored phrase — never MDK prose, which
+    /// prints group ids, member keys and absolute epochs.
     #[error("MDK error")]
-    MdkError(String),
+    MdkError(&'static str),
 
     /// A still-admin caller attempted to leave a group. Haven's stable
     /// mapping of the engine's typed `AdminCannotSelfRemove` rejection
@@ -101,6 +103,31 @@ pub enum NostrError {
     /// loop that cannot succeed. Carries no group id and no epoch.
     #[error("the circle's group state cannot be repaired on this device")]
     EpochUnrecoverable,
+
+    /// The commit is under a durable fanout row: only the fanout driver may
+    /// confirm it or roll it back. Nothing was changed.
+    #[error("the commit is resolved by its durable fanout only")]
+    FanoutOwned,
+
+    /// The engine was not asked for what this call was for: a commit it
+    /// rolled back is not yet retired from its store, and a convergence pass
+    /// could merge it; or the call's circle still holds stranded input the
+    /// hand-back has not reached, and nothing new of that circle goes ahead
+    /// of it. Nothing was changed; the next call retires the commit, or
+    /// hands back more, and proceeds — or is refused the same way.
+    #[error("the engine is held until what stands ahead of this call is cleared")]
+    EngineHeld,
+
+    /// This device asked to leave the circle: nothing is sealed for it.
+    #[error("this device is leaving the circle")]
+    LeaveInProgress,
+
+    /// The engine refused to seal for a circle that is stable and holds a
+    /// member's departure nobody has committed: the signature of a departure
+    /// left half-made in this device's group state, which ends when a commit
+    /// of that circle is applied here.
+    #[error("the circle cannot share from this device until a member's departure is finished")]
+    SendBlockedByDeparture,
 
     /// Group not found.
     ///
@@ -187,6 +214,10 @@ impl NostrError {
             Self::AdminSelfDemoteRequired => "admin-self-demote-required",
             Self::EpochNotStable => "epoch-not-stable",
             Self::EpochUnrecoverable => "epoch-unrecoverable",
+            Self::FanoutOwned => "fanout-owned",
+            Self::EngineHeld => "engine-held",
+            Self::LeaveInProgress => "leave-in-progress",
+            Self::SendBlockedByDeparture => "send-blocked-by-departure",
             Self::GroupNotFound(_) => "group-not-found",
             Self::InvalidWelcome(_) => "invalid-welcome",
             Self::StorageError(_) => "storage",
@@ -214,7 +245,7 @@ mod tests {
     /// `Display` must render. The pairing is the anti-vacuity anchor for the
     /// absence tests below, and stronger than a substring marker: a rendering
     /// that EQUALS its sentence cannot also carry the payload.
-    fn every_payload_carrying_variant(payload: &str) -> Vec<(NostrError, &'static str)> {
+    fn every_payload_carrying_variant(payload: &'static str) -> Vec<(NostrError, &'static str)> {
         vec![
             (
                 NostrError::MlsGroup(payload.to_owned()),
@@ -244,7 +275,7 @@ mod tests {
                 NostrError::HexError(payload.to_owned()),
                 "Hex encoding error",
             ),
-            (NostrError::MdkError(payload.to_owned()), "MDK error"),
+            (NostrError::MdkError(payload), "MDK error"),
             (
                 NostrError::GroupNotFound(payload.to_owned()),
                 "Group not found",
@@ -427,6 +458,10 @@ mod tests {
             NostrError::AdminSelfDemoteRequired.code(),
             NostrError::EpochNotStable.code(),
             NostrError::EpochUnrecoverable.code(),
+            NostrError::FanoutOwned.code(),
+            NostrError::EngineHeld.code(),
+            NostrError::LeaveInProgress.code(),
+            NostrError::SendBlockedByDeparture.code(),
             NostrError::Serialization(serde_json::from_str::<i32>("!").unwrap_err()).code(),
         ]);
         let unique: std::collections::HashSet<&str> = codes.iter().copied().collect();

@@ -49,6 +49,26 @@ pub trait RelayPlane: Send + Sync {
         std::future::ready(Ok(()))
     }
 
+    /// Gives `device` `count` endpoints of its own that each stand for an
+    /// address no plane serves (`rig/address_map.rs`), every one a listener
+    /// of its own in front of this relay. Defaulted to nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::provision`].
+    fn provision_aliases(
+        &mut self,
+        _device: DeviceTag,
+        _count: usize,
+    ) -> impl Future<Output = Result<(), RigError>> + Send {
+        std::future::ready(Ok(()))
+    }
+
+    /// The addresses of `device`'s alias endpoints. Never rendered.
+    fn alias_urls_for(&self, _device: DeviceTag) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The address `device`'s engine and publish plane dial: its own endpoint
     /// where it has one, the canonical one otherwise. Never rendered.
     fn url_for(&self, _device: DeviceTag) -> &str {
@@ -80,8 +100,8 @@ pub trait RelayPlane: Send + Sync {
         self.apply(fault)
     }
 
-    /// How many bind attempts the last `Up`/`Heal` needed and how long it
-    /// waited, once a plane has come back up. `None` for a plane that never
+    /// How many listens the last `Up`/`Heal` made and how long they took,
+    /// once a plane has come back up. `None` for a plane that never
     /// rebinds (a test double), so the world records nothing for it.
     fn last_rebind(&self) -> Option<(u32, Duration)> {
         None
@@ -184,17 +204,16 @@ pub enum TimelineRecord {
         /// bucket — how many events were published.
         events: &'static str,
     },
-    /// A relay endpoint that came back after `Up`/`Heal`, with the rebind
-    /// cost — the measurement that shows a same-port rebind is a bounded retry
-    /// and never an `EADDRINUSE` race.
+    /// A relay endpoint that came back after `Up`/`Heal` on the port it held
+    /// while down, with what the listen cost.
     Rebound {
         /// delta.
         tick: u64,
         /// tag.
         relay: RelayTag,
-        /// bucket — bind attempts before the listener was back.
+        /// bucket — listens before the listener was back.
         attempts: &'static str,
-        /// duration — how long the rebind waited.
+        /// duration — how long the listen took.
         wait_ms: u64,
     },
     /// A flood arm's reading of one device's durable store for one circle: a
@@ -211,6 +230,19 @@ pub enum TimelineRecord {
         circle: CircleTag,
         /// literal — [`BUFFER_GREW`] or [`BUFFER_DID_NOT_GROW`].
         grew: &'static str,
+    },
+    /// How long a commit stayed pending on its relays — from the driver's
+    /// first send to the drive that confirmed it — in the window a flood arm
+    /// held open. A duration, measured; the circle's sends waited that long.
+    PendingWindow {
+        /// delta.
+        tick: u64,
+        /// tag.
+        device: DeviceTag,
+        /// tag.
+        circle: CircleTag,
+        /// duration — how long the commit stayed pending.
+        open_ms: u64,
     },
     /// Which side of a disjunction a killed device's circle took once it was
     /// back. The arm's canary accepts either, so this record is the only place

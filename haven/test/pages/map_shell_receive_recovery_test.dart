@@ -18,8 +18,10 @@ library;
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:fake_async/fake_async.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/map_shell.dart';
@@ -45,7 +47,7 @@ void main() {
 
     test('a glance 5 s after the last one does NOT re-anchor', () {
       // Ten shade-pull glances must not become ten pool reconnects and ten
-      // 49-hour gift-wrap replays, each wrap costing a secret materialisation
+      // 96-hour gift-wrap replays, each wrap costing a secret materialisation
       // and an FFI NIP-59 unwrap.
       expect(
         MapShell.shouldReanchorOnResume(
@@ -161,6 +163,388 @@ void main() {
     });
   });
 
+  // The heal timer, on a fake clock. Every interval below is drawn from a
+  // seeded generator the test replays, so "the base interval" is the exact
+  // draw and not a range a doubled one could hide inside.
+  group('LiveSyncHealBackstop', () {
+    const seed = 20261011;
+    const span = LiveSyncHealBackstop.maxSecs - LiveSyncHealBackstop.minSecs;
+
+    /// The next base interval the backstop will draw, from a replay of its
+    /// generator.
+    Duration draw(math.Random replay) => Duration(
+      seconds: LiveSyncHealBackstop.minSecs + replay.nextInt(span + 1),
+    );
+
+    /// Elapses to one second short of [interval], checks [heals] has not
+    /// moved, then crosses it.
+    void crossExpecting(
+      FakeAsync async,
+      Duration interval,
+      int Function() heals, {
+      required String reason,
+    }) {
+      final before = heals();
+      async.elapse(interval - const Duration(seconds: 1));
+      expect(heals(), before, reason: 'early: $reason');
+      async.elapse(const Duration(seconds: 1));
+      expect(heals(), before + 1, reason: reason);
+    }
+
+    test('a heal that stood down adds nothing to the back-off', () {
+      // The user's own pause ended the start, or no session was wanted: that
+      // says nothing about the relays. Counted, three quick visits put the
+      // next tick up to twenty minutes out.
+      fakeAsync((async) {
+        final replay = math.Random(seed);
+        var heals = 0;
+        final backstop = LiveSyncHealBackstop(
+          random: math.Random(seed),
+          heal: () async {
+            heals++;
+            return LiveSyncHealOutcome.stoodDown;
+          },
+        )..start();
+
+        for (var tick = 0; tick < 6; tick++) {
+          crossExpecting(
+            async,
+            draw(replay),
+            () => heals,
+            reason: 'tick $tick is one base interval after the last',
+          );
+        }
+        expect(heals, 6, reason: 'six ticks, six base intervals');
+        backstop.stop();
+      });
+    });
+
+    test('after three quick visits the next tick is the base interval', () {
+      fakeAsync((async) {
+        final replay = math.Random(seed);
+        var heals = 0;
+        final backstop = LiveSyncHealBackstop(
+          random: math.Random(seed),
+          heal: () async {
+            heals++;
+            return LiveSyncHealOutcome.stoodDown;
+          },
+        );
+
+        for (var visit = 0; visit < 3; visit++) {
+          // A resume: its own heal, then the timers. The pause that follows
+          // ends that start before it comes up.
+          unawaited(backstop.heal());
+          backstop.start();
+          async.flushMicrotasks();
+          backstop.stop();
+          // One draw by `start()`, one by the heal's own re-arm.
+          draw(replay);
+          draw(replay);
+        }
+        expect(heals, 3);
+
+        unawaited(backstop.heal());
+        backstop.start();
+        async.flushMicrotasks();
+        draw(replay);
+        crossExpecting(
+          async,
+          draw(replay),
+          () => heals,
+          reason: 'a stood-down heal was counted as a failed restart',
+        );
+        backstop.stop();
+      });
+    });
+
+    test('a restart that failed backs off, doubling to the cap', () {
+      fakeAsync((async) {
+        final replay = math.Random(seed);
+        var heals = 0;
+        final backstop = LiveSyncHealBackstop(
+          random: math.Random(seed),
+          heal: () async {
+            heals++;
+            return LiveSyncHealOutcome.failed;
+          },
+        )..start();
+
+        for (final multiplier in const [1, 2, 4, 8, 8, 8]) {
+          crossExpecting(
+            async,
+            draw(replay) * multiplier,
+            () => heals,
+            reason: 'multiplier $multiplier',
+          );
+        }
+        expect(heals, 6, reason: 'no tick came early, none was skipped');
+        expect(LiveSyncHealBackstop.maxMultiplier, 8);
+        backstop.stop();
+      });
+    });
+
+    test('a heal that finds the engine running resets the back-off', () {
+      fakeAsync((async) {
+        final replay = math.Random(seed);
+        final outcomes = [
+          LiveSyncHealOutcome.failed,
+          LiveSyncHealOutcome.failed,
+          LiveSyncHealOutcome.running,
+          LiveSyncHealOutcome.running,
+        ];
+        var heals = 0;
+        final backstop = LiveSyncHealBackstop(
+          random: math.Random(seed),
+          heal: () async => outcomes[heals++],
+        )..start();
+
+        for (final multiplier in const [1, 2, 4, 1]) {
+          crossExpecting(
+            async,
+            draw(replay) * multiplier,
+            () => heals,
+            reason: 'multiplier $multiplier',
+          );
+        }
+        backstop.stop();
+      });
+    });
+
+    test('a stood-down heal neither adds to nor clears a real back-off', () {
+      fakeAsync((async) {
+        final replay = math.Random(seed);
+        final outcomes = [
+          LiveSyncHealOutcome.failed,
+          LiveSyncHealOutcome.stoodDown,
+          LiveSyncHealOutcome.stoodDown,
+        ];
+        var heals = 0;
+        final backstop = LiveSyncHealBackstop(
+          random: math.Random(seed),
+          heal: () async => outcomes[heals++],
+        )..start();
+
+        for (final multiplier in const [1, 2, 2]) {
+          crossExpecting(
+            async,
+            draw(replay) * multiplier,
+            () => heals,
+            reason: 'multiplier $multiplier',
+          );
+        }
+        backstop.stop();
+      });
+    });
+
+    test("the resume's heal re-draws the tick from its own outcome", () {
+      // `_onResumed` arms the timers before its heal has answered. Left at
+      // that draw, a heal that brought the engine back would still wait out
+      // the back-off of the failures before it.
+      fakeAsync((async) {
+        final replay = math.Random(seed);
+        var outcome = LiveSyncHealOutcome.failed;
+        var heals = 0;
+        final backstop = LiveSyncHealBackstop(
+          random: math.Random(seed),
+          heal: () async {
+            heals++;
+            return outcome;
+          },
+        )..start();
+        for (final multiplier in const [1, 2, 4]) {
+          async.elapse(draw(replay) * multiplier);
+        }
+        expect(heals, 3, reason: 'premise: three failed restarts');
+        draw(replay);
+        backstop.stop();
+
+        // The resume.
+        outcome = LiveSyncHealOutcome.running;
+        unawaited(backstop.heal());
+        backstop.start();
+        async.flushMicrotasks();
+        draw(replay);
+        expect(heals, 4);
+
+        crossExpecting(
+          async,
+          draw(replay),
+          () => heals,
+          reason: 'the next tick was left at eight times the base interval',
+        );
+        backstop.stop();
+      });
+    });
+
+    test('a heal that completes after a stop does not re-arm', () {
+      // The pause cancels the timer while a heal is in flight; that heal's
+      // completion is the re-arm. Armed there, it ticks for the whole
+      // background window.
+      fakeAsync((async) {
+        final replay = math.Random(seed);
+        final inFlight = Completer<LiveSyncHealOutcome>();
+        var heals = 0;
+        final backstop = LiveSyncHealBackstop(
+          random: math.Random(seed),
+          heal: () {
+            heals++;
+            return inFlight.future;
+          },
+        )..start();
+        async.elapse(draw(replay));
+        expect(heals, 1, reason: 'premise: the tick is out');
+
+        backstop.stop();
+        inFlight.complete(LiveSyncHealOutcome.failed);
+        async.flushMicrotasks();
+
+        expect(async.pendingTimers, isEmpty);
+        async.elapse(const Duration(hours: 6));
+        expect(heals, 1);
+      });
+    });
+
+    test('a mount arms nothing unless the app reads resumed, and the first '
+        'resumed arms', () {
+      // A process the OS relaunched in the background mounts the shell under
+      // the embedder's seed (`detached`), `inactive` or `paused`. Armed
+      // there, every tick re-establishes a dead session with nobody looking.
+      final binding = TestWidgetsFlutterBinding.ensureInitialized();
+      addTearDown(
+        () => binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+      );
+      for (final away in const [
+        AppLifecycleState.detached,
+        AppLifecycleState.inactive,
+        AppLifecycleState.hidden,
+        AppLifecycleState.paused,
+      ]) {
+        fakeAsync((async) {
+          binding.handleAppLifecycleStateChanged(away);
+          var heals = 0;
+          final backstop = LiveSyncHealBackstop(
+            random: math.Random(seed),
+            heal: () async {
+              heals++;
+              return LiveSyncHealOutcome.failed;
+            },
+          )..startAtMount();
+          expect(async.pendingTimers, isEmpty, reason: '$away');
+
+          // The mount's own first start, failing: its completion arms
+          // nothing either.
+          unawaited(backstop.heal());
+          async.flushMicrotasks();
+          expect(async.pendingTimers, isEmpty, reason: '$away');
+          async.elapse(const Duration(hours: 6));
+          expect(heals, 1, reason: 'a tick ran in an app that is $away');
+
+          // The resume handler's arming, at the first `resumed` dispatch.
+          binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+          backstop.start();
+          expect(async.pendingTimers, hasLength(1), reason: '$away');
+          backstop.stop();
+        });
+      }
+    });
+
+    test('a mount in an app that reads resumed arms it', () {
+      TestWidgetsFlutterBinding.ensureInitialized()
+          .handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      fakeAsync((async) {
+        final replay = math.Random(seed);
+        var heals = 0;
+        final backstop = LiveSyncHealBackstop(
+          random: math.Random(seed),
+          heal: () async {
+            heals++;
+            return LiveSyncHealOutcome.running;
+          },
+        )..startAtMount();
+        crossExpecting(
+          async,
+          draw(replay),
+          () => heals,
+          reason: 'a foreground launch has no heal timer',
+        );
+        backstop.stop();
+      });
+    });
+
+    test('a stop cancels the tick that was armed, and a start arms one', () {
+      fakeAsync((async) {
+        final replay = math.Random(seed);
+        var heals = 0;
+        final backstop = LiveSyncHealBackstop(
+          random: math.Random(seed),
+          heal: () async {
+            heals++;
+            return LiveSyncHealOutcome.running;
+          },
+        )..start();
+        draw(replay);
+        backstop.stop();
+        expect(async.pendingTimers, isEmpty);
+        async.elapse(const Duration(hours: 6));
+        expect(heals, 0);
+
+        backstop
+          ..start()
+          ..start();
+        draw(replay);
+        expect(
+          async.pendingTimers,
+          hasLength(1),
+          reason: 'start is idempotent',
+        );
+        crossExpecting(
+          async,
+          draw(replay),
+          () => heals,
+          reason: 'the second start re-draws, it does not add a timer',
+        );
+        backstop.stop();
+      });
+    });
+  });
+
+  group('a logout ends what the shell built for the identity', () {
+    test('MapShell.identityEnded: a logout or another identity ends it; a '
+        'first resolution or a reload of the same one does not', () {
+      expect(MapShell.identityEnded(before: 'aa', after: null), isTrue);
+      expect(MapShell.identityEnded(before: 'aa', after: 'bb'), isTrue);
+      expect(MapShell.identityEnded(before: null, after: 'aa'), isFalse);
+      expect(MapShell.identityEnded(before: 'aa', after: 'aa'), isFalse);
+      expect(MapShell.identityEnded(before: null, after: null), isFalse);
+    });
+
+    test('the identity listener drops the re-subscriber, whose running set '
+        "holds the previous identity's circles", () {
+      // MapShell is not disposed on logout, so without this the next
+      // identity's first delta diffs against the previous identity's circles
+      // and unsubscribes them on its own session.
+      final source = File('lib/src/pages/map_shell.dart').readAsStringSync();
+      final arms = conditionalArms(
+        source,
+        className: '_MapShellState',
+        method: 'initState',
+        conditionContains: 'identityEnded',
+      );
+      expect(arms, hasLength(1));
+      expect(arms.single.then, contains('_forgetLiveSyncInstall()'));
+      final forget = methodSource(
+        source,
+        className: '_MapShellState',
+        method: '_forgetLiveSyncInstall',
+      );
+      expect(forget, contains('_liveSyncResubscriber?.dispose()'));
+      expect(forget, contains('_liveSyncResubscriber = null'));
+      expect(forget, contains('_liveSyncCirclesSub?.close()'));
+      expect(forget, contains('_liveSyncCirclesSub = null'));
+    });
+  });
+
   group('the live-sync install and first start are retryable', () {
     late String source;
 
@@ -186,20 +570,22 @@ void main() {
     });
 
     test('the first start goes through the self-heal', () {
-      final start = source.indexOf('Future<void> _startLiveSync() async {');
-      expect(start, isNonNegative, reason: '_startLiveSync must exist');
-      final body = source.substring(start, source.indexOf('\n  /// ', start));
       expect(
-        body.contains('_healLiveSyncIfStopped()'),
-        isTrue,
-        reason: 'the heal is the one start path; startup uses it so a failed '
-            'first start is retried on the same backstop as every later one',
+        source,
+        contains('Future<void> _startLiveSync() => _healBackstop.heal();'),
+        reason: 'the heal is the one start path; startup uses it THROUGH the '
+            'backstop, so a failed first start is counted and retried on the '
+            'same cadence as every later one, and the interval is re-drawn '
+            "from the first attempt's outcome (`LiveSyncHealBackstop`, tested "
+            'on a fake clock in the group above)',
       );
       expect(
-        body.contains('_rearmLiveSyncHealTimer()'),
-        isTrue,
-        reason: 'the backstop interval must be re-drawn from the first '
-            "attempt's outcome, not left at the one armed before it",
+        source.replaceAll(RegExp(r'\s+'), ' '),
+        contains(
+          '_healBackstop = LiveSyncHealBackstop( '
+          'heal: _healLiveSyncIfStopped, );',
+        ),
+        reason: 'the backstop must heal through the one gated door',
       );
     });
 
@@ -211,7 +597,7 @@ void main() {
       // and `resumeAfterBackground()` a no-op against a null engine. Live
       // receive was gone for the rest of the process.
       final start = source.indexOf(
-        'Future<void> _healLiveSyncIfStopped() async {',
+        'Future<LiveSyncHealOutcome> _healLiveSyncIfStopped() async {',
       );
       expect(start, isNonNegative);
       final body = source.substring(start, source.indexOf('\n  //', start));
@@ -222,10 +608,12 @@ void main() {
             're-subscriber',
       );
       expect(
-        RegExp(r'if \(resubscriber == null\) return').hasMatch(body),
-        isFalse,
+        body,
+        contains(
+          'if (resubscriber == null) return LiveSyncHealOutcome.failed;',
+        ),
         reason: 'a null re-subscriber must still count a failure and back off, '
-            'never silently succeed or bail without one',
+            'never silently succeed or stand down without one',
       );
     });
 
@@ -250,16 +638,19 @@ void main() {
       );
       expect(
         args['foregrounded'],
-        'ref.read(appForegroundProvider)',
+        'appIsResumed()',
         reason: 'a re-anchor while the app is AWAY puts a standing REQ back '
             'between bursts (R14); the timer can outlive a pause because '
-            '`_startLiveSync` re-arms it from its own completion',
+            '`_startLiveSync` re-arms it from its own completion. The STRICT '
+            'read, the one the engine is handed as its foreground claim: '
+            '`appForegroundProvider` answers yes for `inactive` and for an '
+            'unset lifecycle, and a re-anchor is a foreground open',
       );
       expect(
         args['lastReanchorAt'],
         '_lastReanchorAt',
         reason: 'the SAME clock the resume stamps, which is what stops the '
-            'two spending two pool reconnects and two 49 h `#p` replays on '
+            'two spending two pool reconnects and two 96 h `#p` replays on '
             'one repair',
       );
       expect(
@@ -314,10 +705,7 @@ void main() {
       expect(start, isNonNegative);
       final body = source.substring(start, source.indexOf('\n  ///', start));
       expect(body.contains('_liveSyncResubscriber = resubscriber'), isTrue);
-      expect(
-        body.contains('LiveSyncResubscriber.groupsForCircles(circles)'),
-        isTrue,
-      );
+      expect(body.contains('initialCircles: circles,'), isTrue);
       expect(
         body.contains('_liveSyncCirclesSub = ref.listenManual'),
         isTrue,
@@ -340,9 +728,8 @@ void main() {
       // Both halves are load-bearing. `conditionalArms` visits `IfStatement`
       // nodes and refuses to walk comments, so neither prose describing the
       // gate nor a string literal spelling it can satisfy this; and the file
-      // holds a SECOND, byte-identical `if (!liveSyncEnabled) return;` in
-      // `_rearmLiveSyncHealTimer`, so a file-wide needle would go on passing
-      // with the heal's own gate deleted.
+      // holds other reads of the same flag, so a file-wide needle would go
+      // on passing with the heal's own gate deleted.
       final gate = conditionalArms(
         source,
         className: '_MapShellState',
@@ -358,8 +745,9 @@ void main() {
       expect(gate.single.condition.toSource(), '!liveSyncEnabled');
       expect(
         gate.single.then,
-        'return;',
-        reason: 'the flag-off arm must LEAVE the method, not fall through to a '
+        'return LiveSyncHealOutcome.stoodDown;',
+        reason: 'the flag-off arm must LEAVE the method — as a heal that '
+            'stood down, which counts no failure — not fall through to a '
             'narrower branch that still installs or starts something',
       );
       expect(
@@ -433,7 +821,7 @@ void main() {
       // Bounded at the debounce's early return: everything asserted below has
       // to happen BEFORE it, so slicing there is what makes "before the
       // debounce" checkable rather than merely "somewhere in the method".
-      final debounce = source.indexOf('if (_resumeStopwatch.isRunning', start);
+      final debounce = source.indexOf('if (!resumeExtrasDue()) return;', start);
       expect(debounce, greaterThan(start), reason: 'the debounce must exist');
       resumeBody = source.substring(start, debounce);
     });
@@ -464,7 +852,7 @@ void main() {
     test('but never unthrottled — it goes through its own guard', () {
       // Ahead of the debounce it would otherwise run on EVERY glance, and a
       // re-anchor is not cheap: it reconnects the pool and re-issues every REQ
-      // including the inbox one, which asks for 49 hours of gift wraps, each
+      // including the inbox one, which asks for 96 hours of gift wraps, each
       // costing a secret materialisation and an FFI NIP-59 unwrap.
       final call = resumeBody.indexOf('MapShell.reanchorOnResume(');
       final guard = resumeBody.indexOf('MapShell.shouldReanchorOnResume(');
@@ -488,7 +876,7 @@ void main() {
       // dropped, and only then does anything read it again.
       final endHandoff = resumeBody.indexOf('_endMlsSessionHandoff()');
       final invalidate = resumeBody.indexOf('_invalidateHandoffWindowPoison()');
-      final heal = resumeBody.indexOf('_healLiveSyncIfStopped()');
+      final heal = resumeBody.indexOf('_healBackstop.heal()');
       expect(endHandoff, isNonNegative);
       expect(invalidate, greaterThan(endHandoff));
       expect(heal, greaterThan(invalidate));
@@ -532,8 +920,8 @@ void main() {
       final start = source.indexOf('Future<void> _onPaused() async {');
       expect(start, isNonNegative);
       final body = source.substring(start, source.indexOf('\n  ///', start));
-      final cancel = body.indexOf('_liveSyncHealTimer?.cancel()');
-      final handoff = body.indexOf('_handOffMlsSession()');
+      final cancel = body.indexOf('_healBackstop.stop()');
+      final handoff = body.indexOf('_handOffMlsSession(');
       final readToggle = body.indexOf('ref.read(backgroundSharingProvider)');
       expect(cancel, isNonNegative, reason: 'the cancel must still be here');
       expect(handoff, greaterThan(cancel));
@@ -560,8 +948,8 @@ void main() {
       // bound it.
       expect(
         kLiveSyncRestartBudget,
-        lessThan(const Duration(seconds: 90)),
-        reason: 'the heal jitter floor is 90 s (`_healMinSecs`)',
+        lessThan(const Duration(seconds: LiveSyncHealBackstop.minSecs)),
+        reason: 'the heal jitter floor',
       );
     });
   });

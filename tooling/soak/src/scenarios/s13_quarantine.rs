@@ -163,12 +163,7 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
     let sends = world
         .device(victim)?
         .manager()?
-        .encrypt_location(
-            &sibling_group,
-            &world.device(victim)?.keys.public_key(),
-            &LocationMessage::new(7.5, 8.25),
-            haven_core::location::LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(&sibling_group, &LocationMessage::new(7.5, 8.25))
         .await
         .is_ok();
     if sends {

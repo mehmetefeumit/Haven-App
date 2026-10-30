@@ -13,6 +13,19 @@ import 'package:haven/src/services/circle_service.dart';
 
 /// No-op stubs for last-known-location methods.
 mixin CircleServiceRetentionStubs {
+  Future<List<RejoinOffer>> rejoinOffersForInvitation(
+    List<int> invitationId,
+  ) async => const [];
+
+  Future<Circle> confirmGroupRejoin(
+    List<int> invitationId,
+    RejoinOffer offer,
+  ) => throw UnimplementedError('confirmGroupRejoin');
+
+  Future<void> declineGroupRejoin(List<int> invitationId) async {}
+
+  Future<void> leaveDisbandedCircle({required List<int> mlsGroupId}) async {}
+
   /// The epoch repair is a foreground user action no retention-surface fake
   /// exercises; a fake that DOES care overrides this.
   Future<EpochRepairResult> repairCircleEpoch(
@@ -51,7 +64,14 @@ mixin CircleServiceRetentionStubs {
 
   Future<void> wipeAllMlsState() async {}
 
-  Future<void> destroyLegacyMlsState() async {}
+  Future<void> acknowledgeStorageReset() async {}
+
+  Future<bool> retryQuarantinedCircle(List<int> mlsGroupId) async => false;
+
+  Future<KeyPackageAdmission> checkMemberKeyPackage({
+    required String keyPackageJson,
+    List<int>? mlsGroupId,
+  }) async => KeyPackageAdmission.admissible;
 
   Future<void> pruneProcessedGiftWraps({DateTime? now}) async {}
 
@@ -73,54 +93,28 @@ mixin CircleServiceRetentionStubs {
     String? displayName,
   }) async {}
 
-  // Rule 8 blocked-circle tracking — inert no-op set for fakes that do not
-  // exercise the `Unrecoverable` path.
-  final Set<String> _blockedCircleIdsStub = {};
+  /// Nothing holds a circle for a fake that does not exercise the recovery
+  /// read.
+  Future<CircleRecoveryCause?> circleRecovery(Circle circle) async => null;
 
-  void markCircleBlocked(List<int> mlsGroupId) {
-    _blockedCircleIdsStub.add(mlsGroupId.join(','));
-  }
+  Future<List<String>> unmadeRemovalMembers(List<int> mlsGroupId) async =>
+      const [];
 
-  bool isCircleBlocked(List<int> mlsGroupId) =>
-      _blockedCircleIdsStub.contains(mlsGroupId.join(','));
-
-  Future<void> updateCircleRelays({
+  Future<ChangeDelivery> updateCircleRelays({
     required List<int> mlsGroupId,
     required List<String> newRelays,
-  }) async {}
-
-  // Leaver-backstop liveness predicate — stubbed "still a member"; fakes that
-  // use this mixin never run a backstop, so the value is inert.
-  Future<bool> stillAMember({
-    required List<int> mlsGroupId,
-    required String ownPubkeyHex,
-  }) async => true;
+  }) async => ChangeDelivery.applied;
 
   Future<AddMemberResult> addMember({
-    required Future<List<int>> Function() secretProvider,
     required List<int> mlsGroupId,
     required List<KeyPackageData> memberKeyPackages,
-    List<String> creatorFallbackRelays = const [],
-  }) async => const AddMemberResult(welcomesSent: 1, welcomesTotal: 1);
-
-  // Receive-side auto-commit surface (Rule 13) — inert no-op defaults for
-  // fakes that do not exercise the peer-`SelfRemove`-eviction path. A
-  // resolution replays nothing here, which is what an empty outcome says.
-  Future<DecryptLocationOutcome> decryptLocationCollectingCommits({
-    required String eventJson,
-  }) async => const DecryptLocationOutcome(
-    results: [],
-    autoCommits: [],
-    proposals: [],
+  }) async => const AddMemberResult(
+    delivery: ChangeDelivery.applied,
+    welcomesDelivered: 1,
+    welcomesTotal: 1,
   );
 
-  Future<DecryptLocationOutcome> confirmPendingCommit(
-    PendingCommitToken pending,
-  ) async =>
-      const DecryptLocationOutcome(results: [], autoCommits: [], proposals: []);
-
-  Future<DecryptLocationOutcome> failPendingCommit(
-    PendingCommitToken pending,
-  ) async =>
-      const DecryptLocationOutcome(results: [], autoCommits: [], proposals: []);
+  // The driver's ingest — an inert default for fakes that receive nothing.
+  Future<IngestResult> ingestEvent({required String eventJson}) async =>
+      const IngestResult(results: [], held: false);
 }

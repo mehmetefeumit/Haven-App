@@ -9,8 +9,9 @@
 //!   a commit whose acknowledgement never left the building (Rule 13).
 //! * `Down` closes the endpoint the client dials, so a down plane refuses
 //!   connections rather than accepting them and failing behind the curtain,
-//!   and `Up` takes the SAME port back — a schedule that moved the URL would
-//!   be testing the rig's bookkeeping, not the subject's reconnect.
+//!   and holds its port, so `Up` serves on the SAME port — a schedule that
+//!   moved the URL would be testing the rig's bookkeeping, not the subject's
+//!   reconnect.
 //!
 //! The shape is promoted from `haven-core/tests/catchup_sweep_e2e.rs`'s
 //! `TamperedRelay`; this copy is authoritative for the rig, and the test copy
@@ -19,32 +20,25 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::Duration;
+use std::time::Instant;
 
 use nostr::{ClientMessage, Event, EventId, JsonUtil, RelayMessage, SubscriptionId};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::nemesis::types::{ClosedPrefix, DropClass, RigCount};
 use crate::relay::forge::{take_frame, take_http_head, text_frame, Frame};
-use crate::relay::ledger::Ledger;
+use crate::relay::ledger::{Ledger, NegFrame};
 use crate::relay::policies::{closed_message, oversize_message};
-use crate::rig::{poll_until, DeviceTag, RigError, Step};
+use crate::rig::{DeviceTag, RigError, Step};
 
-/// How long `Up` waits for its own port back.
-///
-/// The accept loop's listener is released when the task owning it is dropped,
-/// which `take_down` awaits, so the first attempt normally succeeds; the bound
-/// covers the kernel releasing a listening socket and turns the one case that
-/// would otherwise hang — a port that never comes back — into a loud failure.
-const REBIND_BOUND: Duration = Duration::from_secs(5);
-/// How often a rebind retries inside [`REBIND_BOUND`].
-const REBIND_EVERY: Duration = Duration::from_millis(20);
+/// The accept backlog of an endpoint: the one `TcpListener::bind` gives.
+const BACKLOG: u32 = 1024;
 /// How much room each read asks for. One page holds any NIP-01 frame the rig
 /// sees whole, and a bigger frame simply takes two reads.
 const READ_CHUNK: usize = 4096;
@@ -174,6 +168,13 @@ pub struct FaultState {
     pub refuse_page: Option<RefusedPage>,
     /// Whether the next connection this endpoint accepts is dropped.
     pub cold_first_connect: bool,
+    /// Whether every connection this endpoint accepts is held unanswered.
+    pub unanswering: bool,
+    /// Whether every `EOSE` the relay sends is kept from the client.
+    pub withhold_eose: bool,
+    /// Whether every `NEG-OPEN` is answered as a relay without NIP-77 answers
+    /// it, and never passed on.
+    pub refuse_negentropy: bool,
 }
 
 impl FaultState {
@@ -182,6 +183,10 @@ impl FaultState {
         self.drop_class.is_some() && self.drop_class == class
     }
 }
+
+/// What a plane under [`crate::nemesis::Fault::RefusesNegentropy`] answers a
+/// `NEG-OPEN` with: strfry's text with NIP-77 off.
+pub const NEG_REFUSAL: &str = "ERROR: bad msg: unknown cmd";
 
 /// The listening half of a plane: one endpoint, canonical or a device's own.
 pub struct Proxy {
@@ -201,6 +206,24 @@ pub struct Proxy {
     generation: Arc<watch::Sender<u64>>,
     inject: broadcast::Sender<String>,
     accept: Option<JoinHandle<()>>,
+    /// The port, bound and not listening, while the endpoint is down.
+    held: Option<TcpSocket>,
+}
+
+/// A socket bound to `addr` and not listening.
+///
+/// A dial to it is refused exactly as a dial to a closed port is. Without
+/// `SO_REUSEADDR` no other socket can bind the port while it is not listening:
+/// two sockets that both set it may share a port neither listens on, and
+/// tokio's and std's listeners set it. With `SO_REUSEPORT` it can be bound
+/// beside the endpoint's own listener, so the port is never free between the
+/// two.
+fn reserve(addr: SocketAddr) -> std::io::Result<TcpSocket> {
+    let socket = TcpSocket::new_v4()?;
+    socket.set_reuseaddr(false)?;
+    socket.set_reuseport(true)?;
+    socket.bind(addr)?;
+    Ok(socket)
 }
 
 impl Proxy {
@@ -210,13 +233,13 @@ impl Proxy {
     ///
     /// [`RigError::Core`] with [`Step::ApplyFault`] if the endpoint cannot be
     /// bound — a plane with no address is not a plane.
-    pub async fn start(
+    pub fn start(
         relay_url: &str,
         ledger: Ledger,
         device: Option<DeviceTag>,
     ) -> Result<Self, RigError> {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
+        let listener = reserve((Ipv4Addr::LOCALHOST, 0).into())
+            .and_then(|socket| socket.listen(BACKLOG))
             .map_err(|_| RigError::Core(Step::ApplyFault))?;
         let addr = listener
             .local_addr()
@@ -236,6 +259,7 @@ impl Proxy {
             generation: Arc::new(generation),
             inject,
             accept: None,
+            held: None,
         };
         proxy.serve_on(listener);
         Ok(proxy)
@@ -252,59 +276,72 @@ impl Proxy {
     }
 
     /// Changes what is wrong with the stream, effective on the next frame.
-    pub fn edit(&self, change: impl FnOnce(&mut FaultState)) {
+    pub fn edit<T>(&self, change: impl FnOnce(&mut FaultState) -> T) -> T {
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
-        change(&mut state);
+        change(&mut state)
     }
 
-    /// Closes the endpoint and drops every live connection.
+    /// Drops every live connection, the listener left accepting.
+    pub fn cut_connections(&self) {
+        self.generation.send_modify(|generation| *generation += 1);
+    }
+
+    /// Undoes every fault, the endpoint included. Held sockets go after the
+    /// state clears, so the client's next dial is served.
     ///
-    /// Awaits the accept task so the listener is released before returning:
-    /// `Down` then `Up` is a sequence the schedule may apply back to back, and
-    /// a rebind racing an undropped listener would be an `EADDRINUSE` flake in
-    /// the rig rather than a finding about the subject.
-    pub async fn take_down(&mut self) {
+    /// # Errors
+    ///
+    /// As [`Self::bring_up`].
+    pub fn heal(&mut self) -> Result<(), RigError> {
+        if self.edit(|state| std::mem::take(state).unanswering) {
+            self.cut_connections();
+        }
+        self.bring_up()
+    }
+
+    /// Closes the endpoint and drops every live connection, keeping the port.
+    ///
+    /// The port is reserved before the listener goes, so it is never free: in
+    /// a process full of other listeners and outbound dials, a released port
+    /// is anybody's, and `Up` would have nowhere to come back to. Awaits the
+    /// accept task so the listener is closed before returning: one still open
+    /// at `Up` would share the port with the listener `Up` makes.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::Core`] with [`Step::ApplyFault`] if the port cannot be
+    /// reserved; the endpoint is then left up.
+    pub async fn take_down(&mut self) -> Result<(), RigError> {
+        if self.is_up() {
+            self.held = Some(reserve(self.addr).map_err(|_| RigError::Core(Step::ApplyFault))?);
+        }
         if let Some(accept) = self.accept.take() {
             accept.abort();
             let _ = accept.await;
         }
         self.generation.send_modify(|generation| *generation += 1);
+        Ok(())
     }
 
-    /// Takes the same port back, retrying inside [`REBIND_BOUND`].
+    /// Serves on the port the endpoint held while it was down.
     ///
     /// # Errors
     ///
-    /// [`RigError::Core`] with [`Step::ApplyFault`] if the port never came
-    /// back: a plane that healed onto a different address would prove nothing
-    /// about a client's reconnect.
-    pub async fn bring_up(&mut self) -> Result<(), RigError> {
+    /// [`RigError::Core`] with [`Step::ApplyFault`] if the held port cannot
+    /// listen: a plane that healed onto a different address would prove
+    /// nothing about a client's reconnect.
+    pub fn bring_up(&mut self) -> Result<(), RigError> {
         if self.is_up() {
             return Ok(());
         }
-        let attempts = AtomicU32::new(0);
-        let bound: Mutex<Option<TcpListener>> = Mutex::new(None);
-        let addr = self.addr;
-        let waited = poll_until(REBIND_BOUND, REBIND_EVERY, || {
-            let attempts = &attempts;
-            let bound = &bound;
-            async move {
-                attempts.fetch_add(1, Ordering::Relaxed);
-                (TcpListener::bind(addr).await).map_or(Ok(false), |listener| {
-                    *bound.lock().unwrap_or_else(PoisonError::into_inner) = Some(listener);
-                    Ok(true)
-                })
-            }
-        })
-        .await?;
-        let (Some(waited), Some(listener)) = (
-            waited,
-            bound.lock().unwrap_or_else(PoisonError::into_inner).take(),
-        ) else {
-            return Err(RigError::Core(Step::ApplyFault));
-        };
-        self.ledger
-            .note_rebind(attempts.load(Ordering::Relaxed), waited);
+        let started = Instant::now();
+        let listener = self
+            .held
+            .take()
+            .ok_or(RigError::Core(Step::ApplyFault))?
+            .listen(BACKLOG)
+            .map_err(|_| RigError::Core(Step::ApplyFault))?;
+        self.ledger.note_rebind(1, started.elapsed());
         self.serve_on(listener);
         Ok(())
     }
@@ -367,6 +404,11 @@ impl Proxy {
                     ledger.note_refused_connect();
                     continue;
                 }
+                if unanswered(&state) {
+                    ledger.note_unanswered_connect();
+                    tokio::spawn(hold_unanswered(client, generation.subscribe()));
+                    continue;
+                }
                 tokio::spawn(serve(
                     client,
                     target.clone(),
@@ -379,6 +421,21 @@ impl Proxy {
             }
         }));
     }
+}
+
+/// Whether this accept is one [`FaultState::unanswering`] holds.
+fn unanswered(state: &RwLock<FaultState>) -> bool {
+    state
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .unanswering
+}
+
+/// Holds an accepted socket, never reading its handshake, until the endpoint
+/// cuts its connections or goes away.
+async fn hold_unanswered(client: TcpStream, mut cancel: watch::Receiver<u64>) {
+    let _ = cancel.changed().await;
+    drop(client);
 }
 
 /// Whether this accept is the one [`FaultState::cold_first_connect`] refuses,
@@ -427,6 +484,7 @@ async fn serve(
     let mut upstream = tokio::spawn(pump_to_relay(
         from_client,
         to_relay,
+        device,
         Arc::clone(&state),
         ledger.clone(),
         forged_tx,
@@ -456,6 +514,7 @@ async fn serve(
 async fn pump_to_relay(
     mut from_client: OwnedReadHalf,
     mut to_relay: OwnedWriteHalf,
+    device: Option<DeviceTag>,
     state: Arc<RwLock<FaultState>>,
     ledger: Ledger,
     forged: mpsc::Sender<String>,
@@ -469,6 +528,7 @@ async fn pump_to_relay(
     loop {
         while let Some(frame) = take_frame(&mut buf) {
             let upstream = Upstream {
+                device,
                 state: &state,
                 ledger: &ledger,
                 forged: &forged,
@@ -566,6 +626,7 @@ async fn read_more(from: &mut OwnedReadHalf, buf: &mut Vec<u8>) -> Option<usize>
 /// frames are recorded, where a forged answer goes, and what it has open.
 #[derive(Clone, Copy)]
 struct Upstream<'a> {
+    device: Option<DeviceTag>,
     state: &'a RwLock<FaultState>,
     ledger: &'a Ledger,
     forged: &'a mpsc::Sender<String>,
@@ -582,6 +643,22 @@ struct Subscriptions {
     paging: HashSet<SubscriptionId>,
 }
 
+/// strfry's answer to a NEG-OPEN with NIP-77 off: a `NOTICE` the pool
+/// classifies as "negentropy not supported" (`nostr-relay-pool` 0.44.3
+/// `relay/inner.rs` `check_negentropy_support`). The NEG-OPEN is never passed
+/// on.
+async fn refuse_negentropy(
+    device: Option<DeviceTag>,
+    ledger: &Ledger,
+    forged: &mpsc::Sender<String>,
+) -> bool {
+    ledger.note_neg(device, NegFrame::Refused);
+    forged
+        .send(RelayMessage::Notice(Cow::Borrowed(NEG_REFUSAL)).as_json())
+        .await
+        .is_ok()
+}
+
 async fn forward_from_client(
     frame: &Frame,
     to_relay: &mut OwnedWriteHalf,
@@ -589,6 +666,7 @@ async fn forward_from_client(
     reqs: &mut ReqCount,
 ) -> bool {
     let Upstream {
+        device,
         state,
         ledger,
         forged,
@@ -682,6 +760,12 @@ async fn forward_from_client(
                     held.open.remove(subscription_id.as_ref());
                     held.paging.remove(subscription_id.as_ref());
                 }
+                ClientMessage::NegOpen { .. } if faults.refuse_negentropy => {
+                    return refuse_negentropy(device, ledger, forged).await;
+                }
+                ClientMessage::NegOpen { .. } => ledger.note_neg(device, NegFrame::Open),
+                ClientMessage::NegMsg { .. } => ledger.note_neg(device, NegFrame::ClientMessage),
+                ClientMessage::NegClose { .. } => ledger.note_neg(device, NegFrame::Close),
                 _ => {}
             }
         }
@@ -792,6 +876,10 @@ async fn deliver(
                             return false;
                         }
                     }
+                    if faults.withhold_eose {
+                        ledger.note_withheld_eose();
+                        return true;
+                    }
                     if !write(to_client, frame.bytes()).await {
                         return false;
                     }
@@ -810,6 +898,18 @@ async fn deliver(
                         return false;
                     }
                     ledger.note_notice(text.into_owned());
+                    return true;
+                }
+                RelayMessage::NegMsg { .. } | RelayMessage::NegErr { .. } => {
+                    if !write(to_client, frame.bytes()).await {
+                        return false;
+                    }
+                    let seen = if matches!(message, RelayMessage::NegMsg { .. }) {
+                        NegFrame::RelayMessage
+                    } else {
+                        NegFrame::Error
+                    };
+                    ledger.note_neg(endpoint.device, seen);
                     return true;
                 }
                 _ => {}

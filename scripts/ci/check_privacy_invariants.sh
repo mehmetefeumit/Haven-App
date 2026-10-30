@@ -189,6 +189,8 @@
 #      fixture it declares)
 
 set -Eeuo pipefail
+LITERAL_FREE="$(cat "$(dirname "${BASH_SOURCE[0]}")/lib/literal_free.awk")"
+readonly LITERAL_FREE
 
 SCRIPT_NAME="check_privacy_invariants"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -1491,15 +1493,15 @@ extract_kind_tokens() { # extract_kind_tokens <root>
   (( ${#files[@]} > 0 )) || return 0
 
   for f in "${files[@]}"; do
-    awk -v file="${f}" '
+    awk -v file="${f}" "${LITERAL_FREE}"'
       { L[NR] = $0 }
       END {
         depth = 0; intest = 0; pending = 0; testdepth = 0
         for (j = 1; j <= NR; j++) {
           t = L[j]
           if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
-          tmp = t; o = gsub(/[{]/, "", tmp)
-          tmp = t; c = gsub(/[}]/, "", tmp)
+          lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+          tmp = lfree; c = gsub(/[}]/, "", tmp)
           if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
             intest = 1; testdepth = depth; pending = 0
           }

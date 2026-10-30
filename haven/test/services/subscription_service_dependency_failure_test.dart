@@ -68,7 +68,7 @@ void main() {
         var ingestCalls = 0;
         var locationsChangedCalls = 0;
         final router = LiveEventRouter(
-          circleService: _UnusedCircleService(),
+          circleService: _UnusedCircleService.new,
           circlesSnapshot: () async => throw StateError('storage unavailable'),
           secretBytes: () async => const [],
           parseLocation: (content, sender) async => _decrypted(sender),
@@ -106,7 +106,7 @@ void main() {
         var reconcileCalls = 0;
         var groupUpdatedCalls = 0;
         final router = LiveEventRouter(
-          circleService: _UnusedCircleService(),
+          circleService: _UnusedCircleService.new,
           circlesSnapshot: () async => throw StateError('storage unavailable'),
           secretBytes: () async => const [],
           parseLocation: (content, sender) async => null,
@@ -143,7 +143,7 @@ void main() {
         var ingestCalls = 0;
         var locationsChangedCalls = 0;
         final router = LiveEventRouter(
-          circleService: _UnusedCircleService(),
+          circleService: _UnusedCircleService.new,
           circlesSnapshot: () async => [_circle(const [1, 2, 3])],
           secretBytes: () async => const [],
           parseLocation: (content, sender) async =>
@@ -178,7 +178,7 @@ void main() {
       () async {
         var groupUpdatedCalls = 0;
         final router = LiveEventRouter(
-          circleService: _UnusedCircleService(),
+          circleService: _UnusedCircleService.new,
           circlesSnapshot: () async => [_circle(const [1, 2, 3])],
           secretBytes: () async => const [],
           parseLocation: (content, sender) async => null,
@@ -215,7 +215,7 @@ void main() {
       () async {
         var reconcileCalls = 0;
         final router = LiveEventRouter(
-          circleService: _UnusedCircleService(),
+          circleService: _UnusedCircleService.new,
           circlesSnapshot: () async => [_circle(const [1, 2, 3])],
           secretBytes: () async => const [],
           parseLocation: (content, sender) async => null,
@@ -246,7 +246,7 @@ void main() {
 
     test('an onStatus failure does not propagate out of handleEvent', () async {
       final router = LiveEventRouter(
-        circleService: _UnusedCircleService(),
+        circleService: _UnusedCircleService.new,
         circlesSnapshot: () async => const [],
         secretBytes: () async => const [],
         parseLocation: (content, sender) async => null,

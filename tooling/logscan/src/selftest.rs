@@ -62,11 +62,13 @@ const SEALED_DROPPED: usize = 94;
 /// withheld `nsec` renderings, the two hinted bech32 forms, and the three the
 /// fixture values are too short for.
 const SEALED_COVERAGE_GAPS: usize = 33;
-/// Lines of `dirty.logcat.log` that must each be caught, individually.
-const DIRTY_RULE_LINES: usize = 13;
+/// Lines of `dirty.logcat.log` that must each be caught, individually: one per
+/// rule of [`RULE_COUNT`].
+const DIRTY_RULE_LINES: usize = 14;
 /// Lines of `dirty.logcat.log` that must each stay clean: the vendor line (tag
-/// scoping) and the alias-only Haven line.
-const DIRTY_CLEAN_LINES: usize = 2;
+/// scoping), `SQLCipher`'s record from a vendor pid (S-SQLC's process scoping) and
+/// the alias-only Haven line.
+const DIRTY_CLEAN_LINES: usize = 3;
 /// Lines of the real-furniture negative controls, pinned so a fixture that lost
 /// lines cannot report the same clean verdict over less evidence.
 const FURNITURE_DRIVE_LINES: u64 = 98;
@@ -91,8 +93,9 @@ const IOS_OWNED_RULE_LINES: [u64; 12] = [45, 46, 47, 48, 49, 56, 57, 58, 61, 62,
 const IOS_NEEDLE_LINES: [u64; 3] = [68, 78, 79];
 /// Lines of it, pinned so a fixture that lost a variant cannot pass quietly.
 const IOS_FORMAT_LINES: u64 = 79;
-/// Structural rules, all of which the dirty fixture must exercise.
-const RULE_COUNT: usize = 13;
+/// Structural rules S1–S13 and S-SQLC, all of which the dirty fixture must
+/// exercise.
+const RULE_COUNT: usize = 14;
 /// Bytes the CLI's throughput probe generates.
 const FULL_PROBE_BYTES: u64 = 64 * 1024 * 1024;
 /// Bytes `cargo test`'s run of the self-test generates. The single-pass property
@@ -549,7 +552,7 @@ fn case_rules(rig: &Rig, mutation: Option<&'static str>) -> Case {
         require(
             !by_line.contains_key(&line),
             &format!(
-                "line {line} of the dirty fixture is a clean control and must not be caught (it is a vendor-tagged line or an alias-only Haven line)"
+                "line {line} of the dirty fixture is a clean control and must not be caught (it is a vendor-tagged line, a vendor process's SQLCipher record or an alias-only Haven line)"
             ),
         )?;
     }
@@ -1533,7 +1536,17 @@ mod tests {
         // exemption skips on one shape: a suppression that went unnoticed there
         // is exactly the hole the narrowed shape exists to close. S13 is here
         // because it is the one rule a marker list can silence by narrowing.
-        for rule in ["S1", "S2", "S5", "S6", "S10", "S12", "S13"] {
+        // S-SQLC because it reads the one kind of line no other rule does.
+        for rule in [
+            "S1",
+            "S2",
+            "S5",
+            "S6",
+            "S10",
+            "S12",
+            "S13",
+            crate::rules::SQLCIPHER_RULE,
+        ] {
             let mut out = Vec::new();
             let mut err = Vec::new();
             let result = run_with(&mut out, &mut err, SMALL_PROBE_BYTES, Some(rule));

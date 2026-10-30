@@ -7,12 +7,15 @@
 
 use std::sync::Arc;
 
-use nostr::prelude::{Event, UnsignedEvent};
+use nostr::prelude::Event;
+#[cfg(any(test, feature = "test-utils"))]
+use nostr::prelude::UnsignedEvent;
 
 use super::manager::SessionManager;
 use super::types::{GroupId, ScreenedIngest};
 use crate::log_alias::{self, LogAliasClass};
 use crate::nostr::error::{NostrError, Result};
+#[cfg(any(test, feature = "test-utils"))]
 use cgka_session::SessionEffects;
 
 /// Context for an MLS group used for location sharing.
@@ -93,7 +96,8 @@ impl MlsGroupContext {
         Ok(())
     }
 
-    /// Encrypts an unsigned inner rumor for this group.
+    /// Encrypts an unsigned inner rumor for this group. Test builds only, as
+    /// [`SessionManager::create_message`].
     ///
     /// Delegates to [`SessionManager::create_message`], which enforces the W9
     /// inner-sender invariant and returns the publishable transport work.
@@ -101,6 +105,7 @@ impl MlsGroupContext {
     /// # Errors
     ///
     /// Returns an error if encryption/send fails.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn encrypt_event(&self, rumor: UnsignedEvent) -> Result<SessionEffects> {
         self.manager.create_message(&self.group_id, rumor).await
     }

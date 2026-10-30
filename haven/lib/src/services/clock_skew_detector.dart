@@ -11,11 +11,18 @@
 ///
 /// * **Clock ahead** — a spec-conformant relay refuses every event as being in
 ///   its future, so location sharing is dead for the session. The rejection
-///   died in a `debugPrint`.
+///   died in a `debugPrint`. Inside the relay's future window the publish is
+///   accepted instead and the device goes deaf: once it runs
+///   [kClockSkewTotalLossThreshold] ahead, its own relay pool discards every
+///   peer location as expired. Neither signal below sees that case — the relay
+///   took the event, and the peer timestamps are in the events that were
+///   dropped.
 /// * **Clock behind** — the expiration is computed from the same skewed clock,
-///   so the event is born already expired. The relay still ACKs it, **the
-///   publisher reports success**, and a correctly-clocked peer discards it
-///   before decryption. The loss is total and indistinguishable from working.
+///   so the event expires early, or is born expired. The relay still ACKs it,
+///   **the publisher reports success**, and a correctly-clocked peer's relay
+///   pool discards it on receipt once it has expired. Past
+///   [kClockSkewTotalLossThreshold] the loss is total and indistinguishable
+///   from working.
 ///
 /// ## The time reference, and what it deliberately is NOT
 ///
@@ -56,7 +63,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/constants/location.dart';
-import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/rust/api.dart'
+    show DeviceClockComplaintFfi, LocationPublishFfi;
 import 'package:haven/src/utils/log_alias.dart';
 
 /// What the evidence says about the direction of this device's clock error.
@@ -164,17 +172,6 @@ class ClockSkewDetector {
   /// sleeping.
   ClockSkewDetector({DateTime Function() now = DateTime.now}) : _now = now;
 
-  /// The Haven-authored token that carries a device-clock classification
-  /// across the FFI's `Result<T, String>` error flattening.
-  ///
-  /// Emitted by `RelayError::DeviceClockRejected`'s `Display`
-  /// (`haven-core/src/relay/clock_skew.rs`). Contains no relay-controlled
-  /// text by construction, so matching it cannot be steered by a hostile
-  /// relay. The two literals are pinned together by
-  /// `scripts/ci/check_clock_skew_policy_parity.sh`.
-  static const String deviceClockRejectedToken =
-      'haven.clock.device_clock_rejected';
-
   /// Distinct MLS-authenticated members that must independently agree before
   /// the peer signal fires — whenever that many members are *available* to
   /// agree. See [_evaluate] for the sole-source exception.
@@ -220,179 +217,49 @@ class ClockSkewDetector {
   // direction).
   // -------------------------------------------------------------------------
 
-  /// Extracts a device-clock classification from an error raised by the
-  /// publish path, or `null` when the error is not a clock rejection.
-  ///
-  /// Matches only the Haven-authored [deviceClockRejectedToken]; a relay's own
-  /// words are never part of this string (Security Rule 8) and are never
-  /// inspected here.
-  static DeviceClockComplaint? complaintFromError(Object error) {
-    final text = error is String ? error : error.toString();
-    const marker = '$deviceClockRejectedToken:';
-    final start = text.indexOf(marker);
-    if (start < 0) return null;
-    final suffix = text.substring(start + marker.length);
-    // Stop at the first non-token character so a wrapped/decorated error
-    // ("... haven.clock.device_clock_rejected:ahead)") still parses.
-    final match = RegExp('^[a-z]+').firstMatch(suffix);
-    return _complaintFromWireToken(match?.group(0) ?? '');
-  }
-
-  static DeviceClockComplaint? _complaintFromWireToken(String token) {
-    switch (token) {
-      case 'ahead':
-        return DeviceClockComplaint.ahead;
-      case 'behind':
-        return DeviceClockComplaint.behind;
-      case 'unspecified':
-        return DeviceClockComplaint.unspecified;
-      default:
-        return null;
+  /// Records what the one send of a sealed location did, by variant: a send
+  /// a relay took clears the relay signal, and so does one every answering
+  /// relay refused for something other than its time (the relays judged the
+  /// event and blamed nothing about its clock); one no relay took with at
+  /// least one blaming its timestamp raises it in that direction; one no
+  /// relay was reached for, or that was not sent, says nothing either way.
+  void recordLocationPublish(LocationPublishFfi publish) {
+    switch (publish) {
+      case LocationPublishFfi.accepted || LocationPublishFfi.refused:
+        _setRelayComplaint(null);
+      case LocationPublishFfi.clockAhead:
+        _setRelayComplaint(DeviceClockComplaint.ahead);
+      case LocationPublishFfi.clockBehind:
+        _setRelayComplaint(DeviceClockComplaint.behind);
+      case LocationPublishFfi.clockUnspecified:
+        _setRelayComplaint(DeviceClockComplaint.unspecified);
+      case LocationPublishFfi.unreachable ||
+          LocationPublishFfi.expired ||
+          LocationPublishFfi.superseded ||
+          LocationPublishFfi.ended ||
+          LocationPublishFfi.inFlight:
+        break;
     }
   }
 
-  /// Classifies a single relay rejection reason.
-  ///
-  /// A Dart mirror of
-  /// `haven_core::relay::clock_skew::classify_relay_rejection`,
-  /// needed for the *partial* rejection case: when one relay accepts and
-  /// another rejects, Rust returns `Ok`, so the reasons reach Dart as
-  /// [RelayRejection] text rather than as a classified error. The two
-  /// implementations are pinned together by
-  /// `scripts/ci/check_clock_skew_policy_parity.sh`.
-  ///
-  /// Returns `null` for every rejection that is not about the timestamp (rate
-  /// limits, auth, proof-of-work, size caps, blocked kinds, transport errors),
-  /// so an ordinary outage is never misreported to the user as a broken clock.
-  static DeviceClockComplaint? classifyRelayRejection(String reason) {
-    final lowered = reason.toLowerCase();
-    bool containsAny(List<String> phrases) => phrases.any(lowered.contains);
-
-    if (containsAny(_aheadPhrases)) return DeviceClockComplaint.ahead;
-    if (containsAny(_behindPhrases)) return DeviceClockComplaint.behind;
-    if (containsAny(_unspecifiedPhrases)) {
-      return DeviceClockComplaint.unspecified;
-    }
-    return null;
+  /// Records what a drive's relays blamed on this device's clock, by variant:
+  /// the core hands it over only when no relay took what the drive sent
+  /// (a seal's, a leave's, a change's, an ingest's or a resume's drives). A
+  /// drive that blamed nothing says nothing either way: it may have sent
+  /// nothing at all.
+  void recordDriveClockRejection(DeviceClockComplaintFfi complaint) {
+    _setRelayComplaint(switch (complaint) {
+      DeviceClockComplaintFfi.ahead => DeviceClockComplaint.ahead,
+      DeviceClockComplaintFfi.behind => DeviceClockComplaint.behind,
+      DeviceClockComplaintFfi.unspecified => DeviceClockComplaint.unspecified,
+    });
   }
 
-  static const List<String> _aheadPhrases = <String>[
-    'in the future',
-    'into the future',
-    'too new',
-    'newer than',
-    'future timestamp',
-    'future created_at',
-  ];
-
-  static const List<String> _behindPhrases = <String>[
-    'too old',
-    'older than',
-    'in the past',
-    'into the past',
-    'outdated',
-    'event expired',
-    'event is expired',
-    'expired event',
-  ];
-
-  // Deliberately excludes the bare word `time`: "connection timed out" is a
-  // transport failure, not a clock verdict, and transport errors share the
-  // rejection channel with genuine `OK false` reasons.
-  static const List<String> _unspecifiedPhrases = <String>[
-    'too far off',
-    'created_at',
-    'creation date',
-    'creation time',
-    'timestamp',
-    'time stamp',
-    'clock',
-    'current time',
-    'time skew',
-    'invalid time',
-  ];
-
-  /// Records the outcome of a publish that returned a [PublishResult].
-  ///
-  /// A publish that reached at least one relay clears the relay signal: the
-  /// location is on the network, so telling the user their clock is broken
-  /// would be crying wolf. A publish that reached none, where at least one
-  /// relay blamed the timestamp, raises it.
-  void recordPublishResult(PublishResult result) {
-    if (result.isSuccess) {
-      _setRelayComplaint(null);
-      return;
-    }
-    DeviceClockComplaint? merged;
-    for (final rejection in result.rejectedBy) {
-      final complaint = classifyRelayRejection(rejection.reason);
-      if (complaint == null) continue;
-      merged = merged == null ? complaint : _merge(merged, complaint);
-    }
-    _setRelayComplaint(merged);
-  }
-
-  /// Records a publish that threw.
-  ///
-  /// Raises the relay signal when the error is a [RelayClockRejectionException]
-  /// or carries [deviceClockRejectedToken]; leaves the current verdict
-  /// untouched otherwise, because an ordinary transport failure says nothing
-  /// either way about the clock — clearing the verdict there would let one
-  /// dropped connection hide a clock that is still wrong.
-  ///
-  /// The typed branch makes this method total over the error vocabulary its own
-  /// service layer actually throws. [RelayClockRejectionException.toString]
-  /// deliberately does not embed [deviceClockRejectedToken] — the token lives
-  /// in a field so the relay layer needs no dependency on this enum — so
-  /// [complaintFromError] cannot parse one out of it. A caller that reaches for
-  /// the generic entry point with the typed exception in hand would otherwise
-  /// drop the classification silently. Production catches the typed exception
-  /// first and calls [recordPublishClockRejection] directly; this is the
-  /// backstop for every other caller, not a replacement for that call site.
-  ///
-  /// The two branches differ on ONE input, deliberately: an *unrecognised*
-  /// token. The typed branch degrades it to
-  /// [DeviceClockComplaint.unspecified] (a fault the relays typed as a clock
-  /// complaint is still a clock complaint, whatever direction word it used),
-  /// while the text branch stays silent (arbitrary error prose must not be
-  /// read as a verdict). Not reachable in production — the token is built from
-  /// a [DeviceClockComplaint]'s `name`, a closed enum — so this is a contract
-  /// for future wire tokens, not a live divergence.
-  void recordPublishError(Object error) {
-    if (error is RelayClockRejectionException) {
-      recordPublishClockRejection(error.complaintToken);
-      return;
-    }
-    final complaint = complaintFromError(error);
-    if (complaint == null) return;
-    _setRelayComplaint(complaint);
-  }
-
-  /// Records a publish refused on timestamp grounds, from an already-parsed
-  /// wire token (`ahead` / `behind` / `unspecified`).
-  ///
-  /// Used by the service layer, which receives the classification as a typed
-  /// `RelayClockRejectionException` rather than as raw error text. An
-  /// unrecognised token degrades to [DeviceClockComplaint.unspecified] rather
-  /// than to silence: the relays did refuse the timestamp, and only the
-  /// direction is unknown.
-  void recordPublishClockRejection(String wireToken) {
-    _setRelayComplaint(
-      _complaintFromWireToken(wireToken) ?? DeviceClockComplaint.unspecified,
-    );
-  }
-
-  static DeviceClockComplaint _merge(
-    DeviceClockComplaint a,
-    DeviceClockComplaint b,
-  ) {
-    if (a == DeviceClockComplaint.unspecified) return b;
-    if (b == DeviceClockComplaint.unspecified) return a;
-    if (a == b) return a;
-    // Two relays that disagree about the direction: report the fact, not a
-    // coin flip.
-    return DeviceClockComplaint.unspecified;
-  }
+  /// Records a change a relay acknowledged: a relay took this device's
+  /// timestamp, so the relay signal clears, as an answered location send
+  /// clears it — a clock that was fixed stops showing the banner even with
+  /// sharing off.
+  void recordDriveAccepted() => _setRelayComplaint(null);
 
   void _setRelayComplaint(DeviceClockComplaint? complaint) {
     if (_relayComplaint == complaint) {
@@ -426,13 +293,15 @@ class ClockSkewDetector {
   ///   `encrypt` and our `decrypt` pushes the observed offset *more negative*.
   ///   So a consistently positive offset can only be clock disagreement.
   /// * **Negative offsets are structurally uninformative.** An event whose
-  ///   NIP-40 expiration is more than `RECEIVER_EXPIRATION_GRACE_SECS` past is
-  ///   dropped by the receiver before decryption, so every sample that reaches
-  ///   this method already satisfies `offset > -(228 + 60)`. The evidence for
-  ///   "our clock is ahead" has been discarded before we could see it, and any
-  ///   threshold small enough to fire inside that window would fire on ordinary
-  ///   catch-up delivering a two-minute-old location. The *ahead* direction is
-  ///   covered by signal 1 instead, where a relay reports it directly.
+  ///   NIP-40 expiration is behind this device's clock is dropped by the relay
+  ///   pool on receipt, so every sample that reaches this method already
+  ///   satisfies `offset >= -228`. The evidence for "our clock is ahead" has
+  ///   been discarded before we could see it, and any threshold small enough
+  ///   to fire inside that window would fire on ordinary catch-up delivering a
+  ///   two-minute-old location. The *ahead* direction is covered by signal 1
+  ///   instead, where a relay reports it directly — and only there, so a
+  ///   device ahead by less than the relay's own future window is not
+  ///   detected at all.
   void recordPeerTimestamp({
     required String senderPubkey,
     required DateTime peerTimestamp,
@@ -528,13 +397,12 @@ class ClockSkewDetector {
     //
     // What a sole source can and cannot support, exactly: with one peer,
     // "we are behind" and "they are ahead" are indistinguishable from inside
-    // this process. Nor does a disagreement of this size prove any loss —
-    // both sides screen the NIP-40 expiration with
-    // `LOCATION_MESSAGE_RETENTION_SECS` (228 s) +
-    // `RECEIVER_EXPIRATION_GRACE_SECS` (60 s) of tolerance, so nothing is
-    // dropped anywhere until the gap passes [kClockSkewTotalLossThreshold]
-    // (288 s), well above the 120 s that raises this. Between the two, all
-    // that is known is that the clocks disagree.
+    // this process. Nor does a disagreement of this size prove any loss: a
+    // location keeps `228 s - gap` of residency, so until the gap reaches
+    // [kClockSkewTotalLossThreshold] (228 s) a member who is online still
+    // receives every one, and only a member who catches up later can find one
+    // already expired. Between 120 s and that point, all that is known is that
+    // the clocks disagree.
     //
     // That is why the sole-source verdict must NOT be surfaced with the copy
     // the corroborated one uses: `resolveClockSkewCopy`

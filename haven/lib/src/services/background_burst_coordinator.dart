@@ -10,7 +10,8 @@
 ///
 /// This coordinator replaces that with one bounded burst per publish tick:
 ///
-/// 1. `openBackgroundBurst()` — re-anchor every REQ at its persisted cursor.
+/// 1. `openBackgroundBurstWithin()` — re-anchor every REQ at its persisted
+///    cursor, or start a session into the burst where it finds none.
 /// 2. `waitBacklogSettled()` — let the stored replay land, so a peer commit
 ///    received here is APPLIED before this burst encrypts (the location then
 ///    goes out at the current epoch).
@@ -70,7 +71,7 @@
 ///   maintenance: ref.read(maintenanceSchedulerProvider.notifier),
 ///   stagger: ref.read(locationPublishStaggerProvider),
 ///   shutdownPublishPool: shutdownPublishPool,
-///   pendingCommitCritical: () => inFlightCommitCritical,
+///   pendingCommitCritical: () => publishPool?.inFlightDrives,
 ///   burstEnabled: () => ref.read(backgroundSharingProvider),
 ///   foregrounded: () => foregroundOwnsEngine,
 ///   onOpenOutcome: (failures) => failures == 0
@@ -114,7 +115,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'package:haven/src/constants/location.dart' show kOneShotLocationTimeout;
-import 'package:haven/src/rust/api.dart' show BacklogOutcomeFfi;
+import 'package:haven/src/rust/api.dart'
+    show BacklogOutcomeFfi, BurstOpenFfi, LiveLifecycleFfi;
 import 'package:haven/src/services/circle_service.dart' show Circle;
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:haven/src/services/subscription_service.dart';
@@ -264,21 +266,32 @@ abstract class BurstMaintenance {
 
   /// Runs a relay-list maintenance tick if one is due at [now]. Never throws.
   Future<void> runRelayListIfDue(DateTime now);
+
+  /// Carries on every leave this device asked for, claiming no foreground.
+  /// Never throws.
+  Future<void> carryOnLeaves();
 }
 
-/// How many further commit-critical ladders one teardown adopts after the one
-/// it found in flight.
+/// How many further rounds of driver entries one teardown adopts after the
+/// one it found in flight.
 ///
-/// Three, because a ladder is the COMMIT path (≈49 s), so a teardown that
-/// adopts four is already minutes long, and the one producer a BACKGROUNDED
-/// process still runs — the motion trigger — is capped at one publish per
-/// `kLocationPublishOverlapGuard` (60 s). The cap is what the number rests on,
-/// not the trigger being the registry's only writer: `fetchMemberLocations`
-/// and the evolution poller register ladders too, and both are foreground
-/// paths whose timers the pause cancelled before any of this runs. A fifth
-/// round therefore says the registry is answering with something other than
-/// the work in flight — the runaway this cap stops, not a real backlog.
-const int _maxAdoptedLadders = 3;
+/// Three, because a drive can run to the core's own budget, so a teardown
+/// that adopts four is already long, and the one producer a BACKGROUNDED
+/// process still runs on its own — the motion trigger — is capped at one
+/// publish per `kLocationPublishOverlapGuard` (60 s). The cap is what the
+/// number rests on, not the trigger being the registry's only writer: the
+/// polls and the maintenance ticks drive too, and they are foreground paths
+/// whose timers the pause cancelled before any of this runs. A fifth round
+/// therefore says the registry is answering with something other than the
+/// work in flight — the runaway this cap stops, not a real backlog.
+const int _maxAdoptedRounds = 3;
+
+/// Starts a session directly into the burst asking for it.
+typedef BurstStart = Future<void> Function();
+
+/// The default `prepareStartIntoBurst`: no session may be started, so a burst
+/// that finds none publishes nothing.
+Future<BurstStart?> _startsNone(Duration budget) async => null;
 
 /// The default `pendingCommitCritical` read: nothing is tracked, so the
 /// teardown drains nothing and shuts the pool exactly as it did before the
@@ -332,6 +345,9 @@ class BackgroundBurstCoordinator implements BurstSink {
     required void Function(int consecutiveFailures) onOpenOutcome,
     Future<void>? Function() pendingCommitCritical = _noCommitCriticalWork,
     bool Function() foregrounded = _stillBackgrounded,
+    Future<BurstStart?> Function(Duration budget) prepareStartIntoBurst =
+        _startsNone,
+    Future<bool> Function()? receiveWithoutSession,
     DateTime Function() now = DateTime.now,
   }) : _engine = engine,
        _publisher = publisher,
@@ -342,6 +358,8 @@ class BackgroundBurstCoordinator implements BurstSink {
        _onOpenOutcome = onOpenOutcome,
        _pendingCommitCritical = pendingCommitCritical,
        _foregrounded = foregrounded,
+       _prepareStartIntoBurst = prepareStartIntoBurst,
+       _receiveWithoutSession = receiveWithoutSession,
        _now = now;
 
   final SubscriptionService _engine;
@@ -351,31 +369,29 @@ class BackgroundBurstCoordinator implements BurstSink {
   final Future<void> Function() _shutdownPublishPool;
   final bool Function() _burstEnabled;
 
-  /// The commit-critical publish currently on the SHARED publish pool, or
-  /// `null` when there is none — read by the teardown, and drained UNBOUNDED
-  /// before the pool is shut.
+  /// The driver entries currently on the SHARED publish pool, or `null` when
+  /// there are none — read by the teardown, and drained UNBOUNDED before the
+  /// pool is shut.
   ///
   /// A burst awaits its own publishes, so its own work is drained by
   /// structure. The pool is not the burst's, though: while backgrounded on
-  /// iOS the motion trigger is deliberately left running and publishes over
-  /// the same pool, unawaited by and invisible to this coordinator. That path
-  /// can reach the deferred-send ladder — `publishEvent`, then
-  /// `confirmPublished` on an ack or `publishFailed` without one — and
-  /// `shutdownPublishPool` reaches `RelayManager::shutdown`, i.e.
-  /// `client.disconnect()` with no drain of any kind (the engine's own
-  /// `settleBeforePause` / `pauseSubscriptions` drain a DIFFERENT pool).
-  /// Disconnecting there makes `wait_for_ok` fail on a commit a relay may
-  /// already have stored and served, so the sender rolls back a commit its
-  /// peers have applied: the roster fork Security Rule 13 exists to prevent,
-  /// not a lost location sample.
+  /// iOS the motion trigger, a leave's carry-on and a drive run over the same
+  /// pool, unawaited by this coordinator, and `shutdownPublishPool` reaches
+  /// `RelayManager::shutdown`, i.e. `client.disconnect()` with no drain of any
+  /// kind (the engine's own `settleBeforePause` / `pauseSubscriptions` drain a
+  /// DIFFERENT pool). The core forks nothing under a disconnect — a commit
+  /// whose ack it never saw stays recorded and awaiting — but the drive is cut
+  /// short and its sends wait for the next wake
+  /// (`NostrRelayService.inFlightDrives`).
   ///
-  /// Same discipline as the foreground service's teardown, which reads its
-  /// `_inFlightCommitCritical` after its bounded drain and awaits it with no
-  /// bound at all (`background_location_task.dart`).
+  /// The foreground service's teardown differs on two entries, a location's
+  /// seal and its send: it reads its pool's `inFlightNonLocationDrives` after
+  /// its bounded drain and awaits it with no bound, leaving those two inside
+  /// that bound (`background_location_task.dart`).
   ///
   /// The contract for whoever supplies it: return the future while the work is
   /// genuinely in flight and `null` once it has completed — the shape
-  /// `_inFlightCommitCritical` already has, where a `finally` clears it.
+  /// `inFlightDrives` has, where a `finally` clears it.
   final Future<void>? Function() _pendingCommitCritical;
 
   /// Whether the FOREGROUND has taken the engine back, in which case this
@@ -407,6 +423,16 @@ class BackgroundBurstCoordinator implements BurstSink {
   final void Function(int consecutiveFailures) _onOpenOutcome;
 
   final DateTime Function() _now;
+
+  /// Readies a start into the burst — the circles and inbox relays a
+  /// foreground start takes, bounded by `budget` — or answers `null` where
+  /// none may be started: no live session is wanted, or the shell is gone.
+  final Future<BurstStart?> Function(Duration budget) _prepareStartIntoBurst;
+
+  /// Set only in a configuration with no live plane at all (the live-sync-off
+  /// build): the receive a burst runs in place of opening a session, which
+  /// answers whether it completed. `null` where a live plane exists.
+  final Future<bool> Function()? _receiveWithoutSession;
 
   /// Circle keys waiting to be published, in the order their ticks arrived.
   ///
@@ -484,8 +510,8 @@ class BackgroundBurstCoordinator implements BurstSink {
   /// [runningBurst] instead of pausing underneath it, and a resume orders
   /// behind it. It reuses [_closeBurst] rather than open-coding the three
   /// links, which is what carries the per-link handback re-reads (a resume
-  /// 300 ms later must stop this, not race it) and the unbounded
-  /// commit-critical drain (Security Rule 13).
+  /// 300 ms later must stop this, not race it) and the unbounded drive
+  /// drain.
   Future<void> closeIdle() {
     return _chain = _chain
         .then((_) async {
@@ -526,11 +552,48 @@ class BackgroundBurstCoordinator implements BurstSink {
       _due.clear();
       return;
     }
+    // The drives of this burst end with its own links (decision: the burst
+    // path has no OS deadline of its own while the keep-alive session is
+    // armed; the settle and the pause's Rule-13 drain come after those links
+    // and are bounded by neither).
+    final budget = burstBound(_due.length, _stagger);
     final startedAt = _now();
+    // Running from here, before any start: a resume landing while the burst
+    // starts a session orders behind it ([runningBurst]) instead of racing
+    // the start for the engine.
     _bursting = true;
     _joinable = true;
     try {
       try {
+        // How this burst receives before it seals (receive-before-seal, both
+        // configurations). Where no live plane exists at all, through the
+        // catch-up, and only once it completed (decision 244); where a live
+        // plane exists but finds no session — read from the typed lifecycle,
+        // never from an error — by starting one into the burst (decision
+        // 190). A burst that cannot receive publishes nothing; one with a
+        // live plane says so to the health model as a failed open, one
+        // without says nothing (it holds no subscription to lose).
+        var startedIntoBurst = false;
+        final receiveWithoutSession = _receiveWithoutSession;
+        if (receiveWithoutSession != null) {
+          if (!await _receivedWithoutSession(receiveWithoutSession)) {
+            _due.clear();
+            debugPrint('[BackgroundBurst] receive not completed: nothing '
+                'published');
+            return;
+          }
+        } else {
+          switch (_engine.lifecycle()) {
+            case LiveLifecycleFfi.noSession || LiveLifecycleFfi.stopped:
+              if (!await _startedIntoBurst(budget)) return;
+              startedIntoBurst = true;
+            case LiveLifecycleFfi.launched ||
+                LiveLifecycleFfi.foreground ||
+                LiveLifecycleFfi.burst ||
+                LiveLifecycleFfi.paused:
+              break;
+          }
+        }
         // A failed open is NOT swallowed by the engine wrapper, deliberately:
         // a burst open has no redundancy, and a caller that went on to wait
         // for a backlog nobody requested would spend the entire wait budget
@@ -540,18 +603,36 @@ class BackgroundBurstCoordinator implements BurstSink {
         // it from past-epoch keys and the next burst converges. What a failed
         // open must NOT be is invisible: the run of them goes to the health
         // model (see [_onOpenOutcome]).
-        var opened = false;
-        try {
-          await _engine.openBackgroundBurst();
-          opened = true;
-          _openFailures = 0;
-        } on Object catch (e) {
-          _openFailures++;
-          // Rule 8: the type and a count. The FFI message is remote text.
-          debugPrint('[BackgroundBurst] open failed ($_openFailures in a '
-              'row): ${e.runtimeType}');
+        var opened = startedIntoBurst;
+        if (receiveWithoutSession == null) {
+          try {
+            // A session that ended after the lifecycle read answers the open
+            // with the typed no-session, and a start into the burst takes its
+            // place as for a session found missing — within what the open
+            // left of the one budget.
+            if (!opened) {
+              switch (await _engine.openBackgroundBurstWithin(budget)) {
+                case BurstOpenFfi.opened:
+                  break;
+                case BurstOpenFfi.noSession:
+                  final left = budget - _now().difference(startedAt);
+                  if (!await _startedIntoBurst(
+                    left.isNegative ? Duration.zero : left,
+                  )) {
+                    return;
+                  }
+              }
+            }
+            opened = true;
+            _openFailures = 0;
+          } on Object catch (e) {
+            _openFailures++;
+            // Rule 8: the type and a count. The FFI message is remote text.
+            debugPrint('[BackgroundBurst] open failed ($_openFailures in a '
+                'row): ${e.runtimeType}');
+          }
+          _onOpenOutcome(_openFailures);
         }
-        _onOpenOutcome(_openFailures);
         if (opened && _burstEnabled()) {
           final outcome = await _engine.waitBacklogSettled();
           if (outcome == BacklogOutcomeFfi.timedOut) {
@@ -575,16 +656,64 @@ class BackgroundBurstCoordinator implements BurstSink {
       if (_burstEnabled()) await _foldMaintenance();
     } finally {
       // Nested, because the flag must be cleared even when the teardown throws
-      // — its handback and commit-critical reads are caller-supplied closures.
+      // — its handback and drive reads are caller-supplied closures.
       // Latched true, `runningBurst` answers non-null for the life of the
       // coordinator, and every later resume takes the burst-in-flight bypass:
-      // a pool reconnect and a 49 h `#p` gift-wrap replay per glance, which is
+      // a pool reconnect and a 96 h `#p` gift-wrap replay per glance, which is
       // exactly the cost the re-anchor throttle exists to bound.
       try {
         await _closeBurst();
       } finally {
         _bursting = false;
       }
+    }
+  }
+
+  /// Runs [receive], and answers whether it completed while the burst still
+  /// owns the wake. Never throws.
+  Future<bool> _receivedWithoutSession(Future<bool> Function() receive) async {
+    try {
+      final completed = await receive();
+      return completed && !_foregrounded() && _burstEnabled();
+    } on Object catch (e) {
+      debugPrint('[BackgroundBurst] receive failed: ${e.runtimeType}');
+      return false;
+    }
+  }
+
+  /// Starts a session into this burst where none runs (decision 190): false
+  /// when nothing may be published — the start failed, which is a failed
+  /// open told to the health model unless the foreground or the consent took
+  /// the burst back meanwhile, or the foreground took the engine back while
+  /// it ran (its re-anchor, ordered behind this burst, takes the session).
+  Future<bool> _startedIntoBurst(Duration budget) async {
+    if (!await _startIntoBurst(budget)) {
+      _due.clear();
+      if (_foregrounded() || !_burstEnabled()) return false;
+      _openFailures++;
+      debugPrint('[BackgroundBurst] no session: nothing published');
+      _onOpenOutcome(_openFailures);
+      return false;
+    }
+    if (_foregrounded()) {
+      _due.clear();
+      return false;
+    }
+    return true;
+  }
+
+  /// Starts a session into this burst, if one may be started and the burst
+  /// still owns the wake. Never throws.
+  Future<bool> _startIntoBurst(Duration budget) async {
+    try {
+      final start = await _prepareStartIntoBurst(budget);
+      if (start == null || _foregrounded() || !_burstEnabled()) return false;
+      await start();
+      return true;
+    } on Object catch (e) {
+      // Rule 8: the type alone. The FFI message is remote text.
+      debugPrint('[BackgroundBurst] start into burst failed: ${e.runtimeType}');
+      return false;
     }
   }
 
@@ -631,7 +760,7 @@ class BackgroundBurstCoordinator implements BurstSink {
         // permission revoked, or a one-shot fix that timed out. Every circle
         // still queued would be refused the same way a second later, so
         // leaving them due is what turned ONE refusal into one whole burst per
-        // due circle — a cold connect, a REQ set replaying 49 h of `#p` gift
+        // due circle — a cold connect, a REQ set replaying 96 h of `#p` gift
         // wraps and a pool cycle each, publishing nothing, on the branch this
         // phase exists to keep quiet.
         //
@@ -724,6 +853,11 @@ class BackgroundBurstCoordinator implements BurstSink {
     } on Object catch (e) {
       debugPrint('[BackgroundBurst] relay-list fold failed: ${e.runtimeType}');
     }
+    try {
+      await _maintenance.carryOnLeaves();
+    } on Object catch (e) {
+      debugPrint('[BackgroundBurst] leave carry-on failed: ${e.runtimeType}');
+    }
   }
 
   /// Settles, pauses, drains and shuts the publish pool — the links that must
@@ -766,8 +900,10 @@ class BackgroundBurstCoordinator implements BurstSink {
       } on Object catch (e) {
         debugPrint('[BackgroundBurst] pause failed: ${e.runtimeType}');
       }
-      if (_handedBack('pool shutdown')) return;
+      if (_handedBack('drive drain')) return;
       await _drainCommitCritical();
+      // Read again: the drain can run as long as a drive does.
+      if (_handedBack('pool shutdown')) return;
       try {
         await _shutdownPublishPool();
       } on Object catch (e) {
@@ -787,52 +923,51 @@ class BackgroundBurstCoordinator implements BurstSink {
     return true;
   }
 
-  /// Awaits the commit-critical publish the shared pool is carrying, if any,
-  /// before that pool is disconnected.
+  /// Awaits the driver entries the shared pool is carrying, if any, before
+  /// that pool is disconnected.
   ///
   /// UNBOUNDED, and it must stay that way: bounding it is the same defect as
   /// not having it, because a `.timeout(` cancels nothing — it just returns
-  /// here and lets the shutdown cut the socket under a commit that is between
-  /// SEND and OK (Security Rule 13). Normally a no-op: [_pendingCommitCritical]
-  /// is null on the overwhelming majority of teardowns.
+  /// here and lets the shutdown cut the socket under a drive that is between
+  /// a send and its ack. Normally a no-op: [_pendingCommitCritical] is null on
+  /// the overwhelming majority of teardowns.
   ///
   /// Re-read after each drain, because the motion trigger keeps running while
-  /// backgrounded and can START a ladder inside one — the shutdown that
+  /// backgrounded and can START a drive inside one — the shutdown that
   /// follows would cut that one instead. Rounds after the first are capped
-  /// ([_maxAdoptedLadders]) and that caps nothing this method promises: the
-  /// ladder in flight when the pool would have been shut — the whole defect —
-  /// is always awaited to its own conclusion, and the rounds after it adopt
-  /// work that began later. Without the cap a registry that manufactures a
-  /// future on every read (an `() async =>` closure where the contract asks
-  /// for a field) spins here forever: no burst ever completes again, both
-  /// pools stay open, and background sharing ends for the process with nothing
-  /// in the log but this line repeating.
+  /// ([_maxAdoptedRounds]), and each awaits only the drives in flight when it
+  /// reads, so a drive that joins during the last adopted round is not
+  /// awaited and may be cut; the motion trigger's 60 s spacing
+  /// (`kLocationPublishOverlapGuard`) keeps its drives from landing in round
+  /// after round. Without the cap a registry that manufactures a future on
+  /// every read (an `() async =>` closure where the contract asks for a
+  /// field) spins here forever: no burst ever completes again, both pools
+  /// stay open, and background sharing ends for the process with nothing in
+  /// the log but this line repeating.
   Future<void> _drainCommitCritical() async {
-    for (var round = 0; round <= _maxAdoptedLadders; round++) {
+    for (var round = 0; round <= _maxAdoptedRounds; round++) {
       final Future<void>? commitCritical;
       try {
         commitCritical = _pendingCommitCritical();
       } on Object catch (e) {
         // The one link of the teardown whose read is a caller-supplied closure
-        // rather than an engine call — in production a Riverpod read, which
-        // throws once the container is disposed. Unguarded it escaped the
-        // whole teardown, so the pool this method exists to protect was left
-        // OPEN. A container that can no longer be read has no ladder left to
-        // wait for, so the shutdown that follows is the right disposition.
-        debugPrint('[BackgroundBurst] commit-critical read failed: '
-            '${e.runtimeType}');
+        // rather than an engine call — one that reads a provider throws once
+        // its container is disposed. Unguarded it escaped the whole teardown,
+        // so the pool this method exists to protect was left OPEN. A read
+        // that cannot answer has no drive to offer, so the shutdown that
+        // follows is the right disposition.
+        debugPrint('[BackgroundBurst] drive read failed: ${e.runtimeType}');
         return;
       }
       if (commitCritical == null) return;
-      debugPrint('[BackgroundBurst] draining commit-critical work before the '
-          'pool shutdown');
+      debugPrint('[BackgroundBurst] draining driver entries before the pool '
+          'shutdown');
       try {
         await commitCritical;
       } on Object catch (e) {
-        // Reaching its own conclusion is the point; the ladder that owns it
+        // Reaching its own conclusion is the point; the drive that owns it
         // logs the cause. Rule 8: the type only.
-        debugPrint('[BackgroundBurst] commit-critical drain failed: '
-            '${e.runtimeType}');
+        debugPrint('[BackgroundBurst] drive drain failed: ${e.runtimeType}');
       }
     }
   }

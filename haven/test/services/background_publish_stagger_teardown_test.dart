@@ -32,10 +32,15 @@ library;
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/background_location_task.dart';
 import 'package:haven/src/services/mls_session_handover.dart';
+import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../helpers/log_capture.dart';
+import '../mocks/background_task_fakes.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -147,55 +152,94 @@ void main() {
       expect(destroyed, isTrue);
     });
 
-    test('a wedged publish is abandoned but a wedged commit-critical fetch '
-        'is NOT', () async {
-      // The drain budget is a licence to abandon a LOCATION SAMPLE, and
-      // nothing else. `fetchMemberLocations` can publish a receiver-side
-      // auto-commit (a peer's SelfRemove) and then confirm it; a teardown that
-      // gave up between those two steps would shut down the relay and dispose
-      // the manager underneath a commit that is possibly already on a relay,
-      // leaving it neither confirmed nor rolled back — Rule 13 broken, and the
-      // group wedged in `PendingPublish`. So that window is drained WITHOUT a
-      // budget, and this is the test that says the two are not the same wait.
-      // A ZERO budget, so "the bounded phase has given up" is an event-loop
-      // fact rather than a wall-clock hope: a zero-duration timeout fires on
-      // the next turn, which `pumpEventQueue` below guarantees. With a
-      // millisecond budget the check underneath could pass simply because the
-      // budget had not elapsed yet — and it did, silently, against a mutant
-      // that bounded the commit-critical drain too.
+    // Through the real registry: the service's own relay service over a pool
+    // whose drives park. A ZERO budget, so "the bounded phase has given up"
+    // is an event-loop fact rather than a wall-clock hope.
+    test('a seal parked inside its drive is abandoned at the bound', () async {
+      final pool = _ParkedPool();
+      final relay = NostrRelayService(
+        openPool: () async => pool,
+        fixOf: (_, _) async => _Opaque(),
+      );
+      final seal = relay.sealLocation(
+        circle: _Opaque(),
+        mlsGroupId: const [1],
+        latitude: 1,
+        longitude: 2,
+        foreground: false,
+      );
+      await pumpEventQueue();
+      expect(pool.parked, ['seal'], reason: 'premise: inside its drive');
       final handler = BackgroundLocationTaskHandler()
-        ..teardownDrainBudget = Duration.zero;
-      final wedgedPublish = Completer<void>();
-      final wedgedFetch = Completer<void>();
-      handler
-        ..inFlightPublishForTest = wedgedPublish.future
-        ..inFlightCommitCriticalForTest = wedgedFetch.future;
+        ..teardownDrainBudget = Duration.zero
+        ..inFlightPublishForTest = seal
+        ..relayServiceForTest = relay;
+
+      await expectLater(
+        handler.onDestroy(DateTime.now(), false),
+        completes,
+        reason: 'a location drive waited out past the bound outlasts the '
+            "UI's handover budget",
+      );
+      expect(pool.shutdowns, 1, reason: 'and the pool is shut under it');
+      pool.release();
+    });
+
+    test('a leave drive parked holds onDestroy until it ends', () async {
+      final logs = LogCapture.install();
+      final pool = _ParkedPool();
+      final relay = NostrRelayService(openPool: () async => pool);
+      final leave = relay.resumeLeave(
+        circle: _Opaque(),
+        mlsGroupId: const [1],
+        foreground: false,
+      );
+      await pumpEventQueue();
+      expect(pool.parked, ['resumeLeave']);
+      final handler = BackgroundLocationTaskHandler()
+        ..teardownDrainBudget = Duration.zero
+        ..inFlightPublishForTest = leave
+        ..relayServiceForTest = relay;
 
       var destroyed = false;
       final destroy = handler
           .onDestroy(DateTime.now(), false)
           .then((_) => destroyed = true);
-
       await pumpEventQueue();
       expect(
         destroyed,
         isFalse,
-        reason: 'the commit-critical window has not finished, so teardown '
-            'must not have proceeded to the relay shutdown and the manager '
-            'dispose that would strand its commit',
+        reason: 'the leave drive was cut short by the teardown',
       );
+      expect(pool.shutdowns, 0);
 
-      // Only the fetch finishing may release it — the publish is still wedged
-      // and stays wedged, which is exactly the point: one is abandonable and
-      // the other is not.
-      wedgedFetch.complete();
+      pool.release();
       await expectLater(destroy, completes);
-      expect(destroyed, isTrue);
-      expect(
-        wedgedPublish.isCompleted,
-        isFalse,
-        reason: 'the location publish was abandoned, as designed',
+      expect(pool.shutdowns, 1);
+      logs
+        ..assertContains('[BackgroundTask] onDestroy: draining driver entries')
+        ..assertNoNeedles(['wss://']);
+    });
+
+    test('the drain line names nothing a drive in flight failed with',
+        () async {
+      final logs = LogCapture.install();
+      final failing = Completer<void>();
+      final handler = BackgroundLocationTaskHandler()
+        ..teardownDrainBudget = Duration.zero
+        ..relayServiceForTest = (FakeNostrRelayService()
+          ..inFlightNonLocationDrives = failing.future);
+
+      final destroy = handler.onDestroy(DateTime.now(), false);
+      await pumpEventQueue();
+      failing.completeError(
+        StateError('group ${'ab' * 32} at wss://planted.example'),
       );
+      await destroy;
+
+      logs
+        ..assertContains('[BackgroundTask] onDestroy: draining driver entries')
+        ..assertNoNeedles(['ab' * 32, 'wss://planted.example']);
     });
 
     test('the handover budget covers the drain the service is allowed',
@@ -266,4 +310,63 @@ void main() {
       reason: 'the refusal must precede the probe, not follow it',
     );
   });
+}
+
+/// A pool whose seal and leave drives park until [release].
+class _ParkedPool implements RelayManagerFfi {
+  final List<String> parked = [];
+  final Completer<void> _gate = Completer<void>();
+  int shutdowns = 0;
+
+  void release() {
+    if (!_gate.isCompleted) _gate.complete();
+  }
+
+  @override
+  Future<SealOutcomeFfi> sealLocationDriven({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required LocationMessage location,
+    required bool foreground,
+  }) async {
+    parked.add('seal');
+    await _gate.future;
+    return const SealOutcomeFfi(replayed: [], errored: false);
+  }
+
+  @override
+  Future<LeaveOutcomeFfi> resumeLeaveDriven({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required bool foreground,
+  }) async {
+    parked.add('resumeLeave');
+    await _gate.future;
+    return const LeaveOutcomeFfi(status: LeaveStatusFfi.proposed);
+  }
+
+  @override
+  Future<void> shutdown() async => shutdowns++;
+
+  @override
+  void dispose() {}
+
+  @override
+  bool get isDisposed => false;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('unexpected call: ${invocation.memberName}');
+}
+
+class _Opaque implements CircleManagerFfi, LocationMessage {
+  @override
+  void dispose() {}
+
+  @override
+  bool get isDisposed => false;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('unexpected call: ${invocation.memberName}');
 }

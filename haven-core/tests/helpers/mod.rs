@@ -20,6 +20,12 @@
 
 #![allow(dead_code)]
 
+pub mod drive;
+pub mod neg_wire;
+pub mod removals;
+pub mod stranded;
+pub mod twin_key_packages;
+
 use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -28,8 +34,8 @@ use std::sync::{Mutex, MutexGuard, Once, PoisonError};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use haven_core::nostr::mls::types::{
-    GroupEvent, GroupId, LocationGroupConfig, PendingStateRef, PublishWork, SessionEffects,
-    TransportMessage,
+    GroupEvent, GroupId, LocationGroupConfig, PublishWork, SessionEffects, TransportMessage,
+    WelcomeAcceptance,
 };
 use haven_core::nostr::mls::SessionManager;
 use haven_core::nostr::NostrError;
@@ -73,14 +79,21 @@ pub async fn create_key_package_event(
         .event
 }
 
-/// Extracts the sole `GroupCreated { welcomes, pending }` from create effects.
-fn take_group_created(effects: &SessionEffects) -> (Vec<TransportMessage>, PendingStateRef) {
+/// Extracts the sole `FoundingGroupCreated { welcomes }` from create effects: a
+/// founding create is canonical on return, with no pending ref to confirm.
+fn take_group_created(effects: &SessionEffects) -> Vec<TransportMessage> {
     for work in &effects.publish {
-        if let PublishWork::GroupCreated { welcomes, pending } = work {
-            return (welcomes.clone(), *pending);
+        if let PublishWork::FoundingGroupCreated { welcomes } = work {
+            return welcomes.clone();
         }
     }
-    panic!("create_group produced no GroupCreated publish work");
+    panic!("create_group produced no FoundingGroupCreated publish work");
+}
+
+/// The first gift-wrapped (1059) Welcome a founding create produced.
+pub fn first_welcome_event(effects: &SessionEffects) -> Event {
+    SessionManager::transport_message_to_event(&take_group_created(effects)[0])
+        .expect("welcome to event")
 }
 
 /// Result of setting up a two-party MLS group.
@@ -107,8 +120,7 @@ impl TwoPartyGroup {
 ///
 /// 1. Creates separate `SessionManager`s for Alice and Bob.
 /// 2. Bob mints a kind-30443 `KeyPackage` event.
-/// 3. Alice creates the group with Bob's `KeyPackage` and confirms the pending
-///    create (publish-before-apply).
+/// 3. Alice creates the group with Bob's `KeyPackage` (canonical on return).
 /// 4. Bob ingests the engine-produced gift-wrapped (1059) welcome to join.
 pub async fn setup_two_party_group(prefix: &str) -> TwoPartyGroup {
     let relays = vec!["wss://relay.test.com".to_string()];
@@ -138,19 +150,20 @@ pub async fn setup_two_party_group(prefix: &str) -> TwoPartyGroup {
     let group_id = created.group_id.clone();
     let (nostr_group_id, _) = alice.group_routing(&group_id).await.expect("routing");
 
-    let (welcomes, pending) = take_group_created(&created.effects);
-    // Confirm the pending create so Alice's group is Stable at the created epoch.
-    alice
-        .confirm_published(pending)
-        .await
-        .expect("confirm create");
+    let welcomes = take_group_created(&created.effects);
 
     // Bob joins by ingesting the (still-encrypted) gift-wrapped welcome.
     let welcome_event =
         SessionManager::transport_message_to_event(&welcomes[0]).expect("welcome to event");
-    bob.accept_welcome(&welcome_event)
-        .await
-        .expect("bob accepts welcome");
+    assert!(
+        matches!(
+            bob.accept_welcome(&welcome_event)
+                .await
+                .expect("bob accepts welcome"),
+            WelcomeAcceptance::Ingested(_)
+        ),
+        "a fresh welcome is ingested"
+    );
 
     TwoPartyGroup {
         alice,
@@ -212,21 +225,19 @@ pub async fn setup_two_party_group_capturing_welcome(prefix: &str) -> TwoPartyGr
     let group_id = created.group_id.clone();
     let (nostr_group_id, _) = alice.group_routing(&group_id).await.expect("routing");
 
-    let (welcomes, _pending) = take_group_created(&created.effects);
-    for work in &created.effects.publish {
-        if let PublishWork::GroupCreated { pending, .. } = work {
-            alice
-                .confirm_published(*pending)
-                .await
-                .expect("confirm create");
-        }
-    }
+    let welcomes = take_group_created(&created.effects);
 
     let welcome_event =
         SessionManager::transport_message_to_event(&welcomes[0]).expect("welcome to event");
-    bob.accept_welcome(&welcome_event)
-        .await
-        .expect("bob accepts welcome");
+    assert!(
+        matches!(
+            bob.accept_welcome(&welcome_event)
+                .await
+                .expect("bob accepts welcome"),
+            WelcomeAcceptance::Ingested(_)
+        ),
+        "a fresh welcome is ingested"
+    );
 
     TwoPartyGroupWithWelcome {
         group: TwoPartyGroup {
@@ -539,6 +550,414 @@ pub fn assert_some_line_from(lines: &[LogLine], target_prefix: &str) {
          over these {} line(s) proves nothing",
         lines.len()
     );
+}
+// ── A circle built through the public circle API ─────────────────────────────
+
+/// One member of a [`CircleFixture`]: a circle manager over its own stores.
+pub struct CircleMember {
+    pub circle: std::sync::Arc<haven_core::circle::CircleManager>,
+    pub keys: Keys,
+    pub dir: tempfile::TempDir,
+}
+
+impl CircleMember {
+    pub fn new() -> Self {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let keys = Keys::generate();
+        let circle = std::sync::Arc::new(
+            haven_core::circle::CircleManager::new_unencrypted(dir.path(), &keys)
+                .expect("circle manager"),
+        );
+        Self { circle, keys, dir }
+    }
+
+    pub fn session(&self) -> &SessionManager {
+        self.circle.session()
+    }
+
+    pub fn pubkey_hex(&self) -> String {
+        self.keys.public_key().to_hex()
+    }
+
+    /// Ends this member's process and starts another over the same stores.
+    pub fn reopen(self) -> Self {
+        let Self { circle, keys, dir } = self;
+        drop(
+            std::sync::Arc::try_unwrap(circle)
+                .unwrap_or_else(|_| panic!("the member's manager is still shared")),
+        );
+        let circle = std::sync::Arc::new(
+            haven_core::circle::CircleManager::new_unencrypted(dir.path(), &keys)
+                .expect("the stores reopen"),
+        );
+        Self { circle, keys, dir }
+    }
+}
+
+impl CircleMember {
+    /// Ends this member's process, marks `group` unrecoverable in its MLS
+    /// store as MDK's convergence persists a halt, and starts another over
+    /// the same stores, which re-seeds the halt at the open.
+    pub fn halted(self, group: &GroupId) -> Self {
+        let Self { circle, keys, dir } = self;
+        drop(
+            std::sync::Arc::try_unwrap(circle)
+                .unwrap_or_else(|_| panic!("the member's manager is still shared")),
+        );
+        haven_core::nostr::mls::storage::set_group_unrecoverable_for_test(
+            &haven_core::nostr::mls::StorageConfig::new(dir.path()).database_path(),
+            &haven_core::nostr::mls::StorageConfig::test_sqlcipher_key().expect("test key"),
+            group,
+            true,
+        )
+        .expect("the halt is persisted");
+        let circle = std::sync::Arc::new(
+            haven_core::circle::CircleManager::new_unencrypted(dir.path(), &keys)
+                .expect("the stores reopen"),
+        );
+        Self { circle, keys, dir }
+    }
+}
+
+/// A circle of real co-members, the first of whom created it and is its admin.
+pub struct CircleFixture {
+    pub members: Vec<CircleMember>,
+    pub group: GroupId,
+}
+
+impl CircleFixture {
+    pub fn admin(&self) -> &CircleMember {
+        &self.members[0]
+    }
+}
+
+/// Builds a circle of `size` members whose routing component names `relays`.
+/// Nothing is dialled: every member joins from its Welcome in process.
+pub async fn setup_circle(size: usize, relays: &[&str]) -> CircleFixture {
+    setup_circle_of((0..size).map(|_| CircleMember::new()).collect(), relays).await
+}
+
+/// As [`setup_circle`], of `members` as given: the first creates the circle.
+pub async fn setup_circle_of(members: Vec<CircleMember>, relays: &[&str]) -> CircleFixture {
+    let invitees: Vec<&CircleMember> = members[1..].iter().collect();
+    let group = found_circle(&members[0], &invitees, relays).await;
+    CircleFixture { members, group }
+}
+
+/// A circle `founder` creates with `invitees`, each joining from its Welcome
+/// in process. A member may found, or be invited to, more than one. The
+/// create is the driven one the app makes, its founding Welcomes sent from
+/// their records and acknowledged at once, so none is left owed.
+pub async fn found_circle(
+    founder: &CircleMember,
+    invitees: &[&CircleMember],
+    relays: &[&str],
+) -> GroupId {
+    let relays: Vec<String> = relays.iter().map(ToString::to_string).collect();
+    let inbox = vec!["wss://member-inbox.example.com".to_string()];
+    let mut invited = Vec::new();
+    for member in invitees {
+        invited.push(haven_core::circle::MemberKeyPackage {
+            key_package_event: create_key_package_event(member.session(), &member.keys, &inbox)
+                .await,
+            inbox_relays: inbox.clone(),
+            nip65_relays: Vec::new(),
+        });
+    }
+    let transport = haven_core::relay::fanout::scripted::ScriptedFanout::default();
+    let publisher = drive::Recorder::acking(true);
+    let clock = drive::ManualClock::at(0);
+    let created = haven_core::relay::fanout::Publishing {
+        fanout: &transport,
+        publisher: &publisher,
+        clock: &*clock,
+        deadline_ms: None,
+        mode: &haven_core::relay::fanout::DriveMode::Full,
+    }
+    .create_circle(
+        &founder.circle,
+        &founder.keys,
+        invited,
+        &haven_core::circle::CircleConfig::new("Fixture").with_relays(relays.clone()),
+    )
+    .await
+    .expect("the circle is created");
+    assert_eq!(
+        created.welcomes_sent,
+        invitees.len(),
+        "a founding Welcome was left owed"
+    );
+    let handed = publisher.handed();
+    for member in invitees {
+        let (welcome, _) = handed
+            .iter()
+            .find(|(event, _)| {
+                event.tags.iter().any(|tag| {
+                    tag.as_slice().first().is_some_and(|name| name == "p")
+                        && tag.as_slice().get(1) == Some(&member.pubkey_hex())
+                })
+            })
+            .expect("a welcome for each member");
+        member
+            .circle
+            .process_gift_wrapped_invitation(&member.keys, welcome)
+            .await
+            .expect("the invitation is held");
+        member
+            .circle
+            .accept_invitation(&welcome.id)
+            .await
+            .expect("the member joins");
+    }
+    created.circle.mls_group_id
+}
+
+/// A store of notes that refuses to write on demand.
+#[derive(Default)]
+pub struct BalkyNotes {
+    /// While set, what stands cannot be read: [`Self::peek`] answers as a
+    /// store that failed does, with nothing.
+    pub unreadable: std::sync::atomic::AtomicBool,
+    pub refusing: std::sync::atomic::AtomicBool,
+    pub untold: std::sync::Mutex<Vec<haven_core::nostr::mls::ChangeNote>>,
+    pub removal_targets: std::sync::Mutex<Vec<haven_core::nostr::mls::types::MemberId>>,
+}
+
+impl haven_core::nostr::mls::KeptInput for BalkyNotes {}
+
+impl haven_core::nostr::mls::CommitNotes for BalkyNotes {
+    fn set_removes_nobody(&self, _: &GroupId, _: bool) -> bool {
+        true
+    }
+
+    fn removes_nobody(&self, _: &GroupId) -> bool {
+        false
+    }
+
+    fn mark_repair(&self, _: &GroupId, _: bool) -> bool {
+        !self.refusing.load(Ordering::SeqCst)
+    }
+
+    fn repair_marked(&self, _: &GroupId) -> Option<bool> {
+        (!self.unreadable.load(Ordering::SeqCst)).then_some(false)
+    }
+
+    fn keep_dropped_removal(
+        &self,
+        _: &GroupId,
+        _: &haven_core::nostr::mls::types::MessageId,
+    ) -> bool {
+        !self.refusing.load(Ordering::SeqCst)
+    }
+
+    fn take_dropped_removal(
+        &self,
+        _: &GroupId,
+        _: &haven_core::nostr::mls::types::MessageId,
+    ) -> Option<bool> {
+        (!self.unreadable.load(Ordering::SeqCst)).then_some(false)
+    }
+
+    fn note(&self, _: &GroupId, note: haven_core::nostr::mls::ChangeNote) -> bool {
+        if self.refusing.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.untold.lock().expect("notes").push(note);
+        true
+    }
+
+    fn note_all(&self, groups: &[&GroupId], note: haven_core::nostr::mls::ChangeNote) -> bool {
+        if self.refusing.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.untold
+            .lock()
+            .expect("notes")
+            .extend(groups.iter().map(|_| note));
+        true
+    }
+
+    fn peek(&self, _: &GroupId) -> Vec<haven_core::nostr::mls::ChangeNote> {
+        if self.unreadable.load(Ordering::SeqCst) {
+            return Vec::new();
+        }
+        self.untold.lock().expect("notes").clone()
+    }
+
+    fn stands(&self, group_id: &GroupId, note: haven_core::nostr::mls::ChangeNote) -> Option<bool> {
+        (!self.unreadable.load(Ordering::SeqCst)).then(|| self.peek(group_id).contains(&note))
+    }
+
+    fn notice(&self, group_id: &GroupId) -> haven_core::nostr::mls::ChangeNotice {
+        let readable = !self.unreadable.load(Ordering::SeqCst);
+        let bits = self
+            .peek(group_id)
+            .iter()
+            .fold(0, |bits, note| bits | note.bit());
+        haven_core::nostr::mls::ChangeNotice::read(bits, readable.then_some(0))
+    }
+
+    fn acknowledge(
+        &self,
+        group_id: &GroupId,
+        notice: &haven_core::nostr::mls::ChangeNotice,
+    ) -> bool {
+        if notice.seen().is_none() {
+            return false;
+        }
+        for note in haven_core::nostr::mls::ChangeNote::of(notice.dropped_bits()) {
+            self.clear(group_id, note);
+        }
+        true
+    }
+
+    fn clear(&self, _: &GroupId, note: haven_core::nostr::mls::ChangeNote) {
+        self.untold
+            .lock()
+            .expect("notes")
+            .retain(|told| *told != note);
+        if note == haven_core::nostr::mls::ChangeNote::QueuedRemovalDropped {
+            self.removal_targets.lock().expect("targets").clear();
+        }
+    }
+
+    fn keep_removal_targets(
+        &self,
+        _: &GroupId,
+        targets: &[haven_core::nostr::mls::types::MemberId],
+        _set_aside_epoch: u64,
+        _asks: u32,
+    ) -> bool {
+        if self.refusing.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.removal_targets
+            .lock()
+            .expect("targets")
+            .extend_from_slice(targets);
+        true
+    }
+
+    fn leaving(&self, _: &GroupId) -> Option<bool> {
+        (!self.unreadable.load(Ordering::SeqCst)).then_some(false)
+    }
+
+    fn circle_stands(&self, _: &GroupId) -> Option<bool> {
+        (!self.unreadable.load(Ordering::SeqCst)).then_some(true)
+    }
+
+    /// This store keeps no route.
+    fn keep_welcome_route(&self, _: &GroupId, _: &str, _: &[String], _: Option<u64>) -> bool {
+        false
+    }
+
+    fn welcome_route(
+        &self,
+        _: &GroupId,
+        _: &str,
+    ) -> Result<Option<haven_core::nostr::mls::KeptWelcomeRoute>, haven_core::nostr::mls::RouteUnread>
+    {
+        Ok(None)
+    }
+
+    fn forget_welcome_route(&self, _: &GroupId, _: &str) {}
+
+    fn removal_targets(&self, _: &GroupId) -> Option<Vec<haven_core::nostr::mls::types::MemberId>> {
+        (!self.unreadable.load(Ordering::SeqCst))
+            .then(|| self.removal_targets.lock().expect("targets").clone())
+    }
+
+    /// Every target counts as asked for as often as it may be: this store
+    /// keeps no count.
+    fn kept_removals(&self, group_id: &GroupId) -> Option<Vec<haven_core::nostr::mls::KeptTarget>> {
+        self.removal_targets(group_id).map(|targets| {
+            targets
+                .into_iter()
+                .map(|member| haven_core::nostr::mls::KeptTarget {
+                    member,
+                    set_aside_epoch: 0,
+                    asks: haven_core::nostr::mls::MAX_REQUEUE_ATTEMPTS,
+                })
+                .collect()
+        })
+    }
+
+    fn take_out_removal_targets(
+        &self,
+        _: &GroupId,
+        members: &[haven_core::nostr::mls::types::MemberId],
+        _epoch: u64,
+        _by: Option<&haven_core::nostr::mls::types::MessageId>,
+    ) -> bool {
+        let mut targets = self.removal_targets.lock().expect("targets");
+        let before = targets.len();
+        targets.retain(|target| !members.contains(target));
+        targets.len() != before
+    }
+
+    /// This store forgets who was taken out: nothing comes back.
+    fn bring_back_removal_targets(
+        &self,
+        _: &GroupId,
+        _: &haven_core::nostr::mls::types::MessageId,
+        _: u32,
+    ) -> bool {
+        false
+    }
+
+    /// Every target of this store counts as asked for as often as it may be.
+    fn spend_removal_asks(&self, _: &GroupId, _: u32) -> bool {
+        true
+    }
+
+    fn spend_target_asks(
+        &self,
+        _: &GroupId,
+        _: &[haven_core::nostr::mls::types::MemberId],
+        _: u32,
+    ) -> bool {
+        true
+    }
+
+    fn taken_out_by(
+        &self,
+        _: &GroupId,
+        _: &haven_core::nostr::mls::types::MemberId,
+    ) -> Option<haven_core::nostr::mls::types::MessageId> {
+        None
+    }
+
+    fn forget_gone_removal_targets(&self, _: &GroupId, _before_epoch: u64) {}
+
+    fn count_removal_asks(
+        &self,
+        _: &GroupId,
+        _: &[haven_core::nostr::mls::types::MemberId],
+    ) -> Option<Vec<(haven_core::nostr::mls::types::MemberId, u32)>> {
+        None
+    }
+
+    fn refund_removal_asks(
+        &self,
+        _: &GroupId,
+        _: &[(haven_core::nostr::mls::types::MemberId, u32)],
+    ) {
+    }
+
+    fn settle_removal(&self, _: &GroupId) {
+        if !self.refusing.load(Ordering::SeqCst) {
+            self.untold
+                .lock()
+                .expect("notes")
+                .retain(|told| *told != haven_core::nostr::mls::ChangeNote::QueuedRemovalDropped);
+        }
+    }
+
+    fn restage_wait(&self, _: &GroupId) -> Option<haven_core::nostr::mls::RestageWait> {
+        None
+    }
+
+    fn set_restage_wait(&self, _: &GroupId, _: Option<haven_core::nostr::mls::RestageWait>) {}
 }
 
 // ── Self-tests for the log-anonymity capture helpers above ──────────────────

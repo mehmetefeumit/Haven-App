@@ -39,11 +39,15 @@ haven-logscan = { path = "../logscan" }
 # haven-core/Cargo.lock resolves. A different 0.44.x would split the `nostr`
 # type graph from MDK's pinned rev, and this is the one crate where haven-core's
 # `nostr` types and the relay's must be the same universe.
-nostr = { version = "=0.44.7", features = ["std", "nip44"] }
+nostr = { version = "=0.44.8", features = ["std", "nip44"] }
 nostr-sdk = { version = "=0.44.1", default-features = false, features = ["nip44", "nip59"] }
 nostr-relay-builder = "=0.44.1"
 nostr-database = "=0.44.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync"] }
+# The product driver's transport trait (`FanoutSend`) is an `async_trait`, and
+# the rig wraps it to read what the driver sent. Already resolved through
+# haven-core at the same version, so this adds ZERO crates.
+async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
 tempfile = "3.10"
@@ -61,34 +65,40 @@ toml = "0.8"
 # as a literal-plus-grep would restate the constant it is measuring (decision
 # 0.36/0.37). Pinned to the rev haven-core pins, byte for byte. The one-universe
 # hazard does not arise: this adds ZERO crates (the engine already resolves
-# through haven-core), and `rust-check.yml`'s `soak-tooling` step asserts one
-# version, one source and equality with haven-core's over `cgka-engine` and
-# its neighbours. Nothing here may format a value of its (Rule 15,
+# through haven-core), and `check_lockfile_universe.sh` holds this lockfile to
+# haven-core's (version, source) for `cgka-engine` and its neighbours, on the
+# rev in `scripts/ci/mdk_pins.env`. Nothing here may format a value of its (Rule 15,
 # `check_soak_test_only.sh`'s `FOREIGN_RE`): the caps are matched and compared,
 # never rendered.
-cgka-engine = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
+cgka-engine = { git = "https://github.com/marmot-protocol/mdk", rev = "fcc85edd8dbd07c8293c899ee52230f72c54c897" }
+# The routing component's encoder, for S24 alone: the arm commits a routing
+# update onto another circle's id the way another client's admin can, and no
+# haven-core surface builds one (Haven never would). Pinned as `cgka-engine` is
+# and for the same reasons; ZERO new crates, the same universe guard.
+cgka-traits = { git = "https://github.com/marmot-protocol/mdk", rev = "fcc85edd8dbd07c8293c899ee52230f72c54c897" }
 # `OpenMLS`, for S12's `kp-expired-rejected` and nothing else: the arm mints an
 # expired KeyPackage in the device's own production shape (`KeyPackageBuilder`,
 # `Lifetime`), which no haven-core or engine surface exposes. The provider and
 # the basic-credential signer come with it, because `KeyPackageBuilder::build`
-# takes both. Pinned exactly as haven-core pins them (same version, same
-# `extensions-draft-08` feature), so this adds ZERO crates. `rust-check.yml`'s
-# `soak-tooling` step asserts that `openmls`, `openmls_rust_crypto`,
-# `openmls_basic_credential` and `openmls_traits` each resolve to exactly one
-# version here, equal to the one in haven-core's lock, so a `cargo update` in
-# this crate alone cannot drift a sibling. The same
-# rule as the engine's caps: a value of these crates is matched, never
-# formatted.
-openmls = { version = "~0.8.1", default-features = false, features = [
-  "extensions-draft-08",
-] }
-openmls_rust_crypto = "~0.5"
-openmls_basic_credential = "0.5"
+# takes both. Pinned to the exact fork rev and features MDK's workspace pins
+# (`erskingardner/openmls@59e7d3b…`, `extensions-draft`), so this adds ZERO
+# crates. `check_lockfile_universe.sh` requires every openmls crate to resolve
+# to one (version, source) here, equal to haven-core's, so a `cargo update` in
+# this crate alone cannot drift a sibling. The same rule as the engine's caps:
+# a value of these crates is matched, never formatted.
+openmls = { git = "https://github.com/erskingardner/openmls.git", rev = "59e7d3b27a7e95237879dd5478de1fd90eff7ada", features = ["extensions-draft"] }
+openmls_rust_crypto = { git = "https://github.com/erskingardner/openmls.git", rev = "59e7d3b27a7e95237879dd5478de1fd90eff7ada" }
+openmls_basic_credential = { git = "https://github.com/erskingardner/openmls.git", rev = "59e7d3b27a7e95237879dd5478de1fd90eff7ada" }
 #
 # NOT here, deliberately: `rusqlite`, and `transport-nostr-peeler`, EVER:
 # `check_no_exporter_label_override.sh` roots at `haven-core/src` +
 # `haven/rust_builder/src` and would not see a Rule-11 exporter-label downgrade
 # written here. Adding it means extending that guard in the same change.
+
+# MDK's SQLCipher 4.17 source (tracked exception T-LIBSQLITE-PATCH), repeated
+# from haven-core: only a root's `[patch]` applies.
+[patch.crates-io]
+libsqlite3-sys = { git = "https://github.com/rusqlite/rusqlite.git", rev = "5ae7fdf83085c595fd54f977b3a56ccacabaf16b" }
 
 [profile.soak]
 inherits = "release"

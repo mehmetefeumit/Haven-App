@@ -16,12 +16,13 @@
 //! account becomes **silently uninvitable** with no error anywhere on the
 //! publishing device.
 //!
-//! The single most important test here is
-//! [`heal_does_not_reset_the_rotation_clock`]. Haven's heal path republishes
-//! CACHED bytes under a FRESH `created_at`; the reference app ages `KeyPackages`
-//! off exactly that event timestamp. Had Haven copied it, one healed flaky relay
-//! per week would keep resetting the timer while the real `not_after` ticked
-//! down to zero.
+//! A heal republishes the tracked package's signed event byte for byte
+//! ([`a_heal_republishes_the_tracked_event_and_the_rotation_clock_does_not_move`]),
+//! and the rotation clock is read off the package, never off an event stamp:
+//! moving a package into another slot signs a NEW event for OLD material
+//! ([`a_repoint_does_not_reset_the_rotation_clock`]). The reference app ages
+//! `KeyPackages` off the event timestamp; had Haven copied it, a re-signed
+//! event would push the rotation out while the real `not_after` ticked down.
 
 mod helpers;
 
@@ -30,8 +31,9 @@ use std::time::Duration;
 use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::maintenance::{
     build_kp_maintenance_events, build_kp_maintenance_events_reusing, decide_kp_maintenance,
-    monotonic_kp_created_at, read_kp_lifetime, KeyPackageLifetime, KpMaintenanceDecision,
-    RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot, TrackedKpLifetime,
+    kp_event_is_pre_migration, monotonic_kp_created_at, now_secs, read_kp_lifetime,
+    KeyPackageLifetime, KpMaintenanceDecision, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
+    TrackedKpLifetime, TrackedKpSlot,
 };
 use haven_core::relay::RelayManager;
 use nostr::{Keys, Kind};
@@ -103,6 +105,8 @@ async fn kp_snapshot(
                 .map(|ev| RelayKpEntry {
                     d_tag: kp_d_tag(ev),
                     event_id: ev.id.to_hex(),
+                    created_at: ev.created_at.as_secs(),
+                    pre_migration: false,
                 })
                 .collect(),
         });
@@ -129,6 +133,37 @@ async fn fetch_slot(
         .collect();
     events.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
     events
+}
+
+/// Reads every kind-30443 the relays serve for `author` until `want` holds,
+/// and fails loudly if it never does.
+///
+/// Not a sleep: each attempt is a real REQ → EOSE round trip, and an OK-acked
+/// write is already stored, so the first attempt normally suffices.
+async fn served_until(
+    mgr: &RelayManager,
+    author: nostr::PublicKey,
+    relays: &[String],
+    what: &str,
+    want: impl Fn(&[nostr::Event]) -> bool,
+) -> Vec<nostr::Event> {
+    for _ in 0..25 {
+        let filter = nostr::Filter::new()
+            .kind(Kind::Custom(30443))
+            .author(author)
+            .limit(64);
+        let served: Vec<nostr::Event> = mgr
+            .fetch_events_per_relay(filter, relays)
+            .await
+            .unwrap()
+            .into_iter()
+            .flat_map(|o| o.events)
+            .collect();
+        if want(&served) {
+            return served;
+        }
+    }
+    panic!("the relay never reached the expected state: {what}");
 }
 
 /// Waits for the relay to have persisted a write before the next probe.
@@ -187,7 +222,7 @@ async fn past_threshold_package_is_reminted_into_the_same_slot() {
     let snapshot = kp_snapshot(&mgr, dev.keys.public_key(), &own).await;
     let decision = decide_kp_maintenance(
         &snapshot,
-        Some(&slot_d),
+        Some(tracked(&slot_d)),
         TrackedKpLifetime::Known(lifetime),
         lifetime.rotate_at(),
     );
@@ -273,20 +308,11 @@ async fn past_threshold_package_is_reminted_into_the_same_slot() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. THE test: a heal must not reset the rotation clock.
+// 2. A heal is the same event, and no new event moves the rotation clock.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn heal_does_not_reset_the_rotation_clock() {
-    // The trap this whole design exists to avoid.
-    //
-    // The reference app rotates on `now - event.created_at > 30 days`, which is
-    // honest FOR IT because every publish there mints fresh material. Haven's
-    // heal path republishes CACHED bytes under a FRESH `created_at`. Keying
-    // rotation on the event timestamp would therefore let a device that heals a
-    // flaky relay every few days push its rotation deadline out indefinitely,
-    // while `not_after` — the only thing an inviter actually checks — kept
-    // counting down to a hard cliff.
+async fn a_heal_republishes_the_tracked_event_and_the_rotation_clock_does_not_move() {
     let _ = haven_core::relay::allow_ws_loopback_for_test();
     let relay_a = MockRelay::run().await.expect("relay a");
     let relay_b = MockRelay::run().await.expect("relay b");
@@ -308,92 +334,288 @@ async fn heal_does_not_reset_the_rotation_clock() {
     .await
     .expect("first publish");
     let slot_d = first.d_tag.clone();
-    let cached_bytes = first.key_package.bytes().to_vec();
     mgr.publish_event(&first.event, std::slice::from_ref(&url_a))
         .await
         .expect("publish to A");
+    assert!(dev
+        .session
+        .promote_key_package(&first.event.id)
+        .await
+        .expect("promote"));
     settle().await;
 
-    let lifetime_before = read_kp_lifetime(&cached_bytes);
-    let TrackedKpLifetime::Known(before) = lifetime_before else {
+    let tracked_package = dev
+        .session
+        .tracked_key_package()
+        .await
+        .expect("read the record")
+        .expect("a package is tracked");
+    let lifetime = read_kp_lifetime(&tracked_package.package);
+    let TrackedKpLifetime::Known(window) = lifetime else {
         panic!("expected a readable lifetime");
     };
+    let first_id = first.event.id.to_hex();
+    let slot = || TrackedKpSlot {
+        d_tag: &slot_d,
+        event_id: &first_id,
+        created_at: first.event.created_at.as_secs(),
+        adopted: false,
+        replacement_owed: false,
+    };
 
-    // HEAL: B does not serve the slot, so the decision republishes the CACHED
-    // bytes there, stamped with a brand-new `created_at`.
+    // HEAL: B does not serve the slot, so the decision targets B alone.
     let snapshot = kp_snapshot(&mgr, dev.keys.public_key(), &own).await;
     let decision = decide_kp_maintenance(
         &snapshot,
-        Some(&slot_d),
-        lifetime_before,
+        Some(slot()),
+        lifetime,
         // A clock comfortably short of the threshold, so this really is a heal.
-        before.not_before + 1,
+        window.not_before + 1,
     );
-    let KpMaintenanceDecision::Republish {
-        existing_d,
-        targets,
-    } = decision
-    else {
+    let KpMaintenanceDecision::Republish { targets, .. } = decision else {
         panic!("a fresh package missing from one relay must HEAL: {decision:?}");
     };
     assert_eq!(targets, vec![url_b.clone()], "heal B only");
 
-    let healed = build_kp_maintenance_events_reusing(
-        &dev.keys,
-        &cached_bytes,
-        &targets,
-        existing_d.as_deref().unwrap(),
-        Some(i64::try_from(first.event.created_at.as_secs()).unwrap()),
-    )
-    .expect("heal");
-    mgr.publish_event(&healed.event, &targets)
+    let frozen = tracked_package
+        .published
+        .expect("the acknowledged event is tracked");
+    mgr.publish_event(&frozen, &targets)
         .await
         .expect("publish heal");
     settle().await;
 
-    // The heal DID move the event timestamp forward…
-    assert!(
-        healed.event.created_at.as_secs() > first.event.created_at.as_secs(),
-        "precondition: the heal must republish under a strictly newer \
-         `created_at`, or this test proves nothing"
-    );
-    // …and republished byte-identical material.
-    assert_eq!(
-        healed.key_package.bytes(),
-        cached_bytes.as_slice(),
-        "a heal must re-advertise the SAME package, not mint a new one"
-    );
+    // B now serves the very event A serves: one signature, one `created_at`.
+    for url in [&url_a, &url_b] {
+        let served = fetch_slot(
+            &mgr,
+            dev.keys.public_key(),
+            std::slice::from_ref(url),
+            &slot_d,
+        )
+        .await;
+        assert_eq!(served.len(), 1);
+        assert_eq!(
+            nostr::JsonUtil::as_json(&served[0]),
+            nostr::JsonUtil::as_json(&first.event),
+            "a heal must republish the signed event byte for byte"
+        );
+    }
 
-    // THE ASSERTION: the rotation clock did not move.
-    let lifetime_after = read_kp_lifetime(healed.key_package.bytes());
+    // Healed everywhere: nothing to do, until the package's own threshold.
+    let healed = kp_snapshot(&mgr, dev.keys.public_key(), &own).await;
     assert_eq!(
-        lifetime_after, lifetime_before,
-        "the heal must NOT have moved the package's lifetime — if this fails, \
-         the rotation clock is being read from the event and a heal loop can \
-         defer rotation past `not_after` forever"
+        decide_kp_maintenance(&healed, Some(slot()), lifetime, window.not_before + 1),
+        KpMaintenanceDecision::NoOp
     );
-    let TrackedKpLifetime::Known(after) = lifetime_after else {
-        unreachable!("equality with a Known value was just asserted")
+    let at_threshold = decide_kp_maintenance(&healed, Some(slot()), lifetime, window.rotate_at());
+    assert!(
+        matches!(at_threshold, KpMaintenanceDecision::Rotate { .. }),
+        "the package must rotate at its own threshold — got {at_threshold:?}"
+    );
+}
+
+/// A package moved into another slot is the same material under a NEW signed
+/// event: the event's stamp is fresh, the package's lifetime is not, and the
+/// rotation instant is read from the package.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repoint_does_not_reset_the_rotation_clock() {
+    let dev = Device::new("kprot_repoint_clock");
+    let own = vec!["wss://own.example.com".to_string()];
+    let first = build_kp_maintenance_events(&dev.session, &dev.keys, &own, None, Some(1))
+        .await
+        .expect("first publish");
+    let before = read_kp_lifetime(first.key_package.bytes());
+    let TrackedKpLifetime::Known(window) = before else {
+        panic!("expected a readable lifetime");
     };
-    assert_eq!(
-        after.rotate_at(),
-        before.rotate_at(),
-        "the rotation instant must be identical before and after the heal"
-    );
 
-    // And the consequence: at the ORIGINAL rotation instant the package is due,
-    // no matter how many heals refreshed its `created_at` in between.
-    let post_heal_snapshot = kp_snapshot(&mgr, dev.keys.public_key(), &own).await;
-    let post_heal = decide_kp_maintenance(
-        &post_heal_snapshot,
-        Some(&slot_d),
-        lifetime_after,
-        before.rotate_at(),
+    let moved = build_kp_maintenance_events_reusing(
+        &dev.keys,
+        first.key_package.bytes(),
+        &own,
+        &"b".repeat(64),
+        Some(i64::try_from(first.event.created_at.as_secs()).unwrap()),
+    )
+    .expect("re-sign the same package");
+    assert!(
+        moved.event.created_at.as_secs() > first.event.created_at.as_secs()
+            && moved.event.id != first.event.id,
+        "precondition: a NEW event with a strictly newer `created_at`"
+    );
+    assert_eq!(moved.key_package.bytes(), first.key_package.bytes());
+
+    let after = read_kp_lifetime(moved.key_package.bytes());
+    assert_eq!(
+        after, before,
+        "a new event for the same package must not move its lifetime"
+    );
+    let snapshot = RelayKpSnapshot {
+        responders: vec![RelayKpPerRelay {
+            relay_url: own[0].clone(),
+            canonical: vec![RelayKpEntry {
+                d_tag: moved.d_tag.clone(),
+                event_id: moved.event.id.to_hex(),
+                created_at: moved.event.created_at.as_secs(),
+                pre_migration: false,
+            }],
+        }],
+    };
+    let due = decide_kp_maintenance(
+        &snapshot,
+        Some(tracked(&moved.d_tag)),
+        after,
+        window.rotate_at(),
     );
     assert!(
-        matches!(post_heal, KpMaintenanceDecision::Rotate { .. }),
-        "after a heal, the package must STILL rotate at its original threshold \
-         — got {post_heal:?}"
+        matches!(due, KpMaintenanceDecision::Rotate { .. }),
+        "the package rotates at its ORIGINAL threshold — got {due:?}"
+    );
+}
+
+/// After the storage reset the account's own pre-reset package is still on
+/// its relays, in its old slot. The slot is adopted, recognised as this
+/// account's own by the pre-migration proof, and refilled in place: one slot,
+/// now serving a Current package (`transports/nostr.md:310-314`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines)]
+async fn a_reset_account_replaces_its_old_slot_in_place() {
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let own = vec![url.clone()];
+    let dev = Device::new("kprot_reset_slot");
+    let mgr = RelayManager::new();
+
+    let old_slot = "c".repeat(64);
+    let pre_reset = nostr::EventBuilder::new(
+        Kind::Custom(30443),
+        nostr::base64::Engine::encode(
+            &nostr::base64::engine::general_purpose::STANDARD,
+            helpers::twin_key_packages::pre_migration(&dev.keys),
+        ),
+    )
+    .tags([nostr::Tag::identifier(old_slot.clone())])
+    .custom_created_at(nostr::Timestamp::from_secs(1_700_000_000))
+    .sign_with_keys(&dev.keys)
+    .expect("sign");
+    mgr.publish_event(&pre_reset, &own)
+        .await
+        .expect("the pre-reset package is on the relay");
+    served_until(
+        &mgr,
+        dev.keys.public_key(),
+        &own,
+        "the pre-reset package",
+        |served| served.iter().any(|e| e.id == pre_reset.id),
+    )
+    .await;
+
+    // The FFI's snapshot, with the pre-migration reading it takes per event.
+    let probe = || async {
+        let filter = nostr::Filter::new()
+            .kind(Kind::Custom(30443))
+            .author(dev.keys.public_key())
+            .limit(64);
+        let per_relay = mgr.fetch_events_per_relay(filter, &own).await.unwrap();
+        RelayKpSnapshot {
+            responders: per_relay
+                .iter()
+                .filter(|o| o.responded)
+                .map(|o| RelayKpPerRelay {
+                    relay_url: o.relay_url.clone(),
+                    canonical: o
+                        .events
+                        .iter()
+                        .map(|ev| RelayKpEntry {
+                            d_tag: kp_d_tag(ev),
+                            event_id: ev.id.to_hex(),
+                            created_at: ev.created_at.as_secs(),
+                            pre_migration: kp_event_is_pre_migration(ev),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    };
+
+    // Tick 1: nothing tracked, the relay serves a slot: adopt it.
+    let KpMaintenanceDecision::SeedD { d } =
+        decide_kp_maintenance(&probe().await, None, TrackedKpLifetime::Absent, now_secs())
+    else {
+        panic!("a served slot is adopted before anything is published");
+    };
+    assert_eq!(d, old_slot);
+    dev.session
+        .adopt_key_package_slot(&d, now_secs())
+        .await
+        .expect("adopt");
+
+    // Tick 2: the adopted slot holds only this account's pre-reset package.
+    let adopted = dev
+        .session
+        .tracked_key_package()
+        .await
+        .expect("read the record")
+        .expect("the slot is tracked");
+    assert!(adopted.adopted && adopted.package.is_empty());
+    let decision = decide_kp_maintenance(
+        &probe().await,
+        Some(TrackedKpSlot {
+            d_tag: &adopted.slot,
+            event_id: "",
+            created_at: adopted.created_at.unwrap_or(0),
+            adopted: adopted.adopted,
+            replacement_owed: adopted.replacement_owed,
+        }),
+        read_kp_lifetime(&adopted.package),
+        now_secs(),
+    );
+    assert_eq!(
+        decision,
+        KpMaintenanceDecision::Republish {
+            existing_d: Some(old_slot.clone()),
+            targets: own.clone(),
+        }
+    );
+    let replacement = build_kp_maintenance_events(
+        &dev.session,
+        &dev.keys,
+        &own,
+        Some(&old_slot),
+        adopted.created_at.and_then(|at| i64::try_from(at).ok()),
+    )
+    .await
+    .expect("mint into the adopted slot");
+    mgr.publish_event(&replacement.event, &own)
+        .await
+        .expect("publish the replacement");
+    assert!(dev
+        .session
+        .promote_key_package(&replacement.event.id)
+        .await
+        .expect("promote"));
+
+    let served = served_until(
+        &mgr,
+        dev.keys.public_key(),
+        &own,
+        "the replacement, alone",
+        |served| served.len() == 1 && served[0].id == replacement.event.id,
+    )
+    .await;
+    assert_eq!(served.len(), 1, "one slot, one event: no second slot");
+    assert_eq!(served[0].id, replacement.event.id);
+    assert_eq!(kp_d_tag(&served[0]), old_slot);
+    assert!(!kp_event_is_pre_migration(&served[0]));
+    assert!(
+        !dev.session
+            .tracked_key_package()
+            .await
+            .expect("read the record")
+            .expect("tracked")
+            .adopted,
+        "the slot is this device's own now"
     );
 }
 
@@ -630,7 +852,7 @@ async fn a_fresh_package_is_not_reminted_and_its_bytes_are_untouched() {
         let now = l.not_before + (l.rotate_at() - l.not_before) * i / 10;
         let snap = kp_snapshot(&mgr, dev.keys.public_key(), &own).await;
         assert_eq!(
-            decide_kp_maintenance(&snap, Some(&slot_d), lifetime, now),
+            decide_kp_maintenance(&snap, Some(tracked(&slot_d)), lifetime, now),
             KpMaintenanceDecision::NoOp,
             "tick {i} (at {now}, threshold {}) must not rotate",
             l.rotate_at()
@@ -693,7 +915,7 @@ async fn an_account_published_before_the_feature_rotates_on_its_next_check() {
     let day_70 = l.not_before + 70 * 86_400;
     assert!(
         matches!(
-            decide_kp_maintenance(&snap, Some(&slot_d), lifetime, day_70),
+            decide_kp_maintenance(&snap, Some(tracked(&slot_d)), lifetime, day_70),
             KpMaintenanceDecision::Rotate { .. }
         ),
         "a package minted 70 days ago must rotate immediately"
@@ -703,7 +925,7 @@ async fn an_account_published_before_the_feature_rotates_on_its_next_check() {
     // existing install into a simultaneous republish.
     let day_10 = l.not_before + 10 * 86_400;
     assert_eq!(
-        decide_kp_maintenance(&snap, Some(&slot_d), lifetime, day_10),
+        decide_kp_maintenance(&snap, Some(tracked(&slot_d)), lifetime, day_10),
         KpMaintenanceDecision::NoOp,
         "a young package must not be churned just because the check is new"
     );
@@ -747,7 +969,12 @@ async fn past_threshold_plus_partial_drop_remints_once_to_every_relay() {
     let snap = kp_snapshot(&mgr, dev.keys.public_key(), &own).await;
     assert_eq!(snap.responders.len(), 2, "both relays must respond");
 
-    let decision = decide_kp_maintenance(&snap, Some(&slot_d), TrackedKpLifetime::Known(due), now);
+    let decision = decide_kp_maintenance(
+        &snap,
+        Some(tracked(&slot_d)),
+        TrackedKpLifetime::Known(due),
+        now,
+    );
     let KpMaintenanceDecision::Rotate { targets, .. } = decision else {
         panic!(
             "past-threshold must dominate the heal branch — healing first would \
@@ -869,7 +1096,7 @@ async fn a_tampered_key_package_reads_as_unreadable_and_forces_a_rotation() {
 /// engine, because `delete_key_package` is idempotent and silent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deleting_an_init_key_makes_welcomes_to_that_package_undecryptable() {
-    use haven_core::nostr::mls::types::{LocationGroupConfig, PublishWork};
+    use haven_core::nostr::mls::types::{LocationGroupConfig, PublishWork, WelcomeAcceptance};
 
     let alice = Device::new("kprot_oracle_alice");
     let bob = Device::new("kprot_oracle_bob");
@@ -898,11 +1125,7 @@ async fn deleting_an_init_key_makes_welcomes_to_that_package_undecryptable() {
                 .expect("create group");
             let mut welcome = None;
             for work in &created.effects.publish {
-                if let PublishWork::GroupCreated { welcomes, pending } = work {
-                    alice_session
-                        .confirm_published(*pending)
-                        .await
-                        .expect("confirm");
+                if let PublishWork::FoundingGroupCreated { welcomes } = work {
                     welcome = Some(
                         SessionManager::transport_message_to_event(&welcomes[0])
                             .expect("welcome event"),
@@ -917,10 +1140,16 @@ async fn deleting_an_init_key_makes_welcomes_to_that_package_undecryptable() {
     let welcome_after = make_welcome(bob_kp.clone(), "After").await;
 
     // While the init key lives, Bob can join.
-    bob.session
-        .accept_welcome(&welcome_before)
-        .await
-        .expect("bob must be able to join while his init key lives");
+    assert!(
+        matches!(
+            bob.session
+                .accept_welcome(&welcome_before)
+                .await
+                .expect("bob must be able to join while his init key lives"),
+            WelcomeAcceptance::Ingested(_)
+        ),
+        "a live init key joins"
+    );
 
     // Delete the init key — exactly what the `not_after` bound does.
     bob.session
@@ -932,14 +1161,16 @@ async fn deleting_an_init_key_makes_welcomes_to_that_package_undecryptable() {
     // is now undecryptable. This is the deliberate confidentiality-over-
     // availability trade the spec names, and the oracle the publish-before-
     // delete test relies on.
-    let err = bob.session.accept_welcome(&welcome_after).await.expect_err(
-        "after the init key is deleted, a Welcome encrypted to that \
-             KeyPackage MUST no longer be processable — if this succeeds, \
-             `delete_key_package` is not actually destroying the private half \
-             and the `not_after` bound is cosmetic",
-    );
+    let outcome = bob.session.accept_welcome(&welcome_after).await;
     // Redaction check while we are here (Security Rules 6/8).
-    let text = format!("{err:?}");
+    let text = format!("{outcome:?}");
+    assert!(
+        matches!(outcome, Ok(WelcomeAcceptance::NeedsNewInvite)),
+        "after the init key is deleted, a Welcome encrypted to that \
+         KeyPackage MUST no longer be processable — if this joins, \
+         `delete_key_package` is not actually destroying the private half \
+         and the `not_after` bound is cosmetic: {text}"
+    );
     assert!(
         !text.contains(&hex::encode(bob_kp.bytes())),
         "an MLS error must never echo raw KeyPackage bytes"
@@ -993,4 +1224,16 @@ async fn a_first_publish_mints_a_binding_shaped_random_slot_id() {
         d,
         "each fresh slot must be independently random, never derived"
     );
+}
+
+/// A tracked slot whose last event any served event in the slot is at least
+/// as new as: the slot-presence view these tests pin.
+const fn tracked(d: &str) -> TrackedKpSlot<'_> {
+    TrackedKpSlot {
+        d_tag: d,
+        event_id: "",
+        created_at: 0,
+        adopted: false,
+        replacement_owed: false,
+    }
 }

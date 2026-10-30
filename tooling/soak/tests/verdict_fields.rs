@@ -139,8 +139,14 @@ fn every_finding() -> Vec<Finding> {
         Finding::BranchDiverged { circle },
         Finding::ConvergenceGated { device, circle },
         Finding::ProposalUncommitted { device, circle },
-        Finding::RemovalOwed { device },
-        Finding::RemovalOrphaned { device },
+        Finding::CommitPending { device },
+        Finding::HeldCircleSealed { device, circle },
+        Finding::CursorHeld { device, circle },
+        Finding::CircleTrafficCrossed { circle },
+        Finding::UnaskedHandshake { circle },
+        Finding::SilentRelayStalled { device, circle },
+        Finding::HeldEventLost { device, circle },
+        Finding::ResubscribeUnbounded { device },
         Finding::SendRefused {
             device,
             circle,
@@ -163,7 +169,7 @@ fn every_finding() -> Vec<Finding> {
 }
 
 /// The number of `Finding` variants, pinned.
-const FINDING_VARIANTS: usize = 27;
+const FINDING_VARIANTS: usize = 33;
 
 /// A distinct ordinal per `Finding` variant.
 ///
@@ -185,8 +191,7 @@ const fn variant_index(finding: &Finding) -> usize {
         Finding::BranchDiverged { .. } => 8,
         Finding::ConvergenceGated { .. } => 9,
         Finding::ProposalUncommitted { .. } => 10,
-        Finding::RemovalOwed { .. } => 11,
-        Finding::RemovalOrphaned { .. } => 12,
+        Finding::CommitPending { .. } => 11,
         Finding::SendRefused { .. } => 13,
         Finding::RetentionEdgeRefused { .. } => 14,
         Finding::RetentionWindowOverrun { .. } => 15,
@@ -201,6 +206,13 @@ const fn variant_index(finding: &Finding) -> usize {
         Finding::RemovalProbeShortCircuited { .. } => 24,
         Finding::RemovalProbeInconclusive { .. } => 25,
         Finding::RemovalProbesIncomplete => 26,
+        Finding::HeldCircleSealed { .. } => 27,
+        Finding::CircleTrafficCrossed { .. } => 28,
+        Finding::SilentRelayStalled { .. } => 29,
+        Finding::HeldEventLost { .. } => 30,
+        Finding::ResubscribeUnbounded { .. } => 31,
+        Finding::UnaskedHandshake { .. } => 12,
+        Finding::CursorHeld { .. } => 32,
     }
 }
 

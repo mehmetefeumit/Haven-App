@@ -7,6 +7,8 @@
 //!
 //! - **WSS only**: Plaintext ws:// connections are rejected
 //! - **Direct connections**: Uses nostr-sdk Client for relay communication
+//! - **Verified events**: every relay event's id and signature are checked
+//!   before anything acts on it (`verified`), on the one client constructor
 //!
 //! # Architecture
 //!
@@ -23,23 +25,24 @@
 //! Nostr Relays (WSS)
 //! ```
 
-pub mod auto_commit;
 pub mod catchup;
 pub mod clock_skew;
 pub mod cursor;
 pub mod discovery;
 mod error;
+pub mod fanout;
 pub mod live_sync;
 pub mod maintenance;
 mod manager;
+pub mod negentropy;
 pub mod publishers;
+pub mod retick;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod scripted_relay;
 mod types;
 pub mod url_norm;
+mod verified;
 
-pub use auto_commit::{
-    park_or_rollback_receive_publish_work, publish_then_resolve, resolve_receive_publish_work,
-    resolve_receive_publish_work_with_policy, AutoCommitPublisher, ReceiveAutoCommitPolicy,
-};
 pub use catchup::{CatchupOutcome, ReceiveOnlyOutcome};
 pub use clock_skew::{
     classify_publish_outcome, classify_relay_rejection, publish_retry_is_hopeless,
@@ -53,7 +56,11 @@ pub use cursor::{
 };
 pub use discovery::{discovery_relays, set_discovery_relays_for_test, PRODUCTION_DISCOVERY_RELAYS};
 pub use error::{InvalidUrlReason, RelayError, RelayResult};
-pub use manager::{allow_ws_loopback_for_test, ws_loopback_allowed_for_test, RelayManager};
+pub use manager::{
+    allow_ws_loopback_for_test, ws_loopback_allowed_for_test, FanoutTransport, Nip65Relays,
+    RelayManager,
+};
+pub(crate) use manager::{foreign_relay_dialable, retain_dialable_foreign_relays};
 pub use publishers::{
     build_nip09_deletion, build_nip65_relay_list_event, build_relay_list_event,
     build_unpublish_event, dedup_relay_targets, superseding_created_at, PublisherError,

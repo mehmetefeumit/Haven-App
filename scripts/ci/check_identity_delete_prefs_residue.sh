@@ -95,7 +95,6 @@ declare -A KEEP_LIST=(
   [kLocaleKey]="device preference (haven.locale.tag), not identity or circle data"
   [kThemeModeKey]="device preference (haven.theme.mode)"
   [kMapStyleKey]="device preference (haven.map.style)"
-  [kLegacyCutoverDoneKey]="one-time migration marker (haven.security.legacy_cutover_done_v1); re-running its idempotent destroy after a delete is harmless — see LegacyCutoverService"
   [_kBgCatchupEnabledMirrorKey]="WorkManager capability mirror (background_catchup_enabled) — a device/OS capability flag, not identity or circle data"
 )
 

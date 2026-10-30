@@ -12,6 +12,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
@@ -22,6 +23,7 @@ import 'package:haven/src/providers/join_watcher_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/member_directory_service.dart';
@@ -33,7 +35,9 @@ import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/circles/member_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../helpers/accessibility_announcements.dart';
 import '../../helpers/localized_app_harness.dart';
+import '../../helpers/log_capture.dart';
 import '../../mocks/mock_circle_service.dart';
 import '../../mocks/mock_member_directory_service.dart';
 import '../../mocks/mock_profile_service.dart';
@@ -104,14 +108,6 @@ MemberDirectory _aliceDirectory() {
 KeyPackageData _makeKp(String pubkeyHex) => KeyPackageData(
   pubkey: 'npub1newmember',
   eventJson: jsonEncode({'kind': 30443, 'pubkey': pubkeyHex}),
-  relays: const ['wss://relay.example.com'],
-);
-
-/// Builds a [KeyPackageData] carrying the deprecated pre-Dark-Matter kind
-/// (443) — the peer is on an old Haven build (DM-4c, plan §6 F11).
-KeyPackageData _makeLegacyKp(String pubkeyHex) => KeyPackageData(
-  pubkey: 'npub1newmember',
-  eventJson: jsonEncode({'kind': 443, 'pubkey': pubkeyHex}),
   relays: const ['wss://relay.example.com'],
 );
 
@@ -433,7 +429,8 @@ void main() {
         );
         final mockCircle = MockCircleService()
           ..addMemberResult = const AddMemberResult(
-            welcomesSent: 1,
+            delivery: ChangeDelivery.applied,
+            welcomesDelivered: 1,
             welcomesTotal: 1,
           );
         final circle = _makeCircle();
@@ -499,6 +496,9 @@ void main() {
         await tester.pump(Duration.zero);
         await tester.pump(Duration.zero);
 
+        // The package was chosen for THIS circle, not for a new one.
+        expect(mockRelay.fetchKeyPackageTargets, [circle.mlsGroupId]);
+
         // addMember was called exactly once with the correct group id.
         expect(mockCircle.addMemberCalls, hasLength(1));
         expect(
@@ -513,7 +513,11 @@ void main() {
         );
 
         // Success snackbar names the circle.
-        expect(find.text('Invitation sent to Test Circle'), findsOneWidget);
+        // Isolated, so a right-to-left circle name cannot reorder it.
+        expect(
+          find.text('Invitation sent to \u2068Test Circle\u2069'),
+          findsOneWidget,
+        );
 
         // joinWatcher must have entered adminWaitingForJoin synchronously
         // (startAdminWatch updates state immediately, before any timer fires).
@@ -535,15 +539,22 @@ void main() {
     // 6. Partial delivery
     // -----------------------------------------------------------------------
     testWidgets(
-      '6. partial delivery: snackbar reports the pending-delivery count',
+      '6. a re-invite owed: the snack and a screen reader name the circle '
+      'and the one remedy, and promise no later delivery',
       (tester) async {
+        final announcements = captureAccessibilityAnnouncements(tester);
+        // Before: any Welcome no relay acked in the call. Now the driver sends
+        // a Welcome again until a relay takes it; the remedy is offered only
+        // when the invite was applied with no Welcome left to deliver.
         final mockRelay = MockRelayService(
           keyPackageResult: _makeKp(_newMemberHex),
         );
         final mockCircle = MockCircleService()
           ..addMemberResult = const AddMemberResult(
-            welcomesSent: 0,
+            delivery: ChangeDelivery.applied,
+            welcomesDelivered: 0,
             welcomesTotal: 1,
+            reinviteOwed: true,
           );
         final circle = _makeCircle();
 
@@ -597,14 +608,307 @@ void main() {
         await tester.pump(Duration.zero);
         await tester.pump(Duration.zero);
 
+        final l10n = AppLocalizations.of(tester.element(find.text('Open')));
         expect(
-          find.text(
-            'Invitations sent (0 of 1). Delivery pending for the rest.',
-          ),
+          find.text(l10n.addMemberReinviteNeeded('\u2068Test Circle\u2069')),
           findsOneWidget,
+          reason: 'it names the circle, and offers the one remedy that works',
         );
+        expect(
+          announcements,
+          contains(l10n.addMemberReinviteNeeded('Test Circle')),
+          reason: 'a SnackBar is not a live region; spoken without isolates',
+        );
+        expect(
+          find.textContaining(RegExp('pending|later', caseSensitive: false)),
+          findsNothing,
+          reason: 'no invitation is left to send, so the copy must not say so',
+        );
+        // The messenger may hold the same snackbar for more than one
+        // scaffold while the page pops; every copy must be the long one.
+        final snacks = tester.widgetList<SnackBar>(find.byType(SnackBar));
+        expect(snacks, isNotEmpty);
+        for (final snack in snacks) {
+          expect(
+            snack.persist,
+            isTrue,
+            reason: 'a remedy stays up until it is read',
+          );
+          expect(snack.action, isNotNull, reason: 'and can be dismissed');
+        }
 
         // Cancel the watcher so no pending timers survive after test disposal.
+        container.read(joinWatcherProvider.notifier).cancel();
+      },
+    );
+
+    testWidgets(
+      '6b. Welcomes the driver is still sending: the snack says how many '
+      'were sent so far and that the rest are sent again, a screen reader '
+      'hears it, and the page hands back a partial outcome',
+      (tester) async {
+        // The rest are sent again by the driver, while the app is open, for
+        // up to a day: "sent so far", never "sent", and no re-invite asked.
+        final announcements = captureAccessibilityAnnouncements(tester);
+        final results = <AddMemberPageResult?>[];
+        final mockCircle = MockCircleService()
+          ..addMemberResult = const AddMemberResult(
+            delivery: ChangeDelivery.applied,
+            welcomesDelivered: 1,
+            welcomesTotal: 3,
+          );
+        final observer = _RecordingNavigatorObserver();
+        final container = ProviderContainer(
+          overrides: _overrides(
+            mockRelay: MockRelayService(
+              keyPackageResult: _makeKp(_newMemberHex),
+            ),
+            mockCircle: mockCircle,
+          ),
+        );
+        addTearDown(container.dispose);
+        await _openAddMemberPage(
+          tester,
+          container,
+          observer: observer,
+          results: results,
+        );
+        await _addMember(tester, _newMemberNpub);
+        await tester.pumpAndSettle();
+        observer.reset();
+
+        await tester.tap(find.byKey(WidgetKeys.addMemberConfirm));
+        await tester.pump();
+        await tester.pump(Duration.zero);
+        await tester.pump(Duration.zero);
+
+        final l10n = AppLocalizations.of(tester.element(find.text('Open')));
+        expect(
+          find.text(l10n.addMemberSentSoFar(1, 3, '\u2068Test Circle\u2069')),
+          findsOneWidget,
+        );
+        expect(
+          announcements,
+          contains(l10n.addMemberSentSoFar(1, 3, 'Test Circle')),
+        );
+        expect(
+          find.textContaining(
+            RegExp('remove (them|that person)', caseSensitive: false),
+          ),
+          findsNothing,
+          reason: 'the rest are still being sent: no re-invite is owed yet',
+        );
+        expect(observer.popped, isTrue);
+        expect(results, [AddMemberPageResult.partial]);
+        container.read(joinWatcherProvider.notifier).cancel();
+      },
+    );
+
+    testWidgets(
+      "6d. awaiting relays is no error: no snack, the circle's deferred-send "
+      'cause is recorded and the page pops',
+      (tester) async {
+        final health = _RecordingHealth();
+        final results = <AddMemberPageResult?>[];
+        final mockCircle = MockCircleService()
+          ..addMemberResult = const AddMemberResult(
+            delivery: ChangeDelivery.awaitingRelays,
+            welcomesDelivered: 0,
+            welcomesTotal: 1,
+          );
+        final observer = _RecordingNavigatorObserver();
+        final container = ProviderContainer(
+          overrides: [
+            ..._overrides(
+              mockRelay: MockRelayService(
+                keyPackageResult: _makeKp(_newMemberHex),
+              ),
+              mockCircle: mockCircle,
+            ),
+            sharingHealthProvider.overrideWith(() => health),
+          ],
+        );
+        addTearDown(container.dispose);
+        await _openAddMemberPage(
+          tester,
+          container,
+          observer: observer,
+          results: results,
+        );
+        await _addMember(tester, _newMemberNpub);
+        await tester.pumpAndSettle();
+        observer.reset();
+
+        await tester.tap(find.byKey(WidgetKeys.addMemberConfirm));
+        await tester.pump();
+        await tester.pump(Duration.zero);
+        await tester.pump(Duration.zero);
+
+        expect(
+          find.text('Failed to add member. Please try again.'),
+          findsNothing,
+          reason: 'awaiting relays was shown as an error',
+        );
+        expect(find.byType(SnackBar), findsNothing);
+        expect(health.deferred, [sharingCircleKey(_makeCircle())]);
+        expect(health.byUser, [true], reason: "the user's own action");
+        expect(observer.popped, isTrue);
+        expect(
+          results,
+          [AddMemberPageResult.awaiting],
+          reason: 'so Circle details stays open, where its card says the rest',
+        );
+        expect(container.read(joinWatcherProvider).mode, JoinWatchMode.idle);
+      },
+    );
+
+    testWidgets(
+      '6f. an invitee no invitation can reach gets its own copy, never the '
+      'generic error, and the page stays',
+      (tester) async {
+        final capture = LogCapture.install();
+        final observer = _RecordingNavigatorObserver();
+        final container = ProviderContainer(
+          overrides: _overrides(
+            mockRelay: MockRelayService(
+              keyPackageResult: _makeKp(_newMemberHex),
+            ),
+            mockCircle: _UnreachableInviteeService(),
+          ),
+        );
+        addTearDown(container.dispose);
+        await _openAddMemberPage(tester, container, observer: observer);
+        await _addMember(tester, _newMemberNpub);
+        await tester.pumpAndSettle();
+        observer.reset();
+
+        await tester.tap(find.byKey(WidgetKeys.addMemberConfirm));
+        await tester.pump();
+        await tester.pump(Duration.zero);
+
+        final l10n = AppLocalizations.of(
+          tester.element(find.byType(AddMemberPage)),
+        );
+        expect(find.text(l10n.memberCannotReceiveInvitations), findsOneWidget);
+        expect(find.text(l10n.addMemberError), findsNothing);
+        expect(observer.popped, isFalse);
+        // Restored inside the body: a widget test checks its debug variables
+        // before tear-downs run.
+        capture
+          ..restore()
+          ..assertContains('[AddMember] Invitee unreachable')
+          ..assertNoNeedles([_newMemberNpub, _newMemberHex, 'Test Circle']);
+      },
+    );
+
+    testWidgets(
+      '6e. a change not made shows the error and keeps the page',
+      (tester) async {
+        final mockCircle = MockCircleService()
+          ..addMemberResult = const AddMemberResult(
+            delivery: ChangeDelivery.rejected,
+            welcomesDelivered: 0,
+            welcomesTotal: 1,
+          );
+        final observer = _RecordingNavigatorObserver();
+        final container = ProviderContainer(
+          overrides: _overrides(
+            mockRelay: MockRelayService(
+              keyPackageResult: _makeKp(_newMemberHex),
+            ),
+            mockCircle: mockCircle,
+          ),
+        );
+        addTearDown(container.dispose);
+        await _openAddMemberPage(tester, container, observer: observer);
+        await _addMember(tester, _newMemberNpub);
+        await tester.pumpAndSettle();
+        observer.reset();
+
+        await tester.tap(find.byKey(WidgetKeys.addMemberConfirm));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text('Failed to add member. Please try again.'),
+          findsOneWidget,
+        );
+        expect(observer.popped, isFalse);
+        expect(container.read(joinWatcherProvider).mode, JoinWatchMode.idle);
+      },
+    );
+
+    testWidgets(
+      '6c. leaving the page while the invitations go out still reports them',
+      (tester) async {
+        final gate = Completer<AddMemberResult>();
+        final mockCircle = _GatedAddMemberService(gate);
+        final container = ProviderContainer(
+          overrides: _overrides(
+            mockRelay: MockRelayService(
+              keyPackageResult: _makeKp(_newMemberHex),
+            ),
+            mockCircle: mockCircle,
+          ),
+        );
+        addTearDown(container.dispose);
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(
+                body: Builder(
+                  builder: (ctx) => ElevatedButton(
+                    onPressed: () => Navigator.of(ctx).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => AddMemberPage(circle: _makeCircle()),
+                      ),
+                    ),
+                    child: const Text('Open'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Open'));
+        await tester.pumpAndSettle();
+        final l10n = AppLocalizations.of(
+          tester.element(find.byType(AddMemberPage)),
+        );
+        await _addMember(tester, _newMemberNpub);
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(WidgetKeys.addMemberConfirm));
+        await tester.pump();
+
+        await tester.state<NavigatorState>(find.byType(Navigator)).maybePop();
+        await tester.pumpAndSettle();
+        expect(find.byType(AddMemberPage), findsNothing, reason: 'precondition');
+
+        gate.complete(
+          const AddMemberResult(
+            delivery: ChangeDelivery.applied,
+            welcomesDelivered: 0,
+            welcomesTotal: 1,
+            reinviteOwed: true,
+          ),
+        );
+        await tester.pump();
+        await tester.pump(Duration.zero);
+
+        expect(
+          find.text(l10n.addMemberReinviteNeeded('\u2068Test Circle\u2069')),
+          findsOneWidget,
+          reason: 'the remedy has to reach the user wherever they went',
+        );
+        expect(
+          container.read(joinWatcherProvider).mode,
+          JoinWatchMode.adminWaitingForJoin,
+          reason: 'the new member is still watched for',
+        );
+        expect(tester.takeException(), isNull);
         container.read(joinWatcherProvider.notifier).cancel();
       },
     );
@@ -827,41 +1131,6 @@ void main() {
         expect(find.byIcon(LucideIcons.lock), findsNothing);
       },
     );
-
-    // -----------------------------------------------------------------------
-    // 12. Legacy (kind 443) KeyPackage — Dark Matter migration (DM-4c)
-    // -----------------------------------------------------------------------
-    testWidgets(
-      '12. legacy (kind 443) KeyPackage shows "needs update" status and '
-      'keeps confirm disabled',
-      (tester) async {
-        final mockRelay = MockRelayService(
-          keyPackageResult: _makeLegacyKp(_newMemberHex),
-        );
-        final mockCircle = MockCircleService();
-        final circle = _makeCircle();
-
-        await tester.pumpWidget(
-          _buildApp(
-            circle: circle,
-            mockRelay: mockRelay,
-            mockCircle: mockCircle,
-          ),
-        );
-        await tester.pumpAndSettle();
-
-        await _addMember(tester, _newMemberNpub);
-        await tester.pumpAndSettle();
-
-        expect(find.byIcon(LucideIcons.circleCheck), findsNothing);
-        expect(find.text('Needs to update Haven'), findsOneWidget);
-
-        final button = tester.widget<FilledButton>(
-          find.byKey(WidgetKeys.addMemberConfirm),
-        );
-        expect(button.onPressed, isNull);
-      },
-    );
   });
 
   // -------------------------------------------------------------------------
@@ -879,6 +1148,94 @@ void main() {
   // `ThemeData(useMaterial3: false)`, whose text metrics are not the ones the
   // app renders, so they cannot measure this.
   // -------------------------------------------------------------------------
+  group('AddMemberPage — KeyPackage admission (MDK v0.10.4)', () {
+    Future<MockCircleService> stage(
+      WidgetTester tester,
+      KeyPackageAdmission admission,
+    ) async {
+      final mockCircle = MockCircleService()..keyPackageAdmission = admission;
+      await tester.pumpWidget(
+        _buildApp(
+          circle: _makeCircle(),
+          mockRelay: MockRelayService(keyPackageResult: _makeKp(_newMemberHex)),
+          mockCircle: mockCircle,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await _addMember(tester, _newMemberNpub);
+      await tester.pumpAndSettle();
+      expect(mockCircle.methodCalls, contains('checkMemberKeyPackage'));
+      return mockCircle;
+    }
+
+    AppLocalizations l10n(WidgetTester tester) =>
+        AppLocalizations.of(tester.element(find.byType(AddMemberPage)));
+
+    testWidgets('a peer on a pre-migration build needs to update, and '
+        'confirm stays disabled', (tester) async {
+      await stage(tester, KeyPackageAdmission.needsUpdate);
+
+      expect(find.text(l10n(tester).pendingMemberNeedsUpdate), findsOneWidget);
+      expect(
+        find.byIcon(LucideIcons.refreshCw),
+        findsOneWidget,
+        reason: 'opening Haven publishes a current package, so a retry can '
+            'succeed',
+      );
+      final button = tester.widget<FilledButton>(
+        find.byKey(WidgetKeys.addMemberConfirm),
+      );
+      expect(button.onPressed, isNull);
+    });
+
+    testWidgets('once the peer has updated, Retry makes them ready to invite', (
+      tester,
+    ) async {
+      final mockCircle = await stage(tester, KeyPackageAdmission.needsUpdate);
+      mockCircle.keyPackageAdmission = KeyPackageAdmission.admissible;
+
+      await tester.tap(find.byIcon(LucideIcons.refreshCw));
+      await tester.pumpAndSettle();
+
+      expect(find.text(l10n(tester).pendingMemberReadyToInvite), findsOneWidget);
+      expect(find.text(l10n(tester).pendingMemberNeedsUpdate), findsNothing);
+      final button = tester.widget<FilledButton>(
+        find.byKey(WidgetKeys.addMemberConfirm),
+      );
+      expect(button.onPressed, isNotNull);
+    });
+
+    testWidgets('a screen reader hears that the peer needs to update once', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await stage(tester, KeyPackageAdmission.needsUpdate);
+      final sentence = l10n(tester).pendingMemberNeedsUpdate;
+      final labels = find.semantics
+          .byPredicate((_) => true)
+          .evaluate()
+          .map((node) => node.getSemanticsData().label);
+      expect(
+        sentence.allMatches(labels.join('\n')).length,
+        1,
+        reason: 'the icon must not repeat the subtitle',
+      );
+      semantics.dispose();
+    });
+
+    testWidgets('a KeyPackage the engine would refuse offers a retry, and '
+        'confirm stays disabled', (tester) async {
+      await stage(tester, KeyPackageAdmission.unusable);
+
+      expect(find.text(l10n(tester).memberKeyPackageStale), findsOneWidget);
+      expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
+      final button = tester.widget<FilledButton>(
+        find.byKey(WidgetKeys.addMemberConfirm),
+      );
+      expect(button.onPressed, isNull);
+    });
+  });
+
   group('AddMemberPage — layout under a squeeze', () {
     /// Lays the page out on an iPhone 15 with the keyboard up.
     Future<void> pumpSqueezed(
@@ -1286,4 +1643,82 @@ class _RecordingNavigatorObserver extends NavigatorObserver {
   void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
     _popped = true;
   }
+}
+
+/// A circle service whose invite the core refuses: an invitee lists no inbox
+/// relay a Welcome could reach.
+class _UnreachableInviteeService extends MockCircleService {
+  @override
+  Future<AddMemberResult> addMember({
+    required List<int> mlsGroupId,
+    required List<KeyPackageData> memberKeyPackages,
+  }) async => throw const CircleInviteesUnreachableException();
+}
+
+class _GatedAddMemberService extends MockCircleService {
+  _GatedAddMemberService(this.gate);
+
+  final Completer<AddMemberResult> gate;
+
+  @override
+  Future<AddMemberResult> addMember({
+    required List<int> mlsGroupId,
+    required List<KeyPackageData> memberKeyPackages,
+  }) {
+    methodCalls.add('addMember');
+    return gate.future;
+  }
+}
+
+/// Records the circles whose deferred-send cause a flow recorded.
+class _RecordingHealth extends SharingHealthNotifier {
+  final List<String> deferred = [];
+
+  /// Whether each recorded hold was the user's own action, in order.
+  final List<bool> byUser = [];
+
+  @override
+  SharingHealth build() => SharingHealth.healthy;
+
+  @override
+  void recordDeferredSend(String circleKey, {bool byUser = false}) {
+    deferred.add(circleKey);
+    this.byUser.add(byUser);
+  }
+}
+
+/// Opens [AddMemberPage] over a parent route it can pop back to.
+Future<void> _openAddMemberPage(
+  WidgetTester tester,
+  ProviderContainer container, {
+  required NavigatorObserver observer,
+  List<AddMemberPageResult?>? results,
+}) async {
+  await tester.pumpWidget(
+    UncontrolledProviderScope(
+      container: container,
+      child: MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        navigatorObservers: [observer],
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => ElevatedButton(
+              onPressed: () => Navigator.of(ctx)
+                  .push(
+                    MaterialPageRoute<AddMemberPageResult>(
+                      builder: (_) => AddMemberPage(circle: _makeCircle()),
+                    ),
+                  )
+                  .then((result) => results?.add(result)),
+              child: const Text('Open'),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Open'));
+  await tester.pumpAndSettle();
 }

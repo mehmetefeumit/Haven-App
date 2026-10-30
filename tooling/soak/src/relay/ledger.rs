@@ -33,6 +33,24 @@ use nostr::{Event, EventId, Filter, SubscriptionId};
 
 use crate::rig::{sim_magnitude, DeviceTag, EventTag};
 
+/// One NIP-77 frame, by the side that sent it and its verb.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NegFrame {
+    /// A client's `NEG-OPEN` the plane passed on to the relay.
+    Open,
+    /// A client's `NEG-MSG`.
+    ClientMessage,
+    /// A client's `NEG-CLOSE`: a session it finished.
+    Close,
+    /// The relay's `NEG-MSG`, written towards the client.
+    RelayMessage,
+    /// The relay's `NEG-ERR`, written towards the client.
+    Error,
+    /// A client's `NEG-OPEN` the plane answered itself, as a relay that does
+    /// not speak NIP-77 (`Fault::RefusesNegentropy`), and never passed on.
+    Refused,
+}
+
 /// The frames one relay plane carried, per direction.
 ///
 /// Cheap to clone: every clone reads and writes the same ledger, because the
@@ -83,16 +101,19 @@ struct Inner {
     /// rendering its id.
     tags: HashMap<EventId, EventTag>,
     next_tag: u64,
-    /// How many attempts the last `Up` needed to take its port back, and how
-    /// long it waited. The wait IS the measurement — an accept loop releases
-    /// its listener when the task that owns it is dropped, so a rebind that
-    /// takes several attempts is worth seeing rather than hiding behind a
-    /// retry.
+    /// How many listens the last `Up` made on the port its endpoint held while
+    /// down — one, as nothing else can bind that port — and how long it took.
     rebind_attempts: u32,
     rebind_wait: Duration,
     /// Connections an endpoint dropped before their handshake under
     /// `ColdFirstConnect`: armed is not fired, and this is the firing.
     refused_connects: usize,
+    /// Connections an endpoint held unanswered under `Unanswering`.
+    unanswered_connects: usize,
+    /// `EOSE` frames kept from the client under `WithholdEose`.
+    withheld_eose: usize,
+    /// NIP-77 frames, per endpoint and kind.
+    neg: HashMap<(Option<DeviceTag>, NegFrame), usize>,
 }
 
 impl Ledger {
@@ -274,7 +295,7 @@ impl Ledger {
         self.with(|inner| inner.tags.get(event_id).copied())
     }
 
-    /// How many bind attempts the last `Up` needed, and how long it waited.
+    /// How many listens the last `Up` made, and how long it took.
     /// `(0, ZERO)` until a plane has come back up.
     #[must_use]
     pub fn rebind(&self) -> (u32, Duration) {
@@ -285,6 +306,42 @@ impl Ledger {
     #[must_use]
     pub fn refused_connects(&self) -> usize {
         self.with(|inner| inner.refused_connects)
+    }
+
+    /// How many connections were accepted and never answered.
+    #[must_use]
+    pub fn unanswered_connects(&self) -> usize {
+        self.with(|inner| inner.unanswered_connects)
+    }
+
+    /// How many `EOSE` frames were kept from the client.
+    #[must_use]
+    pub fn withheld_eose(&self) -> usize {
+        self.with(|inner| inner.withheld_eose)
+    }
+
+    /// How many NIP-77 frames of `frame` crossed `device`'s endpoint (`None`:
+    /// the plane's canonical one).
+    #[must_use]
+    pub fn neg(&self, device: Option<DeviceTag>, frame: NegFrame) -> usize {
+        self.with(|inner| inner.neg.get(&(device, frame)).copied().unwrap_or(0))
+    }
+
+    /// How many NIP-77 frames of `frame` crossed any endpoint of the plane.
+    #[must_use]
+    pub fn neg_total(&self, frame: NegFrame) -> usize {
+        self.with(|inner| {
+            inner
+                .neg
+                .iter()
+                .filter(|((_, seen), _)| *seen == frame)
+                .map(|(_, count)| count)
+                .sum()
+        })
+    }
+
+    pub(crate) fn note_neg(&self, device: Option<DeviceTag>, frame: NegFrame) {
+        self.with(|inner| *inner.neg.entry((device, frame)).or_default() += 1);
     }
 
     pub(crate) fn note_ok(&self, event_id: EventId, status: bool, message: &str) {
@@ -354,6 +411,14 @@ impl Ledger {
         self.with(|inner| inner.refused_connects += 1);
     }
 
+    pub(crate) fn note_unanswered_connect(&self) {
+        self.with(|inner| inner.unanswered_connects += 1);
+    }
+
+    pub(crate) fn note_withheld_eose(&self) {
+        self.with(|inner| inner.withheld_eose += 1);
+    }
+
     pub(crate) fn note_rebind(&self, attempts: u32, waited: Duration) {
         self.with(|inner| {
             inner.rebind_attempts = attempts;
@@ -391,6 +456,12 @@ impl fmt::Debug for Ledger {
                 .field("eose", &sim_magnitude(inner.eose))
                 .field("faults", &sim_magnitude(inner.faults.len()))
                 .field("refused_connects", &sim_magnitude(inner.refused_connects))
+                .field(
+                    "unanswered_connects",
+                    &sim_magnitude(inner.unanswered_connects),
+                )
+                .field("withheld_eose", &sim_magnitude(inner.withheld_eose))
+                .field("neg", &sim_magnitude(inner.neg.values().sum()))
                 .finish_non_exhaustive()
         })
     }

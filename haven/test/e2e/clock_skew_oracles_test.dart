@@ -25,8 +25,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/location.dart'
     show kClockSkewAlertThreshold;
+import 'package:haven/src/rust/api.dart' show LocationPublishFfi;
 import 'package:haven/src/services/clock_skew_detector.dart';
-import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/widgets/location/clock_skew_banner.dart';
 
 import '../../integration_test/e2e/_lib/clock_skew_oracles.dart';
@@ -41,92 +41,65 @@ ClockSkewDetector _detector() => ClockSkewDetector(now: () => _now);
 
 void main() {
   group('checkFastClockRejectionClassified', () {
-    test('HEALTHY: a typed device-clock rejection passes', () {
-      // What `NostrRelayService.publishEvent` throws today when
-      // `publish_with_retry` classified the refusal.
-      for (final token in kDeviceClockWireTokens) {
-        expect(
-          checkFastClockRejectionClassified(
-            RelayClockRejectionException(token),
-          ),
-          isNull,
-          reason: 'token "$token" is part of the wire vocabulary',
-        );
+    test('HEALTHY: a send refused for its time, in any direction, passes', () {
+      for (final publish in [
+        LocationPublishFfi.clockAhead,
+        LocationPublishFfi.clockBehind,
+        LocationPublishFfi.clockUnspecified,
+      ]) {
+        expect(checkFastClockRejectionClassified(publish), isNull);
       }
     });
 
-    test('REVERTED: publish_with_retry collapsing to AllRelaysFailed fails',
-        () {
-      // The pre-fix behaviour: the per-relay reasons are discarded inside
-      // Rust, `RelayError::AllRelaysFailed` crosses the FFI, and
-      // `NostrRelayService` has nothing to recognise.
+    test('REVERTED: a timestamp refusal folded into unreachable fails', () {
+      // The pre-fix behaviour: the relays' blame dropped inside Rust and the
+      // send answered as a transport failure.
       final reason = checkFastClockRejectionClassified(
-        const RelayServiceException('Failed to publish event'),
+        LocationPublishFfi.unreachable,
       );
       expect(reason, isNotNull);
       expect(reason, contains('NO device-clock classification'));
     });
 
-    test('REVERTED: the raw pre-fix FFI error string fails', () {
-      // One layer lower: `RelayError::AllRelaysFailed`'s own Display, in case
-      // a future refactor stops wrapping FFI errors at all.
+    test('REVERTED: a timestamp refusal read as a plain refusal fails', () {
       expect(
-        checkFastClockRejectionClassified(
-          'All relays failed to accept the event',
-        ),
+        checkFastClockRejectionClassified(LocationPublishFfi.refused),
         isNotNull,
       );
     });
 
-    test('REVERTED: a service layer that stops typing the error fails', () {
-      // The token still crosses the FFI, but nothing converts it into a
-      // `RelayClockRejectionException`, so every caller above sees an untyped
-      // failure. Caught, and named distinctly so triage lands in the right
-      // file.
-      final reason = checkFastClockRejectionClassified(
-        Exception('${ClockSkewDetector.deviceClockRejectedToken}:ahead'),
-      );
-      expect(reason, isNotNull);
-      expect(reason, contains('RelayClockRejectionException'));
-    });
-
-    test('REVERTED: a wire-token rename is caught rather than degraded', () {
-      // The direction would silently collapse to "unspecified" at runtime.
-      expect(
-        checkFastClockRejectionClassified(
-          const RelayClockRejectionException('fast'),
-        ),
-        isNotNull,
-      );
-    });
-
-    test('a publish that SUCCEEDED cannot satisfy the oracle', () {
+    test('a send that SUCCEEDED, was not made, or never answered cannot '
+        'satisfy the oracle', () {
       // Guards the vacuity mode: with no refusal there is no classification to
       // judge, and reporting that as "held" would bless a relay that accepted
       // an event signed 6 h in its future.
-      expect(checkFastClockRejectionClassified(null), isNotNull);
+      for (final publish in [
+        LocationPublishFfi.accepted,
+        LocationPublishFfi.expired,
+        LocationPublishFfi.superseded,
+        LocationPublishFfi.ended,
+        LocationPublishFfi.inFlight,
+        null,
+      ]) {
+        expect(
+          checkFastClockRejectionClassified(publish, error: StateError('x')),
+          isNotNull,
+          reason: '$publish',
+        );
+      }
     });
   });
 
   group('checkRelayVerdictRaised', () {
-    test('HEALTHY: the real detector raises the verdict from a token', () {
-      final detector = _detector()..recordPublishClockRejection('unspecified');
+    test('HEALTHY: the real detector raises the verdict from a send', () {
+      final detector = _detector()
+        ..recordLocationPublish(LocationPublishFfi.clockUnspecified);
       addTearDown(detector.dispose);
       expect(checkRelayVerdictRaised(detector.status), isNull);
     });
 
     test('REVERTED: a detector never told about the rejection fails', () {
       final detector = _detector();
-      addTearDown(detector.dispose);
-      expect(checkRelayVerdictRaised(detector.status), isNotNull);
-    });
-
-    test('REVERTED: a drifted wire token leaves the verdict unraised', () {
-      // What `check_clock_skew_policy_parity.sh` exists to prevent, seen from
-      // the runtime side: the error carries a token Dart no longer matches, so
-      // `recordPublishError` finds nothing and the banner never appears.
-      final detector = _detector()
-        ..recordPublishError('haven.clock.device_clock_REFUSED:ahead');
       addTearDown(detector.dispose);
       expect(checkRelayVerdictRaised(detector.status), isNotNull);
     });
@@ -423,6 +396,21 @@ void main() {
         ),
         isNotNull,
       );
+    });
+  });
+
+  group('checkPoolDropsPastTotalLoss', () {
+    test('holds when the fast device did not receive the location', () {
+      expect(checkPoolDropsPastTotalLoss(delivered: false), isNull);
+    });
+
+    test('reports a relay pool that delivered an expired location', () {
+      // The reverted-premise case: a pool that grew a grace (or stopped
+      // checking expiration) hands the fast device a location whose
+      // expiration is behind its clock.
+      final finding = checkPoolDropsPastTotalLoss(delivered: true);
+      expect(finding, isNotNull);
+      expect(finding, contains('kClockSkewTotalLossThreshold'));
     });
   });
 

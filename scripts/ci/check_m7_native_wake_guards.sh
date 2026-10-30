@@ -121,6 +121,8 @@
 #      tool)
 
 set -uo pipefail
+LITERAL_FREE="$(cat "$(dirname "${BASH_SOURCE[0]}")/lib/literal_free.awk")"
+readonly LITERAL_FREE
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -190,11 +192,11 @@ swift_str_value() { local v; v="$(code_view "$2")"; grep -oE "$1"' *= *"[^"]+"' 
 # Extract the (comment-stripped) body of the function whose signature contains $1.
 fn_slice() {
   local v; v="$(code_view "$2")"
-  awk -v sig="$1" '
+  awk -v sig="$1" "${LITERAL_FREE}"'
     index($0, sig) > 0 { inbody = 1 }
     inbody {
       print
-      o = gsub(/[{]/, "&"); c = gsub(/[}]/, "&")
+      lfree = literal_free($0); o = gsub(/[{]/, "&", lfree); c = gsub(/[}]/, "&", lfree)
       depth += o - c
       if (seen && depth <= 0) exit
       if (o > 0) seen = 1

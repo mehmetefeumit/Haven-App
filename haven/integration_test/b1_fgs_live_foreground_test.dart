@@ -302,7 +302,6 @@ import 'package:haven/src/providers/service_providers.dart'
     show circleServiceProvider;
 import 'package:haven/src/rust/api.dart'
     show
-        CircleCreationResultFfi,
         CircleManagerFfi,
         MemberKeyPackageFfi,
         RelayManagerFfi;
@@ -317,7 +316,9 @@ import 'package:path_provider/path_provider.dart'
     show getApplicationSupportDirectory;
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
+import 'e2e/_lib/app_lifecycle.dart';
+import 'e2e/_lib/circle_creation.dart'
+    show DeliveredCircle, createCircleDelivered;
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
 import 'e2e/_lib/pump_helpers.dart'
     show pumpUntilCondition, pumpUntilFound, waitUntilAsync;
@@ -453,6 +454,11 @@ final Duration _forcedIdleHoldDuration =
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  // The binding forgets the lifecycle after every test and never reads it
+  // back from the platform, so without this the launch session's foreground
+  // claim rests on whether the engine's own lifecycle message has arrived.
+  // See `e2e/_lib/app_lifecycle.dart`.
+  resumeAppBeforeEachTest();
 
   testWidgets(
     'B1: hold a live foreground MLS session across a REAL pause and prove '
@@ -515,6 +521,7 @@ void main() {
       // HavenApp directly (as every E2E drive does) bypasses.
       final introSeen = prefs.getBool(kOnboardingIntroSeenKey) ?? false;
       final completed = prefs.getBool(kOnboardingCompletedKey) ?? false;
+      expectAppResumed();
       await tester.pumpWidget(
         ProviderScope(
           overrides: <Override>[
@@ -639,10 +646,11 @@ void main() {
       // checkpoint A2 — the EXACT CircleManagerFfi instance MapShell's own
       // providers already share.
       final relayManager = await RelayManagerFfi.newInstance();
-      final CircleCreationResultFfi creation;
+      final DeliveredCircle creation;
       try {
         final bobKp = await relayManager.fetchMemberKeypackage(
           pubkey: bob.pubkeyHex,
+          circle: aliceManager,
         );
         if (bobKp == null) {
           throw StateError(
@@ -660,14 +668,12 @@ void main() {
           () => container
               .read(identityNotifierProvider.notifier)
               .getSecretBytes(),
-          // Publishes Bob's gift-wrapped Welcome and CONFIRMS the staged
-          // create (Security Rule 13) — an unconfirmed create pins the
-          // group in MDK's PendingPublish, where every inbound kind-445
-          // (including the FGS's own publish) buffers forever. See
-          // createCircleConfirmed's doc.
-          (aliceSecret) => createCircleConfirmed(
+          // Publishes Bob's gift-wrapped Welcome and requires every relay ack:
+          // an invitee whose Welcome never landed never joins. See
+          // `createCircleDelivered`'s doc.
+          (aliceSecret) => createCircleDelivered(
             manager: aliceManager,
-            relay: relay,
+            relayManager: relayManager,
             identitySecretBytes: aliceSecret,
             members: <MemberKeyPackageFfi>[bobKp],
             name: 'B1 FGS Publish Circle',
@@ -676,7 +682,6 @@ void main() {
             // Bob (a SyntheticUser) advertises no inbox relays, so the
             // Welcome-delivery cascade needs the admin's own relay as a
             // fallback (mirrors the production admin flow).
-            creatorFallbackRelays: <String>[defaultStrfryUrl],
             scenario: 'b1',
           ),
         );
@@ -684,11 +689,6 @@ void main() {
         await relayManager.shutdown();
       }
 
-      if (!creation.welcomeEvents.any(
-        (e) => e.recipientPubkey.toLowerCase() == bob.pubkeyHex.toLowerCase(),
-      )) {
-        throw StateError('[b1] createCircle produced no gift-wrap for Bob.');
-      }
 
       // Bob accepts (Welcome → MDK state) — a genuine second member, so
       // filterPublishEligibleCircles sees a real, non-trivial circle.

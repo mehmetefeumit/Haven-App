@@ -534,7 +534,7 @@ abstract class AppLocalizations {
   /// **'My KeyPackage Relays'**
   String get relaySettingsKeyPackageTitle;
 
-  /// Subtitle of the KeyPackage relays section. 'kind 10002' is a Nostr event-kind identifier, intentionally English (not translated). This list no longer carries the public profile — kind-0 profile lookups/publish moved to the separate, local-only Profile relays section below (relaySettingsProfileSubtitle) so the two planes stay on disjoint relays. Do not reintroduce a 'your public profile is published' clause here.
+  /// Subtitle of the KeyPackage relays section. 'kind 10002' is a Nostr event-kind identifier, intentionally English (not translated). This list no longer carries the public profile — kind-0 profile lookups/publish moved to the separate, local-only Profile relays section below (relaySettingsProfileSubtitle) so the two planes stay on disjoint relays. Do not reintroduce a 'your public profile is published' clause here. The keys it names are what storageResetAcknowledgeFailed calls the user's 'invitation key'; the two terms are to be aligned in a later copy pass, so do not change either one alone.
   ///
   /// In en, this message translates to:
   /// **'Where others find the keys they need to invite you (kind 10002)'**
@@ -1224,12 +1224,6 @@ abstract class AppLocalizations {
   /// **'Creating secure group...'**
   String get nameCircleStageCreatingGroup;
 
-  /// Progress label shown while circle invitations are being sent.
-  ///
-  /// In en, this message translates to:
-  /// **'Sending invitations...'**
-  String get nameCircleStageSendingInvites;
-
   /// Progress label shown when circle creation has completed.
   ///
   /// In en, this message translates to:
@@ -1248,11 +1242,11 @@ abstract class AppLocalizations {
   /// **'{percent} percent complete'**
   String nameCirclePercentComplete(int percent);
 
-  /// Snackbar after creating a circle when only SOME invitations reached a relay. Replaces reusing addMemberPartialDelivery here: that string was written for the add-member page, where the circle already exists and the user knows it, so on the create flow it reported delivery while silently dropping the primary outcome — that the circle was created at all. Both facts must survive translation, and the circle name must stay present, because the user is popped two screens back immediately after seeing this. Keep the counts honest: {sent} is the number of invitations a relay actually acked, not the number of people invited.
+  /// Snackbar after creating a circle when not every invitation was sent yet, including when none was. The circle IS created. {sent} is how many invitations a relay accepted, always less than {total}, the number invited. Haven sends the rest again while the app is open, for up to a day. Say 'sent' (a relay accepted it), never 'delivered'. {sent} must not govern inflection: restructure as TRANSLATION_GUIDE.md says (placeholders never govern inflection). {name} is the user-entered circle name. Replaces nameCircleCreatedSentCountSnack.
   ///
   /// In en, this message translates to:
-  /// **'Circle \"{name}\" created. Invitations sent ({sent} of {total}); delivery pending for the rest.'**
-  String nameCircleCreatedPartialSnack(String name, int sent, int total);
+  /// **'{total, plural, =1{Circle \"{name}\" created. {sent} of 1 invitation sent so far. Haven keeps sending it while the app is open, for up to a day.} other{Circle \"{name}\" created. {sent} of {total} invitations sent so far. Haven keeps sending the rest while the app is open, for up to a day.}}'**
+  String nameCircleCreatedSentSoFarSnack(String name, int sent, int total);
 
   /// Success snackbar after creating a circle, naming it and how many invitations were sent. {name} is the user-entered circle name.
   ///
@@ -1314,11 +1308,35 @@ abstract class AppLocalizations {
   /// **'{count, plural, =1{Invitation sent to {circleName}} other{Invitations sent to {circleName}}}'**
   String addMemberSentToCircle(int count, String circleName);
 
-  /// Snackbar after partially sending invitations on the add-member page, reporting how many were delivered.
+  /// Snackbar (and spoken announcement) on the add-member page when not every invitation was sent yet. {sent} is how many a relay accepted, always less than {total}. Haven sends the rest again while the app is open, for up to a day. Say 'sent' (a relay accepted it), never 'delivered'. {sent} must not govern inflection. The shown text isolates {circleName}; the announcement is built from the raw name. Replaces addMemberSentCount.
   ///
   /// In en, this message translates to:
-  /// **'Invitations sent ({sent} of {total}). Delivery pending for the rest.'**
-  String addMemberPartialDelivery(int sent, int total);
+  /// **'{total, plural, =1{{sent} of 1 invitation to {circleName} sent so far. Haven keeps sending it while the app is open, for up to a day.} other{{sent} of {total} invitations to {circleName} sent so far. Haven keeps sending the rest while the app is open, for up to a day.}}'**
+  String addMemberSentSoFar(int sent, int total, String circleName);
+
+  /// Snackbar (and spoken announcement) when an added person is on the member list but no invitation is left to send them; only removing and re-adding them helps. The shown text isolates {circleName}; the announcement uses the raw name. 'That person' / 'them' are gender-neutral. Say 'sent' (a relay accepted it), never 'delivered'.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven can’t send the invitation to {circleName}. Remove that person and add them again.'**
+  String addMemberReinviteNeeded(String circleName);
+
+  /// Error shown when creating a circle or adding members is refused because an invitee lists no inbox relay an invitation could reach. Nothing was created or sent. The refusal names nobody: never say who, how many, or which app they use; never say 'open Haven'; never imply they did something wrong; never say 'delivered'.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven can’t invite everyone you chose, because it couldn’t find where to send at least one of their invitations. Ask the people you chose to check that their app can receive invitations, then try again.'**
+  String get memberCannotReceiveInvitations;
+
+  /// Action button on the snackbar that reports how many invitations were sent so far when some were not yet (nameCircleCreatedSentSoFarSnack). It opens a list of the people whose invitation is still being sent. Keep it short: it sits under the snackbar text.
+  ///
+  /// In en, this message translates to:
+  /// **'Show who'**
+  String get missedInvitationsShowWho;
+
+  /// Title of the dialog opened by missedInvitationsShowWho, listing by shortened public key (npub1…) each person whose invitation was not sent. {count} is how many are listed, always at least 1. Say 'sent', never 'delivered'.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{Invitation not sent} other{Invitations not sent}}'**
+  String missedInvitationsTitle(int count);
 
   /// Error snackbar shown when adding a member fails.
   ///
@@ -1404,6 +1422,12 @@ abstract class AppLocalizations {
   /// **'Couldn\'t remove {name}. Nothing changed — check your connection and try again.'**
   String circleMemberRemoveError(String name);
 
+  /// Screen-reader announcement only (no visual message) when a removal is waiting for a relay to confirm it; meanwhile the circle is held in both directions. {name} is the member's display name, passed raw (never bidi-isolated) because this is speech. Do not say the person was removed.
+  ///
+  /// In en, this message translates to:
+  /// **'Still removing {name}: waiting for the relays. Until it’s done, nothing is shared with this circle.'**
+  String circleMemberRemoveAwaitingAnnouncement(String name);
+
   /// Chip label marking a circle member as an administrator.
   ///
   /// In en, this message translates to:
@@ -1428,13 +1452,13 @@ abstract class AppLocalizations {
   /// **'tap to center map on their location'**
   String get circleMemberHintTapToCenter;
 
-  /// Tooltip on the button that retries validating a pending member after a network failure.
+  /// Tooltip on the button that checks a pending member again: after the lookup failed, found a package that could not be used, or found one from a Haven that needs updating (which updating Haven replaces).
   ///
   /// In en, this message translates to:
   /// **'Retry validation'**
   String get pendingMemberRetryTooltip;
 
-  /// Tooltip on the button that drops someone from the staged list of people you are about to invite, BEFORE any invitation is sent. Deliberately not "Remove member": Haven ships no way to remove an existing member from a circle. This label must not be readable as circle-member removal.
+  /// Tooltip on the button that drops someone from the staged list of people you are about to invite, BEFORE any invitation is sent. Deliberately not "Remove member": an admin can remove an existing member from a circle (circleMemberRemoveTooltip, "Remove from circle"), and this label must not be readable as that.
   ///
   /// In en, this message translates to:
   /// **'Remove from list'**
@@ -1452,7 +1476,7 @@ abstract class AppLocalizations {
   /// **'Valid'**
   String get pendingMemberValid;
 
-  /// Accessibility label for the icon shown when a pending member failed validation.
+  /// Accessibility label for the warning icon on a pending member who failed validation or needs to update Haven; the row's subtitle says which.
   ///
   /// In en, this message translates to:
   /// **'Warning'**
@@ -1470,11 +1494,17 @@ abstract class AppLocalizations {
   /// **'Ready to invite'**
   String get pendingMemberReadyToInvite;
 
-  /// Subtitle/accessibility label shown when a pending member's discovered KeyPackage is the deprecated pre-migration kind — the person is running an old Haven build and must update it before they can be invited (Dark Matter migration).
+  /// Subtitle shown when a pending member's discovered KeyPackage cannot be used by this Haven version: it comes from an older Haven, or from a Haven that was updated but has not been opened since (an updated Haven replaces its old invitation key once it is opened and its update notice is answered). The person must update Haven, or open it if they already have, before they can be invited.
   ///
   /// In en, this message translates to:
-  /// **'Needs to update Haven'**
+  /// **'Needs to update or open Haven'**
   String get pendingMemberNeedsUpdate;
+
+  /// Shown beside a person the user is trying to invite when the invitation key they published is one Haven cannot use (for example incomplete or malformed). Opening Haven on their phone publishes a new one. Different from pendingMemberNeedsUpdate, which is for someone still on an older Haven.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven can’t invite them right now. Ask them to open Haven, then try again.'**
+  String get memberKeyPackageStale;
 
   /// Hint inside the member-search text field where a member ID is entered.
   ///
@@ -1686,6 +1716,36 @@ abstract class AppLocalizations {
   /// **'Failed to accept invitation. Please try again.'**
   String get invitationAcceptError;
 
+  /// Shown on an invitation card when the invitation can never be accepted on this phone (it was made for keys this phone no longer holds, for example after Haven's encryption-engine upgrade; or what it carries was not written by the inviter it shows, or it is for a circle this phone is leaving); the card is then removed. Must not name a cause: the one remedy for every case is a new invitation from the person named. {name} is the inviter's nickname, else their public name, else their shortened npub. Keep the inviter gender-neutral.
+  ///
+  /// In en, this message translates to:
+  /// **'This invitation can no longer be used. Ask {name} to invite you again. They may need to update Haven first.'**
+  String invitationNeedsNewInviteError(String name);
+
+  /// Title of the dialog shown when accepting an invitation would replace a circle already on this phone (the user was removed from it without this phone seeing it). Asks for the user's explicit consent; the default (focused) action is commonCancel, which changes nothing.
+  ///
+  /// In en, this message translates to:
+  /// **'Join this circle again?'**
+  String get rejoinDialogTitle;
+
+  /// Body of the rejoin dialog (rejoinDialogTitle). {inviterName} is the inviter's nickname, else their public name, as on the invitation card; keep them gender-neutral. {circleName} is this phone's own name for the circle. 'Replaces this phone's copy' is the honest consequence. 'Decline' and 'Cancel' must be the exact translations of invitationCardDecline and commonCancel (the dialog's buttons): Decline is final, Cancel keeps the invitation. Must not promise anything about other members.
+  ///
+  /// In en, this message translates to:
+  /// **'{inviterName} invited you to “{circleName}”, which is already on this phone. This can happen if you were removed from it and invited back. Joining again replaces this phone’s copy of the circle. Decline ends this invitation for good; Cancel keeps it for later.'**
+  String rejoinDialogBody(String inviterName, String circleName);
+
+  /// Body of the rejoin dialog when the inviter has no name to show (the invitation card above shows their key). {circleName} is this phone's name for the circle. 'Decline' and 'Cancel' must be the exact translations of invitationCardDecline and commonCancel (the dialog's buttons). Decline is final; Cancel keeps the invitation.
+  ///
+  /// In en, this message translates to:
+  /// **'You were invited to “{circleName}”, which is already on this phone. This can happen if you were removed from it and invited back. Joining again replaces this phone’s copy of the circle. Decline ends this invitation for good; Cancel keeps it for later.'**
+  String rejoinDialogBodyUnnamed(String circleName);
+
+  /// Rejoin dialog button that gives the consent: joins the circle again from the invitation. The dialog's other buttons are commonCancel (keeps the invitation, changes nothing) and invitationCardDecline (declines the invitation).
+  ///
+  /// In en, this message translates to:
+  /// **'Join again'**
+  String get rejoinDialogConfirm;
+
   /// Error snackbar shown when the user already belongs to the maximum number of circles ({limit}, kMaxCirclesPerAccount) so the invitation was NOT accepted. Must state the limit AND the remedy — leaving a circle — and must keep the reassurance that the invitation is still waiting; do not translate this as a transient failure or add 'try again'. Mark the ceiling EXPLICITLY in your language ('up to', 'at most', 'only', a restrictive construction, a bounding particle — whatever your language uses): a bare positive ('you can be in 10 circles') reads as capability or permission rather than as a limit in most of the languages this app ships, and under a possessive framing it is also ambiguous between 'exactly 10' and 'up to 10'. Eleven of the twelve locales independently had to add a limiter to the previous, unmarked English wording, which is why the English marks it now too. {limit} is the maximum, currently 10.
   ///
   /// In en, this message translates to:
@@ -1818,6 +1878,12 @@ abstract class AppLocalizations {
   /// **'Leave Circle'**
   String get circleDetailsLeaveCircle;
 
+  /// Label of the disabled Leave button in Circle details while Haven finishes leaving the circle (sharingHealthTitleLeaving).
+  ///
+  /// In en, this message translates to:
+  /// **'Leaving circle…'**
+  String get circleDetailsLeavingInProgress;
+
   /// Title of the confirmation dialog shown before leaving a circle.
   ///
   /// In en, this message translates to:
@@ -1829,6 +1895,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Leave this circle? You will stop sending your location to its members and stop seeing theirs. The last position you sent stays on their phones for up to a day. You cannot undo this: you would need a new invitation to rejoin.'**
   String get leaveCircleDialogBody;
+
+  /// Body of the leave dialog for a circle an admin ended, instead of leaveCircleDialogBody. Leaving only removes it from this phone; nothing is sent. 'Leaving' must match leaveCircleConfirm / circleDetailsLeaveCircle.
+  ///
+  /// In en, this message translates to:
+  /// **'This circle has ended, so nothing is shared with it any more. Leaving removes it from this phone.'**
+  String get leaveDisbandedCircleDialogBody;
+
+  /// Second paragraph of the leave dialog for an admin of a circle with at least one other member. Say 'tries': after about a day the leave completes even if the hand-over did not reach the relays. 'Admin' must match circleMemberAdmin.
+  ///
+  /// In en, this message translates to:
+  /// **'You’re an admin of this circle. Before you leave, Haven tries to make another member an admin so the circle can keep working.'**
+  String get leaveCircleDialogAdminNote;
 
   /// Confirm button in the leave-circle dialog.
   ///
@@ -1854,89 +1932,53 @@ abstract class AppLocalizations {
   /// **'Failed to leave circle'**
   String get leaveCircleError;
 
-  /// Title of the banner shown above a circle's member list when the encryption engine has flagged the circle as unrecoverable (Dark Matter migration, Security Rule 8). Never shows a raw internal error.
-  ///
-  /// In en, this message translates to:
-  /// **'This circle can’t be updated'**
-  String get circleBlockedBannerTitle;
-
-  /// Body text of the blocked-circle banner. Kept generic and non-technical, per the app's no-raw-errors-in-UI rule.
-  ///
-  /// In en, this message translates to:
-  /// **'Something went wrong with this circle’s encryption, so Haven can no longer send or receive updates in it. You can still see what you last knew below, or leave the circle.'**
-  String get circleBlockedBannerBody;
-
-  /// Title of the banner shown in place of the member list for a circle left over from before the app's encryption engine was upgraded (Dark Matter migration).
-  ///
-  /// In en, this message translates to:
-  /// **'This circle needs to be re-created'**
-  String get legacyCircleBannerTitle;
-
-  /// Body text of the legacy-circle banner, explaining why the circle must be re-created.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven’s encryption engine was upgraded, so this circle can no longer be used. Re-create it to keep sharing locations with the same people. You’ll need to invite them again.'**
-  String get legacyCircleBannerBody;
-
-  /// Button that starts creating a new circle, pre-filled with the old circle's name. Shown on the legacy-circle banner and on the blocked-circle banner — both are circles that can only be recovered by re-creating them.
+  /// Button that starts creating a new circle, pre-filled with the old circle's name. Shown in the sharing status card in Circle details for a circle that stopped working on this phone (sharingHealthTitleUnrecoverable).
   ///
   /// In en, this message translates to:
   /// **'Re-create Circle'**
   String get legacyCircleRecreateCta;
 
-  /// Button on the legacy-circle banner that removes the stale local circle entry.
-  ///
-  /// In en, this message translates to:
-  /// **'Remove'**
-  String get legacyCircleRemoveCta;
-
-  /// Title of the confirmation dialog shown before removing a legacy (pre-upgrade) circle.
-  ///
-  /// In en, this message translates to:
-  /// **'Remove circle?'**
-  String get legacyCircleRemoveDialogTitle;
-
-  /// Body of the confirmation dialog shown before removing a legacy (pre-upgrade) circle.
-  ///
-  /// In en, this message translates to:
-  /// **'This circle can no longer be used and will be removed from your list. This does not affect any new circle you create to replace it.'**
-  String get legacyCircleRemoveDialogBody;
-
-  /// Confirm button in the remove-legacy-circle dialog.
-  ///
-  /// In en, this message translates to:
-  /// **'Remove'**
-  String get legacyCircleRemoveConfirm;
-
-  /// Title of the one-time dialog shown after Haven's encryption engine upgrade (Dark Matter migration) destroys the old, no-longer-usable circle data.
+  /// Title of the one-time notice shown on the first launch after Haven's encryption-engine upgrade reset this phone's local Haven data. Shown once per reset, never on a fresh install.
   ///
   /// In en, this message translates to:
   /// **'Haven has been updated'**
-  String get legacyCutoverExplainerTitle;
+  String get storageResetTitle;
 
-  /// First paragraph of the one-time cutover explainer: reassures the user their Nostr identity/profile survived the upgrade.
+  /// What the reset did NOT touch: the user's identity, and the public profile already published to the network. Do not extend this to profile edits that had not finished saving: those were removed (see storageResetLost).
   ///
   /// In en, this message translates to:
-  /// **'Your identity and public profile are unchanged. There is nothing you need to do for those.'**
-  String get legacyCutoverExplainerIdentityUnchanged;
+  /// **'Your identity is unchanged, and the public profile you already published stays as it is.'**
+  String get storageResetKept;
 
-  /// Second paragraph of the one-time cutover explainer: explains that existing circles must be re-created.
+  /// What the reset removed from this phone: the circles made before this update (those who had some re-create each circle and invite its members again), the nicknames the user gave people before this update, and any profile edit that had not finished saving by then (by the time of the update). Scope every removal to the update — 'circles made before this update', 'nicknames … before this update', 'by then' — never 'any circles you had', 'all your circles', bare 'your nicknames' or an unscoped 'profile change': the notice can show again later, after the user has made new circles, given new nicknames and edited their profile, none of which the reset touched. State it as done, not as 'may have been removed'.
   ///
   /// In en, this message translates to:
-  /// **'For improved security, your circles need to be re-created and their members re-invited before you can share locations in them again.'**
-  String get legacyCutoverExplainerCirclesNeedRecreation;
+  /// **'To move to Haven’s new encryption engine, circles made before this update were removed. Re-create them and invite their members again. Nicknames you gave people before this update, and any profile change that had not finished saving by then, were also removed.'**
+  String get storageResetLost;
 
-  /// Acknowledgement button that dismisses the one-time cutover explainer dialog.
+  /// The reset of the relay settings, told as an event of this update, then a promise the app keeps. Never state the relay settings' current state ('your relay settings are Haven's defaults'): the notice can show again after the user has added relays, which the reset did not touch. The second sentence's scope is exact: the user's relay settings (their relay lists) are not published until they press the Continue button (storageResetContinue) or come back from the Relay settings page (storageResetOpenRelaySettings) — returning from that page counts as continuing. Do NOT widen it to 'nothing is published': their profile, invitations and location still go out. Keep both actions recognisably tied to those buttons. There is no setting that stops Haven publishing relay lists; do not imply one.
   ///
   /// In en, this message translates to:
-  /// **'Got it'**
-  String get legacyCutoverExplainerAcknowledge;
+  /// **'This update reset your relay settings to Haven’s defaults. These settings won’t be published until you continue or come back from Relay settings, so you can add your own relays first.'**
+  String get storageResetRelays;
 
-  /// Subtle, non-blocking note on the Relay Settings page shown only while the one-time post-upgrade cleanup of old encryption-key advertisements has not yet completed (most commonly because no relay was reachable yet).
+  /// Primary button of the storage-reset notice. Dismisses it; only after this (or after returning from Relay settings) may Haven publish the user's relay lists.
   ///
   /// In en, this message translates to:
-  /// **'Haven is still asking relays to drop some old data from the recent security update.'**
-  String get relaySettingsLegacyRetractionPending;
+  /// **'Continue'**
+  String get storageResetContinue;
+
+  /// Secondary button of the storage-reset notice. Opens the Relay settings page so the user can add or change relays before their relay lists are published; returning from that page counts as continuing, exactly like the Continue button.
+  ///
+  /// In en, this message translates to:
+  /// **'Relay settings'**
+  String get storageResetOpenRelaySettings;
+
+  /// Snackbar when the user answered the storage-reset notice but Haven could not record the answer. The middle sentence is a promise the code keeps, so keep it exact: until the answer is saved Haven publishes neither the user's relay settings (their relay lists) nor their invitation key (the key others need to invite them), and without those nobody can invite them. Do NOT widen it to 'nothing is published': the profile, invitations the user sends and their location still go out. 'Invitation key' is the user-facing name for that key — say it the way you would for something people use to invite you, not a technical term. The snackbar carries a Try Again button (commonTryAgain) that tries to save the answer again; left alone, the notice shows again the next time Haven opens. Must not blame the user or name a technical cause.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven couldn’t save your answer. Until it’s saved, Haven won’t publish your relay settings or invitation key, so no one can invite you yet. Try again, or Haven will ask again the next time it opens.'**
+  String get storageResetAcknowledgeFailed;
 
   /// Accessibility announcement when the circles bottom sheet snaps to its collapsed position.
   ///
@@ -2202,6 +2244,12 @@ abstract class AppLocalizations {
   /// **'Failed to delete identity. Please try again.'**
   String get identityAdvancedDeleteError;
 
+  /// Label of the disabled delete button, and the spoken announcement, while the identity is being deleted.
+  ///
+  /// In en, this message translates to:
+  /// **'Deleting your identity…'**
+  String get identityAdvancedDeletingProgress;
+
   /// Snackbar confirming an arbitrary labelled value (e.g. 'Public key') was copied to the clipboard.
   ///
   /// In en, this message translates to:
@@ -2412,13 +2460,13 @@ abstract class AppLocalizations {
   /// **'Copy public key'**
   String get npubQrCopyButton;
 
-  /// Snackbar confirming a circle member's public key (npub) was copied to the clipboard after long-pressing their row in the member list.
+  /// Snackbar confirming a public key (npub) was copied to the clipboard after a long press: on a circle member's row in the member list, or on a person's row in the list of invitations not sent (missedInvitationsTitle).
   ///
   /// In en, this message translates to:
   /// **'Public key copied to clipboard'**
   String get circleMemberPublicKeyCopied;
 
-  /// Accessibility hint spoken by screen readers for the long-press action on a circle member row, which copies that member's public key (npub) to the clipboard.
+  /// Accessibility action spoken by screen readers for the long press that copies a public key (npub) to the clipboard: on a circle member's row, or on a person's row in the list of invitations not sent (missedInvitationsTitle).
   ///
   /// In en, this message translates to:
   /// **'Copy public key'**
@@ -2712,10 +2760,10 @@ abstract class AppLocalizations {
   /// **'Your circles are not receiving your location, because the relays reject the time this phone stamps on it. Turn on automatic date and time in system settings to fix it.'**
   String get clockSkewBodyRejected;
 
-  /// Banner body when TWO OR MORE independent circle members consistently report times ahead of this device (a clock running slow). The one-member case is a DIFFERENT string (clockSkewBodyDisagreement) because a single peer cannot tell us whose clock is wrong; this one may accuse this phone precisely because several members agree. Crucially this fault is INVISIBLE: the send succeeds and the data is then discarded, so the wording must convey 'sent but wasted', and MUST NEVER imply the send failed — that is the distinction from clockSkewBodyRejected, and the two bodies must not be merged. 'Expire' refers to a short time-to-live carried on each location update. Same remedy sentence as clockSkewBodyRejected; keep it identical in your locale so the fix reads the same in both faults.
+  /// Banner body when TWO OR MORE independent circle members consistently report times ahead of this device (a clock running slow). The one-member case is a DIFFERENT string (clockSkewBodyDisagreement) because a single peer cannot tell us whose clock is wrong; this one may accuse this phone precisely because several members agree. Crucially this fault is INVISIBLE: the send succeeds and the data then expires early, so the wording must convey 'sent but partly or wholly wasted', and MUST NEVER imply the send failed — that is the distinction from clockSkewBodyRejected, and the two bodies must not be merged. 'Expire' refers to the short time-to-live (just under four minutes) carried on each location update; a slow clock shortens it by the amount the clock is behind. 'Some or all' is exact and must keep both halves: at a smaller lag a member who is online still sees each location but one who checks in later can find it already expired, and once the lag reaches the whole time-to-live nobody sees any of them. Same remedy sentence as clockSkewBodyRejected; keep it identical in your locale so the fix reads the same in both faults.
   ///
   /// In en, this message translates to:
-  /// **'This phone is running behind the rest of your circles, so the locations it sends expire before anyone can see them. Turn on automatic date and time in system settings to fix it.'**
+  /// **'This phone is running behind the rest of your circles, so the locations it sends expire early, and your circles can miss some or all of them. Turn on automatic date and time in system settings to fix it.'**
   String get clockSkewBodyBehind;
 
   /// Screen-reader announcement spoken once when the clock warning clears. A live region announces its appearance but never its removal, so this is the only signal a screen-reader user gets that sharing recovered. 'Haven' is the app name and is never translated.
@@ -2730,7 +2778,7 @@ abstract class AppLocalizations {
   /// **'A clock in one of your circles is wrong'**
   String get clockSkewTitleDisagreement;
 
-  /// Banner body paired with clockSkewTitleDisagreement: exactly one other member has been heard from, so the disagreement is certain but the CULPRIT is not. Three hard accuracy limits, all of which a careless translation breaks. (1) NEVER say this phone's clock is wrong, only that the two disagree. (2) NEVER say anything IS being lost: the protocol tolerates roughly four and a half minutes of disagreement, so between two minutes (when this fires) and that point nothing is lost yet — hence 'can expire', a possibility, never 'expire'. Compare clockSkewBodyBehind, which DOES assert real loss and is used only when several members agree. (3) The remedy is deliberately hedged: fixing this phone's clock only rules THIS phone out; it cannot fix the other member's. 'Two minutes' is the real alert threshold (120 seconds) — keep the number. 'Expire' refers to a short time-to-live carried on each location update. Use the same words for the automatic-date-and-time setting as clockSkewBodyRejected does in your locale (on iOS Settings > General > Date & Time > Set Automatically, on Android Settings > System > Date & time > Set time automatically).
+  /// Banner body paired with clockSkewTitleDisagreement: exactly one other member has been heard from, so the disagreement is certain but the CULPRIT is not. Three hard accuracy limits, all of which a careless translation breaks. (1) NEVER say this phone's clock is wrong, only that the two disagree. (2) NEVER say anything IS being lost: one member cannot show which phone is behind, and below just under four minutes of disagreement a member who is online still receives every location — hence 'can expire', a possibility, never 'expire'. Compare clockSkewBodyBehind, which DOES assert real loss and is used only when several members agree. (3) The remedy is deliberately hedged: fixing this phone's clock only rules THIS phone out; it cannot fix the other member's. 'Two minutes' is the real alert threshold (120 seconds) — keep the number. 'Expire' refers to a short time-to-live carried on each location update. Use the same words for the automatic-date-and-time setting as clockSkewBodyRejected does in your locale (on iOS Settings > General > Date & Time > Set Automatically, on Android Settings > System > Date & time > Set time automatically).
   ///
   /// In en, this message translates to:
   /// **'This phone\'s clock and another member\'s disagree by two minutes or more. If this phone\'s is the wrong one, the locations it sends can expire before anyone sees them. Turn on automatic date and time in system settings to make sure this phone is not the one that is wrong.'**
@@ -2742,13 +2790,13 @@ abstract class AppLocalizations {
   /// **'The clock warning is gone.'**
   String get clockSkewDisagreementResolvedAnnouncement;
 
-  /// Headline of the map banner shown when BOTH directions of location sharing have stopped (the relay connection dropped): this device is neither sending nor receiving. Do not merge with the two directional headlines below — saying 'has stopped' when only one direction is broken would be inaccurate.
+  /// Headline of the sharing status card in Circle details when BOTH directions of location sharing have stopped: this device is neither sending nor receiving updates for the circle (a dropped connection, a change waiting for a relay, or a previous connection still closing). Do not merge with the two directional headlines — saying 'has stopped' when only one direction is broken would be inaccurate.
   ///
   /// In en, this message translates to:
   /// **'Location sharing has stopped'**
   String get sharingHealthTitleStopped;
 
-  /// Headline of the map banner shown when this device's location updates are no longer reaching any relay. Receiving may still be working, so this must NOT claim that all of sharing stopped.
+  /// Headline of the sharing status card when this device's location updates are not reaching the circle — because they are failing, or because Haven is holding them back on purpose (a removal not yet made, a departure not yet completed, updates not yet processed). Receiving may still be working, so this must NOT claim that all of sharing stopped.
   ///
   /// In en, this message translates to:
   /// **'Your location is not being shared'**
@@ -2784,37 +2832,13 @@ abstract class AppLocalizations {
   /// **'Repair'**
   String get sharingHealthRepairAction;
 
-  /// Accessibility hint spoken for the Repair button while it is DISABLED, Map → sharing-health banner. WCAG 2.1 SC 4.1.2: a disabled control must still say why it cannot be used. Shown for BOTH outcomes that never clear by waiting — this device is not the circle's admin, and the circle's encryption state is unrecoverable here — so it must be true of both. Do NOT say the circle cannot be repaired on this phone: in the first case it CAN be, just not by this user, which the banner line beside it says outright. Say only that the control is unavailable for this circle; the banner carries the reason. Must not invite a retry. It is sometimes the ONLY spoken statement of why the button is dead: the button is its own focusable node, so a user arriving by focus traversal hears this and not the banner line above it.
-  ///
-  /// In en, this message translates to:
-  /// **'Repair is unavailable for this circle'**
-  String get sharingHealthRepairUnavailableHint;
-
-  /// Accessibility hint spoken for the Repair button, describing what it actually does. It re-reads the circle list, re-anchors the relay subscriptions, re-runs the location publish, and MAY commit a new circle key. Two hedges are load-bearing and must both survive translation. (1) The key clause is conditional on ROLE: only this circle's sole admin can do it — use this locale's 'Admin' badge wording (circleMemberAdmin), not 'the person who created it', because after an admin handoff those differ. (2) 'may' is not politeness: five further gates (epoch too recent, circle too busy, a departure pending, already repaired today, engine state unsettled) decline silently even for the admin, so a flat promise would be wrong most of the time. Do not say 'rotates keys' or imply anything periodic. The commit carries no MLS UpdatePath: it resets the sender ratchets and gives NO post-compromise security, so 'new key' must stay that plain — never 'fresh', 'secure again', 'locks out', or any wording implying past or future traffic becomes unreadable to anyone.
-  ///
-  /// In en, this message translates to:
-  /// **'Reconnects to the relays, retries sending your location, and, if you are this circle\'s admin, may give it a new key'**
-  String get sharingHealthRepairHint;
-
-  /// Shown in the sharing-health banner AND spoken by the screen reader (it is folded into the banner's live-region label), Map. MUST NOT promise instant recovery: the repair changes this device's key material immediately, but every other member only applies it when they next RECEIVE it — which is a receive event on their side, not merely their next send — so their locations start arriving again some minutes later, longer if a phone is asleep. Do not translate as 'fixed' or 'sharing restored' — the honest claim is that the repair was sent and the others will follow once they have picked it up. 'Repair' must match sharingHealthRepairAction. The commit carries no MLS UpdatePath: it resets the sender ratchets and gives NO post-compromise security, so never strengthen this into 'secure again', 'locked out', or any wording implying past or future traffic becomes unreadable to anyone.
+  /// Shown in the sharing status card AND spoken by the screen reader (folded into its live label), Circle details. The repair is a key update this phone makes for itself; every other member applies it only when they next RECEIVE it, so their locations start arriving again minutes later, longer if a phone is asleep. Must not promise instant recovery — do not translate as 'fixed' or 'sharing restored'. Promise nothing about what was sent before, and never 'secure again', 'locked out' or anything implying past traffic becomes unreadable to anyone. 'Repair' must match sharingHealthRepairAction.
   ///
   /// In en, this message translates to:
   /// **'Repair sent. The others will catch up once their phones have picked it up.'**
   String get sharingHealthRepairSent;
 
-  /// Shown in the sharing-health banner AND spoken (folded into the live-region label), Map. Displayed when the user taps Repair on a circle where this device is not the SOLE admin — which is normally the circle's creator, but NOT always: after an admin handoff the creator is no longer the admin, and mid-handoff there are briefly two. So the copy must name the ROLE, not the creator: use whatever this locale uses for the 'Admin' badge (see circleMemberAdmin). Repairing needs that admin, and there is no message the app can send on the user's behalf, so the remedy is a real-world one: ask them to remove and re-add you. Say WHO can do it and WHAT to ask for; do not imply the app will do it, and do not suggest leaving and rejoining on your own (that is not the same thing and does not work).
-  ///
-  /// In en, this message translates to:
-  /// **'Only this circle\'s admin can repair it. Ask them to remove you and add you back.'**
-  String get sharingHealthRepairNotOwner;
-
-  /// Shown in the sharing-health banner AND spoken (folded into the live-region label), Map. Displayed when the circle's encryption state is unrecoverable on this device. This never clears by waiting, so the copy must NOT invite a retry — it is the one repair outcome with no second attempt, and the Repair button is disabled while it is on screen. Keep it concrete and non-technical: the remedy is a new circle with the same members. Do not mention epochs, MLS, or state machines.
-  ///
-  /// In en, this message translates to:
-  /// **'This circle cannot be repaired on this phone. Make a new circle with the same people.'**
-  String get sharingHealthRepairNeedsNewCircle;
-
-  /// Shown in the sharing-health banner AND spoken (folded into the live-region label), Map. Displayed when the repair ran but the key-change step declined for a reason that will clear on its own — the epoch changed too recently, the circle is busy, a departure is pending, it was already repaired today, or the engine state is unsettled. It exists so a tap is never SILENT. Must not sound like a failure and must not invite an immediate retry; the second sentence carries that. Keep it short: it is read aloud after the fault line.
+  /// Shown in the sharing status card AND spoken (folded into its live label), Circle details. Displayed when the repair ran but the key-change step declined for a reason that will clear on its own — the circle changed too recently, it is busy, or it was already repaired recently. It exists so a tap is never SILENT. Must not sound like a failure and must not invite an immediate retry; the second sentence carries that. Keep it short: it is read aloud after the fault line.
   ///
   /// In en, this message translates to:
   /// **'Nothing to repair right now. Haven will keep trying.'**
@@ -2831,6 +2855,300 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Location sharing is working again.'**
   String get sharingHealthResumedAnnouncement;
+
+  /// Banner title when this phone could not load a circle's encrypted state. The circle is not deleted; the banner's Try Again button (commonTryAgain) retries loading it. Must not suggest removing or re-creating the circle.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven can’t open this circle right now'**
+  String get sharingHealthTitleQuarantined;
+
+  /// Banner body under sharingHealthTitleQuarantined. Reassures that the circle still exists; must not suggest removing or re-creating it, and must not name a technical cause.
+  ///
+  /// In en, this message translates to:
+  /// **'Something went wrong loading this circle on this phone. The circle is still here.'**
+  String get sharingHealthBodyQuarantined;
+
+  /// Banner title when an admin of the selected circle disbanded (ended) it: nothing is sent to or received from it again. The banner offers no button; the remedy is leaving the circle from the circle-details sheet.
+  ///
+  /// In en, this message translates to:
+  /// **'This circle has ended'**
+  String get sharingHealthTitleDisbanded;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Body under sharingHealthTitleDisbanded. Deliberately does not name the admin. 'Leave' must match leaveCircleConfirm / the sheet's Leave button (circleDetailsLeaveCircle), which is just below this card. Must not suggest that the circle can be repaired or rejoined.
+  ///
+  /// In en, this message translates to:
+  /// **'An admin ended this circle, so nothing is shared with it any more. Leave it to remove it from this phone.'**
+  String get sharingHealthBodyDisbanded;
+
+  /// Accessibility hint spoken for the Try Again button on the banner shown when Haven could not load a circle (sharingHealthTitleQuarantined). Says what the button does: it tries to load the circle again. Must not promise it will work.
+  ///
+  /// In en, this message translates to:
+  /// **'Tries to load this circle again'**
+  String get sharingHealthQuarantineRetryHint;
+
+  /// Screen-reader announcement spoken once when the user tapped Try Again on the could-not-load-circle banner and the circle still could not be loaded. Reports the outcome only; must not blame the user or promise a retry will help.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven still can’t open this circle.'**
+  String get sharingHealthQuarantineRetryFailedAnnouncement;
+
+  /// Title of the sharing status card when this phone's encryption library halted the circle for good: it neither sends nor receives updates here, and this is remembered across restarts. Say it stopped working on THIS phone only — the circle may still work for the other members. Do not name a technical cause.
+  ///
+  /// In en, this message translates to:
+  /// **'This circle stopped working on this phone'**
+  String get sharingHealthTitleUnrecoverable;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Body under sharingHealthTitleUnrecoverable; the card's button is legacyCircleRecreateCta. True because the circle is repaired in place only when an admin removes this phone's person and adds them back (a member still listed cannot simply be added again), and re-creating touches nothing of the old circle. 'Admins' must match the circle's Admin badge (circleMemberAdmin). Must not invite a retry: no button is offered, and waiting or pressing again does not help. Do not mention encryption internals.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven can no longer send or receive updates in this circle on this phone. Ask one of its admins to remove you and add you back. If no one can, make a new circle with the same people.'**
+  String get sharingHealthBodyUnrecoverable;
+
+  /// Title of the sharing status card when this phone has looked for the circle's missing change on the relays three times, each time with a complete answer, and found nothing that lets it read the others' updates. Say 'can't read', never 'is broken' or 'has ended'.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven can’t read this circle’s updates'**
+  String get sharingHealthTitleStalled;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Body under sharingHealthTitleStalled. 'Seems' is load-bearing: a flood of junk traffic can look the same, so keep the hedge. 'Couldn't find it on the relays' = three complete searches came back empty. The remedy is a re-join by an admin; the last sentence covers a phone whose person is the only admin. Must not invite a retry: no button is offered, and waiting or pressing again does not help. Stalled is NOT terminal: it clears on its own if the circle's state moves on, so never write that it will not fix itself. 'Admins' must match circleMemberAdmin.
+  ///
+  /// In en, this message translates to:
+  /// **'This phone seems to have missed a change to the circle and couldn’t find it on the relays. Ask one of its admins to remove you and add you back. If no one can, make a new circle with the same people.'**
+  String get sharingHealthBodyStalled;
+
+  /// Title of the sharing status card when Haven itself holds a circle in both directions to protect the user's location (nothing is sent to it and nothing is routed from it). Used with sharingHealthBodyCollision and sharingHealthBodyCannotCheck.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven paused this circle'**
+  String get sharingHealthTitlePaused;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Body under sharingHealthTitlePaused when the circle's routing problem is recorded and stands until the circle itself is left (the sheet's Leave button is the remedy; 'Leaving' must match leaveCircleConfirm / circleDetailsLeaveCircle). Rejoining needs a new invitation, as leaveCircleDialogBody says. Never claim that two circles share an identifier or name the other circle: a storage fault reads the same and such a claim could be false.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven found a problem with this circle on this phone and stopped sharing with it to keep your location private. Leaving the circle is the only way to fix this. To join it again, you’ll need a new invitation.'**
+  String get sharingHealthBodyCollision;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Body under sharingHealthTitlePaused when the check itself failed (a storage read did not answer); nothing was recorded, and the next read checks again. No remedy and no button: do not suggest leaving, deleting or re-creating the circle. Never claim two circles share an identifier.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven couldn’t check this circle on this phone, so it paused sharing with it to keep your location private. It checks again on its own.'**
+  String get sharingHealthBodyCannotCheck;
+
+  /// Title of the sharing status card after the user asked to leave and while Haven finishes the leave. Gender-neutral address.
+  ///
+  /// In en, this message translates to:
+  /// **'You’re leaving this circle'**
+  String get sharingHealthTitleLeaving;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Body under sharingHealthTitleLeaving. True because nothing is sent from the moment the leave is asked, the leave is bounded at about a day, and the circle is then removed from this phone. Keep 'about': it is a bound, not a promise of an exact time. No button.
+  ///
+  /// In en, this message translates to:
+  /// **'Nothing is shared with this circle while Haven finishes leaving it. This can take about a day. The circle disappears from this phone when it’s done.'**
+  String get sharingHealthBodyLeaving;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Body under sharingHealthTitleNotSending when a removal the user asked for was dropped unmade and someone it named is still in the circle; the change card below it (changeNoticeHeading) offers the choices. Receiving still works, so do not say all sharing stopped. Never say the person was removed. 'Anyone you tried to remove' is deliberately number-neutral.
+  ///
+  /// In en, this message translates to:
+  /// **'A removal you asked for wasn’t made, so Haven has paused sharing your location with this circle to keep it from anyone you tried to remove.'**
+  String get sharingHealthBodyRemovalUnmade;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Same situation as sharingHealthBodyRemovalUnmade, used when no change card is shown for it, so the body points to the circle's member list instead. Never say the person was removed.
+  ///
+  /// In en, this message translates to:
+  /// **'A removal you asked for wasn’t made, so Haven has paused sharing your location with this circle to keep it from anyone you tried to remove. Open the member list to see who is still in the circle.'**
+  String get sharingHealthBodyRemovalUnmadeNoNotice;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Body under sharingHealthTitleNotSending: a member left and the change that removes them is not made yet; until it is, nothing is sent to the circle. Receiving still works. 'Someone' is gender-neutral; keep it so.
+  ///
+  /// In en, this message translates to:
+  /// **'Someone left this circle and their departure hasn’t been completed. Until it is, Haven doesn’t share your location with this circle.'**
+  String get sharingHealthBodyDepartureDue;
+
+  /// Title of the sharing status card when the circle's relays changed while Haven was in the background: until Haven finishes switching while it is open, nothing is sent for this circle in the background. Say 'background' explicitly; sharing while the app is open is not affected.
+  ///
+  /// In en, this message translates to:
+  /// **'Background sharing is paused for this circle'**
+  String get sharingHealthTitleBackgroundPaused;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Body under sharingHealthTitleBackgroundPaused. 'Its' is the circle. True because the hold ends at the end of the next full refresh made while the app is open.
+  ///
+  /// In en, this message translates to:
+  /// **'Its relays changed while Haven was in the background. Haven finishes switching while it’s open; until then this circle isn’t shared in the background.'**
+  String get sharingHealthBodyAwaitsForeground;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Body under sharingHealthTitleStopped: a change to the circle (an invite, a removal, a relay change, a repair, or this phone's routine key update after joining) is waiting for a relay's confirmation, and until then the circle is held in BOTH directions. Do not say 'yet', 'soon' or that it will be confirmed: it may never be. 'While the app is open' under-claims on purpose.
+  ///
+  /// In en, this message translates to:
+  /// **'A change to this circle is waiting for a relay to confirm it. Until then, Haven isn’t sending your location to this circle or showing new locations from it. It keeps trying while the app is open.'**
+  String get sharingHealthBodyAwaitingRelays;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Body under sharingHealthTitleStopped: a relay accepted the change and Haven is applying it. 'Updates wait' covers both directions. Say 'sent' (a relay accepted it), never 'delivered'.
+  ///
+  /// In en, this message translates to:
+  /// **'A relay accepted a change to this circle and Haven is finishing it. Until then, this circle’s updates wait.'**
+  String get sharingHealthBodyAcknowledged;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Body under sharingHealthTitleStopped: a change was prepared but could not be recorded, so it was never sent; it is undone at a later attempt or at the latest the next time Haven starts. 'Updates wait' covers both directions.
+  ///
+  /// In en, this message translates to:
+  /// **'A change to this circle couldn’t be saved, so it wasn’t sent. Haven sorts it out, at the latest the next time it starts; until then this circle’s updates wait.'**
+  String get sharingHealthBodyStagedWithoutRecord;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Body under sharingHealthTitleNotSending: this phone holds received updates for the circle it has not processed yet, and sends nothing until it has. It cannot tell a slow case from a stuck one, so promise neither a quick end nor a fault.
+  ///
+  /// In en, this message translates to:
+  /// **'This phone has updates for this circle that it hasn’t been able to process. Until it has, Haven doesn’t share your location with this circle.'**
+  String get sharingHealthBodyStoredInput;
+
+  /// Shown in the sharing status card at the top of the Circle details sheet (circleDetailsTitle) and spoken as one sentence with its title by a screen reader. Body under sharingHealthTitleStopped: a previous connection is still shutting down, and only one may run at a time. Restarting the phone is the one remedy true on every platform (closing the app does not always end it), so keep 'phone', not 'app'.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven is still closing its last connection, so location sharing is paused. It resumes once that finishes. Restarting your phone always clears it.'**
+  String get sharingHealthBodySessionHeld;
+
+  /// Accessibility hint spoken for the Repair button in the sharing status card, describing what it does. Any member can run it — name no role. 'May' is load-bearing: several checks decline the key step silently, so never make it a promise. Make no claim about earlier messages or about anyone being locked out. Replaces sharingHealthRepairHint, which named the admin.
+  ///
+  /// In en, this message translates to:
+  /// **'Reconnects to the relays, retries sending your location, and may give this circle new encryption keys'**
+  String get sharingHealthRepairHintAnyMember;
+
+  /// Screen-reader announcement (spoken only) for the selected circle, made while its Circle details sheet is closed, when a sharing problem appears or is still there when the user comes back to the app. 'Circle details' must match circleDetailsButtonTooltip. One or two short sentences; no technical cause.
+  ///
+  /// In en, this message translates to:
+  /// **'Location sharing needs attention in this circle. Open Circle details to see why.'**
+  String get sharingHealthAttentionAnnouncement;
+
+  /// Screen-reader announcement (spoken only, never shown) made while the Circle details sheet is closed, the first time a note about changes appears for a circle — any circle, not only the selected one. {circleName} is the circle's name, passed without bidi isolates because this is speech. 'Details' must match circleDetailsButtonTooltip. Never say the change was the user's: some notes are about changes by others.
+  ///
+  /// In en, this message translates to:
+  /// **'Something about recent changes to {circleName} needs your attention. Open that circle’s details to read it.'**
+  String changeNoticeArrivedAnnouncement(String circleName);
+
+  /// Accessible name (and tooltip) of the Circle details button while the selected circle has a sharing problem or a note about changes. Only on that button; a circle row in the selector list uses circleRowAttentionSemantics. 'Circle details' must match circleDetailsButtonTooltip. The badge itself has no text, so this is its only name.
+  ///
+  /// In en, this message translates to:
+  /// **'Circle details, needs attention'**
+  String get circleDetailsAttentionTooltip;
+
+  /// Accessible name of a circle row in the circle selector list while that circle has a sharing problem or a note about changes. {circleName} is the row's circle name; the placeholder lets word order follow the language. Not bidi-isolated: this is a semantics label.
+  ///
+  /// In en, this message translates to:
+  /// **'{circleName}, needs attention'**
+  String circleRowAttentionSemantics(String circleName);
+
+  /// Heading of the card in Circle details that lists notes about changes to the circle. Some notes are about changes by others, so do not say 'your changes'.
+  ///
+  /// In en, this message translates to:
+  /// **'Changes to this circle'**
+  String get changeNoticeHeading;
+
+  /// One line of the change card. A change that removed someone — the user's removal, the removal of someone who left, or a change whose kind this phone did not record — was undone because every relay refused it. The conditional 'if it removed someone' is what keeps this true for all three; do not drop it. 'They' is gender- and number-neutral.
+  ///
+  /// In en, this message translates to:
+  /// **'A change to this circle didn’t go through. If it removed someone, they’re still in the circle and can see what’s shared with it.'**
+  String get changeNoteRemovalUndone;
+
+  /// One line of the change card. A change that removed nobody was undone: every relay refused it, or none could be reached for a day. 'If it was yours' — the note does not say whose change it was.
+  ///
+  /// In en, this message translates to:
+  /// **'A change to this circle didn’t go through, so nothing changed. If it was yours, make it again if you still want it.'**
+  String get changeNoteChangeUndone;
+
+  /// One line of the change card. A change may have been accepted by a relay without this phone ever learning so; keep both 'may's. Offers no remedy.
+  ///
+  /// In en, this message translates to:
+  /// **'A change to this circle may have reached the others without this phone knowing, so this phone may be out of step with them.'**
+  String get changeNoteMayBeOutOfStep;
+
+  /// One line of the change card. The invitee is on the member list with no invitation left to send; only removing and re-adding them helps. 'Someone' is gender-neutral. Say 'sent' (a relay accepted it), never 'delivered'.
+  ///
+  /// In en, this message translates to:
+  /// **'Someone you invited is listed in this circle but can’t join, because Haven can’t send their invitation. Remove them and add them again.'**
+  String get changeNoteReinviteOwed;
+
+  /// One line of the change card: a change was prepared but could not be recorded, so it was never sent.
+  ///
+  /// In en, this message translates to:
+  /// **'A change to this circle couldn’t be saved, so it wasn’t sent.'**
+  String get changeNoteChangeUnrecorded;
+
+  /// One line of the change card. A queued change was taken out unmade (its author is no longer an admin, or a person it removes is already gone — including removed by hand). 'May already have been made' covers the second case.
+  ///
+  /// In en, this message translates to:
+  /// **'A change waiting to be made in this circle was cancelled because it could no longer be made as asked. It may already have been made another way.'**
+  String get changeNoteQueuedChangeDropped;
+
+  /// One line of the change card: changes are queued and the step that would release them failed. They are still queued.
+  ///
+  /// In en, this message translates to:
+  /// **'Some changes to this circle are still waiting to be made.'**
+  String get changeNoteQueuedChangesHeld;
+
+  /// One line of the change card. A removal the user asked for was taken out unmade, and someone it named may still be in the circle and able to read it. Never say the person was removed. 'Anyone you tried to remove' is number-neutral.
+  ///
+  /// In en, this message translates to:
+  /// **'A removal you asked for in this circle wasn’t made. Anyone you tried to remove may still be in the circle.'**
+  String get changeNoteQueuedRemovalDropped;
+
+  /// One line of the change card. Another member's change won and the user's was withdrawn; the note does not say which kind of change, so do not guess.
+  ///
+  /// In en, this message translates to:
+  /// **'Another member’s change to this circle replaced one of yours, so yours wasn’t made. Make it again if you still want it.'**
+  String get changeNoteChangeWithdrawn;
+
+  /// One line of the change card. An invitation no inbox relay of the invitee has accepted yet: it is sent again while the app is open, for up to a day from the invite; after that it stops, and only removing and re-adding the person helps. True both while it is still being sent and after it stopped. 'Them' / 'the person' are gender-neutral. Say 'sent' (a relay accepted it), never 'delivered'.
+  ///
+  /// In en, this message translates to:
+  /// **'An invitation to this circle hasn’t gone through. Haven keeps sending it while the app is open, for up to a day after you invited them. If the person hasn’t joined by then, remove them and add them again.'**
+  String get changeNoteWelcomeOwed;
+
+  /// Information line in the change card (no button; it clears by itself). Some updates sent to the circle could not be opened on this phone. Do not say whose they were.
+  ///
+  /// In en, this message translates to:
+  /// **'Some recent updates sent to this circle couldn’t be opened on this phone.'**
+  String get changeNoteUnreadLocation;
+
+  /// Label in the change card followed by the names of the people a dropped removal named who are still listed in the circle. Part of the card's spoken label. Keep the colon or the locale's equivalent list introducer.
+  ///
+  /// In en, this message translates to:
+  /// **'Still in the circle:'**
+  String get changeNoticeStillInCircleLabel;
+
+  /// Button in the change card, offered only to an admin, that removes again the people a dropped removal named who are still in the circle.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove again'**
+  String get changeNoticeRemoveAgain;
+
+  /// Button beside changeNoteRemovalUndone in the change card: closes Circle details and shows the circle's member list.
+  ///
+  /// In en, this message translates to:
+  /// **'Review members'**
+  String get changeNoticeReviewMembers;
+
+  /// Button in the change card after a dropped removal: the user chooses to leave the people in the circle. It opens a confirmation (changeNoticeKeepConfirmTitle). 'Them' is number- and gender-neutral.
+  ///
+  /// In en, this message translates to:
+  /// **'Keep them in the circle'**
+  String get changeNoticeKeepMembers;
+
+  /// Title of the confirmation dialog for changeNoticeKeepMembers. Never promise that sharing resumes or starts now: another hold may still stop it. Never say the people were removed.
+  ///
+  /// In en, this message translates to:
+  /// **'Keep them in the circle?'**
+  String get changeNoticeKeepConfirmTitle;
+
+  /// Body of the keep-them confirmation dialog: confirming lifts only the pause this removal caused. Never promise that sharing resumes or starts now — another hold (a pending change, an ended circle, leaving) may still stop it. Never say the people were removed. The dialog's default button is commonCancel.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven will no longer pause sharing with this circle because of this removal. Anyone you tried to remove who is still in the circle stays in it and can see your location whenever Haven shares it with this circle.'**
+  String get changeNoticeKeepConfirmBody;
+
+  /// Confirm button of the keep-them dialog (shown in the error colour). Never promise that sharing resumes; never say the people were removed.
+  ///
+  /// In en, this message translates to:
+  /// **'Keep them'**
+  String get changeNoticeKeepConfirmAction;
 
   /// Secondary line on a circle member's row in the members list, giving the age of their last known location. Shown only once the location is older than the threshold the map marker's age pill uses, so the list and the map never disagree. Deliberately expressed in minutes at every age (e.g. '90 minutes ago' rather than '1 hour ago') to match that pill exactly.
   ///

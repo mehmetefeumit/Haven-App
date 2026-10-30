@@ -110,7 +110,9 @@
 ///    the commits via FFI. Exactly one of them ends up `isAdmin=true`
 ///    (lex-smallest non-self per `select_successor`). Epoch deltas
 ///    asserted on the winner (committer's epoch advanced) and the
-///    loser (adopts winner's commit, epoch also advances).
+///    loser (adopts winner's commit, epoch also advances). Alice's leave
+///    ends — her tile goes — only once one of them has committed her
+///    SelfRemove proposal.
 /// 6. **Non-admin leaves via FFI**: the residual member who is NOT
 ///    admin calls `SyntheticUser.leaveAsNonAdmin`; the remaining
 ///    admin drains the SelfRemove and asserts the leaver is gone.
@@ -144,7 +146,7 @@
 library;
 
 import 'dart:async';
-import 'dart:convert' show jsonDecode, jsonEncode;
+import 'dart:convert' show jsonEncode;
 import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/foundation.dart' show debugPrint, listEquals;
@@ -174,13 +176,13 @@ import 'package:haven/src/providers/relay_preferences_provider.dart'
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart'
     show
-        CircleCreationResultFfi,
         CircleFfi,
         CircleWithMembersFfi,
         InvitationFfi,
         MemberKeyPackageFfi,
         RelayManagerFfi;
-import 'package:haven/src/services/circle_service.dart' show Circle;
+import 'package:haven/src/services/circle_service.dart'
+    show ChangeDelivery, Circle;
 import 'package:haven/src/services/live_sync_resubscriber.dart'
     show LiveSyncResubscriber;
 import 'package:haven/src/services/location_sharing_service.dart' show MemberLocation;
@@ -191,7 +193,9 @@ import 'package:haven/src/utils/log_alias.dart'
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '_lib/circle_creation.dart' show createCircleConfirmed;
+import '_lib/app_lifecycle.dart';
+import '_lib/circle_creation.dart'
+    show DeliveredCircle, createCircleDelivered, giftWrapIdsFor;
 import '_lib/coordination.dart';
 import '_lib/diagnostics.dart';
 import '_lib/fake_location_service.dart';
@@ -199,6 +203,7 @@ import '_lib/log_needles.dart';
 import '_lib/pump_helpers.dart';
 import '_lib/scenario_harness.dart';
 import '_lib/sheet_helpers.dart';
+import '_lib/sqlcipher_wrong_key.dart' show provokeSqlcipherWrongKeyOpen;
 import '_lib/synthetic_user.dart' show DecryptedCoords, SyntheticUser;
 import '_lib/test_relay.dart'
     show TestRelay, TestRelayEvent, wireRecorderDeclared;
@@ -403,6 +408,12 @@ Future<void> _boundedTeardown(
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  // Eleven tests share this process and the binding forgets the lifecycle
+  // after each one: without this only the first could ever claim the
+  // foreground for its live-sync session, and the eight M11 scenarios would
+  // exercise the legacy receive path instead of the one a foregrounded app
+  // runs. See `_lib/app_lifecycle.dart`.
+  resumeAppBeforeEachTest();
 
   // `late` keeps the test body ergonomic; the `_didInit*` sentinels
   // make `tearDownAll` safe against a partial `setUpAll` failure —
@@ -434,6 +445,11 @@ void main() {
     // forward, so the earlier it lands, the more of the run it covers.
     _needles = LogNeedles(ctx.relay);
     await _needles.plant('open');
+
+    // The S-SQLC stimulus, inside the window the plant above proves is
+    // captured: a wrong-key SQLCipher open in this process, which the lane's
+    // log-privacy gate then scans for SQLCipher's own lines.
+    await provokeSqlcipherWrongKeyOpen();
 
     // Pre-seed Alice's identity from her sentinel seed and skip
     // onboarding. The production identity-loading + KeyPackagePublisher
@@ -575,6 +591,7 @@ void main() {
           completed: prefs.getBool(kOnboardingCompletedKey) ?? false,
         );
 
+        expectAppResumed();
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
@@ -1004,7 +1021,28 @@ void main() {
         final CircleWithMembersFfi residualBobCircle;
         final CircleWithMembersFfi residualCarolCircle;
         try {
-          await _aliceLeavesViaUi(
+          // A non-admin leave ends only when a remaining member commits
+          // Alice's SelfRemove proposal (or at the core's 24 h bound), and
+          // the peers here take it in only inside `_reconcileHandoff`. So:
+          // the press, its `leaving` answer, the peers' commit, and only
+          // then the tile going. Expected: the reconcile, then at once on
+          // the live configuration (the commit arrives as a group update)
+          // and within the next poll or the leave's 15 s / 45 s follow-ups
+          // on the poll one.
+          await _aliceAsksToLeaveViaUi(tester: tester);
+
+          final residual = await _reconcileHandoff(
+            bob: bob,
+            carol: carol,
+            inbox: handoffInbox,
+            relay: ctx.relay,
+            bobCircle: bobCircle,
+            carolCircle: carolCircle,
+          );
+          residualBobCircle = residual.bob;
+          residualCarolCircle = residual.carol;
+
+          await _aliceLeaveEnds(
             tester: tester,
             nostrGroupIdHex: _hexLower(bobCircle.circle.nostrGroupId),
           );
@@ -1024,17 +1062,6 @@ void main() {
           // requires a 4-member circle or an admin-grant flow, and is
           // estimated as a separate, larger change.
           await _assertAliceCirclesProviderIsEmpty(tester: tester);
-
-          final residual = await _reconcileHandoff(
-            bob: bob,
-            carol: carol,
-            inbox: handoffInbox,
-            relay: ctx.relay,
-            bobCircle: bobCircle,
-            carolCircle: carolCircle,
-          );
-          residualBobCircle = residual.bob;
-          residualCarolCircle = residual.carol;
         } finally {
           await handoffInbox.dispose();
         }
@@ -1432,10 +1459,10 @@ void main() {
 
       // ------------------------------------------------------------------
       // Step 2 — Alice fetches Dave's KeyPackage and creates a 2-member
-      // circle. `createCircle` returns the circle metadata AND a
-      // gift-wrapped Welcome for Dave. We publish Dave's gift-wrap to the
-      // relay so the scenario mirrors production: the gift-wrap DOES
-      // reach Dave, and Dave simply never acts on it.
+      // circle. The driven create sends Dave's gift-wrapped Welcome to the
+      // relay and the helper requires its ack, so the scenario mirrors
+      // production: the gift-wrap DOES reach Dave, and Dave simply never
+      // acts on it.
       //
       // `fetchMemberKeypackage` lives on `RelayManagerFfi` (not
       // `CircleManagerFfi`), so we create a dedicated relay-manager
@@ -1444,6 +1471,7 @@ void main() {
       final relayManager = await RelayManagerFfi.newInstance();
       final daveKp = await relayManager.fetchMemberKeypackage(
         pubkey: fe2Dave.pubkeyHex,
+        circle: fe2Alice.user.circleManager,
       );
       if (daveKp == null) {
         throw StateError(
@@ -1453,22 +1481,17 @@ void main() {
       }
 
       final aliceSecret = await fe2Alice.user.getSecretBytes();
-      final CircleCreationResultFfi creationResult;
+      final DeliveredCircle creationResult;
       try {
-        creationResult = await fe2Alice.user.circleManager.createCircle(
+        creationResult = await createCircleDelivered(
+          manager: fe2Alice.user.circleManager,
+          relayManager: relayManager,
           identitySecretBytes: aliceSecret,
           members: <MemberKeyPackageFfi>[daveKp],
           name: 'FE-2 Circle',
           circleType: 'location_sharing',
           relays: <String>[fe2Relay.url],
-          // Dave (a SyntheticUser) advertises no inbox/NIP-65 relays, so the
-          // Welcome-delivery cascade has no recipient relay to resolve and
-          // fails closed with MissingWelcomeRelays unless the admin supplies a
-          // fallback. Pass the admin's own inbox relay (the hermetic relay) —
-          // exactly what the production admin flow does — so createCircle
-          // resolves Dave's recipient relays and returns his gift-wrap, which
-          // this test then publishes manually below.
-          creatorFallbackRelays: <String>[fe2Relay.url],
+          scenario: 'FE-2',
         );
       } finally {
         for (var i = 0; i < aliceSecret.length; i++) {
@@ -1487,26 +1510,6 @@ void main() {
         nostrGroupId: creationResult.circle.nostrGroupId,
         label: 'FE-2 circle',
       );
-
-      // Publish Dave's gift-wrap so the relay `firstWhere` below is
-      // non-vacuous. Without publishing, Dave would never have a real
-      // gift-wrap to "ignore", and the invite-ignore assertion would pass
-      // trivially without exercising the processGiftWrappedInvitation path.
-      final daveWelcome = creationResult.welcomeEvents.firstWhere(
-        (e) => e.recipientPubkey.toLowerCase() ==
-            fe2Dave.pubkeyHex.toLowerCase(),
-        orElse: () => throw StateError(
-          '[FE-2] createCircle did not produce a gift-wrap for Dave. '
-          'Regression in the Rust-side gift-wrap generation.',
-        ),
-      );
-      final (daveWelcomeAccepted, _) =
-          await fe2Relay.publishAndAwaitOk(daveWelcome.eventJson);
-      if (!daveWelcomeAccepted) {
-        // Never the relay's OK reason text (remote-authored prose, Security
-        // Rule 15) — the boolean rejection is the whole diagnostic here.
-        throw StateError('[FE-2] relay rejected the gift-wrap for Dave');
-      }
 
       // ------------------------------------------------------------------
       // Step 3 — Wait for Dave's gift-wrap to be observable on the relay
@@ -1962,13 +1965,19 @@ void main() {
 
           final noise = runNoise();
 
-          // Remove Bob through the production converging path (flag-on routes
-          // removeMember via stage_remove_members_converging + settle window +
-          // converge_after_window). This MUST NOT throw notApplied.
-          await container.read(circleServiceProvider).removeMember(
+          // Remove Bob through the production path: the fanout driver, from
+          // the app in front of its user. It must be acknowledged and applied,
+          // never merely awaiting its relays.
+          final removal = await container.read(circleServiceProvider)
+              .removeMember(
                 mlsGroupId: mlsGroupId,
                 memberPubkeyHex: bob.pubkeyHex,
               );
+          expect(
+            removal,
+            ChangeDelivery.applied,
+            reason: '[M11:H1] the removal was not applied ($removal)',
+          );
           await noise; // drain the noise loop (its errors are swallowed above)
 
           final roster = await _m11AliceRoster(container, mlsGroupId);
@@ -2110,6 +2119,7 @@ void main() {
           final relayManager = await RelayManagerFfi.newInstance();
           final aliceKp = await relayManager.fetchMemberKeypackage(
             pubkey: _alicePubkeyHex(),
+            circle: bob.user.circleManager,
           );
           if (aliceKp == null) {
             throw StateError(
@@ -2118,19 +2128,29 @@ void main() {
             );
           }
 
+          // The wraps the relay already holds for Alice: earlier scenarios
+          // invited her too, so the one this create sends is the one that is
+          // new.
+          final heldWraps = await giftWrapIdsFor(
+            relayManager: relayManager,
+            recipientPubkeyHex: _alicePubkeyHex(),
+            relays: <String>[m11Relay.url],
+          );
           // Bob (a SyntheticUser, no engine) creates a circle inviting Alice;
           // the resulting Welcome carries the NIP-59 back-dated (±48 h)
           // created_at the FFI stamps.
           final bobSecret = await bob.user.getSecretBytes();
-          final CircleCreationResultFfi creation;
+          final DeliveredCircle creation;
           try {
-            creation = await bob.user.circleManager.createCircle(
+            creation = await createCircleDelivered(
+              manager: bob.user.circleManager,
+              relayManager: relayManager,
               identitySecretBytes: bobSecret,
               members: <MemberKeyPackageFfi>[aliceKp],
               name: 'M11 f Circle',
               circleType: 'location_sharing',
               relays: <String>[m11Relay.url],
-              creatorFallbackRelays: <String>[m11Relay.url],
+              scenario: 'M11:f',
             );
           } finally {
             for (var i = 0; i < bobSecret.length; i++) {
@@ -2147,34 +2167,24 @@ void main() {
             label: 'M11:f circle (Bob-created)',
           );
 
-          final aliceWelcome = creation.welcomeEvents.firstWhere(
-            (e) =>
-                e.recipientPubkey.toLowerCase() ==
-                _alicePubkeyHex().toLowerCase(),
-            orElse: () => throw StateError(
-              '[M11:f] Bob createCircle produced no Welcome for Alice.',
-            ),
-          );
-          final (ok, _) =
-              await m11Relay.publishAndAwaitOk(aliceWelcome.eventJson);
-          if (!ok) {
-            // Never the relay's OK reason text (remote-authored prose,
-            // Security Rule 15) — the boolean rejection is the whole
-            // diagnostic here.
-            throw StateError('[M11:f] relay rejected the Welcome');
-          }
-
           // The engine's inbox plane (#p=Alice, 7-day lookback) delivers the
           // back-dated wrap → processGiftWrappedInvitation → invalidate
           // pendingInvitationsProvider. Poll until it surfaces. DM-4:
           // Alice's pending invitations are keyed by the GIFT-WRAP event id
           // (the real MLS group id stays inside the still-encrypted welcome
-          // until Accept), so match on the exact wrap just published — a
+          // until Accept), so match on the exact wrap just sent — a
           // stronger oracle than a group-id match, since it pins THE event.
-          final fWrapId = hexToBytes(
-            (jsonDecode(aliceWelcome.eventJson) as Map<String, dynamic>)['id']
-                as String,
-          ).toList();
+          final sent = (await giftWrapIdsFor(
+            relayManager: relayManager,
+            recipientPubkeyHex: _alicePubkeyHex(),
+            relays: <String>[m11Relay.url],
+          )).difference(heldWraps);
+          if (sent.length != 1) {
+            throw StateError(
+              '[M11:f] the create sent Alice no single new Welcome',
+            );
+          }
+          final fWrapId = hexToBytes(sent.single).toList();
           await _m11PumpUntilInvitation(
             tester,
             container,
@@ -2621,22 +2631,33 @@ void main() {
           final relayManager = await RelayManagerFfi.newInstance();
           final aliceKp = await relayManager.fetchMemberKeypackage(
             pubkey: _alicePubkeyHex(),
+            circle: bob.user.circleManager,
           );
           if (aliceKp == null) {
             throw StateError(
               '[M11:g] fetchMemberKeypackage returned null for Alice.',
             );
           }
+          // The wraps the relay already holds for Alice: earlier scenarios
+          // invited her too, so the one this create sends is the one that is
+          // new.
+          final heldWraps = await giftWrapIdsFor(
+            relayManager: relayManager,
+            recipientPubkeyHex: _alicePubkeyHex(),
+            relays: <String>[m11Relay.url],
+          );
           final bobSecret = await bob.user.getSecretBytes();
-          final CircleCreationResultFfi creation;
+          final DeliveredCircle creation;
           try {
-            creation = await bob.user.circleManager.createCircle(
+            creation = await createCircleDelivered(
+              manager: bob.user.circleManager,
+              relayManager: relayManager,
               identitySecretBytes: bobSecret,
               members: <MemberKeyPackageFfi>[aliceKp],
               name: 'M11 g Circle',
               circleType: 'location_sharing',
               relays: <String>[m11Relay.url],
-              creatorFallbackRelays: <String>[m11Relay.url],
+              scenario: 'M11:g',
             );
           } finally {
             for (var i = 0; i < bobSecret.length; i++) {
@@ -2652,29 +2673,19 @@ void main() {
             label: 'M11:g circle (Bob-created)',
           );
 
-          final aliceWelcome = creation.welcomeEvents.firstWhere(
-            (e) =>
-                e.recipientPubkey.toLowerCase() ==
-                _alicePubkeyHex().toLowerCase(),
-            orElse: () => throw StateError(
-              '[M11:g] Bob createCircle produced no Welcome for Alice.',
-            ),
-          );
-          final (ok, _) =
-              await m11Relay.publishAndAwaitOk(aliceWelcome.eventJson);
-          if (!ok) {
-            // Never the relay's OK reason text (remote-authored prose,
-            // Security Rule 15) — the boolean rejection is the whole
-            // diagnostic here.
-            throw StateError('[M11:g] relay rejected the Welcome');
-          }
-
           // DM-4: match on the gift-wrap event id — the stand-in key pending
           // invitations carry until Accept (see scenario f's doc).
-          final gWrapId = hexToBytes(
-            (jsonDecode(aliceWelcome.eventJson) as Map<String, dynamic>)['id']
-                as String,
-          ).toList();
+          final sent = (await giftWrapIdsFor(
+            relayManager: relayManager,
+            recipientPubkeyHex: _alicePubkeyHex(),
+            relays: <String>[m11Relay.url],
+          )).difference(heldWraps);
+          if (sent.length != 1) {
+            throw StateError(
+              '[M11:g] the create sent Alice no single new Welcome',
+            );
+          }
+          final gWrapId = hexToBytes(sent.single).toList();
           await _m11PumpUntilInvitation(
             tester,
             container,
@@ -4445,10 +4456,9 @@ Future<Map<String, DecryptedCoords>> _drainUntilLocationsVisible({
 // PHASE 5 helpers — Alice leaves through the UI; Bob and Carol observe
 // =============================================================================
 
-Future<void> _aliceLeavesViaUi({
-  required WidgetTester tester,
-  required String nostrGroupIdHex,
-}) async {
+/// Alice presses Leave and confirms, and the press answers `leaving`: the
+/// leave stands until a remaining member commits her SelfRemove proposal.
+Future<void> _aliceAsksToLeaveViaUi({required WidgetTester tester}) async {
   // Select by stable WidgetKey, not the translatable "Circle details"
   // tooltip — the tooltip stays for accessibility, but the selector
   // no longer breaks on a copy/i18n change.
@@ -4489,19 +4499,35 @@ Future<void> _aliceLeavesViaUi({
 
   await tapWhenHittable(tester, find.byKey(WidgetKeys.leaveCircleConfirm));
 
-  // FFI: planLeave (AdminHandoff) → proposeAdminHandoff → publish →
-  // finalize → proposeSelfDemote → publish → finalize → proposeLeave →
-  // publish → completeLeave. Three relay round-trips.
-  //
-  // pumpUntilGone, not pumpAndSettle: the dialog pops immediately
-  // when the tap is processed, then the async FFI chain begins.
-  // pumpAndSettle can see a momentarily-empty frame queue BETWEEN
-  // the dialog close and the next FFI await, settle prematurely,
-  // and let the next assertion fire while the chain is still in
-  // flight. Waiting on the actual observable — the circle selector's
-  // active-selection widget leaving the tree — gates the next
-  // assertion on the work being done. The key is scoped to
-  // [nostrGroupIdHex] so the finder cannot false-match another
+  // One driver call: the hand-off, the step-down and the SelfRemove
+  // proposal, each sent until a relay takes it. The press then answers
+  // `leaving` and arms the leave's foreground follow-up — the observable
+  // waited on here, by driving frames rather than settling (MapShell's
+  // timers keep the frame queue busy).
+  final container = ProviderScope.containerOf(
+    tester.element(find.byType(HavenApp)),
+    listen: false,
+  );
+  await pumpUntilCondition(
+    tester,
+    () => container
+        .read(maintenanceSchedulerProvider.notifier)
+        .leaveFollowUpArmedForTest,
+    description: "Alice's press answering `leaving`",
+    timeout: const Duration(seconds: 60),
+  );
+  debugPrint('[e2e_combined:alice] PHASE 5 leave asked for.');
+}
+
+/// Waits for Alice's leave to end after the peers committed it: her circle
+/// selector's active tile for the circle leaves the tree.
+Future<void> _aliceLeaveEnds({
+  required WidgetTester tester,
+  required String nostrGroupIdHex,
+}) async {
+  // pumpUntilGone, not pumpAndSettle: waiting on the actual observable —
+  // the circle selector's active-selection widget leaving the tree. The key
+  // is scoped to [nostrGroupIdHex] so the finder cannot false-match another
   // circle or a SnackBar carrying the circle name.
   await pumpUntilGone(
     tester,
@@ -4510,7 +4536,7 @@ Future<void> _aliceLeavesViaUi({
     description:
         'circle selector active-tile '
         '(id: ${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)}) '
-        'disappearing after Alice taps Leave',
+        "disappearing after the peers committed Alice's leave",
   );
 
   expect(find.byType(MapShell), findsOneWidget);
@@ -4626,9 +4652,8 @@ class _ArrivalOrderedInbox {
 ///      processes — later re-issues / the location / avatar chunks
 ///      target a stale epoch once Alice is gone and are absorbed
 ///      harmlessly as decrypt failures — and publishes exactly ONE
-///      commit, `C_winner`. Its event id is captured directly from the
-///      publish (`ApplyEventsSummary.publishedCommitEventIds`), not
-///      inferred positionally from the buffer.
+///      commit, `C_winner`. Its event id was captured directly from the
+///      publish, not inferred positionally from the buffer.
 ///   3. The LOSER re-applies the same growing buffer with
 ///      `finalizeAutoCommit: false`, which stages but WITHHOLDS its own
 ///      candidate SelfRemove commit and stops processing the rest of
@@ -4718,12 +4743,11 @@ _reconcileHandoff({
   // member's engine to COMMIT it before anyone converges, and the engine
   // DOES emit that commit as a `PublishWork::AutoPublish` — it just cannot
   // publish it itself (the Rust `CircleManagerFfi` holds no relay handle).
-  // `SyntheticUser.applyArrivalOrdered` previously ingested via the
-  // `decryptLocation` shim, which ROLLS BACK that auto-commit, so the
-  // eviction was silently discarded and Alice stayed in both peers'
-  // rosters forever. The drain now uses
-  // `decryptLocationCollectingCommits` + publish-then-confirm, mirroring
-  // production `LocationSharingService._publishAutoCommits`.
+  // `SyntheticUser.applyArrivalOrdered` once ingested through a shim that
+  // ROLLED BACK that auto-commit, so the eviction was silently discarded and
+  // Alice stayed in both peers' rosters forever. The drain now ingests
+  // through the fanout driver, which records and drives the auto-commit
+  // itself, as production's poll does.
   //
   // Consequence, and why the poll below drives BOTH peers together: with
   // the contract honoured, Bob AND Carol each auto-commit Alice's
@@ -5768,7 +5792,7 @@ Future<void> _assertAliceCirclesProviderHasFamily({
 /// real circle state, not merely that the circle tile text disappeared
 /// from the UI widget tree.
 ///
-/// Call this immediately after [_aliceLeavesViaUi] returns.
+/// Call this immediately after [_aliceLeaveEnds] returns.
 /// Corroborates — at the production-provider layer — that Alice's
 /// AdminHandoff leave removed the circle from her real state.
 ///
@@ -6101,7 +6125,10 @@ Future<ProviderContainer> _m11PumpAliceLiveEngine(
     introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
     completed: prefs.getBool(kOnboardingCompletedKey) ?? false,
   );
+  // The superseded check FIRST: a scenario that has been overtaken must end
+  // as superseded, not as a lifecycle failure the scenario after it caused.
   if (_m11Superseded(generation)) throw const _M11ScenarioSuperseded();
+  expectAppResumed();
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
@@ -6180,6 +6207,7 @@ Future<CircleFfi> _m11AliceCreatesCircle({
     await waitForKeyPackage(relay: relay, authorPubkeyHex: invitee.pubkeyHex);
     final kp = await relayManager.fetchMemberKeypackage(
       pubkey: invitee.pubkeyHex,
+      circle: manager,
     );
     if (kp == null) {
       throw StateError(
@@ -6195,16 +6223,13 @@ Future<CircleFfi> _m11AliceCreatesCircle({
   final secret = Uint8List.fromList(
     await container.read(identityNotifierProvider.notifier).getSecretBytes(),
   );
-  // Publishes the Welcomes and CONFIRMS the staged create (Security Rule 13).
-  // Without the confirm the group stays in MDK's `PendingPublish`, where every
-  // inbound kind-445 returns `Buffered` — Bob's location would never surface
-  // and each scenario would time out on the receive path. See
-  // `createCircleConfirmed`'s doc.
-  final CircleCreationResultFfi result;
+  // Publishes the Welcomes and requires every relay ack: an invitee whose
+  // Welcome never landed never joins. See `createCircleDelivered`'s doc.
+  final DeliveredCircle result;
   try {
-    result = await createCircleConfirmed(
+    result = await createCircleDelivered(
       manager: manager,
-      relay: relay,
+      relayManager: relayManager,
       identitySecretBytes: secret,
       members: members,
       name: name,
@@ -6213,7 +6238,6 @@ Future<CircleFfi> _m11AliceCreatesCircle({
       // Synthetic peers advertise no inbox/NIP-65 relays, so pass Alice's own
       // inbox (the hermetic relay) as the Welcome-delivery fallback — exactly
       // what the production admin flow does (see the FE-2 note).
-      creatorFallbackRelays: <String>[relay.url],
       scenario: 'M11',
     );
   } finally {

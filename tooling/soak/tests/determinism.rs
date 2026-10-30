@@ -205,14 +205,12 @@ async fn event_handles_are_bijective_and_never_reused() {
         let (event, _, _) = device
             .manager()
             .expect("a manager")
-            .encrypt_location(
+            .seal_location_for_test(
                 &group,
-                &device.keys.public_key(),
                 &haven_core::location::LocationMessage::new(
                     f64::from(step) / 8.0,
                     f64::from(step) / 4.0,
                 ),
-                haven_core::location::LOCATION_MESSAGE_RETENTION_SECS,
             )
             .await
             .expect("a location encrypts");

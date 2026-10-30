@@ -459,36 +459,30 @@ convergence budget expires. No error is raised anywhere.
 
 **Cause.** A bare `SelfRemove` is a PROPOSAL (RFC 9420 §12.1.2). It becomes a
 removal only when a remaining member publishes the commit their engine stages
-for it. The engine hands that commit back as
-`DecryptLocationOutcomeFfi.autoCommits` — it cannot publish it itself, because
-the Rust `CircleManagerFfi` holds no relay handle. Two Dart ingest APIs exist and
-only one is safe on a receive path:
+for it. When this bit, the engine handed that commit back to Dart as
+`DecryptLocationOutcomeFfi.autoCommits`, and of the two Dart ingest APIs
+`decryptLocationCollectingCommits` surfaced it for the caller to publish while
+`decryptLocation` rolled it back (`publish_failed`). Ingesting a peer's
+`SelfRemove` through the second discarded the eviction on arrival. The proposal
+was consumed, nothing was published, and the leaver stayed in the roster
+permanently — silently, which is why the only symptom was a timeout far
+downstream. The E2E synthetic peer's drain used it, so every leave scenario
+deadlocked.
 
-| API | Receive-side auto-commit |
-|---|---|
-| `decryptLocationCollectingCommits` | **surfaced** for the caller to publish, then confirm on a ≥1-relay ack |
-| `decryptLocation` | **rolled back** (`publish_failed`) |
-
-Ingesting a peer's `SelfRemove` through the shim discards the eviction on
-arrival. The proposal is consumed, nothing is published, and the leaver stays in
-the roster permanently — silently, which is why the only symptom is a timeout far
-downstream. This bit the E2E synthetic peer: its drain used the shim, so every
-leave scenario deadlocked.
-
-**Fix / check.** The receiving side must run the full dance: publish once,
-`confirmPublished` on an ack, `publishFailed` otherwise — never confirm before an
-ack, never drop the pending ref. Production does this in
-`LocationSharingService._publishAutoCommits` (foreground poll); live-sync and
-background catch-up publish it in-Rust via
-`haven_core::relay::auto_commit::resolve_receive_publish_work`. The E2E synthetic
-peer mirrors it in `SyntheticUser._publishAutoCommits`.
+**Fix / check.** Both APIs are retired; no Dart code publishes or confirms a
+commit. Every receive path — both production polls and the synthetic peer's
+drain (`driven_location.dart`'s `ingestDriven`) — ingests through the fanout
+driver (`RelayManagerFfi::ingest_driven`), which records the eviction the engine
+owes, sends it to the circle's relays and applies it only on an acknowledgement,
+all in Rust. A plane that makes no commit (a background wake, for one) leaves
+the eviction due rather than discarding it.
 
 Two guards keep this from recurring without an emulator lane:
-`haven/test/lints/receive_side_auto_commit_test.dart` (scans for the shim CALL —
-a substring search for the safe name is not enough, the file also documents it)
-and `haven-core/tests/circle_integration_test.rs`
-`peer_self_remove_surfaces_a_receive_side_auto_commit` (pins both APIs on the
-same proposal).
+`haven/test/lints/receive_side_auto_commit_test.dart` (fails if the synthetic
+peer calls a retired ingest or confirm, or a production receive path collects a
+commit itself) and `haven-core/tests/circle_integration_test.rs`
+`peer_self_remove_is_made_by_a_driving_plane_and_left_due_by_one_that_makes_none`
+(both kinds of plane on the same proposal).
 
 **Expected side effect, not a bug.** Once the contract is honoured, EVERY
 remaining member auto-commits the proposal — a real concurrent-commit fork, just

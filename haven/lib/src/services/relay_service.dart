@@ -102,6 +102,11 @@ enum KeyPackageFailureKind {
 
   /// The tick itself errored — FFI, MLS storage, or the circle-manager handle.
   tickErrored,
+
+  /// The one-time storage reset has run and the user has not yet dismissed its
+  /// notice, so no KeyPackage (or relay list) is published: the relay settings
+  /// it reset to defaults are the user's to review first.
+  awaitingResetAcknowledgement,
 }
 
 /// What a caller should do about a [KeyPackageMaintenanceFailed].
@@ -314,7 +319,8 @@ final class KeyPackageMaintenanceFailed extends KeyPackageMaintenanceOutcome {
     // before any network work until the user adds one, so every "retry" would
     // be the same early return at a faster cadence.
     KeyPackageFailureKind.identityUnavailable ||
-    KeyPackageFailureKind.noRelaysConfigured =>
+    KeyPackageFailureKind.noRelaysConfigured ||
+    KeyPackageFailureKind.awaitingResetAcknowledgement =>
       KeyPackageRetryDisposition.awaitUserAction,
   };
 
@@ -336,6 +342,9 @@ enum RelayListMaintenanceAction {
 
   /// The list was (re)published to own relays this tick.
   republished,
+
+  /// Nothing published: the storage-reset notice has not been dismissed yet.
+  awaitingResetAcknowledgement,
 }
 
 /// Presence-only per-category tally of an M8 relay-list maintenance tick.
@@ -409,6 +418,15 @@ enum SubscriptionHealthAction {
   /// that read it as "the receive plane is whole" would clear a real fault
   /// latch on the strength of a session it never inspected.
   paused,
+
+  /// A relay had dropped, or a REQ the session expects was missing, and the
+  /// tick carried no foreground claim: nothing was re-anchored. The
+  /// whole-session repair is the foreground's, and waits for a tick or a
+  /// resume that finds the app's lifecycle `resumed`.
+  ///
+  /// The opposite of proof: the tick saw a receive plane that is not whole
+  /// and left it so. It must never clear a fault latch.
+  awaitingForeground,
 }
 
 /// Presence-only result of an M8 subscription-health maintenance tick.
@@ -469,35 +487,6 @@ class SubscriptionHealthResult {
   final int subscriptionsSilent;
 }
 
-/// Presence-only result of the one-time legacy KeyPackage retraction
-/// (Dark Matter cutover, security F10a). Counters only — no relay urls,
-/// event ids, or `d` values — mirrors the Rust `LegacyRetractionOutcomeFfi`.
-@immutable
-class LegacyRetractionResult {
-  /// Creates a legacy-retraction result.
-  const LegacyRetractionResult({
-    this.alreadyDone = false,
-    this.legacy443Scrubbed = 0,
-    this.relayListRetracted = false,
-    this.relayErrors = 0,
-  });
-
-  /// An empty result (e.g. a best-effort call that failed / no-op'd).
-  const LegacyRetractionResult.empty() : this();
-
-  /// `true` when the sentinel was already set (no work done this call).
-  final bool alreadyDone;
-
-  /// Stale legacy kind-443 KeyPackage twins scrubbed (kind-5 deletions ACKed).
-  final int legacy443Scrubbed;
-
-  /// `true` when the kind-10051 KeyPackage-relay list was retracted (≥1 ACK).
-  final bool relayListRetracted;
-
-  /// Relay probes / publishes that errored (tallied, never fatal).
-  final int relayErrors;
-}
-
 /// Exception thrown when relay operations fail.
 class RelayServiceException implements Exception {
   /// Creates a [RelayServiceException] with the given message.
@@ -519,25 +508,19 @@ class RelayServiceException implements Exception {
 /// the user fixes their clock. A user told "location sharing is failing"
 /// cannot act; a user told "this phone's clock is wrong" can.
 ///
-/// Carries no relay-controlled text. The direction is classified in Rust
-/// (`haven_core::relay::clock_skew`) and crosses the FFI as a closed token;
-/// the relay's own words are discarded there and never reach a log line or a
-/// UI string (Security Rule 8).
+/// Carries no relay-controlled text: the direction is classified in Rust
+/// (`haven_core::relay::clock_skew`) and crosses the FFI as a typed field of
+/// the publish failure; the relay's own words are discarded there and never
+/// reach a log line or a UI string (Security Rule 8).
 class RelayClockRejectionException implements Exception {
   /// Creates a clock-rejection exception.
-  ///
-  /// [complaintToken] is the wire token (`ahead` / `behind` / `unspecified`)
-  /// carried by `RelayError::DeviceClockRejected`. It is kept as a plain
-  /// string so this layer stays free of a dependency on the detector, which
-  /// owns the enum.
-  const RelayClockRejectionException(this.complaintToken);
+  const RelayClockRejectionException(this.complaint);
 
-  /// The direction the relays reported, as a wire token.
-  final String complaintToken;
+  /// The direction the relays reported.
+  final DeviceClockComplaintFfi complaint;
 
   @override
-  String toString() =>
-      'RelayClockRejectionException(device clock $complaintToken)';
+  String toString() => 'RelayClockRejectionException($complaint)';
 }
 
 /// Result of publishing an event to relays.
@@ -638,22 +621,10 @@ class RelayGiftWrapFetch {
 ///
 /// Handles fetching KeyPackages and publishing events via Nostr relays.
 abstract class RelayService {
-  /// Fetches a user's KeyPackage relay list.
-  ///
-  /// Resolves through the Dark Matter discovery cascade: the legacy kind-10051
-  /// list first, then the kind-10002 NIP-65 list that replaced it. Both tiers
-  /// are still consulted so an account that has not re-published since the
-  /// cutover stays reachable.
-  ///
-  /// Returns the list of relay URLs where the user publishes KeyPackages.
-  /// Returns an empty list if no relay list is found.
-  ///
-  /// Throws [RelayServiceException] if the fetch fails.
-  Future<List<String>> fetchKeyPackageRelays(String pubkey);
-
   /// Fetches a user's NIP-65 general relay list (kind 10002).
   ///
-  /// Returns the relay URLs from the user's general-purpose relay list.
+  /// Returns the read-capable relay URLs from the user's general-purpose relay
+  /// list.
   /// Used as a fallback when inbox relays (kind 10050) are not available.
   ///
   /// Returns an empty list if no relay list is found.
@@ -661,72 +632,36 @@ abstract class RelayService {
   /// Throws [RelayServiceException] if the fetch fails.
   Future<List<String>> fetchNip65Relays(String pubkey);
 
-  /// Fetches the latest KeyPackage (kind 443) for a user.
+  /// Fetches the KeyPackage (kind 30443) to invite a user with.
   ///
-  /// First resolves the user's KeyPackage relay list through the discovery
-  /// cascade (legacy kind 10051, then kind-10002 NIP-65, then defaults), then
-  /// fetches the KeyPackage from those relays.
+  /// Fetches from the user's NIP-65 (kind 10002) write-capable relays,
+  /// falling back to the discovery relays. The package is chosen for one
+  /// invite target — the existing circle [mlsGroupId], or a new circle when
+  /// it is `null` — so one the target cannot admit is never preferred to one
+  /// it can, however recently it was published.
   ///
   /// Returns `null` if no KeyPackage is found (user may not have Haven).
   ///
   /// Throws [RelayServiceException] if the fetch fails.
-  Future<KeyPackageData?> fetchKeyPackage(String pubkey);
-
-  /// Publishes a gift-wrapped welcome event.
-  ///
-  /// The [welcomeEvent] is already gift-wrapped (kind 1059) and ready
-  /// to publish. Simply publishes to the recipient's relays.
-  ///
-  /// Returns the publish result with success/failure per relay.
-  ///
-  /// Throws [RelayServiceException] if publishing fails completely.
-  Future<PublishResult> publishWelcome({
-    required GiftWrappedWelcome welcomeEvent,
+  Future<KeyPackageData?> fetchKeyPackage(
+    String pubkey, {
+    List<int>? mlsGroupId,
   });
 
   /// Publishes a signed event to relays.
   ///
   /// Takes up to three attempts before giving up, so an event whose loss
-  /// cannot be repaired by a later send — a commit, a welcome, a proposal, a
-  /// KeyPackage, a relay list, a profile — is worth the radio time.
+  /// cannot be repaired by a later send — a KeyPackage, a relay list, a
+  /// deletion — is worth the radio time. A group message (kind 445) and a
+  /// gift wrap (kind 1059) are refused: each leaves the device only from its
+  /// record, through the fanout driver.
   ///
   /// Returns the publish result with success/failure per relay.
   ///
-  /// Throws [RelayServiceException] if publishing fails completely.
+  /// Throws [RelayClockRejectionException] when no relay accepted and at
+  /// least one blamed this device's clock, and [RelayServiceException] for
+  /// every other failure.
   Future<PublishResult> publishEvent({
-    required String eventJson,
-    required List<String> relays,
-  });
-
-  /// Publishes a kind-445 LOCATION event, and only that.
-  ///
-  /// One connect and one 5 s per-relay ack window — 10 s worst case against
-  /// [publishEvent]'s ~49 s ladder — succeeding as soon as one relay returns
-  /// `OK`. A missed location is superseded by the next tick, so a retry buys
-  /// a stale sample at the price of holding the radio awake; a commit is
-  /// never superseded, and one that is neither confirmed nor rolled back
-  /// forks the group, so everything that resolves a staged `PendingStateRef`
-  /// keeps [publishEvent] (Security Rule 13).
-  ///
-  /// Returns the publish result with success/failure per relay.
-  ///
-  /// Throws [RelayClockRejectionException] when the relays refused the event
-  /// on timestamp grounds — the one publish failure a user can act on, kept
-  /// distinct here exactly as [publishEvent] keeps it — and
-  /// [RelayServiceException] if publishing fails for any other reason.
-  Future<PublishResult> publishLocationEvent({
-    required String eventJson,
-    required List<String> relays,
-  });
-
-  /// Publishes a signed event in the background without waiting for
-  /// relay acknowledgment.
-  ///
-  /// Suitable for location updates and key package re-publishes where
-  /// periodic timers ensure eventual delivery. NOT for welcome events.
-  ///
-  /// Throws [RelayServiceException] if relay URL validation fails.
-  Future<void> publishEventFireAndForget({
     required String eventJson,
     required List<String> relays,
   });
@@ -780,6 +715,15 @@ abstract class RelayService {
   Future<CatchupResult> runCatchup({
     required CircleManagerFfi circle,
     required String ownPubkeyHex,
+    int maxDurationSecs = 20,
+  });
+
+  /// Runs only the redelivery of objects the engine refused for a local
+  /// resource bound, for only the circles that owe one — what the live plane's
+  /// `refetchOwed` status asks for. Sweeps no window. Best-effort — returns a
+  /// [CatchupResult.empty] on failure rather than throwing.
+  Future<CatchupResult> runRefusedRefetch({
+    required CircleManagerFfi circle,
     int maxDurationSecs = 20,
   });
 
@@ -844,24 +788,6 @@ abstract class RelayService {
     required List<int> identitySecretBytes,
   });
 
-  /// Once-only Dark Matter cutover cleanup (plan §6 step 5 / security F10a):
-  /// retracts this account's stale pre-migration KeyPackage advertisements
-  /// (legacy kind-443 twins + the kind-10051 relay list) so an old-stack
-  /// client cannot mint a Welcome the new stack can't process.
-  ///
-  /// Self-gates on a persisted sentinel (`legacy_kp_retraction_done`) so it
-  /// fires at most once; a repeat call after the sentinel is set returns
-  /// [LegacyRetractionResult.alreadyDone] `== true` with no relay traffic.
-  /// `circle` is the circle-manager FFI handle; the secret bytes are
-  /// consumed by the FFI and zeroized Rust-side.
-  ///
-  /// Best-effort — returns a [LegacyRetractionResult.empty] on failure rather
-  /// than throwing.
-  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
-    required CircleManagerFfi circle,
-    required List<int> identitySecretBytes,
-  });
-
   /// Runs an M8 subscription-health maintenance tick (engine-coupled).
   ///
   /// Reads the live-sync engine's session: with no running engine it returns
@@ -870,9 +796,19 @@ abstract class RelayService {
   /// connectivity and re-anchors every subscription at its persisted cursor if
   /// any relay has dropped. Takes no secret and no circle handle.
   ///
+  /// [foreground] is the caller's claim that the app's lifecycle reads
+  /// `resumed`: pass `appIsResumed()` and nothing looser. Only with it does
+  /// the tick make that whole-session re-anchor, put a session that was only
+  /// started in the engine's foreground lifecycle, or ask for a drive of the
+  /// stored fanout records; without it the tick changes no lifecycle and
+  /// answers [SubscriptionHealthAction.awaitingForeground] where the
+  /// re-anchor was due.
+  ///
   /// Best-effort — returns a [SubscriptionHealthResult.empty] on failure rather
   /// than throwing.
-  Future<SubscriptionHealthResult> maintainSubscriptionHealth();
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth({
+    required bool foreground,
+  });
 
   /// Fetches MLS group messages (kind 445) from relays.
   ///

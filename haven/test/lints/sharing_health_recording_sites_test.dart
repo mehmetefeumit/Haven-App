@@ -63,7 +63,10 @@ void main() {
 
       expect(
         code,
-        contains('acked: result.acceptedBy.isNotEmpty'),
+        contains(
+          'case LocationPublishSent(:final acked): '
+          '_recordPublishOutcome(circle, acked: acked);',
+        ),
         reason: 'the scheduler must classify the publish by what a relay kept, '
             'not by whether the call returned',
       );
@@ -79,7 +82,10 @@ void main() {
         _read('lib/src/providers/location_sharing_provider.dart'),
       );
 
-      expect(code, contains('acked: result.acceptedBy.isNotEmpty'));
+      expect(
+        code,
+        contains('_recordPublishOutcome(ref, circle, acked: acked);'),
+      );
       expect(code, contains('_recordPublishOutcome(ref, circle, acked: false)'));
     });
 
@@ -96,7 +102,7 @@ void main() {
       expect(
         code,
         contains(
-          'if (publishResult.acceptedBy.isNotEmpty) { '
+          'case LocationPublishFfi.accepted: '
           'await _circleManager!.notePublishAcked(',
         ),
         reason: 'the ACK guard must sit immediately around the stamp',
@@ -117,7 +123,7 @@ void main() {
       expect(
         code,
         contains(
-          'if (publishResult.acceptedBy.isNotEmpty) { '
+          'case LocationPublishFfi.accepted: '
           'await _healthService?.notePublishAcked(',
         ),
       );

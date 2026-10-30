@@ -1,32 +1,25 @@
 /// Integration tests for [NostrCircleService.removeMember].
 ///
-/// ## Test 1 — fail-closed guard (original, preserved verbatim per FN-3 rules)
+/// ## Test 1 — fail-closed guard
 ///
-/// `NostrCircleService.removeMember` is the admin-side eviction path that
-/// publishes a kind-445 RemoveMember commit to the circle's relays. The
-/// production guard at `nostr_circle_service.dart:667` says:
-///
-/// ```dart
-/// if (relays == null || relays.isEmpty) {
-///   debugPrint('Circle relays unavailable — aborting remove');
-///   throw const CircleServiceException('Failed to remove member');
-/// }
-/// ```
-///
-/// This guard is critical for **defence-in-depth** privacy: if we ever lost
-/// the circle's relay list (storage corruption, unmigrated record, FFI
-/// throw), falling back to `DEFAULT_RELAYS` would leak the kind-445 commit
-/// (and therefore the `nostr_group_id` h-tag) to relays that have no other
-/// reason to know this group exists. That is a relay-level group-membership
+/// `NostrCircleService.removeMember` sends a kind-445 RemoveMember commit
+/// through the fanout driver, to the circle's own relays and nowhere else.
+/// Falling back to `DEFAULT_RELAYS` for a circle whose relay list is lost
+/// would leak the commit (and the `nostr_group_id` h-tag) to relays with no
+/// other reason to know the group exists: a relay-level group-membership
 /// disclosure. The contract is: **fail closed — never broadcast to a
-/// dubious relay set.**
+/// dubious relay set.** Through the driver, a removal in a circle this device
+/// does not hold is not made, and the driver's publish pool dials nothing.
+/// That a commit's targets are the circle's own list is Rust's
+/// (`haven-core/tests/foreign_routing_entry_e2e.rs`
+/// `a_circle_whose_every_routing_entry_is_refused_has_no_relay`).
 ///
 /// ## Test 2 — real removal happy path (FN-3)
 ///
 /// Creates a genuine two-party MLS circle (Alice + Bob), then Alice removes
-/// Bob via the real `removeMembers` FFI call. Asserts:
+/// Bob through the fanout driver (`removeMembersDriven`). Asserts:
 /// 1. `getCircle().members.length` drops by one.
-/// 2. Bob can no longer `decryptLocation` a freshly-encrypted message (forward
+/// 2. Bob can no longer take in a freshly sealed message (forward
 ///    secrecy: after epoch advance the removed party's key material is stale).
 ///
 /// Both tests exercise the real FFI boundary; the keyring must be available.
@@ -46,7 +39,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
-import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
@@ -63,6 +55,9 @@ import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:integration_test/integration_test.dart';
 
+import 'e2e/_lib/circle_creation.dart'
+    show createCircleDelivered, joinDeliveredWelcome;
+import 'e2e/_lib/driven_location.dart';
 import 'e2e/_lib/test_user.dart';
 import 'e2e/_lib/throw_time_error_capture.dart';
 
@@ -96,6 +91,12 @@ class _RecordingRelayService implements RelayService {
   }) async => const CatchupResult.empty();
 
   @override
+  Future<CatchupResult> runRefusedRefetch({
+    required CircleManagerFfi circle,
+    int maxDurationSecs = 20,
+  }) async => const CatchupResult.empty();
+
+  @override
   Future<KeyPackageMaintenanceOutcome> maintainKeyPackage({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
@@ -111,14 +112,9 @@ class _RecordingRelayService implements RelayService {
   }) async => const RelayListMaintenanceResult.empty();
 
   @override
-  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
-      const SubscriptionHealthResult.empty();
-
-  @override
-  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
-    required CircleManagerFfi circle,
-    required List<int> identitySecretBytes,
-  }) async => const LegacyRetractionResult.empty();
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth({
+    required bool foreground,
+  }) async => const SubscriptionHealthResult.empty();
 
   /// When true, [publishEvent] answers as a relay that ACCEPTED the event.
   ///
@@ -130,9 +126,6 @@ class _RecordingRelayService implements RelayService {
   bool ackPublishes = false;
 
   final List<({String eventJson, List<String> relays})> publishEventCalls = [];
-  final List<({String eventJson, List<String> relays})>
-  publishFireAndForgetCalls = [];
-  final List<GiftWrappedWelcome> publishWelcomeCalls = [];
 
   @override
   Future<PublishResult> publishEvent({
@@ -148,51 +141,15 @@ class _RecordingRelayService implements RelayService {
     );
   }
 
-  /// A removal is a COMMIT: it must take the retry ladder and its outcome
-  /// resolves a staged `PendingStateRef`, so reaching the one-shot location
-  /// publish from here would be the Rule-13 mistake this stub exists to
-  /// notice.
-  @override
-  Future<PublishResult> publishLocationEvent({
-    required String eventJson,
-    required List<String> relays,
-  }) => throw UnimplementedError();
-
-  @override
-  Future<void> publishEventFireAndForget({
-    required String eventJson,
-    required List<String> relays,
-  }) async {
-    publishFireAndForgetCalls.add((
-      eventJson: eventJson,
-      relays: List.of(relays),
-    ));
-  }
-
-  @override
-  Future<PublishResult> publishWelcome({
-    required GiftWrappedWelcome welcomeEvent,
-  }) async {
-    publishWelcomeCalls.add(welcomeEvent);
-    return const PublishResult(
-      eventId: '',
-      acceptedBy: [],
-      rejectedBy: [],
-      failed: [],
-    );
-  }
-
-  @override
-  Future<List<String>> fetchKeyPackageRelays(String pubkey) =>
-      throw UnimplementedError();
-
   @override
   Future<List<String>> fetchNip65Relays(String pubkey) =>
       throw UnimplementedError();
 
   @override
-  Future<KeyPackageData?> fetchKeyPackage(String pubkey) =>
-      throw UnimplementedError();
+  Future<KeyPackageData?> fetchKeyPackage(
+    String pubkey, {
+    List<int>? mlsGroupId,
+  }) => throw UnimplementedError();
 
   @override
   Future<List<String>> fetchGiftWraps({
@@ -238,7 +195,7 @@ void main() {
     // local strfry. Dark Matter made both mandatory here: `addUserRelay`
     // (the NIP-65 seeding step before `maintainKeyPackage`) rejects a plain
     // `ws://` URL with "Use wss:// for security" unless the opt-in is armed,
-    // and `fetchKeypackage`'s discovery-plane fallback would consult the
+    // and `fetchMemberKeypackage`'s discovery-plane fallback would consult the
     // PUBLIC indexers (non-hermetic) without the override. The override also
     // sharpens the fail-closed proof below: if removeMember ever regressed
     // into falling back to DEFAULT_RELAYS, it would now reach a LIVE local
@@ -257,7 +214,9 @@ void main() {
 
   group('NostrCircleService.removeMember (fail-closed contract)', () {
     // =========================================================================
-    // Test 1: original fail-closed guard — preserved verbatim (FN-3 rule).
+    // Test 1: the fail-closed guard, through the fanout driver. (It used to
+    // run over a service with no driver, which threw before staging
+    // anything, so it held nothing.)
     // =========================================================================
     // testWidgets (not bare test): only a testWidgets body's failure reaches
     // the integration binding's results map and can fail the `flutter drive`
@@ -265,8 +224,8 @@ void main() {
     // test/lints/integration_test_propagation_test.dart. The `tester` is unused
     // (this drives the service/FFI directly, no widget tree).
     testWidgets(
-      'throws CircleServiceException and does not fall back to DEFAULT_RELAYS '
-      'when the circle has no relays available',
+      'a removal in a circle this device does not hold is not made, and the '
+      "driver's pool dials nothing (no DEFAULT_RELAYS fallback)",
       (tester) async {
         installThrowTimeErrorLogging();
         // ----------------------------------------------------------------
@@ -294,9 +253,10 @@ void main() {
           final idManager = await NostrIdentityManager.newInstance();
           await idManager.createIdentity();
 
-          final relayRecorder = _RecordingRelayService();
+          final pool = await RelayManagerFfi.newInstance();
+          final driver = NostrRelayService(openPool: () async => pool);
           final service = NostrCircleService(
-            relayService: relayRecorder,
+            relayService: driver,
             dataDirectoryProvider: _FixedDataDirectoryProvider(dataDir.path),
             // The FFI getter itself, NOT a closure over one fetched buffer:
             // the service opens the manager through `withFreshSecret`, which
@@ -308,64 +268,44 @@ void main() {
 
           await service.initialize();
 
-          // Fabricate a non-existent circle ID. `_circleRelays` calls
-          // `manager.getCircle(...)` which returns null for any ID we did
-          // NOT create — the empty/null guard then fires before any
-          // FFI staging or relay publish.
+          // A circle this device does not hold: no relay list to send to.
           final missingMlsGroupId = List<int>.generate(32, (i) => i + 1);
-
-          // Any 32-byte hex pubkey will do — we never reach the FFI staging
-          // call where pubkey validity matters.
           final memberPubkeyHex = 'aa' * 32;
 
           // ----------------------------------------------------------------
-          // Assertion 1: removeMember must throw the generic
-          // CircleServiceException with the redacted message — no FFI
-          // detail leakage in the user-facing string.
+          // Assertion 1: the removal is not made — the generic exception
+          // with fixed copy, or "not made" from a driver that refused it —
+          // and never "applied".
           // ----------------------------------------------------------------
-          await expectLater(
-            service.removeMember(
+          ChangeDelivery? delivery;
+          Object? thrown;
+          try {
+            delivery = await service.removeMember(
               mlsGroupId: missingMlsGroupId,
               memberPubkeyHex: memberPubkeyHex,
-            ),
-            throwsA(
-              isA<CircleServiceException>().having(
-                (e) => e.message,
-                'message',
-                'Failed to remove member',
-              ),
-            ),
+            );
+          } on CircleServiceException catch (e) {
+            thrown = e;
+          }
+          expect(
+            thrown == null
+                ? delivery
+                : (thrown as CircleServiceException).message,
+            anyOf(ChangeDelivery.rejected, 'Failed to remove member'),
           );
 
           // ----------------------------------------------------------------
-          // Assertion 2 (the load-bearing one): no relay-publish was
-          // attempted. If a regression let `removeMember` fall back to
-          // DEFAULT_RELAYS, the recorder would have at least one entry.
-          // Empty == fail-closed contract upheld.
+          // Assertion 2 (the load-bearing one): the driver's publish pool
+          // dialled no relay. A fallback to DEFAULT_RELAYS would have.
           // ----------------------------------------------------------------
           expect(
-            relayRecorder.publishEventCalls,
+            await pool.getRelayStatus(),
             isEmpty,
             reason:
                 'removeMember must NOT fall back to DEFAULT_RELAYS when the '
-                'circle relay list is unavailable. publishEvent was called '
-                '${magnitudeBucket(relayRecorder.publishEventCalls.length)} '
-                'time(s) — this is a relay-level group-membership disclosure. '
-                'See docs/LOCATION_SHARING_SECURITY_BACKLOG.md.',
-          );
-
-          // Defence in depth: the fire-and-forget and welcome paths must
-          // also stay untouched on this code path.
-          expect(
-            relayRecorder.publishFireAndForgetCalls,
-            isEmpty,
-            reason: 'removeMember must not use fire-and-forget publishing',
-          );
-          expect(
-            relayRecorder.publishWelcomeCalls,
-            isEmpty,
-            reason:
-                'removeMember (eviction) must not invoke welcome publishing',
+                'circle relay list is unavailable — this is a relay-level '
+                'group-membership disclosure. See '
+                'docs/LOCATION_SHARING_SECURITY_BACKLOG.md.',
           );
         } finally {
           // Best-effort cleanup of the temp data directory.
@@ -417,10 +357,9 @@ void main() {
         final aliceIdManager = await NostrIdentityManager.newInstance();
         await aliceIdManager.createIdentity();
         final aliceSecretBytes = await aliceIdManager.getSecretBytes();
-        final alicePubkeyHex = aliceIdManager.pubkeyHex();
 
         final bobIdManager = await NostrIdentityManager.newInstance();
-        await bobIdManager.createIdentity();
+        final bobIdentity = await bobIdManager.createIdentity();
         final bobSecretBytes = await bobIdManager.getSecretBytes();
         final bobPubkeyHex = bobIdManager.pubkeyHex();
 
@@ -448,9 +387,10 @@ void main() {
           circle: bobManager,
           identitySecretBytes: bobSecretBytes,
         );
-        final bobKpJson = await bobRelayManager.fetchKeypackage(
+        final bobKpJson = (await bobRelayManager.fetchMemberKeypackage(
           pubkey: bobPubkeyHex,
-        );
+          circle: aliceManager,
+        ))?.keyPackageJson;
         expect(
           bobKpJson,
           isNotNull,
@@ -464,11 +404,14 @@ void main() {
         // the real removeMembers FFI path to execute (bypasses the
         // fail-closed guard that the guard test exercises).
         // ----------------------------------------------------------------
-        final creation = await aliceManager.createCircle(
+        final creation = await createCircleDelivered(
+          manager: aliceManager,
+          relayManager: bobRelayManager,
           identitySecretBytes: aliceSecretBytes,
           members: [
             MemberKeyPackageFfi(
               keyPackageJson: bobKpJson!,
+              authorNpub: bobIdentity.npub,
               inboxRelays: const [_testRelayUrl],
               nip65Relays: const [_testRelayUrl],
             ),
@@ -476,43 +419,22 @@ void main() {
           name: 'Remove Member Test Circle',
           circleType: 'location_sharing',
           relays: const [_testRelayUrl],
-          creatorFallbackRelays: const [_testRelayUrl],
+          scenario: 'remove',
         );
 
         final mlsGroupId = Uint8List.fromList(creation.circle.mlsGroupId);
 
-        // Alice confirms her pending group-creation state (from adding
-        // Bob) before any subsequent operations on the group
-        // (publish-before-apply, Rule 13) — the Welcome is handed to Bob
-        // in-process here, not via a real relay round-trip.
-        await aliceManager.confirmPublished(pending: creation.pending);
-
         // ----------------------------------------------------------------
-        // Bob processes his welcome and accepts — both parties must be
-        // at the same MLS epoch before Alice can encrypt/remove.
+        // Bob takes his Welcome off the relay and accepts — both parties
+        // must be at the same MLS epoch before Alice can encrypt/remove.
         // ----------------------------------------------------------------
-        expect(
-          creation.welcomeEvents,
-          isNotEmpty,
-          reason: 'createCircle must emit at least one Welcome event for Bob',
-        );
-
-        final bobInvitation = await bobManager.processGiftWrappedInvitation(
-          identitySecretBytes: bobSecretBytes,
-          giftWrapEventJson: creation.welcomeEvents.first.eventJson,
-        );
-        expect(
-          bobInvitation,
-          isNotNull,
-          reason:
-              'Bob must receive a pending invitation; null means the '
-              'gift-wrap was already processed in a prior run, which '
-              'cannot happen for a freshly-created temp dir.',
-        );
-        // `bobInvitation.mlsGroupId` is the pre-join stand-in id — actually
-        // the gift-wrap event id the invitation was keyed by.
-        await bobManager.acceptInvitation(
-          giftWrapId: bobInvitation!.mlsGroupId,
+        await joinDeliveredWelcome(
+          relayManager: bobRelayManager,
+          invitee: bobManager,
+          inviteeSecretBytes: bobSecretBytes,
+          inviteePubkeyHex: bobPubkeyHex,
+          relays: const [_testRelayUrl],
+          scenario: 'remove',
         );
 
         // ----------------------------------------------------------------
@@ -543,17 +465,20 @@ void main() {
         // post-removal "cannot decrypt" assertion would pass vacuously
         // if Bob never had working decryption in the first place.
         // ----------------------------------------------------------------
-        final preRemovalEncrypt = (await aliceManager.encryptLocation(
+        // Every seal, ingest and change below goes through the fanout
+        // driver, as production does.
+        final aliceRelayManager = await RelayManagerFfi.newInstance();
+        final preRemoval = await sealLocationForTest(
+          relay: aliceRelayManager,
+          circle: aliceManager,
           mlsGroupId: mlsGroupId,
-          senderPubkeyHex: alicePubkeyHex,
           latitude: 40.111222,
           longitude: -74.333444,
-          updateIntervalSecs: BigInt.from(
-            kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
-          ),
-        )).sent!;
-        final bobPreRemovalResults = await bobManager.decryptLocation(
-          eventJson: preRemovalEncrypt.eventJson,
+        );
+        final bobPreRemovalResults = await ingestForTest(
+          relay: bobRelayManager,
+          circle: bobManager,
+          eventJson: preRemoval.eventJson,
         );
         final bobPreRemovalLocation = bobPreRemovalResults
             .where((r) => r.kind == LocationMessageResultKindFfi.location)
@@ -574,17 +499,22 @@ void main() {
         );
 
         // ----------------------------------------------------------------
-        // Alice removes Bob directly via the FFI (bypassing the service
-        // layer so we test the core MDK path without relay publish). This
-        // stages a commit and returns a pending token; confirming it here
-        // (publish-before-apply, Rule 13) merges it directly rather than
-        // via a real relay round-trip.
+        // Alice removes Bob through the driver (below the service layer):
+        // the commit is staged, sent to the circle's relay and applied only
+        // on that relay's acknowledgement (publish-before-apply, Rule 13).
         // ----------------------------------------------------------------
-        final removeResult = await aliceManager.removeMembers(
+        final removal = await aliceRelayManager.removeMembersDriven(
+          circle: aliceManager,
           mlsGroupId: mlsGroupId,
           memberPubkeys: [bobPubkeyHex],
+          foreground: true,
         );
-        await aliceManager.confirmPublished(pending: removeResult.pending);
+        expect(
+          removal.status,
+          PublishStatusFfi.confirmed,
+          reason: 'the removal must be acknowledged and applied before its '
+              'forward secrecy is tested',
+        );
 
         // ----------------------------------------------------------------
         // FN-3 Assertion 1: member count dropped by one on Alice's side.
@@ -624,11 +554,11 @@ void main() {
 
         // ----------------------------------------------------------------
         // FN-3 Assertion 2: forward secrecy — Bob cannot decrypt a
-        // message Alice encrypts AFTER the remove commit.
+        // message Alice seals AFTER the remove commit.
         //
         // Bob's MLS state is now stale (Alice advanced the epoch by
-        // merging the remove commit). When Bob's CircleManagerFfi calls
-        // decryptLocation on Alice's new message, MDK must reject it
+        // merging the remove commit). When Bob's driver takes in Alice's
+        // new message, MDK must reject it
         // because the epoch or key material no longer matches.
         //
         // The remove evolution event must be fed to Bob's state first so
@@ -637,38 +567,44 @@ void main() {
         // it he is explicitly removed and his group state is invalid.
         //
         // In either case, the critical invariant is: Bob gets null (or
-        // an unprocessable result) from decryptLocation on Alice's post-
+        // an unprocessable result) from taking in Alice's post-
         // removal message — he must NOT recover the plaintext coordinates.
         // ----------------------------------------------------------------
 
-        // Feed the removal evolution event into Bob's state (this is
-        // what the production relay layer would deliver to Bob).
-        // We don't assert on this call's return value — the important
-        // check is what happens when Bob tries to decrypt *after* it.
-        try {
-          await bobManager.decryptLocation(
-            eventJson: removeResult.commitEventJson,
-          );
-        } on Object catch (e) {
-          // If Bob's side rejects the commit event (e.g., MDK raises an
-          // error for a remove that targets the processor itself), that
-          // is also consistent with the forward-secrecy invariant.
-          debugPrint(
-            '[remove_member_test] Bob processed removal event with '
-            'result: ${e.runtimeType} (acceptable)',
-          );
+        // Feed the removal commit into Bob's state from the relay, as the
+        // production receive path delivers it. We don't assert on these
+        // calls' return values — the important check is what happens when
+        // Bob tries to decrypt *after* them.
+        final onRelay = await bobRelayManager.fetchGroupMessages(
+          nostrGroupId: creation.circle.nostrGroupId,
+          relays: const [_testRelayUrl],
+        );
+        for (final eventJson in onRelay) {
+          try {
+            await ingestForTest(
+              relay: bobRelayManager,
+              circle: bobManager,
+              eventJson: eventJson,
+            );
+          } on Object catch (e) {
+            // If Bob's side rejects the commit event (e.g., MDK raises an
+            // error for a remove that targets the processor itself), that
+            // is also consistent with the forward-secrecy invariant.
+            debugPrint(
+              '[remove_member_test] Bob processed removal event with '
+              'result: ${e.runtimeType} (acceptable)',
+            );
+          }
         }
 
-        // Alice encrypts a fresh location at the new epoch.
-        final postRemovalEncrypt = (await aliceManager.encryptLocation(
+        // Alice seals a fresh location at the new epoch.
+        final postRemoval = await sealLocationForTest(
+          relay: aliceRelayManager,
+          circle: aliceManager,
           mlsGroupId: mlsGroupId,
-          senderPubkeyHex: alicePubkeyHex,
           latitude: 55.123456,
           longitude: 12.654321,
-          updateIntervalSecs: BigInt.from(
-            kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
-          ),
-        )).sent!;
+        );
 
         // Bob attempts to decrypt Alice's post-removal message. Having merged
         // his own eviction above, Bob's group state is invalid, so MDK fails
@@ -684,8 +620,10 @@ void main() {
         // yields no plaintext.
         List<LocationMessageResultFfi> bobPostRemovalResults = const [];
         try {
-          bobPostRemovalResults = await bobManager.decryptLocation(
-            eventJson: postRemovalEncrypt.eventJson,
+          bobPostRemovalResults = await ingestForTest(
+            relay: bobRelayManager,
+            circle: bobManager,
+            eventJson: postRemoval.eventJson,
           );
         } on Object catch (e) {
           debugPrint(
@@ -699,7 +637,7 @@ void main() {
         // silently pass a non-null plaintext location through.
         //
         // Acceptable outcomes for `recovered`:
-        //   null  — decryptLocation threw (failed closed), so the result stays
+        //   null  — the ingest threw (failed closed), so the result stays
         //           null (no group / evicted)
         //   null  — the engine returned no results, or a `location`-kind
         //           result had a null inner location (a commit/state event,
@@ -768,16 +706,19 @@ void main() {
         final alicePubkeyHex = aliceIdManager.pubkeyHex();
 
         final bobIdManager = await NostrIdentityManager.newInstance();
-        await bobIdManager.createIdentity();
+        final bobIdentity = await bobIdManager.createIdentity();
         final bobSecretBytes = await bobIdManager.getSecretBytes();
         final bobPubkeyHex = bobIdManager.pubkeyHex();
 
         // ONE session per MLS database (Security Rule 14): Alice's circle is
         // created through the service's OWN handle, never a second
         // CircleManagerFfi opened on the same directory.
-        final relayRecorder = _RecordingRelayService()..ackPublishes = true;
+        // The removal goes through the fanout driver: Rust publishes it to
+        // the circle's relay and applies it only once that relay acked.
+        final relayRecorder = _RecordingRelayService();
         final service = NostrCircleService(
           relayService: relayRecorder,
+          changeDriver: NostrRelayService(),
           dataDirectoryProvider: _FixedDataDirectoryProvider(aliceDir.path),
           // The FFI getter, not a closure over `aliceSecretBytes`: the service
           // scrubs the buffer the provider hands it, and this test reuses
@@ -800,16 +741,20 @@ void main() {
           circle: bobManager,
           identitySecretBytes: bobSecretBytes,
         );
-        final bobKpJson = await bobRelayManager.fetchKeypackage(
+        final bobKpJson = (await bobRelayManager.fetchMemberKeypackage(
           pubkey: bobPubkeyHex,
-        );
+          circle: aliceManager,
+        ))?.keyPackageJson;
         expect(bobKpJson, isNotNull);
 
-        final creation = await aliceManager.createCircle(
+        await createCircleDelivered(
+          manager: aliceManager,
+          relayManager: bobRelayManager,
           identitySecretBytes: aliceSecretBytes,
           members: [
             MemberKeyPackageFfi(
               keyPackageJson: bobKpJson!,
+              authorNpub: bobIdentity.npub,
               inboxRelays: const [_testRelayUrl],
               nip65Relays: const [_testRelayUrl],
             ),
@@ -817,9 +762,8 @@ void main() {
           name: 'UI Removal Circle',
           circleType: 'location_sharing',
           relays: const [_testRelayUrl],
-          creatorFallbackRelays: const [_testRelayUrl],
+          scenario: 'remove',
         );
-        await aliceManager.confirmPublished(pending: creation.pending);
 
         final circles = await service.getVisibleCircles();
         expect(circles, hasLength(1));
@@ -912,17 +856,14 @@ void main() {
         final after = await aliceManager.getCircle(
           mlsGroupId: Uint8List.fromList(circle.mlsGroupId),
         );
+        // Applied only once the relay acked it: the driver confirms nothing
+        // unacked (publish-before-apply, Rule 13 — owned by
+        // `haven-core/tests/security_rule_gates.rs`).
         expect(
           after!.members.map((m) => m.pubkey.toLowerCase()),
           isNot(contains(bobPubkeyHex.toLowerCase())),
           reason: 'a tap on the row must have staged, published, acked and '
               'applied a real Remove commit',
-        );
-        expect(
-          relayRecorder.publishEventCalls,
-          isNotEmpty,
-          reason: 'the commit must have gone to the relay before it was '
-              'applied (publish-before-apply, Rule 13)',
         );
 
         // And the list the admin is looking at agrees.

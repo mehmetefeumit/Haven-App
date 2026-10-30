@@ -118,6 +118,24 @@ pub(crate) fn dedup_key(url: &str) -> String {
     )
 }
 
+/// Refuses a relay list that names something Haven itself would not dial.
+///
+/// A relay list is an advertisement: other clients connect to what it names,
+/// and most dial plaintext `ws` without asking. The stored list is normalised
+/// on the way in; this is the write that makes it public.
+fn refuse_undialable(urls: &[String]) -> PublisherResult<()> {
+    let dialable = |url: &String| {
+        nostr::RelayUrl::parse(url).is_ok_and(|url| crate::relay::url_norm::may_dial(&url))
+    };
+    if urls.iter().all(dialable) {
+        Ok(())
+    } else {
+        Err(PublisherError::Build(
+            "a relay list may name encrypted relays only".to_string(),
+        ))
+    }
+}
+
 /// Builds a signed replaceable relay list event.
 ///
 /// Per MIP-00 (kind 10051) and NIP-17 (kind 10050), each entry is a tag of
@@ -135,6 +153,7 @@ pub fn build_relay_list_event(
     urls: &[String],
     created_at: Option<i64>,
 ) -> PublisherResult<nostr::Event> {
+    refuse_undialable(urls)?;
     let tags: Vec<Tag> = urls
         .iter()
         .map(|url| {
@@ -187,6 +206,7 @@ pub fn build_nip65_relay_list_event(
     urls: &[String],
     created_at: Option<i64>,
 ) -> PublisherResult<nostr::Event> {
+    refuse_undialable(urls)?;
     let tags: Vec<Tag> = urls
         .iter()
         .map(|url| {
@@ -420,6 +440,32 @@ mod tests {
             let s = t.as_slice();
             !s.is_empty() && s[0] == "relay"
         }));
+    }
+
+    /// A relay list is an advertisement: other clients dial what it names. A
+    /// stored string that parses to plaintext `ws` is never put in one.
+    #[test]
+    fn a_relay_list_never_advertises_a_plaintext_relay() {
+        let k = keys();
+        for plaintext in [
+            "ws://relay.example",
+            "WS://relay.example",
+            "ws:relay.example",
+        ] {
+            let urls = vec!["wss://a.example.com".to_string(), plaintext.to_string()];
+            assert!(
+                build_relay_list_event(&k, RelayType::Inbox, &urls, None).is_err(),
+                "a kind-10050 list was built naming a plaintext relay",
+            );
+            assert!(
+                build_nip65_relay_list_event(&k, &urls, None).is_err(),
+                "a kind-10002 list was built naming a plaintext relay",
+            );
+        }
+        assert!(
+            build_nip65_relay_list_event(&k, &["not a relay".to_string()], None).is_err(),
+            "a kind-10002 list was built naming something that is not a relay",
+        );
     }
 
     #[test]

@@ -13,6 +13,8 @@
 ///   app text, and announced without those invisible code points
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -27,12 +29,14 @@ import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/services/publish_stagger.dart'
     show kMaxCirclesPerAccount;
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/invitation_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../helpers/localized_app_harness.dart';
+import '../../helpers/log_capture.dart';
 import '../../mocks/mock_circle_service.dart';
 import '../../mocks/mock_profile_service.dart';
 
@@ -227,6 +231,485 @@ void main() {
         greaterThan(countBeforeTap),
         reason: 'keyPackagePublisherProvider should be rebuilt after accept',
       );
+    });
+
+    /// The invitation list as the app renders it, over [service].
+    Future<AppLocalizations> pumpList(
+      WidgetTester tester,
+      MockCircleService service, {
+      Profile? profile,
+      Locale locale = kDefaultTestLocale,
+      TextScaler? textScaler,
+    }) async {
+      await pumpLocalized(
+        tester,
+        Scaffold(
+          body: Consumer(
+            builder: (context, ref, _) => Column(
+              children: [
+                for (final invitation
+                    in ref.watch(pendingInvitationsProvider).valueOrNull ??
+                        const <Invitation>[])
+                  InvitationCard(invitation: invitation),
+              ],
+            ),
+          ),
+        ),
+        locale: locale,
+        textScaler: textScaler,
+        overrides: [
+          circleServiceProvider.overrideWithValue(service),
+          profileServiceProvider.overrideWithValue(
+            MockProfileService(
+              memberProfiles: profile == null ? {} : {_inviterHex: profile},
+            ),
+          ),
+        ],
+      );
+      expect(find.byType(InvitationCard), findsOneWidget);
+      return l10nOf(tester, InvitationCard);
+    }
+
+    /// The snackbar on screen, which must stay up long enough to read and
+    /// offer a way to dismiss it (WCAG 2.2.1).
+    void expectLongDismissibleSnack(
+      WidgetTester tester,
+      AppLocalizations l10n,
+    ) {
+      final snack = tester.widget<SnackBar>(find.byType(SnackBar));
+      expect(snack.persist, isTrue);
+      expect(snack.action?.label, l10n.commonDismiss);
+    }
+
+    /// Pumps the card on a route of its own, opened over a home screen.
+    Future<AppLocalizations> pumpOnOwnRoute(
+      WidgetTester tester,
+      MockCircleService service,
+    ) async {
+      await pumpLocalized(
+        tester,
+        Scaffold(
+          body: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => Scaffold(
+                    body: InvitationCard(invitation: _invitation()),
+                  ),
+                ),
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+        overrides: [
+          circleServiceProvider.overrideWithValue(service),
+          profileServiceProvider.overrideWithValue(MockProfileService()),
+        ],
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      return l10nOf(tester, InvitationCard);
+    }
+
+    testWidgets(
+      'an accept that finishes after the user left the screen still lands: '
+      'the circle is selected and the user is told',
+      (tester) async {
+        final service = _GatedCircleService();
+        final l10n = await pumpOnOwnRoute(tester, service);
+        final container = ProviderScope.containerOf(
+          tester.element(find.text('open', skipOffstage: false)),
+        );
+
+        await tester.tap(find.text(l10n.invitationCardAccept));
+        await tester.pump();
+        Navigator.of(tester.element(find.byType(InvitationCard))).pop();
+        await tester.pumpAndSettle();
+        expect(find.byType(InvitationCard), findsNothing);
+
+        service.accept.complete(
+          TestCircleFactory.createCircle(mlsGroupId: _invitation().mlsGroupId),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text(l10n.invitationAcceptedSnack), findsOneWidget);
+        expect(
+          container.read(selectedCircleIdProvider),
+          _invitation().mlsGroupId,
+        );
+      },
+    );
+
+    testWidgets(
+      'a decline that finishes after the user left the screen still lands',
+      (tester) async {
+        final service = _GatedCircleService();
+        final l10n = await pumpOnOwnRoute(tester, service);
+
+        await tester.tap(find.text(l10n.invitationCardDecline));
+        await tester.pump();
+        Navigator.of(tester.element(find.byType(InvitationCard))).pop();
+        await tester.pumpAndSettle();
+
+        service.decline.complete();
+        await tester.pumpAndSettle();
+
+        expect(find.text(l10n.invitationDeclinedSnack), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'an invitation made for keys this phone no longer holds says so, names '
+      'the inviter isolated, and leaves the list',
+      (tester) async {
+        final l10n = await pumpList(
+          tester,
+          _NeedsNewInviteCircleService(),
+          profile: const Profile(pubkeyHex: _inviterHex, displayName: _rtlName),
+        );
+
+        await tester.tap(find.text(l10n.invitationCardAccept));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text(l10n.invitationNeedsNewInviteError(_isolated(_rtlName))),
+          findsOneWidget,
+          reason: 'not the generic "please try again": no retry can work, '
+              'and an attacker-chosen name cannot reorder the sentence',
+        );
+        expect(find.text(l10n.invitationAcceptError), findsNothing);
+        expectLongDismissibleSnack(tester, l10n);
+        expect(
+          find.byType(InvitationCard),
+          findsNothing,
+          reason: 'the core resolved it like a decline, so the card leaves',
+        );
+      },
+    );
+
+    group('an invitation that would replace a circle already on this phone',
+        () {
+      const offer = RejoinOffer(
+        mlsGroupId: [9, 9, 9],
+        circleName: 'Family',
+        localStateToken: [1, 1, 1],
+      );
+      const inviterName = 'Alice';
+
+      // Not `pumpAndSettle`: the card's accept spinner keeps animating under
+      // the dialog until the user answers it.
+      Future<void> tapAccept(WidgetTester tester, AppLocalizations l10n) async {
+        await tester.tap(find.text(l10n.invitationCardAccept));
+        for (var i = 0; i < 5; i++) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+      }
+
+      Future<AppLocalizations> pumpRejoin(
+        WidgetTester tester,
+        _RejoinCircleService service, {
+        Locale locale = kDefaultTestLocale,
+        TextScaler? textScaler,
+      }) => pumpList(
+        tester,
+        service,
+        profile: const Profile(
+          pubkeyHex: _inviterHex,
+          displayName: inviterName,
+        ),
+        locale: locale,
+        textScaler: textScaler,
+      );
+
+      testWidgets('at 2x text on a small phone the whole consequence can be '
+          'read before the choice', (tester) async {
+        // German: the longest body. The consequence is its last sentence, the
+        // one a clipped dialog loses first.
+        tester.view
+          ..physicalSize = const Size(320, 568)
+          ..devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final service = _RejoinCircleService()..rejoinOffers = const [[offer]];
+        final l10n = await pumpRejoin(
+          tester,
+          service,
+          locale: const Locale('de'),
+          textScaler: const TextScaler.linear(2),
+        );
+
+        await tapAccept(tester, l10n);
+
+        final body = find.text(
+          l10n.rejoinDialogBody(
+            _isolated(inviterName),
+            _isolated(offer.circleName),
+          ),
+        );
+        final paragraph = tester.renderObject<RenderParagraph>(body);
+        expect(
+          paragraph.size.height,
+          greaterThanOrEqualTo(
+            paragraph.getMaxIntrinsicHeight(paragraph.size.width) - 0.5,
+          ),
+          reason: 'the body was cut short: the consequence of joining again '
+              'is the part a clipped dialog hides',
+        );
+        final scroll = tester
+            .state<ScrollableState>(
+              find.ancestor(of: body, matching: find.byType(Scrollable)),
+            )
+            .position;
+        scroll.jumpTo(scroll.maxScrollExtent);
+        await tester.pump();
+        expect(
+          tester.getRect(body).bottom,
+          lessThanOrEqualTo(568),
+          reason: 'the end of the consequence must be reachable on screen',
+        );
+      });
+
+      testWidgets('asks first, naming the circle and the inviter, with Cancel '
+          'the focused default', (tester) async {
+        final service = _RejoinCircleService()..rejoinOffers = const [[offer]];
+        final l10n = await pumpRejoin(tester, service);
+
+        await tapAccept(tester, l10n);
+
+        expect(find.text(l10n.rejoinDialogTitle), findsOneWidget);
+        expect(
+          find.text(
+            l10n.rejoinDialogBody(
+              _isolated(inviterName),
+              _isolated(offer.circleName),
+            ),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          Focus.of(tester.element(find.text(l10n.commonCancel))).hasFocus,
+          isTrue,
+          reason: "joining again discards this phone's copy and declining "
+              'ends the invitation; the focused default must do neither',
+        );
+        expect(service.methodCalls, isNot(contains('confirmGroupRejoin')));
+      });
+
+      testWidgets('speaks the names without bidi isolate marks', (
+        tester,
+      ) async {
+        final handle = tester.ensureSemantics();
+        final service = _RejoinCircleService()..rejoinOffers = const [[offer]];
+        final l10n = await pumpRejoin(tester, service);
+        await tapAccept(tester, l10n);
+
+        final spoken = l10n.rejoinDialogBody(inviterName, offer.circleName);
+        final node = tester.getSemantics(find.bySemanticsLabel(spoken));
+        expect(
+          node.label,
+          isNot(matches(RegExp('[\u2066-\u2069]'))),
+          reason: 'the isolates protect a layout a label never undergoes, and '
+              'a screen reader would meet them in the sentence',
+        );
+        handle.dispose();
+      });
+
+      testWidgets('with no name to show it reads no key aloud, and never as a '
+          'name', (tester) async {
+        final handle = tester.ensureSemantics();
+        final service = _RejoinCircleService()..rejoinOffers = const [[offer]];
+        final l10n = await pumpList(tester, service);
+        await tapAccept(tester, l10n);
+
+        expect(
+          find.text(l10n.rejoinDialogBodyUnnamed(_isolated(offer.circleName))),
+          findsOneWidget,
+        );
+        final labels = <String>[];
+        void walk(SemanticsNode node) {
+          labels.add(node.label);
+          node.visitChildren((child) {
+            walk(child);
+            return true;
+          });
+        }
+
+        walk(tester.semantics.find(find.byType(AlertDialog)));
+        expect(labels.where((l) => l.contains('npub1')), isEmpty);
+        handle.dispose();
+      });
+
+      testWidgets('Cancel changes nothing: nothing is confirmed or declined, '
+          'and the invitation stays in the list', (tester) async {
+        final service = _RejoinCircleService()..rejoinOffers = const [[offer]];
+        final l10n = await pumpRejoin(tester, service);
+        final reads = service.methodCalls
+            .where((call) => call == 'getPendingInvitations')
+            .length;
+
+        await tapAccept(tester, l10n);
+        await tester.tap(find.byKey(WidgetKeys.rejoinDialogCancel));
+        await tester.pumpAndSettle();
+
+        expect(find.text(l10n.rejoinDialogTitle), findsNothing);
+        expect(service.methodCalls, isNot(contains('confirmGroupRejoin')));
+        expect(service.methodCalls, isNot(contains('declineGroupRejoin')));
+        expect(find.byType(SnackBar), findsNothing);
+        expect(find.byType(InvitationCard), findsOneWidget);
+        expect(
+          service.methodCalls
+              .where((call) => call == 'getPendingInvitations')
+              .length,
+          reads,
+          reason: 'the invitation is still held, so nothing re-reads the list',
+        );
+      });
+
+      testWidgets('Join again consents to that offer and says, as a live '
+          'region, that the invitation was accepted', (tester) async {
+        final service = _RejoinCircleService()
+          ..rejoinOffers = const [[offer]]
+          ..rejoinConfirms = [
+            TestCircleFactory.createCircle(mlsGroupId: offer.mlsGroupId),
+          ];
+        final l10n = await pumpRejoin(tester, service);
+        final handle = tester.ensureSemantics();
+
+        await tapAccept(tester, l10n);
+        await tester.tap(find.byKey(WidgetKeys.rejoinDialogConfirm));
+        await tester.pumpAndSettle();
+
+        expect(service.confirmedOffers, [offer]);
+        expect(service.methodCalls, isNot(contains('declineGroupRejoin')));
+        expect(find.text(l10n.invitationAcceptedSnack), findsOneWidget);
+        expect(
+          tester
+              .getSemantics(find.text(l10n.invitationAcceptedSnack))
+              .flagsCollection
+              .isLiveRegion,
+          isTrue,
+          reason: 'the outcome must be spoken without moving focus',
+        );
+        handle.dispose();
+      });
+
+      testWidgets('Decline declines the offers with the invitation, and says '
+          'so', (tester) async {
+        final service = _RejoinCircleService()..rejoinOffers = const [[offer]];
+        final l10n = await pumpRejoin(tester, service);
+
+        await tapAccept(tester, l10n);
+        await tester.tap(find.byKey(WidgetKeys.rejoinDialogDecline));
+        await tester.pumpAndSettle();
+
+        expect(service.methodCalls, contains('declineGroupRejoin'));
+        expect(service.methodCalls, isNot(contains('declineInvitation')));
+        expect(service.confirmedOffers, isEmpty);
+        expect(find.text(l10n.invitationDeclinedSnack), findsOneWidget);
+        expect(find.byType(InvitationCard), findsNothing);
+      });
+
+      testWidgets('a decline that fails says the decline failed, logs no '
+          'identifier, and the invitation stays', (tester) async {
+        final service = _RejoinCircleService()
+          ..rejoinOffers = const [[offer]]
+          ..declineFails = true;
+        final l10n = await pumpRejoin(tester, service);
+
+        // Restored before the body ends: `testWidgets` checks that debugPrint
+        // is back.
+        final capture = LogCapture();
+        try {
+          await tapAccept(tester, l10n);
+          await tester.tap(find.byKey(WidgetKeys.rejoinDialogDecline));
+          await tester.pumpAndSettle();
+        } finally {
+          capture.restore();
+        }
+
+        expect(find.text(l10n.invitationDeclineError), findsOneWidget);
+        expect(find.text(l10n.invitationDeclinedSnack), findsNothing);
+        expect(find.byType(InvitationCard), findsOneWidget);
+        capture
+          ..assertContains('[Accept] rejoin decline failed')
+          ..assertNoNeedles(['ab' * 32, 'wss://planted.example']);
+      });
+
+      testWidgets('a copy that moved after the offer was read is read once '
+          "more and the same circle's offer confirmed, without asking again",
+          (tester) async {
+        const moved = RejoinOffer(
+          mlsGroupId: [9, 9, 9],
+          circleName: 'Family',
+          localStateToken: [2, 2, 2],
+        );
+        final service = _RejoinCircleService()
+          ..rejoinOffers = const [[offer], [moved]]
+          ..rejoinConfirms = [
+            const InvitationRejoinConfirmationRequiredException(),
+            TestCircleFactory.createCircle(mlsGroupId: offer.mlsGroupId),
+          ];
+        final l10n = await pumpRejoin(tester, service);
+
+        await tapAccept(tester, l10n);
+        await tester.tap(find.byKey(WidgetKeys.rejoinDialogConfirm));
+        await tester.pumpAndSettle();
+
+        expect(service.confirmedOffers, [offer, moved]);
+        expect(find.text(l10n.rejoinDialogTitle), findsNothing);
+        expect(find.text(l10n.invitationAcceptedSnack), findsOneWidget);
+      });
+
+      testWidgets('a copy that moves twice fails the accept with the generic '
+          'copy, and the invitation stays', (tester) async {
+        final service = _RejoinCircleService()
+          ..rejoinOffers = const [[offer]]
+          ..rejoinConfirms = const [
+            InvitationRejoinConfirmationRequiredException(),
+          ];
+        final l10n = await pumpRejoin(tester, service);
+
+        await tapAccept(tester, l10n);
+        await tester.tap(find.byKey(WidgetKeys.rejoinDialogConfirm));
+        await tester.pumpAndSettle();
+
+        expect(service.confirmedOffers, hasLength(2));
+        expect(find.text(l10n.invitationAcceptError), findsOneWidget);
+        expect(find.byType(InvitationCard), findsOneWidget);
+      });
+
+      testWidgets('an offer the core declined (written by someone other than '
+          'the inviter shown, or for a circle being left) is answered with '
+          'the needs-new-invite copy, and no dialog', (tester) async {
+        final service = _RejoinCircleService()..offersNeedNewInvite = true;
+        final l10n = await pumpRejoin(tester, service);
+
+        await tapAccept(tester, l10n);
+
+        expect(find.text(l10n.rejoinDialogTitle), findsNothing);
+        expect(
+          find.text(l10n.invitationNeedsNewInviteError(_isolated(inviterName))),
+          findsOneWidget,
+        );
+        expect(find.byType(InvitationCard), findsNothing);
+      });
+
+      testWidgets('with no offer held any more the invitation is accepted '
+          'again, and joins', (tester) async {
+        final service = _RejoinCircleService()
+          ..rejoinOffers = const [[]]
+          ..acceptsAfterFirst = true;
+        final l10n = await pumpRejoin(tester, service);
+
+        await tapAccept(tester, l10n);
+
+        expect(
+          service.methodCalls.where((call) => call == 'acceptInvitation'),
+          hasLength(2),
+        );
+        expect(find.text(l10n.rejoinDialogTitle), findsNothing);
+        expect(find.text(l10n.invitationAcceptedSnack), findsOneWidget);
+      });
     });
 
     testWidgets(
@@ -964,12 +1447,114 @@ void main() {
 // Mock Implementations
 // ==========================================================================
 
+/// A circle service whose every accept needs a new invitation, after which
+/// the invitation is gone — the core resolved it like a decline.
+class _NeedsNewInviteCircleService extends MockCircleService {
+  bool _resolved = false;
+
+  @override
+  Future<List<Invitation>> getPendingInvitations() async {
+    methodCalls.add('getPendingInvitations');
+    return _resolved ? [] : [_invitation()];
+  }
+
+  @override
+  Future<Circle> acceptInvitation(List<int> mlsGroupId) async {
+    methodCalls.add('acceptInvitation');
+    _resolved = true;
+    throw const InvitationNeedsNewInviteException();
+  }
+}
+
+/// A circle service whose accept would replace a circle already held: the
+/// invitation stays pending until joined or declined.
+class _RejoinCircleService extends MockCircleService {
+  bool _resolved = false;
+
+  /// When set, the offers read finds them declined by the core.
+  bool offersNeedNewInvite = false;
+
+  /// When set, every accept after the first joins.
+  bool acceptsAfterFirst = false;
+
+  /// When set, declining the offers fails with [plantedDeclineError].
+  bool declineFails = false;
+
+  /// Engine text naming a circle and a relay, as a raw FFI error can.
+  static final plantedDeclineError =
+      'group ${'ab' * 32} at wss://planted.example';
+  int _accepts = 0;
+
+  @override
+  Future<List<Invitation>> getPendingInvitations() async {
+    methodCalls.add('getPendingInvitations');
+    return _resolved ? [] : [_invitation()];
+  }
+
+  @override
+  Future<Circle> acceptInvitation(List<int> mlsGroupId) async {
+    methodCalls.add('acceptInvitation');
+    if (acceptsAfterFirst && _accepts++ > 0) {
+      _resolved = true;
+      return TestCircleFactory.createCircle(mlsGroupId: mlsGroupId);
+    }
+    throw const InvitationRejoinConfirmationRequiredException();
+  }
+
+  @override
+  Future<List<RejoinOffer>> rejoinOffersForInvitation(
+    List<int> invitationId,
+  ) async {
+    if (offersNeedNewInvite) {
+      methodCalls.add('rejoinOffersForInvitation');
+      _resolved = true;
+      throw const InvitationNeedsNewInviteException();
+    }
+    return super.rejoinOffersForInvitation(invitationId);
+  }
+
+  @override
+  Future<Circle> confirmGroupRejoin(
+    List<int> invitationId,
+    RejoinOffer offer,
+  ) async {
+    final circle = await super.confirmGroupRejoin(invitationId, offer);
+    _resolved = true;
+    return circle;
+  }
+
+  @override
+  Future<void> declineGroupRejoin(List<int> invitationId) async {
+    await super.declineGroupRejoin(invitationId);
+    if (declineFails) throw StateError(plantedDeclineError);
+    _resolved = true;
+  }
+}
+
 /// A circle service at the account roster bound: every accept is refused.
 class _RosterFullCircleService extends MockCircleService {
   @override
   Future<Circle> acceptInvitation(List<int> mlsGroupId) async {
     methodCalls.add('acceptInvitation');
     throw const CircleRosterFullException();
+  }
+}
+
+/// A circle service whose accept and decline finish only when the test says.
+class _GatedCircleService extends MockCircleService {
+  final Completer<Circle> accept = Completer<Circle>();
+  final Completer<void> decline = Completer<void>();
+
+  @override
+  Future<Circle> acceptInvitation(List<int> mlsGroupId) {
+    methodCalls.add('acceptInvitation');
+    return accept.future;
+  }
+
+  @override
+  Future<void> declineInvitation(List<int> mlsGroupId) {
+    methodCalls.add('declineInvitation');
+    return decline.future;
   }
 }
 

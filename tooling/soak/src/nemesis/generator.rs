@@ -330,7 +330,10 @@ mod tests {
             | Fault::DropClass(_)
             | Fault::ClampLimit(_)
             | Fault::RefusePage { .. }
-            | Fault::ColdFirstConnect => false,
+            | Fault::ColdFirstConnect
+            | Fault::Unanswering
+            | Fault::WithholdEose
+            | Fault::RefusesNegentropy => false,
         };
         assert!(FAULT_PALETTE.into_iter().all(schedulable));
         for seed in 0..16 {

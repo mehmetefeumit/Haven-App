@@ -47,10 +47,12 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/providers/location_access_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/location_settings_launcher.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:haven/src/widgets/common/dim_overlay.dart';
 import 'package:haven/src/widgets/map/map_status_banners.dart';
+import 'package:haven/src/widgets/map/sharing_health_banner.dart';
 
 import '../mocks/mock_circle_service.dart';
 
@@ -114,6 +116,7 @@ void main() {
     double topPadding = _kTopPadding,
     double sheetSize = 0.12,
     TextScaler textScaler = TextScaler.noScaling,
+    List<Override> extra = const [],
   }) async {
     tester.view.devicePixelRatio = 1.0;
     tester.view.physicalSize = size;
@@ -132,6 +135,7 @@ void main() {
           ),
           locationSettingsLauncherProvider.overrideWithValue(launcher),
           circleServiceProvider.overrideWithValue(MockCircleService()),
+          ...extra,
         ],
         child: MaterialApp(
           locale: const Locale('en'),
@@ -196,6 +200,27 @@ void main() {
   // -------------------------------------------------------------------------
   // F1 — the occlusion
   // -------------------------------------------------------------------------
+
+  group("a circle's sharing fault is never a map layer", () {
+    testWidgets('with a fault standing, no layer builds the sharing card', (
+      tester,
+    ) async {
+      // OD-1: the card lives in Circle details alone; the map's layers hold
+      // the device banners only.
+      await pumpShellLayers(
+        tester,
+        status: LocationAccessStatus.available,
+        extra: [
+          sharingHealthProvider.overrideWith(
+            () => _FaultHealth(
+              SharingHealth.receiveSilent(DateTime.utc(2026, 8, 28, 12)),
+            ),
+          ),
+        ],
+      );
+      expect(find.byType(SharingHealthBanner), findsNothing);
+    });
+  });
 
   group('the banner is usable at every sheet detent', () {
     testWidgets('its remedy is hit-testable at the 0.85 snap', (tester) async {
@@ -462,4 +487,17 @@ void main() {
       );
     });
   });
+}
+
+/// A sharing verdict that stands as given.
+class _FaultHealth extends SharingHealthNotifier {
+  _FaultHealth(this._health);
+
+  final SharingHealth _health;
+
+  @override
+  SharingHealth build() => _health;
+
+  @override
+  Future<void> refresh() async {}
 }

@@ -7,7 +7,7 @@
 //! `SQLCipher` database — none of them plants a row to "reach" the state it
 //! asserts.
 //!
-//! Six are READ seams; three are not. `set_stored_message_write_fault_for_test`
+//! Seven are READ seams; three are not. `set_stored_message_write_fault_for_test`
 //! MUTATES a live database so a harness can make a write the engine performs
 //! mid-call fail, `forge_future_header_445_for_test` SEALS a crafted event
 //! under the group key (a member's outbound power, not a reader's), and
@@ -16,12 +16,12 @@
 //! marked, because "a harness can see state the product does not expose" is not
 //! a true description of any of them.
 //!
-//! The nine seams and what each is for:
+//! The ten seams and what each is for:
 //!
 //! 1. `SessionManager::process_event_typed_for_test` — one ingest of one event
-//!    that keeps BOTH pre-authentication screens and hands back the engine's own
-//!    error type, so a classifier can match a variant instead of parsing
-//!    redacted prose.
+//!    that keeps production's pre-authentication screen and hands back the
+//!    engine's own error type, so a classifier can match a variant instead of
+//!    parsing redacted prose.
 //! 2. `SessionManager::stored_message_record_for_test` — a stored row's
 //!    disposition AND epoch, which is what tells a branch loss from an ordinary
 //!    past-epoch drop.
@@ -57,10 +57,14 @@
 //!    the production publisher is refused (`RelayNotFound`) and every
 //!    receive-side eviction stays owed. The harness supplies `Fn(&str) ->
 //!    String`; haven-core wraps the engine's OWN `Client` in a private type
-//!    that delegates to production's `impl AutoCommitPublisher for Client`, so
+//!    that delegates to production's `impl UnrecordedPublisher for Client`, so
 //!    the pool, the sockets and the ≥1-relay OK rule cannot be substituted.
 //!    Its socket-opening tests live in `test_utils_seams_sockets.rs`, apart
 //!    from this file's process-wide log capture; its gate test is below.
+//! 10. `processed_transport_id_count_for_test` — a count of the engine's
+//!     processed-transport-id rows for one group: one per peeled wrapper, kept
+//!     for the life of the group and never pruned (T-DEDUPE-GROWTH). The engine
+//!     exposes no count, so a growth scenario has nothing else to read.
 //!
 //! # Rule 15 over this file
 //!
@@ -78,11 +82,13 @@ use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::storage::{
     delete_openmls_group_state_for_test, openmls_group_keys_for_test,
-    set_stored_message_write_fault_for_test, OpenMlsGroupKey,
+    processed_transport_id_count_for_test, set_stored_message_write_fault_for_test,
+    OpenMlsGroupKey,
 };
 use haven_core::nostr::mls::types::{
-    EpochId, GroupId, IngestOutcome, LocationMessageResult, MessageId, MessageState,
-    OpenMlsContentKind, PreAuthRejection, ScreenedIngest, StaleReason, StoredMessageProbe,
+    DeferralLineage, EpochId, GroupEvent, GroupId, IngestOutcome, InputRejectionCategory,
+    LocationMessageResult, MessageId, MessageState, OpenMlsContentKind, PreAuthRejection,
+    ScreenedIngest, StoredMessageProbe,
 };
 use haven_core::nostr::mls::StorageConfig;
 use haven_core::relay::live_sync::{group_cursor_stream, LiveSyncCore};
@@ -157,17 +163,14 @@ async fn two_member_circle(name: &str) -> Circle {
             &alice.keys,
             vec![bob.key_package().await],
             &CircleConfig::new(name).with_relays(relays.clone()),
-            &relays,
         )
         .await
         .expect("create a circle");
+    // As the app's driven create leaves it: the founding Welcomes sent from
+    // their records and acknowledged, so no later drive sends them.
+    let _ = alice.manager.land_staged_for_test().await;
     let mls_group_id = result.circle.mls_group_id.clone();
     let nostr_group_id = result.circle.nostr_group_id;
-    alice
-        .manager
-        .confirm_published(result.pending)
-        .await
-        .expect("confirm the create");
     bob.manager
         .process_gift_wrapped_invitation(&bob.keys, &result.welcome_events[0].event)
         .await
@@ -190,17 +193,12 @@ async fn make_co_admins(c: &Circle) {
     let handoff = c
         .alice
         .manager
-        .propose_admin_handoff(&c.mls_group_id, &c.bob.keys.public_key())
+        .admin_handoff_for_test(&c.mls_group_id, &c.bob.keys.public_key())
         .await
         .expect("alice hands bob the admin bit");
-    c.alice
-        .manager
-        .confirm_published(handoff.pending)
-        .await
-        .expect("confirm the handoff");
     c.bob
         .manager
-        .decrypt_location(&handoff.commit_event)
+        .ingest_for_test(&handoff)
         .await
         .expect("bob applies the handoff commit");
     assert!(
@@ -215,14 +213,10 @@ async fn make_co_admins(c: &Circle) {
 async fn commit_relay_update(dev: &Device, group_id: &GroupId, relay: &str) -> Event {
     let staged = dev
         .manager
-        .update_circle_relays(group_id, &[GROUP_RELAY.to_string(), relay.to_string()])
+        .update_relays_for_test(group_id, &[GROUP_RELAY.to_string(), relay.to_string()])
         .await
         .expect("stage a relay-list commit");
-    dev.manager
-        .finalize_relay_update(staged.pending, group_id)
-        .await
-        .expect("confirm the relay-list commit");
-    staged.commit_event
+    staged
 }
 
 /// The value-free shape of one ingest, so a test can assert which arm the engine
@@ -234,12 +228,19 @@ enum Arm {
     Other,
 }
 
-/// Ingests `event` through the typed seam ONCE and reports which arm it took.
+/// Ingests `event` — a relay-list commit adding `commit_relay` — through the
+/// typed seam ONCE, serves the convergence window MDK's pinned policy holds it
+/// in, and reports which arm the engine took: `Applied` when the device now
+/// routes by that commit, `PastEpoch` when it kept the branch it was on and
+/// discarded this one.
 ///
 /// One event, one ingest, one call: the engine answers a second ingest of the
-/// same MLS content with `Stale { AlreadySeen }`, so a helper that ingested
-/// twice would classify the second look and turn a branch loss into a duplicate.
-async fn ingest_arm(dev: &Device, event: &Event) -> Arm {
+/// same MLS content as a duplicate, so a helper that ingested twice would
+/// classify the second look and turn a branch loss into a duplicate. The arm is
+/// read off the group's routing rather than the ingest outcome, because at MDK
+/// v0.10.4 a commit is `Buffered` on arrival and the branch is selected only
+/// when its convergence pass closes.
+async fn ingest_arm(dev: &Device, group_id: &GroupId, event: &Event, commit_relay: &str) -> Arm {
     let Ok(screened) = dev
         .manager
         .session()
@@ -249,48 +250,91 @@ async fn ingest_arm(dev: &Device, event: &Event) -> Arm {
         panic!("a co-member commit must not fail the ingest outright");
     };
     let ScreenedIngest::Ingested(effects) = screened else {
-        panic!("a co-member commit passes both pre-auth screens");
+        panic!("a co-member commit passes the pre-auth screen");
     };
-    match effects.outcome {
-        IngestOutcome::Processed => Arm::Applied,
-        IngestOutcome::Stale {
-            reason: StaleReason::AlreadyAtEpoch { .. },
-        } => Arm::PastEpoch,
-        _ => Arm::Other,
+    if !matches!(
+        effects.outcome,
+        IngestOutcome::Processed | IngestOutcome::Buffered { .. }
+    ) {
+        return Arm::Other;
+    }
+    let Ok(_) = dev
+        .manager
+        .session()
+        .settle_receive_for_test(group_id)
+        .await
+    else {
+        panic!("serving the convergence window must not fail");
+    };
+    let Ok((_, relays)) = dev.manager.session().group_routing(group_id).await else {
+        panic!("a live group has routing");
+    };
+    if relays.iter().any(|relay| relay == commit_relay) {
+        Arm::Applied
+    } else {
+        Arm::PastEpoch
     }
 }
 
-// ── Seam 1: the typed ingest keeps both pre-authentication screens ───────────
+// ── Seam 1: the typed ingest keeps production's pre-authentication screen ────
 
+/// The NIP-40 `expiration` tag is not a validity signal (Marmot
+/// `transports/nostr.md:190-192`): a co-member's commit carrying a past
+/// `expiration` is applied, while an envelope carrying two `#h` tags is still
+/// refused before authentication.
 #[tokio::test]
-async fn typed_ingest_keeps_the_expiration_screen() {
+async fn typed_ingest_never_screens_on_expiration_and_keeps_the_malformed_screen() {
     let c = two_member_circle("typed expiry").await;
-    let stale = EventBuilder::new(Kind::Custom(445), "never read: the screen runs first")
+    let commit = commit_relay_update(&c.alice, &c.mls_group_id, "wss://second.example.com").await;
+    let h = Tag::custom(
+        TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+        [hex::encode(c.nostr_group_id)],
+    );
+    let expired = EventBuilder::new(Kind::Custom(445), commit.content.clone())
+        .tags([h.clone(), Tag::expiration(Timestamp::from(1))])
+        .sign_with_keys(&Keys::generate())
+        .expect("sign");
+    assert_eq!(
+        ingest_arm(
+            &c.bob,
+            &c.mls_group_id,
+            &expired,
+            "wss://second.example.com"
+        )
+        .await,
+        Arm::Applied,
+        "an expired but member-sealed commit must reach the engine and apply"
+    );
+    assert_eq!(
+        c.bob.manager.group_epoch(&c.mls_group_id).await.unwrap(),
+        c.alice.manager.group_epoch(&c.mls_group_id).await.unwrap()
+    );
+
+    let double_h = EventBuilder::new(Kind::Custom(445), commit.content)
         .tags([
+            h,
             Tag::custom(
                 TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
-                [hex::encode(c.nostr_group_id)],
+                [hex::encode([0x11u8; 32])],
             ),
-            Tag::expiration(Timestamp::from(1)),
         ])
         .sign_with_keys(&Keys::generate())
         .expect("sign");
-
     let Ok(screened) = c
         .bob
         .manager
         .session()
-        .process_event_typed_for_test(&stale)
+        .process_event_typed_for_test(&double_h)
         .await
     else {
-        panic!("an expired event is screened, never an engine failure");
+        panic!("an unparseable envelope is screened, never an engine failure");
     };
     assert!(
         matches!(
             screened,
-            ScreenedIngest::RejectedBeforeAuth(PreAuthRejection::Expired)
+            ScreenedIngest::RejectedBeforeAuth(PreAuthRejection::Malformed)
         ),
-        "the typed seam must run production's NIP-40 receiver screen, not skip it"
+        "the typed seam must run production's pre-engine transport parse"
     );
 }
 
@@ -327,12 +371,7 @@ async fn typed_ingest_applies_a_real_group_event() {
     let sent = c
         .alice
         .manager
-        .encrypt_location(
-            &c.mls_group_id,
-            &c.alice.keys.public_key(),
-            &LocationMessage::new(48.85, 2.35),
-            60,
-        )
+        .seal_location_for_test(&c.mls_group_id, &LocationMessage::new(48.85, 2.35))
         .await
         .expect("alice encrypts")
         .0;
@@ -376,8 +415,20 @@ async fn a_same_epoch_race_costs_exactly_one_branch() {
     let bob_commit = commit_relay_update(&c.bob, &c.mls_group_id, "wss://bob.example.com").await;
 
     let arms = [
-        ingest_arm(&c.alice, &bob_commit).await,
-        ingest_arm(&c.bob, &alice_commit).await,
+        ingest_arm(
+            &c.alice,
+            &c.mls_group_id,
+            &bob_commit,
+            "wss://bob.example.com",
+        )
+        .await,
+        ingest_arm(
+            &c.bob,
+            &c.mls_group_id,
+            &alice_commit,
+            "wss://alice.example.com",
+        )
+        .await,
     ];
     assert_eq!(
         arms.iter().filter(|a| **a == Arm::PastEpoch).count(),
@@ -400,19 +451,14 @@ async fn a_same_epoch_race_costs_exactly_one_branch() {
     let sent = c
         .alice
         .manager
-        .encrypt_location(
-            &c.mls_group_id,
-            &c.alice.keys.public_key(),
-            &LocationMessage::new(51.5, -0.12),
-            60,
-        )
+        .seal_location_for_test(&c.mls_group_id, &LocationMessage::new(51.5, -0.12))
         .await
         .expect("alice sends after the race")
         .0;
     assert!(
         c.bob
             .manager
-            .decrypt_location(&sent)
+            .ingest_for_test(&sent)
             .await
             .expect("bob ingests")
             .iter()
@@ -447,8 +493,20 @@ async fn the_probe_reports_the_branch_the_engine_discarded() {
         commit_relay_update(&c.bob, &c.mls_group_id, "wss://bob-probe.example.com").await;
 
     let arms = [
-        ingest_arm(&c.alice, &bob_commit).await,
-        ingest_arm(&c.bob, &alice_commit).await,
+        ingest_arm(
+            &c.alice,
+            &c.mls_group_id,
+            &bob_commit,
+            "wss://bob-probe.example.com",
+        )
+        .await,
+        ingest_arm(
+            &c.bob,
+            &c.mls_group_id,
+            &alice_commit,
+            "wss://alice-probe.example.com",
+        )
+        .await,
     ];
     let mut losses = 0;
     for (device, arm) in [(&c.alice, &arms[0]), (&c.bob, &arms[1])] {
@@ -458,22 +516,22 @@ async fn the_probe_reports_the_branch_the_engine_discarded() {
             losses += 1;
             assert_eq!(
                 probe.state,
-                MessageState::EpochInvalidated,
-                "the device that reported the peer's commit past-epoch lost that \
-                 branch, and `EpochInvalidated` is the ONLY signal saying so — the \
-                 engine outcome alone cannot distinguish it from an ordinary \
-                 past-epoch drop"
+                MessageState::ConvergenceDeferred,
+                "the device that kept its branch discarded the peer's commit, and at \
+                 MDK v0.10.4 the discarded edge stays as convergence-graph input \
+                 (`ConvergenceDeferred`), never applied — which is what tells it \
+                 from an ordinary past-epoch drop (`Failed`)"
             );
             assert!(
-                probe.epoch == EpochId(tip),
-                "and the row carries its own epoch column — this device's tip when \
-                 the engine stored it"
+                probe.epoch == EpochId(tip - 1),
+                "and the row carries the commit's own source epoch — the one both \
+                 racing commits were made from, below the surviving branch's tip"
             );
         } else {
-            assert_ne!(
+            assert_eq!(
                 probe.state,
-                MessageState::EpochInvalidated,
-                "the device that APPLIED the surviving branch lost nothing"
+                MessageState::Processed,
+                "the device that APPLIED the surviving branch holds it applied"
             );
         }
     }
@@ -532,7 +590,7 @@ async fn fork_classification_leaks_no_identifier() {
     const CIRCLE_NAME: &str = "fork needle circle";
     let facts: Mutex<Option<(Vec<String>, usize)>> = Mutex::new(None);
 
-    let lines = capture_haven_log(async {
+    let lines = Box::pin(capture_haven_log(async {
         let c = two_member_circle(CIRCLE_NAME).await;
         make_co_admins(&c).await;
         let alice_commit =
@@ -540,8 +598,20 @@ async fn fork_classification_leaks_no_identifier() {
         let bob_commit =
             commit_relay_update(&c.bob, &c.mls_group_id, "wss://bob-fork.example.com").await;
         let arms = [
-            ingest_arm(&c.alice, &bob_commit).await,
-            ingest_arm(&c.bob, &alice_commit).await,
+            ingest_arm(
+                &c.alice,
+                &c.mls_group_id,
+                &bob_commit,
+                "wss://bob-fork.example.com",
+            )
+            .await,
+            ingest_arm(
+                &c.bob,
+                &c.mls_group_id,
+                &alice_commit,
+                "wss://alice-fork.example.com",
+            )
+            .await,
         ];
         *facts.lock().unwrap() = Some((
             vec![
@@ -555,7 +625,7 @@ async fn fork_classification_leaks_no_identifier() {
             ],
             arms.iter().filter(|a| **a == Arm::PastEpoch).count(),
         ));
-    })
+    }))
     .await;
 
     let (needles, branch_losses) = facts.into_inner().unwrap().expect("the scenario ran");
@@ -606,7 +676,11 @@ async fn the_processor_accessor_reaches_the_cores_own_processor() {
     let c = two_member_circle("processor").await;
     let group_hex = hex::encode(c.nostr_group_id);
     let stream = group_cursor_stream(&group_hex);
-    let core = LiveSyncCore::new_local(Arc::clone(&c.alice.manager), c.alice.keys.public_key());
+    let core = LiveSyncCore::new_local(
+        Arc::clone(&c.alice.manager),
+        c.alice.keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
 
     assert!(
         core.processor().all_advances_consumed(),
@@ -659,7 +733,7 @@ async fn circle_rotation_state_reads_back_what_the_write_side_stamped() {
     let commit = commit_relay_update(&c.alice, &c.mls_group_id, "wss://rotation.example.com").await;
     c.bob
         .manager
-        .decrypt_location(&commit)
+        .ingest_for_test(&commit)
         .await
         .expect("bob applies the commit");
     let ceiling_ms = chrono::Utc::now().timestamp_millis();
@@ -747,12 +821,7 @@ async fn deleting_one_groups_openmls_state_quarantines_exactly_that_group() {
         "and a sibling group in the SAME database must not be"
     );
     reopened
-        .encrypt_location(
-            &healthy,
-            &keys.public_key(),
-            &LocationMessage::new(51.5, -0.12),
-            60,
-        )
+        .seal_location_for_test(&healthy, &LocationMessage::new(51.5, -0.12))
         .await
         .expect("the healthy sibling must still send after the reopen");
 }
@@ -770,14 +839,12 @@ async fn create_confirmed_circle(
             keys,
             vec![invitee.key_package().await],
             &CircleConfig::new(name).with_relays(relays.to_vec()),
-            relays,
         )
         .await
         .expect("create a circle");
-    manager
-        .confirm_published(result.pending)
-        .await
-        .expect("confirm the create");
+    // As the app's driven create leaves it: the founding Welcomes sent from
+    // their records and acknowledged, so no later drive sends them.
+    let _ = manager.land_staged_for_test().await;
     result.circle.mls_group_id
 }
 
@@ -786,9 +853,8 @@ async fn create_confirmed_circle(
 /// The one MUTATION seam: arming it makes the engine's own stored-message write
 /// fail, and disarming it restores the call it broke.
 ///
-/// This is the only way to reach the shape that matters for Rule 12 — an engine
-/// call that has ALREADY handed a decrypted peer message to the application and
-/// then fails before its durable row is written. Both directions are asserted,
+/// It reaches an engine call that fails mid-way on a storage write (PLAN §8 V4:
+/// the trigger still fires at MDK v0.10.4). Both directions are asserted,
 /// because a fault that could not be lifted would make every later test in the
 /// same database a fiction, and a fault that never bit would make the tests it
 /// exists for vacuous.
@@ -803,12 +869,7 @@ async fn the_write_fault_breaks_exactly_one_engine_write_and_then_lets_go() {
     let first = c
         .bob
         .manager
-        .encrypt_location(
-            &c.mls_group_id,
-            &c.bob.keys.public_key(),
-            &LocationMessage::new(51.5, -0.12),
-            60,
-        )
+        .seal_location_for_test(&c.mls_group_id, &LocationMessage::new(51.5, -0.12))
         .await
         .expect("bob sends");
 
@@ -828,12 +889,7 @@ async fn the_write_fault_breaks_exactly_one_engine_write_and_then_lets_go() {
     let second = c
         .bob
         .manager
-        .encrypt_location(
-            &c.mls_group_id,
-            &c.bob.keys.public_key(),
-            &LocationMessage::new(48.85, 2.35),
-            60,
-        )
+        .seal_location_for_test(&c.mls_group_id, &LocationMessage::new(48.85, 2.35))
         .await
         .expect("bob sends again");
     assert!(
@@ -845,6 +901,60 @@ async fn the_write_fault_breaks_exactly_one_engine_write_and_then_lets_go() {
             .is_ok(),
         "disarmed, the same call must succeed again: a fault that outlived its \
          own scope would make every later assertion in this database a fiction"
+    );
+}
+
+/// A peer message whose ingest a storage fault aborted is lost to MDK's
+/// dedupe: the redelivery is `Ignored { Duplicate }` and delivers nothing, so
+/// no relay redelivery can recover it (`docs/MDK_UPSTREAM_TRACKER.md`
+/// T-FAULTED-INGEST-SEEN). Haven cannot undo the engine's record of the
+/// object; this pins the residual, and goes red the day MDK stops recording
+/// an aborted ingest as seen.
+#[tokio::test]
+async fn an_ingest_a_storage_fault_aborted_is_never_redelivered() {
+    let c = two_member_circle("faulted ingest").await;
+    let db = StorageConfig::new(c.alice.dir_path()).database_path();
+    let key = StorageConfig::test_sqlcipher_key().expect("the test key");
+    let (event, _, _) = c
+        .bob
+        .manager
+        .seal_location_for_test(&c.mls_group_id, &LocationMessage::new(51.5, -0.12))
+        .await
+        .expect("bob sends");
+
+    set_stored_message_write_fault_for_test(&db, &key, true).expect("arm the fault");
+    let faulted = c.alice.manager.session().process_event(&event).await;
+    set_stored_message_write_fault_for_test(&db, &key, false).expect("disarm the fault");
+    assert!(
+        faulted.is_err(),
+        "precondition: the fault aborted the ingest"
+    );
+
+    let redelivered = c
+        .alice
+        .manager
+        .session()
+        .process_event(&event)
+        .await
+        .expect("the redelivery is ingested");
+    let ingest = redelivered.ingested().expect("an authenticated envelope");
+    assert!(
+        matches!(
+            ingest.outcome,
+            IngestOutcome::Ignored {
+                category: InputRejectionCategory::Duplicate,
+                ..
+            }
+        ),
+        "the engine recorded the aborted object as seen"
+    );
+    assert!(
+        !ingest
+            .effects
+            .events
+            .iter()
+            .any(|e| matches!(e, GroupEvent::MessageReceived { .. })),
+        "and the redelivery delivers nothing"
     );
 }
 
@@ -974,7 +1084,7 @@ async fn the_convergence_count_grows_on_a_buffered_future_header_and_drains_at_t
         let commit = commit_relay_update(&c.alice, &c.mls_group_id, relay).await;
         c.bob
             .manager
-            .decrypt_location(&commit)
+            .ingest_for_test(&commit)
             .await
             .expect("bob applies the commit");
     }
@@ -1029,11 +1139,13 @@ async fn an_unpeelable_event_fills_peel_deferred_and_leaves_the_convergence_coun
     assert!(
         matches!(
             effects.outcome,
-            IngestOutcome::Stale {
-                reason: StaleReason::PeelFailed
+            IngestOutcome::TransportDeferred {
+                lineage: DeferralLineage::Uncontested,
+                ..
             }
         ),
-        "an event the device cannot peel is retained as PeelDeferred, reported PeelFailed"
+        "an event the device cannot peel is retained as PeelDeferred, reported \
+         TransportDeferred with no competing branch"
     );
     assert_eq!(
         c.bob
@@ -1150,7 +1262,7 @@ fn forge_future_header_is_gated_by_its_own_test_utils_attribute() {
     );
 }
 
-// ── Seam 9: the auto-commit address map (socket tests: test_utils_seams_sockets.rs)
+// ── Seam 9: the drive's address map (socket tests: test_utils_seams_sockets.rs)
 
 #[test]
 fn new_local_with_relay_map_is_gated_by_its_own_test_utils_attribute() {
@@ -1171,9 +1283,117 @@ fn new_local_with_relay_map_is_gated_by_its_own_test_utils_attribute() {
     // "Cannot substitute a transport" holds only while the wrapper is haven-core's
     // own and unreachable: a visible one could be built around anything.
     assert!(
-        source.contains("\nstruct RelayMappedClient<")
-            && !source.contains("pub struct RelayMappedClient")
-            && !source.contains("pub(crate) struct RelayMappedClient"),
+        source.contains("\nstruct RelayMappedPool<")
+            && !source.contains("pub struct RelayMappedPool")
+            && !source.contains("pub(crate) struct RelayMappedPool"),
         "the address-map wrapper stays private to the session module"
+    );
+}
+
+// ── Seam 10: the processed-transport-id count ───────────────────────────────
+
+/// One row per wrapper the engine peeled, and only then: a co-member's location
+/// grows the count by exactly one, its redelivery by none, and an event the
+/// device cannot peel by none.
+#[tokio::test]
+async fn the_processed_id_count_grows_once_per_peeled_wrapper_and_never_on_a_duplicate() {
+    let c = two_member_circle("processed ids").await;
+    let db = StorageConfig::new(c.bob.dir_path()).database_path();
+    let key = StorageConfig::test_sqlcipher_key().expect("the test key");
+    let count = || {
+        processed_transport_id_count_for_test(&db, &key, &c.mls_group_id)
+            .expect("read the processed-id count")
+    };
+    let before = count();
+
+    let sent = c
+        .alice
+        .manager
+        .seal_location_for_test(&c.mls_group_id, &LocationMessage::new(48.85, 2.35))
+        .await
+        .expect("alice encrypts")
+        .0;
+    let Ok(ScreenedIngest::Ingested(effects)) = c
+        .bob
+        .manager
+        .session()
+        .process_event_typed_for_test(&sent)
+        .await
+    else {
+        panic!("a genuine co-member location must ingest");
+    };
+    assert!(matches!(effects.outcome, IngestOutcome::Processed));
+    assert!(
+        count() == before + 1,
+        "a peeled wrapper is recorded exactly once"
+    );
+
+    let Ok(ScreenedIngest::Ingested(effects)) = c
+        .bob
+        .manager
+        .session()
+        .process_event_typed_for_test(&sent)
+        .await
+    else {
+        panic!("a redelivery is an outcome, not an ingest error");
+    };
+    assert!(matches!(effects.outcome, IngestOutcome::Ignored { .. }));
+    assert!(count() == before + 1, "a duplicate records nothing");
+
+    let undecryptable = EventBuilder::new(Kind::Custom(445), "A".repeat(40))
+        .tags([Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+            [hex::encode(c.nostr_group_id)],
+        )])
+        .sign_with_keys(&Keys::generate())
+        .expect("sign");
+    let Ok(ScreenedIngest::Ingested(effects)) = c
+        .bob
+        .manager
+        .session()
+        .process_event_typed_for_test(&undecryptable)
+        .await
+    else {
+        panic!("a peel failure is an outcome, not an ingest error");
+    };
+    assert!(matches!(
+        effects.outcome,
+        IngestOutcome::TransportDeferred { .. }
+    ));
+    assert!(
+        count() == before + 1,
+        "a wrapper the device could not peel is not a processed one"
+    );
+}
+
+/// A database the engine never wrote is an error, never a count of zero, which
+/// a growth scenario would read as "nothing was peeled".
+#[test]
+fn the_processed_id_count_refuses_a_database_the_engine_never_wrote() {
+    let empty = TempDir::new().expect("temp dir");
+    let key = StorageConfig::test_sqlcipher_key().expect("the test key");
+    assert!(processed_transport_id_count_for_test(
+        &empty.path().join("session.sqlite"),
+        &key,
+        &GroupId::new(vec![7u8; 32]),
+    )
+    .is_err());
+}
+
+#[test]
+fn the_processed_id_count_is_gated_by_its_own_test_utils_attribute() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nostr/mls/storage.rs"),
+    )
+    .expect("read the storage module");
+    let declaration = source
+        .find("pub fn processed_transport_id_count_for_test")
+        .expect("the seam is declared here");
+    let gate = source[..declaration]
+        .rfind("#[cfg(any(test, feature = \"test-utils\"))]")
+        .expect("and it carries a gate");
+    assert!(
+        !source[gate..declaration].contains("pub fn "),
+        "the gate must be the seam's OWN attribute, not one belonging to an earlier item"
     );
 }

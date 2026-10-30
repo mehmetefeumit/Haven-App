@@ -4,17 +4,17 @@
 //! A relay caps the size of an event it will accept. Below that cap everything
 //! works; at it, a publish comes back `OK false invalid:` and Rule 13's
 //! disposition follows — no confirm, nothing applied locally, the staged commit
-//! rolled back. Three of this scenario's arms grade exactly that. The fourth
-//! grades what happens when the refused commit carries a REMOVAL, which is the
-//! one case where the disposition is deliberately not a rollback and the circle
-//! never recovers.
+//! rolled back by the product's driver. Three of this scenario's arms grade
+//! exactly that. The fourth records what happens when the refused commit
+//! carries a REMOVAL, which can never be published and so never lands.
 //!
 //! # The cap is MEASURED off this run's own event
 //!
 //! `nostr-relay-builder` has no event-size knob, and no Tier-1 roster reaches
 //! strfry's 65 536, so the ceiling here is synthetic: the arm stages the commit
-//! it is about to publish, measures that event's own JSON length, and arms the
-//! plane one byte below it. That is a measurement of THIS commit — never a
+//! under its record — the product's staging call, which sends nothing —
+//! measures the frozen event's own JSON length, and arms the plane one byte
+//! below it before the driver sends it. That is a measurement of THIS commit — never a
 //! literal, and never a restatement of a production relay's configuration. The
 //! matched pair one byte the other way is what proves the SIZE is the variable
 //! and not the roster, the plane or the fan-out. The real caps of a real relay
@@ -31,80 +31,82 @@
 //! Welcome arm below is a RELAY-side refusal and says so, so a reader does not
 //! take it for the other thing.
 //!
-//! # The removal wedge is a RECORDED EXPECTATION, tied to OD-1 and OQ-A
+//! # The oversized removal is a RECORDED EXPECTATION, tied to OD-1 and OQ-A
 //!
-//! `CircleManager::publish_failed` deliberately refuses to roll back a
-//! removal-bearing commit IT OWES A PUBLISH FOR — a peer's `SelfRemove`
-//! auto-commit, whose obligation the receive path records before it opens the
-//! publish window (`circle/manager.rs:2723`, driven from
-//! `relay/auto_commit.rs:407`). The admin's own `remove_members` records no such
-//! obligation and rolls back normally; the distinction is the whole reason the
-//! predicate exists. Rolling an OWED one back is a silent, permanent drop of the
-//! eviction, and the leaver would keep deriving the group's keys until some
-//! unrelated commit moved the epoch. Parking is therefore correct. What is
-//! UNDECIDED is what should happen to an obligation that can never be
-//! discharged — and an oversized removal commit is exactly that, because every
-//! retry refuses for the same reason the first one did. The circle then stays in
-//! its publish-before-apply transition for ever: no send succeeds, every inbound
-//! event is buffered, the evictee stays in every remaining member's roster, and
-//! Haven reports no verdict at all.
+//! A removal commit too large for every relay can never be published, whatever
+//! Haven does with it. Which shape that takes is a property of the relays, and
+//! this arm MEASURES it off the rig's own: the relay double refuses an
+//! oversized frame `OK false invalid:` (`relay/policies.rs` `OVERSIZE_PREFIX`),
+//! a machine-readable rejection. So every target proved it refused and none may
+//! hold the commit, and the product's driver rolls the eviction back (Rule 13,
+//! the product's own); the engine arms the eviction again, and Haven's refused
+//! eviction wait (`RESTAGE_BASE_MS`, doubling to `RETRY_MAX_MS`) holds the
+//! circle's location sends — deferred, typed `DepartureDue` — while it runs.
+//! The circle is never held in a publish-before-apply transition, the evictee
+//! stays in every remaining member's roster, and Haven raises no dedicated
+//! verdict about it. (A relay that dropped the frame with no answer would
+//! produce the other shape: possibly exposed, so pending with paced retries
+//! and the circle's sends waiting behind it. The rig's relays do not; the
+//! tracker row T-OQA records which one was measured.)
 //!
 //! The arm asserts that whole state as its EXPECTATION rather than grading it.
-//! Both directions are therefore covered: if the wedge stops happening, the
-//! canary is unmet and the arm is **rc 3** — "the recorded expectation is
-//! stale"; if a verdict starts appearing, the silence canary is unmet and it is
-//! **rc 3** again, which is the correct signal, because the recorded expectation
-//! must then be replaced by a graded one in the same commit. Changing it in
-//! either direction without citing OD-1 (DECIDED — a per-circle verdict in the
-//! circle's details sheet — and NOT BUILT) and owner decision OQ-A (name the
-//! undischargeable obligation as its own cause) is a regression.
+//! Both directions are therefore covered: if the shape changes — the commit
+//! left pending, or the eviction not re-armed — a canary is unmet and the arm
+//! is **rc 3**, "the recorded expectation is stale"; if a verdict starts
+//! appearing, the silence canary is unmet and it is **rc 3** again, which is
+//! the correct signal, because the recorded expectation must then be replaced
+//! by a graded one in the same commit. Changing it in either direction
+//! without citing OD-1 (BUILT — one per-circle card in the circle's details
+//! sheet, read from `circle_recovery`, which no arm reads yet) and owner
+//! decision OQ-A (name the state as its own cause) is a regression. The cause
+//! keeps the existing neutral wording until W9r names it.
 //!
-//! # The wedged circle is not one of the world's, and the wedge is released at
-//! the end
+//! # The circle is not one of the world's, and the eviction is released at the
+//! end
 //!
-//! The circle cannot be one of the world's: it does not send while the wedge
-//! stands. `build_extra_circle` keeps it out of `world.circles()`, so no
-//! world-wide oracle grades a circle this arm froze on purpose — which is also
-//! why that arm declares `epochs_crossed: 0` and carries its epoch claims as
-//! canaries instead.
+//! The circle cannot be one of the world's: its sends wait while the refused
+//! eviction's wait runs. `build_extra_circle` keeps it out of
+//! `world.circles()`, so no world-wide oracle grades a circle this arm froze
+//! on purpose — which is also why that arm declares `epochs_crossed: 0` and
+//! carries its epoch claims as canaries instead.
 //!
-//! The obligation, though, is a property of the DEVICE and not of the circle:
-//! `owed_removal_commits()` is a per-device read, so O2 and O6 would report an
-//! unredeemed eviction — correctly — for every round after this arm, and the arm
-//! would then be grading the world on a state it induced on purpose. So once
-//! every canary above has been read, the arm lifts the cap and lands the same
-//! commit, which discharges the obligation. That release is not a softening: it
-//! is the arm's own matched pair, and without it "still owed after three passes"
-//! would be satisfied by a world in which nothing can be published at all. A
-//! REAL oversized removal has no such release — every relay refuses the same
-//! bytes for the same reason, for ever — and that permanence is exactly the
-//! undischargeable obligation OQ-A has to name.
+//! Once every canary has been read, the arm lifts the cap and lets the product
+//! land the eviction it re-armed. That release is not a softening: it is the
+//! arm's own matched pair, and without it the canaries would be satisfied by a
+//! world in which nothing can be published at all. A REAL oversized removal has
+//! no such release — every relay refuses the same bytes for the same reason,
+//! for ever — and that permanence is exactly the state OQ-A has to name.
 
 use std::time::Duration;
 
-use haven_core::circle::CommitToPublish;
-use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
-use haven_core::nostr::mls::types::{ConvergedRoster, GroupId};
+use haven_core::nostr::mls::types::{ConvergedRoster, EpochState, FanoutMls, GroupId};
+use haven_core::relay::fanout::{FanoutClock as _, LocationSeal, SendHeld, WallClock};
 use nostr::{Event, EventId, Filter, JsonUtil, Kind};
 
 use crate::nemesis::types::{ByteCap, Fault};
-use crate::oracle::undecryptable::{self, StoredRow};
 use crate::oracle::vacuity::{ExpectationFloor, Observed};
 use crate::oracle::{bounds, Invariant, ProbeToken, Reach, Recovery};
 use crate::relay::OVERSIZE_PREFIX;
-use crate::rig::{DeviceTag, LogDrain, RelayPlane, RigError, SimCircle, Step, TimelineSink};
+use crate::rig::{
+    DeviceTag, LogDrain, PacingClock, PublishVerdict, RelayPlane, RigError, Step, TimelineSink,
+};
 use crate::scenarios::{
-    await_connected, closing_pairs, grade_round, round, Absence, Arm, ArmOutcome, ScenarioWorld,
-    WithheldAcks, NO_GATING_ROWS,
+    await_condition, await_connected, closing_pairs, grade_round, pending_record, round,
+    surface_eviction, Absence, Arm, ArmOutcome, Recorded, ScenarioWorld, WithheldAcks,
+    NO_GATING_ROWS,
 };
 
-/// How many foreground publish passes the wedge arm makes.
-///
-/// Three, and the count is the claim: one refused attempt proves "not yet", and
-/// the finding is the NEVER-ness. Two further passes after the first is the
-/// smallest number that makes the obligation's survival a sequence rather than a
-/// point, and it is what the arm's `WithheldAcks::Fixed(3)` prices.
-const WEDGE_PUBLISH_PASSES: usize = 3;
+/// How many paced drives the wedge arm gives the eviction's record to end in:
+/// the first finds the relays not yet due again (the unreachable attempt the
+/// staging made earned a wait), the clock is stepped past it, and the next
+/// sends into the refusal; the third is the margin for one more wait.
+const WEDGE_DRIVES: usize = 3;
+
+/// How far the release steps the pacing clock before each drive: past the
+/// longest wait a refused eviction earns (Haven's `RESTAGE_BASE_MS`, doubling
+/// to `RETRY_MAX_MS`), so the wait the refusal earned is behind it at the
+/// first drive. A policy clock; nothing a relay produced is compared with it.
+const REFUSAL_WAIT_STEP_MS: u64 = haven_core::relay::fanout::RETRY_MAX_MS;
 
 /// The arms this scenario offers.
 pub const ARMS: [Arm; 4] = [
@@ -114,8 +116,8 @@ pub const ARMS: [Arm; 4] = [
         probe_rounds: 1,
         resubscribes: false,
         absence: Absence::None,
-        // The one commit published into the refusal.
-        withheld_acks: WithheldAcks::Fixed(1),
+        // The refusal is an answer: the drive into it waits for nothing.
+        withheld_acks: WithheldAcks::None,
         floor: ExpectationFloor {
             faults_applied: 1,
             // The matched pair re-stages the same commit under a cap one byte
@@ -133,7 +135,7 @@ pub const ARMS: [Arm; 4] = [
         probe_rounds: 1,
         resubscribes: false,
         absence: Absence::None,
-        withheld_acks: WithheldAcks::Fixed(1),
+        withheld_acks: WithheldAcks::None,
         floor: ExpectationFloor {
             // One cap per plane: the arm's whole claim is that a second relay
             // changes nothing, so a world where only one took the fault would
@@ -168,13 +170,15 @@ pub const ARMS: [Arm; 4] = [
         probe_rounds: 1,
         resubscribes: false,
         absence: Absence::None,
-        // One publish per foreground pass: the never-ness is the finding, and
-        // the arm pays for every attempt it makes.
-        withheld_acks: WithheldAcks::Fixed(3),
+        // The staging drive into planes that are down: one call of MDK's
+        // relay client at most. The refusal after it is an answer.
+        withheld_acks: WithheldAcks::FanoutDrives(1),
         floor: ExpectationFloor {
+            // The size cap; the outage the staging drive meets is the arm's
+            // own instrument.
             faults_applied: 1,
-            // The wedged circle is outside the world's table, so this term
-            // cannot see it and the canaries carry every epoch claim.
+            // The circle is outside the world's table, so this term cannot see
+            // it and the canaries carry every epoch claim.
             epochs_crossed: 0,
             deliveries_observed: 1,
             canaries_caught: 6,
@@ -201,14 +205,13 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
         return Err(RigError::ShapeMismatch);
     };
 
-    let mut classified: Vec<undecryptable::Verdict> = Vec::new();
     let canaries = match arm.label {
         "oversized-commit" => oversized_commit(world, admin).await?,
         "refusal-is-relay-count-invariant" => relay_count_invariant(world, admin).await?,
         "oversized-welcome" => oversized_welcome(world).await?,
         "oversized-removal-wedges-the-circle" => {
             let remaining = tags.get(2).copied().ok_or(RigError::ShapeMismatch)?;
-            wedge(world, admin, second, remaining, &mut classified).await?
+            wedge(world, admin, second, remaining).await?
         }
         _ => return Err(RigError::UnknownTarget),
     };
@@ -236,23 +239,18 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
         tick,
         NO_GATING_ROWS,
         &[],
-        &classified,
+        &[],
     );
-    let invariants: &[Invariant] = if classified.is_empty() {
+    let graded = grade_round(
+        world,
+        &closing,
         &[
             Invariant::Quiescence,
             Invariant::LocationRoundTrip,
             Invariant::SendPathLiveness,
-        ]
-    } else {
-        &[
-            Invariant::Quiescence,
-            Invariant::Undecryptable,
-            Invariant::LocationRoundTrip,
-            Invariant::SendPathLiveness,
-        ]
-    };
-    let graded = grade_round(world, &closing, invariants).await?;
+        ],
+    )
+    .await?;
 
     world.drain_buses();
     let observed = Observed::measure(world, canaries).await?;
@@ -263,8 +261,8 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
     })
 }
 
-/// A commit one byte over the cap: refused, not confirmed, nothing applied —
-/// and the same commit one byte under it, acked and applied.
+/// A commit one byte over the cap: refused, rolled back by the driver,
+/// nothing applied — and the same commit one byte under it, acked and applied.
 async fn oversized_commit<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     admin: DeviceTag,
@@ -277,28 +275,18 @@ async fn oversized_commit<T: TimelineSink, L: LogDrain>(
 
     let mut canaries = 0_usize;
     let refused = stage(world, admin, &group, &relays).await?;
-    let cap = ByteCap::new(refused.commit_event.as_json().len().saturating_sub(1));
+    let cap = ByteCap::new(refused.commit.as_json().len().saturating_sub(1));
     cap_every_plane(world, cap).await?;
-
-    let acked = world
-        .publish_witnessed(admin, std::slice::from_ref(&refused.commit_event))
-        .await?;
+    let verdict = drive(world, admin, &group, &refused).await?;
     // 1. The refusal is machine-readable and the relay never took the event:
     //    the client heard `OK false invalid:` and no store holds it. A plane
     //    that stored it and said no would let this arm pass on the store.
-    if refused_machine_readably(world, &refused.commit_event.id).await? {
+    if refused_machine_readably(world, &refused.commit.id).await? {
         canaries += 1;
     }
-    // 2. Rule 13: no acknowledgement reached the publisher, so the commit may
-    //    not be confirmed, and the arm rolls it back instead.
-    let rolled_back = acked.is_none()
-        && world
-            .device(admin)?
-            .manager()?
-            .publish_failed(refused.pending)
-            .await
-            .is_ok();
-    if rolled_back {
+    // 2. Rule 13, the product's: every relay proved it refused and none may
+    //    hold the commit, so the driver rolled it back.
+    if verdict == PublishVerdict::RolledBack {
         canaries += 1;
     }
     // 3. …and nothing was applied locally: every device holds the epoch and the
@@ -313,9 +301,15 @@ async fn oversized_commit<T: TimelineSink, L: LogDrain>(
     //    other way — acked, confirmed, and the epoch moves. Without it the arm
     //    would pass on a plane that was simply broken.
     let accepted = stage(world, admin, &group, &relays).await?;
-    let room = ByteCap::new(accepted.commit_event.as_json().len().saturating_add(1));
+    let room = ByteCap::new(accepted.commit.as_json().len().saturating_add(1));
     cap_every_plane(world, room).await?;
-    if confirmed(world, admin, &group, accepted).await? && agreement(world, &group).await? > before
+    // Every device follows it: the peers apply it once MDK's quiescence window
+    // closes, so the agreement is awaited, bounded, rather than read once.
+    if drive(world, admin, &group, &accepted).await? == PublishVerdict::Confirmed
+        && await_condition(bounds::round_trip(Recovery::Undisturbed), || async {
+            Ok(agreement(world, &group).await? > before)
+        })
+        .await?
     {
         canaries += 1;
     }
@@ -338,34 +332,28 @@ async fn relay_count_invariant<T: TimelineSink, L: LogDrain>(
 
     let mut canaries = 0_usize;
     let refused = stage(world, admin, &group, &relays).await?;
-    let id = refused.commit_event.id;
-    let cap = ByteCap::new(refused.commit_event.as_json().len().saturating_sub(1));
+    let id = refused.commit.id;
+    let cap = ByteCap::new(refused.commit.as_json().len().saturating_sub(1));
     cap_every_plane(world, cap).await?;
-    let acked = world
-        .publish_witnessed(admin, std::slice::from_ref(&refused.commit_event))
-        .await?;
-    let _ = world
-        .device(admin)?
-        .manager()?
-        .publish_failed(refused.pending)
-        .await
-        .map_err(|_| RigError::Core(Step::RollBackPublish))?;
+    let verdict = drive(world, admin, &group, &refused).await?;
 
     // 1. EVERY plane refused the same bytes, and none of them acked: relay
     //    redundancy is the mitigation for every other publish failure in this
     //    plan, and it is the one that does nothing here. A quorum that demands
     //    more acks can only make an oversized event LESS publishable.
-    if acked.is_none() && refusals_everywhere(world, &id).await? {
+    if verdict == PublishVerdict::RolledBack && refusals_everywhere(world, &id).await? {
         canaries += 1;
     }
 
     // 2. The matched pair, on both planes at once: the same-shaped commit under
     //    a cap above it is carried by every plane.
     let accepted = stage(world, admin, &group, &relays).await?;
-    let room = ByteCap::new(accepted.commit_event.as_json().len().saturating_add(1));
-    let id = accepted.commit_event.id;
+    let room = ByteCap::new(accepted.commit.as_json().len().saturating_add(1));
+    let id = accepted.commit.id;
     cap_every_plane(world, room).await?;
-    if confirmed(world, admin, &group, accepted).await? && stored_everywhere(world, &id).await? {
+    if drive(world, admin, &group, &accepted).await? == PublishVerdict::Confirmed
+        && stored_everywhere(world, &id).await?
+    {
         canaries += 1;
     }
     Ok(canaries)
@@ -412,202 +400,179 @@ async fn oversized_welcome<T: TimelineSink, L: LogDrain>(
     Ok(canaries)
 }
 
-/// The recorded expectation: an oversized REMOVAL commit wedges its circle for
-/// ever, and Haven says nothing about it.
+/// The recorded expectation, measured off the rig's relays: what the product
+/// does with a REMOVAL commit no relay will take.
 ///
-/// See the module docs for what makes this stale in either direction, and for
-/// the two decisions it is tied to.
+/// The relays answer `OK false invalid:` — a machine-readable rejection — so
+/// every target proved it refused and none may hold the commit: the driver
+/// rolls the eviction back, and the engine arms it again. The circle is never
+/// held in a publish-before-apply transition, the removal stays undone, and
+/// Haven says nothing about it. See the module docs for what makes this stale
+/// in either direction, and for the two decisions it is tied to.
 async fn wedge<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     admin: DeviceTag,
     leaver: DeviceTag,
     remaining: DeviceTag,
-    classified: &mut Vec<undecryptable::Verdict>,
 ) -> Result<usize, RigError> {
     let circle = world.build_extra_circle().await?;
     let group = circle.mls_group_id().clone();
     let leaver_hex = world.device(leaver)?.pubkey_hex();
-    let commit = surface_eviction(world, admin, leaver, remaining, &circle).await?;
-
-    let cap = ByteCap::new(commit.commit_event.as_json().len().saturating_sub(1));
+    // Every plane down while the eviction is staged: its first drive sends
+    // nothing a relay could hold, and the commit is measured off its record.
+    for plane in world.relays_mut() {
+        plane.apply(Fault::Down).await?;
+    }
+    let eviction = surface_eviction(world, admin, leaver, (remaining, 22), &circle).await?;
+    heal(world).await?;
+    let cap = ByteCap::new(eviction.commit.as_json().len().saturating_sub(1));
     cap_every_plane(world, cap).await?;
 
-    let mut owed_after_every_pass = true;
-    for _ in 0..WEDGE_PUBLISH_PASSES {
-        let acked = world
-            .publish_witnessed(admin, std::slice::from_ref(&commit.commit_event))
-            .await?;
-        // The FFI's own no-ack rung, called exactly as every publishing plane
-        // calls it. It does not roll a removal back; the obligation stands.
-        let _ = world
-            .device(admin)?
-            .manager()?
-            .publish_failed(commit.pending)
-            .await
-            .map_err(|_| RigError::Core(Step::RollBackPublish))?;
-        owed_after_every_pass &= acked.is_none()
-            && !world
-                .device(admin)?
-                .manager()?
-                .owed_removal_commits()
-                .is_empty();
+    // The refused send: drives, the clock stepped past each wait the drive
+    // announces, until the eviction's record has ended — the unreachable
+    // attempt's wait first, then the refusal.
+    let clock = PacingClock::default();
+    let mut ended = false;
+    for _ in 0..WEDGE_DRIVES {
+        let outcome = world.resume_paced(admin, &clock).await?;
+        if pending_record(world.device(admin)?, &group)
+            .await?
+            .is_none()
+        {
+            ended = true;
+            break;
+        }
+        clock.step(outcome.retry_after_ms.unwrap_or(0));
     }
+    // Read inside the wait the refusal earned, before the clock moves again.
+    let held = world
+        .seal_fix(
+            admin,
+            &group,
+            &ProbeToken::mint(22, 1).as_location(),
+            &clock,
+        )
+        .await?
+        .seal;
+    // …and once that wait is over, before the cap is lifted: the eviction is
+    // still due and unmade. MDK re-arms it 10–50 ms of its own monotonic time
+    // after the rollback (`message_processor/mod.rs:50-51,1310-1321`); the
+    // send is made once the engine announces it due, so its preflight makes
+    // the eviction again and the cap refuses it again, never a race with
+    // that deadline.
+    clock.step(REFUSAL_WAIT_STEP_MS);
+    let due = await_condition(bounds::round_trip(Recovery::Undisturbed), || async {
+        Ok(world
+            .device(admin)?
+            .session()?
+            .eviction_due_after_for_test(&group)
+            .await
+            == Some(Duration::ZERO))
+    })
+    .await?;
+    let after = world
+        .seal_fix(
+            admin,
+            &group,
+            &ProbeToken::mint(22, 2).as_location(),
+            &clock,
+        )
+        .await?
+        .seal;
 
     let mut canaries = 0_usize;
-    // 1. The S2 harm: the evictee is still in the roster of the member that
-    //    never saw the commit, and still derives the circle's keys.
+    // 1. The shape the relays produce: a machine-readable rejection, and no
+    //    store holds the commit.
+    if ended && refused_machine_readably(world, &eviction.commit.id).await? {
+        canaries += 1;
+    }
+    // 2. …so the driver rolled the eviction back — no record of it is left
+    //    pending, and the circle is not held in a publish-before-apply
+    //    transition — and the engine armed it again.
+    let rearmed = world
+        .device(admin)?
+        .session()?
+        .eviction_due_after_for_test(&group)
+        .await
+        .is_some();
+    if ended
+        && !matches!(
+            world.device(admin)?.session()?.epoch_state(&group).await,
+            Some(EpochState::PendingPublish(_))
+        )
+        && rearmed
+    {
+        canaries += 1;
+    }
+    // 3. The removal stays undone: the evictee is still in the roster of the
+    //    member that never saw a commit, and still derives the circle's keys.
     if roster_of(world, remaining, &group)
         .await?
         .contains(&leaver_hex)
     {
         canaries += 1;
     }
-    // 2. The circle cannot send. Every projected read — the epoch, the roster —
-    //    reports the POST-merge state from the moment the commit is staged, so
-    //    the send gate is the only thing that can tell the wedge from a merge.
-    if seal(world, admin, &group, 1).await.is_err() {
-        canaries += 1;
-    }
-    // 3. …and it cannot receive either: an inbound fix from the remaining
-    //    member is BUFFERED before the peel, never applied. This is the receive
-    //    half of the freeze, and no other scenario covers it.
-    let inbound = seal(world, remaining, &group, 2).await?;
-    let verdict =
-        undecryptable::classify(world.device(admin)?, &inbound, StoredRow::Unknown).await?;
-    classified.push(verdict);
-    if matches!(
-        verdict,
-        undecryptable::Verdict::CommitGap | undecryptable::Verdict::ForwardDistance
-    ) {
-        canaries += 1;
-    }
-    // 4. And Haven says nothing: no circle is reported unrecoverable, on either
-    //    surface. The recorded silence — OD-1's gap, and OQ-A's subject.
-    world.drain_buses();
-    if silent_about_the_wedge(world, admin) {
-        canaries += 1;
-    }
-    // 5. The state is `PendingPublish` and not the `PendingProposal` dead end a
-    //    rollback would have left: `do_publish_failed` clears a staged COMMIT
-    //    but not the stored PROPOSAL behind it, so the day the disposition
-    //    changes, this is where it shows.
-    if !world
-        .device(admin)?
-        .session()?
-        .has_pending_proposal(&group)
-        .await
-        .map_err(|_| RigError::Core(Step::ReadConvergenceState))?
+    // 4. From the refusal until the release no location is sealed for the
+    //    member who left: inside the wait the refusal earned and after it, a
+    //    location is deferred, typed — the departure is due.
+    if due
+        && matches!(held, LocationSeal::Deferred(SendHeld::DepartureDue))
+        && matches!(after, LocationSeal::Deferred(SendHeld::DepartureDue))
     {
         canaries += 1;
     }
-
-    // 6. The obligation outlived every refused pass — AND the SIZE is the only
-    //    thing that was holding it: with the cap lifted, the very same commit is
-    //    acked, confirmed and the obligation discharged. Without that second
-    //    half, "still owed after three passes" would be satisfied by a world in
-    //    which nothing can ever be published at all.
-    //
-    //    Releasing it is also what keeps this arm honest about the rest of the
-    //    run: an unredeemed eviction obligation is a property of the DEVICE, not
-    //    of the circle, so O2 and O6 would report it — correctly — for every
-    //    later round, and the arm would be grading the world on a state it
-    //    induced on purpose. A real oversized removal has no such release: every
-    //    relay refuses the same bytes for the same reason, for ever, which is
-    //    the undischargeable obligation OQ-A is about.
-    if owed_after_every_pass && released(world, admin, &group, &commit).await? {
+    // 5. And Haven says nothing: no circle is reported unrecoverable, on either
+    //    surface. The recorded silence — OQ-A's subject.
+    world.drain_buses();
+    if silent_about_the_wedge(world, admin).await {
+        canaries += 1;
+    }
+    // 6. The SIZE is the only thing holding it: with the cap lifted the
+    //    re-armed eviction is staged again, accepted and applied — the evictee
+    //    leaves the roster and nothing is left pending. Without that, the
+    //    canaries above would be satisfied by a world in which nothing can be
+    //    published at all. A REAL oversized removal has no such release: every
+    //    relay refuses the same bytes for the same reason, for ever.
+    if released(world, admin, &group, &leaver_hex, &clock).await? {
         canaries += 1;
     }
     Ok(canaries)
 }
 
-/// Lifts every cap and lands the eviction the wedge was holding.
-///
-/// The pending ref is still alive: the kept-owed rung returns before it touches
-/// the engine, so three refused passes consumed nothing. With the planes taking
-/// the event again, Rule 13 licenses the confirm on the relay's own
-/// acknowledgement — and the confirm is what discharges the obligation.
+/// Lifts every cap and lets the product land the eviction it re-armed: the
+/// foreground drive (`Publishing::resume`) stages an eviction left due in a
+/// circle the session has caught up with, so the circle is marked caught up —
+/// it has no engine subscription, and the mark stands for the sweep the app
+/// would have run — and drives run on `clock` until the eviction is staged
+/// again (the engine's own deadline, and the wait the refusal earned), sent,
+/// accepted and applied. Whether it got there inside the round trip.
 async fn released<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     admin: DeviceTag,
     group: &GroupId,
-    commit: &CommitToPublish,
+    leaver_hex: &str,
+    clock: &PacingClock,
 ) -> Result<bool, RigError> {
     heal(world).await?;
-    if world
-        .publish_witnessed(admin, std::slice::from_ref(&commit.commit_event))
-        .await?
-        .is_none()
-    {
-        return Ok(false);
-    }
-    let ingest = world
+    let world: &ScenarioWorld<T, L> = world;
+    world
         .device(admin)?
-        .manager()?
-        .confirm_published(commit.pending)
-        .await
-        .map_err(|_| RigError::Core(Step::ConfirmPublished))?;
-    world.resolve_ingest(admin, ingest).await?;
-    Ok(world
-        .device(admin)?
-        .manager()?
-        .owed_removal_commits()
-        .is_empty()
-        && seal(world, admin, group, 3).await.is_ok())
-}
-
-/// Drives a peer's `SelfRemove` proposal until the eviction commit surfaces to
-/// the caller with its obligation recorded.
-///
-/// The engine schedules the auto-commit behind a short jitter and surfaces it on
-/// the next convergence tick, so the loop re-ticks with a fresh location from a
-/// third member rather than waiting: a tick is what advances convergence, and a
-/// sleep would be waiting for a clock instead of for the state.
-async fn surface_eviction<T: TimelineSink, L: LogDrain>(
-    world: &ScenarioWorld<T, L>,
-    admin: DeviceTag,
-    leaver: DeviceTag,
-    remaining: DeviceTag,
-    circle: &SimCircle,
-) -> Result<CommitToPublish, RigError> {
-    let group = circle.mls_group_id().clone();
-    let proposal = world
-        .device(leaver)?
-        .manager()?
-        .propose_leave(&group)
-        .await
-        .map_err(|_| RigError::Core(Step::StageCommit))?;
-    let mut ingest = world
-        .device(admin)?
-        .manager()?
-        .decrypt_location_collecting_commits(&proposal)
-        .await
-        .map_err(|_| RigError::Core(Step::StageCommit))?;
-
-    let bound = bounds::round_trip(Recovery::Undisturbed);
-    let started = tokio::time::Instant::now();
-    let mut index = 0_u32;
-    loop {
-        if let Some(commit) = ingest.auto_commits.pop() {
-            return Ok(commit);
-        }
-        if started.elapsed() >= bound {
-            // The eviction never surfaced, so the arm never reached the state
-            // it records: that is "this proved nothing", not a finding.
-            return Err(RigError::Core(Step::StageCommit));
-        }
-        index = index.wrapping_add(1);
-        let tick = seal(world, remaining, &group, index).await?;
-        ingest = world
-            .device(admin)?
-            .manager()?
-            .decrypt_location_collecting_commits(&tick)
-            .await
-            .map_err(|_| RigError::Core(Step::StageCommit))?;
-    }
+        .session()?
+        .mark_caught_up_for_test(group);
+    await_condition(bounds::round_trip(Recovery::Undisturbed), || async {
+        clock.step(REFUSAL_WAIT_STEP_MS);
+        let _ = world.resume_paced(admin, clock).await?;
+        Ok(pending_record(world.device(admin)?, group).await?.is_none()
+            && !roster_of(world, admin, group)
+                .await?
+                .iter()
+                .any(|member| member == leaver_hex))
+    })
+    .await
 }
 
 /// Whether neither surface reports the wedged circle as unrecoverable.
-fn silent_about_the_wedge<T: TimelineSink, L: LogDrain>(
+async fn silent_about_the_wedge<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     admin: DeviceTag,
 ) -> bool {
@@ -615,65 +580,94 @@ fn silent_about_the_wedge<T: TimelineSink, L: LogDrain>(
         .devices()
         .iter()
         .all(|device| device.ledger().unrecoverable() == 0);
-    quiet_bus
-        && world.device(admin).is_ok_and(|device| {
-            device
-                .manager()
-                .is_ok_and(|manager| manager.unrecoverable_circles().is_empty())
-        })
+    if !quiet_bus {
+        return false;
+    }
+    match world.device(admin).and_then(|device| device.manager()) {
+        Ok(manager) => manager.unrecoverable_circles().await.is_empty(),
+        Err(_) => false,
+    }
 }
 
-/// One staged relay-list commit, unresolved.
-struct Staged {
-    commit_event: Event,
-    pending: haven_core::nostr::mls::types::PendingStateRef,
-}
-
-/// Stages a relay-list commit on `device` without resolving it.
+/// Stages a relay-list commit on `device` under its record, sending nothing:
+/// the product's staging call, so the commit can be measured before any relay
+/// is handed it.
 async fn stage<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     device: DeviceTag,
     group: &GroupId,
     relays: &[String],
-) -> Result<Staged, RigError> {
+) -> Result<Recorded, RigError> {
     let staged = world
         .device(device)?
         .manager()?
-        .update_circle_relays(group, relays)
+        .update_circle_relays_staging(group, relays, WallClock.now_ms())
         .await
         .map_err(|_| RigError::Core(Step::StageCommit))?;
-    Ok(Staged {
-        commit_event: staged.commit_event,
-        pending: staged.pending,
-    })
+    let id = staged.commit.ok_or(RigError::Core(Step::StageCommit))?;
+    let probe = world
+        .device(device)?
+        .session()?
+        .fanout_probe_for_test(&id)
+        .await
+        .ok()
+        .flatten()
+        .ok_or(RigError::Core(Step::StageCommit))?;
+    let commit = Event::from_json(&probe.payload).map_err(|_| RigError::Core(Step::StageCommit))?;
+    Ok(Recorded { id, commit })
 }
 
-/// Publishes `staged` and confirms it on a witnessed acknowledgement.
-async fn confirmed<T: TimelineSink, L: LogDrain>(
+/// One foreground drive of `device` (`Publishing::resume`), and where
+/// `staged`'s commit stands after it.
+async fn drive<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     device: DeviceTag,
     group: &GroupId,
-    staged: Staged,
-) -> Result<bool, RigError> {
-    let guard = world.note_pending_staged();
-    let acked = world
-        .publish_witnessed(device, std::slice::from_ref(&staged.commit_event))
-        .await?;
-    let manager = world.device(device)?.manager()?;
-    let ingest = if acked.is_some() {
-        manager
-            .finalize_relay_update(staged.pending, group)
-            .await
-            .map_err(|_| RigError::Core(Step::ConfirmPublished))?
+    staged: &Recorded,
+) -> Result<PublishVerdict, RigError> {
+    let before = world
+        .device(device)?
+        .manager()?
+        .group_epoch(group)
+        .await
+        .map_err(|_| RigError::Core(Step::ReadEpoch))?;
+    let _ = world.resume(device).await?;
+    stood(world, device, group, staged, Some(before)).await
+}
+
+/// Where `staged`'s commit stands on `device`: read off its record while it
+/// stands, and, once the record is gone, off the epoch it would have moved
+/// (`before`, when the caller read one) — or the engine's own state.
+async fn stood<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    device: DeviceTag,
+    group: &GroupId,
+    staged: &Recorded,
+    before: Option<u64>,
+) -> Result<PublishVerdict, RigError> {
+    let session = world.device(device)?.session()?;
+    let probe = session
+        .fanout_probe_for_test(&staged.id)
+        .await
+        .map_err(|_| RigError::Core(Step::ReadConvergenceState))?;
+    if let Some(probe) = probe {
+        return Ok(match probe.mls {
+            FanoutMls::Pending => PublishVerdict::Unresolved,
+            FanoutMls::Confirmed => PublishVerdict::Confirmed,
+            FanoutMls::RolledBack | FanoutMls::NotApplicable => PublishVerdict::RolledBack,
+        });
+    }
+    let now = world
+        .device(device)?
+        .manager()?
+        .group_epoch(group)
+        .await
+        .map_err(|_| RigError::Core(Step::ReadEpoch))?;
+    Ok(if before.is_some_and(|before| now > before) {
+        PublishVerdict::Confirmed
     } else {
-        manager
-            .publish_failed(staged.pending)
-            .await
-            .map_err(|_| RigError::Core(Step::RollBackPublish))?
-    };
-    world.resolve_ingest(device, ingest).await?;
-    drop(guard);
-    Ok(acked.is_some())
+        PublishVerdict::RolledBack
+    })
 }
 
 /// The world's relay list plus one address it does not already hold, so the
@@ -884,30 +878,9 @@ async fn roster_of<T: TimelineSink, L: LogDrain>(
     Ok(member_pubkeys_hex)
 }
 
-/// Seals one location at `device`'s current epoch, unpublished.
-async fn seal<T: TimelineSink, L: LogDrain>(
-    world: &ScenarioWorld<T, L>,
-    device: DeviceTag,
-    group: &GroupId,
-    index: u32,
-) -> Result<Event, RigError> {
-    let sender = world.device(device)?;
-    sender
-        .manager()?
-        .encrypt_location(
-            group,
-            &sender.keys.public_key(),
-            &ProbeToken::mint(22, index).as_location(),
-            LOCATION_MESSAGE_RETENTION_SECS,
-        )
-        .await
-        .map(|(event, _, _)| event)
-        .map_err(|_| RigError::Core(Step::Publish))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ARMS, WEDGE_PUBLISH_PASSES};
+    use super::{ARMS, WEDGE_DRIVES};
     use crate::oracle::Recovery;
     use crate::scenarios::WithheldAcks;
 
@@ -948,23 +921,33 @@ mod tests {
     }
 
     #[test]
-    fn the_wedge_arm_pays_for_every_pass_it_makes_and_reads_the_whole_freeze() {
+    fn a_refused_commit_is_priced_as_the_answer_it_is() {
+        for arm in [ARMS[0], ARMS[1]] {
+            assert!(
+                arm.withheld_acks == WithheldAcks::None,
+                "{}: a relay that refuses has answered; the drive waits for nothing",
+                arm.label
+            );
+        }
+    }
+
+    #[test]
+    fn the_removal_arm_prices_its_one_unanswered_drive_and_reads_the_measured_shape() {
         assert!(
-            ARMS[3].withheld_acks == WithheldAcks::Fixed(3) && WEDGE_PUBLISH_PASSES == 3,
-            "one unacknowledged publish per foreground pass, and three of them: \
-             one attempt proves `not yet`, and the never-ness needs a sequence"
+            ARMS[3].withheld_acks == WithheldAcks::FanoutDrives(1) && WEDGE_DRIVES == 3,
+            "the staging drive into planes that are down is the arm's one call nobody \
+             answers; the refusal after it is an answer"
         );
         assert!(
             ARMS[3].floor.canaries_caught == 6,
-            "the evictee still in the roster, the send that fails, the receive \
-             that buffers, the silence, the staged commit that is not a stranded \
-             proposal, and the obligation that outlives every refused pass and is \
-             discharged the moment the size stops being the problem"
+            "the machine-readable refusal, the rollback and the re-arm, the evictee still \
+             in the roster, the send deferred inside the refusal's wait, the silence, and \
+             the eviction that lands the moment the size stops being the problem"
         );
         assert!(
             ARMS[3].floor.epochs_crossed == 0,
-            "the wedged circle is outside the world's table, so a term that cannot \
-             see it may not be declared as if it could"
+            "the circle is outside the world's table, so a term that cannot see it may \
+             not be declared as if it could"
         );
     }
 

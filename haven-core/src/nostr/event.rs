@@ -37,22 +37,6 @@ pub const KIND_GROUP_MESSAGE: u16 = 445;
 /// see what the constant holds.
 pub const KIND_LOCATION_UPDATE: u16 = 25442;
 
-/// The kind Haven sent location rumors as before [`KIND_LOCATION_UPDATE`].
-///
-/// **Receive-only, and only in combination with a `["t","location"]` tag** — see
-/// `inner_location_content` in [`crate::nostr::mls`], the single site that reads
-/// it. Nothing constructs a rumor at this kind any more.
-///
-/// The pairing narrows the transitional window: every Haven build that can still
-/// share an MLS group with this one (v0.1.11 and v0.1.12 — earlier builds are
-/// pre-Dark-Matter and cannot decrypt a current kind 445 at all) stamps that
-/// hashtag on its kind-9 rumor, while a White Noise chat message is a bare kind
-/// 9. It does not close the window — a client that lifts `#hashtags` out of
-/// message content into `t` tags emits the same pair for anyone who types
-/// "#location" — so this gate is defense in depth ON TOP OF the
-/// `LocationMessage` parse, never a replacement for it.
-pub const LEGACY_KIND_LOCATION_UPDATE: u16 = 9;
-
 /// A signed Nostr event ready for relay transmission.
 ///
 /// This is the outer event (kind 445) that contains encrypted location data.
@@ -350,10 +334,11 @@ mod tests {
     #[test]
     fn location_update_kind_collides_with_no_allocated_kind() {
         // NIP-01 short text note / repost, NIP-09 deletion, NIP-25 reaction,
-        // Marmot chat and welcome, and the Marmot/MDK group-system and media
-        // kinds. 1209 is NOT an allocation — it appears in no Marmot registry
-        // and no MDK rev — and is reserved here deliberately, as margin next to
-        // 1210.
+        // Marmot chat and welcome, the Marmot/MDK group-system and media kinds,
+        // NIP-88 poll response and poll, and Marmot's content report, report
+        // dismissal and admin content deletion. 1209 is NOT an allocation — it
+        // appears in no Marmot registry and no MDK rev — and is reserved here
+        // deliberately, as margin next to 1210.
         for allocated in [
             1u16,
             2,
@@ -369,11 +354,16 @@ mod tests {
             451,
             452,
             1009,
+            1018,
+            1068,
             1200,
             1201,
             1202,
             1209,
             1210,
+            1984,
+            1985,
+            4891,
             KIND_GROUP_MESSAGE,
         ] {
             assert_ne!(
@@ -387,15 +377,6 @@ mod tests {
              the 445 and never reaches a relay. It is where an application draws \
              a kind nothing else renders: got {KIND_LOCATION_UPDATE}"
         );
-    }
-
-    /// The legacy kind is the chat kind, and it is the reason the tag pairing in
-    /// the receive gate is load-bearing: on its own, this number cannot tell a
-    /// pre-cutover Haven rumor from a White Noise chat message.
-    #[test]
-    fn legacy_location_kind_is_the_marmot_chat_kind() {
-        assert_eq!(LEGACY_KIND_LOCATION_UPDATE, 9);
-        assert_ne!(LEGACY_KIND_LOCATION_UPDATE, KIND_LOCATION_UPDATE);
     }
 
     #[test]

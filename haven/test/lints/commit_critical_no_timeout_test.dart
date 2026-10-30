@@ -97,23 +97,61 @@ import 'package:flutter_test/flutter_test.dart';
 ///   ways a staged MLS commit is RESOLVED. A resolution that is abandoned
 ///   half-way leaves the group in `PendingPublish`, where every later send
 ///   fails.
+/// * the thirteen `*Driven` entries — each sends what its circle owes, waits
+///   for a relay's acknowledgement and resolves it inside the one call. A
+///   bound cuts no Rust future; it lets the caller go on to a teardown that
+///   shuts the pool under the drive, which leaves its sends to the next wake
+///   (the core forks nothing: a commit no relay acknowledged stays recorded
+///   and awaiting).
 const _criticalMethods = {
   'settleBeforePause',
   'pauseSubscriptions',
   'confirmPublished',
   'finalizeRelayUpdate',
   'publishFailed',
+  'addMembersDriven',
+  'adminHandoffDriven',
+  'ingestDriven',
+  'leaveDriven',
+  'publishLocationDriven',
+  'reinviteDriven',
+  'removeMembersDriven',
+  'repairRotationDriven',
+  'resumeDriven',
+  'resumeLeaveDriven',
+  'sealLocationDriven',
+  'selfDemoteDriven',
+  'updateCircleRelaysDriven',
+};
+
+/// Critical methods `lib/` no longer calls, each for a stated reason: still
+/// checked wherever one comes back, and exempt from the anti-vacuity count.
+const _uncalledCritical = {
+  // W9n: a relay update goes through the fanout driver, which confirms it in
+  // Rust.
+  'finalizeRelayUpdate',
+  // A location send seals through the fanout driver, and the polls ingest
+  // through it: what either stages is confirmed or reported in Rust, so
+  // nothing in lib/ resolves a commit.
+  'confirmPublished',
+  'publishFailed',
 };
 
 /// Futures that ARE a commit-critical section, held in a variable rather than
 /// called inline.
 ///
-/// `background_location_task.dart` tracks its receive-side auto-commit publish
-/// in `_inFlightCommitCritical` precisely so its teardown can await that one
-/// slice unbounded, next to a DIFFERENT in-flight future (`_inFlightPublish`,
-/// a plain application message) that it deliberately DOES bound. Only the name
-/// distinguishes them at the await, so only the name can protect it.
-const _criticalFutures = {'_inFlightCommitCritical', 'commitCritical'};
+/// `NostrRelayService.inFlightDrives` is every driver entry in flight (the
+/// iOS burst teardown awaits it); `inFlightNonLocationDrives` every one but a
+/// location's seal and send, which the background task's teardown awaits
+/// unbounded (as `commitCritical`), next to a DIFFERENT in-flight future
+/// (`_inFlightPublish`, the whole cycle) that it deliberately DOES bound.
+/// Only the name distinguishes them at the await, so only the name can
+/// protect it.
+const _criticalFutures = {
+  'inFlightDrives',
+  'inFlightNonLocationDrives',
+  'commitCritical',
+};
 
 /// Every file that OWNS a commit-critical link, and the links it must still
 /// contain.
@@ -136,17 +174,25 @@ const _teardownOwners = <String, Set<String>>{
     'pauseSubscriptions',
   },
   'lib/src/services/background_location_task.dart': {
-    '_inFlightCommitCritical',
+    'inFlightNonLocationDrives',
     'commitCritical',
   },
-  'lib/src/services/background_deferred_send.dart': {
-    'confirmPublished',
-    'publishFailed',
-  },
-  'lib/src/services/nostr_circle_service.dart': {
-    'confirmPublished',
-    'publishFailed',
-    'finalizeRelayUpdate',
+  // The driver entries themselves: one public method per `*Driven` FFI entry,
+  // each registered in `inFlightDrives`.
+  'lib/src/services/nostr_relay_service.dart': {
+    'addMembersDriven',
+    'adminHandoffDriven',
+    'ingestDriven',
+    'leaveDriven',
+    'publishLocationDriven',
+    'reinviteDriven',
+    'removeMembersDriven',
+    'repairRotationDriven',
+    'resumeDriven',
+    'resumeLeaveDriven',
+    'sealLocationDriven',
+    'selfDemoteDriven',
+    'updateCircleRelaysDriven',
   },
   // The opt-out release: consent withdrawn while the app is paused has to
   // leave no socket behind, and `releaseBurstPlaneOnOptOut` is where the
@@ -155,20 +201,10 @@ const _teardownOwners = <String, Set<String>>{
   // with nothing red: the global count would still be supplied by the
   // subscription service, and the scan would go on inspecting this file for
   // nothing.
-  'lib/src/pages/map_shell.dart': {'pauseSubscriptions'},
-  // The shared publish pool's other user. `resolveAutoCommits` publishes a
-  // staged commit and then resolves it over the SAME pool the burst teardown
-  // shuts, and `_awaitCommitCritical(commitCritical)` is what makes those
-  // three windows visible to the teardown.
-  //
-  // This floor is the NAME's floor and nothing more: it goes red when
-  // `commitCritical` leaves the file's executable code entirely, which is
-  // what a rename or a deleted registration helper looks like. It does NOT
-  // see one of the three windows losing its registration — the helper's own
-  // body still names the parameter — and it is not asked to. That case is
-  // caught below, by the group that asserts the three PUBLIC callers are
-  // still derived THROUGH the registration; both mutations were run.
-  'lib/src/services/location_sharing_service.dart': {'commitCritical'},
+  // And the read the burst teardown drains before it shuts the shared pool.
+  'lib/src/pages/map_shell.dart': {'pauseSubscriptions', 'inFlightDrives'},
+  // `location_sharing_service.dart` owned the registration no path wrote; it
+  // is gone, replaced by `NostrRelayService.inFlightDrives` above.
 };
 
 /// One `.timeout(` that bounds a commit-critical link.
@@ -503,6 +539,7 @@ List<TimeoutViolation> _violationsIn(String source) {
 const _coordinator = 'lib/src/services/background_burst_coordinator.dart';
 const _mapShell = 'lib/src/pages/map_shell.dart';
 const _locationSharing = 'lib/src/services/location_sharing_service.dart';
+const _relayService = 'lib/src/services/nostr_relay_service.dart';
 
 void main() {
   group('checker self-tests', () {
@@ -560,8 +597,15 @@ void main() {
         'commitCritical',
       );
       expect(
-        run('await _inFlightCommitCritical?.timeout(budget);').single.what,
-        '_inFlightCommitCritical',
+        run('await pool.inFlightDrives?.timeout(budget);').single.what,
+        'inFlightDrives',
+      );
+    });
+
+    test('flags a bounded driver entry', () {
+      expect(
+        run('await pool.resumeDriven(c).timeout(budget);').single.what,
+        'resumeDriven()',
       );
     });
 
@@ -937,7 +981,10 @@ class _S {
           file.readAsStringSync(),
         ).forEach((k, v) => counts[k] = (counts[k] ?? 0) + v);
       }
-      for (final name in {..._criticalMethods, '_inFlightCommitCritical'}) {
+      for (final name in {
+        ..._criticalMethods.difference(_uncalledCritical),
+        ..._criticalFutures,
+      }) {
         expect(
           counts[name] ?? 0,
           greaterThan(0),
@@ -945,6 +992,25 @@ class _S {
               'no call to `$name` was found anywhere in lib/. Either it was '
               'renamed (update _criticalMethods / _criticalFutures in the '
               'same change) or this guard has gone blind.',
+        );
+      }
+    });
+
+    test('a name exempted as uncalled is uncalled', () {
+      // Once one is called again it needs its owning file and its floor back.
+      final counts = <String, int>{};
+      for (final file in _libSources()) {
+        _criticalCounts(
+          file.readAsStringSync(),
+        ).forEach((k, v) => counts[k] = (counts[k] ?? 0) + v);
+      }
+      for (final name in _uncalledCritical) {
+        expect(
+          counts[name] ?? 0,
+          0,
+          reason:
+              '`$name` is called in lib/ again: remove it from '
+              '_uncalledCritical and add its file to _teardownOwners',
         );
       }
     });
@@ -975,7 +1041,10 @@ class _S {
       // global count and no per-file floor — exactly the hole above.
       final owned = _teardownOwners.values.expand((s) => s).toSet();
       expect(
-        {..._criticalMethods, ..._criticalFutures}.difference(owned),
+        {
+          ..._criticalMethods.difference(_uncalledCritical),
+          ..._criticalFutures,
+        }.difference(owned),
         isEmpty,
         reason:
             'these critical names have no owning file, so only the global '
@@ -1092,83 +1161,64 @@ class _S {
     });
   });
 
-  group('the derivation fires on the real location-sharing service '
-      '(anti-vacuity)', () {
-    // `_awaitCommitCritical(commitCritical)` registers each of the three
-    // `resolveAutoCommits` windows as in-flight, so the burst teardown can see
-    // them before it shuts the SHARED publish pool. The registration is
-    // reached by the parameter's NAME, and the callers that go through it are
-    // PUBLIC — this is the first production use of the same-unit public rule,
-    // so it is pinned against the real file rather than assumed.
-    Map<String, String> wrappers() => criticalWrappersIn(
-      parseString(
-        content: _read(_locationSharing),
-        throwIfDiagnostics: false,
-      ).unit,
+  group('the derivation fires on the real relay service (anti-vacuity)', () {
+    // Each public driver method reaches its `*Driven` entry inside this unit,
+    // so a bound on a call to one HERE is caught; called in another file it
+    // is not (see the boundary self-tests), and the registry is what a
+    // teardown elsewhere drains instead.
+    Map<String, String> wrappers(String path) => criticalWrappersIn(
+      parseString(content: _read(path), throwIfDiagnostics: false).unit,
     );
 
-    test('the registration is derived critical', () {
-      expect(
-        wrappers()['_awaitCommitCritical'],
-        contains('commitCritical'),
-        reason:
-            'the registration is what the three resolveAutoCommits windows '
-            'are reached through. If it stops being derived, a bound anywhere '
-            'above it goes back to being invisible.',
-      );
+    test('every driver method is derived critical through its entry', () {
+      final derived = wrappers(_relayService);
+      for (final (method, entry) in [
+        ('addMembers', 'addMembersDriven'),
+        ('ingest', 'ingestDriven'),
+        ('resume', 'resumeDriven'),
+        ('reinvite', 'reinviteDriven'),
+        ('sealLocation', 'sealLocationDriven'),
+        ('publishLocation', 'publishLocationDriven'),
+        ('leave', 'leaveDriven'),
+        ('resumeLeave', 'resumeLeaveDriven'),
+      ]) {
+        expect(derived[method], contains(entry), reason: method);
+      }
     });
 
-    test('its PUBLIC callers are derived through it', () {
-      // Under the old private-only rule these three would have derived
-      // nothing: every one of them is public, and every one of them owns a
-      // publish-then-confirm window.
-      final derived = wrappers();
+    test('no send or poll of the location service reaches a Dart-held commit',
+        () {
+      // Before: `publishLocation` reached a staged commit through the
+      // service's registration, and so did the two polls before them. All
+      // three go through the fanout driver now, which owns the commit in
+      // Rust, so they derive nothing here.
+      final derived = wrappers(_locationSharing);
       for (final name in [
-        'fetchMemberLocations',
         'publishLocation',
+        'fetchMemberLocations',
         'pollEvolutionEvents',
       ]) {
         expect(
           derived[name],
-          contains('commitCritical'),
-          reason:
-              '`$name` reaches a staged commit through _awaitCommitCritical, '
-              'so a `.timeout(` on a call to it in this file cuts the same '
-              'future. It is public, which is exactly the case the derivation '
-              'was widened for.',
+          isNull,
+          reason: '`$name` reaches a Dart-held commit again',
         );
       }
     });
 
-    test('a bound on the real registration call is flagged', () {
+    test('a bound on a call to a real driver method is flagged', () {
       final mutated = _injectIntoMethod(
-        _read(_locationSharing),
-        '_handleDeferredSend',
-        'await _awaitCommitCritical(p).timeout(const Duration(seconds: 5));',
+        _read(_relayService),
+        'disconnectRelay',
+        'await resume(circle: c, foreground: true).timeout(Duration.zero);',
       );
       final found = _violationsIn(mutated);
       expect(found, hasLength(1));
-      expect(found.single.what, contains('_awaitCommitCritical()'));
-    });
-
-    test('a bound on a real PUBLIC caller is flagged', () {
-      // The rule the widening bought, on production code:
-      // `fetchMemberLocations` is public, is declared in THIS unit, and is
-      // derived critical — so a bound on a call to it here is caught, while
-      // the same name called in another file is not (see the boundary
-      // self-tests). The argument list is irrelevant: nothing resolves it.
-      final mutated = _injectIntoMethod(
-        _read(_locationSharing),
-        '_handleDeferredSend',
-        'await fetchMemberLocations(c).timeout(const Duration(seconds: 5));',
-      );
-      final found = _violationsIn(mutated);
-      expect(found, hasLength(1));
-      expect(found.single.what, contains('fetchMemberLocations()'));
+      expect(found.single.what, contains('resume()'));
     });
 
     test('the unmutated service is clean (the mutation is what fires)', () {
-      expect(_violationsIn(_read(_locationSharing)), isEmpty);
+      expect(_violationsIn(_read(_relayService)), isEmpty);
     });
   });
 }

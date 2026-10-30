@@ -115,11 +115,13 @@ class OwnProfileSyncController extends Notifier<ProfileSyncStatus> {
   /// Consults the persisted pending/partial/backoff state and syncs ONLY
   /// when a save is pending AND the backoff permits another attempt now —
   /// never unconditionally (relay metadata minimization). This is the
-  /// resume/cold-start entry point (`utils/profile_sync_trigger.dart`'s
+  /// resume/cold-start entry point, and what a photo removal calls
+  /// afterwards (`utils/profile_sync_trigger.dart`'s
   /// `triggerProfileSyncRetry`).
   ///
   /// When pending but not yet due, resolves the resting `partial`/`failed`
-  /// state without touching the network.
+  /// state without touching the network. While a sync is in flight it does
+  /// nothing: it neither starts nor queues another.
   Future<void> retryIfPending() async {
     if (_disposed) return;
     final service = ref.read(profileServiceProvider);
@@ -136,7 +138,11 @@ class OwnProfileSyncController extends Notifier<ProfileSyncStatus> {
       if (!_disposed) state = ProfileSyncStatus.failed;
       return;
     }
-    if (_disposed) return;
+    // A sync in flight is already publishing what is pending and resolves
+    // the status itself. Calling sync() here would queue a follow-up that
+    // runs the moment it ends — a second publish at once, past the backoff
+    // it has just recorded.
+    if (_disposed || _inFlight) return;
     if (!pendingState.pending) {
       state = ProfileSyncStatus.synced;
       return;

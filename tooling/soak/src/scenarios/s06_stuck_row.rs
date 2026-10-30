@@ -1,14 +1,15 @@
-//! **S06** — a stored convergence input gates a circle until the sweep retires
-//! it.
+//! **S06** — a stored input the engine can never resolve neither wedges the
+//! circle nor outlives the window a relay would redeliver it in.
 //!
-//! The promise has two halves and both are graded here. A row the engine can
-//! never resolve — application bytes sealed at an epoch this device will never
-//! reach — must GATE the circle's outbound path rather than being silently
-//! dropped, and it must stop gating it once it is older than the window a relay
-//! would still redeliver it in. A sweep that retired it sooner would discard a
-//! message the group could still converge on; one that never retired it would
-//! wedge the circle for good, which is the field incident this scenario exists
-//! for.
+//! The field incident this scenario exists for: one unresolvable row —
+//! application bytes sealed at an epoch this device will never reach — used to
+//! gate the circle's outbound path until a sweep retired it. At MDK v0.10.4 an
+//! application row gates only while competing commit edges make it a branch
+//! witness (`ConvergenceInputContext::gates_outbound`), so the row no longer
+//! gates at all, and the circle keeps sending. The sweep's half is unchanged and
+//! still graded: the row survives a sweep below the horizon (retiring it sooner
+//! would discard a message the group could still converge on) and is retired by
+//! one past it.
 //!
 //! # The row is real, and so is the gate
 //!
@@ -33,12 +34,11 @@ use haven_core::nostr::mls::types::{MessageState, OpenMlsContentKind};
 
 use crate::clock::WallNow;
 use crate::oracle::bounds;
-use crate::oracle::undecryptable::{classify_send, Verdict as Classification};
 use crate::oracle::vacuity::{ExpectationFloor, Observed};
 use crate::oracle::{Invariant, Reach, Recovery};
 use crate::rig::{DeviceTag, LogDrain, RigError, Step, TimelineSink};
 use crate::scenarios::{
-    grade_round, relay_update, round, Absence, Arm, ArmOutcome, ScenarioWorld, WithheldAcks,
+    grade_round, hand_off_admin, round, Absence, Arm, ArmOutcome, ScenarioWorld, WithheldAcks,
 };
 
 /// The arm this scenario offers.
@@ -84,10 +84,9 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
     let row = stage_stuck_row(world, sender, stuck, circle_tag, &group).await?;
 
     let mut canaries = 0_usize;
-    let mut classified: Vec<Classification> = Vec::new();
 
-    // 1. The row is read back as gating BEFORE anything sweeps, and as the
-    //    disposition a crash really leaves.
+    // 1. The row really is stored, with the disposition a crash leaves — and it
+    //    does not gate the circle.
     let state = world
         .device(stuck)?
         .session()?
@@ -95,28 +94,18 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
         .await
         .map_err(|_| RigError::Core(Step::ReadGatingRows))?
         .map(|probe| probe.state);
-    if gating(world, stuck, &group).await? > 0 && state == Some(MessageState::Retryable) {
+    if gating(world, stuck, &group).await? == 0 && state == Some(MessageState::Retryable) {
         canaries += 1;
     }
 
-    // 2. The send path is closed, and says so as a classification rather than
-    //    as prose.
-    let refused = world
+    // 2. …so the send path stays open.
+    let sent = world
         .device(stuck)?
         .manager()?
-        .encrypt_location(
-            &group,
-            &world.device(stuck)?.keys.public_key(),
-            &LocationMessage::new(3.0, 4.0),
-            haven_core::location::LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(&group, &LocationMessage::new(3.0, 4.0))
         .await;
-    if let Err(error) = refused {
-        let verdict = classify_send(&error);
-        classified.push(verdict);
-        if verdict == Classification::SendDeferred {
-            canaries += 1;
-        }
+    if sent.is_ok() {
+        canaries += 1;
     }
 
     // 3. A sweep BELOW the horizon must decline the row. Without this the age
@@ -128,7 +117,7 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
         .sweep_unresolvable_inputs(now.secs())
         .await
         .map_err(|_| RigError::Core(Step::ReadGatingRows))?;
-    if early.disposed_messages == 0 && gating(world, stuck, &group).await? > 0 {
+    if early.disposed_messages == 0 && still_pending(world, stuck, &row).await? {
         canaries += 1;
     }
 
@@ -145,14 +134,13 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
         .sweep_unresolvable_inputs(aged.secs())
         .await
         .map_err(|_| RigError::Core(Step::ReadGatingRows))?;
-    if swept.disposed_messages > 0 && gating(world, stuck, &group).await? == 0 {
+    if swept.disposed_messages > 0 && !still_pending(world, stuck, &row).await? {
         canaries += 1;
     }
 
-    // The gate is open again, so the world may resume and be graded. The gated
-    // device SENDS first — that is the path this arm closed — and the reverse
-    // direction follows, because a branch can decrypt one way and not the
-    // other.
+    // The world may resume and be graded. The device that held the row SENDS
+    // first, and the reverse direction follows, because a branch can decrypt
+    // one way and not the other.
     world.device_mut(stuck)?.come_online().await?;
     let pairs = [(stuck, sender), (sender, stuck)];
     let opened = [stuck];
@@ -163,16 +151,12 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
         tick,
         NO_GATING_ROWS,
         &opened,
-        &classified,
+        &[],
     );
     let graded = grade_round(
         world,
         &recovery,
-        &[
-            Invariant::Quiescence,
-            Invariant::Undecryptable,
-            Invariant::LocationRoundTrip,
-        ],
+        &[Invariant::Quiescence, Invariant::LocationRoundTrip],
     )
     .await?;
 
@@ -198,17 +182,16 @@ async fn stage_stuck_row<T: TimelineSink, L: LogDrain>(
     circle_tag: crate::rig::CircleTag,
     group: &haven_core::nostr::mls::types::GroupId,
 ) -> Result<haven_core::nostr::mls::types::MessageId, RigError> {
-    let relays = world.relay_urls();
-
     // The gated device stops receiving first, so the commit below leaves it a
     // genuine epoch behind rather than one it would immediately catch up on.
     world.device_mut(stuck)?.go_offline().await?;
 
-    // One real commit, resolved under Rule 13. The relay list is the world's
-    // own, so the circle's routing is unchanged and the only effect is the
-    // epoch advance this arm needs.
+    // One real commit, resolved under Rule 13: an admin hand-over, so the
+    // circle's routing is unchanged and the only effect is the epoch advance
+    // this arm needs (a repeat of the relay list the circle holds stages
+    // nothing, and a new one moves the circle's REQ inside the resume).
     let circle = world.circle(circle_tag)?;
-    let (_, verdict) = relay_update(world, sender, circle, &relays).await?;
+    let (_, verdict) = hand_off_admin(world, sender, circle, stuck).await?;
     if verdict != crate::rig::PublishVerdict::Confirmed {
         // Nothing was merged, so there is no epoch above the gated device and
         // the whole arm would be vacuous.
@@ -227,12 +210,7 @@ async fn stage_stuck_row<T: TimelineSink, L: LogDrain>(
     world
         .device(sender)?
         .manager()?
-        .encrypt_location(
-            group,
-            &world.device(sender)?.keys.public_key(),
-            &LocationMessage::new(1.0, 2.0),
-            haven_core::location::LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(group, &LocationMessage::new(1.0, 2.0))
         .await
         .map_err(|_| RigError::Core(Step::Publish))?;
     let source = world
@@ -273,6 +251,21 @@ async fn gating<T: TimelineSink, L: LogDrain>(
         .gating_input_count(group)
         .await
         .map_err(|_| RigError::Core(Step::ReadGatingRows))
+}
+
+/// Whether `row` still awaits a disposition in `device`'s store.
+async fn still_pending<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    device: DeviceTag,
+    row: &haven_core::nostr::mls::types::MessageId,
+) -> Result<bool, RigError> {
+    Ok(world
+        .device(device)?
+        .session()?
+        .stored_message_record_for_test(row)
+        .await
+        .map_err(|_| RigError::Core(Step::ReadGatingRows))?
+        .is_some_and(|probe| probe.state == MessageState::Retryable))
 }
 
 #[cfg(test)]

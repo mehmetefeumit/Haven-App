@@ -47,3 +47,17 @@ void triggerProfileRefresh(
         .refreshAll(maxAge: maxAge, circles: circles),
   );
 }
+
+/// [triggerProfileRefresh] for a caller that has outlived its widget — an
+/// accept that finished after the card left the tree — and so holds the
+/// container rather than a `WidgetRef`.
+void triggerProfileRefreshIn(
+  ProviderContainer container, {
+  required Duration maxAge,
+}) {
+  unawaited(
+    container
+        .read(memberProfileRefreshProvider.notifier)
+        .refreshAll(maxAge: maxAge),
+  );
+}

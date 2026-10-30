@@ -21,14 +21,17 @@ import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/rust/api.dart'
-    show FfiSyncStatusReason, SkipReasonFfi;
+    show FfiSyncStatusReason, LocationPublishFfi, SkipReasonFfi;
 import 'package:haven/src/services/circle_health_service.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/map/sharing_health_banner.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../helpers/localized_app_harness.dart';
+import '../../helpers/sheet_health_overrides.dart';
 import '../../mocks/mock_circle_service.dart';
 
 final _t0 = DateTime.utc(2026, 8, 28, 12);
@@ -121,6 +124,7 @@ void main() {
       tester,
       const Scaffold(body: SharingHealthBanner()),
       overrides: [
+        ...deviceBannerOverrides(),
         sharingHealthProvider.overrideWith(() => notifier),
         sharingHealthClockProvider.overrideWithValue(() {
           copyDerivations++;
@@ -161,13 +165,14 @@ void main() {
       tester,
       const Scaffold(body: SharingHealthBanner()),
       overrides: [
+        ...deviceBannerOverrides(),
         sharingHealthClockProvider.overrideWithValue(clock),
         circleHealthServiceProvider.overrideWithValue(
           const _NoEvidenceHealthService(),
         ),
+        circleServiceProvider.overrideWithValue(MockCircleService()),
+        circlesProvider.overrideWith((ref) async => const <Circle>[]),
         selectedCircleProvider.overrideWithValue(
-          // A member list is required: an accepted circle with an empty roster
-          // is `isLegacyOrphaned`, which the model declines to judge at all.
           TestCircleFactory.createCircle(
             members: [
               TestCircleFactory.createMember(pubkey: _identity.pubkeyHex),
@@ -214,6 +219,262 @@ void main() {
     return announcements;
   }
 
+  group('a disbanded circle', () {
+    testWidgets('names the cause and what is left to do, speaks both at '
+        'once, claims no age, and offers no repair', (tester) async {
+      final handle = tester.ensureSemantics();
+      notifier = _StubHealthNotifier(
+        SharingHealth.paused(
+          SharingPausedReason.circleDisbanded,
+          _t0,
+          ageProvable: false,
+        ),
+      );
+      repairCalls = 0;
+      await pumpLocalized(
+        tester,
+        const Scaffold(body: SharingHealthBanner()),
+        overrides: [
+          ...deviceBannerOverrides(),
+          sharingHealthProvider.overrideWith(() => notifier),
+          sharingHealthClockProvider.overrideWithValue(
+            () => _t0.add(const Duration(hours: 3)),
+          ),
+          sharingRepairProvider.overrideWithValue(() async {
+            repairCalls++;
+            return null;
+          }),
+        ],
+      );
+
+      expect(find.text(l10n.sharingHealthTitleDisbanded), findsOneWidget);
+      expect(find.text(l10n.sharingHealthBodyDisbanded), findsOneWidget);
+      expect(
+        find.text(formatSharingHealthAge(l10n, const Duration(hours: 3))),
+        findsNothing,
+      );
+      final status = find.bySemanticsLabel(
+        '${l10n.sharingHealthTitleDisbanded}\n'
+        '${l10n.sharingHealthBodyDisbanded}',
+      );
+      expect(tester.getSemantics(status).flagsCollection.isLiveRegion, isTrue);
+      expect(
+        find.byKey(WidgetKeys.sharingHealthRepairButton),
+        findsNothing,
+        reason: 'nothing can repair or reload a circle an admin ended; '
+            'leaving it is done from its details',
+      );
+      expect(repairCalls, 0);
+      handle.dispose();
+    });
+  });
+
+  group('a quarantined circle', () {
+    testWidgets('names the cause, claims no age, and its one remedy reloads '
+        'the circle instead of running the repair', (tester) async {
+      var retries = 0;
+      notifier = _StubHealthNotifier(
+        SharingHealth.paused(SharingPausedReason.circleQuarantined, _t0),
+      );
+      repairCalls = 0;
+      await pumpLocalized(
+        tester,
+        const Scaffold(body: SharingHealthBanner()),
+        overrides: [
+          ...deviceBannerOverrides(),
+          sharingHealthProvider.overrideWith(() => notifier),
+          sharingHealthClockProvider.overrideWithValue(
+            () => _t0.add(const Duration(hours: 3)),
+          ),
+          sharingRepairProvider.overrideWithValue(() async {
+            repairCalls++;
+            return null;
+          }),
+          sharingQuarantineRetryProvider.overrideWithValue(() async {
+            retries++;
+            notifier.moveTo(SharingHealth.healthy);
+          }),
+        ],
+      );
+
+      expect(find.text(l10n.sharingHealthTitleQuarantined), findsOneWidget);
+      expect(find.text(l10n.sharingHealthBodyQuarantined), findsOneWidget);
+      expect(
+        find.text(formatSharingHealthAge(l10n, const Duration(hours: 3))),
+        findsNothing,
+        reason: 'the cause is on this phone, not in how old an update is',
+      );
+
+      await tester.tap(find.text(l10n.commonTryAgain));
+      await tester.pumpAndSettle();
+
+      expect(retries, 1);
+      expect(repairCalls, 0, reason: 'no repair leg can load a circle');
+      expect(find.byKey(WidgetKeys.sharingHealthBanner), findsNothing);
+    });
+
+    Future<void> pumpQuarantined(
+      WidgetTester tester, {
+      required Future<void> Function() retry,
+      TextScaler? textScaler,
+      Locale locale = kDefaultTestLocale,
+    }) async {
+      notifier = _StubHealthNotifier(
+        SharingHealth.paused(SharingPausedReason.circleQuarantined, _t0),
+      );
+      await pumpLocalized(
+        tester,
+        // Hosted as Circle details hosts it: in a scroll view, the banner
+        // having none of its own.
+        const Scaffold(
+          body: SingleChildScrollView(child: SharingHealthBanner()),
+        ),
+        textScaler: textScaler,
+        locale: locale,
+        overrides: [
+          ...deviceBannerOverrides(),
+          sharingHealthProvider.overrideWith(() => notifier),
+          sharingHealthClockProvider.overrideWithValue(() => _t0),
+          sharingRepairProvider.overrideWithValue(() async => null),
+          sharingQuarantineRetryProvider.overrideWithValue(retry),
+        ],
+      );
+    }
+
+    testWidgets('speaks the reassurance with the cause, and its button says '
+        'what it does', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpQuarantined(tester, retry: () async {});
+
+      final status = find.bySemanticsLabel(
+        '${l10n.sharingHealthTitleQuarantined}\n'
+        '${l10n.sharingHealthBodyQuarantined}',
+      );
+      expect(
+        status,
+        findsOneWidget,
+        reason: 'the live region speaks that the circle is still here',
+      );
+      expect(
+        tester.getSemantics(status),
+        containsSemantics(isLiveRegion: true),
+        reason: 'spoken the moment it appears, without stealing focus',
+      );
+      expect(
+        find.bySemanticsLabel(l10n.sharingHealthBodyQuarantined),
+        findsNothing,
+        reason: 'and never a second time on its own',
+      );
+      expect(
+        tester.getSemantics(find.byKey(WidgetKeys.sharingHealthRepairButton)),
+        containsSemantics(
+          isButton: true,
+          label: l10n.commonTryAgain,
+          hint: l10n.sharingHealthQuarantineRetryHint,
+        ),
+      );
+      handle.dispose();
+    });
+
+    testWidgets('a retry that still cannot load it says so', (tester) async {
+      final announcements = captureAnnouncements(tester);
+      await pumpQuarantined(tester, retry: () async {});
+
+      await tester.tap(find.byKey(WidgetKeys.sharingHealthRepairButton));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(WidgetKeys.sharingHealthBanner), findsOneWidget);
+      expect(announcements, [
+        l10n.sharingHealthQuarantineRetryFailedAnnouncement,
+      ]);
+    });
+
+    testWidgets('a retry that ends in a different fault does not claim the '
+        'circle still cannot load', (tester) async {
+      final announcements = captureAnnouncements(tester);
+      await pumpQuarantined(
+        tester,
+        retry: () async => notifier.moveTo(
+          SharingHealth.paused(SharingPausedReason.relayDisconnected, _t0),
+        ),
+      );
+
+      await tester.tap(find.byKey(WidgetKeys.sharingHealthRepairButton));
+      await tester.pumpAndSettle();
+
+      expect(
+        announcements,
+        isNot(contains(l10n.sharingHealthQuarantineRetryFailedAnnouncement)),
+        reason: 'the circle loaded; the new fault speaks for itself',
+      );
+    });
+
+    testWidgets('a retry that loads it says sharing resumed', (tester) async {
+      final announcements = captureAnnouncements(tester);
+      await pumpQuarantined(
+        tester,
+        retry: () async => notifier.moveTo(SharingHealth.healthy),
+      );
+
+      await tester.tap(find.byKey(WidgetKeys.sharingHealthRepairButton));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(WidgetKeys.sharingHealthBanner), findsNothing);
+      expect(announcements, [l10n.sharingHealthResumedAnnouncement]);
+    });
+
+    for (final (label, scaler, locale, direction) in [
+      (
+        'at 200% text',
+        const TextScaler.linear(2),
+        kDefaultTestLocale,
+        TextDirection.ltr,
+      ),
+      ('in a right-to-left locale', null, const Locale('ar'), TextDirection.rtl),
+    ]) {
+      testWidgets('$label on a small phone it lays out, reads in its own '
+          'direction and its button stays reachable', (tester) async {
+        tester.view
+          ..devicePixelRatio = 1
+          ..physicalSize = const Size(320, 568);
+        addTearDown(tester.view.reset);
+        var retries = 0;
+        await pumpQuarantined(
+          tester,
+          retry: () async => retries++,
+          textScaler: scaler,
+          locale: locale,
+        );
+
+        expect(tester.takeException(), isNull);
+        final localized = l10nOf(tester, SharingHealthBanner);
+        final icon = tester.getCenter(find.byIcon(LucideIcons.radioTower));
+        final title = tester.getCenter(
+          find.text(localized.sharingHealthTitleQuarantined),
+        );
+        final banner = tester.getCenter(
+          find.byKey(WidgetKeys.sharingHealthBanner),
+        );
+        await tester.ensureVisible(
+          find.byKey(WidgetKeys.sharingHealthRepairButton),
+        );
+        final button = tester.getCenter(
+          find.byKey(WidgetKeys.sharingHealthRepairButton),
+        );
+        if (direction == TextDirection.ltr) {
+          expect(icon.dx, lessThan(title.dx), reason: 'icon leads the title');
+          expect(button.dx, greaterThan(banner.dx), reason: 'button at end');
+        } else {
+          expect(icon.dx, greaterThan(title.dx), reason: 'icon leads, mirrored');
+          expect(button.dx, lessThan(banner.dx), reason: 'button at end, mirrored');
+        }
+        await tester.tap(find.byKey(WidgetKeys.sharingHealthRepairButton));
+        await tester.pumpAndSettle();
+        expect(retries, 1);
+      });
+    }
+  });
+
   group('what it renders', () {
     testWidgets('nothing at all while the pipeline is healthy', (tester) async {
       // Anti-vacuity for every "is shown" assertion below.
@@ -248,6 +509,31 @@ void main() {
       expect(find.text(l10n.sharingHealthTitleStopped), findsNothing);
     });
 
+    testWidgets('under a skewed clock the cause still shows, and Repair does '
+        'not', (tester) async {
+      // Repair would republish into the same failure; the clock banner names
+      // the setting that fixes it. A cause the core reads is never hidden.
+      final detector = ClockSkewDetector();
+      addTearDown(detector.dispose);
+      detector.recordLocationPublish(LocationPublishFfi.clockAhead);
+      notifier = _StubHealthNotifier(
+        SharingHealth.paused(SharingPausedReason.awaitingRelays, _t0),
+      );
+      await pumpLocalized(
+        tester,
+        const Scaffold(body: SharingHealthBanner()),
+        overrides: [
+          ...deviceBannerOverrides(),
+          clockSkewDetectorProvider.overrideWithValue(detector),
+          sharingHealthProvider.overrideWith(() => notifier),
+          sharingHealthClockProvider.overrideWithValue(() => _t0),
+          sharingRepairProvider.overrideWithValue(() async => null),
+        ],
+      );
+      expect(find.text(l10n.sharingHealthBodyAwaitingRelays), findsOneWidget);
+      expect(find.byKey(WidgetKeys.sharingHealthRepairButton), findsNothing);
+    });
+
     testWidgets('a dropped relay connection is the only both-directions '
         'headline', (tester) async {
       await pumpBanner(
@@ -261,16 +547,29 @@ void main() {
       expect(find.text(l10n.sharingHealthTitleStopped), findsOneWidget);
     });
 
-    testWidgets('a deferred send (Unit B) reads as a send fault', (
+    testWidgets('a send the core withholds reads as a send fault, and says '
+        'why', (tester) async {
+      await pumpBanner(
+        tester,
+        health: SharingHealth.paused(SharingPausedReason.storedInput, _t0),
+      );
+
+      expect(find.text(l10n.sharingHealthTitleNotSending), findsOneWidget);
+      expect(find.text(l10n.sharingHealthBodyStoredInput), findsOneWidget);
+      expect(find.text(l10n.sharingHealthTitleStopped), findsNothing);
+    });
+
+    testWidgets('a change awaiting its relays holds both ways, and says so', (
       tester,
     ) async {
       await pumpBanner(
         tester,
-        health: SharingHealth.paused(SharingPausedReason.sendDeferred, _t0),
+        health: SharingHealth.paused(SharingPausedReason.awaitingRelays, _t0),
       );
 
-      expect(find.text(l10n.sharingHealthTitleNotSending), findsOneWidget);
-      expect(find.text(l10n.sharingHealthTitleStopped), findsNothing);
+      expect(find.text(l10n.sharingHealthTitleStopped), findsOneWidget);
+      expect(find.text(l10n.sharingHealthBodyAwaitingRelays), findsOneWidget);
+      expect(find.text(l10n.sharingHealthTitleNotSending), findsNothing);
     });
 
     testWidgets('a lost subscription (Unit C) reads as a receive fault', (
@@ -572,7 +871,7 @@ void main() {
       await pumpBanner(
         tester,
         health: SharingHealth.receiveSilent(_t0),
-        repairResult: const EpochRepairSkipped(SkipReasonFfi.notSoleAdmin),
+        repairResult: const EpochRepairSkipped(SkipReasonFfi.recentEpochChange),
       );
       final handle = tester.ensureSemantics();
       await tester.tap(find.byKey(WidgetKeys.sharingHealthRepairButton));
@@ -585,7 +884,7 @@ void main() {
       );
       expect(
         find.bySemanticsLabel(
-          RegExp(RegExp.escape(l10n.sharingHealthRepairNotOwner)),
+          RegExp(RegExp.escape(l10n.sharingHealthRepairNothingToDo)),
         ),
         findsOneWidget,
         reason: 'and a swipe back over the banner must still reach it',
@@ -708,7 +1007,7 @@ void main() {
       await pumpBanner(
         tester,
         health: SharingHealth.receiveSilent(_t0),
-        repairResult: const EpochRepairSkipped(SkipReasonFfi.notSoleAdmin),
+        repairResult: const EpochRepairSkipped(SkipReasonFfi.recentEpochChange),
       );
       await tester.tap(find.byKey(WidgetKeys.sharingHealthRepairButton));
       await tester.pumpAndSettle();
@@ -716,11 +1015,62 @@ void main() {
       final node = tester.getSemantics(
         find.bySemanticsLabel(
           '${l10n.sharingHealthTitleNotReceiving}\n'
-          '${l10n.sharingHealthRepairNotOwner}',
+          '${l10n.sharingHealthRepairNothingToDo}',
         ),
       );
       expect(node.flagsCollection.isLiveRegion, isTrue);
       handle.dispose();
+    });
+
+    testWidgets('a hold no delivery dates shows and speaks no age', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      final announcements = captureAnnouncements(tester);
+      final foreground = foregroundSignal();
+      await pumpBanner(
+        tester,
+        health: SharingHealth.paused(
+          SharingPausedReason.storedInput,
+          _t0,
+          ageProvable: false,
+        ),
+        now: _t0.add(const Duration(days: 3)),
+        foreground: foreground,
+      );
+
+      expect(find.text(l10n.sharingHealthTitleNotSending), findsOneWidget);
+      expect(find.text(l10n.sharingHealthNoUpdatesDays(3)), findsNothing);
+      final status = tester.getSemantics(
+        find.bySemanticsLabel(
+          '${l10n.sharingHealthTitleNotSending}\n'
+          '${l10n.sharingHealthBodyStoredInput}',
+        ),
+      );
+      expect(status.flagsCollection.isLiveRegion, isTrue);
+
+      foreground.value = false;
+      await tester.pump();
+      foreground.value = true;
+      await tester.pump();
+      expect(announcements, [
+        [
+          l10n.sharingHealthTitleNotSending,
+          l10n.sharingHealthBodyStoredInput,
+        ].join('\n'),
+      ]);
+      handle.dispose();
+    });
+
+    testWidgets('a failing send no ack dates shows no age', (tester) async {
+      await pumpBanner(
+        tester,
+        health: SharingHealth.publishFailing(_t0, ageProvable: false),
+        now: _t0.add(const Duration(days: 3)),
+      );
+
+      expect(find.text(l10n.sharingHealthTitleNotSending), findsOneWidget);
+      expect(find.text(l10n.sharingHealthNoUpdatesDays(3)), findsNothing);
     });
 
     testWidgets('a resume with a persisting fault announces exactly once', (
@@ -816,7 +1166,7 @@ void main() {
       final node = tester.getSemantics(
         find.byKey(WidgetKeys.sharingHealthRepairButton),
       );
-      expect(node.hint, contains(l10n.sharingHealthRepairHint));
+      expect(node.hint, contains(l10n.sharingHealthRepairHintAnyMember));
     });
 
     testWidgets('the recovery is announced, because a live region never '
@@ -883,11 +1233,15 @@ void main() {
   });
 
   group('layout', () {
-    testWidgets('the remedy stays on screen at a 200% text scale', (
+    // Hosted as Circle details hosts it: in a scroll view, with no scroll of
+    // its own (a `Flexible` inside the sheet's unbounded height would throw).
+    Widget scrolled() => const Scaffold(
+      body: SingleChildScrollView(child: SharingHealthBanner()),
+    );
+
+    testWidgets('the remedy is reachable at a 200% text scale', (
       tester,
     ) async {
-      // A banner whose only action is below the fold, in a surface with no
-      // scroll view of its own, is a banner that cannot be acted on.
       tester.view.physicalSize = const Size(320, 640);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
@@ -897,21 +1251,10 @@ void main() {
       repairCalls = 0;
       await pumpLocalized(
         tester,
-        const Scaffold(
-          body: Stack(
-            children: [
-              PositionedDirectional(
-                top: 0,
-                bottom: 0,
-                start: 0,
-                end: 0,
-                child: SharingHealthBanner(),
-              ),
-            ],
-          ),
-        ),
+        scrolled(),
         textScaler: const TextScaler.linear(2),
         overrides: [
+          ...deviceBannerOverrides(),
           sharingHealthProvider.overrideWith(() => notifier),
           sharingHealthClockProvider.overrideWithValue(
             () => _t0.add(const Duration(minutes: 7)),
@@ -924,20 +1267,19 @@ void main() {
       );
 
       expect(tester.takeException(), isNull);
-      final button = tester.getRect(
-        find.byKey(WidgetKeys.sharingHealthRepairButton),
-      );
-      expect(button.bottom, lessThanOrEqualTo(640));
+      final button = find.byKey(WidgetKeys.sharingHealthRepairButton);
+      await tester.ensureVisible(button);
+      await tester.pumpAndSettle();
+      expect(tester.getRect(button).bottom, lessThanOrEqualTo(640));
 
-      await tester.tap(find.byKey(WidgetKeys.sharingHealthRepairButton));
+      await tester.tap(button);
       await tester.pumpAndSettle();
       expect(repairCalls, 1);
     });
 
-    testWidgets('the remedy line fits too, at the same scale', (tester) async {
-      // The tallest state the banner can reach: the fault copy, the age line,
-      // the action, AND the epoch leg's extra sentence — which only appears
-      // after a tap, so the layout above never exercised it.
+    testWidgets('the remedy line is reachable too, at the same scale', (
+      tester,
+    ) async {
       tester.view.physicalSize = const Size(320, 640);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
@@ -946,39 +1288,31 @@ void main() {
       notifier = _StubHealthNotifier(SharingHealth.receiveSilent(_t0));
       await pumpLocalized(
         tester,
-        const Scaffold(
-          body: Stack(
-            children: [
-              PositionedDirectional(
-                top: 0,
-                bottom: 0,
-                start: 0,
-                end: 0,
-                child: SharingHealthBanner(),
-              ),
-            ],
-          ),
-        ),
+        scrolled(),
         textScaler: const TextScaler.linear(2),
         overrides: [
+          ...deviceBannerOverrides(),
           sharingHealthProvider.overrideWith(() => notifier),
           sharingHealthClockProvider.overrideWithValue(
             () => _t0.add(const Duration(minutes: 7)),
           ),
           sharingRepairProvider.overrideWithValue(
-            () async => const EpochRepairSkipped(SkipReasonFfi.notSoleAdmin),
+            () async => const EpochRepairSkipped(SkipReasonFfi.rotatedRecently),
           ),
         ],
       );
-      await tester.tap(find.byKey(WidgetKeys.sharingHealthRepairButton));
+      final button = find.byKey(WidgetKeys.sharingHealthRepairButton);
+      await tester.ensureVisible(button);
+      await tester.pumpAndSettle();
+      await tester.tap(button);
       await tester.pumpAndSettle();
 
       expect(tester.takeException(), isNull);
-      final remedy = tester.getRect(
-        find.byKey(const Key('sharing_health_epoch_repair_message')),
-      );
+      final line = find.byKey(const Key('sharing_health_epoch_repair_message'));
+      await tester.ensureVisible(line);
+      await tester.pumpAndSettle();
       expect(
-        remedy.bottom,
+        tester.getRect(line).bottom,
         lessThanOrEqualTo(640),
         reason: 'advice the user cannot read is not advice',
       );

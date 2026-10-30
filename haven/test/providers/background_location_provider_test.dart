@@ -7,6 +7,9 @@
 ///   4. BackgroundSharingNotifier Android-seam permission cases (T9–T11)
 library;
 
+import 'dart:async';
+
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -301,6 +304,55 @@ void main() {
     // -----------------------------------------------------------------------
     // Disable case — does NOT gate on Platform.isAndroid → runs everywhere.
     // -----------------------------------------------------------------------
+
+    test('loaded completes once the persisted consent is the state', () async {
+      // The pause a shell mounted under `paused` takes waits for it: read
+      // before, the consent is the constructor's `false`.
+      SharedPreferences.setMockInitialValues({
+        kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true,
+      });
+      final notifier = BackgroundSharingNotifier(
+        ensurePermissions: stubThatThrows(),
+      );
+      expect(notifier.state, isFalse, reason: 'premise: still loading');
+
+      await notifier.loaded;
+
+      expect(notifier.state, isTrue);
+    });
+
+    test('an iOS session arm that never answers does not hold loaded past '
+        'its bound, and the consent still reads off', () {
+      // The pause a shell mounted under `paused` takes waits on `loaded`: a
+      // platform call that never answered used to keep that pause from ever
+      // running. Failing toward the pause: the state stays `false`, the
+      // branch that stops everything.
+      fakeAsync((async) {
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
+        final arm = Completer<void>();
+        final notifier = BackgroundSharingNotifier(
+          ensurePermissions: stubThatThrows(),
+          iosBackgroundSession: _HangingSession(arm.future),
+          isIOS: true,
+        );
+        var loaded = false;
+        unawaited(notifier.loaded.then((_) => loaded = true));
+
+        async.elapse(kConsentArmBound - const Duration(milliseconds: 1));
+        expect(loaded, isFalse, reason: 'the bound is not the wait itself');
+        async.elapse(const Duration(milliseconds: 1));
+        expect(loaded, isTrue);
+        expect(notifier.state, isFalse);
+
+        arm.complete();
+        async.flushMicrotasks();
+        expect(notifier.state, isTrue, reason: 'the answer still lands');
+      });
+    });
 
     test(
       'disable → state false, prefs false, no permission check called',
@@ -1543,4 +1595,14 @@ void main() {
       },
     );
   });
+}
+
+/// An iOS background session whose arm answers only when [answer] does.
+class _HangingSession extends _FakeIosBackgroundSessionService {
+  _HangingSession(this.answer);
+
+  final Future<void> answer;
+
+  @override
+  Future<void> arm() => answer;
 }

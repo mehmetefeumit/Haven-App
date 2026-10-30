@@ -131,6 +131,8 @@
 #      Info.plist, a missing input file, a failed self-test)
 
 set -Eeuo pipefail
+LITERAL_FREE="$(cat "$(dirname "${BASH_SOURCE[0]}")/lib/literal_free.awk")"
+readonly LITERAL_FREE
 
 SCRIPT_NAME="check_ios_privacy_blur"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -191,10 +193,10 @@ code_view() {
 # handled: the slice only ends once a brace has actually been opened.
 # ---------------------------------------------------------------------------
 method_range() {
-  awk -v sig="$1" '
+  awk -v sig="$1" "${LITERAL_FREE}"'
     !started && index($0, sig) > 0 { started = 1; start = NR }
     started {
-      o = gsub(/[{]/, "&"); c = gsub(/[}]/, "&")
+      lfree = literal_free($0); o = gsub(/[{]/, "&", lfree); c = gsub(/[}]/, "&", lfree)
       depth += o - c
       if (o > 0) seen = 1
       if (seen && depth <= 0) { print start " " NR; found = 1; exit }
@@ -213,10 +215,10 @@ method_range() {
 # dropped, so what remains is exactly the statement list.
 # ---------------------------------------------------------------------------
 top_level() {
-  awk '
+  awk "${LITERAL_FREE}"'
     {
       d = depth
-      o = gsub(/[{]/, "&"); c = gsub(/[}]/, "&")
+      lfree = literal_free($0); o = gsub(/[{]/, "&", lfree); c = gsub(/[}]/, "&", lfree)
       depth += o - c
       if (d == 1) {
         t = $0; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
@@ -438,11 +440,11 @@ protection."
   # single recognised guard's `else` clause, which is on the guard line itself
   # and at statement depth — a `guard` nested inside an `if` is not it.
   local stray_return
-  stray_return="$(awk '
+  stray_return="$(awk "${LITERAL_FREE}"'
     function word(s, w) { return s ~ "(^|[^A-Za-z0-9_])" w "([^A-Za-z0-9_]|$)" }
     {
       d = depth
-      o = gsub(/[{]/, "&"); c = gsub(/[}]/, "&")
+      lfree = literal_free($0); o = gsub(/[{]/, "&", lfree); c = gsub(/[}]/, "&", lfree)
       depth += o - c
       if (word($0, "return") && !(d == 1 && word($0, "guard"))) print
     }' <<<"${add_body}")"

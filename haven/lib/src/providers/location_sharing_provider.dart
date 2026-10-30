@@ -12,13 +12,13 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
+import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
-import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/utils/log_alias.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -66,7 +66,7 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
   final profileService = ref.read(profileServiceProvider);
 
   if (liveSyncEnabled) {
-    final cached = await service.cachedLocations(circle);
+    final cached = _onRoster(await service.cachedLocations(circle), circle);
     final filtered = identity == null
         ? cached
         : cached.where((loc) => loc.pubkey != identity.pubkeyHex).toList();
@@ -89,7 +89,7 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
 
     // Exclude the current user's own location — it is already shown
     // from on-device GPS via UserLocationMarker.
-    final locations = result.locations;
+    final locations = _onRoster(result.locations, circle);
     final otherMembers = identity == null
         ? locations
         : locations.where((loc) => loc.pubkey != identity.pubkeyHex).toList();
@@ -107,6 +107,22 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
     return [];
   }
 });
+
+/// [locations] of members on [circle]'s roster only.
+///
+/// A removal the fanout driver applies after it answered "awaiting relays" is
+/// learnt from the roster alone — nothing forgets the member's cached or
+/// persisted location then — so the read holds what is shown to the roster.
+/// A roster that was not read (empty: it always lists this device) filters
+/// nothing.
+List<MemberLocation> _onRoster(List<MemberLocation> locations, Circle circle) {
+  if (circle.members.isEmpty) return locations;
+  final roster = {for (final m in circle.members) m.pubkey.toLowerCase()};
+  return [
+    for (final l in locations)
+      if (roster.contains(l.pubkey.toLowerCase())) l,
+  ];
+}
 
 /// Attaches each member's effective display name (plan D6 / Flutter review
 /// F4) to [MemberLocation.displayName], resolved **cache-only** — a plain
@@ -241,18 +257,10 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
     debugPrint('[LocationPublish] GPS fix acquired');
 
     final circles = await circleService.getVisibleCircles();
-    // Rule 8 (no send/mutate for a blocked circle) + the Dark Matter cutover:
-    // exclude circles the MLS engine has flagged Unrecoverable
-    // (`isCircleBlocked`) and orphaned pre-cutover rows (`isLegacyOrphaned`,
-    // no live MLS group to encrypt against) from the publish set. Both would
-    // otherwise fail the encrypt/publish call anyway; skipping them here
-    // avoids a noisy per-tick failure for a circle the user cannot fix by
-    // retrying.
-    final accepted = circles
-        .where((c) => c.membershipStatus == MembershipStatus.accepted)
-        .where((c) => !c.isLegacyOrphaned)
-        .where((c) => !circleService.isCircleBlocked(c.mlsGroupId))
-        .toList();
+    // Rule 8: only a circle live on this device's engine is published to.
+    // Every other would be refused at the seal anyway; skipping it here
+    // avoids a noisy per-tick deferral a retry of the publish cannot fix.
+    final accepted = filterPublishEligibleCircles(circles);
 
     debugPrint(
       '[LocationPublish] ${magnitudeBucket(circles.length)} visible '
@@ -268,7 +276,7 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
     // CSPRNG gap of more than one second before each publish after the first.
     //
     // NEVER restore `Future.wait` here. Parallel dispatch puts every circle's
-    // `encryptLocation` in the same wall-clock second, and the engine stamps
+    // seal in the same wall-clock second, and the engine stamps
     // the outer kind-445 `created_at` from the inner event's whole-second
     // clock — so parallel dispatch is exactly the shared-`created_at` leak,
     // not merely a co-timing hint. The gap must exceed one second for the same
@@ -299,51 +307,30 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
         final outcome = await service.publishLocation(
           mlsGroupId: circle.mlsGroupId,
           nostrGroupId: circle.nostrGroupId,
-          senderPubkeyHex: identity.pubkeyHex,
           latitude: position.latitude,
           longitude: position.longitude,
         );
-        // A deferral is not a publish verdict: the MLS engine never encrypted,
-        // so no relay accepted or rejected anything. It gets its own health
-        // input and skips `recordPublishOutcome` entirely.
-        //
-        // Switched, not cast: a third variant added later must be a COMPILE
-        // error here, not a runtime one on the publish path.
-        final PublishResult result;
+        // Switched, not cast: a variant added later must be a COMPILE error
+        // here, not a runtime one on the publish path.
+        final bool acked;
         switch (outcome) {
           case LocationPublishDeferred():
-            debugPrint(
-              '[LocationPublish] send deferred by the MLS engine — '
-              'gating=${magnitudeBucket(outcome.unresolvedInputs)}, '
-              'repaired=${outcome.repaired}',
-            );
+            // Not a publish verdict: the core held the circle's sends, so no
+            // relay accepted or rejected anything.
+            debugPrint('[LocationPublish] send held by the core');
             _recordDeferredSend(ref, circle);
-            // NOT counted as published. `published` is what this burst reports
-            // as delivered, and a deferral delivered nothing — inflating it
-            // would make a wholly stalled burst read as a complete one in the
-            // only number the caller gets back.
+            // NOT counted as published: `published` is what this burst
+            // reports as delivered, and a held send delivered nothing.
             continue;
-          case LocationPublishSent(result: final r):
-            result = r;
+          case LocationPublishInFlight():
+            continue;
+          case LocationPublishSent(acked: final a):
+            acked = a;
         }
-        // A `PublishResult` no relay accepted delivered nothing. That verdict
-        // used to end in the debugPrint below and nowhere else, which is why a
-        // send plane could die without the user ever being told.
-        _recordPublishOutcome(
-          ref,
-          circle,
-          acked: result.acceptedBy.isNotEmpty,
-        );
-        debugPrint(
-          '[LocationPublish] Published — '
-          'accepted=${magnitudeBucket(result.acceptedBy.length)}, '
-          'rejected=${magnitudeBucket(result.rejectedBy.length)}, '
-          'failed=${magnitudeBucket(result.failed.length)}',
-        );
-        // A relay's rejection reason is remote-authored NIP-01 `OK false
-        // <reason>` prose (Security Rule 8/15) — never logged, by URL or by
-        // reason. The bucketed `rejected=`/`failed=` counts above are already
-        // the whole signal a caller can act on.
+        // A send no relay took delivered nothing: told to the health model,
+        // so a send plane cannot die without the user being told.
+        _recordPublishOutcome(ref, circle, acked: acked);
+        debugPrint('[LocationPublish] Published');
         published++;
       } on Object catch (_) {
         debugPrint('[LocationPublish] Publish failed for circle');
@@ -365,7 +352,7 @@ void _recordDeferredSend(Ref ref, Circle circle) {
   try {
     ref
         .read(sharingHealthProvider.notifier)
-        .recordDeferredSend(sharingCircleKey(circle.nostrGroupId));
+        .recordDeferredSend(sharingCircleKey(circle));
   } on Object catch (e) {
     debugPrint('[LocationPublish] deferred record failed: ${e.runtimeType}');
   }
@@ -380,7 +367,7 @@ void _recordPublishOutcome(Ref ref, Circle circle, {required bool acked}) {
     ref
         .read(sharingHealthProvider.notifier)
         .recordPublishOutcome(
-          sharingCircleKey(circle.nostrGroupId),
+          sharingCircleKey(circle),
           acked: acked,
         );
   } on Object catch (e) {

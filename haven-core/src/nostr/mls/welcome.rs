@@ -12,9 +12,9 @@
 //!
 //! - **Accept** → hand the held 1059 to `SessionManager::accept_welcome`, which
 //!   ingests it (the engine peels + joins, emitting `GroupJoined`).
-//! - **Decline** → [`PendingWelcomeStore::remove`] drops the held 1059 locally.
-//!   It is never ingested, so no join commit, no self-remove, nothing on the
-//!   wire.
+//! - **Decline** → [`PendingWelcomeStore::remove_recording`] drops the held 1059
+//!   locally. It is never ingested, so no join commit, no self-remove, nothing
+//!   on the wire.
 //!
 //! # Secret-at-rest posture (F3 / Rule 7)
 //!
@@ -128,11 +128,34 @@ impl PendingWelcomeStore {
         Self::default()
     }
 
-    /// Inserts (or replaces) a held welcome, keyed by its gift-wrap id.
+    /// Holds `welcome` once `mark` has recorded how many are then held, keyed
+    /// by its gift-wrap id; a failed `mark` holds nothing.
+    ///
+    /// `mark` runs under this store's lock, as the `unmark` of
+    /// [`Self::remove_recording`] and [`Self::unmark_if_empty`] does: a record
+    /// kept beside the store ("an invitation is held") can therefore never be
+    /// cleared by one caller between another's mark and its insert.
     ///
     /// Idempotent per gift-wrap id: re-receiving the same 1059 from a second
     /// relay overwrites the identical entry rather than duplicating it.
-    pub fn insert(&self, welcome: PendingWelcome) {
+    ///
+    /// # Errors
+    ///
+    /// Returns `mark`'s error.
+    pub fn insert_marked<E>(
+        &self,
+        welcome: PendingWelcome,
+        mark: impl FnOnce(usize) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
+        let mut guard = self.lock();
+        mark(guard.len() + usize::from(!guard.contains_key(&welcome.id())))?;
+        guard.insert(welcome.id(), welcome);
+        drop(guard);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn insert(&self, welcome: PendingWelcome) {
         let mut guard = self.lock();
         guard.insert(welcome.id(), welcome);
     }
@@ -143,12 +166,36 @@ impl PendingWelcomeStore {
         self.lock().get(id).cloned()
     }
 
-    /// Removes and returns the held welcome for `id`.
+    /// Removes and returns the held welcome for `id`, and has `record` told
+    /// how many are still held — under the lock [`Self::insert_marked`] marks
+    /// under.
     ///
     /// This is the **decline** path (drop, never ingest) and also the
     /// post-accept cleanup (remove after a successful join). Either way the
     /// still-encrypted 1059 is dropped locally with no on-wire trace.
-    pub fn remove(&self, id: &EventId) -> Option<PendingWelcome> {
+    pub fn remove_recording(
+        &self,
+        id: &EventId,
+        record: impl FnOnce(usize),
+    ) -> Option<PendingWelcome> {
+        let mut guard = self.lock();
+        let removed = guard.remove(id);
+        record(guard.len());
+        drop(guard);
+        removed
+    }
+
+    /// Runs `unmark` if nothing is held, under the same lock.
+    pub fn unmark_if_empty(&self, unmark: impl FnOnce()) {
+        let guard = self.lock();
+        if guard.is_empty() {
+            unmark();
+        }
+        drop(guard);
+    }
+
+    #[cfg(test)]
+    fn remove(&self, id: &EventId) -> Option<PendingWelcome> {
         self.lock().remove(id)
     }
 
@@ -253,6 +300,78 @@ mod tests {
 
         // A second decline of the same id is a no-op.
         assert!(store.remove(&id).is_none());
+    }
+
+    /// The record kept beside the store is written and cleared with the store
+    /// locked, so no clear can land between another caller's mark and its
+    /// insert. Every callback notes whether the lock is held as it runs: a
+    /// `std` mutex its own thread already holds answers `try_lock` with an
+    /// error.
+    #[test]
+    fn the_mark_beside_the_store_is_written_and_cleared_under_the_stores_lock() {
+        let store = PendingWelcomeStore::new();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let note = |label: &'static str| {
+            let (seen, store) = (&seen, &store);
+            move || {
+                seen.borrow_mut()
+                    .push((label, store.inner.try_lock().is_err()));
+            }
+        };
+        let (first, second) = (pending("first"), pending("second"));
+        let (first_id, second_id) = (first.id(), second.id());
+
+        let counts = std::cell::RefCell::new(Vec::new());
+        let mark = note("mark");
+        store
+            .insert_marked(first.clone(), |held| {
+                mark();
+                counts.borrow_mut().push(held);
+                Ok::<(), ()>(())
+            })
+            .expect("held");
+        store
+            .insert_marked(first, |held| {
+                counts.borrow_mut().push(held);
+                Ok::<(), ()>(())
+            })
+            .expect("held again");
+        store
+            .insert_marked(second, |held| {
+                counts.borrow_mut().push(held);
+                Ok::<(), ()>(())
+            })
+            .expect("held");
+        assert!(store.contains(&first_id) && store.contains(&second_id));
+
+        // Each removal is told how many are left; nothing is cleared early.
+        let record = note("record");
+        assert!(store
+            .remove_recording(&first_id, |held| {
+                record();
+                counts.borrow_mut().push(held);
+            })
+            .is_some());
+        store.unmark_if_empty(note("early unmark"));
+        assert!(store
+            .remove_recording(&second_id, |held| counts.borrow_mut().push(held))
+            .is_some());
+        store.unmark_if_empty(note("unmark when empty"));
+        assert_eq!(
+            seen.into_inner(),
+            [
+                ("mark", true),
+                ("record", true),
+                ("unmark when empty", true)
+            ]
+        );
+        assert_eq!(counts.into_inner(), [1, 1, 2, 1, 0]);
+
+        // A mark that fails holds nothing.
+        let refused = pending("refused");
+        let refused_id = refused.id();
+        assert_eq!(store.insert_marked(refused, |_| Err("no")), Err("no"));
+        assert!(!store.contains(&refused_id) && store.is_empty());
     }
 
     #[test]

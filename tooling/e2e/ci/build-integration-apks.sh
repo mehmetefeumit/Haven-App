@@ -92,8 +92,8 @@ readonly BUILD_APK="build/app/outputs/flutter-apk/app-debug.apk"
 # retried disk/memory exhaustion — intermittent but REAL — which turns a capacity
 # problem into a green build that hides it. The wrapper classifies on Gradle's
 # own dependency-resolution wording instead, and carries the per-job wall-clock
-# budget that keeps a seven-APK step's worst case bounded (a per-target budget
-# would be spent seven times over). Its header has the failure it was measured
+# budget that keeps an eight-APK step's worst case bounded (a per-target budget
+# would be spent eight times over). Its header has the failure it was measured
 # against and the worst-case arithmetic.
 readonly BUILD_WRAPPER="${REPO_ROOT}/scripts/ci/build_apk_with_retry.sh"
 
@@ -130,6 +130,9 @@ declare -a DEFAULT_TARGETS=(
   # isolates unstuck, nothing else drives a contended acquire, so the
   # fail-closed property they all rest on could rot unnoticed.
   "integration_test/session_guard_contention_test.dart"
+  # A Welcome whose invitee's inbox relay was down is sent again, the same
+  # event, by the next foreground drive (founding and invite).
+  "integration_test/welcome_redelivery_test.dart"
 )
 
 declare -a TARGETS

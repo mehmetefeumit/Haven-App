@@ -9,12 +9,16 @@
 /// or destroy the identity belongs here.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -31,6 +35,10 @@ class IdentityAdvancedPage extends ConsumerStatefulWidget {
 class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
   String? _nsec;
   bool _showNsec = false;
+
+  /// True from the confirmed delete until it fails; a delete that succeeds
+  /// leaves the page.
+  bool _deleting = false;
 
   @override
   void dispose() {
@@ -92,18 +100,26 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
       ),
     );
 
-    if (confirmed != true) return;
+    if (confirmed != true || !mounted) return;
 
+    // The revealed secret leaves the screen before the delete is awaited, not
+    // after it (Rule 9): the delete takes seconds, and nothing it does needs
+    // the secret on screen.
+    setState(() {
+      _nsec = null;
+      _showNsec = false;
+      _deleting = true;
+    });
+    unawaited(
+      SemanticsService.sendAnnouncement(
+        View.of(context),
+        l10n.identityAdvancedDeletingProgress,
+        Directionality.of(context),
+      ),
+    );
     try {
       await ref.read(identityNotifierProvider.notifier).deleteIdentity();
       if (!mounted) return;
-      // Drop the nsec reference immediately if it was revealed; the page
-      // is about to unmount, but be explicit so any synchronous rebuild
-      // between now and the pop does not still render it.
-      setState(() {
-        _nsec = null;
-        _showNsec = false;
-      });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(l10n.identityAdvancedDeletedSnack),
@@ -113,9 +129,12 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
       // Return to the main identity page; it will surface the recovery
       // view because the provider has already flipped to null.
       Navigator.of(context).pop();
-    } on IdentityServiceException catch (_) {
-      debugPrint('[Identity] Deletion failed');
+    } on Object catch (e) {
+      // Any failure, not only the service's own: the page must not stay
+      // locked behind a delete that ended. Type only (Rule 8).
+      debugPrint('[Identity] Deletion failed: ${e.runtimeType}');
       if (!mounted) return;
+      setState(() => _deleting = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(l10n.identityAdvancedDeleteError),
@@ -159,37 +178,53 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
     final l10n = AppLocalizations.of(context);
     final identityAsync = ref.watch(identityNotifierProvider);
 
-    return Scaffold(
-      appBar: AppBar(title: Text(l10n.identityAdvancedTitle)),
-      body: identityAsync.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, _) {
-          debugPrint('[Identity] Advanced: provider error');
-          return _buildErrorBody();
-        },
-        data: (identity) {
-          if (identity == null) return _buildMissingIdentityBody();
-          return SingleChildScrollView(
-            padding: const EdgeInsets.all(HavenSpacing.base),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _buildPublicKeyCard(identity),
-                const SizedBox(height: HavenSpacing.base),
-                _buildSecretKeyCard(),
-                const SizedBox(height: HavenSpacing.lg),
-                OutlinedButton.icon(
-                  onPressed: _deleteIdentity,
-                  icon: const Icon(LucideIcons.trash2),
-                  label: Text(l10n.identityAdvancedDeleteIdentityCta),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Theme.of(context).colorScheme.error,
+    // No way back mid-delete: the page reports the delete's outcome.
+    return PopScope(
+      canPop: !_deleting,
+      child: Scaffold(
+        appBar: AppBar(title: Text(l10n.identityAdvancedTitle)),
+        body: identityAsync.when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (error, _) {
+            debugPrint('[Identity] Advanced: provider error');
+            return _buildErrorBody();
+          },
+          data: (identity) {
+            if (identity == null) return _buildMissingIdentityBody();
+            return SingleChildScrollView(
+              padding: const EdgeInsets.all(HavenSpacing.base),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _buildPublicKeyCard(identity),
+                  const SizedBox(height: HavenSpacing.base),
+                  _buildSecretKeyCard(),
+                  const SizedBox(height: HavenSpacing.lg),
+                  OutlinedButton.icon(
+                    key: WidgetKeys.identityDeleteCta,
+                    onPressed: _deleting ? null : _deleteIdentity,
+                    icon: _deleting
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(LucideIcons.trash2),
+                    // The label names the work while it runs, so the disabled
+                    // control keeps an accessible name (WCAG 2.1 SC 4.1.2).
+                    label: Text(
+                      _deleting
+                          ? l10n.identityAdvancedDeletingProgress
+                          : l10n.identityAdvancedDeleteIdentityCta,
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Theme.of(context).colorScheme.error,
+                    ),
                   ),
-                ),
-              ],
-            ),
-          );
-        },
+                ],
+              ),
+            );
+          },
+        ),
       ),
     );
   }

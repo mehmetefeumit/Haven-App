@@ -30,7 +30,13 @@
 //! SqliteAccountStorage (encrypted session.sqlite)
 //! ```
 
+mod commit_notes;
 mod context;
+mod engine_gate;
+pub(crate) mod epoch_stall;
+mod kept_input;
+#[cfg(test)]
+pub(crate) mod ledger_test_support;
 mod manager;
 mod retention;
 mod signer;
@@ -38,12 +44,27 @@ pub mod storage;
 pub mod types;
 mod welcome;
 
+#[cfg(test)]
+pub(crate) use commit_notes::a_notice_drops_only_what_it_read;
+pub use commit_notes::{
+    ChangeNote, ChangeNotice, CommitNotes, KeptTarget, KeptWelcomeRoute, RestageWait, RouteUnread,
+};
 pub use context::MlsGroupContext;
+pub(crate) use epoch_stall::{EpochStallEvidence, StallEvidence};
+pub use kept_input::{KeptEvent, KeptInput, KEPT_BYTES_PER_CIRCLE, KEPT_EVENTS_PER_CIRCLE};
 pub use manager::redact_hex_sequences;
 pub use manager::{
-    app_message_past_epoch_limit, max_rewind_commits, SessionManager, DEFAULT_EXPORTER_LABEL,
-    DEFAULT_MAX_PAST_EPOCHS,
+    app_message_past_epoch_limit, chain_effects, max_rewind_commits, refetch_spacing_secs,
+    OwedRange, RangePass, RefusedRedeliveryLedger, SessionManager, TrackedKeyPackage,
+    DEFAULT_EXPORTER_LABEL, DEFAULT_MAX_PAST_EPOCHS, HAND_BACK_SLICE, HAND_BACK_WHOLE,
+    MAX_REFUSED_IDS_PER_GROUP, MAX_REQUEUE_ATTEMPTS, REFETCH_SPACING_BASE_SECS,
+    REFETCH_SPACING_CAP_SECS, REQUEUE_SET_ASIDE_REMOVALS,
 };
+pub(crate) use manager::{
+    AwayHold, IngestClass, PlaneStanding, RemovalRequeue, SEND_PEEL_DRAIN_ADVANCES,
+};
+#[cfg(any(test, feature = "test-utils"))]
+pub use manager::{HandBackStop, StoreFault, ORDER_PANIC_FOR_TEST};
 pub use retention::{bounded_retention_secs, RetentionBoundPeeler};
 pub use signer::HavenIdentityProofSigner;
 pub use storage::StorageConfig;

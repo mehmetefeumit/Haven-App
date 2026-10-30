@@ -15,9 +15,9 @@ use std::time::Duration;
 
 use haven_core::circle::RelayType;
 use haven_core::relay::maintenance::{
-    build_legacy_key_package_retraction, decide_kp_maintenance, decide_relay_list,
-    list_relay_healthy, KeyPackageLifetime, KpMaintenanceDecision, RelayKpEntry, RelayKpPerRelay,
-    RelayKpSnapshot, RelayListDecision, RelayListPerRelay, RelayListSnapshot, TrackedKpLifetime,
+    decide_kp_maintenance, decide_relay_list, list_relay_healthy, KeyPackageLifetime,
+    KpMaintenanceDecision, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot, RelayListDecision,
+    RelayListPerRelay, RelayListSnapshot, TrackedKpLifetime, TrackedKpSlot,
 };
 use haven_core::relay::RelayManager;
 use nostr::{EventBuilder, Keys, Kind, Tag};
@@ -28,9 +28,9 @@ use nostr_relay_builder::MockRelay;
 // `decide_kp_maintenance` takes `(snapshot, stored_stable_d)` and `RelayKpEntry`
 // no longer carries `hash_ref_matches_local_live`. The per-republish legacy-443
 // twin GC (`latest_legacy_event_id`, `KEY_PACKAGE_KIND_*`, per-cycle deletions)
-// is retired (30443 self-supersedes via NIP-33 same-`d`); its surviving piece —
-// the one-time cutover retraction of a stale 443 — is `build_legacy_key_package_retraction`,
-// exercised in a single re-expressed test at the bottom.
+// is retired (30443 self-supersedes via NIP-33 same-`d`), and so is the one-time
+// cutover retraction of a stale 443: the MDK v0.10.4 reset wiped the sentinel
+// that kept it one-time, and both kinds are retired protocol objects.
 
 // ---------------------------------------------------------------------------
 // Helpers that mirror the FFI's per-relay snapshot construction.
@@ -49,7 +49,7 @@ const fn fresh_tracked() -> TrackedKpLifetime {
 
 /// `decide_kp_maintenance` with a fresh tracked package at [`NOW`].
 fn decide_fresh(snap: &RelayKpSnapshot, stored_d: Option<&str>) -> KpMaintenanceDecision {
-    decide_kp_maintenance(snap, stored_d, fresh_tracked(), NOW)
+    decide_kp_maintenance(snap, stored_d.map(tracked), fresh_tracked(), NOW)
 }
 
 /// Extracts a kind-30443 event's NIP-33 `d` tag (mirrors the FFI helper).
@@ -108,6 +108,8 @@ async fn kp_snapshot(
             .map(|ev| RelayKpEntry {
                 d_tag: kp_d_tag(ev),
                 event_id: ev.id.to_hex(),
+                created_at: ev.created_at.as_secs(),
+                pre_migration: false,
             })
             .collect();
         responders.push(RelayKpPerRelay {
@@ -162,21 +164,11 @@ async fn list_snapshot(
         });
     }
     RelayListSnapshot {
+        reset_acknowledged: true,
         publish_enabled,
         responders,
         configured_relays: configured.to_vec(),
     }
-}
-
-/// Builds a signed kind-443 legacy `KeyPackage`-twin event. The legacy 443 is a
-/// regular (non-replaceable) event, so each republish (rebuilding FRESH MLS
-/// material, hence different content) leaves the prior one as a lingering twin
-/// under a distinct event id — the exact garbage the maintenance GC scrubs.
-/// `content` distinguishes cycles the way fresh key material does in production.
-fn kp_443(keys: &Keys, content: &str) -> nostr::Event {
-    EventBuilder::new(Kind::Custom(443), content)
-        .sign_with_keys(keys)
-        .unwrap()
 }
 
 /// Publishes an event to just `relay` via a bare client, so a probe against
@@ -538,60 +530,14 @@ async fn test24_target_url_byte_matches_configured_entry() {
         .expect("targeted publish to the round-tripped URL must succeed");
 }
 
-// ---------------------------------------------------------------------------
-// Test 24b (RE-EXPRESSED): legacy-443 cutover RETRACTION builder.
-//
-// DELETED-WITH-SUBJECT: the pre-migration per-republish 443-twin GC — tests 24b
-// (`latest_legacy_event_id` + `KEY_PACKAGE_KIND_CANONICAL/_LEGACY` + the old
-// 5-field `PublishedKeyPackageRow`), 25 (per-cycle twin scrub), 26 (first-publish
-// no-op), 27 (best-effort deletion). Under Dark Matter the KeyPackage kind is
-// 30443-only and NIP-33-addressable, so a republish into the same `d`
-// SELF-supersedes: there is no per-cycle 443 twin to garbage-collect. The one
-// surviving obligation is the ONE-TIME cutover retraction of a stale legacy 443
-// (F10a), built by `build_legacy_key_package_retraction`. This test re-expresses
-// its load-bearing invariants: a self-authored kind-5 (NIP-09) deletion that
-// e-tags exactly the stale 443 id, refuses to author a deletion for another key,
-// and never targets the addressable 30443 canonical.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn legacy_443_retraction_targets_the_stale_443_and_guards_self_authorship() {
-    let keys = Keys::generate();
-    let author_hex = keys.public_key().to_hex();
-    // A real, self-signed stale 443 to retract, and a 30443 canonical that must
-    // NEVER be a retraction target (it self-supersedes via NIP-33 same-`d`).
-    let stale_443 = kp_443(&keys, "stale-legacy-material");
-    let canonical_30443 = kp_30443(&keys, "stable-d");
-
-    // The one-time cutover retraction: a self-authored kind-5 e-tag deletion.
-    let retraction =
-        build_legacy_key_package_retraction(&keys, &stale_443.id.to_hex(), &author_hex)
-            .expect("retraction builds for a self-authored 443");
-    assert_eq!(retraction.kind, Kind::EventDeletion);
-    assert!(
-        retraction.tags.iter().any(|t| {
-            let s = t.as_slice();
-            s.len() >= 2 && s[0] == "e" && s[1] == stale_443.id.to_hex()
-        }),
-        "the retraction must e-tag exactly the stale 443 id"
-    );
-    assert!(
-        !retraction.tags.iter().any(|t| {
-            let s = t.as_slice();
-            s.len() >= 2 && s[1] == canonical_30443.id.to_hex()
-        }),
-        "the retraction must NEVER reference the addressable 30443 canonical"
-    );
-
-    // Self-authorship guard: refuse to author a deletion of another key's event.
-    let other = Keys::generate();
-    assert!(
-        build_legacy_key_package_retraction(
-            &keys,
-            &stale_443.id.to_hex(),
-            &other.public_key().to_hex()
-        )
-        .is_err(),
-        "must refuse to retract an event authored by another key"
-    );
+/// A tracked slot whose last event any served event in the slot is at least
+/// as new as: the slot-presence view these tests pin.
+const fn tracked(d: &str) -> TrackedKpSlot<'_> {
+    TrackedKpSlot {
+        d_tag: d,
+        event_id: "",
+        created_at: 0,
+        adopted: false,
+        replacement_owed: false,
+    }
 }

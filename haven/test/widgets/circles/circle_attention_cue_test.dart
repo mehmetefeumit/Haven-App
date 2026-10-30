@@ -1,0 +1,274 @@
+/// The non-text "needs attention" cue: a circle with a fault or a note it has
+/// not been shown is marked where the user can see it with Circle details
+/// closed, and one tap opens that circle's details. It carries no message of
+/// its own (OD-1); it has an accessible name, and its badge is visible
+/// against the sheet in both themes (WCAG 2.1 SC 1.4.11).
+library;
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
+import 'package:haven/src/rust/api.dart' show ChangeNoteFfi;
+import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
+
+import '../../helpers/fake_change_notices.dart';
+import '../../helpers/sheet_health_overrides.dart';
+import '../../mocks/mock_circle_service.dart';
+
+const _selfPubkey =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+class _Health extends SharingHealthNotifier {
+  _Health(this._health);
+
+  final SharingHealth _health;
+
+  @override
+  SharingHealth build() => _health;
+
+  @override
+  Future<void> refresh() async {}
+}
+
+Circle _circle(int id, String name) => TestCircleFactory.createCircle(
+  mlsGroupId: [id],
+  nostrGroupId: [id],
+  displayName: name,
+  members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+);
+
+final Circle _home = _circle(1, 'Home');
+final Circle _work = _circle(2, 'Work');
+
+String _hex(List<int> b) =>
+    b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+
+double _contrast(Color a, Color b) {
+  final la = a.computeLuminance();
+  final lb = b.computeLuminance();
+  final hi = la > lb ? la : lb;
+  final lo = la > lb ? lb : la;
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/// Pumps the resting (0.12) circles sheet on a phone with [_home] selected.
+Future<void> _pump(
+  WidgetTester tester, {
+  SharingHealth health = SharingHealth.healthy,
+  FakeNoticeManager? notices,
+  double scale = 1,
+  ThemeData? theme,
+  Size size = const Size(390, 844),
+}) async {
+  tester.view
+    ..devicePixelRatio = 1
+    ..physicalSize = size;
+  addTearDown(tester.view.reset);
+  final selected = StateProvider<Circle?>((ref) => _home);
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        ...sheetHealthOverrides(notices: notices),
+        sharingHealthProvider.overrideWith(() => _Health(health)),
+        circleServiceProvider.overrideWithValue(
+          MockCircleService(circles: [_home, _work]),
+        ),
+        circlesProvider.overrideWith((ref) async => [_home, _work]),
+        selectedCircleProvider.overrideWith((ref) {
+          final id = ref.watch(selectedCircleIdProvider);
+          if (id == null) return ref.watch(selected);
+          return [_home, _work].firstWhere((c) => listEquals(c.mlsGroupId, id));
+        }),
+        identityProvider.overrideWith(
+          (_) async => Identity(
+            pubkeyHex: _selfPubkey,
+            npub: 'npub1self',
+            createdAt: DateTime(2024),
+          ),
+        ),
+        memberLocationsProvider.overrideWith((_) async => const []),
+      ],
+      child: MaterialApp(
+        theme: theme,
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(
+            context,
+          ).copyWith(textScaler: TextScaler.linear(scale)),
+          child: child!,
+        ),
+        home: Scaffold(
+          body: Stack(
+            children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
+AppLocalizations _l10n(WidgetTester tester) =>
+    AppLocalizations.of(tester.element(find.byType(CirclesBottomSheet)));
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  for (final scale in const [1.0, 2.0]) {
+    testWidgets('at ${scale}x, a fault shows a labelled cue at the resting '
+        'detent, and one tap opens Circle details', (tester) async {
+      final handle = tester.ensureSemantics();
+      await _pump(
+        tester,
+        health: SharingHealth.publishFailing(DateTime.utc(2026, 8, 28, 12)),
+        scale: scale,
+      );
+      final cue = find.byKey(WidgetKeys.circleAttentionCue);
+      expect(cue, findsOneWidget);
+      expect(
+        tester.getRect(cue).bottom,
+        lessThanOrEqualTo(844),
+        reason: 'on screen with the sheet at rest',
+      );
+      expect(
+        tester.getSemantics(cue).tooltip,
+        _l10n(tester).circleDetailsAttentionTooltip,
+      );
+
+      await tester.tap(cue);
+      await tester.pumpAndSettle();
+      expect(find.byKey(WidgetKeys.leaveCircleCta), findsOneWidget);
+      handle.dispose();
+    });
+  }
+
+  testWidgets('a healthy circle with no note shows no cue', (tester) async {
+    await _pump(tester);
+    expect(find.byKey(WidgetKeys.circleAttentionCue), findsNothing);
+  });
+
+  testWidgets('a note the selected circle has not been shown shows the cue',
+      (tester) async {
+    await _pump(
+      tester,
+      notices: FakeNoticeManager(notes: const [ChangeNoteFfi.changeUndone]),
+    );
+    expect(find.byKey(WidgetKeys.circleAttentionCue), findsOneWidget);
+  });
+
+  testWidgets('level notes alone show no cue', (tester) async {
+    await _pump(
+      tester,
+      notices: FakeNoticeManager(notes: const [ChangeNoteFfi.unreadLocation]),
+    );
+    expect(find.byKey(WidgetKeys.circleAttentionCue), findsNothing);
+  });
+
+  testWidgets('a note in a circle NOT selected marks its row in the list, '
+      'named for a screen reader, and its cue opens that circle', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    final notices = FakeNoticeManager()
+      ..notesFor = (id) => listEquals(id, _work.mlsGroupId)
+          ? const [ChangeNoteFfi.removalUndone]
+          : const [];
+    // Tall enough that the opened list is on screen at the resting detent.
+    await _pump(tester, notices: notices, size: const Size(800, 5000));
+
+    await tester.tap(find.text('Home'));
+    await tester.pumpAndSettle();
+    final rowCue = find.byKey(WidgetKeys.circleRowAttentionCue(_hex([2])));
+    expect(rowCue, findsOneWidget);
+    expect(
+      find.byKey(WidgetKeys.circleRowAttentionCue(_hex([1]))),
+      findsNothing,
+    );
+    expect(
+      find.bySemanticsLabel(
+        RegExp(
+          RegExp.escape(_l10n(tester).circleRowAttentionSemantics('Work')),
+        ),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(rowCue);
+    await tester.pumpAndSettle();
+    expect(find.byKey(WidgetKeys.leaveCircleCta), findsOneWidget);
+    expect(
+      find.byKey(WidgetKeys.circleSelectorActive(_hex([2]))),
+      findsOneWidget,
+      reason: 'one tap selected the circle whose details opened',
+    );
+    handle.dispose();
+  });
+
+  testWidgets('a note in a circle NOT selected shows the cue at rest, and one '
+      'tap opens that circle', (tester) async {
+    // The sighted half of "a told note is never unseen": with the list
+    // closed, the resting trigger row is all that is on screen.
+    final notices = FakeNoticeManager()
+      ..notesFor = (id) => listEquals(id, _work.mlsGroupId)
+          ? const [ChangeNoteFfi.changeUndone]
+          : const [];
+    await _pump(tester, notices: notices);
+    final cue = find.byKey(WidgetKeys.circleAttentionCue);
+    expect(cue, findsOneWidget);
+    expect(tester.getRect(cue).bottom, lessThanOrEqualTo(844));
+
+    await tester.tap(cue);
+    await tester.pumpAndSettle();
+    expect(find.byKey(WidgetKeys.leaveCircleCta), findsOneWidget);
+    expect(
+      find.byKey(WidgetKeys.circleSelectorActive(_hex([2]))),
+      findsOneWidget,
+      reason: 'the circle that needed attention was selected and opened',
+    );
+  });
+
+  for (final (name, theme) in <(String, ThemeData)>[
+    ('light', HavenTheme.light()),
+    ('dark', HavenTheme.dark()),
+  ]) {
+    testWidgets('$name: the badge clears 3:1 against the sheet surface', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        health: SharingHealth.publishFailing(DateTime.utc(2026, 8, 28, 12)),
+        theme: theme,
+      );
+      final badge = tester.widget<Badge>(
+        find.descendant(
+          of: find.byKey(WidgetKeys.circleAttentionCue),
+          matching: find.byType(Badge),
+        ),
+      );
+      final scheme = Theme.of(
+        tester.element(find.byType(CirclesBottomSheet)),
+      ).colorScheme;
+      final colour = badge.backgroundColor!;
+      expect(colour, scheme.error);
+      for (final surface in [scheme.surface, scheme.surfaceContainerLow]) {
+        expect(
+          _contrast(colour, surface),
+          greaterThanOrEqualTo(3),
+          reason: '$name badge on $surface',
+        );
+      }
+    });
+  }
+}

@@ -63,6 +63,8 @@
 #      manifest it cannot parse; a failed self-test)
 
 set -euo pipefail
+LITERAL_FREE="$(cat "$(dirname "${BASH_SOURCE[0]}")/lib/literal_free.awk")"
+readonly LITERAL_FREE
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly ANDROID_SRC="${REPO_ROOT}/haven/android/app/src"
@@ -101,11 +103,11 @@ code_view() {
 # as brace-delimited would run the slice to EOF and swallow every method after
 # it — silently turning a check bound to ONE method into a check on the file.
 fn_body() {
-  awk -v sig="$1" '
+  awk -v sig="$1" "${LITERAL_FREE}"'
     !inbody && index($0, sig) > 0 { inbody = 1 }
     inbody {
       print
-      o = gsub(/[{]/, "&"); c = gsub(/[}]/, "&")
+      lfree = literal_free($0); o = gsub(/[{]/, "&", lfree); c = gsub(/[}]/, "&", lfree)
       depth += o - c
       if (seen && depth <= 0) exit
       if (o > 0) { seen = 1; next }

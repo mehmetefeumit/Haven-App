@@ -38,7 +38,7 @@
 /// nothing; one landing DURING a burst passes the engine's `paused` gate (a
 /// burst clears the flag for its whole duration), reads the mid-`connect()`
 /// pool as dropped, and repairs it through the FOREGROUND re-anchor — standing
-/// REQs, an inbox REQ replaying 49 h of gift wraps keyed on this npub, and a
+/// REQs, an inbox REQ replaying 96 h of gift wraps keyed on this npub, and a
 /// socket left open until the next burst's pause, at an instant that is not a
 /// publish. So the burst is the repair, and health is gated exactly like
 /// `KeyPackage` and relay-list.
@@ -105,18 +105,25 @@ library;
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/services/background_burst_coordinator.dart';
 import 'package:haven/src/services/mls_session_handover.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
+import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/live_sync_provider.dart'
+    show liveSyncEnabled;
 import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/sharing_health_provider.dart';
+import 'package:haven/src/services/leaver_backstop.dart' show LeaveCarryOn;
+import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/utils/log_alias.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // ---------------------------------------------------------------------------
 // Interval constants
@@ -259,6 +266,13 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
     _profileAntiEntropyInFlight = false;
     _awaitedLoginPublish = false;
     _keyPackageFailureStreak = 0;
+    // A carry-on of the previous lifecycle ends at its next generation check
+    // and is no caller's to join.
+    _carryingOn = null;
+    _passAsk = null;
+    _owedFront = null;
+    _owedBack = null;
+    _unnamedFollowUp = LeaveCarryOn.unnamedWait;
     final generation = ++_generation;
 
     ref.onDispose(() {
@@ -283,6 +297,8 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
   }
 
   void _cancelAll() {
+    _leaveFollowUp?.cancel();
+    _leaveFollowUp = null;
     _keyPackageTimer?.cancel();
     _keyPackageTimer = null;
     _relayListTimer?.cancel();
@@ -354,6 +370,183 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
     await _runRelayListTick(_generation);
   }
 
+  /// A burst's leave carry-on: a burst is never the foreground.
+  @override
+  Future<void> carryOnLeaves() => carryOnLeavesNow();
+
+  /// The carry-on in flight, which every caller landing meanwhile joins, and
+  /// what its current pass was asked.
+  Future<void>? _carryingOn;
+  _CarryOnAsk? _passAsk;
+
+  /// What joiners asked that the pass in flight does not cover, one ask per
+  /// kind — a foreground caller's, which claims from its lifecycle read and
+  /// stops at a pause, and a burst's, which claims nothing and does not — run
+  /// as one more pass each when it ends. An ask past the waits is always
+  /// owed: the group update behind it may end a leave the pass already read.
+  _CarryOnAsk? _owedFront;
+  _CarryOnAsk? _owedBack;
+
+  /// The one follow-up a leave still standing in front of the user arms, and
+  /// what the next one waits when the core named no wait: the unnamed wait,
+  /// doubling to the health tick's cadence, which carries it on from there.
+  Timer? _leaveFollowUp;
+  Duration _unnamedFollowUp = LeaveCarryOn.unnamedWait;
+
+  /// Carries on every leave this device asked for — at the health tick, the
+  /// start-up's and the resume's relay contact (with [migrateFirst], which
+  /// moves a marker an older build left onto the core first), a group update
+  /// an ingest reports ([pastWaits]), a standing leave's follow-up and each
+  /// background burst — and forgets each circle a leave ended for, clearing
+  /// its selection. Single-flight: a caller landing while one runs joins it,
+  /// and what a joiner asked beyond that pass runs once more after it, within
+  /// the lifecycle the carry-on began in. [inFront] is a foreground caller's
+  /// lifecycle read, `null` for a burst. Never throws.
+  Future<void> carryOnLeavesNow({
+    bool Function()? inFront,
+    bool pastWaits = false,
+    bool migrateFirst = false,
+  }) {
+    if (_disposed) return Future<void>.value();
+    final ask = (inFront: inFront, pastWaits: pastWaits, migrate: migrateFirst);
+    final running = _carryingOn;
+    if (running != null) {
+      _owe(ask);
+      return running;
+    }
+    final generation = _generation;
+    late final Future<void> flight;
+    return flight = _carryingOn = () async {
+      var next = ask;
+      while (true) {
+        _passAsk = next;
+        await _carryOnOnce(
+          inFront: next.inFront,
+          pastWaits: next.pastWaits,
+          migrate: next.migrate,
+        );
+        if (!_isCurrent(generation)) return;
+        final owed = _owedBack ?? _owedFront;
+        if (owed == null) return;
+        if (identical(owed, _owedBack)) {
+          _owedBack = null;
+        } else {
+          _owedFront = null;
+        }
+        next = owed;
+      }
+    }().whenComplete(() {
+      // A newer lifecycle's carry-on is its own.
+      if (!identical(_carryingOn, flight)) return;
+      _carryingOn = null;
+      _passAsk = null;
+    });
+  }
+
+  /// Records what [ask] wants beyond the pass in flight.
+  void _owe(_CarryOnAsk ask) {
+    final pass = _passAsk;
+    final front = ask.inFront != null;
+    final covered =
+        pass != null &&
+        front == (pass.inFront != null) &&
+        !ask.pastWaits &&
+        (!ask.migrate || pass.migrate);
+    if (covered) return;
+    final owed = front ? _owedFront : _owedBack;
+    final merged = (
+      inFront: ask.inFront,
+      pastWaits: ask.pastWaits || (owed?.pastWaits ?? false),
+      migrate: ask.migrate || (owed?.migrate ?? false),
+    );
+    if (front) {
+      _owedFront = merged;
+    } else {
+      _owedBack = merged;
+    }
+  }
+
+  Future<void> _carryOnOnce({
+    required bool Function()? inFront,
+    required bool pastWaits,
+    required bool migrate,
+  }) async {
+    final generation = _generation;
+    try {
+      if (migrate && inFront != null) {
+        await PendingLeaveService(
+          prefs: await SharedPreferences.getInstance(),
+        ).migrateToCore(
+          circleService: ref.read(circleServiceProvider),
+          inFront: inFront,
+        );
+        if (!_isCurrent(generation)) return;
+      }
+      final carried = await ref
+          .read(maintenanceServiceProvider)
+          .carryOnLeaves(inFront: inFront, pastWaits: pastWaits);
+      if (!_isCurrent(generation)) return;
+      if (!carried.standing) {
+        _unnamedFollowUp = LeaveCarryOn.unnamedWait;
+      } else if (inFront != null) {
+        _armLeaveFollowUp(carried, generation);
+      }
+      if (carried.left.isEmpty) return;
+      final sharing = ref.read(locationSharingServiceProvider);
+      for (final circle in carried.left) {
+        await sharing.removeCircle(
+          mlsGroupId: circle.mlsGroupId,
+          nostrGroupId: circle.nostrGroupId,
+        );
+      }
+      if (!_isCurrent(generation)) return;
+      final selected = ref.read(selectedCircleIdProvider);
+      if (selected != null &&
+          carried.left.any((c) => listEquals(c.mlsGroupId, selected))) {
+        ref.read(selectedCircleIdProvider.notifier).state = null;
+      }
+      ref.invalidate(circlesProvider);
+    } on Object catch (e) {
+      debugPrint('[Maintenance] leave carry-on threw: ${e.runtimeType}');
+    }
+  }
+
+  /// Arms the press's follow-up: a leave answered "leaving" in front of the
+  /// user is carried on again soon, not at the next health tick.
+  void followUpLeave() {
+    if (_disposed) return;
+    _unnamedFollowUp = LeaveCarryOn.unnamedWait;
+    _armLeaveFollowUp(
+      const LeaveCarryOn(unnamedStanding: true),
+      _generation,
+    );
+  }
+
+  /// Arms the one follow-up — at the soonest wait the core named, or sooner
+  /// at the doubling unnamed wait where a leave's answer named none — unless
+  /// one is armed already. Foreground only; a pause cancels it
+  /// ([suspendForBackground]).
+  void _armLeaveFollowUp(LeaveCarryOn carried, int generation) {
+    if (_leaveFollowUp != null || !_isCurrent(generation) || !appIsResumed()) {
+      return;
+    }
+    var delay = carried.namedWait;
+    if (carried.unnamedStanding) {
+      final unnamed = _unnamedFollowUp;
+      if (delay == null || unnamed < delay) delay = unnamed;
+      final doubled = unnamed * 2;
+      _unnamedFollowUp = doubled > subscriptionHealthInterval
+          ? subscriptionHealthInterval
+          : doubled;
+    }
+    if (delay == null) return;
+    _leaveFollowUp = Timer(delay, () {
+      _leaveFollowUp = null;
+      if (!_isCurrent(generation) || !appIsResumed()) return;
+      unawaited(carryOnLeavesNow(inFront: appIsResumed));
+    });
+  }
+
   /// Arms (or re-arms) the subscription-health timer for [generation].
   ///
   /// Foreground-only, exactly like [_armKeyPackage] — the iOS keep-alive
@@ -386,6 +579,8 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
   /// burst design exists to close (see the library doc).
   void suspendForBackground() {
     if (_disposed) return;
+    _leaveFollowUp?.cancel();
+    _leaveFollowUp = null;
     _keyPackageTimer?.cancel();
     _keyPackageTimer = null;
     _relayListTimer?.cancel();
@@ -599,9 +794,21 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
       // No secret + no circle handle: the FFI reads the engine SESSION and
       // self-gates to `engineOff` when the engine is off (the inert path while
       // `liveSyncEnabled` is false).
+      //
+      // The claim is the STRICT read, not the gate above. The gate fails open
+      // on an unset lifecycle so that a tick is never lost at startup; the
+      // claim decides whether the engine may treat its session as the
+      // foreground's — record and drive commits, re-anchor the whole session
+      // — and it is "the lifecycle reads `resumed`", nothing looser: never
+      // yes for a process nobody is looking at, and no for a window that is
+      // visible but unfocused. Read here, at the call, so it is about this
+      // instant.
       final result = await ref
           .read(maintenanceServiceProvider)
-          .maintainSubscriptionHealth();
+          .maintainSubscriptionHealth(foreground: appIsResumed());
+      // A logout or re-login superseded this tick during the probe: nothing
+      // after it is this generation's.
+      if (!_isCurrent(generation)) return;
       debugPrint(
         '[Maintenance] health tick: ${result.action.name} '
         '(relays=${magnitudeBucket(result.relaysTotal)}, '
@@ -634,7 +841,9 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
       // `SubscriptionHealthAction`). `engineOff` proves nothing — there is no
       // session to inspect — and neither does `paused`: a paused engine holds
       // no REQ at all, so the tick inspected nothing and short-circuited before
-      // the probe. Neither may clear anything.
+      // the probe. `awaitingForeground` is the opposite of proof: the tick
+      // found the receive plane NOT whole and, carrying no foreground claim,
+      // left it so. None of the three may clear anything.
       switch (result.action) {
         case SubscriptionHealthAction.healthy:
         case SubscriptionHealthAction.resubscribed:
@@ -644,8 +853,31 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
               .recordRelaySubscriptionRestored();
         case SubscriptionHealthAction.engineOff:
         case SubscriptionHealthAction.paused:
+        case SubscriptionHealthAction.awaitingForeground:
           break;
       }
+      // The re-invites MDK owes, on the same foreground cadence: each lookup
+      // keeps MDK's own schedule, so a tick re-asks nothing that is not due.
+      // The strict read again, at the call.
+      await ref
+          .read(maintenanceServiceProvider)
+          .reinviteOwed(foreground: appIsResumed());
+      // A logout during the re-invites: what follows would be the next
+      // identity's.
+      if (!_isCurrent(generation)) return;
+      // With no live plane, nothing else drives the stored records: a change
+      // a relay has not taken yet is sent again from here.
+      if (!liveSyncEnabled) {
+        await ref
+            .read(maintenanceServiceProvider)
+            .resumeDrive(foreground: appIsResumed());
+        if (!_isCurrent(generation)) return;
+        // A removal that drive made is learnt from the roster alone (the
+        // location read filters on it), and no event re-reads it here.
+        ref.invalidate(circlesProvider);
+      }
+      // Every leave this device asked for, on the same foreground cadence.
+      await carryOnLeavesNow(inFront: appIsResumed);
     } on Object catch (e) {
       debugPrint('[Maintenance] health tick threw: ${e.runtimeType}');
     } finally {
@@ -668,8 +900,8 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
   /// would fire while backgrounded, contacting the profile relay pool with no
   /// UI to render the result.
   ///
-  /// A null `lifecycleState` (before the first lifecycle event, i.e. startup,
-  /// and in unit tests) counts as foregrounded.
+  /// A null `lifecycleState` counts as foregrounded; only a host test binding
+  /// has one (see [appIsForegrounded]).
   static bool _appIsForegrounded() => appIsForegrounded();
 
   Future<void> _runProfileAntiEntropyTick(int generation) async {
@@ -756,6 +988,11 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
   @visibleForTesting
   bool get healthArmedForTest => _healthTimer?.isActive ?? false;
 
+  /// [visibleForTesting] — whether a leave's foreground follow-up is armed:
+  /// what a press answered `leaving` in front of the user leaves behind.
+  @visibleForTesting
+  bool get leaveFollowUpArmedForTest => _leaveFollowUp != null;
+
   /// [visibleForTesting] — whether any of the three relay-contacting timers
   /// (`KeyPackage`, relay list, subscription health) is armed. These are the
   /// ones [suspendForBackground] cancels and [rearmForForeground] brings back;
@@ -792,3 +1029,11 @@ final maintenanceSchedulerProvider =
     NotifierProvider<MaintenanceSchedulerNotifier, void>(
       MaintenanceSchedulerNotifier.new,
     );
+
+/// What a leave carry-on was asked: a foreground caller's lifecycle read, or
+/// none (a burst's); whether past the waits; whether to migrate first.
+typedef _CarryOnAsk = ({
+  bool Function()? inFront,
+  bool pastWaits,
+  bool migrate,
+});

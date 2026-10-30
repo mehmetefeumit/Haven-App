@@ -90,8 +90,9 @@ pub enum PendingReason {
     /// The pool holds fewer REQ pairs than the session expects — a deleted
     /// subscription the pool will never re-issue.
     SubscriptionShortfall(DeviceTag),
-    /// A durable eviction obligation is unredeemed.
-    RemovalOwed(DeviceTag),
+    /// A commit is pending on its relays: the device holds a commit record
+    /// whose MLS half is unresolved.
+    CommitPending(DeviceTag),
     /// Stored inputs still gate this circle's outbound path.
     GatingInputs(DeviceTag, CircleTag),
     /// Outbound intents are durably queued for this circle.
@@ -156,8 +157,10 @@ pub async fn quiescent<R: RelayPlane, T: TimelineSink, L: LogDrain>(
                 device.tag,
             )));
         }
-        if !device.manager()?.owed_removal_commits().is_empty() {
-            return Ok(Quiescence::Pending(PendingReason::RemovalOwed(device.tag)));
+        if !crate::rig::no_pending_fanout(device).await? {
+            return Ok(Quiescence::Pending(PendingReason::CommitPending(
+                device.tag,
+            )));
         }
         if let Some(reason) = circle_terms(world, device).await? {
             return Ok(Quiescence::Pending(reason));
@@ -385,7 +388,7 @@ mod tests {
             PendingReason::InFlightPublish(device),
             PendingReason::AdvanceUnconsumed(device),
             PendingReason::SubscriptionShortfall(device),
-            PendingReason::RemovalOwed(device),
+            PendingReason::CommitPending(device),
             PendingReason::GatingInputs(device, circle),
             PendingReason::QueuedIntents(device, circle),
             PendingReason::PendingProposal(device, circle),
@@ -411,11 +414,11 @@ mod tests {
             }
         }
         assert!(
-            format!("{:?}", reasons[6]).contains("simdev#4"),
+            format!("{:?}", reasons[7]).contains("simdev#4"),
             "a reason that names a device renders its handle, so two lines can be \
              tied together without either naming the device"
         );
-        assert!(format!("{:?}", reasons[6]).contains("simcircle#2"));
+        assert!(format!("{:?}", reasons[7]).contains("simcircle#2"));
         assert_eq!(format!("{:?}", Quiescence::Quiescent), "Quiescent");
     }
 

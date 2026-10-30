@@ -710,9 +710,6 @@ class AppLocalizationsDe extends AppLocalizations {
   String get nameCircleStageCreatingGroup => 'Sichere Gruppe wird erstellt …';
 
   @override
-  String get nameCircleStageSendingInvites => 'Einladungen werden gesendet …';
-
-  @override
   String get nameCircleStageComplete => 'Fertig!';
 
   @override
@@ -730,7 +727,7 @@ class AppLocalizationsDe extends AppLocalizations {
   }
 
   @override
-  String nameCircleCreatedPartialSnack(String name, int sent, int total) {
+  String nameCircleCreatedSentSoFarSnack(String name, int sent, int total) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -739,7 +736,15 @@ class AppLocalizationsDe extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Kreis „$name“ erstellt. Einladungen gesendet ($sentString von $totalString); die Zustellung der übrigen steht noch aus.';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          'Kreis „$name“ erstellt. Bisher $sentString von $totalString Einladungen gesendet. Haven versucht weiterhin, die übrigen zu senden, solange die App geöffnet ist, bis zu einem Tag lang.',
+      one:
+          'Kreis „$name“ erstellt. Bisher $sentString von 1 Einladung gesendet. Haven versucht weiterhin, sie zu senden, solange die App geöffnet ist, bis zu einem Tag lang.',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -820,7 +825,7 @@ class AppLocalizationsDe extends AppLocalizations {
   }
 
   @override
-  String addMemberPartialDelivery(int sent, int total) {
+  String addMemberSentSoFar(int sent, int total, String circleName) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -829,7 +834,38 @@ class AppLocalizationsDe extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Einladungen gesendet ($sentString von $totalString). Die Zustellung der übrigen steht noch aus.';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          'Bisher $sentString von $totalString Einladungen für $circleName gesendet. Haven versucht weiterhin, die übrigen zu senden, solange die App geöffnet ist, bis zu einem Tag lang.',
+      one:
+          'Bisher $sentString von 1 Einladung für $circleName gesendet. Haven versucht weiterhin, sie zu senden, solange die App geöffnet ist, bis zu einem Tag lang.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String addMemberReinviteNeeded(String circleName) {
+    return 'Haven kann die Einladung für $circleName nicht senden. Entferne die Person und füge sie erneut hinzu.';
+  }
+
+  @override
+  String get memberCannotReceiveInvitations =>
+      'Haven kann nicht alle Personen einladen, die du ausgewählt hast, weil es nicht herausfinden konnte, wohin mindestens eine ihrer Einladungen gesendet werden soll. Bitte die ausgewählten Personen darum zu prüfen, ob ihre App Einladungen empfangen kann, und versuche es dann erneut.';
+
+  @override
+  String get missedInvitationsShowWho => 'Personen anzeigen';
+
+  @override
+  String missedInvitationsTitle(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Einladungen nicht gesendet',
+      one: 'Einladung nicht gesendet',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -886,6 +922,11 @@ class AppLocalizationsDe extends AppLocalizations {
   }
 
   @override
+  String circleMemberRemoveAwaitingAnnouncement(String name) {
+    return 'Die Entfernung von $name läuft noch: Haven wartet auf die Relays. Bis sie abgeschlossen ist, wird mit diesem Kreis nichts geteilt.';
+  }
+
+  @override
   String get circleMemberAdmin => 'Admin';
 
   @override
@@ -921,7 +962,11 @@ class AppLocalizationsDe extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'Bereit zum Einladen';
 
   @override
-  String get pendingMemberNeedsUpdate => 'Muss Haven aktualisieren';
+  String get pendingMemberNeedsUpdate => 'Muss Haven aktualisieren oder öffnen';
+
+  @override
+  String get memberKeyPackageStale =>
+      'Haven kann diese Person gerade nicht einladen. Bitte sie, Haven zu öffnen, und versuche es dann erneut.';
 
   @override
   String get memberSearchHint => 'Mitglieds-ID eingeben …';
@@ -1074,6 +1119,27 @@ class AppLocalizationsDe extends AppLocalizations {
       'Einladung konnte nicht angenommen werden. Bitte versuche es erneut.';
 
   @override
+  String invitationNeedsNewInviteError(String name) {
+    return 'Diese Einladung kann nicht mehr verwendet werden. Bitte $name, dich erneut einzuladen. Eventuell muss die Person zuerst Haven aktualisieren.';
+  }
+
+  @override
+  String get rejoinDialogTitle => 'Diesem Kreis erneut beitreten?';
+
+  @override
+  String rejoinDialogBody(String inviterName, String circleName) {
+    return 'Du wurdest von $inviterName in „$circleName“ eingeladen, und dieser Kreis ist schon auf diesem Telefon. Das kann passieren, wenn du aus dem Kreis entfernt und wieder eingeladen wurdest. Wenn du erneut beitrittst, wird die Kopie des Kreises auf diesem Telefon ersetzt. Mit „Ablehnen“ endet diese Einladung endgültig; mit „Abbrechen“ bleibt sie für später erhalten.';
+  }
+
+  @override
+  String rejoinDialogBodyUnnamed(String circleName) {
+    return 'Du wurdest in „$circleName“ eingeladen, und dieser Kreis ist schon auf diesem Telefon. Das kann passieren, wenn du aus dem Kreis entfernt und wieder eingeladen wurdest. Wenn du erneut beitrittst, wird die Kopie des Kreises auf diesem Telefon ersetzt. Mit „Ablehnen“ endet diese Einladung endgültig; mit „Abbrechen“ bleibt sie für später erhalten.';
+  }
+
+  @override
+  String get rejoinDialogConfirm => 'Erneut beitreten';
+
+  @override
   String invitationRosterFullError(int limit) {
     final intl.NumberFormat limitNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1206,11 +1272,22 @@ class AppLocalizationsDe extends AppLocalizations {
   String get circleDetailsLeaveCircle => 'Kreis verlassen';
 
   @override
+  String get circleDetailsLeavingInProgress => 'Kreis wird verlassen …';
+
+  @override
   String get leaveCircleDialogTitle => 'Kreis verlassen';
 
   @override
   String get leaveCircleDialogBody =>
       'Diesen Kreis verlassen? Du sendest seinen Mitgliedern dann keinen Standort mehr und siehst ihren auch nicht mehr. Der zuletzt gesendete Standort bleibt bis zu einem Tag lang auf ihren Handys. Das lässt sich nicht rückgängig machen: Für eine Rückkehr bräuchtest du eine neue Einladung.';
+
+  @override
+  String get leaveDisbandedCircleDialogBody =>
+      'Dieser Kreis wurde beendet, daher wird mit ihm nichts mehr geteilt. Beim Verlassen wird er von diesem Telefon entfernt.';
+
+  @override
+  String get leaveCircleDialogAdminNote =>
+      'Du bist Admin dieses Kreises. Bevor du ihn verlässt, versucht Haven, ein anderes Mitglied zum Admin zu machen, damit der Kreis weiter funktioniert.';
 
   @override
   String get leaveCircleConfirm => 'Verlassen';
@@ -1225,53 +1302,32 @@ class AppLocalizationsDe extends AppLocalizations {
   String get leaveCircleError => 'Kreis konnte nicht verlassen werden';
 
   @override
-  String get circleBlockedBannerTitle =>
-      'Dieser Kreis kann nicht aktualisiert werden';
-
-  @override
-  String get circleBlockedBannerBody =>
-      'Bei der Verschlüsselung dieses Kreises ist etwas schiefgelaufen, daher kann Haven darin keine Aktualisierungen mehr senden oder empfangen. Du kannst unten weiterhin den zuletzt bekannten Stand sehen oder den Kreis verlassen.';
-
-  @override
-  String get legacyCircleBannerTitle => 'Dieser Kreis muss neu erstellt werden';
-
-  @override
-  String get legacyCircleBannerBody =>
-      'Havens Verschlüsselungs-Engine wurde aktualisiert, daher kann dieser Kreis nicht mehr verwendet werden. Erstelle ihn neu, um den Standort weiterhin mit denselben Personen zu teilen. Du musst sie erneut einladen.';
-
-  @override
   String get legacyCircleRecreateCta => 'Kreis neu erstellen';
 
   @override
-  String get legacyCircleRemoveCta => 'Entfernen';
+  String get storageResetTitle => 'Haven wurde aktualisiert';
 
   @override
-  String get legacyCircleRemoveDialogTitle => 'Kreis entfernen?';
+  String get storageResetKept =>
+      'Deine Identität ist unverändert, und das öffentliche Profil, das du bereits veröffentlicht hast, bleibt, wie es ist.';
 
   @override
-  String get legacyCircleRemoveDialogBody =>
-      'Dieser Kreis kann nicht mehr verwendet werden und wird aus deiner Liste entfernt. Das wirkt sich nicht auf einen neuen Kreis aus, den du als Ersatz erstellst.';
+  String get storageResetLost =>
+      'Für den Wechsel zu Havens neuer Verschlüsselungs-Engine wurden die Kreise entfernt, die vor diesem Update erstellt wurden. Erstelle sie neu und lade ihre Mitglieder erneut ein. Auch die Spitznamen, die du anderen vor diesem Update gegeben hast, und Profiländerungen, deren Speichern bis dahin noch nicht abgeschlossen war, wurden entfernt.';
 
   @override
-  String get legacyCircleRemoveConfirm => 'Entfernen';
+  String get storageResetRelays =>
+      'Dieses Update hat deine Relay-Einstellungen auf Havens Standardwerte zurückgesetzt. Sie werden erst veröffentlicht, wenn du fortfährst oder aus den Relay-Einstellungen zurückkehrst – du kannst also zuerst deine eigenen Relays hinzufügen.';
 
   @override
-  String get legacyCutoverExplainerTitle => 'Haven wurde aktualisiert';
+  String get storageResetContinue => 'Fortfahren';
 
   @override
-  String get legacyCutoverExplainerIdentityUnchanged =>
-      'Deine Identität und dein öffentliches Profil sind unverändert. Dafür musst du nichts tun.';
+  String get storageResetOpenRelaySettings => 'Relay-Einstellungen';
 
   @override
-  String get legacyCutoverExplainerCirclesNeedRecreation =>
-      'Für mehr Sicherheit müssen deine Kreise neu erstellt und ihre Mitglieder erneut eingeladen werden, bevor du wieder Standorte darin teilen kannst.';
-
-  @override
-  String get legacyCutoverExplainerAcknowledge => 'Verstanden';
-
-  @override
-  String get relaySettingsLegacyRetractionPending =>
-      'Haven bittet die Relays noch, einige alte Daten aus dem jüngsten Sicherheitsupdate zu verwerfen.';
+  String get storageResetAcknowledgeFailed =>
+      'Haven konnte deine Antwort nicht speichern. Solange sie nicht gespeichert ist, veröffentlicht Haven weder deine Relay-Einstellungen noch deinen Einladungsschlüssel, daher kann dich noch niemand einladen. Versuche es erneut – sonst fragt Haven beim nächsten Öffnen noch einmal.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'Kreis-Panel eingeklappt';
@@ -1496,6 +1552,10 @@ class AppLocalizationsDe extends AppLocalizations {
   @override
   String get identityAdvancedDeleteError =>
       'Identität konnte nicht gelöscht werden. Bitte versuche es erneut.';
+
+  @override
+  String get identityAdvancedDeletingProgress =>
+      'Deine Identität wird gelöscht …';
 
   @override
   String identityAdvancedCopiedToClipboard(String label) {
@@ -1791,7 +1851,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get clockSkewBodyBehind =>
-      'Dieses Gerät geht gegenüber dem Rest deiner Kreise nach, deshalb werden deine Standorte zwar gesendet, laufen aber ab, bevor sie jemand sehen kann. Aktiviere in den Systemeinstellungen die automatische Einstellung von Datum und Uhrzeit, um das zu beheben.';
+      'Dieses Gerät geht gegenüber dem Rest deiner Kreise nach, deshalb werden deine Standorte zwar gesendet, laufen aber zu früh ab, sodass deine Kreise einige oder alle davon verpassen können. Aktiviere in den Systemeinstellungen die automatische Einstellung von Datum und Uhrzeit, um das zu beheben.';
 
   @override
   String get clockSkewResolvedAnnouncement =>
@@ -1868,24 +1928,8 @@ class AppLocalizationsDe extends AppLocalizations {
   String get sharingHealthRepairAction => 'Reparieren';
 
   @override
-  String get sharingHealthRepairUnavailableHint =>
-      'Reparieren ist für diesen Kreis nicht verfügbar';
-
-  @override
-  String get sharingHealthRepairHint =>
-      'Stellt die Verbindung zu den Relays wieder her, sendet deinen Standort erneut und gibt diesem Kreis, wenn du sein Admin bist, möglicherweise einen neuen Schlüssel';
-
-  @override
   String get sharingHealthRepairSent =>
       'Reparatur gesendet. Die anderen ziehen nach, sobald ihre Handys die Reparatur empfangen haben.';
-
-  @override
-  String get sharingHealthRepairNotOwner =>
-      'Nur der Admin dieses Kreises kann ihn reparieren. Wende dich an diese Person, damit sie dich entfernt und wieder hinzufügt.';
-
-  @override
-  String get sharingHealthRepairNeedsNewCircle =>
-      'Dieser Kreis lässt sich auf diesem Handy nicht reparieren. Erstelle einen neuen Kreis mit denselben Personen.';
 
   @override
   String get sharingHealthRepairNothingToDo =>
@@ -1898,6 +1942,194 @@ class AppLocalizationsDe extends AppLocalizations {
   @override
   String get sharingHealthResumedAnnouncement =>
       'Das Teilen von Standorten funktioniert wieder.';
+
+  @override
+  String get sharingHealthTitleQuarantined =>
+      'Haven kann diesen Kreis gerade nicht öffnen';
+
+  @override
+  String get sharingHealthBodyQuarantined =>
+      'Beim Laden dieses Kreises auf diesem Telefon ist etwas schiefgelaufen. Der Kreis ist noch da.';
+
+  @override
+  String get sharingHealthTitleDisbanded => 'Dieser Kreis wurde beendet';
+
+  @override
+  String get sharingHealthBodyDisbanded =>
+      'Ein Admin hat diesen Kreis beendet, daher wird mit ihm nichts mehr geteilt. Verlasse ihn, um ihn von diesem Telefon zu entfernen.';
+
+  @override
+  String get sharingHealthQuarantineRetryHint =>
+      'Versucht erneut, diesen Kreis zu laden';
+
+  @override
+  String get sharingHealthQuarantineRetryFailedAnnouncement =>
+      'Haven kann diesen Kreis weiterhin nicht öffnen.';
+
+  @override
+  String get sharingHealthTitleUnrecoverable =>
+      'Dieser Kreis funktioniert auf diesem Telefon nicht mehr';
+
+  @override
+  String get sharingHealthBodyUnrecoverable =>
+      'Haven kann in diesem Kreis auf diesem Telefon keine Aktualisierungen mehr senden oder empfangen. Bitte einen der Admins dieses Kreises darum, dich zu entfernen und wieder hinzuzufügen. Wenn das niemand kann, erstelle einen neuen Kreis mit denselben Personen.';
+
+  @override
+  String get sharingHealthTitleStalled =>
+      'Haven kann die Aktualisierungen dieses Kreises nicht lesen';
+
+  @override
+  String get sharingHealthBodyStalled =>
+      'Dieses Telefon scheint eine Änderung am Kreis verpasst zu haben und konnte sie auf den Relays nicht finden. Bitte einen der Admins dieses Kreises darum, dich zu entfernen und wieder hinzuzufügen. Wenn das niemand kann, erstelle einen neuen Kreis mit denselben Personen.';
+
+  @override
+  String get sharingHealthTitlePaused => 'Haven hat diesen Kreis pausiert';
+
+  @override
+  String get sharingHealthBodyCollision =>
+      'Haven hat auf diesem Telefon ein Problem mit diesem Kreis festgestellt und das Teilen mit ihm gestoppt, damit dein Standort privat bleibt. Beheben lässt sich das nur, indem du den Kreis verlässt. Um ihm wieder beizutreten, brauchst du eine neue Einladung.';
+
+  @override
+  String get sharingHealthBodyCannotCheck =>
+      'Haven konnte diesen Kreis auf diesem Telefon nicht überprüfen und hat das Teilen mit ihm deshalb pausiert, damit dein Standort privat bleibt. Haven prüft ihn von allein erneut.';
+
+  @override
+  String get sharingHealthTitleLeaving => 'Du verlässt diesen Kreis';
+
+  @override
+  String get sharingHealthBodyLeaving =>
+      'Solange Haven das Verlassen abschließt, wird mit diesem Kreis nichts geteilt. Das kann etwa einen Tag dauern. Sobald es abgeschlossen ist, verschwindet der Kreis von diesem Telefon.';
+
+  @override
+  String get sharingHealthBodyRemovalUnmade =>
+      'Eine von dir angeforderte Entfernung wurde nicht durchgeführt. Deshalb hat Haven das Teilen deines Standorts mit diesem Kreis pausiert, damit ihn niemand sieht, den du entfernen wolltest.';
+
+  @override
+  String get sharingHealthBodyRemovalUnmadeNoNotice =>
+      'Eine von dir angeforderte Entfernung wurde nicht durchgeführt. Deshalb hat Haven das Teilen deines Standorts mit diesem Kreis pausiert, damit ihn niemand sieht, den du entfernen wolltest. Öffne die Mitgliederliste, um zu sehen, wer noch im Kreis ist.';
+
+  @override
+  String get sharingHealthBodyDepartureDue =>
+      'Jemand hat diesen Kreis verlassen, aber der Austritt ist noch nicht abgeschlossen. Bis dahin teilt Haven deinen Standort nicht mit diesem Kreis.';
+
+  @override
+  String get sharingHealthTitleBackgroundPaused =>
+      'Das Teilen im Hintergrund ist für diesen Kreis pausiert';
+
+  @override
+  String get sharingHealthBodyAwaitsForeground =>
+      'Die Relays dieses Kreises haben sich geändert, während Haven im Hintergrund lief. Haven schließt den Wechsel ab, während die App geöffnet ist; bis dahin wird mit diesem Kreis im Hintergrund nichts geteilt.';
+
+  @override
+  String get sharingHealthBodyAwaitingRelays =>
+      'Eine Änderung an diesem Kreis wartet darauf, dass ein Relay sie bestätigt. Bis dahin sendet Haven deinen Standort nicht an diesen Kreis und zeigt keine neuen Standorte aus ihm an. Haven versucht es weiter, solange die App geöffnet ist.';
+
+  @override
+  String get sharingHealthBodyAcknowledged =>
+      'Ein Relay hat eine Änderung an diesem Kreis angenommen, und Haven schließt sie gerade ab. Bis dahin warten die Aktualisierungen dieses Kreises.';
+
+  @override
+  String get sharingHealthBodyStagedWithoutRecord =>
+      'Eine Änderung an diesem Kreis konnte nicht gespeichert werden und wurde deshalb nicht gesendet. Haven bringt das spätestens beim nächsten Start in Ordnung; bis dahin warten die Aktualisierungen dieses Kreises.';
+
+  @override
+  String get sharingHealthBodyStoredInput =>
+      'Dieses Telefon hat Aktualisierungen für diesen Kreis, die es noch nicht verarbeiten konnte. Solange das nicht geschehen ist, teilt Haven deinen Standort nicht mit diesem Kreis.';
+
+  @override
+  String get sharingHealthBodySessionHeld =>
+      'Haven schließt noch seine vorherige Verbindung, deshalb ist das Teilen von Standorten pausiert. Es geht weiter, sobald das abgeschlossen ist. Ein Neustart deines Telefons behebt das immer.';
+
+  @override
+  String get sharingHealthRepairHintAnyMember =>
+      'Stellt die Verbindung zu den Relays wieder her, versucht erneut, deinen Standort zu senden, und gibt diesem Kreis möglicherweise neue Verschlüsselungsschlüssel';
+
+  @override
+  String get sharingHealthAttentionAnnouncement =>
+      'Das Teilen von Standorten in diesem Kreis erfordert deine Aufmerksamkeit. Öffne die Kreisdetails, um zu sehen, warum.';
+
+  @override
+  String changeNoticeArrivedAnnouncement(String circleName) {
+    return 'Zu den jüngsten Änderungen im Kreis $circleName gibt es einen Hinweis, der deine Aufmerksamkeit erfordert. Öffne die Kreisdetails dieses Kreises, um ihn zu lesen.';
+  }
+
+  @override
+  String get circleDetailsAttentionTooltip =>
+      'Kreisdetails, erfordert Aufmerksamkeit';
+
+  @override
+  String circleRowAttentionSemantics(String circleName) {
+    return '$circleName, erfordert Aufmerksamkeit';
+  }
+
+  @override
+  String get changeNoticeHeading => 'Änderungen an diesem Kreis';
+
+  @override
+  String get changeNoteRemovalUndone =>
+      'Eine Änderung an diesem Kreis wurde nicht wirksam. Falls damit jemand entfernt werden sollte, ist jede betroffene Person noch im Kreis und kann sehen, was mit dem Kreis geteilt wird.';
+
+  @override
+  String get changeNoteChangeUndone =>
+      'Eine Änderung an diesem Kreis wurde nicht wirksam, es hat sich also nichts geändert. Falls sie von dir stammt, nimm sie bei Bedarf erneut vor.';
+
+  @override
+  String get changeNoteMayBeOutOfStep =>
+      'Eine Änderung an diesem Kreis hat die anderen möglicherweise erreicht, ohne dass dieses Telefon davon erfahren hat. Dieses Telefon ist daher vielleicht nicht mehr auf demselben Stand wie sie.';
+
+  @override
+  String get changeNoteReinviteOwed =>
+      'Eine Person, die du eingeladen hast, ist in diesem Kreis aufgeführt, kann aber nicht beitreten, weil Haven ihre Einladung nicht senden kann. Entferne sie und füge sie erneut hinzu.';
+
+  @override
+  String get changeNoteChangeUnrecorded =>
+      'Eine Änderung an diesem Kreis konnte nicht gespeichert werden und wurde deshalb nicht gesendet.';
+
+  @override
+  String get changeNoteQueuedChangeDropped =>
+      'Eine ausstehende Änderung in diesem Kreis wurde verworfen, weil sie nicht mehr wie gewünscht durchgeführt werden konnte. Möglicherweise wurde sie bereits auf anderem Weg durchgeführt.';
+
+  @override
+  String get changeNoteQueuedChangesHeld =>
+      'Einige Änderungen an diesem Kreis warten noch darauf, durchgeführt zu werden.';
+
+  @override
+  String get changeNoteQueuedRemovalDropped =>
+      'Eine von dir angeforderte Entfernung in diesem Kreis wurde nicht durchgeführt. Wer entfernt werden sollte, ist möglicherweise noch im Kreis.';
+
+  @override
+  String get changeNoteChangeWithdrawn =>
+      'Die Änderung eines anderen Mitglieds an diesem Kreis hat eine deiner Änderungen ersetzt, deshalb wurde deine nicht durchgeführt. Nimm sie bei Bedarf erneut vor.';
+
+  @override
+  String get changeNoteWelcomeOwed =>
+      'Eine Einladung in diesen Kreis wurde noch nicht gesendet. Haven versucht weiterhin, sie zu senden, solange die App geöffnet ist, bis zu einem Tag lang nach deiner Einladung. Ist die Person bis dahin nicht beigetreten, entferne sie und füge sie erneut hinzu.';
+
+  @override
+  String get changeNoteUnreadLocation =>
+      'Einige kürzlich an diesen Kreis gesendete Aktualisierungen konnten auf diesem Telefon nicht geöffnet werden.';
+
+  @override
+  String get changeNoticeStillInCircleLabel => 'Noch im Kreis:';
+
+  @override
+  String get changeNoticeRemoveAgain => 'Erneut entfernen';
+
+  @override
+  String get changeNoticeReviewMembers => 'Mitglieder prüfen';
+
+  @override
+  String get changeNoticeKeepMembers => 'Im Kreis behalten';
+
+  @override
+  String get changeNoticeKeepConfirmTitle => 'Im Kreis behalten?';
+
+  @override
+  String get changeNoticeKeepConfirmBody =>
+      'Haven pausiert das Teilen mit diesem Kreis dann nicht mehr wegen dieser Entfernung. Wer entfernt werden sollte und noch im Kreis ist, bleibt darin und kann deinen Standort sehen, wann immer Haven ihn mit diesem Kreis teilt.';
+
+  @override
+  String get changeNoticeKeepConfirmAction => 'Behalten';
 
   @override
   String circleMemberLastSeenMinutes(int count) {

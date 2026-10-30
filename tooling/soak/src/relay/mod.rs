@@ -21,12 +21,14 @@ mod ledger;
 mod policies;
 mod proxy;
 
-pub use forge::{mint, Forgery};
-pub use ledger::Ledger;
+pub use forge::{mint, mint_dated, past_expiration, Forgery};
+pub use ledger::{Ledger, NegFrame};
 pub use policies::{oversize_message, NativeClosed, OVERSIZE_PREFIX};
+pub use proxy::NEG_REFUSAL;
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
@@ -67,6 +69,9 @@ pub struct SimRelay {
     relay_url: String,
     canonical: Proxy,
     per_device: BTreeMap<DeviceTag, Proxy>,
+    /// Each device's endpoints for addresses no plane serves: the same relay,
+    /// a listener apiece, so each is a relay of its own to the device.
+    aliases: BTreeMap<DeviceTag, Vec<Proxy>>,
     db: MemoryDatabase,
     // Kept alive deliberately: a `LocalRelay` shuts itself down when its last
     // handle is dropped, which would take the plane's store with it.
@@ -141,13 +146,14 @@ impl SimRelay {
             .map_err(|_| RigError::Core(Step::ApplyFault))?;
         let ledger = Ledger::new();
         let relay_url = relay.url().await.to_string();
-        let canonical = Proxy::start(&relay_url, ledger.clone(), None).await?;
+        let canonical = Proxy::start(&relay_url, ledger.clone(), None)?;
         Ok(Self {
             tag,
             ledger,
             relay_url,
             canonical,
             per_device: BTreeMap::new(),
+            aliases: BTreeMap::new(),
             db,
             _relay: relay,
         })
@@ -256,13 +262,50 @@ impl RelayPlane for SimRelay {
     /// Binds a listener of `device`'s own in front of the same relay, over the
     /// same store and the same ledger. Idempotent: a device provisioned twice
     /// keeps the endpoint its engine already dials.
-    async fn provision(&mut self, device: DeviceTag) -> Result<(), RigError> {
-        if self.per_device.contains_key(&device) {
-            return Ok(());
-        }
-        let proxy = Proxy::start(&self.relay_url, self.ledger.clone(), Some(device)).await?;
-        self.per_device.insert(device, proxy);
-        Ok(())
+    fn provision(
+        &mut self,
+        device: DeviceTag,
+    ) -> impl Future<Output = Result<(), RigError>> + Send {
+        let provisioned = if self.per_device.contains_key(&device) {
+            Ok(())
+        } else {
+            Proxy::start(&self.relay_url, self.ledger.clone(), Some(device)).map(|proxy| {
+                self.per_device.insert(device, proxy);
+            })
+        };
+        std::future::ready(provisioned)
+    }
+
+    /// Idempotent like [`Self::provision`]: a device keeps the alias
+    /// endpoints it was given.
+    fn provision_aliases(
+        &mut self,
+        device: DeviceTag,
+        count: usize,
+    ) -> impl Future<Output = Result<(), RigError>> + Send {
+        let provisioned = if self.aliases.contains_key(&device) {
+            Ok(())
+        } else {
+            (0..count)
+                .map(|_| Proxy::start(&self.relay_url, self.ledger.clone(), Some(device)))
+                .collect::<Result<Vec<_>, _>>()
+                .map(|endpoints| {
+                    self.aliases.insert(device, endpoints);
+                })
+        };
+        std::future::ready(provisioned)
+    }
+
+    fn alias_urls_for(&self, device: DeviceTag) -> Vec<String> {
+        self.aliases
+            .get(&device)
+            .map(|endpoints| {
+                endpoints
+                    .iter()
+                    .map(|proxy| proxy.url().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn url_for(&self, device: DeviceTag) -> &str {
@@ -307,14 +350,22 @@ impl SimRelay {
             ledger,
             canonical,
             per_device,
+            aliases,
             db,
             ..
         } = self;
+        // A device's alias endpoints front the same relay as its own, so they
+        // take its faults with it.
         let mut endpoints: Vec<&mut Proxy> = match device {
             None => std::iter::once(canonical)
                 .chain(per_device.values_mut())
+                .chain(aliases.values_mut().flatten())
                 .collect(),
-            Some(device) => vec![per_device.get_mut(&device).ok_or(RigError::UnknownTarget)?],
+            Some(device) => {
+                std::iter::once(per_device.get_mut(&device).ok_or(RigError::UnknownTarget)?)
+                    .chain(aliases.get_mut(&device).into_iter().flatten())
+                    .collect()
+            }
         };
         let applied = apply_inner(&mut endpoints, db, ledger, fault).await;
         // Recorded once per fault, however many endpoints took it, and only
@@ -328,6 +379,7 @@ impl SimRelay {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn apply_inner(
     endpoints: &mut [&mut Proxy],
     db: &MemoryDatabase,
@@ -337,13 +389,13 @@ async fn apply_inner(
     match fault {
         Fault::Down => {
             for endpoint in endpoints {
-                endpoint.take_down().await;
+                endpoint.take_down().await?;
             }
             Ok(())
         }
         Fault::Up => {
             for endpoint in endpoints {
-                endpoint.bring_up().await?;
+                endpoint.bring_up()?;
             }
             Ok(())
         }
@@ -434,13 +486,28 @@ async fn apply_inner(
             edit_all(endpoints, |state| state.cold_first_connect = true);
             Ok(())
         }
+        // Live connections go too: a relay that answers nothing serves none.
+        Fault::Unanswering => {
+            for endpoint in endpoints {
+                endpoint.edit(|state| state.unanswering = true);
+                endpoint.cut_connections();
+            }
+            Ok(())
+        }
+        Fault::WithholdEose => {
+            edit_all(endpoints, |state| state.withhold_eose = true);
+            Ok(())
+        }
+        Fault::RefusesNegentropy => {
+            edit_all(endpoints, |state| state.refuse_negentropy = true);
+            Ok(())
+        }
         // A heal restores BEHAVIOUR, endpoint included. It cannot restore a
         // wiped store: nothing un-forgets, and pretending otherwise would hide
         // the one fault whose damage outlives it.
         Fault::Heal => {
             for endpoint in endpoints {
-                endpoint.edit(|state| *state = FaultState::default());
-                endpoint.bring_up().await?;
+                endpoint.heal()?;
             }
             Ok(())
         }

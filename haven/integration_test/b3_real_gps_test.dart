@@ -119,7 +119,7 @@ import 'package:haven/src/providers/onboarding_provider.dart'
 import 'package:haven/src/providers/service_providers.dart'
     show circleServiceProvider, locationServiceProvider;
 import 'package:haven/src/rust/api.dart'
-    show CircleCreationResultFfi, MemberKeyPackageFfi, RelayManagerFfi;
+    show MemberKeyPackageFfi, RelayManagerFfi;
 import 'package:haven/src/services/fresh_secret.dart' show withFreshSecret;
 import 'package:haven/src/services/geolocator_location_service.dart'
     show GeolocatorLocationService;
@@ -130,7 +130,7 @@ import 'package:haven/src/services/nostr_circle_service.dart'
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
+import 'e2e/_lib/circle_creation.dart' show createCircleDelivered;
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
 import 'e2e/_lib/fake_location_service.dart'
     show aliceFakeLatitude, aliceFakeLongitude;
@@ -373,10 +373,10 @@ void main() {
       await waitForKeyPackage(relay: relay, authorPubkeyHex: bob.pubkeyHex);
 
       final relayManager = await RelayManagerFfi.newInstance();
-      final CircleCreationResultFfi creation;
       try {
         final bobKp = await relayManager.fetchMemberKeypackage(
           pubkey: bob.pubkeyHex,
+          circle: aliceManager,
         );
         if (bobKp == null) {
           throw StateError(
@@ -384,22 +384,21 @@ void main() {
             'KeyPackage was not found on the relay.',
           );
         }
-        creation = await withFreshSecret(
+        await withFreshSecret(
           () => container
               .read(identityNotifierProvider.notifier)
               .getSecretBytes(),
-          // Rule 13: publishes Bob's Welcome and CONFIRMS the staged create.
-          // An unconfirmed create pins the group in MDK PendingPublish, where
-          // every kind-445 buffers forever.
-          (aliceSecret) => createCircleConfirmed(
+          // Publishes Bob's Welcome and requires every relay ack: an invitee
+          // whose Welcome never landed never joins. See
+          // `createCircleDelivered`'s doc.
+          (aliceSecret) => createCircleDelivered(
             manager: aliceManager,
-            relay: relay,
+            relayManager: relayManager,
             identitySecretBytes: aliceSecret,
             members: <MemberKeyPackageFfi>[bobKp],
             name: 'B3 Real GPS Circle',
             circleType: 'location_sharing',
             relays: <String>[defaultStrfryUrl],
-            creatorFallbackRelays: <String>[defaultStrfryUrl],
             scenario: 'b3',
           ),
         );
@@ -407,11 +406,6 @@ void main() {
         await relayManager.shutdown();
       }
 
-      if (!creation.welcomeEvents.any(
-        (e) => e.recipientPubkey.toLowerCase() == bob.pubkeyHex.toLowerCase(),
-      )) {
-        throw StateError('[b3] createCircle produced no gift-wrap for Bob.');
-      }
 
       final bobCircle = await bob.acceptInvitationViaRelay(relay: relay);
       expect(

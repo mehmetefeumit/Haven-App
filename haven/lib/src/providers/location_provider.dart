@@ -60,6 +60,8 @@ final isIOSProvider = Provider<bool>((_) => Platform.isIOS);
 /// A not-yet-dispatched state (`null`) maps to `true`, which is the ordinary
 /// foreground launch; `inactive` is the transient the OS sandwiches around
 /// `resumed` and is not treated as backgrounded.
+///
+/// Never a claim to the live-sync engine: see `appIsResumed`.
 final appForegroundProvider = StateProvider<bool>((_) {
   return switch (WidgetsBinding.instance.lifecycleState) {
     AppLifecycleState.resumed || AppLifecycleState.inactive || null => true,

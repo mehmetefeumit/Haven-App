@@ -39,7 +39,11 @@ void triggerProfileSync(WidgetRef ref) {
 
 /// Syncs only if the local outbox is pending AND the persisted backoff
 /// permits another attempt now — never unconditionally (relay metadata
-/// minimization). The resume/cold-start entry point.
+/// minimization). The resume/cold-start entry point, and what a photo
+/// removal calls afterwards: the removal can publish what was waiting, and
+/// with nothing left pending this only re-reads the status. It only re-reads
+/// it, too, for a removal some relay did not take: that one is left waiting
+/// with its first retry not yet due.
 ///
 /// Fire-and-forget, same contract as [triggerProfileSync].
 void triggerProfileSyncRetry(WidgetRef ref) {

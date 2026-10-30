@@ -175,6 +175,12 @@ class MockProfileService implements ProfileService {
   }
 
   @override
+  Future<PublishedOwnProfile> fetchOwnPublishedProfile() async {
+    methodCalls.add((method: 'fetchOwnPublishedProfile', args: const {}));
+    return const PublishedOwnProfile.unanswered();
+  }
+
+  @override
   Future<Profile> updateOwnProfile({
     required String displayName,
     String? about,

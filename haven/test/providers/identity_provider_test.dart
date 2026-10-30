@@ -17,27 +17,54 @@
 /// with a stale cached value after a successful mutation.
 library;
 
+import 'dart:async';
+
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/constants/tiles.dart';
+import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart' show liveSyncEnabled;
+import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_prefetch_provider.dart';
-import 'package:haven/src/rust/api.dart' show BacklogOutcomeFfi, FfiGroupSpec;
+import 'package:haven/src/rust/api.dart'
+    show
+        BacklogOutcomeFfi,
+        BurstOpenFfi,
+        FfiGroupSpec,
+        FfiRelayEvent,
+        FfiRelayEventKind,
+        LiveLifecycleFfi,
+        RelayManagerFfi;
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/live_sync_resubscriber.dart';
+import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/services/maintenance_service.dart';
+import 'package:haven/src/services/nostr_relay_service.dart';
+import 'package:haven/src/services/nostr_subscription_service.dart';
 import 'package:haven/src/services/pending_leave_service.dart' show kPendingLeaveKey;
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
+import 'package:haven/src/services/relay_preferences_service.dart';
 import 'package:haven/src/services/subscription_service.dart'
-    show LiveSyncStopOutcome, SubscriptionService;
+    show
+        LiveEventRouter,
+        LiveSyncStopOutcome,
+        SubscriptionService,
+        SubscriptionServiceException;
 import 'package:haven/src/services/tile_prefetch_service.dart';
-import 'package:latlong2/latlong.dart';
+import 'package:latlong2/latlong.dart' hide Circle;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../helpers/fake_live_sync_engine.dart';
 import '../mocks/mock_circle_service.dart';
+import '../mocks/mock_relay_preferences_service.dart';
+import '../mocks/mock_relay_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -518,6 +545,227 @@ void main() {
       );
     });
 
+    test("a logout forgets the clock evidence the identity's peers gave",
+        () async {
+      final at = DateTime.utc(2026, 10, 14, 12);
+      final detector = ClockSkewDetector(now: () => at);
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            _MockIdentityService(
+              initialIdentity: createdIdentity,
+              deleteClears: true,
+            ),
+          ),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
+          clockSkewDetectorProvider.overrideWithValue(detector),
+        ],
+      );
+      addTearDown(container.dispose);
+      detector.recordPeerTimestamp(
+        senderPubkey: 'a-peer-of-the-first-identity',
+        peerTimestamp: at.add(const Duration(minutes: 10)),
+      );
+      expect(detector.status.isSkewed, isTrue, reason: 'premise: a verdict');
+
+      await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+      expect(
+        detector.status,
+        ClockSkewStatus.healthy,
+        reason: 'the next identity is shown a clock banner raised by the '
+            "deleted one's peers",
+      );
+      expect(detector.trackedSourceCountForTest, 0);
+    });
+
+    test("a logout forgets the waits the identity's leaves and drives named",
+        () async {
+      final maintenance = _ForgetCountingMaintenance();
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            _MockIdentityService(
+              initialIdentity: createdIdentity,
+              deleteClears: true,
+            ),
+          ),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
+          maintenanceServiceProvider.overrideWithValue(maintenance),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+      expect(
+        maintenance.forgets,
+        1,
+        reason: "the next identity's first carry-on and drive wait out the "
+            "deleted one's circles",
+      );
+    });
+
+    test('a logout closes the publish connection after the stops and the '
+        "wipe, so the next identity's first publish opens its own", () async {
+      // Left open, the pool's sockets live 60-70 s past their last send, and
+      // the next identity's publishes inside that window would ride them —
+      // one connection carrying both identities links the two at that relay.
+      final identity = _MockIdentityService(
+        initialIdentity: createdIdentity,
+        deleteClears: true,
+      );
+      final circle = MockCircleService();
+      final engine = _RecordingSubscriptionService(sharedLog: []);
+      late final List<String> atShutdown;
+      final pool = _RecordingRelayManager(
+        onShutdown: () => atShutdown = [
+          if (circle.methodCalls.contains('wipeAllMlsState')) 'wiped',
+          if (identity.deleteCallCount == 1) 'key deleted',
+          'stops:${engine.stopCalls}',
+        ],
+      );
+      final relay = NostrRelayService.withInjectedManager(pool);
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(identity),
+          circleServiceProvider.overrideWithValue(circle),
+          subscriptionServiceProvider.overrideWithValue(engine),
+          relayServiceProvider.overrideWithValue(relay),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+      expect(pool.shutdownCalls, 1, reason: 'the pool was left open');
+      expect(atShutdown, [
+        'wiped',
+        'key deleted',
+        'stops:${liveSyncEnabled ? 2 : 0}',
+      ]);
+      expect(
+        relay.poolOpenForTest,
+        isFalse,
+        reason: "the next identity's first relay call would reuse the last "
+            "identity's pool",
+      );
+      expect(pool.otherCalls, isEmpty);
+    });
+
+    /// Logs in through [login] over a pool that records its shutdown.
+    Future<void> loginShutsThePool(
+      Future<void> Function(IdentityNotifier notifier) login,
+    ) async {
+      // Whatever the last identity left on the pool — a publish, a fetch, a
+      // pool opened after its logout — the next one opens its own.
+      SharedPreferences.setMockInitialValues({});
+      final identity = _MockIdentityService(
+        createResult: createdIdentity,
+        importResult: importedIdentity,
+      );
+      int? provisionedAtShutdown;
+      final pool = _RecordingRelayManager(
+        onShutdown: () => provisionedAtShutdown =
+            identity.createCallCount + identity.importCallCount,
+      );
+      final relay = NostrRelayService.withInjectedManager(pool);
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(identity),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
+          relayServiceProvider.overrideWithValue(relay),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await login(container.read(identityNotifierProvider.notifier));
+
+      expect(pool.shutdownCalls, 1, reason: 'the pool was left open');
+      expect(provisionedAtShutdown, 0, reason: 'shut after provisioning');
+      expect(relay.poolOpenForTest, isFalse);
+    }
+
+    test('createIdentity shuts the publish pool before the identity is '
+        'provisioned', () => loginShutsThePool((n) => n.createIdentity()));
+
+    test('importFromNsec shuts the publish pool before the identity is '
+        'provisioned', () => loginShutsThePool((n) => n.importFromNsec('x')));
+
+    test('the clock reset comes after the stops: a sample recorded while the '
+        'first is out is gone', () {
+      // A handler of the deleted identity's session runs until its stop
+      // returns, and records what it receives on the location service the
+      // wipe has not yet closed. On a fake clock: the logout arms its 65 s
+      // stop deadline.
+      SharedPreferences.setMockInitialValues({});
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            ..allMessagesHandler = (_, _, _) async => null;
+      addTearDown(() => messenger.allMessagesHandler = null);
+      fakeAsync((async) {
+        final at = DateTime.utc(2026, 10, 15, 12);
+        final detector = ClockSkewDetector(now: () => at);
+        final engine = _ParkedFirstStopService()
+          ..firstStop = Completer<void>();
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(
+              _MockIdentityService(
+                initialIdentity: createdIdentity,
+                deleteClears: true,
+              ),
+            ),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+            clockSkewDetectorProvider.overrideWithValue(detector),
+            subscriptionServiceProvider.overrideWithValue(engine),
+          ],
+        );
+        final sharing = container.read(locationSharingServiceProvider);
+        var loggedOut = false;
+        unawaited(
+          container
+              .read(identityNotifierProvider.notifier)
+              .deleteIdentity()
+              .then((_) => loggedOut = true),
+        );
+        async.flushMicrotasks();
+        unawaited(
+          sharing.ingestStreamedLocation(
+            circle: TestCircleFactory.createCircle(
+              nostrGroupId: const [1, 2, 3],
+              mlsGroupId: const [9, 9, 9],
+            ),
+            decrypted: DecryptedLocation(
+              senderPubkey: 'a-peer-of-the-first-identity',
+              latitude: 1,
+              longitude: 2,
+              geohash: 'g',
+              timestamp: at.add(const Duration(minutes: 10)),
+              expiresAt: at.add(const Duration(hours: 1)),
+            ),
+          ),
+        );
+        async.flushMicrotasks();
+        if (liveSyncEnabled) {
+          expect(engine.stopCalls, 1, reason: 'premise: inside the first stop');
+          expect(detector.status.isSkewed, isTrue, reason: 'premise: recorded');
+        }
+        engine.firstStop!.complete();
+        async.flushMicrotasks();
+
+        expect(loggedOut, isTrue, reason: 'premise: the logout ended');
+        expect(
+          detector.trackedSourceCountForTest,
+          0,
+          reason: "the next identity inherits a sample of the deleted one's "
+              'peer, recorded after the reset',
+        );
+        expect(detector.status, ClockSkewStatus.healthy);
+        container.dispose();
+      });
+    });
+
     test(
       'deleteIdentity calls closeAndInvalidate and wipeAllMlsState (M10)',
       () async {
@@ -724,7 +972,1090 @@ void main() {
 
       await container.read(identityNotifierProvider.notifier).deleteIdentity();
 
-      expect(engine.stopCalls, liveSyncEnabled ? 1 : 0);
+      // Once before the wipes, once behind the circle service's latch.
+      expect(engine.stopCalls, liveSyncEnabled ? 2 : 0);
+    });
+
+    test('the second stop is behind the latch and ahead of the MLS wipe',
+        () async {
+      final mockCircle = MockCircleService();
+      final engine = _RecordingSubscriptionService(
+        sharedLog: mockCircle.methodCalls,
+      );
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            _MockIdentityService(
+              initialIdentity: createdIdentity,
+              deleteClears: true,
+            ),
+          ),
+          circleServiceProvider.overrideWithValue(mockCircle),
+          subscriptionServiceProvider.overrideWithValue(engine),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+      final order = [
+        for (final call in mockCircle.methodCalls)
+          if (const {
+            'subscriptionService.stop',
+            'resetAllSyncCursors',
+            'closeAndInvalidate',
+            'wipeAllMlsState',
+          }.contains(call))
+            call,
+      ];
+      expect(
+        order,
+        liveSyncEnabled
+            ? const [
+                'subscriptionService.stop',
+                'resetAllSyncCursors',
+                'closeAndInvalidate',
+                'subscriptionService.stop',
+                'wipeAllMlsState',
+              ]
+            : const [
+                'resetAllSyncCursors',
+                'closeAndInvalidate',
+                'wipeAllMlsState',
+              ],
+        reason: 'ahead of the latch a queued leg can still build an engine '
+            'behind the stop; behind the wipe that engine has already been '
+            'left holding the files',
+      );
+    });
+  });
+
+  // A logout stops the engine and then wipes. It has no deadline of its own,
+  // and a start can be seconds from resolving — or never resolve.
+  group('IdentityNotifier.deleteIdentity — a live-sync start in flight', () {
+    test('the logout ends the start, and wipes only once the engine has '
+        'stopped', () async {
+      final mockCircle = MockCircleService();
+      final engine = _LoggingEngine(mockCircle.methodCalls)
+        ..startGate = Completer<void>();
+      final service = NostrSubscriptionService(
+        router: LiveEventRouter(
+          circleService: () => mockCircle,
+          circlesSnapshot: () async => const [],
+          secretBytes: () async => const [],
+          parseLocation: (_, _) async => null,
+          ingestLocation: (_, _) async {},
+          reconcileRoster: (_) async {},
+          onLocationsChanged: () {},
+          onGroupUpdated: (_) {},
+          onInvitationReceived: () {},
+          onStatus: (_) {},
+        ),
+        engineFactory: () async => engine,
+      );
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            _MockIdentityService(
+              initialIdentity: createdIdentity,
+              deleteClears: true,
+            ),
+          ),
+          circleServiceProvider.overrideWithValue(mockCircle),
+          subscriptionServiceProvider.overrideWithValue(service),
+        ],
+      );
+      addTearDown(container.dispose);
+      final starting = service
+          .start(groups: const [], inboxRelays: const [])
+          .then<Object?>((_) => null, onError: (Object e) => e);
+      await pumpEventQueue();
+      expect(engine.calls, ['start'], reason: 'premise: still connecting');
+
+      // The start's gate is never opened.
+      final loggingOut =
+          container.read(identityNotifierProvider.notifier).deleteIdentity();
+      await pumpEventQueue();
+      if (liveSyncEnabled) {
+        expect(
+          engine.calls,
+          ['start', 'stop'],
+          reason: 'the logout is waiting for a start nothing else can end',
+        );
+      }
+      await loggingOut;
+
+      final wiped = mockCircle.methodCalls.indexOf('wipeAllMlsState');
+      expect(wiped, isNot(-1), reason: 'the logout must reach its wipe');
+      if (liveSyncEnabled) {
+        expect(
+          engine.calls,
+          ['start', 'stop'],
+          reason: 'a logout that waited for the start would never have '
+              'returned',
+        );
+        expect(
+          mockCircle.methodCalls.indexOf('engine.stopSession'),
+          lessThan(wiped),
+          reason: 'the session must be down before the state it reads is '
+              'deleted',
+        );
+        expect(await starting, isA<SubscriptionServiceException>());
+        expect(service.isRunning, isFalse);
+      } else {
+        expect(
+          engine.calls,
+          ['start'],
+          reason: 'the rollback build never touches the engine at logout',
+        );
+        await service.stop();
+      }
+    });
+  });
+
+  // MapShell stays mounted across a logout (the router gates on onboarding,
+  // not on identity), so its re-subscriber and every leg queued on it are
+  // still there, in an app that is in front. The first stop ends the start
+  // in flight; the legs behind it then find the identity present and the
+  // manager open, for as long as the awaited wipes take.
+  group('IdentityNotifier.deleteIdentity — legs queued behind the start it '
+      'ends', () {
+    LiveEventRouter router(MockCircleService circle) => LiveEventRouter(
+      circleService: () => circle,
+      circlesSnapshot: () async => const [],
+      secretBytes: () async => const [],
+      parseLocation: (_, _) async => null,
+      ingestLocation: (_, _) async {},
+      reconcileRoster: (_) async {},
+      onLocationsChanged: () {},
+      onGroupUpdated: (_) {},
+      onInvitationReceived: () {},
+      onStatus: (_) {},
+    );
+
+    test('no engine survives the wipe, and none is built behind the latch',
+        () async {
+      final circle = _GatedCursorsCircle()..cursorGate = Completer<void>();
+      final engines = <_LoggingEngine>[];
+      var refusedBuilds = 0;
+      final service = NostrSubscriptionService(
+        router: router(circle),
+        // What the provider's factory does: once the circle service has
+        // latched it hands out no manager (`NostrCircleService.initialize`).
+        engineFactory: () async {
+          if (circle.methodCalls.contains('closeAndInvalidate')) {
+            refusedBuilds++;
+            throw const CircleServiceException('circle service was wiped');
+          }
+          final engine = _LoggingEngine(circle.methodCalls);
+          if (engines.isEmpty) engine.startGate = Completer<void>();
+          engines.add(engine);
+          return engine;
+        },
+      );
+      final resubscriber = LiveSyncResubscriber(
+        engine: service,
+        inboxRelays: () async => const ['wss://inbox.test'],
+        initialCircles: const [],
+        sessionWanted: () => true,
+      );
+      addTearDown(resubscriber.dispose);
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            _MockIdentityService(
+              initialIdentity: createdIdentity,
+              deleteClears: true,
+            ),
+          ),
+          circleServiceProvider.overrideWithValue(circle),
+          subscriptionServiceProvider.overrideWithValue(service),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      // The resume's heal, still connecting, and two more legs behind it.
+      final legs = [
+        resubscriber.ensureRunning(),
+        resubscriber.ensureRunning(),
+        resubscriber.ensureRunning(),
+      ];
+      await pumpEventQueue();
+      expect(engines.single.calls, ['start'], reason: 'premise: connecting');
+
+      final loggingOut =
+          container.read(identityNotifierProvider.notifier).deleteIdentity();
+      await pumpEventQueue();
+      expect(
+        circle.methodCalls,
+        isNot(contains('closeAndInvalidate')),
+        reason: 'premise: the logout is still in its awaited wipes',
+      );
+
+      if (!liveSyncEnabled) {
+        // The rollback build never touches the engine at logout.
+        circle.cursorGate!.complete();
+        await loggingOut;
+        expect(engines.single.calls, ['start']);
+        await service.stop();
+        await Future.wait(legs);
+        return;
+      }
+
+      expect(
+        engines,
+        hasLength(2),
+        reason: 'premise: a leg queued behind the start the logout ended '
+            'built a new engine, with the identity still present',
+      );
+      expect(service.isRunning, isTrue, reason: 'premise: and it is up');
+
+      circle.cursorGate!.complete();
+      await loggingOut;
+      await pumpEventQueue();
+
+      expect(await Future.wait(legs), [
+        LiveSyncHealOutcome.stoodDown,
+        LiveSyncHealOutcome.running,
+        LiveSyncHealOutcome.running,
+      ]);
+      expect(
+        [for (final engine in engines) engine.stopCalls],
+        [1, 1],
+        reason: 'an engine built during the wipes outlived the logout: its '
+            'REQs stand on the deleted identity until the app is restarted',
+      );
+      expect(service.isRunning, isFalse);
+      final stops = [
+        for (final (i, call) in circle.methodCalls.indexed)
+          if (call == 'engine.stopSession') i,
+      ];
+      expect(
+        stops.last,
+        allOf(
+          greaterThan(circle.methodCalls.indexOf('closeAndInvalidate')),
+          lessThan(circle.methodCalls.indexOf('wipeAllMlsState')),
+        ),
+        reason: 'behind the latch, so nothing can start behind it; ahead of '
+            'the wipe, so the files are not deleted under an open session',
+      );
+      expect(refusedBuilds, 0, reason: 'no start was left in flight');
+
+      // And the latch really is final: a heal tick after the logout.
+      expect(
+        await resubscriber.ensureRunning(),
+        LiveSyncHealOutcome.failed,
+      );
+      expect(refusedBuilds, 1);
+      expect(engines, hasLength(2));
+      expect(service.isRunning, isFalse);
+    });
+
+    test('a session the engine would not let go does not hold the wipe back',
+        () async {
+      // The key's deletion is the primary objective. What the logout must
+      // not do is report that session gone: the service goes on answering
+      // `stillHolding` for it.
+      final circle = MockCircleService();
+      final engine = _LoggingEngine(circle.methodCalls)..failStopCalls = 2;
+      final service = NostrSubscriptionService(
+        router: router(circle),
+        engineFactory: () async => engine,
+      );
+      final identity = _MockIdentityService(
+        initialIdentity: createdIdentity,
+        deleteClears: true,
+      );
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(identity),
+          circleServiceProvider.overrideWithValue(circle),
+          subscriptionServiceProvider.overrideWithValue(service),
+        ],
+      );
+      addTearDown(container.dispose);
+      await service.start(groups: const [], inboxRelays: const []);
+
+      await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+      expect(circle.methodCalls, contains('wipeAllMlsState'));
+      expect(identity.deleteCallCount, 1);
+      expect(await service.stop(), LiveSyncStopOutcome.stillHolding);
+    });
+  });
+
+  // The secret key's removal is the logout's last step, behind two engine
+  // stops. The engine's stop takes its lifecycle lock first, with no bound.
+  group('IdentityNotifier.deleteIdentity — a stop that does not return', () {
+    test('does not keep the key past one deadline: both stops share it, and '
+        'the wipe and the deletion proceed at it', () {
+      // Every platform channel the logout touches answers "not implemented",
+      // as in every other test here — but at once, inside the fake clock,
+      // not from the real event loop this test never returns to.
+      SharedPreferences.setMockInitialValues({});
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            ..allMessagesHandler = (_, _, _) async => null;
+      addTearDown(() => messenger.allMessagesHandler = null);
+      fakeAsync((async) {
+        final circle = MockCircleService();
+        final engine = _NeverStoppingSubscriptionService();
+        final identity = _MockIdentityService(
+          initialIdentity: createdIdentity,
+          deleteClears: true,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(identity),
+            circleServiceProvider.overrideWithValue(circle),
+            subscriptionServiceProvider.overrideWithValue(engine),
+          ],
+        );
+        var done = false;
+        unawaited(
+          container
+              .read(identityNotifierProvider.notifier)
+              .deleteIdentity()
+              .then((_) => done = true),
+        );
+        async.flushMicrotasks();
+        if (liveSyncEnabled) {
+          expect(identity.deleteCallCount, 0, reason: 'premise: waiting');
+          expect(circle.methodCalls, isNot(contains('wipeAllMlsState')));
+          async.elapse(kLiveSyncRestartBudget - const Duration(seconds: 1));
+          expect(
+            circle.methodCalls,
+            isNot(contains('resetAllSyncCursors')),
+            reason: 'premise: still inside the first stop',
+          );
+          expect(done, isFalse, reason: 'premise: the deadline is not up');
+        }
+
+        // The second stop joins the same stop in flight: it gets no budget of
+        // its own. The whole wait is one budget.
+        async.elapse(const Duration(seconds: 1));
+
+        expect(
+          done,
+          isTrue,
+          reason: 'the key waited a second budget for a stop that had already '
+              'had one — a user who kills the app meanwhile keeps it',
+        );
+        expect(
+          async.pendingTimers,
+          isEmpty,
+          reason: 'the deadline outlived the logout',
+        );
+        expect(engine.stopCalls, liveSyncEnabled ? 2 : 0);
+        expect(circle.methodCalls, contains('wipeAllMlsState'));
+        expect(identity.deleteCallCount, 1);
+        container.dispose();
+      });
+    });
+
+    test("a stop given up on drops the deleted identity's handlers: none "
+        "reaches the next identity's cache", () {
+      // The engine's stop waits on its lifecycle lock, unbounded, and the
+      // logout gives up on it. A handler parked across the logout and the
+      // login must find its identity ended, and the old core must deliver
+      // nothing more, although the stop never returned.
+      SharedPreferences.setMockInitialValues({});
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            ..allMessagesHandler = (_, _, _) async => null;
+      addTearDown(() => messenger.allMessagesHandler = null);
+      fakeAsync((async) {
+        final circleServices = <MockCircleService>[];
+        late ProviderContainer container;
+        final circle = TestCircleFactory.createCircle(
+          nostrGroupId: const [1, 2, 3],
+          mlsGroupId: const [9, 9, 9],
+        );
+        final t0 = DateTime.utc(2026, 10, 15, 12);
+        final parsing = Completer<void>();
+        final engine = FakeLiveSyncEngine();
+        final router = LiveEventRouter(
+          circleService: () => container.read(circleServiceProvider),
+          circlesSnapshot: () async => [circle],
+          secretBytes: () async => const [],
+          parseLocation: (_, sender) async {
+            await parsing.future;
+            return DecryptedLocation(
+              senderPubkey: sender,
+              latitude: 1,
+              longitude: 2,
+              geohash: 'g',
+              timestamp: t0,
+              expiresAt: t0.add(const Duration(days: 3650)),
+            );
+          },
+          ingestLocation: (circle, decrypted) => container
+              .read(locationSharingServiceProvider)
+              .ingestStreamedLocation(circle: circle, decrypted: decrypted),
+          reconcileRoster: (_) async {},
+          onLocationsChanged: () {},
+          onGroupUpdated: (_) {},
+          onInvitationReceived: () {},
+          onStatus: (_) {},
+        );
+        final service = NostrSubscriptionService(
+          router: router,
+          engineFactory: () async => engine,
+        );
+        container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(
+              _MockIdentityService(
+                initialIdentity: createdIdentity,
+                deleteClears: true,
+                createResult: importedIdentity,
+              ),
+            ),
+            circleServiceProvider.overrideWith((ref) {
+              final service = MockCircleService();
+              circleServices.add(service);
+              return service;
+            }),
+            subscriptionServiceProvider.overrideWithValue(service),
+            liveEventRouterProvider.overrideWithValue(router),
+          ],
+        );
+        unawaited(service.start(groups: const [], inboxRelays: const []));
+        async.flushMicrotasks();
+        engine
+          ..stopGate = Completer<void>()
+          ..controller.add(
+            FfiRelayEvent(
+              kind: FfiRelayEventKind.location,
+              nostrGroupId: Uint8List.fromList(circle.nostrGroupId),
+              senderPubkey: 'a-peer-of-the-first-identity',
+              content: '{}',
+            ),
+          );
+        async.flushMicrotasks();
+
+        final notifier = container.read(identityNotifierProvider.notifier);
+        var loggedOut = false;
+        unawaited(notifier.deleteIdentity().then((_) => loggedOut = true));
+        async
+          ..elapse(kLiveSyncRestartBudget)
+          ..flushMicrotasks();
+        expect(loggedOut, isTrue, reason: 'premise: the logout gave up');
+        unawaited(notifier.createIdentity());
+        async.flushMicrotasks();
+        parsing.complete();
+        // The old core is still up, its stop unanswered: what it delivers
+        // after the login arrives under the next identity.
+        if (!engine.controller.isClosed) {
+          engine.controller.add(
+            FfiRelayEvent(
+              kind: FfiRelayEventKind.location,
+              nostrGroupId: Uint8List.fromList(circle.nostrGroupId),
+              senderPubkey: 'another-peer-of-the-first-identity',
+              content: '{}',
+            ),
+          );
+        }
+        async
+          ..elapse(Duration.zero)
+          ..flushMicrotasks();
+
+        if (liveSyncEnabled) {
+          expect(
+            container
+                .read(locationSharingServiceProvider)
+                .debugCachedLocationCount,
+            0,
+            reason: "a coordinate of the deleted identity's peer was merged "
+                "into the next identity's cache",
+          );
+          expect(
+            [
+              for (final circles in circleServices)
+                ...circles.methodCalls.where(
+                  (c) => c == 'upsertLastKnownLocation',
+                ),
+            ],
+            isEmpty,
+            reason: "and written to the next identity's store",
+          );
+        } else {
+          expect(engine.stopCalls, 0, reason: 'the flag-off logout stops none');
+        }
+        container.dispose();
+      });
+    });
+
+    test('leaves no deadline behind when the engine stops at once', () {
+      SharedPreferences.setMockInitialValues({});
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            ..allMessagesHandler = (_, _, _) async => null;
+      addTearDown(() => messenger.allMessagesHandler = null);
+      fakeAsync((async) {
+        final circle = MockCircleService();
+        final engine = _RecordingSubscriptionService(sharedLog: []);
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(
+              _MockIdentityService(
+                initialIdentity: createdIdentity,
+                deleteClears: true,
+              ),
+            ),
+            circleServiceProvider.overrideWithValue(circle),
+            subscriptionServiceProvider.overrideWithValue(engine),
+          ],
+        );
+        var done = false;
+        unawaited(
+          container
+              .read(identityNotifierProvider.notifier)
+              .deleteIdentity()
+              .then((_) => done = true),
+        );
+        async.flushMicrotasks();
+
+        expect(done, isTrue);
+        expect(engine.stopCalls, liveSyncEnabled ? 2 : 0);
+        // Riverpod's zero-delay refresh of what the logout invalidated.
+        async.elapse(Duration.zero);
+        expect(
+          async.pendingTimers,
+          isEmpty,
+          reason: 'a 65 s timer left running after a logout that is over',
+        );
+        container.dispose();
+      });
+    });
+  });
+
+  // One container lives for the process. Whatever a provider read while it
+  // was built — the circle service, a relay list, the own pubkey — is the
+  // PREVIOUS identity's after a logout and a login, unless it is rebuilt.
+  group('a logout, then a login as someone else, in one process', () {
+    const firstInbox = ['wss://inbox.private.first.example'];
+    const secondInbox = ['wss://inbox.second.example'];
+
+    /// A container whose circle service is a NEW instance at every build, as
+    /// the production one is, and whose relay preferences are that
+    /// instance's: the first identity's list is customised.
+    ({
+      ProviderContainer container,
+      List<MockCircleService> circleServices,
+      _MockIdentityService identity,
+    })
+    scope({
+      List<Override> overrides = const [],
+      MockCircleService Function() circleService = MockCircleService.new,
+    }) {
+      SharedPreferences.setMockInitialValues({});
+      final circleServices = <MockCircleService>[];
+      final identity = _MockIdentityService(
+        initialIdentity: createdIdentity,
+        deleteClears: true,
+        createResult: importedIdentity,
+      );
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(identity),
+          circleServiceProvider.overrideWith((ref) {
+            final service = circleService();
+            circleServices.add(service);
+            return service;
+          }),
+          relayPreferencesServiceProvider.overrideWith((ref) async {
+            final first = identical(
+              ref.read(circleServiceProvider),
+              circleServices.first,
+            );
+            return MockRelayPreferencesService(
+              initialRelays: {
+                RelayCategory.inbox: first ? firstInbox : secondInbox,
+              },
+            );
+          }),
+          ...overrides,
+        ],
+      );
+      addTearDown(container.dispose);
+      return (
+        container: container,
+        circleServices: circleServices,
+        identity: identity,
+      );
+    }
+
+    test("the second identity's inbox REQ is issued on its own relay list",
+        () async {
+      final (:container, :circleServices, identity: _) = scope();
+      final notifier = container.read(identityNotifierProvider.notifier);
+      expect(
+        await container.read(inboxRelaysProvider.future),
+        firstInbox,
+        reason: 'premise: the first identity customised its inbox list',
+      );
+
+      await notifier.deleteIdentity();
+      // Logged out, the shell is still mounted and a heal tick still reads
+      // the list.
+      await container.read(inboxRelaysProvider.future);
+      await notifier.createIdentity();
+
+      expect(
+        await container.read(inboxRelaysProvider.future),
+        secondInbox,
+        reason: "the new npub's gift-wrap REQ went to the previous "
+            "identity's private inbox relay: the two are linked there, and "
+            'it listens where nobody sends its Welcomes',
+      );
+      expect(circleServices, hasLength(2), reason: 'on a fresh circle service');
+    });
+
+    test('a logout drops what was built from the identity, before any login',
+        () async {
+      final held = TestCircleFactory.createCircle(
+        nostrGroupId: const [4, 5, 6],
+        mlsGroupId: const [7, 7, 7],
+      );
+      final (:container, :circleServices, identity: _) = scope(
+        circleService: () => _WipedCircleService(held),
+      );
+      await container.read(inboxRelaysProvider.future);
+      expect(
+        await container.read(circlesProvider.future),
+        [held],
+        reason: "premise: the identity's circle list was read",
+      );
+      final sharing = container.read(locationSharingServiceProvider);
+
+      await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+      expect(
+        container.read(locationSharingServiceProvider),
+        isNot(same(sharing)),
+        reason: 'the service that cached the deleted pubkey is still the one '
+            'in use',
+      );
+      // Settled values only: the refresh the logout's invalidation began
+      // carries the previous list until the wiped service answers.
+      final yielded = <List<Circle>>[];
+      container.listen<AsyncValue<List<Circle>>>(circlesProvider, (_, next) {
+        if (next is AsyncData<List<Circle>> && !next.isLoading) {
+          yielded.add(next.value);
+        }
+      }, fireImmediately: true);
+      yielded.add(await container.read(circlesProvider.future));
+      expect(
+        yielded.where((circles) => circles.contains(held)),
+        isEmpty,
+        reason: "the deleted identity's circle list was served after the "
+            'logout',
+      );
+      expect(
+        (circleServices.single as _WipedCircleService).readsAfterWipe,
+        isPositive,
+        reason: 'the circle list after the logout was not read from the '
+            'wiped service',
+      );
+      expect(
+        circleServices,
+        hasLength(1),
+        reason: 'the circle service itself is NOT retired by a logout: it '
+            'stays as the wiped, latched instance until a login',
+      );
+    });
+
+    test('a location still in its handler at the logout reaches no cache, '
+        'then or after the login', () async {
+      // A handler outlives the stop. One parked before the ingest, across
+      // the logout AND the login: the service it would reach by then is the
+      // next identity's, open and empty.
+      late final LiveEventRouter router;
+      final (:container, :circleServices, identity: _) = scope(
+        overrides: [liveEventRouterProvider.overrideWith((_) => router)],
+      );
+      final notifier = container.read(identityNotifierProvider.notifier);
+      final circle = TestCircleFactory.createCircle(
+        nostrGroupId: const [1, 2, 3],
+        mlsGroupId: const [9, 9, 9],
+      );
+      final t0 = DateTime.now();
+      final parsing = Completer<void>();
+      final engine = FakeLiveSyncEngine();
+      final service = NostrSubscriptionService(
+        router: router = LiveEventRouter(
+          circleService: () => container.read(circleServiceProvider),
+          circlesSnapshot: () async => [circle],
+          secretBytes: () async => const [],
+          parseLocation: (_, sender) async {
+            await parsing.future;
+            return DecryptedLocation(
+              senderPubkey: sender,
+              latitude: 1,
+              longitude: 2,
+              geohash: 'g',
+              timestamp: t0,
+              expiresAt: t0.add(const Duration(hours: 1)),
+            );
+          },
+          // The production wiring's own closure.
+          ingestLocation: (circle, decrypted) => container
+              .read(locationSharingServiceProvider)
+              .ingestStreamedLocation(circle: circle, decrypted: decrypted),
+          reconcileRoster: (_) async {},
+          onLocationsChanged: () {},
+          onGroupUpdated: (_) {},
+          onInvitationReceived: () {},
+          onStatus: (_) {},
+        ),
+        engineFactory: () async => engine,
+      );
+      await service.start(groups: const [], inboxRelays: const []);
+      engine.controller.add(
+        FfiRelayEvent(
+          kind: FfiRelayEventKind.location,
+          nostrGroupId: Uint8List.fromList(circle.nostrGroupId),
+          senderPubkey: 'a-peer-of-the-first-identity',
+          content: '{}',
+        ),
+      );
+      await pumpEventQueue();
+
+      // The logout's own stop, then the logout and the login.
+      await service.stop();
+      await notifier.deleteIdentity();
+      await notifier.createIdentity();
+      parsing.complete();
+      await pumpEventQueue();
+
+      expect(
+        container.read(locationSharingServiceProvider).debugCachedLocationCount,
+        0,
+        reason: "a coordinate of the deleted identity's peer was merged into "
+            "the next identity's cache",
+      );
+      expect(
+        [
+          for (final circles in circleServices)
+            ...circles.methodCalls.where((c) => c == 'upsertLastKnownLocation'),
+        ],
+        isEmpty,
+        reason: "and written to the next identity's store",
+      );
+    });
+
+    test('a location the engine delivered, mid-write at the logout, is not '
+        'merged behind the wipe', () async {
+      // Through the chain a live location takes: engine stream, router,
+      // the production ingest closure, the location service, its store.
+      late final LiveEventRouter router;
+      final park = Completer<void>();
+      final (:container, :circleServices, identity: _) = scope(
+        overrides: [liveEventRouterProvider.overrideWith((_) => router)],
+        circleService: () => _ParkedUpsertCircle()..park = park,
+      );
+      final circle = TestCircleFactory.createCircle(
+        nostrGroupId: const [1, 2, 3],
+        mlsGroupId: const [9, 9, 9],
+      );
+      final t0 = DateTime.now();
+      final engine = FakeLiveSyncEngine();
+      final service = NostrSubscriptionService(
+        router: router = LiveEventRouter(
+          circleService: () => container.read(circleServiceProvider),
+          circlesSnapshot: () async => [circle],
+          secretBytes: () async => const [],
+          parseLocation: (_, sender) async => DecryptedLocation(
+            senderPubkey: sender,
+            latitude: 1,
+            longitude: 2,
+            geohash: 'g',
+            timestamp: t0,
+            expiresAt: t0.add(const Duration(hours: 1)),
+          ),
+          ingestLocation: (circle, decrypted) => container
+              .read(locationSharingServiceProvider)
+              .ingestStreamedLocation(circle: circle, decrypted: decrypted),
+          reconcileRoster: (_) async {},
+          onLocationsChanged: () {},
+          onGroupUpdated: (_) {},
+          onInvitationReceived: () {},
+          onStatus: (_) {},
+        ),
+        engineFactory: () async => engine,
+      );
+      final used = container.read(locationSharingServiceProvider);
+      await service.start(groups: const [], inboxRelays: const []);
+      engine.controller.add(
+        FfiRelayEvent(
+          kind: FfiRelayEventKind.location,
+          nostrGroupId: Uint8List.fromList(circle.nostrGroupId),
+          senderPubkey: 'a-peer-of-the-first-identity',
+          content: '{}',
+        ),
+      );
+      await pumpEventQueue();
+      expect(
+        (circleServices.single as _ParkedUpsertCircle).upserts,
+        1,
+        reason: 'premise: parked inside the write',
+      );
+
+      await service.stop();
+      await container.read(identityNotifierProvider.notifier).deleteIdentity();
+      park.complete();
+      await pumpEventQueue();
+
+      expect(
+        used.debugCachedLocationCount,
+        0,
+        reason: "a coordinate of the deleted identity's peer went back into "
+            'the cache the logout had just wiped',
+      );
+      expect(
+        container.read(locationSharingServiceProvider).debugCachedLocationCount,
+        0,
+      );
+    });
+
+    test('a location mid-write at the logout is not merged behind the wipe',
+        () async {
+      // The other half: a handler already inside the ingest when the wipe
+      // clears the cache. It belongs to a session that was still live when
+      // it entered.
+      final (:container, circleServices: _, identity: _) = scope();
+      final store = _ParkedUpsertCircle()..park = Completer<void>();
+      final sharing = LocationSharingService(
+        circleService: store,
+        relayService: MockRelayService(),
+      );
+      final circle = TestCircleFactory.createCircle(
+        nostrGroupId: const [1, 2, 3],
+        mlsGroupId: const [9, 9, 9],
+      );
+      final t0 = DateTime.now();
+      final ingesting = sharing.ingestStreamedLocation(
+        circle: circle,
+        decrypted: DecryptedLocation(
+          senderPubkey: 'a-peer-of-the-first-identity',
+          latitude: 1,
+          longitude: 2,
+          geohash: 'g',
+          timestamp: t0,
+          expiresAt: t0.add(const Duration(hours: 1)),
+        ),
+      );
+      await pumpEventQueue();
+      expect(store.upserts, 1, reason: 'premise: parked inside the write');
+
+      await sharing.wipeAll();
+      store.park!.complete();
+      await ingesting;
+
+      expect(
+        sharing.debugCachedLocationCount,
+        0,
+        reason: "a coordinate of the deleted identity's peer went back into "
+            'the cache the wipe had just cleared',
+      );
+      expect(await sharing.cachedLocations(circle), isEmpty);
+      // And a logout does call that wipe, on the service in use.
+      final used = container.read(locationSharingServiceProvider);
+      await container.read(identityNotifierProvider.notifier).deleteIdentity();
+      expect(
+        await used.cachedLocations(circle),
+        isEmpty,
+        reason: 'the service a logout wiped still takes writes',
+      );
+      await used.ingestStreamedLocation(
+        circle: circle,
+        decrypted: DecryptedLocation(
+          senderPubkey: 'a-peer-of-the-first-identity',
+          latitude: 1,
+          longitude: 2,
+          geohash: 'g',
+          timestamp: t0,
+          expiresAt: t0.add(const Duration(hours: 1)),
+        ),
+      );
+      expect(used.debugCachedLocationCount, 0);
+    });
+
+    test('a resume dispatched during the logout does not reopen the cache '
+        'the wipe closed', () async {
+      // The shell stays mounted through a logout, and its resume handler
+      // opens the cache first thing. Between the wipe and the end of the
+      // logout — milliseconds, or the stops' whole bound with a wedged engine
+      // — a shade pull is enough.
+      final store = _ParkedUpsertCircle()..park = Completer<void>();
+      final sharing = LocationSharingService(
+        circleService: store,
+        relayService: MockRelayService(),
+      );
+      final circle = TestCircleFactory.createCircle(
+        nostrGroupId: const [1, 2, 3],
+        mlsGroupId: const [9, 9, 9],
+      );
+      final t0 = DateTime.now();
+      final ingesting = sharing.ingestStreamedLocation(
+        circle: circle,
+        decrypted: DecryptedLocation(
+          senderPubkey: 'a-peer-of-the-first-identity',
+          latitude: 1,
+          longitude: 2,
+          geohash: 'g',
+          timestamp: t0,
+          expiresAt: t0.add(const Duration(hours: 1)),
+        ),
+      );
+      await pumpEventQueue();
+      expect(store.upserts, 1, reason: 'premise: parked inside the write');
+
+      await sharing.wipeAll();
+      sharing.onAppResumed();
+      store.park!.complete();
+      await ingesting;
+
+      expect(
+        sharing.debugCachedLocationCount,
+        0,
+        reason: "a coordinate of the deleted identity's peer was merged into "
+            'a cache the wipe had closed and a resume reopened',
+      );
+      expect(await sharing.cachedLocations(circle), isEmpty);
+    });
+
+    test("a wiped location service hands neither identity's location to its "
+        'store', () async {
+      // Before: it was read off the self-echo filter — the deleted identity's
+      // cached pubkey must not make the next one's own location a peer's.
+      // Now nothing of either reaches the wiped instance's store at all.
+      SharedPreferences.setMockInitialValues({});
+      final identity = _MockIdentityService(
+        initialIdentity: createdIdentity,
+        deleteClears: true,
+        createResult: importedIdentity,
+      );
+      final store = _ParkedUpsertCircle();
+      final sharing = LocationSharingService(
+        circleService: store,
+        relayService: MockRelayService(),
+        identityService: identity,
+      );
+      final circle = TestCircleFactory.createCircle(
+        nostrGroupId: const [1, 2, 3],
+        mlsGroupId: const [9, 9, 9],
+      );
+      final t0 = DateTime.now();
+      Future<void> streamFrom(String sender) => sharing.ingestStreamedLocation(
+        circle: circle,
+        decrypted: DecryptedLocation(
+          senderPubkey: sender,
+          latitude: 1,
+          longitude: 2,
+          geohash: 'g',
+          timestamp: t0,
+          expiresAt: t0.add(const Duration(hours: 1)),
+        ),
+      );
+      await streamFrom(createdIdentity.pubkeyHex);
+      expect(store.upserts, 0, reason: 'premise: dropped as an own echo');
+
+      await sharing.wipeAll();
+      await identity.deleteIdentity();
+      await identity.createIdentity();
+
+      await streamFrom(importedIdentity.pubkeyHex);
+      await streamFrom(createdIdentity.pubkeyHex);
+      await streamFrom('a-peer-of-the-first-identity');
+      expect(
+        store.upserts,
+        0,
+        reason: 'the wiped service persisted a location after the logout',
+      );
+      expect(sharing.debugCachedLocationCount, 0);
+    });
+
+    test("a streamed Welcome reaches the second identity's circle service",
+        () async {
+      final (:container, :circleServices, identity: _) = scope();
+      final notifier = container.read(identityNotifierProvider.notifier);
+      final router = container.read(liveEventRouterProvider);
+
+      await notifier.deleteIdentity();
+      await notifier.createIdentity();
+      await router.handleEvent(
+        const FfiRelayEvent(
+          kind: FfiRelayEventKind.welcome,
+          giftWrapJson: '{}',
+        ),
+      );
+
+      expect(
+        circleServices.last.methodCalls,
+        contains('processGiftWrappedInvitation'),
+        reason: 'the Welcome was handed to the wiped service of the '
+            'previous identity, which refuses it',
+      );
+      expect(
+        circleServices.first.methodCalls,
+        isNot(contains('processGiftWrappedInvitation')),
+      );
+    });
+
+    test("the location pipeline is the second identity's: its store, and "
+        'its own pubkey for the self-echo', () async {
+      final (:container, :circleServices, identity: _) = scope();
+      final notifier = container.read(identityNotifierProvider.notifier);
+      final circle = TestCircleFactory.createCircle(
+        nostrGroupId: const [1, 2, 3],
+        mlsGroupId: const [9, 9, 9],
+      );
+      final t0 = DateTime.now();
+      DecryptedLocation from(String sender) => DecryptedLocation(
+        senderPubkey: sender,
+        latitude: 1,
+        longitude: 2,
+        geohash: 'g',
+        timestamp: t0,
+        expiresAt: t0.add(const Duration(hours: 1)),
+      );
+      // The first identity's service learns its own pubkey.
+      await container
+          .read(locationSharingServiceProvider)
+          .ingestStreamedLocation(
+            circle: circle,
+            decrypted: from(createdIdentity.pubkeyHex),
+          );
+
+      await notifier.deleteIdentity();
+      await notifier.createIdentity();
+      final sharing = container.read(locationSharingServiceProvider);
+      await sharing.ingestStreamedLocation(
+        circle: circle,
+        decrypted: from(importedIdentity.pubkeyHex),
+      );
+      expect(
+        sharing.debugCachedLocationCount,
+        0,
+        reason: "the second identity's own location was shown as a peer's: "
+            'the self-echo filter still holds the first pubkey',
+      );
+      await sharing.ingestStreamedLocation(
+        circle: circle,
+        decrypted: from(createdIdentity.pubkeyHex),
+      );
+      expect(
+        sharing.debugCachedLocationCount,
+        1,
+        reason: 'the first identity is a peer like any other now',
+      );
+      expect(
+        circleServices.last.methodCalls,
+        contains('upsertLastKnownLocation'),
+        reason: 'last-known persistence went to the wiped service',
+      );
     });
   });
 
@@ -924,35 +2255,6 @@ void main() {
   // must be backed by a test that fails if the corresponding clear is
   // removed. Each group below pins ONE such promise.
   // ---------------------------------------------------------------------------
-
-  group('IdentityNotifier.deleteIdentity — stranded legacy MLS state', () {
-    test('destroyLegacyMlsState is called on the circle service', () async {
-      final mockService = _MockIdentityService(
-        initialIdentity: createdIdentity,
-        deleteClears: true,
-      );
-      final mockCircle = MockCircleService();
-      final container = ProviderContainer(
-        overrides: [
-          identityServiceProvider.overrideWithValue(mockService),
-          circleServiceProvider.overrideWithValue(mockCircle),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      await container.read(identityNotifierProvider.notifier).deleteIdentity();
-
-      expect(
-        mockCircle.methodCalls,
-        contains('destroyLegacyMlsState'),
-        reason:
-            'a previously-failed one-time Dark Matter cutover must not '
-            'survive identity deletion — its own launch retry is gated on '
-            'an identity being present, so deletion is the last chance to '
-            'remove the stranded haven_mdk.db + its keyring key',
-      );
-    });
-  });
 
   group('IdentityNotifier.deleteIdentity — pending-leave markers', () {
     test(
@@ -1399,6 +2701,15 @@ void main() {
 // Mock Identity Service
 // =============================================================================
 
+/// Counts the logout's [MaintenanceService.forget]; nothing else is asked
+/// of it.
+class _ForgetCountingMaintenance extends Fake implements MaintenanceService {
+  int forgets = 0;
+
+  @override
+  void forget() => forgets++;
+}
+
 /// A controllable mock [IdentityService] for testing [IdentityNotifier]
 /// and [identityProvider] invalidation behavior.
 ///
@@ -1585,6 +2896,31 @@ class _SpyPrefetchService implements TilePrefetchService {
 // M10.1 test helpers
 // =============================================================================
 
+/// A [CircleService] holding one circle until its [wipeAllMlsState] and
+/// nothing after it, counting the circle reads made after the wipe.
+class _WipedCircleService extends MockCircleService {
+  _WipedCircleService(Circle circle) : super(circles: [circle]);
+
+  bool _wiped = false;
+
+  /// How many times the circle list was read after the wipe.
+  int readsAfterWipe = 0;
+
+  @override
+  Future<List<Circle>> getVisibleCircles() async {
+    if (!_wiped) return super.getVisibleCircles();
+    methodCalls.add('getVisibleCircles');
+    readsAfterWipe++;
+    return const [];
+  }
+
+  @override
+  Future<void> wipeAllMlsState() async {
+    _wiped = true;
+    return super.wipeAllMlsState();
+  }
+}
+
 /// A [CircleService] that extends [MockCircleService] and invokes a callback
 /// inside [wipeAllMlsState] so tests can inspect the SharedPreferences state
 /// at the exact moment the wipe is called.
@@ -1630,6 +2966,120 @@ class _ThrowingWipeMockCircleService2 extends MockCircleService {
 // M11 test helpers
 // =============================================================================
 
+/// A circle service whose last-known write waits for the test.
+class _ParkedUpsertCircle extends MockCircleService {
+  Completer<void>? park;
+  int upserts = 0;
+
+  @override
+  Future<void> upsertLastKnownLocation({
+    required List<int> nostrGroupId,
+    required String senderPubkey,
+    required double latitude,
+    required double longitude,
+    required String geohash,
+    required DateTime timestamp,
+    required DateTime expiresAt,
+    required DateTime purgeAfter,
+    required DateTime updatedAt,
+    String? displayName,
+  }) async {
+    upserts++;
+    await park?.future;
+    await super.upsertLastKnownLocation(
+      nostrGroupId: nostrGroupId,
+      senderPubkey: senderPubkey,
+      latitude: latitude,
+      longitude: longitude,
+      geohash: geohash,
+      timestamp: timestamp,
+      expiresAt: expiresAt,
+      purgeAfter: purgeAfter,
+      updatedAt: updatedAt,
+      displayName: displayName,
+    );
+  }
+}
+
+/// A [SubscriptionService] whose stop never answers: the engine waiting on
+/// its lifecycle lock behind a pause that is draining a publish.
+class _NeverStoppingSubscriptionService extends _RecordingSubscriptionService {
+  _NeverStoppingSubscriptionService() : super(sharedLog: []);
+
+  @override
+  Future<LiveSyncStopOutcome> stop({Future<void>? givenUp}) {
+    stopCalls++;
+    return Completer<LiveSyncStopOutcome>().future;
+  }
+}
+
+/// A relay manager that records its shutdown and refuses anything else.
+class _RecordingRelayManager implements RelayManagerFfi {
+  _RecordingRelayManager({required this.onShutdown});
+
+  final void Function() onShutdown;
+  int shutdownCalls = 0;
+  final List<Symbol> otherCalls = [];
+
+  @override
+  Future<void> shutdown() async {
+    shutdownCalls++;
+    onShutdown();
+  }
+
+  @override
+  void dispose() {}
+
+  @override
+  bool get isDisposed => false;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    otherCalls.add(invocation.memberName);
+    throw UnimplementedError('unexpected relay call');
+  }
+}
+
+/// A subscription service whose first stop waits for the test.
+class _ParkedFirstStopService extends _RecordingSubscriptionService {
+  _ParkedFirstStopService() : super(sharedLog: []);
+
+  Completer<void>? firstStop;
+
+  @override
+  Future<LiveSyncStopOutcome> stop({Future<void>? givenUp}) async {
+    final outcome = await super.stop(givenUp: givenUp);
+    if (stopCalls == 1) await firstStop?.future;
+    return outcome;
+  }
+}
+
+/// A circle service whose cursor reset — one of the wipes a logout awaits
+/// between its first stop and the latch — waits for the test.
+class _GatedCursorsCircle extends MockCircleService {
+  Completer<void>? cursorGate;
+
+  @override
+  Future<void> resetAllSyncCursors() async {
+    await super.resetAllSyncCursors();
+    await cursorGate?.future;
+  }
+}
+
+/// A fake engine that records its `stopSession` into the SAME ordered log a
+/// co-installed [MockCircleService] appends to.
+class _LoggingEngine extends FakeLiveSyncEngine {
+  _LoggingEngine(this.sharedLog);
+
+  final List<String> sharedLog;
+
+  @override
+  Future<void> stopSession() {
+    sharedLog.add('engine.stopSession');
+    return super.stopSession();
+  }
+}
+
 /// A [SubscriptionService] that records `stop()` into a SHARED call-order log
 /// — the SAME [MockCircleService.methodCalls] list a test also installs on a
 /// co-overridden [MockCircleService] — so the M11 ordering test above can
@@ -1640,6 +3090,10 @@ class _ThrowingWipeMockCircleService2 extends MockCircleService {
 /// `stop()` last left it as.
 class _RecordingSubscriptionService implements SubscriptionService {
   _RecordingSubscriptionService({required this.sharedLog});
+
+  @override
+  LiveLifecycleFfi lifecycle() =>
+      isRunning ? LiveLifecycleFfi.launched : LiveLifecycleFfi.noSession;
 
   /// The SAME ordered log a co-installed [MockCircleService] appends to, so
   /// this call's position can be compared against `wipeAllMlsState`'s.
@@ -1658,7 +3112,7 @@ class _RecordingSubscriptionService implements SubscriptionService {
   }
 
   @override
-  Future<LiveSyncStopOutcome> stop() async {
+  Future<LiveSyncStopOutcome> stop({Future<void>? givenUp}) async {
     stopCalls++;
     sharedLog.add('subscriptionService.stop');
     _running = false;
@@ -1667,6 +3121,9 @@ class _RecordingSubscriptionService implements SubscriptionService {
 
   @override
   Future<void> resumeAfterBackground() async {}
+
+  @override
+  Future<void> claimForeground() async {}
 
   @override
   Future<void> subscribeCircle(FfiGroupSpec spec) async {}
@@ -1691,7 +3148,15 @@ class _RecordingSubscriptionService implements SubscriptionService {
   // no-op'ing means a future change that routes teardown through a burst fails
   // here instead of silently passing on a fake that did nothing.
   @override
-  Future<void> openBackgroundBurst() => throw UnimplementedError();
+  Future<BurstOpenFfi> openBackgroundBurstWithin(Duration budget) =>
+      throw UnimplementedError();
+
+  @override
+  Future<void> startIntoBurst({
+    required List<FfiGroupSpec> groups,
+    required List<String> inboxRelays,
+    required Duration budget,
+  }) => throw UnimplementedError();
 
   @override
   Future<BacklogOutcomeFfi> waitBacklogSettled() => throw UnimplementedError();

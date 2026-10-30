@@ -1,7 +1,9 @@
 # Haven → MDK 0.9.x "Dark Matter" — Migration Plan
 
 **Status: READINESS BLUEPRINT — do NOT execute now. DM-0 prep is bankable today; DM-1 onward
-executes only at the §3 go-signals.**
+executes only at the §3 go-signals.** *(Executed 2026-07-18, at v0.9.4; the tree has since moved
+to v0.10.4, rev `fcc85edd`. Everything below is the record of the plan as written, including its
+go/no-go reasoning and the state of whitenoise-rs, since archived, at the time.)*
 
 **Baseline:** Haven on `mdk-core` 0.7.1+21, git rev `93ae324` (repo now `marmot-protocol/mdk`,
 formerly `parres-hq/mdk`).

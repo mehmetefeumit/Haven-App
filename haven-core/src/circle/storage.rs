@@ -71,7 +71,429 @@ pub struct CircleRotationState {
     pub last_inbound_event_at_ms: Option<i64>,
 }
 
+/// The sync-cursor stream of the routing id `nostr_group_id`, as the event
+/// processor keys it (`STREAM_GROUP_445:{hex}`).
+fn group_stream(nostr_group_id: &[u8]) -> String {
+    format!(
+        "{}:{}",
+        crate::relay::cursor::STREAM_GROUP_445,
+        hex::encode(nostr_group_id)
+    )
+}
+
+/// Whether a circle other than `mls_group_id` names `nostr_group_id`, as its
+/// routing id or a prior routing's: a Welcome named an id this device held.
+fn named_by_another(
+    tx: &rusqlite::Transaction<'_>,
+    nostr_group_id: &[u8],
+    mls_group_id: &GroupId,
+) -> rusqlite::Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM circles WHERE nostr_group_id = ?1 AND mls_group_id != ?2
+             UNION ALL
+             SELECT 1 FROM routing_history WHERE nostr_group_id = ?1 AND mls_group_id != ?2)",
+        params![nostr_group_id, mls_group_id.as_slice()],
+        |row| row.get(0),
+    )
+}
+
+/// Drops the last-known locations and the delivery-health row (the record of
+/// when a circle last worked) kept under routing id `nostr_group_id`. Under an
+/// id two circles have named nothing tells whose a row is, so a leaving
+/// circle takes them all with it.
+fn drop_id_keyed_rows(tx: &rusqlite::Transaction<'_>, nostr_group_id: &[u8]) -> Result<()> {
+    // The table names are constants, never input.
+    for table in ["last_known_locations", "circle_health"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE nostr_group_id = ?1"),
+            params![nostr_group_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Drops the sync cursor of the routing id `nostr_group_id`, the catch-up
+/// state keyed off it and the floors relays owe it: a floor without its
+/// cursor would resume a chase inside a window that no longer exists, a hold
+/// count without its cursor describes sweeps of an id nobody listens at, and
+/// a relay floor asks history of an id nobody listens at.
+fn drop_stream_state(tx: &rusqlite::Transaction<'_>, nostr_group_id: &[u8]) -> Result<()> {
+    let stream = group_stream(nostr_group_id);
+    // The table names are constants, never input.
+    for table in [
+        "sync_cursors",
+        "catchup_backfill_floors",
+        "catchup_cutoff_holds",
+    ] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE stream = ?1"),
+            params![stream],
+        )?;
+    }
+    tx.execute(
+        "DELETE FROM relay_floors WHERE nostr_group_id = ?1",
+        params![nostr_group_id],
+    )?;
+    Ok(())
+}
+
+/// A circle's routing as it stood before a change: its routing id and
+/// relays, the epoch it changed at, and when that is recorded.
+pub struct PriorRouting<'a> {
+    /// The routing id it used.
+    pub nostr_group_id: [u8; 32],
+    /// The relays it used.
+    pub relays: &'a [String],
+    /// The epoch the routing changed at.
+    pub until_epoch: u64,
+    /// The oldest epoch whose prior routings are kept.
+    pub oldest_kept: u64,
+    /// When the change is recorded (seconds).
+    pub written_at: i64,
+}
+
+/// Keeps `prior` as one of `mls_group_id`'s prior routings inside `tx`, and
+/// forgets every prior routing no epoch at or after `prior.oldest_kept`
+/// used — with the sync state of a routing id no routing it keeps uses any
+/// more.
+fn keep_prior_routing_in(
+    tx: &rusqlite::Transaction<'_>,
+    mls_group_id: &GroupId,
+    prior: &PriorRouting<'_>,
+) -> Result<()> {
+    let encoded = serde_json::to_string(prior.relays)
+        .map_err(|_| CircleError::Storage("a routing could not be encoded".into()))?;
+    let oldest_kept = i64::try_from(prior.oldest_kept).unwrap_or(i64::MAX);
+    tx.execute(
+        "INSERT OR REPLACE INTO routing_history
+         (mls_group_id, until_epoch, nostr_group_id, relays, written_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            mls_group_id.as_slice(),
+            i64::try_from(prior.until_epoch).unwrap_or(i64::MAX),
+            &prior.nostr_group_id[..],
+            encoded,
+            prior.written_at
+        ],
+    )?;
+    let forgotten: Vec<Vec<u8>> = tx
+        .prepare(
+            "SELECT DISTINCT h.nostr_group_id FROM routing_history h
+             WHERE h.mls_group_id = ?1 AND h.until_epoch < ?2
+             AND h.nostr_group_id NOT IN (SELECT nostr_group_id FROM circles)
+             AND NOT EXISTS (SELECT 1 FROM routing_history k
+                 WHERE k.mls_group_id = ?1 AND k.until_epoch >= ?2
+                 AND k.nostr_group_id = h.nostr_group_id)",
+        )?
+        .query_map(params![mls_group_id.as_slice(), oldest_kept], |row| {
+            row.get(0)
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    tx.execute(
+        "DELETE FROM routing_history WHERE mls_group_id = ?1 AND until_epoch < ?2",
+        params![mls_group_id.as_slice(), oldest_kept],
+    )?;
+    for ngid in &forgotten {
+        drop_stream_state(tx, ngid)?;
+    }
+    Ok(())
+}
+
+/// Moves every store keyed by the routing id `prior` to `next` inside `tx`,
+/// merging into what the circle already keeps under `next` — a rotation
+/// back to an id it used before, or a write made with the id it had then:
+/// a peer's last-known location under `prior` wins over one of the same
+/// peer under `next` (`prior` is the id the circle has been keeping it
+/// under), each delivery-health instant keeps the later of the two (they
+/// only advance). `next`'s sync state starts over: every relay floor
+/// owed to it is dropped, and its cursor is set at the earlier of
+/// `cursor_floor_ms` and `prior`'s own cursor, or — with `None`, when no
+/// instant at or before the change is known — unset, so the stream's
+/// cold-start width applies.
+fn move_routing_in(
+    tx: &rusqlite::Transaction<'_>,
+    prior: &[u8],
+    next: &[u8],
+    cursor_floor_ms: Option<i64>,
+) -> Result<()> {
+    tx.execute(
+        "DELETE FROM last_known_locations WHERE nostr_group_id = ?2 AND sender_pubkey IN
+         (SELECT sender_pubkey FROM last_known_locations WHERE nostr_group_id = ?1)",
+        params![prior, next],
+    )?;
+    tx.execute(
+        "UPDATE last_known_locations SET nostr_group_id = ?2 WHERE nostr_group_id = ?1",
+        params![prior, next],
+    )?;
+    tx.execute(
+        "INSERT INTO circle_health (nostr_group_id, last_publish_acked_at_ms,
+             last_peer_event_at_ms, last_epoch_change_seen_at_ms, last_rotation_at_ms,
+             last_inbound_event_at_ms)
+         SELECT ?2, last_publish_acked_at_ms, last_peer_event_at_ms,
+             last_epoch_change_seen_at_ms, last_rotation_at_ms, last_inbound_event_at_ms
+         FROM circle_health WHERE nostr_group_id = ?1
+         ON CONFLICT(nostr_group_id) DO UPDATE SET
+           last_publish_acked_at_ms = MAX(COALESCE(last_publish_acked_at_ms,
+             excluded.last_publish_acked_at_ms), COALESCE(excluded.last_publish_acked_at_ms,
+             last_publish_acked_at_ms)),
+           last_peer_event_at_ms = MAX(COALESCE(last_peer_event_at_ms,
+             excluded.last_peer_event_at_ms), COALESCE(excluded.last_peer_event_at_ms,
+             last_peer_event_at_ms)),
+           last_epoch_change_seen_at_ms = MAX(COALESCE(last_epoch_change_seen_at_ms,
+             excluded.last_epoch_change_seen_at_ms),
+             COALESCE(excluded.last_epoch_change_seen_at_ms, last_epoch_change_seen_at_ms)),
+           last_rotation_at_ms = MAX(COALESCE(last_rotation_at_ms,
+             excluded.last_rotation_at_ms), COALESCE(excluded.last_rotation_at_ms,
+             last_rotation_at_ms)),
+           last_inbound_event_at_ms = MAX(COALESCE(last_inbound_event_at_ms,
+             excluded.last_inbound_event_at_ms), COALESCE(excluded.last_inbound_event_at_ms,
+             last_inbound_event_at_ms))",
+        params![prior, next],
+    )?;
+    tx.execute(
+        "DELETE FROM circle_health WHERE nostr_group_id = ?1",
+        params![prior],
+    )?;
+    drop_stream_state(tx, next)?;
+    if let Some(floor) = cursor_floor_ms {
+        let prior_cursor: Option<i64> = tx
+            .query_row(
+                "SELECT last_synced_ms FROM sync_cursors WHERE stream = ?1",
+                params![group_stream(prior)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        tx.execute(
+            "INSERT INTO sync_cursors (stream, last_synced_ms) VALUES (?1, ?2)",
+            params![
+                group_stream(next),
+                prior_cursor.map_or(floor, |ms| ms.min(floor))
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 impl CircleStorage {
+    /// [`keep_prior_routing_in`] in a transaction of its own.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error.
+    pub fn keep_prior_routing(
+        &self,
+        mls_group_id: &GroupId,
+        prior: &PriorRouting<'_>,
+    ) -> Result<()> {
+        let mut conn = self
+            .conn()
+            .lock()
+            .map_err(|_| CircleError::Storage("Failed to acquire database lock".into()))?;
+        let tx = conn.transaction()?;
+        keep_prior_routing_in(&tx, mls_group_id, prior)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Each prior routing of the circle that an epoch at or after
+    /// `oldest_kept` used, as its routing id and relays — with
+    /// `written_since`, only those written at or after that instant and not
+    /// after `now` (seconds, both).
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error.
+    pub fn prior_routings(
+        &self,
+        mls_group_id: &GroupId,
+        oldest_kept: u64,
+        written_since: Option<(i64, i64)>,
+    ) -> Result<Vec<([u8; 32], Vec<String>)>> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|_| CircleError::Storage("Failed to acquire database lock".into()))?;
+        let (since, now) = written_since.unwrap_or((i64::MIN, i64::MAX));
+        let mut statement = conn.prepare(
+            "SELECT nostr_group_id, relays FROM routing_history
+             WHERE mls_group_id = ?1 AND until_epoch >= ?2
+             AND written_at >= ?3 AND written_at <= ?4",
+        )?;
+        let rows = statement
+            .query_map(
+                params![
+                    mls_group_id.as_slice(),
+                    i64::try_from(oldest_kept).unwrap_or(i64::MAX),
+                    since,
+                    now
+                ],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(ngid, encoded)| {
+                let ngid = <[u8; 32]>::try_from(ngid.as_slice())
+                    .map_err(|_| CircleError::Storage("a routing could not be read".into()))?;
+                let relays = serde_json::from_str(&encoded)
+                    .map_err(|_| CircleError::Storage("a routing could not be read".into()))?;
+                Ok((ngid, relays))
+            })
+            .collect()
+    }
+
+    /// The earliest write, at or before `now` and at or after `since`
+    /// (seconds, both), of any circle's prior routing, or `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error.
+    pub fn earliest_prior_routing_written(&self, since: i64, now: i64) -> Result<Option<i64>> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|_| CircleError::Storage("Failed to acquire database lock".into()))?;
+        Ok(conn.query_row(
+            "SELECT MIN(written_at) FROM routing_history WHERE written_at >= ?1 AND written_at <= ?2",
+            params![since, now],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Every other circle that names `nostr_group_id`: `None` beside one
+    /// whose routing id it is, and the epoch its prior routing stood until
+    /// beside one whose prior routing used it. Not `mls_group_id` itself, so
+    /// a rotation back to its own prior id is not another's.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error.
+    pub fn routing_id_holders(
+        &self,
+        nostr_group_id: &[u8; 32],
+        mls_group_id: &GroupId,
+    ) -> Result<Vec<(GroupId, Option<u64>)>> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|_| CircleError::Storage("Failed to acquire database lock".into()))?;
+        let mut statement = conn.prepare(
+            "SELECT mls_group_id, NULL FROM circles WHERE nostr_group_id = ?1 AND mls_group_id != ?2
+             UNION ALL
+             SELECT mls_group_id, until_epoch FROM routing_history
+             WHERE nostr_group_id = ?1 AND mls_group_id != ?2",
+        )?;
+        let holders = statement
+            .query_map(
+                params![&nostr_group_id[..], mls_group_id.as_slice()],
+                |row| {
+                    Ok((
+                        GroupId::from_slice(&row.get::<_, Vec<u8>>(0)?),
+                        row.get::<_, Option<i64>>(1)?
+                            .map(|until| u64::try_from(until).unwrap_or(0)),
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(holders)
+    }
+
+    /// The circles whose row names `nostr_group_id` as its routing id, two at
+    /// most — enough to tell one from several: an index seek, read on every
+    /// health stamp and last-known write, whatever the number of circles.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error.
+    pub fn circles_named_by(&self, nostr_group_id: &[u8; 32]) -> Result<Vec<GroupId>> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|_| CircleError::Storage("Failed to acquire database lock".into()))?;
+        let mut statement =
+            conn.prepare("SELECT mls_group_id FROM circles WHERE nostr_group_id = ?1 LIMIT 2")?;
+        let named = statement
+            .query_map(params![&nostr_group_id[..]], |row| {
+                row.get::<_, Vec<u8>>(0)
+                    .map(|group| GroupId::from_slice(&group))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(named)
+    }
+
+    /// The circle a prior routing of which used `nostr_group_id`, or `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error.
+    pub fn circle_with_prior_routing_id(
+        &self,
+        nostr_group_id: &[u8; 32],
+    ) -> Result<Option<Circle>> {
+        let found: Option<Vec<u8>> = {
+            let conn = self
+                .conn()
+                .lock()
+                .map_err(|_| CircleError::Storage("Failed to acquire database lock".into()))?;
+            conn.query_row(
+                "SELECT mls_group_id FROM routing_history WHERE nostr_group_id = ?1 LIMIT 1",
+                params![&nostr_group_id[..]],
+                |row| row.get(0),
+            )
+            .optional()?
+        };
+        found.map_or_else(
+            || Ok(None),
+            |group| self.get_circle(&GroupId::from_slice(&group)),
+        )
+    }
+
+    /// Moves `moved`'s circle row to its routing — `moved.nostr_group_id`
+    /// and `moved.relays` — keeping the routing it leaves, `prior`, as a
+    /// prior routing; and when the routing id changed, every store keyed by
+    /// the id it had with it ([`move_routing_in`], `cursor_floor_ms`). One
+    /// transaction: the row never names a routing whose prior is unkept, and
+    /// no store is left under an id the row no longer names.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error; nothing has moved.
+    pub fn follow_routing(
+        &self,
+        moved: &Circle,
+        prior: &PriorRouting<'_>,
+        cursor_floor_ms: Option<i64>,
+    ) -> Result<()> {
+        let relays = serde_json::to_string(&moved.relays)
+            .map_err(|_| CircleError::Storage("a routing could not be encoded".into()))?;
+        let mut conn = self
+            .conn()
+            .lock()
+            .map_err(|_| CircleError::Storage("Failed to acquire database lock".into()))?;
+        let tx = conn.transaction()?;
+        keep_prior_routing_in(&tx, &moved.mls_group_id, prior)?;
+        if moved.nostr_group_id != prior.nostr_group_id {
+            move_routing_in(
+                &tx,
+                &prior.nostr_group_id,
+                &moved.nostr_group_id,
+                cursor_floor_ms,
+            )?;
+        }
+        tx.execute(
+            "UPDATE circles SET nostr_group_id = ?2, relays = ?3, updated_at = ?4
+             WHERE mls_group_id = ?1",
+            params![
+                moved.mls_group_id.as_slice(),
+                &moved.nostr_group_id[..],
+                relays,
+                moved.updated_at
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Crate-private accessor used by sibling modules
     /// (e.g. [`super::storage_relay_prefs`]) to extend `CircleStorage` with
     /// additional methods that share the single `Mutex<Connection>` design.
@@ -117,6 +539,7 @@ impl CircleStorage {
     ///
     /// Returns an error if the database cannot be created or initialized.
     pub fn new(path: &Path, encryption_hex_key: Option<&str>) -> Result<Self> {
+        crate::sqlcipher_init::ensure()?;
         let db_exists = path.exists();
 
         if let Some(hex_key) = encryption_hex_key {
@@ -181,6 +604,7 @@ impl CircleStorage {
     /// from the unencrypted database into a new encrypted database, then
     /// replaces the original file.
     fn migrate_to_encrypted(path: &Path, hex_key: &str) -> Result<Self> {
+        crate::sqlcipher_init::ensure()?;
         // First, verify the existing DB is actually unencrypted by reading without a key.
         // If we can't read it, it's encrypted with a different key — don't corrupt it.
         {
@@ -312,6 +736,7 @@ impl CircleStorage {
     /// Returns an error if the database cannot be initialized.
     #[cfg(test)]
     pub fn in_memory() -> Result<Self> {
+        crate::sqlcipher_init::ensure()?;
         let conn = Connection::open_in_memory()?;
         let storage = Self {
             conn: Mutex::new(conn),
@@ -507,6 +932,8 @@ impl CircleStorage {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_circles_nostr_group_id
+                ON circles(nostr_group_id);
 
             -- Membership state (pending/accepted/declined invitations)
             CREATE TABLE IF NOT EXISTS circle_memberships (
@@ -670,7 +1097,7 @@ impl CircleStorage {
             -- never skips an unprocessed commit (the field epoch-desync bug).
             -- `last_synced_ms` is the raw event/rumor timestamp in
             -- MILLISECONDS; the per-stream lookback buffer (gift-wrap 7d cold
-            -- start / 49h re-anchor for inbox, 10/60s for group) is applied
+            -- start / 96 h re-anchor for inbox, 10/60s for group) is applied
             -- live at REQ time by
             -- `since_for_stream`, never stored here. Single-identity Haven;
             -- adding an `account_pubkey` column is additive if multi-identity
@@ -725,60 +1152,219 @@ impl CircleStorage {
                 sweeps INTEGER NOT NULL
             );
 
-            -- Removal-bearing receive-side auto-commits a BACKGROUND burst
-            -- declined to publish (OD4-c option (iv)). One row per circle whose
-            -- departing peer's eviction commit is staged in the MLS engine and
-            -- deliberately unresolved, waiting for a FOREGROUND pass to publish
-            -- it under the Rule-13 ladder.
-            --
-            -- Durable because the obligation must outlive the process, and the
-            -- `PendingStateRef` that resolves it cannot: it is an in-memory
-            -- engine handle. A row with no matching in-memory deferral therefore
-            -- means a previous session staged this eviction and died before
-            -- publishing it -- the one state this engine cannot repair at the
-            -- pinned MDK rev (the in-memory `SelfRemove` auto-commit schedule is
-            -- gone and a redelivered proposal short-circuits to `Buffered`
-            -- without rescheduling), and the ONLY signal there is that it
-            -- happened. `crate::circle::CircleManager::orphaned_removal_deferrals`
-            -- reads exactly that, and the live-sync engine turns it into a
-            -- `GroupUnrecoverable` status.
-            --
-            -- Keyed by `nostr_group_id` (the pseudonymous routing id), never the
-            -- MLS group id (Security Rule 4), and dropped with the circle.
-            CREATE TABLE IF NOT EXISTS deferred_removal_commits (
-                nostr_group_id BLOB PRIMARY KEY,
-                deferred_at_ms INTEGER NOT NULL
-            );
+            -- The legacy removal-deferral table: every commit is now staged
+            -- under a durable fanout record, so nothing writes or reads it.
+            -- Dropped where an older build created it.
+            DROP TABLE IF EXISTS deferred_removal_commits;
 
-            -- Dark Matter (DM-2b): identity-level tracking of the CURRENT
-            -- KeyPackage this device has published, so the periodic
-            -- KeyPackageMaintenance task can (a) republish the SAME cached
-            -- last-resort KeyPackage into the SAME NIP-33 `d` slot when a relay
-            -- drops it, and (b) `delete_key_package` the superseded private
-            -- bundle on rotation (mdk#160). A row records one published kind-30443
-            -- event: its `event_id`, its stable NIP-33 `d_tag` (30443 is
-            -- addressable — always present now; the non-addressable 443 twin is
-            -- RETIRED), the public `key_package` wire bytes (re-published verbatim
-            -- on a heal, and fed to `delete_key_package` on rotation), and
-            -- `created_at`. Single kind (30443), so no `kind` column; last-resort
-            -- KeyPackages never die on join, so the old MLS `hash_ref`
-            -- live-material correlator is GONE.
-            --
-            -- This table is IDENTITY-scoped, NOT per-circle: KeyPackages are
-            -- pre-group init material and outlive any single circle, so there is
-            -- NO `delete_circle` cascade (a circle's teardown must not drop the
-            -- user's published-KP tracking). Single-identity Haven, so no
-            -- account_pubkey column (additive if multi-identity ever lands).
-            CREATE TABLE IF NOT EXISTS published_key_packages (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_id     TEXT NOT NULL,
-                d_tag        TEXT NOT NULL,
-                key_package  BLOB NOT NULL,
-                created_at   INTEGER NOT NULL,
-                UNIQUE (event_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_published_key_packages_slot
-                ON published_key_packages(d_tag, created_at DESC);
+            -- Event ids of kind-445s the engine refused for a local resource
+            -- bound (`TransportObjectResourceRefused`), each owed a refetch by
+            -- id until it is delivered again or every relay asked answers
+            -- without it. The engine keeps nothing of the object and the cursor
+            -- has passed it, so this row is its only way back across a kill or
+            -- a wake deadline. Dropped with the circle.
+            -- `seq` is an id's place in the queue it is asked for from: the
+            -- back when it is recorded and the back again each time it is
+            -- asked for, so that an id that has had its turn waits behind
+            -- those that were owed before it and ahead of every one recorded
+            -- after — an order nobody who mints ids can put theirs first in.
+            CREATE TABLE IF NOT EXISTS refused_redeliveries (
+                mls_group_id BLOB NOT NULL,
+                event_id BLOB NOT NULL,
+                last_tried INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_due INTEGER NOT NULL DEFAULT 0,
+                seq INTEGER NOT NULL,
+                PRIMARY KEY (mls_group_id, event_id)
+            ) WITHOUT ROWID;
+
+            -- A circle whose refused ids outgrew the per-group cap owes a
+            -- refetch of its history up to `until_secs` instead, walked down a
+            -- page budget per sweep: the overlapping-range redelivery Marmot
+            -- `transports/nostr.md` allows. `walk_secs` is where the walk under
+            -- way has got to (NULL: none is), and `unsettled` that something of
+            -- that walk is still owed, so reaching the bottom does not end the
+            -- range. Dropped with the circle. A settled range keeps its row
+            -- with `until_secs` NULL, so `generation` never goes back and a
+            -- pass still holding an old read cannot end the next range owed.
+            CREATE TABLE IF NOT EXISTS refused_ranges (
+                mls_group_id BLOB PRIMARY KEY,
+                until_secs INTEGER,
+                walk_secs INTEGER,
+                unsettled INTEGER NOT NULL DEFAULT 0,
+                generation INTEGER NOT NULL DEFAULT 0,
+                last_tried INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_due INTEGER NOT NULL DEFAULT 0
+            ) WITHOUT ROWID;
+
+            -- What Haven keeps about a circle's commit under a durable fanout
+            -- that MDK's record has no place for: whether the recorded
+            -- pending commit is known to remove nobody (only such a commit is
+            -- ever undone for want of a reachable relay), and the outcomes
+            -- of changes nobody was waiting on, as a set of fixed notes, until
+            -- they are read; and how many writes of a note or a held member
+            -- there have been, so that a notice read before one drops
+            -- nothing. Dropped with the circle.
+            CREATE TABLE IF NOT EXISTS commit_notes (
+                mls_group_id BLOB PRIMARY KEY,
+                removes_nobody INTEGER NOT NULL DEFAULT 0,
+                untold INTEGER NOT NULL DEFAULT 0,
+                writes INTEGER NOT NULL DEFAULT 0
+            ) WITHOUT ROWID;
+
+            -- What the epoch-stall detector gathered about a circle stuck at
+            -- one epoch, kept across a restart: the epoch, how many walks of
+            -- its history the relays answered in full with nothing that
+            -- moved it, whether that already reached a report, and the
+            -- instant of the last arm. A group id at rest, here only; dropped
+            -- with the circle, at a join, and when an epoch move leaves none;
+            -- a peer heard again rewrites it, keeping the instant.
+            CREATE TABLE IF NOT EXISTS epoch_stall_evidence (
+                mls_group_id BLOB PRIMARY KEY,
+                stalled_epoch INTEGER NOT NULL,
+                fruitless_completions INTEGER NOT NULL,
+                fruitless_reported INTEGER NOT NULL,
+                last_arm_at_ms INTEGER NOT NULL
+            ) WITHOUT ROWID;
+
+            -- A removal the user asked for that branch selection withdrew and
+            -- that was dropped with its members held, by its commit's id:
+            -- what a later re-adoption of that commit takes back. Dropped
+            -- with the circle and when the re-adoption is told.
+            CREATE TABLE IF NOT EXISTS dropped_removals (
+                mls_group_id BLOB NOT NULL,
+                commit_id BLOB NOT NULL,
+                PRIMARY KEY (mls_group_id, commit_id)
+            ) WITHOUT ROWID;
+
+            -- A circle whose user-asked repair is being staged: written
+            -- before the engine is asked for the self-update and removed when
+            -- the hold that staged it ends. One a process left standing tells
+            -- the next open that the self-update it clears was the user's
+            -- repair. Dropped with the circle.
+            CREATE TABLE IF NOT EXISTS repair_marks (
+                mls_group_id BLOB PRIMARY KEY
+            ) WITHOUT ROWID;
+
+            -- How long a circle waits before the engine's own commit is
+            -- staged again after the fanout driver rolled one back: how many
+            -- rollbacks in a row, and the instant the wait ends. A row only
+            -- while a wait stands. Dropped with the circle.
+            CREATE TABLE IF NOT EXISTS restage_waits (
+                mls_group_id BLOB PRIMARY KEY,
+                rollbacks INTEGER NOT NULL,
+                not_before_ms INTEGER NOT NULL
+            ) WITHOUT ROWID;
+
+            -- Who a removal the user asked for named, when it was taken out
+            -- of the engine's queue unmade by a call that could never have
+            -- made it: one row per member, for as long as the note that says
+            -- so stands (`commit_notes.untold`). While one of them is still
+            -- in the circle nothing is sealed for it away from the
+            -- foreground. Beside each, the epoch the circle stood on when the
+            -- removal was set aside and how often it was asked for again
+            -- (decision 180); and, once a commit this device applied took the
+            -- member out, the epoch it reached and that commit's id — kept
+            -- while branch selection can still withdraw it, then dropped.
+            -- Member ids at rest, here only; dropped with the note and with
+            -- the circle.
+            CREATE TABLE IF NOT EXISTS removal_targets (
+                mls_group_id BLOB NOT NULL,
+                member BLOB NOT NULL,
+                set_aside_epoch INTEGER NOT NULL,
+                asks INTEGER NOT NULL,
+                gone_epoch INTEGER,
+                gone_by BLOB,
+                PRIMARY KEY (mls_group_id, member)
+            ) WITHOUT ROWID;
+
+            -- The routing a circle used before its routing last changed —
+            -- its routing id and relays — and the epoch it changed at, kept
+            -- while an epoch that used it can still be fetched (the
+            -- retained-history windows): its traffic is fetched again at the
+            -- address it was sent to (`app-components/nostr-routing-v1.md`
+            -- 56-62), and listened at for a day from the row's own write.
+            -- Relay URLs at rest, here only; dropped with the circle.
+            CREATE TABLE IF NOT EXISTS routing_history (
+                mls_group_id BLOB NOT NULL,
+                until_epoch INTEGER NOT NULL,
+                nostr_group_id BLOB NOT NULL,
+                relays TEXT NOT NULL,
+                written_at INTEGER NOT NULL,
+                PRIMARY KEY (mls_group_id, until_epoch)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_routing_history_nostr_group_id
+                ON routing_history(nostr_group_id);
+
+            -- Where an invitee's Welcome to a circle goes — their inbox
+            -- relays, as the invite was asked with — and the `not_after` of
+            -- the KeyPackage it is made for, from before the invite is
+            -- staged until the Welcome's own delivery record (MDK's
+            -- `cgka_transport_fanout`, in the MLS store) carries them, or the
+            -- invite is undone. A pubkey and relay URLs at rest, here only;
+            -- dropped with the circle.
+            CREATE TABLE IF NOT EXISTS welcome_routes (
+                mls_group_id BLOB NOT NULL,
+                recipient TEXT NOT NULL,
+                relays TEXT NOT NULL,
+                not_after INTEGER,
+                PRIMARY KEY (mls_group_id, recipient)
+            ) WITHOUT ROWID;
+
+            -- What Haven has taken over of a circle's input that the engine
+            -- left parked unopened and would not read again by itself: the
+            -- signed event exactly as a relay served it (ciphertext under
+            -- the circle's epoch key), in the order it was taken over, until
+            -- the engine has been handed it back and answered. No count of
+            -- epochs ends one: what the engine could not take may be from an
+            -- epoch the device has not reached. `asked` marks one the engine
+            -- was handed and erred on. Dropped with the circle.
+            CREATE TABLE IF NOT EXISTS kept_input (
+                event_id BLOB PRIMARY KEY,
+                mls_group_id BLOB NOT NULL,
+                seq INTEGER NOT NULL,
+                change INTEGER NOT NULL,
+                asked INTEGER NOT NULL DEFAULT 0,
+                event TEXT NOT NULL
+            ) WITHOUT ROWID;
+
+            -- Where a relay stopped vouching for a routing id's history:
+            -- the `since` of a REQ the relay was left out of the circle's
+            -- end-of-stored-events coverage for (not connected when it was
+            -- issued, or silent past the bounded wait). The next REQ to that
+            -- relay for that id asks from here, and the row goes once the
+            -- relay has answered a REQ that reached back this far. A relay
+            -- URL at rest, here only; dropped with the circle, and with a
+            -- prior routing id once the window forgets it.
+            CREATE TABLE IF NOT EXISTS relay_floors (
+                nostr_group_id BLOB NOT NULL,
+                relay TEXT NOT NULL,
+                since_secs INTEGER NOT NULL,
+                PRIMARY KEY (nostr_group_id, relay)
+            ) WITHOUT ROWID;
+
+            -- Groups whose circle has ended on this device and whose MLS
+            -- state is still to be forgotten: kept because the engine could
+            -- not read them, or for an invitation held unanswered. Asked
+            -- about at every foreground drive and every open until forgotten
+            -- or joined anew. A group id at rest, here only.
+            CREATE TABLE IF NOT EXISTS left_groups (
+                mls_group_id BLOB PRIMARY KEY
+            ) WITHOUT ROWID;
+
+            -- Gift wraps the user chose to accept, written before the engine
+            -- ingests the Welcome and removed when the joined circle's row
+            -- commits. A join the engine hands back at an open becomes a
+            -- circle only with a row here: the engine joins any Welcome it is
+            -- handed, so this is the user's consent, not the engine's — given
+            -- to the inviter the invitation showed (`inviter`, the seal
+            -- author's raw key), whom the join's MLS-authenticated welcomer
+            -- must be.
+            CREATE TABLE IF NOT EXISTS accept_intents (
+                gift_wrap_id BLOB PRIMARY KEY,
+                inviter BLOB NOT NULL
+            ) WITHOUT ROWID;
 
             -- Public-profile (kind-0) metadata cache. Keyed by pubkey (hex);
             -- there is deliberately NO circle/group column (a group id must
@@ -953,10 +1539,6 @@ impl CircleStorage {
         // public-profile cutover. Sentinel-gated so it runs at most once.
         Self::migrate_drop_legacy_avatar_tables(&conn)?;
 
-        // Dark Matter cutover: drop the pre-migration `published_key_packages`
-        // schema (hash_ref/kind columns) so the fresh DM schema takes over.
-        Self::migrate_reset_published_key_packages(&conn)?;
-
         // Profile-plane miss cache: additive ALTER of the EXISTING `profiles`
         // table (never a drop — that would blank every cached display name).
         Self::migrate_add_profile_miss_columns(&conn)?;
@@ -983,9 +1565,7 @@ impl CircleStorage {
     ///
     /// # Why `ALTER`, never drop-and-recreate
     ///
-    /// Unlike `published_key_packages` (whose contents are ephemeral and
-    /// regenerated on the next maintenance tick), `profiles` is a *cache of
-    /// other people's display names and avatars*. Dropping it would blank every
+    /// `profiles` is a *cache of other people's display names and avatars*. Dropping it would blank every
     /// member name on upgrade and make the first launch refetch the entire
     /// contact set at once — a visible regression AND a burst of relay traffic
     /// that undoes the per-author request spreading this whole feature exists
@@ -1096,71 +1676,6 @@ impl CircleStorage {
         if added > 0 {
             log::info!("circle migration: added {added} rotation column(s) to `circle_health`");
         }
-        Ok(())
-    }
-
-    /// Sentinel for whether the Dark Matter `published_key_packages` reset ran.
-    const KP_TRACKING_RESET_KEY: &'static str = "dm_published_key_packages_reset_v1";
-
-    /// One-shot, sentinel-guarded drop of the legacy (pre-Dark-Matter)
-    /// `published_key_packages` table.
-    ///
-    /// The pre-migration schema carried `key_package_hash_ref` + `kind` columns
-    /// (for the deleted M8-2 live-material gate and the retired 443 twin). The
-    /// Dark Matter schema replaces them with a single-kind (30443) row holding
-    /// the public `KeyPackage` wire bytes. Because `CREATE TABLE IF NOT EXISTS`
-    /// will not alter an existing table, this drops the old table so the DM
-    /// `CREATE TABLE` above recreates it in the new shape. The tracked data is
-    /// purely ephemeral (regenerated by the next maintenance tick), so dropping
-    /// it loses nothing precious — this is exactly the `published_key_packages`
-    /// clear the migration plan §5.5 mandates at cutover. `DROP TABLE IF EXISTS`
-    /// makes a brand-new database a clean no-op; the sentinel makes it once-only.
-    ///
-    /// Runs BEFORE the schema batch's `CREATE TABLE IF NOT EXISTS` on the next
-    /// open, so ordering is: (open N) create new schema afresh if absent; (open
-    /// with legacy schema present) this drop fires, then the create recreates.
-    /// To guarantee that ordering within a single open, the drop is idempotent
-    /// and the DM `CREATE TABLE IF NOT EXISTS` re-adds the table in the same
-    /// `initialize_schema` pass that follows.
-    fn migrate_reset_published_key_packages(conn: &Connection) -> Result<()> {
-        let already: Option<String> = conn
-            .query_row(
-                "SELECT value FROM user_settings WHERE key = ?1",
-                params![Self::KP_TRACKING_RESET_KEY],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?;
-        if already.is_some() {
-            return Ok(());
-        }
-
-        // Only drop when the LEGACY shape is present (the `kind` column is the
-        // discriminator). A fresh DM database created the new schema directly in
-        // this same pass, so we must not drop it.
-        let is_legacy = Self::table_has_column(conn, "published_key_packages", "kind")?;
-        if is_legacy {
-            conn.execute_batch("DROP TABLE IF EXISTS published_key_packages;")?;
-            conn.execute_batch(
-                r"
-                CREATE TABLE IF NOT EXISTS published_key_packages (
-                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_id     TEXT NOT NULL,
-                    d_tag        TEXT NOT NULL,
-                    key_package  BLOB NOT NULL,
-                    created_at   INTEGER NOT NULL,
-                    UNIQUE (event_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_published_key_packages_slot
-                    ON published_key_packages(d_tag, created_at DESC);
-                ",
-            )?;
-            log::info!("dark matter migration: reset published_key_packages tracking");
-        }
-
-        conn.execute(
-            "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, '1')",
-            params![Self::KP_TRACKING_RESET_KEY],
-        )?;
         Ok(())
     }
 
@@ -1553,6 +2068,18 @@ impl CircleStorage {
     /// Returns an error if any step of the cascade fails. The transaction
     /// is rolled back on error so partial state cannot leak.
     pub fn delete_circle(&self, mls_group_id: &GroupId) -> Result<bool> {
+        self.delete_left_circle(mls_group_id, false)
+    }
+
+    /// [`Self::delete_circle`] for a circle that has been left: when
+    /// `group_kept`, its MLS group was kept unforgotten, and it is put on the
+    /// list of left groups still to forget ([`Self::left_groups`]) in the
+    /// same transaction, so no restart loses it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::delete_circle`].
+    pub fn delete_left_circle(&self, mls_group_id: &GroupId, group_kept: bool) -> Result<bool> {
         let mut conn = self
             .conn
             .lock()
@@ -1575,6 +2102,22 @@ impl CircleStorage {
             .optional()?;
 
         let existed = nostr_group_id.is_some();
+        // Every routing id the circle names — its own, and each a rotation
+        // left it — keys state that goes with the circle: rows under one
+        // another circle names too are that circle's as much as this one's.
+        let mut ids: Vec<Vec<u8>> = tx
+            .prepare("SELECT DISTINCT nostr_group_id FROM routing_history WHERE mls_group_id = ?1")?
+            .query_map(params![mls_group_id.as_slice()], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        ids.extend(nostr_group_id);
+        for ngid in &ids {
+            drop_id_keyed_rows(&tx, ngid)?;
+            // A circle coming back under the id re-seeds rather than resuming
+            // at a stale floor — unless another circle still listens there.
+            if !named_by_another(&tx, ngid, mls_group_id)? {
+                drop_stream_state(&tx, ngid)?;
+            }
+        }
 
         // Delete in order respecting foreign key constraints
         tx.execute(
@@ -1585,12 +2128,15 @@ impl CircleStorage {
             "DELETE FROM circle_memberships WHERE mls_group_id = ?1",
             params![mls_group_id.as_slice()],
         )?;
-        // The leave-intent marker outlives nothing: a circle that is gone has
-        // no leave to be in progress, and a stale marker would make a LATER
+        // The leave markers outlive nothing: a circle that is gone has no
+        // leave to be in progress, and a stale intent would make a LATER
         // eviction from a re-joined group read as voluntary.
         tx.execute(
-            "DELETE FROM user_settings WHERE key = ?1",
-            params![Self::leave_intent_key(mls_group_id)],
+            "DELETE FROM user_settings WHERE key IN (?1, ?2)",
+            params![
+                Self::leave_intent_key(mls_group_id),
+                Self::leave_recorded_key(mls_group_id)
+            ],
         )?;
         tx.execute(
             "DELETE FROM circles WHERE mls_group_id = ?1",
@@ -1609,52 +2155,46 @@ impl CircleStorage {
             "DELETE FROM processed_gift_wraps WHERE mls_group_id = ?1",
             params![mls_group_id.as_slice()],
         )?;
-        if let Some(ngid) = nostr_group_id {
-            // Wipe-on-LEAVE for the per-group sync cursor so a returning
-            // circle with the same nostr_group_id re-seeds cleanly instead of
-            // resuming at a stale floor. The key mirrors the group cursor key
-            // built in the event processor (`STREAM_GROUP_445:{hex}`).
-            let group_cursor_stream = format!(
-                "{}:{}",
-                crate::relay::cursor::STREAM_GROUP_445,
-                hex::encode(&ngid)
-            );
+        tx.execute(
+            "DELETE FROM refused_redeliveries WHERE mls_group_id = ?1",
+            params![mls_group_id.as_slice()],
+        )?;
+        tx.execute(
+            "DELETE FROM refused_ranges WHERE mls_group_id = ?1",
+            params![mls_group_id.as_slice()],
+        )?;
+        tx.execute(
+            "DELETE FROM commit_notes WHERE mls_group_id = ?1",
+            params![mls_group_id.as_slice()],
+        )?;
+        tx.execute(
+            "DELETE FROM restage_waits WHERE mls_group_id = ?1",
+            params![mls_group_id.as_slice()],
+        )?;
+        tx.execute(
+            "DELETE FROM removal_targets WHERE mls_group_id = ?1",
+            params![mls_group_id.as_slice()],
+        )?;
+        // The table names are constants, never input.
+        for table in [
+            "welcome_routes",
+            "routing_history",
+            "kept_input",
+            "repair_marks",
+            "epoch_stall_evidence",
+            "dropped_removals",
+        ] {
             tx.execute(
-                "DELETE FROM sync_cursors WHERE stream = ?1",
-                params![group_cursor_stream],
-            )?;
-            // ...and the catch-up sweep state keyed off the same stream: a floor
-            // without its cursor would resume a returning circle's chase inside
-            // a window that no longer exists, and a hold count without its
-            // cursor describes sweeps of a circle that is gone.
-            tx.execute(
-                "DELETE FROM catchup_backfill_floors WHERE stream = ?1",
-                params![group_cursor_stream],
-            )?;
-            tx.execute(
-                "DELETE FROM catchup_cutoff_holds WHERE stream = ?1",
-                params![group_cursor_stream],
-            )?;
-            tx.execute(
-                "DELETE FROM last_known_locations WHERE nostr_group_id = ?1",
-                params![ngid],
-            )?;
-            // ...and any deferred eviction commit: the circle is gone, so an
-            // obligation to publish a commit into it is not merely stale but
-            // unactionable, and leaving the row would report the departed
-            // circle unrecoverable forever.
-            tx.execute(
-                "DELETE FROM deferred_removal_commits WHERE nostr_group_id = ?1",
-                params![ngid],
-            )?;
-            // ...and the delivery-health row, for the same reason: a leave must
-            // not leave behind a record of when this circle last worked.
-            tx.execute(
-                "DELETE FROM circle_health WHERE nostr_group_id = ?1",
-                params![ngid],
+                &format!("DELETE FROM {table} WHERE mls_group_id = ?1"),
+                params![mls_group_id.as_slice()],
             )?;
         }
-
+        if group_kept {
+            tx.execute(
+                "INSERT OR IGNORE INTO left_groups (mls_group_id) VALUES (?1)",
+                params![mls_group_id.as_slice()],
+            )?;
+        }
         tx.commit()?;
 
         if !existed {
@@ -1670,7 +2210,54 @@ impl CircleStorage {
         format!("leave_intent_v1:{}", hex::encode(mls_group_id.as_slice()))
     }
 
-    /// Records that THIS device asked to leave `mls_group_id`.
+    fn leave_recorded_key(mls_group_id: &GroupId) -> String {
+        format!("leave_recorded_v1:{}", hex::encode(mls_group_id.as_slice()))
+    }
+
+    /// Records that this device's leave proposal of `mls_group_id` minted at
+    /// `epoch` was recorded for its relays. A relay's acknowledgement ends
+    /// the record, and the engine mints no second proposal in that epoch:
+    /// this is what still says it was sent.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mark_leave_intent`].
+    pub fn mark_leave_recorded(&self, mls_group_id: &GroupId, epoch: u64) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, ?2)",
+            params![Self::leave_recorded_key(mls_group_id), epoch.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// The epoch of the last leave proposal of `mls_group_id` recorded
+    /// ([`Self::mark_leave_recorded`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mark_leave_intent`].
+    pub fn leave_recorded_epoch(&self, mls_group_id: &GroupId) -> Result<Option<u64>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let found: Option<String> = conn
+            .query_row(
+                "SELECT value FROM user_settings WHERE key = ?1",
+                params![Self::leave_recorded_key(mls_group_id)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.and_then(|value| value.parse().ok()))
+    }
+
+    /// Records that THIS device asked to leave `mls_group_id`, and when:
+    /// `at_secs`, unix seconds, on the caller's clock. A second press keeps
+    /// the first instant — the leave's bound is measured from it.
     ///
     /// The engine cannot answer the question this marker exists for. A peer's
     /// commit of our own `SelfRemove` and an admin evicting us produce the
@@ -1682,34 +2269,77 @@ impl CircleStorage {
     /// member directory would delete the co-members of the circle the user just
     /// walked out of — the exact relationship requirement R5 exists to keep.
     ///
-    /// Durable, because the leave is two-phase: the proposal is published and
-    /// the local teardown happens later, and a process death in between must
-    /// not lose the intent. Cleared by [`Self::delete_circle`], which is what
-    /// every leave finalizer runs.
+    /// It is also what stops every location of the circle from the instant
+    /// it is written (`SessionManager::leaving`), so it is written before the
+    /// engine is asked for anything. Durable, because the leave is two-phase:
+    /// the proposal is published and the local teardown happens later, and a
+    /// process death in between must not lose the intent. Cleared by
+    /// [`Self::delete_circle`], which is what every leave finalizer runs, and
+    /// by [`Self::clear_leave_intent`] on a refusal no retry can change.
     ///
     /// # Errors
     ///
     /// Returns [`CircleError::Storage`] on lock poisoning and
     /// [`CircleError::Database`] on `SQLite` failure.
-    pub fn mark_leave_intent(&self, mls_group_id: &GroupId) -> Result<()> {
+    pub fn mark_leave_intent(&self, mls_group_id: &GroupId, at_secs: i64) -> Result<()> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
         conn.execute(
-            "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, '1')",
-            params![Self::leave_intent_key(mls_group_id)],
+            "INSERT OR IGNORE INTO user_settings (key, value) VALUES (?1, ?2)",
+            params![Self::leave_intent_key(mls_group_id), at_secs.to_string()],
         )?;
         Ok(())
     }
 
-    /// Whether this device asked to leave `mls_group_id` — see
-    /// [`Self::mark_leave_intent`].
+    /// [`Self::mark_leave_intent`] at `at_secs` whatever instant stood: a
+    /// press that finds no proposal ever minted renews the request.
     ///
     /// # Errors
     ///
     /// As [`Self::mark_leave_intent`].
-    pub fn has_leave_intent(&self, mls_group_id: &GroupId) -> Result<bool> {
+    pub fn renew_leave_intent(&self, mls_group_id: &GroupId, at_secs: i64) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, ?2)",
+            params![Self::leave_intent_key(mls_group_id), at_secs.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Ends the leave intent of `mls_group_id`: the leave was refused for
+    /// good, and the circle shares again.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mark_leave_intent`].
+    pub fn clear_leave_intent(&self, mls_group_id: &GroupId) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "DELETE FROM user_settings WHERE key IN (?1, ?2)",
+            params![
+                Self::leave_intent_key(mls_group_id),
+                Self::leave_recorded_key(mls_group_id)
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// When this device asked to leave `mls_group_id`, unix seconds — see
+    /// [`Self::mark_leave_intent`]. A marker an older build wrote holds no
+    /// instant and reads as the epoch, whose bound is long past.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mark_leave_intent`].
+    pub fn leave_intent_at(&self, mls_group_id: &GroupId) -> Result<Option<i64>> {
         let conn = self
             .conn
             .lock()
@@ -1721,7 +2351,17 @@ impl CircleStorage {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(found.is_some())
+        Ok(found.map(|value| value.parse().unwrap_or(0)))
+    }
+
+    /// Whether this device asked to leave `mls_group_id` — see
+    /// [`Self::mark_leave_intent`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mark_leave_intent`].
+    pub fn has_leave_intent(&self, mls_group_id: &GroupId) -> Result<bool> {
+        Ok(self.leave_intent_at(mls_group_id)?.is_some())
     }
 
     /// Sentinel recording that the member directory owes a withdrawing sweep.
@@ -2958,111 +3598,6 @@ impl CircleStorage {
         Ok(())
     }
 
-    // ============ Deferred Removal Commits (OD4-c option (iv)) ============
-
-    /// Records that `nostr_group_id`'s departing-peer eviction commit is staged
-    /// in the engine and was deliberately NOT published, because it surfaced
-    /// inside a background burst.
-    ///
-    /// Written BEFORE the in-memory deferral is registered, so a crash between
-    /// the two leaves the LOUD state (a durable row with no live deferral, which
-    /// reports the circle unrecoverable) rather than the silent one.
-    /// `deferred_at_ms` is a wall-clock reading kept for diagnostics only —
-    /// nothing branches on it, because a clock that moved must never decide
-    /// whether a removal is owed.
-    ///
-    /// Idempotent: a second deferral for the same circle refreshes the instant
-    /// and nothing else (there is at most one staged commit per group).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
-    pub fn put_deferred_removal_commit(
-        &self,
-        nostr_group_id: &[u8; 32],
-        deferred_at_ms: i64,
-    ) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        conn.execute(
-            "INSERT INTO deferred_removal_commits (nostr_group_id, deferred_at_ms) \
-             VALUES (?1, ?2) \
-             ON CONFLICT(nostr_group_id) DO UPDATE SET deferred_at_ms = ?2",
-            params![nostr_group_id.as_slice(), deferred_at_ms],
-        )?;
-        Ok(())
-    }
-
-    /// Every circle with an outstanding deferred eviction commit.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
-    pub fn deferred_removal_commits(&self) -> Result<Vec<[u8; 32]>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        let mut stmt = conn.prepare("SELECT nostr_group_id FROM deferred_removal_commits")?;
-        let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
-        let mut out = Vec::new();
-        for row in rows {
-            // A row whose key is not 32 bytes cannot name a circle, so it is
-            // skipped rather than surfaced: reporting it would name no circle
-            // the consumer could act on.
-            if let Ok(id) = <[u8; 32]>::try_from(row?.as_slice()) {
-                out.push(id);
-            }
-        }
-        Ok(out)
-    }
-
-    /// Whether `nostr_group_id` owes a deferred eviction commit.
-    ///
-    /// A point lookup on a table that holds at most one row per circle mid-leave,
-    /// so it is cheap enough for the send path to ask on every successful
-    /// publish — which is what discharges a row a peer's commit already healed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
-    pub fn has_deferred_removal_commit(&self, nostr_group_id: &[u8; 32]) -> Result<bool> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        Ok(conn
-            .query_row(
-                "SELECT 1 FROM deferred_removal_commits WHERE nostr_group_id = ?1",
-                params![nostr_group_id.as_slice()],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .is_some())
-    }
-
-    /// Clears `nostr_group_id`'s deferral — the eviction commit was published
-    /// and confirmed, or the epoch moved past it under a peer's commit.
-    ///
-    /// Idempotent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
-    pub fn clear_deferred_removal_commit(&self, nostr_group_id: &[u8; 32]) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        conn.execute(
-            "DELETE FROM deferred_removal_commits WHERE nostr_group_id = ?1",
-            params![nostr_group_id.as_slice()],
-        )?;
-        Ok(())
-    }
-
     // ==================== Gift Wrap Idempotency ====================
 
     /// Checks whether a gift-wrap (kind 1059) wrapper event has already been
@@ -3110,12 +3645,169 @@ impl CircleStorage {
             .conn
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let tx = conn.transaction()?;
+        Self::insert_joined_circle(&tx, circle, membership)?;
+        tx.execute(
+            "INSERT INTO processed_gift_wraps (wrapper_event_id, mls_group_id, processed_at) \
+             VALUES (?1, ?2, ?3)",
+            params![
+                wrapper_event_id.as_bytes(),
+                circle.mls_group_id.as_slice(),
+                processed_at,
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM accept_intents WHERE gift_wrap_id = ?1",
+            params![wrapper_event_id.as_bytes().as_slice()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
 
+    /// Records a circle the engine joined whose invitation is no longer held —
+    /// the join MDK handed back at an open because its rows never committed —
+    /// with its membership, and spends the accept intent that consented to it
+    /// (`gift_wrap_id`), in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a write fails; the transaction is rolled back.
+    pub fn record_joined_circle(
+        &self,
+        circle: &Circle,
+        membership: &CircleMembership,
+        gift_wrap_id: &[u8],
+    ) -> Result<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let tx = conn.transaction()?;
+        Self::insert_joined_circle(&tx, circle, membership)?;
+        tx.execute(
+            "DELETE FROM accept_intents WHERE gift_wrap_id = ?1",
+            params![gift_wrap_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Every left group still to be forgotten
+    /// ([`Self::delete_left_circle`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn left_groups(&self) -> Result<Vec<GroupId>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let mut stmt = conn.prepare("SELECT mls_group_id FROM left_groups")?;
+        let groups = stmt
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .map(|id| id.map(|bytes| GroupId::from_slice(&bytes)))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(groups)
+    }
+
+    /// Puts `mls_group_id` on the list of left groups still to forget.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn mark_left_group(&self, mls_group_id: &GroupId) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "INSERT OR IGNORE INTO left_groups (mls_group_id) VALUES (?1)",
+            params![mls_group_id.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Takes `mls_group_id` off the list of left groups still to forget.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn clear_left_group(&self, mls_group_id: &GroupId) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "DELETE FROM left_groups WHERE mls_group_id = ?1",
+            params![mls_group_id.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Records that the user accepted the invitation `gift_wrap_id` from
+    /// `inviter` (its raw key), before the engine ingests its Welcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure; the accept must not proceed.
+    pub fn record_accept_intent(&self, gift_wrap_id: &EventId, inviter: &[u8]) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "INSERT OR IGNORE INTO accept_intents (gift_wrap_id, inviter) VALUES (?1, ?2)",
+            params![gift_wrap_id.as_bytes().as_slice(), inviter],
+        )?;
+        Ok(())
+    }
+
+    /// The inviter (raw key) the user accepted the invitation whose gift
+    /// wrap has this id from, while its circle has not been recorded yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn accept_intent_inviter(&self, gift_wrap_id: &[u8]) -> Result<Option<Vec<u8>>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        Ok(conn
+            .query_row(
+                "SELECT inviter FROM accept_intents WHERE gift_wrap_id = ?1",
+                params![gift_wrap_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Drops the accept intent for `gift_wrap_id`: the invitation was declined
+    /// or can never be accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn clear_accept_intent(&self, gift_wrap_id: &EventId) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "DELETE FROM accept_intents WHERE gift_wrap_id = ?1",
+            params![gift_wrap_id.as_bytes().as_slice()],
+        )?;
+        Ok(())
+    }
+
+    fn insert_joined_circle(
+        tx: &rusqlite::Transaction<'_>,
+        circle: &Circle,
+        membership: &CircleMembership,
+    ) -> Result<()> {
         let relays_json = serde_json::to_string(&circle.relays)
             .map_err(|e| CircleError::Storage(format!("Failed to serialize relays: {e}")))?;
-
-        let tx = conn.transaction()?;
-
         tx.execute(
             r"
             INSERT INTO circles (mls_group_id, nostr_group_id, display_name, circle_type, relays, created_at, updated_at)
@@ -3160,17 +3852,6 @@ impl CircleStorage {
             ],
         )?;
 
-        tx.execute(
-            "INSERT INTO processed_gift_wraps (wrapper_event_id, mls_group_id, processed_at) \
-             VALUES (?1, ?2, ?3)",
-            params![
-                wrapper_event_id.as_bytes(),
-                circle.mls_group_id.as_slice(),
-                processed_at,
-            ],
-        )?;
-
-        tx.commit()?;
         Ok(())
     }
 
@@ -3402,6 +4083,284 @@ mod tests {
             created_at: 1_000_000,
             updated_at: 2_000_000,
         }
+    }
+
+    // ==================== Routing Tests ====================
+
+    fn group_stream_of(id: u8) -> String {
+        group_stream(&[id; 32])
+    }
+
+    fn prior(
+        nostr_group_id: [u8; 32],
+        relays: &[String],
+        until: u64,
+        oldest: u64,
+    ) -> PriorRouting<'_> {
+        PriorRouting {
+            nostr_group_id,
+            relays,
+            until_epoch: until,
+            oldest_kept: oldest,
+            written_at: 1,
+        }
+    }
+
+    /// The lookups every health stamp and last-known write makes by routing
+    /// id are index seeks, not reads of every circle.
+    #[test]
+    fn a_routing_id_is_looked_up_through_its_index() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let conn = storage.conn().lock().unwrap();
+        for (sql, index) in [
+            (
+                "SELECT mls_group_id FROM circles WHERE nostr_group_id = ?1 LIMIT 2",
+                "idx_circles_nostr_group_id",
+            ),
+            (
+                "SELECT mls_group_id FROM routing_history WHERE nostr_group_id = ?1 LIMIT 1",
+                "idx_routing_history_nostr_group_id",
+            ),
+        ] {
+            let plan: Vec<String> = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map([&[0u8; 32][..]], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(
+                plan.iter().any(|step| step.contains(index)),
+                "{sql} does not use {index}: {plan:?}",
+            );
+        }
+    }
+
+    /// A circle deleted with a prior routing id another circle names now —
+    /// as its current id — takes the locations and the health row under that
+    /// id with it, for nothing tells whose they are, and leaves the stream
+    /// state the other circle still listens with.
+    #[test]
+    fn leaving_a_circle_drops_the_rows_under_an_id_another_circle_shares() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let leaving = create_test_circle(1);
+        let staying = create_test_circle(2);
+        storage.save_circle(&leaving).unwrap();
+        storage.save_circle(&staying).unwrap();
+        storage
+            .keep_prior_routing(
+                &leaving.mls_group_id,
+                &prior(staying.nostr_group_id, &leaving.relays, 3, 0),
+            )
+            .unwrap();
+        storage.note_peer_event(&staying.nostr_group_id, 7).unwrap();
+        let stream =
+            crate::relay::live_sync::group_cursor_stream(&hex::encode(staying.nostr_group_id));
+        storage.update_sync_cursor_max(&stream, 9_000).unwrap();
+        assert!(storage.delete_circle(&leaving.mls_group_id).unwrap());
+        assert_eq!(
+            storage
+                .circle_health(&staying.nostr_group_id)
+                .unwrap()
+                .last_peer_event_at_ms,
+            None,
+            "a leaving circle left a health row under an id it shared",
+        );
+        assert_eq!(
+            storage.read_sync_cursor(&stream).unwrap(),
+            Some(9_000),
+            "a leaving circle took the stream state another circle listens with",
+        );
+    }
+
+    /// A moved routing id keeps the routing it leaves, and the new id's
+    /// cursor starts at the earlier of
+    /// the prior id's cursor and the floor it is given — at the floor when
+    /// the prior id has none, and unset when no floor is known.
+    #[test]
+    fn a_moved_routing_id_starts_at_the_earlier_cursor() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let left = vec!["wss://left.example.com".to_string()];
+        for (id, prior_cursor, floor, started) in [
+            (1, Some(10_000), Some(5_000), Some(5_000)),
+            (2, Some(3_000), Some(5_000), Some(3_000)),
+            (3, None, Some(5_000), Some(5_000)),
+            (4, Some(3_000), None, None),
+        ] {
+            let circle = create_test_circle(id);
+            storage.save_circle(&circle).unwrap();
+            if let Some(ms) = prior_cursor {
+                storage
+                    .update_sync_cursor_max(&group_stream_of(id), ms)
+                    .unwrap();
+            }
+            let moved = Circle {
+                nostr_group_id: [id + 100; 32],
+                relays: vec!["wss://moved.example.com".to_string()],
+                ..circle.clone()
+            };
+            storage
+                .follow_routing(&moved, &prior([id; 32], &left, 3, 0), floor)
+                .unwrap();
+            let row = storage.get_circle(&circle.mls_group_id).unwrap().unwrap();
+            assert_eq!(row.nostr_group_id, moved.nostr_group_id);
+            assert_eq!(row.relays, moved.relays);
+            assert_eq!(
+                storage
+                    .read_sync_cursor(&group_stream_of(id + 100))
+                    .unwrap(),
+                started,
+                "circle {id}"
+            );
+            assert_eq!(
+                storage
+                    .prior_routings(&circle.mls_group_id, 0, None)
+                    .unwrap(),
+                vec![([id; 32], left.clone())],
+                "circle {id}: the routing it left was not kept with the move"
+            );
+        }
+    }
+
+    /// A rotation back to an id the circle used before, which still has
+    /// rows of the circle's under it — residue, or a write made with the id
+    /// it had then — moves without a conflict: the peer row under the id it
+    /// is leaving wins, each health instant keeps the later, and a peer only
+    /// the old id kept stays.
+    #[test]
+    fn a_rotation_back_to_an_id_with_rows_under_it_merges_them() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let circle = Circle {
+            nostr_group_id: [0xB0; 32],
+            ..create_test_circle(1)
+        };
+        storage.save_circle(&circle).unwrap();
+        let (back, current) = ([0xA0; 32], [0xB0; 32]);
+        let row = |id: [u8; 32], sender: &str, latitude: f64| LastKnownLocation {
+            nostr_group_id: id,
+            sender_pubkey: sender.to_string(),
+            latitude,
+            longitude: 0.0,
+            geohash: "s0000000".to_string(),
+            display_name: None,
+            timestamp: 1_000,
+            expires_at: 2_000,
+            purge_after: i64::MAX,
+            updated_at: 1_000,
+        };
+        for (id, sender, latitude) in [(back, "aa", 1.0), (back, "cc", 3.0), (current, "aa", 2.0)] {
+            storage
+                .upsert_last_known_location(&row(id, sender, latitude))
+                .unwrap();
+        }
+        storage.note_publish_acked(&back, 9_000).unwrap();
+        storage.note_peer_event(&back, 1_000).unwrap();
+        storage.note_publish_acked(&current, 5_000).unwrap();
+        storage.note_peer_event(&current, 7_000).unwrap();
+        let moved = Circle {
+            nostr_group_id: back,
+            ..circle.clone()
+        };
+        storage
+            .follow_routing(&moved, &prior(current, &circle.relays, 9, 0), Some(1))
+            .expect("a rotation back moves without a conflict");
+        let mut kept: Vec<(String, f64)> = storage
+            .snapshot_last_known_for_circle(&back, 1_500)
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.sender_pubkey, row.latitude))
+            .collect();
+        kept.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(kept, vec![("aa".to_string(), 2.0), ("cc".to_string(), 3.0)]);
+        assert!(storage
+            .snapshot_last_known_for_circle(&current, 1_500)
+            .unwrap()
+            .is_empty());
+        let health = storage.circle_health(&back).unwrap();
+        assert_eq!(
+            (
+                health.last_publish_acked_at_ms,
+                health.last_peer_event_at_ms
+            ),
+            (Some(9_000), Some(7_000))
+        );
+        assert_eq!(
+            storage.circle_health(&current).unwrap(),
+            CircleHealth::default()
+        );
+    }
+
+    /// A prior routing the window no longer keeps takes the sync state of its
+    /// routing id with it — unless a routing still kept, or a circle's
+    /// current routing, uses that id.
+    #[test]
+    fn a_forgotten_prior_routing_id_takes_its_sync_state_with_it() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let circle = create_test_circle(1);
+        storage.save_circle(&circle).unwrap();
+        let group = &circle.mls_group_id;
+        let relays = vec!["wss://prior.example.com".to_string()];
+        for id in [1, 7, 8] {
+            storage
+                .update_sync_cursor_max(&group_stream_of(id), 9_000)
+                .unwrap();
+            storage
+                .lower_backfill_floor(&group_stream_of(id), 4)
+                .unwrap();
+            storage.bump_cutoff_holds(&group_stream_of(id)).unwrap();
+            storage
+                .owe_relay_floor(&[id; 32], "wss://owed.example.com", 4)
+                .unwrap();
+        }
+        storage
+            .keep_prior_routing(group, &prior([7; 32], &relays, 2, 0))
+            .unwrap();
+        storage
+            .keep_prior_routing(group, &prior([1; 32], &relays, 3, 0))
+            .unwrap();
+        storage
+            .keep_prior_routing(group, &prior([8; 32], &relays, 4, 0))
+            .unwrap();
+        storage
+            .keep_prior_routing(group, &prior([8; 32], &relays, 7, 0))
+            .unwrap();
+        storage
+            .keep_prior_routing(group, &prior([9; 32], &relays, 9, 5))
+            .unwrap();
+        let held = |id: u8| {
+            let stream = group_stream_of(id);
+            (
+                storage.read_sync_cursor(&stream).unwrap().is_some(),
+                storage.read_backfill_floor(&stream).unwrap().is_some(),
+                storage.read_cutoff_holds(&stream).unwrap() > 0,
+                storage
+                    .relay_floor(&[id; 32], "wss://owed.example.com")
+                    .unwrap()
+                    .is_some(),
+            )
+        };
+        assert_eq!(
+            held(7),
+            (false, false, false, false),
+            "a forgotten id kept its state"
+        );
+        assert_eq!(
+            held(1),
+            (true, true, true, true),
+            "the circle's current id lost its state"
+        );
+        assert_eq!(
+            held(8),
+            (true, true, true, true),
+            "an id a kept routing uses lost its state"
+        );
+        let kept: Vec<[u8; 32]> = storage
+            .prior_routings(group, 0, None)
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(kept, vec![[8; 32], [9; 32]]);
     }
 
     // ==================== Circle Tests ====================
@@ -3987,6 +4946,25 @@ mod tests {
         );
     }
 
+    /// A circle's removal mark is cleared in this database before its
+    /// commit's record is written in MDK's (`commit_notes`), and that order
+    /// means something across a power loss only if the clear is on disk when
+    /// the call that made it returns: `synchronous = FULL`, on the encrypted
+    /// path the product opens. `SQLite`'s default; pinned so that a
+    /// performance pragma added here later has to argue with this.
+    #[test]
+    fn a_write_to_circles_db_is_on_disk_when_it_returns() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = CircleStorage::new(&dir.path().join("sync.db"), Some(&test_hex_key()))
+            .expect("create encrypted DB");
+        assert_eq!(
+            pragma_i64(&storage, "synchronous"),
+            2,
+            "circles.db no longer syncs each commit before returning: the removal \
+             mark's clear-before-record order would not survive a power loss",
+        );
+    }
+
     /// M7-B (d): the unencrypted constructor path also applies `busy_timeout`
     /// (it flows through the same `apply_hardening_pragmas`), so the concurrency
     /// posture is identical regardless of encryption.
@@ -4263,6 +5241,26 @@ mod tests {
         assert_eq!(snapshot[0].timestamp, 2_000_000);
     }
 
+    /// Of two fixes of one member dated in the same second the first to
+    /// arrive is the one kept: only a strictly fresher fix replaces a row.
+    #[test]
+    fn last_known_upsert_keeps_the_first_of_two_fixes_dated_in_the_same_second() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let first = create_test_last_known(1, "alice", 1_000_000);
+        let mut second = first.clone();
+        second.latitude = 41.0;
+
+        storage.upsert_last_known_location(&first).unwrap();
+        storage.upsert_last_known_location(&second).unwrap();
+
+        let snapshot = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert!(
+            (snapshot[0].latitude - first.latitude).abs() < f64::EPSILON,
+            "a fix no fresher than the one stored replaced it",
+        );
+    }
+
     #[test]
     fn last_known_upsert_updates_on_newer_timestamp() {
         let storage = CircleStorage::in_memory().unwrap();
@@ -4521,6 +5519,132 @@ mod tests {
 
         let snap = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
         assert_eq!(snap.len(), 0);
+    }
+
+    #[test]
+    fn delete_circle_cascades_to_commit_notes_and_the_restage_wait() {
+        use crate::nostr::mls::{ChangeNote, CommitNotes, RestageWait};
+
+        let storage = CircleStorage::in_memory().unwrap();
+        let circle = create_test_circle(1);
+        let kept = create_test_circle(2);
+        let wait = RestageWait {
+            rollbacks: 1,
+            not_before_ms: 60_000,
+        };
+        for row in [&circle, &kept] {
+            storage.save_circle(row).unwrap();
+            assert!(storage.set_removes_nobody(&row.mls_group_id, true));
+            assert!(storage.note(&row.mls_group_id, ChangeNote::ChangeUndone));
+            storage.set_restage_wait(&row.mls_group_id, Some(wait));
+            assert!(storage.keep_removal_targets(
+                &row.mls_group_id,
+                &[crate::nostr::mls::types::MemberId::new(vec![7; 32])],
+                1,
+                0,
+            ));
+        }
+
+        storage.delete_circle(&circle.mls_group_id).unwrap();
+
+        assert!(
+            !storage.removes_nobody(&circle.mls_group_id)
+                && storage.peek(&circle.mls_group_id).is_empty(),
+            "a deleted circle left its commit notes behind",
+        );
+        assert!(
+            storage.removal_targets(&circle.mls_group_id) == Some(Vec::new())
+                && storage
+                    .removal_targets(&kept.mls_group_id)
+                    .is_some_and(|targets| targets.len() == 1),
+            "a deleted circle left behind who its set-aside removals named, or took another's",
+        );
+        assert_eq!(
+            storage.restage_wait(&circle.mls_group_id),
+            None,
+            "a deleted circle left its re-staging wait behind",
+        );
+        assert!(
+            storage.removes_nobody(&kept.mls_group_id)
+                && storage.peek(&kept.mls_group_id) == [ChangeNote::ChangeUndone]
+                && storage.restage_wait(&kept.mls_group_id) == Some(wait),
+            "deleting one circle took another's notes or wait",
+        );
+    }
+
+    /// A leave's markers end with its circle, and with an intent refused for
+    /// good, and never another circle's: a stale one would answer a later
+    /// leave of a re-joined circle as proposed.
+    #[test]
+    fn the_leave_markers_end_with_the_circle_and_the_refused_intent() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let (gone, refused, kept) = (
+            create_test_circle(1),
+            create_test_circle(2),
+            create_test_circle(3),
+        );
+        for row in [&gone, &refused, &kept] {
+            storage.save_circle(row).unwrap();
+            storage.mark_leave_intent(&row.mls_group_id, 100).unwrap();
+            storage.mark_leave_recorded(&row.mls_group_id, 7).unwrap();
+        }
+        storage.mark_leave_recorded(&kept.mls_group_id, 8).unwrap();
+
+        storage.delete_circle(&gone.mls_group_id).unwrap();
+        storage.clear_leave_intent(&refused.mls_group_id).unwrap();
+
+        for row in [&gone, &refused] {
+            assert!(
+                storage
+                    .leave_intent_at(&row.mls_group_id)
+                    .unwrap()
+                    .is_none()
+                    && storage
+                        .leave_recorded_epoch(&row.mls_group_id)
+                        .unwrap()
+                        .is_none(),
+                "a leave's marker outlived its circle or its refused intent",
+            );
+        }
+        assert!(
+            storage.leave_intent_at(&kept.mls_group_id).unwrap() == Some(100)
+                && storage.leave_recorded_epoch(&kept.mls_group_id).unwrap() == Some(8),
+            "ending one circle's leave took another's markers, or a later mark did not replace \
+             an earlier",
+        );
+    }
+
+    /// Leaving a circle destroys what Haven kept of its input: the events
+    /// are that circle's traffic (Security Rule 5).
+    #[test]
+    fn delete_circle_cascades_to_the_input_kept_for_it() {
+        use crate::nostr::mls::types::MessageId;
+        use crate::nostr::mls::KeptInput;
+
+        let storage = CircleStorage::in_memory().unwrap();
+        let circle = create_test_circle(1);
+        let other = create_test_circle(2);
+        for (row, id) in [(&circle, 7), (&other, 9)] {
+            storage.save_circle(row).unwrap();
+            assert!(storage.keep(
+                &row.mls_group_id,
+                &MessageId::new(vec![id; 32]),
+                true,
+                "event"
+            ));
+        }
+
+        storage.delete_circle(&circle.mls_group_id).unwrap();
+
+        assert!(
+            storage.kept(&circle.mls_group_id).expect("read").is_empty(),
+            "a deleted circle left the input kept for it behind",
+        );
+        assert_eq!(
+            storage.kept(&other.mls_group_id).expect("read").len(),
+            1,
+            "deleting one circle destroyed what was kept for another",
+        );
     }
 
     #[test]
@@ -5213,6 +6337,37 @@ mod tests {
                 last_publish_acked_at_ms: Some(1_700_000_100_000),
                 last_peer_event_at_ms: Some(1_700_000_100_000),
             }
+        );
+    }
+
+    #[test]
+    fn delete_circle_removes_the_relay_floors_owed_to_it() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let circle = create_test_circle(1);
+        let other = create_test_circle(2);
+        storage.save_circle(&circle).unwrap();
+        storage.save_circle(&other).unwrap();
+        for owner in [&circle, &other] {
+            storage
+                .owe_relay_floor(&owner.nostr_group_id, "wss://owed.example.com", 4)
+                .unwrap();
+        }
+
+        storage.delete_circle(&circle.mls_group_id).unwrap();
+
+        assert!(
+            storage
+                .relay_floor(&circle.nostr_group_id, "wss://owed.example.com")
+                .unwrap()
+                .is_none(),
+            "a deleted circle left a relay owing it a floor"
+        );
+        assert!(
+            storage
+                .relay_floor(&other.nostr_group_id, "wss://owed.example.com")
+                .unwrap()
+                .is_some(),
+            "deleting one circle dropped another's floor"
         );
     }
 

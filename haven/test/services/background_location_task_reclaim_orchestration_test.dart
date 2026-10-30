@@ -46,6 +46,8 @@ import 'package:haven/src/services/foreground_liveness_probe.dart'
     show kLivenessPongKey;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../mocks/background_task_fakes.dart' show FakeWakeLockChannel;
+
 /// Short enough that the "genuinely dead" cases below cost tens of
 /// milliseconds, not the real 5 s + 3 s + 5 s production sequence.
 const _shortTimeout = Duration(milliseconds: 30);
@@ -118,6 +120,33 @@ void main() {
       );
     },
   );
+
+  test('a stop that lands during the probes releases nothing', () async {
+    FakeWakeLockChannel();
+    final events = <String>[];
+    Future<void>? teardown;
+    late final BackgroundLocationTaskHandler handler;
+    handler = buildHandler(
+      isSessionLive: ({required dataDir}) {
+        events.add('query');
+        // The post-probe re-check: the probes are behind it.
+        if (events.length == 3) {
+          teardown ??= handler.onDestroy(DateTime.now(), false);
+        }
+        return true;
+      },
+      onForceRelease: () {
+        events.add('release');
+        return ForceReleaseOutcomeFfi.drained;
+      },
+    );
+
+    final acquired = await handler.ensureSessionForTest(dataDir: 'd');
+    await teardown;
+
+    expect(acquired, isFalse);
+    expect(events, ['query', 'query', 'query']);
+  });
 
   test(
     'a foreground that answers the FIRST probe is never torn down',

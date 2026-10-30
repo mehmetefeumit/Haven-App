@@ -200,10 +200,9 @@ Notes:
    a rendezvous-hash slot, so every author assigned to it is unresolvable while
    it stays. Replacing one entry also means:
    * re-checking disjointness (`profile_plane_separation.rs` will tell you);
-   * keeping the count at eight, or changing the copy that quotes it —
-     `privacyRelaysDetailIndexers` and `privacyRelaysDetailProfileLookups` both
-     say "eight" in thirteen locales, and `haven-core/tests/privacy_copy_ties.rs`
-     holds the constant and the English together;
+   * keeping the count at eight, which `relay_pool.rs` pins exactly (the copy
+     that once quoted it went with the Settings → Privacy page, and with it the
+     `privacy_copy_ties.rs` pin);
    * updating the mirrored Dart list `fallbackDefaultProfileRelays`
      (`haven/lib/src/constants/relays.dart`), which
      `scripts/ci/check_profile_privacy_boundaries.sh` check 13 diffs against the

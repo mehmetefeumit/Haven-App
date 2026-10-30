@@ -2,10 +2,12 @@
 //!
 //! The Dark Matter engine binds the MLS leaf signature key to the Marmot
 //! account identity with a Schnorr signature over a canonical, unpublished
-//! kind-450 Nostr event (`marmot.account-identity-proof.v2`, extension type
-//! `0xF2F1`). The engine asks the application to produce that signature through
-//! the [`AccountIdentityProofSigner`] trait at every leaf-creating operation
-//! (group create, key-package generation, self-update).
+//! kind-450 Nostr event (`marmot.account-identity-proof.v2`), carried in the
+//! `LeafNode` app component `0x8009` (Current profile; `created_at` = signing
+//! time; Marmot `app-components/account-identity-proof-v2.md`). The engine asks
+//! the application to produce that signature through the
+//! [`AccountIdentityProofSigner`] trait at every leaf-creating operation (group
+//! create, key-package generation, self-update).
 //!
 //! # Why this wrapper is hardened, not a passthrough
 //!
@@ -132,6 +134,7 @@ impl AccountIdentityProofSigner for HavenIdentityProofSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cgka_traits::group::ProtocolProfile;
     use nostr::secp256k1::schnorr::Signature;
     use nostr::PublicKey;
 
@@ -149,7 +152,48 @@ mod tests {
             mls_signature_public_key: leaf_key.to_vec(),
             ciphersuite: CIPHERSUITE,
             signature_scheme: SIGNATURE_SCHEME_ED25519,
+            created_at: 1_700_000_000,
+            protocol_profile: ProtocolProfile::Current,
         }
+    }
+
+    #[test]
+    fn current_proof_event_matches_spec_vector() {
+        // Marmot `app-components/account-identity-proof-v2.md` "Signing test
+        // vector": BIP-340 secret key 3, created_at 1700000000, leaf key
+        // 0x00..1f. The event Haven signs must be the spec's exact canonical
+        // event, so its id is the spec's id and the signature Haven returns
+        // verifies over it. (The spec's signature uses all-zero auxiliary
+        // randomness; BIP-340 signing with fresh randomness gives a different,
+        // equally valid one, so the signature is verified, not compared.)
+        let mut secret = [0_u8; 32];
+        secret[31] = 3;
+        let keys = Keys::new(SecretKey::from_slice(&secret).expect("secret 3"));
+        assert_eq!(
+            keys.public_key().to_hex(),
+            "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+        );
+        let leaf_key: Vec<u8> = (0_u8..32).collect();
+        let request = request_for(&keys, &leaf_key);
+        let id = request
+            .proof_event_id()
+            .expect("the canonical event builds");
+        assert_eq!(
+            hex::encode(id),
+            "b7e9a15dd85990fb0f49c33db3cc9875f73986207b038404ceb6b7fec4e0af6b"
+        );
+
+        let sig = HavenIdentityProofSigner::new(&keys)
+            .sign_account_identity_proof(&request)
+            .expect("a request for our own identity must sign");
+        let message = nostr::secp256k1::Message::from_digest(id);
+        nostr::SECP256K1
+            .verify_schnorr(
+                &Signature::from_slice(&sig).expect("64-byte signature"),
+                &message,
+                &keys.public_key().xonly().expect("x-only key"),
+            )
+            .expect("Haven's signature verifies over the spec's event id");
     }
 
     #[test]

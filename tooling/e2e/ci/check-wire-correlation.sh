@@ -12,7 +12,8 @@
 # relationships between events:
 #
 #   C5.1  no ONE publisher sends two kind-445s with different `h` in one second
-#   C5.2  REQ-filter allow-list (the multiplexed `#h` shape, and nothing wider)
+#   C5.2  REQ-filter allow-list (the multiplexed `#h` shape, and nothing wider;
+#         a NIP-77 NEG-OPEN filter is judged by the same rules)
 #   C5.3  per-EVENT kind-445 tag shape ∈ { {h}, {h,expiration} }
 #   C5.4  no `g` and no `alt` tag on any kind
 #   C5.5  kind-1059 tag set is exactly {p}, exactly once
@@ -20,6 +21,13 @@
 #   C5.7  every kind-445 carries a FRESH EPHEMERAL author (Security Rule 2)
 #   C5.8  the real MLS group id NEVER appears on the wire (Security Rule 4)
 #   C5.9  a kind-445 carries no `p` (recipient) tag
+#   C5.10 an application kind-445 asks for exactly the circle's retention:
+#         `expiration - created_at` == Haven's 0x8005 window, read from source
+#   C5.11 a kind-30443's tag VALUES: each of the seven tags exactly once, a
+#         binding-shaped `d`, a 32-byte `i`, `mls_proposals` == {0x0008,
+#         0x000a}, no default or retired id in `mls_extensions`,
+#         `app_components` only from the private-use range and including
+#         0x8009 and 0x800c, and no `client` / `encoding` tag
 #
 # Almost every one of these is invisible to C4, and that is why it is a
 # separate file rather than more entries in `wire_allowlist.json`. C4 asserts
@@ -176,6 +184,18 @@ readonly RC_METAFLOOR=4
 
 SELF_PATH="${BASH_SOURCE[0]}"
 readonly SELF_PATH
+
+# The retention window every Haven circle declares (component 0x8005), read
+# from the one place that defines it: restating the number here would let the
+# two drift, and C5.10 would then grade the wire against a stale promise.
+readonly RETENTION_SOURCE="$(cd "$(dirname "${SELF_PATH}")/../../.." && pwd)/haven-core/src/location/ttl.rs"
+RETENTION_SECS="$(sed -nE 's/^pub const LOCATION_MESSAGE_RETENTION_SECS: u64 = ([0-9]+);.*/\1/p' "${RETENTION_SOURCE}" 2>/dev/null || true)"
+readonly RETENTION_SECS
+if [[ ! "${RETENTION_SECS}" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: cannot read LOCATION_MESSAGE_RETENTION_SECS from ${RETENTION_SOURCE}; C5.10" >&2
+  echo "       has nothing to hold the wire to." >&2
+  exit "${RC_UNUSABLE}"
+fi
 
 usage() {
   cat >&2 <<'EOF'
@@ -376,6 +396,15 @@ normalize() {
              up:$up, listen:$lst,
              sub:(($line.frame[1] // "") | tostring),
              filters:[ $line.frame[2:][] | select(type == "object") ]}
+          elif $verb == "NEG-OPEN" then
+            # A NIP-77 reconciliation (`["NEG-OPEN", <subid>, <filter>, <msg>]`)
+            # puts a filter on the relay exactly as a REQ does, so C5.2 judges
+            # its one filter by the same rules. `neg` keeps it out of the
+            # group-plane precondition: a reconciliation is not a subscription.
+            {t:"req", neg:true, seq:$line.wire_seq, dir:$line.dir, conn:$line.conn_id,
+             up:$up, listen:$lst,
+             sub:(($line.frame[1] // "") | tostring),
+             filters:[ $line.frame[2:3][] | select(type == "object") ]}
           elif ($verb == "HAVEN_WIRE_SENTINEL" and $line.dir == "c2r") then
             # A HARNESS-SOCKET DECLARATION. The verb exists only in the E2E
             # harness (`TestRelay._declareHarnessSocket` /
@@ -726,7 +755,7 @@ evaluate() {
     # location material. NIP-50 `search`, for one, puts plaintext query terms
     # on the wire, and it is rejected here by omission rather than by name.
     | ["ids","authors","kinds","since","until","limit","#a","#d","#e","#h","#p"] as $KNOWNKEYS
-    | ( [ $reqs[] | .filters[] | select(has("#h")) ] ) as $hFilters
+    | ( [ $reqs[] | select(.neg != true) | .filters[] | select(has("#h")) ] ) as $hFilters
 
     # H(E): the union of every `#h` value REQ-ed at endpoint E, over the whole
     # snapshot. Used by the relay-set-homogeneity rule below.
@@ -1082,6 +1111,91 @@ evaluate() {
       ] as $c59viol
 
     # ======================================================================
+    # C5.10 — an application kind-445 asks for exactly the circle's retention
+    # ======================================================================
+    # Every circle Haven creates declares one message-retention window
+    # (component 0x8005), and the peeler stamps `expiration` = the inner
+    # `created_at` + that window, with the outer `created_at` bound to the
+    # inner one. So the difference is a constant of the build. A longer one
+    # means relays are asked to hold location ciphertext past the promise the
+    # app makes; a shorter one means locations expire before the next fix. An
+    # event with a second `expiration` is C5.3's finding and is skipped here.
+    | [ $s445[] | select(([ nameList(.tags)[] | select(. == "expiration") ] | length) == 1) ] as $s445app
+    | [ (if (($s445app | length) == 0) then
+          "C5.10 precondition: no APPLICATION kind-445 (one carrying `expiration`) was PUBLISHED below the sentinel, so the retention window was never on the wire to be read."
+         else empty end) ] as $c510meta
+    | [ $s445app[]
+        | . as $e
+        | (tagVals(.tags; "expiration") | first) as $exp
+        | select((($exp | tostring | test("^[0-9]+$")) | not)
+                 or ((($exp | tonumber) - ($e.created_at // 0)) != $retentionSecs))
+        | "C5.10 retention: kind-445 \(short($e.id))… was PUBLISHED asking relays to keep it for a window other than the \($retentionSecs) s every Haven circle declares (component 0x8005; LOCATION_MESSAGE_RETENTION_SECS). `expiration - created_at` is a constant of the build: a longer one keeps location ciphertext on relays past what the app tells its user, a shorter one drops it before the next fix arrives, and either means the stamp no longer comes from the circle's own component."
+      ] as $c510viol
+
+    # ======================================================================
+    # C5.11 — kind-30443 tag VALUES
+    # ======================================================================
+    # C4 pins the tag NAMES. A receiver compares the VALUES to what the
+    # package decodes to and rejects a mismatch, so a KeyPackage with the
+    # right names and the wrong values is an account nobody can invite. This
+    # cannot decode the package; it holds the values to what a Haven package
+    # decodes to (Marmot `transports/nostr.md` "KeyPackage publication",
+    # `foundation/registries.md`): the Rust half is
+    # `build_key_package_event_has_marmot_tag_set_and_no_encoding_or_relays`.
+    | [ $uSent[] | select(.kind == 30443) ] as $s30443
+    | [ (if (($s30443 | length) == 0) then
+          "C5.11 precondition: no kind-30443 was PUBLISHED below the sentinel, so no KeyPackage tag value was on the wire to be read."
+         else empty end) ] as $c511meta
+    # `normalize` pads a bare `["name"]` to `["name",""]`, so an EMPTY id-list
+    # reaches here as one empty value and is read as such below.
+    | def tagsNamed($tags; $n): [ $tags[] | select(.[0] == $n) ];
+      def vals($tags; $n): (tagsNamed($tags; $n) | first // []) | .[1:];
+      [ $s30443[]
+        | . as $e
+        | ( ( ["d","mls_protocol_version","i","mls_ciphersuite","mls_extensions","mls_proposals","app_components"][]
+              | . as $n
+              | select((tagsNamed($e.tags; $n) | length) != 1)
+              | "the `\($n)` tag appears \(tagsNamed($e.tags; $n) | length) times, not once" ),
+            ( ["client","encoding"][]
+              | . as $n
+              | select((tagsNamed($e.tags; $n) | length) > 0)
+              | "it carries a `\($n)` tag" ),
+            ( ["d","mls_protocol_version","i","mls_ciphersuite"][]
+              | . as $n
+              | select((tagsNamed($e.tags; $n) | length) == 1 and (vals($e.tags; $n) | length) != 1)
+              | "the `\($n)` tag carries \(vals($e.tags; $n) | length) values, not one" ),
+            ( select((vals($e.tags; "d") | first // "") | test("^[0-9a-f]{64}$") | not)
+              | "its `d` slot id is not 64 lowercase hex characters" ),
+            ( select((vals($e.tags; "mls_protocol_version")) != ["1.0"])
+              | "its `mls_protocol_version` is not 1.0" ),
+            ( ["mls_extensions","mls_proposals","app_components"][]
+              | . as $n
+              | vals($e.tags; $n) as $v
+              | select(($v | map(select(. != "")) | length) == 0 or ($v | unique | length) != ($v | length))
+              | "the `\($n)` id-list is empty or repeats a value" ),
+            ( ["mls_ciphersuite","mls_extensions","mls_proposals","app_components"][]
+              | . as $n
+              | select(any(vals($e.tags; $n)[]; (tostring | test("^0x[0-9a-f]{4}$")) | not))
+              | "the `\($n)` id-list carries a value that is not a 0x-prefixed four-digit lowercase hex id" ),
+            ( select((vals($e.tags; "i") | first // "") | test("^[0-9a-f]{64}$") | not)
+              | "its `i` KeyPackageRef is not 64 lowercase hex characters" ),
+            ( vals($e.tags; "app_components")[]
+              | select(test("^0x[0-9a-f]{4}$") and . < "0x8000")
+              | "`app_components` lists \(.), which is below the private-use range the tag carries (0x8000 and up)" ),
+            ( vals($e.tags; "mls_extensions")[]
+              | select(. == "0x0003" or . == "0x000a" or . == "0xf2f1")
+              | "`mls_extensions` lists \(.), which a current-profile package never advertises there" ),
+            ( select((vals($e.tags; "mls_proposals") | sort) != ["0x0008","0x000a"])
+              | "`mls_proposals` is not exactly 0x0008 and 0x000a" ),
+            ( ["0x8009","0x800c"][]
+              | . as $id
+              | select((vals($e.tags; "app_components") | index($id)) == null)
+              | "`app_components` lacks \($id)" )
+          )
+        | "C5.11 KeyPackage tag values: kind-30443 \(short($e.id))… — \(.). A peer rejects a KeyPackage whose tags do not say what the package decodes to, so the account that published this cannot be invited; and a `client` tag would name the app on a public, identity-signed event."
+      ] as $c511viol
+
+    # ======================================================================
     # Inbound: reported, never asserted
     # ======================================================================
     # Everything C5.7 asks is a question about the SENDER, and inbound frames
@@ -1108,9 +1222,9 @@ evaluate() {
 
     | {
         meta: ($c51meta + $c52meta + $c53meta + $c54meta + $c55meta + $c56meta
-               + $c57meta + $c58meta + $c59meta),
+               + $c57meta + $c58meta + $c59meta + $c510meta + $c511meta),
         violations: ($c51viol + $c52viol + $c53viol + $c54viol + $c55viol + $c56viol
-                     + $c57viol + $c58viol + $c59viol),
+                     + $c57viol + $c58viol + $c59viol + $c510viol + $c511viol),
         advisories: ($advisories
           + (if ($mlsNotAsserted != "") and (($s445 | length) > 0) then
                [ "C5.8 NOT ASSERTED (declared by the lane): \($mlsNotAsserted). \($s445 | length) kind-445(s) were published below the sentinel and were NOT scanned for a leaked real MLS group id, because the lane declared it cannot supply one. Security Rule 4 is therefore asserted for this run ONLY by the in-drive _assertWirePrivacyInvariants, which is narrower: it reads back a single circle's kind-445 stream and says nothing about 1059/30443/10002/0. This line is printed on EVERY run by design — it is the record that an invariant was skipped, not an absence to be inferred." ]
@@ -1118,7 +1232,8 @@ evaluate() {
         summary: {
           event_frames: ($events | length),
           unique_events: ($uniq | length),
-          req_frames: ($reqs | length),
+          req_frames: ([ $reqs[] | select(.neg != true) ] | length),
+          neg_open_frames: ([ $reqs[] | select(.neg == true) ] | length),
           k445: ($u445 | length),
           k445_app: ($u445app | length),
           k445_commit: ($u445nonapp | length),
@@ -1148,6 +1263,7 @@ JQPROG
     --argjson mlsGroupIds "${mlsids}" \
     --argjson expectMlsGroupIds "${expect_mlsids}" \
     --arg mlsNotAsserted "${mls_not_asserted}" \
+    --argjson retentionSecs "${RETENTION_SECS}" \
     -f "${prog}" -- "${stream}"
   local rc=$?
   rm -f "${prog}"
@@ -1475,10 +1591,11 @@ main() {
   # C5.8 here while an advisory three lines above says it was not scanned is a
   # false statement in the one place it does the most damage.
   if [[ -n "${MLS_NOT_ASSERTED}" ]]; then
-    echo "wire-correlation: clean on EIGHT of nine — C5.1 per-publisher timestamp separation," \
+    echo "wire-correlation: clean on TEN of eleven — C5.1 per-publisher timestamp separation," \
          "C5.2 REQ-filter allow-list, C5.3 per-event 445 tag shape, C5.4 no g/alt," \
          "C5.5 1059 == {p}, C5.6 per-kind publish containment, C5.7 fresh ephemeral" \
-         "445 author and C5.9 no p-tag on a 445 all hold, and all eight had a" \
+         "445 author, C5.9 no p-tag on a 445, C5.10 the retention window and C5.11" \
+         "KeyPackage tag values all hold, and all ten had a" \
          "non-empty sample. C5.8 (no real MLS group id on the wire) was NOT" \
          "ASSERTED — see the advisory above. This run is NOT evidence for" \
          "Security Rule 4."
@@ -1486,8 +1603,9 @@ main() {
     echo "wire-correlation: clean — C5.1 per-publisher timestamp separation, C5.2 REQ-filter" \
          "allow-list, C5.3 per-event 445 tag shape, C5.4 no g/alt, C5.5 1059 == {p}," \
          "C5.6 per-kind publish containment, C5.7 fresh ephemeral 445 author," \
-         "C5.8 no real MLS group id on the wire and C5.9 no p-tag on a 445 all hold," \
-         "and all nine had a non-empty sample."
+         "C5.8 no real MLS group id on the wire, C5.9 no p-tag on a 445, C5.10 the" \
+         "retention window and C5.11 KeyPackage tag values all hold," \
+         "and all eleven had a non-empty sample."
   fi
   exit "${RC_CLEAN}"
 }
@@ -1658,9 +1776,12 @@ readonly RELAY_A="ws://127.0.0.1:7777"
 readonly RELAY_B="ws://127.0.0.1:7779"
 readonly DISCOVERY="ws://127.0.0.1:7999"
 
-# The real kind-30443 tag set, copied from
-# haven-core/src/relay/maintenance/key_package.rs:479-486.
-readonly KP_TAGS='[["d","haven-kp-0"],["mls_protocol_version","1.0"],["i","0001"],["mls_ciphersuite","0x0001"],["mls_extensions","0x0002"],["mls_proposals","0x0003"],["app_components","0x8005"]]'
+# The kind-30443 tag set a Haven package really publishes: the id-list values
+# are what `build_key_package_event` emits for a package minted by this build
+# (the Rust half pins the same values in
+# `build_key_package_event_has_marmot_tag_set_and_no_encoding_or_relays`), so
+# C5.11 is exercised against the production shape and not an invented one.
+readonly KP_TAGS='[["d","0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"],["mls_protocol_version","1.0"],["i","1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e"],["mls_ciphersuite","0x0001"],["mls_extensions","0x0006"],["mls_proposals","0x0008","0x000a"],["app_components","0x8001","0x8003","0x8004","0x8005","0x8009","0x800c"]]'
 
 # The sentinel exchange the recorder actually performs: the drive emits
 # `["HAVEN_WIRE_SENTINEL", <token>]` (never forwarded upstream) and the proxy
@@ -1841,7 +1962,7 @@ self_test() {
   # assertion being wrong.
   local idcollision="${tmp}/id-collision.ndjson"
   write_healthy "${idcollision}"
-  jline c2r c1 "[\"EVENT\",$(ev 445 "eDUP" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886500\"]]" 1785886200)]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eDUP" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886428\"]]" 1785886200)]"
   jline c2r c1 "[\"EVENT\",$(ev 445 "eDUP" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"h\",\"${H2}\"],[\"g\",\"u4pru\"],[\"alt\",\"Encrypted group message\"]]" 1785886200)]"
   emit_sentinel c0
   expect_rc 1 "two bodies under one event id are both checked, not collapsed" \
@@ -1881,7 +2002,7 @@ self_test() {
   # correlation C5.1 exists to find is deleted by the de-dup.
   local tscollapse="${tmp}/id-collision-created-at.ndjson"
   write_healthy "${tscollapse}"
-  jline c2r c1 "[\"EVENT\",$(ev 445 "eTS" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886389\"]]" 1785886200)]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eTS" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886428\"]]" 1785886200)]"
   jline c2r c1 "[\"EVENT\",$(ev 445 "eTS" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886389\"]]" 1785886161)]"
   emit_sentinel c0
   expect_rc 1 "a 445 sharing everything but its CREATED_AT with another event is still checked" \
@@ -1989,8 +2110,8 @@ self_test() {
   write_healthy "${c51two}"
   jopen c3
   jopen c4
-  jline c2r c3 "[\"EVENT\",$(ev 445 "eDEV1" "${PK_EPH5}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886500\"]]" 1785886228)]"
-  jline c2r c4 "[\"EVENT\",$(ev 445 "eDEV2" "${PK_EPH6}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886500\"]]" 1785886228)]"
+  jline c2r c3 "[\"EVENT\",$(ev 445 "eDEV1" "${PK_EPH5}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886456\"]]" 1785886228)]"
+  jline c2r c4 "[\"EVENT\",$(ev 445 "eDEV2" "${PK_EPH6}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886456\"]]" 1785886228)]"
   emit_sentinel c0
   expect_rc 0 "C5.1 two DIFFERENT devices coinciding in one second is not a finding" \
     --journal "${c51two}" "${base[@]}" || fail=1
@@ -2004,8 +2125,8 @@ self_test() {
   local c51same="${tmp}/c51-one-device.ndjson"
   write_healthy "${c51same}"
   jopen c3
-  jline c2r c3 "[\"EVENT\",$(ev 445 "eDEV1" "${PK_EPH5}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886500\"]]" 1785886228)]"
-  jline c2r c3 "[\"EVENT\",$(ev 445 "eDEV2" "${PK_EPH6}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886500\"]]" 1785886228)]"
+  jline c2r c3 "[\"EVENT\",$(ev 445 "eDEV1" "${PK_EPH5}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886456\"]]" 1785886228)]"
+  jline c2r c3 "[\"EVENT\",$(ev 445 "eDEV2" "${PK_EPH6}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886456\"]]" 1785886228)]"
   emit_sentinel c0
   expect_rc 1 "C5.1 ONE device publishing to two circles in one second is still a violation" \
     --journal "${c51same}" "${base[@]}" || fail=1
@@ -2017,8 +2138,8 @@ self_test() {
   # be silent, and provably silent rather than merely outvoted.
   local c51in="${tmp}/c51-inbound.ndjson"
   write_healthy "${c51in}"
-  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eIN1" "${PK_EPH7}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886500\"]]" 1785886229)]"
-  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eIN2" "${PK_EPH8}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886500\"]]" 1785886229)]"
+  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eIN1" "${PK_EPH7}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886457\"]]" 1785886229)]"
+  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eIN2" "${PK_EPH8}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886457\"]]" 1785886229)]"
   emit_sentinel c0
   expect_rc 0 "C5.1 two inbound 445s in one second are the relay's output, not Haven's" \
     --journal "${c51in}" "${base[@]}" || fail=1
@@ -2046,7 +2167,7 @@ self_test() {
   local c51disjoint="${tmp}/c51-disjoint-relays.ndjson"
   write_healthy "${c51disjoint}"
   jopen c5 "${RELAY_B}" "127.0.0.1:7790"
-  jline c2r c5 "[\"EVENT\",$(ev 445 "eFAR" "${PK_EPH9}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886500\"]]" 1785886231)]" "${RELAY_B}" "127.0.0.1:7790"
+  jline c2r c5 "[\"EVENT\",$(ev 445 "eFAR" "${PK_EPH9}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886459\"]]" 1785886231)]" "${RELAY_B}" "127.0.0.1:7790"
   emit_sentinel c0
   expect_rc 4 "C5.1 refuses to report clean when two groups' relay sets are disjoint" \
     --journal "${c51disjoint}" "${base[@]}" || fail=1
@@ -2176,6 +2297,44 @@ self_test() {
   renumber "${tmp}/c52nohd.raw" "${c52nohd}"
   expect_rc 4 "C5.2 precondition: a snapshot with no #h REQ proves nothing" \
     --journal "${c52nohd}" "${base[@]}" || fail=1
+
+  # NIP-77: a NEG-OPEN puts a filter on the relay as a REQ does, and C5.2
+  # judges it by the same rules. The circle window Haven reconciles — one `#h`,
+  # kind 445, since/until/limit — is clean beside the healthy traffic.
+  local c52neg="${tmp}/c52-neg.ndjson"
+  write_healthy "${c52neg}"
+  jline c2r c1 "[\"NEG-OPEN\",\"neg-1\",{\"kinds\":[445],\"#h\":[\"${H1}\"],\"since\":1783294144,\"until\":1785886144,\"limit\":16384},\"6100000200\"]"
+  jline c2r c1 '["NEG-CLOSE","neg-1"]'
+  emit_sentinel c0
+  expect_rc 0 "C5.2 the one-circle NEG-OPEN window is the accepted reconciliation shape" \
+    --journal "${c52neg}" "${base[@]}" || fail=1
+
+  local c52negkey="${tmp}/c52-neg-key.ndjson"
+  write_healthy "${c52negkey}"
+  jline c2r c1 "[\"NEG-OPEN\",\"neg-1\",{\"kinds\":[445],\"#h\":[\"${H1}\"],\"search\":\"alice\"},\"6100000200\"]"
+  emit_sentinel c0
+  expect_msg "carried the filter key \"search\"" \
+    "C5.2 a NEG-OPEN filter key nobody has reasoned about is closed out" \
+    --journal "${c52negkey}" "${base[@]}" || fail=1
+
+  local c52negkinds="${tmp}/c52-neg-kinds.ndjson"
+  write_healthy "${c52negkinds}"
+  jline c2r c1 "[\"NEG-OPEN\",\"neg-1\",{\"kinds\":[445,1059],\"#h\":[\"${H1}\",\"${H2}\"]},\"6100000200\"]"
+  emit_sentinel c0
+  expect_msg "rather than kind 445 alone" \
+    "C5.2 a multi-#h NEG-OPEN widened past kind 445 is refused like a REQ" \
+    --journal "${c52negkinds}" "${base[@]}" || fail=1
+
+  # ...and a reconciliation is not a subscription: a snapshot whose only `#h`
+  # filter is a NEG-OPEN still has not exercised the group-plane shape.
+  local c52negonly="${tmp}/c52-neg-only.ndjson"
+  jq -c 'select((.frame | tostring | test("\"#h\"")) | not)' "${healthy}" | sed '$d' > "${tmp}/c52negonly.raw"
+  FIXTURE_FILE="${tmp}/c52negonly.raw"; FIXTURE_SEQ=900
+  jline c2r c1 "[\"NEG-OPEN\",\"neg-1\",{\"kinds\":[445],\"#h\":[\"${H1}\"]},\"6100000200\"]"
+  emit_sentinel c0
+  renumber "${tmp}/c52negonly.raw" "${c52negonly}"
+  expect_rc 4 "C5.2 precondition: a NEG-OPEN does not stand in for the group-plane REQ" \
+    --journal "${c52negonly}" "${base[@]}" || fail=1
 
   # =========================================================================
   # C5.3 — per-event 445 tag shape
@@ -2313,7 +2472,7 @@ self_test() {
   local c56out="${tmp}/c56-outside.ndjson"
   write_healthy "${c56out}"
   jopen c6 "ws://127.0.0.1:7900" "127.0.0.1:7901"
-  jline c2r c6 "[\"EVENT\",$(ev 445 "eOUT" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886500\"]]" 1785886200)]" "ws://127.0.0.1:7900" "127.0.0.1:7901"
+  jline c2r c6 "[\"EVENT\",$(ev 445 "eOUT" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886428\"]]" 1785886200)]" "ws://127.0.0.1:7900" "127.0.0.1:7901"
   emit_sentinel c0
   expect_rc 1 "C5.6 a 445 outside its circle's relays is a violation" \
     --journal "${c56out}" "${base[@]}" || fail=1
@@ -2329,7 +2488,7 @@ self_test() {
   local c56fan="${tmp}/c56-fanout.ndjson"
   write_healthy "${c56fan}"
   local fanbody
-  fanbody="$(ev 445 "eFAN" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886500\"]]" 1785886200)"
+  fanbody="$(ev 445 "eFAN" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886428\"]]" 1785886200)"
   jopen c6 "ws://127.0.0.1:7900" "127.0.0.1:7901"
   jline c2r c1 "[\"EVENT\",${fanbody}]"
   jline c2r c6 "[\"EVENT\",${fanbody}]" "ws://127.0.0.1:7900" "127.0.0.1:7901"
@@ -2365,7 +2524,7 @@ self_test() {
   local c56idkind="${tmp}/c56-shared-id-two-kinds.ndjson"
   write_healthy "${c56idkind}"
   jopen c5 "${RELAY_B}" "127.0.0.1:7790"
-  jline c2r c5 "[\"EVENT\",$(ev 445 "eSHARED" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886500\"]]" 1785886200)]" "${RELAY_B}" "127.0.0.1:7790"
+  jline c2r c5 "[\"EVENT\",$(ev 445 "eSHARED" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886428\"]]" 1785886200)]" "${RELAY_B}" "127.0.0.1:7790"
   jline c2r c5 "[\"EVENT\",$(ev 30443 "eSHARED" "${PK_A}" "${KP_TAGS}")]" "${RELAY_B}" "127.0.0.1:7790"
   emit_sentinel c0
   expect_rc 1 "C5.6 a second KIND under one event id at one endpoint is contained on its own terms" \
@@ -2425,6 +2584,7 @@ self_test() {
   jline_bare c2r c1 "[\"EVENT\",$(ev 445 "e09" "${PK_EPH2}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886372\"]]" 1785886144)]"
   jline_bare c2r c1 "[\"EVENT\",$(ev 445 "e10" "${PK_EPH3}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886389\"]]" 1785886161)]"
   jline_bare c2r c1 "[\"EVENT\",$(ev 1059 "e07" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"]]")]"
+  jline_bare c2r c1 "[\"EVENT\",$(ev 30443 "e04" "${PK_A}" "${KP_TAGS}")]"
   jline_bare c2r c1 "[\"REQ\",\"sub-h\",{\"kinds\":[445],\"#h\":[\"${H1}\",\"${H2}\"]}]"
   emit_sentinel c0 bare
   expect_rc 4 "C5.6 precondition: an endpoint-less journal cannot bound containment" \
@@ -2439,6 +2599,7 @@ self_test() {
   jline_bare c2r c1 "[\"EVENT\",$(ev 445 "e09" "${PK_EPH2}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886372\"]]" 1785886144)]"
   jline_bare c2r c1 "[\"EVENT\",$(ev 445 "e10" "${PK_EPH3}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886389\"]]" 1785886161)]"
   jline_bare c2r c1 "[\"EVENT\",$(ev 1059 "e07" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"]]")]"
+  jline_bare c2r c1 "[\"EVENT\",$(ev 30443 "e04" "${PK_A}" "${KP_TAGS}")]"
   jline_bare c2r c1 "[\"REQ\",\"sub-h\",{\"kinds\":[445],\"#h\":[\"${H1}\",\"${H2}\"]}]"
   emit_sentinel c0 bare
   expect_rc 0 "C5.6 a conn_open record resolves a journal in the bare contract shape" \
@@ -2459,7 +2620,7 @@ self_test() {
   # observation and not by declaration — which is what `base_nodecl` isolates.
   local c57idk="${tmp}/c57-identity-author.ndjson"
   write_healthy "${c57idk}"
-  jline c2r c1 "[\"EVENT\",$(ev 445 "eIDK" "${PK_A}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886500\"]]" 1785886200)]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eIDK" "${PK_A}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886428\"]]" 1785886200)]"
   emit_sentinel c0
   expect_rc 1 "C5.7 a 445 signed by an identity key is a violation" \
     --journal "${c57idk}" "${base[@]}" || fail=1
@@ -2478,7 +2639,7 @@ self_test() {
   # clean without the declaration and red with it, or the flag is decoration.
   local c57decl="${tmp}/c57-declared-identity.ndjson"
   write_healthy "${c57decl}"
-  jline c2r c1 "[\"EVENT\",$(ev 445 "eDECL" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886520\"]]" 1785886250)]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eDECL" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886478\"]]" 1785886250)]"
   emit_sentinel c0
   expect_rc 0 "C5.7 an undeclared, never-identity-signing key is an ordinary ephemeral author" \
     --journal "${c57decl}" "${base[@]}" || fail=1
@@ -2489,8 +2650,8 @@ self_test() {
   # freshness half, and the one a single-445 run cannot test at all.
   local c57reuse="${tmp}/c57-key-reuse.ndjson"
   write_healthy "${c57reuse}"
-  jline c2r c1 "[\"EVENT\",$(ev 445 "eR1" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886600\"]]" 1785886240)]"
-  jline c2r c1 "[\"EVENT\",$(ev 445 "eR2" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886601\"]]" 1785886241)]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eR1" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886468\"]]" 1785886240)]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eR2" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886469\"]]" 1785886241)]"
   emit_sentinel c0
   expect_rc 1 "C5.7 one ephemeral key signing two different 445s is a violation" \
     --journal "${c57reuse}" "${base[@]}" || fail=1
@@ -2505,8 +2666,8 @@ self_test() {
   # "the rule looked and stayed silent" from "the rule is switched off".
   local c57in="${tmp}/c57-inbound-reuse.ndjson"
   write_healthy "${c57in}"
-  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eR1" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886600\"]]" 1785886240)]"
-  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eR2" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886601\"]]" 1785886241)]"
+  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eR1" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886468\"]]" 1785886240)]"
+  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eR2" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886469\"]]" 1785886241)]"
   emit_sentinel c0
   expect_rc 0 "C5.7 an author repeated across two INBOUND 445s is not Haven's traffic" \
     --journal "${c57in}" "${base[@]}" || fail=1
@@ -2521,7 +2682,7 @@ self_test() {
   # would silently fold into one bucket with every other author-less event.
   local c57nopk="${tmp}/c57-no-pubkey.ndjson"
   write_healthy "${c57nopk}"
-  jline c2r c1 "[\"EVENT\",$(ev 445 "eNOPK" "" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886620\"]]" 1785886260)]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eNOPK" "" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886488\"]]" 1785886260)]"
   emit_sentinel c0
   expect_rc 1 "C5.7 a 445 carrying no author pubkey is a violation" \
     --journal "${c57nopk}" "${base[@]}" || fail=1
@@ -2536,7 +2697,7 @@ self_test() {
   local c57fan="${tmp}/c57-fanout.ndjson"
   write_healthy "${c57fan}"
   local c57body
-  c57body="$(ev 445 "eFANK" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886640\"]]" 1785886270)"
+  c57body="$(ev 445 "eFANK" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886498\"]]" 1785886270)"
   jopen c5 "${RELAY_B}" "127.0.0.1:7790"
   jline c2r c1 "[\"EVENT\",${c57body}]"
   jline c2r c5 "[\"EVENT\",${c57body}]" "${RELAY_B}" "127.0.0.1:7790"
@@ -2621,7 +2782,20 @@ self_test() {
     "C5.7 precondition names the empty comparison set" \
     --journal "${c57noid}" "${base_nodecl[@]}" || fail=1
 
-  expect_rc 0 "C5.7 --identity-pubkey supplies the ground truth an identity-free journal lacks" \
+  # It cannot be rc 0 any more: a device that signed nothing with its identity
+  # key published no KeyPackage either, and C5.11 says so. What is held instead
+  # is exactly what rc 0 held — the declaration discharges C5.7's floor and
+  # nothing else is red — by pinning that C5.11's is the ONE precondition left.
+  expect_rc 4 "C5.7 --identity-pubkey supplies the ground truth an identity-free journal lacks" \
+    --journal "${c57noid}" "${base[@]}" || fail=1
+  expect_no_msg "no key this device is known to sign with" \
+    "...so C5.7's floor is discharged by the declaration" \
+    --journal "${c57noid}" "${base[@]}" || fail=1
+  expect_msg "ERROR: 1 precondition failure(s)" \
+    "...and exactly one precondition is left standing" \
+    --journal "${c57noid}" "${base[@]}" || fail=1
+  expect_msg "C5.11 precondition" \
+    "...which is the KeyPackage an identity-free journal cannot contain" \
     --journal "${c57noid}" "${base[@]}" || fail=1
 
   # The floor must be SEND-SIDE. An inbound identity-scoped event supplies a key
@@ -2660,7 +2834,7 @@ self_test() {
   # that mints the routing value.
   local c58alias="${tmp}/c58-alias.ndjson"
   write_healthy "${c58alias}"
-  jline c2r c1 "[\"EVENT\",$(ev 445 "eALIAS" "${PK_EPH4}" "[[\"h\",\"${MLS1}\"],[\"expiration\",\"1785886700\"]]" 1785886210)]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eALIAS" "${PK_EPH4}" "[[\"h\",\"${MLS1}\"],[\"expiration\",\"1785886438\"]]" 1785886210)]"
   emit_sentinel c0
   expect_rc 1 "C5.8 an h tag whose value is the real MLS group id is a violation" \
     --journal "${c58alias}" "${base[@]}" || fail=1
@@ -2699,7 +2873,7 @@ self_test() {
   # merely noisy relay.
   local c58in="${tmp}/c58-inbound.ndjson"
   write_healthy "${c58in}"
-  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eINLEAK" "${PK_EPH4}" "[[\"h\",\"${MLS1}\"],[\"expiration\",\"1785886720\"]]" 1785886230)]"
+  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eINLEAK" "${PK_EPH4}" "[[\"h\",\"${MLS1}\"],[\"expiration\",\"1785886458\"]]" 1785886230)]"
   emit_sentinel c0
   expect_rc 0 "C5.8 an inbound frame carrying the id is the relay's output, not Haven's" \
     --journal "${c58in}" "${base[@]}" || fail=1
@@ -2736,18 +2910,18 @@ self_test() {
   # The SUCCESS BANNER is the line a reader greps to conclude "green => the rule
   # held". Listing C5.8 there while an advisory above says it was never scanned
   # is a false statement in the highest-traffic place, so the banner must drop
-  # to eight-of-nine and say so. Without these two fixtures the banner fix is
+  # to ten-of-eleven and say so. Without these two fixtures the banner fix is
   # itself unverified -- which is the defect it exists to repair.
-  expect_msg "clean on EIGHT of nine" \
-    "the success banner drops to eight-of-nine when C5.8 is not asserted" \
+  expect_msg "clean on TEN of eleven" \
+    "the success banner drops to ten-of-eleven when C5.8 is not asserted" \
     --journal "${healthy}" "${base_nomls[@]}" \
     --mls-group-id-not-asserted "no channel yet" || fail=1
   expect_msg "NOT evidence for Security Rule 4" \
     "the banner states outright that the run does not evidence Rule 4" \
     --journal "${healthy}" "${base_nomls[@]}" \
     --mls-group-id-not-asserted "no channel yet" || fail=1
-  # ...and the nine-of-nine claim is still made when C5.8 really did run.
-  expect_msg "all nine had a non-empty sample" \
+  # ...and the eleven-of-eleven claim is still made when C5.8 really did run.
+  expect_msg "all eleven had a non-empty sample" \
     "the full banner survives when the id IS declared" \
     --journal "${healthy}" "${base_nomls[@]}" --mls-group-id "${MLS1}" || fail=1
   # The skip must be attributable to the lane, never inferable from silence: if
@@ -2829,7 +3003,7 @@ self_test() {
   # just became queryable.
   local c59p="${tmp}/c59-p-tag.ndjson"
   write_healthy "${c59p}"
-  jline c2r c1 "[\"EVENT\",$(ev 445 "ePTAG" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886740\"],[\"p\",\"${PK_B}\"]]" 1785886280)]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "ePTAG" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886508\"],[\"p\",\"${PK_B}\"]]" 1785886280)]"
   emit_sentinel c0
   expect_rc 1 "C5.9 a p tag on a published 445 is a violation" \
     --journal "${c59p}" "${base[@]}" || fail=1
@@ -2845,7 +3019,7 @@ self_test() {
   # not accuse Haven of publishing something it received.
   local c59in="${tmp}/c59-inbound-p.ndjson"
   write_healthy "${c59in}"
-  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "ePIN" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886760\"],[\"p\",\"${PK_B}\"]]" 1785886290)]"
+  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "ePIN" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886518\"],[\"p\",\"${PK_B}\"]]" 1785886290)]"
   emit_sentinel c0
   expect_no_msg "C5.9 recipient privacy" \
     "C5.9 does not accuse Haven of publishing a p tag a relay sent it" \
@@ -2860,6 +3034,149 @@ self_test() {
   expect_msg "C5.9 precondition" \
     "C5.9 declares its own empty subset rather than riding C5.8's" \
     --journal "${c58no445}" "${base[@]}" || fail=1
+
+  # =========================================================================
+  # C5.10 — an application kind-445 asks for exactly the circle's retention
+  # =========================================================================
+  # THE LEAK, in both directions and one second off each way: the constant is
+  # read from source, so the fixture is derived from it rather than restating
+  # 228 — a fixture that hard-coded the window would keep passing after the
+  # source moved and the wire did not.
+  local c510long="${tmp}/c510-long.ndjson" c510short="${tmp}/c510-short.ndjson"
+  write_healthy "${c510long}"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eLONG" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"$(( 1785886280 + RETENTION_SECS + 1 ))\"]]" 1785886280)]"
+  emit_sentinel c0
+  expect_rc 1 "C5.10 a 445 kept one second past the circle's retention is a violation" \
+    --journal "${c510long}" "${base[@]}" || fail=1
+  expect_msg "C5.10 retention" "C5.10 names the retention window" \
+    --journal "${c510long}" "${base[@]}" || fail=1
+  expect_no_msg "C5.3 kind-445 tag shape" \
+    "...and ONLY C5.10: the event's tag SHAPE is the legal one" \
+    --journal "${c510long}" "${base[@]}" || fail=1
+  write_healthy "${c510short}"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eSHORT" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"$(( 1785886280 + RETENTION_SECS - 1 ))\"]]" 1785886280)]"
+  emit_sentinel c0
+  expect_rc 1 "C5.10 a 445 dropped one second before the circle's retention is a violation" \
+    --journal "${c510short}" "${base[@]}" || fail=1
+
+  # ...and the exact window, on the same event, is clean: the two reds above
+  # are the rule and not the extra message.
+  local c510exact="${tmp}/c510-exact.ndjson"
+  write_healthy "${c510exact}"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eEXACT" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"$(( 1785886280 + RETENTION_SECS ))\"]]" 1785886280)]"
+  emit_sentinel c0
+  expect_rc 0 "C5.10 a 445 stamped with exactly the retention window is clean" \
+    --journal "${c510exact}" "${base[@]}" || fail=1
+
+  # An INBOUND 445 with another window is some other client's, or a relay's.
+  local c510in="${tmp}/c510-inbound.ndjson"
+  write_healthy "${c510in}"
+  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eINLONG" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785899999\"]]" 1785886280)]"
+  emit_sentinel c0
+  expect_rc 0 "C5.10 an inbound 445 with a foreign window is the relay's frame, not Haven's" \
+    --journal "${c510in}" "${base[@]}" || fail=1
+
+  # THE EMPTY SUBSET: commits only, so no retention stamp was ever on the wire.
+  local c510none="${tmp}/c510-commit-only.ndjson"
+  jq -c 'if (.frame | tostring | test("\"kind\":445")) then
+           .frame = (.frame | map(if (type == "object" and .kind == 445)
+                                  then .tags = [ .tags[] | select(.[0] != "expiration") ]
+                                  else . end))
+         else . end' "${healthy}" > "${c510none}"
+  expect_msg "C5.10 precondition" \
+    "C5.10 declares its own empty subset when no application 445 was published" \
+    --journal "${c510none}" "${base[@]}" || fail=1
+
+  # =========================================================================
+  # C5.11 — kind-30443 tag VALUES
+  # =========================================================================
+  # One finding per fixture: each replaces the device's KeyPackage `e04` with a
+  # copy that is wrong in exactly one way, and each names the rule that must
+  # speak. kp_variant <out> <jq over the tag array>.
+  kp_variant() {
+    jq -c --argjson f "$2" 'if (.dir == "c2r" and (.frame | tostring | test("\"id\":\"e04\""))) then
+             .frame = (.frame | map(if (type == "object" and .kind == 30443)
+                                    then .tags = (.tags | '"$3"')
+                                    else . end))
+           else . end' "${healthy}" > "$1"
+  }
+  local kpv="${tmp}/c511.ndjson"
+  c511_red() {
+    local label="$1" needle="$2" edit="$3"
+    kp_variant "${kpv}" 'null' "${edit}"
+    expect_rc 1 "C5.11 ${label} is a violation" --journal "${kpv}" "${base[@]}" || fail=1
+    expect_msg "${needle}" "...and C5.11 names it" --journal "${kpv}" "${base[@]}" || fail=1
+  }
+  c511_red "an id-list split across two tags" \
+    'the `app_components` tag appears 2 times' \
+    '. + [["app_components","0x8001"]]'
+  c511_red "a missing tag" \
+    'the `mls_proposals` tag appears 0 times' \
+    'map(select(.[0] != "mls_proposals"))'
+  c511_red "a second d tag" \
+    'the `d` tag appears 2 times' \
+    '. + [["d","0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"]]'
+  c511_red "a slot id that is not 32 bytes of hex" \
+    'its `d` slot id is not 64 lowercase hex characters' \
+    'map(if .[0] == "d" then ["d","haven-kp-0"] else . end)'
+  c511_red "a second value on a single-value tag" \
+    'the `i` tag carries 2 values' \
+    'map(if .[0] == "i" then . + ["2f2f"] else . end)'
+  c511_red "a protocol version other than 1.0" \
+    'its `mls_protocol_version` is not 1.0' \
+    'map(if .[0] == "mls_protocol_version" then ["mls_protocol_version","1.1"] else . end)'
+  c511_red "a repeated id inside one list" \
+    'the `mls_extensions` id-list is empty or repeats a value' \
+    'map(if .[0] == "mls_extensions" then . + ["0x0006"] else . end)'
+  c511_red "an empty id-list" \
+    'the `mls_extensions` id-list is empty or repeats a value' \
+    'map(if .[0] == "mls_extensions" then ["mls_extensions"] else . end)'
+  c511_red "an id that is not 0x-prefixed four-digit hex" \
+    'the `mls_ciphersuite` id-list carries a value that is not' \
+    'map(if .[0] == "mls_ciphersuite" then ["mls_ciphersuite","1"] else . end)'
+  c511_red "the retired identity-proof extension" \
+    '`mls_extensions` lists 0xf2f1' \
+    'map(if .[0] == "mls_extensions" then . + ["0xf2f1"] else . end)'
+  c511_red "the last-resort extension advertised as a capability" \
+    '`mls_extensions` lists 0x000a' \
+    'map(if .[0] == "mls_extensions" then . + ["0x000a"] else . end)'
+  c511_red "the required-capabilities extension advertised as a capability" \
+    '`mls_extensions` lists 0x0003' \
+    'map(if .[0] == "mls_extensions" then . + ["0x0003"] else . end)'
+  c511_red "a proposal list without self-remove" \
+    '`mls_proposals` is not exactly 0x0008 and 0x000a' \
+    'map(if .[0] == "mls_proposals" then ["mls_proposals","0x0008"] else . end)'
+  c511_red "a component list without the identity proof" \
+    '`app_components` lacks 0x8009' \
+    'map(if .[0] == "app_components" then map(select(. != "0x8009")) else . end)'
+  c511_red "a component list without disband" \
+    '`app_components` lacks 0x800c' \
+    'map(if .[0] == "app_components" then map(select(. != "0x800c")) else . end)'
+  c511_red "a component id below the private-use range" \
+    '`app_components` lists 0x0001' \
+    'map(if .[0] == "app_components" then . + ["0x0001"] else . end)'
+  c511_red "a KeyPackageRef that is not 32 bytes" \
+    'its `i` KeyPackageRef is not 64 lowercase hex characters' \
+    'map(if .[0] == "i" then ["i","1e1e"] else . end)'
+  c511_red "a client tag" \
+    'it carries a `client` tag' \
+    '. + [["client","haven"]]'
+  c511_red "an encoding tag" \
+    'it carries a `encoding` tag' \
+    '. + [["encoding","base64"]]'
+
+  # The same wrong values on an INBOUND 30443 are a peer's package, which is
+  # the receive path's to refuse (`KeyPackageCandidate::validate`) and not
+  # evidence about what this device published.
+  local c511in="${tmp}/c511-inbound.ndjson"
+  write_healthy "${c511in}"
+  jline r2c c1 "[\"EVENT\",\"sub-kp\",$(ev 30443 "eKPIN" "${PK_B}" '[["d","x"],["client","other"]]')]"
+  emit_sentinel c0
+  expect_rc 0 "C5.11 an inbound 30443 with foreign tags is not Haven's publish" \
+    --journal "${c511in}" "${base[@]}" || fail=1
+
+  # THE EMPTY SUBSET is the C5.7 pair above: a journal that published no
+  # KeyPackage reports C5.11's precondition as the one thing left standing.
 
   # =========================================================================
   # --exclude-conn — the harness's own socket is not Haven's traffic
@@ -2908,8 +3225,8 @@ self_test() {
   write_healthy "${xpeers}"
   jopen c7
   emit_declaration c7
-  jline c2r c7 "[\"EVENT\",$(ev 445 "ePEER1" "${PK_EPH5}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886500\"]]" 1785886228)]"
-  jline c2r c7 "[\"EVENT\",$(ev 445 "ePEER2" "${PK_EPH6}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886500\"]]" 1785886228)]"
+  jline c2r c7 "[\"EVENT\",$(ev 445 "ePEER1" "${PK_EPH5}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886456\"]]" 1785886228)]"
+  jline c2r c7 "[\"EVENT\",$(ev 445 "ePEER2" "${PK_EPH6}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886456\"]]" 1785886228)]"
   emit_sentinel c0
   expect_rc 0 "two peers multiplexed onto ONE harness socket in one second are not a Haven finding" \
     --journal "${xpeers}" "${base[@]}" || fail=1
@@ -3016,7 +3333,7 @@ self_test() {
   # At 114-against-124 that room was ten cases, which is most of the C5.8
   # section. An exact pin means retiring a case is a two-line diff that has to
   # say why, which is the reviewable act the slack was quietly avoiding.
-  readonly MIN_CASES=157
+  readonly MIN_CASES=210
   if (( CASES_RUN != MIN_CASES )); then
     echo "SELF-TEST FAIL: ${CASES_RUN} fixture(s) ran; exactly ${MIN_CASES} expected." >&2
     echo "  A case was added or removed without moving MIN_CASES — the self-test" >&2
@@ -3029,7 +3346,7 @@ self_test() {
     return 1
   fi
   echo "check-wire-correlation: self-test passed (${CASES_RUN} fixtures — a healthy" \
-       "two-circle journal clears all nine invariants; each of C5.1-C5.9 goes red on" \
+       "two-circle journal clears all eleven invariants; each of C5.1-C5.11 goes red on" \
        "the leak it guards AND red as a META-FLOOR on an empty relevant subset," \
        "including the commit-only trap that would make C5.1 vacuous and the" \
        "single-445 trap that would make C5.7 vacuous; C5.1 is proven to attribute" \

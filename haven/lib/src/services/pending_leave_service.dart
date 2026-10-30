@@ -1,58 +1,26 @@
-/// Durable "leave in progress" markers and launch-resume for the REV-1 leaver
-/// backstop (driver 2).
+/// The retired Dart "leave in progress" markers, and their one migration.
 ///
-/// ## Problem
-///
-/// Under live-sync a departing member publishes a `SelfRemove` and then runs a
-/// bounded backstop — re-issuing a fresh SelfRemove until it observes its own
-/// removal — before `complete_leave` wipes its MLS state (see
-/// `leaver_backstop.dart`). If the process is killed mid-backstop (crash, OS
-/// kill, force-quit) the leave is left half-finished: the leaver is still a
-/// member of the group but is no longer trying to leave. Without a durable
-/// record the returning leaver would silently remain a stale roster ghost.
-///
-/// ## Solution
-///
-/// This service records, in [SharedPreferences], the set of circles whose leave
-/// is in progress. Each entry is the circle's **public `nostr_group_id`** in
-/// lowercase hex — the same relay-routing identifier that already appears in
-/// the `["h", …]` tag of every kind:445 event the circle emits. It is NEVER the
-/// MLS group id, a pubkey, or any secret material (Haven privacy rule — no such
-/// data in plaintext storage); the `nostr_group_id` is the least-sensitive
-/// stable handle that still lets the launch resume map a marker to its circle.
-///
-/// ### Set/clear ordering (crash-safe)
-///
-/// 1. `markLeaving` SET the marker BEFORE the backstop's first re-issue.
-/// 2. `clearLeaving` CLEAR the marker ONLY AFTER `complete_leave` has wiped the
-///    leaver's MLS state for that circle.
-/// 3. A crash or thrown exception therefore leaves the marker SET.
-///
-/// Both writes are best-effort: a [SharedPreferences] failure is logged
-/// generically and never blocks the leave (the primary objective).
-///
-/// ### Launch resume
-///
-/// On the next launch `resumePendingLeaves` re-runs the leave for every pending
-/// circle that is still present, then clears the marker once the leave
-/// completes (`leaveCircle` itself handles both the still-a-member re-issue and
-/// the already-removed orphan-wipe, so no separate membership probe is needed).
-/// A marker whose circle is already gone (the leave completed and wiped before
-/// the crash) is cleared without redoing anything. A resume that still fails
-/// keeps the marker for the next launch.
+/// Older builds kept, in [SharedPreferences], the public `nostr_group_id` of
+/// every circle whose leave a crash could interrupt, and re-ran the leave from
+/// Dart at the next launch. The leave's intent now lives in the core, written
+/// before anything else and carried on by the leaver backstop at every wake,
+/// so nothing writes a marker any more. A marker an older build left on disk
+/// is migrated once: its circle, if still present, is left through the driver
+/// — which writes the core's intent — and the key is removed. Each entry is a
+/// public `nostr_group_id`, never an MLS group id, a pubkey or a secret.
 library;
 
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// [SharedPreferences] key for the durable set of in-progress leaves.
+/// [SharedPreferences] key for the retired set of in-progress leaves.
 ///
 /// The value is a `List<String>` of lowercase-hex `nostr_group_id`s. It NEVER
 /// holds an MLS group id, pubkey, relay URL, or any secret material.
 const String kPendingLeaveKey = 'haven.security.pending_leaves';
 
-/// Records, clears, and resumes durable leaver-backstop intent.
+/// Migrates and clears the retired leave markers.
 ///
 /// Inject [SharedPreferences] for testability; production callers obtain one
 /// via [SharedPreferences.getInstance] and construct directly.
@@ -66,34 +34,6 @@ class PendingLeaveService {
   /// Lowercase, 2-digit-per-byte hex of [bytes] — the marker encoding.
   static String _hex(List<int> bytes) =>
       bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-
-  // ---------------------------------------------------------------------------
-  // Marker access
-  // ---------------------------------------------------------------------------
-
-  /// The set of `nostr_group_id` hexes with a leave in progress.
-  Set<String> get pendingLeaves =>
-      (_prefs.getStringList(kPendingLeaveKey) ?? const <String>[]).toSet();
-
-  /// Whether a leave is in progress for the circle with [nostrGroupId].
-  bool isLeaving(List<int> nostrGroupId) =>
-      pendingLeaves.contains(_hex(nostrGroupId));
-
-  /// Marks the circle with [nostrGroupId] as leave-in-progress.
-  ///
-  /// Call BEFORE the backstop's first re-issue so a crash leaves it set.
-  /// Best-effort — a write failure is logged and does not rethrow.
-  Future<void> markLeaving(List<int> nostrGroupId) async {
-    final set = pendingLeaves..add(_hex(nostrGroupId));
-    await _write(set);
-  }
-
-  /// Clears the leave-in-progress marker for the circle with [nostrGroupId].
-  ///
-  /// Call ONLY AFTER `complete_leave` wiped the leaver's MLS state.
-  /// Best-effort — a write failure is logged and does not rethrow.
-  Future<void> clearLeaving(List<int> nostrGroupId) =>
-      _clearHex(_hex(nostrGroupId));
 
   /// Clears every leave-in-progress marker unconditionally, removing the key
   /// entirely (not merely emptying it).
@@ -109,90 +49,45 @@ class PendingLeaveService {
     await _prefs.remove(kPendingLeaveKey);
   }
 
-  Future<void> _clearHex(String hex) async {
-    final set = pendingLeaves..remove(hex);
-    await _write(set);
-  }
-
-  Future<void> _write(Set<String> set) async {
-    try {
-      await _prefs.setStringList(kPendingLeaveKey, set.toList());
-    } on Object catch (e) {
-      // A marker write failure must never block the leave. Log only the type —
-      // never `e` (SharedPreferences errors could echo the stored value).
-      debugPrint(
-        '[PendingLeave] WARNING: failed to persist leave markers: '
-        '${e.runtimeType}',
-      );
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Launch resume
-  // ---------------------------------------------------------------------------
-
-  /// Finishes every leave interrupted by a crash.
-  ///
-  /// For each pending marker:
-  /// - if no live circle matches it → the leave already completed and wiped;
-  ///   the stale marker is cleared;
-  /// - otherwise the leave is re-run via [CircleService.leaveCircle] (which,
-  ///   when still a member, re-enters the bounded backstop, and when already
-  ///   removed, orphan-wipes) and the marker is cleared once it completes.
-  ///
-  /// A resume that still fails keeps the marker for the next launch.
-  /// Best-effort throughout — a failure to enumerate circles simply defers to
-  /// the next launch. [selfPubkeyHex] is the leaver's own identity pubkey.
-  Future<void> resumePendingLeaves({
+  /// Moves every marker an older build left onto the core: each circle
+  /// still present is left through [CircleService.leaveCircle], which writes
+  /// the core's intent; the key is removed once every present circle's leave
+  /// was asked for. A circle gone already needs nothing. If a leave cannot be
+  /// asked for, or the app is no longer in front of its user ([inFront],
+  /// read before each circle), the key stays for the next start-up.
+  Future<void> migrateToCore({
     required CircleService circleService,
-    required String selfPubkeyHex,
+    required bool Function() inFront,
   }) async {
-    final pending = pendingLeaves;
+    final pending = (_prefs.getStringList(kPendingLeaveKey) ?? const <String>[])
+        .toSet();
     if (pending.isEmpty) return;
-
     final List<Circle> circles;
     try {
       circles = await circleService.getVisibleCircles();
     } on Object catch (e) {
       debugPrint(
-        '[PendingLeave] resume: could not list circles: ${e.runtimeType}',
+        '[PendingLeave] migration: could not list circles: ${e.runtimeType}',
       );
-      return; // retry next launch
+      return;
     }
-
-    // Map each live circle by its public nostr_group_id hex.
-    final byHex = <String, Circle>{
-      for (final c in circles) _hex(c.nostrGroupId): c,
-    };
-
-    for (final hex in pending) {
-      final circle = byHex[hex];
-      if (circle == null) {
-        // No live circle → the interrupted leave already wiped before the
-        // crash. Clear the stale marker.
-        await _clearHex(hex);
-        continue;
-      }
-
+    for (final circle in circles) {
+      if (!pending.contains(_hex(circle.nostrGroupId))) continue;
+      if (!inFront()) return;
       try {
-        debugPrint('[PendingLeave] resuming a leave');
-
-        // Re-run the leave unconditionally — leaveCircle -> planLeave already
-        // resolves both cases with no separate membership probe: still a member
-        // -> republish the SelfRemove and re-enter the bounded backstop;
-        // already removed -> orphan-wipe. Either path finishes the leave and
-        // wipes the leaver's MLS state.
-        await circleService.leaveCircle(
-          mlsGroupId: circle.mlsGroupId,
-          selfPubkeyHex: selfPubkeyHex,
-        );
-        await _clearHex(hex);
+        await circleService.leaveCircle(mlsGroupId: circle.mlsGroupId);
       } on Object catch (e) {
-        debugPrint(
-          '[PendingLeave] resume for a circle failed: ${e.runtimeType}',
-        );
-        // Keep the marker so the next launch retries.
+        debugPrint('[PendingLeave] migration failed: ${e.runtimeType}');
+        return;
       }
+    }
+    try {
+      await _prefs.remove(kPendingLeaveKey);
+    } on Object catch (e) {
+      // Log only the type: a SharedPreferences error could echo the value.
+      debugPrint(
+        '[PendingLeave] migration: marker not removed: ${e.runtimeType}',
+      );
     }
   }
 }

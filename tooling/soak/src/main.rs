@@ -31,7 +31,9 @@ use haven_soak::oracle::{
 use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
 use haven_soak::rc::Rc;
 use haven_soak::relay::SimRelay;
-use haven_soak::rig::{DeviceTag, RelayPlane, RelayTag, RigError, SimWorld};
+use haven_soak::rig::{
+    Change, DeviceTag, PublishVerdict, RelayPlane, RelayTag, RigError, SimWorld,
+};
 use haven_soak::scenarios::registry;
 use haven_soak::timeline::{self, Timeline};
 
@@ -630,74 +632,67 @@ async fn case_o5(logs: &SoakLogs) -> Result<bool, Refusal> {
     // Bob has to be able to commit at all, so alice hands him the admin bit and
     // his live engine applies it — the last thing either engine does.
     let successor = world.device(bob)?.keys.public_key();
-    let handoff = world
-        .device(alice)?
-        .manager()?
-        .propose_admin_handoff(&group, &successor)
-        .await
-        .map_err(|_| RigError::Core(haven_soak::rig::Step::StageCommit))?;
-    world
-        .publish_and_confirm(alice, handoff.pending, &[handoff.commit_event])
+    let handed = world
+        .change(
+            alice,
+            Change::AdminHandoff {
+                group: &group,
+                successor: &successor,
+            },
+        )
         .await?;
+    if handed.verdict != PublishVerdict::Confirmed {
+        return Err(Refusal::Rig(RigError::PublishNeverAcked));
+    }
     if !epochs_agree(&world, &group).await? {
         return Err(Refusal::Rig(RigError::Timeout(
             haven_soak::rig::Wait::SessionReopen,
         )));
     }
 
-    // Paused, both of them: a live engine would ingest the peer's commit first,
+    // Both engines stopped: a live engine would ingest the peer's commit first,
     // and the classifier would then be reading the second look, where a lost
-    // branch reads as a duplicate.
-    for device in world.devices_mut() {
-        device.go_offline().await?;
-    }
+    // branch reads as a duplicate. Stopped, not paused: a paused plane's
+    // driver only finishes, as the bridge's does, and makes no commit to race.
+    haven_soak::scenarios::s14_restart_race::deafen(&mut world, (alice, bob)).await?;
 
     let mut commits = Vec::with_capacity(2);
     for (index, tag) in [alice, bob].into_iter().enumerate() {
         let mut relays = world.relay_urls();
         relays.push(format!("wss://race-{index}.example.com"));
-        let staged = world
-            .device(tag)?
-            .manager()?
-            .update_circle_relays(&group, &relays)
-            .await
-            .map_err(|_| RigError::Core(haven_soak::rig::Step::StageCommit))?;
-        let outstanding = world.note_pending_staged();
-        // Rule 13, in the one place a self-test could quietly skip it: the
-        // finalise below APPLIES the staged commit, so it may only run once a
-        // relay has been seen to acknowledge the publish. A dropped `Option`
-        // here would make the case's world a forked one and everything it then
-        // classified a fiction.
-        if world
-            .publish_witnessed(tag, std::slice::from_ref(&staged.commit_event))
-            .await?
-            .is_none()
-        {
+        // Through the product driver: applied only once a relay acknowledged
+        // it. Anything else here would make the case's world a forked one and
+        // everything it then classified a fiction.
+        let changed = world
+            .change(
+                tag,
+                Change::Relays {
+                    group: &group,
+                    relays: &relays,
+                },
+            )
+            .await?;
+        let (PublishVerdict::Confirmed, Some(commit)) = (changed.verdict, changed.commit) else {
             return Err(Refusal::Rig(RigError::PublishNeverAcked));
-        }
-        let ingest = world
-            .device(tag)?
-            .manager()?
-            .finalize_relay_update(staged.pending, &group)
-            .await
-            .map_err(|_| RigError::Core(haven_soak::rig::Step::ConfirmPublished))?;
-        // The confirm's own replay can stage further work; the self-test is a
-        // real world and leaving a ref unresolved in it would fork the group.
-        world.resolve_ingest(tag, ingest).await?;
-        drop(outstanding);
-        commits.push(staged.commit_event);
+        };
+        commits.push(commit);
     }
 
+    // MDK v0.10.4 holds each sibling for the convergence pass that adjudicates
+    // the race; the branch is read once that pass has closed, and here with no
+    // row named, which is the plant.
     let mut classified = Vec::with_capacity(2);
     for (ingester, source) in [(bob, 0_usize), (alice, 1_usize)] {
-        classified.push(
-            undecryptable::classify(
-                world.device(ingester)?,
-                &commits[source],
-                StoredRow::Unknown,
-            )
-            .await?,
-        );
+        let device = world.device(ingester)?;
+        undecryptable::classify(device, &commits[source], StoredRow::Unknown).await?;
+        device
+            .session()?
+            .settle_receive_for_test(&group)
+            .await
+            .map_err(|_| RigError::Core(haven_soak::rig::Step::ServeConvergence))?;
+        classified.push(undecryptable::classify_settled_sibling(
+            undecryptable::Probe::Unnamed,
+        ));
     }
 
     let pairs = chain_pairs(&world);

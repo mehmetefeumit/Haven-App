@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e9342fa7a519a8e3ac62404528887379e0af9a09f6cdb300ea185fbdb0c54afb # shrinks to entries = ["wss://a.example.com/#frag"]

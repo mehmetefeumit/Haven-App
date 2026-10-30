@@ -119,9 +119,10 @@
 #       at its cursor, ingest, publish at the resulting epoch, settle, pause —
 #       so a lane that never exercised the ingest half was measuring half a
 #       mechanism. It is also why these two legs set HAVEN_LIVE_SYNC=true: with
-#       the receive engine compiled out, every burst's open fails, the
-#       coordinator takes its documented failed-open branch, and the burst
-#       degenerates to a publish.
+#       the receive engine compiled out a burst has no session to open; it
+#       receives through the flag-off catch-up instead and seals only once
+#       that sweep completed (decision 244), so the poll leg's P2a/P2b still
+#       count publishes while P2c's subscription oracle has nothing to read.
 #
 #       The oracle is the engine's COUNT of registered pool subscriptions, and
 #       the choice is load-bearing: `isPaused` cannot stand in for it, because
@@ -149,11 +150,15 @@
 #       published.
 #
 #       This phase drives NOTHING: the timer is the subject, so calling a tick
-#       would replace the mechanism under test. That is also what makes the row
-#       attributable — on this leg nothing else can write it. The publish
-#       tick's burst open fails with no engine (P1's throwing read is the proof
-#       there is none), the foreground fetch timer was cancelled at the pause,
-#       and no provider recomputes with frames off. Its window spans TWO timer
+#       would replace the mechanism under test. The row alone does not
+#       attribute it: since decision 244 a publish tick's burst on this leg
+#       receives through the same catch-up before it seals and writes the same
+#       row. So the TIMER is attributed by its own count of finished sweeps,
+#       `MapShell.backgroundReceiveTimerSweeps`, asserted to advance inside the
+#       window beside the row (`check_ios_background_publish.sh` pins both);
+#       the foreground fetch timer was cancelled at the pause, and no provider
+#       recomputes with frames off, so the burst and the timer are the only
+#       writers. Its window spans TWO timer
 #       ticks, not one: a sweep whose window opened in the same whole second
 #       the peer's event was stored can miss it and still advance the group
 #       cursor to that second, and it is the NEXT sweep's 60 s re-read below the

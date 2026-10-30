@@ -1,0 +1,24 @@
+# Cargokit runs cargo from a temporary directory (Xcode's TARGET_TEMP_DIR on
+# iOS), where the repository's .cargo/config.toml is not discovered, so the
+# SQLCipher logger and tracer flags (Security Rule 15) are passed here as well.
+# scripts/ci/check_sqlcipher_logger_omitted.sh keeps this value equal to the
+# root config's and probes every built artifact for it.
+cargo:
+  debug:
+    extra_flags:
+      - --config
+      - env.LIBSQLITE3_FLAGS.value="-DSQLCIPHER_OMIT_LOG -DSQLCIPHER_OMIT_DEFAULT_LOGGING -DSQLITE_OMIT_TRACE"
+      - --config
+      - env.LIBSQLITE3_FLAGS.force=true
+  profile:
+    extra_flags:
+      - --config
+      - env.LIBSQLITE3_FLAGS.value="-DSQLCIPHER_OMIT_LOG -DSQLCIPHER_OMIT_DEFAULT_LOGGING -DSQLITE_OMIT_TRACE"
+      - --config
+      - env.LIBSQLITE3_FLAGS.force=true
+  release:
+    extra_flags:
+      - --config
+      - env.LIBSQLITE3_FLAGS.value="-DSQLCIPHER_OMIT_LOG -DSQLCIPHER_OMIT_DEFAULT_LOGGING -DSQLITE_OMIT_TRACE"
+      - --config
+      - env.LIBSQLITE3_FLAGS.force=true

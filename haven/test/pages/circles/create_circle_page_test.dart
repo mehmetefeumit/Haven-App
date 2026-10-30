@@ -27,6 +27,7 @@ import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/circles/member_picker.dart';
 
 import '../../helpers/localized_app_harness.dart';
+import '../../mocks/mock_circle_service.dart';
 import '../../mocks/mock_member_directory_service.dart';
 import '../../mocks/mock_profile_service.dart';
 import '../../mocks/mock_relay_service.dart';
@@ -75,23 +76,19 @@ KeyPackageData _makeKeyPackage(String pubkey) => KeyPackageData(
   relays: const ['wss://relay.example.com'],
 );
 
-/// A KeyPackage carrying the deprecated pre-Dark-Matter kind (443) — the
-/// peer is on an old Haven build (DM-4c, plan §6 F11).
-KeyPackageData _makeLegacyKeyPackage(String pubkey) => KeyPackageData(
-  pubkey: pubkey,
-  eventJson: '{"kind":443}',
-  relays: const ['wss://relay.example.com'],
-);
-
 /// Builds the test app with a Material 2 theme to avoid the ink_sparkle
 /// shader issue in test environments.
 Widget _buildApp(
   MockRelayService mockRelay, {
   MemberDirectory? directory,
+  KeyPackageAdmission admission = KeyPackageAdmission.admissible,
 }) {
   return ProviderScope(
     overrides: [
       relayServiceProvider.overrideWithValue(mockRelay),
+      circleServiceProvider.overrideWithValue(
+        MockCircleService()..keyPackageAdmission = admission,
+      ),
       memberDirectoryServiceProvider.overrideWithValue(
         MockMemberDirectoryService(directory: directory),
       ),
@@ -311,15 +308,17 @@ void main() {
   // cannot be invited — blocked with a distinct "needs update" status, not
   // treated as a generic invalid/no-account result.
   // ---------------------------------------------------------------------------
-  group('CreateCirclePage legacy KeyPackage detection (DM-4c)', () {
+  group('CreateCirclePage KeyPackage admission (MDK v0.10.4)', () {
     testWidgets(
-      'shows "needs update" status for a legacy (kind 443) KeyPackage and '
-      'keeps continue disabled',
+      'shows "needs update" for a peer on a pre-migration build and keeps '
+      'continue disabled',
       (tester) async {
         final mock = MockRelayService(
-          keyPackageResult: _makeLegacyKeyPackage('hex'),
+          keyPackageResult: _makeKeyPackage('hex'),
         );
-        await tester.pumpWidget(_buildApp(mock));
+        await tester.pumpWidget(
+          _buildApp(mock, admission: KeyPackageAdmission.needsUpdate),
+        );
 
         await _addMember(tester, _testNpub1);
         await tester.pumpAndSettle();
@@ -328,8 +327,45 @@ void main() {
         expect(find.byIcon(LucideIcons.circleCheck), findsNothing);
         expect(find.text('Ready to invite'), findsNothing);
         expect(find.text("Couldn't find a Haven account for this ID"), findsNothing);
-        expect(find.text('Needs to update Haven'), findsOneWidget);
+        expect(find.text('Needs to update or open Haven'), findsOneWidget);
+        expect(
+          find.byIcon(LucideIcons.refreshCw),
+          findsOneWidget,
+          reason: 'opening Haven publishes a current package, so a retry can '
+              'succeed without removing and re-adding the person',
+        );
 
+        final button = tester.widget<FilledButton>(
+          find.widgetWithText(FilledButton, 'Continue'),
+        );
+        expect(button.onPressed, isNull);
+      },
+    );
+
+    testWidgets(
+      'a KeyPackage the engine would refuse says it may be out of date, '
+      'offers a retry and keeps continue disabled',
+      (tester) async {
+        final mock = MockRelayService(
+          keyPackageResult: _makeKeyPackage('hex'),
+        );
+        await tester.pumpWidget(
+          _buildApp(mock, admission: KeyPackageAdmission.unusable),
+        );
+
+        await _addMember(tester, _testNpub1);
+        await tester.pumpAndSettle();
+
+        final l10n = AppLocalizations.of(
+          tester.element(find.byType(CreateCirclePage)),
+        );
+        expect(find.text(l10n.memberKeyPackageStale), findsOneWidget);
+        expect(find.text('Ready to invite'), findsNothing);
+        expect(
+          find.byIcon(LucideIcons.refreshCw),
+          findsOneWidget,
+          reason: 'a newer KeyPackage may already be on the relays',
+        );
         final button = tester.widget<FilledButton>(
           find.widgetWithText(FilledButton, 'Continue'),
         );
@@ -613,6 +649,11 @@ void main() {
 
       expect(find.byType(PendingMemberTile), findsOneWidget);
       expect(mock.methodCalls, contains('fetchKeyPackage'));
+      expect(
+        mock.fetchKeyPackageTargets,
+        [null],
+        reason: 'no circle exists yet: the package is chosen for a new one',
+      );
     });
   });
 }

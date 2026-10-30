@@ -1,50 +1,45 @@
-//! One pass over a receive plane must finish the leave cascade it started.
+//! A drive finishes the leave cascade it started, and is bounded without
+//! losing anything.
 //!
 //! Confirming a peer's eviction ends in the engine's replay, which can apply the
-//! NEXT leaver's proposal and stage the next eviction. A plane that ran only the
-//! batch it was handed would leave that one staged, unpublished and unconfirmed
-//! for as long as it takes some other pass to notice — and for the planes that
-//! run in a short-lived isolate (the background catch-up sweep, the Android
-//! foreground service) there is no other pass: their `PendingStateRef`s die with
-//! the isolate, so what they leave behind surfaces as a durable ORPHAN a user is
-//! told to rebuild their circle over.
-//!
-//! So the ladder loops until its worklist is empty, with a resolved-refs set for
-//! termination and a cap that is a runaway guard and nothing else. At the cap
-//! every un-run commit is PARKED — the same durable row + in-memory ref an
-//! ordinary deferral writes — so nothing is rolled back and nothing dangles.
+//! NEXT leaver's proposal and schedule the next eviction. Every eviction is made
+//! by the fanout driver under a durable record, and the drive asks to be run
+//! again when the engine's next deadline falls due
+//! ([`ResumeOutcome::retry_after_ms`]), so a cascade is finished by the drive's
+//! own schedule — no later event has to arrive to notice it. What bounds a
+//! drive is its wake's budget: a record it cannot see through is not begun,
+//! and stays stored, staged and unattempted for the next drive. Nothing is ever
+//! rolled back to tidy up.
 //!
 //! # How a cascade is staged here
 //!
 //! A `SelfRemove` proposal is valid only in its source epoch, so leavers cannot
 //! all propose up front: each one has to propose at the epoch the PREVIOUS
-//! eviction produced. The recording publisher below is what makes that
-//! deterministic — it is a relay, so delivering the commit it was handed to the
+//! eviction produced. The cascading transport below is what makes that
+//! deterministic — it is a relay, so delivering the commit it was sent to the
 //! remaining devices and letting the next leaver propose off the back of it is
 //! exactly what a relay does.
 
 use std::collections::VecDeque;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use haven_core::circle::MAX_REDEMPTION_STEPS;
 use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::location::LocationMessage;
-use haven_core::nostr::mls::storage::set_stored_message_write_fault_for_test;
-use haven_core::nostr::mls::types::{GroupId, LocationMessageResult, PublishWork};
-use haven_core::nostr::mls::StorageConfig;
-use haven_core::relay::auto_commit::{
-    resolve_receive_publish_work, resolve_receive_publish_work_with_policy, AutoCommitPublisher,
-    ReceiveAutoCommitPolicy, RESOLVE_RUNAWAY_CAP,
+use haven_core::nostr::mls::types::{EpochState, GroupId, TransportMessage};
+use haven_core::nostr::mls::SessionManager;
+use haven_core::relay::fanout::scripted::{Answer, ScriptedFanout};
+use haven_core::relay::fanout::{
+    DriveMode, FanoutClock, FanoutSend, FanoutTargetOutcome, Publishing, ResumeOutcome, Taken,
+    UnrecordedPublisher, ROW_BUDGET_MS,
 };
-use haven_core::relay::live_sync::{EngineProcessor, EventBus, LiveSyncEvent};
+use haven_core::relay::live_sync::{EngineProcessor, EventBus, LiveDriver, LiveSyncEvent};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use nostr::{Event, Keys};
 use tempfile::TempDir;
 
 mod helpers;
-use helpers::{assert_no_needles, assert_some_line_from, capture_haven_log, haven_core_lines};
+use helpers::drive::{ManualClock, Recorder};
 
 const GROUP_RELAY: &str = "wss://group.example.com";
 
@@ -114,13 +109,9 @@ async fn build_cascade(name: &str, peer_count: usize) -> Cascade {
     let alice = Arc::new(CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap());
     let config = CircleConfig::new(name).with_relays(relays.clone());
     let result = alice
-        .create_circle(&alice_keys, key_packages, &config, &relays)
+        .create_circle(&alice_keys, key_packages, &config)
         .await
         .expect("create circle");
-    alice
-        .confirm_published(result.pending)
-        .await
-        .expect("alice confirms creation");
     for peer in &peers {
         let welcome = result
             .welcome_events
@@ -164,23 +155,6 @@ impl Cascade {
             .collect()
     }
 
-    /// `leaver` proposes and the OTHER co-members receive it, but Alice does
-    /// not — for the caller that wants to feed it to her through a plane.
-    async fn mint_leave(&self, leaver: &Device) -> Event {
-        let proposal = leaver
-            .manager
-            .propose_leave(&self.mls_group_id)
-            .await
-            .expect("the leaver proposes");
-        for peer in &self.peers {
-            if peer.hex() == leaver.hex() {
-                continue;
-            }
-            let _ = peer.manager.session().process_event(&proposal).await;
-        }
-        proposal
-    }
-
     /// `leaver` proposes, and everyone who needs the proposal to validate the
     /// commit that will cover it receives one.
     async fn propose_leave(&self, leaver: &Device) -> Event {
@@ -188,34 +162,10 @@ impl Cascade {
             .manager
             .propose_leave(&self.mls_group_id)
             .await
-            .expect("the leaver proposes");
+            .expect("the leaver proposes")
+            .expect("a first leave in this epoch proposes");
         deliver(&self.alice, &self.peers, leaver, &proposal).await;
         proposal
-    }
-
-    /// The raw `AutoPublish` batch the engine stages for the pending
-    /// `SelfRemove`, exactly as a receive plane is handed it.
-    ///
-    /// The engine re-queues the group until a real wall-clock due time passes,
-    /// so a single advance would strand the eviction.
-    async fn staged_eviction_work(&self) -> Vec<PublishWork> {
-        for _ in 0..40 {
-            let effects = self
-                .alice
-                .session()
-                .advance_convergence(&self.mls_group_id)
-                .await
-                .expect("advance convergence");
-            if effects
-                .publish
-                .iter()
-                .any(|w| matches!(w, PublishWork::AutoPublish { .. }))
-            {
-                return effects.publish;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        panic!("the SelfRemove auto-commit never surfaced within the jitter window");
     }
 }
 
@@ -230,307 +180,346 @@ async fn deliver(alice: &CircleManager, peers: &[Arc<Device>], author: &Device, 
     }
 }
 
-/// A recording relay plane with a fixed verdict and no behaviour of its own —
-/// for the arms whose subject is the ladder rather than the cascade.
-struct FlatPublisher {
-    ack: bool,
-    published: Mutex<Vec<Event>>,
+/// Whether `circle`'s engine holds a commit of its own staged for `group`.
+async fn holds_a_staged_commit(circle: &CircleManager, group: &GroupId) -> bool {
+    matches!(
+        circle.session().epoch_state(group).await,
+        Some(EpochState::PendingPublish(_))
+    )
 }
 
-impl FlatPublisher {
-    const fn new(ack: bool) -> Self {
-        Self {
-            ack,
-            published: Mutex::new(Vec::new()),
+/// How many fanout records `circle` stores for `group`.
+async fn records(circle: &CircleManager, group: &GroupId) -> usize {
+    circle
+        .session()
+        .fanout_ids_for_test(group)
+        .await
+        .expect("the records are read")
+        .len()
+}
+
+/// `proposal` taken in by `circle`'s foreground poll over a transport that
+/// takes no relay, and its circle's driving advance served at each deadline
+/// the engine announces until the eviction it brings is staged and recorded —
+/// never sent.
+async fn record_the_eviction(circle: &CircleManager, group: &GroupId, proposal: &Event) {
+    let _ = circle.ingest_staging_for_test(proposal).await;
+    // Caught up, as the poll's end of a page makes it: only then is an
+    // eviction left due staged.
+    circle.session().mark_caught_up_for_test(group);
+    for _ in 0..12 {
+        if holds_a_staged_commit(circle, group).await {
+            assert_eq!(records(circle, group).await, 1, "premise: one record");
+            return;
         }
+        let session = circle.session();
+        let announced = match session.eviction_due_after_for_test(group).await {
+            Some(wait) => Some(wait),
+            None => session.receive_retick_after(group).await,
+        };
+        tokio::time::sleep(announced.unwrap_or_default() + Duration::from_millis(5)).await;
+        let _ = session.advance_for_drive(group, ManualClock::ORIGIN).await;
     }
-
-    fn published(&self) -> Vec<Event> {
-        self.published.lock().unwrap().clone()
-    }
+    panic!("the eviction of the member who left was never staged");
 }
 
-impl AutoCommitPublisher for FlatPublisher {
-    fn publish_auto_commit<'a>(
-        &'a self,
-        event: &'a Event,
-        _relays: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            self.published.lock().unwrap().push(event.clone());
-            self.ack
-        })
-    }
-}
-
-/// A recording relay plane that also behaves like one: it delivers each commit
-/// it publishes to the remaining devices, and lets the next scheduled leaver
-/// propose off the back of it.
-///
-/// That is what makes a multi-generation cascade DETERMINISTIC instead of a
-/// race — a leaver can only propose at the epoch the previous eviction produced.
-struct CascadePublisher {
+/// A relay that also behaves like one: it delivers each commit it is sent to
+/// the remaining devices, and lets the next scheduled leaver propose off the
+/// back of it. Every send is acknowledged.
+struct Cascading {
+    inner: ScriptedFanout,
     alice: Arc<CircleManager>,
     group: GroupId,
     peers: Vec<Arc<Device>>,
     queue: Mutex<VecDeque<Arc<Device>>>,
-    published: Mutex<Vec<Event>>,
-    ack: bool,
+    sent: Mutex<Vec<nostr::EventId>>,
 }
 
-impl CascadePublisher {
-    fn new(cascade: &Cascade, queue: Vec<Arc<Device>>, ack: bool) -> Self {
-        Self {
-            alice: Arc::clone(&cascade.alice),
-            group: cascade.mls_group_id.clone(),
-            peers: cascade.everyone(),
-            queue: Mutex::new(queue.into()),
-            published: Mutex::new(Vec::new()),
-            ack,
+#[async_trait::async_trait]
+impl FanoutSend for Cascading {
+    async fn take(&self, target: &str) -> Option<Taken> {
+        self.inner.take(target).await
+    }
+
+    async fn publish(
+        &self,
+        target: &str,
+        message: &TransportMessage,
+        taken: Taken,
+    ) -> FanoutTargetOutcome {
+        let event = SessionManager::transport_message_to_event(message).expect("a commit event");
+        self.sent.lock().unwrap().push(event.id);
+        for peer in &self.peers {
+            let _ = peer
+                .manager
+                .session()
+                .process_event_settled_for_test(&event)
+                .await;
         }
+        let next = self.queue.lock().unwrap().pop_front();
+        if let Some(leaver) = next {
+            if let Ok(Some(proposal)) = leaver.manager.propose_leave(&self.group).await {
+                deliver(&self.alice, &self.peers, &leaver, &proposal).await;
+            }
+        }
+        self.inner.publish(target, message, taken).await
     }
 
-    fn published(&self) -> Vec<Event> {
-        self.published.lock().unwrap().clone()
+    async fn publish_location(
+        &self,
+        event: &Event,
+        targets: &[String],
+    ) -> haven_core::relay::RelayResult<haven_core::relay::PublishResult> {
+        self.inner.publish_location(event, targets).await
     }
 }
 
-impl AutoCommitPublisher for CascadePublisher {
-    fn publish_auto_commit<'a>(
-        &'a self,
-        event: &'a Event,
-        _relays: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            self.published.lock().unwrap().push(event.clone());
-            // The relay half: every remaining device applies the commit and so
-            // reaches the epoch the next proposal must be minted at.
-            for peer in &self.peers {
-                let _ = peer.manager.session().process_event(event).await;
-            }
-            let next = self.queue.lock().unwrap().pop_front();
-            if let Some(leaver) = next {
-                if let Ok(proposal) = leaver.manager.propose_leave(&self.group).await {
-                    deliver(&self.alice, &self.peers, &leaver, &proposal).await;
-                }
-            }
-            self.ack
-        })
+/// A transport whose every send takes `by_ms` of the driver's clock: how a
+/// test spends a wake's budget one row at a time.
+struct Spending {
+    inner: ScriptedFanout,
+    clock: Arc<ManualClock>,
+    by_ms: u64,
+}
+
+#[async_trait::async_trait]
+impl FanoutSend for Spending {
+    async fn take(&self, target: &str) -> Option<Taken> {
+        self.inner.take(target).await
+    }
+
+    async fn publish(
+        &self,
+        target: &str,
+        message: &TransportMessage,
+        taken: Taken,
+    ) -> FanoutTargetOutcome {
+        let outcome = self.inner.publish(target, message, taken).await;
+        self.clock
+            .set(self.clock.now_ms() - ManualClock::ORIGIN + self.by_ms);
+        outcome
+    }
+
+    async fn publish_location(
+        &self,
+        event: &Event,
+        targets: &[String],
+    ) -> haven_core::relay::RelayResult<haven_core::relay::PublishResult> {
+        self.inner.publish_location(event, targets).await
     }
 }
 
-// ============================================================================
-// 17. The ladder runs until the worklist is empty
-// ============================================================================
+/// Drives `alice`'s stored records over `fanout` until the drive asks for
+/// nothing more, waiting out each deadline the drive itself names — the
+/// engine's own, which nothing can set (`docs/MDK_UPSTREAM_TRACKER.md`
+/// T-CONVERGENCE-CLOCK).
+async fn drive_until_settled<T: FanoutSend>(alice: &CircleManager, fanout: &T) {
+    let outbox = Recorder::acking(true);
+    let clock = ManualClock::at(0);
+    for _ in 0..24 {
+        let ResumeOutcome { retry_after_ms, .. } = Publishing {
+            fanout,
+            publisher: &outbox,
+            clock: clock.as_ref(),
+            deadline_ms: None,
+            mode: &DriveMode::Full,
+        }
+        .resume(alice)
+        .await;
+        let Some(after) = retry_after_ms else {
+            return;
+        };
+        tokio::time::sleep(Duration::from_millis(after) + Duration::from_millis(5)).await;
+    }
+    panic!("the drive never stopped asking to be run again");
+}
 
-#[tokio::test(flavor = "multi_thread")]
-async fn the_resolve_ladder_runs_until_the_worklist_is_empty() {
-    // Three leavers, one after the other. Each eviction's CONFIRM is what
-    // applies the next leaver's proposal and stages the next eviction, so a
-    // plane that ran one generation would publish the first and abandon two.
-    let fx = build_cascade("Ladder Cascade Circle", 3).await;
-    let bob = Arc::clone(&fx.peers[0]);
-    let carol = Arc::clone(&fx.peers[1]);
-    let dave = Arc::clone(&fx.peers[2]);
+/// One circle of Alice + one peer, the peer's eviction staged and recorded on
+/// Alice's side and never sent.
+struct RecordedCircle {
+    mls_group_id: GroupId,
+    peer: Arc<Device>,
+    _dir: TempDir,
+}
 
-    fx.propose_leave(&bob).await;
-    let work = fx.staged_eviction_work().await;
-    let publisher = CascadePublisher::new(&fx, vec![carol, dave], true);
-
-    let ingest = resolve_receive_publish_work(&fx.alice, &publisher, &work).await;
-
-    assert_eq!(
-        publisher.published().len(),
-        3,
-        "every generation the cascade produced must be published by the pass \
-         that started it"
-    );
-    let roster = fx.roster().await;
-    assert_eq!(
-        roster,
-        vec![fx.alice_keys.public_key().to_hex()],
-        "and confirmed: all three leavers are out, which only an applied commit does"
-    );
-    assert!(
-        fx.alice.owed_removal_commits().is_empty(),
-        "nothing is left owed when the ladder runs to empty"
-    );
-    assert!(
-        fx.alice
-            .encrypt_location(
-                &fx.mls_group_id,
-                &fx.alice_keys.public_key(),
-                &LocationMessage::new(1.0, 2.0),
-                300,
+/// Builds `count` such circles inside ONE `CircleManager`. Two members each,
+/// so the cost is linear in circles.
+async fn record_evictions_in(
+    alice: &Arc<CircleManager>,
+    alice_keys: &Keys,
+    count: usize,
+) -> Vec<RecordedCircle> {
+    let relays = vec![GROUP_RELAY.to_string()];
+    let mut recorded = Vec::with_capacity(count);
+    for index in 0..count {
+        let (manager, keys, member, dir) = mint_device().await;
+        let result = alice
+            .create_circle(
+                alice_keys,
+                vec![member],
+                &CircleConfig::new(format!("Drive Circle {index}")).with_relays(relays.clone()),
             )
             .await
-            .is_ok(),
-        "the circle can send again, so no commit is left staged"
-    );
-    assert!(
-        ingest.auto_commits.is_empty(),
-        "the ladder hands back no un-run commit: it ran them"
-    );
+            .expect("create circle");
+        let welcome = &result.welcome_events[0];
+        manager
+            .process_gift_wrapped_invitation(&keys, &welcome.event)
+            .await
+            .expect("peer holds the welcome");
+        manager
+            .accept_invitation(&welcome.event.id)
+            .await
+            .expect("peer accepts");
+        let peer = Arc::new(Device { manager, keys });
+        let group = result.circle.mls_group_id.clone();
+        let proposal = peer
+            .manager
+            .propose_leave(&group)
+            .await
+            .expect("the peer proposes leave")
+            .expect("a first leave in this epoch proposes");
+        record_the_eviction(alice, &group, &proposal).await;
+        recorded.push(RecordedCircle {
+            mls_group_id: group,
+            peer,
+            _dir: dir,
+        });
+    }
+    recorded
+}
+
+/// A live plane over `alice` whose drive sends through `fanout` on `clock`.
+fn plane(
+    alice: &Arc<CircleManager>,
+    fanout: Arc<dyn FanoutSend>,
+    clock: &Arc<ManualClock>,
+    bus: EventBus,
+) -> EngineProcessor {
+    EngineProcessor::with_driver(
+        Arc::clone(alice),
+        bus,
+        LiveDriver {
+            fanout,
+            publisher: Arc::new(Recorder::acking(true)) as Arc<dyn UnrecordedPublisher>,
+            clock: Arc::clone(clock) as Arc<dyn FanoutClock>,
+        },
+    )
 }
 
 // ============================================================================
-// 19. A short-lived plane manufactures no orphan
+// The drive finishes the cascade it started
 // ============================================================================
 
+/// Three leavers, one after the other. Each eviction's CONFIRM is what applies
+/// the next leaver's proposal and schedules the next eviction, so a drive that
+/// made one generation and stopped asking would leave two leavers in the
+/// circle until some later event happened to arrive.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_orphan_is_not_manufactured_by_a_short_lived_plane() {
-    // The catch-up sweep runs in a background isolate over its own
-    // `CircleManager`. Its `PendingStateRef`s die with it, so any obligation it
-    // leaves recorded-but-unredeemed surfaces on the next foreground open as a
-    // circle the user is told to rebuild. A ladder that stopped after one
-    // generation would manufacture exactly that out of an ordinary triple leave.
-    let fx = build_cascade("Ladder Isolate Circle", 3).await;
+async fn the_drive_finishes_the_leave_cascade_it_started_on_its_own_schedule() {
+    let fx = build_cascade("Drive Cascade Circle", 3).await;
     let bob = Arc::clone(&fx.peers[0]);
-    let carol = Arc::clone(&fx.peers[1]);
-    let dave = Arc::clone(&fx.peers[2]);
+    let cascading = Cascading {
+        inner: ScriptedFanout::default(),
+        alice: Arc::clone(&fx.alice),
+        group: fx.mls_group_id.clone(),
+        peers: fx.everyone(),
+        queue: Mutex::new(vec![Arc::clone(&fx.peers[1]), Arc::clone(&fx.peers[2])].into()),
+        sent: Mutex::new(Vec::new()),
+    };
+    cascading.inner.answer(GROUP_RELAY, [Answer::Accepted]);
 
-    fx.propose_leave(&bob).await;
-    let work = fx.staged_eviction_work().await;
-    let publisher = CascadePublisher::new(&fx, vec![carol, dave], true);
-    // The sweep's own entry point: `catchup::resolve_publish_work` is this call
-    // over its `RelayManager`.
-    let _ = resolve_receive_publish_work(&fx.alice, &publisher, &work).await;
+    let proposal = fx.propose_leave(&bob).await;
+    record_the_eviction(&fx.alice, &fx.mls_group_id, &proposal).await;
+    drive_until_settled(fx.alice.as_ref(), &cascading).await;
 
-    // The isolate dies. The temp dir is MOVED out so the reopen finds the SAME
-    // database — a fresh one would pass this assertion for the wrong reason.
+    assert_eq!(
+        cascading.sent.lock().unwrap().len(),
+        3,
+        "every generation the cascade produced must be sent by the drive's own schedule"
+    );
+    assert_eq!(
+        fx.roster().await,
+        vec![fx.alice_keys.public_key().to_hex()],
+        "and applied: all three leavers are out, which only an applied commit does"
+    );
+    assert!(
+        !holds_a_staged_commit(&fx.alice, &fx.mls_group_id).await,
+        "no commit is left staged"
+    );
+
+    // A kill after the cascade: the same store opened again holds nothing a
+    // next foreground would have to drive or report.
     let Cascade {
         alice,
         alice_keys,
         alice_dir,
+        mls_group_id,
         ..
     } = fx;
-    drop(publisher);
+    drop(cascading);
     drop(alice);
-
     let reborn = CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).expect("reopen");
     assert!(
-        reborn.orphaned_removal_deferrals().is_empty(),
-        "a plane that finished its cascade leaves no durable obligation behind, \
-         so the next foreground open reports nothing"
-    );
-    assert!(
-        reborn.owed_removal_commits().is_empty(),
-        "and no durable row at all"
-    );
-}
-
-// ============================================================================
-// The cap: a disposition, never a dangling ref — one case per plane policy
-// ============================================================================
-
-// The cap bounds the WORK one ladder call does, so it is reached with MANY
-// CIRCLES rather than with a deep cascade — one leaver each, one commit each.
-// That is not a convenience: an engine batch is not single-group, so the shape
-// that actually reaches the cap in the field is a device holding many circles
-// that all lose a member, not a single circle losing seventeen in a row. It is
-// also the only affordable shape. A cascade of k leavers in ONE circle costs
-// O(k^3) here — every generation delivers a commit to k devices and every device
-// applies it against a k-member tree — measured in this tree, debug build:
-//
-//     k=3  3.5 s    k=5  12.4 s    k=7  39.1 s    k=9  115.9 s
-//
-// which puts seventeen past forty minutes. Seventeen two-member circles are
-// linear — measured here at ~10 s for the cap arm and ~24 s for the redemption
-// pass's (which needs 33).
-//
-// The fold's own `MAX_FOLD_BATCHES` is NOT reached this way, and no plane can
-// reach it at all: it counts engine BATCHES inside one fold, which needs 33
-// groups in a single `pending_convergence` drain, and `collect_effects` empties
-// that buffer on the way out of every engine call while the only scheduler a
-// resolution reaches is single-group. Its disposition is driven in-crate, where
-// the fold can be handed its batch directly
-// (`circle::manager::tests::the_batch_cap_stops_generating_without_dropping_what_it_holds`).
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_deferring_plane_gives_every_commit_it_will_not_run_a_disposition() {
-    // The other plane policy. A background burst runs NO generation at all —
-    // opening a publish-before-apply window inside a wake the OS may end is what
-    // OD4-c forbids — so its disposition has to be the same shape as the cap's:
-    // parked, owed, never rolled back.
-    let fx = build_cascade("Ladder Burst Circle", 2).await;
-    let bob = Arc::clone(&fx.peers[0]);
-    fx.propose_leave(&bob).await;
-    let work = fx.staged_eviction_work().await;
-    let publisher = CascadePublisher::new(&fx, vec![], true);
-
-    let (deferred, ingest) = resolve_receive_publish_work_with_policy(
-        &fx.alice,
-        &publisher,
-        &work,
-        ReceiveAutoCommitPolicy::DeferToForeground,
-    )
-    .await;
-
-    assert_eq!(deferred, 1, "the commit is parked, and the caller is told");
-    assert!(
-        publisher.published().is_empty(),
-        "a burst puts nothing on the wire"
-    );
-    assert!(
-        fx.alice.owed_removal_commits().contains(&fx.nostr_group_id),
-        "parked means OWED: the obligation is durable"
-    );
-    assert!(
-        fx.alice.orphaned_removal_deferrals().is_empty(),
-        "and this session can still redeem it"
-    );
-    assert!(
-        ingest.results.is_empty() && ingest.auto_commits.is_empty(),
-        "nothing was resolved, so there is no batch to hand back"
+        !holds_a_staged_commit(&reborn, &mls_group_id).await
+            && reborn
+                .session()
+                .fanout_ids_for_test(&mls_group_id)
+                .await
+                .is_ok_and(|ids| ids.is_empty()),
+        "a drive that finished its cascade left a record or a staged commit behind"
     );
 }
 
 // ============================================================================
-// The location a resolution replays reaches the plane, not just the store
+// The location a drive's confirm replays reaches the plane
 // ============================================================================
 
+/// The eviction's publish-before-apply window holds whatever arrives behind
+/// it unread. The drive's confirm replays that — and the plane has to be
+/// handed the result, or the map shows nothing until the next delivery from
+/// that peer.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_location_replayed_by_the_planes_own_resolution_reaches_the_plane() {
-    // The eviction's publish-before-apply window buffers whatever arrives behind
-    // it. Confirming it replays that — and the plane has to be handed the result,
-    // or the map shows nothing until the next delivery from that peer.
-    let fx = build_cascade("Ladder Replay Circle", 2).await;
+async fn a_location_replayed_by_a_drives_confirm_reaches_the_plane() {
+    let fx = build_cascade("Drive Replay Circle", 2).await;
     let bob = Arc::clone(&fx.peers[0]);
     let carol = Arc::clone(&fx.peers[1]);
-
     // Minted BEFORE the leave reaches her: a device holding a peer's pending
-    // `SelfRemove` is send-gated, which is the engine's business and not this
-    // test's subject.
+    // `SelfRemove` is send-gated, which is not this test's subject.
     let (carol_fix, _, _) = carol
         .manager
-        .encrypt_location(
-            &fx.mls_group_id,
-            &carol.keys.public_key(),
-            &LocationMessage::new(45.46, 9.19),
-            300,
-        )
+        .seal_location_for_test(&fx.mls_group_id, &LocationMessage::new(45.46, 9.19))
         .await
         .expect("carol encrypts");
+    let proposal = fx.propose_leave(&bob).await;
+    record_the_eviction(&fx.alice, &fx.mls_group_id, &proposal).await;
 
-    fx.propose_leave(&bob).await;
-    let work = fx.staged_eviction_work().await;
+    let transport = Arc::new(ScriptedFanout::default());
+    transport.answer(GROUP_RELAY, [Answer::Accepted]);
+    let clock = ManualClock::at(0);
+    let bus = EventBus::new();
+    let mut rx = bus.subscribe();
+    let processor = plane(
+        &fx.alice,
+        Arc::clone(&transport) as Arc<dyn FanoutSend>,
+        &clock,
+        bus,
+    );
+    processor.for_test().set_background_burst(false);
+    // Carol's fix arrives while Alice's eviction is staged: held unread.
+    let _ = processor
+        .process_group_event(&carol_fix, &fx.nostr_group_id)
+        .await;
+    processor.for_test().drive_due().await;
 
-    // Carol's fix arrives while Alice's eviction commit is staged.
-    fx.alice
-        .session()
-        .process_event(&carol_fix)
-        .await
-        .expect("alice takes carol's fix");
-
-    let publisher = CascadePublisher::new(&fx, vec![], true);
-    let ingest = resolve_receive_publish_work(&fx.alice, &publisher, &work).await;
-
+    let mut routed = false;
+    while let Ok(event) = rx.try_recv() {
+        if let LiveSyncEvent::Location { sender_pubkey, .. } = event {
+            routed |= sender_pubkey == carol.hex();
+        }
+    }
     assert!(
-        ingest.results.iter().any(|r| matches!(
-            r,
-            LocationMessageResult::Location { sender_pubkey, .. } if *sender_pubkey == carol.hex()
-        )),
-        "the plane is handed the replayed fix, so it can route it to the UI"
+        transport.calls().len() == 1 && routed,
+        "the plane was not handed the fix the drive's confirm replayed"
     );
     let rows = fx
         .alice
@@ -538,65 +527,25 @@ async fn a_location_replayed_by_the_planes_own_resolution_reaches_the_plane() {
         .expect("snapshot");
     assert!(
         rows.iter().any(|r| r.sender_pubkey == carol.hex()),
-        "and the core has already persisted it, which is why no plane re-persists"
+        "and the core has persisted it, which is why no plane re-persists"
     );
 }
 
-// A drained `GroupEvolution` carrying welcomes (O3) is NOT driven from a plane
-// here: the arm needs a queued outbound Invite AND a `SelfRemove`
-// scheduled-but-not-yet-due at the instant the fold re-advances convergence,
-// because `converge_and_drain_queued_outbound_intents` returns early whenever
-// the eviction IS due (`message_processor/mod.rs:216-221`). That is the engine's
-// jitter race, and a test that waits on it is a flaky test. The arm's behaviour
-// is covered in-crate by
-// `circle::manager::tests::a_drained_group_evolution_is_surfaced_with_its_welcomes_noted`
-// and its trace by
-// `security_rule_gates::drained_group_evolution_welcomes_are_never_dropped_silently`.
-
 // ============================================================================
-// route_results: a resolution's replay is keyed off each result's OWN circle
+// route_results: every location is keyed off its OWN circle
 // ============================================================================
 
-/// A recording relay plane that also strands one event in the engine's global
-/// buffers at publish time.
-///
-/// The engine's effect buffers are not per-group: a call that fails mid-way
-/// leaves what it already emitted in them, and the NEXT `collect_effects` —
-/// here, the confirm of a completely different circle's eviction — drains it.
-/// That is how one resolution batch comes to span two circles, and it is exactly
-/// the case an ambient `nostr_group_id` would file under the wrong one.
-struct StrandingPublisher {
-    alice: Arc<CircleManager>,
-    db: std::path::PathBuf,
-    stranded: Mutex<Option<Event>>,
-}
-
-impl AutoCommitPublisher for StrandingPublisher {
-    fn publish_auto_commit<'a>(
-        &'a self,
-        _event: &'a Event,
-        _relays: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            let stranded = self.stranded.lock().unwrap().take();
-            if let Some(event) = stranded {
-                let key = StorageConfig::test_sqlcipher_key().expect("test key");
-                set_stored_message_write_fault_for_test(&self.db, &key, true).expect("arm");
-                let _ = self.alice.session().process_event(&event).await;
-                set_stored_message_write_fault_for_test(&self.db, &key, false).expect("disarm");
-            }
-            true
-        })
-    }
-}
-
+/// A location reaches the bus under the circle its own event belongs to, never
+/// under the subscription that happened to carry it. At MDK v0.10.4 an engine
+/// batch no longer spans two circles (nothing emits a message before its durable
+/// write, so no failed call strands one for the next to collect), so the cross
+/// shape is driven the one way it still reaches the plane: another circle's
+/// event delivered on this circle's subscription.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_replayed_location_reaches_the_bus_under_its_own_circle() {
-    let fx = build_cascade("Router Home Circle", 2).await;
-    let bob = Arc::clone(&fx.peers[0]);
+async fn a_location_reaches_the_bus_under_its_own_circle() {
+    let fx = build_cascade("Router Home Circle", 1).await;
 
-    // A second circle in Alice's OWN store, whose peer's fix will ride the first
-    // circle's resolution.
+    // A second circle in Alice's OWN store.
     let (dave_manager, dave_keys, dave_member, _dave_dir) = mint_device().await;
     let relays = vec![GROUP_RELAY.to_string()];
     let sibling = fx
@@ -605,14 +554,9 @@ async fn a_replayed_location_reaches_the_bus_under_its_own_circle() {
             &fx.alice_keys,
             vec![dave_member],
             &CircleConfig::new("Router Sibling Circle").with_relays(relays.clone()),
-            &relays,
         )
         .await
         .expect("create the sibling circle");
-    fx.alice
-        .confirm_published(sibling.pending)
-        .await
-        .expect("confirm the sibling create");
     let sibling_ngid = sibling.circle.nostr_group_id;
     let welcome = &sibling.welcome_events[0];
     dave_manager
@@ -624,35 +568,20 @@ async fn a_replayed_location_reaches_the_bus_under_its_own_circle() {
         .await
         .expect("dave accepts");
     let dave_fix = dave_manager
-        .encrypt_location(
+        .seal_location_for_test(
             &sibling.circle.mls_group_id,
-            &dave_keys.public_key(),
             &LocationMessage::new(-22.9, -43.17),
-            300,
         )
         .await
         .expect("dave encrypts")
         .0;
 
-    let publisher = Arc::new(StrandingPublisher {
-        alice: Arc::clone(&fx.alice),
-        db: StorageConfig::new(fx.alice_dir.path()).database_path(),
-        stranded: Mutex::new(Some(dave_fix)),
-    });
     let bus = EventBus::new();
     let mut rx = bus.subscribe();
-    let processor = EngineProcessor::with_publisher(
-        Arc::clone(&fx.alice),
-        bus,
-        publisher as Arc<dyn AutoCommitPublisher>,
-    );
-
-    // The home circle's leave drives a resolution; the sibling's fix rides it.
-    // Minted without handing it to Alice: the PLANE is what must ingest it, or
-    // the engine answers the plane's copy "already seen" and stages nothing.
-    let proposal = fx.mint_leave(&bob).await;
+    let processor = EngineProcessor::new(Arc::clone(&fx.alice), bus);
+    // Delivered on the HOME circle's subscription.
     let _ = processor
-        .process_group_event(&proposal, &fx.nostr_group_id)
+        .process_group_event(&dave_fix, &fx.nostr_group_id)
         .await;
 
     let mut routed = Vec::new();
@@ -668,423 +597,228 @@ async fn a_replayed_location_reaches_the_bus_under_its_own_circle() {
     }
     assert!(
         routed.contains(&(sibling_ngid.to_vec(), dave_keys.public_key().to_hex())),
-        "a location a resolution replayed must reach the bus under ITS OWN \
-         circle — the ambient subscription id belongs to a circle that peer is \
-         not even in"
+        "a location must reach the bus under ITS OWN circle — the subscription \
+         that carried it belongs to a circle that peer is not even in"
     );
     assert!(
         !routed
             .iter()
             .any(|(ngid, _)| ngid.as_slice() == fx.nostr_group_id.as_slice()),
-        "and never under the circle whose event happened to trigger the pass"
+        "and never under the circle whose subscription carried it"
     );
 }
 
 // ============================================================================
-// The cap, driven through the production entry point
+// What bounds a drive
 // ============================================================================
 
-/// One circle of Alice + one peer, with that peer's eviction already staged and
-/// waiting for a plane to resolve it.
-struct ArmedCircle {
-    work: PublishWork,
-    nostr_group_id: [u8; 32],
-    mls_group_id: GroupId,
-    peer: Arc<Device>,
-    _dir: TempDir,
-}
-
-/// Builds `count` such circles inside ONE `CircleManager`.
-///
-/// Two members each, so the cost is linear in circles: the expensive axis is
-/// members-per-circle, not circles.
-async fn arm_many_circles(
-    alice: &Arc<CircleManager>,
-    alice_keys: &Keys,
-    count: usize,
-) -> Vec<ArmedCircle> {
-    let relays = vec![GROUP_RELAY.to_string()];
-    let mut armed = Vec::with_capacity(count);
-    for index in 0..count {
-        let (manager, keys, member, dir) = mint_device().await;
-        let result = alice
-            .create_circle(
-                alice_keys,
-                vec![member],
-                &CircleConfig::new(format!("Cap Circle {index}")).with_relays(relays.clone()),
-                &relays,
-            )
-            .await
-            .expect("create circle");
-        alice
-            .confirm_published(result.pending)
-            .await
-            .expect("confirm creation");
-        let welcome = &result.welcome_events[0];
-        manager
-            .process_gift_wrapped_invitation(&keys, &welcome.event)
-            .await
-            .expect("peer holds the welcome");
-        manager
-            .accept_invitation(&welcome.event.id)
-            .await
-            .expect("peer accepts");
-
-        let peer = Arc::new(Device { manager, keys });
-        let group = result.circle.mls_group_id.clone();
-        let proposal = peer
-            .manager
-            .propose_leave(&group)
-            .await
-            .expect("the peer proposes leave");
-        alice
-            .session()
-            .process_event(&proposal)
-            .await
-            .expect("alice ingests the proposal");
-
-        // The engine re-queues the group until the jitter-delayed due time
-        // passes, so a single advance would strand the eviction.
-        let mut staged = None;
-        for _ in 0..40 {
-            let effects = alice
-                .session()
-                .advance_convergence(&group)
-                .await
-                .expect("advance convergence");
-            if let Some(item) = effects
-                .publish
-                .into_iter()
-                .find(|w| matches!(w, PublishWork::AutoPublish { .. }))
-            {
-                staged = Some(item);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        armed.push(ArmedCircle {
-            work: staged.expect("the eviction surfaces within the jitter window"),
-            nostr_group_id: result.circle.nostr_group_id,
-            mls_group_id: group,
-            peer,
-            _dir: dir,
-        });
-    }
-    armed
-}
-
+/// A drive begins no record it could not see through inside its wake: one
+/// whose budget runs out after the first row sends that row alone. The
+/// records it did not reach are stored, staged and unattempted — nothing is
+/// rolled back, nothing dropped — and the next drive sends each exactly once.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_commit_past_the_runaway_cap_is_owed_and_redeemable_never_dropped() {
-    // One more circle than the cap will run, so the ladder must stop mid-batch.
-    // What it must NOT do is roll one back (the permanent silent drop) or walk
-    // away from it (a staged commit with nothing recording the debt). It parks:
-    // owed, redeemable by this session, and published by the very next
-    // redemption pass.
+async fn a_drive_stops_at_its_budget_and_every_record_it_did_not_reach_stands() {
     let alice_dir = TempDir::new().unwrap();
     let alice_keys = Keys::generate();
     let alice = Arc::new(CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap());
-    let armed = arm_many_circles(&alice, &alice_keys, RESOLVE_RUNAWAY_CAP + 2).await;
+    let recorded = record_evictions_in(&alice, &alice_keys, 3).await;
 
-    // One of the two the cap will not run has had its circle torn down in the
-    // meantime — the user left it while this wake was mid-ladder. Its park
-    // therefore cannot be RECORDED (the obligation row is keyed by a circle that
-    // no longer exists), which is the one case where the ladder has neither a
-    // publish nor a durable debt to fall back on.
-    let over_ngid = armed.last().expect("a circle past the cap").nostr_group_id;
-    let unrecordable = &armed[RESOLVE_RUNAWAY_CAP];
-    alice
-        .complete_leave(&unrecordable.mls_group_id, chrono::Utc::now().timestamp())
-        .await
-        .expect("the user leaves that circle");
-
-    let work: Vec<PublishWork> = armed.iter().map(|c| c.work.clone()).collect();
-    let publisher = FlatPublisher::new(true);
-    // Under a live logger, because that is how the product runs and because the
-    // cap's REPORT is half of its disposition: a cap that stopped silently would
-    // be the invisible wedge this whole obligation machinery exists to prevent.
-    let mut ingest = None;
-    let lines = capture_haven_log(async {
-        ingest = Some(resolve_receive_publish_work(&alice, &publisher, &work).await);
-    })
+    let clock = ManualClock::at(0);
+    let spending = Spending {
+        inner: ScriptedFanout::default(),
+        clock: Arc::clone(&clock),
+        by_ms: ROW_BUDGET_MS,
+    };
+    spending.inner.answer(GROUP_RELAY, [Answer::Accepted]);
+    let outbox = Recorder::acking(true);
+    let _ = Publishing {
+        fanout: &spending,
+        publisher: &outbox,
+        clock: clock.as_ref(),
+        deadline_ms: Some(clock.now_ms() + ROW_BUDGET_MS + 1),
+        mode: &DriveMode::Full,
+    }
+    .resume(&alice)
     .await;
-    let ingest = ingest.expect("the ladder ran");
-    assert_cap_reported_without_naming_anyone(&lines, over_ngid, &alice_keys);
+    let first = spending.inner.calls();
+    assert_eq!(
+        first.len(),
+        1,
+        "a drive began a row its wake could not see through"
+    );
+    let mut standing = 0;
+    for circle in &recorded {
+        assert!(
+            !alice
+                .session()
+                .member_pubkeys(&circle.mls_group_id)
+                .await
+                .expect("the roster reads")
+                .contains(&circle.peer.hex()),
+            "an eviction was rolled back",
+        );
+        if holds_a_staged_commit(&alice, &circle.mls_group_id).await
+            && records(&alice, &circle.mls_group_id).await == 1
+        {
+            standing += 1;
+        }
+    }
+    assert_eq!(
+        standing,
+        recorded.len() - 1,
+        "a record the drive did not reach was rolled back, dropped or ended",
+    );
+
+    drive_until_settled(alice.as_ref(), &spending.inner).await;
+    let rest = spending.inner.calls();
+    assert!(
+        rest.len() == recorded.len() - 1
+            && rest.iter().all(|call| call.event_id != first[0].event_id),
+        "the next drive did not send each record it had not reached exactly once",
+    );
+    for circle in &recorded {
+        assert!(
+            !holds_a_staged_commit(&alice, &circle.mls_group_id).await,
+            "an eviction a relay acknowledged was not applied by the next drive",
+        );
+    }
+}
+
+/// A record driven again once its relay acknowledged it is not sent again:
+/// one record, one send, and the second drive changes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_record_driven_again_after_its_ack_is_sent_once() {
+    let fx = build_cascade("Drive Duplicate Circle", 2).await;
+    let bob = Arc::clone(&fx.peers[0]);
+    let proposal = fx.propose_leave(&bob).await;
+    record_the_eviction(&fx.alice, &fx.mls_group_id, &proposal).await;
+    let transport = ScriptedFanout::default();
+    transport.answer(GROUP_RELAY, [Answer::Accepted]);
+
+    drive_until_settled(fx.alice.as_ref(), &transport).await;
+    let epoch = fx.alice.group_epoch(&fx.mls_group_id).await.expect("epoch");
+    drive_until_settled(fx.alice.as_ref(), &transport).await;
 
     assert_eq!(
-        publisher.published().len(),
-        RESOLVE_RUNAWAY_CAP,
-        "the cap bounds the work of ONE call: it runs exactly that many and no more"
+        transport.calls().len(),
+        1,
+        "one record, one send — a drive after the ack sent it again"
     );
     assert!(
-        ingest.auto_commits.is_empty(),
-        "and it hands nothing back — the un-run commits are parked, not returned \
-         for the caller to guess at"
+        !fx.roster().await.contains(&bob.hex())
+            && fx.alice.group_epoch(&fx.mls_group_id).await.expect("epoch") == epoch,
+        "the one resolution was not applied once and left as it was"
+    );
+}
+
+/// A session that leaves the foreground — a pause, a stop, a logout — stops
+/// its drive before it begins anything: no relay is called, and every record
+/// stays as it was. The foreground that follows sends each, exactly once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_teardown_stops_the_drive_without_losing_a_record() {
+    let alice_dir = TempDir::new().unwrap();
+    let alice_keys = Keys::generate();
+    let alice = Arc::new(CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap());
+    let recorded = record_evictions_in(&alice, &alice_keys, 2).await;
+    let transport = Arc::new(ScriptedFanout::default());
+    transport.answer(GROUP_RELAY, [Answer::Accepted]);
+    let clock = ManualClock::at(0);
+    let processor = plane(
+        &alice,
+        Arc::clone(&transport) as Arc<dyn FanoutSend>,
+        &clock,
+        EventBus::new(),
     );
 
-    let over = armed.last().expect("the circle past the cap");
-    assert_eq!(over.nostr_group_id, over_ngid);
+    processor.for_test().leave_foreground();
+    processor.for_test().drive_due().await;
     assert!(
-        alice.owed_removal_commits().contains(&over.nostr_group_id),
-        "the commit the cap refused to run is OWED"
+        transport.calls().is_empty(),
+        "a drive ran after the session left the foreground"
     );
-    assert!(
-        alice.orphaned_removal_deferrals().is_empty(),
-        "and redeemable: this session still holds its pending ref"
-    );
-    assert!(
-        alice
-            .encrypt_location(
-                &over.mls_group_id,
-                &alice_keys.public_key(),
-                &LocationMessage::new(1.0, 2.0),
-                300,
-            )
-            .await
-            .is_err(),
-        "nothing was rolled back either — the un-run commit is still staged, \
-         which is what keeps the removal from being silently dropped"
-    );
-    for done in &armed[..RESOLVE_RUNAWAY_CAP] {
+    for circle in &recorded {
         assert!(
-            !alice.owed_removal_commits().contains(&done.nostr_group_id),
-            "a commit the ladder DID run discharged its own obligation"
+            holds_a_staged_commit(&alice, &circle.mls_group_id).await
+                && records(&alice, &circle.mls_group_id).await == 1,
+            "a teardown rolled back or ended a record",
         );
     }
 
-    // The un-recordable one: no publish, no durable debt — and above all no
-    // rollback. A rollback would put the leaver back in this device's projected
-    // roster and drop the removal for good, which is strictly worse than a
-    // commit left staged with nobody watching it.
-    assert!(
-        !alice
-            .owed_removal_commits()
-            .contains(&unrecordable.nostr_group_id),
-        "precondition: there is no circle left to key an obligation under"
-    );
-    assert!(
-        !alice
-            .session()
-            .member_pubkeys(&unrecordable.mls_group_id)
-            .await
-            .expect("the projected roster still reads")
-            .contains(&unrecordable.peer.hex()),
-        "the eviction is still STAGED: rolling it back to tidy up would restore \
-         the leaver and lose the removal permanently"
-    );
-
-    // The park is genuinely redeemable: the next pass lands it.
-    let redeemed = alice.redeem_removal_deferrals(&publisher, None).await;
-    assert_eq!(redeemed, 1, "the parked commit is published and confirmed");
-    assert!(
-        alice.owed_removal_commits().is_empty(),
-        "and nothing is owed afterwards"
-    );
-    assert!(
-        alice
-            .encrypt_location(
-                &over.mls_group_id,
-                &alice_keys.public_key(),
-                &LocationMessage::new(1.0, 2.0),
-                300,
-            )
-            .await
-            .is_ok(),
-        "the circle sends again, which only an applied commit allows"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_pending_ref_handed_twice_is_resolved_once() {
-    // The `resolved` set's whole job. A second resolution of a ref the first
-    // already confirmed would apply a commit the group has merged — and on the
-    // rollback rung it would discard one the group is waiting on.
-    let fx = build_cascade("Ladder Duplicate Circle", 2).await;
-    let bob = Arc::clone(&fx.peers[0]);
-    fx.propose_leave(&bob).await;
-    let work = fx.staged_eviction_work().await;
-    let item = work
-        .into_iter()
-        .find(|w| matches!(w, PublishWork::AutoPublish { .. }))
-        .expect("the eviction surfaces");
-
-    let publisher = FlatPublisher::new(true);
-    let doubled = [item.clone(), item];
-    let _ = resolve_receive_publish_work(&fx.alice, &publisher, &doubled).await;
-
+    processor.for_test().set_background_burst(false);
+    processor.for_test().drive_due().await;
     assert_eq!(
-        publisher.published().len(),
-        1,
-        "one ref, one publish — a duplicate must be skipped, not published twice"
+        transport.calls().len(),
+        recorded.len(),
+        "the foreground did not send each record once"
     );
-    assert!(
-        !fx.roster().await.contains(&bob.hex()),
-        "and the one resolution it did make applied: the leaver is out"
-    );
-    assert!(
-        fx.alice.owed_removal_commits().is_empty(),
-        "with its obligation discharged by the confirm"
-    );
+    for circle in &recorded {
+        assert!(
+            !holds_a_staged_commit(&alice, &circle.mls_group_id).await,
+            "an acknowledged eviction was not applied",
+        );
+    }
 }
 
-/// The cap's report exists and says nothing a Rule-15 needle would catch.
-fn assert_cap_reported_without_naming_anyone(
-    lines: &[helpers::LogLine],
-    ngid: [u8; 32],
-    keys: &Keys,
-) {
-    assert!(
-        haven_core_lines(lines).iter().any(|l| l
-            .message
-            .contains("resolve ladder stopped at the runaway cap")),
-        "the cap reports what it stood down from"
-    );
-    assert_some_line_from(lines, "haven_core");
-    assert_no_needles(
-        &haven_core_lines(lines),
-        &[
-            &hex::encode(ngid),
-            &keys.public_key().to_hex(),
-            "Cap Circle 0",
-        ],
-    );
-}
-
+/// A background burst's drive is bounded by the burst's measured end: it
+/// sends again the record that is due and fits, and begins none past it. What
+/// it did not reach is stored and staged, and the next burst sends it.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_teardown_stops_the_redemption_pass_without_losing_an_obligation() {
-    // The pass runs under the live-sync lifecycle lock, so a cascade of relay
-    // round-trips is a logout that looks hung. It yields — and what it yields
-    // keeps its durable row, so the circle is reported at the next foreground
-    // open rather than forgotten.
+async fn a_bursts_drive_stops_at_its_budget_with_every_record_still_standing() {
     let alice_dir = TempDir::new().unwrap();
     let alice_keys = Keys::generate();
     let alice = Arc::new(CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap());
-    let armed = arm_many_circles(&alice, &alice_keys, 2).await;
-
-    let park = FlatPublisher::new(true);
-    let work: Vec<PublishWork> = armed.iter().map(|c| c.work.clone()).collect();
-    let _ = resolve_receive_publish_work_with_policy(
+    let recorded = record_evictions_in(&alice, &alice_keys, 2).await;
+    let clock = ManualClock::at(0);
+    let spending = Arc::new(Spending {
+        inner: ScriptedFanout::default(),
+        clock: Arc::clone(&clock),
+        by_ms: ROW_BUDGET_MS,
+    });
+    // The first send of each, in the foreground: unanswered.
+    spending.inner.answer(GROUP_RELAY, [Answer::Silent]);
+    let processor = plane(
         &alice,
-        &park,
-        &work,
-        ReceiveAutoCommitPolicy::DeferToForeground,
-    )
-    .await;
+        Arc::clone(&spending) as Arc<dyn FanoutSend>,
+        &clock,
+        EventBus::new(),
+    );
+    processor.for_test().set_background_burst(false);
+    processor.for_test().drive_due().await;
     assert_eq!(
-        alice.owed_removal_commits().len(),
-        2,
-        "precondition: both circles owe a publish"
+        spending.inner.calls().len(),
+        recorded.len(),
+        "premise: each sent once"
     );
 
-    let teardown = std::sync::atomic::AtomicBool::new(true);
-    let publisher = FlatPublisher::new(true);
-    let confirmed = alice
-        .redeem_removal_deferrals(&publisher, Some(&teardown))
-        .await;
-
+    clock.set(4 * 3_600_000);
+    spending.inner.answer(GROUP_RELAY, [Answer::Accepted]);
+    processor.for_test().set_background_burst(true);
+    processor
+        .for_test()
+        .set_burst_budget(Some(ROW_BUDGET_MS + 1));
+    processor.for_test().drive_due().await;
     assert_eq!(
-        confirmed, 0,
-        "a raised teardown stops the pass before it runs"
-    );
-    assert!(
-        publisher.published().is_empty(),
-        "and nothing goes on the wire after the caller asked to stop"
-    );
-    assert_eq!(
-        alice.owed_removal_commits().len(),
-        2,
-        "nothing is discharged and nothing is rolled back: both still owe"
-    );
-
-    // Lowered, the same pass completes — so the check is a yield, not a wedge.
-    teardown.store(false, std::sync::atomic::Ordering::Release);
-    assert_eq!(
-        alice
-            .redeem_removal_deferrals(&publisher, Some(&teardown))
-            .await,
-        2,
-        "with the teardown clear the pass runs to the end"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn the_redemption_pass_stops_at_its_cap_with_everything_still_owed() {
-    // `redeem_removal_deferrals` runs the same worklist shape as the ladder, so
-    // it carries the same runaway guard — and must carry the same disposition.
-    // One more owed commit than the cap will run, so the pass stops mid-list:
-    // what it did not reach is still owed, still redeemable, and still staged.
-    let alice_dir = TempDir::new().unwrap();
-    let alice_keys = Keys::generate();
-    let alice = Arc::new(CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap());
-    let armed = arm_many_circles(&alice, &alice_keys, MAX_REDEMPTION_STEPS + 1).await;
-
-    // Parked rather than published, which is exactly what the map the redemption
-    // pass reads is filled from.
-    let park = FlatPublisher::new(true);
-    let work: Vec<PublishWork> = armed.iter().map(|c| c.work.clone()).collect();
-    // The ladder's own cap parks the tail rather than running it, which is the
-    // same disposition — so every circle ends up owed either way, which is all
-    // this precondition needs.
-    let _ = resolve_receive_publish_work_with_policy(
-        &alice,
-        &park,
-        &work,
-        ReceiveAutoCommitPolicy::DeferToForeground,
-    )
-    .await;
-    assert!(
-        park.published().is_empty(),
-        "precondition: a deferring plane puts nothing on the wire"
-    );
-    assert_eq!(
-        alice.owed_removal_commits().len(),
-        MAX_REDEMPTION_STEPS + 1,
-        "precondition: every circle owes a publish before the pass begins"
-    );
-
-    let publisher = FlatPublisher::new(true);
-    let confirmed = alice.redeem_removal_deferrals(&publisher, None).await;
-
-    assert_eq!(
-        confirmed, MAX_REDEMPTION_STEPS,
-        "the pass runs exactly its cap's worth and stops"
-    );
-    assert_eq!(
-        alice.owed_removal_commits().len(),
+        spending.inner.calls().len(),
         1,
-        "and the one it did not reach is still OWED, not abandoned"
+        "a burst's drive began a row past its end"
     );
-    assert!(
-        alice.orphaned_removal_deferrals().is_empty(),
-        "still redeemable: this session holds its ref"
-    );
-    let left = alice
-        .owed_removal_commits()
-        .into_iter()
-        .next()
-        .expect("one owed circle");
-    let stranded = armed
-        .iter()
-        .find(|c| c.nostr_group_id == left)
-        .expect("it is one of this test's circles");
-    assert!(
-        alice
-            .encrypt_location(
-                &stranded.mls_group_id,
-                &alice_keys.public_key(),
-                &LocationMessage::new(1.0, 2.0),
-                300,
-            )
-            .await
-            .is_err(),
-        "nothing was rolled back: its commit is still staged"
-    );
+    for circle in &recorded {
+        assert_eq!(
+            records(&alice, &circle.mls_group_id).await,
+            1,
+            "a record the burst did not reach was rolled back or ended",
+        );
+    }
 
-    // …and the very next pass lands it, which is what makes the cap a pause
-    // rather than a loss.
-    assert_eq!(
-        alice.redeem_removal_deferrals(&publisher, None).await,
-        1,
-        "the next pass redeems the remainder"
-    );
-    assert!(alice.owed_removal_commits().is_empty());
+    processor.for_test().set_background_burst(true);
+    processor
+        .for_test()
+        .set_burst_budget(Some(4 * ROW_BUDGET_MS));
+    processor.for_test().drive_due().await;
+    for circle in &recorded {
+        assert!(
+            !holds_a_staged_commit(&alice, &circle.mls_group_id).await,
+            "the next burst did not land the record the first one left",
+        );
+    }
 }

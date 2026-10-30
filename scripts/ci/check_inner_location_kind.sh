@@ -52,8 +52,8 @@
 # the possibility that the comment reflects real intent. Do not re-describe it
 # as an allocation.
 #
-# Haven does publish kind 5 (the legacy-443 cutover retraction) — through
-# `EventBuilder::delete`, which carries no number. What checks 4 and 5 ban is
+# Haven does publish kind 5 (malformed KeyPackage slot retirement, relay-list
+# unpublish) — through `EventBuilder::delete`, which carries no number. What checks 4 and 5 ban is
 # the BARE LITERAL, never the kind: the pinned nostr crate names these kinds
 # (`Kind::EventDeletion`, `Kind::Metadata`, both already used in this tree), and
 # a bare reserved number is either a mistake or a deliberate collision.
@@ -91,15 +91,16 @@
 # value; and a construction rustfmt has split across lines is folded back onto
 # the line it starts on before anything greps it.
 #
-# Check 5 bans CONSTRUCTING a reserved kind, not naming one. Haven deliberately
-# keeps `LEGACY_KIND_LOCATION_UPDATE: u16 = 9` for the receive side, to keep a
-# not-yet-updated circle member on the map through the cutover; it is compared
-# against an inbound kind and never built.
+# Check 5 bans CONSTRUCTING a reserved kind, not naming one: a constant at a
+# reserved value may be declared and compared against an inbound kind (the
+# retired `LEGACY_KIND_LOCATION_UPDATE: u16 = 9` receive arm was), never built.
 #
 # ## The transitional window's expiry (check 6)
 #
-# That legacy arm is transitional, and check 6 is what ends it — nothing else in
-# the repository can. `haven/pubspec.yaml` reads `0.1.0+1` at every release tag,
+# The window CLOSED at the MDK v0.10.4 bump, which deleted the arm; check 6 now
+# keeps it deleted. The reasoning it enforced, kept because it is what a future
+# transitional window would be held to: the legacy arm was transitional, and
+# check 6 is what ended it — nothing else in the repository could. `haven/pubspec.yaml` reads `0.1.0+1` at every release tag,
 # so no version number here moves, and a wall-clock sunset would turn CI red on a
 # morning nobody chose. The MDK pin is the real boundary.
 #
@@ -133,6 +134,8 @@
 #   2  the guard itself is broken or misconfigured
 
 set -Eeuo pipefail
+LITERAL_FREE="$(cat "$(dirname "${BASH_SOURCE[0]}")/lib/literal_free.awk")"
+readonly LITERAL_FREE
 
 SCRIPT_NAME="check_inner_location_kind"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -196,15 +199,15 @@ reserved_alternation() {
 # guard that can be argued with.
 # ---------------------------------------------------------------------------
 prod_view() { # prod_view <file>
-  awk '
+  awk "${LITERAL_FREE}"'
     { L[NR] = $0 }
     END {
       depth = 0; intest = 0; pending = 0; testdepth = 0
       for (j = 1; j <= NR; j++) {
         t = L[j]
         if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
-        tmp = t; o = gsub(/[{]/, "", tmp)
-        tmp = t; c = gsub(/[}]/, "", tmp)
+        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+        tmp = lfree; c = gsub(/[}]/, "", tmp)
         if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
           intest = 1; testdepth = depth; pending = 0
         }
@@ -311,6 +314,18 @@ kind_constants() { # kind_constants <file>...
 # over fixture trees. Checks accumulate rather than short-circuit: one red run
 # should report every violation, the way the repo-guards job does.
 # ---------------------------------------------------------------------------
+# The repository's api.rs, walked, still reaches its live-sync bridge near the
+# end of its production code: a brace inside a literal once cut the walk short
+# at about line 11282, and everything after was silently out of this guard's
+# reach. Checked on the real tree only; the fixtures test the walk itself.
+view_reaches_late_api_line() {
+  if [[ "$(prod_view "${REPO_ROOT}/haven/rust_builder/src/api.rs")" != *"fn live_event_to_ffi("* ]]; then
+    fail_msg "[view] the production view of api.rs ends before its live-sync bridge \
+(fn live_event_to_ffi): the brace walk was cut short, or the function was renamed."
+    return 1
+  fi
+}
+
 run_checks() {
   local root="$1" fail=0
   local event_rs="${root}/${EVENT_RS}" manager_rs="${root}/${MANAGER_RS}"
@@ -409,9 +424,8 @@ nothing to scan, checks 4-6 would pass vacuously."
 
   # A reserved kind reached through a CONSTANT is invisible to check 4, and is
   # exactly how the retired kind-9 location constant comes back under a new
-  # name. Declaring one stays legal — `LEGACY_KIND_LOCATION_UPDATE` is compared
-  # against an inbound kind so a mid-cutover peer stays on the map — but
-  # BUILDING one does not.
+  # name. Declaring one stays legal — a receive-side comparison, as the retired
+  # `LEGACY_KIND_LOCATION_UPDATE` arm made — but BUILDING one does not.
   local reserved_consts="" pair name value
   while IFS= read -r pair; do
     [[ -n "${pair}" ]] || continue
@@ -826,6 +840,7 @@ main() {
   fi
   (( $# == 0 )) || misconfig "usage: ${SCRIPT_NAME}.sh [--self-test]"
 
+  view_reaches_late_api_line || exit 1
   if run_checks "${REPO_ROOT}"; then
     log "OK: the inner location kind is pinned at ${EXPECTED_KIND}, named at the send site, \
 and no production Rust builds a reserved kind."

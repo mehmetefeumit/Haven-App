@@ -601,27 +601,24 @@ class _S {
       );
     });
 
-    test('the Rule-13 drain is given something real to observe', () {
+    test('the drive drain is given something real to observe', () {
       // The teardown's `shutdownPublishPool` reaches `RelayManager::shutdown`
       // — `client.disconnect()` with no drain of any kind — and the pool it
-      // cuts is SHARED: the motion trigger keeps running while backgrounded on
-      // iOS and publishes over it, unawaited by and invisible to the
-      // coordinator. That path reaches the deferred-send ladder, so a cut
-      // there makes an ack unobservable and the sender rolls back a commit a
-      // relay may already have stored and served: the roster fork Rule 13
-      // exists to prevent, not a lost location sample.
+      // cuts is SHARED: the motion trigger, a leave's carry-on and a drive
+      // run over it while backgrounded on iOS, unawaited by the coordinator.
+      // The core forks nothing under a disconnect; the drain lets the drive
+      // finish instead of leaving its sends to the next wake.
       //
       // Unwired, the parameter defaults to "nothing in flight" — armed, and
       // observing nothing, which is the defect wearing the fix's name.
       expect(
         args['pendingCommitCritical'],
-        '() => mounted ? '
-            'ref.read(locationSharingServiceProvider).inFlightCommitCritical '
-            ': null',
-        reason: 'the registry must be READ per call and never captured: it '
-            'answers the same future object while work is in flight and null '
-            'once the last ladder finishes, which is what makes the '
-            'coordinator’s drain-until-null loop terminate',
+        '() => _publishPool?.inFlightDrives',
+        reason: 'the registry must be READ per call and never captured, off '
+            'the pool the shutdown closes: it answers the same future object '
+            'while a drive is in flight and null once the last one ends, '
+            'which is what makes the coordinator’s drain-until-null loop '
+            'terminate',
       );
     });
 
@@ -990,15 +987,33 @@ class _S {
         reason: 'same stamp, same reason as the pause branch',
       );
       // And ordered behind the engine restart, on BOTH exits. The arm this
-      // edge arrives from STOPPED the engine (sharing read `false`), and
-      // `NostrSubscriptionService.stop()` nulls its handle synchronously — so
-      // work issued beside the restart either opens a burst against a stopped
-      // session (no receive, one failed open on the banner) or starts a fresh
-      // session the original stop then cancels the event subscription of.
+      // edge arrives from STOPPED the engine (sharing read `false`), so work
+      // issued beside the restart opens a burst against a stopped session: no
+      // receive, and one failed open on the banner. And the restart is
+      // itself ordered behind that stop, unbounded: a heal that joined a slow
+      // stop inside its own budget answers before its leg has run, the burst
+      // then pauses nothing, and the leg starts a session nothing pauses
+      // (`MapShell.healBehindStop`, background_burst_coordinator_test.dart).
       expect(
-        invocationCount(rearm, '_restartReceiveAfterPausedStop'),
+        invocationCount(rearm, 'healBehindStop'),
         1,
         reason: 'anti-vacuity: the restart the two exits order behind',
+      );
+      expect(
+        rearm,
+        contains(
+          'MapShell.healBehindStop(stop: engineStop ?? '
+          'Future.value(LiveSyncStopOutcome.idle), '
+          'heal: _healBackstop.heal)',
+        ),
+        reason: "behind the pause's own stop, and through the counted heal",
+      );
+      expect(
+        invocationCount(rearm, '_stopLiveSyncBounded'),
+        0,
+        reason: 'the edge joins the stop the pause issued and issues none: '
+            'on a pause that kept its session a consent flap would stop a '
+            'healthy paused session and start it again from the background',
       );
       for (final call in const ['_driveBurstNow', 'closeIdle']) {
         expect(

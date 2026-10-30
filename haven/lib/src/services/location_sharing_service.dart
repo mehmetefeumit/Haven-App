@@ -7,15 +7,13 @@ library;
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:haven/src/constants/location.dart';
+import 'package:haven/src/rust/api.dart' show LocationPublishFfi;
 
 import 'package:haven/src/services/circle_health_service.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/identity_service.dart';
-import 'package:haven/src/services/location_auto_commit.dart';
 import 'package:haven/src/services/relay_service.dart';
-import 'package:haven/src/utils/event_tags.dart';
 import 'package:haven/src/utils/log_alias.dart';
 
 /// A circle member's location.
@@ -172,57 +170,39 @@ class LocationFetchResult {
 
 /// The outcome of a [LocationSharingService.publishLocation] call.
 ///
-/// Sealed so a caller cannot forget the deferred case. A deferral is not an
-/// error — nothing failed, the MLS engine simply could not encrypt yet — so it
-/// is returned rather than thrown, and it carries presence-only counters the
-/// sharing-health model reads.
+/// Sealed so a caller cannot forget the held case. A held send is not an
+/// error — nothing failed, the core held the circle's sends — so it is
+/// returned rather than thrown.
 @immutable
 sealed class LocationPublishOutcome {
   /// Const base constructor.
   const LocationPublishOutcome();
 }
 
-/// The location was encrypted and handed to the relays.
+/// The location was sealed and its one send made.
 @immutable
 final class LocationPublishSent extends LocationPublishOutcome {
   /// Creates a [LocationPublishSent].
-  const LocationPublishSent(this.result);
+  const LocationPublishSent({required this.acked});
 
-  /// The relay verdict. `acceptedBy.isEmpty` still means nothing was delivered.
-  final PublishResult result;
+  /// Whether a relay took it; `false` delivered nothing.
+  final bool acked;
 }
 
-/// The MLS engine deferred the send; no location reached the relays.
-///
-/// Any commit the engine staged in the same call has already been run through
-/// the Rule-13 publish-then-confirm ladder by [LocationSharingService]; the
-/// counters here are for the health model and for logs.
+/// Nothing reached a relay: the core held the circle's sends, or the sealed
+/// location was not sent (it expired, the circle came to be held after the
+/// seal, or its record ended).
 @immutable
 final class LocationPublishDeferred extends LocationPublishOutcome {
   /// Creates a [LocationPublishDeferred].
-  const LocationPublishDeferred({
-    required this.unresolvedInputs,
-    required this.discardedIntents,
-    required this.repaired,
-    required this.stagedCommits,
-    required this.publishedProposals,
-  });
+  const LocationPublishDeferred();
+}
 
-  /// Stored rows still gating outbound sends for this circle. Zero means the
-  /// next scheduled publish should encrypt normally.
-  final int unresolvedInputs;
-
-  /// Queued location intents the engine-side repair discarded.
-  final int discardedIntents;
-
-  /// Whether the repair left the circle with nothing gating.
-  final bool repaired;
-
-  /// How many staged commits were handed back and run through the ladder.
-  final int stagedCommits;
-
-  /// How many bare proposals were published.
-  final int publishedProposals;
+/// Not sent by this call: a send of the same sealed location is under way.
+@immutable
+final class LocationPublishInFlight extends LocationPublishOutcome {
+  /// Creates a [LocationPublishInFlight].
+  const LocationPublishInFlight();
 }
 
 /// Service for sharing and receiving locations through circles.
@@ -252,8 +232,9 @@ final class LocationPublishDeferred extends LocationPublishOutcome {
 ///   produce a benign `PreviouslyFailed` from MLS and be recorded as a
 ///   `decryptFailed` count.
 /// - [onAppPaused] drops all in-memory caches when the app is
-///   backgrounded. The persistent store is untouched, and the next
-///   `fetchMemberLocations` call transparently rehydrates it.
+///   backgrounded, and closes the location cache until [onAppResumed]. The
+///   persistent store is untouched, and the first read after the resume
+///   rehydrates from it.
 class LocationSharingService {
   /// Creates a [LocationSharingService].
   ///
@@ -273,6 +254,7 @@ class LocationSharingService {
     IdentityService? identityService,
     ClockSkewDetector? clockSkewDetector,
     CircleHealthService? healthService,
+    void Function()? onGroupStateChanged,
     this.maxSeenEventIds = _defaultMaxSeenEventIds,
     this.cacheEvictionGrace = _defaultCacheEvictionGrace,
     DateTime Function() now = DateTime.now,
@@ -286,7 +268,13 @@ class LocationSharingService {
        _identityService = identityService,
        _clockSkewDetector = clockSkewDetector,
        _healthService = healthService,
+       _onGroupStateChanged = onGroupStateChanged,
        _now = now;
+
+  /// Told once per batch that carried a roster or epoch change — the commit
+  /// that ends a leave this device asked for among them — so the caller can
+  /// carry leaves on at once rather than at the next wake.
+  final void Function()? _onGroupStateChanged;
 
   /// Maximum number of event IDs retained in [_seenEventIds] before
   /// FIFO eviction kicks in. ~2048 × 64-byte ids ≈ 128 KiB, well below
@@ -347,7 +335,7 @@ class LocationSharingService {
 
   /// Per-circle location cache: latest non-expired location per sender.
   ///
-  /// Keyed by hex-encoded `nostrGroupId`, then by sender pubkey.
+  /// Keyed by [_circleKey], then by sender pubkey.
   /// Persists across polling cycles so locations remain visible
   /// between fetches.
   final Map<String, Map<String, MemberLocation>> _locationCache = {};
@@ -356,7 +344,7 @@ class LocationSharingService {
   ///
   /// Passed as `since` on subsequent fetches to avoid downloading the
   /// full event history from relays every polling cycle.
-  final Map<String, DateTime> _lastFetchTime = {};
+  final _RoutedFloors _lastFetchTime = _RoutedFloors();
 
   /// Clock skew buffer in seconds.
   ///
@@ -376,392 +364,116 @@ class LocationSharingService {
   /// `_seenEventIds` with the very data we intended to drop.
   int _pauseGeneration = 0;
 
-  /// How many commit-critical ladders this service currently has in flight.
+  /// Whether the in-memory cache refuses writes.
   ///
-  /// A count, not a single future: the ladders come from three independent
-  /// call chains — a deferred SEND, a location fetch and an evolution poll —
-  /// which interleave freely at their awaits, so "the one in flight" is not a
-  /// thing that exists. Two really can overlap: a motion-triggered publish and
-  /// a poll tick are separate chains and neither awaits the other.
-  int _commitCriticalCount = 0;
+  /// Closed by [onAppPaused] and [wipeAll], opened by [onAppResumed] — but
+  /// never again after a wipe ([_wiped]). A state, not a generation captured
+  /// by the writer: a location the engine streamed is merged by a handler that
+  /// can still be queued when the drop runs — it would capture the generation
+  /// AFTER the drop and write straight back into a paused, or logged-out,
+  /// process. While closed by a pause a streamed location is still persisted
+  /// to the encrypted store where this isolate holds it; it is the merge, and
+  /// the hydration from that store, that are refused. A wiped service
+  /// persists nothing.
+  bool _cacheClosed = false;
 
-  /// Completes when the LAST in-flight commit-critical ladder has reached its
-  /// own conclusion; `null` whenever there are none.
+  /// Whether [wipeAll] has run: its close is terminal.
   ///
-  /// Held as a completer rather than composed per read, because
-  /// [inFlightCommitCritical]'s reader must be able to read it repeatedly and
-  /// get the same object: a `Future.wait` built at read time is a NEW future
-  /// every time, and a caller that drains until the read comes back `null`
-  /// would then never finish.
-  Completer<void>? _commitCriticalQuiescent;
+  /// The shell stays mounted through a logout and its resume handler opens
+  /// the cache first thing, so a `resumed` dispatched between the wipe and
+  /// the end of the logout would reopen the cache of an identity that is
+  /// being deleted, under a location still in its handler. This instance
+  /// has nothing left to show — its store is wiped and its circle service
+  /// latched — and the logout replaces it. Nor does a location reach its
+  /// store or the clock-skew detector the logout resets at its end.
+  bool _wiped = false;
 
-  /// The commit-critical work this service has in flight, or `null` when it
-  /// has none.
+  /// Seals the user's location for a circle and makes its one send.
   ///
-  /// "Commit-critical" is the window between an auto-commit's `publishEvent`
-  /// and the `confirmPublished` / `publishFailed` that resolves it. Tearing a
-  /// relay pool down inside that window makes the ack unobservable, so the
-  /// sender rolls back a commit a relay may already have stored and served —
-  /// the roster fork Security Rule 13 exists to prevent, not a lost location
-  /// sample. Anything that shuts the shared publish pool must therefore wait
-  /// for this future first, UNBOUNDED: a `.timeout(` cancels nothing, it only
-  /// lets the caller return while the ladder is still mid-flight. The iOS
-  /// background burst's teardown is the caller that does
-  /// (`background_burst_coordinator.dart`); the Android foreground service
-  /// keeps its own equivalent field.
-  ///
-  /// The contract this satisfies, exactly:
-  ///
-  ///  * non-`null` while any ladder is in flight, `null` once every one of
-  ///    them has finished — including the ones that failed;
-  ///  * the SAME future object on every read while it is non-null, so a
-  ///    drain-until-null loop terminates;
-  ///  * never a future manufactured by the read itself.
-  ///
-  /// Deliberately NOT cleared by [onAppPaused]: a ladder that is running when
-  /// the app backgrounds is exactly the one a teardown must wait for, and a
-  /// registry that forgot it would report quiescence that does not exist.
-  Future<void>? get inFlightCommitCritical => _commitCriticalQuiescent?.future;
-
-  /// Registers [commitCritical] as in-flight for as long as it runs, and
-  /// awaits it, rethrowing whatever it throws.
-  ///
-  /// The bookkeeping is in a `finally` and must stay there: a ladder that
-  /// threw and never deregistered would leave [inFlightCommitCritical]
-  /// non-null for the life of the process, and its reader waits on that future
-  /// without a bound — a burst teardown that never ends, which is a worse
-  /// outcome than the fork it was protecting against.
-  Future<T> _awaitCommitCritical<T>(Future<T> commitCritical) async {
-    _commitCriticalCount++;
-    _commitCriticalQuiescent ??= Completer<void>();
-    try {
-      return await commitCritical;
-    } finally {
-      _commitCriticalCount--;
-      if (_commitCriticalCount == 0) {
-        // Cleared BEFORE the completion, so anything that runs on that
-        // completion reads the quiescent state rather than the one being left.
-        final quiescent = _commitCriticalQuiescent;
-        _commitCriticalQuiescent = null;
-        quiescent?.complete();
-      }
-    }
-  }
-
-  /// Pushes [commitCritical] through the same registration the three
-  /// auto-commit sites use.
-  ///
-  /// Exists because `resolveAutoCommits` never throws — every step of it is
-  /// guarded — so the failure half of the registration contract has no
-  /// reachable production path to be proved on, and an untested `finally` is
-  /// how a permanently non-null registry ships.
-  @visibleForTesting
-  Future<void> trackCommitCriticalForTest(Future<void> commitCritical) =>
-      _awaitCommitCritical(commitCritical);
-
-  /// Encrypts and publishes the user's location to a circle.
-  ///
-  /// Encrypts the location via MLS, then publishes the kind 445 event
-  /// to the circle's relays.
+  /// The core seals only for a circle nothing holds — a leave, a change
+  /// awaiting its relays and an owed departure each hold it — and sends the
+  /// sealed event to the relays its record names. What the seal's drives
+  /// handed back reaches the cache as a poll's results do.
   ///
   /// [nostrGroupId] is the circle's PUBLIC `#h` value (never the real MLS
-  /// group id, Security Rule 4) and is used only to key the delivery-health
-  /// record; it never reaches the wire from here.
-  ///
-  /// Returns the publish result.
+  /// group id, Security Rule 4) and keys the delivery-health record; it never
+  /// reaches the wire from here.
   Future<LocationPublishOutcome> publishLocation({
     required List<int> mlsGroupId,
     required List<int> nostrGroupId,
-    required String senderPubkeyHex,
     required double latitude,
     required double longitude,
   }) async {
-    // Step 1: Encrypt location
-    debugPrint('[LocationService] Encrypting location via MLS...');
-    final outcome = await _circleService.encryptLocation(
+    final seal = await _circleService.sealLocation(
       mlsGroupId: mlsGroupId,
-      senderPubkeyHex: senderPubkeyHex,
       latitude: latitude,
       longitude: longitude,
-      // This argument no longer reaches the wire. It once seeded a
-      // per-send jittered NIP-40 TTL; since the Dark Matter cutover the
-      // engine stamps `expiration = inner_created_at + 228 s` from the
-      // group's `message-retention.v1` component, and the core binds this
-      // value as `_update_interval_secs` and discards it. Only the FFI's
-      // `[60, 3600]` range check still observes it, which 198 satisfies.
-      //
-      // The no-gap reasoning the old comment carried now lives on
-      // `LOCATION_MESSAGE_RETENTION_SECS` itself, which encodes the same
-      // margin (168 s publish ceiling + 2 × 30 s buffer = 228 s).
-      updateIntervalSecs:
-          kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
     );
-    // The engine QUEUED the update instead of encrypting it. That is a state,
-    // not a failure: it carries staged work the caller must still resolve, and
-    // counters the sharing-health model reads. Narrowed here so every later
-    // step below can assume there really is an event.
-    //
-    // Switched, not cast: an `as` would compile happily against a third variant
-    // added later and fail at RUNTIME, on the publish path, in the background —
-    // exactly where a silent failure is hardest to notice. The switch makes the
-    // analyzer name this site instead.
-    final EncryptedLocation encrypted;
-    switch (outcome) {
-      case LocationSendDeferred():
-        return _handleDeferredSend(deferred: outcome, mlsGroupId: mlsGroupId);
-      case LocationEncrypted(encrypted: final e):
-        encrypted = e;
+    await _ingestSealReplay(mlsGroupId, seal.replayed);
+    final LocationSealed sealed;
+    switch (seal) {
+      case LocationSendHeld():
+        // A state, not a failure, and no relay verdict: neither the clock
+        // detector nor the delivery stamp hears of it.
+        debugPrint('[LocationService] send held: nothing sealed');
+        return const LocationPublishDeferred();
+      case LocationSealed():
+        sealed = seal;
     }
-    // Surface the event's log-alias handle so that when a receiver later
-    // logs an `evt=<handle>` line we can correlate it back to the
-    // originating publish, WITHOUT ever printing the event id itself
-    // (Security Rule 15 — a prefix of an identifier is still an identifier).
-    final encryptedEventId = _extractEventId(encrypted.eventJson);
-    debugPrint(
-      '[LocationService] evt=${_evtHandle(encryptedEventId)} encrypted OK — '
-      'publishing to ${magnitudeBucket(encrypted.relays.length)} relay(s)',
-    );
-
-    // Step 2: Publish to relays.
-    //
-    // The outcome is reported to the clock-skew detector BEFORE it is returned
-    // or rethrown. That ordering is the fix, not a detail: every caller of this
-    // method drops the result on the floor (the per-circle scheduler and the
-    // publisher provider both `catch`-and-`debugPrint`), so routing the verdict
-    // through the service itself is what stops a relay's "your timestamp is out
-    // of range" from dying in a log line no user will ever read.
-    //
-    // The one-shot ladder, never the 3-attempt one: this fix is superseded by
-    // the next tick within `kLocationPublishMaxInterval`, so a retry would
-    // hold the radio awake to deliver a sample that is already stale. The
-    // deferral branch above has already returned, so nothing carrying a
-    // staged `PendingStateRef` reaches this call (Security Rule 13).
-    final PublishResult publishResult;
-    try {
-      publishResult = await _relayService.publishLocationEvent(
-        eventJson: encrypted.eventJson,
-        relays: encrypted.relays,
-      );
-    } on RelayClockRejectionException catch (e) {
-      _clockSkewDetector?.recordPublishClockRejection(e.complaintToken);
-      // `complaintToken` is a fixed Haven-authored vocabulary
-      // (ahead/behind/unspecified) — `classify_relay_rejection` on the Rust
-      // side discards the relay's own words before this exception is ever
-      // built, so this is a typed code, not remote-authored prose (Security
-      // Rule 8/15 both allow it, the same way `e.code` is allowed).
-      // log-scan-ok: complaintToken is a closed Haven-authored token, not e
-      debugPrint(
-        '[LocationService] evt=${_evtHandle(encryptedEventId)} publish '
-        'refused — the relays judged the device clock ${e.complaintToken}',
-      );
-      rethrow;
-    } on Object catch (e) {
-      _clockSkewDetector?.recordPublishError(e);
-      debugPrint(
-        '[LocationService] evt=${_evtHandle(encryptedEventId)} publish failed: '
-        '${e.runtimeType}',
-      );
-      rethrow;
+    final publish = await _circleService.publishSealedLocation(sealed);
+    // Reported to the detector before it is returned: every caller drops the
+    // verdict once it has fed the health model, and a relay's "your timestamp
+    // is out of range" must reach the clock banner.
+    _clockSkewDetector?.recordLocationPublish(publish);
+    debugPrint('[LocationService] publish done');
+    switch (publish) {
+      case LocationPublishFfi.accepted:
+        // Delivery liveness on an affirmative ACK only (acked means acked).
+        await _healthService?.notePublishAcked(
+          nostrGroupId: nostrGroupId,
+          at: _now(),
+        );
+        return const LocationPublishSent(acked: true);
+      case LocationPublishFfi.refused ||
+          LocationPublishFfi.unreachable ||
+          LocationPublishFfi.clockAhead ||
+          LocationPublishFfi.clockBehind ||
+          LocationPublishFfi.clockUnspecified:
+        return const LocationPublishSent(acked: false);
+      // Not sent: it expired, the circle came to be held after the seal, or
+      // its record ended (a leave ends a circle's location records).
+      case LocationPublishFfi.expired ||
+          LocationPublishFfi.superseded ||
+          LocationPublishFfi.ended:
+        return const LocationPublishDeferred();
+      case LocationPublishFfi.inFlight:
+        return const LocationPublishInFlight();
     }
-    _clockSkewDetector?.recordPublishResult(publishResult);
-    // Delivery liveness, and ONLY on an affirmative ACK. A `PublishResult`
-    // whose `acceptedBy` is empty reached no relay that kept it, so stamping it
-    // would make a dead publish plane read as healthy — the principle behind
-    // Security Rule 13: acked means acked, never merely sent.
-    if (publishResult.acceptedBy.isNotEmpty) {
-      await _healthService?.notePublishAcked(
-        nostrGroupId: nostrGroupId,
-        at: _now(),
-      );
-    }
-    debugPrint(
-      '[LocationService] evt=${_evtHandle(encryptedEventId)} publish done — '
-      'accepted=${magnitudeBucket(publishResult.acceptedBy.length)}, '
-      'rejected=${magnitudeBucket(publishResult.rejectedBy.length)}, '
-      'failed=${magnitudeBucket(publishResult.failed.length)}',
-    );
-    return LocationPublishSent(publishResult);
   }
 
-  /// Handles a DEFERRED encrypt: runs the Rule-13 ladder over anything the
-  /// engine staged, publishes any bare proposal, and folds the result into a
-  /// typed outcome.
-  ///
-  /// Deliberately reports NOTHING to the clock-skew detector. That detector
-  /// reasons about relay verdicts on our own timestamps, and a deferral never
-  /// reached a relay — feeding it a non-event would dilute the evidence it
-  /// needs to distinguish a wrong device clock from an unreachable relay.
-  /// [notePublishAcked] is likewise not stamped: nothing was delivered, and
-  /// Security Rule 13's "acked means acked" applies to liveness too.
-  Future<LocationPublishDeferred> _handleDeferredSend({
-    required LocationSendDeferred deferred,
-    required List<int> mlsGroupId,
-  }) async {
-    // Captured before the ladder's round trip so a pause landing inside it is
-    // detectable — the same fence the two poll loops apply around their own
-    // `resolveAutoCommits` call.
-    final startGen = _pauseGeneration;
-    debugPrint(
-      '[LocationService] send DEFERRED by the MLS engine — '
-      'gating=${magnitudeBucket(deferred.unresolvedInputs)}, '
-      'repaired=${deferred.repaired}, '
-      'discardedIntents=${magnitudeBucket(deferred.discardedIntents)}, '
-      'stagedCommits=${magnitudeBucket(deferred.commits.length)}, '
-      'proposals=${magnitudeBucket(deferred.proposals.length)}',
-    );
-
-    // The staged work needs the circle's CURRENT relays, and a deferral is the
-    // one send path that carries no relay list of its own (there is no event).
+  /// Routes what a seal's drives handed back as a poll's results are, each
+  /// to the circle its own group id names. The rows are already stored
+  /// Rust-side; the cache and the receive-liveness stamp are this side's.
+  Future<void> _ingestSealReplay(
+    List<int> mlsGroupId,
+    List<LocationEventResult> results,
+  ) async {
+    if (results.isEmpty) return;
     Circle? circle;
     try {
       circle = await _circleService.getCircle(mlsGroupId);
     } on Object catch (e) {
-      debugPrint(
-        '[LocationService] deferred send: circle lookup failed: '
-        '${e.runtimeType}',
-      );
+      debugPrint('[LocationService] seal replay: circle lookup failed: '
+          '${e.runtimeType}');
     }
-
-    var publishedProposals = 0;
-    // A null circle is the no-relays case; `resolveAutoCommits` rolls those
-    // back, which is the only Rule-13-safe disposition left.
-    //
-    // Registered as commit-critical for its whole duration: this ladder rides
-    // the SHARED publish pool, and on the iOS background branch the burst
-    // teardown shuts that pool without one — see [inFlightCommitCritical].
-    final resolved = await _awaitCommitCritical(
-      resolveAutoCommits(
-        relayService: _relayService,
-        circleService: _circleService,
-        autoCommits: deferred.commits,
-        circle: circle,
-      ),
+    if (circle == null) return;
+    await _ingestResults(
+      circle: circle,
+      circleKey: _circleKey(circle),
+      results: results,
+      ownPubkeyHex: await _resolveOwnPubkey(),
+      origin: '[LocationService] seal',
     );
-
-    // The ladder awaited a full publish→confirm round trip, long enough for a
-    // pause to land inside it — the same window the two poll loops fence
-    // around their own `resolveAutoCommits` call. Writing plaintext
-    // coordinates into the cache `onAppPaused` just cleared is the memory-bound
-    // leak that fence exists to prevent.
-    if (circle != null && _pauseGeneration == startGen) {
-      // Whatever those resolutions replayed goes through the same ingest
-      // funnel as a poll's results: the store row is already written
-      // Rust-side, but the map's cache and the receive-liveness stamp are
-      // this side's.
-      await _ingestResults(
-        circle: circle,
-        circleKey: _circleKey(circle.nostrGroupId),
-        results: resolved.results,
-        ownPubkeyHex: await _resolveOwnPubkey(),
-        origin: '[LocationService] deferred-send resolution',
-      );
-    } else if (circle != null) {
-      debugPrint(
-        '[LocationService] deferred-send resolution aborted — paused '
-        'mid-ladder',
-      );
-    }
-
-    // The deferral's OWN proposals belong to the circle this send was for —
-    // the engine minted them in this call, for this group. The ones a
-    // resolution REPLAYED can belong to any group, so they route by `h`.
-    if (deferred.proposals.isNotEmpty && circle != null) {
-      publishedProposals = await _publishDeferredProposals(
-        proposals: deferred.proposals,
-        relays: circle.relays,
-      );
-    }
-    await _publishReplayedProposals(
-      resolved.proposals,
-      '[LocationService] deferred-send resolution',
-    );
-
-    return LocationPublishDeferred(
-      unresolvedInputs: deferred.unresolvedInputs,
-      discardedIntents: deferred.discardedIntents,
-      repaired: deferred.repaired,
-      stagedCommits: deferred.commits.length,
-      publishedProposals: publishedProposals,
-    );
-  }
-
-  /// Publishes proposals a publish RESOLUTION replayed, each to the relays of
-  /// the circle its own `h` tag names.
-  ///
-  /// Not the ambient circle's relays: a replayed proposal is the local user's
-  /// re-proposed leave for whatever group the drain re-minted it in, and
-  /// sending it to another circle's relay set both tells those operators this
-  /// device participates in a second group and may never reach the members the
-  /// leave is addressed to. Every Rust plane routes on the same tag
-  /// (`catchup.rs`, `live_sync/processor.rs`, `manager.rs`).
-  ///
-  /// Fails CLOSED: an `h` naming no circle this device holds — or no `h` at
-  /// all — publishes nowhere. A proposal is recoverable (the durable leave
-  /// request re-mints it); a mis-addressed one is not.
-  Future<void> _publishReplayedProposals(
-    List<String> proposals,
-    String origin,
-  ) async {
-    if (proposals.isEmpty) return;
-    List<Circle> held;
-    try {
-      held = await _circleService.getVisibleCircles();
-    } on Object catch (e) {
-      debugPrint('$origin → proposal routing failed: ${e.runtimeType}');
-      return;
-    }
-    for (final eventJson in proposals) {
-      final h = hTagOf(eventJson);
-      final target = held
-          .where((c) => _circleKey(c.nostrGroupId) == h)
-          .firstOrNull;
-      if (target == null) {
-        debugPrint(
-          '$origin → replayed proposal names a circle this device does not '
-          'hold — not published',
-        );
-        continue;
-      }
-      await _publishDeferredProposals(
-        proposals: [eventJson],
-        relays: target.relays,
-      );
-    }
-  }
-
-  /// Publishes bare proposal events, returning how many reached ≥1 relay.
-  ///
-  /// No confirm step: a proposal carries no staged state, so there is nothing
-  /// to apply or roll back. A failure is logged and swallowed — the durable
-  /// leave request that produced it makes a later convergence pass re-emit it,
-  /// so losing one costs a cycle, never correctness.
-  Future<int> _publishDeferredProposals({
-    required List<String> proposals,
-    required List<String> relays,
-  }) async {
-    if (relays.isEmpty) return 0;
-    var published = 0;
-    for (final eventJson in proposals) {
-      try {
-        final result = await _relayService.publishEvent(
-          eventJson: eventJson,
-          relays: relays,
-        );
-        if (result.acceptedBy.isNotEmpty) {
-          published++;
-        } else {
-          debugPrint(
-            '[LocationService] deferred send: proposal rejected by all relays',
-          );
-        }
-      } on Object catch (e) {
-        debugPrint(
-          '[LocationService] deferred send: proposal publish failed: '
-          '${e.runtimeType}',
-        );
-      }
-    }
-    return published;
   }
 
   /// Tracks which circles have already been hydrated from the persistent
@@ -779,13 +491,16 @@ class LocationSharingService {
     Circle circle,
     String circleKey,
   ) async {
-    if (_hydratedCircles.contains(circleKey)) return;
+    if (_cacheClosed || _hydratedCircles.contains(circleKey)) return;
     _hydratedCircles.add(circleKey);
 
     try {
       final rows = await _circleService.snapshotLastKnownForCircle(
         nostrGroupId: circle.nostrGroupId,
       );
+      // A pause, or a logout, landed during the read: every last-known row
+      // would go back into the cache it has just dropped.
+      if (_cacheClosed) return;
       if (rows.isEmpty) {
         debugPrint('[LocationService] No cached last-known rows for circle');
         return;
@@ -797,6 +512,11 @@ class LocationSharingService {
         final member = circle.members
             .where((m) => m.pubkey == row.senderPubkey)
             .firstOrNull;
+        // A row stored while its sender was a member outlives their removal
+        // until a roster reconcile evicts it — and a removal a background
+        // cycle applied leaves no foreground reconcile behind it. Hydration
+        // shows only the circle's current members.
+        if (member == null) continue;
         final hydrated = MemberLocation(
           pubkey: row.senderPubkey,
           latitude: row.latitude,
@@ -804,7 +524,7 @@ class LocationSharingService {
           geohash: row.geohash,
           timestamp: row.timestamp,
           expiresAt: row.expiresAt,
-          displayName: member?.displayName,
+          displayName: member.displayName,
           // The instant the STORE ranks this row by, not the instant we read
           // it back. Re-stamping a future-dated row with "now" would rank it
           // ABOVE the store's own rank, so a fix landing between the two would
@@ -839,7 +559,16 @@ class LocationSharingService {
   /// Called from the identity-deletion path. Best-effort: errors are logged
   /// but do not propagate, since the caller is in the middle of an account
   /// teardown.
+  ///
+  /// Closes the in-memory cache as well, and moves the pause generation: a
+  /// streamed location still in its handler, or a fetch still in flight,
+  /// must not write a peer's coordinate back behind the wipe. And forgets
+  /// the cached own pubkey, which is the identity being deleted.
   Future<void> wipeAll() async {
+    _pauseGeneration++;
+    _cacheClosed = true;
+    _wiped = true;
+    _ownPubkeyHex = null;
     _locationCache.clear();
     _seenEventIds.clear();
     _lastFetchTime.clear();
@@ -857,8 +586,9 @@ class LocationSharingService {
   ///
   /// The persistent SQLCipher `last_known_location` store is left
   /// untouched — it is the source of truth for the receiver's 1-day
-  /// retention window. The next `fetchMemberLocations` call per circle
-  /// will transparently rehydrate the in-memory cache from disk.
+  /// retention window. The location cache stays closed until
+  /// [onAppResumed]; the first read per circle after that rehydrates it
+  /// from disk.
   ///
   /// What is cleared:
   ///  - [_locationCache] (plaintext coordinates & display names)
@@ -877,6 +607,7 @@ class LocationSharingService {
   /// Safe to call repeatedly and at any point in the app lifecycle.
   void onAppPaused() {
     _pauseGeneration++;
+    _cacheClosed = true;
     _locationCache.clear();
     _hydratedCircles.clear();
     _seenEventIds.clear();
@@ -895,6 +626,15 @@ class LocationSharingService {
     // been asked to alias for as long as the process lives otherwise.
     clearLogAliasMemo();
     debugPrint('[LocationService] in-memory caches cleared on pause');
+  }
+
+  /// Opens the in-memory cache again: the app is back in front.
+  ///
+  /// The mirror of [onAppPaused]. Nothing is restored — the cache rehydrates
+  /// from the encrypted store on its next read. Does nothing once [wipeAll]
+  /// has run.
+  void onAppResumed() {
+    if (!_wiped) _cacheClosed = false;
   }
 
   /// Evicts entries from [cache] whose `expiresAt` is more than
@@ -949,8 +689,11 @@ class LocationSharingService {
   ///
   /// Called from the leave-circle / circle-deletion flow so no residual
   /// location data for former co-members remains on disk.
-  Future<void> removeCircle(List<int> nostrGroupId) async {
-    final circleKey = _circleKey(nostrGroupId);
+  Future<void> removeCircle({
+    required List<int> mlsGroupId,
+    required List<int> nostrGroupId,
+  }) async {
+    final circleKey = _hexId(mlsGroupId);
     _locationCache.remove(circleKey);
     _lastFetchTime.remove(circleKey);
     _lastEvolutionFetchTime.remove(circleKey);
@@ -991,6 +734,7 @@ class LocationSharingService {
     // One lookup per distinct foreign group per batch (normally zero).
     final resolved = <String, Circle?>{};
     var persisted = 0;
+    if (_anyGroupState(results)) _onGroupStateChanged?.call();
     for (final result in results) {
       switch (result.kind) {
         case LocationEventKind.joined:
@@ -998,7 +742,7 @@ class LocationSharingService {
         case LocationEventKind.invalidated:
           debugPrint('$origin → ${result.kind.name}');
         case LocationEventKind.unrecoverable:
-          debugPrint('$origin → unrecoverable (circle blocked)');
+          debugPrint('$origin → unrecoverable (circle refreshed)');
         case LocationEventKind.location:
           final decrypted = result.location;
           if (decrypted == null) {
@@ -1034,7 +778,7 @@ class LocationSharingService {
           try {
             await _persistDecryptedLocation(
               circle: target,
-              circleKey: _circleKey(target.nostrGroupId),
+              circleKey: _circleKey(target),
               decrypted: decrypted,
               ownPubkeyHex: ownPubkeyHex,
             );
@@ -1117,6 +861,10 @@ class LocationSharingService {
     required DecryptedLocation decrypted,
     required String? ownPubkeyHex,
   }) async {
+    // A wiped service is the deleted identity's: nothing reaches its store,
+    // its cache or the clock-skew detector the logout resets at its end.
+    if (_wiped) return;
+
     // Device-clock evidence, signal 2. This is the single funnel every receive
     // plane (poll fetch, evolution poll, live-sync stream) reaches, so one hook
     // here covers all three.
@@ -1193,6 +941,10 @@ class LocationSharingService {
       at: _now(),
     );
 
+    // Persisted above; no further while the cache is closed — see
+    // [_cacheClosed].
+    if (_cacheClosed) return;
+
     // Merge into the in-memory cache. Freshest rank wins — see
     // [MemberLocation.outranks].
     final cache = _locationCache.putIfAbsent(circleKey, () => {});
@@ -1233,11 +985,19 @@ class LocationSharingService {
   /// non-expired location per sender from the cumulative cache, plus
   /// a flag indicating whether any MLS group state changes were
   /// processed (so the caller can refresh circle membership).
+  ///
+  /// [stopped], read before the relays are asked and before each event is
+  /// taken in, ends the fetch there as a pause does — no poll floor written,
+  /// so what was not taken in is fetched again (Rule 12): the Android
+  /// service's teardown.
   Future<LocationFetchResult> fetchMemberLocations({
     required Circle circle,
     DateTime? since,
+    bool Function()? stopped,
   }) async {
-    if (circle.membershipStatus != MembershipStatus.accepted) {
+    // A disbanded circle's routing id is unlisted: no relay is asked for it.
+    if (circle.membershipStatus != MembershipStatus.accepted ||
+        circle.isDisbanded) {
       return const LocationFetchResult(locations: []);
     }
 
@@ -1248,7 +1008,7 @@ class LocationSharingService {
     // ([_locationCache], [_seenEventIds], [_lastFetchTime]).
     final startGen = _pauseGeneration;
 
-    final circleKey = _circleKey(circle.nostrGroupId);
+    final circleKey = _circleKey(circle);
     await _hydrateFromStoreIfNeeded(circle, circleKey);
     if (_pauseGeneration != startGen) {
       return const LocationFetchResult(locations: []);
@@ -1270,13 +1030,18 @@ class LocationSharingService {
     final ownPubkeyHex = await _resolveOwnPubkey();
 
     // Use tracked last-fetch time if no explicit since is provided
-    final effectiveSince = since ?? _lastFetchTime[circleKey];
+    final effectiveSince = since ?? _lastFetchTime.of(circle);
     final fetchTime = DateTime.now();
 
     // Apply clock skew buffer to since timestamp
     final adjustedSince = effectiveSince?.subtract(
       const Duration(seconds: _clockSkewBufferSeconds),
     );
+
+    // The awaits above may have outlived a stop: no REQ goes out after it.
+    if (stopped?.call() ?? false) {
+      return const LocationFetchResult(locations: []);
+    }
 
     // Step 1: Fetch encrypted events from relays. This is the longest
     // `await` in the method — a pause is most likely to interleave
@@ -1334,6 +1099,8 @@ class LocationSharingService {
     var skippedSeen = 0;
     var decryptNull = 0;
     var decryptFailed = 0;
+    var held = 0;
+    final floor = _HeldFloor();
     var groupUpdated = false;
     // NOTE: this loop deliberately keeps NO cursor high-water mark. It used to
     // accumulate the newest fully-processed event's `created_at` and push it
@@ -1355,6 +1122,10 @@ class LocationSharingService {
       // guarantee.
       if (_pauseGeneration != startGen) {
         debugPrint('[LocationService] fetch aborted — paused mid-loop');
+        return const LocationFetchResult(locations: []);
+      }
+      if (stopped?.call() ?? false) {
+        debugPrint('[LocationService] fetch aborted — stopped mid-loop');
         return const LocationFetchResult(locations: []);
       }
 
@@ -1380,67 +1151,36 @@ class LocationSharingService {
       }
 
       try {
-        // The Dark Matter engine owns publish-before-apply for every SEND-side
-        // commit internally, so a decrypt/ingest never hands back an outbound
-        // event for those. The ONE exception is a receive-side auto-commit (a
-        // peer `SelfRemove` eviction a remaining member's engine decided to
-        // auto-commit): this poll path owns no Rust-side relay handle, so
-        // `decryptLocationCollectingCommits` surfaces it instead of rolling it
-        // back, and `resolveAutoCommits` (a sibling FILE, so nothing
-        // carrying a pending token can reach the one-shot location publish)
-        // runs the publish-then-confirm dance (Rule 13 / security F13). A
-        // single outer event can still yield SEVERAL folded results (the
-        // engine may release buffered inbound after this one), so iterate the
-        // list.
-        final outcome = await _circleService.decryptLocationCollectingCommits(
+        // Through the fanout driver: the engine takes the event in, and
+        // whatever it stages on the way — a receive-side auto-commit for a
+        // peer's `SelfRemove` included — is recorded and driven in Rust. One
+        // outer event can still hand back SEVERAL results (the engine may
+        // release buffered inbound after it), each routed by its own group.
+        final ingested = await _circleService.ingestEvent(
           eventJson: eventJson,
         );
-        if (outcome.autoCommits.isNotEmpty) {
-          final resolved = await _awaitCommitCritical(
-            resolveAutoCommits(
-              relayService: _relayService,
-              circleService: _circleService,
-              autoCommits: outcome.autoCommits,
-              circle: circle,
-            ),
-          );
-          // The ladder awaited a full publish→confirm round trip, which is
-          // long enough for a pause to land inside it. Writing plaintext
-          // coordinates into the cache `onAppPaused` just cleared is the
-          // memory-bound leak that fence exists to prevent.
-          if (_pauseGeneration != startGen) {
-            debugPrint('[LocationService] fetch aborted — paused mid-ladder');
-            return const LocationFetchResult(locations: []);
-          }
-          newEvents += await _ingestResults(
-            circle: circle,
-            circleKey: circleKey,
-            results: resolved.results,
-            ownPubkeyHex: ownPubkeyHex,
-            origin: '[LocationService] publish-resolution',
-          );
-          groupUpdated |= _anyGroupState(resolved.results);
-          await _publishReplayedProposals(
-            resolved.proposals,
-            '[LocationService] publish-resolution',
-          );
+        if (_pauseGeneration != startGen) {
+          debugPrint('[LocationService] fetch aborted — paused mid-ingest');
+          return const LocationFetchResult(locations: []);
+        }
+        if (ingested.held) {
+          // Not taken in yet: it is fetched again, and this circle's poll
+          // floor does not move past it (Security Rule 12).
+          held++;
+          floor.hold(_extractCreatedAt(eventJson));
+          debugPrint('[LocationService] evt=${_evtHandle(eventId)} → held');
+        } else if (eventId != null) {
+          _seenEventIds.add(eventId);
+          _enforceSeenEventIdsCap();
         }
 
-        final results = outcome.results;
+        final results = ingested.results;
         if (results.isEmpty) {
           decryptNull++;
           debugPrint(
             '[LocationService] evt=${_evtHandle(eventId)} → empty',
           );
           continue;
-        }
-
-        // Fully processed (the engine ingested it, regardless of how many —
-        // if any — folded results it yielded) — mark seen so the next fetch
-        // skips this event, and let the cursor advance past it.
-        if (eventId != null) {
-          _seenEventIds.add(eventId);
-          _enforceSeenEventIdsCap();
         }
 
         newEvents += await _ingestResults(
@@ -1454,9 +1194,11 @@ class LocationSharingService {
       } on Object catch (e) {
         decryptFailed++;
         debugPrint('[LocationService] Decrypt failed: ${e.runtimeType}');
-        // Do NOT mark seen — a transient FFI error or an upstream
-        // cache-write failure is worth retrying on the next poll,
-        // matching the White Noise reference behaviour.
+        // Not marked seen, and held like an event the engine holds: a throw
+        // says nothing was taken in, so the next poll must fetch it again
+        // (Security Rule 12).
+        held++;
+        floor.hold(_extractCreatedAt(eventJson));
       }
     }
 
@@ -1465,12 +1207,17 @@ class LocationSharingService {
       '[LocationService] Results: ${magnitudeBucket(newEvents)} new, '
       '${magnitudeBucket(skippedSeen)} seen, '
       '${magnitudeBucket(decryptNull)} null, '
-      '${magnitudeBucket(decryptFailed)} failed'
+      '${magnitudeBucket(decryptFailed)} failed, '
+      '${magnitudeBucket(held)} held'
       '${groupUpdated ? ', group updated' : ''}',
     );
 
-    // Track fetch time for next incremental query
-    _lastFetchTime[circleKey] = fetchTime;
+    // Track fetch time for next incremental query — no later than the
+    // earliest event held, which the next query must fetch again.
+    _lastFetchTime.set(
+      circle,
+      floor.next(fetchTime, _lastFetchTime.of(circle)),
+    );
 
     // A roster-changing result (joined / groupUpdate / invalidated) means the
     // engine already applied the change internally by the time decrypt
@@ -1535,7 +1282,7 @@ class LocationSharingService {
     }
     await _persistDecryptedLocation(
       circle: circle,
-      circleKey: _circleKey(circle.nostrGroupId),
+      circleKey: _circleKey(circle),
       decrypted: decrypted,
       ownPubkeyHex: ownPubkeyHex,
     );
@@ -1549,7 +1296,7 @@ class LocationSharingService {
   /// from the persistent store on first access (last-known on restart) and evicts
   /// long-stale entries, mirroring [fetchMemberLocations]'s return path.
   Future<List<MemberLocation>> cachedLocations(Circle circle) async {
-    final circleKey = _circleKey(circle.nostrGroupId);
+    final circleKey = _circleKey(circle);
     await _hydrateFromStoreIfNeeded(circle, circleKey);
     final cache = _locationCache[circleKey];
     if (cache == null) return const [];
@@ -1562,7 +1309,7 @@ class LocationSharingService {
   /// converged in-Rust). Called on a stream `GroupUpdate` so a departed member
   /// leaves the map.
   Future<void> reconcileRoster(Circle circle) async {
-    final circleKey = _circleKey(circle.nostrGroupId);
+    final circleKey = _circleKey(circle);
     final cache = _locationCache[circleKey];
     if (cache == null || cache.isEmpty) return;
     await _evictDepartedMembers(
@@ -1764,7 +1511,7 @@ class LocationSharingService {
   /// Separate from [_lastFetchTime] (which drives the location-fetch `since`
   /// cursor) so the evolution poll can manage its own incremental window
   /// without disturbing the location cursor.
-  final Map<String, DateTime> _lastEvolutionFetchTime = {};
+  final _RoutedFloors _lastEvolutionFetchTime = _RoutedFloors();
 
   /// Performs the actual evolution-event fetch-and-process work.
   ///
@@ -1800,7 +1547,11 @@ class LocationSharingService {
     final ownPubkeyHex = await _resolveOwnPubkey();
 
     for (final circle in circles) {
-      if (circle.membershipStatus != MembershipStatus.accepted) continue;
+      // A disbanded circle's routing id is unlisted: nothing is fetched for it.
+      if (circle.membershipStatus != MembershipStatus.accepted ||
+          circle.isDisbanded) {
+        continue;
+      }
 
       // Bail out early if the app was paused mid-loop.
       if (_pauseGeneration != startGen) {
@@ -1808,7 +1559,7 @@ class LocationSharingService {
         return false;
       }
 
-      final circleKey = _circleKey(circle.nostrGroupId);
+      final circleKey = _circleKey(circle);
 
       // Retry any eviction deferred by a prior cycle's `getMembers`
       // failure, symmetric with the `fetchMemberLocations` path.
@@ -1818,7 +1569,7 @@ class LocationSharingService {
         return false;
       }
 
-      final lastFetch = _lastEvolutionFetchTime[circleKey];
+      final lastFetch = _lastEvolutionFetchTime.of(circle);
       final adjustedSince = lastFetch?.subtract(
         const Duration(seconds: _clockSkewBufferSeconds),
       );
@@ -1869,6 +1620,7 @@ class LocationSharingService {
       var skipped = 0;
       // Per-circle group-updated flag for the onGroupUpdated callback.
       var circleGroupUpdated = false;
+      final circleFloor = _HeldFloor();
       // No cursor high-water mark here either — same reason as
       // `fetchMemberLocations`: a group-cursor advance may never be derived from
       // an inbound event's unauthenticated `created_at`.
@@ -1891,74 +1643,39 @@ class LocationSharingService {
           continue;
         }
 
-        DecryptLocationOutcome outcome;
+        final IngestResult ingested;
         try {
-          outcome = await _circleService.decryptLocationCollectingCommits(
-            eventJson: eventJson,
-          );
+          ingested = await _circleService.ingestEvent(eventJson: eventJson);
         } on Object catch (e) {
           debugPrint(
             '[EvolutionPoller] evt=${_evtHandle(eventId)} → decrypt error: '
             '${e.runtimeType}',
           );
+          // Nothing taken in: fetched again, the floor holds (Rule 12).
+          circleFloor.hold(_extractCreatedAt(eventJson));
           continue;
         }
-
-        // Rule 13 / security F13: a receive-side auto-commit (a peer
-        // `SelfRemove` eviction) surfaces here instead of being rolled back —
-        // this poller, like `fetchMemberLocations`, owns no Rust-side relay
-        // handle, so `resolveAutoCommits` runs the publish-then-confirm
-        // dance.
-        if (outcome.autoCommits.isNotEmpty) {
-          final resolved = await _awaitCommitCritical(
-            resolveAutoCommits(
-              relayService: _relayService,
-              circleService: _circleService,
-              autoCommits: outcome.autoCommits,
-              circle: circle,
-            ),
-          );
-          // Same fence as the location poll's: the ladder's round trip is a
-          // window a pause can land in, and what follows writes the cache.
-          if (_pauseGeneration != startGen) {
-            debugPrint('[EvolutionPoller] aborted — paused mid-ladder');
-            return false;
-          }
-          // The resolution replays whatever the engine buffered behind that
-          // staged commit — peer locations included, and this is the plane
-          // that owns the map's cache for them.
-          if (await _ingestResults(
-                circle: circle,
-                circleKey: circleKey,
-                results: resolved.results,
-                ownPubkeyHex: ownPubkeyHex,
-                origin: '[EvolutionPoller] publish-resolution',
-              ) >
-              0) {
-            anyLocationPersisted = true;
-          }
-          if (_anyGroupState(resolved.results)) {
-            anyGroupUpdated = true;
-            circleGroupUpdated = true;
-          }
-          await _publishReplayedProposals(
-            resolved.proposals,
-            '[EvolutionPoller] publish-resolution',
-          );
+        if (_pauseGeneration != startGen) {
+          debugPrint('[EvolutionPoller] aborted — paused mid-ingest');
+          return false;
+        }
+        if (ingested.held) {
+          // Fetched again; this circle's poll floor holds (Rule 12).
+          circleFloor.hold(_extractCreatedAt(eventJson));
+          debugPrint('[EvolutionPoller] evt=${_evtHandle(eventId)} → held');
+        } else if (eventId != null) {
+          // Shared with `fetchMemberLocations`: once either loop marks an id
+          // seen, the other skips it.
+          _seenEventIds.add(eventId);
+          _enforceSeenEventIdsCap();
         }
 
-        final results = outcome.results;
+        final results = ingested.results;
         if (results.isEmpty) {
           debugPrint('[EvolutionPoller] evt=${_evtHandle(eventId)} → empty');
           continue;
         }
 
-        // The Dark Matter engine owns publish-before-apply for every commit
-        // internally, so there is no outbound evolution event for this loop
-        // to publish/finalize (contrast the pre-migration receiver-side
-        // auto-commit dance). Fully processed regardless of how many — if
-        // any — folded results came back, so mark seen unconditionally.
-        //
         // Persisting a location here (rather than just logging it) is
         // mandatory: this loop and `fetchMemberLocations` share
         // `_seenEventIds`, so once either marks an id seen the other
@@ -1976,11 +1693,6 @@ class LocationSharingService {
         if (_anyGroupState(results)) {
           anyGroupUpdated = true;
           circleGroupUpdated = true;
-        }
-
-        if (eventId != null) {
-          _seenEventIds.add(eventId);
-          _enforceSeenEventIdsCap();
         }
 
         processed++;
@@ -2012,7 +1724,10 @@ class LocationSharingService {
       // Advance the per-circle evolution cursor. In-memory only: this bounds
       // the NEXT fetch's `since` for this process, and is not the persisted sync
       // cursor (which Rust owns).
-      _lastEvolutionFetchTime[circleKey] = fetchTime;
+      _lastEvolutionFetchTime.set(
+        circle,
+        circleFloor.next(fetchTime, _lastEvolutionFetchTime.of(circle)),
+      );
 
       // Notify the caller that this circle had a group state change
       // (membership/epoch advance), for any per-circle follow-up it needs.
@@ -2083,11 +1798,77 @@ class LocationSharingService {
     return int.tryParse(eventJson.substring(valueStart, end));
   }
 
-  /// Converts a `nostrGroupId` to a hex string for use as a map key.
-  static String _circleKey(List<int> nostrGroupId) => _hexId(nostrGroupId);
+  /// A circle's key in every per-circle map here: hex of its `mlsGroupId`,
+  /// which a routing rotation leaves alone. In memory only.
+  static String _circleKey(Circle circle) => _hexId(circle.mlsGroupId);
 
   /// Lowercase hex of a raw id: the per-circle cache key ([_circleKey]) and
   /// the memo key a replayed result's MLS group id is resolved under.
   static String _hexId(List<int> id) =>
       id.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+}
+
+/// Poll floors per circle, each kept with the routing id it was taken under: a
+/// rotated circle's new id is fetched from no floor, since a fetch of the
+/// prior id says nothing about what the new one carries, and the prior id's
+/// floor is replaced rather than left behind.
+class _RoutedFloors {
+  final Map<String, ({String routing, DateTime at})> _byCircle = {};
+
+  DateTime? of(Circle circle) {
+    final floor = _byCircle[LocationSharingService._circleKey(circle)];
+    return floor?.routing == LocationSharingService._hexId(circle.nostrGroupId)
+        ? floor!.at
+        : null;
+  }
+
+  void set(Circle circle, DateTime? at) {
+    final key = LocationSharingService._circleKey(circle);
+    if (at == null) {
+      _byCircle.remove(key);
+    } else {
+      _byCircle[key] = (
+        routing: LocationSharingService._hexId(circle.nostrGroupId),
+        at: at,
+      );
+    }
+  }
+
+  void remove(String circleKey) => _byCircle.remove(circleKey);
+
+  void clear() => _byCircle.clear();
+}
+
+/// Where a poll's next query starts when some of what it fetched was held:
+/// never past the earliest held event, so it is fetched again (Rule 12).
+class _HeldFloor {
+  bool _held = false;
+  bool _undated = false;
+  DateTime? _earliest;
+
+  /// Records one held event by its `created_at` (unix seconds), if it has
+  /// one: relay-supplied, so it only ever pulls the floor back.
+  void hold(int? createdAt) {
+    _held = true;
+    if (createdAt == null) {
+      _undated = true;
+      return;
+    }
+    final at = DateTime.fromMillisecondsSinceEpoch(
+      createdAt * 1000,
+      isUtc: true,
+    );
+    final earliest = _earliest;
+    if (earliest == null || at.isBefore(earliest)) _earliest = at;
+  }
+
+  /// The next floor: [fetchTime] when nothing was held; the earliest held
+  /// event's instant (never later than [fetchTime]) otherwise; [previous]
+  /// when a held event carried no date.
+  DateTime? next(DateTime fetchTime, DateTime? previous) {
+    if (!_held) return fetchTime;
+    final earliest = _earliest;
+    if (_undated || earliest == null) return previous;
+    return earliest.isBefore(fetchTime) ? earliest : fetchTime;
+  }
 }

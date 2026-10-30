@@ -37,10 +37,16 @@ import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:integration_test/integration_test.dart';
+import 'e2e/_lib/app_lifecycle.dart';
 import 'e2e/_lib/throw_time_error_capture.dart';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  // The second test mounts MapShell, which starts a live-sync session in the
+  // lane that compiles the engine in. Unclaimed, that session is a different
+  // plane from the one a foregrounded app runs. See
+  // `e2e/_lib/app_lifecycle.dart`.
+  resumeAppBeforeEachTest();
 
   setUpAll(() async {
     try {
@@ -105,6 +111,7 @@ void main() {
       'shows OnboardingShell (not MapShell) when onboarding is not completed',
       (tester) async {
         installThrowTimeErrorLogging();
+        expectAppResumed();
         await tester.pumpWidget(buildApp(completed: false));
         // One pump settles Riverpod's initial build; pumpAndSettle would
         // time out if any child starts an animation or async operation.
@@ -137,6 +144,7 @@ void main() {
       'shows MapShell (not OnboardingShell) when onboarding is completed',
       (tester) async {
         installThrowTimeErrorLogging();
+        expectAppResumed();
         await tester.pumpWidget(buildApp(completed: true));
         await tester.pump();
 

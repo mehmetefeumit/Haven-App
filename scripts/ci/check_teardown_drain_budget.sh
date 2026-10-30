@@ -19,6 +19,10 @@
 #     anything can still happen, and the UI isolate's handover budget (derived
 #     from this one) makes the user wait it out on a blank map.
 #
+# It also holds that a location drive is the one thing left inside that budget:
+# the service waits on every other driver entry unbounded after it, never on a
+# location's seal and send (`check_split`, decision 252).
+#
 # Pure-grep gate (no toolchain) so it runs in seconds alongside the other repo
 # guards, as a step in .github/workflows/repo-guards.yml.
 #
@@ -37,11 +41,13 @@ cd "$(dirname "$0")/../.."
 
 readonly RUST_SRC='haven-core/src/relay/manager.rs'
 readonly DART_SRC='haven/lib/src/services/mls_session_handover.dart'
+readonly FGS_SRC='haven/lib/src/services/background_location_task.dart'
+readonly RELAY_SRC='haven/lib/src/services/nostr_relay_service.dart'
 
 # Reads `const NAME: Duration = Duration::from_secs(N);` → N.
 rust_secs() {
   local name="$1" src="$2"
-  sed -n "s/^const ${name}: Duration = Duration::from_secs(\([0-9]\+\));.*/\1/p" \
+  sed -n "s/^\(pub \)\{0,1\}const ${name}: Duration = Duration::from_secs(\([0-9]\+\));.*/\2/p" \
     "${src}" | head -n 1
 }
 
@@ -83,6 +89,31 @@ check_pair() {
     echo "to abandon (Rule 13 is not at stake for an application message), and"
     echo "handoverTimeout is derived from it. Re-derive the Dart constant from"
     echo "the Rust ones and re-pin the doc comment; do not widen this check."
+    return 1
+  fi
+  return 0
+}
+
+# The budget bounds a location drive, and only that one is left inside it
+# (decision 252): the service's unbounded wait reads the registry without a
+# location's seal and send, and the relay service registers exactly those two
+# as location drives. Waiting a location drive out unbounded would outlast the
+# handover budget this file pins.
+check_split() {
+  local fgs_src="$1" relay_src="$2" located
+  if ! grep -qF '_relayService?.inFlightNonLocationDrives' "${fgs_src}" ||
+    grep -qF '.inFlightDrives' "${fgs_src}"; then
+    echo "ERROR: ${fgs_src} must wait, past its bounded drain, on"
+    echo "_relayService?.inFlightNonLocationDrives and never on inFlightDrives:"
+    echo "a location drive waited out unbounded outlasts handoverTimeout."
+    return 1
+  fi
+  located=$(grep -c 'location: true' "${relay_src}" || true)
+  if [[ "${located}" != 2 ]]; then
+    echo "ERROR: ${relay_src} must carry 'location: true' exactly twice — on"
+    echo "sealLocation and publishLocation; found ${located}. This guard counts"
+    echo "the marks; which entries carry them is pinned by"
+    echo "test/services/nostr_relay_service_drive_registry_test.dart."
     return 1
   fi
   return 0
@@ -131,11 +162,34 @@ self_test() {
   write_rust 5 10; : >"${tmp}/handover.dart"
   case_is 2 'a missing Dart constant is guard drift, not a pass'
 
+  split_is() {
+    local want="$1" name="$2" got
+    set +e
+    check_split "${tmp}/fgs.dart" "${tmp}/relay.dart" >/dev/null 2>&1
+    got=$?
+    set -e
+    if (( got != want )); then
+      echo "self-test FAILED [${name}]: expected exit ${want}, got ${got}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+  local fgs='final c = _relayService?.inFlightNonLocationDrives;'
+  local relay=$'_driving(location: true, () {});\n_driving(location: true, () {});'
+  printf '%s\n' "${fgs}" >"${tmp}/fgs.dart"; printf '%s\n' "${relay}" >"${tmp}/relay.dart"
+  split_is 0 'the split holds'
+  printf '%s\n' 'final c = _relayService?.inFlightDrives;' >"${tmp}/fgs.dart"
+  split_is 1 'the service waiting on every drive is refused'
+  printf '%s\n%s\n' "${fgs}" 'await x.inFlightDrives;' >"${tmp}/fgs.dart"
+  split_is 1 'a second read of every drive is refused'
+  printf '%s\n' "${fgs}" >"${tmp}/fgs.dart"
+  printf '%s\n' '_driving(location: true, () {});' >"${tmp}/relay.dart"
+  split_is 1 'a location drive registered as another is refused'
+
   if (( failures )); then
     echo "the teardown-budget guard cannot be trusted until the ${failures} case(s) above are fixed." >&2
     return 2
   fi
-  echo "teardown drain budget guard: self-test OK (6 fixtures)."
+  echo "teardown drain budget guard: self-test OK (10 fixtures)."
   return 0
 }
 
@@ -146,6 +200,7 @@ fi
 
 rc=0
 check_pair "${RUST_SRC}" "${DART_SRC}" || rc=$?
+if (( rc == 0 )); then check_split "${FGS_SRC}" "${RELAY_SRC}" || rc=$?; fi
 if (( rc == 0 )); then
   echo "teardown drain budget guard: OK ($(dart_secs '_teardownDrainBudgetSecs' \
     "${DART_SRC}")s == CONNECTION_TIMEOUT + DEFAULT_TIMEOUT)."

@@ -158,7 +158,7 @@ void main() {
 
       expect(
         notifier.eligibleKeysForTest,
-        {_hex(const [10]), _hex(const [20])},
+        {_hex(const [1]), _hex(const [2])},
         reason: 'both circles are publish targets of the one burst',
       );
       expect(
@@ -359,7 +359,7 @@ void main() {
       );
       expect(
         spy.publishOutcomes.map((o) => o.key).toSet(),
-        {_hex(const [10]), _hex(const [20])},
+        {_hex(const [1]), _hex(const [2])},
         reason: 'a window that never answered is every waiting circle\'s '
             'failed publish; without the attribution a dead GPS reads as '
             'healthy until the silence threshold expires',
@@ -382,21 +382,23 @@ void main() {
       );
     });
 
-    test('a legacy-orphaned circle is never in the burst', () async {
+    test('a quarantined circle is never in the burst', () async {
       final healthy = TestCircleFactory.createCircle(
         mlsGroupId: const [1],
         nostrGroupId: const [10],
         members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
       );
-      // Default factory circle: accepted + no members == legacy-orphaned.
+      // Its encrypted state failed to load: no live group to encrypt with.
       final orphan = TestCircleFactory.createCircle(
         mlsGroupId: const [2],
         nostrGroupId: const [20],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+        engineState: CircleEngineState.quarantined,
       );
       final env = build([healthy, orphan]);
       final notifier = await ready(env.container);
 
-      expect(notifier.eligibleKeysForTest, {_hex(const [10])});
+      expect(notifier.eligibleKeysForTest, {_hex(const [1])});
 
       await notifier.triggerTickForTest();
 
@@ -404,7 +406,35 @@ void main() {
         env.mock.encryptedMlsGroupIds,
         [const [1]],
         reason: 'one tick now reaches every circle in the roster, so keeping '
-            'an orphan OUT of the roster is what keeps it unpublished',
+            'a quarantined circle OUT of the roster is what keeps it '
+            'unpublished',
+      );
+    });
+
+    test('a disbanded circle is never in the burst', () async {
+      final healthy = TestCircleFactory.createCircle(
+        mlsGroupId: const [1],
+        nostrGroupId: const [10],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+      );
+      final disbanded = TestCircleFactory.createCircle(
+        mlsGroupId: const [4],
+        nostrGroupId: const [40],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+        engineState: CircleEngineState.disbanded,
+      );
+      final env = build([healthy, disbanded]);
+      final notifier = await ready(env.container);
+
+      expect(notifier.eligibleKeysForTest, {_hex(const [1])});
+
+      await notifier.triggerTickForTest();
+
+      expect(
+        env.mock.encryptedMlsGroupIds,
+        [const [1]],
+        reason: 'nothing is sent for a disbanded circle again, so it must '
+            'never hold a publish slot',
       );
     });
 
@@ -420,10 +450,10 @@ void main() {
         members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
       );
       final env = build([healthy, blocked])
-        ..mock.markCircleBlocked(const [3]);
+        ..mock.setEngineState(const [3], CircleEngineState.unrecoverable);
       final notifier = await ready(env.container);
 
-      expect(notifier.eligibleKeysForTest, {_hex(const [10])});
+      expect(notifier.eligibleKeysForTest, {_hex(const [1])});
 
       await notifier.triggerTickForTest();
 
@@ -483,7 +513,7 @@ void main() {
       expect(notifier.isActiveForTest, isTrue);
       expect(
         notifier.eligibleKeysForTest,
-        {_hex(const [10])},
+        {_hex(const [1])},
         reason: 'resumed: the roster is rebuilt from the current circles',
       );
       expect(notifier.armedWakesForTest, 1, reason: 'and the tick is re-armed');
@@ -517,7 +547,7 @@ void main() {
 
       // The engine flags whichever circle has NOT gone out yet.
       final blocked = firstOut.first == 1 ? const [2] : const [1];
-      env.mock.markCircleBlocked(blocked);
+      env.mock.setEngineState(blocked, CircleEngineState.unrecoverable);
       env.container.invalidate(circlesProvider);
       await env.container.read(circlesProvider.future);
       await pumpEventQueue();
@@ -594,7 +624,7 @@ void main() {
       // The engine flags the only circle Unrecoverable — the roster's last
       // publishable member is gone, which is the same transition as leaving
       // it.
-      live.mock.markCircleBlocked(const [1]);
+      live.mock.setEngineState(const [1], CircleEngineState.unrecoverable);
       live.container.invalidate(circlesProvider);
       await live.container.read(circlesProvider.future);
       await pumpEventQueue();
@@ -923,6 +953,36 @@ void main() {
       );
     });
 
+    test('a circle whose routing id rotates keeps its key and its place in '
+        'the queue', () async {
+      final circles = <Circle>[
+        for (final i in const [1, 2, 3])
+          TestCircleFactory.createCircle(
+            mlsGroupId: [i],
+            nostrGroupId: [i * 10],
+            members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+          ),
+      ];
+      final env = build(circles);
+      final notifier = await ready(env.container);
+      final queued = notifier.rotationForTest;
+
+      circles[1] = TestCircleFactory.createCircle(
+        mlsGroupId: const [2],
+        nostrGroupId: const [99],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+      );
+      env.container.invalidate(circlesProvider);
+      await env.container.read(circlesProvider.future);
+      await pumpEventQueue();
+
+      expect(notifier.rotationForTest, queued);
+      expect(
+        notifier.eligibleCircle(_hex(const [2]))?.nostrGroupId,
+        const [99],
+      );
+    });
+
     test('a departed circle loses its place in the queue', () async {
       // The other direction of the same merge, and the one with teeth. The tick
       // reads the roster through the keys the queue hands it, so a key left
@@ -943,14 +1003,14 @@ void main() {
 
       // The engine flags one of the three Unrecoverable — the same shape the
       // roster sees for a leave, a removal or a pre-cutover orphan.
-      env.mock.markCircleBlocked(const [2]);
+      env.mock.setEngineState(const [2], CircleEngineState.unrecoverable);
       env.container.invalidate(circlesProvider);
       await env.container.read(circlesProvider.future);
       await pumpEventQueue();
 
       expect(
         notifier.rotationForTest,
-        unorderedEquals(<String>[_hex(const [10]), _hex(const [30])]),
+        unorderedEquals(<String>[_hex(const [1]), _hex(const [3])]),
         reason: 'the queue must hold exactly the live roster; a departed key '
             'left in it is a slot no burst can ever fill',
       );
@@ -1079,7 +1139,7 @@ void main() {
 
       // One of the two stops being publishable: a roster change entirely
       // unrelated to the cadence, and one that leaves the roster non-empty.
-      env.mock.markCircleBlocked(const [2]);
+      env.mock.setEngineState(const [2], CircleEngineState.unrecoverable);
       env.container.invalidate(circlesProvider);
       await env.container.read(circlesProvider.future);
       await pumpEventQueue();
@@ -1148,13 +1208,13 @@ void main() {
       );
     });
 
-    test('a DEFERRED send routes to the health model as a deferral, never as '
-        'a publish verdict', () async {
-      // The engine queued the update instead of encrypting it. Nothing reached
-      // a relay, so there is no publish verdict to report — recording one
-      // would either claim a delivery that never happened or blame a relay
-      // that was never asked. It must reach `recordDeferredSend` instead, so
-      // the banner can name the real cause.
+    test('a HELD send sends nothing and routes to the health model as a '
+        'deferral, never as a publish verdict', () async {
+      // The core held the circle's sends — a leave, a change awaiting its
+      // relays, a departure owed — so nothing reached a relay and there is
+      // no publish verdict to report: recording one would claim a delivery
+      // that never happened or blame a relay that was never asked. It must
+      // reach `recordDeferredSend` instead, so the banner names the cause.
       final a = TestCircleFactory.createCircle(
         mlsGroupId: const [1],
         nostrGroupId: const [10],
@@ -1163,21 +1223,25 @@ void main() {
       final spy = _SpyHealthNotifier();
       final env = build([a], health: spy);
       final notifier = await ready(env.container);
-      env.mock.deferNextEncrypt = const LocationSendDeferred(
-        unresolvedInputs: 2,
-        discardedIntents: 1,
-        repaired: false,
-        commits: [],
-        proposals: [],
-      );
+      env.mock.holdNextSeal = true;
 
       await notifier.triggerTickForTest();
 
       expect(
+        env.mock.methodCalls,
+        isNot(contains('publishSealedLocation')),
+        reason: 'a location was sent for a circle whose sends are held',
+      );
+      expect(
         spy.deferredKeys,
-        [_hex(const [10])],
+        [_hex(const [1])],
         reason: 'the deferral must be recorded against the circle it happened '
             'to, keyed the same way every other health input is',
+      );
+      expect(
+        spy.deferredByUser,
+        [false],
+        reason: "a tick's hold is no user action: it waits out the window",
       );
       expect(
         spy.publishOutcomes,
@@ -1187,33 +1251,22 @@ void main() {
       );
     });
 
-    test('the deferral line states a magnitude, never how many inputs gate '
-        'the circle', () async {
-      // An exact count of MLS inputs still gating a circle tells circles
-      // apart (Rule 15) — the same reason the service-layer twin in
-      // `location_sharing_service.dart` buckets it.
+    test('the held line names no circle', () async {
       final logs = LogCapture.install();
       final a = TestCircleFactory.createCircle(
-        mlsGroupId: const [1],
-        nostrGroupId: const [10],
+        mlsGroupId: const [0xab, 1],
+        nostrGroupId: const [0xcd, 2],
         members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
       );
       final env = build([a]);
       final notifier = await ready(env.container);
-      env.mock.deferNextEncrypt = const LocationSendDeferred(
-        unresolvedInputs: 7,
-        discardedIntents: 0,
-        repaired: false,
-        commits: [],
-        proposals: [],
-      );
+      env.mock.holdNextSeal = true;
 
       await notifier.triggerTickForTest();
 
       logs
-        ..assertContains('[LocationPublishScheduler] send deferred')
-        ..assertContains('gating=5+')
-        ..assertNoNeedles(['gating=7']);
+        ..assertContains('[LocationPublishScheduler] send held by the core')
+        ..assertNoNeedles([_hex(const [0xab, 1]), _hex(const [0xcd, 2])]);
     });
 
     test('a SENT publish still routes to the publish verdict', () async {
@@ -1231,7 +1284,7 @@ void main() {
       await notifier.triggerTickForTest();
 
       expect(spy.deferredKeys, isEmpty);
-      expect(spy.publishOutcomes.single.key, _hex(const [10]));
+      expect(spy.publishOutcomes.single.key, _hex(const [1]));
       expect(spy.publishOutcomes.single.acked, isTrue);
     });
   });
@@ -1262,7 +1315,7 @@ void main() {
 
       expect(
         sink.ticks,
-        unorderedEquals(<String>[_hex(const [10]), _hex(const [20])]),
+        unorderedEquals(<String>[_hex(const [1]), _hex(const [2])]),
         reason: 'every circle is handed over before the first await, so the '
             'coordinator carries them all in ONE burst instead of opening a '
             'socket per circle — the iOS-background half of the wake claim',
@@ -1289,7 +1342,7 @@ void main() {
 
       await notifier.triggerTickForTest();
 
-      expect(sink.ticks, [_hex(const [10, 11])]);
+      expect(sink.ticks, [_hex(const [1])]);
       expect(sink.circles.single.nostrGroupId, const [10, 11]);
     });
 
@@ -1355,10 +1408,10 @@ void main() {
       expect(
         sink.completed,
         unorderedEquals(<String>[
-          _hex(const [10]),
-          _hex(const [20]),
-          _hex(const [10]),
-          _hex(const [20]),
+          _hex(const [1]),
+          _hex(const [2]),
+          _hex(const [1]),
+          _hex(const [2]),
         ]),
         reason: 'two ticks over two circles: every handover still completes '
             'on its own after the chain moved on — a count alone would pass a '
@@ -1382,7 +1435,7 @@ void main() {
       final notifier = await ready(env.container);
 
       expect(
-        notifier.eligibleCircle(_hex(const [10]))?.nostrGroupId,
+        notifier.eligibleCircle(_hex(const [1]))?.nostrGroupId,
         const [10],
       );
       expect(
@@ -1404,14 +1457,14 @@ void main() {
       );
       final env = build([a]);
       final notifier = await ready(env.container);
-      expect(notifier.eligibleCircle(_hex(const [10])), isNotNull);
+      expect(notifier.eligibleCircle(_hex(const [1])), isNotNull);
 
-      env.mock.markCircleBlocked(const [1]);
+      env.mock.setEngineState(const [1], CircleEngineState.unrecoverable);
       env.container.invalidate(circlesProvider);
       await env.container.read(circlesProvider.future);
       await pumpEventQueue();
 
-      expect(notifier.eligibleCircle(_hex(const [10])), isNull);
+      expect(notifier.eligibleCircle(_hex(const [1])), isNull);
     });
 
     test('nothing is eligible once the scheduler has stopped', () async {
@@ -1427,7 +1480,7 @@ void main() {
       final env = build([a]);
       final notifier = await ready(env.container)..stopScheduling();
 
-      expect(notifier.eligibleCircle(_hex(const [10])), isNull);
+      expect(notifier.eligibleCircle(_hex(const [1])), isNull);
     });
 
     test('a burst publish shares one window across every circle it publishes',
@@ -1489,13 +1542,13 @@ void main() {
 
       expect(
         spy.publishOutcomes.map((o) => o.key),
-        [_hex(const [10]), _hex(const [20])],
+        [_hex(const [1]), _hex(const [2])],
       );
       expect(spy.publishOutcomes.every((o) => !o.acked), isTrue);
     });
 
-    test('a burst publish that defers still routes to the health model as a '
-        'deferral', () async {
+    test('a burst publish the core holds sends nothing and routes to the '
+        'health model as a deferral', () async {
       final a = TestCircleFactory.createCircle(
         mlsGroupId: const [1],
         nostrGroupId: const [10],
@@ -1504,18 +1557,13 @@ void main() {
       final spy = _SpyHealthNotifier();
       final env = build([a], health: spy);
       final notifier = await ready(env.container);
-      env.mock.deferNextEncrypt = const LocationSendDeferred(
-        unresolvedInputs: 2,
-        discardedIntents: 1,
-        repaired: false,
-        commits: [],
-        proposals: [],
-      );
+      env.mock.holdNextSeal = true;
 
       final fix = await notifier.openBurstPublishWindow([a]);
       await notifier.publishInBurst(a, fix!);
 
-      expect(spy.deferredKeys, [_hex(const [10])]);
+      expect(env.mock.methodCalls, isNot(contains('publishSealedLocation')));
+      expect(spy.deferredKeys, [_hex(const [1])]);
       expect(spy.publishOutcomes, isEmpty);
     });
   });
@@ -1699,12 +1747,14 @@ class _FixedLocationService implements LocationService {
 /// pins were renamed).
 class _SpyHealthNotifier extends SharingHealthNotifier {
   final List<String> deferredKeys = [];
+  final List<bool> deferredByUser = [];
   final List<({String key, bool acked})> publishOutcomes = [];
 
   @override
-  void recordDeferredSend(String circleKey) {
+  void recordDeferredSend(String circleKey, {bool byUser = false}) {
     deferredKeys.add(circleKey);
-    super.recordDeferredSend(circleKey);
+    deferredByUser.add(byUser);
+    super.recordDeferredSend(circleKey, byUser: byUser);
   }
 
   @override

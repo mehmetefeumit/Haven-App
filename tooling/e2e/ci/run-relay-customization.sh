@@ -4,7 +4,7 @@
 # action-booted emulator-5554, ONE target at a time, against TWO
 # hermetic strfry relays (the relay-customization CI lane).
 #
-# This is the two-relay sibling of run-integration-tests.sh. The three
+# This is the two-relay sibling of run-integration-tests.sh. The four
 # targets it drives:
 #
 #   integration_test/relay_customization_publish_test.dart   (service-FFI wire proofs)
@@ -110,6 +110,8 @@
 #     them to /tmp/relay-custom-logs/<slug>.{logcat,drive}.log so a
 #     later target can't clobber an earlier failure's evidence.
 #   - Resets BOTH strfry containers + their data dirs between targets.
+#   - Stops and restarts R2 mid-drive on the publish target's OD-2 cues
+#     (R2_STOP_CUE / R2_START_CUE below), wiping its data dir on the stop.
 
 set -euo pipefail
 
@@ -140,6 +142,63 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/logscan-gate.sh"
 # Where this runner's gate writes its findings report (sink:line, class, rule
 # ids — never a value). Outside LOG_DIR, which the workflow uploads whole.
 readonly LOGSCAN_REPORT="/tmp/logscan-report-relay-customization.ndjson"
+
+# The OD-2 proof's host half (relay_customization_publish_test.dart, FFI-OD2):
+# the HARNESS prints these cues — product code never does — and the watcher
+# beside each drive stops R2 on the first and starts it again on the second.
+# MUST match `_kStopR2Cue` / `_kStartR2Cue` there; the self-test reads
+# them. The device waits for each effect itself, bounded, so a cue the host
+# misses is a red drive, never a pass.
+readonly R2_STOP_CUE='[od2-cue] stop R2'
+readonly R2_START_CUE='[od2-cue] start R2'
+# The only target that prints them; its drive must complete one stop/start
+# cycle, so losing the proof is a red lane, not a quiet one.
+readonly R2_CUE_TARGET='integration_test/relay_customization_publish_test.dart'
+readonly R2_CUE_POLL_SECS=1
+
+# r2_cue_watch <logcat> <status> <done> — acts on the cues in <logcat>
+# until it has done both or <done> exists, then makes one more pass so a cue
+# printed just before the drive ended is not lost. Appends `stopped`, then
+# `started` or `failed`, to <status>.
+r2_cue_watch() {
+  local logcat="$1" status="$2" done_file="$3" stopped=0
+  : > "${status}"
+  while [[ ! -e "${done_file}" ]]; do
+    r2_cue_pass && return 0
+    sleep "${R2_CUE_POLL_SECS}"
+  done
+  r2_cue_pass || true
+}
+
+# r2_cue_pass — one pass of r2_cue_watch over its locals; 0 once it has acted
+# on the start cue.
+r2_cue_pass() {
+  if (( ! stopped )) && grep -aqF -- "${R2_STOP_CUE}" "${logcat}" 2>/dev/null; then
+    echo "[relay] stopping R2 on the drive's cue"
+    stop_r2
+    stopped=1
+    echo stopped >> "${status}"
+  fi
+  (( stopped )) && grep -aqF -- "${R2_START_CUE}" "${logcat}" 2>/dev/null || return 1
+  echo "[relay] starting R2 on the drive's cue"
+  if start_r2; then
+    echo started >> "${status}"
+  else
+    echo failed >> "${status}"
+  fi
+}
+
+# r2_cue_verdict <target> <drive rc> <cue status, comma-joined> — echoes
+# the drive's rc, or 1 where the drive passed but the host failed a cue, or
+# <target> is R2_CUE_TARGET and did not cue a whole stop/start cycle.
+r2_cue_verdict() {
+  local target="$1" rc="$2" cycle="$3"
+  if (( rc == 0 )) && { [[ "${cycle}" == stopped,failed ]] \
+       || { [[ "${target}" == "${R2_CUE_TARGET}" ]] && [[ "${cycle}" != stopped,started ]]; }; }; then
+    rc=1
+  fi
+  echo "${rc}"
+}
 
 # --self-test — hermetic: no device, no docker, no relay. Two things are under
 # test. (1) CONTAINMENT: through logscan-gate.sh's floor arm with a FAKE
@@ -302,11 +361,75 @@ run_self_test() {
     echo "SELF-TEST FAIL (wiring): this runner echoes a captured log itself; only the AVD runner may, after its gate" >&2
     fail=1
   fi
+  # The OD-2 cue watcher, with R2's stop and start faked. <done> exists before
+  # each run, so the watcher makes exactly its one final scan and returns:
+  # no timing in the fixture.
+  local cue_case name has_stop has_start start_rc want_calls want_status got_calls got_status
+  stop_r2() { echo stop >> "${tmp}/calls"; }
+  start_r2() { echo start >> "${tmp}/calls"; return "${start_rc}"; }
+  # <name>:<stop cue printed>:<start cue printed>:<start rc>:<R2 calls>:<status>
+  for cue_case in \
+      "none:0:0:0::" \
+      "start-only:0:1:0::" \
+      "stop-only:1:0:0:stop:stopped" \
+      "both:1:1:0:stop,start:stopped,started" \
+      "start-fails:1:1:1:stop,start:stopped,failed"; do
+    IFS=':' read -r name has_stop has_start start_rc want_calls want_status <<<"${cue_case}"
+    rm -f "${tmp}/calls"
+    {
+      printf 'I/flutter ( 5487): 00:00 +0: (setUpAll)\n'
+      if (( has_stop )); then printf 'I/flutter ( 5487): %s\n' "${R2_STOP_CUE}"; fi
+      if (( has_start )); then printf 'I/flutter ( 5487): %s\n' "${R2_START_CUE}"; fi
+    } > "${tmp}/cue.logcat.log"
+    : > "${tmp}/cue.done"
+    r2_cue_watch "${tmp}/cue.logcat.log" "${tmp}/cue.status" "${tmp}/cue.done" >/dev/null 2>&1
+    got_calls="$(paste -sd, "${tmp}/calls" 2>/dev/null || true)"
+    got_status="$(paste -sd, "${tmp}/cue.status" 2>/dev/null || true)"
+    if [[ "${got_calls}" != "${want_calls}" || "${got_status}" != "${want_status}" ]]; then
+      echo "SELF-TEST FAIL (cues): case '${name}' made R2 calls '${got_calls}' and status '${got_status}', want '${want_calls}' and '${want_status}' — R2 is stopped on the stop cue only, started on the start cue only after a stop, and a failed start is recorded" >&2
+      fail=1
+    fi
+  done
+  unset -f stop_r2 start_r2
+  local dart_test
+  dart_test="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/haven/${R2_CUE_TARGET}"
+  if ! grep -qF "const String _kStopR2Cue = '${R2_STOP_CUE}';" "${dart_test}" \
+     || ! grep -qF "const String _kStartR2Cue = '${R2_START_CUE}';" "${dart_test}"; then
+    echo "SELF-TEST FAIL (cues): ${R2_CUE_TARGET} no longer prints this runner's cues verbatim; the host would never stop R2 and the OD-2 proof would die on the device's wait" >&2
+    fail=1
+  fi
+  # <target>|<drive rc>|<cue status>|<verdict>
+  local verdict_case v_target v_rc v_cycle v_want v_got other='integration_test/relay_customization_trigger_test.dart'
+  for verdict_case in \
+      "${R2_CUE_TARGET}|0|stopped,started|0" \
+      "${R2_CUE_TARGET}|0||1" \
+      "${R2_CUE_TARGET}|0|stopped|1" \
+      "${R2_CUE_TARGET}|0|stopped,failed|1" \
+      "${R2_CUE_TARGET}|124|stopped|124" \
+      "${other}|0||0" \
+      "${other}|0|stopped,failed|1" \
+      "${other}|1||1"; do
+    IFS='|' read -r v_target v_rc v_cycle v_want <<<"${verdict_case}"
+    v_got="$(r2_cue_verdict "${v_target}" "${v_rc}" "${v_cycle}")"
+    if [[ "${v_got}" != "${v_want}" ]]; then
+      echo "SELF-TEST FAIL (cues): verdict ${v_got} for '${v_target##*/}' at drive rc ${v_rc} with cue status '${v_cycle}', want ${v_want} — a passing drive of the OD-2 target must have cued a whole cycle, a failed start fails any target, and a red rc passes through for the retry" >&2
+      fail=1
+    fi
+  done
+  # Every drive — the rc-124 retry included — runs beside the watcher, and the
+  # watcher is waited for by PID after the drive ends.
+  if (( "$(grep -cF 'bash "${SINGLE_AVD}" "${target}"' <<<"${real_run}")" != 1 )) \
+     || (( "$(grep -cE '^[[:space:]]*drive_target "\$\{target\}" \|\| rc=\$\?$' <<<"${real_run}")" != 2 )) \
+     || ! grep -qF 'r2_cue_watch /tmp/adb-logcat.log "${R2_CUE_STATUS}" "${done_file}" &' <<<"${real_run}" \
+     || ! grep -qF 'wait "${watcher}" || true' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (wiring): every drive must go through drive_target, which runs the cue watcher beside the one AVD-runner call and waits for it by PID" >&2
+    fail=1
+  fi
   if (( fail )); then
     echo "run-relay-customization.sh: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-relay-customization.sh: self-test passed (the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; the gate library is sourced, the one gate call covers LOG_DIR with its report outside the upload and claims one drive transcript per target spec from a count taken before the loop — a literal in its place is refused, and the one per-target copy keeps a retried target at one file — no soft scanner gate, no captured-log echo of its own, the manifest is sealed once with the lane's drive, logcat and relay floors before the first target; each target's TWO relay logs are dumped from the live containers, typed as relay sinks, before the aggregate gate)."
+  echo "run-relay-customization.sh: self-test passed (the OD-2 cue watcher stops R2 on the stop cue only, starts it on the start cue only after a stop and records a failed start; a passing drive of the OD-2 target without a whole cycle, or any drive whose start failed, is red; the Dart target prints the same cues; every drive, the retry included, runs beside the watcher and waits for it by PID; the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; the gate library is sourced, the one gate call covers LOG_DIR with its report outside the upload and claims one drive transcript per target spec from a count taken before the loop — a literal in its place is refused, and the one per-target copy keeps a retried target at one file — no soft scanner gate, no captured-log echo of its own, the manifest is sealed once with the lane's drive, logcat and relay floors before the first target; each target's TWO relay logs are dumped from the live containers, typed as relay sinks, before the aggregate gate)."
   return 0
 }
 
@@ -411,12 +534,15 @@ if (( seal_rc != 0 )); then
 fi
 
 # Start/stop helpers for each relay. R1 uses the script defaults; R2
-# overrides container/port/data-dir via env. STRFRY_IMAGE /
+# overrides container/port/data-dir via env, and runs the NIP-77 config, so a
+# circle routed over both relays mixes one that speaks NIP-77 with one that
+# refuses it. STRFRY_IMAGE /
 # STRFRY_READY_TIMEOUT (if set in the environment) flow through to both
 # because start-strfry.sh reads them from the environment.
 start_r1() { bash "${START_STRFRY}"; }
 stop_r1()  { bash "${STOP_STRFRY}"; }
 start_r2() {
+  STRFRY_CONFIG=strfry-negentropy.conf \
   STRFRY_CONTAINER="${R2_CONTAINER}" \
   STRFRY_PORT="${R2_PORT}" \
   STRFRY_DATA_DIR="${R2_DATA_DIR}" \
@@ -450,6 +576,41 @@ reset_relays() {
   stop_r2 || true
   start_r1
   start_r2
+}
+
+# drive_target <target> — one run-single-avd-scenario.sh drive with the cue
+# watcher beside it; returns r2_cue_verdict's rc. R2 is restarted when a
+# drive ended between the cues, so a retry, the relay dump and the next target
+# all find it up.
+readonly R2_CUE_STATUS="/tmp/r2-cue.status"
+readonly R2_CUE_DONE="/tmp/r2-cue.done"
+drive_target() {
+  local target="$1" rc=0 watcher cycle done_file="${R2_CUE_DONE}"
+  # The watcher reads the capture before the AVD runner replaces it; a
+  # previous drive's cues must not be in it.
+  rm -f /tmp/adb-logcat.log "${done_file}"
+  r2_cue_watch /tmp/adb-logcat.log "${R2_CUE_STATUS}" "${done_file}" &
+  watcher=$!
+  HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY:-ws://10.0.2.2:7777}" \
+    bash "${SINGLE_AVD}" "${target}" || rc=$?
+  touch "${done_file}"
+  wait "${watcher}" || true
+  cycle="$(paste -sd, "${R2_CUE_STATUS}" 2>/dev/null || true)"
+  case "${cycle}" in
+    stopped)
+      echo "[relay] restarting R2: the drive ended between its cues"
+      start_r2 || true
+      ;;
+    stopped,failed)
+      echo "ERROR: R2 did not start again on the drive's cue (see start-strfry.sh above)." >&2
+      ;;
+  esac
+  if (( rc == 0 )) && [[ "$(r2_cue_verdict "${target}" 0 "${cycle}")" != 0 ]]; then
+    echo "ERROR: ${target} passed without a whole R2 stop/start cycle on its cues" \
+         "(host saw '${cycle:-no cue}'), so the OD-2 proof did not run as designed." >&2
+    rc=1
+  fi
+  return "${rc}"
 }
 
 # A filesystem-safe slug for a target path, used to name per-target log
@@ -526,8 +687,7 @@ run_one() {
   # (HAVEN_E2E_RELAY) is forwarded as env — R2 was baked into the APK
   # at build time; the drive step never re-passes dart-defines.
   local rc=0
-  HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY:-ws://10.0.2.2:7777}" \
-    bash "${SINGLE_AVD}" "${target}" || rc=$?
+  drive_target "${target}" || rc=$?
 
   # Retry ONCE on a per-drive TIMEOUT only (rc=124). The first target in the
   # loop cold-attaches a snapshot-restored emulator, where `flutter drive`'s
@@ -544,8 +704,7 @@ run_one() {
       "cold-attach flake; force-stopping and retrying once."
     adb -s emulator-5554 shell am force-stop com.oblivioustech.haven || true
     rc=0
-    HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY:-ws://10.0.2.2:7777}" \
-      bash "${SINGLE_AVD}" "${target}" || rc=$?
+    drive_target "${target}" || rc=$?
   fi
 
   # --- Preserve this target's evidence before the next target

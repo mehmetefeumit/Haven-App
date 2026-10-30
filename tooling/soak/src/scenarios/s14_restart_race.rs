@@ -22,13 +22,23 @@
 //! # Every arm runs in a circle of its own, outside the world's table
 //!
 //! [`SimWorld::build_extra_circle`](crate::rig::SimWorld::build_extra_circle)
-//! keeps the circle out of `world.circles()`, which buys two things at once. No
-//! world-wide oracle grades it, so the forked arm cannot redden a lane for
-//! behaviour the product is known to have; and no device's engine subscribes to
-//! it, so the siblings reach a peer only when this module hands them over —
+//! keeps the circle out of `world.circles()`, so no world-wide oracle grades
+//! it and the forked arm cannot redden a lane for behaviour the product is
+//! known to have. The world's own circles are untouched by every arm and are
+//! what the closing round grades.
+//!
+//! # The racers' engines are stopped for the race
+//!
+//! An engine listens to every circle its device holds — it follows each
+//! circle's routing at its start and whenever a row moves — so a running
+//! engine would hand a racer its sibling the moment the sibling reached the
+//! relay, and the engine answers a second look at one MLS message with a
+//! duplicate: the arm's own ingest would then read the duplicate, not the
+//! race. Each arm therefore stops both racers' engines before the race
+//! ([`deafen`]) and starts them again once its reads are done ([`rehear`]),
 //! which is what makes "neither device has ingested the other's commit" a
-//! property of the arm rather than of a pause that has to be timed. The world's
-//! own circles are untouched by every arm and are what the closing round grades.
+//! property of the arm rather than of a pause that has to be timed. A restart
+//! inside the arm rebuilds the session from disk with no engine to restart.
 //!
 //! The cost of that isolation is that [`Observed::measure`] cannot see the
 //! circle's epochs (`WorldFingerprint` walks `world.circles()`), so every arm
@@ -47,21 +57,27 @@
 
 use std::time::Duration;
 
-use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
-use haven_core::nostr::mls::max_rewind_commits;
-use haven_core::nostr::mls::types::{ConvergedRoster, OpenMlsContentKind, PendingStateRef};
-use nostr::Event;
+use haven_core::nostr::mls::types::{ConvergedRoster, FanoutId, FanoutMls, OpenMlsContentKind};
+use haven_core::nostr::mls::{max_rewind_commits, SessionManager};
+use haven_core::relay::fanout::{
+    drive_due, drive_one, DriveMode, FanoutClock, FanoutStatus, WallClock,
+};
+use haven_core::relay::live_sync::StopOutcome;
+use nostr::{Event, JsonUtil as _};
+
+use crate::nemesis::types::Fault;
 
 use crate::oracle::undecryptable::{self, Probe, StoredRow};
 use crate::oracle::vacuity::{ExpectationFloor, Observed};
 use crate::oracle::{Finding, Invariant, ProbeToken, Reach, Recovery, Verdict};
+use crate::rig::circle::PacingClock;
 use crate::rig::{
-    kill_and_reopen, DeviceTag, KillKind, LogDrain, PublishVerdict, RigError, SimCircle, Step,
-    TimelineSink,
+    kill_and_reopen, DeviceTag, KillKind, LogDrain, PublishVerdict, RelayPlane as _, RigError,
+    SimCircle, Step, TimelineSink,
 };
 use crate::scenarios::{
-    closing_pairs, grade_round, hand_off_admin, round, Absence, Arm, ArmOutcome, ScenarioWorld,
-    WithheldAcks, NO_GATING_ROWS,
+    closing_pairs, grade_round, hand_off_admin, relay_update, round, Absence, Arm, ArmOutcome,
+    ScenarioWorld, WithheldAcks, NO_GATING_ROWS,
 };
 
 /// The arms this scenario offers.
@@ -70,8 +86,8 @@ pub const ARMS: [Arm; 4] = [
         label: "race-no-restart",
         recovery: Recovery::Undisturbed,
         probe_rounds: 2,
-        // Nothing restarts, so no device re-opens a REQ.
-        resubscribes: false,
+        // The racers' engines start again after the race ([`rehear`]).
+        resubscribes: true,
         absence: Absence::None,
         withheld_acks: WithheldAcks::None,
         floor: ExpectationFloor {
@@ -103,7 +119,9 @@ pub const ARMS: [Arm; 4] = [
         probe_rounds: 1,
         resubscribes: true,
         absence: Absence::None,
-        withheld_acks: WithheldAcks::None,
+        // The second commit's drive: its relays store the commit and their
+        // acknowledgements never reach the device.
+        withheld_acks: WithheldAcks::FanoutDrives(1),
         floor: ExpectationFloor {
             faults_applied: 0,
             epochs_crossed: 0,
@@ -137,8 +155,10 @@ pub struct RaceStage {
     /// The second device's commit.
     pub second: Event,
     /// Whether both devices really staged from ONE epoch and both commits were
-    /// acknowledged — the premise without which nothing below is a race.
+    /// accepted by a relay — the premise without which nothing below is a race.
     pub genuine: bool,
+    /// The second commit's durable fanout, when it was left staged.
+    pub left_staged: Option<FanoutId>,
 }
 
 /// What the second device does with its own staged commit.
@@ -149,13 +169,52 @@ pub struct RaceStage {
 pub enum SecondCommit {
     /// Published, acknowledged and confirmed, like the first.
     Confirmed,
-    /// Published and acknowledged, and then deliberately left staged, so a
-    /// caller can end the process inside the publish→confirm window.
+    /// Staged with its durable fanout and driven by the product's own driver
+    /// into relays that store it and whose acknowledgements never arrive: it
+    /// stays staged, inside the publish→confirm window, for a caller to end
+    /// the process in. The caller arms that fault on the device first.
     LeftStaged,
 }
 
+/// Stops both racers' engines (see the module docs).
+///
+/// # Errors
+///
+/// [`RigError::StopTimedOut`] if an engine's stop did not drain, or
+/// [`RigError::UnknownTarget`] if a racer is not in the world.
+pub async fn deafen<T: TimelineSink, L: LogDrain>(
+    world: &mut ScenarioWorld<T, L>,
+    racers: (DeviceTag, DeviceTag),
+) -> Result<(), RigError> {
+    for tag in <[DeviceTag; 2]>::from(racers) {
+        if let Some(core) = world.device_mut(tag)?.take_engine() {
+            if core.stop().await == StopOutcome::TimedOut {
+                return Err(RigError::StopTimedOut);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Starts both racers' engines again over their own circles.
+///
+/// # Errors
+///
+/// [`RigError::Core`] with [`Step::StartEngine`] if a start failed.
+pub async fn rehear<T: TimelineSink, L: LogDrain>(
+    world: &mut ScenarioWorld<T, L>,
+    racers: (DeviceTag, DeviceTag),
+) -> Result<(), RigError> {
+    for tag in <[DeviceTag; 2]>::from(racers) {
+        let device = world.device_mut(tag)?;
+        let specs = device.specs().to_vec();
+        device.start_engine(specs).await?;
+    }
+    Ok(())
+}
+
 /// Makes `successor` a co-admin of `circle` and applies the handoff on its own
-/// engine.
+/// session.
 ///
 /// Without it there is no race to have: the engine refuses a membership or
 /// policy commit from a non-admin, so only one device in a circle can stage one.
@@ -175,13 +234,18 @@ pub async fn co_admin<T: TimelineSink, L: LogDrain>(
     if verdict != PublishVerdict::Confirmed {
         return Err(RigError::PublishNeverAcked);
     }
-    // The successor's own engine has to have APPLIED the handoff before it can
-    // use it, and nothing delivers this circle: it is deliberately outside the
-    // world's table, so no engine subscribes to it.
-    world
-        .device(successor)?
-        .session()?
+    // The successor's own session has to have APPLIED the handoff before it
+    // can use it, and nothing delivers this circle: the racers' engines are
+    // stopped (module docs). MDK v0.10.4 holds a peer
+    // commit for its quiescence window, so the deadline it announces is served
+    // the way a receive plane serves it.
+    let session = world.device(successor)?.session()?;
+    session
         .process_event_typed_for_test(&commit)
+        .await
+        .map_err(|_| RigError::Core(Step::StageCommit))?;
+    session
+        .settle_receive_for_test(circle.mls_group_id())
         .await
         .map_err(|_| RigError::Core(Step::StageCommit))?;
     Ok(())
@@ -194,16 +258,18 @@ pub async fn co_admin<T: TimelineSink, L: LogDrain>(
 /// acknowledgement before confirming — Rule 13 on both sides — so the two
 /// branches are branches the group could really be on.
 ///
-/// `circle` must be one no engine subscribes to (an extra circle), or the live
-/// plane delivers the first commit to the second device before it stages: the
+/// Both racers' engines must be stopped ([`deafen`]), or the live plane
+/// delivers the first commit to the second device before it stages: the
 /// engine records every message's disposition, and the second look at one MLS
 /// message is a duplicate, so a race ingested live would classify as one.
 ///
-/// [`SecondCommit::LeftStaged`] drops the second pending state ON PURPOSE. The
-/// caller is about to end the process that owns it, which IS the resolution in
-/// the only sense left — nothing can confirm or roll back a ref that died with
-/// its process — and the rig's staged-commit count may not outlive this call, or
-/// the caller's own closing round could never settle.
+/// [`SecondCommit::LeftStaged`] stages the second commit the way the product
+/// does — in staging mode, its durable fanout written with it — and hands it
+/// to the product's driver. The caller has armed a swallowed acknowledgement
+/// on that device, so the drive ends with the commit on the relay, unresolved
+/// on the device, and the process can be ended in exactly that window. The
+/// rig's staged-commit count does not hold it: the fanout row does, and the
+/// caller resumes it after the restart.
 ///
 /// # Errors
 ///
@@ -216,58 +282,32 @@ pub async fn stage_race<T: TimelineSink, L: LogDrain>(
     racers: (DeviceTag, DeviceTag),
     second: SecondCommit,
 ) -> Result<RaceStage, RigError> {
-    let group = circle.mls_group_id().clone();
     let (first_tag, second_tag) = racers;
     let mut commits: Vec<Event> = Vec::with_capacity(2);
     let mut staged_from: Vec<u64> = Vec::with_capacity(2);
     let mut acked = true;
+    let mut left_staged = None;
 
     for (index, tag) in [first_tag, second_tag].into_iter().enumerate() {
         staged_from.push(epoch_of(world, tag, circle).await?);
-        // A relay list the circle does not already hold: a repeat is a no-op,
-        // and a no-op advances no epoch and stages no branch.
+        // A relay list the circle does not already hold: the product answers
+        // a repeat already so, which advances no epoch and stages no branch.
         let mut relays = world.relay_urls();
         relays.push(format!("wss://s14-race-{index}.example.com"));
-        let staged = world
-            .device(tag)?
-            .manager()?
-            .update_circle_relays(&group, &relays)
-            .await
-            .map_err(|_| RigError::Core(Step::StageCommit))?;
-        let commit = staged.commit_event.clone();
-        let guard = world.note_pending_staged();
-        let witnessed = world
-            .publish_witnessed(tag, std::slice::from_ref(&commit))
-            .await?;
-        acked &= witnessed.is_some();
-        if witnessed.is_none() {
-            // Rule 13: nothing was acknowledged, so the commit may not be
-            // merged. Roll it back rather than leaving a ref nobody resolves,
-            // and report that the arm has no race to grade.
-            let ingest = world
-                .device(tag)?
-                .manager()?
-                .publish_failed(staged.pending)
-                .await
-                .map_err(|_| RigError::Core(Step::RollBackPublish))?;
-            world.resolve_ingest(tag, ingest).await?;
-            drop(guard);
-            return Err(RigError::PublishNeverAcked);
-        }
         if tag == second_tag && second == SecondCommit::LeftStaged {
-            let _: PendingStateRef = staged.pending;
+            let (commit, id, stored) =
+                stage_and_drive_unacknowledged(world, tag, circle, relays).await?;
+            acked &= stored;
             commits.push(commit);
-            drop(guard);
+            left_staged = Some(id);
             continue;
         }
-        let ingest = world
-            .device(tag)?
-            .manager()?
-            .finalize_relay_update(staged.pending, &group)
-            .await
-            .map_err(|_| RigError::Core(Step::ConfirmPublished))?;
-        world.resolve_ingest(tag, ingest).await?;
-        drop(guard);
+        let (commit, verdict) = relay_update(world, tag, circle, &relays).await?;
+        if verdict != PublishVerdict::Confirmed {
+            // No relay acknowledged it, so the product did not apply it and
+            // the arm has no race to grade.
+            return Err(RigError::PublishNeverAcked);
+        }
         commits.push(commit);
     }
 
@@ -278,20 +318,84 @@ pub async fn stage_race<T: TimelineSink, L: LogDrain>(
         first,
         second: second_commit,
         genuine: acked && staged_from.first() == staged_from.last(),
+        left_staged,
     })
 }
 
-/// One device ingests one sibling commit, exactly once, classified.
+/// Stages a relay-list commit on `tag` in staging mode and drives it once
+/// through the product's durable-fanout driver, expecting NO acknowledgement:
+/// the commit and its fanout, and whether a relay plane stored the commit
+/// while none of them saw its `OK` reach the device.
+async fn stage_and_drive_unacknowledged<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    tag: DeviceTag,
+    circle: &SimCircle,
+    relays: Vec<String>,
+) -> Result<(Event, FanoutId, bool), RigError> {
+    let device = world.device(tag)?;
+    let session = device.session()?;
+    let staged = session
+        .update_relays_staging(circle.mls_group_id(), relays, WallClock.now_ms())
+        .await
+        .map_err(|_| RigError::Core(Step::StageCommit))?;
+    let [id] =
+        <[FanoutId; 1]>::try_from(staged.fanouts).map_err(|_| RigError::Core(Step::StageCommit))?;
+    let frozen = session
+        .fanout_probe_for_test(&id)
+        .await
+        .ok()
+        .flatten()
+        .ok_or(RigError::Core(Step::StageCommit))?;
+    let commit =
+        Event::from_json(&frozen.payload).map_err(|_| RigError::Core(Step::StageCommit))?;
+
+    let outcome = drive_one(
+        device.manager()?,
+        &device.fanout_transport(),
+        &WallClock,
+        &id,
+        &DriveMode::Full,
+    )
+    .await
+    .map_err(|_| RigError::Core(Step::Publish))?;
+    let mut stored = false;
+    for plane in world.relays() {
+        stored |= plane.stored(&commit.id).await?;
+    }
+    Ok((
+        commit,
+        id,
+        stored && outcome.status == FanoutStatus::Unresolved,
+    ))
+}
+
+/// Arms, or heals, a swallowed acknowledgement on `device`'s own endpoint of
+/// every relay plane.
+async fn swallow_acks<T: TimelineSink, L: LogDrain>(
+    world: &mut ScenarioWorld<T, L>,
+    device: DeviceTag,
+    on: bool,
+) -> Result<(), RigError> {
+    let fault = if on { Fault::SwallowOk } else { Fault::Heal };
+    for plane in world.relays_mut() {
+        plane.apply_for(device, fault).await?;
+    }
+    Ok(())
+}
+
+/// One device ingests one sibling commit, exactly once, classified — and, if
+/// the engine holds it for the convergence pass that adjudicates the race,
+/// classified again once that pass has closed.
 ///
 /// The stored row is located AFTER the ingest and never before: the engine keys
 /// every row on its hash over the PEELED MLS bytes, so a caller holding only the
 /// signed event cannot name the row its own ingest is about to write. Without
-/// that row an `AlreadyAtEpoch` disposition is undetermined rather than
-/// cheerfully "no branch was lost", which would under-report forks.
+/// that row a branch loss is undetermined rather than cheerfully "no branch was
+/// lost", which would under-report forks.
 ///
 /// # Errors
 ///
-/// [`RigError`] naming the read that failed.
+/// [`RigError`] naming the read or the convergence service that failed.
 pub async fn ingest_sibling<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     circle: &SimCircle,
@@ -300,7 +404,23 @@ pub async fn ingest_sibling<T: TimelineSink, L: LogDrain>(
 ) -> Result<undecryptable::Verdict, RigError> {
     let session = world.device(ingester)?.session()?;
     let outcome = session.process_event_typed_for_test(sibling).await;
-    let probe = match session
+    let verdict = undecryptable::classify_ingest(&outcome, sibling_row(session, circle).await);
+    if verdict != undecryptable::Verdict::CommitGap {
+        return Ok(verdict);
+    }
+    session
+        .settle_receive_for_test(circle.mls_group_id())
+        .await
+        .map_err(|_| RigError::Core(Step::ServeConvergence))?;
+    Ok(undecryptable::classify_settled_sibling(
+        sibling_row(session, circle).await,
+    ))
+}
+
+/// The most recently stored commit row in `circle` — the sibling's, after its
+/// ingest.
+async fn sibling_row(session: &SessionManager, circle: &SimCircle) -> Probe {
+    match session
         .stored_convergence_input_for_test(circle.mls_group_id(), OpenMlsContentKind::Commit, 1)
         .await
     {
@@ -309,8 +429,7 @@ pub async fn ingest_sibling<T: TimelineSink, L: LogDrain>(
             .await
             .map_or(Probe::Unreadable, Probe::Read),
         Err(_) => Probe::Read(None),
-    };
-    Ok(undecryptable::classify_ingest(&outcome, probe))
+    }
 }
 
 /// Each racer ingests the OTHER's commit exactly once, classified.
@@ -447,6 +566,7 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
     };
 
     let circle = world.build_extra_circle().await?;
+    deafen(world, racers).await?;
     co_admin(world, &circle, alice, bob).await?;
 
     let canaries = match arm.label {
@@ -464,13 +584,14 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
         }
         _ => return Err(RigError::UnknownTarget),
     };
+    rehear(world, racers).await?;
 
     // Graded over the WORLD's circles, which no arm here touches. The device
     // that was restarted sends first: its epoch and exporter state came back
     // off disk, and a reuse there is invisible to it and visible only to a peer
     // that cannot read what it produced.
     let pairs = closing_pairs(world, bob);
-    let opened = [bob];
+    let opened = [alice, bob];
     let closing = round(
         2,
         Reach::These(&pairs),
@@ -568,10 +689,12 @@ async fn restart_after_confirm<T: TimelineSink, L: LogDrain>(
         canaries += 1;
     }
     // 2. …and the restart really happened: the session was held, released and
-    //    retaken (Rule 14, asserted inside `kill_and_reopen`), and the engine
-    //    came back with it.
-    let report = kill_and_reopen(world.device_mut(racers.1)?, KillKind::Hard).await?;
-    if report.engine_restarted {
+    //    retaken (Rule 14, asserted inside `kill_and_reopen`), and the device
+    //    came back at the epoch its own confirmed commit left it — read off
+    //    disk, its in-memory guard gone with the process.
+    let confirmed_at = epoch_of(world, racers.1, circle).await?;
+    kill_and_reopen(world.device_mut(racers.1)?, KillKind::Hard).await?;
+    if epoch_of(world, racers.1, circle).await? == confirmed_at {
         canaries += 1;
     }
     let verdicts = merge_race(world, circle, racers, &stage).await?;
@@ -591,32 +714,34 @@ async fn restart_after_confirm<T: TimelineSink, L: LogDrain>(
     Ok(canaries)
 }
 
-/// The kill lands between SEND and confirm, so the group never advanced and the
-/// staged commit outlives the process that staged it.
+/// The kill lands between the relay's acknowledgement and the local confirm:
+/// the relay holds the second commit, the device never saw the `OK`, and the
+/// process that staged it is gone.
 ///
-/// # What the reopen does with it, and what this arm can actually see
+/// # What the reopen does with it
 ///
-/// The engine's hydrate clears such a commit transactionally and rewinds the
-/// group to its pre-stage epoch, pushing a `PendingCommitRecovered` event into
-/// its buffer. That event is NOT delivered by the reopen: it surfaces on the
-/// first session call that collects effects, and in a world whose engine
-/// restarts with the device, the engine's own processor is a receive path and
-/// gets there first — so the event itself is not deterministically observable
-/// from an arm. What IS observable, and is what canary 2 reads, is the rewind's
-/// own consequence: the circle's send path was gated while the commit was
-/// staged and is open again after the reopen. Nothing else could have opened it
-/// — the `PendingStateRef` that could have confirmed or rolled the commit back
-/// died with the process.
+/// The commit was staged with its durable fanout row, so MDK's hydrate
+/// restores it as it was — staged, under its own pending ref — instead of
+/// clearing it. The circle's send path is therefore STILL shut after the
+/// reopen (canary 2), and what holds it is one pending fanout carrying the
+/// very event the relay stored. The product's driver then sends that event
+/// again, byte for byte, once its relay is due — a wait this arm steps the
+/// driver's pacing clock over rather than sits through — and applies the
+/// commit on the relay's answer. The arm stops there if it does not: a
+/// device that cannot finish its own acknowledged commit has no race to
+/// grade.
 ///
-/// # What this arm deliberately does NOT deliver, and why
+/// A commit cleared at the open instead — the shape this arm had while the
+/// rig published commits itself and dropped the pending ref — is merged by
+/// the reopened device's first convergence pass on its own, whatever its
+/// peer holds, which is how the two devices used to end on two branches
+/// wearing one epoch number.
 ///
-/// The abandoned commit is never handed to the peer. It really was published, so
-/// a live circle's peer really would receive it — and at this engine the peer's
-/// fork resolver may pick EITHER branch by its content-derived ordering, while
-/// the device that staged it has already discarded it. Which side wins is then a
-/// fresh coin toss per run, and an arm that asserted either outcome would be
-/// flaky rather than informative. What this arm claims is the RESTARTED device's
-/// own disposition; the peer's is an open question and is recorded as one.
+/// # Both commits reach both devices
+///
+/// Both are on the relay, so each device is handed the other's, and the
+/// promise is the one every other arm here grades: exactly one branch
+/// survives, on both devices.
 async fn restart_before_confirm<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     circle: &SimCircle,
@@ -625,26 +750,37 @@ async fn restart_before_confirm<T: TimelineSink, L: LogDrain>(
     extra: &mut Vec<(Invariant, Verdict)>,
 ) -> Result<usize, RigError> {
     let mut canaries = 0_usize;
+    swallow_acks(world, racers.1, true).await?;
     let stage = stage_race(world, circle, racers, SecondCommit::LeftStaged).await?;
-    // 1. The window is real: the commit crossed the wire and was acknowledged,
-    //    AND the circle's own send path is held shut while it is staged.
+    swallow_acks(world, racers.1, false).await?;
+    let id = stage
+        .left_staged
+        .clone()
+        .ok_or(RigError::Core(Step::StageCommit))?;
+    // 1. The window is real: a relay holds the commit, the device was never
+    //    told, AND the circle's own send path is held shut while it is staged.
     if stage.genuine && !can_send(world, racers.1, circle).await? {
         canaries += 1;
     }
 
     kill_and_reopen(world.device_mut(racers.1)?, KillKind::Hard).await?;
 
-    // 2. The staged commit did not survive the process: the send path is open
-    //    again, which only the hydrate's clear-and-rewind can have done.
-    if can_send(world, racers.1, circle).await? {
+    // 2. The staged commit survived the process: the send path is STILL shut,
+    //    and what holds it is one pending fanout with the staged commit's id.
+    if !can_send(world, racers.1, circle).await?
+        && holds_only(world, racers.1, circle, &id, &stage.second).await?
+    {
         canaries += 1;
     }
-    let verdict = ingest_sibling(world, circle, racers.1, &stage.first).await?;
-    classified.push(verdict);
-    // 3. The rewind put the device back at the epoch the sibling was sealed
-    //    from, so the sibling arrives at `msg_epoch == current_epoch` and
-    //    APPLIES rather than being refused as a past epoch.
-    if verdict == undecryptable::Verdict::Applied {
+    resume(world, racers.1, circle, &id).await?;
+
+    let verdicts = merge_race(world, circle, racers, &stage).await?;
+    classified.extend(verdicts.iter().copied());
+    // 3. The second commit was acknowledged before the kill, so it is a real
+    //    branch on the relay, and the reopened device has applied it. Once
+    //    each side holds the other's commit the race costs exactly one branch,
+    //    whichever the engine's content-derived ordering picks.
+    if one_branch_lost(&verdicts) {
         canaries += 1;
     }
     let branches = branch_state(world, circle, racers).await?;
@@ -655,6 +791,71 @@ async fn restart_before_confirm<T: TimelineSink, L: LogDrain>(
     }
     grade_convergence(circle, &branches, extra);
     Ok(canaries)
+}
+
+/// Whether `device` holds exactly one fanout for `circle`: `id`, pending, and
+/// carrying `commit`.
+async fn holds_only<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    device: DeviceTag,
+    circle: &SimCircle,
+    id: &FanoutId,
+    commit: &Event,
+) -> Result<bool, RigError> {
+    let session = world.device(device)?.session()?;
+    let rows = session
+        .fanout_ids_for_test(circle.mls_group_id())
+        .await
+        .map_err(|_| RigError::Core(Step::ReadEpoch))?;
+    let row = session
+        .fanout_probe_for_test(id)
+        .await
+        .map_err(|_| RigError::Core(Step::ReadEpoch))?;
+    Ok(rows.as_slice() == std::slice::from_ref(id)
+        && row.is_some_and(|row| row.event_id == commit.id && row.mls == FanoutMls::Pending))
+}
+
+/// Resumes `device`'s pending commit fanouts for `circle` through the
+/// product's driver: asks it what is due, steps its pacing clock over the
+/// wait it names, and lets it send.
+///
+/// # Errors
+///
+/// [`RigError::PublishNeverAcked`] if the commit `id` names is not applied
+/// afterwards; [`RigError`] naming the step that failed otherwise.
+async fn resume<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    device: DeviceTag,
+    circle: &SimCircle,
+    id: &FanoutId,
+) -> Result<(), RigError> {
+    let device = world.device(device)?;
+    let transport = device.fanout_transport();
+    let clock = PacingClock::default();
+    let group = Some(circle.mls_group_id());
+    for _ in 0..2 {
+        let due = drive_due(
+            device.manager()?,
+            &transport,
+            &clock,
+            group,
+            None,
+            &DriveMode::Full,
+        )
+        .await;
+        if due.error.is_some() {
+            return Err(RigError::Core(Step::ConfirmPublished));
+        }
+        if due
+            .driven
+            .iter()
+            .any(|(driven, outcome)| driven == id && outcome.status == FanoutStatus::Confirmed)
+        {
+            return Ok(());
+        }
+        clock.step(due.retry_after_ms.unwrap_or(0));
+    }
+    Err(RigError::PublishNeverAcked)
 }
 
 /// The recorded known-bad: each branch walks past the distance at which a
@@ -679,12 +880,13 @@ async fn restart_before_confirm<T: TimelineSink, L: LogDrain>(
 /// report the same epoch, the same roster and a healthy send path, and only a
 /// cross-decrypt says otherwise. There is no peer epoch on the wire, so the only
 /// detector Haven could have is receive silence past the delivery-silence
-/// window. OD-1 is DECIDED and NOT BUILT; this arm records the silence — an
-/// empty `unrecoverable_circles()` and no `GroupUnrecoverable` on either bus —
-/// rather than grading it, so the day a verdict starts appearing the canary is
-/// unmet and the arm goes rc 3, which is the correct signal: the recorded
-/// expectation must be replaced by a graded one in the same commit. The 684-
-/// second form of that silence is asserted by S03's weekly arm
+/// window. OD-1 is BUILT (one per-circle card in the circle's details sheet,
+/// read from `circle_recovery`, which no arm reads yet); this arm records the
+/// silence — an empty `unrecoverable_circles()` and no `GroupUnrecoverable` on
+/// either bus — rather than grading it, so the day a verdict starts appearing
+/// the canary is unmet and the arm goes rc 3, which is the correct signal: the
+/// recorded expectation must be replaced by a graded one in the same commit.
+/// The 684-second form of that silence is asserted by S03's weekly arm
 /// `lost-commit-unnamed`; a second eleven-minute absence here would buy no
 /// further claim, which is why every arm in this scenario declares
 /// `Absence::None`.
@@ -745,26 +947,32 @@ async fn anchor_exhausted<T: TimelineSink, L: LogDrain>(
     if branches.twin_fork() {
         canaries += 1;
     }
-    // 5. …and Haven says nothing about it. The OD-1 gap, recorded.
-    if silent_about_the_fork(world, racers) {
+    // 5. …and no surface the rig reads says anything about it, recorded.
+    if silent_about_the_fork(world, racers).await {
         canaries += 1;
     }
     Ok(canaries)
 }
 
 /// Whether neither racer reports the circle as unrecoverable, on either surface.
-fn silent_about_the_fork<T: TimelineSink, L: LogDrain>(
+async fn silent_about_the_fork<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     racers: (DeviceTag, DeviceTag),
 ) -> bool {
-    [racers.0, racers.1].into_iter().all(|tag| {
-        world.device(tag).is_ok_and(|device| {
-            device.ledger().unrecoverable() == 0
-                && device
-                    .manager()
-                    .is_ok_and(|manager| manager.unrecoverable_circles().is_empty())
-        })
-    })
+    for tag in <[DeviceTag; 2]>::from(racers) {
+        let Ok(device) = world.device(tag) else {
+            return false;
+        };
+        let quiet = device.ledger().unrecoverable() == 0
+            && match device.manager() {
+                Ok(manager) => manager.unrecoverable_circles().await.is_empty(),
+                Err(_) => false,
+            };
+        if !quiet {
+            return false;
+        }
+    }
+    true
 }
 
 /// Grades the convergence the three convergent arms assert.
@@ -804,7 +1012,7 @@ fn grade_convergence(
 /// in-memory `we_committed_from` guard takes the direct fork-recovery route and
 /// reports the losing sibling as a past-epoch branch loss; a rebuilt one takes
 /// STORED convergence, where a losing sibling is a dropped message and the
-/// engine reports it as a peel failure (measured at this pin: six runs in ten,
+/// engine reported it as a peel failure (measured at `e391adc`: six runs in ten,
 /// tracking which branch the content-derived ordering picked). Both mean "one
 /// branch, and it is not this one".
 fn exactly_one_branch_survived(verdicts: &[undecryptable::Verdict]) -> bool {
@@ -851,20 +1059,10 @@ async fn walk_branch<T: TimelineSink, L: LogDrain>(
     count: u64,
     salt: &str,
 ) -> Result<(), RigError> {
-    let group = circle.mls_group_id().clone();
     for index in 0..count {
         let mut relays = world.relay_urls();
         relays.push(format!("wss://s14-walk-{salt}-{index}.example.com"));
-        let staged = world
-            .device(device)?
-            .manager()?
-            .update_circle_relays(&group, &relays)
-            .await
-            .map_err(|_| RigError::Core(Step::StageCommit))?;
-        let commit = staged.commit_event.clone();
-        let verdict = world
-            .publish_and_confirm(device, staged.pending, std::slice::from_ref(&commit))
-            .await?;
+        let (_, verdict) = relay_update(world, device, circle, &relays).await?;
         if verdict != PublishVerdict::Confirmed {
             return Err(RigError::PublishNeverAcked);
         }
@@ -894,11 +1092,9 @@ async fn seal<T: TimelineSink, L: LogDrain>(
     let sender = world.device(device)?;
     sender
         .manager()?
-        .encrypt_location(
+        .seal_location_for_test(
             circle.mls_group_id(),
-            &sender.keys.public_key(),
             &ProbeToken::mint(14, index).as_location(),
-            LOCATION_MESSAGE_RETENTION_SECS,
         )
         .await
         .map(|(event, _, _)| event)
@@ -948,15 +1144,12 @@ mod tests {
     use crate::oracle::Recovery;
 
     #[test]
-    fn the_control_arm_restarts_nothing_and_the_other_three_do() {
-        assert!(
-            !ARMS[0].resubscribes,
-            "the control's whole content is that nothing was interrupted"
-        );
-        for arm in &ARMS[1..] {
+    fn every_arm_pays_for_the_racers_engines_starting_again() {
+        for arm in &ARMS {
             assert!(
                 arm.resubscribes,
-                "a restarted device re-opens its own REQs, so the ladder is in the bound"
+                "both racers' engines are stopped for the race and started after it, \
+                 re-opening their REQs, so the ladder is in every bound"
             );
         }
         for arm in &ARMS {

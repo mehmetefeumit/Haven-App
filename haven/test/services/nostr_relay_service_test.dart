@@ -14,7 +14,6 @@
 library;
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
 void main() {
@@ -233,41 +232,6 @@ void main() {
       final relays = ['wss://relay1.example.com', 'wss://relay2.example.com'];
       expect(relays[0], startsWith('wss://'));
       expect(relays[1], startsWith('wss://'));
-    });
-  });
-
-  group('RelayService - Welcome Events', () {
-    test('gift wrap is kind 1059', () {
-      const welcome = GiftWrappedWelcome(
-        recipientPubkey:
-            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-        recipientRelays: ['wss://relay.example.com'],
-        eventJson: '{"kind":1059,"content":"..."}',
-      );
-
-      expect(welcome.eventJson, contains('"kind":1059'));
-    });
-
-    test('welcome requires recipient pubkey', () {
-      const welcome = GiftWrappedWelcome(
-        recipientPubkey:
-            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-        recipientRelays: ['wss://relay.example.com'],
-        eventJson: '{"kind":1059}',
-      );
-
-      expect(welcome.recipientPubkey.length, 64);
-    });
-
-    test('welcome requires recipient relays', () {
-      const welcome = GiftWrappedWelcome(
-        recipientPubkey:
-            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-        recipientRelays: ['wss://relay.example.com'],
-        eventJson: '{"kind":1059}',
-      );
-
-      expect(welcome.recipientRelays, isNotEmpty);
     });
   });
 }

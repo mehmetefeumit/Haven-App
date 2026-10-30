@@ -713,9 +713,6 @@ class AppLocalizationsAr extends AppLocalizations {
   String get nameCircleStageCreatingGroup => 'جارٍ إنشاء مجموعة آمنة...';
 
   @override
-  String get nameCircleStageSendingInvites => 'جارٍ إرسال الدعوات...';
-
-  @override
   String get nameCircleStageComplete => 'تم!';
 
   @override
@@ -733,7 +730,7 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
-  String nameCircleCreatedPartialSnack(String name, int sent, int total) {
+  String nameCircleCreatedSentSoFarSnack(String name, int sent, int total) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -742,7 +739,23 @@ class AppLocalizationsAr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'تم إنشاء الدائرة \"$name\". أُرسلت الدعوات ($sentString من $totalString)؛ التسليم معلّق للبقية.';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          'تم إنشاء الدائرة \"$name\". عدد الدعوات المُرسَلة حتى الآن: $sentString من $totalString. ويواصل Haven إرسال ما تبقّى منها ما دام التطبيق مفتوحًا، لمدة تصل إلى يوم.',
+      many:
+          'تم إنشاء الدائرة \"$name\". عدد الدعوات المُرسَلة حتى الآن: $sentString من $totalString. ويواصل Haven إرسال ما تبقّى منها ما دام التطبيق مفتوحًا، لمدة تصل إلى يوم.',
+      few:
+          'تم إنشاء الدائرة \"$name\". عدد الدعوات المُرسَلة حتى الآن: $sentString من $totalString. ويواصل Haven إرسال ما تبقّى منها ما دام التطبيق مفتوحًا، لمدة تصل إلى يوم.',
+      two:
+          'تم إنشاء الدائرة \"$name\". عدد الدعوات المُرسَلة حتى الآن: $sentString من $totalString. ويواصل Haven إرسال ما تبقّى منها ما دام التطبيق مفتوحًا، لمدة تصل إلى يوم.',
+      one:
+          'تم إنشاء الدائرة \"$name\". عدد الدعوات المُرسَلة حتى الآن: $sentString من $totalString. ويواصل Haven إرسالها ما دام التطبيق مفتوحًا، لمدة تصل إلى يوم.',
+      zero:
+          'تم إنشاء الدائرة \"$name\". عدد الدعوات المُرسَلة حتى الآن: $sentString من $totalString. ويواصل Haven إرسال ما تبقّى منها ما دام التطبيق مفتوحًا، لمدة تصل إلى يوم.',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -839,7 +852,7 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
-  String addMemberPartialDelivery(int sent, int total) {
+  String addMemberSentSoFar(int sent, int total, String circleName) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -848,7 +861,50 @@ class AppLocalizationsAr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'أُرسلت الدعوات ($sentString من $totalString). التسليم معلّق للبقية.';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          'عدد الدعوات المُرسَلة حتى الآن للانضمام إلى $circleName: $sentString من $totalString. ويواصل Haven إرسال ما تبقّى منها ما دام التطبيق مفتوحًا، لمدة تصل إلى يوم.',
+      many:
+          'عدد الدعوات المُرسَلة حتى الآن للانضمام إلى $circleName: $sentString من $totalString. ويواصل Haven إرسال ما تبقّى منها ما دام التطبيق مفتوحًا، لمدة تصل إلى يوم.',
+      few:
+          'عدد الدعوات المُرسَلة حتى الآن للانضمام إلى $circleName: $sentString من $totalString. ويواصل Haven إرسال ما تبقّى منها ما دام التطبيق مفتوحًا، لمدة تصل إلى يوم.',
+      two:
+          'عدد الدعوات المُرسَلة حتى الآن للانضمام إلى $circleName: $sentString من $totalString. ويواصل Haven إرسال ما تبقّى منها ما دام التطبيق مفتوحًا، لمدة تصل إلى يوم.',
+      one:
+          'عدد الدعوات المُرسَلة حتى الآن للانضمام إلى $circleName: $sentString من $totalString. ويواصل Haven إرسالها ما دام التطبيق مفتوحًا، لمدة تصل إلى يوم.',
+      zero:
+          'عدد الدعوات المُرسَلة حتى الآن للانضمام إلى $circleName: $sentString من $totalString. ويواصل Haven إرسال ما تبقّى منها ما دام التطبيق مفتوحًا، لمدة تصل إلى يوم.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String addMemberReinviteNeeded(String circleName) {
+    return 'لا يستطيع Haven إرسال الدعوة للانضمام إلى $circleName. يُرجى إزالة ذلك الشخص ثم إضافته من جديد.';
+  }
+
+  @override
+  String get memberCannotReceiveInvitations =>
+      'لا يستطيع Haven دعوة جميع من اخترتهم، لأنه لم يعثر على وجهة يُرسل إليها دعوةً واحدة على الأقل من دعواتهم. يُرجى الطلب ممن اخترتهم أن يتحقّقوا من أنّ تطبيقاتهم تستطيع استقبال الدعوات، ثم إعادة المحاولة.';
+
+  @override
+  String get missedInvitationsShowWho => 'عرض الأشخاص';
+
+  @override
+  String missedInvitationsTitle(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'لم تُرسَل الدعوات',
+      many: 'لم تُرسَل الدعوات',
+      few: 'لم تُرسَل الدعوات',
+      two: 'لم تُرسَل الدعوتان',
+      one: 'لم تُرسَل الدعوة',
+      zero: 'لم تُرسَل الدعوات',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -903,6 +959,11 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
+  String circleMemberRemoveAwaitingAnnouncement(String name) {
+    return 'لا تزال إزالة $name جارية: بانتظار المُرحِّلات. وإلى أن تكتمل، لا يُشارَك أي شيء مع هذه الدائرة.';
+  }
+
+  @override
   String get circleMemberAdmin => 'مشرف';
 
   @override
@@ -936,7 +997,11 @@ class AppLocalizationsAr extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'جاهز للدعوة';
 
   @override
-  String get pendingMemberNeedsUpdate => 'بحاجة إلى تحديث Haven';
+  String get pendingMemberNeedsUpdate => 'بحاجة إلى تحديث Haven أو فتحه';
+
+  @override
+  String get memberKeyPackageStale =>
+      'لا يستطيع Haven دعوة هذا الشخص الآن. اطلب منه فتح Haven، ثم أعد المحاولة.';
 
   @override
   String get memberSearchHint => 'أدخل معرّف العضو...';
@@ -1088,6 +1153,27 @@ class AppLocalizationsAr extends AppLocalizations {
       'تعذّر قبول الدعوة. يُرجى إعادة المحاولة.';
 
   @override
+  String invitationNeedsNewInviteError(String name) {
+    return 'لم يعد بالإمكان استخدام هذه الدعوة. اطلب من $name تحديث Haven إن لزم الأمر، ثم إرسال دعوة جديدة إليك.';
+  }
+
+  @override
+  String get rejoinDialogTitle => 'الانضمام إلى هذه الدائرة مجددًا؟';
+
+  @override
+  String rejoinDialogBody(String inviterName, String circleName) {
+    return 'وصلتك دعوة من $inviterName إلى «$circleName»، وهي دائرة موجودة بالفعل على هذا الهاتف. قد يحدث هذا إذا أُزيلت عضويتك منها ثم دُعيت إليها مجددًا. والانضمام مجددًا يستبدل نسخة هذا الهاتف من الدائرة. أمّا «رفض» فيُنهي هذه الدعوة نهائيًا، وأمّا «إلغاء» فيُبقيها لوقت لاحق.';
+  }
+
+  @override
+  String rejoinDialogBodyUnnamed(String circleName) {
+    return 'وصلتك دعوة إلى «$circleName»، وهي دائرة موجودة بالفعل على هذا الهاتف. قد يحدث هذا إذا أُزيلت عضويتك منها ثم دُعيت إليها مجددًا. والانضمام مجددًا يستبدل نسخة هذا الهاتف من الدائرة. أمّا «رفض» فيُنهي هذه الدعوة نهائيًا، وأمّا «إلغاء» فيُبقيها لوقت لاحق.';
+  }
+
+  @override
+  String get rejoinDialogConfirm => 'الانضمام مجددًا';
+
+  @override
   String invitationRosterFullError(int limit) {
     final intl.NumberFormat limitNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1236,11 +1322,22 @@ class AppLocalizationsAr extends AppLocalizations {
   String get circleDetailsLeaveCircle => 'مغادرة الدائرة';
 
   @override
+  String get circleDetailsLeavingInProgress => 'جارٍ مغادرة الدائرة…';
+
+  @override
   String get leaveCircleDialogTitle => 'مغادرة الدائرة';
 
   @override
   String get leaveCircleDialogBody =>
       'هل تريد مغادرة هذه الدائرة؟ ستتوقّف عن إرسال موقعك إلى أعضائها وعن رؤية مواقعهم. ويبقى آخر موقع أرسلته على هواتفهم مدة تصل إلى يوم. ولا يمكنك التراجع عن هذا: ستحتاج إلى دعوة جديدة للانضمام من جديد.';
+
+  @override
+  String get leaveDisbandedCircleDialogBody =>
+      'انتهت هذه الدائرة، فلم يعد يُشارَك معها أي شيء. ومغادرة الدائرة تزيلها من هذا الهاتف.';
+
+  @override
+  String get leaveCircleDialogAdminNote =>
+      'أنت من مشرفي هذه الدائرة. وقبل مغادرتك، يحاول Haven تعيين عضو آخر مشرفًا كي تواصل الدائرة عملها.';
 
   @override
   String get leaveCircleConfirm => 'مغادرة';
@@ -1255,52 +1352,32 @@ class AppLocalizationsAr extends AppLocalizations {
   String get leaveCircleError => 'تعذّرت مغادرة الدائرة';
 
   @override
-  String get circleBlockedBannerTitle => 'لا يمكن تحديث هذه الدائرة';
-
-  @override
-  String get circleBlockedBannerBody =>
-      'حدث خلل في تشفير هذه الدائرة، فلم يعد Haven قادرًا على إرسال التحديثات فيها أو استقبالها. يمكنك مع ذلك الاطلاع على آخر ما عرفته أدناه، أو مغادرة الدائرة.';
-
-  @override
-  String get legacyCircleBannerTitle => 'يجب إعادة إنشاء هذه الدائرة';
-
-  @override
-  String get legacyCircleBannerBody =>
-      'جرى تحديث محرك التشفير في Haven، فلم يعد بالإمكان استخدام هذه الدائرة. أعد إنشاءها لمواصلة مشاركة الموقع مع الأشخاص أنفسهم. ستحتاج إلى دعوتهم مجددًا.';
-
-  @override
   String get legacyCircleRecreateCta => 'إعادة إنشاء الدائرة';
 
   @override
-  String get legacyCircleRemoveCta => 'إزالة';
+  String get storageResetTitle => 'تم تحديث Haven';
 
   @override
-  String get legacyCircleRemoveDialogTitle => 'إزالة الدائرة؟';
+  String get storageResetKept =>
+      'هويتك لم تتغيّر، ويبقى الملف الشخصي العام الذي نشرته من قبل كما هو.';
 
   @override
-  String get legacyCircleRemoveDialogBody =>
-      'لم يعد بالإمكان استخدام هذه الدائرة وستُزال من قائمتك. لا يؤثر هذا في أي دائرة جديدة تُنشئها لتحل محلها.';
+  String get storageResetLost =>
+      'للانتقال إلى محرّك التشفير الجديد في Haven، أُزيلت الدوائر التي أُنشئت قبل هذا التحديث. أعد إنشاءها وادعُ أعضاءها من جديد. وأُزيلت أيضًا الأسماء المستعارة التي أعطيتها للأشخاص قبل هذا التحديث، وأي تغيير في الملف الشخصي لم يكتمل حفظه حتى ذلك الحين.';
 
   @override
-  String get legacyCircleRemoveConfirm => 'إزالة';
+  String get storageResetRelays =>
+      'أعاد هذا التحديث إعدادات المُرحِّلات إلى الإعدادات الافتراضية في Haven. لن تُنشر هذه الإعدادات حتى تتابع أو تعود من إعدادات المُرحِّلات، لذا يمكنك إضافة مُرحِّلاتك الخاصة أولًا.';
 
   @override
-  String get legacyCutoverExplainerTitle => 'تم تحديث Haven';
+  String get storageResetContinue => 'متابعة';
 
   @override
-  String get legacyCutoverExplainerIdentityUnchanged =>
-      'هويتك وملفك الشخصي العام لم يتغيّرا. ولا يلزمك فعل أي شيء بشأنهما.';
+  String get storageResetOpenRelaySettings => 'إعدادات المُرحِّلات';
 
   @override
-  String get legacyCutoverExplainerCirclesNeedRecreation =>
-      'لتحسين الأمان، يجب إعادة إنشاء دوائرك ودعوة أعضائها مجددًا قبل أن تتمكّن من مشاركة الموقع فيها من جديد.';
-
-  @override
-  String get legacyCutoverExplainerAcknowledge => 'فهمت';
-
-  @override
-  String get relaySettingsLegacyRetractionPending =>
-      'لا يزال Haven يطلب من المُرحِّلات إسقاط بعض البيانات القديمة من التحديث الأمني الأخير.';
+  String get storageResetAcknowledgeFailed =>
+      'تعذّر على Haven حفظ إجابتك. وإلى أن تُحفظ، لن ينشر Haven إعدادات المُرحِّلات الخاصة بك ولا مفتاح الدعوة، فلا يمكن لأحد دعوتك بعد. أعد المحاولة، وإلا فسيسألك Haven من جديد عند فتحه في المرة القادمة.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'لوحة الدوائر مطوية';
@@ -1536,6 +1613,9 @@ class AppLocalizationsAr extends AppLocalizations {
   @override
   String get identityAdvancedDeleteError =>
       'تعذّر حذف الهوية. يُرجى إعادة المحاولة.';
+
+  @override
+  String get identityAdvancedDeletingProgress => 'جارٍ حذف هويتك…';
 
   @override
   String identityAdvancedCopiedToClipboard(String label) {
@@ -1816,7 +1896,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get clockSkewBodyBehind =>
-      'هذا الهاتف متأخّر في التوقيت عن بقية أعضاء دوائرك، فهو يرسل تحديثات موقعك، لكن تنتهي صلاحيتها قبل أن يراها أحد. فعّل ضبط التاريخ والوقت تلقائيًا في إعدادات النظام لحلّ المشكلة.';
+      'هذا الهاتف متأخّر في التوقيت عن بقية أعضاء دوائرك، فهو يرسل تحديثات موقعك، لكن تنتهي صلاحيتها مبكرًا، فقد لا يرى أعضاء دوائرك بعضها أو كلها. فعّل ضبط التاريخ والوقت تلقائيًا في إعدادات النظام لحلّ المشكلة.';
 
   @override
   String get clockSkewResolvedAnnouncement =>
@@ -1902,24 +1982,8 @@ class AppLocalizationsAr extends AppLocalizations {
   String get sharingHealthRepairAction => 'إصلاح';
 
   @override
-  String get sharingHealthRepairUnavailableHint =>
-      'الإصلاح غير متاح لهذه الدائرة';
-
-  @override
-  String get sharingHealthRepairHint =>
-      'يعيد الاتصال بالمُرحِّلات، ويعيد محاولة إرسال موقعك، وقد يمنح الدائرة مفتاحًا جديدًا إن كنت مشرفها';
-
-  @override
   String get sharingHealthRepairSent =>
       'تم إرسال الإصلاح. وسيلحق الآخرون بهذا التغيير بمجرّد أن تستقبله هواتفهم.';
-
-  @override
-  String get sharingHealthRepairNotOwner =>
-      'لا يستطيع إصلاح هذه الدائرة إلا مشرفها. اطلب من المشرف إزالتك ثم إضافتك من جديد.';
-
-  @override
-  String get sharingHealthRepairNeedsNewCircle =>
-      'لا يمكن إصلاح هذه الدائرة على هذا الهاتف. أنشئ دائرةً جديدةً مع الأشخاص أنفسهم.';
 
   @override
   String get sharingHealthRepairNothingToDo =>
@@ -1931,6 +1995,194 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get sharingHealthResumedAnnouncement => 'تعمل مشاركة الموقع من جديد.';
+
+  @override
+  String get sharingHealthTitleQuarantined =>
+      'لا يستطيع Haven فتح هذه الدائرة الآن';
+
+  @override
+  String get sharingHealthBodyQuarantined =>
+      'حدث خطأ أثناء تحميل هذه الدائرة على هذا الهاتف. الدائرة لا تزال موجودة.';
+
+  @override
+  String get sharingHealthTitleDisbanded => 'انتهت هذه الدائرة';
+
+  @override
+  String get sharingHealthBodyDisbanded =>
+      'أنهى مشرفٌ هذه الدائرة، فلم يعد يُشارَك معها أي شيء. ولإزالتها من هذا الهاتف، يمكن مغادرتها.';
+
+  @override
+  String get sharingHealthQuarantineRetryHint =>
+      'يحاول تحميل هذه الدائرة مرة أخرى';
+
+  @override
+  String get sharingHealthQuarantineRetryFailedAnnouncement =>
+      'ما زال Haven لا يستطيع فتح هذه الدائرة.';
+
+  @override
+  String get sharingHealthTitleUnrecoverable =>
+      'توقّفت هذه الدائرة عن العمل على هذا الهاتف';
+
+  @override
+  String get sharingHealthBodyUnrecoverable =>
+      'لم يعد Haven قادرًا على إرسال التحديثات في هذه الدائرة أو استقبالها على هذا الهاتف. يُرجى الطلب من أحد مشرفيها أن يزيلك ثم يضيفك من جديد. وإن لم يستطع أحد ذلك، فيمكن إنشاء دائرة جديدة مع الأشخاص أنفسهم.';
+
+  @override
+  String get sharingHealthTitleStalled =>
+      'لا يستطيع Haven قراءة تحديثات هذه الدائرة';
+
+  @override
+  String get sharingHealthBodyStalled =>
+      'يبدو أنّ هذا الهاتف فاته تغييرٌ في الدائرة، ولم يعثر عليه على المُرحِّلات. يُرجى الطلب من أحد مشرفيها أن يزيلك ثم يضيفك من جديد. وإن لم يستطع أحد ذلك، فيمكن إنشاء دائرة جديدة مع الأشخاص أنفسهم.';
+
+  @override
+  String get sharingHealthTitlePaused => 'أوقف Haven هذه الدائرة مؤقتًا';
+
+  @override
+  String get sharingHealthBodyCollision =>
+      'وجد Haven مشكلة في هذه الدائرة على هذا الهاتف، فأوقف المشاركة معها حفاظًا على خصوصية موقعك. ومغادرة الدائرة هي السبيل الوحيد لحلّ ذلك. ويتطلّب الانضمام إليها من جديد دعوةً جديدة.';
+
+  @override
+  String get sharingHealthBodyCannotCheck =>
+      'تعذّر على Haven التحقق من هذه الدائرة على هذا الهاتف، فأوقف المشاركة معها مؤقتًا حفاظًا على خصوصية موقعك. وسيعيد Haven التحقق منها تلقائيًا.';
+
+  @override
+  String get sharingHealthTitleLeaving => 'جارٍ مغادرة هذه الدائرة';
+
+  @override
+  String get sharingHealthBodyLeaving =>
+      'لا يُشارَك أي شيء مع هذه الدائرة ريثما يُنهي Haven مغادرتها. وقد يستغرق ذلك نحو يوم. وتختفي الدائرة من هذا الهاتف عند الانتهاء.';
+
+  @override
+  String get sharingHealthBodyRemovalUnmade =>
+      'لم تُنفَّذ عملية إزالة طلبتها، لذا أوقف Haven مؤقتًا مشاركة موقعك مع هذه الدائرة كي لا يصل إلى أيّ شخص حاولت إزالته.';
+
+  @override
+  String get sharingHealthBodyRemovalUnmadeNoNotice =>
+      'لم تُنفَّذ عملية إزالة طلبتها، لذا أوقف Haven مؤقتًا مشاركة موقعك مع هذه الدائرة كي لا يصل إلى أيّ شخص حاولت إزالته. يُرجى فتح قائمة الأعضاء لمعرفة مَن لا يزال في الدائرة.';
+
+  @override
+  String get sharingHealthBodyDepartureDue =>
+      'غادر شخصٌ هذه الدائرة ولم تكتمل مغادرته بعد. وإلى أن تكتمل، لا يشارك Haven موقعك مع هذه الدائرة.';
+
+  @override
+  String get sharingHealthTitleBackgroundPaused =>
+      'المشاركة في الخلفية متوقّفة مؤقتًا لهذه الدائرة';
+
+  @override
+  String get sharingHealthBodyAwaitsForeground =>
+      'تغيّرت مُرحِّلات هذه الدائرة بينما كان Haven يعمل في الخلفية. ويُكمل Haven الانتقال إلى المُرحِّلات الجديدة حين يكون مفتوحًا، وحتى ذلك الحين لا تتم المشاركة مع هذه الدائرة في الخلفية.';
+
+  @override
+  String get sharingHealthBodyAwaitingRelays =>
+      'تغييرٌ في هذه الدائرة بانتظار أن يؤكّده أحد المُرحِّلات. وحتى ذلك الحين، لا يرسل Haven موقعك إلى هذه الدائرة ولا يعرض مواقع جديدة منها. ويواصل Haven المحاولة ما دام التطبيق مفتوحًا.';
+
+  @override
+  String get sharingHealthBodyAcknowledged =>
+      'قبِل أحد المُرحِّلات تغييرًا في هذه الدائرة، ويعمل Haven على إكماله. وحتى ذلك الحين، تبقى تحديثات هذه الدائرة معلّقة.';
+
+  @override
+  String get sharingHealthBodyStagedWithoutRecord =>
+      'تعذّر حفظ تغييرٍ في هذه الدائرة، فلم يُرسَل. وسيعالج Haven الأمر في موعدٍ أقصاه تشغيله في المرة القادمة، وحتى ذلك الحين تبقى تحديثات هذه الدائرة معلّقة.';
+
+  @override
+  String get sharingHealthBodyStoredInput =>
+      'لدى هذا الهاتف تحديثات لهذه الدائرة لم يتمكّن من معالجتها بعد. وإلى أن يعالجها، لا يشارك Haven موقعك مع هذه الدائرة.';
+
+  @override
+  String get sharingHealthBodySessionHeld =>
+      'لا يزال Haven يُغلق اتصاله الأخير، لذا توقّفت مشاركة الموقع مؤقتًا. وتُستأنف المشاركة بمجرّد انتهاء ذلك. وإعادة تشغيل هاتفك تحلّ ذلك دائمًا.';
+
+  @override
+  String get sharingHealthRepairHintAnyMember =>
+      'يعيد الاتصال بالمُرحِّلات، ويعيد محاولة إرسال موقعك، وقد يمنح هذه الدائرة مفاتيح تشفير جديدة';
+
+  @override
+  String get sharingHealthAttentionAnnouncement =>
+      'تتطلّب مشاركة الموقع في هذه الدائرة انتباهك. ويمكن معرفة السبب بفتح تفاصيل الدائرة.';
+
+  @override
+  String changeNoticeArrivedAnnouncement(String circleName) {
+    return 'هناك ما يتطلّب انتباهك بشأن التغييرات الأخيرة في الدائرة $circleName. ويمكن قراءته بفتح تفاصيل تلك الدائرة.';
+  }
+
+  @override
+  String get circleDetailsAttentionTooltip =>
+      'تفاصيل الدائرة، بحاجة إلى انتباه';
+
+  @override
+  String circleRowAttentionSemantics(String circleName) {
+    return '$circleName، بحاجة إلى انتباه';
+  }
+
+  @override
+  String get changeNoticeHeading => 'التغييرات في هذه الدائرة';
+
+  @override
+  String get changeNoteRemovalUndone =>
+      'لم يُنفَّذ تغييرٌ في هذه الدائرة. وإن كان هذا التغيير يُزيل أحدًا، فمن كان سيُزال لا يزال في الدائرة، ويستطيع رؤية ما يُشارَك معها.';
+
+  @override
+  String get changeNoteChangeUndone =>
+      'لم يُنفَّذ تغييرٌ في هذه الدائرة، فلم يتغيّر شيء. وإن كان التغيير منك وكنت ما زلت بحاجة إليه، فيمكن إجراؤه من جديد.';
+
+  @override
+  String get changeNoteMayBeOutOfStep =>
+      'ربما وصل تغييرٌ في هذه الدائرة إلى الآخرين دون علم هذا الهاتف، فقد يكون هذا الهاتف غير متزامن معهم.';
+
+  @override
+  String get changeNoteReinviteOwed =>
+      'أحد من دعوتهم مُدرَج في هذه الدائرة لكنه لا يستطيع الانضمام، لأنّ Haven لا يستطيع إرسال الدعوة إليه. يُرجى إزالته ثم إضافته من جديد.';
+
+  @override
+  String get changeNoteChangeUnrecorded =>
+      'تعذّر حفظ تغييرٍ في هذه الدائرة، فلم يُرسَل.';
+
+  @override
+  String get changeNoteQueuedChangeDropped =>
+      'أُلغي تغييرٌ كان ينتظر التنفيذ في هذه الدائرة، لأنه لم يعد ممكنًا تنفيذه كما طُلب. وربما نُفِّذ بالفعل بطريقة أخرى.';
+
+  @override
+  String get changeNoteQueuedChangesHeld =>
+      'لا تزال بعض التغييرات في هذه الدائرة تنتظر التنفيذ.';
+
+  @override
+  String get changeNoteQueuedRemovalDropped =>
+      'لم تُنفَّذ عملية إزالة طلبتها في هذه الدائرة. وربما لا يزال في الدائرة أيّ شخص حاولت إزالته.';
+
+  @override
+  String get changeNoteChangeWithdrawn =>
+      'حلّ تغييرٌ أجراه عضو آخر في هذه الدائرة محلّ أحد تغييراتك، فلم يُنفَّذ تغييرك. ويمكن إجراؤه من جديد إن كنت ما زلت بحاجة إليه.';
+
+  @override
+  String get changeNoteWelcomeOwed =>
+      'لم تُرسَل بعدُ دعوةٌ للانضمام إلى هذه الدائرة. ويواصل Haven إرسالها ما دام التطبيق مفتوحًا، لمدة تصل إلى يوم من وقت الدعوة. وإن لم ينضمّ الشخص بحلول ذلك الوقت، فيُرجى إزالته ثم إضافته من جديد.';
+
+  @override
+  String get changeNoteUnreadLocation =>
+      'تعذّر على هذا الهاتف فتح بعض التحديثات الأخيرة المُرسَلة إلى هذه الدائرة.';
+
+  @override
+  String get changeNoticeStillInCircleLabel => 'مَن لا يزال في الدائرة:';
+
+  @override
+  String get changeNoticeRemoveAgain => 'إعادة الإزالة';
+
+  @override
+  String get changeNoticeReviewMembers => 'مراجعة الأعضاء';
+
+  @override
+  String get changeNoticeKeepMembers => 'الإبقاء في الدائرة';
+
+  @override
+  String get changeNoticeKeepConfirmTitle => 'الإبقاء في الدائرة؟';
+
+  @override
+  String get changeNoticeKeepConfirmBody =>
+      'لن يُوقف Haven المشاركة مع هذه الدائرة مؤقتًا بسبب هذه الإزالة بعد الآن. وأيّ شخص حاولت إزالته ولا يزال في الدائرة سيبقى فيها، ويستطيع رؤية موقعك كلما شاركه Haven مع هذه الدائرة.';
+
+  @override
+  String get changeNoticeKeepConfirmAction => 'الإبقاء';
 
   @override
   String circleMemberLastSeenMinutes(int count) {

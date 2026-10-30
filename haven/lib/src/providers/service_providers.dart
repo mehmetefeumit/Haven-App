@@ -15,6 +15,7 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/locale_provider.dart';
+import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 // Intentional 2-file import cycle with sharing_health_provider.dart: the
@@ -27,6 +28,7 @@ import 'package:haven/src/services/mls_session_handover.dart';
 import 'package:haven/src/services/background_location_task.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/catchup_service.dart';
+import 'package:haven/src/services/change_notices.dart';
 import 'package:haven/src/services/circle_health_service.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/clock_skew_detector.dart';
@@ -197,13 +199,6 @@ final iosLocationPermissionProvider = FutureProvider<IosAuthStatus>((ref) {
 final circleServiceProvider = Provider<CircleService>((ref) {
   return NostrCircleService(
     relayService: ref.read(relayServiceProvider),
-    // REV-1 leaver backstop (driver 2): the foreground service authors leaves,
-    // so it runs the bounded SelfRemove re-issue loop. No identity secret is
-    // wired into the backstop itself — the re-issue publishes under an
-    // ephemeral key (Rule 9: nothing to materialise), and a concurrent-logout
-    // abort is enforced by the service's own `_wiped` latch, not an identity
-    // fetch.
-    enableLeaverBackstop: true,
     // Dark Matter (DM-4): `CircleManagerFfi.newInstance` hard-requires the
     // device identity's secret bytes at construction time (it binds the
     // account identity, the NIP-59 welcome signer, and the
@@ -244,9 +239,29 @@ final circleServiceProvider = Provider<CircleService>((ref) {
 
 /// Provides the relay service singleton.
 ///
-/// Uses [NostrRelayService] in production.
-final relayServiceProvider = Provider<RelayService>((ref) {
-  return NostrRelayService();
+/// Uses [NostrRelayService] in production. Same `circleManagerFactory` shape
+/// as [profileServiceProvider]: a KeyPackage is chosen by what the inviter's
+/// own circle can admit, read through the manager the circle service opened.
+/// Resolved per call, because the circle service is itself built over this
+/// provider — which is also why this one's type is written out: the two
+/// initializers name each other.
+final Provider<RelayService> relayServiceProvider = Provider<RelayService>((
+  ref,
+) {
+  return NostrRelayService(
+    circleManagerFactory: () async {
+      final circleService = ref.read(circleServiceProvider);
+      if (circleService is! NostrCircleService) {
+        throw StateError('circle service is not Nostr-backed');
+      }
+      return circleService.getCircleManagerFfi();
+    },
+    onClockRejected: (complaint) => ref
+        .read(clockSkewDetectorProvider)
+        .recordDriveClockRejection(complaint),
+    onRelayAccepted: () =>
+        ref.read(clockSkewDetectorProvider).recordDriveAccepted(),
+  );
 });
 
 /// Provides the public-Nostr-profile service singleton (M8 F2).
@@ -289,6 +304,20 @@ final memberDirectoryServiceProvider = Provider<MemberDirectoryService>((ref) {
   );
 });
 
+/// Reads change notices, and acknowledges only the ones a screen showed: the
+/// change card in Circle details. The circle service is read at each use.
+final changeNoticesProvider = Provider<ChangeNotices>(
+  (ref) => ChangeNotices(
+    manager: () async {
+      final circleService = ref.read(circleServiceProvider);
+      if (circleService is! NostrCircleService) {
+        throw StateError('circle service is not Nostr-backed');
+      }
+      return circleService.getCircleManagerFfi();
+    },
+  ),
+);
+
 /// Provides the device-clock skew detector singleton.
 ///
 /// A singleton because its whole value is corroboration across sources: the
@@ -327,8 +356,21 @@ final locationSharingServiceProvider = Provider<LocationSharingService>((ref) {
     identityService: ref.read(identityServiceProvider),
     clockSkewDetector: ref.read(clockSkewDetectorProvider),
     healthService: ref.read(circleHealthServiceProvider),
+    onGroupStateChanged: () => _carryOnLeavesPastWaits(ref),
   );
 });
+
+/// A group update an ingest reported may be the commit that ends a leave
+/// this device asked for: every leave is carried on at once, past the waits,
+/// while the app is in front (the lifecycle read stops it otherwise).
+void _carryOnLeavesPastWaits(Ref ref) => _safeInvalidate(
+  () => unawaited(
+    ref
+        .read(maintenanceSchedulerProvider.notifier)
+        .carryOnLeavesNow(inFront: appIsResumed, pastWaits: true),
+  ),
+  'leaveCarryOn',
+);
 
 /// Helper: invalidate a provider, swallowing any failure (Security/robustness —
 /// an invalidation throw must never break the stream loop).
@@ -384,6 +426,80 @@ Future<DecryptedLocation?> parseStreamedLocation(
   }
 }
 
+/// Runs the refused-object refetch when the live engine reports an object it
+/// refused for a local resource bound: the live plane would otherwise leave it
+/// to the next catch-up. Every other reason is ignored.
+@visibleForTesting
+void requestCatchupOnRefetchOwed(
+  FfiSyncStatusReason reason,
+  RefetchCatchupCoalescer catchup,
+) {
+  if (reason != FfiSyncStatusReason.refetchOwed) return;
+  catchup.request();
+}
+
+/// Runs the refused-object refetch at most once at a time, and no sooner than
+/// [minInterval] after the previous one started.
+///
+/// A flood of refusals reports one `refetchOwed` per batch, and each refetch
+/// already asks for everything owed: requests that arrive while one runs, or
+/// within [minInterval] of its start, fold into ONE run afterwards, so an
+/// outsider's flood costs a bounded rate of work, and no request is lost.
+class RefetchCatchupCoalescer {
+  /// Coalesces calls to the refetch it is given. [now] and [wait] are the
+  /// clock and the delay it schedules the trailing run with.
+  RefetchCatchupCoalescer(
+    this._runRefetch, {
+    DateTime Function()? now,
+    Future<void> Function(Duration)? wait,
+    this.minInterval = kRefetchMinInterval,
+  }) : _now = now ?? DateTime.now,
+       _wait = wait ?? Future<void>.delayed;
+
+  final Future<Object?> Function() _runRefetch;
+  final DateTime Function() _now;
+  final Future<void> Function(Duration) _wait;
+
+  /// The least time between the starts of two refetches.
+  final Duration minInterval;
+
+  bool _running = false;
+  bool _trailing = false;
+  DateTime? _lastStart;
+
+  /// Asks for a refetch: now if none ran recently, else once more later.
+  void request() {
+    if (_running) {
+      _trailing = true;
+      return;
+    }
+    unawaited(_drive());
+  }
+
+  Future<void> _drive() async {
+    _running = true;
+    do {
+      _trailing = false;
+      final last = _lastStart;
+      if (last != null) {
+        final due = last.add(minInterval).difference(_now());
+        if (due > Duration.zero) await _wait(due);
+      }
+      _lastStart = _now();
+      try {
+        await _runRefetch();
+      } on Object catch (e) {
+        debugPrint('[LiveSync] refetch failed: ${e.runtimeType}');
+      }
+    } while (_trailing);
+    _running = false;
+  }
+}
+
+/// The least time between two refused-object refetches the live plane asks
+/// for.
+const Duration kRefetchMinInterval = Duration(minutes: 1);
+
 /// Feeds one engine status reason to the sharing-health model's typed
 /// subscription inputs.
 ///
@@ -427,19 +543,25 @@ void recordRelaySubscriptionSignal(
     case FfiSyncStatusReason.sessionStarted:
     case FfiSyncStatusReason.sessionStopped:
     case FfiSyncStatusReason.paused:
+    case FfiSyncStatusReason.refetchOwed:
       break;
   }
 }
 
-/// Provides the live-sync subscription service (M6-3).
+/// Routes the live-sync engine's events into the same providers and
+/// persistence the pollers feed.
 ///
-/// Builds a [LiveSyncFfi] engine (via the single authoritative MLS manager +
-/// the own pubkey) and routes its `liveEvents()` stream into the same providers
-/// + persistence the pollers feed. Inert until `liveSyncEnabled` is flipped on
-/// and a caller invokes `start()`; until then nothing constructs the engine.
-final subscriptionServiceProvider = Provider<SubscriptionService>((ref) {
-  final router = LiveEventRouter(
-    circleService: ref.read(circleServiceProvider),
+/// Every identity-scoped dependency is read at the event, never captured
+/// here: this router, like the service over it, lives for the process, and
+/// one identity's circle service, relay list or pubkey must not be used for
+/// the next (see `identityScopedProviders`). A provider of its own so that
+/// wiring can be driven without the bridge.
+final liveEventRouterProvider = Provider<LiveEventRouter>((ref) {
+  final refetchCatchup = RefetchCatchupCoalescer(
+    () => ref.read(catchupServiceProvider).runRefusedRefetch(),
+  );
+  return LiveEventRouter(
+    circleService: () => ref.read(circleServiceProvider),
     circlesSnapshot: () => ref.read(circlesProvider.future),
     secretBytes: () =>
         ref.read(identityNotifierProvider.notifier).getSecretBytes(),
@@ -454,6 +576,7 @@ final subscriptionServiceProvider = Provider<SubscriptionService>((ref) {
       'memberLocations',
     ),
     onGroupUpdated: (circle) {
+      _carryOnLeavesPastWaits(ref);
       _safeInvalidate(() => ref.invalidate(circlesProvider), 'circles');
       _safeInvalidate(
         () => ref.invalidate(memberLocationsProvider),
@@ -494,11 +617,35 @@ final subscriptionServiceProvider = Provider<SubscriptionService>((ref) {
         ),
         'sharingHealth',
       );
+      _safeInvalidate(
+        () => requestCatchupOnRefetchOwed(reason, refetchCatchup),
+        'catchup',
+      );
     },
+    onClockRejected: (complaint) => _safeInvalidate(
+      () => ref
+          .read(clockSkewDetectorProvider)
+          .recordDriveClockRejection(complaint),
+      'clockSkew',
+    ),
   );
+});
 
+/// Provides the live-sync subscription service (M6-3).
+///
+/// Builds a [LiveSyncFfi] engine (via the single authoritative MLS manager +
+/// the own pubkey) and hands its `liveEvents()` stream to
+/// [liveEventRouterProvider]. Nothing constructs the engine until a caller
+/// invokes `start()`, and nothing does in the `HAVEN_LIVE_SYNC=false` build.
+final subscriptionServiceProvider = Provider<SubscriptionService>((ref) {
   return NostrSubscriptionService(
-    router: router,
+    router: ref.read(liveEventRouterProvider),
+    // Read at the call, not here: the health model watches providers that
+    // read this one, so an eager read would form a cycle.
+    onStopOutcome: (outcome) => _safeInvalidate(
+      () => ref.read(sharingHealthProvider.notifier).recordStopOutcome(outcome),
+      'sharingHealth',
+    ),
     engineFactory: () async {
       final circleService = ref.read(circleServiceProvider);
       if (circleService is! NostrCircleService) {
@@ -562,5 +709,11 @@ final maintenanceServiceProvider = Provider<MaintenanceService>((ref) {
     // fails closed (returns an empty outcome, no publish).
     identitySecretBytes: () =>
         ref.read(identityNotifierProvider.notifier).getSecretBytes(),
+    onReplayed: (replayed) {
+      final circleService = ref.read(circleServiceProvider);
+      if (circleService is NostrCircleService) {
+        circleService.absorbReplayed(replayed);
+      }
+    },
   );
 });

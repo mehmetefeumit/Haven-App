@@ -276,29 +276,30 @@ impl reqwest::dns::Resolve for SsrfGuardResolver {
     }
 }
 
-/// Shared, lazily-built download client (redirects disabled, SSRF-filtered
-/// resolver, generic UA, bounded timeouts, no cookies).
-static DOWNLOAD_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-/// Returns the shared download client, building it on first use.
-///
-/// Never panics on a build failure (maps to [`ProfileError::Http`]); the build
-/// is retried until it succeeds, then cached.
-fn download_client() -> Result<&'static reqwest::Client> {
-    if let Some(client) = DOWNLOAD_CLIENT.get() {
-        return Ok(client);
-    }
-    let client = reqwest::Client::builder()
+/// How a request's client is built (redirects disabled, SSRF-filtered
+/// resolver, generic UA, bounded timeouts, no cookies, no idle connection).
+fn client_builder() -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("Haven")
         .connect_timeout(BLOSSOM_TIMEOUT)
         .timeout(BLOSSOM_TIMEOUT)
-        .dns_resolver(Arc::new(SsrfGuardResolver))
-        .build()
-        .map_err(ProfileError::http)?;
-    // A racing initializer may win; either way `get()` is then `Some`.
-    let _ = DOWNLOAD_CLIENT.set(client);
-    Ok(DOWNLOAD_CLIENT.get().expect("download client just set"))
+        .pool_max_idle_per_host(0)
+        .dns_resolver(Arc::new(SsrfGuardResolver));
+    #[cfg(test)]
+    let builder = tests::trusting_the_test_root(builder);
+    builder
+}
+
+/// A client of its own for one upload or download, built for it and dropped
+/// with it. Nothing of one request is there for the next: no pooled
+/// connection, and no TLS session — rustls keeps resumption tickets in its
+/// client config, one per `reqwest::Client`, so a client shared across a
+/// logout would present the previous identity's ticket to the same host,
+/// which could link the two. The cost is one full handshake per request;
+/// avatars are cached and uploads are rare.
+fn download_client() -> Result<reqwest::Client> {
+    client_builder().build().map_err(ProfileError::http)
 }
 
 // ===========================================================================
@@ -388,7 +389,7 @@ pub async fn upload_profile_picture(
     require_https(server)?;
     // The shared client re-filters at connect time (anti-SSRF, redirects off,
     // bounded timeouts) — the same hardened seam the download path uses.
-    upload_with_client(download_client()?, keys, server, staged).await
+    upload_with_client(&download_client()?, keys, server, staged).await
 }
 
 /// The transport core shared by the public upload and its tests: builds the
@@ -474,7 +475,7 @@ pub async fn download_profile_picture(url: &str) -> Result<ProfilePicture> {
     // Pre-flight resolution + filter: fail fast with a clean InsecureUrl.
     preflight_ssrf_check(&parsed).await?;
     // The shared client's resolver re-filters at connect time (anti-rebinding).
-    download_with_client(download_client()?, &parsed).await
+    download_with_client(&download_client()?, &parsed).await
 }
 
 /// Resolves `url`'s host and rejects if any resolved address is forbidden.
@@ -586,12 +587,227 @@ fn extract_sha256_from_url(url: &url::Url) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    // A mockito `Server` (and its mock guards) must live for the whole test so
-    // the async HTTP round-trips can reach it; `significant_drop_tightening`'s
-    // "drop earlier" suggestion is a false positive here.
     #![allow(clippy::significant_drop_tightening)]
 
     use super::*;
+
+    /// A self-signed certificate for 127.0.0.1 and its PKCS#8 key, made
+    /// once per test process and trusted by no client outside this module's
+    /// tests. Made at run time so that no private key is committed.
+    fn test_tls() -> &'static (Vec<u8>, Vec<u8>) {
+        static TLS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+        TLS.get_or_init(|| {
+            use ring::signature::{EcdsaKeyPair, KeyPair as _, ECDSA_P256_SHA256_ASN1_SIGNING};
+            let rng = ring::rand::SystemRandom::new();
+            let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng)
+                .expect("a test key");
+            let pair =
+                EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng)
+                    .expect("the test key loads");
+            let tlv = |tag: u8, body: &[u8]| -> Vec<u8> {
+                let mut out = vec![tag];
+                match u8::try_from(body.len()) {
+                    Ok(len) if len < 0x80 => out.push(len),
+                    Ok(len) => out.extend([0x81, len]),
+                    Err(_) => {
+                        let len = u16::try_from(body.len()).expect("a short field");
+                        out.push(0x82);
+                        out.extend(len.to_be_bytes());
+                    }
+                }
+                out.extend_from_slice(body);
+                out
+            };
+            let seq = |parts: &[Vec<u8>]| tlv(0x30, &parts.concat());
+            let ecdsa_sha256 = seq(&[tlv(0x06, &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02])]);
+            let name = seq(&[tlv(
+                0x31,
+                &seq(&[
+                    tlv(0x06, &[0x55, 0x04, 0x03]),
+                    tlv(0x0c, b"haven-blossom-test"),
+                ]),
+            )]);
+            let spki = seq(&[
+                seq(&[
+                    tlv(0x06, &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01]),
+                    tlv(0x06, &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]),
+                ]),
+                tlv(0x03, &[&[0][..], pair.public_key().as_ref()].concat()),
+            ]);
+            let loopback_san = seq(&[seq(&[
+                tlv(0x06, &[0x55, 0x1d, 0x11]),
+                tlv(0x04, &seq(&[tlv(0x87, &[127, 0, 0, 1])])),
+            ])]);
+            let tbs = seq(&[
+                tlv(0xa0, &tlv(0x02, &[2])),
+                tlv(0x02, &[1]),
+                ecdsa_sha256.clone(),
+                name.clone(),
+                seq(&[tlv(0x17, b"200101000000Z"), tlv(0x18, b"21000101000000Z")]),
+                name,
+                spki,
+                tlv(0xa3, &loopback_san),
+            ]);
+            let signature = pair
+                .sign(&rng, &tbs)
+                .expect("the test certificate is signed");
+            let certificate = seq(&[
+                tbs,
+                ecdsa_sha256,
+                tlv(0x03, &[&[0][..], signature.as_ref()].concat()),
+            ]);
+            (certificate, pkcs8.as_ref().to_vec())
+        })
+    }
+
+    /// Whether this test process trusts [`test_tls`]'s certificate: set only
+    /// by the TLS test.
+    static TRUST_TEST_ROOT: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// The request client of a test process that trusts the test certificate
+    /// as well.
+    pub(super) fn trusting_the_test_root(
+        builder: reqwest::ClientBuilder,
+    ) -> reqwest::ClientBuilder {
+        if TRUST_TEST_ROOT.load(std::sync::atomic::Ordering::SeqCst) {
+            builder.add_root_certificate(
+                reqwest::Certificate::from_der(&test_tls().0).expect("the test certificate parses"),
+            )
+        } else {
+            builder
+        }
+    }
+
+    /// No TLS session of one Blossom request is resumed by the next: two
+    /// requests in a row to one host each make a FULL handshake, as the server
+    /// that issued them tickets sees it. What a logout leaves behind cannot
+    /// carry the previous identity's session to the next identity's request.
+    #[tokio::test]
+    async fn no_tls_session_outlives_its_request() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        TRUST_TEST_ROOT.store(true, std::sync::atomic::Ordering::SeqCst);
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let (certificate, pkcs8) = test_tls();
+        let certs = vec![rustls::pki_types::CertificateDer::from(certificate.clone())];
+        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
+            rustls::pki_types::PrivatePkcs8KeyDer::from(pkcs8.clone()),
+        );
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("protocol versions")
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("the server certificate");
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let kinds = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&kinds);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let (acceptor, seen) = (acceptor.clone(), Arc::clone(&seen));
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(socket).await else {
+                        return;
+                    };
+                    seen.lock()
+                        .expect("kinds")
+                        .push(tls.get_ref().1.handshake_kind());
+                    let mut request = [0_u8; 1024];
+                    if tls.read(&mut request).await.is_ok_and(|read| read > 0) {
+                        let _ = tls
+                            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")
+                            .await;
+                        let _ = tls.shutdown().await;
+                    }
+                });
+            }
+        });
+        for _ in 0..2 {
+            let body = download_client()
+                .expect("the client builds")
+                .get(format!("https://{address}/"))
+                .send()
+                .await
+                .expect("answered")
+                .bytes()
+                .await
+                .expect("read");
+            assert_eq!(&body[..], b"ok");
+        }
+        server.abort();
+        assert_eq!(
+            *kinds.lock().expect("kinds"),
+            [
+                Some(rustls::HandshakeKind::Full),
+                Some(rustls::HandshakeKind::Full)
+            ],
+            "a request resumed the TLS session an earlier request opened",
+        );
+    }
+
+    /// No connection of the shared client outlives its request: two requests
+    /// to one host in a row open two connections, so nothing one identity
+    /// opened carries the next one's traffic after a logout. Counted at the
+    /// server, an IP literal on loopback (the resolver is never asked).
+    #[tokio::test]
+    async fn no_connection_outlives_its_request() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&accepted);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut request = [0_u8; 1024];
+                    // A connection kept alive answers every request on it.
+                    while socket.read(&mut request).await.is_ok_and(|read| read > 0) {
+                        let answered = socket
+                            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                            .await;
+                        if answered.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let client = client_builder().build().expect("the client builds");
+        for _ in 0..2 {
+            let body = client
+                .get(format!("http://{address}/"))
+                .send()
+                .await
+                .expect("answered")
+                .bytes()
+                .await
+                .expect("read");
+            assert_eq!(&body[..], b"ok");
+        }
+        server.abort();
+        assert_eq!(
+            accepted.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a request rode a connection an earlier request left open",
+        );
+    }
+
+    // A mockito `Server` (and its mock guards) must live for the whole test so
+    // the async HTTP round-trips can reach it; `significant_drop_tightening`'s
+    // "drop earlier" suggestion is a false positive here.
     use crate::avatar::image::process_own_avatar;
     use base64::Engine;
     use image::{codecs::jpeg::JpegEncoder, RgbImage};

@@ -52,6 +52,8 @@ pub mod s20_catchup_sweep;
 pub mod s21_removal_effectiveness;
 pub mod s22_oversized_event;
 pub mod s23_chained_backlog;
+pub mod s24_routing_collision;
+pub mod s25_silent_relays;
 
 use std::fmt;
 use std::time::Duration;
@@ -69,8 +71,8 @@ use crate::rc::Rc;
 use crate::relay::SimRelay;
 use crate::rig::circle::WITNESS_BOUND;
 use crate::rig::{
-    poll_until, sim_magnitude, CircleTag, DeviceTag, LogDrain, PublishVerdict, RelayPlane,
-    RigError, SimCircle, SimDevice, SimWorld, Step, TimelineSink,
+    poll_until, sim_magnitude, Change, Changed, CircleTag, DeviceTag, LogDrain, PublishVerdict,
+    RelayPlane, RigError, SimCircle, SimDevice, SimWorld, Step, TimelineSink,
 };
 
 /// The world every scenario runs against.
@@ -191,6 +193,16 @@ pub enum WithheldAcks {
     /// This many LOCATION publishes go unacknowledged: one bounded attempt
     /// each, with no retry behind it.
     Locations(u32),
+    /// This many drives of the product's durable-fanout driver go
+    /// unacknowledged: each waits out one call of MDK's relay client and
+    /// leaves the commit staged, with no witness poll behind it — the arm
+    /// reads the relay's own store when the drive returns.
+    FanoutDrives(u32),
+    /// This many sends of the product's durable-fanout driver are cut by a
+    /// process death between the send and its relay's answer: the stored
+    /// record is sent again when that relay is next due, and the arm waits
+    /// that out before the re-send can be acknowledged.
+    FanoutResends(u32),
 }
 
 impl WithheldAcks {
@@ -199,7 +211,10 @@ impl WithheldAcks {
     pub fn count(self, shape: &WorldShape) -> u32 {
         match self {
             Self::None => 0,
-            Self::Fixed(count) | Self::Locations(count) => count,
+            Self::Fixed(count)
+            | Self::Locations(count)
+            | Self::FanoutDrives(count)
+            | Self::FanoutResends(count) => count,
             // The admin welcomes everybody but itself; a circle of one cannot
             // be built, so this is never zero in a world the rig can construct.
             Self::PerInvitedMember => u32::try_from(shape.members)
@@ -223,6 +238,8 @@ impl WithheldAcks {
             return Duration::ZERO;
         }
         let ladder = match self {
+            Self::FanoutDrives(_) => return bounds::fanout_call_ceiling() * count,
+            Self::FanoutResends(_) => return bounds::fanout_resend_after_silence() * count,
             Self::Locations(_) => bounds::location_publish_window(),
             Self::None | Self::Fixed(_) | Self::PerInvitedMember => {
                 bounds::withheld_publish_ladder()
@@ -268,6 +285,11 @@ pub enum Absence {
     /// edge, and a shortened one would let the sweep recover what the arm set
     /// out to bury.
     ResubscribeLookback,
+    /// Haven's spacing between the starts of two NIP-77 passes: let pass so
+    /// the sweep an arm drives begins a pass of its own. A span the arm lets
+    /// pass, not an absence it asserts, priced and never scaled for the
+    /// lookback's reasons.
+    NegentropySpacing,
 }
 
 impl Absence {
@@ -286,6 +308,7 @@ impl Absence {
             Self::DeliverySilenceWindow => bounds::silence_window(),
             Self::RemovalPublishTail => bounds::location_publish_window(),
             Self::ResubscribeLookback => bounds::resubscribe_lookback(),
+            Self::NegentropySpacing => bounds::negentropy_spacing(),
         }
     }
 }
@@ -309,7 +332,7 @@ pub enum Scenario {
     /// retires it.
     StuckRow,
     /// **S08** — a commit buried on the live plane under a page of forgeries
-    /// past the relay's replay cap. Expected red until C8 is fixed.
+    /// past the relay's replay cap, recovered by the NIP-77 pass (C8).
     LivePlaneBurial,
     /// **S09** — an adversary forges at a circle's public routing id for the
     /// whole run, and neither receive plane's anchor takes a number from it.
@@ -336,10 +359,11 @@ pub enum Scenario {
     /// **S10** — the whole roster: ten circles on one account, one outage
     /// across all of them.
     TenCircleRoster,
-    /// **S23** — a device misses two chained commits and never converges
-    /// again. Expected red until C7 is fixed.
+    /// **S23** — a device misses two chained commits and still converges once
+    /// they arrive (red until C7's fix).
     ChainedBacklog,
-    /// **S16** — durable-storage growth: three floods, three stores, one cap.
+    /// **S16** — durable-storage growth: three floods over three stores with
+    /// one cap, and one table ordinary traffic grows without bound.
     StorageGrowth,
     /// **S21** — a removed member stops reading the circle, on both delivery
     /// paths, and the removal-effectiveness lag is bounded (invariant S8).
@@ -347,11 +371,17 @@ pub enum Scenario {
     /// **S20** — the catch-up sweep against clamped, refused, cold and forged
     /// pages (RLY-05).
     CatchupSweep,
+    /// **S24** — two circles on distinct relays share one routing id: both
+    /// held, and each leave kept to its own circle's relays.
+    RoutingCollision,
+    /// **S25** — a circle's relay never answers and another never ends its
+    /// replay: the circle advances without them and loses nothing they held.
+    SilentRelays,
 }
 
 impl Scenario {
     /// Every scenario this crate runs.
-    pub const REGISTRY: [Self; 21] = [
+    pub const REGISTRY: [Self; 23] = [
         Self::RelayOutage,
         Self::ReceiverPartition,
         Self::LostCommit,
@@ -373,6 +403,8 @@ impl Scenario {
         Self::RemovalEffectiveness,
         Self::OversizedEvent,
         Self::ChainedBacklog,
+        Self::RoutingCollision,
+        Self::SilentRelays,
     ];
 
     /// The id the profiles, the timeline and `--list-scenarios` spell.
@@ -400,6 +432,8 @@ impl Scenario {
             Self::StorageGrowth => "S16",
             Self::RemovalEffectiveness => "S21",
             Self::CatchupSweep => "S20",
+            Self::RoutingCollision => "S24",
+            Self::SilentRelays => "S25",
         }
     }
 
@@ -428,6 +462,8 @@ impl Scenario {
             Self::StorageGrowth => "DURABLE-STORAGE GROWTH",
             Self::RemovalEffectiveness => "BOUNDED REMOVAL EFFECTIVENESS",
             Self::CatchupSweep => "CATCH-UP SWEEP UNDER PAGE FAULTS",
+            Self::RoutingCollision => "ROUTING COLLISION ON DISTINCT RELAYS",
+            Self::SilentRelays => "DEAD AND EOSE-SILENT RELAYS",
         }
     }
 
@@ -456,6 +492,8 @@ impl Scenario {
             Self::StorageGrowth => &s16_storage_growth::ARMS,
             Self::RemovalEffectiveness => &s21_removal_effectiveness::ARMS,
             Self::CatchupSweep => &s20_catchup_sweep::ARMS,
+            Self::RoutingCollision => &s24_routing_collision::ARMS,
+            Self::SilentRelays => &s25_silent_relays::ARMS,
         }
     }
 
@@ -501,28 +539,44 @@ impl Scenario {
         tick: Duration,
     ) -> Result<ScenarioReport, RigError> {
         let started = tokio::time::Instant::now();
+        // Each arm's future boxed: their sum on one frame is past what a
+        // worker's stack should hold.
         let outcome = match self {
-            Self::RelayOutage => s01_relay_outage::run(world, arm, tick).await?,
-            Self::ReceiverPartition => s02_receiver_partition::run(world, arm, tick).await?,
-            Self::LostCommit => s03_lost_commit::run(world, arm, tick).await?,
-            Self::OfflineMember => s04_offline_member::run(world, arm, tick).await?,
-            Self::PublishConfirmWindow => s05_publish_confirm::run(world, arm, tick).await?,
-            Self::StuckRow => s06_stuck_row::run(world, arm, tick).await?,
-            Self::LivePlaneBurial => s08_live_plane_burial::run(world, arm, tick).await?,
-            Self::CursorPoisoning => s09_cursor_poisoning::run(world, arm, tick).await?,
-            Self::QuietCircle => s11_quiet_circle::run(world, arm, tick).await?,
-            Self::KeyPackageRotation => s12_key_package_rotation::run(world, arm, tick).await?,
-            Self::HydrationQuarantine => s13_quarantine::run(world, arm, tick).await?,
-            Self::RestartRace => s14_restart_race::run(world, arm, tick).await?,
-            Self::ClosedPrefixes => s17_closed_prefixes::run(world, arm, tick).await?,
-            Self::SwallowedOk => s18_swallowed_ok::run(world, arm, tick).await?,
-            Self::DuplicateReorder => s19_duplicate_reorder::run(world, arm, tick).await?,
-            Self::OversizedEvent => s22_oversized_event::run(world, arm, tick).await?,
-            Self::TenCircleRoster => s10_ten_circles::run(world, arm, tick).await?,
-            Self::ChainedBacklog => s23_chained_backlog::run(world, arm, tick).await?,
-            Self::StorageGrowth => s16_storage_growth::run(world, arm, tick).await?,
-            Self::RemovalEffectiveness => s21_removal_effectiveness::run(world, arm, tick).await?,
-            Self::CatchupSweep => s20_catchup_sweep::run(world, arm, tick).await?,
+            Self::RelayOutage => Box::pin(s01_relay_outage::run(world, arm, tick)).await?,
+            Self::ReceiverPartition => {
+                Box::pin(s02_receiver_partition::run(world, arm, tick)).await?
+            }
+            Self::LostCommit => Box::pin(s03_lost_commit::run(world, arm, tick)).await?,
+            Self::OfflineMember => Box::pin(s04_offline_member::run(world, arm, tick)).await?,
+            Self::PublishConfirmWindow => {
+                Box::pin(s05_publish_confirm::run(world, arm, tick)).await?
+            }
+            Self::StuckRow => Box::pin(s06_stuck_row::run(world, arm, tick)).await?,
+            Self::LivePlaneBurial => Box::pin(s08_live_plane_burial::run(world, arm, tick)).await?,
+            Self::CursorPoisoning => Box::pin(s09_cursor_poisoning::run(world, arm, tick)).await?,
+            Self::QuietCircle => Box::pin(s11_quiet_circle::run(world, arm, tick)).await?,
+            Self::KeyPackageRotation => {
+                Box::pin(s12_key_package_rotation::run(world, arm, tick)).await?
+            }
+            Self::HydrationQuarantine => Box::pin(s13_quarantine::run(world, arm, tick)).await?,
+            Self::RestartRace => Box::pin(s14_restart_race::run(world, arm, tick)).await?,
+            Self::ClosedPrefixes => Box::pin(s17_closed_prefixes::run(world, arm, tick)).await?,
+            Self::SwallowedOk => Box::pin(s18_swallowed_ok::run(world, arm, tick)).await?,
+            Self::DuplicateReorder => {
+                Box::pin(s19_duplicate_reorder::run(world, arm, tick)).await?
+            }
+            Self::OversizedEvent => Box::pin(s22_oversized_event::run(world, arm, tick)).await?,
+            Self::TenCircleRoster => Box::pin(s10_ten_circles::run(world, arm, tick)).await?,
+            Self::ChainedBacklog => Box::pin(s23_chained_backlog::run(world, arm, tick)).await?,
+            Self::StorageGrowth => Box::pin(s16_storage_growth::run(world, arm, tick)).await?,
+            Self::RemovalEffectiveness => {
+                Box::pin(s21_removal_effectiveness::run(world, arm, tick)).await?
+            }
+            Self::CatchupSweep => Box::pin(s20_catchup_sweep::run(world, arm, tick)).await?,
+            Self::RoutingCollision => {
+                Box::pin(s24_routing_collision::run(world, arm, tick)).await?
+            }
+            Self::SilentRelays => Box::pin(s25_silent_relays::run(world, arm, tick)).await?,
         };
         Ok(self.report(world, arm, outcome, started))
     }
@@ -822,60 +876,51 @@ where
         .is_none())
 }
 
-/// Stages a relay-list commit on `device` and resolves it under Rule 13.
+/// Changes `circle`'s relay list from `device`, through the product driver.
 ///
-/// Returns the commit event and how it was resolved. The confirm happens ONLY
-/// on a ledger-witnessed acknowledgement; without one the staged state is
-/// rolled back, because a commit that was merged without being published forks
-/// the group for every member that never sees it.
+/// Returns the commit the driver sent and where it stands when the call
+/// returns: confirmed on a relay's `OK`, rolled back only when every relay
+/// proved it refused, otherwise pending and sent again on its relays'
+/// schedule (Rule 13, the product's own).
+///
+/// # Errors
+///
+/// [`RigError::Core`] with [`Step::StageCommit`] if the product refused the
+/// change or sent no commit for it.
 pub(crate) async fn relay_update<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     device: DeviceTag,
     circle: &SimCircle,
     relays: &[String],
 ) -> Result<(Event, PublishVerdict), RigError> {
-    let guard = world.note_pending_staged();
-    let sender = world.device(device)?;
-    let manager = sender.manager()?;
-    let staged = manager
-        .update_circle_relays(circle.mls_group_id(), relays)
-        .await
-        .map_err(|_| RigError::Core(Step::CreateCircle))?;
-    let event = staged.commit_event.clone();
-    let witnessed = world
-        .publish_witnessed(device, std::slice::from_ref(&event))
-        .await?;
-    // Either rung ends in the engine's replay, so either can hand back work.
-    // It goes down the rig's one Rule-13 ladder rather than on the floor.
-    let (verdict, ingest) = if witnessed.is_some() {
-        let ingest = manager
-            .finalize_relay_update(staged.pending, circle.mls_group_id())
-            .await
-            .map_err(|_| RigError::Core(Step::ConfirmPublished))?;
-        (PublishVerdict::Confirmed, ingest)
-    } else {
-        let ingest = manager
-            .publish_failed(staged.pending)
-            .await
-            .map_err(|_| RigError::Core(Step::RollBackPublish))?;
-        (PublishVerdict::RolledBack, ingest)
-    };
-    world.resolve_ingest(device, ingest).await?;
-    drop(guard);
-    Ok((event, verdict))
+    committed(
+        world
+            .change(
+                device,
+                Change::Relays {
+                    group: circle.mls_group_id(),
+                    relays,
+                },
+            )
+            .await?,
+    )
 }
 
-/// Removes `victim` from `circle` under `admin`, resolved under Rule 13.
+/// The commit a change sent, with its verdict; an error when it sent none.
+fn committed(changed: Changed) -> Result<(Event, PublishVerdict), RigError> {
+    let verdict = changed.verdict;
+    changed
+        .commit
+        .map(|commit| (commit, verdict))
+        .ok_or(RigError::Core(Step::StageCommit))
+}
+
+/// Removes `victim` from `circle` under `admin`, through the product driver.
 ///
 /// Public, unlike [`relay_update`], because the rig's membership ops are a
 /// capability of this crate rather than of one scenario: the arms that need
 /// them are not all written yet, and the crate's own tests drive them
 /// meanwhile.
-///
-/// The membership sibling of [`relay_update`], and the same shape: stage,
-/// publish-and-witness, confirm on an ack or roll back without one, drain the
-/// engine's replay. The commit event comes back so a scenario can withhold it,
-/// forge against it or watch for it on a plane.
 ///
 /// The world's own roster table is NOT updated, deliberately: no oracle reads
 /// [`SimCircle::members`] — every roster verdict is read from the product's own
@@ -884,8 +929,8 @@ pub(crate) async fn relay_update<T: TimelineSink, L: LogDrain>(
 ///
 /// # Errors
 ///
-/// [`RigError::Core`] naming the step that failed: staging (the engine refused
-/// the removal, e.g. the caller is not an admin) or the Rule-13 resolution.
+/// [`RigError::Core`] with [`Step::StageCommit`] if the product refused the
+/// removal (e.g. the caller is not an admin) or sent no commit for it.
 pub async fn remove_member<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     admin: DeviceTag,
@@ -893,34 +938,31 @@ pub async fn remove_member<T: TimelineSink, L: LogDrain>(
     victim: DeviceTag,
 ) -> Result<(Event, PublishVerdict), RigError> {
     let victim_pubkey = world.device(victim)?.pubkey_hex();
-    let staged = world
-        .device(admin)?
-        .manager()?
-        .remove_members(circle.mls_group_id(), std::slice::from_ref(&victim_pubkey))
-        .await
-        .map_err(|_| RigError::Core(Step::StageCommit))?;
-    let commit = staged.commit_event.clone();
-    let verdict = world
-        .publish_and_confirm(admin, staged.pending, std::slice::from_ref(&commit))
-        .await?;
-    Ok((commit, verdict))
+    committed(
+        world
+            .change(
+                admin,
+                Change::Remove {
+                    group: circle.mls_group_id(),
+                    members: std::slice::from_ref(&victim_pubkey),
+                },
+            )
+            .await?,
+    )
 }
 
-/// Adds `joiner` to `circle` under `admin`, and joins it from its own welcome.
+/// Adds `joiner` to `circle` under `admin`, through the product driver, and
+/// joins it from its own welcome.
 ///
-/// The welcomes go out with the commit and the whole batch is resolved once:
-/// haven-core stages one pending state for an add, and a rig that confirmed the
-/// commit while a welcome was still in flight would be inventing a second
-/// Rule-13 window the product does not have.
-///
-/// The joiner processes its welcome only on a CONFIRMED add: a rolled-back
-/// commit means the group never advanced, and a member that joined from its
-/// welcome anyway would be a member of an epoch nobody else holds.
+/// The driver sends each Welcome only once its invite's commit is applied on
+/// the admin's device, so the joiner processes one only after a CONFIRMED
+/// add: a member that joined from a welcome whose commit nobody holds would be
+/// a member of an epoch nobody else holds.
 ///
 /// # Errors
 ///
 /// [`RigError::Core`] naming the step that failed: minting the joiner's key
-/// package, staging the add, the Rule-13 resolution, or the join itself.
+/// package, the change, or the join itself.
 pub async fn add_member<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     admin: DeviceTag,
@@ -933,67 +975,62 @@ pub async fn add_member<T: TimelineSink, L: LogDrain>(
         build_kp_maintenance_events(joining.session()?, &joining.keys, &urls, None, None)
             .await
             .map_err(|_| RigError::Core(Step::MintKeyPackage))?;
-    let sender = world.device(admin)?;
-    let staged = sender
-        .manager()?
-        .add_members_with_welcomes(
-            &sender.keys,
-            circle.mls_group_id(),
-            vec![MemberKeyPackage {
-                key_package_event: key_package.event,
-                // Explicit, always: an empty relay set falls back to the
-                // PRODUCTION default pool, which would take the welcome off
-                // this world's relay and onto the public network.
-                inbox_relays: urls.clone(),
-                nip65_relays: Vec::new(),
-            }],
-            &urls,
+    let members = [MemberKeyPackage {
+        key_package_event: key_package.event,
+        // Explicit, always: an empty relay set falls back to the PRODUCTION
+        // default pool, which would take the welcome off this world's relay
+        // and onto the public network.
+        inbox_relays: urls.clone(),
+        nip65_relays: Vec::new(),
+    }];
+    let changed = world
+        .change(
+            admin,
+            Change::Add {
+                group: circle.mls_group_id(),
+                members: &members,
+            },
         )
-        .await
-        .map_err(|_| RigError::Core(Step::StageCommit))?;
-
-    let commit = staged.commit_event.clone();
-    let mut batch = vec![commit.clone()];
-    batch.extend(
-        staged
-            .welcome_events
-            .iter()
-            .map(|welcome| welcome.event.clone()),
-    );
-    let verdict = world
-        .publish_and_confirm(admin, staged.pending, &batch)
         .await?;
-    if verdict == PublishVerdict::Confirmed {
-        for welcome in &staged.welcome_events {
-            if welcome.recipient_pubkey != joining.pubkey_hex() {
+    if changed.verdict == PublishVerdict::Confirmed {
+        let joiner_hex = joining.pubkey_hex();
+        for welcome in &changed.welcomes {
+            if !addressed_to(welcome, &joiner_hex) {
                 continue;
             }
             joining
                 .manager()?
-                .process_gift_wrapped_invitation(&joining.keys, &welcome.event)
+                .process_gift_wrapped_invitation(&joining.keys, welcome)
                 .await
                 .map_err(|_| RigError::Core(Step::ProcessInvitation))?;
             joining
                 .manager()?
-                .accept_invitation(&welcome.event.id)
+                .accept_invitation(&welcome.id)
                 .await
                 .map_err(|_| RigError::Core(Step::AcceptInvitation))?;
         }
     }
-    Ok((commit, verdict))
+    committed(changed)
 }
 
-/// Makes `successor` an admin of `circle`, resolved under Rule 13.
+/// Whether gift wrap `welcome` names `pubkey_hex` as its recipient.
+fn addressed_to(welcome: &Event, pubkey_hex: &str) -> bool {
+    welcome.tags.iter().any(|tag| {
+        tag.kind() == nostr::TagKind::p() && tag.content().is_some_and(|value| value == pubkey_hex)
+    })
+}
+
+/// Makes `successor` an admin of `circle`, through the product driver.
 ///
 /// An ADDITIVE policy update, which is what the product's own call is: the
 /// existing admins keep the bit. A scenario that needs the handing-off device
-/// to lose it demotes itself afterwards, which is a second commit and a second
-/// Rule-13 window.
+/// to lose it demotes itself afterwards, which is a second commit.
 ///
 /// # Errors
 ///
-/// [`RigError::Core`] naming the step that failed: staging (the caller is not
-/// an admin, or the successor holds no leaf in the group) or the resolution.
+/// [`RigError::Core`] with [`Step::StageCommit`] if the product refused it
+/// (the caller is not an admin, or the successor holds no leaf in the group)
+/// or sent no commit for it.
 pub async fn hand_off_admin<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     admin: DeviceTag,
@@ -1001,17 +1038,152 @@ pub async fn hand_off_admin<T: TimelineSink, L: LogDrain>(
     successor: DeviceTag,
 ) -> Result<(Event, PublishVerdict), RigError> {
     let successor_pubkey = world.device(successor)?.keys.public_key();
-    let staged = world
-        .device(admin)?
-        .manager()?
-        .propose_admin_handoff(circle.mls_group_id(), &successor_pubkey)
+    committed(
+        world
+            .change(
+                admin,
+                Change::AdminHandoff {
+                    group: circle.mls_group_id(),
+                    successor: &successor_pubkey,
+                },
+            )
+            .await?,
+    )
+}
+
+/// One commit staged under its durable record, and its frozen event.
+///
+/// No `Debug`: the event is signed, and an event id is an identifier.
+pub(crate) struct Recorded {
+    /// The record.
+    pub id: haven_core::nostr::mls::types::FanoutId,
+    /// The frozen event the driver sends, byte for byte.
+    pub commit: Event,
+}
+
+/// `device`'s one commit record for `circle` still pending, with its frozen
+/// event; `None` when it holds none.
+///
+/// # Errors
+///
+/// [`RigError::Core`] if a record cannot be read.
+pub(crate) async fn pending_record(
+    device: &SimDevice,
+    circle: &haven_core::nostr::mls::types::GroupId,
+) -> Result<Option<Recorded>, RigError> {
+    use nostr::JsonUtil as _;
+    let session = device.session()?;
+    for id in session
+        .fanout_ids_for_test(circle)
         .await
-        .map_err(|_| RigError::Core(Step::StageCommit))?;
-    let commit = staged.commit_event.clone();
-    let verdict = world
-        .publish_and_confirm(admin, staged.pending, std::slice::from_ref(&commit))
-        .await?;
-    Ok((commit, verdict))
+        .map_err(|_| RigError::Core(Step::ReadConvergenceState))?
+    {
+        let Some(probe) = session
+            .fanout_probe_for_test(&id)
+            .await
+            .map_err(|_| RigError::Core(Step::ReadConvergenceState))?
+        else {
+            continue;
+        };
+        if probe.mls == haven_core::nostr::mls::types::FanoutMls::Pending {
+            let commit =
+                Event::from_json(&probe.payload).map_err(|_| RigError::Core(Step::StageCommit))?;
+            return Ok(Some(Recorded { id, commit }));
+        }
+    }
+    Ok(None)
+}
+
+/// `leaver` leaves `circle` through the product driver, and `committer` is
+/// handed the proposal — then fixes of `ticker`, stamped `round` — through the
+/// app's poll (`Publishing::ingest_for_poll`) until the eviction the leave asks
+/// for is staged under its record. Returns that record.
+///
+/// The CALLER makes the committer's relays unreachable first: the drive that
+/// stages the eviction then sends nothing a relay could hold, so the commit is
+/// read off its record before any relay is handed it. The engine schedules
+/// the auto-commit behind a short jitter and stages it on the next
+/// convergence tick, so the loop re-ticks with a fresh fix rather than
+/// waiting: a tick is what advances convergence, and a sleep would be waiting
+/// for a clock instead of for the state.
+///
+/// # Errors
+///
+/// [`RigError::Core`] with [`Step::StageCommit`] if the leave sent no
+/// proposal or the eviction never surfaced inside the round trip: the arm then
+/// reached nothing it records — "this proved nothing", not a finding.
+pub(crate) async fn surface_eviction<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    committer: DeviceTag,
+    leaver: DeviceTag,
+    (ticker, round): (DeviceTag, u32),
+    circle: &SimCircle,
+) -> Result<Recorded, RigError> {
+    let group = circle.mls_group_id();
+    let (_, sent, _) = world.leave(leaver, group).await?;
+    let proposal = sent
+        .into_iter()
+        .find(|event| {
+            crate::nemesis::types::DropClass::of(event)
+                == Some(crate::nemesis::types::DropClass::Handshake)
+        })
+        .ok_or(RigError::Core(Step::StageCommit))?;
+    let _ = world.ingest(committer, &proposal).await?;
+    let bound = bounds::round_trip(Recovery::Undisturbed);
+    let started = tokio::time::Instant::now();
+    let mut index = 0_u32;
+    loop {
+        if let Some(recorded) = pending_record(world.device(committer)?, group).await? {
+            return Ok(recorded);
+        }
+        if started.elapsed() >= bound {
+            return Err(RigError::Core(Step::StageCommit));
+        }
+        index = index.wrapping_add(1);
+        let sender = world.device(ticker)?;
+        let fix = sender
+            .manager()?
+            .seal_location_for_test(
+                group,
+                &crate::oracle::ProbeToken::mint(round, index).as_location(),
+            )
+            .await
+            .map(|(event, _, _)| event)
+            .map_err(|_| RigError::Core(Step::Publish))?;
+        let _ = world.ingest(committer, &fix).await?;
+    }
+}
+
+/// Drives `device`'s stored records, the pacing clock stepped past each wait
+/// the drive announces, until `circle` holds no pending commit record — at
+/// most `drives` times. Whether it got there.
+///
+/// # Errors
+///
+/// [`RigError`] if a drive or a record read failed.
+pub(crate) async fn drive_until_settled<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    device: DeviceTag,
+    circle: &haven_core::nostr::mls::types::GroupId,
+    clock: &crate::rig::PacingClock,
+    drives: usize,
+) -> Result<bool, RigError> {
+    for _ in 0..drives {
+        let outcome = world.resume_paced(device, clock).await?;
+        let Some(pending) = pending_record(world.device(device)?, circle).await? else {
+            return Ok(true);
+        };
+        // The device's own live engine may hold the record in a call of its
+        // own — one a fault swallowed the answer to, waiting out MDK's call
+        // ceiling. A paced drive meanwhile finds it busy and sends nothing,
+        // so the next one waits for that call to let go: the product's own
+        // bound, never a margin of the rig's.
+        haven_core::relay::fanout::fanout_row_let_go_for_test(&pending.id).await;
+        clock.step(outcome.retry_after_ms.unwrap_or(0));
+    }
+    Ok(pending_record(world.device(device)?, circle)
+        .await?
+        .is_none())
 }
 
 /// How many location deliveries `device` has folded for `circle`.
@@ -1035,8 +1207,6 @@ mod tests {
     use crate::rig::doubles::{RecordingTimeline, StubDrain};
     use crate::rig::{CircleTag, DeviceTag, RelayPlane, RelayTag, SimWorld};
     use haven_core::nostr::mls::types::ConvergedRoster;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::Arc;
     use std::time::Duration;
 
     /// The world the membership cases run in: three real devices on a real
@@ -1072,9 +1242,7 @@ mod tests {
         build_circle(
             CircleTag::new(9),
             &world.devices()[..2],
-            world.relays(),
             &world.relay_urls(),
-            &Arc::new(AtomicUsize::new(0)),
         )
         .await
         .expect("a two-member circle is created")
@@ -1238,20 +1406,28 @@ mod tests {
         // The successor's own engine has to have APPLIED the handoff before it
         // can use it, and in this world nothing delivers it: the commit goes
         // in through the same ingest a live plane would use.
-        world
+        let session = world
             .device(successor)
             .expect("a device")
             .session()
-            .expect("a session")
+            .expect("a session");
+        session
             .process_event_typed_for_test(&commit)
             .await
             .expect("the successor ingests the handoff commit")
             .ingested()
             .expect("a handoff commit is not screened before authentication");
-
-        let (_, verdict) = hand_off_admin(&world, successor, &circle, admin)
+        // MDK v0.10.4 holds a peer commit for its quiescence window.
+        session
+            .settle_receive_for_test(circle.mls_group_id())
             .await
-            .expect("the new admin can now commit a policy change of its own");
+            .expect("the successor applies the handoff");
+
+        // The very change it was refused above. (Handing the bit back would be
+        // no change at all: the first admin still holds it.)
+        let (_, verdict) = remove_member(&world, successor, &circle, admin)
+            .await
+            .expect("the new admin can now commit a membership change of its own");
         assert!(
             verdict == PublishVerdict::Confirmed,
             "the successor holds the admin bit the handoff gave it"
@@ -1427,6 +1603,15 @@ mod tests {
                 == quiet.deadline(tick, &wide) + bounds::location_publish_window() + WITNESS_BOUND,
             "a withheld location pays one bounded attempt and one witness bound"
         );
+        // A drive of the durable-fanout driver is neither: it waits out one
+        // call of MDK's relay client and polls for nothing afterwards.
+        let mut driven = quiet;
+        driven.withheld_acks = WithheldAcks::FanoutDrives(1);
+        assert!(
+            driven.deadline(tick, &wide)
+                == quiet.deadline(tick, &wide) + bounds::fanout_call_ceiling(),
+            "a withheld fanout drive pays one call ceiling and no witness bound"
+        );
         assert!(
             located.deadline(tick, &wide) < one.deadline(tick, &wide),
             "and strictly less than the same arm withholding a commit"
@@ -1460,6 +1645,7 @@ mod tests {
             Absence::DeliverySilenceWindow,
             Absence::RemovalPublishTail,
             Absence::ResubscribeLookback,
+            Absence::NegentropySpacing,
         ] {
             let window = absence.window();
             assert!(

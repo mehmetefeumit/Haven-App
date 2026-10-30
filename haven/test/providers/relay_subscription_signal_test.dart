@@ -11,6 +11,7 @@
 /// depends on a wall clock or a sleep.
 library;
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -24,11 +25,13 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/rust/api.dart' show FfiSyncStatusReason;
 import 'package:haven/src/services/circle_health_service.dart';
+import 'package:haven/src/services/circle_service.dart' show Circle;
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/maintenance_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
+import '../helpers/log_capture.dart';
 import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_profile_service.dart';
 import '../mocks/mock_relay_service.dart';
@@ -73,6 +76,10 @@ class _Harness {
         ...extraOverrides,
         sharingHealthClockProvider.overrideWithValue(() => now),
         circleHealthServiceProvider.overrideWithValue(_StubHealthService()),
+        // The model reads the core's recovery cause and listens to the circle
+        // list: neither may reach the real, uninitialisable circle service.
+        circleServiceProvider.overrideWithValue(MockCircleService()),
+        circlesProvider.overrideWith((ref) async => const <Circle>[]),
         selectedCircleProvider.overrideWithValue(
           TestCircleFactory.createCircle(
             members: [
@@ -104,7 +111,9 @@ class _Harness {
     await container.read(identityProvider.future);
     await container.read(memberLocationsProvider.future);
     await health.refresh();
-    return container.read(sharingHealthProvider);
+    // Which circle the verdict is about is held by its own test; the
+    // assertions here are about the verdict itself.
+    return container.read(sharingHealthProvider).about(null);
   }
 
   void advance(Duration by) => now = now.add(by);
@@ -128,6 +137,8 @@ void main() {
     expect(await h.settle(), SharingHealth.paused(
       SharingPausedReason.receiveSubscriptionLost,
       _t0,
+      // No delivery is stored, so no age is provable from the onset.
+      ageProvable: false,
     ));
   });
 
@@ -227,8 +238,8 @@ void main() {
 
   test('the production status hook feeds BOTH consumers', () {
     // The mapping above is only worth testing if something calls it. The
-    // router's `onStatus` closure is built inside `subscriptionServiceProvider`
-    // and reachable only through the private router field, so this is pinned
+    // router's `onStatus` closure is built inside `liveEventRouterProvider`,
+    // over notifiers a host container cannot stand in for, so this is pinned
     // over the source — the same fallback `map_shell_*` tests use.
     final source = File(
       'lib/src/providers/service_providers.dart',
@@ -252,11 +263,114 @@ void main() {
           "engine's RelayError reaches nothing that can tell the user",
     );
     expect(
-      '_safeInvalidate('.allMatches(body).length,
-      2,
-      reason: 'two independent consumers, guarded independently — one shared '
-          'guard would let a failure to reach either cost the other',
+      body.contains('requestCatchupOnRefetchOwed('),
+      isTrue,
+      reason: 'a refused object comes back only through a refetch',
     );
+    final provider = source.substring(
+      source.indexOf('final liveEventRouterProvider'),
+      start,
+    );
+    expect(
+      provider.contains('.runRefusedRefetch()') &&
+          !provider.contains('.runCatchup('),
+      isTrue,
+      reason: 'a refusal runs the owing circle\'s refetch, never a full '
+          'catch-up of every circle',
+    );
+    expect(
+      '_safeInvalidate('.allMatches(body).length,
+      3,
+      reason: 'three independent consumers, guarded independently — one '
+          'shared guard would let a failure to reach one cost the others',
+    );
+  });
+
+  group('a refused object asks for a catch-up', () {
+    test('refetchOwed runs the sweep once, and no other reason does', () {
+      var runs = 0;
+      final catchup = RefetchCatchupCoalescer(() async => runs++);
+      for (final reason in FfiSyncStatusReason.values) {
+        requestCatchupOnRefetchOwed(reason, catchup);
+      }
+      expect(runs, 1);
+    });
+
+    test('a sweep that fails is logged by its type, never thrown', () async {
+      final logs = LogCapture();
+      try {
+        requestCatchupOnRefetchOwed(
+          FfiSyncStatusReason.refetchOwed,
+          RefetchCatchupCoalescer(
+            () async => throw StateError('relay wss://secret.example failed'),
+          ),
+        );
+        await pumpEventQueue();
+      } finally {
+        logs.restore();
+      }
+      logs
+        ..assertContains('StateError')
+        ..assertNoNeedles(['secret.example']);
+    });
+
+    test('a burst of refusals runs one refetch and one more after it, never '
+        'two at once, and never two closer than the minimum interval', () async {
+      var clock = DateTime.utc(2026, 10, 2, 12);
+      final waits = <Duration>[];
+      final sweeps = <Completer<void>>[];
+      var inFlight = 0;
+      var mostInFlight = 0;
+      final catchup = RefetchCatchupCoalescer(
+        () async {
+          inFlight++;
+          mostInFlight = inFlight > mostInFlight ? inFlight : mostInFlight;
+          final sweep = Completer<void>();
+          sweeps.add(sweep);
+          await sweep.future;
+          inFlight--;
+          return null;
+        },
+        now: () => clock,
+        wait: (delay) async {
+          waits.add(delay);
+          clock = clock.add(delay);
+        },
+        minInterval: const Duration(minutes: 1),
+      );
+
+      for (var i = 0; i < 5; i++) {
+        requestCatchupOnRefetchOwed(FfiSyncStatusReason.refetchOwed, catchup);
+      }
+      await pumpEventQueue();
+      expect(sweeps, hasLength(1), reason: 'one refetch runs');
+      expect(waits, isEmpty, reason: 'the first runs at once');
+
+      clock = clock.add(const Duration(seconds: 5));
+      sweeps.single.complete();
+      await pumpEventQueue();
+      expect(
+        sweeps,
+        hasLength(2),
+        reason: 'the requests that came during it fold into one more refetch',
+      );
+      expect(
+        waits,
+        [const Duration(seconds: 55)],
+        reason: 'which starts no sooner than a minute after the first',
+      );
+      sweeps.last.complete();
+      await pumpEventQueue();
+      expect(sweeps, hasLength(2), reason: 'and nothing is owed after it');
+      expect(mostInFlight, 1, reason: 'never two refetches at once');
+
+      clock = clock.add(const Duration(minutes: 5));
+      requestCatchupOnRefetchOwed(FfiSyncStatusReason.refetchOwed, catchup);
+      await pumpEventQueue();
+      expect(sweeps, hasLength(3), reason: 'a later refusal runs again');
+      expect(waits, hasLength(1), reason: 'at once, the interval having passed');
+      sweeps.last.complete();
+    });
   });
 
   group('the health tick clears the lost-subscription latch', () {
@@ -321,6 +435,29 @@ void main() {
       );
     });
 
+    test('a tick that left a dropped session for the foreground clears '
+        'nothing', () async {
+      // It carried no foreground claim, found a relay dropped or a REQ
+      // missing, and re-anchored nothing. That is the receive plane seen NOT
+      // whole: the one verdict that must never read as a repair.
+      final h = _TickHarness()
+        ..status(FfiSyncStatusReason.relayError)
+        ..advance(kSharingFaultConfirmationWindow + const Duration(seconds: 1));
+      expect((await h.settle()).state, SharingHealthState.paused);
+
+      h.maintenance.outcome = const SubscriptionHealthResult(
+        action: SubscriptionHealthAction.awaitingForeground,
+        relaysTotal: 3,
+        relaysDisconnected: 1,
+      );
+      await h.runHealthTick();
+
+      expect(
+        (await h.settle()).pausedReason,
+        SharingPausedReason.receiveSubscriptionLost,
+      );
+    });
+
     test('a paused tick clears nothing', () async {
       // A paused engine holds no REQ at all, so the tick short-circuited
       // before the connectivity probe and inspected nothing. Treating it as
@@ -357,8 +494,9 @@ class _StubMaintenanceService extends MaintenanceService {
   SubscriptionHealthResult outcome = const SubscriptionHealthResult.empty();
 
   @override
-  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
-      outcome;
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth({
+    required bool foreground,
+  }) async => outcome;
 
   @override
   Future<RelayListMaintenanceResult> maintainRelayList() async =>

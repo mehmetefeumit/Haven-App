@@ -14,6 +14,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/member_removal_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 
@@ -78,6 +79,46 @@ void main() {
         reason: 'a removal aimed at the wrong group would evict a stranger '
             'from a circle the admin was not even looking at',
       );
+    });
+
+    test("a removal awaiting its relays is no failure: the circle's "
+        "deferred-send cause is recorded and the member's pin stays",
+        () async {
+      final health = _RecordingHealth();
+      final awaiting = ProviderContainer(
+        overrides: [
+          circleServiceProvider.overrideWithValue(
+            circleService..removeMemberDelivery = ChangeDelivery.awaitingRelays,
+          ),
+          locationSharingServiceProvider.overrideWithValue(locationService),
+          sharingHealthProvider.overrideWith(() => health),
+        ],
+      );
+      addTearDown(awaiting.dispose);
+      final circle = _circleWithBob();
+
+      final outcome = await awaiting
+          .read(memberRemovalProvider.notifier)
+          .remove(circle: circle, memberPubkeyHex: _bobPubkey);
+
+      expect(outcome, MemberRemovalOutcome.awaitingRelays);
+      expect(health.deferred, [sharingCircleKey(circle)]);
+      expect(health.byUser, [true], reason: "the user's own action");
+      expect(
+        circleService.removeLastKnownMemberCalls,
+        isEmpty,
+        reason: 'a member the removal has not yet left is still in the circle',
+      );
+    });
+
+    test('a removal not made is a failure', () async {
+      circleService.removeMemberDelivery = ChangeDelivery.rejected;
+
+      final outcome = await container
+          .read(memberRemovalProvider.notifier)
+          .remove(circle: _circleWithBob(), memberPubkeyHex: _bobPubkey);
+
+      expect(outcome, MemberRemovalOutcome.failed);
     });
 
     test('publishes the pubkey being removed while the work runs', () async {
@@ -202,4 +243,21 @@ void main() {
       );
     });
   });
+}
+
+/// Records the circles whose deferred-send cause a flow recorded.
+class _RecordingHealth extends SharingHealthNotifier {
+  final List<String> deferred = [];
+
+  /// Whether each recorded hold was the user's own action, in order.
+  final List<bool> byUser = [];
+
+  @override
+  SharingHealth build() => SharingHealth.healthy;
+
+  @override
+  void recordDeferredSend(String circleKey, {bool byUser = false}) {
+    deferred.add(circleKey);
+    this.byUser.add(byUser);
+  }
 }

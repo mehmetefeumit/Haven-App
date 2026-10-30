@@ -258,6 +258,14 @@ pub struct RepairQueue {
     /// Counted unconditionally, so the loop a test observes is the loop that
     /// ships; only the accessor is test-only.
     wakeups: std::sync::atomic::AtomicU64,
+    /// Relays that came up connected since the repair task last looked.
+    reconnected: Mutex<Vec<RelayUrl>>,
+    /// The live pool lost every relay and has one back, and the repair task
+    /// has not acted on it yet ([`Self::note_network_back`]).
+    network_back: std::sync::atomic::AtomicBool,
+    /// How many times the network was said to be back, never reset: what a
+    /// test reads to tell one edge from two.
+    network_backs: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for RepairQueue {
@@ -291,6 +299,51 @@ impl RepairQueue {
         // `notify_one` stores a permit when nobody is parked, so a close that
         // lands between the task's deadline read and its park is not lost.
         self.wake.notify_one();
+    }
+
+    /// Records a relay that came up connected and wakes the repair task, which
+    /// re-issues alone each REQ of it the pool does not hold.
+    pub(crate) fn note_reconnected(&self, relay_url: RelayUrl) {
+        self.reconnected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(relay_url);
+        self.wake.notify_one();
+    }
+
+    /// Records that the live pool, having lost every relay while live, has
+    /// one back, and wakes the repair task, which makes every relay a pending
+    /// record could not reach due again at most once a minute
+    /// (`EngineProcessor::network_back`).
+    pub(crate) fn note_network_back(&self) {
+        self.network_backs
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.network_back
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.wake.notify_one();
+    }
+
+    /// Whether the network came back since the last call.
+    pub(crate) fn take_network_back(&self) -> bool {
+        self.network_back
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    /// How many times the network was said to be back (tests only).
+    #[cfg(test)]
+    pub(crate) fn network_backs(&self) -> u64 {
+        self.network_backs
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The relays that came up connected since the last call.
+    pub(crate) fn take_reconnected(&self) -> Vec<RelayUrl> {
+        std::mem::take(
+            &mut *self
+                .reconnected
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
     }
 
     /// Keys whose re-issue is due now, each armed with its next backoff window.
@@ -332,6 +385,12 @@ impl RepairQueue {
             .unwrap_or_else(PoisonError::into_inner)
             .entries
             .clear();
+        self.reconnected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.network_back
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 
     /// Records one wake of the repair task (see [`Self::wakeups`]).

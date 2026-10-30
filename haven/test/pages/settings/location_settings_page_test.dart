@@ -40,6 +40,7 @@ import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/ios_background_session_service.dart';
 import 'package:haven/src/services/ios_location_auth_service.dart';
 import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/widgets/common/long_message_snack_bar.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // =============================================================================
@@ -1569,6 +1570,232 @@ void main() {
         ),
         isNull,
       );
+    });
+  });
+
+  group('LocationSettingsPage — its snackbars leave others alone', () {
+    testWidgets(
+      'a snackbar from elsewhere the user has not answered survives a toggle',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubThatThrows(),
+            fakeDisclosure: _FakeDisclosureController(false),
+            isAndroid: true,
+          ),
+        );
+        await tester.pump(Duration.zero);
+        final page = tester.element(find.byType(LocationSettingsPage));
+        ScaffoldMessenger.of(page).showSnackBar(
+          longMessageSnackBar(
+            page,
+            'An answer still owed',
+            action: SnackBarAction(label: 'Act', onPressed: () {}),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text('An answer still owed'),
+          findsOneWidget,
+          reason: 'clearing the queue would throw away a remedy',
+        );
+        await tester.tap(find.byIcon(Icons.close));
+        await tester.pumpAndSettle();
+        expect(
+          find.text('Background sharing disabled'),
+          findsOneWidget,
+          reason: 'and the toggle is still confirmed, in its turn',
+        );
+      },
+    );
+
+    testWidgets(
+      'behind a snackbar from elsewhere, toggling twice queues one '
+      'confirmation: the latest',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubReturning(const EnsurePermissionsGranted()),
+            fakeDisclosure: _FakeDisclosureController(true),
+            isAndroid: true,
+          ),
+        );
+        await tester.pump(Duration.zero);
+        final page = tester.element(find.byType(LocationSettingsPage));
+        ScaffoldMessenger.of(page).showSnackBar(
+          longMessageSnackBar(
+            page,
+            'An answer still owed',
+            action: SnackBarAction(label: 'Act', onPressed: () {}),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(Icons.close));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Background sharing enabled'), findsOneWidget);
+        expect(
+          find.text('Background sharing disabled'),
+          findsNothing,
+          reason: 'the outdated outcome is never said',
+        );
+        expect(
+          tester.widget<SnackBar>(find.byType(SnackBar)).duration,
+          const Duration(seconds: 8),
+          reason: 'a waiting plain outcome may say the longest of them',
+        );
+        await tester.pump(const Duration(seconds: 9));
+        await tester.pumpAndSettle();
+        expect(
+          find.byType(SnackBar),
+          findsNothing,
+          reason: 'one confirmation queued, not one per toggle',
+        );
+      },
+    );
+
+    Future<BuildContext> pumpBehindForeign(
+      WidgetTester tester,
+      EnsurePermissionsFn ensurePermissions, {
+      bool startOn = false,
+    }) async {
+      SharedPreferences.setMockInitialValues({
+        if (startOn) kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true,
+      });
+      await tester.pumpWidget(
+        _buildApp(
+          ensurePermissions: ensurePermissions,
+          fakeDisclosure: _FakeDisclosureController(true),
+          isAndroid: true,
+        ),
+      );
+      await tester.pump(Duration.zero);
+      final page = tester.element(find.byType(LocationSettingsPage));
+      ScaffoldMessenger.of(page).showSnackBar(
+        longMessageSnackBar(
+          page,
+          'An answer still owed',
+          action: SnackBarAction(label: 'Act', onPressed: () {}),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return page;
+    }
+
+    testWidgets(
+      'behind a snackbar from elsewhere, the notification remedy waits once',
+      (tester) async {
+        final page = await pumpBehindForeign(
+          tester,
+          _stubReturning(const EnsurePermissionsNotificationDenied()),
+        );
+        final remedy = AppLocalizations.of(
+          tester.element(find.byType(LocationSettingsPage)),
+        ).locationSettingsNotificationDeniedSnack;
+
+        await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(Icons.close));
+        await tester.pumpAndSettle();
+
+        expect(find.text(remedy), findsOneWidget);
+        ScaffoldMessenger.of(page).hideCurrentSnackBar();
+        await tester.pumpAndSettle();
+        expect(
+          find.byType(SnackBar),
+          findsNothing,
+          reason: 'the same remedy is not said twice',
+        );
+      },
+    );
+
+    testWidgets(
+      'a plain outcome after a waiting remedy is said after it, never before',
+      (tester) async {
+        EnsurePermissionsResult next =
+            const EnsurePermissionsNotificationDenied();
+        final page = await pumpBehindForeign(
+          tester,
+          () async => next,
+          startOn: true,
+        );
+        final remedy = AppLocalizations.of(
+          tester.element(find.byType(LocationSettingsPage)),
+        ).locationSettingsNotificationDeniedSnack;
+
+        await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+        await tester.pumpAndSettle(); // disabled
+        await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+        await tester.pumpAndSettle(); // the remedy
+        next = const EnsurePermissionsGranted();
+        await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+        await tester.pumpAndSettle(); // enabled
+
+        final said = <String>[];
+        await tester.tap(find.byIcon(Icons.close));
+        await tester.pumpAndSettle();
+        while (find.byType(SnackBar).evaluate().isNotEmpty) {
+          for (final text in [
+            'Background sharing disabled',
+            'Background sharing enabled',
+            remedy,
+          ]) {
+            if (find.text(text).evaluate().isNotEmpty) said.add(text);
+          }
+          ScaffoldMessenger.of(page).hideCurrentSnackBar();
+          await tester.pumpAndSettle();
+        }
+
+        expect(
+          said.last,
+          'Background sharing enabled',
+          reason: 'the latest outcome is the last word, not a stale remedy',
+        );
+        expect(said.where((text) => text == remedy), hasLength(1));
+      },
+    );
+
+    testWidgets('its own previous confirmation is replaced, not queued', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      await tester.pumpWidget(
+        _buildApp(
+          ensurePermissions: _stubReturning(const EnsurePermissionsGranted()),
+          fakeDisclosure: _FakeDisclosureController(true),
+          isAndroid: true,
+        ),
+      );
+      await tester.pump(Duration.zero);
+
+      await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+      await tester.pumpAndSettle();
+      expect(find.text('Background sharing enabled'), findsOneWidget);
+
+      await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+      await tester.pumpAndSettle();
+      expect(find.text('Background sharing enabled'), findsNothing);
+      expect(find.text('Background sharing disabled'), findsOneWidget);
     });
   });
 }

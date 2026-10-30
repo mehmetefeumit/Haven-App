@@ -33,6 +33,7 @@ import 'package:haven/src/providers/stranger_profile_provider.dart';
 import 'package:haven/src/services/circle_service.dart' show DirectoryTier;
 import 'package:haven/src/services/member_directory_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/bidi_isolate.dart';
 import 'package:haven/src/utils/member_pick_state.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/member_avatar.dart';
@@ -578,7 +579,7 @@ class _TypedStrangerRow extends ConsumerWidget {
       excludeSemantics: true,
       onTap: () => onSelected(npub),
       label: [
-        _bidiIsolate(name ?? _chunkForSpeech(shortNpub)),
+        bidiIsolate(name ?? _chunkForSpeech(shortNpub)),
         lookupNote,
       ].join(', '),
       customSemanticsActions: {
@@ -675,7 +676,7 @@ class MemberCandidateTile extends StatelessWidget {
     // The circle name is remote-supplied — chosen by whoever created the
     // group (`haven-core/src/circle/manager.rs`), not by the local user — so
     // the RENDERED copy isolates it before it shares a paragraph with app
-    // text, same as `_bidiIsolate` in invitation_card.dart. The label below
+    // text, as `bidiIsolate` documents. The label below
     // is built from the un-isolated name: see `_semanticsLabel`'s doc for
     // why a label needs isolation only where something follows the
     // untrusted text within the SAME string, which is not the case here.
@@ -686,7 +687,7 @@ class MemberCandidateTile extends StatelessWidget {
     final renderedCollisionLabel = collisionCircleName == null
         ? null
         : l10n.memberPickerCollisionCircleLabel(
-            _bidiIsolate(collisionCircleName),
+            bidiIsolate(collisionCircleName),
           );
 
     // The npub, in the one form Haven displays it: no maxLines and no
@@ -783,13 +784,13 @@ class MemberCandidateTile extends StatelessWidget {
   ///
   /// The tier is repeated on every row because a reader swiping row by row
   /// never hears the section heading above them (§7.2). `identity` alone
-  /// is wrapped in [_bidiIsolate]: within this ONE joined string it is
+  /// is wrapped in [bidiIsolate]: within this ONE joined string it is
   /// followed by the tier, the nickname note, the collision note and any
   /// refusal reason, so an unterminated override inside it could otherwise
   /// swallow all of them — not for TTS or braille, which read codepoints in
   /// logical order regardless, but for whatever else renders this same
   /// string visibly (an accessibility inspector, a semantics-tree dump). See
-  /// [_bidiIsolate]'s doc for the full doctrine. [collisionLabel] is passed
+  /// [bidiIsolate]'s doc for the full doctrine. [collisionLabel] is passed
   /// through un-isolated: nothing follows it in this string, so there is
   /// nothing left for an isolate to protect.
   ///
@@ -811,7 +812,7 @@ class MemberCandidateTile extends StatelessWidget {
       DirectoryTier.recent => l10n.memberPickerTierRecent,
     };
     return [
-      _bidiIsolate(identity),
+      bidiIsolate(identity),
       if (name != null && undistinguishedCollision) _chunkForSpeech(shortNpub),
       tier,
       if (candidate.petname != null) l10n.memberPickerNicknameNote,
@@ -877,18 +878,6 @@ List<String> _chunkRun(String run) {
   return chunks;
 }
 
-/// Wraps [text] in U+2068 FIRST STRONG ISOLATE / U+2069 POP DIRECTIONAL
-/// ISOLATE.
-///
-/// A near-duplicate of `_bidiIsolate` in invitation_card.dart — private to
-/// that library, so not importable from here. See its doc for the full
-/// doctrine: unnecessary for TTS or braille, which both read a string's
-/// codepoints in logical order with no paragraph layout for an override to
-/// escape, but free (never spoken, never a braille cell) and worth keeping
-/// wherever OTHER text — in a rendered paragraph OR a joined semantics
-/// label — follows the untrusted substring, since that is exactly what an
-/// unterminated override could otherwise swallow.
-String _bidiIsolate(String text) => '\u2068$text\u2069';
 
 /// The mark that says the name beside it is the user's own local petname,
 /// not the person's published name.

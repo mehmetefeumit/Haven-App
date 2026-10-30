@@ -9,6 +9,7 @@
 library;
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/rust/api.dart' show LocationPublishFfi;
 import 'package:haven/src/services/circle_health_service.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
@@ -66,7 +67,6 @@ void main() {
   Future<LocationPublishOutcome> publish() => service.publishLocation(
     mlsGroupId: const [1, 2, 3],
     nostrGroupId: const [9, 9],
-    senderPubkeyHex: 'ff' * 32,
     latitude: 1,
     longitude: 2,
   );
@@ -81,49 +81,38 @@ void main() {
       expect(health.acks.single.at, _now);
     });
 
-    test('a publish NO relay accepted is not recorded', () async {
-      // The load-bearing assertion of this file. `shouldRejectPublish` returns
-      // a well-formed `PublishResult` with an empty `acceptedBy` — the shape a
-      // relay policy rejection produces, which the old code path could not
-      // distinguish from a success because it dropped the result entirely.
-      relayService.shouldRejectPublish = true;
+    test('a send NO relay took is not recorded, whatever it was answered',
+        () async {
+      // The load-bearing assertion of this file: a send no relay took
+      // delivered nothing, and stamping it would make a dead publish plane
+      // read as healthy forever.
+      for (final answer in LocationPublishFfi.values) {
+        if (answer == LocationPublishFfi.accepted) continue;
+        circleService.publishAnswers = [answer];
 
-      final result = await publish();
+        await publish();
+        circleService.publishAnswers = [];
 
-      expect(result, isA<LocationPublishSent>());
-      expect(
-        (result as LocationPublishSent).result.acceptedBy,
-        isEmpty,
-        reason: 'anti-vacuity for the below',
-      );
-      expect(
-        health.acks,
-        isEmpty,
-        reason: 'a rejected publish delivered nothing; stamping it would make '
-            'a dead publish plane read as healthy forever',
-      );
+        expect(health.acks, isEmpty, reason: '$answer was stamped delivered');
+      }
     });
 
     test('a publish that throws is not recorded', () async {
-      relayService.publishThrows = StateError('relay unreachable');
+      circleService.publishSealedThrows = const CircleServiceException(
+        'Failed to publish location',
+      );
 
-      await expectLater(publish(), throwsA(isA<StateError>()));
+      await expectLater(publish(), throwsA(isA<CircleServiceException>()));
       expect(health.acks, isEmpty);
     });
 
-    test('a DEFERRED send is never stamped as delivered', () async {
-      // Unit B's engine-deferral path: the MLS engine queued the update instead
-      // of encrypting it, so nothing reached a relay. It is the one outcome
-      // that most resembles a success from the caller's side — no throw, no
-      // rejection — and stamping it would be the original defect in a new
-      // costume: a circle that has not sent anything for hours reading healthy.
-      circleService.deferNextEncrypt = const LocationSendDeferred(
-        unresolvedInputs: 1,
-        discardedIntents: 1,
-        repaired: false,
-        commits: [],
-        proposals: [],
-      );
+    test('a HELD send is never stamped as delivered', () async {
+      // The core held the circle's sends, so nothing reached a relay. It is
+      // the one outcome that most resembles a success from the caller's side
+      // — no throw, no rejection — and stamping it would be the original
+      // defect in a new costume: a circle that has not sent anything for
+      // hours reading healthy.
+      circleService.holdNextSeal = true;
 
       final outcome = await publish();
 
@@ -147,13 +136,12 @@ void main() {
       final result = await bare.publishLocation(
         mlsGroupId: const [1, 2, 3],
         nostrGroupId: const [9, 9],
-        senderPubkeyHex: 'ff' * 32,
         latitude: 1,
         longitude: 2,
       );
 
       expect(result, isA<LocationPublishSent>());
-      expect((result as LocationPublishSent).result.acceptedBy, isNotEmpty);
+      expect((result as LocationPublishSent).acked, isTrue);
     });
   });
 

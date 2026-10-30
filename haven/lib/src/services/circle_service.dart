@@ -9,7 +9,15 @@
 library;
 
 import 'package:flutter/foundation.dart';
-import 'package:haven/src/rust/api.dart' show SkipReasonFfi;
+import 'package:haven/src/rust/api.dart'
+    show
+        LeaveStatusFfi,
+        LocationPublishFfi,
+        PublishStatusFfi,
+        RecoveryCauseFfi,
+        ReinviteResultFfi,
+        SealedLocationFfi,
+        SkipReasonFfi;
 import 'package:haven/src/utils/log_alias.dart';
 
 /// Exception thrown when circle operations fail.
@@ -36,6 +44,63 @@ class CircleRosterFullException extends CircleServiceException {
   const CircleRosterFullException() : super('Circle roster is full');
 }
 
+/// Thrown when a create or an invite is refused because an invitee lists no
+/// inbox relay a Welcome could reach: nothing was made.
+///
+/// Its own type because the remedy is the invitee's (publish where they
+/// receive invitations), not a retry of the same request as it stands.
+class CircleInviteesUnreachableException extends CircleServiceException {
+  /// Creates a [CircleInviteesUnreachableException].
+  const CircleInviteesUnreachableException()
+    : super('An invitee cannot receive invitations');
+}
+
+/// Thrown when an invitation can never be accepted on this device: its
+/// Welcome was made for a KeyPackage this device no longer holds (the storage
+/// reset, or a replaced package), is invalid, or was already processed.
+///
+/// Its own type because the remedy is the inviter's, not a retry: the caller
+/// asks the user to get a new invitation. The core has already declined the
+/// invitation, so it is gone from the pending list.
+class InvitationNeedsNewInviteException extends CircleServiceException {
+  /// Creates an [InvitationNeedsNewInviteException].
+  const InvitationNeedsNewInviteException()
+    : super('Invitation needs a new invite');
+}
+
+/// Thrown when accepting an invitation would replace a circle this device
+/// still holds (a removal it never saw, or a split circle), which the engine
+/// does only on the user's explicit confirmation
+/// ([CircleService.rejoinOffersForInvitation]). The invitation stays pending.
+class InvitationRejoinConfirmationRequiredException
+    extends CircleServiceException {
+  /// Creates an [InvitationRejoinConfirmationRequiredException].
+  const InvitationRejoinConfirmationRequiredException()
+    : super('Invitation would replace a held circle');
+}
+
+/// A replacement Welcome awaiting the user's consent: joining it discards
+/// this device's copy of the circle [mlsGroupId].
+@immutable
+class RejoinOffer {
+  /// Creates a [RejoinOffer].
+  const RejoinOffer({
+    required this.mlsGroupId,
+    required this.circleName,
+    required this.localStateToken,
+  });
+
+  /// The circle it would join again.
+  final List<int> mlsGroupId;
+
+  /// The local display name of that circle on this device.
+  final String circleName;
+
+  /// The token of the local copy the consent discards, handed back unchanged
+  /// to [CircleService.confirmGroupRejoin]. Never logged.
+  final List<int> localStateToken;
+}
+
 /// The local user's own invitation state for a circle.
 ///
 /// Never a statement about a peer: processing an MLS Welcome emits nothing
@@ -50,6 +115,105 @@ enum MembershipStatus {
 
   /// This device declined the invitation.
   declined,
+}
+
+/// Whether this device's encryption engine holds a circle live.
+enum CircleEngineState {
+  /// The circle's encrypted state loaded; it can send and receive.
+  live,
+
+  /// The circle's encrypted state failed to load on this device. It still
+  /// exists and may load on a retry; it neither sends nor receives meanwhile.
+  quarantined,
+
+  /// An admin disbanded the circle: nothing is sent or received for it again,
+  /// and it can only be left.
+  disbanded,
+
+  /// MDK halted the circle on this device: it neither sends nor receives
+  /// until an admin removes this device and adds it back. Persisted, so it
+  /// holds across a restart.
+  unrecoverable,
+}
+
+/// What the user needs to know first about a circle that is not sharing, in
+/// the core's worst-first order. Mirrors `RecoveryCauseFfi` so no FFI enum
+/// leaks above the service layer.
+enum CircleRecoveryCause {
+  /// An admin disbanded the circle.
+  disbanded,
+
+  /// MDK halted the circle on this device.
+  unrecoverable,
+
+  /// The circle failed to load on this device.
+  quarantined,
+
+  /// The circle's routing id is another circle's on this device too.
+  routingCollision,
+
+  /// This device asked to leave the circle.
+  leaving,
+
+  /// This device cannot read its peers: history walks the relays answered in
+  /// full brought back nothing that moves it.
+  stalled,
+
+  /// A removal the user asked for was dropped unmade and a member it named is
+  /// still in the circle.
+  removalUnmade,
+
+  /// The removal of a member who left is due and not made yet.
+  departureDue,
+
+  /// A change of the circle's relays waits for the app's foreground.
+  awaitsForeground,
+
+  /// A change of the circle awaits a relay's acknowledgement.
+  awaitingRelays,
+
+  /// A change a relay acknowledged awaits its confirm.
+  acknowledged,
+
+  /// A commit is staged in the circle with no record.
+  stagedWithoutRecord,
+
+  /// Stored input still holds the circle's sends.
+  storedInput,
+}
+
+/// The [CircleRecoveryCause] of a recovery read, by variant only (Rule 8).
+///
+/// Exhaustive with no `_`: a cause added upstream fails to compile here.
+CircleRecoveryCause circleRecoveryCauseOf(RecoveryCauseFfi cause) =>
+    switch (cause) {
+      RecoveryCauseFfi.disbanded => CircleRecoveryCause.disbanded,
+      RecoveryCauseFfi.unrecoverable => CircleRecoveryCause.unrecoverable,
+      RecoveryCauseFfi.quarantined => CircleRecoveryCause.quarantined,
+      RecoveryCauseFfi.routingCollision => CircleRecoveryCause.routingCollision,
+      RecoveryCauseFfi.leaving => CircleRecoveryCause.leaving,
+      RecoveryCauseFfi.stalled => CircleRecoveryCause.stalled,
+      RecoveryCauseFfi.removalUnmade => CircleRecoveryCause.removalUnmade,
+      RecoveryCauseFfi.departureDue => CircleRecoveryCause.departureDue,
+      RecoveryCauseFfi.awaitsForeground => CircleRecoveryCause.awaitsForeground,
+      RecoveryCauseFfi.awaitingRelays => CircleRecoveryCause.awaitingRelays,
+      RecoveryCauseFfi.acknowledged => CircleRecoveryCause.acknowledged,
+      RecoveryCauseFfi.stagedWithoutRecord =>
+        CircleRecoveryCause.stagedWithoutRecord,
+      RecoveryCauseFfi.storedInput => CircleRecoveryCause.storedInput,
+    };
+
+/// Whether a fetched KeyPackage can be invited, by MDK's own admission check.
+enum KeyPackageAdmission {
+  /// It can be invited.
+  admissible,
+
+  /// It comes from an older Haven; the person must update first.
+  needsUpdate,
+
+  /// It cannot be used (for example incomplete or malformed); a fresh one is
+  /// published when the person next opens Haven.
+  unusable,
 }
 
 /// Circle type enumeration.
@@ -78,6 +242,7 @@ class Circle {
     required this.members,
     required this.createdAt,
     required this.updatedAt,
+    this.engineState = CircleEngineState.live,
   });
 
   /// Internal MLS group identifier (not shared publicly).
@@ -107,6 +272,18 @@ class Circle {
   /// When this circle was last updated.
   final DateTime updatedAt;
 
+  /// Whether this device's engine holds the circle live.
+  final CircleEngineState engineState;
+
+  /// Whether the circle's encrypted state failed to load on this device.
+  bool get isQuarantined => engineState == CircleEngineState.quarantined;
+
+  /// Whether an admin disbanded the circle.
+  bool get isDisbanded => engineState == CircleEngineState.disbanded;
+
+  /// Whether MDK halted the circle on this device.
+  bool get isUnrecoverable => engineState == CircleEngineState.unrecoverable;
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -119,28 +296,6 @@ class Circle {
 
   @override
   String toString() => 'Circle(members: ${magnitudeBucket(members.length)})';
-}
-
-/// Dark Matter cutover helpers (DM-4c).
-extension CircleLegacyStatus on Circle {
-  /// Whether this is an orphaned pre-cutover circle row: locally recorded as
-  /// [MembershipStatus.accepted] but with an empty [members] list.
-  ///
-  /// A live, healthy accepted circle always includes at least the caller
-  /// (self) in [members] (the underlying MLS roster always contains the
-  /// local device once accepted), so this combination is otherwise
-  /// unreachable. It arises specifically when the local `circles.db` row
-  /// survives the once-only Dark Matter cutover (see
-  /// `LegacyCutoverService`/`destroyLegacyMlsState`, which deletes only the
-  /// old MLS session store) while the MLS group it refers to no longer
-  /// exists — `getVisibleCircles`/`getCircles` swallow the resulting
-  /// per-group member-lookup failure to an empty list rather than failing
-  /// the whole call (see `haven-core`'s `CircleManager::get_circles`).
-  ///
-  /// A circle in this state must be re-created (and its members re-invited)
-  /// — there is no way to resume the old MLS group.
-  bool get isLegacyOrphaned =>
-      membershipStatus == MembershipStatus.accepted && members.isEmpty;
 }
 
 /// Represents a member of a circle.
@@ -252,11 +407,10 @@ class DirectoryEntry {
 
 /// Result of creating a circle.
 ///
-/// Publish-before-apply (Rule 13): `CircleService.createCircle` publishes the
-/// gift-wrapped Welcome events and confirms (or rolls back) the engine's
-/// pending group-creation state internally before returning, so this result
-/// is presence-only — the raw welcome events never leave the service
-/// (mirrors [AddMemberResult]).
+/// `CircleService.createCircle` creates the circle through the fanout driver,
+/// which records each founding Welcome and sends it from that record, so this
+/// result carries counts only — no Welcome event reaches Dart (mirrors
+/// [AddMemberResult]).
 @immutable
 class CircleCreationResult {
   /// Creates a new [CircleCreationResult].
@@ -264,16 +418,23 @@ class CircleCreationResult {
     required this.circle,
     required this.welcomesSent,
     required this.welcomesTotal,
+    this.unsentNpubs = const [],
   });
 
   /// The created circle.
   final Circle circle;
 
-  /// Number of gift-wrapped Welcomes that reached at least one relay.
+  /// Number of founding Welcomes an inbox relay acknowledged during the
+  /// call.
   final int welcomesSent;
 
   /// Total Welcomes produced (one per invited member).
   final int welcomesTotal;
+
+  /// The invitees (`npub1…`) whose founding Welcome no relay acknowledged
+  /// during the call. Each is still owed: later foreground drives send it
+  /// again from its record, for a day.
+  final List<String> unsentNpubs;
 }
 
 /// Result of adding members to an existing circle.
@@ -281,42 +442,143 @@ class CircleCreationResult {
 class AddMemberResult {
   /// Creates a new [AddMemberResult].
   const AddMemberResult({
-    required this.welcomesSent,
+    required this.delivery,
+    required this.welcomesDelivered,
     required this.welcomesTotal,
+    this.reinviteOwed = false,
   });
 
-  /// Number of gift-wrapped Welcomes that reached at least one relay.
-  final int welcomesSent;
+  /// What became of the invite's commit.
+  final ChangeDelivery delivery;
 
-  /// Total Welcomes produced (one per added member).
+  /// How many Welcomes an inbox relay acknowledged so far. The rest are sent
+  /// again by the driver, each from a record of its own, until a relay takes
+  /// it or it expires.
+  final int welcomesDelivered;
+
+  /// Total Welcomes the invite carries (one per invitee).
   final int welcomesTotal;
+
+  /// The invite was applied with no Welcome left to deliver: the invitees must
+  /// be removed and added again.
+  final bool reinviteOwed;
 }
 
-/// A gift-wrapped welcome event for a circle invitation.
+/// What became of a circle change asked of the fanout driver.
+enum ChangeDelivery {
+  /// A relay acknowledged the commit and the engine applied it — or the
+  /// circle already was as asked, and nothing needed to be sent.
+  applied,
+
+  /// Not made yet, and not refused: staged and sent again until a relay
+  /// acknowledges it, or queued behind what the circle is still resolving
+  /// (made later, or retired at the next open with a notice). Never an error:
+  /// it shows through the circle's deferred-send cause.
+  awaitingRelays,
+
+  /// Not made: refused before the engine was asked, refused by every relay,
+  /// set aside by the engine, or staged and never sent.
+  rejected,
+}
+
+/// What became of one re-invite MDK owed. None of these is made: the one on
+/// its way says so in its name.
+enum ReinviteDelivery {
+  /// Staged with a fresh package: awaiting its relays.
+  awaitingRelays,
+
+  /// Still owed, and looked for again at its next lookup: queued, not due,
+  /// its circle not settled, no admissible package, no inbox relay a Welcome
+  /// could reach, or not made this time.
+  stillOwed,
+
+  /// Given up: the user invites again. The circle's change notice carries
+  /// the re-invite owed until the user does.
+  needsReinvite,
+
+  /// Ended by MDK: no member any more, the invitees already in, or a conflict.
+  ended,
+}
+
+/// The [ReinviteDelivery] of a re-invite result, by variant only (Rule 8).
 ///
-/// Contains a kind 1059 gift-wrapped event that encapsulates an encrypted
-/// kind 444 Welcome message. Ready to publish directly to relays.
+/// Exhaustive with no `_`: a result added upstream fails to compile here.
+ReinviteDelivery reinviteDeliveryOf(ReinviteResultFfi result) =>
+    switch (result) {
+      ReinviteResultFfi.reissuedAwaitingRelays =>
+        ReinviteDelivery.awaitingRelays,
+      ReinviteResultFfi.queued ||
+      ReinviteResultFfi.notDue ||
+      ReinviteResultFfi.unsettled ||
+      ReinviteResultFfi.keyPackageMissing ||
+      ReinviteResultFfi.noInbox ||
+      ReinviteResultFfi.unmade => ReinviteDelivery.stillOwed,
+      ReinviteResultFfi.gaveUp => ReinviteDelivery.needsReinvite,
+      ReinviteResultFfi.ended => ReinviteDelivery.ended,
+    };
+
+/// Where a leave the user asked for stands.
+enum LeaveDelivery {
+  /// Left on this device: the circle is gone from it.
+  left,
+
+  /// Asked for and carried on at every wake until it ends: nothing is shared
+  /// with the circle meanwhile. Never an error: it shows through the circle's
+  /// deferred-send cause.
+  leaving,
+
+  /// Not asked for: refused for good, the leave's intent ended.
+  notMade,
+}
+
+/// The [LeaveDelivery] of a leave status, by variant only (Security Rule 8).
+///
+/// Exhaustive with no `_`: a status added upstream fails to compile here.
+LeaveDelivery leaveDeliveryOf(LeaveStatusFfi status) => switch (status) {
+  // The circle is not on this device: nothing of it is left to leave.
+  LeaveStatusFfi.completed ||
+  LeaveStatusFfi.circleNotFound => LeaveDelivery.left,
+  // The intent stands, and the next wake carries it on: a proposal no peer
+  // has committed yet, a circle not stable yet or a failure no variant names
+  // (`pending`, no wait named), an admin step only the app in front makes, or
+  // input the engine holds first.
+  LeaveStatusFfi.proposed ||
+  LeaveStatusFfi.pending ||
+  LeaveStatusFfi.foregroundOnly ||
+  LeaveStatusFfi.engineHeld => LeaveDelivery.leaving,
+  // The driver keeps the intent and steps down first itself now, so it no
+  // longer answers `adminMustStepDown`; the bridge still maps the error to it,
+  // so it stays mapped.
+  LeaveStatusFfi.adminMustStepDown ||
+  LeaveStatusFfi.notLeaving => LeaveDelivery.notMade,
+};
+
+/// The [ChangeDelivery] of a driver status, by variant only (Security Rule 8).
+///
+/// Exhaustive with no `_` on purpose: a status added upstream fails to compile
+/// here rather than land in an arm that shows it as made.
+ChangeDelivery changeDeliveryOf(PublishStatusFfi status) => switch (status) {
+  PublishStatusFfi.confirmed => ChangeDelivery.applied,
+  PublishStatusFfi.unresolved ||
+  PublishStatusFfi.queued => ChangeDelivery.awaitingRelays,
+  PublishStatusFfi.rolledBack ||
+  PublishStatusFfi.stale ||
+  PublishStatusFfi.unrecorded ||
+  PublishStatusFfi.refused => ChangeDelivery.rejected,
+};
+
+/// What [CircleService.ingestEvent] did with one received event.
 @immutable
-class GiftWrappedWelcome {
-  /// Creates a new [GiftWrappedWelcome].
-  const GiftWrappedWelcome({
-    required this.recipientPubkey,
-    required this.recipientRelays,
-    required this.eventJson,
-  });
+class IngestResult {
+  /// Creates an [IngestResult].
+  const IngestResult({required this.results, required this.held});
 
-  /// Recipient's Nostr public key (hex format).
-  final String recipientPubkey;
+  /// What the event and the drives it made handed back, each routed by its
+  /// own group id.
+  final List<LocationEventResult> results;
 
-  /// Relay URLs to publish this event to (recipient's inbox relays).
-  final List<String> recipientRelays;
-
-  /// Gift-wrapped event as JSON string (kind 1059).
-  ///
-  /// This is a signed, ready-to-publish event containing the encrypted
-  /// Welcome message. The outer event uses an ephemeral keypair to hide
-  /// the sender's identity per NIP-59.
-  final String eventJson;
+  /// Not taken in yet: the engine holds it, and it is fetched again.
+  final bool held;
 }
 
 /// Represents a pending invitation to join a circle.
@@ -447,15 +709,16 @@ enum LocationEventKind {
   /// earlier change as if it never happened.
   invalidated,
 
-  /// The group entered the unrecoverable state; the UI MUST block
-  /// send/mutate for it (Rule 8, blocked-circle UI state).
+  /// MDK halted the group: its circle reads
+  /// [CircleEngineState.unrecoverable] from then on, which blocks send and
+  /// mutate for it (Rule 8).
   unrecoverable,
 }
 
 /// One folded engine result from decrypting/ingesting a single `kind:445`
 /// event. A single ingest can yield SEVERAL of these — the engine's internal
 /// convergence may release buffered inbound after the outer event — so
-/// [CircleService.decryptLocation] returns a `List`.
+/// [IngestResult.results] is a `List`.
 ///
 /// Cursor contract: the engine owns out-of-order buffering, so callers
 /// advance their relay sync cursor on the OUTER event's `created_at` (which
@@ -488,151 +751,38 @@ class LocationEventResult {
   final int epoch;
 }
 
-/// An opaque publish-before-apply token for a [PendingAutoCommit].
+/// What a seal made of a fix ([CircleService.sealLocation]).
 ///
-/// Dart-native mirror of `PendingStateRefFfi` — pass it, unmodified, to
-/// [CircleService.confirmPendingCommit] or [CircleService.failPendingCommit].
-/// Meaningless across a process restart; never persisted, never published.
+/// Sealed so the compiler, not a reviewer, holds every call site to handling
+/// a send the core held: that is a state, never a failure.
 @immutable
-class PendingCommitToken {
-  /// Creates a [PendingCommitToken] wrapping the opaque engine token.
-  const PendingCommitToken(this.value);
-
-  /// The opaque engine token.
-  final BigInt value;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is PendingCommitToken && value == other.value;
-
-  @override
-  int get hashCode => value.hashCode;
-}
-
-/// A group-evolving commit the engine auto-staged while ingesting a received
-/// `kind:445` (a peer `SelfRemove` eviction it decided to auto-commit) that
-/// the caller MUST publish then confirm/fail. Dart-native mirror of
-/// `CommitToPublishFfi`.
-///
-/// Publish-before-apply (Rule 13 / security F13): publish
-/// [commitEventJson] to the circle's relays, then
-/// [CircleService.confirmPendingCommit] on a ≥1-relay ACK, or
-/// [CircleService.failPendingCommit] on failure/timeout. NEVER confirm
-/// before an ACK, and NEVER drop an entry silently — that re-forks the
-/// group the leaver departed.
-@immutable
-class PendingAutoCommit {
-  /// Creates a [PendingAutoCommit].
-  const PendingAutoCommit({
-    required this.commitEventJson,
-    required this.pendingToken,
-  });
-
-  /// JSON-serialized kind 445 commit event to publish to the circle's relays.
-  final String commitEventJson;
-
-  /// The pending commit to confirm/fail after publishing.
-  final PendingCommitToken pendingToken;
-}
-
-/// The outcome of a [CircleService.encryptLocation] call.
-///
-/// Sealed so the compiler, not a reviewer, is responsible for every call site
-/// handling the deferral: the MLS engine can QUEUE a location update instead of
-/// encrypting it, and that is an actionable state rather than a failure. Before
-/// this type it was flattened to an opaque exception string that every caller
-/// dropped into a `debugPrint`, which is precisely how a device could stop
-/// sharing without anything noticing.
-@immutable
-sealed class EncryptLocationOutcome {
+sealed class LocationSeal {
   /// Const base constructor.
-  const EncryptLocationOutcome();
+  const LocationSeal({required this.replayed});
+
+  /// What the seal's drives handed back, each routed by its own group id.
+  /// Every location in it is already stored.
+  final List<LocationEventResult> replayed;
 }
 
-/// The engine encrypted the update; [encrypted] is ready to publish.
+/// Sealed and recorded; [CircleService.publishSealedLocation] sends it.
 @immutable
-final class LocationEncrypted extends EncryptLocationOutcome {
-  /// Creates a [LocationEncrypted].
-  const LocationEncrypted(this.encrypted);
+final class LocationSealed extends LocationSeal {
+  /// Creates a [LocationSealed].
+  const LocationSealed(this.sealed, {required super.replayed});
 
-  /// The signed kind-445 event and its routing.
-  final EncryptedLocation encrypted;
+  /// The sealed event, which only the core sends.
+  final SealedLocationFfi sealed;
 }
 
-/// The engine QUEUED the update instead of encrypting it.
-///
-/// There is no location event to publish. Two obligations remain, and both are
-/// the caller's:
-///
-/// * **Rule 13.** [commits] carries any commit the engine staged inside that
-///   same call — a peer `SelfRemove` eviction that came due. Each must be
-///   published and then confirmed on a ≥1-relay ACK (or rolled back). Dropping
-///   one leaves the group in `PendingPublish`, where every later send fails.
-/// * [proposals] carries bare proposal events: publish-or-lose, nothing to
-///   confirm, and recoverable — a later convergence pass re-emits them.
+/// Nothing was sealed: something holds the circle's sends — a change
+/// awaiting its relays, a departure owed, a leave — or the core asked nothing
+/// of the engine. Every caller treats either as a deferral; the next tick
+/// seals again.
 @immutable
-final class LocationSendDeferred extends EncryptLocationOutcome {
-  /// Creates a [LocationSendDeferred].
-  const LocationSendDeferred({
-    required this.unresolvedInputs,
-    required this.discardedIntents,
-    required this.repaired,
-    required this.commits,
-    required this.proposals,
-  });
-
-  /// Stored rows still gating outbound sends for this circle after the
-  /// in-place repair. Zero means the next send should encrypt.
-  final int unresolvedInputs;
-
-  /// Queued location intents the repair discarded, so a stalled circle cannot
-  /// bank one stale fix per publish cycle.
-  final int discardedIntents;
-
-  /// Whether the repair left the circle with nothing gating.
-  final bool repaired;
-
-  /// Staged commits awaiting the publish-then-confirm ladder (Rule 13).
-  final List<PendingAutoCommit> commits;
-
-  /// JSON-serialized bare proposal events to publish (no confirm).
-  final List<String> proposals;
-}
-
-/// What the engine folded out of one call — the folded location-facing results,
-/// any receive-side auto-commit the caller MUST publish then confirm/fail
-/// (Rule 13), and any bare proposal to publish. Dart-native mirror of
-/// `DecryptLocationOutcomeFfi`.
-///
-/// Two origins, one shape: ingesting one received `kind:445`
-/// ([CircleService.decryptLocationCollectingCommits]), and RESOLVING a staged
-/// commit ([CircleService.confirmPendingCommit] /
-/// [CircleService.failPendingCommit]), which replays everything the engine
-/// buffered while that commit was in flight.
-///
-/// Every location it carries is ALREADY persisted to the last-known store by
-/// the Rust core before the call returns; the caller routes them for DISPLAY
-/// and for the receive-liveness stamp, never for durability.
-@immutable
-class DecryptLocationOutcome {
-  /// Creates a [DecryptLocationOutcome].
-  const DecryptLocationOutcome({
-    required this.results,
-    required this.autoCommits,
-    required this.proposals,
-  });
-
-  /// The folded location-facing results (locations, joins, updates, …).
-  final List<LocationEventResult> results;
-
-  /// Receive-side auto-commits the caller MUST publish then confirm/fail.
-  final List<PendingAutoCommit> autoCommits;
-
-  /// JSON-serialized bare proposal events to publish (no confirm) — the local
-  /// user's own re-proposed leave. Publish-or-lose, and recoverable: the
-  /// durable leave request makes a later convergence pass re-emit it.
-  final List<String> proposals;
+final class LocationSendHeld extends LocationSeal {
+  /// Creates a [LocationSendHeld].
+  const LocationSendHeld({required super.replayed});
 }
 
 /// Abstract interface for circle management services.
@@ -645,16 +795,12 @@ abstract class CircleService {
   /// (32 bytes). The [memberKeyPackages] are the fetched KeyPackage data
   /// for each member. The [name] is the user-facing display name.
   ///
-  /// Publishes the gift-wrapped Welcome events and confirms (or rolls back)
-  /// the engine's pending group-creation state internally (publish-before-
-  /// apply, Rule 13) before returning a [CircleCreationResult] with the
-  /// created circle and Welcome delivery counts.
-  ///
-  /// [creatorFallbackRelays] are the creator's own inbox relays (kind 10050),
-  /// used as the third tier in the Welcome-delivery cascade
-  /// (member 10050 → member 10002 → creator inbox → FAIL CLOSED). Pass an
-  /// empty list if the creator has no inbox relays; delivery then fails
-  /// closed (no public-default fallback) when tiers 1–2 are also empty.
+  /// Through the fanout driver: a delivery record is written for each
+  /// founding Welcome before this returns, and each is sent from it to its
+  /// invitee's inbox relays (kind 10050) alone until one acknowledges it; a
+  /// member with none fails the creation closed, before anything is made.
+  /// Returns a [CircleCreationResult] with the created circle and how many
+  /// Welcomes were acknowledged during the call.
   ///
   /// Throws [CircleRosterFullException] when the account already holds
   /// `kMaxCirclesPerAccount` circles — checked before anything is staged, so a
@@ -667,7 +813,6 @@ abstract class CircleService {
     required CircleType circleType,
     String? description,
     List<String>? relays,
-    List<String> creatorFallbackRelays = const [],
   });
 
   /// Gets all visible circles (excludes declined invitations).
@@ -708,7 +853,9 @@ abstract class CircleService {
   /// Throws [CircleRosterFullException] when the account already holds
   /// `kMaxCirclesPerAccount` circles — checked before the held Welcome is
   /// ingested, so the invitation stays pending and acceptable once the user
-  /// leaves a circle. Throws [CircleServiceException] if acceptance fails.
+  /// leaves a circle. Throws [InvitationNeedsNewInviteException] when the
+  /// invitation can never be accepted on this device (it is declined), and
+  /// [CircleServiceException] if acceptance otherwise fails.
   Future<Circle> acceptInvitation(List<int> mlsGroupId);
 
   /// Declines an invitation to join a circle.
@@ -719,37 +866,48 @@ abstract class CircleService {
   /// Throws [CircleServiceException] if declining fails.
   Future<void> declineInvitation(List<int> mlsGroupId);
 
-  /// Leaves a circle.
+  /// The replacement offers of the invitation [invitationId] that
+  /// [acceptInvitation] answered with an
+  /// [InvitationRejoinConfirmationRequiredException]. Empty when none is held
+  /// any more.
   ///
-  /// Removes the user from the circle. This action cannot be undone.
-  ///
-  /// [selfPubkeyHex] is the caller's Nostr identity pubkey — required so
-  /// the Rust layer can classify the leave (non-admin, admin handoff, or
-  /// sole-member abandon) before executing the matching MLS sequence.
-  ///
-  /// Throws [CircleServiceException] if leaving fails.
-  Future<void> leaveCircle({
-    required List<int> mlsGroupId,
-    required String selfPubkeyHex,
-  });
+  /// Throws [InvitationNeedsNewInviteException] when the core declined them
+  /// (an author who is not the inviter shown, or a circle this device is
+  /// leaving), and [CircleServiceException] if the read fails.
+  Future<List<RejoinOffer>> rejoinOffersForInvitation(List<int> invitationId);
 
-  /// Whether [ownPubkeyHex] is still in the MLS roster of the circle with
-  /// [mlsGroupId] — the REV-1 leaver-backstop liveness predicate.
+  /// The user's consent to [offer]: the circle is joined again, and this
+  /// device's copy of it is discarded.
   ///
-  /// After publishing a `SelfRemove`, the leave flow polls this with the
-  /// leaver's OWN pubkey: while it returns `true` the leaver re-issues a fresh
-  /// `propose_leave` on each poll; once it returns `false` the eviction has
-  /// landed and the local wipe (`complete_leave`) may proceed. Fails SAFE to
-  /// `false` when the group is gone or the caller has been evicted, so a
-  /// removed leaver stops re-issuing.
+  /// Throws [InvitationRejoinConfirmationRequiredException] when the local
+  /// copy moved since [offer] was read — nothing changed; read the offers
+  /// again — [InvitationNeedsNewInviteException] when the offer is gone, and
+  /// [CircleServiceException] if the join otherwise fails.
+  Future<Circle> confirmGroupRejoin(List<int> invitationId, RejoinOffer offer);
+
+  /// Declines every replacement offer of the invitation [invitationId], and
+  /// the invitation with them. Nothing is sent.
   ///
-  /// Throws [CircleServiceException] on a genuine infrastructure failure (a
-  /// caller in the backstop loop treats a throw conservatively — as "cannot
-  /// confirm removal" — never as a removal).
-  Future<bool> stillAMember({
-    required List<int> mlsGroupId,
-    required String ownPubkeyHex,
-  });
+  /// Throws [CircleServiceException] if declining fails.
+  Future<void> declineGroupRejoin(List<int> invitationId);
+
+  /// Leaves a circle through the fanout driver: the intent is written first,
+  /// and from then nothing is shared with the circle on any plane. A leaving
+  /// admin hands the circle on and steps down first; the leave's proposal
+  /// follows, and the leave ends on this device once a peer commits it or its
+  /// bound passes — carried on at every wake ([LeaveDelivery.leaving]) by the
+  /// leaver backstop, never by a loop here.
+  ///
+  /// Throws [CircleServiceException] when the driver answers an error that
+  /// is no typed status.
+  Future<LeaveDelivery> leaveCircle({required List<int> mlsGroupId});
+
+  /// Leaves a circle an admin disbanded ([Circle.isDisbanded]): nothing is
+  /// sent, since no member receives anything for it again, and this device's
+  /// copy is deleted with the disband's record kept.
+  ///
+  /// Throws [CircleServiceException] if the deletion fails.
+  Future<void> leaveDisbandedCircle({required List<int> mlsGroupId});
 
   /// Removes [memberPubkeyHex] from the circle identified by [mlsGroupId].
   ///
@@ -758,42 +916,28 @@ abstract class CircleService {
   /// themselves go through the MIP-03 `LeavePlan` path (self-demote
   /// then SelfRemove); this method is for removing **other** members.
   ///
-  /// Stages the MLS `RemoveMember` commit, publishes the `kind:445`
-  /// evolution event to the circle's relays, and finalizes (or clears,
-  /// on publish failure) the pending commit locally.
+  /// Through the fanout driver: the commit is staged under a durable record
+  /// and sent until a relay acknowledges it. Returns what became of it;
+  /// [ChangeDelivery.awaitingRelays] is not a failure.
   ///
-  /// Throws [CircleServiceException] if the caller is not an admin, the
-  /// member is not in the circle, staging the commit fails, or the
-  /// evolution event could not be published to any relay.
-  Future<void> removeMember({
+  /// Throws [CircleServiceException] only when the driver could not be asked.
+  Future<ChangeDelivery> removeMember({
     required List<int> mlsGroupId,
     required String memberPubkeyHex,
   });
 
   /// Adds new members to an already-created circle (admin only).
   ///
-  /// Stages the MLS add commit, publishes the kind:445 evolution event to
-  /// the circle's relays, finalizes (or clears, on publish failure) the
-  /// pending commit, then publishes the gift-wrapped Welcome(s) to each new
-  /// member's relays. Welcomes are published ONLY after a successful
-  /// finalize, so a rolled-back add never leaves a dangling invitation.
+  /// Through the fanout driver: the invite is staged under a record of its
+  /// own and driven, and each Welcome goes from a record of its own to its
+  /// invitee's inbox relays once a relay takes the commit. Welcomes are sent
+  /// ONLY after a relay took the commit, so a rolled-back add never leaves a
+  /// dangling invitation.
   ///
-  /// [creatorFallbackRelays] are the adder's own inbox relays (kind 10050),
-  /// the third tier of the Welcome-delivery cascade.
-  ///
-  /// [secretProvider] yields the caller's 32-byte identity secret; it is
-  /// invoked FRESH for each staging attempt (and scrubbed straight after) so
-  /// the plaintext is never held across a settle-window wait (Rule 9). Under
-  /// live-sync convergence an add re-stages up to three times, so passing raw
-  /// bytes would keep the secret resident for ~24s.
-  ///
-  /// Throws [CircleServiceException] if not admin, relays unavailable,
-  /// staging/publish/finalize fails, or delivery fails closed.
+  /// Throws [CircleServiceException] only when the driver could not be asked.
   Future<AddMemberResult> addMember({
-    required Future<List<int>> Function() secretProvider,
     required List<int> mlsGroupId,
     required List<KeyPackageData> memberKeyPackages,
-    List<String> creatorFallbackRelays = const [],
   });
 
   /// Processes a gift-wrapped invitation event.
@@ -817,114 +961,33 @@ abstract class CircleService {
     required String giftWrapEventJson,
   });
 
-  /// Encrypts a location for a circle.
+  /// Seals a fix for the circle and records it, after the circle's records
+  /// are driven: from a leave's intent on — or while a change awaits its
+  /// relays, or a departure is owed — nothing is sealed ([LocationSendHeld]).
   ///
-  /// Creates an MLS-encrypted kind 445 event containing the location data,
-  /// ready for publishing to the circle's relays.
-  ///
-  /// [updateIntervalSecs] is retired and no longer reaches the wire: the
-  /// engine stamps the outer NIP-40 `expiration` from the group's
-  /// `message-retention.v1` component (228 s), and the core discards this
-  /// argument. Must still be in `[60, 3600]`, which the Rust FFI validates —
-  /// that range check is now its only effect.
-  ///
-  /// Returns an [EncryptLocationOutcome]: either [LocationEncrypted] with the
-  /// event to publish, or [LocationSendDeferred] when the engine queued the
-  /// update instead. A deferral is NOT an exception — it carries work the
-  /// caller must still do (see [LocationSendDeferred]).
-  ///
-  /// Throws [CircleServiceException] if encryption fails.
-  Future<EncryptLocationOutcome> encryptLocation({
+  /// Throws [CircleServiceException] when the driver answers an error that
+  /// is no typed outcome.
+  Future<LocationSeal> sealLocation({
     required List<int> mlsGroupId,
-    required String senderPubkeyHex,
     required double latitude,
     required double longitude,
-    required int updateIntervalSecs,
   });
 
-  /// Decrypts / ingests a received kind 445 event through the MLS engine.
+  /// Sends [seal] once, to the relays its record names, and ends its record
+  /// whatever was answered.
   ///
-  /// Returns the folded engine results (Dark Matter five-variant taxonomy —
-  /// see [LocationEventKind]). A single ingest can yield SEVERAL results (the
-  /// engine may release buffered inbound after the outer event), so this
-  /// returns a `List` — empty when nothing new resulted (e.g. a duplicate).
-  ///
-  /// Callers should refresh the circle's member list on
-  /// [LocationEventKind.joined], [LocationEventKind.groupUpdate], or
-  /// [LocationEventKind.invalidated], and treat
-  /// [LocationEventKind.unrecoverable] as a blocked-circle signal (Rule 8 —
-  /// see [markCircleBlocked]). The engine owns publish-before-apply for every
-  /// commit internally, so callers never need to publish or finalize
-  /// anything in reaction to a decrypt result.
+  /// Throws [CircleServiceException] when the driver could not be asked.
+  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal);
+
+  /// Ingests a received kind-445 through the fanout driver: the engine takes
+  /// it in, records and drives whatever it stages on the way (a receive-side
+  /// auto-commit included), and every location it hands back is already
+  /// stored. A [IngestResult.held] event is fetched again: whoever polled it
+  /// does not move past it (Security Rule 12).
   ///
   /// Throws [CircleServiceException] if the event JSON is invalid or the
   /// engine ingest fails hard.
-  Future<List<LocationEventResult>> decryptLocation({
-    required String eventJson,
-  });
-
-  /// Decrypts / ingests a received kind 445 event, identically to
-  /// [decryptLocation], but ALSO surfaces any receive-side auto-commit the
-  /// engine staged (a peer `SelfRemove` eviction) instead of rolling it back.
-  ///
-  /// Rule 13 / security F13: for EACH
-  /// [DecryptLocationOutcome.autoCommits] entry, publish its
-  /// `commitEventJson` to the circle's relays, then
-  /// [confirmPendingCommit] on a ≥1-relay ACK (or [failPendingCommit] on
-  /// failure/timeout) — exactly like the [PendingAutoCommit] contract
-  /// describes. NEVER confirm before an ACK, and NEVER drop an entry
-  /// silently.
-  ///
-  /// The foreground poll receive path (which owns no Rust-side relay handle)
-  /// SHOULD call this in place of [decryptLocation]; the live-sync and
-  /// background-catch-up planes already publish receive-side auto-commits
-  /// in-Rust.
-  ///
-  /// Throws [CircleServiceException] if the event JSON is invalid or the
-  /// engine ingest fails hard.
-  Future<DecryptLocationOutcome> decryptLocationCollectingCommits({
-    required String eventJson,
-  });
-
-  /// Confirms a [PendingAutoCommit] after ≥1 relay acknowledged its publish
-  /// (Rule 13). See [decryptLocationCollectingCommits].
-  ///
-  /// Returns what the engine replayed out of the buffer it filled while that
-  /// commit was in flight: peer locations to surface, further auto-commits to
-  /// run through this same ladder, and proposals to publish. Dropping any of
-  /// them costs display freshness, a stalled eviction, or a wedged leave.
-  ///
-  /// Throws [CircleServiceException] if the confirm fails.
-  Future<DecryptLocationOutcome> confirmPendingCommit(
-    PendingCommitToken pending,
-  );
-
-  /// Rolls back a [PendingAutoCommit] after a publish failure/timeout
-  /// (Rule 13). See [decryptLocationCollectingCommits].
-  ///
-  /// Returns the same replayed outcome [confirmPendingCommit] does — the
-  /// engine replays its buffer on both verdicts, so a no-ack must not cost a
-  /// peer's fix.
-  ///
-  /// Best-effort: implementations should swallow rollback failures rather
-  /// than throw, since the caller has already determined the publish did
-  /// not succeed; an outcome with nothing in it is the honest report then.
-  Future<DecryptLocationOutcome> failPendingCommit(PendingCommitToken pending);
-
-  /// Records that [mlsGroupId] entered the MLS `Unrecoverable` state (Rule 8).
-  ///
-  /// Session-scoped (in-memory): the FFI surface does not persist this flag
-  /// on the circle row, so it is derived locally from
-  /// [LocationEventKind.unrecoverable] results and does not survive an app
-  /// restart — a restart re-derives it from the next ingest of an event for
-  /// that group, if any arrives. See [isCircleBlocked].
-  void markCircleBlocked(List<int> mlsGroupId);
-
-  /// Whether [mlsGroupId] was observed entering the MLS `Unrecoverable`
-  /// state this session (see [markCircleBlocked]).
-  ///
-  /// The UI MUST block send/mutate for a blocked circle (Rule 8).
-  bool isCircleBlocked(List<int> mlsGroupId);
+  Future<IngestResult> ingestEvent({required String eventJson});
 
   // REMOVED: BOTH of Dart's sync-cursor advances — the group one that took an
   // inbound kind:445's `created_at`, and the inbox one that took a kind:1059
@@ -1047,25 +1110,51 @@ abstract class CircleService {
 
   /// Wipes ALL local MLS state on logout.
   ///
-  /// Deletes both encrypted database files (`circles.db` and `haven_mdk.db`,
-  /// plus WAL/SHM/journal sidecars) and then removes both keyring keys.
-  /// Permanent and irreversible — call only on identity deletion.
+  /// Deletes both encrypted database files (`circles-v2.db` and
+  /// `session-v2.sqlite`, plus WAL/SHM/journal sidecars), then removes both
+  /// keyring keys and this identity's part of the storage reset (any notice
+  /// still owed, and the record that its preferences were cleared). Permanent
+  /// and irreversible — call only on identity deletion.
   ///
   /// The caller MUST have already called [closeAndInvalidate] to drop the
   /// SQLite handle before this; otherwise file deletion races an open fd.
   Future<void> wipeAllMlsState();
 
-  /// Destroys any stranded PRE-Dark-Matter MLS state (`haven_mdk.db` + its
-  /// keyring key) unconditionally.
+  /// Dismisses the one-time storage-reset notice: deletes the marker the
+  /// reset left, which lifts the core's hold on relay-list publishing.
   ///
-  /// Independent of [wipeAllMlsState]: that wipes the CURRENT stack
-  /// (`session.sqlite`); this targets the legacy `haven_mdk.db` a failed
-  /// one-time cutover (`LegacyCutoverService`) may have left behind. Wired
-  /// into identity deletion because the cutover's own launch retry is gated
-  /// on an identity being present — once the identity is deleted that gate
-  /// can never fire again, so deletion is the last chance to remove it.
-  /// Idempotent and safe to call even when no legacy state exists.
-  Future<void> destroyLegacyMlsState();
+  /// Throws [CircleServiceException] if the marker cannot be removed; the
+  /// notice is then owed again next launch.
+  Future<void> acknowledgeStorageReset();
+
+  /// Whether the fetched KeyPackage event [keyPackageJson] can be invited into
+  /// the circle [mlsGroupId], or into a new circle when it is `null`.
+  ///
+  /// Throws [CircleServiceException] if the check itself fails.
+  Future<KeyPackageAdmission> checkMemberKeyPackage({
+    required String keyPackageJson,
+    List<int>? mlsGroupId,
+  });
+
+  /// Retries loading a circle whose encrypted state failed to load
+  /// ([CircleEngineState.quarantined]). Returns whether it is live now.
+  ///
+  /// Throws [CircleServiceException] if the retry itself fails.
+  Future<bool> retryQuarantinedCircle(List<int> mlsGroupId);
+
+  /// What the user needs to know first about [circle], worst first; `null`
+  /// when nothing holds it. One standing read: nothing is sent.
+  ///
+  /// Throws [CircleServiceException] when the read fails.
+  Future<CircleRecoveryCause?> circleRecovery(Circle circle);
+
+  /// The members (hex) a removal the user asked for named, dropped unmade,
+  /// that are still in the circle [mlsGroupId]: the people "Remove again" is
+  /// offered for. Never logged.
+  ///
+  /// Throws [CircleServiceException] when the circle store cannot be read: an
+  /// empty answer would hide a member the user tried to remove.
+  Future<List<String>> unmadeRemovalMembers(List<int> mlsGroupId);
 
   /// Prunes the dedup cache of processed gift-wrap events.
   ///
@@ -1143,40 +1232,33 @@ abstract class CircleService {
   });
 
   /// Rotates the relay list for [mlsGroupId] via a MIP-01
-  /// `GroupContextExtensions` commit (admin-only).
-  ///
-  /// Stages the commit, publishes the resulting `kind:445` evolution event to
-  /// the **union** of the circle's current relays and [newRelays] — so a
-  /// member that only listens on a relay being removed still receives the
-  /// commit before it stops polling that relay. On publish success, confirms
-  /// the engine's pending state (which also re-syncs the admin's own
-  /// `circle.relays` to [newRelays]). On publish failure, rolls the pending
-  /// state back and rethrows.
+  /// `GroupContextExtensions` commit (admin-only), through the fanout driver:
+  /// the commit is staged under a durable record and sent until a relay
+  /// acknowledges it. Returns what became of it;
+  /// [ChangeDelivery.awaitingRelays] is not a failure.
   ///
   /// [newRelays] must be non-empty, `wss://` (or a debug loopback URL in
-  /// test builds), credential-free, and at most 20 entries. Admin
-  /// authorization is enforced by MDK against live MLS state — non-admins
-  /// will receive a [CircleServiceException].
+  /// test builds), credential-free, and at most 16 entries (the engine's
+  /// routing bound). Admin
+  /// authorization is enforced by MDK against live MLS state.
   ///
-  /// Throws [CircleServiceException] on any failure.
-  Future<void> updateCircleRelays({
+  /// Throws [CircleServiceException] only when the driver could not be asked.
+  Future<ChangeDelivery> updateCircleRelays({
     required List<int> mlsGroupId,
     required List<String> newRelays,
   });
 
-  /// Repairs a circle whose message delivery has stopped because a sender
-  /// ratchet ran out, by committing a byte-identical admin-policy update.
-  ///
-  /// This is a **ratchet reset**, not key rotation: applying the commit
-  /// restarts every sender ratchet in the group, so a peer whose messages this
-  /// device could no longer decrypt becomes readable again. The commit carries
-  /// no `UpdatePath`, so it rotates no leaf key and provides no
-  /// post-compromise security — never describe it as key rotation in code, in
-  /// logs, or in user copy.
+  /// Repairs a circle whose message delivery has stopped, by a self-update of
+  /// this device's own leaf: a commit with an `UpdatePath`, which any member
+  /// may make. Applying it moves the circle to a new epoch with new keys, so
+  /// a peer whose messages this device could no longer decrypt becomes
+  /// readable again once they have applied it.
   ///
   /// Fetches once for the circle BEFORE asking the core, so a departure
-  /// proposal sitting on a relay becomes a clean
-  /// [EpochRepairSkipped] decline instead of a same-epoch race.
+  /// proposal sitting on a relay becomes a clean [EpochRepairSkipped] decline
+  /// instead of a same-epoch race. [selfPubkeyHex] is what that fetch is
+  /// scoped by (`RelayService.runCatchup`); this service holds no identity of
+  /// its own to read it from.
   ///
   /// Foreground only (Rule 14): never call this from a background isolate.
   /// Enforced by `scripts/ci/check_epoch_repair_isolation.sh`.
@@ -1200,7 +1282,7 @@ sealed class EpochRepairResult {
   const EpochRepairResult();
 }
 
-/// The repair committed: the ratchet reset is published and applied locally.
+/// The repair committed: the self-update is published and applied locally.
 ///
 /// Peers apply it on their own next epoch pass, so delivery does not recover
 /// the instant this returns — copy must not promise that it does.
@@ -1214,14 +1296,13 @@ final class EpochRepairSkipped extends EpochRepairResult {
   /// Creates an [EpochRepairSkipped] carrying the gate that declined.
   const EpochRepairSkipped(this.reason);
 
-  /// Which gate declined. [SkipReasonFfi.notSoleAdmin] and
-  /// [SkipReasonFfi.epochUnrecoverable] are terminal for this device; every
-  /// other reason is retryable.
+  /// Which gate declined. [SkipReasonFfi.epochUnrecoverable] is terminal for
+  /// this device; every other reason is retryable.
   final SkipReasonFfi reason;
 
   /// Whether waiting could change this answer.
   ///
-  /// `false` for the two reasons that never clear on their own, so the UI can
+  /// `false` for the reason that never clears on its own, so the UI can
   /// offer a different remedy instead of a retry — and, in the banner, disable
   /// the control rather than invite a loop that cannot succeed.
   ///
@@ -1229,7 +1310,7 @@ final class EpochRepairSkipped extends EpochRepairResult {
   /// new terminal reason added upstream would silently classify as retryable
   /// and be offered as a retry. This way it fails to COMPILE instead.
   bool get isRetryable => switch (reason) {
-    SkipReasonFfi.notSoleAdmin || SkipReasonFfi.epochUnrecoverable => false,
+    SkipReasonFfi.epochUnrecoverable => false,
     SkipReasonFfi.epochNotStable ||
     SkipReasonFfi.recentEpochChange ||
     SkipReasonFfi.recentInboundTraffic ||
@@ -1238,10 +1319,18 @@ final class EpochRepairSkipped extends EpochRepairResult {
   };
 }
 
+/// The repair commit is staged and recorded, sent again until a relay
+/// acknowledges it: not applied yet, and not a failure.
+final class EpochRepairAwaitingRelays extends EpochRepairResult {
+  /// Creates an [EpochRepairAwaitingRelays].
+  const EpochRepairAwaitingRelays();
+}
+
 /// The circle is send-gated, so nothing was staged.
 ///
-/// Any work the engine surfaced during the in-place repair has already been run
-/// through the Rule-13 publish ladder by the service.
+/// What still holds the circle's sends is the driver's to resolve — for a
+/// routing collision, only leaving this circle itself does; leaving the other
+/// colliding circle does not release it.
 final class EpochRepairDeferred extends EpochRepairResult {
   /// Creates an [EpochRepairDeferred].
   const EpochRepairDeferred();
@@ -1260,7 +1349,9 @@ class KeyPackageData {
     this.nip65Relays = const [],
   });
 
-  /// User's Nostr public key (hex format).
+  /// The account the KeyPackage was verified to belong to (`npub1…`): its
+  /// signer and MLS credential, as `fetchKeyPackage` returns it. Passed back
+  /// on create/add, where Rust refuses a package it does not name.
   final String pubkey;
 
   /// KeyPackage event as JSON string (kind 30443, or legacy kind 443 from a

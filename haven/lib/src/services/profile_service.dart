@@ -166,6 +166,30 @@ enum ProfileSyncOutcome {
   poolUnderflow,
 }
 
+/// What the profile relays hold of the user's own profile
+/// ([ProfileService.fetchOwnPublishedProfile]).
+@immutable
+class PublishedOwnProfile {
+  /// The relays did not settle it: nothing was asked (an earlier miss is
+  /// still backing off, or no relay is usable), or no profile came back while
+  /// a relay had yet to answer.
+  const PublishedOwnProfile.unanswered() : answered = false, profile = null;
+
+  /// The relays settled it: [profile] is the one a relay served, or `null`
+  /// when every relay answered and none has one.
+  const PublishedOwnProfile.answered(this.profile) : answered = true;
+
+  /// Whether the relays settled what is published.
+  final bool answered;
+
+  /// The profile's text fields — no picture is read — or `null` when none
+  /// is published or the relays did not settle it.
+  ///
+  /// The relays' newest copy, unless this device holds a newer one, and with
+  /// any edit still waiting to publish applied on top.
+  final Profile? profile;
+}
+
 /// The result of one own-profile sync pass ([ProfileService.syncOwnProfile]).
 ///
 /// Mirrors the FFI `ProfileSyncResultFfi` — kept as a distinct Dart type so no
@@ -281,6 +305,19 @@ abstract class ProfileService {
   ///
   /// Throws [ProfileServiceException] on a genuine failure.
   Future<Profile?> getOwnProfile({bool forceRefresh = false});
+
+  /// What the profile relays hold of the user's own profile now — never the
+  /// cached copy alone, which may be an edit the network never saw.
+  ///
+  /// After a fetch that found no profile, asks nothing until the backoff
+  /// [refreshMemberProfiles] keeps for an unresolved profile has run, so a
+  /// caller that repeats it until it is answered does not ask the relays each
+  /// time.
+  ///
+  /// Always allowed (a read).
+  ///
+  /// Throws [ProfileServiceException] on a genuine failure.
+  Future<PublishedOwnProfile> fetchOwnPublishedProfile();
 
   /// Merges [displayName] and [about] onto the LOCAL cache and queues them
   /// for publication — this no longer touches a relay.

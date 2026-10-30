@@ -215,6 +215,12 @@ class _MockRelayService implements RelayService {
   }) async => const CatchupResult.empty();
 
   @override
+  Future<CatchupResult> runRefusedRefetch({
+    required CircleManagerFfi circle,
+    int maxDurationSecs = 20,
+  }) async => const CatchupResult.empty();
+
+  @override
   Future<KeyPackageMaintenanceOutcome> maintainKeyPackage({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
@@ -230,14 +236,10 @@ class _MockRelayService implements RelayService {
   }) async => const RelayListMaintenanceResult.empty();
 
   @override
-  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
-      const SubscriptionHealthResult.empty();
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth({
+    required bool foreground,
+  }) async => const SubscriptionHealthResult.empty();
 
-  @override
-  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
-    required CircleManagerFfi circle,
-    required List<int> identitySecretBytes,
-  }) async => const LegacyRetractionResult.empty();
   _MockRelayService({this.giftWraps = const []});
 
   final List<String> giftWraps;
@@ -259,20 +261,13 @@ class _MockRelayService implements RelayService {
   }) async => [];
 
   @override
-  Future<List<String>> fetchKeyPackageRelays(String pubkey) async => [];
-
-  @override
   Future<List<String>> fetchNip65Relays(String pubkey) async => [];
 
   @override
-  Future<KeyPackageData?> fetchKeyPackage(String pubkey) async => null;
-
-  @override
-  Future<PublishResult> publishWelcome({
-    required GiftWrappedWelcome welcomeEvent,
-  }) async {
-    throw UnimplementedError();
-  }
+  Future<KeyPackageData?> fetchKeyPackage(
+    String pubkey, {
+    List<int>? mlsGroupId,
+  }) async => null;
 
   @override
   Future<PublishResult> publishEvent({
@@ -281,20 +276,6 @@ class _MockRelayService implements RelayService {
   }) async {
     throw UnimplementedError();
   }
-
-  @override
-  Future<PublishResult> publishLocationEvent({
-    required String eventJson,
-    required List<String> relays,
-  }) async {
-    throw UnimplementedError();
-  }
-
-  @override
-  Future<void> publishEventFireAndForget({
-    required String eventJson,
-    required List<String> relays,
-  }) async {}
 
   @override
   Future<List<String>> fetchGroupMessages({
@@ -344,7 +325,6 @@ class _MockCircleServiceThrowsErrorOnProcess
     required CircleType circleType,
     String? description,
     List<String>? relays,
-    List<String> creatorFallbackRelays = const [],
   }) async {
     throw UnimplementedError();
   }
@@ -358,16 +338,14 @@ class _MockCircleServiceThrowsErrorOnProcess
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
-  Future<void> leaveCircle({
-    required List<int> mlsGroupId,
-    required String selfPubkeyHex,
-  }) async {}
+  Future<LeaveDelivery> leaveCircle({required List<int> mlsGroupId}) async =>
+      LeaveDelivery.left;
 
   @override
-  Future<void> removeMember({
+  Future<ChangeDelivery> removeMember({
     required List<int> mlsGroupId,
     required String memberPubkeyHex,
-  }) async {}
+  }) async => ChangeDelivery.applied;
 
   @override
   Future<Invitation?> processGiftWrappedInvitation({
@@ -379,19 +357,15 @@ class _MockCircleServiceThrowsErrorOnProcess
   }
 
   @override
-  Future<EncryptLocationOutcome> encryptLocation({
+  Future<LocationSeal> sealLocation({
     required List<int> mlsGroupId,
-    required String senderPubkeyHex,
     required double latitude,
     required double longitude,
-    required int updateIntervalSecs,
-    String? displayName,
   }) async => throw UnimplementedError();
 
   @override
-  Future<List<LocationEventResult>> decryptLocation({
-    required String eventJson,
-  }) async => throw UnimplementedError();
+  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async =>
+      throw UnimplementedError();
 
   @override
   Future<String> signDeletionEvent({
@@ -428,7 +402,6 @@ class _MockCircleServiceThrowsOnFirst
     required CircleType circleType,
     String? description,
     List<String>? relays,
-    List<String> creatorFallbackRelays = const [],
   }) async {
     throw UnimplementedError();
   }
@@ -442,16 +415,14 @@ class _MockCircleServiceThrowsOnFirst
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
-  Future<void> leaveCircle({
-    required List<int> mlsGroupId,
-    required String selfPubkeyHex,
-  }) async {}
+  Future<LeaveDelivery> leaveCircle({required List<int> mlsGroupId}) async =>
+      LeaveDelivery.left;
 
   @override
-  Future<void> removeMember({
+  Future<ChangeDelivery> removeMember({
     required List<int> mlsGroupId,
     required String memberPubkeyHex,
-  }) async {}
+  }) async => ChangeDelivery.applied;
 
   @override
   Future<Invitation?> processGiftWrappedInvitation({
@@ -477,19 +448,15 @@ class _MockCircleServiceThrowsOnFirst
   }
 
   @override
-  Future<EncryptLocationOutcome> encryptLocation({
+  Future<LocationSeal> sealLocation({
     required List<int> mlsGroupId,
-    required String senderPubkeyHex,
     required double latitude,
     required double longitude,
-    required int updateIntervalSecs,
-    String? displayName,
   }) async => throw UnimplementedError();
 
   @override
-  Future<List<LocationEventResult>> decryptLocation({
-    required String eventJson,
-  }) async => throw UnimplementedError();
+  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async =>
+      throw UnimplementedError();
 
   @override
   Future<String> signDeletionEvent({
@@ -526,7 +493,6 @@ class _MockCircleServiceMixedErrors
     required CircleType circleType,
     String? description,
     List<String>? relays,
-    List<String> creatorFallbackRelays = const [],
   }) async {
     throw UnimplementedError();
   }
@@ -540,16 +506,14 @@ class _MockCircleServiceMixedErrors
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
-  Future<void> leaveCircle({
-    required List<int> mlsGroupId,
-    required String selfPubkeyHex,
-  }) async {}
+  Future<LeaveDelivery> leaveCircle({required List<int> mlsGroupId}) async =>
+      LeaveDelivery.left;
 
   @override
-  Future<void> removeMember({
+  Future<ChangeDelivery> removeMember({
     required List<int> mlsGroupId,
     required String memberPubkeyHex,
-  }) async {}
+  }) async => ChangeDelivery.applied;
 
   @override
   Future<Invitation?> processGiftWrappedInvitation({
@@ -578,19 +542,15 @@ class _MockCircleServiceMixedErrors
   }
 
   @override
-  Future<EncryptLocationOutcome> encryptLocation({
+  Future<LocationSeal> sealLocation({
     required List<int> mlsGroupId,
-    required String senderPubkeyHex,
     required double latitude,
     required double longitude,
-    required int updateIntervalSecs,
-    String? displayName,
   }) async => throw UnimplementedError();
 
   @override
-  Future<List<LocationEventResult>> decryptLocation({
-    required String eventJson,
-  }) async => throw UnimplementedError();
+  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async =>
+      throw UnimplementedError();
 
   @override
   Future<String> signDeletionEvent({

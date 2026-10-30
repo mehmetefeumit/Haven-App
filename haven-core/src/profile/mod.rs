@@ -61,7 +61,10 @@ pub use config::{
 };
 pub use consent::has_published_profile;
 pub use error::{ProfileError, Result};
-pub use fetch::{fetch_own_profile, fetch_profiles_assigned, AssignedFetch};
+pub use fetch::{
+    fetch_own_profile, fetch_profiles_assigned, read_own_profile_on_relays, AssignedFetch,
+    OwnProfileOnRelays,
+};
 pub use merge::{enforce_name_rule, merge_edits};
 pub use outbox::{merge_base, PendingEdits, PendingSnapshot};
 pub use parse::parse_newest_metadata;

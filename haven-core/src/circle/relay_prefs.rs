@@ -34,13 +34,10 @@
 //!   kind-0 profile unconditional on save (owner-directed); the old
 //!   "single-purpose client, no kind 0/1/3" rationale no longer holds.
 //!
-//! [`RelayType::KeyPackage`] therefore still maps to kind **10051** here, and
-//! must keep doing so: its one surviving production caller is the legacy
-//! retraction in [`crate::relay::maintenance`], which publishes an EMPTY
-//! kind-10051 to scrub a pre-Dark-Matter list. 10051 is the kind being
-//! *retracted*, not one Haven advertises. Re-pointing this mapping at 10002
-//! would make the cutover scrub the user's live NIP-65 list instead — pinned
-//! by `no_relay_type_maps_to_nip65_kind_10002` in
+//! [`RelayType::KeyPackage`] still maps to kind **10051** here, and no
+//! production path publishes through that mapping: the FFI routes the
+//! category to the NIP-65 builder. It must never be re-pointed at 10002 —
+//! pinned by `no_relay_type_maps_to_nip65_kind_10002` in
 //! `tests/relay_preferences_integration_test.rs`.
 //!
 //! # Why the profile category has no wire kind

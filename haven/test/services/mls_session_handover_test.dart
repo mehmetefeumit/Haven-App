@@ -137,6 +137,35 @@ void main() {
       );
     });
 
+    test('an app that went away during the guard check never touches the '
+        'service', () async {
+      // The check reads the registry over FFI: the user can leave meanwhile,
+      // and what is left of the open is then background maintenance.
+      var foregrounded = true;
+      var stops = 0;
+      var restarts = 0;
+      final outcome = await requestSessionHandover(
+        dataDir: '/data/haven',
+        isSessionLive: (_) async {
+          foregrounded = false;
+          return true;
+        },
+        stopService: () async => stops++,
+        restartService: () async => restarts++,
+        backgroundSharingEnabled: true,
+        isForegrounded: () => foregrounded,
+        delay: (_) async {},
+      );
+      expect(outcome, HandoverOutcome.backgrounded);
+      expect(
+        stops,
+        0,
+        reason: 'background sharing stopped for an app that is no longer in '
+            'front',
+      );
+      expect(restarts, 0);
+    });
+
     test('the same conditions DO recover in the foreground', () async {
       // The counterpart: without this the gate could be satisfied by never
       // recovering at all.

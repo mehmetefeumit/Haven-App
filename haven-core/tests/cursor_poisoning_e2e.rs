@@ -7,21 +7,24 @@
 //! that ciphertext into a fresh event, signed by a throwaway key, carrying a
 //! `created_at` of their choosing.
 //!
-//! Both halves of that attack used to poison the victim's PERSISTED per-circle
-//! cursor, because both receive planes derived the cursor from the inbound
-//! event's outer `created_at`:
+//! That attack used to poison the victim's PERSISTED per-circle cursor, because
+//! both receive planes derived the cursor from the inbound event's outer
+//! `created_at`:
 //!
-//! * WITH a past NIP-40 `expiration`, the event was dropped by Haven's own
-//!   receiver-side screen — which runs before the signature, the ephemeral
-//!   author or the ciphertext are looked at by anything — and that drop was
-//!   reported as a synthetic `Stale`, which both cursor gates read as "advance
-//!   past it".
-//! * WITHOUT the expiration tag, the event reached the engine, the outer AEAD
-//!   opened (same ciphertext, same exporter secret) and the genuine inner MLS
-//!   message authenticated, so the engine returned a clean verdict — and the
-//!   cursor advanced to the attacker's timestamp anyway. **No receive-side check
-//!   binds the outer envelope's `created_at` to the inner message the engine
-//!   authenticates**, for any outcome.
+//! * a locally screened event (Haven once dropped past-`expiration` events
+//!   before authentication) was reported as a synthetic `Stale`, which both
+//!   cursor gates read as "advance past it";
+//! * an event that reached the engine opened its outer AEAD (same ciphertext,
+//!   same exporter secret) and authenticated the genuine inner MLS message, so
+//!   the engine returned a clean verdict — and the cursor advanced to the
+//!   attacker's timestamp anyway. **No receive-side check binds the outer
+//!   envelope's `created_at` to the inner message the engine authenticates**,
+//!   for any outcome.
+//!
+//! The NIP-40 `expiration` tag is no longer a screen at all (receivers must not
+//! judge validity by it, Marmot `transports/nostr.md:190-192`): an expired
+//! re-wrap reaches the engine exactly like an unexpired one, and the gates below
+//! say so.
 //!
 //! Either way `since_for_stream` then derived every subsequent REQ floor from
 //! the poisoned cursor, so every legitimate event below it fell outside every
@@ -54,33 +57,35 @@
 //! parse cannot read (a second `#h` tag is enough, and a NIP-01 `#h` filter
 //! matches such an event on either value) is a pre-authentication rejection: it
 //! neither advances the cursor nor holds it, because it can be minted for free,
-//! in bulk, by anyone who has seen the circle's public routing id. An
-//! ENGINE-side failure — envelope parsed, engine took the message, engine choked
-//! — still holds, because something on the authenticated path is genuinely
-//! unresolved there. Both sides are gated below, in both planes; the accepted
-//! cost of skipping the first class is recorded at the classification point in
-//! `SessionManager::process_event`.
+//! in bulk, by anyone who has seen the circle's public routing id. Content the
+//! engine itself proves invalid (not base64) is its terminal verdict at MDK
+//! v0.10.4 (`Ignored { InvalidEncoding }`) and holds nothing either. A hard
+//! ENGINE-side failure — the engine took the message and a storage write failed
+//! mid-ingest — still holds, because something on the authenticated path is
+//! genuinely unresolved there. All three are gated below, in both planes; the
+//! accepted cost of skipping the first class is recorded at the classification
+//! point in `SessionManager::process_event`.
 //!
 //! # Why the catch-up plane's expired case is NOT end-to-end here
 //!
 //! `MockRelay` is backed by `nostr-database`, whose `DatabaseHelper` rejects an
 //! expired event on save and filters expired events out of every query
-//! (`helper.rs:193,216`) — i.e. it is NIP-40-conformant, so it will not serve the
-//! very input that screen exists to defend against. (That is the screen's own
-//! premise: only a malicious or non-conformant relay replays past a TTL.) The
-//! catch-up plane is therefore covered where it can be driven honestly: its
-//! `ingest_one` classification and its cursor arithmetic are unit-tested in
-//! `src/relay/catchup.rs`, and the end-to-end sweep gates below cover everything
-//! a conformant relay CAN deliver — including the un-expired re-wrap, which is
-//! the more dangerous half.
+//! (`helper.rs:193,216`) — it is NIP-40-conformant, and `nostr-relay-pool`
+//! drops an expired event a relay still serves before any subscriber sees it.
+//! The live plane's expired cases therefore hand the event to the processor
+//! directly, and the catch-up plane's `ingest_one` classification and cursor
+//! arithmetic are unit-tested in `src/relay/catchup.rs`; the end-to-end sweep
+//! gates below cover everything a conformant relay CAN deliver — including the
+//! un-expired re-wrap.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::location::LocationMessage;
+use haven_core::nostr::mls::storage::set_stored_message_write_fault_for_test;
 use haven_core::nostr::mls::types::GroupId;
-use haven_core::nostr::mls::SessionManager;
+use haven_core::nostr::mls::{SessionManager, StorageConfig};
 use haven_core::relay::catchup::run_catchup_all_circles;
 use haven_core::relay::live_sync::planes::group::group_filter;
 use haven_core::relay::live_sync::{
@@ -100,10 +105,9 @@ use tempfile::TempDir;
 struct TwoMemberCircle {
     alice: Arc<CircleManager>,
     bob: Arc<CircleManager>,
-    bob_keys: Keys,
     mls_group_id: GroupId,
     nostr_group_id: [u8; 32],
-    _dirs: Vec<TempDir>,
+    dirs: Vec<TempDir>,
 }
 
 impl TwoMemberCircle {
@@ -137,16 +141,20 @@ impl TwoMemberCircle {
         );
     }
 
+    /// Arms or disarms a storage write failure inside Alice's engine: while
+    /// armed, an ingest the engine has taken fails with a hard error — the one
+    /// ENGINE-side failure reachable at MDK v0.10.4.
+    fn alice_write_fault(&self, armed: bool) {
+        let key = StorageConfig::test_sqlcipher_key().expect("test key");
+        let db = StorageConfig::new(self.dirs[0].path()).database_path();
+        set_stored_message_write_fault_for_test(&db, &key, armed).expect("set the write fault");
+    }
+
     /// A genuine, MLS-authenticated `kind:445` location from Bob — the event an
     /// attacker gets to OBSERVE on the relay.
     async fn bob_location(&self, lat: f64, lon: f64) -> Event {
         self.bob
-            .encrypt_location(
-                &self.mls_group_id,
-                &self.bob_keys.public_key(),
-                &LocationMessage::new(lat, lon),
-                300,
-            )
+            .seal_location_for_test(&self.mls_group_id, &LocationMessage::new(lat, lon))
             .await
             .expect("bob encrypts a location")
             .0
@@ -186,15 +194,14 @@ async fn build_two_member_circle(group_relays: Vec<String>) -> TwoMemberCircle {
     let alice = Arc::new(CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap());
     let config = CircleConfig::new("Cursor Integrity Circle").with_relays(group_relays.clone());
     let result = alice
-        .create_circle(&alice_keys, vec![bob_member], &config, &group_relays)
+        .create_circle(&alice_keys, vec![bob_member], &config)
         .await
         .expect("create circle");
+    // As the app's driven create leaves it: the founding Welcomes sent from
+    // their records and acknowledged, so no later drive sends them.
+    let _ = alice.land_staged_for_test().await;
     let mls_group_id = result.circle.mls_group_id.clone();
     let nostr_group_id = result.circle.nostr_group_id;
-    alice
-        .confirm_published(result.pending)
-        .await
-        .expect("alice confirms creation");
 
     let welcome = result
         .welcome_events
@@ -211,10 +218,9 @@ async fn build_two_member_circle(group_relays: Vec<String>) -> TwoMemberCircle {
     TwoMemberCircle {
         alice,
         bob,
-        bob_keys,
         mls_group_id,
         nostr_group_id,
-        _dirs: vec![alice_dir, bob_dir],
+        dirs: vec![alice_dir, bob_dir],
     }
 }
 
@@ -274,10 +280,10 @@ fn malformed_445(h: &str, created_at_secs: u64) -> Event {
 }
 
 /// A `kind:445` whose ENVELOPE is well formed but whose `content` is not
-/// base64 — so the pre-engine parse succeeds and the ENGINE is the thing that
-/// fails. The other side of the classification boundary from
-/// [`malformed_445`].
-fn engine_unprocessable_445(h: &str, created_at_secs: u64) -> Event {
+/// base64 — so the pre-engine parse succeeds and the ENGINE judges it: at MDK
+/// v0.10.4 a terminal `Ignored { InvalidEncoding }`, since no later context can
+/// make such bytes valid.
+fn undecodable_445(h: &str, created_at_secs: u64) -> Event {
     EventBuilder::new(nostr::Kind::Custom(445), "!!!!not-base64!!!!")
         .tags(vec![Tag::parse(["h", h]).unwrap()])
         .custom_created_at(Timestamp::from(created_at_secs))
@@ -313,8 +319,8 @@ async fn wait_until_after(secs: i64) {
 // Live-sync plane (EngineProcessor)
 // ============================================================================
 
-/// HEADLINE: a forged 445 whose `expiration` has passed is dropped before any
-/// authentication and moves the persisted cursor NOWHERE.
+/// A forged 445 whose `expiration` has passed reaches the engine like any other
+/// re-wrap, and moves the persisted cursor NOWHERE.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn livesync_a_forged_expired_445_does_not_move_the_cursor() {
     let fx = build_two_member_circle(vec!["wss://group.example.com".to_string()]).await;
@@ -337,14 +343,14 @@ async fn livesync_a_forged_expired_445_does_not_move_the_cursor() {
 
     assert_eq!(
         outcome,
-        GroupProcessOutcome::RejectedBeforeAuth,
-        "the forgery must be reported as a PRE-AUTHENTICATION rejection, never as \
-         an engine outcome"
+        GroupProcessOutcome::Applied,
+        "the expiration tag is not a screen: the re-wrapped ciphertext is a \
+         member's own, seen here for the first time, so the engine applies it"
     );
     assert_eq!(
         fx.alice_cursor(),
         Some(floor),
-        "an unauthenticated event must not move the cursor one millisecond"
+        "an unauthenticated envelope must not move the cursor one millisecond"
     );
 }
 
@@ -391,15 +397,16 @@ async fn livesync_the_same_forgery_without_the_expiration_tag_moves_no_cursor() 
     );
 }
 
-/// The OTHER direction a forgery could attack: a pre-authentication rejection
-/// must not HOLD the cursor back either.
+/// The OTHER direction a forgery could attack: an expired forgery must not HOLD
+/// the cursor back either.
 ///
 /// Hold-backs exist for events that were delivered but not applied, and they are
 /// deliberately allowed to take a remote `created_at` — lowering the advance is
-/// safe. But a screened event is not an un-applied message: there is nothing to
-/// come back for. If it held, one forged 445 dated far in the past would pin the
-/// circle's cursor for the whole subscription generation — the same denial the
-/// advance-side fix exists to prevent, bought from the other end.
+/// safe. An expired re-wrap of a member's ciphertext is applied, so there is
+/// nothing to come back for. If it held, one forged 445 dated far in the past
+/// would pin the circle's cursor for the whole subscription generation — the
+/// same denial the advance-side fix exists to prevent, bought from the other
+/// end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn livesync_a_forged_expired_445_cannot_hold_the_cursor_back_either() {
     let fx = build_two_member_circle(vec!["wss://group.example.com".to_string()]).await;
@@ -417,16 +424,51 @@ async fn livesync_a_forged_expired_445_cannot_hold_the_cursor_back_either() {
         processor
             .process_group_event(&forged, &fx.nostr_group_id)
             .await,
-        GroupProcessOutcome::RejectedBeforeAuth,
-        "precondition: the screen really fired"
+        GroupProcessOutcome::Applied,
+        "precondition: the expired forgery reached the engine and was applied"
     );
 
     assert!(processor.note_end_of_stored_events(&fx.group_hex()));
     assert_eq!(
         fx.alice_cursor(),
         Some(opened_at * 1000),
-        "the screened event must contribute nothing in EITHER direction — the \
+        "the expired event must contribute nothing in EITHER direction — the \
          generation still redeems its full anchor",
+    );
+}
+
+/// A member can stamp a past `expiration` on a genuine commit, and every
+/// conformant peer applies it: receivers must not judge validity by the tag
+/// (Marmot `transports/nostr.md:190-192`), and a device that dropped it would
+/// stall one epoch behind its circle. Handed to the live plane's processor
+/// directly, because `nostr-relay-pool` drops an expired event before any
+/// subscriber sees it (`docs/MDK_UPSTREAM_TRACKER.md` T-NIP40-POOL); the
+/// processor is where Haven's own judgement is made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_with_forged_expiration_is_still_applied() {
+    let group_relay = "wss://group.example.com".to_string();
+    let fx = build_two_member_circle(vec![group_relay.clone()]).await;
+    let staged = fx
+        .alice
+        .update_relays_for_test(
+            &fx.mls_group_id,
+            &[group_relay, "wss://second.example.com".to_string()],
+        )
+        .await
+        .expect("alice stages a relay-list commit");
+    let forged = rewrap(&staged, Timestamp::now().as_secs(), true);
+
+    let processor = EngineProcessor::new(Arc::clone(&fx.bob), EventBus::new());
+    assert_eq!(
+        processor
+            .process_group_event(&forged, &fx.nostr_group_id)
+            .await,
+        GroupProcessOutcome::Applied
+    );
+    assert_eq!(
+        fx.bob.group_epoch(&fx.mls_group_id).await.unwrap(),
+        fx.alice.group_epoch(&fx.mls_group_id).await.unwrap(),
+        "bob converges on the commit"
     );
 }
 
@@ -511,7 +553,11 @@ async fn livesync_a_buffered_message_holds_the_cursor_below_itself() {
     // Stage a commit and deliberately never confirm it (Rule 13: no relay ack).
     let _staged = fx
         .alice
-        .update_circle_relays(&fx.mls_group_id, &["wss://group2.example.com".to_string()])
+        .update_circle_relays_staging(
+            &fx.mls_group_id,
+            &["wss://group2.example.com".to_string()],
+            0,
+        )
         .await
         .expect("alice stages a routing commit");
 
@@ -554,19 +600,15 @@ async fn livesync_a_buffered_message_holds_the_cursor_below_itself() {
 /// still holds its generation back, and must never be reclassified as a
 /// pre-authentication rejection.
 ///
-/// This event's envelope is well formed — a single, correctly-sized `#h`, a
-/// valid signature — so the pure pre-engine parse accepts it and hands it to the
-/// engine, which chokes on the non-base64 content. Something at this position
-/// has therefore been *looked at by the authenticated path* and left unresolved,
-/// so the conservative reading is the only safe one: hold, and re-request at the
-/// cost of a wider window.
+/// The event is a genuine co-member location — well formed, validly signed,
+/// authenticated by the engine — whose ingest a storage write failure aborts.
+/// Something at this position has therefore been *looked at by the
+/// authenticated path* and left unresolved, so the conservative reading is the
+/// only safe one: hold, and re-request at the cost of a wider window.
 ///
 /// Widening the `Malformed` screen to swallow this class is what the whole
-/// design forbids: it would turn every engine-side failure into a SKIP, which is
-/// the primitive the cursor contract exists to deny. (It is also where the
-/// design's residual cost lands — an unauthenticated party who can produce
-/// engine-bound ciphertext buys a stall here, never a skip, floored by the
-/// monotonic cursor write. See this file's header.)
+/// design forbids: it would turn every engine-side failure into a SKIP, which
+/// is the primitive the cursor contract exists to deny.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn livesync_an_engine_side_failure_holds_the_cursor_below_itself() {
     let fx = build_two_member_circle(vec!["wss://group.example.com".to_string()]).await;
@@ -578,19 +620,22 @@ async fn livesync_an_engine_side_failure_holds_the_cursor_below_itself() {
     processor.note_subscription_opened(&fx.group_hex(), opened_at);
 
     // Dated an hour below the anchor so the hold-back is unmistakable.
-    let unprocessable_secs = now_secs() - 3600;
-    let junk =
-        engine_unprocessable_445(&fx.group_hex(), u64::try_from(unprocessable_secs).unwrap());
+    let failed_secs = now_secs() - 3600;
+    let observed = fx.bob_location(48.85, 2.35).await;
+    let genuine = rewrap(&observed, u64::try_from(failed_secs).unwrap(), false);
     assert!(
-        SessionManager::event_to_transport_message(&junk).is_ok(),
-        "precondition: the ENVELOPE parses — only the content is junk — so what \
-         follows is the engine failing, not a pre-auth screen firing"
+        SessionManager::event_to_transport_message(&genuine).is_ok(),
+        "precondition: the ENVELOPE parses, so what follows is the engine \
+         failing, not a pre-auth screen firing"
     );
 
+    fx.alice_write_fault(true);
+    let outcome = processor
+        .process_group_event(&genuine, &fx.nostr_group_id)
+        .await;
+    fx.alice_write_fault(false);
     assert_eq!(
-        processor
-            .process_group_event(&junk, &fx.nostr_group_id)
-            .await,
+        outcome,
         GroupProcessOutcome::Unprocessable,
         "an engine-side ingest failure must stay `Unprocessable`, never be \
          reclassified as a pre-authentication rejection"
@@ -604,9 +649,53 @@ async fn livesync_an_engine_side_failure_holds_the_cursor_below_itself() {
     assert!(processor.note_end_of_stored_events(&fx.group_hex()));
     assert_eq!(
         fx.alice_cursor(),
-        Some(unprocessable_secs * 1000),
+        Some(failed_secs * 1000),
         "and it caps the generation's anchor at itself rather than letting it \
          redeem its full {opened_at} s",
+    );
+}
+
+/// Content the engine proves invalid is its TERMINAL verdict: it neither
+/// advances the cursor on delivery nor holds the generation back.
+///
+/// At MDK v0.10.4 non-base64 content is `Ignored { InvalidEncoding }` — no later
+/// epoch, snapshot or repair can make those bytes valid, so holding for a
+/// redelivery would only let anyone who has seen the circle's routing id pin
+/// its cursor with bytes they minted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn livesync_an_undecodable_445_is_the_engines_terminal_verdict_and_holds_nothing() {
+    let fx = build_two_member_circle(vec!["wss://group.example.com".to_string()]).await;
+    let processor = EngineProcessor::new(Arc::clone(&fx.alice), EventBus::new());
+
+    let floor = (now_secs() - 7200) * 1000;
+    fx.seed_alice_cursor(floor);
+    let opened_at = now_secs();
+    processor.note_subscription_opened(&fx.group_hex(), opened_at);
+
+    let minted_secs = now_secs() - 3600;
+    let junk = undecodable_445(&fx.group_hex(), u64::try_from(minted_secs).unwrap());
+    assert!(
+        SessionManager::event_to_transport_message(&junk).is_ok(),
+        "precondition: the envelope parses, so the verdict below is the engine's"
+    );
+    assert_eq!(
+        processor
+            .process_group_event(&junk, &fx.nostr_group_id)
+            .await,
+        GroupProcessOutcome::Stale,
+        "the engine judged it, terminally"
+    );
+    assert_eq!(
+        fx.alice_cursor(),
+        Some(floor),
+        "it moves no cursor on delivery"
+    );
+
+    assert!(processor.note_end_of_stored_events(&fx.group_hex()));
+    assert_eq!(
+        fx.alice_cursor(),
+        Some(opened_at * 1000),
+        "and it holds nothing: the anchor redeems its full open time"
     );
 }
 
@@ -696,18 +785,14 @@ async fn livesync_a_malformed_445_does_not_disarm_a_real_hold_back() {
             .await,
         GroupProcessOutcome::RejectedBeforeAuth,
     );
-    assert_eq!(
-        processor
-            .process_group_event(
-                &engine_unprocessable_445(
-                    &fx.group_hex(),
-                    u64::try_from(engine_fail_secs).unwrap()
-                ),
-                &fx.nostr_group_id,
-            )
-            .await,
-        GroupProcessOutcome::Unprocessable,
-    );
+    let observed = fx.bob_location(48.85, 2.35).await;
+    let genuine = rewrap(&observed, u64::try_from(engine_fail_secs).unwrap(), false);
+    fx.alice_write_fault(true);
+    let outcome = processor
+        .process_group_event(&genuine, &fx.nostr_group_id)
+        .await;
+    fx.alice_write_fault(false);
+    assert_eq!(outcome, GroupProcessOutcome::Unprocessable);
 
     assert!(processor.note_end_of_stored_events(&fx.group_hex()));
     assert_eq!(
@@ -801,15 +886,14 @@ async fn livesync_the_held_cursor_survives_a_restart() {
     let relays = vec!["wss://group.example.com".to_string()];
     let config = CircleConfig::new("Restart Circle").with_relays(relays.clone());
     let result = alice
-        .create_circle(&alice_keys, vec![bob_member], &config, &relays)
+        .create_circle(&alice_keys, vec![bob_member], &config)
         .await
         .expect("create circle");
+    // As the app's driven create leaves it: the founding Welcomes sent from
+    // their records and acknowledged, so no later drive sends them.
+    let _ = alice.land_staged_for_test().await;
     let mls_group_id = result.circle.mls_group_id.clone();
     let nostr_group_id = result.circle.nostr_group_id;
-    alice
-        .confirm_published(result.pending)
-        .await
-        .expect("confirm");
     let welcome = result
         .welcome_events
         .iter()
@@ -827,12 +911,7 @@ async fn livesync_the_held_cursor_survives_a_restart() {
     alice.advance_sync_cursor(&stream, floor).expect("seed");
 
     let observed = bob
-        .encrypt_location(
-            &mls_group_id,
-            &bob_keys.public_key(),
-            &LocationMessage::new(9.0, 9.0),
-            300,
-        )
+        .seal_location_for_test(&mls_group_id, &LocationMessage::new(9.0, 9.0))
         .await
         .expect("bob encrypts")
         .0;
@@ -843,8 +922,8 @@ async fn livesync_the_held_cursor_survives_a_restart() {
         processor
             .process_group_event(&forged, &nostr_group_id)
             .await,
-        GroupProcessOutcome::RejectedBeforeAuth,
-        "precondition: the forgery really was screened"
+        GroupProcessOutcome::Applied,
+        "precondition: the expired forgery reached the engine and was applied"
     );
 
     drop(processor);
@@ -1129,11 +1208,11 @@ async fn catchup_a_malformed_445_neither_advances_the_cursor_nor_holds_it() {
 /// THE CLASSIFICATION BOUNDARY, catch-up plane: an ENGINE-side ingest failure
 /// still holds the sweep's cursor at itself.
 ///
-/// The counterpart of the gate above, over an event whose envelope parses and
-/// whose content the engine then rejects. If the `Malformed` screen ever widened
-/// to cover engine failures, this cursor would jump to the window's open time
-/// and the un-applied event would be stranded below every future REQ floor —
-/// the original defect, re-created from the inside.
+/// The counterpart of the gate above, over a genuine co-member location whose
+/// ingest a storage write failure aborts. If the `Malformed` screen ever
+/// widened to cover engine failures, this cursor would jump to the window's
+/// open time and the un-applied event would be stranded below every future REQ
+/// floor — the original defect, re-created from the inside.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn catchup_an_engine_side_failure_holds_the_cursor_at_itself() {
     let (_relay, url, relay_mgr) = relay_under_test().await;
@@ -1142,19 +1221,21 @@ async fn catchup_an_engine_side_failure_holds_the_cursor_at_itself() {
     let floor = (now_secs() - 7200) * 1000;
     fx.seed_alice_cursor(floor);
 
-    let unprocessable_secs = now_secs() - 3600;
-    let junk =
-        engine_unprocessable_445(&fx.group_hex(), u64::try_from(unprocessable_secs).unwrap());
+    let failed_secs = now_secs() - 3600;
+    let observed = fx.bob_location(48.85, 2.35).await;
+    let genuine = rewrap(&observed, u64::try_from(failed_secs).unwrap(), false);
     assert!(
-        SessionManager::event_to_transport_message(&junk).is_ok(),
+        SessionManager::event_to_transport_message(&genuine).is_ok(),
         "precondition: the envelope parses, so the failure below is the engine's"
     );
     relay_mgr
-        .publish_event(&junk, std::slice::from_ref(&url))
+        .publish_event(&genuine, std::slice::from_ref(&url))
         .await
-        .expect("the junk reaches the relay");
+        .expect("the event reaches the relay");
 
+    fx.alice_write_fault(true);
     let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
+    fx.alice_write_fault(false);
 
     assert_eq!(
         out.events_deferred, 1,
@@ -1163,7 +1244,7 @@ async fn catchup_an_engine_side_failure_holds_the_cursor_at_itself() {
     assert_eq!(out.events_rejected_pre_auth, 0);
     assert_eq!(
         fx.alice_cursor(),
-        Some(unprocessable_secs * 1000),
+        Some(failed_secs * 1000),
         "the sweep must stop at the un-applied event so the next sweep's `since` \
          comes back for it",
     );
@@ -1176,9 +1257,11 @@ async fn catchup_an_engine_side_failure_holds_the_cursor_at_itself() {
 /// outage — the one case where "no events" carries no information at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn catchup_an_unreachable_relay_holds_the_cursor() {
-    // Port 1 refuses immediately: no network, no connect-timeout hang, and still
-    // a well-formed `wss://` so it exercises the fetch path.
-    let fx = build_two_member_circle(vec!["wss://127.0.0.1:1".to_string()]).await;
+    // Port 1 refuses immediately: no network, no connect-timeout hang, and a
+    // loopback relay through the debug-only opt-in, so it exercises the fetch
+    // path.
+    let _ = allow_ws_loopback_for_test();
+    let fx = build_two_member_circle(vec!["ws://127.0.0.1:1".to_string()]).await;
     let relay_mgr = RelayManager::new();
 
     let floor = (now_secs() - 7200) * 1000;
@@ -1193,4 +1276,37 @@ async fn catchup_an_unreachable_relay_holds_the_cursor() {
         Some(floor),
         "nothing was reached, so nothing may be claimed as caught up",
     );
+}
+
+/// A peer's location waits at the relay its circle has since left: the
+/// catch-up sweep asks that relay too for a day from when this device
+/// recorded the change (decision 237), so the location is fetched where it
+/// was sent; past the day that relay is swept no longer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catchup_sweeps_a_relay_the_circle_left_for_a_day_and_no_longer() {
+    for (what, past_the_day, applied) in [("within the day", false, 1), ("past the day", true, 0)] {
+        let (_old, old_url, relay_mgr) = relay_under_test().await;
+        let new = MockRelay::run().await.expect("second mock relay");
+        let new_url = new.url().await.to_string();
+        let fx = build_two_member_circle(vec![old_url.clone()]).await;
+        fx.seed_alice_cursor((now_secs() - 7200) * 1000);
+        let location = fx.bob_location(52.370_216, 4.895_168).await;
+        relay_mgr
+            .publish_event(&location, std::slice::from_ref(&old_url))
+            .await
+            .expect("bob's location reaches the relay the circle is on");
+        fx.alice
+            .update_relays_for_test(&fx.mls_group_id, std::slice::from_ref(&new_url))
+            .await
+            .expect("alice moves the circle");
+        if past_the_day {
+            fx.alice
+                .date_prior_routing_for_test(&fx.mls_group_id, now_secs() - 86_401);
+        }
+        let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
+        assert_eq!(
+            out.events_applied, applied,
+            "{what}: the relay the circle left was swept wrongly",
+        );
+    }
 }

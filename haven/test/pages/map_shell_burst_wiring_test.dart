@@ -29,16 +29,19 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/sharing_health_provider.dart';
-import 'package:haven/src/rust/api.dart' show BacklogOutcomeFfi, FfiGroupSpec;
+import 'package:haven/src/rust/api.dart'
+    show BacklogOutcomeFfi, BurstOpenFfi, FfiGroupSpec, LiveLifecycleFfi;
 import 'package:haven/src/services/background_burst_coordinator.dart';
 import 'package:haven/src/services/circle_health_service.dart';
 import 'package:haven/src/services/circle_service.dart' show Circle;
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
+import 'package:haven/src/services/relay_service.dart' show CatchupResult;
 import 'package:haven/src/services/subscription_service.dart';
 
 import '../mocks/mock_circle_service.dart';
+import 'map_shell_burst_collaborators_test.dart' show methodSource;
 
 const _selfPubkey =
     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -95,6 +98,10 @@ String _rustFnBody(String source, String signature) {
 
 /// Records the two teardown links the opt-out must always reach.
 class _RecordingEngine implements SubscriptionService {
+  @override
+  LiveLifecycleFfi lifecycle() =>
+      isRunning ? LiveLifecycleFfi.launched : LiveLifecycleFfi.noSession;
+
   final List<String> log = [];
   int pauses = 0;
   bool throwOnPause = false;
@@ -122,7 +129,15 @@ class _RecordingEngine implements SubscriptionService {
   // Nothing else is reachable from the opt-out edge; a call would be the test
   // silently exercising a different path.
   @override
-  Future<void> openBackgroundBurst() async => throw UnimplementedError();
+  Future<BurstOpenFfi> openBackgroundBurstWithin(Duration budget) async =>
+      throw UnimplementedError();
+
+  @override
+  Future<void> startIntoBurst({
+    required List<FfiGroupSpec> groups,
+    required List<String> inboxRelays,
+    required Duration budget,
+  }) async => throw UnimplementedError();
 
   @override
   Future<BacklogOutcomeFfi> waitBacklogSettled() async =>
@@ -133,6 +148,9 @@ class _RecordingEngine implements SubscriptionService {
 
   @override
   Future<void> resumeAfterBackground() async => throw UnimplementedError();
+
+  @override
+  Future<void> claimForeground() async => throw UnimplementedError();
 
   @override
   Future<void> start({
@@ -149,12 +167,17 @@ class _RecordingEngine implements SubscriptionService {
       throw UnimplementedError();
 
   @override
-  Future<LiveSyncStopOutcome> stop() async => throw UnimplementedError();
+  Future<LiveSyncStopOutcome> stop({Future<void>? givenUp}) async =>
+      throw UnimplementedError();
 }
 
 /// The engine as the RESUME edge sees it: it can be paused by something other
 /// than the caller (a burst's teardown), and it counts re-anchors.
 class _ResumeEngine implements SubscriptionService {
+  @override
+  LiveLifecycleFfi lifecycle() =>
+      isRunning ? LiveLifecycleFfi.launched : LiveLifecycleFfi.noSession;
+
   int reanchors = 0;
   bool paused = false;
   bool throwOnReanchor = false;
@@ -165,6 +188,9 @@ class _ResumeEngine implements SubscriptionService {
     paused = false;
     if (throwOnReanchor) throw const SubscriptionServiceException('no session');
   }
+
+  @override
+  Future<void> claimForeground() async => throw UnimplementedError();
 
   @override
   bool get isPaused => paused;
@@ -178,7 +204,15 @@ class _ResumeEngine implements SubscriptionService {
   Future<void> pauseSubscriptions() async => throw UnimplementedError();
 
   @override
-  Future<void> openBackgroundBurst() async => throw UnimplementedError();
+  Future<BurstOpenFfi> openBackgroundBurstWithin(Duration budget) async =>
+      throw UnimplementedError();
+
+  @override
+  Future<void> startIntoBurst({
+    required List<FfiGroupSpec> groups,
+    required List<String> inboxRelays,
+    required Duration budget,
+  }) async => throw UnimplementedError();
 
   @override
   Future<BacklogOutcomeFfi> waitBacklogSettled() async =>
@@ -202,19 +236,34 @@ class _ResumeEngine implements SubscriptionService {
       throw UnimplementedError();
 
   @override
-  Future<LiveSyncStopOutcome> stop() async => throw UnimplementedError();
+  Future<LiveSyncStopOutcome> stop({Future<void>? givenUp}) async =>
+      throw UnimplementedError();
 }
 
 /// A full burst engine, for the ONE-burst-per-pause proof: it counts the links
 /// a burst costs, so "N ticks cost one burst" is measured rather than asserted
 /// about a loop's shape.
 class _BurstEngine implements SubscriptionService {
+  @override
+  LiveLifecycleFfi lifecycle() =>
+      isRunning ? LiveLifecycleFfi.launched : LiveLifecycleFfi.noSession;
+
   int opens = 0;
   int settles = 0;
   int pauses = 0;
 
   @override
-  Future<void> openBackgroundBurst() async => opens++;
+  Future<BurstOpenFfi> openBackgroundBurstWithin(Duration budget) async {
+    opens++;
+    return BurstOpenFfi.opened;
+  }
+
+  @override
+  Future<void> startIntoBurst({
+    required List<FfiGroupSpec> groups,
+    required List<String> inboxRelays,
+    required Duration budget,
+  }) async => throw UnimplementedError();
 
   @override
   Future<BacklogOutcomeFfi> waitBacklogSettled() async =>
@@ -236,6 +285,9 @@ class _BurstEngine implements SubscriptionService {
   Future<void> resumeAfterBackground() async => throw UnimplementedError();
 
   @override
+  Future<void> claimForeground() async => throw UnimplementedError();
+
+  @override
   Future<void> start({
     required List<FfiGroupSpec> groups,
     required List<String> inboxRelays,
@@ -250,7 +302,8 @@ class _BurstEngine implements SubscriptionService {
       throw UnimplementedError();
 
   @override
-  Future<LiveSyncStopOutcome> stop() async => throw UnimplementedError();
+  Future<LiveSyncStopOutcome> stop({Future<void>? givenUp}) async =>
+      throw UnimplementedError();
 }
 
 /// The scheduler's half of a burst, with a publish window that can refuse —
@@ -290,6 +343,9 @@ class _NoMaintenance implements BurstMaintenance {
 
   @override
   Future<void> runRelayListIfDue(DateTime now) async {}
+
+  @override
+  Future<void> carryOnLeaves() async {}
 }
 
 /// In-memory [CircleHealthService] — the persisted half of the health model.
@@ -333,6 +389,10 @@ class _HealthHarness {
       overrides: [
         sharingHealthClockProvider.overrideWithValue(() => now),
         circleHealthServiceProvider.overrideWithValue(health),
+        // The model reads the core's recovery cause and listens to the circle
+        // list: neither may reach the real, uninitialisable circle service.
+        circleServiceProvider.overrideWithValue(MockCircleService()),
+        circlesProvider.overrideWith((ref) async => const <Circle>[]),
         selectedCircleProvider.overrideWithValue(
           TestCircleFactory.createCircle(
             mlsGroupId: const [1, 2, 3],
@@ -372,13 +432,101 @@ class _HealthHarness {
     await container.read(identityProvider.future);
     await container.read(memberLocationsProvider.future);
     await notifier.refresh();
-    return container.read(sharingHealthProvider);
+    // Which circle the verdict is about is held by its own test; the
+    // assertions here are about the verdict itself.
+    return container.read(sharingHealthProvider).about(null);
   }
 
   void advance(Duration by) => now = now.add(by);
 }
 
 void main() {
+  group('a live-sync-off burst', () {
+    // Decision 244: with no live plane at all, a burst receives through the
+    // flag-off catch-up and seals only once it completed; the coordinator's
+    // side is driven in `background_burst_coordinator_test.dart`.
+    String flat(String method) => methodSource(
+      File('lib/src/pages/map_shell.dart').readAsStringSync(),
+      className: '_MapShellState',
+      method: method,
+    ).replaceAll(RegExp(r'\s+'), ' ');
+
+    test('is handed the catch-up as its receive, and only with no live '
+        'plane', () {
+      expect(
+        flat('_installBurstCoordinator'),
+        contains('receiveWithoutSession: liveSyncEnabled ? null : '
+            '_receiveBeforeBurstSeal,'),
+      );
+      expect(
+        flat('_receiveBeforeBurstSeal'),
+        contains('MapShell.catchupCompleted(await ref'
+            '.read(catchupServiceProvider)'
+            '.runCatchup(isBackgroundWake: true))'),
+      );
+    });
+
+    test('seals behind a sweep only when it swept, every relay answered and '
+        'its deadline did not cut it', () {
+      expect(
+        MapShell.catchupCompleted(const CatchupResult(circlesSwept: 2)),
+        isTrue,
+      );
+      for (final cut in const [
+        CatchupResult(),
+        CatchupResult(circlesSwept: 2, deadlineHit: true),
+        CatchupResult(circlesSwept: 2, relayErrors: 1),
+      ]) {
+        expect(MapShell.catchupCompleted(cut), isFalse);
+      }
+    });
+  });
+
+  group('a burst that finds no session', () {
+    // MapShell cannot be pumped without the Rust bridge: its wiring is pinned
+    // over the source (comments stripped); what the coordinator does with the
+    // spec is driven in `background_burst_coordinator_test.dart`.
+    String flat(String method) => methodSource(
+      File('lib/src/pages/map_shell.dart').readAsStringSync(),
+      className: '_MapShellState',
+      method: method,
+    ).replaceAll(RegExp(r'\s+'), ' ');
+
+    test('is handed the start a foreground start would make', () {
+      expect(
+        flat('_installBurstCoordinator'),
+        contains('prepareStartIntoBurst: _prepareStartIntoBurst,'),
+      );
+      final start = flat('_prepareStartIntoBurst');
+      expect(start, contains('LiveSyncResubscriber.groupsForCircles(circles)'));
+      expect(
+        start,
+        contains('engine.startIntoBurst(groups: groups, '
+            'inboxRelays: inboxRelays, budget: budget)'),
+      );
+    });
+
+    test('starts one only where a live session is wanted, read once the '
+        'consent has loaded', () {
+      final spec = flat('_prepareStartIntoBurst');
+      expect(spec, contains('if (!liveSyncEnabled || !mounted) return null;'));
+      final loaded = spec.indexOf(
+        'await ref.read(backgroundSharingProvider.notifier).loaded;',
+      );
+      // And the shell may have gone during that wait (B12).
+      final wanted = spec.indexOf(
+        'if (!mounted || !_liveSyncWanted()) return null;',
+      );
+      expect(loaded, isNonNegative);
+      expect(
+        wanted,
+        greaterThan(loaded),
+        reason: 'a consent still loading reads as off, and a session the '
+            'user wants would never be started into a burst',
+      );
+    });
+  });
+
   group('the mid-pause opt-out leaves no socket', () {
     test('with no burst in flight it pauses the engine and shuts the pool',
         () async {
@@ -742,7 +890,7 @@ void main() {
         () async {
       // The common case now that the coordinator stops its teardown on the
       // handback. A second re-anchor is not free: it reconnects the pool and
-      // re-issues every REQ, the inbox one replaying 49 hours of gift wraps
+      // re-issues every REQ, the inbox one replaying 96 hours of gift wraps
       // keyed on this npub.
       final engine = _ResumeEngine();
 
@@ -855,7 +1003,7 @@ void main() {
     test('it declines inside the throttle the resume just stamped', () async {
       // `_onResumed` records the instant BEFORE it launches its own re-anchor,
       // so a heal running behind it must not spend a second pool reconnect and
-      // a second 49 h `#p` gift-wrap replay on the same repair.
+      // a second 96 h `#p` gift-wrap replay on the same repair.
       final engine = _ResumeEngine()..paused = true;
 
       expect(
@@ -926,7 +1074,7 @@ void main() {
           mlsGroupId: [i],
           nostrGroupId: [i, i],
         );
-        final key = sharingCircleKey(circle.nostrGroupId);
+        final key = sharingCircleKey(circle);
         roster[key] = circle;
         ticks.add((key: key, circle: circle));
       }
@@ -953,7 +1101,7 @@ void main() {
       // so none of them found a burst running and each queued its own; and a
       // refused window returns without draining the due set, so bursts 2..N
       // did not find it empty either. Four circles cost four opens, four
-      // pauses, four pool cycles and four REQ sets — each replaying 49 hours
+      // pauses, four pool cycles and four REQ sets — each replaying 96 hours
       // of `#p` gift wraps — to publish nothing at all.
       final h = harness(circles: 4, refuseWindow: true);
 

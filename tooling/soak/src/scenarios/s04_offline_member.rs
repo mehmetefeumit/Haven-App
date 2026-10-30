@@ -1,9 +1,9 @@
 //! **S04** — a member is away, and comes back.
 //!
 //! Four spans of the same promise, from shortest to longest: away across
-//! nothing, away across a commit, away while the group crosses the whole
-//! retention window and one epoch more, and away across a change to the roster
-//! itself. In every one of them the returning device must end up where its
+//! nothing, away across a chain of commits, away while the group crosses the
+//! whole retention window and one epoch more, and away across a change to the
+//! roster itself. In every one of them the returning device must end up where its
 //! peers are — same epoch, same roster, able to read and be read — and in the
 //! long one it must ALSO stop being able to read ciphertext from before the
 //! window Security Rule 5 bounds.
@@ -32,7 +32,6 @@
 
 use std::time::Duration;
 
-use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
 use haven_core::nostr::mls::types::{ConvergedRoster, GroupId};
 use haven_core::nostr::mls::DEFAULT_MAX_PAST_EPOCHS;
 use nostr::Event;
@@ -62,32 +61,18 @@ const EPOCHS_PAST_RETENTION: u64 = DEFAULT_MAX_PAST_EPOCHS as u64 + 1;
 
 /// How many confirmed commits land while the member is away.
 ///
-/// One, and the reason is measured rather than chosen. A relay serves a stored
-/// page NEWEST FIRST, and a kind-445 commit's outer layer is keyed at its
-/// committer's pre-commit epoch — so of two backlogged commits the newer one
-/// cannot peel until the older has been applied, and it is retained as a
-/// deferred row instead. Those rows are retried by a sweep the engine runs on
-/// its next PEELABLE inbound event, and a device one epoch behind its peers
-/// never gets one: every fresh fix is sealed above it. Measured at this pin, a
-/// two-commit backlog leaves the returning device exactly one epoch short and
-/// three further fixes from the committer do not move it.
-///
-/// That is a PRODUCT DEFECT, not a design constraint. A device that missed two
-/// chained commits never converges again on its own, and for Haven that means
-/// its peers' fixes stop arriving: **sharing stops**, silently, with the circle
-/// still reporting a healthy send path. It is recorded as **C7** in
-/// `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`, and S23
-/// (`s23_chained_backlog.rs`) is the scenario that GRADES it — red at rc 1,
-/// deliberately, until the product fix lands.
-///
-/// So `1` here is a WORKAROUND pending that fix, not a design: one commit is
-/// redelivered and applied on its own, which keeps this scenario about member
-/// absence. It is not a statement that one commit is the span the product
-/// supports.
-const COMMITS_WHILE_AWAY: u64 = 1;
+/// Two: a chain, which is what an absence long enough to matter produces. It
+/// was held at one while C7 stood — a relay serves the newer commit of a pair
+/// first, its outer layer is keyed at the committer's pre-commit epoch, and the
+/// retained row was never retried on a device that did not send
+/// (`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md` C7). Haven now drains it
+/// (`docs/MDK_UPSTREAM_TRACKER.md` row C7), so the span is the plan's again.
+/// This arm does not pin the page order the way S23 does, so either order may
+/// be served; both must converge, and S23 is the arm that grades the drain.
+const COMMITS_WHILE_AWAY: u64 = 2;
 
 /// How many epochs the medium arm's group crosses in total: one the returning
-/// member takes live, and one it misses.
+/// member takes live, and the ones it misses.
 const EPOCHS_CROSSED_MEDIUM: u64 = COMMITS_WHILE_AWAY + 1;
 
 /// The arms this scenario offers.
@@ -108,10 +93,6 @@ pub const ARMS: [Arm; 4] = [
         },
     },
     Arm {
-        // The span is ONE commit, for the reason `COMMITS_WHILE_AWAY` records.
-        // The plural label stands because it is pinned in both profile TOMLs
-        // and in three of `tests/oracles.rs`'s bodies, and a rename buys a
-        // reader nothing the constant above does not already say.
         label: "offline-across-commits",
         recovery: Recovery::Undisturbed,
         probe_rounds: 2,
@@ -353,7 +334,7 @@ async fn await_delivery<T: TimelineSink, L: LogDrain>(
     }
 }
 
-/// Away across a confirmed commit, in a group that crossed two.
+/// Away across a chain of confirmed commits, after one it took live.
 async fn across_commits<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     admin: DeviceTag,
@@ -363,7 +344,7 @@ async fn across_commits<T: TimelineSink, L: LogDrain>(
 ) -> Result<usize, RigError> {
     let group = world.circle(circle_tag)?.mls_group_id().clone();
     // One commit the returning member takes live, so the closing round's
-    // agreement is about the one it MISSED rather than about a group that never
+    // agreement is about the ones it MISSED rather than about a group that never
     // moved while it was here.
     advance(
         world,
@@ -414,13 +395,9 @@ async fn across_commits<T: TimelineSink, L: LogDrain>(
 ///
 /// The device is away across the LAST `COMMITS_WHILE_AWAY` of the
 /// `window + 1` advances rather than across all of them. What the arm claims is
-/// the retention window measured from a tip the device reached by catching up,
-/// and a device that is away for the whole chain never reaches that tip at this
-/// pin — the deferred-peel retries that would drain such a backlog are driven by
-/// inbound events, so a quiet world leaves the chain half-applied (see
-/// [`advance`]). Stretching the absence would not strengthen the claim; it would
-/// replace it with an unrelated one about backlog drainage, which wants a
-/// scenario and an owner decision of its own.
+/// the retention window measured from a tip the device reached by catching up.
+/// Stretching the absence would not strengthen that claim; it would add one
+/// about draining a long backlog, which is S23's.
 async fn past_retention<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     admin: DeviceTag,
@@ -587,12 +564,12 @@ async fn across_removal<T: TimelineSink, L: LogDrain>(
 /// keyed at its committer's PRE-commit epoch, and a relay serves a page newest
 /// first, so a device that is several commits behind cannot peel any of them
 /// until the oldest arrives — the rest are retained as deferred rows and retried
-/// by a sweep that INBOUND EVENTS drive. In a world that has gone quiet, that
-/// leaves a long chain draining a row or two and then stopping (measured at this
-/// pin: five chained commits published back to back left a resumed device short
-/// of the tip after three minutes). Staging the chain at the rate the group can
-/// apply it is what keeps this arm measuring the absence it names rather than
-/// that backlog behaviour, which is a scenario of its own.
+/// by a later advance. Before C7's fix that left a long chain in a quiet world
+/// draining a row or two and then stopping (measured: five chained commits
+/// published back to back left a resumed device short of the tip after three
+/// minutes). Staging the chain at the rate the group can apply it keeps this
+/// arm measuring the absence it names rather than backlog drainage, which is
+/// S23's.
 async fn advance<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     device: DeviceTag,
@@ -641,10 +618,10 @@ fn catchup_bound(backlog: u64) -> Duration {
 
 /// Resumes `returner` and waits for it to reach the committer's epoch.
 ///
-/// The commit it missed is redelivered by the resume's own re-subscription,
-/// from the persisted cursor, and applies on its own: it is sealed at the epoch
-/// the returning device still holds, so the peel needs nothing the device does
-/// not have. See [`COMMITS_WHILE_AWAY`] for why the absence spans exactly one.
+/// The commits it missed are redelivered by the resume's own re-subscription,
+/// from the persisted cursor. The oldest is sealed at the epoch the returning
+/// device still holds, and each one it applies lets the next peel — see
+/// [`COMMITS_WHILE_AWAY`].
 async fn resume_and_catch_up<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     committer: DeviceTag,
@@ -691,12 +668,7 @@ async fn seal<T: TimelineSink, L: LogDrain>(
     let sender = world.device(device)?;
     sender
         .manager()?
-        .encrypt_location(
-            group,
-            &sender.keys.public_key(),
-            &ProbeToken::mint(4, index).as_location(),
-            LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(group, &ProbeToken::mint(4, index).as_location())
         .await
         .map(|(event, _, _)| event)
         .map_err(|_| RigError::Core(Step::Publish))
@@ -793,7 +765,7 @@ mod tests {
             ARMS[1].floor.epochs_crossed == EPOCHS_CROSSED_MEDIUM
                 && EPOCHS_CROSSED_MEDIUM > COMMITS_WHILE_AWAY,
             "the medium arm's group crosses one epoch the member takes live and \
-             one it misses, so its agreement is about the one it missed"
+             the ones it misses, so its agreement is about the ones it missed"
         );
         assert!(
             ARMS[2].floor.epochs_crossed > ARMS[1].floor.epochs_crossed,

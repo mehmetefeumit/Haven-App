@@ -26,6 +26,10 @@ pub mod log_alias;
 pub mod nostr;
 pub mod profile;
 pub mod relay;
+pub mod sqlcipher_init;
+pub mod storage_reset;
+#[cfg(test)]
+mod test_log;
 pub mod tiles;
 pub mod util;
 pub mod validation;

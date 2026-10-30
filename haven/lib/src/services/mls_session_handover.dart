@@ -41,7 +41,8 @@ import 'package:flutter/widgets.dart';
 
 
 /// Ceiling on how long the foreground service's `onDestroy` WAITS for the
-/// location publish that was in flight when the stop arrived.
+/// cycle that was in flight when the stop arrived — a location's seal and
+/// send included, which it never waits out past this bound.
 ///
 /// Lives here, beside [handoverTimeout], because the two are one number seen
 /// from both ends: `background_location_task.dart` enforces it on the drain,
@@ -53,18 +54,21 @@ import 'package:flutter/widgets.dart';
 /// `DEFAULT_TIMEOUT` (10 s) in `haven-core/src/relay/manager.rs` — not that
 /// module's full three-attempt ~49 s ladder. The retries exist to buy back a
 /// location sample, and a service that is stopping will not publish another.
-/// Rule 13 is not at stake for the step this bounds: a location is an MLS
-/// *application* message, so abandoning one costs a sample, never a commit.
-/// (The commit-critical half of a cycle is drained separately and UNBOUNDED —
-/// see `background_location_task.dart`.)
+/// Rule 13 is not at stake for the step this bounds: a location drive cut at
+/// it costs a sample, and any commit it was carrying stays recorded for the
+/// next wake — the core confirms nothing without a relay's ack. (The other
+/// driver entries in flight are drained after it, UNBOUNDED —
+/// `NostrRelayService.inFlightNonLocationDrives`; one that runs long holds
+/// the handover past this number, and a resume then takes the force-release
+/// path.)
 ///
 /// # What it does NOT bound
 ///
-/// It bounds the WAIT, not the release. An abandoned publish keeps running in
-/// Rust, and its future still owns an `Arc<CoreCircleManager>` until the whole
-/// ladder finishes — so the Rule-14 guard can legitimately stay held for tens
-/// of seconds after `onDestroy` returns. Nothing here can shorten that; only
-/// the ladder finishing does.
+/// It bounds the WAIT, not the release. An abandoned location drive keeps
+/// running in Rust, and its future still owns an `Arc<CoreCircleManager>`
+/// until the drive ends — so the Rule-14 guard can legitimately stay held for
+/// tens of seconds after `onDestroy` returns. Nothing here can shorten that;
+/// only the drive finishing does.
 const Duration kBackgroundTeardownDrainBudget = Duration(
   seconds: _teardownDrainBudgetSecs,
 );
@@ -110,8 +114,12 @@ const Duration handoverPollInterval = Duration(milliseconds: 250);
 /// `MapShell` is not disposed when the app is backgrounded, so neither widget
 /// lifetime nor "this code is running" is a foreground proxy.
 ///
-/// A null `lifecycleState` — before the first lifecycle event, i.e. startup,
-/// and in unit tests — counts as foregrounded.
+/// A null `lifecycleState` counts as foregrounded. Only a host test binding
+/// has one: on a device the binding reads the embedder's `detached` seed when
+/// it is initialised — or the platform message that replaced it before then —
+/// so until the platform's first message this answers NO.
+///
+/// Never a claim to the live-sync engine: see [appIsResumed].
 bool appIsForegrounded() {
   try {
     final state = WidgetsBinding.instance.lifecycleState;
@@ -119,6 +127,36 @@ bool appIsForegrounded() {
   } on Object {
     // No binding (pure-Dart test context) — nothing to defer to.
     return true;
+  }
+}
+
+/// Whether the app's lifecycle state is `resumed` right now, and nothing
+/// else: the STRICT read.
+///
+/// On Android `resumed` is "the activity is resumed AND its window has
+/// focus": a Haven window that is visible but unfocused (split-screen,
+/// freeform), or under the notification shade or a system dialog, reads
+/// `inactive` for as long as that lasts, and so answers no.
+///
+/// This is the claim the live-sync engine is handed with every call that can
+/// put a session in its foreground lifecycle — where it records commits as
+/// durable fanouts, drives the stored ones and redeems a parked eviction. The
+/// engine cannot see the screen, so it acts on this word alone, and a wrong
+/// "yes" from a process nobody is looking at is the one answer that must
+/// never be given. So it fails CLOSED where [appIsForegrounded] fails open:
+/// an unset state (a host test binding's), `inactive`, `hidden`, `paused`,
+/// `detached` — the embedder's seed, before the platform's first message —
+/// and a missing binding all answer `false`.
+///
+/// Not a replacement for [appIsForegrounded], whose callers gate work that
+/// must not be lost at startup. This one is the claim passed across the FFI,
+/// and the gate on re-anchoring a paused engine from a heal (`MapShell`).
+bool appIsResumed() {
+  try {
+    return WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+  } on Object {
+    // No binding: nothing says anybody is looking.
+    return false;
   }
 }
 
@@ -187,6 +225,9 @@ Future<HandoverOutcome> requestSessionHandover({
   // cannot fix, and stopping it would cost the user background sharing for
   // nothing.
   if (!await isSessionLive(dataDir)) return HandoverOutcome.notHeld;
+  // Again after that await: an app that went away meanwhile is the same
+  // background maintenance the first check refuses.
+  if (!isForegrounded()) return HandoverOutcome.backgrounded;
 
   try {
     await stopService();

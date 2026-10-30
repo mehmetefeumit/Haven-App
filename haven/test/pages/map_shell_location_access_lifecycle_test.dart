@@ -358,6 +358,22 @@ class _InvocationVisitor extends RecursiveAstVisitor<void> {
   void visitComment(Comment node) {}
 }
 
+/// The offsets of every `await` [body] makes itself, in source order.
+class _AwaitOffsets extends RecursiveAstVisitor<void> {
+  _AwaitOffsets(this.body);
+
+  final AstNode body;
+  final List<int> offsets = [];
+
+  @override
+  void visitAwaitExpression(AwaitExpression node) {
+    if (identical(node.thisOrAncestorOfType<FunctionBody>(), body)) {
+      offsets.add(node.offset);
+    }
+    super.visitAwaitExpression(node);
+  }
+}
+
 class _MethodBodyVisitor extends RecursiveAstVisitor<void> {
   _MethodBodyVisitor({required this.className, required this.method});
 
@@ -605,7 +621,7 @@ class _MapShellState {
       );
       final resumeAt = source.indexOf('Future<void> _onResumed() async {');
       expect(resumeAt, isNonNegative);
-      final debounceAt = source.indexOf('_resumeStopwatch.isRunning', resumeAt);
+      final debounceAt = source.indexOf('resumeExtrasDue()', resumeAt);
       final refreshAt = source.indexOf(
         'locationAccessProvider.notifier',
         resumeAt,
@@ -851,7 +867,7 @@ class _MapShellState {
       // one bounded burst per publish tick; a health tick landing between
       // bursts inspects a paused engine and learns nothing, and one landing
       // DURING a burst repairs the mid-`connect()` pool through the FOREGROUND
-      // re-anchor — standing REQs and a 49-hour inbox replay, at an instant
+      // re-anchor — standing REQs and a 96-hour inbox replay, at an instant
       // that is not a publish. `_armHealth` refuses while backgrounded for
       // that reason, so the old call is inert; requiring an inert call is
       // exactly the coverage-without-a-guarantee this suite must not report.
@@ -1018,33 +1034,42 @@ class _MapShellState {
       );
     });
 
-    test('every engine stop on a pause path is behind the named rule', () {
-      // Two call sites, and the second is the fix: the rule's iOS arm used to
-      // be unreachable, because its only caller sat inside the branch that
-      // `else if (Platform.isIOS)` had already claimed — so `isIOS:` there was
-      // constant-false, and a user who had turned background sharing OFF still
-      // held every per-circle REQ, the inbox REQ, the engine socket and the
-      // crate's 55 s pinger for the whole background window. Nothing failed,
-      // because `pausedRelayOwner` returning `none` only closes the PUBLISH
-      // pool.
+    test('the one engine stop on the pause path is behind the named rule, '
+        'and is issued before anything is awaited', () {
+      // ONE call site, where there were two (and, on Android with sharing on,
+      // a third inside the hand-off, behind two awaited platform writes). A
+      // claimed session used to outlive that pause by the writes' duration —
+      // and by the whole background window when one of them threw. The rule's
+      // iOS arm also used to be unreachable, because its only caller sat
+      // inside the branch that `else if (Platform.isIOS)` had already claimed;
+      // one stop ahead of every branch cannot be.
       final stops = _invocationsOf(pausedBlock, '_stopLiveSyncBounded');
       expect(
         stops,
-        hasLength(2),
-        reason: 'the Android branch and the iOS branch — a third direct stop '
-            'would be one this rule does not own',
+        hasLength(1),
+        reason: 'a second direct stop would be one this rule does not own',
       );
-      for (final stop in stops) {
-        expect(
-          _enclosingControlFlow(stop, pausedBlock).first,
+      const rule =
           'MapShell.shouldStopLiveSyncOnPause(isIOS: Platform.isIOS, '
-              'backgroundSharingEnabled: bgEnabled)',
-          reason: 'the decision belongs to the named rule, asked about the '
-              'real platform AND the toggle this pause read — a hand-rolled '
-              'test beside it is how the two silently diverge, and dropping '
-              'the toggle stops the one branch that must keep receiving',
-        );
-      }
+          'backgroundSharingEnabled: bgEnabled)';
+      expect(
+        _enclosingControlFlow(stops.single, pausedBlock),
+        [rule],
+        reason: 'the decision belongs to the named rule and to nothing else, '
+            'asked about the real platform AND the toggle this pause read — '
+            'nested in a platform branch it is not the first act of every '
+            'branch that stops, and without the toggle it stops the one '
+            'branch that must keep receiving',
+      );
+      final awaits = _AwaitOffsets(pausedBlock.parent!);
+      pausedBlock.accept(awaits);
+      expect(awaits.offsets, isNotEmpty, reason: 'anti-vacuity');
+      expect(
+        stops.single.offset,
+        lessThan(awaits.offsets.first),
+        reason: 'a stop behind an await is a session that outlives the pause '
+            'by that await, and for good if it throws',
+      );
     });
 
     test('the iOS arm that keeps publishing never stops the engine', () {
@@ -1094,16 +1119,17 @@ class _MapShellState {
         reason: 'anti-vacuity: the arms below must be the iOS branch and the '
             'Android-with-sharing-off one it falls through to',
       );
+      // The stop itself is no longer in either arm: it is the one issued
+      // ahead of every branch (see the rule's own test above).
+      expect(
+        _invocationsOf(pausedBlock, '_stopLiveSyncBounded').single.offset,
+        lessThan(platformIf.offset),
+        reason: 'both arms must find the engine already being stopped',
+      );
       for (final branch in [
         platformIf.thenStatement.toSource(),
         platformIf.elseStatement!.toSource(),
       ]) {
-        expect(
-          branch,
-          contains('_stopLiveSyncBounded()'),
-          reason: 'the engine must be stopped, through the ONE bounded stop '
-              'path',
-        );
         expect(
           branch,
           isNot(contains('releaseForHandoff')),
@@ -1147,7 +1173,7 @@ class _MapShellState {
       expect(restart, isNonNegative);
       expect(
         restart,
-        lessThan(resumeBody.indexOf('_resumeStopwatch.isRunning')),
+        lessThan(resumeBody.indexOf('resumeExtrasDue()')),
         reason: 'behind the debounce, a glance-and-return would come back to a '
             'map with no position stream at all',
       );
@@ -1164,13 +1190,13 @@ class _MapShellState {
       // reading "backgrounded": the foreground published nothing, the service
       // correctly declined to publish against a live foreground app, and the
       // notification kept saying Haven was sending and receiving.
-      final debounce = resumeBody.indexOf('_resumeStopwatch.isRunning');
+      final debounce = resumeBody.indexOf('resumeExtrasDue()');
       expect(debounce, isNonNegative, reason: 'the debounce must still exist');
       for (final anchor in const [
         'markForegroundActive(active: true)',
         'waitUntilIdle()',
         'readLastPublishTime()',
-        '_startTimers()',
+        '_startTimers(atMount: false)',
       ]) {
         final at = resumeBody.indexOf(anchor);
         expect(at, isNonNegative, reason: '$anchor must still run on resume');
@@ -1190,12 +1216,12 @@ class _MapShellState {
       // the timers moved above the debounce that duplicate is not merely
       // redundant — it is the tell that something load-bearing is still
       // trapped below.
-      final debounce = resumeBody.indexOf('_resumeStopwatch.isRunning');
+      final debounce = resumeBody.indexOf('resumeExtrasDue()');
       final returnAt = resumeBody.indexOf('return;', debounce);
       expect(returnAt, isNonNegative);
       expect(
         resumeBody.substring(debounce, returnAt),
-        isNot(contains('_rearmLiveSyncHealTimer')),
+        isNot(contains('_healBackstop')),
         reason: 'the debounced path must not need to repair anything; if it '
             'does, that repair belongs above the debounce',
       );
@@ -1224,7 +1250,7 @@ class _MapShellState {
       );
       expect(
         resumeBody.indexOf('setTickSink('),
-        lessThan(resumeBody.indexOf('_resumeStopwatch.isRunning')),
+        lessThan(resumeBody.indexOf('resumeExtrasDue()')),
         reason: 'behind the 30 s debounce, a glance-and-return would come back '
             'to a foreground that still publishes in bursts and pauses the '
             'engine after each one',
@@ -1411,10 +1437,23 @@ class _MapShellState {
         // reachable with a live tree that returns here leaves the publish
         // scheduler, the heartbeat and the motion trigger stopped for the
         // rest of the session while the notification claims Haven is sending.
+        //
+        // A moved `_lifecycleTurn` is the one other reason, and it is not
+        // that: a pause has been dispatched SINCE this resume began and has
+        // stopped exactly what the rest of it would start (or a later resume
+        // has, and does all of it itself) — and the app cannot be on screen
+        // again without another resume. Without it the tail of this resume
+        // lands on that pause: the handoff ended, the heartbeat stamping a
+        // foreground owner, every timer armed, in a backgrounded process.
         expect(
           enclosing.first,
-          '!mounted',
-          reason: 'the only reason to abandon a resume is a torn-down tree',
+          anyOf(
+            '!mounted',
+            'turn != _lifecycleTurn',
+            '!mounted || turn != _lifecycleTurn',
+          ),
+          reason: 'the only reasons to abandon a resume are a torn-down tree '
+              'and a pause that has already superseded it',
         );
       }
     });
@@ -1425,16 +1464,26 @@ class _MapShellState {
       // resume: the stamp is what stops the service publishing on behalf of a
       // foregrounded app, and the drain is what keeps the two off the same
       // in-flight encrypt.
-      for (final call in const [
-        'markForegroundActive',
-        'waitUntilIdle',
-        'readLastPublishTime',
+      // The stamp and the drain are each made inside a guarded write
+      // (`_handoffWrite`), so it is those calls' places that are read here,
+      // stamp first.
+      final writes = _invocationsOf(resumeBlock, '_handoffWrite');
+      expect(
+        writes.map((w) => w.argumentList.toSource()).toList(),
+        [
+          contains('markForegroundActive(active: true)'),
+          contains('waitUntilIdle()'),
+        ],
+      );
+      for (final call in [
+        ...writes,
+        _invocationOf(resumeBlock, 'readLastPublishTime'),
       ]) {
         expect(
-          _enclosingControlFlow(_invocationOf(resumeBlock, call), resumeBlock),
+          _enclosingControlFlow(call, resumeBlock),
           ['Platform.isAndroid'],
-          reason: '$call() is either unreachable on some Android resumes or '
-              'reached on iOS, where no foreground service exists',
+          reason: '${call.toSource()} is either unreachable on some Android '
+              'resumes or reached on iOS, where no foreground service exists',
         );
       }
     });
@@ -1496,7 +1545,33 @@ class _MapShellState {
       // the teardown has settled" to "now, mid-teardown". The declined path
       // has already told the user the truth (`fgsNotificationPaused`); it must
       // not also poke the service.
-      final signal = _invocationOf(pausedBlock, 'signalTask');
+      //
+      // The signal lives in the handoff's `announce` callback, which
+      // `MapShell.handOffMlsSession` calls with the handoff result — and not
+      // at all for a user who came back first
+      // (`map_shell_pause_start_test.dart`).
+      final handoff = _invocationOf(pausedBlock, '_handOffMlsSession');
+      expect(
+        _enclosingControlFlow(handoff, pausedBlock),
+        ['bgEnabled && Platform.isAndroid'],
+        reason: 'the handoff, and the signal it announces with, must never '
+            'leave the Android + sharing-on branch, where there is a '
+            'foreground service to receive it',
+      );
+      final announce =
+          handoff.argumentList.arguments
+                  .whereType<NamedExpression>()
+                  .singleWhere((a) => a.name.label.name == 'announce')
+                  .expression
+              as FunctionExpression;
+      final probe = _InvocationVisitor(name: 'signalTask', body: announce.body);
+      announce.body.accept(probe);
+      expect(
+        probe.found,
+        hasLength(1),
+        reason: 'anti-vacuity: the announcement must carry the signal',
+      );
+      final signal = probe.found.single;
       expect(
         signal.argumentList.arguments.single.toSource(),
         'kForegroundPausedSignal',
@@ -1504,13 +1579,17 @@ class _MapShellState {
             'would cancel the registration the service is about to need',
       );
       expect(
-        _enclosingControlFlow(signal, pausedBlock),
-        ['handedOff', 'bgEnabled && Platform.isAndroid'],
+        _enclosingControlFlow(signal, announce.body),
+        ['handedOff'],
         reason: 'the signal must be CONTAINED by the handoff result, not '
             'merely follow it: a signal sent after a declined handoff races '
-            'the reclaim probe against a session that is still tearing down, '
-            'and it must never leave the Android + sharing-on branch, where '
-            'there is a foreground service to receive it',
+            'the reclaim probe against a session that is still tearing down',
+      );
+      expect(
+        _invocationsOf(pausedBlock, 'signalTask'),
+        isEmpty,
+        reason: 'a signal the pause sends itself is one the handoff result '
+            'does not decide',
       );
     });
 
@@ -1574,17 +1653,22 @@ class _MapShellState {
       // timed-out teardown as a release and orphans the Rule-14 guard — a
       // database no isolate can open until a Force Stop. One implementation
       // means one classification.
-      for (final method in const [
-        '_onDetached',
-        '_handOffMlsSession',
-        '_onPaused',
-      ]) {
+      for (final method in const ['_onDetached', '_onPaused']) {
         expect(
           bodyOf(method),
           contains('_stopLiveSyncBounded()'),
           reason: '$method must use the shared bounded stop',
         );
       }
+      // The hand-off issues none of its own any more: it is handed the stop
+      // the pause issued as its first act.
+      expect(
+        bodyOf('_handOffMlsSession'),
+        allOf(
+          contains('engineStop: engineStop'),
+          isNot(contains('_stopLiveSyncBounded')),
+        ),
+      );
       for (final method in const [
         '_onDetached',
         '_handOffMlsSession',

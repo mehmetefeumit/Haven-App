@@ -249,7 +249,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         ProfileError, ProfileName, ProfileSpec, ScenarioSelection, WorldShape,
     };
     use haven_soak::rc::{Rc, Verdicts};
-    use haven_soak::relay::{Forgery, NativeClosed};
+    use haven_soak::relay::{Forgery, NativeClosed, NegFrame};
     use haven_soak::rig::{
         CapturedLine, CircleTag, DeviceTag, EventTag, KillKind, PublishVerdict, RelayTag,
         ReopenReport, RigError, SessionStoreUse, SimKind, Step, TimelineRecord, Wait, WorldId,
@@ -371,6 +371,9 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
             nth: RigCount::new(NEEDLE_COUNT),
         },
         Fault::ColdFirstConnect,
+        Fault::Unanswering,
+        Fault::WithholdEose,
+        Fault::RefusesNegentropy,
         Fault::Heal,
     ] {
         add(&mut out, "nemesis/types.rs::Fault", format!("{fault:?}"));
@@ -421,6 +424,16 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         },
     ] {
         add(&mut out, "relay/forge.rs::Forgery", format!("{forgery:?}"));
+    }
+    for frame in [
+        NegFrame::Open,
+        NegFrame::ClientMessage,
+        NegFrame::Close,
+        NegFrame::RelayMessage,
+        NegFrame::Error,
+        NegFrame::Refused,
+    ] {
+        add(&mut out, "relay/ledger.rs::NegFrame", format!("{frame:?}"));
     }
     for op in [
         DeviceOp::Restart(KillKind::Soft),
@@ -628,7 +641,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         PendingReason::InFlightPublish(device),
         PendingReason::AdvanceUnconsumed(device),
         PendingReason::SubscriptionShortfall(device),
-        PendingReason::RemovalOwed(device),
+        PendingReason::CommitPending(device),
         PendingReason::GatingInputs(device, circle),
         PendingReason::QueuedIntents(device, circle),
         PendingReason::PendingProposal(device, circle),
@@ -685,7 +698,6 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         );
     }
     for verdict in [
-        undecryptable::Verdict::Expired,
         undecryptable::Verdict::PreAuth,
         undecryptable::Verdict::Applied,
         undecryptable::Verdict::CommitGap,
@@ -959,6 +971,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         Step::ReadGatingRows,
         Step::ReadCursor,
         Step::ReadConvergenceState,
+        Step::ServeConvergence,
         Step::ReadSessionLiveness,
         Step::ReadSessionStoreSize,
         Step::SessionStoreCeiling,
@@ -1102,6 +1115,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         Absence::ThrottledBackoffFloor,
         Absence::DeliverySilenceWindow,
         Absence::ResubscribeLookback,
+        Absence::NegentropySpacing,
     ] {
         add(
             &mut out,
@@ -1113,6 +1127,8 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         WithheldAcks::None,
         WithheldAcks::Fixed(1),
         WithheldAcks::PerInvitedMember,
+        WithheldAcks::Locations(1),
+        WithheldAcks::FanoutDrives(1),
     ] {
         add(
             &mut out,

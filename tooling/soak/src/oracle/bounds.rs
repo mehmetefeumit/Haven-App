@@ -100,6 +100,35 @@ pub const fn withheld_publish_ladder() -> Duration {
     Duration::from_secs(34)
 }
 
+/// What ONE durable-fanout call costs when the relay is reachable and its `OK`
+/// never arrives.
+///
+/// The product's fanout driver waits for MDK's relay client, which gives up
+/// on a call after its own ceiling
+/// (`haven_core::relay::fanout::MDK_CALL_CEILING_SECS`, pinned against MDK's
+/// source by haven-core's `mdks_call_ceiling_is_the_one_a_drive_is_said_to_wait`).
+/// A drive calls its relays at once, so one drive pays it once however many
+/// planes withhold. Named, not a literal: the constant is haven-core's.
+#[must_use]
+pub const fn fanout_call_ceiling() -> Duration {
+    Duration::from_secs(haven_core::relay::fanout::MDK_CALL_CEILING_SECS)
+}
+
+/// How long after a durable-fanout call that got no answer — or never
+/// returned, because the process died with it out — the product's driver
+/// sends the same record to that relay again.
+///
+/// The driver paces a relay on what its last attempt left stored: an
+/// ambiguous one is sent again `AMBIGUOUS_RETRY_BASE_MS` after it began
+/// (haven-core `relay::fanout`, MDK's own base for a silent relay). An arm
+/// that kills a device with such a call out waits this once before the
+/// record's re-send can be acknowledged. Named, not a literal: the constant
+/// is haven-core's.
+#[must_use]
+pub const fn fanout_resend_after_silence() -> Duration {
+    Duration::from_millis(haven_core::relay::fanout::AMBIGUOUS_RETRY_BASE_MS)
+}
+
 /// What ONE LOCATION publish costs when the relay is reachable and its `OK`
 /// never arrives.
 ///
@@ -188,9 +217,9 @@ pub const fn silence_window() -> Duration {
 /// resolve it.
 ///
 /// `UNRESOLVABLE_INPUT_MAX_AGE_SECS` = `LOCATION_MESSAGE_RETENTION_SECS +
-/// RECEIVER_EXPIRATION_GRACE_SECS` (`haven-core/src/nostr/mls/types.rs:452`).
+/// RECEIVER_EXPIRATION_GRACE_SECS` (`haven-core/src/nostr/mls/types.rs:465`).
 /// The predicate that consumes it is strictly greater
-/// (`beyond_relay_retention`, `types.rs:464`), so a row at EXACTLY this age is
+/// (`beyond_relay_retention`, `types.rs:476`), so a row at EXACTLY this age is
 /// still resolvable and a sweep under the horizon must leave it gating.
 #[must_use]
 pub const fn unresolvable_input_max_age() -> Duration {
@@ -213,6 +242,17 @@ pub const fn resubscribe_lookback() -> Duration {
 
 /// The grain `since` and a cursor's second are both counted in.
 const ONE_WALL_SECOND: u64 = 1;
+
+/// How long after a NIP-77 pass began the next one may begin.
+///
+/// The product's own spacing (`haven-core/src/relay/negentropy.rs`,
+/// `NEG_PASS_SPACING_MS`). A LOWER bound, never scaled: an arm that needs the
+/// pass of the sweep it drives waits it out, so a pass an earlier wake began
+/// cannot stand in for it.
+#[must_use]
+pub const fn negentropy_spacing() -> Duration {
+    Duration::from_millis(haven_core::relay::negentropy::NEG_PASS_SPACING_MS)
+}
 
 /// How long a wall second an event was stored or sealed in may take to turn
 /// over.

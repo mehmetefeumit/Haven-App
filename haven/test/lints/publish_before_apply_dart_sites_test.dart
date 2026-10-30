@@ -22,10 +22,10 @@
 // `nostr_circle_service.dart` resolves a staged `PendingStateRefFfi` in
 // exactly three structural shapes:
 //
-//   * if/else pairing — `createCircle`, `updateCircleRelays`, and the
-//     `_publishAndConfirm` helper shared by `removeMember` and both
-//     `leaveCircle` admin steps: `if (<ack>) { confirm-role } else { fail }`.
-//     [_checkIfElsePairs]
+//   * if/else pairing — `updateCircleRelays` and the `_publishAndConfirm`
+//     helper shared by `removeMember` and both `leaveCircle` admin steps:
+//     `if (<ack>) { confirm-role } else { fail }`. (`createCircle` stages
+//     nothing: a founding create is canonical at once.) [_checkIfElsePairs]
 //   * guard-clause pairing — `addMember`: `if (!<ack>) { fail; throw; }`
 //     as a statement, followed by an unconditional sibling `confirmPublished`.
 //     [_checkGuardClauses]
@@ -319,18 +319,6 @@ class _CallCounter extends RecursiveAstVisitor<void> {
       }
     }
     super.visitMethodInvocation(node);
-  }
-}
-
-class _MethodBodyFinder extends RecursiveAstVisitor<void> {
-  _MethodBodyFinder(this.name);
-  final String name;
-  MethodDeclaration? found;
-
-  @override
-  void visitMethodDeclaration(MethodDeclaration node) {
-    if (node.name.lexeme == name) found = node;
-    super.visitMethodDeclaration(node);
   }
 }
 
@@ -756,38 +744,19 @@ void main() {
       );
     });
 
-    test(
-      'if/else pairing found exactly the three known decision blocks '
-      '(anti-vacuity)',
-      () {
-        // createCircle, updateCircleRelays, and the shared _publishAndConfirm
-        // helper (which alone covers removeMember and both leaveCircle admin
-        // steps). Equality, not a floor: this repo's convention is that
-        // slack lets a site be deleted silently — see MDK Rule-14 guard.
-        final matches = _allIfStatements(parsed.unit)
-            .where(
-              (s) => _subtreeCallsAny(s.thenStatement, _confirmRoleMethods),
-            )
-            .length;
-        expect(matches, 3);
-      },
-    );
-
-    test(
-      'guard-clause check found exactly one decision block (anti-vacuity)',
-      () {
-        // addMember is the only guard-clause-shaped resolution in this file.
-        final matches = _allIfStatements(parsed.unit)
-            .where(
-              (s) =>
-                  s.elseStatement == null &&
-                  _subtreeCallsAny(s.thenStatement, {_failRoleMethod}) &&
-                  !_subtreeCallsAny(s.thenStatement, _confirmRoleMethods),
-            )
-            .length;
-        expect(matches, 1);
-      },
-    );
+    test('no decision block is left on the send side (anti-vacuity)', () {
+      // Before: two if/else blocks (updateCircleRelays, _publishAndConfirm)
+      // and one guard clause (addMember). Every user change now goes through
+      // the fanout driver, which holds Rule 13 in Rust: it confirms nothing
+      // without an acknowledgement and records what it sends. Equality, not a
+      // ceiling: a Dart ladder grown back here is a second publish path.
+      final decisions = _allIfStatements(parsed.unit).where(
+        (s) =>
+            _subtreeCallsAny(s.thenStatement, _confirmRoleMethods) ||
+            _subtreeCallsAny(s.thenStatement, {_failRoleMethod}),
+      );
+      expect(decisions, isEmpty);
+    });
 
     test('publish-before-apply site inventory is pinned by count', () {
       // Deleting a call site (e.g. a stray `publishFailed` cleanup during
@@ -795,73 +764,65 @@ void main() {
       // trip one of the structural checks above.
       final counter = _CallCounter();
       parsed.unit.accept(counter);
-      expect(
-        counter.counts['confirmPublished'],
-        4,
-        reason: 'createCircle, addMember, _publishAndConfirm, and '
-            'confirmPendingCommit.',
-      );
-      expect(
-        counter.counts['publishFailed'],
-        5,
-        reason: 'createCircle, addMember, updateCircleRelays, '
-            '_publishAndConfirm, and failPendingCommit.',
-      );
-      expect(
-        counter.counts['finalizeRelayUpdate'],
-        1,
-        reason: "updateCircleRelays' confirm-role call.",
-      );
+      // Before: one each, in the receive-side passthroughs
+      // (confirmPendingCommit / failPendingCommit) the deferred-send ladders
+      // used. A location's seal and a poll's ingest go through the fanout
+      // driver now, which resolves what either stages in Rust: no commit is
+      // resolved from this file.
+      expect(counter.counts['confirmPublished'], isNull);
+      expect(counter.counts['publishFailed'], isNull);
+      expect(counter.counts['finalizeRelayUpdate'], isNull);
     });
 
-    test(
-      'confirmPendingCommit / failPendingCommit stay unconditional '
-      'passthroughs',
-      () {
-        // The receive-side ack DECISION must live entirely in the caller
-        // (LocationSharingService._publishAndConfirmAutoCommit, tested
-        // behaviourally in location_sharing_service_test.dart). If either
-        // passthrough grows its own branching, that caller-side test no
-        // longer covers the real decision.
-        for (final name in [
-          'confirmPendingCommit',
-          'failPendingCommit',
-        ]) {
-          final finder = _MethodBodyFinder(name);
-          parsed.unit.accept(finder);
-          final method = finder.found;
-          expect(
-            method,
-            isNotNull,
-            reason: '$name no longer exists on NostrCircleService — update '
-                'this guard to follow it rather than deleting it.',
-          );
-          expect(
-            _allIfStatements(method!),
-            isEmpty,
-            reason: '$name has grown conditional logic; the ack decision '
-                'must stay entirely in the caller.',
-          );
-        }
-      },
-    );
+    test('no change is staged outside the fanout driver', () {
+      // The legacy staging entries hand back a commit for the caller to
+      // publish and confirm: from here, a change no record holds. Any
+      // receiver, a call or a tear-off; the two names the driver shares are
+      // allowed only on `_driver(...)`.
+      final finder = _LegacyStagingFinder();
+      parsed.unit.accept(finder);
+      expect(finder.found, isEmpty);
+    });
+
+    test('the staging finder sees every spelling', () {
+      final finder = _LegacyStagingFinder();
+      parseString(
+        content: '''
+f(m, CircleManagerFfi manager, x) async {
+  await m.addMembersToCircle();
+  await manager.removeMembers();
+  await x.updateCircleRelays();
+  final t = m.proposeSelfDemote;
+  await (await get()).repairEpochRotation();
+  await this.proposeAdminHandoff();
+  await _driver('x').removeMembers();
+  await _driver('x').updateCircleRelays();
+  await _driver('x').addMembers();
+  final r = manager.removeMembers;
+  final u = (await get()).updateCircleRelays;
+  final d = _driver('x').removeMembers;
+}
+''',
+        throwIfDiagnostics: false,
+      ).unit.accept(finder);
+      expect(finder.found, [
+        'addMembersToCircle',
+        'removeMembers',
+        'updateCircleRelays',
+        'proposeSelfDemote',
+        'repairEpochRotation',
+        'proposeAdminHandoff',
+        'removeMembers',
+        'updateCircleRelays',
+      ]);
+    });
   });
 
-  group('the epoch repair resolves every staged commit it is handed', () {
-    // ## Why this needs its own structural check
-    //
-    // `repairCircleEpoch` is the one Rule-13 site with NO behavioural Dart
-    // test: `NostrCircleService` reaches the core through a concrete
-    // `CircleManagerFfi`, which cannot be constructed or mocked without the
-    // native library. Both ways of breaking it therefore stayed GREEN — delete
-    // the `_publishAndConfirm(...)` call and return `EpochRepairApplied()`
-    // anyway, or delete the `_resolveDeferredWork(...)` call — while leaving a
-    // `PendingStateRef` unresolved, which pins the group in `PendingPublish`
-    // where every later send fails.
-    //
-    // So the pairing is asserted on the SOURCE instead: whatever the body does,
-    // each arm must reach its resolver.
-
+  group('the epoch repair goes through the fanout driver', () {
+    // Before: the rotated arm reached `_publishAndConfirm` and the deferred
+    // arm `_resolveDeferredWork`. The driver now stages, records and drives
+    // both in Rust; what stays on this side is the pre-fetch, its order, and
+    // the one driver call.
     late String body;
 
     setUpAll(() {
@@ -871,61 +832,13 @@ void main() {
       );
     });
 
-    test('the rotated arm reaches the publish-then-confirm ladder', () {
-      expect(
-        body.contains('_publishAndConfirm('),
-        isTrue,
-        reason:
-            'a staged rotation must be published and then confirmed on a '
-            '>=1-relay ack (or rolled back). Returning EpochRepairApplied '
-            'without the ladder applies a commit no relay ever saw.',
-      );
-    });
-
-    test('the deferred arm reaches the deferred-work resolver', () {
-      expect(
-        body.contains('_resolveDeferredWork('),
-        isTrue,
-        reason:
-            'the engine can stage a peer eviction inside the same call. '
-            'Dropping it leaves the group in PendingPublish, where every '
-            'later send fails.',
-      );
-    });
-
-    test('no pending ref is read without flowing into a resolver', () {
-      // The shape a partial refactor leaves behind: the code reads
-      // `outcome.rotated.pending` (or a commit's `.pending`) to log or return
-      // it, and never hands it to anything that confirms or rolls back.
-      final resolvers = [
-        '_publishAndConfirm(',
-        '_resolveDeferredWork(',
-        'confirmPublished(',
-        'publishFailed(',
-      ];
-      final readsPending = body.contains('.pending');
-      if (!readsPending) return;
-      expect(
-        resolvers.any(body.contains),
-        isTrue,
-        reason:
-            'repairCircleEpoch reads a PendingStateRef but never resolves it. '
-            'An unresolved ref is a permanent send blackout for that circle.',
-      );
-    });
-
     test('the fetch happens BEFORE the repair is asked for', () {
       // Ordering is the whole point of the pre-fetch: a departure proposal
       // still sitting on a relay turns a clean `pendingProposal` decline into
-      // a same-epoch race. Asking the core first and fetching afterwards would
-      // read as correct and buy nothing.
-      //
-      // Position alone is not enough. `unawaited(_relayService.runCatchup(…))`
-      // sits in exactly the right place, passes the analyzer, and settles
-      // nothing before the core is asked — so the pin is on the AWAIT, which is
-      // the part that makes the ordering real.
+      // a same-epoch race. The pin is on the AWAIT, which is the part that
+      // makes the ordering real.
       final fetchAt = body.indexOf('await _relayService.runCatchup(');
-      final repairAt = body.indexOf('repairEpochRotation(');
+      final repairAt = body.indexOf('.repairRotation(');
       expect(
         fetchAt,
         isNot(-1),
@@ -933,30 +846,19 @@ void main() {
             'the pre-fetch must be AWAITED; an un-awaited call is correctly '
             'placed and buys nothing',
       );
-      expect(repairAt, isNot(-1), reason: 'the FFI call is missing');
-      expect(
-        fetchAt,
-        lessThan(repairAt),
-        reason:
-            'runCatchup must be awaited BEFORE repairEpochRotation, so a '
-            'proposal that had not yet reached this device becomes a decline '
-            'rather than a race',
-      );
+      expect(repairAt, isNot(-1), reason: 'the driver call is missing');
+      expect(fetchAt, lessThan(repairAt));
     });
 
     test('the body extractor is not vacuous', () {
-      // Every assertion above is a `contains` over this string, so a extractor
-      // that silently returned the whole file — or an empty one — would make
-      // them all meaningless in one direction or the other.
-      expect(body, contains('repairEpochRotation('));
+      expect(body, contains('.repairRotation('));
       expect(
-        body.contains('Future<void> updateCircleRelays('),
+        body.contains('Future<ChangeDelivery> updateCircleRelays('),
         isFalse,
         reason: 'the extractor must return ONE method body, not the file',
       );
     });
   });
-
 }
 
 /// The source text of [methodName]'s body, brace-matched.
@@ -994,4 +896,55 @@ String _methodBody(String source, String methodName) {
     }
   }
   throw StateError('$methodName body is unterminated');
+}
+
+
+/// Every use of a legacy staging entry: a call or a tear-off on any receiver,
+/// except the two names the fanout driver shares when called on `_driver(…)`.
+class _LegacyStagingFinder extends RecursiveAstVisitor<void> {
+  static const _legacyOnly = {
+    'addMembersToCircle',
+    'proposeAdminHandoff',
+    'proposeSelfDemote',
+    'repairEpochRotation',
+  };
+  static const _sharedWithDriver = {'removeMembers', 'updateCircleRelays'};
+
+  final List<String> found = [];
+
+  bool _onDriver(Expression? target) =>
+      target is MethodInvocation && target.methodName.name == '_driver';
+
+  @override
+  void visitMethodInvocation(MethodInvocation node) {
+    final name = node.methodName.name;
+    if (node.target != null || node.realTarget != null) {
+      if (_legacyOnly.contains(name) ||
+          (_sharedWithDriver.contains(name) && !_onDriver(node.target))) {
+        found.add(name);
+      }
+    }
+    super.visitMethodInvocation(node);
+  }
+
+  // A tear-off: a prefix is never `_driver(…)`, so a shared name torn off one
+  // is the legacy entry.
+  @override
+  void visitPrefixedIdentifier(PrefixedIdentifier node) {
+    final name = node.identifier.name;
+    if (_legacyOnly.contains(name) || _sharedWithDriver.contains(name)) {
+      found.add(name);
+    }
+    super.visitPrefixedIdentifier(node);
+  }
+
+  @override
+  void visitPropertyAccess(PropertyAccess node) {
+    final name = node.propertyName.name;
+    if (_legacyOnly.contains(name) ||
+        (_sharedWithDriver.contains(name) && !_onDriver(node.target))) {
+      found.add(name);
+    }
+    super.visitPropertyAccess(node);
+  }
 }

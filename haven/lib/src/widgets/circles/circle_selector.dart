@@ -14,11 +14,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
+import 'package:haven/src/providers/circle_attention_provider.dart';
 import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/profile_refresh_trigger.dart';
+import 'package:haven/src/widgets/circles/circle_attention_cue.dart';
+import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// M3 `motionDurationMedium2` (300 ms) bumped to 320 ms to land at the
@@ -227,6 +231,33 @@ class _DropdownBodyState extends ConsumerState<_DropdownBody>
     );
   }
 
+  /// The circle the resting trigger's cue opens: the selected circle when it
+  /// needs attention, else the first accepted circle that does, so a circle
+  /// not selected is marked at rest too.
+  Circle? _firstNeedingAttention() {
+    final selected = widget.selectedCircle;
+    if (_needsAttention(selected)) return selected;
+    for (final circle in widget.circles) {
+      if (circle.membershipStatus == MembershipStatus.accepted &&
+          _needsAttention(circle)) {
+        return circle;
+      }
+    }
+    return null;
+  }
+
+  bool _needsAttention(Circle? circle) =>
+      circle != null &&
+      ref.watch(circleNeedsAttentionProvider(sharingCircleKey(circle)));
+
+  /// One tap from the cue: [circle] selected, the list closed, and its
+  /// details opened.
+  void _openDetails(Circle circle) {
+    ref.read(circleDropdownOpenProvider.notifier).state = false;
+    ref.read(selectedCircleIdProvider.notifier).state = circle.mlsGroupId;
+    unawaited(showCircleDetails(context, ref, circle));
+  }
+
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -242,6 +273,8 @@ class _DropdownBodyState extends ConsumerState<_DropdownBody>
             ref.read(circleDropdownOpenProvider.notifier).state =
                 !widget.isOpen;
           },
+          attentionCircle: _firstNeedingAttention(),
+          onOpenDetails: _openDetails,
         ),
         // ClipRRect outside SizeTransition: the bottom corners stay
         // rounded throughout the expansion (the clip rect tracks the
@@ -264,6 +297,8 @@ class _DropdownBodyState extends ConsumerState<_DropdownBody>
                   circles: widget.circles,
                   selectedCircle: widget.selectedCircle,
                   colorScheme: colorScheme,
+                  needsAttention: _needsAttention,
+                  onOpenDetails: _openDetails,
                   onSelected: (circle, {required isSelected}) {
                     ref.read(selectedCircleIdProvider.notifier).state =
                         isSelected ? null : circle.mlsGroupId;
@@ -304,6 +339,8 @@ class _ExpandedPanel extends StatelessWidget {
     required this.colorScheme,
     required this.onSelected,
     required this.onNewCircle,
+    required this.needsAttention,
+    required this.onOpenDetails,
   });
 
   final List<Circle> circles;
@@ -311,6 +348,8 @@ class _ExpandedPanel extends StatelessWidget {
   final ColorScheme colorScheme;
   final void Function(Circle circle, {required bool isSelected}) onSelected;
   final VoidCallback onNewCircle;
+  final bool Function(Circle circle) needsAttention;
+  final void Function(Circle circle) onOpenDetails;
 
   @override
   Widget build(BuildContext context) {
@@ -341,6 +380,8 @@ class _ExpandedPanel extends StatelessWidget {
                   circle: circle,
                   isSelected: isSelected,
                   onTap: () => onSelected(circle, isSelected: isSelected),
+                  needsAttention: needsAttention(circle),
+                  onOpenDetails: () => onOpenDetails(circle),
                 );
               },
             ),
@@ -364,6 +405,8 @@ class _TriggerRow extends StatelessWidget {
     required this.isOpen,
     required this.chevronAnimation,
     required this.onTap,
+    required this.attentionCircle,
+    required this.onOpenDetails,
   });
 
   final Circle? selectedCircle;
@@ -371,65 +414,85 @@ class _TriggerRow extends StatelessWidget {
   final Animation<double> chevronAnimation;
   final VoidCallback onTap;
 
+  /// The circle the cue opens; `null` when no circle needs attention.
+  final Circle? attentionCircle;
+  final void Function(Circle circle) onOpenDetails;
+
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
-    return Semantics(
-      button: true,
-      expanded: isOpen,
-      label: l10n.circleSelectorLabel,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: HavenSpacing.base,
-            vertical: HavenSpacing.md,
-          ),
-          child: Row(
-            children: [
-              if (selectedCircle != null) ...[
-                _CircleAvatar(circle: selectedCircle!),
-                const SizedBox(width: HavenSpacing.md),
-                Expanded(
-                  key: WidgetKeys.circleSelectorActive(
-                    selectedCircle!.nostrGroupId
-                        .map(
-                          (b) => b.toRadixString(16).padLeft(2, '0'),
-                        )
-                        .join(),
-                  ),
-                  child: Text(
-                    selectedCircle!.displayName,
-                    style: textTheme.titleSmall,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+    final circle = attentionCircle;
+    // The cue sits beside the trigger, not inside it: its own 48 dp target
+    // and its own node, so one tap from the resting sheet opens the details
+    // rather than the list.
+    return Row(
+      children: [
+        Expanded(
+          child: Semantics(
+            button: true,
+            expanded: isOpen,
+            label: l10n.circleSelectorLabel,
+            child: InkWell(
+              onTap: onTap,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HavenSpacing.base,
+                  vertical: HavenSpacing.md,
                 ),
-              ] else ...[
-                Icon(LucideIcons.users, color: colorScheme.onSurfaceVariant),
-                const SizedBox(width: HavenSpacing.md),
-                Expanded(
-                  child: Text(
-                    l10n.circleSelectorPlaceholder,
-                    style: textTheme.titleSmall?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
+                child: Row(
+                  children: [
+                    if (selectedCircle != null) ...[
+                      _CircleAvatar(circle: selectedCircle!),
+                      const SizedBox(width: HavenSpacing.md),
+                      Expanded(
+                        key: WidgetKeys.circleSelectorActive(
+                          selectedCircle!.nostrGroupId
+                              .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                              .join(),
+                        ),
+                        child: Text(
+                          selectedCircle!.displayName,
+                          style: textTheme.titleSmall,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ] else ...[
+                      Icon(
+                        LucideIcons.users,
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: HavenSpacing.md),
+                      Expanded(
+                        child: Text(
+                          l10n.circleSelectorPlaceholder,
+                          style: textTheme.titleSmall?.copyWith(
+                            color: colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ],
+                    RotationTransition(
+                      turns: chevronAnimation,
+                      child: Icon(
+                        LucideIcons.chevronDown,
+                        color: colorScheme.onSurfaceVariant,
+                      ),
                     ),
-                  ),
-                ),
-              ],
-              RotationTransition(
-                turns: chevronAnimation,
-                child: Icon(
-                  LucideIcons.chevronDown,
-                  color: colorScheme.onSurfaceVariant,
+                  ],
                 ),
               ),
-            ],
+            ),
           ),
         ),
-      ),
+        if (circle != null)
+          CircleAttentionCue(
+            key: WidgetKeys.circleAttentionCue,
+            onPressed: () => onOpenDetails(circle),
+          ),
+      ],
     );
   }
 }
@@ -469,11 +532,15 @@ class _CircleListItem extends StatelessWidget {
     required this.circle,
     required this.isSelected,
     required this.onTap,
+    required this.needsAttention,
+    required this.onOpenDetails,
   });
 
   final Circle circle;
   final bool isSelected;
   final VoidCallback onTap;
+  final bool needsAttention;
+  final VoidCallback onOpenDetails;
 
   @override
   Widget build(BuildContext context) {
@@ -488,20 +555,38 @@ class _CircleListItem extends StatelessWidget {
     // ColoredBox inside the Material widget; without this transparent
     // Material directly above ListTile, the ancestor walk hits that
     // ColoredBox before reaching a Material and trips the assertion.
+    final hex = circle.nostrGroupId
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
     return Material(
-      key: WidgetKeys.circleTile(
-        circle.nostrGroupId
-            .map((b) => b.toRadixString(16).padLeft(2, '0'))
-            .join(),
-      ),
+      key: WidgetKeys.circleTile(hex),
       type: MaterialType.transparency,
       child: ListTile(
         dense: true,
         leading: _CircleAvatar(circle: circle),
-        title: Text(circle.displayName),
+        title: needsAttention
+            ? Semantics(
+                label: AppLocalizations.of(
+                  context,
+                ).circleRowAttentionSemantics(circle.displayName),
+                excludeSemantics: true,
+                child: Text(circle.displayName),
+              )
+            : Text(circle.displayName),
         subtitle: Text(memberText),
-        trailing: isSelected
-            ? Icon(LucideIcons.check, color: colorScheme.primary)
+        trailing: needsAttention || isSelected
+            ? Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (needsAttention)
+                    CircleAttentionCue(
+                      key: WidgetKeys.circleRowAttentionCue(hex),
+                      onPressed: onOpenDetails,
+                    ),
+                  if (isSelected)
+                    Icon(LucideIcons.check, color: colorScheme.primary),
+                ],
+              )
             : null,
         onTap: onTap,
       ),

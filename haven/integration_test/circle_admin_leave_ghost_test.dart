@@ -16,7 +16,7 @@
 /// produce stale rosters in the field.
 ///
 /// The scenario sets up two parties through `CircleManagerFfi` directly
-/// (no UI, no relay), promotes Bob to admin so the admin set has TWO
+/// (no UI), promotes Bob to admin so the admin set has TWO
 /// members, and then has Alice — *still admin* — call `proposeLeave`. The
 /// assertion is that the call throws an error whose message contains
 /// `self-demote` / `self_demote` — satisfied by Haven's stable mapping
@@ -64,6 +64,8 @@ import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 
+import 'e2e/_lib/circle_creation.dart'
+    show createCircleDelivered, joinDeliveredWelcome;
 import 'e2e/_lib/test_user.dart';
 import 'e2e/_lib/throw_time_error_capture.dart';
 
@@ -76,11 +78,9 @@ final Uint8List _bobSeed = Uint8List.fromList(List<int>.filled(32, 2));
 /// Synthetic relay URL embedded into MIP-00 KeyPackage and MIP-04 Welcome
 /// events.
 ///
-/// This is an FFI-level test: events are passed directly between two
-/// `CircleManagerFfi` instances and nothing actually publishes to the
-/// relay. The URL is required only so MDK's `validate_relays_tag`
-/// (`mdk-core/src/key_packages.rs`) accepts the resulting events — MIP-00
-/// makes the Relays tag mandatory.
+/// This is an FFI-level test: the Welcome passes directly between the two
+/// `CircleManagerFfi` instances, and the relay carries only Bob's KeyPackage
+/// and Alice's driven admin hand-over, which applies on its acknowledgement.
 ///
 /// Resolved via `--dart-define=HAVEN_E2E_RELAY=…` so the CI workflow's
 /// hermetic strfry URL flows through to this test on the emulator; falls
@@ -102,7 +102,7 @@ void main() {
     // loopback-`ws://` opt-in (so `_testRelayUrl` passes every Rust
     // `validate_relay_urls` call site), and the default-relay override.
     // The override is load-bearing for Dark Matter's KeyPackage discovery:
-    // `fetchKeypackage`'s cascade ends at the read-only discovery plane,
+    // `fetchMemberKeypackage`'s cascade ends at the read-only discovery plane,
     // which mirrors the default-relay override in debug builds — without
     // it, the fetch below would consult the PUBLIC indexers (non-hermetic,
     // and Bob's KeyPackage only exists on the local strfry → null).
@@ -178,9 +178,10 @@ void main() {
             circle: bobCircle,
             identitySecretBytes: bobSecret,
           );
-          final bobKpJson = await bobRelayManager.fetchKeypackage(
+          final bobKpJson = (await bobRelayManager.fetchMemberKeypackage(
             pubkey: bobPub.pubkeyHex,
-          );
+            circle: aliceCircle,
+          ))?.keyPackageJson;
           expect(
             bobKpJson,
             isNotNull,
@@ -191,11 +192,14 @@ void main() {
           // 2. Alice creates the circle with Bob as the only member.
           //    Alice is the sole admin.
           // --------------------------------------------------------------
-          final creation = await aliceCircle.createCircle(
+          final creation = await createCircleDelivered(
+            manager: aliceCircle,
+            relayManager: bobRelayManager,
             identitySecretBytes: aliceSecret,
             members: [
               MemberKeyPackageFfi(
                 keyPackageJson: bobKpJson!,
+                authorNpub: bobPub.npub,
                 inboxRelays: const <String>[_testRelayUrl],
                 nip65Relays: const <String>[_testRelayUrl],
               ),
@@ -203,46 +207,42 @@ void main() {
             name: 'Ghost Admin Test',
             circleType: 'location_sharing',
             relays: const <String>[_testRelayUrl],
-            creatorFallbackRelays: const <String>[_testRelayUrl],
+            scenario: 'ghost',
           );
           final mlsGroupId = Uint8List.fromList(creation.circle.mlsGroupId);
 
-          // Alice confirms her own pending group-creation state (from
-          // adding Bob) before subsequent operations on the group
-          // (publish-before-apply, Rule 13).
-          await aliceCircle.confirmPublished(pending: creation.pending);
-
           // --------------------------------------------------------------
-          // 3. Bob processes the gift-wrap and accepts.
+          // 3. Bob takes the gift-wrap off the relay and accepts.
           // --------------------------------------------------------------
-          expect(
-            creation.welcomeEvents,
-            isNotEmpty,
-            reason: 'createCircle must emit a Welcome for Bob',
+          await joinDeliveredWelcome(
+            relayManager: bobRelayManager,
+            invitee: bobCircle,
+            inviteeSecretBytes: bobSecret,
+            inviteePubkeyHex: bobPubkeyHex,
+            relays: const <String>[_testRelayUrl],
+            scenario: 'ghost',
           );
-          final invitation = await bobCircle.processGiftWrappedInvitation(
-            identitySecretBytes: bobSecret,
-            giftWrapEventJson: creation.welcomeEvents.first.eventJson,
-          );
-          expect(invitation, isNotNull);
-          // `invitation.mlsGroupId` is the pre-join stand-in id — actually
-          // the gift-wrap event id the invitation was keyed by.
-          await bobCircle.acceptInvitation(giftWrapId: invitation!.mlsGroupId);
 
           // --------------------------------------------------------------
           // 4. Alice promotes Bob to admin via an
           //    `UpdateAppComponents(admin-policy.v1)` commit, so the admin
           //    set has TWO members when she attempts her still-admin
           //    proposeLeave below (see the library doc comment for why the
-          //    2-admin shape is the load-bearing one). Nothing publishes in
-          //    this FFI-level test, so the pending commit is confirmed
-          //    directly — the same seam the circle creation above uses.
+          //    2-admin shape is the load-bearing one). Driven like every
+          //    change: applied only once the test relay acknowledges it.
           // --------------------------------------------------------------
-          final promote = await aliceCircle.proposeAdminHandoff(
+          final promote = await bobRelayManager.adminHandoffDriven(
+            circle: aliceCircle,
             mlsGroupId: mlsGroupId,
-            successorHex: bobPubkeyHex,
+            successor: bobPubkeyHex,
+            foreground: true,
           );
-          await aliceCircle.confirmPublished(pending: promote.pending);
+          expect(
+            promote.status,
+            PublishStatusFfi.confirmed,
+            reason: 'the hand-over must be acknowledged and applied before '
+                'the gate is tested',
+          );
 
           // ==============================================================
           // FN-4: Admin precondition assertions.

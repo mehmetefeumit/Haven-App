@@ -207,7 +207,11 @@ async fn engine_never_authenticates_to_an_auth_required_relay() {
     let dir = TempDir::new().unwrap();
     let circle =
         Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
-    let engine = LiveSyncCore::new_local(circle, Keys::generate().public_key());
+    let engine = LiveSyncCore::new_local(
+        circle,
+        Keys::generate().public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     let mut rx = engine.bus().subscribe(); // before start: capture any content emit
     engine
         .start(
@@ -303,7 +307,13 @@ async fn engine_connects_only_to_configured_relays_never_gossip_discovered() {
     let dir = TempDir::new().unwrap();
     let circle =
         Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
-    let engine = LiveSyncCore::new_local(circle, identity.public_key());
+    // A session lists the ids of circles its manager holds.
+    circle.keep_circle_row_for_test([0x33; 32]);
+    let engine = LiveSyncCore::new_local(
+        circle,
+        identity.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     engine
         .start(
             &[CircleSpec {

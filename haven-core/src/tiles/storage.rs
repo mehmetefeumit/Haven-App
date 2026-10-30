@@ -182,6 +182,7 @@ impl TileCacheStorage {
     /// Returns [`TileCacheError::DecryptFailed`] if the key cannot decrypt the
     /// database, or [`TileCacheError::Storage`] on other `SQLite` failures.
     fn open_keyed_connection(path: &Path, hex_key: &str) -> Result<Connection> {
+        crate::sqlcipher_init::ensure()?;
         let conn = Connection::open(path)?;
         // `temp_store = MEMORY` keeps temp B-trees / sorter spills in RAM so no
         // plaintext tile bytes ever land in an unencrypted on-disk temp file.

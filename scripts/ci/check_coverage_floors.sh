@@ -124,11 +124,20 @@
 # how a measured regression gets laundered into a permitted one, and because
 # rewriting the provenance alone would leave the row failing its own lint.
 #
+# `--drop-stale` is the only writer that deletes. A stale row fails every
+# enforcing run, and removing it used to be a hand-edit of the one file nobody
+# may hand-edit. It deletes a row (and its indented continuation comment) only
+# when no file in the tree matches the row's path — it reads the tree, not a
+# coverage report, so a file no test imports is kept and still fails as STALE.
+# It refuses to write at all while any floor sits below the committed manifest's
+# (`git show HEAD:`), so a lowered number cannot ride in on a tool-made diff.
+#
 # ## Usage
 #
 #   check_coverage_floors.sh <stack> <lcov-file>   # enforce (stack: rust|flutter)
 #   check_coverage_floors.sh --lint [--fix]        # static: floors obey the pin rule
 #   check_coverage_floors.sh --repin <stack> <lcov> # raise earned floors in place
+#   check_coverage_floors.sh --drop-stale          # delete rows for deleted paths
 #   check_coverage_floors.sh --list <stack> <lcov> # print measured rows to re-pin
 #   check_coverage_floors.sh --self-test           # hermetic fixtures, no toolchain
 #
@@ -153,7 +162,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="check_coverage_floors"
-readonly SELF_TEST_FIXTURES=30
+readonly SELF_TEST_FIXTURES=36
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEFAULT_MANIFEST="${REPO_ROOT}/scripts/ci/coverage_floors.txt"
 
@@ -811,6 +820,108 @@ run_repin() { # <stack> <lcov-file>
 }
 
 # ---------------------------------------------------------------------------
+# --drop-stale — delete rows whose path is gone from the tree.
+#
+# Existence is decided with the enforcing run's own matcher (a trailing `/`
+# aggregates a directory, anything else is a glob) over the files under the
+# row's stack root, so the two can never disagree about what a row names.
+# ---------------------------------------------------------------------------
+stack_root() { # <stack>
+  local tree="${HAVEN_COVERAGE_TREE:-${REPO_ROOT}}"
+  case "$1" in
+    rust)    printf '%s\n' "${tree}/haven-core" ;;
+    flutter) printf '%s\n' "${tree}/haven" ;;
+    *) misconfig "--drop-stale: no tree root for stack '$1'" ;;
+  esac
+}
+
+path_present() { # <stack-root> <pattern>
+  local root="$1" glob="$2" base f
+  case "${glob}" in */) glob="${glob}*" ;; esac
+  base="${2%%[*?[]*}"
+  case "${base}" in */*) base="${base%/*}" ;; *) base="" ;; esac
+  [ -d "${root}/${base}" ] || return 1
+  while IFS= read -r -d '' f; do
+    # shellcheck disable=SC2053
+    [[ "${f#"${root}/"}" == ${glob} ]] && return 0
+  done < <(find "${root}/${base}" -type f -print0)
+  return 1
+}
+
+run_drop_stale() {
+  local manifest baseline
+  manifest="$(manifest_path)"
+  [ -f "${manifest}" ] || misconfig "manifest not found: ${manifest}"
+  baseline="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f '${baseline}'" RETURN
+  if [ -n "${HAVEN_COVERAGE_FLOORS_BASELINE:-}" ]; then
+    cat "${HAVEN_COVERAGE_FLOORS_BASELINE}" >"${baseline}" 2>/dev/null \
+      || misconfig "baseline manifest not readable: ${HAVEN_COVERAGE_FLOORS_BASELINE}"
+  else
+    git -C "${REPO_ROOT}" show "HEAD:scripts/ci/coverage_floors.txt" >"${baseline}" 2>/dev/null \
+      || misconfig "cannot read the committed manifest (git show HEAD:scripts/ci/coverage_floors.txt)"
+  fi
+
+  local -A committed=()
+  local line code f_stack f_pattern f_floor
+  while IFS= read -r line || [ -n "${line}" ]; do
+    code="${line%%[[:space:]]#*}"; code="${code%"${code##*[![:space:]]}"}"
+    case "${code}" in ''|\#*) continue ;; esac
+    IFS='|' read -r f_stack f_pattern f_floor _ <<<"${code}"
+    committed["${f_stack}|${f_pattern}"]="${f_floor}"
+  done <"${baseline}"
+
+  local -a lowered=() drop=()
+  local lineno=0 dropping=0 key
+  while IFS= read -r line || [ -n "${line}" ]; do
+    lineno=$((lineno + 1))
+    line="${line%$'\r'}"
+    # An indented comment directly under a dropped row is that row's narrative.
+    if [ "${dropping}" -eq 1 ] && [[ "${line}" =~ ^[[:space:]]+# ]]; then
+      drop+=("${lineno}"); continue
+    fi
+    dropping=0
+    code="${line%%[[:space:]]#*}"; code="${code%"${code##*[![:space:]]}"}"
+    case "${code}" in ''|\#*) continue ;; esac
+    IFS='|' read -r f_stack f_pattern f_floor _ <<<"${code}"
+    key="${f_stack}|${f_pattern}"
+    if [ -n "${committed[${key}]:-}" ] && [ "${f_floor}" -lt "${committed[${key}]}" ]; then
+      lowered+=("$(printf 'LOWERED  %s (line %s): %s%% here, %s%% committed.' "${key}" "${lineno}" "${f_floor}" "${committed[${key}]}")")
+    fi
+    if ! path_present "$(stack_root "${f_stack}")" "${f_pattern}"; then
+      drop+=("${lineno}"); dropping=1
+      log "DROP   ${key} — no file in the tree matches it (manifest line ${lineno})"
+    fi
+  done <"${manifest}"
+
+  if [ "${#lowered[@]}" -gt 0 ]; then
+    printf '  %s\n' "${lowered[@]}" >&2
+    fail "--drop-stale refuses to write while a floor sits below the committed manifest's; ${manifest} is unchanged. Lowering a floor is not a fix."
+  fi
+  if [ "${#drop[@]}" -eq 0 ]; then
+    log "No stale rows: every row's path exists. Manifest unchanged."
+    return 0
+  fi
+
+  local tmp before after
+  tmp="$(mktemp)"
+  awk -v drop="$(printf '%s,' "${drop[@]}")" '
+    BEGIN { n = split(drop, d, ","); for (i = 1; i <= n; i++) if (d[i] != "") skip[d[i]] = 1 }
+    !(FNR in skip)
+  ' "${manifest}" >"${tmp}" || { rm -f "${tmp}"; misconfig "could not rewrite ${manifest}"; }
+  before="$(wc -l <"${manifest}")"; after="$(wc -l <"${tmp}")"
+  if [ "$((before - after))" -ne "${#drop[@]}" ]; then
+    rm -f "${tmp}"
+    misconfig "rewrite would remove $((before - after)) lines, not ${#drop[@]} — refusing, ${manifest} is unchanged"
+  fi
+  cat "${tmp}" >"${manifest}"
+  rm -f "${tmp}"
+  printf '%sRemoved %s line(s). Review the diff, then commit it with the deletion that made the rows stale.%s\n' \
+    "${GREEN}" "${#drop[@]}" "${RESET}"
+}
+
+# ---------------------------------------------------------------------------
 # Self-test — hermetic fixtures, no toolchain, no repo state.
 #
 # Each fixture isolates ONE way this guard could be wrong. The three that carry
@@ -1148,6 +1259,95 @@ EOF
     fails=1
   fi
 
+  # ---- --drop-stale -------------------------------------------------------
+  # A tree with one file under a pinned directory and one pinned file; every
+  # other path the fixtures name is absent.
+  local tree="${tmp}/tree"
+  mkdir -p "${tree}/haven-core/src/nostr/mls" "${tree}/haven/lib/src/services"
+  printf 'fn a() {}\n' >"${tree}/haven-core/src/nostr/mls/group.rs"
+  printf 'void b() {}\n' >"${tree}/haven/lib/src/services/relay.dart"
+  cat >"${tmp}/drop.base" <<'EOF'
+# header comment
+
+rust|src/nostr/mls/|91                        # measured 93.29% (1419/1521)
+rust|src/relay/auto_commit.rs|100             # measured 100.00% (140/140)
+                                              # a continuation line of the row above
+rust|src/gone/|50                             # measured 52.00% (52/100)
+flutter|lib/src/services/relay.dart|84        # measured 86.72% (111/128)
+EOF
+  _drop() { # _drop <manifest> [baseline] — rc of --drop-stale on <manifest>
+    local rc=0
+    ( HAVEN_COVERAGE_FLOORS="$1" HAVEN_COVERAGE_FLOORS_BASELINE="${2:-${tmp}/drop.base}" \
+        HAVEN_COVERAGE_TREE="${tree}" run_drop_stale ) >/dev/null 2>&1 || rc=$?
+    echo "${rc}"
+  }
+  _expect() { # _expect <label> <ok>
+    checked=$(( checked + 1 ))
+    if [ "$2" = yes ]; then
+      printf '  %sPASS%s %s\n' "${GREEN}" "${RESET}" "$1"
+    else
+      printf '  %sFAIL%s %s\n' "${RED}" "${RESET}" "$1" >&2
+      fails=1
+    fi
+  }
+
+  # (26) Absent paths go (a file row with its continuation line, a directory
+  #      row); present ones stay, as does every comment and blank line.
+  cp "${tmp}/drop.base" "${tmp}/drop.m"
+  local drc; drc="$(_drop "${tmp}/drop.m")"
+  cat >"${tmp}/drop.want" <<'EOF'
+# header comment
+
+rust|src/nostr/mls/|91                        # measured 93.29% (1419/1521)
+flutter|lib/src/services/relay.dart|84        # measured 86.72% (111/128)
+EOF
+  if [ "${drc}" = 0 ] && cmp -s "${tmp}/drop.m" "${tmp}/drop.want"; then
+    _expect "--drop-stale removes only rows whose path is absent" yes
+  else
+    _expect "--drop-stale removes only rows whose path is absent (rc=${drc}): $(cat "${tmp}/drop.m")" no
+  fi
+
+  # (27) …and what it leaves still obeys the pin rule.
+  _lint "a --drop-stale'd manifest passes the lint" 0 "${tmp}/drop.m"
+
+  # (28) A manifest whose every path exists is left byte-for-byte alone.
+  cp "${tmp}/drop.want" "${tmp}/drop.present"
+  drc="$(_drop "${tmp}/drop.present" "${tmp}/drop.want")"
+  if [ "${drc}" = 0 ] && cmp -s "${tmp}/drop.present" "${tmp}/drop.want"; then
+    _expect "--drop-stale keeps every row whose path exists" yes
+  else
+    _expect "--drop-stale touched a manifest with no stale row (rc=${drc})" no
+  fi
+
+  # (29) THE REFUSAL — a floor lowered below the committed one, next to a
+  #      stale row. Nothing may be written, the stale row included.
+  sed 's/^rust|src\/nostr\/mls\/|91 /rust|src\/nostr\/mls\/|89 /' "${tmp}/drop.base" >"${tmp}/drop.lowered"
+  cp "${tmp}/drop.lowered" "${tmp}/drop.lowered.orig"
+  drc="$(_drop "${tmp}/drop.lowered")"
+  if [ "${drc}" = 1 ] && cmp -s "${tmp}/drop.lowered" "${tmp}/drop.lowered.orig"; then
+    _expect "--drop-stale refuses, writing nothing, while a floor is lowered" yes
+  else
+    _expect "--drop-stale wrote past a lowered floor (rc=${drc})" no
+  fi
+
+  # (30) A RAISED floor is not a lowered one: the stale rows still go.
+  sed 's/^rust|src\/nostr\/mls\/|91 /rust|src\/nostr\/mls\/|93 /' "${tmp}/drop.base" >"${tmp}/drop.raised"
+  drc="$(_drop "${tmp}/drop.raised")"
+  if [ "${drc}" = 0 ] && ! grep -q 'auto_commit' "${tmp}/drop.raised" && grep -q '^rust|src/nostr/mls/|93 ' "${tmp}/drop.raised"; then
+    _expect "--drop-stale proceeds past a raised floor" yes
+  else
+    _expect "--drop-stale mishandled a raised floor (rc=${drc})" no
+  fi
+
+  # (31) No readable baseline means no way to tell lowered from raised.
+  cp "${tmp}/drop.base" "${tmp}/drop.nobase"
+  drc="$(_drop "${tmp}/drop.nobase" "${tmp}/does-not-exist")"
+  if [ "${drc}" = 2 ] && cmp -s "${tmp}/drop.nobase" "${tmp}/drop.base"; then
+    _expect "--drop-stale without a baseline is a misconfiguration" yes
+  else
+    _expect "--drop-stale ran without a baseline (rc=${drc})" no
+  fi
+
   log ""
   if [ "${fails}" -ne 0 ]; then
     fail "self-test failed — this guard cannot be trusted until it is fixed"
@@ -1177,11 +1377,15 @@ main() {
       [ "$#" -eq 3 ] || misconfig "usage: ${SCRIPT_NAME}.sh --list <rust|flutter> <lcov-file>"
       run_list "$2" "$3"
       ;;
+    --drop-stale)
+      [ "$#" -eq 1 ] || misconfig "usage: ${SCRIPT_NAME}.sh --drop-stale"
+      run_drop_stale
+      ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; $d'
       ;;
     *)
-      [ "$#" -eq 2 ] || misconfig "usage: ${SCRIPT_NAME}.sh <rust|flutter> <lcov-file> | --lint [--fix] | --repin <stack> <lcov> | --list <stack> <lcov> | --self-test"
+      [ "$#" -eq 2 ] || misconfig "usage: ${SCRIPT_NAME}.sh <rust|flutter> <lcov-file> | --lint [--fix] | --repin <stack> <lcov> | --list <stack> <lcov> | --drop-stale | --self-test"
       run_check "$1" "$2"
       ;;
   esac

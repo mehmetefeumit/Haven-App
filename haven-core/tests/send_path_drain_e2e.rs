@@ -34,7 +34,7 @@ impl Device {
 
 struct Fixture {
     alice: CircleManager,
-    alice_keys: Keys,
+    _alice_keys: Keys,
     peers: Vec<Device>,
     mls_group_id: GroupId,
     nostr_group_id: [u8; 32],
@@ -86,14 +86,9 @@ async fn build_circle(name: &str, peer_count: usize) -> Fixture {
             &alice_keys,
             key_packages,
             &CircleConfig::new(name).with_relays(relays.clone()),
-            &relays,
         )
         .await
         .expect("create circle");
-    alice
-        .confirm_published(result.pending)
-        .await
-        .expect("confirm creation");
     for peer in &peers {
         let welcome = result
             .welcome_events
@@ -112,7 +107,7 @@ async fn build_circle(name: &str, peer_count: usize) -> Fixture {
     dirs.push(alice_dir);
     Fixture {
         alice,
-        alice_keys,
+        _alice_keys: alice_keys,
         peers,
         mls_group_id: result.circle.mls_group_id.clone(),
         nostr_group_id: result.circle.nostr_group_id,
@@ -121,15 +116,17 @@ async fn build_circle(name: &str, peer_count: usize) -> Fixture {
 }
 
 /// Drains `manager`'s convergence until a `SelfRemove` auto-commit is staged,
-/// returning it as the signed commit a plane would publish plus its ref.
+/// returning it as the signed commit a plane would publish plus its ref. Each
+/// advance waits for the deadline the engine announces — the proposal's
+/// convergence window, then the auto-commit's jitter.
 async fn stage_eviction(
     manager: &CircleManager,
     group: &GroupId,
 ) -> (Event, haven_core::nostr::mls::types::PendingStateRef) {
-    for _ in 0..40 {
+    for _ in 0..8 {
         let effects = manager
             .session()
-            .advance_convergence(group)
+            .stage_unrecorded_for_test(group)
             .await
             .expect("advance convergence");
         if let Some((msg, pending)) = effects.publish.iter().find_map(|w| match w {
@@ -139,9 +136,14 @@ async fn stage_eviction(
             let event = SessionManager::transport_message_to_event(&msg).expect("commit event");
             return (event, pending);
         }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let wait = manager
+            .session()
+            .receive_retick_after(group)
+            .await
+            .expect("the engine still owes the eviction a deadline");
+        tokio::time::sleep(wait).await;
     }
-    panic!("the SelfRemove auto-commit never surfaced within the jitter window");
+    panic!("the SelfRemove auto-commit never surfaced");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -162,7 +164,8 @@ async fn a_peer_location_replayed_during_a_sends_convergence_settling_is_persist
         .manager
         .propose_leave(&fx.mls_group_id)
         .await
-        .expect("carol proposes leave");
+        .expect("carol proposes leave")
+        .expect("a first leave in this epoch proposes");
     bob.manager
         .session()
         .process_event(&proposal)
@@ -170,6 +173,7 @@ async fn a_peer_location_replayed_during_a_sends_convergence_settling_is_persist
         .expect("bob ingests carol's proposal");
     let (bob_commit, bob_pending) = stage_eviction(&bob.manager, &fx.mls_group_id).await;
     bob.manager
+        .session()
         .confirm_published(bob_pending)
         .await
         .expect("bob confirms his own eviction commit");
@@ -177,12 +181,7 @@ async fn a_peer_location_replayed_during_a_sends_convergence_settling_is_persist
     // A fix sealed at the epoch Alice has not reached.
     let (ahead_fix, _, _) = bob
         .manager
-        .encrypt_location(
-            &fx.mls_group_id,
-            &bob.keys.public_key(),
-            &LocationMessage::new(37.77, -122.41),
-            300,
-        )
+        .seal_location_for_test(&fx.mls_group_id, &LocationMessage::new(37.77, -122.41))
         .await
         .expect("bob encrypts at the new epoch");
     let screened = fx
@@ -208,8 +207,10 @@ async fn a_peer_location_replayed_during_a_sends_convergence_settling_is_persist
         "precondition: nothing is in the store yet"
     );
 
-    // Alice catches up to the epoch the fix was sealed at. She needs Carol's
-    // proposal first: Bob's commit covers it by reference.
+    // Alice takes the epoch the fix was sealed at. She needs Carol's proposal
+    // first: Bob's commit covers it by reference. MDK's pinned policy holds the
+    // commit for its convergence window, and nothing serves it here but the
+    // send below: the deadline passes with no advance in between.
     fx.alice
         .session()
         .process_event(&proposal)
@@ -219,16 +220,19 @@ async fn a_peer_location_replayed_during_a_sends_convergence_settling_is_persist
         .session()
         .process_event(&bob_commit)
         .await
-        .expect("alice applies bob's commit");
+        .expect("alice takes bob's commit");
+    let cutoff = fx
+        .alice
+        .session()
+        .receive_retick_after(&fx.mls_group_id)
+        .await
+        .expect("bob's commit owes a convergence cutoff");
+    tokio::time::sleep(cutoff).await;
 
-    // …and then SENDS. The settle inside this call is what replays Bob's fix.
+    // …and then SENDS. The settle inside this call applies Bob's commit and
+    // replays his fix.
     fx.alice
-        .encrypt_location(
-            &fx.mls_group_id,
-            &fx.alice_keys.public_key(),
-            &LocationMessage::new(1.0, 2.0),
-            300,
-        )
+        .seal_location_for_test(&fx.mls_group_id, &LocationMessage::new(1.0, 2.0))
         .await
         .unwrap_or_else(|e| panic!("alice's own send still succeeds: {e:?}"));
 
@@ -243,95 +247,8 @@ async fn a_peer_location_replayed_during_a_sends_convergence_settling_is_persist
     assert!((bob_row.latitude - 37.77).abs() < 1e-9);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_deferred_send_still_hands_back_its_drained_proposals() {
-    // A regression pin, and the one place `PublishWork::Proposal` is reachable
-    // without a race. Bob's own LEAVE is queued — the engine will not encrypt
-    // while a stored row it cannot settle is in the convergence window — and the
-    // deferred send's repair is what releases it: the sweep retires the stale
-    // row, the advance drains the queued intent, and the proposal comes back as
-    // publish work. Dropping it there leaves the user's leave with nothing in
-    // flight and no way for a peer to commit it.
-    let fx = build_circle("Send Proposal Circle", 2).await;
-    let bob = &fx.peers[0];
-
-    // A row sealed one epoch above Bob's tip, backdated past the age horizon so
-    // the repair's sweep is entitled to retire it.
-    let (_carol, _carol_keys, carol_kp, _carol_dir) = mint_device().await;
-    let added = fx
-        .alice
-        .add_members_with_welcomes(
-            &fx.alice_keys,
-            &fx.mls_group_id,
-            vec![carol_kp],
-            &[GROUP_RELAY.to_string()],
-        )
-        .await
-        .expect("alice stages an add");
-    fx.alice
-        .confirm_published(added.pending)
-        .await
-        .expect("alice confirms the add");
-    let ahead = fx
-        .alice
-        .session()
-        .epoch(&fx.mls_group_id)
-        .await
-        .expect("alice's epoch");
-    fx.alice
-        .encrypt_location(
-            &fx.mls_group_id,
-            &fx.alice_keys.public_key(),
-            &LocationMessage::new(5.0, 6.0),
-            60,
-        )
-        .await
-        .expect("alice sends at the higher epoch");
-    let source = fx
-        .alice
-        .session()
-        .stored_convergence_input_for_test(
-            &fx.mls_group_id,
-            haven_core::nostr::mls::types::OpenMlsContentKind::Application,
-            ahead,
-        )
-        .await
-        .expect("alice's own row at the higher epoch");
-    bob.manager
-        .session()
-        .stage_convergence_input_for_test(
-            &source,
-            haven_core::nostr::mls::types::MessageState::Retryable,
-            haven_core::nostr::mls::types::UNRESOLVABLE_INPUT_MAX_AGE_SECS + 1,
-        )
-        .await
-        .expect("stage the stuck row on bob");
-
-    // Bob's leave cannot be encrypted while that row gates the window, so the
-    // engine QUEUES it durably.
-    assert!(
-        bob.manager.propose_leave(&fx.mls_group_id).await.is_err(),
-        "precondition: the leave is queued, not sent"
-    );
-
-    // …and the next send's repair is what releases it.
-    let err = bob
-        .manager
-        .encrypt_location(
-            &fx.mls_group_id,
-            &bob.keys.public_key(),
-            &LocationMessage::new(1.0, 2.0),
-            60,
-        )
-        .await
-        .expect_err("the send defers behind the same row");
-    let haven_core::circle::CircleError::SendDeferred { work, .. } = err else {
-        panic!("expected a deferred send, got {err:?}");
-    };
-    assert_eq!(
-        work.proposals.len(),
-        1,
-        "the repair's drained proposal must reach the caller that can publish it"
-    );
-    assert_eq!(work.proposals[0].kind, nostr::Kind::Custom(445));
-}
+// A deferred send's repair handing its drained proposals back is pinned at the
+// unit that makes the decision
+// (`circle::manager::tests::a_drained_proposal_is_handed_back_never_dropped`):
+// at MDK v0.10.4 a send's own inputs-only settle opens every gate its repair
+// could, so no send defers with a queued leave its repair can then release.

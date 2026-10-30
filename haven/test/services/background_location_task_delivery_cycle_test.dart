@@ -187,7 +187,7 @@ void main() {
       // Cycle 1: the handoff. It registers, the provider answers with its
       // cached last location, and that fix is what gets published.
       await harness.tick(DateTime.now());
-      expect(harness.manager.encryptCalls, hasLength(1));
+      expect(harness.manager.sealCalls, hasLength(1));
 
       // Cycle 2: a genuine delivery at the circle's next due-time.
       harness.handler.dueTrackerForTest.markBurstPublished(
@@ -196,9 +196,9 @@ void main() {
       );
       await harness.deliverFix(freshFix(latitude: 40.7128, longitude: -74));
 
-      expect(harness.manager.encryptCalls, hasLength(2));
+      expect(harness.manager.sealCalls, hasLength(2));
       expect(
-        harness.manager.encryptCalls.last.latitude,
+        harness.manager.sealCalls.last.latitude,
         40.7128,
         reason: 'the publish carries the fix that woke it, not a re-read',
       );
@@ -220,14 +220,14 @@ void main() {
         'cycle', () async {
       final harness = await deliveringHarness();
       await harness.tick(DateTime.now());
-      final published = harness.manager.encryptCalls.length;
+      final published = harness.manager.sealCalls.length;
       final fix = freshFix();
       harness.handler.dueTrackerForTest.markBurstPublished(
         [scheduleKeyOf(circleFixture(seed: 1))],
         DateTime.now(),
       );
       await harness.deliverFix(fix);
-      expect(harness.manager.encryptCalls.length, published + 1);
+      expect(harness.manager.sealCalls.length, published + 1);
 
       // The circle is due AGAIN, so the only thing standing between the
       // replay and a second kind-445 carrying the identical coordinate is the
@@ -245,7 +245,7 @@ void main() {
       await harness.deliverFix(fix);
 
       expect(
-        harness.manager.encryptCalls.length,
+        harness.manager.sealCalls.length,
         published + 1,
         reason: 'the same fix must not be published twice',
       );
@@ -267,7 +267,7 @@ void main() {
       await harness.deliverFix(freshFix());
 
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         hasLength(1),
         reason: 'the circle is armed 100 s out; a fix arriving early is '
             'consumed silently, not published',
@@ -280,6 +280,23 @@ void main() {
       );
     });
 
+    test('a circle whose routing id rotates keeps the schedule it had',
+        () async {
+      final harness = await deliveringHarness();
+      await harness.tick(DateTime.now());
+      final due = Map.of(harness.handler.dueTrackerForTest.nextDueForTest);
+
+      harness.manager.circles = [circleFixture(seed: 1, routedAs: 7)];
+      await harness.deliverFix(freshFix());
+
+      expect(
+        harness.manager.sealCalls,
+        hasLength(1),
+        reason: 'a rotated circle read as a new one is due at once',
+      );
+      expect(harness.handler.dueTrackerForTest.nextDueForTest, due);
+    });
+
     test('a delivery that finds a circle due within the horizon publishes '
         'only that circle', () async {
       final one = circleFixture(seed: 1);
@@ -290,7 +307,7 @@ void main() {
       );
       harness.location.historicalFix = freshFix();
       await harness.tick(DateTime.now());
-      expect(harness.manager.encryptCalls, hasLength(2));
+      expect(harness.manager.sealCalls, hasLength(2));
 
       // Circle one comes due; circle two stays 100 s out.
       harness.handler.dueTrackerForTest.markBurstPublished(
@@ -299,9 +316,9 @@ void main() {
       );
       await harness.deliverFix(freshFix());
 
-      expect(harness.manager.encryptCalls, hasLength(3));
+      expect(harness.manager.sealCalls, hasLength(3));
       expect(
-        hexOf(harness.manager.encryptCalls.last.mlsGroupId),
+        hexOf(harness.manager.sealCalls.last.mlsGroupId),
         hexOf(one.circle.mlsGroupId),
         reason: 'a shared fix must not collapse two circles onto one publish '
             'instant — the decorrelation the per-circle schedule exists for',
@@ -316,14 +333,14 @@ void main() {
       // written against that bound.
       final harness = await deliveringHarness();
       await harness.tick(DateTime.now());
-      final publishes = harness.manager.encryptCalls.length;
+      final publishes = harness.manager.sealCalls.length;
 
       // ~9000 km, far past kMotionTriggerDistanceMeters, inside one cadence.
       await harness.deliverFix(freshFix(latitude: 51.5, longitude: -0.12));
       await harness.deliverFix(freshFix(latitude: -33.86, longitude: 151.2));
 
       expect(
-        harness.manager.encryptCalls.length,
+        harness.manager.sealCalls.length,
         publishes,
         reason: 'distance must not be a publish trigger in this isolate — a '
             'displacement-driven kind-445 is an activity-level leak the copy '
@@ -337,10 +354,10 @@ void main() {
         'BEFORE the first publish', () async {
       final harness = await deliveringHarness();
       int? registrationsAtFirstEncrypt;
-      harness.manager.encryptOutcome = (id) {
+      harness.manager.sealOutcome = (id) {
         registrationsAtFirstEncrypt ??=
             harness.location.capturedProfiles.length;
-        return harness.manager.sentOutcomeFor(id);
+        return harness.manager.sealedOutcomeFor(id);
       };
 
       await harness.tick(DateTime.now());
@@ -374,7 +391,7 @@ void main() {
       harness.location.clock = () => silent;
       await harness.tick(silent);
 
-      expect(harness.manager.encryptCalls, hasLength(2));
+      expect(harness.manager.sealCalls, hasLength(2));
       expectAimedAt(harness, 1, dueIn: const Duration(seconds: 100));
     });
 
@@ -392,7 +409,7 @@ void main() {
 
       await harness.tick(DateTime.now());
 
-      expect(harness.manager.encryptCalls, hasLength(1));
+      expect(harness.manager.sealCalls, hasLength(1));
       expect(
         registeredInterval(harness, 0),
         greaterThanOrEqualTo(
@@ -423,7 +440,7 @@ void main() {
       );
       expectAimedAt(harness, 1, dueIn: const Duration(seconds: 100));
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         hasLength(1),
         reason: 'nothing was due, so nothing more was published',
       );
@@ -522,9 +539,9 @@ void main() {
       var registrationsAtEncrypt = -1;
       harness.location.onGetCurrentLocation = () =>
           registrationsAtFix = harness.location.capturedProfiles.length;
-      harness.manager.encryptOutcome = (id) {
+      harness.manager.sealOutcome = (id) {
         registrationsAtEncrypt = harness.location.capturedProfiles.length;
-        return harness.manager.sentOutcomeFor(id);
+        return harness.manager.sealedOutcomeFor(id);
       };
 
       final deliveredAt = DateTime.now();
@@ -602,7 +619,7 @@ void main() {
     test('a fix delivered mid-cycle is consumed by a follow-up cycle, never '
         'lost', () async {
       final (harness, _) = await deferringHarness();
-      final seeded = harness.manager.encryptCalls.length;
+      final seeded = harness.manager.sealCalls.length;
       final second = freshFix(latitude: 40.7128, longitude: -74);
       harness.relay.onPublish = (_) {
         harness.relay.onPublish = null;
@@ -612,13 +629,13 @@ void main() {
       await harness.deliverFix(freshFix(latitude: 51.5, longitude: -0.12));
 
       expect(
-        harness.manager.encryptCalls.length,
+        harness.manager.sealCalls.length,
         seeded + 2,
         reason: 'the burst budget deferred the second circle; the fix that '
             'landed mid-cycle is what a follow-up publishes it from',
       );
       expect(
-        harness.manager.encryptCalls.last.latitude,
+        harness.manager.sealCalls.last.latitude,
         40.7128,
         reason: 'the follow-up published the PENDING fix, not a re-read of '
             'the one the first cycle already used',
@@ -635,11 +652,11 @@ void main() {
       // The control for the test above: the follow-up must be caused by the
       // pending FIX, not by the deferral on its own.
       final (harness, _) = await deferringHarness();
-      final seeded = harness.manager.encryptCalls.length;
+      final seeded = harness.manager.sealCalls.length;
 
       await harness.deliverFix(freshFix(latitude: 51.5, longitude: -0.12));
 
-      expect(harness.manager.encryptCalls.length, seeded + 1);
+      expect(harness.manager.sealCalls.length, seeded + 1);
     });
 
     test('a follow-up cycle dedupes the historical re-delivery of the '
@@ -651,13 +668,13 @@ void main() {
         harness.location.deliverFix(second);
       };
       await harness.deliverFix(freshFix(latitude: 51.5, longitude: -0.12));
-      final publishes = harness.manager.encryptCalls.length;
+      final publishes = harness.manager.sealCalls.length;
 
       // The follow-up's own re-registration replays that same fix.
       await harness.deliverFix(second);
 
       expect(
-        harness.manager.encryptCalls.length,
+        harness.manager.sealCalls.length,
         publishes,
         reason: 'without recording the pending fix as consumed, every '
             're-registration costs one spurious nothing-due cycle',
@@ -682,7 +699,7 @@ void main() {
 
       await harness.tick(DateTime.now());
 
-      expect(harness.manager.encryptCalls, hasLength(1));
+      expect(harness.manager.sealCalls, hasLength(1));
       expect(
         harness.location.oneShotRequests,
         0,
@@ -703,7 +720,7 @@ void main() {
 
       await harness.tick(DateTime.now());
 
-      expect(harness.manager.encryptCalls, hasLength(1));
+      expect(harness.manager.sealCalls, hasLength(1));
       expect(
         harness.location.oneShotRequests,
         1,
@@ -722,7 +739,7 @@ void main() {
 
       await harness.tick(DateTime.now().add(const Duration(seconds: 72)));
 
-      expect(harness.manager.encryptCalls, hasLength(1));
+      expect(harness.manager.sealCalls, hasLength(1));
       expect(harness.location.capturedProfiles, hasLength(registrations));
       expect(
         harness.location.fixRequests,
@@ -742,7 +759,7 @@ void main() {
       // backgrounding, then silence, on the ordinary healthy path.
       final harness = await deliveringHarness();
       await harness.tick(DateTime.now());
-      expect(harness.manager.encryptCalls, hasLength(1));
+      expect(harness.manager.sealCalls, hasLength(1));
 
       await harness.tick(DateTime.now().add(const Duration(seconds: 72)));
 
@@ -755,7 +772,7 @@ void main() {
       await harness.deliverFix(freshFix());
 
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         hasLength(2),
         reason: 'a tick that had nothing to do must leave the isolate able to '
             'publish the next delivery — a latched single-flight field stops '
@@ -784,7 +801,7 @@ void main() {
       await harness.tick(silent);
 
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         hasLength(2),
         reason: 'the circle came due during the silence and must still be '
             'published, from the last known position if need be',
@@ -835,7 +852,7 @@ void main() {
       final harness = await deliveringHarness();
       await harness.tick(DateTime.now());
       expect(harness.location.capturedProfiles, hasLength(1));
-      expect(harness.manager.encryptCalls, hasLength(1));
+      expect(harness.manager.sealCalls, hasLength(1));
 
       final log = _captureDebugPrint();
       harness.location.failStream(Exception('provider process died'));
@@ -864,9 +881,9 @@ void main() {
       );
       await harness.deliverFix(freshFix(latitude: 40.7128, longitude: -74));
 
-      expect(harness.manager.encryptCalls, hasLength(2));
+      expect(harness.manager.sealCalls, hasLength(2));
       expect(
-        harness.manager.encryptCalls.last.latitude,
+        harness.manager.sealCalls.last.latitude,
         40.7128,
         reason: "the publish rides the recovered registration's own delivery "
             '— not a one-shot the watchdog paid for later',
@@ -882,7 +899,7 @@ void main() {
     test('the recovery cycle publishes nothing that is not due', () async {
       final harness = await deliveringHarness();
       await harness.tick(DateTime.now());
-      final publishes = harness.manager.encryptCalls.length;
+      final publishes = harness.manager.sealCalls.length;
       final fixes = harness.location.fixRequests;
 
       harness.location.failStream(Exception('provider process died'));
@@ -895,7 +912,7 @@ void main() {
             'recovery cycle did NOT do, which is worthless if none ran',
       );
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         hasLength(publishes),
         reason: 'the circle is armed 100 s out; a recovery is a re-aim, not a '
             'publish trigger, or every provider hiccup would spend an extra '
@@ -980,7 +997,7 @@ void main() {
 
       final cycle = harness.tick(DateTime.now());
       await pumpEventQueue();
-      expect(harness.manager.encryptCalls, hasLength(1));
+      expect(harness.manager.sealCalls, hasLength(1));
       expect(
         harness.handler.inFlightPublishForTest,
         isNotNull,
@@ -1138,7 +1155,7 @@ void main() {
       await BackgroundLocationManager.markForegroundActive(active: true);
       await harness.tick(DateTime.now());
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         isEmpty,
         reason: 'the foreground owns publishing; two writers on one MLS group '
             'is what this yield exists to prevent',
@@ -1152,7 +1169,7 @@ void main() {
       await harness.tick(DateTime.now());
 
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         hasLength(1),
         reason: 'the foreground let go, so the next tick owns publishing and '
             'must run a cycle rather than read a completed future as one',
@@ -1167,7 +1184,7 @@ void main() {
       await harness.signal(kForegroundPausedSignal);
 
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         hasLength(1),
         reason: 'waiting for the next 72 s watchdog tick to notice the '
             'handoff is up to 72 s of nobody publishing',
@@ -1221,7 +1238,7 @@ void main() {
 
       expect(harness.location.capturedProfiles, isEmpty);
       expect(harness.location.fixRequests, 0);
-      expect(harness.manager.encryptCalls, isEmpty);
+      expect(harness.manager.sealCalls, isEmpty);
     });
   });
 
@@ -1254,13 +1271,13 @@ void main() {
         [scheduleKeyOf(circleFixture(seed: 1))],
         DateTime.now(),
       );
-      harness.manager.encryptOutcome = (_) =>
+      harness.manager.sealOutcome = (_) =>
           throw StateError('engine unavailable');
       await harness.deliverFix(freshFix());
       expect(lock.held, isFalse, reason: 'released after an encrypt throw');
 
       // The relay throws.
-      harness.manager.encryptOutcome = harness.manager.sentOutcomeFor;
+      harness.manager.sealOutcome = harness.manager.sealedOutcomeFor;
       harness.relay.publishError = Exception('relay down');
       harness.handler.dueTrackerForTest.markBurstPublished(
         [scheduleKeyOf(circleFixture(seed: 1))],
@@ -1276,10 +1293,10 @@ void main() {
       var heldAtEncrypt = false;
       var acquiresAtEncrypt = 0;
       var acquiresAtFetch = 0;
-      harness.manager.encryptOutcome = (id) {
+      harness.manager.sealOutcome = (id) {
         heldAtEncrypt = lock.held;
         acquiresAtEncrypt = lock.acquireCalls.length;
-        return harness.manager.sentOutcomeFor(id);
+        return harness.manager.sealedOutcomeFor(id);
       };
       harness.sharing.onFetch = (_) =>
           acquiresAtFetch = lock.acquireCalls.length;
@@ -1376,15 +1393,17 @@ void main() {
     test('the hold is re-taken after the unbounded commit-critical drain, '
         'never inherited across it', () async {
       // The other wait `onDestroy` performs, and the one that can outlast the
-      // native 30 s ceiling on its own: a `fetchMemberLocations` that has
-      // published a receiver-side auto-commit is drained WITHOUT a budget
-      // (Rule 13). A hold taken before it is therefore worth nothing to the
-      // relay shutdown and manager dispose that follow.
+      // native 30 s ceiling on its own: the driver entries in flight beside a
+      // location's seal and send are drained WITHOUT a budget
+      // (`NostrRelayService.inFlightNonLocationDrives`). A hold taken before
+      // it is therefore worth nothing to the relay shutdown and manager
+      // dispose that follow.
       final handler = BackgroundLocationTaskHandler()
         ..teardownDrainBudget = Duration.zero
         ..inFlightPublishForTest = Completer<void>().future;
       final wedgedFetch = Completer<void>();
-      handler.inFlightCommitCriticalForTest = wedgedFetch.future;
+      handler.relayServiceForTest = FakeNostrRelayService()
+        ..inFlightNonLocationDrives = wedgedFetch.future;
 
       final destroy = handler.onDestroy(DateTime.now(), false);
       await pumpEventQueue();
@@ -1418,9 +1437,8 @@ void main() {
       final wedgedPublish = Completer<void>();
       final wedgedFetch = Completer<void>();
       Future<void>? teardown;
-      harness.handler
-        ..teardownDrainBudget = Duration.zero
-        ..inFlightCommitCriticalForTest = wedgedFetch.future;
+      harness.handler.teardownDrainBudget = Duration.zero;
+      harness.relay.inFlightNonLocationDrives = wedgedFetch.future;
       harness.relay.onPublish = (_) async {
         teardown ??= harness.handler.onDestroy(DateTime.now(), false);
         await wedgedPublish.future;
@@ -1470,7 +1488,7 @@ void main() {
       // belongs to `onDestroy` alone.
       final harness = await deliveringHarness();
       final wedgedFetch = Completer<void>();
-      harness.handler.inFlightCommitCriticalForTest = wedgedFetch.future;
+      harness.relay.inFlightNonLocationDrives = wedgedFetch.future;
       final teardown = harness.handler.onDestroy(DateTime.now(), false);
       await pumpEventQueue();
       final acquires = lock.acquireCalls.length;
@@ -1594,7 +1612,7 @@ void main() {
       await harness.tick(DateTime.now());
 
       expect(
-        harness.manager.encryptCalls,
+        harness.manager.sealCalls,
         hasLength(1),
         reason: 'the second circle must not advance an MLS epoch while the '
             'foreground owns publishing again',
@@ -1678,7 +1696,7 @@ void main() {
 
       await harness.tick(DateTime.now());
 
-      expect(harness.manager.encryptCalls, isEmpty);
+      expect(harness.manager.sealCalls, isEmpty);
       expect(logs, contains(_coldAsk));
       expect(logs, isNot(contains(_coldInHand)));
     });

@@ -22,8 +22,9 @@ use std::sync::Arc;
 use haven_core::circle::CircleManager;
 use haven_core::nostr::mls::storage::{is_session_live, StorageConfig};
 use haven_core::nostr::mls::SessionManager;
-use haven_core::relay::live_sync::{CircleSpec, LiveSyncCore, LiveSyncEvent};
-use haven_core::relay::RelayManager;
+use haven_core::relay::fanout::RelayMappedFanout;
+use haven_core::relay::live_sync::{CircleSpec, Claim, LiveSyncCore, LiveSyncEvent};
+use haven_core::relay::{FanoutTransport, RelayManager};
 use nostr::Keys;
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::broadcast::Receiver;
@@ -31,7 +32,7 @@ use zeroize::Zeroizing;
 
 use crate::clock::{PolicyNow, WallNow};
 use crate::nemesis::types::DeviceOp;
-use crate::rig::auto_commit::endpoint_map;
+use crate::rig::address_map::{endpoint_map, AliasBook};
 use crate::rig::{CircleTag, DeviceTag, RigError, SimCircle, Step};
 
 /// What a device has seen on its engine bus.
@@ -157,9 +158,12 @@ pub struct SimDevice {
     /// (`rig/circle.rs`).
     inbox_relays: Vec<String>,
     /// Each plane's STORED address, index for index with `inbox_relays`: what
-    /// the engine's auto-commit publisher swaps for the device's own endpoint
-    /// (`rig/auto_commit.rs`).
+    /// the live plane's sends swap for the device's own endpoint
+    /// (`rig/address_map.rs`).
     stored_relays: Vec<String>,
+    /// The endpoints standing for addresses no plane serves, shared by every
+    /// address map built for this device.
+    aliases: Arc<AliasBook>,
     ledger: DeviceLedger,
     /// Every [`DeviceOp::label`] this device took, in the order it took them:
     /// what `coverage.log` reads, so a triple names an operation that really
@@ -207,6 +211,7 @@ impl SimDevice {
             specs: Vec::new(),
             inbox_relays: own.to_vec(),
             stored_relays: stored.to_vec(),
+            aliases: AliasBook::new(Vec::new()),
             ledger: DeviceLedger::default(),
             applied_ops: Vec::new(),
         })
@@ -349,6 +354,41 @@ impl SimDevice {
         &self.applied_ops
     }
 
+    /// The product's durable-fanout transport on this device's publish plane,
+    /// each stored (canonical) relay address dialled at the device's own
+    /// endpoint on that plane — the same address map its engine's publisher
+    /// goes through ([`endpoint_map`]). A fault armed on the device's endpoint
+    /// reaches a fanout call exactly as it reaches every other publish.
+    #[must_use]
+    pub fn fanout_transport(&self) -> RelayMappedFanout<FanoutTransport> {
+        RelayMappedFanout::new(self.relays.fanout_transport(), self.endpoint_route())
+    }
+
+    /// Each stored (canonical) relay address mapped to this device's own
+    /// endpoint on that plane ([`endpoint_map`]).
+    pub fn endpoint_route(&self) -> impl Fn(&str) -> String + Send + Sync + 'static {
+        let routes: Vec<(String, String)> = self
+            .stored_relays
+            .iter()
+            .cloned()
+            .zip(self.inbox_relays.iter().cloned())
+            .collect();
+        endpoint_map(routes, Arc::clone(&self.aliases))
+    }
+
+    /// Hands this device the endpoints that stand for addresses no plane
+    /// serves, before anything dials one.
+    pub(crate) fn hold_aliases(&mut self, endpoints: Vec<String>) {
+        self.aliases = AliasBook::new(endpoints);
+    }
+
+    /// Whether this device named more unserved addresses than it holds
+    /// endpoints for.
+    #[must_use]
+    pub fn aliases_overflowed(&self) -> bool {
+        self.aliases.overflowed()
+    }
+
     /// Starts the engine over `specs`, subscribing to this device's inbox.
     ///
     /// # Errors
@@ -362,10 +402,14 @@ impl SimDevice {
             .cloned()
             .zip(self.inbox_relays.iter().cloned())
             .collect();
+        // The engine's own publish pool for its fanout drives, as the
+        // product gives it one: never the pool the rig's ladder publishes
+        // through, which the engine would close at every pause.
         let core = LiveSyncCore::new_local_with_relay_map_for_test(
             manager,
             self.keys.public_key(),
-            endpoint_map(routes),
+            Arc::new(RelayManager::new()),
+            endpoint_map(routes, Arc::clone(&self.aliases)),
         );
         // Subscribed BEFORE start: a broadcast receiver only sees what is sent
         // after it subscribes, and the first deliveries can land inside start.
@@ -373,6 +417,9 @@ impl SimDevice {
         core.start(&specs, &self.inbox_relays)
             .await
             .map_err(|_| RigError::Core(Step::StartEngine))?;
+        // As the app does once it is in front of its user: a started plane
+        // has claimed nothing, and the driver's mode reads the claim.
+        core.claim_foreground(Claim::Foreground).await;
         self.specs = specs;
         self.bus_rx = Some(bus_rx);
         self.core = Some(core);
@@ -427,12 +474,53 @@ impl SimDevice {
     /// fails.
     pub async fn come_online(&mut self) -> Result<(), RigError> {
         self.engine()?
-            .resume_after_background()
+            .resume_after_background(Claim::Foreground)
             .await
             .map_err(|_| RigError::Core(Step::ResumeEngine))?;
         self.offline = false;
         self.record_op(DeviceOp::ComeOnline);
         Ok(())
+    }
+
+    /// Waits, inside the product's own burst bound, until the REQs this
+    /// device's engine just opened have taken in their stored replay — as a
+    /// burst does before its encrypt — and then, bounded, until the NIP-77
+    /// pass its foreground entry is owed has ended, whatever came of it.
+    /// Until both, the device defers every location seal for the circles
+    /// they carry (Security Rule 10, `SendHeld::StoredInput`): what the pass
+    /// fetches by id is unread until it is ingested. An op scheduled inside
+    /// that window would grade the deferral rather than the device, and a
+    /// pause inside it could cut the pass after its spacing was spent. A
+    /// relay still silent at the bound is released from its REQs' coverage
+    /// by the product, which takes in what it held.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::SessionNotLive`] if no engine is running.
+    pub async fn take_in_replay(&self) -> Result<(), RigError> {
+        let _ = self.engine()?.wait_backlog_settled().await;
+        self.entry_pass_ended(crate::oracle::bounds::round_trip(
+            crate::oracle::Recovery::Undisturbed,
+        ))
+        .await?;
+        Ok(())
+    }
+
+    /// Waits, at most `bound`, until no NIP-77 pass a foreground entry of
+    /// this device's engine is owed is pending or under way, and answers
+    /// whether that came to hold. A condition on the product's own state,
+    /// which a pass that never ends leaves unmet.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::SessionNotLive`] if no engine is running.
+    pub async fn entry_pass_ended(&self, bound: std::time::Duration) -> Result<bool, RigError> {
+        Ok(self
+            .engine()?
+            .processor()
+            .for_test()
+            .entry_pass_ended(bound)
+            .await)
     }
 
     /// Folds every bus event waiting for this device into its ledger and
@@ -463,7 +551,10 @@ impl SimDevice {
                         LiveSyncEvent::GroupUpdate { .. } => self.ledger.group_updates += 1,
                         LiveSyncEvent::Welcome { .. } => self.ledger.welcomes += 1,
                         LiveSyncEvent::GroupUnrecoverable { .. } => self.ledger.unrecoverable += 1,
-                        LiveSyncEvent::Status { .. } => self.ledger.statuses += 1,
+                        // The bridge hands a clock verdict to the app as a status.
+                        LiveSyncEvent::Status { .. } | LiveSyncEvent::ClockRejected { .. } => {
+                            self.ledger.statuses += 1;
+                        }
                     }
                 }
                 // The consumer fell behind: the events are GONE, so the ledger
@@ -560,7 +651,7 @@ mod tests {
         let path = device.session_db_path();
         assert_eq!(
             path.file_name().map(std::ffi::OsStr::to_string_lossy),
-            Some(std::borrow::Cow::Borrowed("session.sqlite")),
+            Some(std::borrow::Cow::Borrowed("session-v2.sqlite")),
             "the registry key is the file; a directory answers `not live` for ever"
         );
         assert!(device.session_is_live().expect("liveness"));

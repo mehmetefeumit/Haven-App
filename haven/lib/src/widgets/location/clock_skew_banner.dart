@@ -7,8 +7,9 @@
 /// and before this banner existed both were invisible. Ahead: every relay
 /// refuses the event as being in its future, and the refusal died in a
 /// `debugPrint`. Behind: the NIP-40 expiration is derived from the same skewed
-/// clock, so the event is born already expired — the relay ACKs it, the
-/// publisher **reports success**, and every peer discards it. Neither shows up
+/// clock, so the event expires early or is born expired — the relay ACKs it,
+/// the publisher **reports success**, and peers miss some or all of it (all,
+/// past `kClockSkewTotalLossThreshold`). Neither shows up
 /// as an error anywhere the user can see, and neither resolves on its own.
 ///
 /// A generic "location sharing is failing" would not help: the user cannot act
@@ -63,9 +64,10 @@ class ClockSkewCopy {
 ///
 /// The bodies say different things because the faults are different user
 /// experiences: with a relay rejection the user's location is going nowhere at
-/// all, whereas with a CORROBORATED peer signal it is being sent and quietly
-/// discarded. Collapsing them into one sentence would make the second one a
-/// lie in the direction that matters (it would imply the send itself failed).
+/// all, whereas with a CORROBORATED peer signal it is being sent and then
+/// expiring early, some or all of it unseen. Collapsing them into one sentence
+/// would make the second one a lie in the direction that matters (it would
+/// imply the send itself failed).
 ///
 /// ## The sole-source branch, and why it cannot share the corroborated copy
 ///
@@ -81,13 +83,14 @@ class ClockSkewCopy {
 ///   see `recordPeerTimestamp`), so the corroborated title — "This phone's
 ///   clock is wrong" — would accuse the innocent device and never the guilty
 ///   one.
-/// * **Whether anything is lost.** Both sides screen the NIP-40 expiration
-///   with 228 s of retention plus 60 s of receiver grace, so nothing is
-///   dropped anywhere until the gap passes `kClockSkewTotalLossThreshold`
-///   (288 s). The signal fires at `kClockSkewAlertThreshold` (120 s), so
-///   across the whole 120–288 s band the corroborated body — "the locations
-///   it sends expire before anyone can see them" — is simply false, and its
-///   remedy cannot clear a banner the user has nothing to fix.
+/// * **Whether anything is lost.** A location keeps `228 s − gap` of
+///   residency, so until the gap reaches `kClockSkewTotalLossThreshold`
+///   (228 s) a member who is online still receives every one. The signal
+///   fires at `kClockSkewAlertThreshold` (120 s), and one member cannot say
+///   which side lags, so the corroborated body — "the locations it sends
+///   expire early, and your circles can miss some or all of them" — would
+///   assert a loss on this phone that the evidence does not place there, and
+///   its remedy cannot clear a banner the user has nothing to fix.
 ///
 /// Hence the third copy bundle: it names the disagreement, names no culprit,
 /// hedges the loss as a possibility, and offers a remedy that only rules THIS

@@ -34,21 +34,56 @@ use super::contamination::ContaminationSource;
 use super::error::{CircleError, Result};
 use super::leave::{plan_leave, LeavePlan};
 use super::rotation::{rotation_decision, RotationDecision, RotationInputs, SkipReason};
-use super::storage::CircleStorage;
+use super::storage::{CircleStorage, PriorRouting};
+use super::storage_key_packages::CONSUMED_HOLD_OVER;
 use super::storage_member_directory::DirectoryTier;
 use super::types::{
-    Circle, CircleConfig, CircleMember, CircleMembership, CircleType, CircleWithMembers, Contact,
-    GiftWrappedWelcome, Invitation, MemberKeyPackage, MembershipStatus,
+    Circle, CircleConfig, CircleEngineState, CircleMember, CircleMembership, CircleType,
+    CircleWithMembers, Contact, GiftWrappedWelcome, Invitation, MemberKeyPackage, MembershipStatus,
 };
 use crate::location::LocationMessage;
 use crate::log_alias::{self, bucket, EventIdHex};
 use crate::nostr::mls::types::{
-    ConvergedRoster, ConvergenceSweep, GroupEvent, GroupId, GroupIdExt, KeyPackage,
-    LocationGroupConfig, LocationMessageResult, PendingStateRef, PublishWork, SessionEffects,
-    TransportMessage,
+    ConvergedRoster, ConvergenceSweep, FanoutId, FanoutSettlement, FoundingWelcome, GroupEvent,
+    GroupId, GroupIdExt, GroupStateChange, KeyPackage, LeftGroup, LocationGroupConfig,
+    LocationMessageResult, MemberId, MessageId, PendingStateRef, PublishWork, QueuedIntentRef,
+    RejoinConfirmation, RejoinOffer, SessionEffects, Staged, StoredFanout, TransportMessage,
+    WelcomeAcceptance,
 };
 use crate::nostr::mls::{bounded_retention_secs, redact_hex_sequences};
-use crate::nostr::mls::{PendingWelcome, PendingWelcomeStore, SessionManager};
+use crate::nostr::mls::{CommitNotes as _, PendingWelcome, PendingWelcomeStore, SessionManager};
+use crate::relay::fanout::{DriveMode, Still};
+
+/// How long a prior routing keeps a standing REQ after its row was written
+/// (decision 237): a day.
+const PRIOR_ROUTING_STANDS_SECS: i64 = 86_400;
+
+/// How many epochs back a prior routing stays an address its traffic is
+/// fetched at: the wider of the engine's two retained-history windows, the
+/// rewind horizon for commits and proposals and the past-epoch window for
+/// application messages.
+fn routing_retained_epochs() -> u64 {
+    crate::nostr::mls::max_rewind_commits()
+        .max(u64::try_from(crate::nostr::mls::DEFAULT_MAX_PAST_EPOCHS).unwrap_or(u64::MAX))
+}
+
+/// The entries of a circle's routing component this device may dial.
+///
+/// Another client's admin writes that component, and MDK admits any spelling
+/// that parses to `ws` or `wss`, on any host, into it. An entry that fails
+/// Haven's rule for another client's relays
+/// ([`crate::relay::foreign_relay_dialable`]: `wss` to a public host) is
+/// dropped HERE, where the circle's own relay list is derived — never
+/// the list, and never the component: every publish validates its whole target
+/// list and the live-sync engine its whole session, so one plaintext entry
+/// would otherwise stop every publish to the circle, the relay update that
+/// repairs it, and receiving for every other circle on the device.
+fn usable_relays(named: Vec<String>) -> Vec<String> {
+    named
+        .into_iter()
+        .filter(|relay| crate::relay::foreign_relay_dialable(relay))
+        .collect()
+}
 
 /// The wall clock in Unix seconds, floored at the epoch.
 ///
@@ -81,8 +116,33 @@ fn secs_from_ms(at_ms: Option<i64>) -> Option<u64> {
 /// `nostr_group_id`. Rule 8 keeps that off the FFI boundary, so a storage
 /// failure crosses it as prose that says what broke and nothing about which
 /// circle it broke on.
-fn redact_storage_error(err: &CircleError) -> CircleError {
+pub fn redact_storage_error(err: &CircleError) -> CircleError {
     CircleError::Storage(redact_hex_sequences(&err.to_string()))
+}
+
+/// File name of the encrypted circle-metadata database. New with the MDK
+/// v0.10.4 store, so a pre-migration file is never opened
+/// (`crate::storage_reset` deletes it).
+pub const CIRCLES_DB_FILENAME: &str = "circles-v2.db";
+
+/// How long a consumed `KeyPackage` waits for a held invitation: 72 hours.
+///
+/// Counted from the first maintenance tick that waited
+/// ([`CircleManager::consumed_key_package_replacement_waits`]). Long enough to
+/// answer an invitation over a weekend; short enough that a stranger's
+/// unanswerable invitation costs three days of one init key and no more.
+pub const CONSUMED_KEY_PACKAGE_HOLD_SECS: u64 = 72 * 60 * 60;
+
+/// What a circle whose epoch cannot be read is taken as when it names a
+/// routing id under a prior routing ([`CircleManager::other_circle_with_routing_id`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnreadEpoch {
+    /// Holding it: MDK has already moved the route, and a store that cannot
+    /// say must not leave the circle it may have taken it from sharing.
+    Holds,
+    /// An error, asked again at the next reconcile: the hold a reconcile
+    /// sets ends only with a leave, never on a transient read.
+    Errs,
 }
 
 /// High-level API for circle management.
@@ -98,18 +158,22 @@ pub struct CircleManager {
     /// gift wraps awaiting the user's accept / decline. In-memory; re-seeded
     /// from relays on each poll (gift wraps are permanent on relays).
     pending_welcomes: PendingWelcomeStore,
-    /// Binds each in-flight `GroupCreated` `pending` to its group id so a
-    /// create that is rolled back (all welcomes zero-ack → `publish_failed`, or
-    /// a post-stage error) removes the eagerly-persisted circle/membership rows
-    /// instead of stranding a ghost circle backed by no confirmed group (F2).
-    /// In-memory: an unresolved create at process exit self-clears on restart
-    /// (the engine also rolls the staged create back at hydrate).
-    create_pending: Mutex<HashMap<PendingStateRef, GroupId>>,
-    /// Binds each in-flight repair-rotation `pending` to the circle whose 24-hour
-    /// rate limit it spends, so [`Self::confirm_published`] records the rotation
-    /// and [`Self::publish_failed`] does not — see
-    /// [`Self::register_rotation_pending`].
-    rotation_pending: Mutex<HashMap<PendingStateRef, [u8; 32]>>,
+    /// The data directory both stores live in, where the storage reset's
+    /// notice marker is read (`crate::storage_reset`).
+    data_dir: std::path::PathBuf,
+    /// Binds each repair rotation staged under a durable fanout, keyed by
+    /// that fanout's commit, to the circle whose 24-hour rate limit it
+    /// spends: spent when the fanout driver's confirm applies it
+    /// ([`Self::confirm_fanout`]).
+    rotation_fanouts: Mutex<HashMap<MessageId, [u8; 32]>>,
+    /// Fired whenever a circle's row moved to new relays, by whichever plane
+    /// applied the change: the live session's follow waits on it
+    /// ([`Self::routing_moved`]).
+    routing_moved: tokio::sync::Notify,
+    /// A test's stand-in for a process killed between a commit and its
+    /// persist: the next follow at the persist is not made.
+    #[cfg(any(test, feature = "test-utils"))]
+    skip_next_follow: std::sync::atomic::AtomicBool,
     /// Serializes everything that publishes or retracts the OWN public profile
     /// — see [`Self::profile_sync_lock`].
     profile_sync_lock: tokio::sync::Mutex<()>,
@@ -130,37 +194,16 @@ pub struct CircleManager {
     /// message at epoch ≥ tip−5 — a circle's whole location history, because a
     /// circle's epoch only advances on a membership commit. Collapsing a storm
     /// into one walk (carrying the strongest verdict asked for while it ran) is
-    /// what keeps that off the latency of Add / Remove / Create Member, which
-    /// Dart awaits inline through `confirm_published`.
+    /// what keeps that off the latency of Add / Remove / Create Member, whose
+    /// drive Dart awaits inline through the fanout driver's confirm.
     directory_flight: Mutex<DirectoryFlight>,
-    /// Groups the engine has reported `Unrecoverable` during THIS session.
-    ///
-    /// `EpochState` has no accessor and is never persisted, so the
-    /// `GroupUnrecoverable` event is the only signal there is. In-memory
-    /// because that is exactly the state's scope: the one legal exit,
-    /// `EpochState::repair_to_stable`, has no caller in the engine at the
-    /// pinned rev, so the state is terminal within a session and gone after
-    /// one — the same lifetime as hydration quarantine, and for the same
-    /// reason. An unrecoverable group answers roster reads `Ok` with the roster
-    /// frozen at its last stable epoch, so a reconcile that trusted it would
-    /// re-stamp those people `Current` with the never-purge sentinel on every
-    /// pass, and no removal there could ever be observed.
-    unrecoverable_groups: Mutex<HashSet<GroupId>>,
-    /// Removal-bearing receive-side auto-commits this device OWES a publish
-    /// for, keyed by circle — see [`Self::owe_removal_publish`].
-    ///
-    /// At most one entry per circle, because a group holds at most one staged
-    /// commit. Written by EVERY plane that takes such a commit, BEFORE it opens
-    /// the publish-before-apply window rather than after that window fails — so
-    /// the wedge a plane can leave behind is recorded whichever plane leaves it,
-    /// and the detector is not blind to the planes that are not live-sync.
-    ///
-    /// In-memory because a [`PendingStateRef`] is: it is an engine handle valid
-    /// for the life of this session and unresolvable after it. The DURABLE half
-    /// lives in `deferred_removal_commits`, and the two disagreeing is the
-    /// signal: a durable row this map does not know is an obligation a previous
-    /// session took and never discharged.
-    removal_deferrals: Mutex<HashMap<[u8; 32], CommitToPublish>>,
+    /// How many invitations were held unanswered when this process opened
+    /// (`usize::MAX` when that could not be read): until as many are held
+    /// again, some may not have been polled back yet.
+    held_at_open: usize,
+    /// Whether as many invitations as were held at the open have been held
+    /// again since.
+    held_polled_back: std::sync::atomic::AtomicBool,
     /// How many convergence re-ticks the publish-resolution fold has SLEPT for
     /// over this manager's life.
     ///
@@ -174,7 +217,7 @@ pub struct CircleManager {
     /// than a `cfg`-split field, and a field that exists only under test is a
     /// field the shipped code path is not the one being measured.
     convergence_reticks: std::sync::atomic::AtomicUsize,
-    pub(crate) storage: CircleStorage,
+    pub(crate) storage: Arc<CircleStorage>,
 }
 
 /// Single-flight bookkeeping for the member-directory reconcile.
@@ -191,14 +234,37 @@ struct DirectoryFlight {
     owed: Option<DirectoryReconcile>,
 }
 
-impl CircleManager {
-    /// Maximum number of relays a circle may carry.
-    ///
-    /// MIP-01 says the group relay list SHOULD NOT exceed 20; Haven enforces it
-    /// as a hard cap to bound kind-445 fan-out metadata and to stop an admin
-    /// from inflating every member's subscription set.
-    const MAX_CIRCLE_RELAYS: usize = 20;
+/// The relay set an admin asked for, canonical — each entry normalized as the
+/// user's own relay list is (a relay Haven may dial), on a public host
+/// ([`crate::relay::foreign_relay_dialable`]: every member's client dials it),
+/// sorted and deduplicated — and one MDK's routing component takes
+/// (`NostrRoutingV1::new`: at most 16 relays, each a bounded `ws`/`wss` URL
+/// with a host and no credentials or fragment). The refusals are fixed text:
+/// MDK's names the count, and no refusal names a relay.
+fn circle_relays(new_relays: &[String]) -> Result<Vec<String>> {
+    let mut canonical: Vec<String> = Vec::with_capacity(new_relays.len());
+    for relay in new_relays {
+        let relay = super::storage_relay_prefs::normalize_url(relay)?;
+        if !crate::relay::foreign_relay_dialable(&relay) {
+            return Err(CircleError::InvalidData(
+                "A circle relay must be on a public host".to_string(),
+            ));
+        }
+        canonical.push(relay);
+    }
+    canonical.sort();
+    canonical.dedup();
+    if canonical.is_empty() {
+        return Err(CircleError::InvalidData(
+            "A circle must have at least one relay".to_string(),
+        ));
+    }
+    cgka_traits::app_components::NostrRoutingV1::new([0; 32], canonical)
+        .map(|routing| routing.relays)
+        .map_err(|_| CircleError::InvalidData("A circle cannot carry this relay set".to_string()))
+}
 
+impl CircleManager {
     /// Creates a new circle manager bound to the device identity `keys`.
     ///
     /// Initializes both the MLS session and circle storage at the given path.
@@ -218,12 +284,19 @@ impl CircleManager {
     pub fn new(data_dir: &Path, keys: &Keys, circle_db_hex_key: Option<&str>) -> Result<Self> {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| CircleError::Storage(format!("Failed to create data directory: {e}")))?;
+        // Before either store opens, in every isolate: whichever process opens
+        // first on an upgraded install is the one that clears the old stores.
+        let _ = crate::storage_reset::reset_pre_v2_storage(data_dir);
 
-        let session = SessionManager::new(data_dir, keys)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-
-        let db_path = data_dir.join("circles.db");
-        let storage = CircleStorage::new(&db_path, circle_db_hex_key)?;
+        // The circle store first: the session's open notes what it finds in
+        // it.
+        let db_path = data_dir.join(CIRCLES_DB_FILENAME);
+        let storage = Arc::new(CircleStorage::new(&db_path, circle_db_hex_key)?);
+        let mut session = SessionManager::new_with_notes(data_dir, keys, Some(storage.clone()))
+            .map_err(CircleError::from_session)?;
+        let held_at_open = storage.held_invitation_count().unwrap_or(usize::MAX);
+        session.install_refused_ledger(storage.clone());
+        session.install_stall_evidence(storage.clone());
         Self::backfill_contamination_ledger(&storage);
         Self::prune_retired_profile_pool(&storage);
         Self::sweep_expired_directory_members(&storage);
@@ -231,13 +304,16 @@ impl CircleManager {
         Ok(Self {
             session: Arc::new(session),
             pending_welcomes: PendingWelcomeStore::new(),
-            create_pending: Mutex::new(HashMap::new()),
-            rotation_pending: Mutex::new(HashMap::new()),
+            data_dir: data_dir.to_path_buf(),
+            rotation_fanouts: Mutex::new(HashMap::new()),
+            routing_moved: tokio::sync::Notify::new(),
+            #[cfg(any(test, feature = "test-utils"))]
+            skip_next_follow: std::sync::atomic::AtomicBool::new(false),
             profile_sync_lock: tokio::sync::Mutex::new(()),
             directory_lock: tokio::sync::Mutex::new(()),
             directory_flight: Mutex::new(DirectoryFlight::default()),
-            unrecoverable_groups: Mutex::new(HashSet::new()),
-            removal_deferrals: Mutex::new(HashMap::new()),
+            held_at_open,
+            held_polled_back: std::sync::atomic::AtomicBool::new(held_at_open == 0),
             convergence_reticks: std::sync::atomic::AtomicUsize::new(0),
             storage,
         })
@@ -350,11 +426,14 @@ impl CircleManager {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| CircleError::Storage(format!("Failed to create data directory: {e}")))?;
 
-        let session = SessionManager::new_unencrypted(data_dir, keys)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-
-        let db_path = data_dir.join("circles.db");
-        let storage = CircleStorage::new(&db_path, None)?;
+        let db_path = data_dir.join(CIRCLES_DB_FILENAME);
+        let storage = Arc::new(CircleStorage::new(&db_path, None)?);
+        let mut session =
+            SessionManager::new_unencrypted_with_notes(data_dir, keys, Some(storage.clone()))
+                .map_err(CircleError::from_session)?;
+        let held_at_open = storage.held_invitation_count().unwrap_or(usize::MAX);
+        session.install_refused_ledger(storage.clone());
+        session.install_stall_evidence(storage.clone());
         Self::backfill_contamination_ledger(&storage);
         Self::prune_retired_profile_pool(&storage);
         Self::sweep_expired_directory_members(&storage);
@@ -362,16 +441,41 @@ impl CircleManager {
         Ok(Self {
             session: Arc::new(session),
             pending_welcomes: PendingWelcomeStore::new(),
-            create_pending: Mutex::new(HashMap::new()),
-            rotation_pending: Mutex::new(HashMap::new()),
+            data_dir: data_dir.to_path_buf(),
+            rotation_fanouts: Mutex::new(HashMap::new()),
+            routing_moved: tokio::sync::Notify::new(),
+            #[cfg(any(test, feature = "test-utils"))]
+            skip_next_follow: std::sync::atomic::AtomicBool::new(false),
             profile_sync_lock: tokio::sync::Mutex::new(()),
             directory_lock: tokio::sync::Mutex::new(()),
             directory_flight: Mutex::new(DirectoryFlight::default()),
-            unrecoverable_groups: Mutex::new(HashSet::new()),
-            removal_deferrals: Mutex::new(HashMap::new()),
+            held_at_open,
+            held_polled_back: std::sync::atomic::AtomicBool::new(held_at_open == 0),
             convergence_reticks: std::sync::atomic::AtomicUsize::new(0),
             storage,
         })
+    }
+
+    /// Whether no storage-reset notice is waiting for the user
+    /// ([`crate::storage_reset::storage_reset_acknowledged`]). While one is, no
+    /// relay list is published.
+    #[must_use]
+    pub fn storage_reset_acknowledged(&self) -> bool {
+        crate::storage_reset::storage_reset_acknowledged(&self.data_dir)
+    }
+
+    /// Retries hydrating a quarantined circle (MDK
+    /// `retry_hydrate_quarantined_group`: non-destructive, never re-joins).
+    /// `true` when the circle is live again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the circle is not quarantined or the retry failed.
+    pub async fn retry_quarantined_circle(&self, mls_group_id: &GroupId) -> Result<bool> {
+        self.session
+            .retry_quarantined_group(mls_group_id)
+            .await
+            .map_err(CircleError::from)
     }
 
     /// A shared handle to the underlying session (for a group-scoped context).
@@ -397,7 +501,7 @@ impl CircleManager {
             .session
             .find_group(mls_group_id)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+            .map_err(CircleError::from_session)?
             .ok_or_else(|| CircleError::NotFound("Group not found: <redacted>".to_string()))?;
         Ok(group.epoch.0)
     }
@@ -429,7 +533,7 @@ impl CircleManager {
             .session
             .find_group(mls_group_id)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+            .map_err(CircleError::from_session)?
             .is_none()
         {
             return Err(CircleError::NotFound(
@@ -440,7 +544,7 @@ impl CircleManager {
             .session
             .group_message_retention_secs(mls_group_id)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+            .map_err(CircleError::from_session)?;
         Ok(bounded_retention_secs(declared))
     }
 
@@ -458,7 +562,7 @@ impl CircleManager {
             .session
             .find_group(mls_group_id)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+            .map_err(CircleError::from_session)?
             .is_none()
         {
             return Ok(false);
@@ -468,7 +572,7 @@ impl CircleManager {
             .session
             .member_pubkeys(mls_group_id)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+            .map_err(CircleError::from_session)?
             .iter()
             .any(|pk| pk == pubkey_hex))
     }
@@ -479,36 +583,54 @@ impl CircleManager {
     ///
     /// Creates the underlying MLS group and stores circle metadata. The engine
     /// produces the per-member gift-wrapped Welcomes (kind 1059) itself (the
-    /// peeler owns the NIP-59 crypto now); Haven only resolves each recipient's
-    /// delivery relays through the fail-closed cascade (member inbox → member
-    /// NIP-65 → creator inbox → fail closed), so a bare-pubkey invitee with no
-    /// advertised relay is uninvitable (the intended two-plane tradeoff).
+    /// peeler owns the NIP-59 crypto now); Haven only routes each Welcome to
+    /// its recipient's inbox relays ([`welcome_route`]), so an invitee with no
+    /// inbox relay Haven may dial is uninvitable (the intended two-plane
+    /// tradeoff).
     ///
-    /// Publish-before-apply (Rule 13): the returned
-    /// [`CircleCreationResult::pending`] must be confirmed via
-    /// [`Self::confirm_published`] after the welcomes reach ≥1 relay, or rolled
-    /// back via [`Self::publish_failed`] on failure.
+    /// A founding create has no group-message obligation (Rule 13): the engine
+    /// returns the group already canonical (`PublishWork::FoundingGroupCreated`,
+    /// MDK `cgka-session/src/lib.rs:268-270`), so nothing is confirmed or
+    /// rolled back. Each Welcome is a delivery obligation of its own, with a
+    /// record written before this returns
+    /// (`SessionManager::record_founding_welcomes`) and sent from it by the
+    /// fanout driver; a Welcome no relay accepted leaves the circle in place
+    /// with that invitee not yet joined.
+    ///
+    /// Test builds only: the app creates through
+    /// `relay::fanout::Publishing::create_circle`, which sends each founding
+    /// Welcome from its record, so no shipped path holds a founding Welcome
+    /// it could publish by any other way.
     ///
     /// # Errors
     ///
     /// Returns an error if circle creation or welcome routing fails.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn create_circle(
         &self,
         sender_keys: &Keys,
         members: Vec<MemberKeyPackage>,
         config: &CircleConfig,
-        creator_fallback_relays: &[String],
+    ) -> Result<CircleCreationResult> {
+        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        self.create_circle_at(sender_keys, members, config, now_ms)
+            .await
+    }
+
+    /// [`Self::create_circle`] with its Welcomes' records written on a
+    /// caller's clock, `now_ms`.
+    pub(crate) async fn create_circle_at(
+        &self,
+        sender_keys: &Keys,
+        members: Vec<MemberKeyPackage>,
+        config: &CircleConfig,
+        now_ms: u64,
     ) -> Result<CircleCreationResult> {
         // Fail closed BEFORE creating the MLS group: a member is deliverable iff
-        // it advertises an inbox/NIP-65 relay OR the creator has an inbox
-        // fallback (identical for every member). Pre-validate so the fail-closed
-        // path leaves storage untouched.
-        if creator_fallback_relays.is_empty() {
-            for m in &members {
-                if m.inbox_relays.is_empty() && m.nip65_relays.is_empty() {
-                    return Err(CircleError::MissingWelcomeRelays);
-                }
-            }
+        // it advertises an inbox relay that may be dialled. Pre-validate so the
+        // fail-closed path leaves storage untouched.
+        for member in &members {
+            welcome_route(member)?;
         }
 
         // Default the group relay set to the user's Inbox relays when the caller
@@ -526,7 +648,17 @@ impl CircleManager {
                 );
                 crate::circle::types::default_relays()
             } else {
-                inbox
+                // The user's own list may name a relay only they can reach, and
+                // a circle names its relays to every member: such an entry is
+                // left out, as `usable_relays` leaves it out of a member's list.
+                // With none left the list goes on whole, so `routing_of`
+                // refuses the create as it refuses a list the caller named.
+                let public = usable_relays(inbox.clone());
+                if public.is_empty() {
+                    inbox
+                } else {
+                    public
+                }
             }
         } else {
             config.relays.clone()
@@ -547,14 +679,8 @@ impl CircleManager {
         let mut cfg = config.clone();
         cfg.relays = effective_relays;
 
-        self.create_circle_with_config(
-            &members,
-            key_package_events,
-            mls_config,
-            &cfg,
-            creator_fallback_relays,
-        )
-        .await
+        self.create_circle_with_config(&members, key_package_events, mls_config, &cfg, now_ms)
+            .await
     }
 
     /// Internal helper for circle creation with a configured MLS config.
@@ -564,7 +690,7 @@ impl CircleManager {
         key_package_events: Vec<Event>,
         mls_config: LocationGroupConfig,
         config: &CircleConfig,
-        creator_fallback_relays: &[String],
+        now_ms: u64,
     ) -> Result<CircleCreationResult> {
         let key_packages = parse_key_packages(&key_package_events)?;
 
@@ -572,7 +698,7 @@ impl CircleManager {
             .session
             .create_group(key_packages, mls_config)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+            .map_err(CircleError::from_session)?;
         let group_id = effects.group_id.clone();
 
         // The transport routing id comes from the engine's freshly-minted
@@ -582,15 +708,70 @@ impl CircleManager {
             .session
             .group_routing(&group_id)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+            .map_err(CircleError::from_session)?;
 
-        // The engine returns gift-wrapped 1059 welcomes + a PendingStateRef under
-        // GroupCreated. Extract BEFORE persisting any storage row, so a
-        // (defensive) extraction failure leaves storage untouched.
-        let (welcomes, pending) = self.take_group_created(effects.effects).await?;
+        // Extract BEFORE persisting any storage row, so an extraction failure
+        // leaves storage untouched.
+        let welcomes = match self.take_group_created(effects.effects).await {
+            Ok(welcomes) => welcomes,
+            Err(e) => {
+                self.abandon_founded_group(&group_id).await;
+                return Err(e);
+            }
+        };
 
+        // A founded group cannot be rolled back, so every failure from here on
+        // — a row that will not save, a Welcome that cannot be routed — abandons
+        // it locally, MLS state and circle rows, rather than leaving a ghost
+        // circle. Nothing has left the device yet.
+        let founded =
+            self.record_founded_circle(&group_id, nostr_group_id, config, members, welcomes);
+        let (circle, welcome_events, founding) = match founded {
+            Ok(founded) => founded,
+            Err(e) => {
+                self.abandon_founded_group(&group_id).await;
+                return Err(e);
+            }
+        };
+        let founding_welcomes = match self
+            .session
+            .record_founding_welcomes(&group_id, founding, now_ms)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                self.abandon_founded_group(&group_id).await;
+                return Err(CircleError::from_session(e));
+            }
+        };
+        // A founded group is canonical on return (MDK v0.10.4
+        // `PublishWork::FoundingGroupCreated`), so its invitees are co-members
+        // now; at v0.9.4 the create's confirm wrote them.
+        self.reconcile_member_directory_best_effort(DirectoryReconcile::Rewrite)
+            .await;
+
+        Ok(CircleCreationResult {
+            circle,
+            welcome_events,
+            founding_welcomes,
+        })
+    }
+
+    /// Saves a freshly founded circle's rows and routes its Welcomes: the part
+    /// of a create that can fail after the group exists.
+    fn record_founded_circle(
+        &self,
+        group_id: &GroupId,
+        nostr_group_id: [u8; 32],
+        config: &CircleConfig,
+        members: &[MemberKeyPackage],
+        welcomes: Vec<TransportMessage>,
+    ) -> Result<(Circle, Vec<GiftWrappedWelcome>, Vec<FoundingWelcome>)> {
         let now = chrono::Utc::now().timestamp();
-        let circle = Circle {
+        // The STORED circle, not the struct assembled here: `save_circle`
+        // sanitizes the display name, and this value is handed straight back to
+        // the caller for rendering.
+        let circle = self.storage.save_circle(&Circle {
             mls_group_id: group_id.clone(),
             nostr_group_id,
             display_name: config.name.clone(),
@@ -598,73 +779,40 @@ impl CircleManager {
             relays: config.relays.clone(),
             created_at: now,
             updated_at: now,
-        };
-        // The STORED circle, not the struct assembled above: `save_circle`
-        // sanitizes the display name, and this value is handed straight back to
-        // the caller for rendering.
-        let circle = self.storage.save_circle(&circle)?;
+        })?;
         // Contamination ledger: this set is about to carry the circle's kind-445
         // traffic and its commits, so it is permanently excluded from the
-        // profile pool. Recorded BEFORE the welcomes go out — over-recording (a
-        // create that is later rolled back) is the safe direction; the ledger is
-        // append-only precisely because under-recording fails OPEN.
+        // profile pool. Recorded BEFORE the welcomes go out — over-recording is
+        // the safe direction; the ledger is append-only precisely because
+        // under-recording fails OPEN.
         self.record_contaminated(&circle.relays, ContaminationSource::CircleRouting)?;
-
-        let membership = CircleMembership {
+        self.storage.save_membership(&CircleMembership {
             mls_group_id: group_id.clone(),
             status: MembershipStatus::Accepted,
             inviter_pubkey: None,
             invited_at: now,
             responded_at: Some(now),
-        };
-        self.storage.save_membership(&membership)?;
-
-        // F2: bind this create's `pending` to the just-saved rows so a later
-        // rollback (all welcomes zero-ack → `publish_failed`, or the route error
-        // below) deletes them instead of stranding a ghost circle backed by no
-        // confirmed group.
-        self.register_create_pending(pending, &group_id);
-
-        // Route each welcome to its recipient's cascade relays. F3: if routing
-        // fails AFTER the group + rows are staged, roll the pending back — which
-        // also deletes the just-saved rows via the create-pending map — so
-        // neither a PendingStateRef nor a ghost circle row leaks.
-        let welcome_events =
-            match self.route_welcomes_with_cascade(members, welcomes, creator_fallback_relays) {
-                Ok(events) => events,
-                Err(e) => {
-                    // The rollback's own batch is discarded: this create was
-                    // staged microseconds ago and has buffered nothing, and the
-                    // caller is being handed an error rather than an ingest.
-                    let _ = self.publish_failed(pending).await;
-                    return Err(e);
-                }
-            };
-
-        Ok(CircleCreationResult {
-            circle,
-            welcome_events,
-            pending,
-        })
+        })?;
+        let (welcome_events, founding) = self.route_welcomes_with_cascade(members, welcomes)?;
+        Ok((circle, welcome_events, founding))
     }
 
-    /// Binds a create's `pending` to its group id so a later rollback removes
-    /// the eagerly-persisted circle/membership rows (F2). See
-    /// [`Self::publish_failed`].
-    fn register_create_pending(&self, pending: PendingStateRef, group_id: &GroupId) {
-        self.create_pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(pending, group_id.clone());
-    }
-
-    /// Removes and returns any group id bound to `pending` in the create-pending
-    /// map (F2).
-    fn take_create_pending(&self, pending: PendingStateRef) -> Option<GroupId> {
-        self.create_pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&pending)
+    /// Forgets a group this device founded moments ago and nobody else knows
+    /// about: its MLS state through MDK's `forget_group_local`, and its circle
+    /// rows. Best-effort — each half logs its own failure code.
+    async fn abandon_founded_group(&self, group_id: &GroupId) {
+        if let Err(e) = self.session.forget_group_local(group_id).await {
+            log::warn!(
+                "abandoning a founded group: MLS forget failed: {}",
+                e.code()
+            );
+        }
+        if let Err(e) = self.storage.delete_circle(group_id) {
+            log::warn!(
+                "abandoning a founded group: circle-row cleanup failed (self-heals on logout wipe): {}",
+                e.code()
+            );
+        }
     }
 
     /// Appends `relays` to the append-only contamination ledger.
@@ -716,8 +864,7 @@ impl CircleManager {
         &self,
         members: &[MemberKeyPackage],
         welcomes: Vec<TransportMessage>,
-        creator_fallback_relays: &[String],
-    ) -> Result<Vec<GiftWrappedWelcome>> {
+    ) -> Result<(Vec<GiftWrappedWelcome>, Vec<FoundingWelcome>)> {
         if welcomes.len() != members.len() {
             return Err(CircleError::Mls(format!(
                 "Expected {} welcome(s), got {}",
@@ -727,25 +874,14 @@ impl CircleManager {
         }
 
         let mut welcome_events = Vec::with_capacity(welcomes.len());
+        let mut founding = Vec::with_capacity(welcomes.len());
         for wt in welcomes {
             let event = SessionManager::transport_message_to_event(&wt)
-                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+                .map_err(CircleError::from_session)?;
 
-            // The gift wrap's `p` tag is the recipient identity.
-            let recipient_pubkey = event
-                .tags
-                .iter()
-                .find_map(|tag| {
-                    let v = tag.as_slice();
-                    if v.len() >= 2 && v[0] == "p" {
-                        PublicKey::from_hex(&v[1]).ok()
-                    } else {
-                        None
-                    }
-                })
-                .ok_or_else(|| {
-                    CircleError::Mls("Welcome gift wrap missing recipient 'p' tag".to_string())
-                })?;
+            let recipient_pubkey = welcome_recipient(&event).ok_or_else(|| {
+                CircleError::Mls("Welcome gift wrap missing recipient 'p' tag".to_string())
+            })?;
 
             let member = members
                 .iter()
@@ -753,17 +889,13 @@ impl CircleManager {
                 .ok_or_else(|| {
                     CircleError::Mls("No member matches welcome recipient".to_string())
                 })?;
-
-            // Cascade: member inbox → member NIP-65 → sender inbox → fail closed.
-            let recipient_relays = if !member.inbox_relays.is_empty() {
-                member.inbox_relays.clone()
-            } else if !member.nip65_relays.is_empty() {
-                member.nip65_relays.clone()
-            } else if !creator_fallback_relays.is_empty() {
-                creator_fallback_relays.to_vec()
-            } else {
-                return Err(CircleError::MissingWelcomeRelays);
-            };
+            let recipient_relays = welcome_route(member)?;
+            founding.push(FoundingWelcome {
+                message: wt,
+                recipient: recipient_pubkey.to_hex(),
+                relays: recipient_relays.clone(),
+                not_after: key_package_not_after(member),
+            });
 
             welcome_events.push(GiftWrappedWelcome {
                 recipient_pubkey: recipient_pubkey.to_hex(),
@@ -783,7 +915,7 @@ impl CircleManager {
             .collect();
         self.record_contaminated(&welcome_relays, ContaminationSource::Welcome)?;
 
-        Ok(welcome_events)
+        Ok((welcome_events, founding))
     }
 
     /// Retrieves a circle with its members.
@@ -800,13 +932,38 @@ impl CircleManager {
             CircleError::NotFound("Membership not found for circle: <redacted>".to_string())
         })?;
 
-        let members = self.get_members(mls_group_id).await?;
+        let engine_state = self.engine_state(mls_group_id).await;
+        let members = if engine_state == CircleEngineState::Live {
+            self.get_members(mls_group_id).await?
+        } else {
+            Vec::new()
+        };
 
         Ok(Some(CircleWithMembers {
             circle,
             membership,
             members,
+            engine_state,
         }))
+    }
+
+    /// Where MDK holds `mls_group_id`, as every circle read reports it. A
+    /// record the engine cannot read is not a verdict: it reads live.
+    pub(crate) async fn engine_state(&self, mls_group_id: &GroupId) -> CircleEngineState {
+        if self
+            .session
+            .quarantined_group_ids()
+            .await
+            .contains(mls_group_id)
+        {
+            CircleEngineState::Quarantined
+        } else if self.session.disbanded(mls_group_id).await {
+            CircleEngineState::Disbanded
+        } else if self.session.unrecoverable(mls_group_id).await == Some(true) {
+            CircleEngineState::Unrecoverable
+        } else {
+            CircleEngineState::Live
+        }
     }
 
     /// Retrieves all circles.
@@ -816,23 +973,79 @@ impl CircleManager {
     /// Returns an error if the database operation fails.
     pub async fn get_circles(&self) -> Result<Vec<CircleWithMembers>> {
         let circles = self.storage.get_all_circles()?;
+        let quarantined = self.session.quarantined_group_ids().await;
         let mut result = Vec::with_capacity(circles.len());
 
         for circle in circles {
             if let Some(membership) = self.storage.get_membership(&circle.mls_group_id)? {
-                let members = self
-                    .get_members(&circle.mls_group_id)
-                    .await
-                    .unwrap_or_default();
+                let engine_state = if quarantined.contains(&circle.mls_group_id) {
+                    CircleEngineState::Quarantined
+                } else if self.session.disbanded(&circle.mls_group_id).await {
+                    CircleEngineState::Disbanded
+                } else if self.session.unrecoverable(&circle.mls_group_id).await == Some(true) {
+                    // A record the engine cannot read is not a verdict: one
+                    // circle never fails the list (AM-R3-5).
+                    CircleEngineState::Unrecoverable
+                } else {
+                    CircleEngineState::Live
+                };
+                let members = if engine_state == CircleEngineState::Live {
+                    self.get_members(&circle.mls_group_id)
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 result.push(CircleWithMembers {
                     circle,
                     membership,
                     members,
+                    engine_state,
                 });
             }
         }
 
         Ok(result)
+    }
+
+    /// The visible circles a receive plane follows and a sweep reads: those
+    /// that read live ([`CircleEngineState::Live`], MDK's own reads). Not a
+    /// disbanded circle, whose traffic nobody sends any more; not one MDK
+    /// holds unrecoverable, which applies nothing it receives until a
+    /// Welcome — which arrives on the inbox — repairs it; and not one MDK
+    /// holds quarantined, which failed to load in this process. (Haven opens
+    /// its session with every group hydrated at the open, so none is left
+    /// unhydrated.) Nothing of a circle left out is advanced or ended by its
+    /// absence: a plane that reads it again takes it up from where it stood.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub(crate) async fn routable_circles(&self) -> Result<Vec<CircleWithMembers>> {
+        Ok(self
+            .get_visible_circles()
+            .await?
+            .into_iter()
+            .filter(|circle| circle.engine_state == CircleEngineState::Live)
+            .collect())
+    }
+
+    /// Who disbanded the circle of `mls_group_id`, as lowercase hex, for the
+    /// notice the user is shown (`app-components/group-lifecycle-v1.md` 97);
+    /// `None` for a circle not disbanded. Never logged.
+    pub async fn disbanded_by(&self, mls_group_id: &GroupId) -> Option<String> {
+        self.session.disbanded_by(mls_group_id).await
+    }
+
+    /// Clears what Haven keeps for a disbanded circle that nothing can use
+    /// any more: its Welcome routes, the notes that a Welcome or a re-invite
+    /// is owed, and its location records. MDK's settle deleted its own
+    /// (records, queued changes, offers, `cgka-engine/src/disband.rs`
+    /// 557-604). Idempotent: run at every open and at each disband seen.
+    async fn reconcile_disbanded(&self, mls_group_id: &GroupId) {
+        let _ = self.storage.forget_welcome_routes(mls_group_id);
+        self.session.clear_owed_notes(mls_group_id);
+        self.session.end_location_records(mls_group_id).await;
     }
 
     /// Retrieves visible circles (excludes declined invitations).
@@ -866,195 +1079,1099 @@ impl CircleManager {
         plan_leave(&self.session, mls_group_id, self_pubkey).await
     }
 
-    /// Step 1 of admin handoff: promote `successor` to admin via an
-    /// `UpdateAppComponents(admin-policy.v1)` commit.
-    ///
-    /// The new policy is the group's current admin set plus `successor`, so a
-    /// handoff never drops an existing admin. The caller stays an admin here —
-    /// [`Self::propose_self_demote`] is the separate second commit — which keeps
-    /// the group admin-covered at every intermediate epoch: a crash between the
-    /// two commits leaves two admins, and `plan_leave` resumes cleanly on
-    /// [`LeavePlan::AdminDemote`](super::leave::LeavePlan::AdminDemote) without
-    /// re-promoting.
-    ///
-    /// Publish-before-apply (Rule 13): publish [`CommitToPublish::commit_event`],
-    /// then [`Self::confirm_published`] on ≥1-relay ack or [`Self::publish_failed`]
-    /// on failure.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CircleError::Mls`] if the caller is not an admin, if `successor`
-    /// holds no member leaf in the group (the engine refuses to mint an admin
-    /// who is not a member), or if the engine rejects the commit.
-    pub async fn propose_admin_handoff(
+    /// The group's current admin set plus `successor`.
+    async fn admins_with(
         &self,
         mls_group_id: &GroupId,
         successor: &PublicKey,
-    ) -> Result<CommitToPublish> {
+    ) -> Result<Vec<[u8; 32]>> {
         let mut admins = self
             .session
             .admin_pubkeys(mls_group_id)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+            .map_err(CircleError::from_session)?;
         admins.push(successor.to_bytes());
-        let effects = self
-            .session
-            .update_admin_policy(mls_group_id, &admins)
-            .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        let (commit_event, _welcomes, pending) = self.take_group_evolution(effects).await?;
-        Ok(CommitToPublish {
-            commit_event,
-            pending,
-        })
+        Ok(admins)
     }
 
-    /// Proposes an admin update of a circle's group relay list (MIP-01) via an
-    /// `UpdateAppComponents(nostr-routing.v1)` commit.
-    ///
-    /// Publish-before-apply (Rule 13): publish [`CommitToPublish::commit_event`]
-    /// to the union of the circle's current and new relays, then
-    /// [`Self::finalize_relay_update`] on ≥1-relay ack or [`Self::publish_failed`]
-    /// on failure. The circle row is updated only on a successful confirm.
+    /// [`Self::propose_admin_handoff`] in staging mode: the commit is staged
+    /// under its durable fanout and nothing is handed back to publish.
     ///
     /// # Errors
     ///
-    /// Returns [`CircleError::InvalidData`] for an empty / all-invalid /
-    /// oversized relay set, or [`CircleError::Mls`] if the caller is not an admin
-    /// or the engine rejects the update.
-    pub async fn update_circle_relays(
+    /// As [`Self::propose_admin_handoff`].
+    pub(crate) async fn propose_admin_handoff_staging(
         &self,
         mls_group_id: &GroupId,
-        new_relays: &[String],
-    ) -> Result<CommitToPublish> {
-        let mut canonical: Vec<String> = Vec::with_capacity(new_relays.len());
-        for relay in new_relays {
-            canonical.push(super::storage_relay_prefs::normalize_url(relay)?);
-        }
-        canonical.sort();
-        canonical.dedup();
+        successor: &PublicKey,
+        now_ms: u64,
+        still: Still<'_>,
+    ) -> Result<StagedChange> {
+        let admins = self.admins_with(mls_group_id, successor).await?;
+        self.admin_change(mls_group_id, &admins, now_ms, still)
+            .await
+    }
 
-        if canonical.is_empty() {
-            return Err(CircleError::InvalidData(
-                "A circle must have at least one relay".to_string(),
+    /// A change of `mls_group_id`'s admins to `admins`, staged under its
+    /// durable fanout — or answered as already made, with nothing staged,
+    /// when the circle has those admins.
+    async fn admin_change(
+        &self,
+        mls_group_id: &GroupId,
+        admins: &[[u8; 32]],
+        now_ms: u64,
+        still: Still<'_>,
+    ) -> Result<StagedChange> {
+        match self
+            .session
+            .change_admin_policy_staging(mls_group_id, admins, now_ms, still)
+            .await
+            .map_err(CircleError::from_session)?
+        {
+            Some(staged) => self.staged_change(mls_group_id, staged).await,
+            None => Ok(StagedChange {
+                commit: None,
+                also: Vec::new(),
+                welcomes: Vec::new(),
+                unrecorded: false,
+                already: true,
+            }),
+        }
+    }
+
+    /// What a staging-mode send left, as the change its caller asked for:
+    /// `mls_group_id`'s own commit record, or the engine's word that the
+    /// change is queued behind what the circle is still resolving.
+    ///
+    /// The locations the send drained are persisted ([`Self::note_send_drain`]).
+    /// Its publish work is NOT surfaced: a commit still in it is one the hold
+    /// could neither record nor roll back, which is staged, unsent, and undone
+    /// at the next hold that stages (`SessionManager::retry_unrecorded`);
+    /// handed to anything that sends it, it would go out with no record and
+    /// then be rolled back by that next hold after a relay may have taken it
+    /// (Security Rule 13).
+    async fn staged_change(&self, mls_group_id: &GroupId, staged: Staged) -> Result<StagedChange> {
+        let Staged {
+            effects,
+            fanouts,
+            welcomes,
+            proposals,
+            unrecorded,
+            waiting: _,
+        } = staged;
+        self.note_send_drain(&effects.events).await;
+        let queued = effects
+            .queued
+            .iter()
+            .any(|intent| &intent.group_id == mls_group_id);
+        // The change is staged and could be neither recorded nor undone: it
+        // is not an error to report as "nothing was staged".
+        let unrecorded = unrecorded.contains(mls_group_id);
+        // A queued change's circle can still have a record in this batch: the
+        // eviction the engine staged ahead of it.
+        let (own, also): (Vec<FanoutId>, Vec<FanoutId>) = fanouts
+            .into_iter()
+            .partition(|id| !queued && id.group() == mls_group_id);
+        let mut own = own.into_iter();
+        let commit = own.next();
+        if commit.is_none() && !queued && !unrecorded {
+            return Err(CircleError::Mls(
+                "operation produced no commit and queued nothing".to_string(),
             ));
         }
-        if canonical.len() > Self::MAX_CIRCLE_RELAYS {
-            return Err(CircleError::InvalidData(format!(
-                "A circle may have at most {} relays",
-                Self::MAX_CIRCLE_RELAYS
-            )));
-        }
-
-        // Contamination is recorded for the NEW set even though the circle row
-        // is not updated until `finalize_relay_update`: the caller publishes
-        // this commit to the UNION of the circle's current and new relays, so
-        // every incoming relay sees group traffic regardless of whether the
-        // update is later confirmed or rolled back.
-        self.record_contaminated(&canonical, ContaminationSource::CircleRouting)?;
-
-        let effects = self
-            .session
-            .update_relays(mls_group_id, canonical)
-            .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        let (commit_event, _welcomes, pending) = self.take_group_evolution(effects).await?;
-        Ok(CommitToPublish {
-            commit_event,
-            pending,
+        let welcomes = welcomes
+            .into_iter()
+            .find(|(id, _)| commit.as_ref() == Some(id))
+            .map(|(_, welcomes)| welcomes)
+            .unwrap_or_default();
+        Ok(StagedChange {
+            unrecorded: unrecorded && commit.is_none() && !queued,
+            commit,
+            also: also.into_iter().chain(own).chain(proposals).collect(),
+            welcomes,
+            already: false,
         })
     }
 
-    /// Re-derives the app-level `circle.relays` row from the engine's routing
-    /// component after a commit. Idempotent; never overwrites a non-empty
-    /// `circle.relays` with an empty set (never bricks 445 routing).
+    /// The relay set an admin asked for, canonical, checked and recorded as
+    /// carrying this device's group traffic.
+    fn new_circle_relays(&self, new_relays: &[String]) -> Result<Vec<String>> {
+        let canonical = circle_relays(new_relays)?;
+        // Recorded for the NEW set before the change is applied, and whether
+        // or not it ever is: the ledger errs towards a relay that was only
+        // named, never towards one that carried traffic unrecorded. Never for
+        // a set the engine would refuse.
+        self.record_contaminated(&canonical, ContaminationSource::CircleRouting)?;
+        Ok(canonical)
+    }
+
+    /// [`Self::update_circle_relays`] in staging mode. The commit's fanout is
+    /// frozen for the relays of the epoch it leaves, and the circle row follows
+    /// the engine's routing component once the commit is applied (the fold).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::update_circle_relays`].
+    pub async fn update_circle_relays_staging(
+        &self,
+        mls_group_id: &GroupId,
+        new_relays: &[String],
+        now_ms: u64,
+    ) -> Result<StagedChange> {
+        let canonical = self.new_circle_relays(new_relays)?;
+        // The engine commits whatever it is handed: the list the circle
+        // already has would cost an epoch and change nothing. Not while a
+        // commit of this device's is pending: the applied list it would be
+        // compared with is not where the circle is going.
+        let (_, current) = self
+            .session
+            .group_routing(mls_group_id)
+            .await
+            .map_err(CircleError::from_session)?;
+        let normalized: Vec<Option<String>> = current
+            .iter()
+            .map(|relay| super::storage_relay_prefs::normalize_url(relay).ok())
+            .collect();
+        // An entry this device may not dial is not in the list it shows, and
+        // re-saving that list is how it is taken out of the component.
+        let refused_entry = normalized.iter().any(Option::is_none);
+        let mut current: Vec<String> = normalized.into_iter().flatten().collect();
+        current.sort();
+        current.dedup();
+        if !refused_entry
+            && current == canonical
+            && self.session.holds_no_own_commit(mls_group_id).await
+        {
+            return Ok(StagedChange {
+                commit: None,
+                also: Vec::new(),
+                welcomes: Vec::new(),
+                unrecorded: false,
+                already: true,
+            });
+        }
+        let staged = self
+            .session
+            .update_relays_staging(mls_group_id, canonical, now_ms)
+            .await
+            .map_err(CircleError::from_session)?;
+        self.staged_change(mls_group_id, staged).await
+    }
+
+    /// Re-derives the app-level circle row — its routing id and its
+    /// `circle.relays` — from the engine's routing component after a commit.
+    /// Idempotent; an EMPTY component never overwrites a non-empty
+    /// `circle.relays` (never bricks 445 routing).
+    ///
+    /// The row holds the component's entries this device may dial
+    /// ([`usable_relays`]). A component that names relays and none of them
+    /// usable leaves the row empty: the circle then has no relay, and saying
+    /// so is the truth — keeping the previous list would send its traffic to
+    /// relays the circle no longer names.
+    ///
+    /// A routing id another client's admin rotated
+    /// (`app-components/nostr-routing-v1.md` 44-63) is followed: the row
+    /// and every store keyed by the id move to the new one, with the
+    /// routing it leaves kept as a prior routing, in one transaction
+    /// ([`CircleStorage::follow_routing`]). Except onto an id another circle
+    /// on this device holds, now or as a prior routing: MDK has then given
+    /// that id's route to this group, so the other circle no longer hears
+    /// its traffic, and both circles' sends are held
+    /// ([`ChangeNote::RoutingCollision`](crate::nostr::mls::ChangeNote::RoutingCollision)).
+    ///
+    /// Run after every commit a plane applies and, so that a follow a kill
+    /// or an error missed is made later, for every circle at each start,
+    /// sweep and burst open ([`Self::reconcile_routing`]).
+    ///
+    /// Returns whether the row's routing changed.
     ///
     /// # Errors
     ///
     /// Returns an error if the engine or storage access fails.
-    async fn resync_circle_relays_from_mdk(&self, mls_group_id: &GroupId) -> Result<()> {
-        let mut engine_relays = self
+    async fn resync_circle_relays_from_mdk(&self, mls_group_id: &GroupId) -> Result<bool> {
+        let (routing_id, named) = self
             .session
-            .group_relays(mls_group_id)
+            .group_routing(mls_group_id)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        engine_relays.sort();
-        engine_relays.dedup();
+            .map_err(CircleError::from_session)?;
 
-        let Some(mut circle) = self.storage.get_circle(mls_group_id)? else {
-            return Ok(());
+        let Some(circle) = self.storage.get_circle(mls_group_id)? else {
+            return Ok(false);
         };
-
-        if engine_relays.is_empty() {
-            return Ok(());
-        }
-
-        // The receiving end of an admin's relay update: a non-admin member
-        // learns the new routing set from the engine's component rather than
-        // from `update_circle_relays`, so this is that member's write site.
-        self.record_contaminated(&engine_relays, ContaminationSource::CircleRouting)?;
 
         let mut current = circle.relays.clone();
         current.sort();
         current.dedup();
-        if current != engine_relays {
-            circle.relays = engine_relays;
-            circle.updated_at = chrono::Utc::now().timestamp();
-            self.storage.save_circle(&circle)?;
+        let from_engine = !named.is_empty();
+        let engine_relays = if from_engine {
+            let mut engine_relays = usable_relays(named);
+            engine_relays.sort();
+            engine_relays.dedup();
+            engine_relays
+        } else {
+            current.clone()
+        };
+        let rotated = routing_id != circle.nostr_group_id;
+        if current == engine_relays && !rotated {
+            return Ok(false);
         }
+        // The receiving end of an admin's relay update: a non-admin member
+        // learns the new routing set from the engine's component rather than
+        // from `update_circle_relays`, so this is that member's write site.
+        // Before the collision check: the engine sends the circle's traffic
+        // to these relays whether or not the row follows.
+        let recorded = if from_engine {
+            self.record_contaminated(&engine_relays, ContaminationSource::CircleRouting)
+        } else {
+            Ok(())
+        };
+        if rotated {
+            match self
+                .other_circle_with_routing_id(&routing_id, mls_group_id, UnreadEpoch::Holds)
+                .await
+            {
+                // MDK has moved the id's route to this group, in memory and
+                // on disk, so the other circle's traffic no longer reaches
+                // it: both are held, and the row stays where it was.
+                Ok(Some(other)) => {
+                    self.session
+                        .note_routing_collision(&[mls_group_id, &other])
+                        .map_err(CircleError::from_session)?;
+                    log::warn!(
+                        "a circle's routing id moved onto one another circle holds; both \
+                         circles' sends are held"
+                    );
+                    return recorded.map(|()| false);
+                }
+                Ok(None) => {}
+                // MDK has moved the route already, and a store that cannot
+                // say whose the id was cannot name the circle it may have
+                // deafened: this one is held now, and that one from the next
+                // reconcile that reads the store (`hold_shared`).
+                Err(e) => {
+                    self.hold_unchecked(mls_group_id)?;
+                    log::warn!(
+                        "a circle's routing id moved and whether another circle holds it could \
+                         not be read; its sends are held"
+                    );
+                    return Err(e);
+                }
+            }
+        }
+        recorded?;
+        // The routing it leaves served every epoch before this one: kept, in
+        // the move's own transaction, while those can still be fetched, so
+        // their traffic is fetched again where it was sent.
+        let epoch = self
+            .session
+            .epoch(mls_group_id)
+            .await
+            .map_err(CircleError::from_session)?;
+        let oldest_kept = epoch.saturating_sub(routing_retained_epochs());
+        let prior = PriorRouting {
+            nostr_group_id: circle.nostr_group_id,
+            relays: &current,
+            until_epoch: epoch,
+            oldest_kept,
+            written_at: chrono::Utc::now().timestamp(),
+        };
+        // The new id is asked from the oldest instant the engine keeps of the
+        // circle's recent epochs — the rotating commit's among them, however
+        // late it was applied — or, when nothing it keeps says, from the
+        // stream's cold start.
+        let cursor_floor_ms = if rotated {
+            self.session
+                .oldest_kept_transport_secs(mls_group_id, oldest_kept)
+                .await
+                .map(|secs| i64::try_from(secs).unwrap_or(i64::MAX).saturating_mul(1000))
+        } else {
+            None
+        };
+        let mut moved = circle.clone();
+        moved.relays = engine_relays;
+        moved.nostr_group_id = routing_id;
+        moved.updated_at = chrono::Utc::now().timestamp();
+        self.storage
+            .follow_routing(&moved, &prior, cursor_floor_ms)?;
+        self.routing_moved.notify_one();
+        Ok(true)
+    }
+
+    /// A circle other than `mls_group_id` whose route MDK may give away to
+    /// a group naming `routing_id`: one whose routing id it is, or one whose
+    /// prior routing used it while an epoch that used it is still retained
+    /// (`app-components/nostr-routing-v1.md` 56-62). A prior routing past
+    /// that window is nobody's: MDK's in-memory index still keeps its route
+    /// until the session ends (mdk#896), but nothing sent under it can be
+    /// peeled any more, the epochs' exporter secrets being gone. A circle
+    /// whose epoch cannot be read is taken as `unread` says.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error: a store that cannot say is not read as an
+    /// answer either way.
+    async fn other_circle_with_routing_id(
+        &self,
+        routing_id: &[u8; 32],
+        mls_group_id: &GroupId,
+        unread: UnreadEpoch,
+    ) -> Result<Option<GroupId>> {
+        for (holder, until_epoch) in self.storage.routing_id_holders(routing_id, mls_group_id)? {
+            let Some(until_epoch) = until_epoch else {
+                return Ok(Some(holder));
+            };
+            let stands = match self.session.epoch(&holder).await {
+                Ok(epoch) => until_epoch >= epoch.saturating_sub(routing_retained_epochs()),
+                Err(e) if unread == UnreadEpoch::Errs => return Err(CircleError::from_session(e)),
+                Err(_) => true,
+            };
+            if stands {
+                return Ok(Some(holder));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Holds `mls_group_id` as a routing collision does
+    /// ([`ChangeNote::RoutingCollision`](crate::nostr::mls::ChangeNote::RoutingCollision)),
+    /// for a routing id MDK has given it
+    /// that the store could not check: whether another circle held the id is
+    /// not known, and the circle that would have lost its route cannot be
+    /// named here — [`Self::hold_shared`] names it at the next reconcile
+    /// that reads the store, and until then it is not held. Like a
+    /// collision's, the hold ends when the circle is left — a transient store
+    /// error costs this circle its sharing until then.
+    fn hold_unchecked(&self, mls_group_id: &GroupId) -> Result<()> {
+        self.session
+            .note_routing_collision(&[mls_group_id])
+            .map_err(CircleError::from_session)
+    }
+
+    /// Follows, for every circle this device holds, the routing its engine
+    /// state names and its row does not: a follow a kill between a commit
+    /// and its persist missed, or one an error stopped. First it holds every
+    /// circle the store says shares its routing id ([`Self::hold_shared`]).
+    /// Best-effort; one line says how many failed, in buckets, and names
+    /// none.
+    pub async fn reconcile_routing(&self) {
+        let circles = match self.storage.get_all_circles() {
+            Ok(circles) => circles,
+            Err(e) => {
+                log::debug!("routing reconcile: the circles were not read: {}", e.code());
+                return;
+            }
+        };
+        let mut failed = 0;
+        for circle in &circles {
+            if self.hold_shared(circle).await.is_err() {
+                failed += 1;
+            }
+        }
+        for circle in circles {
+            if self
+                .resync_circle_relays_from_mdk(&circle.mls_group_id)
+                .await
+                .is_err()
+            {
+                failed += 1;
+            }
+        }
+        if failed > 0 {
+            log::debug!(
+                "routing reconcile: {} circle(s) not followed (retried at the next)",
+                bucket(failed)
+            );
+        }
+    }
+
+    /// Holds `circle` and the other circle that names its routing id — as its
+    /// own, or as a prior routing still inside its window
+    /// ([`Self::other_circle_with_routing_id`]) — as a routing collision,
+    /// unless both are held already. What a Welcome joined under a store
+    /// error leaves is the joined circle held and the one MDK took the route
+    /// from not: this holds that one from the next reconcile on, a repair
+    /// after the fact rather than a prevention.
+    ///
+    /// # Errors
+    ///
+    /// The store's error, or the note's: nothing was held, and the next
+    /// reconcile asks again.
+    async fn hold_shared(&self, circle: &Circle) -> Result<()> {
+        let Some(other) = self
+            .other_circle_with_routing_id(
+                &circle.nostr_group_id,
+                &circle.mls_group_id,
+                UnreadEpoch::Errs,
+            )
+            .await?
+        else {
+            return Ok(());
+        };
+        if self.session.routing_collided(&circle.mls_group_id)
+            && self.session.routing_collided(&other)
+        {
+            return Ok(());
+        }
+        self.session
+            .note_routing_collision(&[&circle.mls_group_id, &other])
+            .map_err(CircleError::from_session)?;
+        log::warn!("two circles were found to share a routing id; both circles' sends are held");
         Ok(())
     }
 
-    /// Finalizes an admin relay update: confirms the pending commit, then
-    /// re-syncs the admin's own `circle.relays` from the engine.
+    /// The circle routed by `routing_id`: the one whose routing id it is, or
+    /// one a prior routing of which used it — what an event still addressed
+    /// to a rotated circle's prior `#h` is for.
     ///
     /// # Errors
     ///
-    /// Returns an error if the confirm fails. A confirm success followed by a
-    /// transient re-sync failure is logged (not returned) — the commit is
-    /// already applied and the re-sync self-heals idempotently.
-    pub async fn finalize_relay_update(
-        &self,
-        pending: PendingStateRef,
-        mls_group_id: &GroupId,
-    ) -> Result<DecryptedIngest> {
-        let ingest = self.confirm_published(pending).await?;
-        if let Err(e) = self.resync_circle_relays_from_mdk(mls_group_id).await {
-            log::warn!(
-                "finalize_relay_update: relay re-sync failed (will self-heal): {}",
-                e.code()
-            );
-        }
-        Ok(ingest)
+    /// Returns the store's error.
+    pub(crate) fn circle_routed_by(&self, routing_id: &[u8; 32]) -> Result<Option<Circle>> {
+        let found = match self.storage.circles_named_by(routing_id)?.as_slice() {
+            [] => self.storage.circle_with_prior_routing_id(routing_id)?,
+            [one] => self.storage.get_circle(one)?,
+            // Two rows name the id — a Welcome named one this device already
+            // held: neither circle is told what the other's traffic or writes
+            // said.
+            _ => None,
+        };
+        // A circle held for a routing collision is routed by nothing: MDK may
+        // give its id's traffic to the other circle, which would then be
+        // published to this one's relays or mark it caught up.
+        Ok(found.filter(|circle| !self.session.routing_collided(&circle.mls_group_id)))
     }
 
-    /// Step 2 of admin handoff (or the sole step on the `AdminDemote` path):
-    /// drop the caller from the admin set via an
-    /// `UpdateAppComponents(admin-policy.v1)` commit.
+    /// Resolves once a circle's row has moved to new relays since the last
+    /// time it resolved, whichever plane applied the change: one wake held
+    /// for a waiter not yet waiting, never a queue of them.
+    pub(crate) async fn routing_moved(&self) {
+        self.routing_moved.notified().await;
+    }
+
+    /// Where `mls_group_id`'s traffic of an epoch that can still be fetched
+    /// was sent: `current`, its relays now, and the relays of every prior
+    /// routing an epoch inside the retained-history windows used
+    /// (`app-components/nostr-routing-v1.md` 56-62), each held to the one
+    /// relay policy. A store that cannot say gives `current` alone.
+    pub async fn routing_addresses(
+        &self,
+        mls_group_id: &GroupId,
+        current: &[String],
+    ) -> Vec<String> {
+        let mut addresses = current.to_vec();
+        for (_, relays) in self.prior_routings(mls_group_id, None).await {
+            addresses.extend(relays);
+        }
+        addresses.sort();
+        addresses.dedup();
+        addresses
+    }
+
+    /// Each routing id `mls_group_id` is listened for at now (`now`,
+    /// seconds), with the relays it is listened at: `routing_id`, its id now,
+    /// at `current` first; then each id a prior routing used, at the relays
+    /// it was used with — a prior relay set of the same id joins
+    /// `routing_id`'s — for a day from that routing's own write (a clock
+    /// reading earlier than the write reads as the day over) and while an
+    /// epoch inside the window still used it (decision 237). A routing left
+    /// keeps no standing REQ for longer, though its traffic is still fetched
+    /// there by id ([`Self::routing_addresses`]); and an id is asked for only
+    /// where it was sent, so a relay that never carried a rotated circle's
+    /// new id is not told it.
+    pub async fn standing_routings(
+        &self,
+        mls_group_id: &GroupId,
+        routing_id: [u8; 32],
+        current: &[String],
+        now: i64,
+    ) -> Vec<([u8; 32], Vec<String>)> {
+        self.routings(
+            mls_group_id,
+            routing_id,
+            current,
+            Some((now.saturating_sub(PRIOR_ROUTING_STANDS_SECS), now)),
+        )
+        .await
+    }
+
+    /// [`Self::standing_routings`] without the day: each routing id the
+    /// circle's traffic of an epoch that can still be fetched was sent under,
+    /// with the relays it was sent to — what a refetch of a range of its
+    /// history asks, one id at its own relays at a time.
+    pub async fn kept_routings(
+        &self,
+        mls_group_id: &GroupId,
+        routing_id: [u8; 32],
+        current: &[String],
+    ) -> Vec<([u8; 32], Vec<String>)> {
+        self.routings(mls_group_id, routing_id, current, None).await
+    }
+
+    async fn routings(
+        &self,
+        mls_group_id: &GroupId,
+        routing_id: [u8; 32],
+        current: &[String],
+        written_since: Option<(i64, i64)>,
+    ) -> Vec<([u8; 32], Vec<String>)> {
+        let mut routings = vec![(routing_id, current.to_vec())];
+        for (id, relays) in self.prior_routings(mls_group_id, written_since).await {
+            match routings.iter_mut().find(|(seen, _)| *seen == id) {
+                Some((_, kept)) => kept.extend(relays),
+                None => routings.push((id, relays)),
+            }
+        }
+        for (_, relays) in &mut routings {
+            relays.sort();
+            relays.dedup();
+        }
+        routings
+    }
+
+    /// The first second, after `now`, at which a prior routing that stands
+    /// now no longer does: where the session's follow wakes by itself, so a
+    /// day is a day and not "until the next follow". `None` when none
+    /// stands, or the store cannot say.
+    pub(crate) fn next_prior_routing_end(&self, now: i64) -> Option<i64> {
+        self.storage
+            .earliest_prior_routing_written(now.saturating_sub(PRIOR_ROUTING_STANDS_SECS), now)
+            .ok()
+            .flatten()
+            .map(|written| written.saturating_add(PRIOR_ROUTING_STANDS_SECS + 1))
+    }
+
+    /// Wakes the session's follow as a routing move would, with no row
+    /// moved: after the app changes what the session lists, and when a
+    /// circle is left.
+    pub(crate) fn wake_routing_follow(&self) {
+        self.routing_moved.notify_one();
+    }
+
+    /// Keeps a circle row routed by `nostr_group_id` with no engine group
+    /// behind it: what a test of a store keyed by routing id writes under.
     ///
-    /// The engine forbids an admin-less group, so this fails closed when the
-    /// caller is the only admin — a sole admin must promote a successor first
-    /// (that is exactly what [`LeavePlan::AdminHandoff`] sequences). Failing
-    /// here rather than emitting an empty policy is what keeps a circle from
-    /// being bricked into a state where nobody can add, remove, or re-key.
+    /// # Panics
     ///
-    /// Publish-before-apply (Rule 13): publish [`CommitToPublish::commit_event`],
-    /// then [`Self::confirm_published`] on ≥1-relay ack or [`Self::publish_failed`]
-    /// on failure.
-    ///
-    /// [`LeavePlan::AdminHandoff`]: super::leave::LeavePlan::AdminHandoff
+    /// When the store refuses the row: a test's setup.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn keep_circle_row_for_test(&self, nostr_group_id: [u8; 32]) {
+        self.storage
+            .save_circle(&Circle {
+                mls_group_id: GroupId::from_slice(&nostr_group_id),
+                nostr_group_id,
+                display_name: "Test".to_string(),
+                circle_type: CircleType::LocationSharing,
+                relays: Vec::new(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .expect("the row is kept");
+    }
+
+    /// Makes the next follow a persist would make not happen, as a process
+    /// killed between the engine's commit and Haven's persist would leave it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn skip_next_follow_for_test(&self) {
+        self.skip_next_follow
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// [`Self::wake_routing_follow`], for a test that dated a routing.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn wake_routing_follow_for_test(&self) {
+        self.wake_routing_follow();
+    }
+
+    /// A location sealed as a background burst seals one — a plane that
+    /// makes no commit — over a transport that takes no relay, its record
+    /// ended as a completed send ends it: how a test hands one member's fix
+    /// to another.
     ///
     /// # Errors
     ///
-    /// Returns [`CircleError::Mls`] if the caller is not an admin, is the last
-    /// admin (no successor was promoted first), or the engine rejects the commit.
-    pub async fn propose_self_demote(&self, mls_group_id: &GroupId) -> Result<CommitToPublish> {
+    /// The seal's own error; [`CircleError::EngineHeld`] when the location
+    /// was deferred.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn seal_location_for_test(
+        &self,
+        mls_group_id: &GroupId,
+        location: &LocationMessage,
+    ) -> Result<(Event, [u8; 32], Vec<String>)> {
+        use crate::relay::fanout::{scripted::Inert, LocationSeal, Publishing, WallClock};
+        let publishing: Publishing<'_, Inert> = Publishing {
+            fanout: &Inert,
+            publisher: &Inert,
+            clock: &WallClock,
+            deadline_ms: None,
+            mode: &DriveMode::FinishOnly,
+        };
+        match publishing
+            .seal_location(self, mls_group_id, location)
+            .await?
+            .seal
+        {
+            LocationSeal::Sealed {
+                event,
+                nostr_group_id,
+                relays,
+            } => {
+                let _ = self
+                    .session
+                    .end_location(&MessageId::new(event.id.as_bytes().to_vec()))
+                    .await;
+                Ok((*event, nostr_group_id, relays))
+            }
+            LocationSeal::Deferred(_) => Err(CircleError::EngineHeld),
+        }
+    }
+
+    /// `event` taken in as the app's foreground poll takes one — the full
+    /// mode, so what the engine stages is recorded — over a transport that
+    /// takes no relay: every record stays pending. What the call folded.
+    ///
+    /// # Errors
+    ///
+    /// The ingest's error.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn ingest_staging_for_test(
+        &self,
+        event: &Event,
+    ) -> Result<Vec<LocationMessageResult>> {
+        use crate::relay::fanout::{scripted::Inert, Publishing, WallClock};
+        let publishing: Publishing<'_, Inert> = Publishing {
+            fanout: &Inert,
+            publisher: &Inert,
+            clock: &WallClock,
+            deadline_ms: None,
+            mode: &DriveMode::Full,
+        };
+        Ok(publishing.ingest_for_poll(self, event).await?.replayed)
+    }
+
+    /// [`Self::ingest_staging_for_test`] with every relay accepting, so what
+    /// the ingest staged lands in the same call: what was folded, and each
+    /// event its relays were sent — the commits and proposals it made.
+    ///
+    /// # Errors
+    ///
+    /// The ingest's error.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn ingest_landing_for_test(
+        &self,
+        event: &Event,
+    ) -> Result<(Vec<LocationMessageResult>, Vec<Event>)> {
+        use crate::relay::fanout::{scripted::Accepting, Publishing, WallClock};
+        let accepting = Accepting::default();
+        let publishing = Publishing {
+            fanout: &accepting,
+            publisher: &accepting,
+            clock: &WallClock,
+            deadline_ms: None,
+            mode: &DriveMode::Full,
+        };
+        let replayed = publishing.ingest_for_poll(self, event).await?.replayed;
+        Ok((replayed, accepting.sent()))
+    }
+
+    /// A change made through the fanout driver in the full mode, every relay
+    /// accepting, and landed: the commit its relays were sent — what the
+    /// circle's other members take in — and what was published beside it
+    /// with no record (each invitee's Welcome). How a test makes a change.
+    ///
+    /// # Errors
+    ///
+    /// The change's own error; [`CircleError::EngineHeld`] when it did not
+    /// land.
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn land_for_test<F>(&self, change: F) -> Result<(Event, Vec<Event>)>
+    where
+        F: AsyncFnOnce(
+            &crate::relay::fanout::Publishing<'_, crate::relay::fanout::scripted::Accepting>,
+        ) -> Result<crate::relay::fanout::EvolutionOutcome>,
+    {
+        use crate::relay::fanout::{scripted::Accepting, EvolutionStatus, Publishing, WallClock};
+        let accepting = Accepting::default();
+        let publishing = Publishing {
+            fanout: &accepting,
+            publisher: &accepting,
+            clock: &WallClock,
+            deadline_ms: None,
+            mode: &DriveMode::Full,
+        };
+        let outcome = change(&publishing).await?;
+        match accepting.sent().pop() {
+            Some(commit) if outcome.status == EvolutionStatus::Confirmed => {
+                Ok((commit, accepting.handed()))
+            }
+            _ => Err(CircleError::EngineHeld),
+        }
+    }
+
+    /// Every stored record driven in the full mode, every relay accepting:
+    /// what lands a change a test staged. The events relays were sent.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn land_staged_for_test(&self) -> Vec<Event> {
+        use crate::relay::fanout::{scripted::Accepting, Publishing, WallClock};
+        let accepting = Accepting::default();
+        let _ = Publishing {
+            fanout: &accepting,
+            publisher: &accepting,
+            clock: &WallClock,
+            deadline_ms: None,
+            mode: &DriveMode::Full,
+        }
+        .resume(self)
+        .await;
+        accepting.sent()
+    }
+
+    /// Every stored record driven in the full mode, every relay refusing:
+    /// what undoes a change a test staged.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn refuse_staged_for_test(&self) {
+        use crate::relay::fanout::{scripted::Refusing, Publishing, WallClock};
+        let _ = Publishing {
+            fanout: &Refusing,
+            publisher: &Refusing,
+            clock: &WallClock,
+            deadline_ms: None,
+            mode: &DriveMode::Full,
+        }
+        .resume(self)
+        .await;
+    }
+
+    /// What the user is told first about `mls_group_id`
+    /// (`Publishing::circle_recovery`), read by a caller in the foreground or
+    /// not, as the bridge reads it.
+    ///
+    /// # Errors
+    ///
+    /// As `Publishing::circle_recovery`.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn circle_recovery_for_test(
+        &self,
+        mls_group_id: &GroupId,
+        foreground: bool,
+    ) -> Result<Option<crate::relay::fanout::RecoveryCause>> {
+        use crate::relay::fanout::{scripted::Inert, Publishing, WallClock};
+        let mode = if foreground {
+            DriveMode::Full
+        } else {
+            DriveMode::FinishOnly
+        };
+        let publishing: Publishing<'_, Inert> = Publishing {
+            fanout: &Inert,
+            publisher: &Inert,
+            clock: &WallClock,
+            deadline_ms: None,
+            mode: &mode,
+        };
+        publishing.circle_recovery(self, mls_group_id).await
+    }
+
+    /// [`Self::repair_rotation_for_test`] with every relay refusing.
+    ///
+    /// # Errors
+    ///
+    /// The repair's own error.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn repair_rotation_refused_for_test(
+        &self,
+        mls_group_id: &GroupId,
+        now_secs: u64,
+    ) -> Result<crate::relay::fanout::RepairOutcome> {
+        use crate::relay::fanout::{
+            scripted::{FixedClock, Refusing},
+            Publishing,
+        };
+        Publishing {
+            fanout: &Refusing,
+            publisher: &Refusing,
+            clock: &FixedClock(now_secs.saturating_mul(1_000)),
+            deadline_ms: None,
+            mode: &DriveMode::Full,
+        }
+        .repair_rotation(self, mls_group_id)
+        .await
+    }
+
+    /// The epoch-rotation repair through the fanout driver in the full
+    /// mode at `now_secs`, every relay accepting: what it answered, and the
+    /// commit its relays were sent when it rotated.
+    ///
+    /// # Errors
+    ///
+    /// The repair's own error.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn repair_rotation_for_test(
+        &self,
+        mls_group_id: &GroupId,
+        now_secs: u64,
+    ) -> Result<(crate::relay::fanout::RepairOutcome, Option<Event>)> {
+        use crate::relay::fanout::{
+            scripted::{Accepting, FixedClock},
+            Publishing,
+        };
+        let accepting = Accepting::default();
+        let publishing = Publishing {
+            fanout: &accepting,
+            publisher: &accepting,
+            clock: &FixedClock(now_secs.saturating_mul(1_000)),
+            deadline_ms: None,
+            mode: &DriveMode::Full,
+        };
+        let outcome = publishing.repair_rotation(self, mls_group_id).await?;
+        Ok((outcome, accepting.sent().pop()))
+    }
+
+    /// The product's full resume over a transport on which every relay
+    /// accepts and nothing is stored: what it sent under a record, in order.
+    /// How a test lands what a full drive makes — a joiner's post-join
+    /// self-update among it — without leaving it on any relay.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn resume_accepted_for_test(&self) -> Vec<Event> {
+        use crate::relay::fanout::{scripted::Accepting, Publishing, WallClock};
+        let accepting = Accepting::default();
+        let publishing = Publishing {
+            fanout: &accepting,
+            publisher: &accepting,
+            clock: &WallClock,
+            deadline_ms: None,
+            mode: &DriveMode::Full,
+        };
+        let _ = publishing.resume(self).await;
+        accepting.sent()
+    }
+
+    /// `members` invited ([`Self::land_for_test`]): the commit, and the
+    /// Welcomes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::land_for_test`].
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn add_members_for_test(
+        &self,
+        mls_group_id: &GroupId,
+        members: &[MemberKeyPackage],
+    ) -> Result<(Event, Vec<Event>)> {
+        self.land_for_test(async |publishing| {
+            publishing.add_members(self, mls_group_id, members).await
+        })
+        .await
+    }
+
+    /// `member_pubkeys` removed ([`Self::land_for_test`]): the commit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::land_for_test`].
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn remove_members_for_test(
+        &self,
+        mls_group_id: &GroupId,
+        member_pubkeys: &[String],
+    ) -> Result<Event> {
+        self.land_for_test(async |publishing| {
+            publishing
+                .remove_members(self, mls_group_id, member_pubkeys)
+                .await
+        })
+        .await
+        .map(|(commit, _)| commit)
+    }
+
+    /// The relay list replaced, under its record, and landed on every relay
+    /// accepting: the commit. A commit is made even for the list the circle
+    /// already has — what a test that moves an epoch needs; the driver's own
+    /// entry answers that list `AlreadySo`.
+    ///
+    /// # Errors
+    ///
+    /// The staging's own error; [`CircleError::EngineHeld`] when no record
+    /// was written or the commit did not land.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn update_relays_for_test(
+        &self,
+        mls_group_id: &GroupId,
+        relays: &[String],
+    ) -> Result<Event> {
+        let canonical = self.new_circle_relays(relays)?;
+        let canonical_relays = canonical.clone();
+        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        let staged = self
+            .session
+            .update_relays_staging(mls_group_id, canonical, now_ms)
+            .await
+            .map_err(CircleError::from_session)?;
+        let [id] = staged.fanouts.as_slice() else {
+            return Err(CircleError::EngineHeld);
+        };
+        let commit = self
+            .session
+            .fanout_probe_for_test(id)
+            .await
+            .map_err(CircleError::from_session)?
+            .ok_or(CircleError::EngineHeld)?;
+        let commit = <Event as nostr::JsonUtil>::from_json(&commit.payload)
+            .map_err(|_| CircleError::EngineHeld)?;
+        // A live plane beside the test may hold the record when this drive
+        // reaches it (`FanoutStatus::Busy`), or answer it first: the record
+        // is driven again once that plane lets go, and landed by whichever
+        // drive's answer applied the change — never two drives at once
+        // (Security Rule 13).
+        for _ in 0..8 {
+            if self
+                .land_staged_for_test()
+                .await
+                .iter()
+                .any(|sent| sent.id == commit.id)
+            {
+                return Ok(commit);
+            }
+            if self
+                .session
+                .fanout_probe_for_test(id)
+                .await
+                .map_err(CircleError::from_session)?
+                .is_none()
+            {
+                let applied = self
+                    .get_circle(mls_group_id)
+                    .await?
+                    .is_some_and(|circle| circle.circle.relays == canonical_relays);
+                return if applied {
+                    Ok(commit)
+                } else {
+                    Err(CircleError::EngineHeld)
+                };
+            }
+            crate::relay::fanout::fanout_row_let_go_for_test(id).await;
+        }
+        Err(CircleError::EngineHeld)
+    }
+
+    /// `successor` made an admin ([`Self::land_for_test`]): the commit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::land_for_test`].
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn admin_handoff_for_test(
+        &self,
+        mls_group_id: &GroupId,
+        successor: &PublicKey,
+    ) -> Result<Event> {
+        self.land_for_test(async |publishing| {
+            publishing
+                .admin_handoff(self, mls_group_id, successor)
+                .await
+        })
+        .await
+        .map(|(commit, _)| commit)
+    }
+
+    /// The caller dropped from the admins ([`Self::land_for_test`]): the
+    /// commit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::land_for_test`].
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn self_demote_for_test(&self, mls_group_id: &GroupId) -> Result<Event> {
+        self.land_for_test(async |publishing| publishing.self_demote(self, mls_group_id).await)
+            .await
+            .map(|(commit, _)| commit)
+    }
+
+    /// `event` taken in as the app's poll takes one in a plane that makes no
+    /// commit, over a transport that takes no relay: what the call folded.
+    ///
+    /// # Errors
+    ///
+    /// The ingest's error.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn ingest_for_test(&self, event: &Event) -> Result<Vec<LocationMessageResult>> {
+        use crate::relay::fanout::{scripted::Inert, Publishing, WallClock};
+        let publishing: Publishing<'_, Inert> = Publishing {
+            fanout: &Inert,
+            publisher: &Inert,
+            clock: &WallClock,
+            deadline_ms: None,
+            mode: &DriveMode::FinishOnly,
+        };
+        Ok(publishing.ingest_for_poll(self, event).await?.replayed)
+    }
+
+    /// Every routing id `mls_group_id` has used that a prior routing it keeps
+    /// names, beside the one it has now, standing or not: what a listing of
+    /// the circle can hold.
+    pub(crate) fn routing_ids_of(&self, mls_group_id: &GroupId) -> Vec<[u8; 32]> {
+        let mut ids: Vec<[u8; 32]> = self.nostr_group_id_for(mls_group_id).into_iter().collect();
+        if let Ok(prior) = self.storage.prior_routings(mls_group_id, 0, None) {
+            for (id, _) in prior {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
+    }
+
+    async fn prior_routings(
+        &self,
+        mls_group_id: &GroupId,
+        written_since: Option<(i64, i64)>,
+    ) -> Vec<([u8; 32], Vec<String>)> {
+        let Ok(epoch) = self.session.epoch(mls_group_id).await else {
+            return Vec::new();
+        };
+        match self.storage.prior_routings(
+            mls_group_id,
+            epoch.saturating_sub(routing_retained_epochs()),
+            written_since,
+        ) {
+            Ok(prior) => prior
+                .into_iter()
+                .map(|(id, relays)| (id, usable_relays(relays)))
+                .collect(),
+            Err(e) => {
+                log::warn!("a circle's prior routing was not read: {}", e.code());
+                Vec::new()
+            }
+        }
+    }
+
+    /// Moves the instant every prior routing of `mls_group_id` was written
+    /// to `written_at` (seconds): how a test ages a routing change, or plants
+    /// one written after a clock that has since been set back.
+    ///
+    /// # Panics
+    ///
+    /// When the store's lock is poisoned or the write fails: a test's setup.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn date_prior_routing_for_test(&self, mls_group_id: &GroupId, written_at: i64) {
+        self.storage
+            .conn()
+            .lock()
+            .expect("the store's lock")
+            .execute(
+                "UPDATE routing_history SET written_at = ?2 WHERE mls_group_id = ?1",
+                rusqlite::params![mls_group_id.as_slice(), written_at],
+            )
+            .expect("the routing history is dated");
+    }
+
+    /// The group's current admin set without this device, refused when that
+    /// would leave it empty.
+    async fn admins_without_self(&self, mls_group_id: &GroupId) -> Result<Vec<[u8; 32]>> {
         let self_id = self.session.self_id().await;
         let admins: Vec<[u8; 32]> = self
             .session
             .admin_pubkeys(mls_group_id)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+            .map_err(CircleError::from_session)?
             .into_iter()
             .filter(|admin| admin.as_slice() != self_id.as_slice())
             .collect();
@@ -1063,69 +2180,34 @@ impl CircleManager {
                 "cannot demote the last admin — promote a successor first".to_string(),
             ));
         }
-        let effects = self
-            .session
-            .update_admin_policy(mls_group_id, &admins)
+        Ok(admins)
+    }
+
+    /// [`Self::propose_self_demote`] in staging mode.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::propose_self_demote`].
+    pub(crate) async fn propose_self_demote_staging(
+        &self,
+        mls_group_id: &GroupId,
+        now_ms: u64,
+        still: Still<'_>,
+    ) -> Result<StagedChange> {
+        let admins = self.admins_without_self(mls_group_id).await?;
+        self.admin_change(mls_group_id, &admins, now_ms, still)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        let (commit_event, _welcomes, pending) = self.take_group_evolution(effects).await?;
-        Ok(CommitToPublish {
-            commit_event,
-            pending,
-        })
     }
 
     // ==================== Epoch-rotation repair (C4) ========================
 
-    /// Repairs a circle whose sender ratchets are exhausted, by committing a
-    /// byte-identical `UpdateAppComponents(admin-policy.v1)`.
-    ///
-    /// This is a **ratchet reset**, not key rotation: applying the commit
-    /// derives a fresh `encryption_secret`, so every sender ratchet in the group
-    /// restarts at generation 0 and a peer whose messages had run past
-    /// `maximum_forward_distance` becomes decryptable again. The commit carries
-    /// no `UpdatePath`, so it rotates no leaf key and provides **no**
-    /// post-compromise security — see [`crate::circle::rotation`].
-    ///
-    /// Repair-TRIGGERED, never periodic: the caller is the user's "Repair"
-    /// action (or the automatic repair behind it), and every gate in
-    /// [`rotation_decision`] must be open. `now_secs` is the wall clock in Unix
-    /// seconds, injected so the gates are testable without sleeping.
-    ///
-    /// # Honest limit
-    ///
-    /// It repairs the ADMIN-stuck case only. A stuck non-admin cannot author any
-    /// commit (every commit-producing `SendIntent` is admin-gated) and there is
-    /// no "please rekey" message in the protocol, so its remedy is to ask the
-    /// circle's owner to remove and re-add it — until MDK exposes a bare
-    /// self-update intent (`docs/EPOCH_ROTATION_REPAIR_PLAN.md` §6).
-    ///
-    /// # Publish-before-apply (Rule 13)
-    ///
-    /// On [`RepairRotationOutcome::Rotated`] the caller publishes
-    /// [`CommitToPublish::commit_event`] to the circle's relays, then calls
-    /// [`Self::confirm_published`] on a ≥1-relay OK-ack or
-    /// [`Self::publish_failed`] on failure. Nothing is confirmed here. The
-    /// 24-hour rate limit is recorded by [`Self::confirm_published`] itself, so
-    /// a repair no relay accepted costs the user nothing and can be retried at
-    /// once.
-    ///
-    /// On [`RepairRotationOutcome::Deferred`] the caller runs that SAME ladder
-    /// over every [`DeferredWork::commits`] entry: the engine staged that work
-    /// during the repair, and leaving it unresolved pins the group in
-    /// `PendingPublish`, where every later send fails.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CircleError::NotFound`] if no circle row matches, or
-    /// [`CircleError::Mls`] if the engine or the message store cannot be read,
-    /// or rejects the commit for a reason other than a non-`Stable` epoch state
-    /// (which is a [`SkipReason::EpochNotStable`] skip, not a failure).
-    pub async fn repair_epoch_rotation(
+    /// Every gate [`Self::repair_epoch_rotation_staging`] reads before it asks
+    /// the engine for the self-update.
+    async fn rotation_preflight(
         &self,
         mls_group_id: &GroupId,
         now_secs: u64,
-    ) -> Result<RepairRotationOutcome> {
+    ) -> Result<RotationPreflight> {
         // Storage errors reach the FFI boundary as prose, and a rusqlite message
         // can quote the failing statement — which on these two tables carries
         // the circle's `nostr_group_id` as hex. Every other fallible call in
@@ -1136,12 +2218,6 @@ impl CircleManager {
             .map_err(|e| redact_storage_error(&e))?
             .ok_or_else(|| CircleError::NotFound("Circle not found: <redacted>".to_string()))?;
 
-        let self_id = self.session.self_id().await;
-        let admins = self
-            .session
-            .admin_pubkeys(mls_group_id)
-            .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
         let rotation_state = self
             .storage
             .circle_rotation_state(&circle.nostr_group_id)
@@ -1163,13 +2239,14 @@ impl CircleManager {
         };
 
         let decision = rotation_decision(&RotationInputs {
-            self_id: self_id.as_slice(),
-            admins: &admins,
-            // The only non-`Stable` state this device can observe BEFORE
-            // attempting the send; `PendingPublish` / `Merging` / `Recovering`
-            // have no getter at MDK `e391adc` and arrive as the typed rejection
-            // below instead.
-            group_is_unrecoverable: self.unrecoverable_group_ids().contains(mls_group_id),
+            // The transient non-`Stable` states are refused by the send itself,
+            // read under its own session lock, and arrive as the typed
+            // rejection below.
+            group_is_unrecoverable: self
+                .session
+                .unrecoverable(mls_group_id)
+                .await
+                .unwrap_or(true),
             last_epoch_change_at: secs_from_ms(rotation_state.last_epoch_change_seen_at_ms),
             last_rotation_at: secs_from_ms(rotation_state.last_rotation_at_ms),
             last_inbound_event_at: secs_from_ms(rotation_state.last_inbound_event_at_ms),
@@ -1177,7 +2254,7 @@ impl CircleManager {
             now: now_secs,
         });
         if let RotationDecision::Skip(reason) = decision {
-            return Ok(RepairRotationOutcome::Skipped(reason));
+            return Ok(RotationPreflight::Skip(reason));
         }
 
         // The send gate, checked BEFORE the intent exists. `do_send` does not
@@ -1188,166 +2265,135 @@ impl CircleManager {
         // circle would bank another epoch bump, all landing in a burst the
         // moment the circle unblocks. Asking the gate first means the intent is
         // never issued at all.
-        if self.gating_input_count(mls_group_id).await > 0 {
-            let report = self
-                .repair_deferred_send(mls_group_id, Vec::new(), now_secs)
-                .await;
-            return Ok(RepairRotationOutcome::Deferred {
-                unresolved_inputs: report.unresolved_inputs,
-                discarded_intents: report.discarded_intents,
-                repaired: report.repaired,
-                work: report.work,
-            });
+        if self.session.send_gated(mls_group_id).await {
+            return Ok(RotationPreflight::Gated);
         }
-
-        // Byte-identical: the admin set the engine just reported, re-encoded.
-        // `admin_changes(before, after)` therefore yields nothing, so the commit
-        // emits no `GroupStateChange` and no member sees a phantom "admins
-        // changed" row.
-        let effects = match self
-            .session
-            .update_admin_policy(mls_group_id, &admins)
-            .await
-        {
-            Ok(effects) => effects,
-            Err(crate::nostr::NostrError::EpochNotStable) => {
-                return Ok(RepairRotationOutcome::Skipped(SkipReason::EpochNotStable));
-            }
-            Err(crate::nostr::NostrError::EpochUnrecoverable) => {
-                return Ok(RepairRotationOutcome::Skipped(
-                    SkipReason::EpochUnrecoverable,
-                ));
-            }
-            Err(e) => return Err(CircleError::Mls(redact_hex_sequences(&e.to_string()))),
-        };
-
-        // Gate 7, checked BEFORE `take_group_evolution` — which would otherwise
-        // report a queued rotation as "produced no GroupEvolution publish work",
-        // the same opaque error `encrypt_location` used to hand back. The
-        // pre-check above models what it can; this stays as the fail-safe for
-        // what it cannot (a non-`Stable` state the engine reports by queueing,
-        // and `stage_due_self_remove_auto_commit` staging an eviction inside
-        // this very call).
-        if !effects.queued.is_empty() {
-            // The intent is already banked at this point, so it must be taken
-            // back out — see
-            // [`SessionManager::discard_queued_repair_rotation_intents`].
-            let discarded = self
-                .discard_queued_repair_rotation(mls_group_id, &admins)
-                .await;
-            let report = self
-                .repair_deferred_send(mls_group_id, effects.publish, now_secs)
-                .await;
-            log::warn!(
-                "epoch-rotation repair deferred: {} input(s) still gating, \
-                 {} queued rotation(s) taken back, {} staged commit(s) handed back",
-                bucket(report.unresolved_inputs),
-                bucket(discarded),
-                bucket(report.work.commits.len())
-            );
-            return Ok(RepairRotationOutcome::Deferred {
-                unresolved_inputs: report.unresolved_inputs,
-                discarded_intents: report.discarded_intents,
-                repaired: report.repaired,
-                work: report.work,
-            });
-        }
-
-        let (commit_event, pending) = self.take_rotation_commit(effects).await?;
-        self.register_rotation_pending(pending, circle.nostr_group_id);
-        Ok(RepairRotationOutcome::Rotated(CommitToPublish {
-            commit_event,
-            pending,
-        }))
+        Ok(RotationPreflight::Go {
+            nostr_group_id: circle.nostr_group_id,
+        })
     }
 
-    /// Extracts the staged rotation commit, rolling the engine's staged state
-    /// back if the transport message cannot be turned into an event.
-    ///
-    /// A staged commit whose message will not serialize must be rolled back,
-    /// never dropped: an unresolved `PendingStateRef` pins the group in
-    /// `PendingPublish`, where every later send fails the engine's "requires
-    /// Stable" gate — a total, permanent send blackout bought for a
-    /// serialization error. Same disposition [`Self::collect_deferred_work`]
-    /// uses on the same failure.
+    /// The epoch-rotation repair in staging mode: a self-update of this
+    /// device's leaf ([`SessionManager::repair_self_update_staging`]), staged
+    /// under its durable fanout; its 24-hour rate limit is spent when the
+    /// fanout driver's confirm applies it, in this session
+    /// ([`Self::confirm_fanout`]). Any member may make it.
     ///
     /// # Errors
     ///
-    /// Returns whatever [`take_group_evolution`] rejected, after the rollback.
-    async fn take_rotation_commit(
-        &self,
-        effects: SessionEffects,
-    ) -> Result<(Event, PendingStateRef)> {
-        // Read the pending ref BEFORE `take_group_evolution` consumes the
-        // effects, so a failure inside it still has something to roll back.
-        let staged_pending = effects.publish.iter().find_map(|work| match work {
-            PublishWork::GroupEvolution { pending, .. } => Some(*pending),
-            _ => None,
-        });
-        match self.take_group_evolution(effects).await {
-            Ok((commit_event, _welcomes, pending)) => Ok((commit_event, pending)),
-            Err(e) => {
-                if let Some(pending) = staged_pending {
-                    // Discarded like the create rollback above: the rotation was
-                    // staged in the call that just failed, and this function's
-                    // contract is an error, not an ingest.
-                    let _ = self.publish_failed(pending).await;
-                }
-                Err(e)
-            }
-        }
-    }
-
-    /// Takes a queued repair rotation back out of the engine's outbound queue,
-    /// or `0` if the store cannot be written.
-    ///
-    /// Best-effort for the same reason every other step of a deferral is: the
-    /// outcome must stay an actionable "sharing is stalled" signal. A discard
-    /// that fails leaves ONE banked rotation, which the next drain turns into a
-    /// single extra epoch bump — noisy, but not a burst, and the log line says
-    /// so.
-    async fn discard_queued_repair_rotation(
+    /// A redacted storage or engine error; nothing was staged.
+    pub(crate) async fn repair_epoch_rotation_staging(
         &self,
         mls_group_id: &GroupId,
-        current_admins: &[[u8; 32]],
-    ) -> usize {
-        self.session
-            .discard_queued_repair_rotation_intents(mls_group_id, current_admins)
+        now_secs: u64,
+        now_ms: u64,
+        still: Still<'_>,
+    ) -> Result<StagedRepair> {
+        let nostr_group_id = match self.rotation_preflight(mls_group_id, now_secs).await? {
+            RotationPreflight::Skip(reason) => return Ok(StagedRepair::Skipped(reason)),
+            RotationPreflight::Gated => {
+                let (handed_back, recorded) = self
+                    .repair_deferred_send_staging(mls_group_id, now_secs, now_ms, still)
+                    .await;
+                return Ok(StagedRepair::Deferred {
+                    recorded,
+                    handed_back,
+                });
+            }
+            RotationPreflight::Go { nostr_group_id } => nostr_group_id,
+        };
+        let staged = match self
+            .session
+            .repair_self_update_staging(mls_group_id, now_ms, still)
             .await
-            .unwrap_or_else(|e| {
-                log::warn!(
-                    "epoch-rotation repair: taking the queued rotation back failed; one \
-                     extra epoch bump may land when the circle unblocks: {}",
-                    e.code()
-                );
-                0
-            })
+        {
+            Ok(staged) => staged,
+            Err(crate::nostr::NostrError::EpochNotStable) => {
+                return Ok(StagedRepair::Skipped(SkipReason::EpochNotStable));
+            }
+            Err(crate::nostr::NostrError::EpochUnrecoverable) => {
+                return Ok(StagedRepair::Skipped(SkipReason::EpochUnrecoverable));
+            }
+            Err(e) => return Err(CircleError::from_session(e)),
+        };
+        // Gate 7: the engine queued the self-update instead of staging it,
+        // and the hold that queued it retired it. What the hold left besides
+        // is folded as a staging hold's batch is: a commit still in it stays
+        // staged and unsent ([`Self::staged_change`]), and the deferral is
+        // repaired.
+        if staged
+            .effects
+            .queued
+            .iter()
+            .any(|queued| &queued.group_id == mls_group_id)
+        {
+            let staged_here = staged.fanouts.iter().any(|id| id.group() == mls_group_id);
+            let mut recorded = staged.fanouts;
+            recorded.extend(staged.proposals);
+            let (mut handed_back, more) =
+                self.fold_staged(staged.effects, false, now_ms, still).await;
+            recorded.extend(more);
+            // A commit this hold recorded in the circle is what queued the
+            // self-update: nothing is stuck, and there is nothing to repair.
+            if !staged_here {
+                let (repaired, more) = self
+                    .repair_deferred_send_staging(mls_group_id, now_secs, now_ms, still)
+                    .await;
+                handed_back.results.extend(repaired.results);
+                handed_back.proposals.extend(repaired.proposals);
+                recorded.extend(more);
+            }
+            return Ok(StagedRepair::Deferred {
+                recorded,
+                handed_back,
+            });
+        }
+        let change = self.staged_change(mls_group_id, staged).await?;
+        if let Some(commit) = &change.commit {
+            self.rotation_fanouts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(commit.message().clone(), nostr_group_id);
+        }
+        Ok(StagedRepair::Rotated(change))
     }
 
-    /// Binds a staged repair rotation to the circle whose rate limit it spends,
-    /// so [`Self::confirm_published`] can record it without the caller having to
-    /// remember to.
-    ///
-    /// Folded into the confirm rather than exposed as a separate
-    /// `note_rotation_confirmed` FFI call for a safety reason, not a size one: a
-    /// caller that forgot the extra call would leave the circle with no rate
-    /// limit at all, and the failure would be silent. The map is in memory
-    /// because the binding only has to outlive the publish attempt — a process
-    /// death before the confirm leaves the commit unapplied, which is exactly
-    /// the state a missing rate-limit record describes.
-    fn register_rotation_pending(&self, pending: PendingStateRef, nostr_group_id: [u8; 32]) {
-        self.rotation_pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(pending, nostr_group_id);
-    }
-
-    /// Removes and returns the circle bound to `pending` in the rotation map.
-    fn take_rotation_pending(&self, pending: PendingStateRef) -> Option<[u8; 32]> {
-        self.rotation_pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&pending)
+    /// The post-join self-update MDK's obligation owes for `mls_group_id`
+    /// ([`SessionManager::post_join_self_update_staging`]), with none of the
+    /// repair's gates and no rate limit charged: the caller has read the
+    /// circle due ([`SessionManager::post_join_due`]). Made only by a full
+    /// drive (`Publishing::resume`).
+    pub(crate) async fn post_join_self_update_staging(
+        &self,
+        mls_group_id: &GroupId,
+        now_ms: u64,
+        still: Still<'_>,
+    ) -> StagedPostJoin {
+        // Not stable, terminal or failed: the obligation stays open, and a
+        // later drive makes it.
+        let Ok(staged) = self
+            .session
+            .post_join_self_update_staging(mls_group_id, now_ms, still)
+            .await
+        else {
+            return StagedPostJoin::NotMade(Vec::new(), DecryptedIngest::default());
+        };
+        if staged
+            .effects
+            .queued
+            .iter()
+            .any(|queued| &queued.group_id == mls_group_id)
+        {
+            let mut recorded = staged.fanouts;
+            recorded.extend(staged.proposals);
+            let (handed_back, more) = self.fold_staged(staged.effects, false, now_ms, still).await;
+            recorded.extend(more);
+            return StagedPostJoin::NotMade(recorded, handed_back);
+        }
+        self.staged_change(mls_group_id, staged).await.map_or_else(
+            |_| StagedPostJoin::NotMade(Vec::new(), DecryptedIngest::default()),
+            StagedPostJoin::Made,
+        )
     }
 
     /// Final step of every non-abandoning leave: returns a `SelfRemove` proposal
@@ -1355,46 +2401,186 @@ impl CircleManager {
     ///
     /// A bare proposal has no `PendingStateRef` — a remaining member commits it
     /// later (RFC 9420 §12.1.2). The caller publishes the returned event, then
-    /// calls [`Self::complete_leave`]; there is nothing to confirm.
+    /// calls [`Self::complete_leave`]; there is nothing to confirm. `None` when
+    /// this epoch's proposal already exists: the leave stands, nothing new is
+    /// published, and the caller proceeds exactly as after a publish.
+    ///
+    /// The leave intent is written FIRST, before the engine is asked for
+    /// anything: from that instant no location of the circle is sealed or
+    /// sent, on any plane ([`CircleError::LeaveInProgress`]). It ends with the
+    /// circle, or when the engine refuses the leave for good.
     ///
     /// # Errors
     ///
-    /// Returns an error if the engine rejects the leave (e.g. the caller is
-    /// still an admin — `AdminCannotSelfRemove`).
-    pub async fn propose_leave(&self, mls_group_id: &GroupId) -> Result<Event> {
-        // Through the boundary conversion, not a flattening closure: it is what
-        // keeps `AdminSelfDemoteRequired` a typed variant, so the caller sees the
-        // self-demote remediation on `Display` instead of a bare "MLS error".
-        let effects = self
-            .session
-            .leave_group(mls_group_id)
-            .await
-            .map_err(CircleError::from)?;
-        let event = self.take_proposal(effects).await?;
-        // Recorded only once the engine has accepted the departure, and durably,
-        // because a peer may commit this `SelfRemove` before the local teardown
-        // runs — possibly in another process. From that commit onward the
-        // engine's `Group.removed` says only "you are out", never "who decided",
-        // so this marker is the whole difference between ageing this circle's
-        // co-members out over three days (R5) and deleting them as if someone
-        // had cut the user off (D3). Best-effort: a leave must not fail because
-        // the picker's index could not be annotated.
-        if let Err(e) = self.storage.mark_leave_intent(mls_group_id) {
-            log::warn!(
-                "leave-intent marker not recorded; this circle's co-members may be \
-                 dropped from the directory instead of ageing out: {}",
-                e.code()
-            );
+    /// Returns the store's error when the intent cannot be written — nothing
+    /// was asked of the engine — and an error if the engine rejects the
+    /// leave: [`CircleError::AdminSelfDemoteRequired`] and
+    /// [`CircleError::NotFound`] end the intent; any other leaves it
+    /// standing.
+    pub async fn propose_leave(&self, mls_group_id: &GroupId) -> Result<Option<Event>> {
+        self.storage
+            .mark_leave_intent(mls_group_id, i64::try_from(now_secs()).unwrap_or(i64::MAX))?;
+        let effects = match self.session.leave_group(mls_group_id).await {
+            Ok(effects) => effects,
+            Err(e) => return Err(self.refused_leave(mls_group_id, e)),
+        };
+        match effects {
+            // Queued behind what the engine staged first: the leave stands,
+            // and the engine's drain mints its proposal later.
+            Some(effects)
+                if effects
+                    .queued
+                    .iter()
+                    .any(|queued| &queued.group_id == mls_group_id) =>
+            {
+                self.note_send_drain(&effects.events).await;
+                Ok(None)
+            }
+            Some(effects) => Ok(Some(self.take_proposal(effects).await?)),
+            None => Ok(None),
         }
-        Ok(event)
     }
 
-    /// Finalizes a leave by removing the local circle row.
+    /// When this device asked to leave `mls_group_id`, unix seconds on the
+    /// clock that asked ([`CircleStorage::mark_leave_intent`]).
     ///
-    /// The Dark Matter engine has no per-group delete: leaving is a `SelfRemove`
-    /// (via [`Self::propose_leave`]) after which the engine marks its local copy
-    /// `removed` (retained inactive, spec `member-departure.md`). Haven removes
-    /// its own circle row here. Safe for the `OrphanLocalOnly` plan.
+    /// # Errors
+    ///
+    /// Returns the store's error.
+    pub fn leave_intent_at(&self, mls_group_id: &GroupId) -> Result<Option<i64>> {
+        self.storage.leave_intent_at(mls_group_id)
+    }
+
+    /// Records that this device asks to leave `mls_group_id` at `at_secs` —
+    /// keeping an earlier instant unless `renewed` — from here no location of
+    /// the circle is sealed or sent.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error; nothing was marked.
+    pub(crate) fn mark_leave_intent(
+        &self,
+        mls_group_id: &GroupId,
+        at_secs: i64,
+        renewed: bool,
+    ) -> Result<()> {
+        if renewed {
+            self.storage.renew_leave_intent(mls_group_id, at_secs)
+        } else {
+            self.storage.mark_leave_intent(mls_group_id, at_secs)
+        }
+    }
+
+    /// The engine's refusal of a leave, at the circle boundary. The two no
+    /// retry changes — an admin who must demote first, a circle the engine
+    /// does not hold — end the intent, and the circle shares again; any
+    /// other leaves it standing, sharing off, for the next attempt.
+    fn refused_leave(&self, mls_group_id: &GroupId, e: crate::nostr::NostrError) -> CircleError {
+        let permanent = matches!(
+            e,
+            crate::nostr::NostrError::AdminSelfDemoteRequired
+                | crate::nostr::NostrError::GroupNotFound(_)
+        );
+        if permanent {
+            if let Err(cleared) = self.storage.clear_leave_intent(mls_group_id) {
+                log::warn!(
+                    "a refused leave's intent was not cleared; the circle stays held: {}",
+                    cleared.code()
+                );
+            }
+        }
+        match e {
+            crate::nostr::NostrError::GroupNotFound(_) => {
+                CircleError::NotFound("Circle not found: <redacted>".to_string())
+            }
+            other => CircleError::from(other),
+        }
+    }
+
+    /// [`Self::propose_leave`]'s engine step in staging mode, for
+    /// [`Publishing::resume_leave`](crate::relay::fanout::Publishing::resume_leave):
+    /// the proposal's durable fanout is written in the hold that minted it,
+    /// with whatever else that hold staged. The intent is the caller's.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::refused_leave`], and [`CircleError::EngineHeld`].
+    pub(crate) async fn propose_leave_staging(
+        &self,
+        mls_group_id: &GroupId,
+        now_ms: u64,
+        still: Still<'_>,
+    ) -> Result<LeaveStep> {
+        let staged = match self
+            .session
+            .leave_group_staging(mls_group_id, now_ms, still)
+            .await
+        {
+            Ok(Some(staged)) => staged,
+            // Proposed only where it is recorded: a proposal the engine holds
+            // that no record stands or stood for was never sent by this device.
+            Ok(None) if self.leave_recorded(mls_group_id).await => {
+                return Ok(LeaveStep::AlreadyProposed)
+            }
+            Ok(None) => return Ok(LeaveStep::Unrecorded(Vec::new())),
+            Err(crate::nostr::NostrError::EpochNotStable) => {
+                return Ok(LeaveStep::AwaitsStable(Vec::new()))
+            }
+            Err(crate::nostr::NostrError::EngineHeld) => return Err(CircleError::EngineHeld),
+            // The driver plans again with the intent kept: the engine's own
+            // preflight may have made this device an admin since its plan.
+            Err(crate::nostr::NostrError::AdminSelfDemoteRequired) => {
+                return Err(CircleError::AdminSelfDemoteRequired)
+            }
+            Err(e) => return Err(self.refused_leave(mls_group_id, e)),
+        };
+        self.note_send_drain(&staged.effects.events).await;
+        let rows = staged.fanouts.into_iter().chain(staged.proposals).collect();
+        if staged
+            .effects
+            .queued
+            .iter()
+            .any(|intent| &intent.group_id == mls_group_id)
+        {
+            return Ok(LeaveStep::AwaitsStable(rows));
+        }
+        if self.leave_recorded(mls_group_id).await {
+            Ok(LeaveStep::Recorded(rows))
+        } else {
+            Ok(LeaveStep::Unrecorded(rows))
+        }
+    }
+
+    /// Whether the leave proposal the engine minted for `mls_group_id` in its
+    /// latest proposing epoch was recorded: a record of that epoch's proposal
+    /// stands and is not spent — and then this is noted
+    /// ([`CircleStorage::mark_leave_recorded`]) — or one did and a relay's
+    /// acknowledgement ended it, as the note says. An earlier epoch's record
+    /// says nothing of this one's, and what cannot be read is no record.
+    async fn leave_recorded(&self, mls_group_id: &GroupId) -> bool {
+        let Some(minted) = self.session.leave_proposed_epoch(mls_group_id) else {
+            return false;
+        };
+        if self
+            .session
+            .proposal_recorded_at(mls_group_id, minted)
+            .await
+        {
+            // Written after the record, so a crash between them understates
+            // the leave and never overstates it; a mark that cannot be
+            // written does the same.
+            let _ = self.storage.mark_leave_recorded(mls_group_id, minted);
+            return true;
+        }
+        self.storage
+            .leave_recorded_epoch(mls_group_id)
+            .is_ok_and(|marked| marked == Some(minted))
+    }
+
+    /// Finalizes a leave: the circle's MLS state is forgotten
+    /// ([`Self::forget_left_group`]), then its local row removed. Safe for the
+    /// `OrphanLocalOnly` plan, and after a process that died between the two:
+    /// a group the engine no longer holds has nothing to forget.
     ///
     /// Reconciles the member directory afterwards, in the ORDINARY (`Rewrite`)
     /// mode. `delete_circle` deliberately does not cascade to the directory, so
@@ -1412,25 +2598,19 @@ impl CircleManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if the circle-row deletion fails. The directory refresh
-    /// is best-effort and never fails the leave.
+    /// Returns an error if the engine refuses the forget or the circle-row
+    /// deletion fails; the row is then kept, and so is the leave's intent,
+    /// which the next attempt carries on. The directory refresh is
+    /// best-effort and never fails the leave.
     pub async fn complete_leave(&self, mls_group_id: &GroupId, now_unix_secs: i64) -> Result<()> {
-        // The in-memory half of an owed removal publish has to go with the row
-        // `delete_circle` cascades away. The `nostr_group_id` is only resolvable
-        // while the circle row still exists, so it is read FIRST; an entry left
-        // behind would pin an `Event` and a dead engine ref to a circle that no
-        // longer exists, and would answer `orphaned_removal_deferrals` for a
-        // durable row that is already gone.
-        let ngid = self
-            .storage
-            .get_circle(mls_group_id)
-            .ok()
-            .flatten()
-            .map(|circle| circle.nostr_group_id);
-        let _existed = self.storage.delete_circle(mls_group_id)?;
-        if let Some(ngid) = ngid {
-            self.forget_removal_deferral_in_memory(&ngid);
-        }
+        let kept = self.forget_left_group(mls_group_id).await?;
+        let _existed = self.storage.delete_left_circle(mls_group_id, kept)?;
+        // Every routing id the circle held is now no one's: the session's
+        // follow stops listening for each.
+        self.wake_routing_follow();
+        // A left circle's locations go unsent; its leave proposals are read
+        // as spent and send nothing (`SessionManager::proposal_is_spent`).
+        self.session.end_location_records(mls_group_id).await;
         self.reconcile_member_directory_at(DirectoryReconcile::Rewrite, now_unix_secs)
             .await;
         Ok(())
@@ -1452,253 +2632,316 @@ impl CircleManager {
         self.complete_leave(mls_group_id, now_unix_secs).await
     }
 
+    /// Forgets the MLS state of `mls_group_id`, whose circle has ended,
+    /// through MDK's `forget_group_local` (Security Rule 5). Kept instead,
+    /// and asked about again ([`Self::forget_left_groups`]), when:
+    ///
+    /// * it was disbanded — the forget would delete the tombstone that keeps
+    ///   it from being joined again (`app-components/group-lifecycle-v1.md`
+    ///   29-32; MDK `storage-sqlite/src/account_projection.rs` 1510-1516);
+    /// * the engine cannot say where it stands;
+    /// * an invitation from one of its members may be held unanswered: the
+    ///   forget makes MDK refuse every Welcome written before it
+    ///   (`cgka-engine/src/group_lifecycle.rs` 1152-1157), so a re-invite
+    ///   made before this device saw its removal could never join. Its old
+    ///   epochs' keys stay on the device until that invitation is answered.
+    ///
+    /// Returns whether the group was kept; a kept group stays on the
+    /// circle store's list of left groups still to forget
+    /// (`CircleStorage::left_groups`), which every later ask reads.
+    ///
+    /// # Errors
+    ///
+    /// The engine's refusal of the forget: nothing was deleted.
+    async fn forget_left_group(&self, mls_group_id: &GroupId) -> Result<bool> {
+        let forgets = match self.session.left_group(mls_group_id).await {
+            LeftGroup::Held(members) => !self.reinvite_may_be_held(&members),
+            LeftGroup::Unread => false,
+            LeftGroup::Gone | LeftGroup::Disbanded => {
+                let _ = self.storage.clear_left_group(mls_group_id);
+                return Ok(false);
+            }
+        };
+        if !forgets {
+            return Ok(true);
+        }
+        self.session
+            .forget_group_local(mls_group_id)
+            .await
+            .map_err(CircleError::from_session)?;
+        let _ = self.storage.clear_left_group(mls_group_id);
+        Ok(false)
+    }
+
+    /// Whether an invitation from one of `members` may be held unanswered.
+    /// Until as many invitations are held again as were held before a
+    /// restart, one not yet polled back counts, and so does a store that
+    /// cannot say.
+    fn reinvite_may_be_held(&self, members: &[MemberId]) -> bool {
+        let held = self.pending_welcomes.previews();
+        if held.is_empty() || !self.held_polled_back(held.len()) {
+            return !matches!(self.storage.held_invitation_outstanding(), Ok(false));
+        }
+        held.iter().any(|(_, preview)| {
+            hex::decode(&preview.inviter_pubkey).map_or(true, |inviter| {
+                members.iter().any(|member| member.as_slice() == inviter)
+            })
+        })
+    }
+
+    /// Asks again about every ended circle whose MLS state was kept
+    /// ([`Self::forget_left_group`]): it is forgotten once nothing keeps it,
+    /// and let go of once its circle has a row again — it was joined anew.
+    /// A forget that fails is asked about again at the next call.
+    pub(crate) async fn forget_left_groups(&self) {
+        let Ok(kept) = self.storage.left_groups() else {
+            return;
+        };
+        for group_id in kept {
+            match self.storage.get_circle(&group_id) {
+                Ok(Some(_)) => {
+                    let _ = self.storage.clear_left_group(&group_id);
+                }
+                Ok(None) => {
+                    let _ = self.forget_left_group(&group_id).await;
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    /// Forgets, as [`Self::forget_left_groups`] does, every group this
+    /// session held at its open that no circle row names and no consented
+    /// join is still owed for: a create, a join or a leave that a process
+    /// died in the middle of left MLS state nothing on the device would ever
+    /// end. A group made after the open is never a candidate, and anything
+    /// that cannot be read keeps the group.
+    async fn sweep_orphaned_groups(&self) {
+        let Some(at_open) = self.session.groups_at_open().map(<[GroupId]>::to_vec) else {
+            return;
+        };
+        let Some(owed) = self.session.owed_joins().await else {
+            return;
+        };
+        for group_id in at_open {
+            if !owed.iter().any(|join| join.group_id == group_id)
+                && matches!(self.storage.get_circle(&group_id), Ok(None))
+            {
+                let _ = self.storage.mark_left_group(&group_id);
+            }
+        }
+        self.forget_left_groups().await;
+    }
+
+    /// Whether as many invitations as were held when this process opened are
+    /// held again (`held` now), latched once they have been.
+    fn held_polled_back(&self, held: usize) -> bool {
+        use std::sync::atomic::Ordering;
+        if held >= self.held_at_open {
+            self.held_polled_back.store(true, Ordering::Release);
+        }
+        self.held_polled_back.load(Ordering::Acquire)
+    }
+
+    /// The count of held invitations to keep durably for `held` now: never
+    /// fewer than were held at the open until those have been polled back,
+    /// so a second restart still knows of them.
+    fn held_to_record(&self, held: usize) -> usize {
+        if self.held_polled_back(held) {
+            held
+        } else {
+            held.max(self.held_at_open)
+        }
+    }
+
     // ==================== Publish-before-apply (Rule 13) ====================
 
-    /// Confirms a staged commit was published (≥1-relay OK-ack) so the engine
-    /// applies it and advances the epoch.
+    /// The fanout driver's confirm: at least one relay acknowledged the
+    /// commit `fanout` holds. Folds what the engine hands back.
     ///
-    /// "Acked" MUST mean a relay returned OK — never merely "sent" — to avoid
-    /// optimistic-merge forks (Rule 13, security F13).
-    ///
-    /// # What it hands back, and why it cannot be `()`
-    ///
-    /// The engine ends `do_confirm_published` in `replay_buffered_messages`,
-    /// which re-ingests everything that arrived while the commit was staged —
-    /// peer locations, peer commits, a re-proposed leave. Every one of those is
-    /// delivered AT MOST ONCE. Locations are persisted before this returns; the
-    /// rest comes back in the [`DecryptedIngest`] for the caller to route and
-    /// publish.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the pending ref is unknown or the engine rejects it.
-    /// The error is returned UNCHANGED even though a batch may have been
-    /// recovered from it: a confirm that failed after the durable merge must
-    /// never be retried and must never be turned into a `publish_failed`.
-    pub async fn confirm_published(&self, pending: PendingStateRef) -> Result<DecryptedIngest> {
-        let result = self
+    /// An error in what it returns is NEVER a reason to roll back: the merge
+    /// may have happened, and the stored row says whether it did.
+    pub(crate) async fn confirm_fanout(
+        &self,
+        fanout: &mut StoredFanout,
+        now_ms: u64,
+        mode: DriveMode,
+        still: Still<'_>,
+    ) -> Option<FanoutResolution> {
+        let settlement = self
             .session
-            .confirm_published(pending)
-            .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())));
-        // A confirmed create KEEPS its eagerly-persisted rows; just drop the
-        // rollback binding so a subsequent stray `publish_failed` can never
-        // delete a now-live circle (F2). A no-op for every non-create pending.
-        // Taken BEFORE the early return: on a rejected confirm the binding is
-        // dead either way, and leaving it in the map keeps a ref nothing will
-        // ever resolve. Bounded and memory-only, but a map that only grows is
-        // not a shape to leave in a long-lived session.
-        let rotation = self.take_rotation_pending(pending);
-        let effects = match result {
-            Ok(effects) => effects,
-            Err(e) => {
-                // The engine aborted mid-replay: `cgka-session` propagates the
-                // `?` BEFORE `collect_effects`, so nothing came back with the
-                // error while everything already emitted sits in the engine's
-                // buffers with its durable row written. Fold that, then return
-                // the ORIGINAL error — the merge may already have happened, so
-                // a retry would apply the commit twice and a `publish_failed`
-                // would discard a commit the group has.
-                let stranded = self.session.drain().await;
-                if !stranded.is_empty() {
-                    // The fold's own products are dropped on purpose: there is
-                    // no caller to hand them to on an error return, and every
-                    // auto-commit it surfaced is already PARKED with its
-                    // obligation recorded, so the next foreground redemption
-                    // pass picks it up. The locations, which cannot be
-                    // re-delivered, are persisted by the fold itself.
-                    let _ = self
-                        .fold_resolved_publish(stranded, BatchOrigin::Drained)
-                        .await;
-                    log::warn!(
-                        "a failed publish resolution stranded engine work; it was folded \
-                         and the failure stands"
-                    );
-                }
-                return Err(e);
-            }
-        };
-        // An APPLIED commit is the obligation discharged. Every plane records a
-        // removal-bearing auto-commit before it publishes, so without this each
-        // peer-leave would leave a durable row behind and the next foreground
-        // open would report a perfectly healthy circle unrecoverable. What
-        // carries the safety is the SCOPE, not the position: matching on the
-        // REF clears this commit's obligation and never the second-generation
-        // one the fold below may record for the same circle (the map holds one
-        // entry per circle, and recording overwrites it). Only on success: a
-        // rejected confirm leaves the commit exactly as staged as it was, and
-        // the obligation with it.
-        self.discharge_owed_removal_publish(pending);
-        let _ = self.take_create_pending(pending);
-        // A repair rotation spends its circle's 24-hour rate limit HERE, not
-        // when it was staged: a commit no relay accepted reset nobody's ratchet,
-        // and charging the user for it would leave a stuck circle unrepairable
-        // for a day.
-        if let Some(nostr_group_id) = rotation {
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            if let Err(e) = self
-                .storage
-                .note_rotation_confirmed(&nostr_group_id, now_ms)
+            .confirm_fanout(fanout, now_ms, mode, still)
+            .await?;
+        // The row says whether the commit was applied, never the call's
+        // result. A repair rotation spends its circle's rate limit here.
+        if fanout.applied() {
+            if let Some(nostr_group_id) =
+                self.take_rotation_fanout(fanout.as_mdk_fanout().message_id())
             {
-                log::warn!(
-                    "epoch-rotation repair: recording the rate limit failed; the circle may \
-                     accept another repair sooner than intended: {}",
-                    e.code()
-                );
-            }
-        }
-        // Confirming is the first moment an announced membership is APPLIED
-        // rather than projected, so it is a directory write site. Read BEFORE
-        // the fold: it carries `note_epoch_changes`, which belongs to the
-        // top-level batch alone.
-        let mode = self.publish_outcome_verdict(&effects.events);
-        let (ingest, drained) = self
-            .fold_resolved_publish(effects, BatchOrigin::TopLevel)
-            .await;
-        // ONE reconcile, after everything the drain could add to the verdict.
-        let mode = drained.map_or(mode, |drained| mode.max(drained));
-        self.reconcile_member_directory_best_effort(mode).await;
-        Ok(ingest)
-    }
-
-    /// Reports that a staged publish failed; the engine discards the staged
-    /// commit and returns the group to `Stable` at the prior epoch.
-    ///
-    /// # The one commit it will NOT discard
-    ///
-    /// A removal-bearing receive-side auto-commit — a peer's `SelfRemove`
-    /// eviction — is never rolled back, from any plane. At MDK `e391adc` that
-    /// rollback is a PERMANENT SILENT DROP of the removal, so the leaver would
-    /// stay in the circle and keep deriving its keys
-    /// ([`Self::owe_removal_publish`] carries the mechanism). Every plane that
-    /// takes one records the obligation first, and this is the ONE place that
-    /// decides what an unacked publish means — so the guarantee covers the
-    /// in-Rust receive planes, the Dart planes that call this over the FFI, and
-    /// a plane written after this comment, instead of resting on three call
-    /// sites agreeing. Such a commit stays STAGED and owed:
-    /// [`Self::redeem_removal_deferrals`] retries it, a successful send
-    /// discharges it ([`Self::discharge_removal_deferral_after_send`]), and a
-    /// session that dies still owing one reports the circle
-    /// ([`Self::orphaned_removal_deferrals`]).
-    ///
-    /// # What it hands back
-    ///
-    /// The same [`DecryptedIngest`] [`Self::confirm_published`] returns, and for
-    /// the same reason: `do_publish_failed` also ends in
-    /// `replay_buffered_messages`. It replays at the ORIGINAL epoch, which is
-    /// what makes this the rung where a peer's buffered `SelfRemove` proposal is
-    /// still applicable and reaches its auto-commit. The kept-owed early return
-    /// above hands back an EMPTY ingest: no engine call was made, so there is
-    /// honestly no batch.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the pending ref is unknown.
-    pub async fn publish_failed(&self, pending: PendingStateRef) -> Result<DecryptedIngest> {
-        if self.keeps_its_removal_publish_owed(pending) {
-            return Ok(DecryptedIngest::default());
-        }
-        let result = self
-            .session
-            .publish_failed(pending)
-            .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())));
-        // F2: a rolled-back create must not strand a ghost circle row. Delete the
-        // eagerly-persisted rows ONLY on a SUCCESSFUL rollback (the engine
-        // actually discarded the staged create); an unknown / already-resolved
-        // pending — e.g. one already confirmed — leaves storage untouched. A
-        // no-op for every non-create pending (auto-commit / evolution).
-        // A rolled-back rotation spent nothing: drop the binding without
-        // recording it, so the user can retry the repair immediately. Taken
-        // before the early return for the same reason as in
-        // `confirm_published` — a rejected rollback leaves the ref just as dead.
-        let _ = self.take_rotation_pending(pending);
-        let effects = match result {
-            Ok(effects) => effects,
-            Err(e) => {
-                // Same stranded-buffer recovery as `confirm_published` — see
-                // there for why the original error is returned unchanged.
-                let stranded = self.session.drain().await;
-                if !stranded.is_empty() {
-                    let _ = self
-                        .fold_resolved_publish(stranded, BatchOrigin::Drained)
-                        .await;
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                if let Err(e) = self
+                    .storage
+                    .note_rotation_confirmed(&nostr_group_id, now_ms)
+                {
                     log::warn!(
-                        "a failed publish resolution stranded engine work; it was folded \
-                         and the failure stands"
+                        "epoch-rotation repair: recording the rate limit failed; the circle may \
+                         accept another repair sooner than intended: {}",
+                        e.code()
                     );
                 }
-                return Err(e);
-            }
-        };
-        if let Some(group_id) = self.take_create_pending(pending) {
-            if let Err(e) = self.storage.delete_circle(&group_id) {
-                log::warn!(
-                    "create rollback: circle-row cleanup failed (self-heals on logout wipe): {}",
-                    e.code()
-                );
             }
         }
-        // Restores anyone [`Self::remove_members`] optimistically deleted for the
-        // commit that was just discarded.
-        let mode = self.publish_outcome_verdict(&effects.events);
-        let (ingest, drained) = self
-            .fold_resolved_publish(effects, BatchOrigin::TopLevel)
-            .await;
-        let mode = drained.map_or(mode, |drained| mode.max(drained));
-        self.reconcile_member_directory_best_effort(mode).await;
-        Ok(ingest)
+        Some(self.settle_fanout(settlement, now_ms, still).await)
     }
 
-    /// Folds a resolved publish's engine batch — and everything draining it
-    /// releases — into the work its caller has to do.
+    /// Removes and returns the circle bound to a repair rotation's fanout.
+    fn take_rotation_fanout(&self, commit: &MessageId) -> Option<[u8; 32]> {
+        self.rotation_fanouts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(commit)
+    }
+
+    /// Finishes a confirm the engine stored and did not complete
+    /// ([`SessionManager::finish_confirmed_fanout`]).
+    pub(crate) async fn finish_confirmed_fanout(
+        &self,
+        pending: PendingStateRef,
+        now_ms: u64,
+        still: Still<'_>,
+    ) -> FanoutResolution {
+        let settlement = self
+            .session
+            .finish_confirmed_fanout(pending, now_ms, still.decided())
+            .await;
+        self.settle_fanout(settlement, now_ms, still).await
+    }
+
+    /// The fanout driver's rollback: every relay proved it did not take the
+    /// commit `fanout` holds and none was ever possibly exposed.
+    pub(crate) async fn roll_back_fanout(
+        &self,
+        fanout: &mut StoredFanout,
+        now_ms: u64,
+        still: Still<'_>,
+    ) -> Option<FanoutResolution> {
+        let settlement = self.session.roll_back_fanout(fanout, now_ms, still).await?;
+        // A rolled-back rotation spent nothing.
+        if fanout.rolled_back() {
+            let _ = self.take_rotation_fanout(fanout.as_mdk_fanout().message_id());
+        }
+        Some(self.settle_fanout(settlement, now_ms, still).await)
+    }
+
+    /// Folds what a fanout resolution handed back.
     ///
-    /// Iterative over an explicit worklist rather than recursive: a recursive
-    /// `async fn` would need boxing, and the generation bound would be a
-    /// call-stack depth rather than a number anyone can read.
+    /// The engine call behind it ran in staging mode, so the batch carries no
+    /// commit: each one already has its row, written in the hold that made
+    /// the call — after a failed call too — and comes back as a handle. So do
+    /// the fold's own advances ([`SessionManager::advance_for_drive`]): the
+    /// next eviction of a cascade, a change the user had queued and a leave
+    /// proposed again are each recorded in the hold that released them, and
+    /// their handles join [`FanoutResolution::staged`] for the same drive.
     ///
-    /// What each pass does, in this order: PERSIST the batch's locations (first,
-    /// because nothing after it may fail before the durable write), fold the
-    /// events into results, record the inbound observation the origin allows
-    /// (R2), accumulate the directory verdict, and dispose of the publish work.
-    /// Then the groups the batch left pending are advanced, and what comes back
-    /// goes on the worklist as a DRAINED batch.
+    /// A failed call's error comes back BESIDE what it left, never instead
+    /// of it: the fold's products and the staged handles are the only way
+    /// their owner learns of them.
     ///
-    /// The re-tick budget is ONE per call — not per batch and not per
-    /// generation — and a batch with nothing pending sleeps not at all. The
-    /// engine's `SelfRemove` auto-commit due time is a real `Instant`, so the
-    /// delay has to be real time; capping it per call is what stops a cascade
-    /// of leaves from multiplying it.
+    /// While a rolled-back commit's own row is still stored as sent, this
+    /// fold persists the batch and advances nothing: a convergence pass
+    /// would merge that commit (T-ROLLBACK-RESURRECT).
     ///
-    /// # Rule 15, for every diagnostic in this function and in the resolve
-    /// ladder it feeds
-    ///
-    /// NEVER add a `log_alias` circle handle to these lines. Each is a
-    /// per-circle ACTIVITY signal the moment one is attached — "circle#a91f3c
-    /// had a peer location replayed" and "circle#a91f3c re-ticked six times"
-    /// say that a peer just moved and that a peer just left, which is exactly
-    /// what a handle is supposed to make unsayable. Magnitudes stay bucketed
-    /// and instants stay absent for the same reason. A later "just add the
-    /// circle for debuggability" is a review stop, not a judgement call.
-    async fn fold_resolved_publish(
+    /// In [`DriveMode::FinishOnly`] the fold's advances are inputs-only
+    /// ([`Disposition::Settle`]): what the confirm replayed is applied and
+    /// stored, and nothing new is made. In the full mode each of them asks
+    /// `still` again with the engine held, and is inputs-only once the mode
+    /// the resolution was decided in has ended.
+    async fn settle_fanout(
+        &self,
+        settlement: FanoutSettlement,
+        now_ms: u64,
+        still: Still<'_>,
+    ) -> FanoutResolution {
+        let FanoutSettlement {
+            staged,
+            error,
+            unretired,
+        } = settlement;
+        let Staged {
+            effects,
+            mut fanouts,
+            proposals,
+            ..
+        } = staged;
+        fanouts.extend(proposals);
+        let disposition = Disposition::recording(now_ms, still);
+        if let Some(e) = error {
+            // Whatever the failed call had already emitted is folded, and the
+            // original error stands.
+            let replayed = if effects.is_empty() {
+                DecryptedIngest::default()
+            } else {
+                let (replayed, _, recorded) = self
+                    .fold_resolved_publish_advancing(
+                        effects,
+                        BatchOrigin::Drained,
+                        !unretired,
+                        disposition,
+                    )
+                    .await;
+                fanouts.extend(recorded);
+                replayed
+            };
+            return FanoutResolution {
+                replayed,
+                staged: fanouts,
+                error: Some(CircleError::from_session(e)),
+            };
+        }
+        let mode = self.publish_outcome_verdict(&effects.events);
+        let (replayed, drained, recorded) = self
+            .fold_resolved_publish_advancing(
+                effects,
+                BatchOrigin::TopLevel,
+                !unretired,
+                disposition,
+            )
+            .await;
+        fanouts.extend(recorded);
+        let mode = drained.map_or(mode, |drained| mode.max(drained));
+        self.reconcile_member_directory_best_effort(mode).await;
+        FanoutResolution {
+            replayed,
+            staged: fanouts,
+            error: None,
+        }
+    }
+
+    /// [`Self::fold_resolved_publish`]; with `advance` off, the batch is
+    /// persisted and disposed of and no group is advanced. `disposition`
+    /// says what becomes of what the fold's own advances release; the
+    /// handles of whatever they recorded come back third.
+    async fn fold_resolved_publish_advancing(
         &self,
         seed: SessionEffects,
         origin: BatchOrigin,
-    ) -> (DecryptedIngest, Option<DirectoryReconcile>) {
-        let mut worklist: std::collections::VecDeque<(SessionEffects, BatchOrigin)> =
-            std::collections::VecDeque::new();
-        worklist.push_back((seed, origin));
+        advance: bool,
+        disposition: Disposition<'_>,
+    ) -> (DecryptedIngest, Option<DirectoryReconcile>, Vec<FanoutId>) {
+        // MDK reports a replayed input's quiescence hold only as a deadline,
+        // so the groups the resolution touched are asked for one at the end.
+        let mut seed_groups = SessionManager::groups_of(&seed.events);
+        let mut worklist = std::collections::VecDeque::from([(seed, origin)]);
         let mut convergence: Vec<GroupId> = Vec::new();
-        // No `PendingStateRef` is resolved twice in one call: a ref rolled back
-        // in one generation must never be rolled back again in the next.
-        let mut resolved: HashSet<PendingStateRef> = HashSet::new();
         let mut out = DecryptedIngest::default();
+        let mut staged: Vec<FanoutId> = Vec::new();
         let mut verdict: Option<DirectoryReconcile> = None;
-        let mut ticks_left = crate::relay::auto_commit::MAX_CONVERGENCE_RETICKS;
+        let mut ticks_left = crate::relay::retick::MAX_CONVERGENCE_RETICKS;
         let mut batches = 0_usize;
-        // Whether a re-advance has already run in this call.
-        let mut advanced = false;
-        let mut capped = false;
+        // Whether a re-advance has already run in this call, and how long the
+        // next one waits for the engine's nearest deadline.
+        let (mut advanced, mut capped) = (false, false);
+        let mut wait = std::time::Duration::ZERO;
 
         loop {
             while let Some((effects, origin)) = worklist.pop_front() {
@@ -1714,16 +2957,14 @@ impl CircleManager {
                 //
                 // The drain still terminates. The only batch a disposal can
                 // release is a rollback's, each rollback resolves a ref
-                // `resolved` will not hand out twice, and each engine cycle
-                // consumes one scheduled `SelfRemove` — of which there is at
-                // most one per member per epoch, and `publish_failed` does not
-                // re-arm it.
+                // `resolved` will not hand out twice, and the eviction MDK
+                // re-arms after a rollback is held until the epoch moves.
                 if batches > MAX_FOLD_BATCHES {
                     capped = true;
                 }
 
                 out.results
-                    .extend(self.persist_and_fold(&effects.events).await);
+                    .extend(self.fold_resolved_batch(&effects.events).await);
                 match origin {
                     BatchOrigin::TopLevel => {
                         self.note_inbound_arrival_for_message_received(&effects.events);
@@ -1732,41 +2973,54 @@ impl CircleManager {
                 }
                 verdict = verdict.max(self.directory_verdict_for_events(&effects.events));
 
-                for item in effects.publish {
-                    if let Some(more) = self
-                        .dispose_publish_work(item, origin, &mut out, &mut resolved)
-                        .await
+                for group_id in SessionManager::groups_owing_advance(&effects) {
+                    // A held eviction would only spin (`eviction_retick_held`).
+                    if !convergence.contains(&group_id)
+                        && !self.session.eviction_retick_held(&group_id).await
                     {
-                        worklist.push_back((more, BatchOrigin::Drained));
-                    }
-                }
-
-                for group_id in effects.pending_convergence {
-                    if !convergence.contains(&group_id) {
                         convergence.push(group_id);
                     }
                 }
+
+                for item in effects.publish {
+                    self.dispose_publish_work(item, &mut out).await;
+                }
             }
 
-            if capped || convergence.is_empty() || ticks_left == 0 {
+            if advance && !advanced && convergence.is_empty() {
+                let (owing, after) = crate::relay::retick::next_receive_retick(
+                    &self.session,
+                    &std::mem::take(&mut seed_groups),
+                    Vec::new(),
+                )
+                .await;
+                if !owing.is_empty() {
+                    convergence = owing;
+                    wait = after;
+                    // The deadline is paid before this first advance: nothing
+                    // is due until it passes.
+                    advanced = true;
+                }
+            }
+            if !advance || capped || convergence.is_empty() || ticks_left == 0 {
                 break;
             }
-            // A group that is STILL pending after the round that advanced it is
-            // waiting on the engine's jitter-delayed auto-commit due time, which
-            // reads a real `Instant`. Re-advancing it without waiting would spin
-            // the CPU through the whole jitter window, so the delay is paid here
-            // — once per re-advance, never before the first one (a commit whose
-            // time has come surfaces with no delay at all) and never when
-            // nothing pends.
+            // A group the engine still owes a deadline after the round that
+            // advanced it — a convergence pass closing, a due `SelfRemove`
+            // auto-commit — is re-advanced once that deadline falls due, which
+            // the engine reads off a real clock. The wait is paid once per
+            // re-advance, never before the first one (work whose time has come
+            // surfaces with no delay at all) and never when nothing is owed.
             if advanced {
                 ticks_left -= 1;
                 self.convergence_reticks
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                tokio::time::sleep(crate::relay::auto_commit::CONVERGENCE_RETICK_DELAY).await;
+                tokio::time::sleep(wait).await;
             }
             advanced = true;
-            for group_id in std::mem::take(&mut convergence) {
-                match self.session.advance_convergence(&group_id).await {
+            let round = std::mem::take(&mut convergence);
+            for group_id in &round {
+                match self.advance_as(group_id, disposition, &mut staged).await {
                     Ok(more) => worklist.push_back((more, BatchOrigin::Drained)),
                     // Re-added rather than dropped: the group still owes an
                     // advance, and the next tick retries it.
@@ -1775,10 +3029,14 @@ impl CircleManager {
                             "publish resolution: advancing convergence failed: {}",
                             e.code()
                         );
-                        convergence.push(group_id);
+                        convergence.push(group_id.clone());
                     }
                 }
             }
+            let (next, after) =
+                crate::relay::retick::next_receive_retick(&self.session, &round, convergence).await;
+            convergence = next;
+            wait = after;
         }
         if capped {
             // A runaway guard, not a business bound. Nothing is dangling and
@@ -1795,75 +3053,234 @@ impl CircleManager {
                  everything already handed back was folded and {} group(s) still await an advance",
                 bucket(convergence.len())
             );
-        } else if ticks_left < crate::relay::auto_commit::MAX_CONVERGENCE_RETICKS {
+        } else if ticks_left < crate::relay::retick::MAX_CONVERGENCE_RETICKS {
             log::debug!(
                 "publish resolution drained convergence after {} re-tick(s)",
-                bucket(crate::relay::auto_commit::MAX_CONVERGENCE_RETICKS - ticks_left)
+                bucket(crate::relay::retick::MAX_CONVERGENCE_RETICKS - ticks_left)
             );
         }
-        (out, verdict)
+        (out, verdict, staged)
     }
 
-    /// One [`PublishWork`] item's disposition inside the fold, returning any
-    /// batch a rollback produced for the caller's worklist.
-    ///
-    /// `resolved` is the call's set of pending refs already dealt with. A ref
-    /// cannot legitimately be handed out twice by one engine — the buffers are
-    /// one-shot drains — so a repeat is a bug, and resolving it again would
-    /// either roll back a commit the first pass surfaced or surface a commit the
-    /// first pass rolled back.
-    #[deny(clippy::wildcard_enum_match_arm)]
-    async fn dispose_publish_work(
+    /// One advance of the fold, as `disposition` asks: what a staging advance
+    /// recorded joins `staged`.
+    async fn advance_as(
         &self,
-        item: PublishWork,
-        origin: BatchOrigin,
-        out: &mut DecryptedIngest,
-        resolved: &mut HashSet<PendingStateRef>,
-    ) -> Option<SessionEffects> {
-        if let Some(pending) = pending_ref_of(&item) {
-            if !resolved.insert(pending) {
-                log::warn!("publish resolution saw a pending ref twice; the repeat is ignored");
-                return None;
+        group_id: &GroupId,
+        disposition: Disposition<'_>,
+        staged: &mut Vec<FanoutId>,
+    ) -> std::result::Result<SessionEffects, crate::nostr::NostrError> {
+        let advanced = match disposition {
+            // Asked again with the engine held: every wait behind the
+            // decision — for the engine, for a deadline of its own — is
+            // where the mode it was made in can end.
+            Disposition::Stage { now_ms, still } => self
+                .session
+                .advance_for_drive_while(group_id, now_ms, still)
+                .await
+                .map(|advanced| recorded_by(advanced, staged)),
+            Disposition::Settle { now_ms } => self
+                .session
+                .settle_inputs_for_drive(group_id, now_ms)
+                .await
+                .map(|advanced| recorded_by(advanced, staged)),
+        };
+        self.forget_dropped_removals().await;
+        advanced
+    }
+
+    /// Deletes the directory rows of members whose queued removal the
+    /// session retired because they were already gone
+    /// (`SessionManager::retire_unmakeable_queued_changes`), and of those a
+    /// removal the driver confirmed took out: the user asked for them to be
+    /// removed, so the row goes outright, as it does for a removal the
+    /// engine announces — a reconcile would only demote it.
+    pub(crate) async fn forget_dropped_removals(&self) {
+        let dropped = self.session.take_dropped_removals();
+        if dropped.is_empty() {
+            return;
+        }
+        let _directory = self.directory_lock.lock().await;
+        self.forget_removed(&dropped);
+    }
+
+    /// Asks the engine for `mls_group_id`'s next deadline and serves it, as a
+    /// receive plane would, for a caller that is not one: the fold's own
+    /// advance-and-retick loop over a batch that owes that one circle an
+    /// advance, in staging mode — the full advance, or in
+    /// [`DriveMode::FinishOnly`] the inputs-only one. What the advances hand
+    /// back is folded and returned beside the handles of what they recorded.
+    pub(crate) async fn serve_deadlines(
+        &self,
+        mls_group_id: &GroupId,
+        now_ms: u64,
+        still: Still<'_>,
+    ) -> (DecryptedIngest, Vec<FanoutId>) {
+        let seed = SessionEffects {
+            events: Vec::new(),
+            publish: Vec::new(),
+            queued: Vec::new(),
+            pending_convergence: vec![mls_group_id.clone()],
+        };
+        self.fold_staged(seed, true, now_ms, still).await
+    }
+
+    /// Folds one batch a plane that drives received — an ingest's, an
+    /// advance's — whose commits and proposals were recorded in the hold
+    /// that produced them; with `advance`, everything the batch leaves owing
+    /// is advanced the same way ([`Self::fold_resolved_publish`]). Returns
+    /// what was folded and the handles of what the advances recorded.
+    pub(crate) async fn fold_staged(
+        &self,
+        effects: SessionEffects,
+        advance: bool,
+        now_ms: u64,
+        still: Still<'_>,
+    ) -> (DecryptedIngest, Vec<FanoutId>) {
+        let (ingest, verdict, staged) = self
+            .fold_resolved_publish_advancing(
+                effects,
+                BatchOrigin::Drained,
+                advance,
+                Disposition::recording(now_ms, still),
+            )
+            .await;
+        if let Some(mode) = verdict {
+            self.reconcile_member_directory_best_effort(mode).await;
+        }
+        (ingest, staged)
+    }
+
+    /// One batch of a resolution, persisted and folded
+    /// ([`Self::persist_and_fold`]), with the two things only a resolution's
+    /// fold owes: the arrival stamp for each fix it replayed, and the
+    /// directory row of each member this device's own commit removed.
+    async fn fold_resolved_batch(&self, events: &[GroupEvent]) -> Vec<LocationMessageResult> {
+        let folded = self.persist_and_fold(events).await;
+        self.note_replayed_fixes(&folded);
+        self.forget_members_this_device_removed(events).await;
+        folded
+    }
+
+    /// Stamps a circle's "a peer's fix arrived" time for every location a
+    /// resolution replayed and this fold persisted.
+    ///
+    /// The receive planes' callers stamp what they route; a fix replayed
+    /// inside a resolution has no such caller, and unstamped it leaves the
+    /// circle reading as one nothing arrives in. Best-effort: an unrecorded
+    /// arrival only makes that reading more cautious.
+    fn note_replayed_fixes(&self, folded: &[LocationMessageResult]) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut stamped: Vec<&GroupId> = Vec::new();
+        for result in folded {
+            let LocationMessageResult::Location { group_id, .. } = result else {
+                continue;
+            };
+            if stamped.contains(&group_id) {
+                continue;
+            }
+            stamped.push(group_id);
+            if let Ok(Some(circle)) = self.storage.get_circle(group_id) {
+                let _ = self.storage.note_peer_event(&circle.nostr_group_id, now_ms);
             }
         }
+    }
+
+    /// Deletes from the member directory everyone a commit of THIS device's
+    /// removed, the moment the engine reports the removal applied.
+    ///
+    /// [`Self::remove_members`] deletes the row when the removal is staged.
+    /// That is not enough for a removal the engine queued: a reconcile that
+    /// runs while it waits finds the person still on the roster and writes the
+    /// row back, and the reconcile after the removal lands only DEMOTES a row
+    /// it finds — three more days one tap from live location (owner decision
+    /// D3). The reconcile that follows restores anyone another circle still
+    /// has. `actor` is the committer; a removal someone else made is theirs.
+    async fn forget_members_this_device_removed(&self, events: &[GroupEvent]) {
+        let own = self.session.identity_pubkey().to_bytes();
+        let removed: Vec<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                GroupEvent::GroupStateChanged {
+                    actor: Some(actor),
+                    change: GroupStateChange::MemberRemoved { member },
+                    ..
+                } if actor.as_slice() == own.as_slice() => Some(hex::encode(member.as_slice())),
+                _ => None,
+            })
+            .collect();
+        if removed.is_empty() {
+            return;
+        }
+        let _directory = self.directory_lock.lock().await;
+        self.forget_removed(&removed);
+    }
+
+    /// Deletes `member_pubkeys` from the member directory, best-effort.
+    fn forget_removed(&self, member_pubkeys: &[String]) {
+        for pubkey_hex in member_pubkeys {
+            if let Err(e) = self.storage.delete_directory_member(pubkey_hex) {
+                log::warn!(
+                    "member directory: removal row not deleted (the next reconcile \
+                     demotes it instead of deleting it): {}",
+                    e.code()
+                );
+            }
+        }
+    }
+
+    /// Re-derives the row of every circle `results` report updated
+    /// ([`Self::resync_circle_relays_from_mdk`]). Best-effort: the next
+    /// commit the circle applies retries it.
+    async fn resync_updated_circles(&self, results: &[LocationMessageResult]) {
+        #[cfg(any(test, feature = "test-utils"))]
+        if results
+            .iter()
+            .any(|result| matches!(result, LocationMessageResult::GroupUpdate { .. }))
+            && self
+                .skip_next_follow
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let mut updated: Vec<&GroupId> = Vec::new();
+        for result in results {
+            if let LocationMessageResult::GroupUpdate { group_id } = result {
+                if !updated.contains(&group_id) {
+                    updated.push(group_id);
+                }
+            }
+        }
+        for group_id in updated {
+            if let Err(e) = self.resync_circle_relays_from_mdk(group_id).await {
+                log::debug!(
+                    "relay re-sync failed (will retry on next commit): {}",
+                    e.code()
+                );
+            }
+        }
+    }
+
+    /// One [`PublishWork`] item's disposition inside the fold.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    async fn dispose_publish_work(&self, item: PublishWork, out: &mut DecryptedIngest) {
         match item {
-            PublishWork::AutoPublish { msg, pending } => {
-                self.surface_auto_commit(&msg, pending, &mut out.auto_commits)
-                    .await
-            }
-            // A released queued intent, whose durable row the engine has
-            // already deleted — rolling it back would destroy it. Only a
-            // DRAINED batch can carry one; at top level `collect_effects` is
-            // called with no send results, so this is unreachable there and
-            // fails closed with everything else that cannot happen.
-            PublishWork::GroupEvolution {
-                msg,
-                welcomes,
-                pending,
-            } if origin == BatchOrigin::Drained => {
-                if !welcomes.is_empty() {
-                    // O3: `CommitToPublish` carries no welcomes, so they are not
-                    // published here. Pre-existing, and said out loud rather
-                    // than becoming silent.
-                    log::warn!("a drained commit carried welcome(s) that are not published here");
-                }
-                match SessionManager::transport_message_to_event(&msg) {
-                    Ok(commit_event) => {
-                        out.auto_commits.push(CommitToPublish {
-                            commit_event,
-                            pending,
-                        });
-                        None
-                    }
-                    Err(_) => self.rollback_unfolded(pending).await,
-                }
-            }
-            PublishWork::GroupEvolution { pending, .. }
-            | PublishWork::GroupCreated { pending, .. } => self.rollback_unfolded(pending).await,
+            // A commit in a batch is one its hold could neither record nor
+            // roll back (`SessionManager::stage_commits`, which said so, told
+            // its circle and kept the ref): every hold that hands a batch here
+            // records what it stages. It is not published: the usual reason
+            // it has no record is an earlier commit of its circle a relay may
+            // hold, and a second one sent beside that would fork the circle.
+            // It stays staged; the next staging hold tries the rollback again,
+            // and failing that the next open settles it.
+            PublishWork::AutoPublish { .. }
+            | PublishWork::GroupEvolution { .. }
+            | PublishWork::GroupCreated { .. }
+            | PublishWork::FoundingGroupCreated { .. } => {}
             // The local user's own re-proposed leave (a peer commit landing
             // while a leave request stands re-mints it for the accepted epoch).
             // Dropping it wedges the leave behind the engine's send gate.
-            PublishWork::Proposal { msg } => {
+            PublishWork::Proposal { msg, queued_intent } => {
                 match SessionManager::transport_message_to_event(&msg) {
                     Ok(event) => out.proposals.push(event),
                     Err(e) => log::warn!(
@@ -1871,41 +3288,36 @@ impl CircleManager {
                         e.code()
                     ),
                 }
-                None
+                self.retire_released_intent(queued_intent.as_ref()).await;
             }
             // Argued drop: a location intent released by the drain is superseded
             // by the fresher fix the next cadence tick sends, and publishing a
-            // stale one would put an out-of-date pin on every peer's map.
-            PublishWork::ApplicationMessage { .. } => {
+            // stale one would put an out-of-date pin on every peer's map. Its
+            // durable intent is retired, or the engine would regenerate the
+            // stale fix after the next restart.
+            PublishWork::ApplicationMessage { queued_intent, .. } => {
                 log::debug!(
                     "publish resolution observed an application message it does not publish"
                 );
-                None
+                self.retire_released_intent(queued_intent.as_ref()).await;
             }
         }
     }
 
-    /// Rolls a staged commit back WITHOUT folding its own batch, handing that
-    /// batch to the caller instead.
+    /// Answers a queued intent a drain regenerated but Haven does not publish
+    /// itself (MDK `confirm_regenerated_queued_intent` retires the durable row).
     ///
-    /// NEVER promote this to [`Self::publish_failed`]. `remove_members` reaches
-    /// this line while holding `directory_lock` — a non-reentrant tokio mutex —
-    /// through `take_group_evolution` → `surface_co_drained_auto_commits` →
-    /// `surface_auto_commit`, and `publish_failed` ends in a directory
-    /// reconcile that takes the same lock. The deadlock would be silent and
-    /// would look like a hung Remove Member.
-    ///
-    /// The owed-guard is kept: a removal-bearing commit this device owes a
-    /// publish for is never discarded, from here any more than from
-    /// [`Self::publish_failed`]. Unreachable for such a ref today (the
-    /// serialization that would send us here fails before the obligation is
-    /// recorded), and the guard stays anyway so a later reordering cannot turn
-    /// this into a silent removal drop.
-    async fn rollback_unfolded(&self, pending: PendingStateRef) -> Option<SessionEffects> {
-        if self.keeps_its_removal_publish_owed(pending) {
-            return None;
+    /// Unanswered, the engine keeps the intent in flight for the session and
+    /// regenerates it after the next restart — a stale location sent late, or a
+    /// leave proposed twice. A released leave stays durable without it: the
+    /// engine's leave request re-proposes it on each epoch.
+    async fn retire_released_intent(&self, intent: Option<&QueuedIntentRef>) {
+        let Some(intent) = intent else {
+            return;
+        };
+        if let Err(e) = self.session.retire_queued_intent(intent).await {
+            log::warn!("retiring a released queued intent failed: {}", e.code());
         }
-        self.session.publish_failed(pending).await.ok()
     }
 
     /// How many convergence re-ticks this manager's publish resolutions have
@@ -1922,7 +3334,7 @@ impl CircleManager {
     ///
     /// Never hard-coded to [`DirectoryReconcile::Rewrite`]. Resolving a pending
     /// ref does not merely apply or discard the staged commit: confirming ends
-    /// in `replay_buffered_messages` (`cgka-engine/src/publish.rs:255`), which
+    /// in `replay_buffered_messages` (`cgka-engine/src/publish.rs:360`), which
     /// runs a full ingest including convergence, so this batch can carry the
     /// `GroupStateInvalidated` of a commit branch selection has just withdrawn.
     /// Reading that as an ordinary rewrite would demote a member who never
@@ -1942,125 +3354,192 @@ impl CircleManager {
 
     // ==================== Member Management ====================
 
-    /// Adds members to a circle, returning the engine [`SessionEffects`]
-    /// (a `GroupEvolution` with the commit + welcomes + `PendingStateRef`).
+    /// [`Self::add_members_with_welcomes`] in staging mode.
+    ///
+    /// The Welcomes are frozen in the commit's fanout and handed over by its
+    /// confirm alone (Security Rule 13). What is kept here is only where each
+    /// one goes: resolved for every invitee BEFORE anything is staged, so an
+    /// invitee with no inbox refuses the invite instead of being added to a
+    /// circle they can never be welcomed into, and kept durably
+    /// ([`CommitNotes::keep_welcome_route`]) so a restart leaves no Welcome
+    /// without a route.
     ///
     /// # Errors
     ///
-    /// Returns an error if adding members fails.
-    pub async fn add_members(
+    /// As [`Self::add_members_with_welcomes`]; and a storage error when a
+    /// route could not be kept — nothing was staged.
+    pub async fn add_members_staging(
         &self,
         mls_group_id: &GroupId,
-        key_packages: &[Event],
-    ) -> Result<SessionEffects> {
-        if let Some(mut circle) = self.storage.get_circle(mls_group_id)? {
-            circle.updated_at = chrono::Utc::now().timestamp();
-            self.storage.save_circle(&circle)?;
-        }
-
-        let kps = parse_key_packages(key_packages)?;
-        self.session
-            .add_members(mls_group_id, kps)
+        members: &[MemberKeyPackage],
+        now_ms: u64,
+    ) -> Result<StagedChange> {
+        let routes = welcome_routes_of(members)?;
+        self.touch_circle(mls_group_id)?;
+        let packages = key_packages_of(members)?;
+        let prior = self.keep_welcome_routes(mls_group_id, &routes)?;
+        let staged = match self
+            .session
+            .add_members_staging(mls_group_id, packages, now_ms)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
+        {
+            Ok(staged) => staged,
+            Err(e) => {
+                // Nothing was staged: no Welcome will ever need these.
+                self.restore_welcome_routes(mls_group_id, &prior);
+                return Err(CircleError::from_session(e));
+            }
+        };
+        // Undone in its own hold, or staged with no record: no Welcome will
+        // go. Queued, the advance that stages it reads them.
+        let change = self.staged_change(mls_group_id, staged).await;
+        // Nothing that will stage it: no record, and not queued.
+        let staged_nothing = change.as_ref().map_or(true, |change| {
+            change.commit.is_none()
+                && (change.unrecorded
+                    || !routes.iter().all(|(recipient, _, _)| {
+                        self.session.invite_is_queued(mls_group_id, recipient)
+                    }))
+        });
+        if staged_nothing {
+            self.restore_welcome_routes(mls_group_id, &prior);
+        }
+        change
     }
 
-    /// Adds members to an existing circle and routes their gift-wrapped Welcomes.
-    ///
-    /// Publish-before-apply (Rule 13): publish
-    /// [`AddMembersResult::commit_event`] to the circle's relays, confirm via
-    /// [`Self::confirm_published`] on ≥1-relay ack (or [`Self::publish_failed`]
-    /// on failure), and only after a successful confirm publish each
-    /// [`AddMembersResult::welcome_events`] entry.
+    /// Keeps where each of `members`' Welcomes to `mls_group_id` is to go
+    /// ([`welcome_route`]), before anything that can stage their invite: the
+    /// confirm hands each Welcome to a record of its own with this route.
     ///
     /// # Errors
     ///
-    /// Returns [`CircleError::MissingWelcomeRelays`] (checked before staging) or
-    /// [`CircleError::Mls`] if staging or the admin gate rejects.
-    pub async fn add_members_with_welcomes(
+    /// [`CircleError::MissingWelcomeRelays`] when an invitee has no inbox
+    /// relay Haven may dial, and a storage error when a route was not kept:
+    /// nothing is kept then.
+    pub(crate) fn keep_welcome_routes(
         &self,
-        _sender_keys: &Keys,
         mls_group_id: &GroupId,
-        members: Vec<MemberKeyPackage>,
-        creator_fallback_relays: &[String],
-    ) -> Result<AddMembersResult> {
-        if creator_fallback_relays.is_empty() {
-            for m in &members {
-                if m.inbox_relays.is_empty() && m.nip65_relays.is_empty() {
-                    return Err(CircleError::MissingWelcomeRelays);
+        routes: &[WelcomeRoute],
+    ) -> Result<Vec<PriorRoute>> {
+        let mut prior = Vec::with_capacity(routes.len());
+        for (recipient, relays, not_after) in routes {
+            // What stood before, put back if this invite stages nothing: an
+            // earlier invite of the same person to the same circle may still
+            // need it.
+            let Ok(before) = self.storage.welcome_route(mls_group_id, recipient) else {
+                self.restore_welcome_routes(mls_group_id, &prior);
+                return Err(CircleError::Storage(
+                    "a Welcome's route was not read".into(),
+                ));
+            };
+            if !self
+                .storage
+                .keep_welcome_route(mls_group_id, recipient, relays, *not_after)
+            {
+                self.restore_welcome_routes(mls_group_id, &prior);
+                return Err(CircleError::Storage(
+                    "a Welcome's route was not kept".into(),
+                ));
+            }
+            prior.push((recipient.clone(), before));
+        }
+        Ok(prior)
+    }
+
+    /// Puts back what [`Self::keep_welcome_routes`] found: nothing will stage
+    /// the invite it kept routes for.
+    pub(crate) fn restore_welcome_routes(&self, mls_group_id: &GroupId, prior: &[PriorRoute]) {
+        for (recipient, before) in prior {
+            match before {
+                Some((relays, not_after)) => {
+                    let _ = self.storage.keep_welcome_route(
+                        mls_group_id,
+                        recipient,
+                        relays,
+                        *not_after,
+                    );
                 }
+                None => self.storage.forget_welcome_route(mls_group_id, recipient),
             }
         }
-
-        let key_package_events: Vec<Event> = members
-            .iter()
-            .map(|m| m.key_package_event.clone())
-            .collect();
-
-        let effects = self.add_members(mls_group_id, &key_package_events).await?;
-        let (commit_event, welcomes, pending) = self.take_group_evolution(effects).await?;
-        let welcome_events =
-            self.route_welcomes_with_cascade(&members, welcomes, creator_fallback_relays)?;
-
-        Ok(AddMembersResult {
-            commit_event,
-            welcome_events,
-            pending,
-        })
     }
 
-    /// Removes members from a circle, returning the commit + pending ref.
-    ///
-    /// Publish-before-apply (Rule 13).
+    /// Enters a Welcome's relays into the contamination ledger before the
+    /// Welcome is sent there: see [`Self::route_welcomes_with_cascade`] for
+    /// why that ledger entry has no second chance. A Welcome whose relays
+    /// could not be recorded is not sent.
+    pub(crate) fn record_welcome_relays(&self, relays: &[String]) -> bool {
+        self.record_contaminated(relays, ContaminationSource::Welcome)
+            .is_ok()
+    }
+
+    /// [`Self::remove_members`] in staging mode. A removal the engine queued
+    /// is accepted too, but its rows stay: until it is applied the member is
+    /// still in the circle and still sent its locations, and a member list
+    /// that had already dropped them would lie. They go when the engine
+    /// reports the removal applied ([`Self::forget_members_this_device_removed`]).
     ///
     /// # Errors
     ///
-    /// Returns an error if removing members fails (e.g. `NotGroupAdmin`).
-    pub async fn remove_members(
+    /// As [`Self::remove_members`].
+    pub async fn remove_members_staging(
         &self,
         mls_group_id: &GroupId,
         member_pubkeys: &[String],
-    ) -> Result<CommitToPublish> {
-        // Held across the stage AND the directory delete, so no concurrent
-        // reconcile can sit between them: a walk that read this circle's roster
-        // a moment ago would otherwise re-insert the person this method just
-        // removed, and a union rewrite demotes rather than deletes, so they
-        // would return as a three-day "recent contact" instead of being gone.
-        let _directory = self.directory_lock.lock().await;
+        now_ms: u64,
+    ) -> Result<StagedChange> {
+        self.removal_staging(mls_group_id, member_pubkeys, now_ms, true)
+            .await
+    }
 
+    /// [`Self::remove_members_staging`] for decision 180's ask: one the
+    /// engine queues is taken back in its hold
+    /// (`SessionManager::requeue_removal_staging`).
+    pub(crate) async fn requeue_removal_staging(
+        &self,
+        mls_group_id: &GroupId,
+        member_pubkeys: &[String],
+        now_ms: u64,
+    ) -> Result<StagedChange> {
+        self.removal_staging(mls_group_id, member_pubkeys, now_ms, false)
+            .await
+    }
+
+    async fn removal_staging(
+        &self,
+        mls_group_id: &GroupId,
+        member_pubkeys: &[String],
+        now_ms: u64,
+        keep_queued: bool,
+    ) -> Result<StagedChange> {
+        // No reconcile between the stage and the delete: it would write back
+        // the row the delete takes out.
+        let _directory = self.directory_lock.lock().await;
+        self.touch_circle(mls_group_id)?;
+        let staged = if keep_queued {
+            self.session
+                .remove_members_staging(mls_group_id, member_pubkeys, now_ms)
+                .await
+        } else {
+            self.session
+                .requeue_removal_staging(mls_group_id, member_pubkeys, now_ms)
+                .await
+        }
+        .map_err(CircleError::from_session)?;
+        let change = self.staged_change(mls_group_id, staged).await?;
+        if change.commit.is_some() {
+            self.forget_removed(member_pubkeys);
+        }
+        Ok(change)
+    }
+
+    /// Stamps the circle row as changed now.
+    fn touch_circle(&self, mls_group_id: &GroupId) -> Result<()> {
         if let Some(mut circle) = self.storage.get_circle(mls_group_id)? {
             circle.updated_at = chrono::Utc::now().timestamp();
             self.storage.save_circle(&circle)?;
         }
-
-        let effects = self
-            .session
-            .remove_members(mls_group_id, member_pubkeys)
-            .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        let (commit_event, _welcomes, pending) = self.take_group_evolution(effects).await?;
-
-        // Owner decision D3, the "you remove them" direction: the row goes at
-        // STAGING time, deliberately not waiting for a relay ack. Erring toward
-        // deleting a row a rollback would restore costs a convenience —
-        // `publish_failed` reconciles and puts it back; erring the other way
-        // leaves someone the user just removed one tap from receiving live
-        // location. Gated on the engine having accepted the removal, because a
-        // rejected one (`NotGroupAdmin`) removed nobody.
-        for pubkey_hex in member_pubkeys {
-            if let Err(e) = self.storage.delete_directory_member(pubkey_hex) {
-                log::warn!(
-                    "member directory: removal row not deleted (the next reconcile \
-                     demotes it instead of deleting it): {}",
-                    e.code()
-                );
-            }
-        }
-
-        Ok(CommitToPublish {
-            commit_event,
-            pending,
-        })
+        Ok(())
     }
 
     /// Gets members of a circle with resolved contact info.
@@ -2073,7 +3552,7 @@ impl CircleManager {
             .session
             .member_pubkeys(mls_group_id)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+            .map_err(CircleError::from_session)?;
 
         // Admin pubkeys are raw x-only bytes; hex-encode to compare with members.
         let admin_hexes: std::collections::HashSet<String> = self
@@ -2183,8 +3662,8 @@ impl CircleManager {
     /// * a circle the engine has reported `Unrecoverable`, whose roster is
     ///   frozen at its last stable epoch — re-stamping it every pass would pin
     ///   those people `Current` with the never-purge sentinel for ever, and no
-    ///   removal there could ever be observed. Also un-healable in-session:
-    ///   the state's only legal exit has no caller at the pinned rev.
+    ///   removal there could ever be observed. It never heals on its own:
+    ///   only joining a replacement Welcome (a re-invite) clears the halt.
     ///
     /// # What may enter it
     ///
@@ -2229,6 +3708,11 @@ impl CircleManager {
         // Serializes the read-union → write-union against every other reconcile
         // and against `remove_members` (see [`Self::directory_lock`]).
         let _serialized = self.directory_lock.lock().await;
+        // A member whose queued removal was retired as moot is deleted, not
+        // aged out: this pass would only demote the row it found
+        // ([`Self::forget_dropped_removals`]). Anyone another circle still
+        // has is written back below.
+        self.forget_removed(&self.session.take_dropped_removals());
 
         // A withdrawal is owed until a withdrawing pass actually completes.
         // Recorded BEFORE any read, because the reasons this pass may not finish
@@ -2244,16 +3728,15 @@ impl CircleManager {
             mode
         };
 
-        // Read once: both sets are fixed for the life of the session, so a
-        // per-circle query would buy a lock acquisition per circle for an answer
-        // that cannot change between them.
+        // Read once: the set is fixed for the life of the session, so a
+        // per-circle query would buy a lock acquisition per circle for an
+        // answer that cannot change between them.
         let quarantined: HashSet<GroupId> = self
             .session
             .quarantined_group_ids()
             .await
             .into_iter()
             .collect();
-        let unrecoverable = self.unrecoverable_group_ids();
 
         let mut union: BTreeSet<String> = BTreeSet::new();
         // Rosters of circles this device has been EVICTED from by someone else.
@@ -2268,7 +3751,17 @@ impl CircleManager {
             // Quarantine is read explicitly rather than inferred from the
             // engine's `UnknownGroup` mapping, so the skip does not depend on
             // that mapping staying in place.
-            if quarantined.contains(group_id) || unrecoverable.contains(group_id) {
+            // A disbanded circle is neither a live roster nor a removal: its
+            // former members age out as after a leave, never deleted as
+            // severed (`disband_commit_is_not_presented_as_member_removals`).
+            // An unrecoverable group answers roster reads with the roster
+            // frozen at its last stable epoch: trusting it would re-stamp
+            // those people present on every pass, and no removal there could
+            // ever be observed. A flag that cannot be read stamps nothing.
+            if quarantined.contains(group_id)
+                || self.session.disbanded(group_id).await
+                || self.session.unrecoverable(group_id).await.unwrap_or(true)
+            {
                 continue;
             }
             let Some(membership) = self.storage.get_membership(group_id)? else {
@@ -2303,7 +3796,7 @@ impl CircleManager {
                 // empty roster is not evidence that its members left.
                 Ok(ConvergedRoster::Absent) => {}
                 Ok(ConvergedRoster::NotConverged) => return Ok(false),
-                Err(e) => return Err(CircleError::Mls(redact_hex_sequences(&e.to_string()))),
+                Err(e) => return Err(CircleError::from_session(e)),
             }
         }
 
@@ -2433,42 +3926,19 @@ impl CircleManager {
         }
     }
 
-    /// The directory verdict for a folded receive batch, recording any group the
-    /// engine reported unrecoverable on the way through.
+    /// The directory verdict for a raw engine event batch.
     ///
-    /// A method rather than a bare call to
-    /// [`DirectoryReconcile::for_receive_results`] because the recording is the
-    /// only signal Haven gets: `EpochState` has no accessor and is never
-    /// persisted, so `Unrecoverable` is observable exactly once, as the event
-    /// that announces it.
-    pub(crate) fn directory_verdict_for_results(
-        &self,
-        results: &[LocationMessageResult],
-    ) -> Option<DirectoryReconcile> {
-        self.note_unrecoverable(results.iter().filter_map(|result| match result {
-            LocationMessageResult::Unrecoverable { group_id } => Some(group_id.clone()),
-            _ => None,
-        }));
-        DirectoryReconcile::for_receive_results(results)
-    }
-
-    /// [`Self::directory_verdict_for_results`] over a raw engine event batch,
-    /// for the receive planes that hold `GroupEvent`s rather than folded
-    /// results.
-    ///
-    /// Records nothing but the unrecoverable set. The epoch-change and
-    /// inbound-observation facts have exactly ONE write site per path — the
-    /// receive planes call [`Self::note_inbound_group_events`], the
-    /// publish-before-apply resolution calls [`Self::note_epoch_changes`] — so
-    /// that a plane doing both cannot record the same fact twice.
+    /// Records nothing. The epoch-change and inbound-observation facts have
+    /// exactly ONE write site per path — the receive planes call
+    /// [`Self::note_inbound_group_events`], the publish-before-apply
+    /// resolution calls [`Self::note_epoch_changes`] — so that a plane doing
+    /// both cannot record the same fact twice; and whether a group is
+    /// unrecoverable is MDK's persisted flag, read where it is needed.
+    #[allow(clippy::unused_self)]
     pub(crate) fn directory_verdict_for_events(
         &self,
         events: &[GroupEvent],
     ) -> Option<DirectoryReconcile> {
-        self.note_unrecoverable(events.iter().filter_map(|event| match event {
-            GroupEvent::GroupUnrecoverable { group_id } => Some(group_id.clone()),
-            _ => None,
-        }));
         DirectoryReconcile::for_group_events(events)
     }
 
@@ -2577,37 +4047,6 @@ impl CircleManager {
                     {
                         log::warn!("epoch-change observation not recorded: {}", e.code());
                     }
-                    // An epoch move discharges an ORPHANED obligation, and
-                    // only an orphaned one. Whatever moved the epoch merged some
-                    // commit, and a merge empties the proposal store — so the
-                    // leaver's `SelfRemove` is gone and a row this session
-                    // cannot redeem is evidence of nothing; leaving it would
-                    // report a circle that has moved on as unrecoverable. A row
-                    // this session CAN still redeem is the opposite case: the
-                    // commit is staged and the publish is still owed, and
-                    // dropping the in-memory entry would destroy the obligation
-                    // with the commit still staged — a silent drop by another
-                    // route.
-                    //
-                    // What does NOT arrive here is the case this used to claim:
-                    // a remaining peer's own commit of the SAME `SelfRemove`
-                    // emits no `EpochChanged` at all (the group record's epoch
-                    // was already projected forward when our commit was staged,
-                    // so applying theirs reports `Processed` with an empty event
-                    // batch), which is exactly why
-                    // [`Self::discharge_removal_deferral_after_send`] exists.
-                    // What does arrive is an UNRELATED peer commit landing after
-                    // an orphaned park — and this device's own confirm, which
-                    // DOES fold through here (`confirm_published` →
-                    // `publish_outcome_verdict`, and the engine returns
-                    // `EpochChanged` for every group-evolution confirm). That is
-                    // harmless rather than redundant-by-luck: the confirm has
-                    // already called [`Self::discharge_owed_removal_publish`] for
-                    // its own ref, so either this circle owed nothing (a no-op
-                    // DELETE) or it still owes a DIFFERENT, superseded ref, which
-                    // is redeemable and must survive — the same answer this arm
-                    // gives every other caller.
-                    self.clear_orphaned_removal_deferral(&circle.nostr_group_id);
                 }
                 // A group with no circle row (a create still mid-flight, or a
                 // circle already deleted) has nothing to record against.
@@ -2620,406 +4059,23 @@ impl CircleManager {
         }
     }
 
-    /// Adds `group_ids` to the session's unrecoverable set — see
-    /// [`Self::unrecoverable_groups`].
-    fn note_unrecoverable(&self, group_ids: impl IntoIterator<Item = GroupId>) {
-        self.unrecoverable_groups
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend(group_ids);
-    }
-
-    /// The groups the engine has reported `Unrecoverable` during this session.
-    fn unrecoverable_group_ids(&self) -> HashSet<GroupId> {
-        self.unrecoverable_groups
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    /// Those same groups as pseudonymous `nostr_group_id`s (Security Rule 4) —
-    /// the ONLY way to observe the engine's terminal verdict more than once.
-    ///
-    /// The engine announces `Unrecoverable` for a group EXACTLY ONCE per
-    /// session: `mark_unrecoverable` latches the state, and every later
-    /// convergence run short-circuits on `is_unrecoverable` before the arm that
-    /// pushes `GroupUnrecoverable` (`cgka-engine/src/distributed_convergence.rs`
-    /// lines 238 and 401 at rev `e391adc`). `EpochState` has no accessor, so a
-    /// consumer that needs a second observation before it acts — as the wedge
-    /// report does, because telling a user to rebuild a working circle costs
-    /// them every invitation in it — cannot get one from the engine. It comes
-    /// from here.
-    ///
-    /// A group whose circle row is gone is dropped: the verdict names a circle
-    /// the consumer can act on, or it names nothing.
-    #[must_use]
-    pub fn unrecoverable_circles(&self) -> Vec<[u8; 32]> {
-        self.unrecoverable_group_ids()
-            .iter()
-            .filter_map(|group_id| self.storage.get_circle(group_id).ok().flatten())
-            .map(|circle| circle.nostr_group_id)
-            .collect()
-    }
-
-    // ===== Owed removal publishes (OD4-c options (i) and (iv)) =====
-
-    /// Parks a departing peer's eviction commit unpublished, because it surfaced
-    /// inside a BACKGROUND burst (owner decision OD4-c, option (iv)).
-    ///
-    /// [`Self::owe_removal_publish`] plus the decision NOT to publish at all: a
-    /// burst must not open a publish-before-apply window inside a wake window
-    /// the OS may end, and a removal-bearing staged commit killed in that window
-    /// is the ONE thing MDK's hydrate deliberately does not recover
-    /// (`cgka-engine/src/engine.rs:820-828` at rev `e391adc` short-circuits on
-    /// `staged_removes_member`).
-    ///
-    /// Returns `None` when the commit is parked, and hands it BACK when the
-    /// obligation could not be recorded, so the caller falls back to its normal
-    /// disposition: a park nobody can redeem OR report is worse than a publish.
-    pub fn defer_removal_commit(&self, commit: CommitToPublish) -> Option<CommitToPublish> {
-        if self.owe_removal_publish(&commit) {
-            None
-        } else {
-            Some(commit)
-        }
-    }
-
-    /// Records that this device OWES the publish of a removal-bearing
-    /// receive-side auto-commit — durably first, then in memory. Returns whether
-    /// the obligation was recorded.
-    ///
-    /// EVERY plane that takes such a commit calls this BEFORE it opens the
-    /// publish-before-apply window, never only once that window has failed.
-    /// A receive-side auto-commit is always removal-bearing (it commits a peer's
-    /// `SelfRemove`), and MDK's hydrate deliberately refuses to recover a
-    /// removal-bearing staged commit, so a process killed mid-publish leaves a
-    /// staged commit no hydrate will clear and emits no
-    /// `PendingCommitRecovered` for anyone to notice. The durable row is the only
-    /// thing that survives that, which is why it is written first and written
-    /// early: it is what turns an invisible wedge into
-    /// [`Self::orphaned_removal_deferrals`], for every plane and not just the
-    /// live-sync one. A crash between the durable write and the in-memory
-    /// registration leaves the state that REPORTS itself, never the state that
-    /// hides.
-    ///
-    /// # Why neither resolution is an alternative to recording this
-    ///
-    /// * **Confirming** without a relay ack applies a commit no peer received
-    ///   (Rule 13) — a roster fork.
-    /// * **Rolling back** is a SILENT PERMANENT DROP of the removal, verified at
-    ///   source and by experiment at the pinned rev: the engine drops the
-    ///   in-memory `scheduled_self_remove_auto_commits` entry before staging,
-    ///   `do_publish_failed` does not re-arm it, and a redelivery of the proposal
-    ///   short-circuits to `Buffered` off its durable `Created` row without ever
-    ///   rescheduling. The leaver would stay in the circle — and keep deriving
-    ///   its keys — until some unrelated commit moved the epoch. That is why
-    ///   [`Self::publish_failed`] refuses to roll one of these back.
-    ///
-    /// `false` means the obligation could NOT be recorded: the `#h` names no
-    /// circle this device holds, or the row could not be written. A caller that
-    /// was going to park must then publish instead, and a caller that was going
-    /// to publish must know that its own no-ack path can no longer keep the
-    /// removal owed.
-    pub fn owe_removal_publish(&self, commit: &CommitToPublish) -> bool {
-        let Some(ngid) = nostr_group_id_from_commit_event(&commit.commit_event) else {
-            return false;
-        };
-        // The circle must exist: the durable row is keyed by `nostr_group_id`
-        // and `delete_circle` is what cascades it away, so a row for a circle
-        // this device does not hold could never be cleared.
-        if !self
-            .storage
-            .get_all_circles()
-            .is_ok_and(|circles| circles.iter().any(|c| c.nostr_group_id == ngid))
-        {
-            return false;
-        }
-        if let Err(e) = self
-            .storage
-            .put_deferred_removal_commit(&ngid, chrono::Utc::now().timestamp_millis())
-        {
-            // The durable half is what makes the obligation loud if this process
-            // dies. Without it, holding the commit would be exactly the silent
-            // wedge OD4-c names, so report the failure to the caller.
-            log::warn!("removal publish obligation not recorded: {}", e.code());
-            return false;
-        }
-        self.removal_deferrals
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                ngid,
-                CommitToPublish {
-                    commit_event: commit.commit_event.clone(),
-                    pending: commit.pending,
-                },
-            );
-        true
-    }
-
-    /// Whether `pending` is a removal-bearing commit this device owes a publish
-    /// for — the one answer [`Self::publish_failed`] needs to know it must not
-    /// roll back.
-    ///
-    /// The obligation was recorded by the plane that took the commit, so nothing
-    /// is written here. Linear over a map that holds at most one entry per circle
-    /// mid-leave, and normally none at all.
-    ///
-    /// Matching on the REF and not on the circle is what keeps a send-side commit
-    /// for the same circle (a Remove, a relay update) rolling back normally: the
-    /// engine's `pending_counter` is monotonic within a session, so no other
-    /// staged commit can wear an owed ref's id.
-    fn keeps_its_removal_publish_owed(&self, pending: PendingStateRef) -> bool {
-        self.removal_deferrals
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .any(|commit| commit.pending == pending)
-    }
-
-    /// Clears the obligation `pending` belongs to, in memory and durably.
-    ///
-    /// [`Self::confirm_published`]'s discharge: the engine applied the eviction,
-    /// so the removal has landed and nothing is owed. The ngid is resolved from
-    /// the map rather than from the event, because that is the key the row is
-    /// under and the map is the only place the two are already joined.
-    fn discharge_owed_removal_publish(&self, pending: PendingStateRef) {
-        let owed = {
-            let deferrals = self
-                .removal_deferrals
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            deferrals
-                .iter()
-                .find(|(_, commit)| commit.pending == pending)
-                .map(|(ngid, _)| *ngid)
-        };
-        if let Some(ngid) = owed {
-            self.clear_removal_deferral(&ngid);
-        }
-    }
-
-    /// Publishes every owed eviction commit under the Rule-13 ladder and clears
-    /// the ones that land. Returns how many were confirmed.
-    ///
-    /// `interrupt`, when supplied, is polled once per commit: a caller that holds
-    /// a lifecycle lock across this pass can stop it rather than make a teardown
-    /// wait out a cascade of relay round-trips.
-    ///
-    /// Call this from a FOREGROUND pass only: the whole point of the obligation
-    /// is that the publish happens where the process is not about to be
-    /// suspended. A commit that gets no relay ack STAYS owed — it is never rolled
-    /// back, because a rollback is the silent drop
-    /// [`Self::owe_removal_publish`] documents — so the next foreground pass
-    /// retries it.
-    ///
-    /// It redeems what THIS session owes, whichever plane took the commit: the
-    /// map holds the only live `PendingStateRef`s there are, and an obligation
-    /// recorded by a session that has since died is unredeemable by construction
-    /// (see [`Self::orphaned_removal_deferrals`]) — which is why a plane running
-    /// in a short-lived isolate must publish rather than park.
-    ///
-    /// # Why it is a worklist and not a pass over a snapshot
-    ///
-    /// A confirm here ends in the engine's replay, which can surface the NEXT
-    /// eviction in a cascade. This pass owns a publisher, so it runs that one
-    /// too rather than leaving a commit staged for a foreground open that has
-    /// already happened.
-    pub async fn redeem_removal_deferrals(
-        &self,
-        publisher: &dyn crate::relay::auto_commit::AutoCommitPublisher,
-        interrupt: Option<&std::sync::atomic::AtomicBool>,
-    ) -> usize {
-        let mut worklist: std::collections::VecDeque<CommitToPublish> = {
-            let deferrals = self
-                .removal_deferrals
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            deferrals
-                .values()
-                .map(|commit| CommitToPublish {
-                    commit_event: commit.commit_event.clone(),
-                    pending: commit.pending,
-                })
-                .collect()
-        };
-        let mut resolved: HashSet<PendingStateRef> = HashSet::new();
-        let mut confirmed = 0;
-        while let Some(commit) = worklist.pop_front() {
-            // The caller holds a lifecycle lock across this whole pass, and a
-            // cascade can be a cap's worth of relay round-trips — long enough
-            // for a logout to look hung. What is abandoned here keeps its
-            // durable row: this session's ref dies with it, so the circle is
-            // REPORTED at the next foreground open instead of published. That
-            // is the right trade against blocking a teardown the user asked
-            // for, and it is the only place this pass gives anything up.
-            if interrupt.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
-                log::info!("removal redemption yielded to a teardown; owed commits stand");
-                break;
+    /// The circles MDK holds unrecoverable, as pseudonymous
+    /// `nostr_group_id`s (Security Rule 4): its persisted flag, read for
+    /// every circle row, so the verdict reads the same on every call and
+    /// after every restart, and ends when a rejoin repairs the circle. A
+    /// quarantined circle, and one whose record cannot be read, is not
+    /// counted.
+    pub async fn unrecoverable_circles(&self) -> Vec<[u8; 32]> {
+        let quarantined = self.session.quarantined_group_ids().await;
+        let mut out = Vec::new();
+        for circle in self.storage.get_all_circles().unwrap_or_default() {
+            if !quarantined.contains(&circle.mls_group_id)
+                && self.session.unrecoverable(&circle.mls_group_id).await == Some(true)
+            {
+                out.push(circle.nostr_group_id);
             }
-            if !resolved.insert(commit.pending) {
-                continue;
-            }
-            if resolved.len() > MAX_REDEMPTION_STEPS {
-                // Everything still queued keeps its durable row and its live
-                // ref, so the next foreground pass redeems it; nothing here is
-                // rolled back and nothing is discarded.
-                log::warn!(
-                    "removal redemption stopped at the runaway cap; {} commit(s) stand owed",
-                    bucket(worklist.len() + 1)
-                );
-                break;
-            }
-            let relays = self
-                .relays_for_commit_event(&commit.commit_event)
-                .unwrap_or_default();
-            let acked = !relays.is_empty()
-                && publisher
-                    .publish_auto_commit(&commit.commit_event, &relays)
-                    .await;
-            if !acked {
-                continue;
-            }
-            let Ok(ingest) = self.confirm_published(commit.pending).await else {
-                // STAYS owed. A confirm can fail with the staged commit still
-                // attached: the engine's durable transaction propagates a lock
-                // blip BEFORE its in-memory state-machine transition, which is
-                // why upstream marks the call retry-safe
-                // (`EngineError::is_transient`). Clearing on ANY error would
-                // delete the only record of a still-owed eviction, leaving a
-                // wedge that reports nothing and a fail rung free to discard the
-                // removal — the silent drop this obligation exists to prevent.
-                // A ref that genuinely is gone costs one redundant publish per
-                // foreground open until that circle's next successful send
-                // discharges the row.
-                continue;
-            };
-            // The obligation was discharged BY REF inside the confirm, at the
-            // one scope that is correct. An ngid-scoped clear here would delete
-            // a SECOND-generation obligation the confirm's own replay has just
-            // recorded (the map holds one entry per circle), leaving a staged,
-            // unpublished, no-longer-owed and no-longer-reported eviction — this
-            // very wedge, re-armed and invisible.
-            confirmed += 1;
-            // `ingest.results` are already persisted and this pass has no UI
-            // surface to route them to.
-            for proposal in ingest.proposals {
-                let relays = self.relays_for_commit_event(&proposal).unwrap_or_default();
-                if !relays.is_empty() {
-                    // A bare proposal opens no publish-before-apply window:
-                    // nothing to confirm, nothing to roll back, and an unacked
-                    // one is re-minted by the next commit this device applies.
-                    let _ = publisher.publish_auto_commit(&proposal, &relays).await;
-                }
-            }
-            worklist.extend(ingest.auto_commits);
         }
-        confirmed
-    }
-
-    /// Every circle that owes an eviction commit, redeemable or not.
-    ///
-    /// The DURABLE view: it counts an obligation this session can still publish
-    /// and one that outlived the session which took it alike. Use
-    /// [`Self::orphaned_removal_deferrals`] for the second alone — that is the
-    /// one that is a wedge.
-    #[must_use]
-    pub fn owed_removal_commits(&self) -> Vec<[u8; 32]> {
-        self.storage.deferred_removal_commits().unwrap_or_default()
-    }
-
-    /// Circles with a DURABLE obligation row that this session cannot redeem —
-    /// the wedge OD4-c option (i) reports.
-    ///
-    /// A row with no live in-memory entry was recorded by a session that is
-    /// gone. Its `PendingStateRef` died with that session, and at MDK `e391adc`
-    /// nothing can re-derive the eviction: the engine's `SelfRemove` auto-commit
-    /// schedule is in-memory only, `do_publish_failed` does not re-arm it, and a
-    /// redelivered proposal short-circuits to `Buffered`. The circle therefore
-    /// carries a staged commit no code path will ever publish or clear, and it
-    /// cannot recover on its own.
-    ///
-    /// Returns the pseudonymous `nostr_group_id`s only (Security Rule 4).
-    #[must_use]
-    pub fn orphaned_removal_deferrals(&self) -> Vec<[u8; 32]> {
-        let Ok(rows) = self.storage.deferred_removal_commits() else {
-            return Vec::new();
-        };
-        let live = self
-            .removal_deferrals
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        rows.into_iter()
-            .filter(|ngid| !live.contains_key(ngid))
-            .collect()
-    }
-
-    /// Discharges `nostr_group_id`'s deferral because an outbound send for that
-    /// circle just SUCCEEDED.
-    ///
-    /// A successful send proves the group is `Stable` — the engine refuses one
-    /// from any other state — which proves no staged commit remains, which proves
-    /// nothing is owed. It is the ONLY positive proof available at MDK `e391adc`:
-    /// every read accessor (`epoch`, `members`, `group_record`,
-    /// `current_safe_export_epoch`) projects the post-merge state from the moment
-    /// a commit is staged, so none of them can tell a merged eviction from a
-    /// staged one.
-    ///
-    /// This is what keeps [`Self::orphaned_removal_deferrals`] from reporting a
-    /// circle another member's commit already healed: that heal arrives as
-    /// `IngestOutcome::Processed` with NO engine events (the record's epoch was
-    /// already projected forward, so nothing "changed"), so there is no event to
-    /// clear the row on — but the very next publish for that circle succeeds, and
-    /// this clears it.
-    ///
-    /// One indexed point lookup per successful send, on a table that holds at
-    /// most one row per circle mid-leave.
-    fn discharge_removal_deferral_after_send(&self, nostr_group_id: &[u8; 32]) {
-        if self
-            .storage
-            .has_deferred_removal_commit(nostr_group_id)
-            .unwrap_or(false)
-        {
-            self.clear_removal_deferral(nostr_group_id);
-        }
-    }
-
-    /// Clears `nostr_group_id`'s obligation only when this session can no
-    /// longer redeem it — the `EpochChanged` fold's discharge, argued at
-    /// [`Self::note_epoch_changes`].
-    fn clear_orphaned_removal_deferral(&self, nostr_group_id: &[u8; 32]) {
-        let redeemable = self
-            .removal_deferrals
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(nostr_group_id);
-        if !redeemable {
-            self.clear_removal_deferral(nostr_group_id);
-        }
-    }
-
-    /// Drops the in-memory half of `nostr_group_id`'s obligation, leaving the
-    /// durable row to whoever owns it.
-    ///
-    /// For the one case where the row is already gone: `delete_circle` cascades
-    /// `deferred_removal_commits`, so re-issuing the DELETE would be noise and
-    /// the map is the only half left to clean up.
-    fn forget_removal_deferral_in_memory(&self, nostr_group_id: &[u8; 32]) {
-        self.removal_deferrals
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(nostr_group_id);
-    }
-
-    /// Forgets `nostr_group_id`'s obligation, in memory and durably.
-    fn clear_removal_deferral(&self, nostr_group_id: &[u8; 32]) {
-        self.removal_deferrals
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(nostr_group_id);
-        if let Err(e) = self.storage.clear_deferred_removal_commit(nostr_group_id) {
-            log::warn!("deferred removal commit not cleared: {}", e.code());
-        }
+        out
     }
 
     // ==================== Invitation Handling ====================
@@ -3080,8 +4136,15 @@ impl CircleManager {
             })?;
         let inviter_pubkey = preview.inviter_pubkey.clone();
 
-        self.pending_welcomes
-            .insert(PendingWelcome::new(gift_wrap_event.clone(), preview));
+        // Durable before the invitation is held: the held copy is gone after a
+        // restart, and the `KeyPackage` it was made for must outlive that.
+        self.pending_welcomes.insert_marked(
+            PendingWelcome::new(gift_wrap_event.clone(), preview),
+            |held| {
+                self.storage
+                    .set_held_invitation_count(self.held_to_record(held))
+            },
+        )?;
 
         let now = chrono::Utc::now().timestamp();
         Ok(Invitation {
@@ -3135,35 +4198,432 @@ impl CircleManager {
             .pending_welcomes
             .get(gift_wrap_id)
             .ok_or_else(|| CircleError::NotFound("No held welcome for invitation".to_string()))?;
+        // The preview's inviter is a NIP-59 seal author, always 32 bytes of
+        // hex (`inviter_from_sender`); anything else can match no welcomer.
+        let inviter = hex::decode(&held.preview().inviter_pubkey).unwrap_or_default();
+        // An intent already standing is an earlier accept's whose circle was
+        // never recorded: recording one clears it in the same transaction.
+        let unrecorded = self
+            .storage
+            .accept_intent_inviter(gift_wrap_id.as_bytes())?
+            .is_some();
+        // The user's consent, durable before the engine can join: a join
+        // handed back at the next open is shown only with it.
+        self.storage.record_accept_intent(gift_wrap_id, &inviter)?;
 
-        let ingest = self
+        let (group_id, effects, welcomer) = match self
             .session
             .accept_welcome(held.gift_wrap())
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+            .map_err(CircleError::from_session)?
+        {
+            WelcomeAcceptance::Ingested(ingest) => {
+                let (group_id, welcomer) = ingest
+                    .effects
+                    .events
+                    .iter()
+                    .find_map(|ev| match ev {
+                        GroupEvent::GroupJoined {
+                            group_id, welcomer, ..
+                        } => Some((group_id.clone(), Some(welcomer.clone()))),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        CircleError::Mls("welcome accept did not yield a joined group".to_string())
+                    })?;
+                (group_id, ingest.effects, welcomer)
+            }
+            // An earlier accept joined, and its rows never committed: record
+            // the circle now instead of telling the user to ask again. Who
+            // wrote the Welcome is read from the join the engine still owes.
+            WelcomeAcceptance::AlreadyJoined { group_id, effects } => {
+                let via = MessageId::new(gift_wrap_id.to_bytes().to_vec());
+                let welcomer = self.session.owed_joins().await.and_then(|owed| {
+                    owed.into_iter()
+                        .find(|join| join.via_welcome == via)
+                        .map(|join| join.welcomer)
+                });
+                (group_id, effects, welcomer)
+            }
+            // Terminal: the same Welcome can never succeed, so it is resolved
+            // exactly as a decline is — held copy dropped, gift wrap marked so
+            // the next poll does not surface it again, nothing on the wire.
+            WelcomeAcceptance::NeedsNewInvite => {
+                self.resolve_invitation(gift_wrap_id);
+                return Err(CircleError::NeedsNewInvite);
+            }
+            // Held, not declined: the Welcome stays valid for the explicit
+            // replacement consent MDK requires.
+            WelcomeAcceptance::RejoinConfirmationRequired => {
+                return Err(CircleError::RejoinConfirmationRequired);
+            }
+        };
+        match welcomer {
+            Some(Some(welcomer)) if welcomer.as_slice() == inviter.as_slice() => {}
+            Some(Some(_)) => {
+                self.refuse_unconsented_join(&group_id, gift_wrap_id, &effects)
+                    .await?;
+                return Err(CircleError::NeedsNewInvite);
+            }
+            // The join is no longer owed and no earlier accept stood
+            // unrecorded: it was recorded, and its record was checked.
+            None if !unrecorded => {}
+            // Who wrote it cannot be told now — a join no longer owed though
+            // an accept stood unrecorded, or one MDK names no author for:
+            // nothing is written and nothing undone.
+            Some(None) | None => {
+                return Err(CircleError::Storage(
+                    "the inviter of a joined circle was not read".into(),
+                ))
+            }
+        }
 
-        let group_id = ingest
-            .effects
-            .events
+        let (circle, membership) = self
+            .joined_circle_rows(&group_id, Some(held.preview().inviter_pubkey.clone()))
+            .await?;
+        let now = circle.created_at;
+        // A row from before the join is a copy this Welcome replaced in place:
+        // one MDK held unrecoverable, which no plane followed.
+        let replaced = matches!(self.storage.get_circle(&group_id), Ok(Some(_)));
+
+        // Atomically persist the circle + membership + dedup row, then drop the
+        // held welcome (terminal).
+        self.storage
+            .record_processed_invitation(gift_wrap_id, &circle, &membership, now)?;
+        // A joined circle carries the INVITER's routing relays, which is the
+        // most common way a relay this user never chose starts seeing their
+        // kind-445 — and the most likely way a profile-pool relay would get
+        // contaminated. Record before the circle is usable.
+        self.record_contaminated(&circle.relays, ContaminationSource::CircleRouting)?;
+        self.release_invitation(gift_wrap_id);
+        // The join is recorded, so the batch's persist acknowledges it, with
+        // its locations, at the one persist-then-acknowledge site; a join an
+        // earlier accept left owed is not in this batch, and is acknowledged
+        // here.
+        self.persist_replayed_locations(&effects.events).await;
+        self.session
+            .acknowledge_outputs(&[MessageId::new(gift_wrap_id.to_bytes().to_vec())])
+            .await;
+        if replaced {
+            self.wake_routing_follow();
+        }
+
+        // Accepting is what makes the roster real, so it is the directory write
+        // site — never the preview above, which is seal-authenticated only
+        // (anyone can gift-wrap a welcome) and where a row would break
+        // decline-leaves-no-trace. Placed after the storage write so the circle
+        // the union is about to read is already persisted.
+        self.reconcile_member_directory_best_effort(DirectoryReconcile::Rewrite)
+            .await;
+        // An ended circle kept for this invitation is let go of, or forgotten
+        // if nothing else keeps it.
+        self.forget_left_groups().await;
+
+        self.get_circle(&group_id)
+            .await?
+            .ok_or_else(|| CircleError::NotFound("Circle not found after acceptance".to_string()))
+    }
+
+    /// The replacement offers MDK holds for the held invitation
+    /// `gift_wrap_id` — what an accept answered
+    /// [`CircleError::RejoinConfirmationRequired`] for: joining it would
+    /// discard this device's still-active copy of its circle, which MDK does
+    /// only on the user's explicit consent ([`Self::confirm_group_rejoin`]).
+    ///
+    /// An offer is matched by the gift wrap it arrived in; MDK keeps the
+    /// first wrapper's id for the same content (`ingest.rs` 293-313), so one
+    /// arriving in another is matched by its author, the inviter the
+    /// invitation showed. An offer whose author is not that inviter, or for
+    /// a circle this device has asked to leave — or whose leave MDK still
+    /// holds a request for, which a rejoin would carry into the new branch
+    /// (`docs/MDK_UPSTREAM_TRACKER.md` T-REJOIN-LEAVE) — is declined, with
+    /// the invitation, and answered [`CircleError::NeedsNewInvite`]. Haven
+    /// never joins one without the user's press.
+    ///
+    /// # Errors
+    ///
+    /// [`CircleError::NotFound`] when no such invitation is held, and as
+    /// above.
+    pub async fn rejoin_offers_for_invitation(
+        &self,
+        gift_wrap_id: &EventId,
+    ) -> Result<Vec<RejoinOffer>> {
+        let (inviter, offers) = self.offers_for(gift_wrap_id, None).await?;
+        let mut shown = Vec::with_capacity(offers.len());
+        for offer in offers {
+            if offer.welcomer.as_slice() == inviter.as_slice() && !self.being_left(&offer.group_id)
+            {
+                shown.push(offer);
+            } else {
+                let _ = self.session.decline_rejoin(&offer.welcome_id).await;
+                self.resolve_invitation(gift_wrap_id);
+                return Err(CircleError::NeedsNewInvite);
+            }
+        }
+        Ok(shown)
+    }
+
+    /// The user's consent to the replacement offer of the held invitation
+    /// `gift_wrap_id` whose local-branch token is `local_state_token`, as
+    /// [`Self::rejoin_offers_for_invitation`] showed it: the circle is joined
+    /// again on the new branch, its row follows MDK's record, and the
+    /// discarded copy's records go with it.
+    ///
+    /// # Errors
+    ///
+    /// [`CircleError::RejoinConfirmationRequired`] when the local branch moved
+    /// since the token was read — nothing changed, and the offer is read
+    /// again; [`CircleError::NeedsNewInvite`] when MDK no longer holds the
+    /// offer, or [`Self::rejoin_offers_for_invitation`] would decline it; and
+    /// the store's or engine's error otherwise.
+    pub async fn confirm_group_rejoin(
+        &self,
+        gift_wrap_id: &EventId,
+        local_state_token: &[u8],
+    ) -> Result<CircleWithMembers> {
+        let (inviter, offers) = self
+            .offers_for(gift_wrap_id, Some(local_state_token))
+            .await?;
+        let Some(offer) = offers.into_iter().next() else {
+            return Err(CircleError::RejoinConfirmationRequired);
+        };
+        if offer.welcomer.as_slice() != inviter.as_slice() || self.being_left(&offer.group_id) {
+            let _ = self.session.decline_rejoin(&offer.welcome_id).await;
+            self.resolve_invitation(gift_wrap_id);
+            return Err(CircleError::NeedsNewInvite);
+        }
+        match self
+            .session
+            .confirm_rejoin(&offer, local_state_token)
+            .await
+            .map_err(CircleError::from_session)?
+        {
+            RejoinConfirmation::Joined => {}
+            RejoinConfirmation::Stale => return Err(CircleError::RejoinConfirmationRequired),
+            RejoinConfirmation::Gone => {
+                self.resolve_invitation(gift_wrap_id);
+                return Err(CircleError::NeedsNewInvite);
+            }
+        }
+        let group_id = offer.group_id;
+        let (circle, membership) = self
+            .joined_circle_rows(&group_id, Some(hex::encode(&inviter)))
+            .await?;
+        self.storage.record_processed_invitation(
+            gift_wrap_id,
+            &circle,
+            &membership,
+            circle.created_at,
+        )?;
+        self.record_contaminated(&circle.relays, ContaminationSource::CircleRouting)?;
+        self.release_invitation(gift_wrap_id);
+        self.session
+            .acknowledge_outputs(std::slice::from_ref(&offer.welcome_id))
+            .await;
+        // The new branch may route where the old copy did not.
+        self.wake_routing_follow();
+        self.reconcile_member_directory_best_effort(DirectoryReconcile::Rewrite)
+            .await;
+        self.forget_left_groups().await;
+        self.get_circle(&group_id)
+            .await?
+            .ok_or_else(|| CircleError::NotFound("Circle not found after rejoin".to_string()))
+    }
+
+    /// Declines every replacement offer of the held invitation
+    /// `gift_wrap_id`, and the invitation with them: redelivery opens none
+    /// again, and nothing is sent.
+    ///
+    /// # Errors
+    ///
+    /// [`CircleError::NotFound`] when no such invitation is held; the
+    /// engine's error when an offer could not be declined, the invitation
+    /// then still held.
+    pub async fn decline_group_rejoin(&self, gift_wrap_id: &EventId) -> Result<()> {
+        let (_, offers) = self.offers_for(gift_wrap_id, None).await?;
+        for offer in offers {
+            self.session
+                .decline_rejoin(&offer.welcome_id)
+                .await
+                .map_err(CircleError::from_session)?;
+        }
+        self.resolve_invitation(gift_wrap_id);
+        Ok(())
+    }
+
+    /// The inviter (raw key) the held invitation `gift_wrap_id` showed, and
+    /// the replacement offers that are its: the one MDK keyed by its gift
+    /// wrap, else those by that inviter — and of those, when `token` is
+    /// given, only the one whose local branch it names (AM-5).
+    async fn offers_for(
+        &self,
+        gift_wrap_id: &EventId,
+        token: Option<&[u8]>,
+    ) -> Result<(Vec<u8>, Vec<RejoinOffer>)> {
+        let held = self
+            .pending_welcomes
+            .get(gift_wrap_id)
+            .ok_or_else(|| CircleError::NotFound("No held welcome for invitation".to_string()))?;
+        let inviter = hex::decode(&held.preview().inviter_pubkey).unwrap_or_default();
+        let wrap = MessageId::new(gift_wrap_id.to_bytes().to_vec());
+        let mut offers = Vec::new();
+        for group_id in self
+            .session
+            .live_group_ids()
+            .await
+            .map_err(CircleError::from_session)?
+        {
+            offers.extend(self.session.rejoin_offers(&group_id).await);
+        }
+        let by_wrap: Vec<RejoinOffer> = offers
             .iter()
-            .find_map(|ev| match ev {
-                GroupEvent::GroupJoined { group_id, .. } => Some(group_id.clone()),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                CircleError::Mls("welcome accept did not yield a joined group".to_string())
-            })?;
+            .filter(|offer| offer.welcome_id == wrap)
+            .cloned()
+            .collect();
+        let mut matched = if by_wrap.is_empty() {
+            offers
+                .into_iter()
+                .filter(|offer| offer.welcomer.as_slice() == inviter.as_slice())
+                .collect()
+        } else {
+            by_wrap
+        };
+        if let Some(token) = token {
+            matched.retain(|offer| offer.local_state_token.as_slice() == token);
+        }
+        Ok((inviter, matched))
+    }
 
+    /// Whether this device asked to leave `group_id`'s circle, or MDK still
+    /// holds a leave request for it; a store that cannot say reads as yes.
+    fn being_left(&self, group_id: &GroupId) -> bool {
+        self.session.leaving(group_id) || self.session.leave_requested(group_id)
+    }
+
+    /// The first half of [`Self::accept_invitation`] alone — the consent
+    /// recorded and the Welcome handed to the engine, which joins — as a
+    /// process that died right after the engine's join leaves it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::accept_invitation`] up to the join.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn accept_and_die_for_test(&self, gift_wrap_id: &EventId) -> Result<()> {
+        let held = self
+            .pending_welcomes
+            .get(gift_wrap_id)
+            .ok_or_else(|| CircleError::NotFound("No held welcome for invitation".to_string()))?;
+        let inviter = hex::decode(&held.preview().inviter_pubkey).unwrap_or_default();
+        self.storage.record_accept_intent(gift_wrap_id, &inviter)?;
+        self.session
+            .accept_welcome(held.gift_wrap())
+            .await
+            .map_err(CircleError::from_session)?;
+        Ok(())
+    }
+
+    /// Undoes a join the user did not consent to: its Welcome's
+    /// MLS-authenticated author is not the inviter the invitation showed.
+    /// The group is forgotten, the invitation resolved as a decline, and
+    /// the engine's owed join acknowledged with the rest of the batch. A
+    /// circle row the join replaced a removed or unrecoverable copy under
+    /// goes too, as a leave's does: nothing of that circle is left on the
+    /// device to show. The `KeyPackage` the Welcome consumed stays consumed
+    /// — MDK names a Welcome's author only by joining.
+    ///
+    /// # Errors
+    ///
+    /// The engine's refusal of the forget: the intent and the held
+    /// invitation stand, and the next accept tries again.
+    async fn refuse_unconsented_join(
+        &self,
+        group_id: &GroupId,
+        gift_wrap_id: &EventId,
+        effects: &SessionEffects,
+    ) -> Result<()> {
+        self.undo_unconsented_join(group_id, gift_wrap_id).await?;
+        self.session
+            .acknowledge_outputs(&[MessageId::new(gift_wrap_id.to_bytes().to_vec())])
+            .await;
+        // After the undo, so nothing of the refused join lands in a row it
+        // deleted; the rest of the batch is still persisted (Rule 12).
+        self.persist_replayed_locations(&effects.events).await;
+        Ok(())
+    }
+
+    /// [`Self::refuse_unconsented_join`]'s undo: the group forgotten, the
+    /// invitation resolved as a decline, and a row the join replaced a copy
+    /// under ended as at a leave.
+    ///
+    /// # Errors
+    ///
+    /// The engine's refusal of the forget, or the store's: what is left
+    /// stands for the next try.
+    async fn undo_unconsented_join(
+        &self,
+        group_id: &GroupId,
+        gift_wrap_id: &EventId,
+    ) -> Result<()> {
+        self.session
+            .forget_group_local(group_id)
+            .await
+            .map_err(CircleError::from_session)?;
+        self.resolve_invitation(gift_wrap_id);
+        if self.storage.get_circle(group_id)?.is_some() {
+            self.complete_leave(group_id, chrono::Utc::now().timestamp())
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The circle and accepted membership rows for a group this device joined,
+    /// from the engine's own record and routing (`group_record`,
+    /// `group_routing`).
+    async fn joined_circle_rows(
+        &self,
+        group_id: &GroupId,
+        inviter_pubkey: Option<String>,
+    ) -> Result<(Circle, CircleMembership)> {
         let (nostr_group_id, relays) = self
             .session
-            .group_routing(&group_id)
+            .group_routing(group_id)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+            .map_err(CircleError::from_session)?;
+        // A Welcome naming a routing id another circle here holds has had MDK
+        // give that id's route to the joined group: both are held, as for a
+        // rotation onto it (`resync_circle_relays_from_mdk`).
+        match self
+            .other_circle_with_routing_id(&nostr_group_id, group_id, UnreadEpoch::Holds)
+            .await
+        {
+            Ok(Some(other)) => {
+                self.session
+                    .note_routing_collision(&[group_id, &other])
+                    .map_err(CircleError::from_session)?;
+                log::warn!(
+                    "a joined circle's routing id is one another circle holds; both circles' \
+                     sends are held"
+                );
+            }
+            Ok(None) => {}
+            // As for a rotation (`resync_circle_relays_from_mdk`): the joined
+            // circle is held, and the join is recorded; a circle the Welcome
+            // took the route from is held from the next reconcile that reads
+            // the store (`hold_shared`).
+            Err(e) => {
+                self.hold_unchecked(group_id)?;
+                log::warn!(
+                    "whether a joined circle's routing id is another circle's could not be read \
+                     ({}); its sends are held",
+                    e.code()
+                );
+            }
+        }
         let group = self
             .session
-            .group_record(&group_id)
+            .group_record(group_id)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+            .map_err(CircleError::from_session)?;
 
         let now = chrono::Utc::now().timestamp();
         let resolved_name = if group.name.is_empty() {
@@ -3174,7 +4634,7 @@ impl CircleManager {
         let effective_relays = if relays.is_empty() {
             crate::circle::types::default_relays()
         } else {
-            relays
+            usable_relays(relays)
         };
         let circle = Circle {
             mls_group_id: group_id.clone(),
@@ -3188,36 +4648,18 @@ impl CircleManager {
         let membership = CircleMembership {
             mls_group_id: group_id.clone(),
             status: MembershipStatus::Accepted,
-            inviter_pubkey: Some(held.preview().inviter_pubkey.clone()),
+            inviter_pubkey,
             invited_at: now,
             responded_at: Some(now),
         };
-
-        // Atomically persist the circle + membership + dedup row, then drop the
-        // held welcome (terminal).
-        self.storage
-            .record_processed_invitation(gift_wrap_id, &circle, &membership, now)?;
-        // A joined circle carries the INVITER's routing relays, which is the
-        // most common way a relay this user never chose starts seeing their
-        // kind-445 — and the most likely way a profile-pool relay would get
-        // contaminated. Record before the circle is usable.
-        self.record_contaminated(&circle.relays, ContaminationSource::CircleRouting)?;
-        self.pending_welcomes.remove(gift_wrap_id);
-
-        // Accepting is what makes the roster real, so it is the directory write
-        // site — never the preview above, which is seal-authenticated only
-        // (anyone can gift-wrap a welcome) and where a row would break
-        // decline-leaves-no-trace. Placed after the storage write so the circle
-        // the union is about to read is already persisted.
-        self.reconcile_member_directory_best_effort(DirectoryReconcile::Rewrite)
-            .await;
-
-        self.get_circle(&group_id)
-            .await?
-            .ok_or_else(|| CircleError::NotFound("Circle not found after acceptance".to_string()))
+        Ok((circle, membership))
     }
 
-    /// Declines an invitation: drops the held 1059 locally.
+    /// Declines an invitation: drops the held 1059 locally, with the
+    /// replacement offer MDK holds for this gift wrap, if any — the offer
+    /// keeps the replacement branch's decrypted state, and nothing could
+    /// confirm it once the invitation is gone (Rule 5). Only the offer keyed
+    /// by this wrap: one matched by its inviter may be another invitation's.
     ///
     /// The welcome is never ingested, so there is no join commit, no
     /// self-remove, nothing on the wire (Rule 10). The gift wrap is marked
@@ -3225,313 +4667,423 @@ impl CircleManager {
     ///
     /// # Errors
     ///
-    /// Returns an error only if the resolution sentinel write fails.
-    pub fn decline_invitation(&self, gift_wrap_id: &EventId) -> Result<()> {
-        self.pending_welcomes.remove(gift_wrap_id);
+    /// The engine's error when the offer could not be declined, the
+    /// invitation then still held.
+    pub async fn decline_invitation(&self, gift_wrap_id: &EventId) -> Result<()> {
+        let wrap = MessageId::new(gift_wrap_id.to_bytes().to_vec());
+        for group_id in self
+            .session
+            .live_group_ids()
+            .await
+            .map_err(CircleError::from_session)?
+        {
+            for offer in self.session.rejoin_offers(&group_id).await {
+                if offer.welcome_id == wrap {
+                    self.session
+                        .decline_rejoin(&offer.welcome_id)
+                        .await
+                        .map_err(CircleError::from_session)?;
+                }
+            }
+        }
+        self.resolve_invitation(gift_wrap_id);
+        Ok(())
+    }
+
+    /// Drops the held invitation `gift_wrap_id` and marks it resolved, for a
+    /// path that has already answered its replacement offers.
+    fn resolve_invitation(&self, gift_wrap_id: &EventId) {
+        self.release_invitation(gift_wrap_id);
+        let _ = self.storage.clear_accept_intent(gift_wrap_id);
         let now = chrono::Utc::now().timestamp();
         // Reuse the failure-sentinel row as a "resolved, do not re-surface" mark.
         let _ = self.storage.record_gift_wrap_failure(gift_wrap_id, now);
-        Ok(())
+    }
+
+    /// Whether an invitation is being held for the user's answer — in memory
+    /// now, or durably from before a restart that has not polled it back yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn held_invitations_outstanding(&self) -> Result<bool> {
+        Ok(!self.pending_welcomes.is_empty() || self.storage.held_invitation_outstanding()?)
+    }
+
+    /// Whether, at `now_secs`, the replacement of a `KeyPackage` a Welcome
+    /// consumed still waits for an invitation the user holds unanswered.
+    ///
+    /// Replacing a consumed package deletes its private material at the first
+    /// relay acknowledgement, and every other invitation made for that
+    /// package would die unanswered. So the maintenance tick leaves it in
+    /// place while one is held — for at most
+    /// [`CONSUMED_KEY_PACKAGE_HOLD_SECS`], counted from the first call that
+    /// found one held. The preview that makes Haven hold an invitation is
+    /// only seal-authenticated, so a stranger can cause a hold; the bound is
+    /// what stops them extending it, and an invitation that arrives later
+    /// does not move it. Nor does the clock: a start that is ahead of it ends
+    /// the hold, and a hold that has ended stays ended until the replacement
+    /// is acknowledged. Rotation, a lost bundle and the `not_after` deletion
+    /// are never held back by it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn consumed_key_package_replacement_waits(&self, now_secs: u64) -> Result<bool> {
+        if !self.held_invitations_outstanding()? {
+            return Ok(false);
+        }
+        match self.storage.consumed_hold_since()? {
+            None => {
+                self.storage.set_consumed_hold_since(Some(now_secs))?;
+                Ok(true)
+            }
+            Some(CONSUMED_HOLD_OVER) => Ok(false),
+            Some(since)
+                if now_secs
+                    .checked_sub(since)
+                    .is_some_and(|waited| waited < CONSUMED_KEY_PACKAGE_HOLD_SECS) =>
+            {
+                Ok(true)
+            }
+            // Past the bound, or the clock reads earlier than the start:
+            // counting again from "now" would let a clock set back keep the
+            // consumed key. A failed write only lets a later clock step
+            // resume the same window; it never widens it.
+            Some(_) => {
+                let _ = self
+                    .storage
+                    .set_consumed_hold_since(Some(CONSUMED_HOLD_OVER));
+                Ok(false)
+            }
+        }
+    }
+
+    /// A replacement `KeyPackage` was acknowledged and promoted.
+    ///
+    /// The hold it ended is over, so a later consumption starts its own. The
+    /// durable held-invitation marker goes too when nothing is held in memory
+    /// — nothing held from before a restart can still open the superseded
+    /// package — unless `replacement_consumed`: the package just promoted was
+    /// itself consumed while its publish was in flight, and an invitation
+    /// from before a restart may be the other one made for it.
+    pub fn note_key_package_replaced(&self, replacement_consumed: bool) {
+        // A failed clear only shortens the next hold; it never lengthens one.
+        let _ = self.storage.set_consumed_hold_since(None);
+        if !replacement_consumed {
+            self.pending_welcomes.unmark_if_empty(|| {
+                // Nothing held before the restart can open a superseded
+                // package: none of it is waited for any more.
+                self.held_polled_back
+                    .store(true, std::sync::atomic::Ordering::Release);
+                let _ = self.storage.set_held_invitation_outstanding(false);
+            });
+        }
+    }
+
+    /// Drops the held invitation `gift_wrap_id`, and the durable marker with
+    /// the last one.
+    fn release_invitation(&self, gift_wrap_id: &EventId) {
+        self.pending_welcomes
+            .remove_recording(gift_wrap_id, |held| {
+                // A failed write only makes a consumed package wait out its
+                // bounded hold; the next answer or acknowledgement clears it.
+                let _ = self
+                    .storage
+                    .set_held_invitation_count(self.held_to_record(held));
+            });
     }
 
     // ==================== Location Sharing ====================
 
-    /// Encrypts a location for a circle, producing a kind 445 event.
+    /// A location sealed in staging mode, for
+    /// [`Publishing::seal_location`](crate::relay::fanout::Publishing::seal_location):
+    /// whatever the engine stages on the way — an eviction its preflight
+    /// commits ahead of the location, a change the pre-send drain releases —
+    /// gets its durable fanout in the hold that staged it, and comes back as
+    /// a handle for the driver. Nothing is handed back to be sent.
     ///
-    /// Builds the inner Marmot app event (kind
-    /// [`KIND_LOCATION_UPDATE`](crate::nostr::KIND_LOCATION_UPDATE), untagged,
-    /// `pubkey` == the local identity per W9) and sends it via the engine,
-    /// returning the transport event plus the circle's `nostr_group_id` and
-    /// relays for the relay layer to publish.
+    /// A send the engine queued is answered with no event; the queued fix is
+    /// discarded (the next tick carries a fresher one) and nothing is
+    /// retried. Inside the wait a refused eviction earned, and for a `mode`
+    /// that makes no new commit while one is due, the send is not made at
+    /// all (`SessionManager::departure_holds_a_send`).
     ///
-    /// The per-send NIP-40 expiration is dropped (retention is now a group-level
-    /// `message-retention.v1` component, not a per-message tag — `dm2_report` #2);
-    /// `update_interval_secs` is retained for signature stability but unused.
+    /// The pre-send drain begins an advance only while the wake, which ends
+    /// at `deadline_ms` on `clock`, still has room for one and for the send
+    /// behind it; a drain cut short leaves the send to MDK's preflight, which
+    /// queues it behind what is still untried.
     ///
     /// # Errors
     ///
-    /// Returns an error if the circle is not found, serialization fails, or the
-    /// engine rejects the send. Returns [`CircleError::SendDeferred`] when the
-    /// engine QUEUED the update instead of encrypting it — see that variant and
-    /// [`Self::deferred_send_outcome`].
-    pub async fn encrypt_location(
+    /// [`CircleError::NotFound`] for a circle this device does not hold, a
+    /// store or engine failure otherwise. A deferral is not an error here.
+    pub(crate) async fn seal_location_staging(
         &self,
         mls_group_id: &GroupId,
-        _sender_pubkey: &PublicKey,
         location: &LocationMessage,
-        _update_interval_secs: u64,
-    ) -> Result<(Event, [u8; 32], Vec<String>)> {
+        now_ms: u64,
+        still: Still<'_>,
+        clock: &dyn crate::relay::fanout::FanoutClock,
+        deadline_ms: Option<u64>,
+    ) -> Result<StagedSeal> {
         let circle = self
             .storage
             .get_circle(mls_group_id)?
             .ok_or_else(|| CircleError::NotFound("Circle not found: <redacted>".to_string()))?;
-
         let content = location.to_string().map_err(|e| {
             CircleError::Mls(format!(
                 "Failed to serialize location: {}",
                 redact_hex_sequences(&e.to_string())
             ))
         })?;
+        let mut seal = StagedSeal::default();
 
-        // `send_location` stamps the inner pubkey with the session identity (W9)
-        // and generates a fresh ephemeral key per 445 (Rule 2, engine-owned).
-        let effects = self
+        let held = self
             .session
-            .send_location(mls_group_id, content)
+            .departure_holds_a_send(mls_group_id, Some(now_ms), still)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-
-        // The engine queued rather than encrypted. Checked BEFORE
-        // `take_app_message`, which would otherwise report the queue as "no
-        // publish work" — the opaque error every Dart caller dropped into a
-        // `debugPrint` while the device silently stopped sharing.
-        if !effects.queued.is_empty() {
-            // The deferred branch drains the same buffers the successful one
-            // does, and it reaches `take_app_message` never — so the peer
-            // locations this send replayed are persisted HERE. The publish half
-            // is `collect_deferred_work`'s, which records its own obligations.
-            self.note_send_drain(&effects.events).await;
-            return Err(self
-                .deferred_send_outcome(mls_group_id, effects.publish, now_secs())
-                .await);
+            .map_err(CircleError::from_session)?;
+        if let Some((settled, held)) = held {
+            self.fold_into(&mut seal, settled, now_ms, still).await;
+            if held {
+                seal.departure_due = true;
+                return Ok(seal);
+            }
         }
-        let event = self.take_app_message(effects).await?;
-        // The engine accepted an outbound message, so this group is `Stable` and
-        // holds no staged commit — the only positive proof that a deferred
-        // eviction is no longer owed. See
-        // [`Self::discharge_removal_deferral_after_send`].
-        self.discharge_removal_deferral_after_send(&circle.nostr_group_id);
-
-        Ok((event, circle.nostr_group_id, circle.relays))
-    }
-
-    /// Turns a deferred (queued) send into a typed, actionable outcome.
-    ///
-    /// Infallible by construction — every internal failure is logged and folded
-    /// into the returned outcome, because the ONE thing this must never do is
-    /// replace an actionable "sharing is stalled" signal with an unrelated
-    /// error string.
-    ///
-    /// # Two causes, two paths
-    ///
-    /// `should_queue_outbound_intent` is true for exactly two reasons, and they
-    /// need opposite handling:
-    ///
-    /// 1. **A staged auto-commit** — a peer's `SelfRemove` came due and the
-    ///    engine staged the eviction commit inside this very call, draining it
-    ///    into `publish`. Nothing is stuck; the circle is mid-handshake. Hand
-    ///    the work back (see [`DeferredWork`] for why neither confirming,
-    ///    rolling back, nor dropping is acceptable) and do NOT sweep: a group
-    ///    in `PendingPublish` has no stuck row to clear, and a sweep would
-    ///    report a repair nobody performed.
-    /// 2. **A stored row the convergence gate cannot settle** — then `publish`
-    ///    is empty and the repair below is the whole response.
-    ///
-    /// # The repair, in order
-    ///
-    /// 1. **Sweep this circle.** One pass does both halves: it discards the
-    ///    location intent the engine just queued (a fix is ephemeral — the next
-    ///    cadence tick carries a fresher one, and a queue that grows one row per
-    ///    publish cycle is the other half of the leak), and it retires any
-    ///    stored row the relay can no longer redeliver. The retirement is the
-    ///    only step that can clear a future-epoch row: convergence re-feeds it
-    ///    on every pass and deliberately keeps it `Retryable` so a late commit
-    ///    can still resolve it.
-    /// 2. **Advance convergence**, which releases everything step 1 unblocked
-    ///    (the engine's `advance_convergence` runs
-    ///    `advance_convergence_inputs_until_settled`, including
-    ///    `retry_deferred_peels`, before draining queued work). Anything it
-    ///    stages is surfaced, never resolved here — same rule as above.
-    /// 3. **Re-read the gate, read-only.** A second mutating sweep would retire
-    ///    rows nobody asked about and report a pass the caller never requested.
-    ///
-    /// No send is retried here. The next scheduled publish re-enters
-    /// [`Self::encrypt_location`] with a current fix, which is both simpler and
-    /// more accurate than resending the one that was queued.
-    async fn deferred_send_outcome(
-        &self,
-        mls_group_id: &GroupId,
-        publish: Vec<PublishWork>,
-        now_secs: u64,
-    ) -> CircleError {
-        let report = self
-            .repair_deferred_send(mls_group_id, publish, now_secs)
-            .await;
-        CircleError::SendDeferred {
-            unresolved_inputs: report.unresolved_inputs,
-            discarded_intents: report.discarded_intents,
-            repaired: report.repaired,
-            work: report.work,
-        }
-    }
-
-    /// The repair itself, shaped as a value rather than as an error.
-    ///
-    /// Split out of [`Self::deferred_send_outcome`] so a deferred EPOCH ROTATION
-    /// — which has no location event to lose and therefore is not an error —
-    /// can run the identical repair and return the identical work without
-    /// destructuring an error to get at it (see
-    /// [`Self::repair_epoch_rotation`]). The behaviour is exactly what
-    /// `encrypt_location` had; only the shape moved.
-    async fn repair_deferred_send(
-        &self,
-        mls_group_id: &GroupId,
-        publish: Vec<PublishWork>,
-        now_secs: u64,
-    ) -> DeferredSendReport {
-        let mut work = self.collect_deferred_work(&publish).await;
-        if !work.is_empty() {
-            // No stored row is stuck here, so there is nothing to retire — but
-            // the engine still QUEUED the location fix that triggered this
-            // deferral, and leaving it banked until the next session open is
-            // exactly the stale-position leak `SendDeferred` promises not to
-            // have. Discard it on this branch too.
-            let discarded_intents = self.discard_queued_location_intents(mls_group_id).await;
-            return DeferredSendReport {
-                unresolved_inputs: self.gating_input_count(mls_group_id).await,
-                discarded_intents,
-                repaired: false,
-                work,
+        // Every deferred-peel row gets its try before the send, or MDK's
+        // preflight queues the send behind it. The inputs-only advance, in
+        // either mode: trying a parked row makes no commit, and the full one
+        // also drains the queue and the engine's maintenance, which a send
+        // must not have made here.
+        let room = |deadline: u64| {
+            clock
+                .now_ms()
+                .saturating_add(cgka_engine::message_processor::BACKGROUND_CONVERGENCE_BUDGET_MS)
+                .saturating_add(crate::relay::fanout::LOCATION_SEND_MS)
+                <= deadline
+        };
+        for _ in 0..crate::nostr::mls::SEND_PEEL_DRAIN_ADVANCES {
+            if !self.session.deferred_peels_due(mls_group_id).await {
+                break;
+            }
+            if !deadline_ms.is_none_or(room) {
+                seal.drain_cut = true;
+                break;
+            }
+            let Ok(drained) = self
+                .advance_as(
+                    mls_group_id,
+                    Disposition::Settle { now_ms },
+                    &mut seal.recorded,
+                )
+                .await
+            else {
+                break;
             };
+            self.fold_into(&mut seal, drained, now_ms, still).await;
         }
 
-        let sweep = match self
+        let (staged, recorded) = self
+            .session
+            .send_location_staging(mls_group_id, content, now_ms, still)
+            .await
+            .map_err(CircleError::from_session)?;
+        let Staged {
+            mut effects,
+            fanouts,
+            proposals,
+            waiting,
+            ..
+        } = staged;
+        seal.recorded.extend(fanouts);
+        seal.recorded.extend(proposals);
+        seal.departure_due = waiting.contains(mls_group_id);
+        let queued = !effects.queued.is_empty();
+        // Taken out before the fold, which retires a location it finds in a
+        // batch as one a drain released.
+        let sealed = effects
+            .publish
+            .iter()
+            .position(|work| matches!(work, PublishWork::ApplicationMessage { .. }))
+            .filter(|_| !queued)
+            .map(|at| effects.publish.remove(at));
+        self.fold_into(&mut seal, effects, now_ms, still).await;
+        if queued {
+            self.discard_queued_location_intents(mls_group_id).await;
+            return Ok(seal);
+        }
+        if sealed.is_none() && seal.departure_due {
+            return Ok(seal);
+        }
+        let (Some(PublishWork::ApplicationMessage { msg, .. }), Some(recorded)) =
+            (sealed, recorded)
+        else {
+            return Err(CircleError::Mls(
+                "send produced no ApplicationMessage publish work".to_string(),
+            ));
+        };
+        let event =
+            SessionManager::transport_message_to_event(&msg).map_err(CircleError::from_session)?;
+        // The relays are the record's: what was frozen with the event in the
+        // hold that sealed it, not what the circle's row says a moment later.
+        seal.sealed = Some((event, circle.nostr_group_id, recorded.relays));
+        Ok(seal)
+    }
+
+    /// Folds one batch of a staging send into `seal`, advancing nothing: a
+    /// send is not a resolution.
+    async fn fold_into(
+        &self,
+        seal: &mut StagedSeal,
+        effects: SessionEffects,
+        now_ms: u64,
+        still: Still<'_>,
+    ) {
+        let (folded, recorded) = self.fold_staged(effects, false, now_ms, still).await;
+        seal.handed_back.results.extend(folded.results);
+        seal.handed_back.proposals.extend(folded.proposals);
+        seal.recorded.extend(recorded);
+    }
+
+    /// The deferred-send repair ([`Self::repair_deferred_send`]) for a plane
+    /// that drives: what its advance releases — a change the user queued,
+    /// the eviction of a member who left, a leave proposed again — is
+    /// recorded in the hold that released it and handed to the driver.
+    ///
+    /// Not for a deferral whose own call recorded a commit in the circle, or
+    /// held the send back for a departure: nothing is stuck then. The circle
+    /// is swept — the queued fix discarded and every stored input the relay
+    /// can no longer redeliver retired — and served as a plane that drives
+    /// serves it ([`Self::serve_deadlines`]): the full advance, which gives
+    /// a queued change its one attempt, or in [`DriveMode::FinishOnly`] the
+    /// inputs-only one.
+    pub(crate) async fn repair_deferred_send_staging(
+        &self,
+        mls_group_id: &GroupId,
+        now_secs: u64,
+        now_ms: u64,
+        still: Still<'_>,
+    ) -> (DecryptedIngest, Vec<FanoutId>) {
+        // Best-effort: a circle the sweep could not clear is answered as
+        // still gated by what it holds, which is read after this.
+        let _ = self
             .session
             .sweep_unresolvable_inputs_for_group(mls_group_id, now_secs)
+            .await;
+        self.serve_deadlines(mls_group_id, now_ms, still).await
+    }
+
+    /// Gives `mls_group_id` the full advance of a plane that drives and folds
+    /// what it releases, advancing no further: how a full drive stages an
+    /// eviction that is due and not made
+    /// (`SessionManager::evictions_left_due`). Inputs-only once the full
+    /// mode `still` was decided in has ended.
+    pub(crate) async fn stage_due_eviction(
+        &self,
+        mls_group_id: &GroupId,
+        now_ms: u64,
+        still: Still<'_>,
+    ) -> (DecryptedIngest, Vec<FanoutId>) {
+        let mut recorded = Vec::new();
+        let Ok(advanced) = self
+            .advance_as(
+                mls_group_id,
+                Disposition::Stage { now_ms, still },
+                &mut recorded,
+            )
             .await
-        {
-            Ok(sweep) => sweep,
-            Err(e) => {
-                log::warn!("deferred send: convergence sweep failed: {}", e.code());
-                ConvergenceSweep::default()
-            }
+        else {
+            return (DecryptedIngest::default(), recorded);
         };
+        let (folded, more) = self.fold_staged(advanced, false, now_ms, still).await;
+        recorded.extend(more);
+        (folded, recorded)
+    }
 
-        match self.session.advance_convergence(mls_group_id).await {
-            Ok(effects) => {
-                // Through the FOLD, not a bare publish scan: this batch is a
-                // drained one, so it carries whatever the release re-ingested —
-                // peer locations (persisted by the fold, which is the point) and
-                // the local user's own re-proposed leave, which must keep
-                // reaching `work.proposals` or the leave wedges behind the
-                // engine's send gate.
-                let (advanced, verdict) = self
-                    .fold_resolved_publish(effects, BatchOrigin::Drained)
-                    .await;
-                work.commits.extend(advanced.auto_commits);
-                work.proposals.extend(advanced.proposals);
-                if let Some(mode) = verdict {
-                    self.reconcile_member_directory_best_effort(mode).await;
-                }
-            }
-            Err(e) => log::warn!("deferred send: advancing convergence failed: {}", e.code()),
-        }
-
-        let unresolved_inputs = self.gating_input_count(mls_group_id).await;
-        log::warn!(
-            "send deferred by the MLS engine: {} input(s) still gating after repair \
-             ({} queued location intent(s) discarded, {} stale input(s) retired, \
-             {} staged commit(s) handed back)",
-            bucket(unresolved_inputs),
-            bucket(sweep.discarded_intents),
-            bucket(sweep.disposed_messages),
-            bucket(work.commits.len())
-        );
-        DeferredSendReport {
-            unresolved_inputs,
-            discarded_intents: sweep.discarded_intents,
-            repaired: unresolved_inputs == 0 && work.is_empty(),
-            work,
+    /// Forgets that the circle routed by `ngid` is caught up
+    /// (`SessionManager::forget_caught_up`).
+    pub(crate) fn forget_caught_up(&self, ngid: &[u8; 32]) {
+        // A store that cannot say which circle is meant forgets them all.
+        match self.circle_routed_by(ngid) {
+            Ok(Some(circle)) => self.session.forget_caught_up(Some(&circle.mls_group_id)),
+            Ok(None) => {}
+            Err(_) => self.session.forget_caught_up(None),
         }
     }
 
-    /// Collects every publish item a deferred send drained, converting staged
-    /// commits to [`CommitToPublish`] and bare proposals to signed events.
-    ///
-    /// Nothing is confirmed and nothing is rolled back — see [`DeferredWork`].
-    /// An item whose transport message cannot be serialized is the ONE case
-    /// that must still be resolved here, because there is no event for a caller
-    /// to publish: it is rolled back (`publish_failed`) rather than left
-    /// staged, which matches [`Self::collect_auto_commits`] on the receive path.
-    ///
-    /// Each of the three rollbacks keeps its OWN batch
-    /// ([`Self::absorb_rollback`]): the engine replays on the way out of
-    /// `publish_failed` too, so even this corner releases peer locations
-    /// (persisted by the resolution itself) and can stage the next commit in a
-    /// cascade.
-    async fn collect_deferred_work(&self, work: &[PublishWork]) -> DeferredWork {
-        let mut out = DeferredWork::default();
-        for item in work {
-            match item {
-                // Split from `GroupEvolution` below for one reason: THIS is the
-                // peer `SelfRemove` eviction the engine staged inside the send,
-                // so it is removal-bearing and its publish is recorded as owed
-                // before it crosses the FFI — exactly as on the receive path
-                // ([`Self::collect_auto_commits`]). A `GroupEvolution` is a
-                // send-side commit this device authored and may legitimately
-                // roll back.
-                PublishWork::AutoPublish { msg, pending } => {
-                    match SessionManager::transport_message_to_event(msg) {
-                        Ok(commit_event) => {
-                            let commit = CommitToPublish {
-                                commit_event,
-                                pending: *pending,
-                            };
-                            if !self.owe_removal_publish(&commit) {
-                                log::warn!(
-                                    "deferred send handed back an eviction commit with no \
-                                     recorded obligation: an unacked publish will roll it back"
-                                );
-                            }
-                            out.commits.push(commit);
-                        }
-                        Err(_) => self.absorb_rollback(*pending, &mut out).await,
-                    }
-                }
-                PublishWork::GroupEvolution { msg, pending, .. } => {
-                    match SessionManager::transport_message_to_event(msg) {
-                        Ok(commit_event) => out.commits.push(CommitToPublish {
-                            commit_event,
-                            pending: *pending,
-                        }),
-                        Err(_) => self.absorb_rollback(*pending, &mut out).await,
-                    }
-                }
-                // A create can never surface on a send path for an existing
-                // group; if the engine ever emitted one there would be no event
-                // to publish here (welcomes only), so roll it back rather than
-                // silently pin the group.
-                PublishWork::GroupCreated { pending, .. } => {
-                    self.absorb_rollback(*pending, &mut out).await;
-                }
-                PublishWork::Proposal { msg } => {
-                    match SessionManager::transport_message_to_event(msg) {
-                        Ok(event) => out.proposals.push(event),
-                        Err(e) => log::warn!(
-                            "deferred send: dropping an unserializable proposal: {}",
-                            e.code()
-                        ),
-                    }
-                }
-                PublishWork::ApplicationMessage { .. } => {}
-            }
-        }
-        out
-    }
-
-    /// Rolls a staged item back and keeps what the rollback itself released.
-    ///
-    /// The engine replays its buffer on the way out of `publish_failed`, so even
-    /// this corner — an item whose transport message will not serialize — hands
-    /// back peer locations (already persisted), the next eviction in a cascade,
-    /// and any re-proposed leave. Folding them here is what stops the rollback
-    /// from being a second drop site.
-    async fn absorb_rollback(&self, pending: PendingStateRef, out: &mut DeferredWork) {
-        let Ok(batch) = self.publish_failed(pending).await else {
+    /// Records the circle routed by `ngid` as caught up in this session
+    /// (`SessionManager::mark_caught_up`) — unless another routing id of
+    /// the circle's is still owed its end of stored events
+    /// (`awaits_eose`, by hex): a commit sealed under a prior id by a member
+    /// that had not yet taken the rotation in is a branch at the circle's
+    /// epoch like any other.
+    pub(crate) fn note_caught_up(&self, ngid: &[u8; 32], awaits_eose: impl Fn(&str) -> bool) {
+        let Ok(Some(circle)) = self.circle_routed_by(ngid) else {
             return;
         };
-        out.commits.extend(batch.auto_commits);
-        out.proposals.extend(batch.proposals);
+        if !self
+            .routing_ids_of(&circle.mls_group_id)
+            .iter()
+            .any(|id| id != ngid && awaits_eose(&hex::encode(id)))
+        {
+            self.session.mark_caught_up(&circle.mls_group_id);
+        }
+    }
+
+    /// Records that `relay` owes the routing id `group_id_hex` its history
+    /// from `since_secs` (Security Rule 12). Whether it was recorded: a relay
+    /// whose debt could not be written must stay in its REQ's coverage.
+    pub(crate) fn owe_relay_floor(&self, group_id_hex: &str, relay: &str, since_secs: i64) -> bool {
+        let Some(id) = routing_id_of_hex(group_id_hex) else {
+            return false;
+        };
+        self.storage
+            .owe_relay_floor(&id, relay, since_secs)
+            .inspect_err(|_| log::warn!("a relay's owed floor was not recorded"))
+            .is_ok()
+    }
+
+    /// The floor `relay` owes the routing id `group_id_hex`, if any. A store
+    /// that cannot say answers none, said in the log.
+    pub(crate) fn relay_floor(&self, group_id_hex: &str, relay: &str) -> Option<i64> {
+        let id = routing_id_of_hex(group_id_hex)?;
+        self.storage
+            .relay_floor(&id, relay)
+            .inspect_err(|_| log::warn!("a relay's owed floor was not read"))
+            .ok()
+            .flatten()
+    }
+
+    /// [`Self::relay_floor`], for a test.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn relay_floor_for_test(&self, group_id_hex: &str, relay: &str) -> Option<i64> {
+        self.relay_floor(group_id_hex, relay)
+    }
+
+    /// Ends the floor `relay` owes `group_id_hex` once a REQ it answered to
+    /// its end asked from `covered_since` or earlier.
+    pub(crate) fn clear_relay_floor(&self, group_id_hex: &str, relay: &str, covered_since: i64) {
+        if let Some(id) = routing_id_of_hex(group_id_hex) {
+            if self
+                .storage
+                .clear_relay_floor(&id, relay, covered_since)
+                .is_err()
+            {
+                log::warn!("a relay's owed floor was not cleared");
+            }
+        }
+    }
+
+    /// The circle a `kind:445` event is addressed to, by its `#h` tag: what
+    /// the event claims, before anything about it is authenticated.
+    pub(crate) fn group_of_event(&self, event: &Event) -> Option<GroupId> {
+        let ngid = nostr_group_id_from_commit_event(event)?;
+        self.circle_routed_by(&ngid)
+            .ok()
+            .flatten()
+            .map(|circle| circle.mls_group_id)
     }
 
     /// Discards the circle's queued location intents, or `0` if the store
@@ -3553,23 +5105,6 @@ impl CircleManager {
             })
     }
 
-    /// Rows still gating outbound sends for a circle, or `0` if the store
-    /// cannot be read.
-    ///
-    /// Read-only. Zero on failure is the fail-SAFE direction here: it makes the
-    /// outcome claim "repaired", and a wrong "repaired" only costs one more
-    /// deferral on the next cadence tick, whereas a wrong "still stuck" would
-    /// park a working circle behind a repair banner forever.
-    async fn gating_input_count(&self, mls_group_id: &GroupId) -> usize {
-        self.session
-            .gating_input_count(mls_group_id)
-            .await
-            .unwrap_or_else(|e| {
-                log::warn!("deferred send: reading the send gate failed: {}", e.code());
-                0
-            })
-    }
-
     /// Gives a terminal disposition to stored convergence inputs the relay can
     /// no longer redeliver, across every circle, and reports what is still
     /// gating outbound sends.
@@ -3585,252 +5120,23 @@ impl CircleManager {
         self.session
             .sweep_unresolvable_inputs(now_secs)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
+            .map_err(CircleError::from_session)
     }
 
-    /// The group relays a `kind:445` commit routes to, resolved from its `#h`
+    /// The group relays a `kind:445` routes to, resolved from its `#h`
     /// (`nostr_group_id`) tag against the local circle rows.
     ///
-    /// Used by the receive-side auto-commit publisher
-    /// ([`crate::relay::auto_commit`]) to target a peer `SelfRemove` eviction
-    /// commit at the correct circle's relays. Returns `None` (fail closed — the
-    /// caller then rolls the commit back rather than publish it nowhere) when the
-    /// `#h` tag is absent/malformed or no local circle matches.
+    /// Used by the fanout driver to send a proposal no record could be
+    /// written for to its circle's relays. Returns `None` (fail closed — the
+    /// proposal is then sent nowhere) when the `#h` tag is absent/malformed
+    /// or no local circle matches.
     #[must_use]
     pub fn relays_for_commit_event(&self, event: &Event) -> Option<Vec<String>> {
         let ngid = nostr_group_id_from_commit_event(event)?;
-        let circles = self.storage.get_all_circles().ok()?;
-        circles
-            .into_iter()
-            .find(|c| c.nostr_group_id == ngid)
+        self.circle_routed_by(&ngid)
+            .ok()
+            .flatten()
             .map(|c| c.relays)
-    }
-
-    /// Decrypts / ingests a received kind 445 event, returning the folded
-    /// location-facing results AND any receive-side auto-commit(s) the engine
-    /// staged (a peer `SelfRemove` eviction).
-    ///
-    /// Ingests the transport message, drains the engine's emitted
-    /// [`GroupEvent`]s, advances stored convergence for any group with pending
-    /// convergence, folds each event into a [`LocationMessageResult`], and
-    /// collects every [`PublishWork::AutoPublish`] into a [`CommitToPublish`].
-    ///
-    /// Publish-before-apply (Rule 13): the caller MUST publish each returned
-    /// [`DecryptedIngest::auto_commits`] entry's `commit_event` to the circle's
-    /// relays and then [`Self::confirm_published`] on a ≥1-relay ack (or
-    /// [`Self::publish_failed`] on failure) — exactly like [`CommitToPublish`]
-    /// from the send paths, except that the failure rung keeps the publish OWED
-    /// instead of discarding the eviction. The obligation is recorded before the
-    /// commit is handed over ([`Self::collect_auto_commits`]). An auto-commit
-    /// that cannot be serialized is rolled back here (never surfaced
-    /// half-formed).
-    ///
-    /// An event Haven's receiver-side screen rejected before any MLS
-    /// authentication (an expired NIP-40 replay) yields an EMPTY
-    /// [`DecryptedIngest`]: no results, no auto-commits, nothing persisted. This
-    /// entry point owns no sync cursor, so there is no cursor decision to make
-    /// here — the two planes that do own one
-    /// ([`crate::relay::live_sync`], [`crate::relay::catchup`]) call
-    /// [`crate::nostr::mls::SessionManager::process_event`] directly and match on
-    /// its [`ScreenedIngest`](crate::nostr::mls::types::ScreenedIngest).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only for a hard ingest failure.
-    pub async fn decrypt_location_collecting_commits(
-        &self,
-        event: &Event,
-    ) -> Result<DecryptedIngest> {
-        let screened = self
-            .session
-            .process_event(event)
-            .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        let Some(ingest) = screened.ingested() else {
-            return Ok(DecryptedIngest::default());
-        };
-
-        // This plane folds to results rather than routing raw events, so it is
-        // its own receive-observation write site (the other planes call
-        // `note_inbound_group_events` at their own `process_event` seam).
-        self.note_inbound_group_events(&ingest.effects.events);
-        let mut results = fold_group_events(&ingest.effects.events);
-        let mut auto_commits = Vec::new();
-        for rolled in self
-            .collect_auto_commits(&ingest.effects.publish, &mut auto_commits)
-            .await
-        {
-            results.extend(fold_group_events(&rolled.events));
-        }
-
-        // Release any queued work + buffered inbound now safe to apply, re-ticking
-        // a group that stays pending until its jitter-delayed `SelfRemove`
-        // auto-commit surfaces (bounded) — a single advance would drain the group
-        // out of the engine's pending set before the auto-commit's wall-clock due
-        // time, so the eviction would never be surfaced for the caller to publish.
-        // A quiet group exits immediately (no delay).
-        let mut pending: Vec<GroupId> = ingest.effects.pending_convergence.clone();
-        for _ in 0..crate::relay::auto_commit::MAX_CONVERGENCE_RETICKS {
-            if pending.is_empty() {
-                break;
-            }
-            let mut next: Vec<GroupId> = Vec::new();
-            for gid in &pending {
-                if let Ok(more) = self.session.advance_convergence(gid).await {
-                    self.note_inbound_group_events(&more.events);
-                    results.extend(fold_group_events(&more.events));
-                    for rolled in self
-                        .collect_auto_commits(&more.publish, &mut auto_commits)
-                        .await
-                    {
-                        results.extend(fold_group_events(&rolled.events));
-                    }
-                    next.extend(more.pending_convergence);
-                }
-            }
-            pending = next;
-            if !pending.is_empty() {
-                tokio::time::sleep(crate::relay::auto_commit::CONVERGENCE_RETICK_DELAY).await;
-            }
-        }
-
-        // Best-effort: re-derive `circle.relays` after a group update. Collect
-        // ids first to avoid borrowing `results` across the await.
-        let updated: Vec<GroupId> = results
-            .iter()
-            .filter_map(|r| match r {
-                LocationMessageResult::GroupUpdate { group_id } => Some(group_id.clone()),
-                _ => None,
-            })
-            .collect();
-        for gid in updated {
-            if let Err(e) = self.resync_circle_relays_from_mdk(&gid).await {
-                log::debug!(
-                    "decrypt_location: relay re-sync failed (will retry on next commit): {}",
-                    e.code()
-                );
-            }
-        }
-
-        // ONE reconcile per ingest, after convergence has drained, so no roster
-        // is ever read mid-drain. `for_receive_results` owns the decision about
-        // WHICH results ask for one — a decrypted kind-445 never does
-        // (`app_message_past_epoch_limit` epochs of slack would resurrect
-        // someone removed several epochs ago).
-        if let Some(mode) = self.directory_verdict_for_results(&results) {
-            self.reconcile_member_directory_best_effort(mode).await;
-        }
-
-        Ok(DecryptedIngest {
-            results,
-            auto_commits,
-            // This plane has no publish-resolution batch of its own, so the
-            // only proposal shape it could see — the local re-proposed leave —
-            // reaches it through the confirm/fail funnel instead.
-            proposals: Vec::new(),
-        })
-    }
-
-    /// Converts each [`PublishWork::AutoPublish`] in `work` into a surfaced
-    /// [`CommitToPublish`], recording the publish this device now owes for it;
-    /// an auto-commit whose wrapped message cannot be serialized is rolled back
-    /// ([`Self::publish_failed`]) rather than surfaced half-formed (Rule 13:
-    /// never leave a pending ref dangling).
-    ///
-    /// The obligation is recorded HERE, not by the caller, because the caller is
-    /// across the FFI: the foreground poll plane and the Android foreground
-    /// service's publish cycle both take the commit into Dart and publish it
-    /// there. Recording it before it crosses is what makes their
-    /// publish-before-apply window survivable — a process killed mid-publish
-    /// leaves the row, and their no-ack `publishFailed` keeps the removal owed
-    /// instead of dropping it (see [`Self::owe_removal_publish`]).
-    /// Returns the batch of every rollback it had to perform, for the caller to
-    /// fold — a rolled-back ref's effects are engine work like any other, and
-    /// dropping them is the defect this whole path exists to close.
-    async fn collect_auto_commits(
-        &self,
-        work: &[PublishWork],
-        out: &mut Vec<CommitToPublish>,
-    ) -> Vec<SessionEffects> {
-        let mut rolled_back = Vec::new();
-        for item in work {
-            if let PublishWork::AutoPublish { msg, pending } = item {
-                if let Some(effects) = self.surface_auto_commit(msg, *pending, out).await {
-                    rolled_back.push(effects);
-                }
-            }
-        }
-        rolled_back
-    }
-
-    /// One [`PublishWork::AutoPublish`] surfaced as a [`CommitToPublish`] with
-    /// its obligation recorded, or rolled back when the wrapped message will not
-    /// serialize — in which case its batch comes back for the caller to fold.
-    async fn surface_auto_commit(
-        &self,
-        msg: &TransportMessage,
-        pending: PendingStateRef,
-        out: &mut Vec<CommitToPublish>,
-    ) -> Option<SessionEffects> {
-        match SessionManager::transport_message_to_event(msg) {
-            Ok(commit_event) => {
-                let commit = CommitToPublish {
-                    commit_event,
-                    pending,
-                };
-                if !self.owe_removal_publish(&commit) {
-                    // Not recordable (the circle row is gone, or the DB refused
-                    // the write). Said out loud rather than assumed away: this
-                    // is the one shape in which the caller's own no-ack path can
-                    // still roll the eviction back.
-                    log::warn!(
-                        "receive-side eviction commit surfaced with no recorded \
-                         obligation: an unacked publish will roll it back"
-                    );
-                }
-                out.push(commit);
-                None
-            }
-            Err(_) => self.rollback_unfolded(pending).await,
-        }
-    }
-
-    /// Decrypts / ingests a received kind 445 event, returning ONLY the folded
-    /// location-facing results.
-    ///
-    /// Back-compatible shim over [`Self::decrypt_location_collecting_commits`]
-    /// for call sites (chiefly tests) that never trigger a peer `SelfRemove`. It
-    /// does NOT surface receive-side auto-commits; to stay Rule-13-safe it
-    /// reports each as failed ([`Self::publish_failed`]) rather than
-    /// optimistically applying an unpublished commit. Production receive paths use
-    /// [`Self::decrypt_location_collecting_commits`] (poll → Dart publishes) or
-    /// the live-sync / catch-up planes (which publish in-Rust).
-    ///
-    /// That report does NOT discard the eviction: the surfacing recorded the
-    /// obligation, so the commit stays staged and OWED
-    /// ([`Self::owe_removal_publish`]). The circle cannot send while it stands
-    /// (`create_message` refuses from `PendingPublish`), which is the honest cost
-    /// of a caller that has no relay plane — the alternative, a rollback, would
-    /// drop the removal permanently and silently and leave the circle equally
-    /// unable to send (`GroupStateError(PendingProposal)`); see
-    /// [`crate::relay::auto_commit::park_or_rollback_receive_publish_work`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only for a hard ingest failure.
-    pub async fn decrypt_location(&self, event: &Event) -> Result<Vec<LocationMessageResult>> {
-        let mut ingest = self.decrypt_location_collecting_commits(event).await?;
-        for commit in std::mem::take(&mut ingest.auto_commits) {
-            // No relay plane here — never apply an unpublished eviction commit,
-            // and never discard it either: this leaves it staged and owed. The
-            // report's OWN batch is merged rather than dropped: the kept-owed
-            // rung returns an empty one, but the rung that actually rolls back
-            // replays, and a peer location it replays is deliverable once.
-            if let Ok(nested) = self.publish_failed(commit.pending).await {
-                ingest.results.extend(nested.results);
-            }
-        }
-        Ok(ingest.results)
     }
 
     // ==================== Last-Known Location Cache ====================
@@ -3848,11 +5154,10 @@ impl CircleManager {
     /// Persists every decrypted peer location in an engine batch as a
     /// last-known-location row.
     ///
-    /// The ONE persist site every receive plane shares, and the reason it is
-    /// shared: the engine delivers `MessageReceived` AT MOST ONCE and writes
-    /// the content row `Processed` in the same breath, with no
-    /// application-acknowledgement boundary — a plane that folds the batch
-    /// without persisting loses the fix permanently.
+    /// The ONE persist site every receive plane shares, and the one place MDK's
+    /// application outputs are acknowledged: only after their rows commit, so
+    /// an output whose row failed — or whose process died first — is handed
+    /// back at the next open instead of lost.
     ///
     /// Three filters, in this order:
     ///
@@ -3867,68 +5172,216 @@ impl CircleManager {
     ///   read itself FAILS the location is persisted anyway: a transient read
     ///   error must never cost a legitimate offline backlog (Rule 12), and the
     ///   display layer still gates.
+    ///
+    /// And the one site every plane's circle row follows the routing a
+    /// commit of the batch applied ([`Self::resync_updated_circles`]).
     async fn persist_locations_from_events(&self, events: &[GroupEvent]) -> RosterDeclined {
         let mut declined = RosterDeclined::default();
+        let mut handled: Vec<crate::nostr::mls::types::MessageId> = Vec::new();
         let own_hex = self.session.identity_pubkey().to_hex();
         // One roster read per distinct group per batch. `None` records a read
         // that FAILED, which is the fail-open case, not an empty roster.
         let mut rosters: HashMap<GroupId, Option<HashSet<String>>> = HashMap::new();
+        let mut joined_any = false;
         for event in events {
-            let Some(LocationMessageResult::Location {
-                sender_pubkey,
-                content,
-                group_id,
-                ..
-            }) = SessionManager::location_result_from_event(event)
-            else {
-                continue;
-            };
-            if sender_pubkey == own_hex {
-                continue;
-            }
-            let Some(nostr_group_id) = self.nostr_group_id_for(&group_id) else {
-                continue;
-            };
-            if !rosters.contains_key(&group_id) {
-                let roster = self
-                    .session
-                    .member_pubkeys(&group_id)
+            match event {
+                GroupEvent::MessageReceived { message_id, .. } => {
+                    if self
+                        .persist_one_location(event, &own_hex, &mut rosters, &mut declined)
+                        .await
+                    {
+                        handled.push(message_id.clone());
+                    }
+                }
+                GroupEvent::GroupJoined {
+                    group_id,
+                    via_welcome,
+                    welcomer,
+                    ..
+                } => match self
+                    .record_unrecorded_join(group_id, via_welcome, welcomer.as_ref())
                     .await
-                    .ok()
-                    .map(|members| members.into_iter().collect::<HashSet<String>>());
-                rosters.insert(group_id.clone(), roster);
-            }
-            if rosters
-                .get(&group_id)
-                .and_then(Option::as_ref)
-                .is_some_and(|roster| !roster.contains(&sender_pubkey))
-            {
-                // Recorded, not merely skipped: the CALLER has to drop the same
-                // one from what it hands back, or the pin this refused to write
-                // arrives across the FFI and is written by the other side.
-                declined.reject(&group_id, &sender_pubkey);
-                continue;
-            }
-            let Ok(msg) = serde_json::from_str::<LocationMessage>(&content) else {
-                continue;
-            };
-            let row = super::LastKnownLocation {
-                nostr_group_id,
-                sender_pubkey,
-                latitude: msg.latitude,
-                longitude: msg.longitude,
-                geohash: msg.geohash,
-                display_name: msg.display_name,
-                timestamp: msg.timestamp.timestamp(),
-                expires_at: msg.expires_at.timestamp(),
-                purge_after: 0, // recomputed authoritatively by upsert
-                updated_at: chrono::Utc::now().timestamp(),
-            };
-            if let Err(e) = self.upsert_last_known_location(&row) {
-                log::warn!("replayed peer location not persisted: {}", e.code());
+                {
+                    JoinRecord::Materialized => {
+                        joined_any = true;
+                        handled.push(via_welcome.clone());
+                    }
+                    JoinRecord::Recorded => handled.push(via_welcome.clone()),
+                    JoinRecord::Owed => {}
+                },
+                GroupEvent::GroupStateChanged {
+                    group_id,
+                    change: GroupStateChange::GroupDisbanded,
+                    ..
+                } => self.reconcile_disbanded(group_id).await,
+                _ => {}
             }
         }
+        // Only now, with the rows committed: an output whose row failed stays
+        // owed, so MDK hands it back at the next open rather than losing it.
+        self.session.acknowledge_outputs(&handled).await;
+        if joined_any {
+            self.reconcile_member_directory_best_effort(DirectoryReconcile::Rewrite)
+                .await;
+        }
+        // A commit in the batch may have moved the circle's routing: the row
+        // follows here, before the caller collects what the engine staged on
+        // the way — a commit sealed under a rotated routing id is owed under
+        // the id the row then names.
+        let updated: Vec<LocationMessageResult> = events
+            .iter()
+            .filter_map(SessionManager::location_result_from_event)
+            .collect();
+        self.resync_updated_circles(&updated).await;
         declined
+    }
+
+    /// Makes sure a `GroupJoined` the user consented to has its circle.
+    ///
+    /// A join MDK handed back at an open because the accept that made it died
+    /// before its rows committed would otherwise leave the user a member the
+    /// app never shows — and the next accept of the same invitation a repeat
+    /// MDK refuses. Consent is the accept intent recorded for its gift wrap
+    /// (`via_welcome`, the Welcome's transport id): the engine joins any
+    /// Welcome it is handed, so a join with no intent — a Welcome nobody
+    /// accepted, or a circle since left whose join was handed back again — is
+    /// acknowledged and kept hidden, never turned into a circle that would be
+    /// sent the user's location.
+    async fn record_unrecorded_join(
+        &self,
+        group_id: &GroupId,
+        via_welcome: &crate::nostr::mls::types::MessageId,
+        welcomer: Option<&MemberId>,
+    ) -> JoinRecord {
+        // Read first: a standing intent means the join's circle was never
+        // recorded, whatever row a replaced copy left — recording one clears
+        // the intent in the same transaction.
+        let inviter = match self.storage.accept_intent_inviter(via_welcome.as_slice()) {
+            Ok(Some(inviter)) => inviter,
+            Ok(None) => return JoinRecord::Recorded,
+            Err(_) => return JoinRecord::Owed,
+        };
+        if self.storage.get_circle(group_id).is_err() {
+            return JoinRecord::Owed;
+        }
+        // A group since left or lost is no circle to show: the join is spent.
+        if !self.session.group_is_live(group_id).await {
+            return JoinRecord::Recorded;
+        }
+        // Consent was given to the inviter the invitation showed: a Welcome
+        // someone else wrote is undone, as at the accept. One MDK names no
+        // author for is not known yet, and stays owed.
+        let Some(welcomer) = welcomer else {
+            return JoinRecord::Owed;
+        };
+        if welcomer.as_slice() != inviter.as_slice() {
+            let Ok(gift_wrap_id) = EventId::from_slice(via_welcome.as_slice()) else {
+                return JoinRecord::Owed;
+            };
+            return match self.undo_unconsented_join(group_id, &gift_wrap_id).await {
+                Ok(()) => JoinRecord::Recorded,
+                Err(_) => JoinRecord::Owed,
+            };
+        }
+        let Ok((circle, membership)) = self.joined_circle_rows(group_id, None).await else {
+            return JoinRecord::Owed;
+        };
+        if self
+            .storage
+            .record_joined_circle(&circle, &membership, via_welcome.as_slice())
+            .is_err()
+            || self
+                .record_contaminated(&circle.relays, ContaminationSource::CircleRouting)
+                .is_err()
+        {
+            return JoinRecord::Owed;
+        }
+        JoinRecord::Materialized
+    }
+
+    /// Persists what the engine handed back at this session's open — every
+    /// output an earlier process never acknowledged — through the shared
+    /// persist site. Run once per session, by the first receive plane, before
+    /// it reads the circle list, so a join recovered here is swept with the
+    /// rest.
+    pub async fn recover_owed_outputs(&self) {
+        let owed = self.session.drain().await;
+        self.persist_replayed_locations(&owed.events).await;
+        self.sweep_orphaned_groups().await;
+        if let Ok(circles) = self.storage.get_all_circles() {
+            for circle in circles {
+                if self.session.disbanded(&circle.mls_group_id).await {
+                    self.reconcile_disbanded(&circle.mls_group_id).await;
+                }
+            }
+        }
+    }
+
+    /// Persists one `MessageReceived` if it is a peer location this device
+    /// keeps, and reports whether it is fully handled — persisted, or one Haven
+    /// keeps no row for by design. `false` only when the row failed to write.
+    async fn persist_one_location(
+        &self,
+        event: &GroupEvent,
+        own_hex: &str,
+        rosters: &mut HashMap<GroupId, Option<HashSet<String>>>,
+        declined: &mut RosterDeclined,
+    ) -> bool {
+        let Some(LocationMessageResult::Location {
+            sender_pubkey,
+            content,
+            group_id,
+            ..
+        }) = SessionManager::location_result_from_event(event)
+        else {
+            return true;
+        };
+        if sender_pubkey == own_hex {
+            return true;
+        }
+        let Some(nostr_group_id) = self.nostr_group_id_for(&group_id) else {
+            return true;
+        };
+        if !rosters.contains_key(&group_id) {
+            let roster = self
+                .session
+                .member_pubkeys(&group_id)
+                .await
+                .ok()
+                .map(|members| members.into_iter().collect::<HashSet<String>>());
+            rosters.insert(group_id.clone(), roster);
+        }
+        if rosters
+            .get(&group_id)
+            .and_then(Option::as_ref)
+            .is_some_and(|roster| !roster.contains(&sender_pubkey))
+        {
+            // Recorded, not merely skipped: the CALLER has to drop the same
+            // one from what it hands back, or the pin this refused to write
+            // arrives across the FFI and is written by the other side.
+            declined.reject(&group_id, &sender_pubkey);
+            return true;
+        }
+        let Ok(msg) = serde_json::from_str::<LocationMessage>(&content) else {
+            return true;
+        };
+        let row = super::LastKnownLocation {
+            nostr_group_id,
+            sender_pubkey,
+            latitude: msg.latitude,
+            longitude: msg.longitude,
+            geohash: msg.geohash,
+            display_name: msg.display_name,
+            timestamp: msg.timestamp.timestamp(),
+            expires_at: msg.expires_at.timestamp(),
+            purge_after: 0, // recomputed authoritatively by upsert
+            updated_at: chrono::Utc::now().timestamp(),
+        };
+        if let Err(e) = self.upsert_last_known_location(&row) {
+            log::warn!("replayed peer location not persisted: {}", e.code());
+            return false;
+        }
+        true
     }
 
     /// [`Self::persist_and_fold`]'s persist half, for a plane that routes raw
@@ -3938,6 +5391,23 @@ impl CircleManager {
     /// be applied to.
     pub(crate) async fn persist_replayed_locations(&self, events: &[GroupEvent]) {
         let _ = self.persist_locations_from_events(events).await;
+    }
+
+    /// Persists a batch and returns each event's own result for a plane that
+    /// routes per event (the live plane), minus the fixes of senders the
+    /// circle's roster no longer names — the same single roster decision
+    /// [`Self::persist_and_fold`] applies, so a departed member's fix is
+    /// neither stored nor put on anyone's map.
+    pub(crate) async fn persist_for_routing(
+        &self,
+        events: &[GroupEvent],
+    ) -> Vec<LocationMessageResult> {
+        let declined = self.persist_locations_from_events(events).await;
+        events
+            .iter()
+            .filter_map(SessionManager::location_result_from_event)
+            .filter(|result| !declined.rejects(result))
+            .collect()
     }
 
     /// Persists a batch's locations and folds the batch, with the ROSTER
@@ -3967,7 +5437,13 @@ impl CircleManager {
             i64::try_from(crate::location::LOCATION_RETENTION_SECS).unwrap_or(i64::MAX);
         let derived_purge_after = location.timestamp.saturating_add(retention_i64);
 
+        // Under the id the circle's row names now, whatever id the caller
+        // read it under; an id no circle holds writes nothing.
+        let Some(circle) = self.circle_routed_by(&location.nostr_group_id)? else {
+            return Ok(());
+        };
         let mut clamped = location.clone();
+        clamped.nostr_group_id = circle.nostr_group_id;
         clamped.purge_after = derived_purge_after;
         clamped.display_name = crate::directory::sanitize_display_name(clamped.display_name);
 
@@ -3998,11 +5474,22 @@ impl CircleManager {
 
     /// Records a relay-acknowledged location publish for a circle (presence only).
     ///
+    /// The three delivery-health entries take whatever routing id the caller
+    /// read the circle under and act on the circle it routes to, under the id
+    /// its row names now: a stamp made with an id a rotation has since moved
+    /// lands on the circle, never on an orphan row, and an id no circle holds
+    /// writes nothing.
+    ///
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
     pub fn note_publish_acked(&self, nostr_group_id: &[u8; 32], at_ms: i64) -> Result<()> {
-        self.storage.note_publish_acked(nostr_group_id, at_ms)
+        match self.circle_routed_by(nostr_group_id)? {
+            Some(circle) => self
+                .storage
+                .note_publish_acked(&circle.nostr_group_id, at_ms),
+            None => Ok(()),
+        }
     }
 
     /// Records a decrypted, persisted peer location for a circle (presence
@@ -4012,16 +5499,24 @@ impl CircleManager {
     ///
     /// Returns an error if the database operation fails.
     pub fn note_peer_event(&self, nostr_group_id: &[u8; 32], at_ms: i64) -> Result<()> {
-        self.storage.note_peer_event(nostr_group_id, at_ms)
+        match self.circle_routed_by(nostr_group_id)? {
+            Some(circle) => self.storage.note_peer_event(&circle.nostr_group_id, at_ms),
+            None => Ok(()),
+        }
     }
 
-    /// Reads a circle's delivery-health timestamps.
+    /// Reads a circle's delivery-health timestamps. A circle held for a
+    /// routing collision reads as unknown, with no instant: the row under the
+    /// shared id is either circle's to have written.
     ///
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
     pub fn circle_health(&self, nostr_group_id: &[u8; 32]) -> Result<super::CircleHealth> {
-        self.storage.circle_health(nostr_group_id)
+        match self.circle_routed_by(nostr_group_id)? {
+            Some(circle) => self.storage.circle_health(&circle.nostr_group_id),
+            None => Ok(super::CircleHealth::default()),
+        }
     }
 
     /// Reads a circle's epoch-rotation stamps.
@@ -4030,7 +5525,7 @@ impl CircleManager {
     /// rotation gate will decide from the stamps the WRITE side actually
     /// recorded — which it stamps from real time
     /// ([`Self::note_inbound_group_events`], `note_epoch_changes`,
-    /// [`Self::confirm_published`]) — and never from the offset it applied,
+    /// [`Self::confirm_fanout`]) — and never from the offset it applied,
     /// because the two are different clocks. The stamps are milliseconds and the
     /// gates take seconds; convert at the call site.
     ///
@@ -4084,36 +5579,6 @@ impl CircleManager {
     /// Returns an error if the database operation fails.
     pub fn prune_expired_last_known(&self, now_unix_secs: i64) -> Result<usize> {
         self.storage.prune_expired_last_known(now_unix_secs)
-    }
-
-    // ==================== Key Packages ====================
-
-    /// Produces a fresh `KeyPackage` for publishing to a directory (kind 30443).
-    ///
-    /// Event building / signing stays in Haven's relay layer (DM-2b); this
-    /// returns the raw engine [`KeyPackage`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if generation fails.
-    pub async fn fresh_key_package(&self) -> Result<KeyPackage> {
-        self.session
-            .fresh_key_package()
-            .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
-    }
-
-    /// Deletes a previously generated `KeyPackage` bundle (publish-failure cleanup;
-    /// mdk#160). Idempotent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if deletion fails.
-    pub async fn delete_key_package(&self, key_package: &KeyPackage) -> Result<()> {
-        self.session
-            .delete_key_package(key_package)
-            .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
     }
 
     // ==================== Sync Cursors ====================
@@ -4369,56 +5834,6 @@ impl CircleManager {
 
     // ==================== KeyPackage maintenance (storage) ====================
 
-    /// See [`CircleStorage::record_published_key_package`].
-    ///
-    /// # Errors
-    ///
-    /// Propagates database errors.
-    pub fn record_published_key_package(
-        &self,
-        row: &super::storage_key_packages::PublishedKeyPackageRow,
-    ) -> Result<()> {
-        self.storage.record_published_key_package(row)
-    }
-
-    /// See [`CircleStorage::latest_published_key_package`].
-    ///
-    /// # Errors
-    ///
-    /// Propagates database errors.
-    pub fn latest_published_key_package(
-        &self,
-    ) -> Result<Option<super::storage_key_packages::PublishedKeyPackageRow>> {
-        self.storage.latest_published_key_package()
-    }
-
-    /// See [`CircleStorage::latest_canonical_d_tag`].
-    ///
-    /// # Errors
-    ///
-    /// Propagates database errors.
-    pub fn latest_canonical_d_tag(&self) -> Result<Option<String>> {
-        self.storage.latest_canonical_d_tag()
-    }
-
-    /// See [`CircleStorage::wipe_published_key_packages`].
-    ///
-    /// # Errors
-    ///
-    /// Propagates database errors.
-    pub fn wipe_published_key_packages(&self) -> Result<()> {
-        self.storage.wipe_published_key_packages()
-    }
-
-    /// See [`CircleStorage::delete_published_key_package`].
-    ///
-    /// # Errors
-    ///
-    /// Propagates database errors.
-    pub fn delete_published_key_package(&self, d_tag: &str) -> Result<()> {
-        self.storage.delete_published_key_package(d_tag)
-    }
-
     /// See [`CircleStorage::kp_slot_retirement_done`].
     ///
     /// # Errors
@@ -4435,24 +5850,6 @@ impl CircleManager {
     /// Propagates database errors.
     pub fn mark_kp_slot_retirement_done(&self) -> Result<()> {
         self.storage.mark_kp_slot_retirement_done()
-    }
-
-    /// See [`CircleStorage::legacy_kp_retraction_done`].
-    ///
-    /// # Errors
-    ///
-    /// Propagates database errors.
-    pub fn legacy_kp_retraction_done(&self) -> Result<bool> {
-        self.storage.legacy_kp_retraction_done()
-    }
-
-    /// See [`CircleStorage::mark_legacy_kp_retraction_done`].
-    ///
-    /// # Errors
-    ///
-    /// Propagates database errors.
-    pub fn mark_legacy_kp_retraction_done(&self) -> Result<()> {
-        self.storage.mark_legacy_kp_retraction_done()
     }
 
     // ==================== Public-profile cache (storage) ====================
@@ -4514,6 +5911,18 @@ impl CircleManager {
         pubkey_hex: &str,
     ) -> Result<Option<crate::profile::PendingSnapshot>> {
         self.storage.pending_profile_sync(pubkey_hex)
+    }
+
+    /// See [`CircleStorage::commit_profile_sync`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn commit_profile_sync(
+        &self,
+        commit: &super::storage_profile_sync::ProfileSyncCommit<'_>,
+    ) -> Result<crate::profile::CachedProfile> {
+        self.storage.commit_profile_sync(commit)
     }
 
     /// See [`CircleStorage::record_profile_sync_attempt`].
@@ -4621,6 +6030,15 @@ impl CircleManager {
     ) -> Result<Vec<(String, u8)>> {
         self.storage
             .profiles_due(pubkeys_hex, now_unix_secs, max_age_secs)
+    }
+
+    /// See [`CircleStorage::profile_retry_due`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn profile_retry_due(&self, pubkey_hex: &str, now_unix_secs: i64) -> Result<bool> {
+        self.storage.profile_retry_due(pubkey_hex, now_unix_secs)
     }
 
     /// See [`CircleStorage::touch_profiles_hit`].
@@ -4740,8 +6158,16 @@ impl CircleManager {
     /// # Errors
     ///
     /// Propagates database errors.
-    pub fn wipe_all_profiles(&self) -> Result<()> {
-        self.storage.wipe_all_profiles()
+    pub fn wipe_all_profiles(
+        &self,
+        own_pubkey: &PublicKey,
+        blank_id: &EventId,
+        blank_created_at: i64,
+        fully_acked: bool,
+        now: i64,
+    ) -> Result<()> {
+        self.storage
+            .wipe_all_profiles(own_pubkey, blank_id, blank_created_at, fully_acked, now)
     }
 
     // ==================== Profile plane (relays + salt) ====================
@@ -4817,6 +6243,86 @@ impl CircleManager {
     // so it needs no method here. See `circle::contamination`'s module docs.
 }
 
+/// The recipient of a gift-wrapped Welcome: the identity its `p` tag names.
+fn welcome_recipient(event: &Event) -> Option<PublicKey> {
+    event.tags.iter().find_map(|tag| {
+        let v = tag.as_slice();
+        if v.len() >= 2 && v[0] == "p" {
+            PublicKey::from_hex(&v[1]).ok()
+        } else {
+            None
+        }
+    })
+}
+
+/// Where one invitee's Welcome is delivered: their kind-10050 inbox relays
+/// that may be dialled (the foreign-relay filter, applied here whatever the
+/// caller resolved), else nowhere — and then the invite is refused rather
+/// than sent with a Welcome that cannot arrive.
+///
+/// No other tier. Marmot sends a Welcome to the recipient's 10050 list
+/// (`transports/nostr.md` 209-215); a NIP-65 hint reaches no Haven invitee,
+/// whose app fetches and subscribes to gift wraps on its inbox list alone;
+/// and the sender's own inbox would hand the invitee's gift wrap to relays
+/// the invitee never reads (`welcome_never_sent_to_sender_inbox`).
+fn welcome_route(member: &MemberKeyPackage) -> Result<Vec<String>> {
+    let relays = crate::relay::retain_dialable_foreign_relays(
+        member.inbox_relays.iter().map(String::as_str),
+    );
+    if relays.is_empty() {
+        Err(CircleError::MissingWelcomeRelays)
+    } else {
+        Ok(relays)
+    }
+}
+
+/// One invitee's Welcome route: the invitee as lowercase hex, their inbox
+/// relays, and their `KeyPackage`'s `not_after` when it can be read.
+pub type WelcomeRoute = (String, Vec<String>, Option<u64>);
+
+/// What [`CircleManager::keep_welcome_routes`] found kept for an invitee
+/// before it wrote theirs: the relays and `not_after`, or nothing.
+pub type PriorRoute = (String, Option<crate::nostr::mls::KeptWelcomeRoute>);
+
+/// Where each of `members`' Welcomes goes ([`welcome_route`]), keyed by
+/// invitee, with the `not_after` of the `KeyPackage` it is made for.
+///
+/// # Errors
+///
+/// [`CircleError::MissingWelcomeRelays`] for an invitee with no inbox relay
+/// Haven may dial.
+pub fn welcome_routes_of(members: &[MemberKeyPackage]) -> Result<Vec<WelcomeRoute>> {
+    members
+        .iter()
+        .map(|member| {
+            Ok((
+                member.key_package_event.pubkey.to_hex(),
+                welcome_route(member)?,
+                key_package_not_after(member),
+            ))
+        })
+        .collect()
+}
+
+/// The `not_after` of `member`'s `KeyPackage`, read through MDK's own
+/// parser; `None` when it cannot be read. The metadata is never formatted:
+/// it names the package (Security Rule 15).
+fn key_package_not_after(member: &MemberKeyPackage) -> Option<u64> {
+    let package = SessionManager::key_package_from_event(&member.key_package_event).ok()?;
+    cgka_engine::key_package_metadata(&package)
+        .ok()
+        .map(|metadata| metadata.not_after)
+}
+
+/// The engine's [`KeyPackage`] of each of `members`.
+pub fn key_packages_of(members: &[MemberKeyPackage]) -> Result<Vec<KeyPackage>> {
+    let events: Vec<Event> = members
+        .iter()
+        .map(|member| member.key_package_event.clone())
+        .collect();
+    parse_key_packages(&events)
+}
+
 /// Parses invitee `KeyPackage` events (kind 30443) into engine [`KeyPackage`]s.
 fn parse_key_packages(events: &[Event]) -> Result<Vec<KeyPackage>> {
     events
@@ -4834,7 +6340,7 @@ fn parse_key_packages(events: &[Event]) -> Result<Vec<KeyPackage>> {
 /// The `take_*` helpers extract only [`PublishWork`]; they intentionally ignore
 /// `effects.events`. Engine [`GroupEvent`]s are folded to location results ONLY
 /// on the ingest / `advance_convergence` path
-/// ([`CircleManager::decrypt_location_collecting_commits`] → [`fold_group_events`]),
+/// (`Publishing::ingest_for_poll` → [`fold_group_events`]),
 /// which is Haven's authoritative resync driver and always runs first after open
 /// (startup relay catch-up) — so a hydrate-emitted `PendingCommitRecovered` /
 /// `GroupHydrationRecovered` surfaces there and maps to a `GroupUpdate`. In the
@@ -4861,8 +6367,6 @@ fn note_dropped_resync_events(events: &[GroupEvent]) {
     }
 }
 
-/// Extracts the `GroupCreated { welcomes, pending }` publish work from a
-/// create-group's effects.
 impl CircleManager {
     /// Everything a SEND drained besides the item it was after.
     ///
@@ -4887,7 +6391,7 @@ impl CircleManager {
     /// for this work specified deleting that function on the premise that the
     /// fold would surface the events instead; it was kept, because surfacing
     /// them means
-    /// widening `encrypt_location`'s return across the FFI for a signal the
+    /// widening the seal's return across the FFI for a signal the
     /// RECEIVE path already drives authoritatively (catch-up runs first after
     /// every open, and its fold maps both events to a `GroupUpdate`). What would
     /// close it is that same FFI widening. Recorded rather than assumed away:
@@ -4897,114 +6401,39 @@ impl CircleManager {
         self.persist_replayed_locations(events).await;
     }
 
-    /// Records the obligation for any eviction auto-commit a send co-drained.
-    ///
-    /// It is never the item a `take_*` is after, and dropping it with a live
-    /// `PendingStateRef` is how a removal goes silent. Recording it is the whole
-    /// disposition: the commit stays staged and OWED.
-    ///
-    /// # Its only recovery is the redemption pass — NOT that circle's next send
-    ///
-    /// The ref is always a DIFFERENT circle's: a same-circle staging puts the
-    /// group in `PendingPublish`, so the send answers `Queued` and takes the
-    /// deferred branch instead of reaching here. And that other circle's next
-    /// send does not recover it either — it comes back `SendDeferred`, but
-    /// [`Self::collect_deferred_work`] reads only that call's own publish
-    /// vector, and the engine never re-emits the `AutoPublish` (the schedule is
-    /// consumed before staging and `publish_failed` does not re-arm it, which is
-    /// what [`Self::orphaned_removal_deferrals`] is built on). So
-    /// [`Self::redeem_removal_deferrals`] — a FOREGROUND live-sync open — is the
-    /// one path that publishes it, and in a `HAVEN_LIVE_SYNC=false` build
-    /// nothing does. See `haven-core/SECURITY.md` for the full residual; closing
-    /// it means widening `encrypt_location`'s return with what it collected.
-    async fn surface_co_drained_auto_commits(&self, publish: &[PublishWork]) {
-        let mut surfaced = Vec::new();
-        for item in publish {
-            if let PublishWork::AutoPublish { msg, pending } = item {
-                // The rollback arm's batch is dropped: it is only reached for a
-                // message the engine built moments ago and could not re-serialize.
-                let _ = self.surface_auto_commit(msg, *pending, &mut surfaced).await;
-            }
-        }
-    }
-
-    /// Extracts the `GroupCreated { welcomes, pending }` publish work from a
-    /// create-group's effects.
-    async fn take_group_created(
-        &self,
-        effects: SessionEffects,
-    ) -> Result<(Vec<TransportMessage>, PendingStateRef)> {
+    /// Extracts the `FoundingGroupCreated { welcomes }` publish work from a
+    /// create-group's effects. A current-profile create never stages: the
+    /// group is canonical on return, so there is no pending ref to resolve.
+    async fn take_group_created(&self, effects: SessionEffects) -> Result<Vec<TransportMessage>> {
         self.note_send_drain(&effects.events).await;
-        self.surface_co_drained_auto_commits(&effects.publish).await;
         for work in effects.publish {
-            if let PublishWork::GroupCreated { welcomes, pending } = work {
-                return Ok((welcomes, pending));
+            if let PublishWork::FoundingGroupCreated { welcomes } = work {
+                return Ok(welcomes);
             }
         }
         Err(CircleError::Mls(
-            "create_group produced no GroupCreated publish work".to_string(),
-        ))
-    }
-
-    /// Extracts the `GroupEvolution { commit, welcomes, pending }` publish work from
-    /// an invite/remove/update's effects, converting the commit to a signed Event.
-    async fn take_group_evolution(
-        &self,
-        effects: SessionEffects,
-    ) -> Result<(Event, Vec<TransportMessage>, PendingStateRef)> {
-        self.note_send_drain(&effects.events).await;
-        self.surface_co_drained_auto_commits(&effects.publish).await;
-        for work in effects.publish {
-            if let PublishWork::GroupEvolution {
-                msg,
-                welcomes,
-                pending,
-            } = work
-            {
-                let commit = SessionManager::transport_message_to_event(&msg)
-                    .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-                return Ok((commit, welcomes, pending));
-            }
-        }
-        Err(CircleError::Mls(
-            "operation produced no GroupEvolution publish work".to_string(),
+            "create_group produced no FoundingGroupCreated publish work".to_string(),
         ))
     }
 
     /// Extracts the bare `Proposal { msg }` (`SelfRemove`) transport event.
     async fn take_proposal(&self, effects: SessionEffects) -> Result<Event> {
         self.note_send_drain(&effects.events).await;
-        self.surface_co_drained_auto_commits(&effects.publish).await;
         for work in effects.publish {
-            if let PublishWork::Proposal { msg } = work {
+            if let PublishWork::Proposal { msg, .. } = work {
                 return SessionManager::transport_message_to_event(&msg)
-                    .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())));
+                    .map_err(CircleError::from_session);
             }
         }
         Err(CircleError::Mls(
             "leave produced no Proposal publish work".to_string(),
         ))
     }
-
-    /// Extracts the `ApplicationMessage { msg }` (location) transport event.
-    async fn take_app_message(&self, effects: SessionEffects) -> Result<Event> {
-        self.note_send_drain(&effects.events).await;
-        self.surface_co_drained_auto_commits(&effects.publish).await;
-        for work in effects.publish {
-            if let PublishWork::ApplicationMessage { msg } = work {
-                return SessionManager::transport_message_to_event(&msg)
-                    .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())));
-            }
-        }
-        Err(CircleError::Mls(
-            "send produced no ApplicationMessage publish work".to_string(),
-        ))
-    }
 }
 
 /// The circle an engine [`GroupEvent`] is about.
 ///
-/// Exhaustive on purpose: every variant at MDK `e391adc` carries a `group_id`,
+/// Exhaustive on purpose: every variant at MDK v0.10.4 carries a `group_id`,
 /// so a new one that does not breaks compilation here instead of silently
 /// dropping out of the receive observation that gate 4 reads.
 const fn group_id_of(event: &GroupEvent) -> &GroupId {
@@ -5016,9 +6445,10 @@ const fn group_id_of(event: &GroupEvent) -> &GroupId {
         | GroupEvent::GroupStateChanged { group_id, .. }
         | GroupEvent::GroupHydrationQuarantined { group_id, .. }
         | GroupEvent::EpochChanged { group_id, .. }
-        | GroupEvent::ForkRecovered { group_id, .. }
         | GroupEvent::CommitRolledBack { group_id, .. }
         | GroupEvent::GroupStateInvalidated { group_id, .. }
+        | GroupEvent::GroupStateRevalidated { group_id, .. }
+        | GroupEvent::TransportObjectResourceRefused { group_id, .. }
         | GroupEvent::GroupUnrecoverable { group_id }
         | GroupEvent::PendingCommitRecovered { group_id, .. }
         | GroupEvent::GroupHydrationRecovered { group_id, .. } => group_id,
@@ -5031,6 +6461,13 @@ fn fold_group_events(events: &[GroupEvent]) -> Vec<LocationMessageResult> {
         .iter()
         .filter_map(SessionManager::location_result_from_event)
         .collect()
+}
+
+/// The routing id a REQ's `#h` hex names; `None` when it names none.
+fn routing_id_of_hex(group_id_hex: &str) -> Option<[u8; 32]> {
+    hex::decode(group_id_hex)
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
 }
 
 /// Reads the 32-byte `nostr_group_id` from a `kind:445` event's `#h` tag
@@ -5052,15 +6489,15 @@ fn nostr_group_id_from_commit_event(event: &Event) -> Option<[u8; 32]> {
 
 /// Result of circle creation.
 ///
-/// Publish-before-apply (Rule 13): publish `welcome_events`, then confirm
-/// `pending`.
+/// The circle is canonical already (a founding create has no group-message
+/// obligation, Rule 13); `welcome_events` are published independently.
 pub struct CircleCreationResult {
     /// The created circle.
     pub circle: Circle,
     /// Gift-wrapped Welcome events (engine-produced 1059s) ready to publish.
     pub welcome_events: Vec<GiftWrappedWelcome>,
-    /// The pending group-creation state to confirm after ≥1-relay welcome ack.
-    pub pending: PendingStateRef,
+    /// The transport id of each founding Welcome's delivery record.
+    pub(crate) founding_welcomes: Vec<MessageId>,
 }
 
 impl std::fmt::Debug for CircleCreationResult {
@@ -5068,64 +6505,143 @@ impl std::fmt::Debug for CircleCreationResult {
         f.debug_struct("CircleCreationResult")
             .field("circle", &"<redacted>")
             .field("welcome_events", &bucket(self.welcome_events.len()))
-            .field("pending", &self.pending)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
-/// Result of adding members to an existing circle.
-///
-/// Publish-before-apply (Rule 13): publish `commit_event`, confirm `pending`,
-/// then publish `welcome_events`.
-pub struct AddMembersResult {
-    /// The kind:445 evolution (Add) commit to publish to the circle's relays.
-    pub commit_event: Event,
-    /// Gift-wrapped Welcome events for the newly added members. Publish only
-    /// after `commit_event` is published and `pending` is confirmed.
-    pub welcome_events: Vec<GiftWrappedWelcome>,
-    /// The pending commit to confirm after ≥1-relay commit ack.
-    pub pending: PendingStateRef,
+/// What the engine step of a leave did ([`CircleManager::propose_leave_staging`]).
+pub enum LeaveStep {
+    /// Proposed: these fanouts — the proposal's, and an eviction its
+    /// preflight committed — are to be driven.
+    Recorded(Vec<FanoutId>),
+    /// This epoch's proposal already stands, under its record.
+    AlreadyProposed,
+    /// The engine made the proposal and no record of it stands: it was not
+    /// sent. These fanouts are driven; the leave is pending.
+    Unrecorded(Vec<FanoutId>),
+    /// Not proposed: the circle is not stable, or the engine queued the
+    /// leave behind what it staged first — an eviction, under these
+    /// fanouts, which are driven now. Proposed once the circle is stable.
+    AwaitsStable(Vec<FanoutId>),
 }
 
-impl std::fmt::Debug for AddMembersResult {
+/// What a send-side change left when it was staged in staging mode.
+pub struct StagedChange {
+    /// The change's own commit, under its durable fanout. `None` when the
+    /// engine queued the change behind what the circle is still resolving: it
+    /// is accepted and durable, and staged by a later advance.
+    pub commit: Option<FanoutId>,
+    /// Every other commit the same call staged: an eviction the engine's own
+    /// preflight committed — in this circle, ahead of a change it then
+    /// queued, or in another.
+    pub also: Vec<FanoutId>,
+    /// The Welcomes `commit` carries, by transport id: an invite's.
+    pub welcomes: Vec<MessageId>,
+    /// The change is staged and has no record: the record could not be
+    /// written and the rollback failed too. It was not sent and is not
+    /// driven; see `ChangeNote::ChangeUnrecorded`.
+    pub unrecorded: bool,
+    /// The circle already was as the change asks: nothing was staged.
+    pub already: bool,
+}
+
+/// Whether the change itself was staged, and nothing else: how many other
+/// commits the call staged is how many members left a circle, how many
+/// Welcomes it carries is how many were invited (Security Rule 15), and each
+/// handle is an MDK id.
+impl std::fmt::Debug for StagedChange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AddMembersResult")
-            .field("commit_event", &"<redacted>")
-            .field("welcome_events", &bucket(self.welcome_events.len()))
-            .field("pending", &self.pending)
-            .finish()
+        f.debug_struct("StagedChange")
+            .field("staged", &self.commit.is_some())
+            .finish_non_exhaustive()
     }
 }
 
-/// A group-evolving commit awaiting publish + confirm (remove / relay update).
-pub struct CommitToPublish {
-    /// The kind:445 commit to publish to the circle's relays.
-    pub commit_event: Event,
-    /// The pending commit to confirm after ≥1-relay ack.
-    pub pending: PendingStateRef,
+/// What [`CircleManager::seal_location_staging`] left.
+///
+/// **No `Debug`, deliberately**: it carries a signed event and MDK handles.
+#[derive(Default)]
+pub struct StagedSeal {
+    /// The location, encrypted: its event, the circle's public id and its
+    /// relays. `None` when the send was deferred.
+    pub sealed: Option<(Event, [u8; 32], Vec<String>)>,
+    /// Records of what the engine staged on the way.
+    pub recorded: Vec<FanoutId>,
+    /// What was folded, and each proposal no record could be written for.
+    pub handed_back: DecryptedIngest,
+    /// The removal of a member who left is due and was not made: the wait a
+    /// refusal earned is running, or the call's mode makes no new commit.
+    pub departure_due: bool,
+    /// The pre-send drain stopped at the wake's end with a deferred-peel row
+    /// still untried.
+    pub drain_cut: bool,
+}
+
+/// What [`CircleManager::repair_epoch_rotation_staging`] did.
+///
+/// **No `Debug`, deliberately**: the deferral's work carries signed events.
+pub enum StagedRepair {
+    /// The self-update is staged.
+    Rotated(StagedChange),
+    /// A gate declined the repair; nothing was staged and nothing changed.
+    Skipped(SkipReason),
+    /// The circle is send-gated, or the engine queued the self-update (and
+    /// it was retired in the hold that queued it): the deferred-send repair
+    /// ran instead ([`CircleManager::repair_deferred_send_staging`]).
+    Deferred {
+        /// Records of what the engine staged and released on the way.
+        recorded: Vec<FanoutId>,
+        /// What was folded, and each proposal no record could be written
+        /// for.
+        handed_back: DecryptedIngest,
+    },
+}
+
+/// What [`CircleManager::post_join_self_update_staging`] did.
+///
+/// **No `Debug`, deliberately**: what it folded carries signed events.
+pub enum StagedPostJoin {
+    /// The self-update is staged.
+    Made(StagedChange),
+    /// Nothing was made: the circle would not take a staged commit, or the
+    /// engine queued the self-update and the hold that queued it retired
+    /// it. What the hold recorded and folded besides.
+    NotMade(Vec<FanoutId>, DecryptedIngest),
+}
+
+/// What [`CircleManager::rotation_preflight`] decided.
+enum RotationPreflight {
+    Skip(SkipReason),
+    /// Stored input gates the circle's sends: the deferred-send repair runs
+    /// instead of the rotation, in the form its caller's plane uses.
+    Gated,
+    Go {
+        nostr_group_id: [u8; 32],
+    },
+}
+
+/// What resolving one fanout's commit left: the folded batch, and the fanouts
+/// staged for whatever the engine's replay committed.
+pub struct FanoutResolution {
+    /// The folded batch.
+    pub replayed: DecryptedIngest,
+    /// The fanouts staged while resolving.
+    pub staged: Vec<FanoutId>,
+    /// The engine's error, when the call behind this failed.
+    pub error: Option<CircleError>,
 }
 
 /// The folded outcome of one engine batch.
 ///
-/// Either a received `kind:445`
-/// ([`CircleManager::decrypt_location_collecting_commits`]) or the replay a
-/// resolved publish releases ([`CircleManager::confirm_published`],
-/// [`CircleManager::publish_failed`], [`CircleManager::finalize_relay_update`]).
-///
-/// Carries the location-facing results AND any receive-side auto-commit the
-/// engine staged (a peer `SelfRemove` eviction). Publish-before-apply (Rule 13):
-/// each [`Self::auto_commits`] entry MUST be published to the circle's relays and
-/// then confirmed on a ≥1-relay ack, else reported as failed — which for these
-/// commits keeps the publish OWED rather than rolling it back
-/// ([`CircleManager::owe_removal_publish`]).
+/// What a fold of a received `kind:445`, an advance, or a fanout
+/// resolution's replay hands on. It carries no commit: every hold that hands
+/// a batch to the fold records what it stages.
 #[derive(Default)]
 pub struct DecryptedIngest {
     /// The folded location-facing results (locations, joins, updates, …).
     pub results: Vec<LocationMessageResult>,
-    /// Receive-side auto-commits the caller must publish then confirm/fail.
-    pub auto_commits: Vec<CommitToPublish>,
     /// Bare proposals to publish — no pending ref, nothing to confirm. At MDK
-    /// `e391adc` this is the local user's own re-proposed leave, re-minted for
+    /// `fcc85edd` this is the local user's own re-proposed leave, re-minted for
     /// the epoch a peer's commit just accepted; dropping it leaves the device
     /// behind the engine's leave send gate with no proposal in flight.
     ///
@@ -5143,7 +6659,6 @@ impl std::fmt::Debug for DecryptedIngest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DecryptedIngest")
             .field("results", &bucket(self.results.len()))
-            .field("auto_commits", &bucket(self.auto_commits.len()))
             .field("proposals", &bucket(self.proposals.len()))
             .finish()
     }
@@ -5152,11 +6667,58 @@ impl std::fmt::Debug for DecryptedIngest {
 /// Where a batch reaching the publish-resolution fold came from.
 ///
 /// The only thing the fold's inbound observation (R2) and its `GroupEvolution`
-/// disposition (a released queued intent, whose durable row the engine has
-/// already deleted) need to differ on.
+/// disposition (a released queued intent, which only an advance can hand
+/// back) need to differ on.
+/// What [`CircleManager::record_unrecorded_join`] made of one `GroupJoined`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinRecord {
+    /// Its circle was missing and is now recorded.
+    Materialized,
+    /// Nothing to record: the circle exists, nobody accepted the join, or the
+    /// group is no longer live.
+    Recorded,
+    /// Its circle could not be recorded; the join stays owed.
+    Owed,
+}
+
+/// What the publish-resolution fold does with what its own advances release.
+///
+/// No `Debug`: one arm carries an instant (Security Rule 15).
+#[derive(Clone, Copy)]
+enum Disposition<'a> {
+    /// Each commit and each proposal is recorded in the hold that released
+    /// it, at `now_ms` on the fanout clock, and its handle returned: the
+    /// fanout driver's own resolutions and the planes that drive. `still`
+    /// is the full mode the caller decided this in, asked again by each
+    /// advance once it holds the engine.
+    Stage { now_ms: u64, still: Still<'a> },
+    /// As [`Self::Stage`], for a drive that makes no new commit
+    /// ([`DriveMode::FinishOnly`]): each advance is inputs-only, so nothing
+    /// is released to record but a leave the engine proposes again.
+    Settle { now_ms: u64 },
+}
+
+impl<'a> Disposition<'a> {
+    /// The disposition of a hold that records, in the mode `still` was
+    /// decided in.
+    const fn recording(now_ms: u64, still: Still<'a>) -> Self {
+        match still.decided() {
+            DriveMode::Full => Self::Stage { now_ms, still },
+            DriveMode::FinishOnly => Self::Settle { now_ms },
+        }
+    }
+}
+
+/// A staging advance's effects, its handles joined to `staged`.
+fn recorded_by(advanced: Staged, staged: &mut Vec<FanoutId>) -> SessionEffects {
+    staged.extend(advanced.fanouts);
+    staged.extend(advanced.proposals);
+    advanced.effects
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BatchOrigin {
-    /// The batch `confirm_published` / `publish_failed` returned.
+    /// The batch the confirm or the rollback itself returned.
     TopLevel,
     /// A batch an `advance_convergence` or a rollback inside the fold produced.
     Drained,
@@ -5217,172 +6779,6 @@ impl RosterDeclined {
 /// directly, by
 /// `tests::the_batch_cap_stops_generating_without_dropping_what_it_holds`.
 const MAX_FOLD_BATCHES: usize = 32;
-
-/// How many owed commits one redemption pass publishes before it stops.
-///
-/// The same runaway guard as [`MAX_FOLD_BATCHES`], on the pass that has a
-/// publisher. Its disposition is a PAUSE, not a loss: what it does not reach
-/// keeps its durable row and its live ref, so the next foreground pass redeems
-/// it, and nothing is rolled back.
-pub const MAX_REDEMPTION_STEPS: usize = 32;
-
-/// The pending ref a publish item owns, if any.
-///
-/// Exhaustive so a new `PublishWork` variant carrying a ref cannot slip past the
-/// fold's resolved-once rule.
-#[deny(clippy::wildcard_enum_match_arm)]
-const fn pending_ref_of(item: &PublishWork) -> Option<PendingStateRef> {
-    match item {
-        PublishWork::AutoPublish { pending, .. }
-        | PublishWork::GroupEvolution { pending, .. }
-        | PublishWork::GroupCreated { pending, .. } => Some(*pending),
-        PublishWork::ApplicationMessage { .. } | PublishWork::Proposal { .. } => None,
-    }
-}
-
-// Redacts the commit event (whose `h` tag carries the `nostr_group_id`) so a
-// stray `{:?}` cannot leak group-id material (Rule 4/6).
-impl std::fmt::Debug for CommitToPublish {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CommitToPublish")
-            .field("commit_event", &"<redacted>")
-            .field("pending", &self.pending)
-            .finish()
-    }
-}
-
-/// What [`CircleManager::repair_epoch_rotation`] did.
-///
-/// Not a `Result` shape: a declined repair is a normal answer the UI shows, and
-/// a deferred one carries work the caller must publish. Only a genuine failure
-/// (an unreadable store, an engine rejection that is not about epoch state) is
-/// an `Err`.
-pub enum RepairRotationOutcome {
-    /// The commit is staged. Publish it, then confirm on a ≥1-relay OK-ack or
-    /// roll it back (Rule 13) — see [`CircleManager::repair_epoch_rotation`].
-    Rotated(CommitToPublish),
-    /// A gate declined the repair; nothing was staged and nothing changed.
-    Skipped(SkipReason),
-    /// The engine QUEUED the rotation instead of staging it, because the circle
-    /// is send-gated. The repair ran anyway (the same one a deferred location
-    /// send runs), and anything it staged is here: the caller MUST run the
-    /// publish → confirm/roll-back ladder over
-    /// [`DeferredWork::commits`], or the group stays in `PendingPublish` and
-    /// stops sending entirely.
-    ///
-    /// Carries the same counters as [`CircleError::SendDeferred`], and for the
-    /// same reason: `unresolved_inputs == 0` is what a caller reads as "the
-    /// next send will encrypt", so it must never be a placeholder.
-    Deferred {
-        /// Stored rows still gating outbound sends, read AFTER the repair.
-        unresolved_inputs: usize,
-        /// Queued location intents the repair discarded.
-        discarded_intents: usize,
-        /// Whether the circle was left with nothing gating and nothing staged.
-        repaired: bool,
-        /// Publish work the engine staged during the repair (Rule 13).
-        work: DeferredWork,
-    },
-}
-
-// Presence-only: the commit event's `h` tag carries the `nostr_group_id`
-// (Rules 4/8). `SkipReason` and `DeferredWork` are already leak-free.
-impl std::fmt::Debug for RepairRotationOutcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Rotated(_) => f.write_str("Rotated"),
-            Self::Skipped(reason) => f.debug_tuple("Skipped").field(reason).finish(),
-            Self::Deferred {
-                unresolved_inputs,
-                discarded_intents,
-                repaired,
-                work,
-            } => f
-                .debug_struct("Deferred")
-                .field("unresolved_inputs", &bucket(*unresolved_inputs))
-                .field("discarded_intents", &bucket(*discarded_intents))
-                .field("repaired", repaired)
-                .field("work", work)
-                .finish(),
-        }
-    }
-}
-
-/// The result of the repair a deferred send performs, before it is shaped into
-/// a [`CircleError::SendDeferred`] or a [`RepairRotationOutcome::Deferred`].
-struct DeferredSendReport {
-    /// Stored rows still gating outbound sends, read AFTER the repair.
-    unresolved_inputs: usize,
-    /// Queued location intents dropped so a stalled circle cannot accumulate
-    /// one stale fix per publish cycle.
-    discarded_intents: usize,
-    /// Whether the circle was left with nothing gating and nothing staged.
-    repaired: bool,
-    /// Publish work the engine staged or emitted during the deferral.
-    work: DeferredWork,
-}
-
-/// Publish work the engine drained during a DEFERRED send, handed to the caller
-/// instead of being resolved here.
-///
-/// # Why this is surfaced rather than resolved
-///
-/// `cgka-engine`'s `should_queue_outbound_intent` returns true in exactly two
-/// situations, and one of them STAGES a commit: when a peer's `SelfRemove`
-/// proposal has become due, `stage_due_self_remove_auto_commit` stages the
-/// eviction auto-commit and reports "queued" for the send that triggered it.
-/// `collect_effects` then drains that commit into the very `SessionEffects` the
-/// deferred send returns, carrying a [`PendingStateRef`].
-///
-/// Both obvious dispositions are wrong (Rule 13):
-///
-/// - **Confirming** applies a commit no relay has acked.
-/// - **Rolling back** (`publish_failed`) looks safe and is not: the engine
-///   removes the in-memory `scheduled_self_remove_auto_commits` entry *before*
-///   staging and `do_publish_failed` does not re-arm it, while a redelivery of
-///   the proposal short-circuits to `Buffered` without rescheduling. The
-///   eviction is then never re-staged and the leaver stays in the circle
-///   forever.
-/// - **Dropping it** silently leaves the group in `PendingPublish`, where every
-///   later send fails the engine's "send requires Stable" gate — a total send
-///   blackout.
-///
-/// So the only correct disposition is the one the receive path already uses:
-/// hand the caller the publish → ack → `confirm_published` /
-/// [`CircleManager::publish_failed`] ladder it already runs for
-/// [`DecryptedIngest::auto_commits`] — where the fail rung does NOT roll a
-/// removal-bearing commit back but keeps it owed
-/// ([`CircleManager::owe_removal_publish`]), which is what makes "rolling back
-/// is never a disposition" true of the Dart planes too.
-#[derive(Default)]
-pub struct DeferredWork {
-    /// Staged commits: publish each, then [`CircleManager::confirm_published`]
-    /// on a ≥1-relay ack, or [`CircleManager::publish_failed`] on failure.
-    pub commits: Vec<CommitToPublish>,
-    /// Bare proposals the engine emitted (no staged state, nothing to confirm).
-    /// Publish-or-lose, but recoverable: a re-proposed `SelfRemove` is driven by
-    /// the durable `LeaveRequest`, so a later convergence pass re-emits it.
-    pub proposals: Vec<Event>,
-}
-
-impl DeferredWork {
-    /// Whether the engine handed back nothing to publish.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.commits.is_empty() && self.proposals.is_empty()
-    }
-}
-
-// Presence-only: a proposal event's `h` tag carries the `nostr_group_id` and its
-// content is group ciphertext, so only counts are printed (Rules 4/6/8).
-impl std::fmt::Debug for DeferredWork {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DeferredWork")
-            .field("commits", &bucket(self.commits.len()))
-            .field("proposals", &bucket(self.proposals.len()))
-            .finish()
-    }
-}
 
 /// How strongly a receive batch asks the member directory to be rewritten.
 ///
@@ -5500,6 +6896,8 @@ mod tests {
     use super::*;
     use crate::circle::types::LastKnownLocation;
     use crate::nostr::mls::types::LocationMessageResult;
+    use crate::nostr::mls::PlaneStanding;
+    use crate::relay::fanout::RepairOutcome;
     use crate::relay::maintenance::build_kp_maintenance_events;
     use nostr::JsonUtil as _;
     use tempfile::TempDir;
@@ -5582,13 +6980,14 @@ mod tests {
         let (manager, keys, temp_dir) = create_test_manager();
         let (group_id, _member) = create_confirmed_circle(&manager, &keys, "Circles").await;
 
-        let conn = rusqlite::Connection::open(temp_dir.path().join("circles.db")).unwrap();
+        crate::sqlcipher_init::ensure().expect("SQLite initialises");
+        let conn = rusqlite::Connection::open(temp_dir.path().join(CIRCLES_DB_FILENAME)).unwrap();
         conn.execute_batch("ALTER TABLE circles RENAME TO circles_x")
             .unwrap();
         drop(conn);
 
         let err = manager
-            .repair_epoch_rotation(&group_id, now_secs())
+            .repair_rotation_for_test(&group_id, now_secs())
             .await
             .expect_err("a missing table must not read as an absent circle");
 
@@ -5615,12 +7014,13 @@ mod tests {
 
         // Break the table the rotation-state read depends on, from a second
         // connection to the same unencrypted file.
-        let conn = rusqlite::Connection::open(temp_dir.path().join("circles.db")).unwrap();
+        crate::sqlcipher_init::ensure().expect("SQLite initialises");
+        let conn = rusqlite::Connection::open(temp_dir.path().join(CIRCLES_DB_FILENAME)).unwrap();
         conn.execute_batch("DROP TABLE circle_health").unwrap();
         drop(conn);
 
         let err = manager
-            .repair_epoch_rotation(&group_id, now_secs())
+            .repair_rotation_for_test(&group_id, now_secs())
             .await
             .expect_err("a missing table must not read as a clean rotation state");
 
@@ -5675,7 +7075,7 @@ mod tests {
     /// A real two-party MLS circle established over the Dark Matter stack.
     struct TwoPartyCircle {
         alice: CircleManager,
-        _alice_dir: TempDir,
+        alice_dir: TempDir,
         alice_keys: Keys,
         bob: CircleManager,
         _bob_dir: TempDir,
@@ -5685,9 +7085,9 @@ mod tests {
         relays: Vec<String>,
     }
 
-    /// Establishes a two-party circle: Alice creates with Bob's `KeyPackage`,
-    /// confirms the pending create (publish-before-apply), then Bob holds and
-    /// accepts the engine-produced gift-wrapped (1059) welcome.
+    /// Establishes a two-party circle: Alice founds it with Bob's `KeyPackage`
+    /// (canonical at once), then Bob holds and accepts the engine-produced
+    /// gift-wrapped (1059) welcome.
     async fn setup_two_party_circle() -> TwoPartyCircle {
         let relays = vec!["wss://relay.test.com".to_string()];
 
@@ -5706,30 +7106,40 @@ mod tests {
             nip65_relays: vec![],
         };
 
+        // Created as the app creates one: its founding Welcome sent from its
+        // record and acknowledged, so no later drive sends it again.
         let config = CircleConfig::new("Test Circle").with_relays(relays.clone());
-        let creation = alice
-            .create_circle(&alice_keys, vec![bob_member], &config, &relays)
-            .await
-            .expect("create two-party circle");
-        alice
-            .confirm_published(creation.pending)
-            .await
-            .expect("confirm create");
+        let accepting = crate::relay::fanout::scripted::Accepting::default();
+        let creation = crate::relay::fanout::Publishing {
+            fanout: &accepting,
+            publisher: &accepting,
+            clock: &crate::relay::fanout::WallClock,
+            deadline_ms: None,
+            mode: &DriveMode::Full,
+        }
+        .create_circle(&alice, &alice_keys, vec![bob_member], &config)
+        .await
+        .expect("create two-party circle");
+        assert_eq!(creation.welcomes_sent, 1, "premise: the Welcome was taken");
 
         let mls_group_id = creation.circle.mls_group_id.clone();
         let nostr_group_id = creation.circle.nostr_group_id;
 
-        let welcome = creation.welcome_events.first().expect("one welcome");
-        bob.process_gift_wrapped_invitation(&bob_keys, &welcome.event)
+        let welcome = accepting
+            .handed()
+            .into_iter()
+            .find(|event| event.kind.as_u16() == 1059)
+            .expect("one welcome");
+        bob.process_gift_wrapped_invitation(&bob_keys, &welcome)
             .await
             .expect("bob holds welcome");
-        bob.accept_invitation(&welcome.event.id)
+        bob.accept_invitation(&welcome.id)
             .await
             .expect("bob accepts welcome");
 
         TwoPartyCircle {
             alice,
-            _alice_dir: alice_dir,
+            alice_dir,
             alice_keys,
             bob,
             _bob_dir: bob_dir,
@@ -5738,6 +7148,138 @@ mod tests {
             nostr_group_id,
             relays,
         }
+    }
+
+    #[tokio::test]
+    async fn a_drained_proposal_is_handed_back_never_dropped() {
+        // A proposal a fold drains (the user's own leave, re-minted) has no
+        // staged state to confirm: the caller must receive it as a signed
+        // event to publish, or the leave has nothing in flight and no peer can
+        // ever commit it.
+        let tp = setup_two_party_circle().await;
+        let effects = tp
+            .bob
+            .session()
+            .leave_group(&tp.mls_group_id)
+            .await
+            .expect("bob leaves")
+            .expect("a first leave in this epoch proposes");
+        assert!(
+            effects
+                .publish
+                .iter()
+                .any(|work| matches!(work, PublishWork::Proposal { .. })),
+            "precondition: the leave is a bare proposal"
+        );
+
+        let (folded, recorded) = tp
+            .bob
+            .fold_staged(
+                effects,
+                false,
+                0,
+                Still::new(&DriveMode::Full, DriveMode::Full),
+            )
+            .await;
+
+        assert_eq!(folded.proposals.len(), 1, "the proposal reaches the caller");
+        assert_eq!(folded.proposals[0].kind, nostr::Kind::Custom(445));
+        assert!(recorded.is_empty(), "and nothing was invented beside it");
+    }
+
+    #[tokio::test]
+    async fn one_batch_persists_each_location_under_its_own_circle() {
+        // Keying the persist off anything but each event's own `group_id` files
+        // a peer under the wrong circle — visible to members of a circle that
+        // peer is not in, which is the privacy failure, not merely a wrong pin.
+        // The batch is two REAL engine events from two circles folded together,
+        // the shape a drained batch or a resolution replay hands the fold.
+        let tp = setup_two_party_circle().await;
+        let carol_dir = TempDir::new().unwrap();
+        let carol_keys = Keys::generate();
+        let carol = CircleManager::new_unencrypted(carol_dir.path(), &carol_keys).unwrap();
+        let carol_member = MemberKeyPackage {
+            key_package_event: make_kp_event(&carol, &carol_keys, &tp.relays).await,
+            inbox_relays: tp.relays.clone(),
+            nip65_relays: vec![],
+        };
+        let sibling = tp
+            .alice
+            .create_circle(
+                &tp.alice_keys,
+                vec![carol_member],
+                &CircleConfig::new("Sibling").with_relays(tp.relays.clone()),
+            )
+            .await
+            .expect("create the sibling circle");
+        let welcome = sibling.welcome_events.first().expect("one welcome");
+        carol
+            .process_gift_wrapped_invitation(&carol_keys, &welcome.event)
+            .await
+            .expect("carol holds the welcome");
+        carol
+            .accept_invitation(&welcome.event.id)
+            .await
+            .expect("carol accepts");
+
+        let bob_fix = LocationMessage::new(51.5, -0.12);
+        let carol_fix = LocationMessage::new(-33.86, 151.21);
+        let (bob_event, _, _) = tp
+            .bob
+            .seal_location_for_test(&tp.mls_group_id, &bob_fix)
+            .await
+            .expect("bob sends");
+        let (carol_event, _, _) = carol
+            .seal_location_for_test(&sibling.circle.mls_group_id, &carol_fix)
+            .await
+            .expect("carol sends");
+        let mut batch = Vec::new();
+        for event in [&bob_event, &carol_event] {
+            let screened = tp
+                .alice
+                .session()
+                .process_event(event)
+                .await
+                .expect("alice's engine takes the event");
+            batch.extend(
+                screened
+                    .ingested()
+                    .expect("an authenticated location")
+                    .effects
+                    .events
+                    .clone(),
+            );
+        }
+        let results = tp.alice.persist_and_fold(&batch).await;
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r, LocationMessageResult::Location { .. }))
+                .count(),
+            2,
+            "precondition: one batch really carried both circles' locations"
+        );
+
+        let now = chrono::Utc::now().timestamp();
+        let bob_hex = tp.bob_keys.public_key().to_hex();
+        let carol_hex = carol_keys.public_key().to_hex();
+        let first = tp
+            .alice
+            .snapshot_last_known_for_circle(&tp.nostr_group_id, now)
+            .expect("first circle's rows");
+        let second = tp
+            .alice
+            .snapshot_last_known_for_circle(&sibling.circle.nostr_group_id, now)
+            .expect("sibling circle's rows");
+        let row = |rows: &[LastKnownLocation], hex: &str| {
+            rows.iter().find(|r| r.sender_pubkey == hex).cloned()
+        };
+        assert!((row(&first, &bob_hex).expect("bob's row").latitude - 51.5).abs() < 1e-9);
+        assert!((row(&second, &carol_hex).expect("carol's row").latitude - (-33.86)).abs() < 1e-9);
+        assert!(
+            row(&first, &carol_hex).is_none() && row(&second, &bob_hex).is_none(),
+            "and neither peer appears under the other circle's id"
+        );
     }
 
     fn sorted_relays(v: &[String]) -> Vec<String> {
@@ -5858,7 +7400,10 @@ mod tests {
     /// invariant under test is unchanged, only the injection needs re-aiming.
     fn tamper_session_db(data_dir: &std::path::Path, sql: &str) {
         let key = crate::nostr::mls::StorageConfig::test_sqlcipher_key().expect("test key");
-        let conn = rusqlite::Connection::open(data_dir.join("session.sqlite")).expect("open");
+        crate::sqlcipher_init::ensure().expect("SQLite initialises");
+        let conn =
+            rusqlite::Connection::open(crate::nostr::mls::storage::session_db_path(data_dir))
+                .expect("open");
         conn.pragma_update(None, "cipher_compatibility", 4i64)
             .expect("cipher compatibility");
         conn.pragma_update(None, "key", key.as_secret_str())
@@ -5878,14 +7423,10 @@ mod tests {
         let member_hex = member.key_package_event.pubkey.to_hex();
         let config = CircleConfig::new(name).with_relays(relays.clone());
         let creation = manager
-            .create_circle(keys, vec![member], &config, &relays)
+            .create_circle(keys, vec![member], &config)
             .await
             .expect("create circle");
-        manager
-            .confirm_published(creation.pending)
-            .await
-            .expect("confirm create");
-        (creation.circle.mls_group_id.clone(), member_hex)
+        (creation.circle.mls_group_id, member_hex)
     }
 
     #[tokio::test]
@@ -5894,20 +7435,21 @@ mod tests {
         // OPTIMISTIC PROJECTION while a commit is staged, so the invitee is in
         // the roster before any relay has seen the commit — and branch
         // selection can still withdraw it. The gate, not the roster, is what
-        // keeps that person off disk.
+        // keeps that person off disk. (A founding create is canonical on
+        // return, so the staged change here is an Add to an existing circle.)
         let dir = TempDir::new().unwrap();
         let keys = Keys::generate();
         let relays = vec!["wss://relay.test.com".to_string()];
         let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
 
+        let (group_id, founder_hex) = create_confirmed_circle(&manager, &keys, "Staged").await;
+        let before = directory_of(&manager);
         let member = make_member_with_relays(relays.clone(), vec![]).await;
         let member_hex = member.key_package_event.pubkey.to_hex();
-        let config = CircleConfig::new("Staged").with_relays(relays.clone());
-        let creation = manager
-            .create_circle(&keys, vec![member], &config, &relays)
+        manager
+            .add_members_staging(&group_id, &[member], 0)
             .await
-            .expect("create circle");
-        let group_id = creation.circle.mls_group_id.clone();
+            .expect("stage the add");
 
         assert!(
             manager
@@ -5934,24 +7476,31 @@ mod tests {
                 .unwrap(),
             "a circle mid-publish must defer the whole reconcile"
         );
-        assert!(
-            directory_of(&manager).is_empty(),
+        assert_eq!(
+            directory_of(&manager),
+            before,
             "nothing may be written from a projection"
         );
+        assert!(!before.iter().any(|(pubkey, _)| pubkey == &member_hex));
 
-        manager
-            .confirm_published(creation.pending)
-            .await
-            .expect("confirm create");
+        assert_eq!(
+            manager.land_staged_for_test().await.len(),
+            1,
+            "premise: the add lands"
+        );
         assert!(manager
             .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
             .await
             .unwrap());
+        let written = directory_of(&manager);
         assert_eq!(
-            directory_of(&manager),
-            vec![(member_hex, DirectoryTier::Current)],
+            written.len(),
+            2,
             "and everything may be written once the commit is applied"
         );
+        for pubkey in [founder_hex, member_hex] {
+            assert!(written.contains(&(pubkey, DirectoryTier::Current)));
+        }
     }
 
     #[tokio::test]
@@ -6104,7 +7653,8 @@ mod tests {
             .bob
             .propose_leave(&circle.mls_group_id)
             .await
-            .expect("non-admin bob may propose SelfRemove");
+            .expect("non-admin bob may propose SelfRemove")
+            .expect("a first leave in this epoch proposes");
         assert!(
             circle
                 .bob
@@ -6116,20 +7666,15 @@ mod tests {
 
         let commit = circle
             .alice
-            .remove_members(
+            .remove_members_for_test(
                 &circle.mls_group_id,
                 &[circle.bob_keys.public_key().to_hex()],
             )
             .await
-            .expect("stage the commit that takes bob out");
-        circle
-            .alice
-            .confirm_published(commit.pending)
-            .await
-            .expect("confirm");
+            .expect("the commit that takes bob out lands");
         circle
             .bob
-            .decrypt_location(&commit.commit_event)
+            .ingest_for_test(&commit)
             .await
             .expect("bob applies the commit that removed him");
 
@@ -6208,7 +7753,7 @@ mod tests {
     #[tokio::test]
     async fn a_publish_outcome_carrying_a_withdrawal_is_not_downgraded_to_a_rewrite() {
         // Resolving a pending ref is not just "apply or discard": confirming
-        // ends in `replay_buffered_messages` (`cgka-engine/src/publish.rs:255`),
+        // ends in `replay_buffered_messages` (`cgka-engine/src/publish.rs:360`),
         // a full ingest that runs convergence and therefore emits
         // `GroupStateInvalidated`. Hard-coding `Rewrite` at the two publish
         // seams throws that away, and a phantom member gets a three-day timer
@@ -6250,7 +7795,7 @@ mod tests {
         // and upgrades the next ordinary rewrite.
         let dir = TempDir::new().unwrap();
         let keys = Keys::generate();
-        let relays = vec!["wss://relay.test.com".to_string()];
+        let relays = vec!["wss://elsewhere.test.com".to_string()];
         let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
 
         let (settled_gid, member_hex) = create_confirmed_circle(&manager, &keys, "Settled").await;
@@ -6263,16 +7808,13 @@ mod tests {
             DirectoryTier::Current
         );
 
-        // A second circle stuck mid-publish: from here every pass defers.
-        let staged = manager
-            .create_circle(
-                &keys,
-                vec![make_member_with_relays(relays.clone(), vec![]).await],
-                &CircleConfig::new("Staged").with_relays(relays.clone()),
-                &relays,
-            )
+        // A second circle stuck mid-publish — a relay update staged and no
+        // relay answered: from here every pass defers.
+        let (staged_gid, _) = create_confirmed_circle(&manager, &keys, "Staged").await;
+        manager
+            .update_circle_relays_staging(&staged_gid, &relays, 0)
             .await
-            .expect("create circle");
+            .expect("stage a relay update");
         // The settled circle's member drops out of the union.
         manager.storage.delete_circle(&settled_gid).unwrap();
 
@@ -6295,10 +7837,7 @@ mod tests {
 
         // The mid-publish circle resolves; the NEXT pass asks only for an
         // ordinary rewrite.
-        manager
-            .storage
-            .delete_circle(&staged.circle.mls_group_id)
-            .unwrap();
+        manager.storage.delete_circle(&staged_gid).unwrap();
         assert!(manager
             .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
             .await
@@ -6315,54 +7854,49 @@ mod tests {
 
     #[tokio::test]
     async fn an_unrecoverable_circle_stops_re_stamping_its_members() {
-        // §5.3's second detector. An `Unrecoverable` group is still "live", so
+        // §5.3's second detector. An unrecoverable group is still "live", so
         // `converged_member_pubkeys` answers `Ok` with the roster frozen at its
         // last stable epoch — which would re-stamp those people `Current` with
         // the never-purge sentinel on every pass, so they could never age out
-        // and a removal there could never be observed. `EpochState` has no
-        // accessor and is never persisted, so the event that announces it is the
-        // only signal there is; it is fed here directly for the same reason.
+        // and a removal there could never be observed. The verdict is MDK's
+        // persisted flag, set here the way MDK leaves it and read after an
+        // open.
         let dir = TempDir::new().unwrap();
         let keys = Keys::generate();
         let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
-        // One circle per way the news can arrive: the receive planes hold raw
-        // engine events, the poll path holds folded results, and a group missed
-        // by either entry point keeps its members pinned for ever.
-        let (event_gid, via_events_hex) = create_confirmed_circle(&manager, &keys, "Doomed").await;
-        let (result_gid, via_results_hex) =
-            create_confirmed_circle(&manager, &keys, "Also doomed").await;
+        let (event_gid, member_hex) = create_confirmed_circle(&manager, &keys, "Doomed").await;
         assert!(manager
             .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
             .await
             .unwrap());
-        for member_hex in [&via_events_hex, &via_results_hex] {
-            assert_eq!(
-                directory_row(&manager, member_hex).unwrap().purge_after,
-                crate::circle::DIRECTORY_PURGE_NEVER,
-                "precondition: a current co-member is pinned against every clock"
-            );
-        }
-
+        assert_eq!(
+            directory_row(&manager, &member_hex).unwrap().purge_after,
+            crate::circle::DIRECTORY_PURGE_NEVER,
+            "precondition: a current co-member is pinned against every clock"
+        );
         assert_eq!(
             manager.directory_verdict_for_events(&[GroupEvent::GroupUnrecoverable {
-                group_id: event_gid,
+                group_id: event_gid.clone(),
             }]),
             None,
             "the event itself asks for no pass — the group it names is now unreadable"
         );
-        assert_eq!(
-            manager.directory_verdict_for_results(&[LocationMessageResult::Unrecoverable {
-                group_id: result_gid,
-            }]),
-            None
-        );
+        drop(manager);
+        crate::nostr::mls::storage::set_group_unrecoverable_for_test(
+            &crate::nostr::mls::StorageConfig::new(dir.path()).database_path(),
+            &crate::nostr::mls::StorageConfig::test_sqlcipher_key().unwrap(),
+            &event_gid,
+            true,
+        )
+        .unwrap();
+        let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
 
         assert!(manager
             .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
             .await
             .unwrap());
-        for member_hex in [&via_events_hex, &via_results_hex] {
-            let row = directory_row(&manager, member_hex).expect("still a recent contact");
+        {
+            let row = directory_row(&manager, &member_hex).expect("still a recent contact");
             assert_eq!(
                 row.tier,
                 DirectoryTier::Recent,
@@ -6396,9 +7930,11 @@ mod tests {
         // Stands in for a walk that is mid-read: it holds the seam.
         let walk = circle.alice.directory_lock.lock().await;
 
-        let removal = circle
-            .alice
-            .remove_members(&circle.mls_group_id, std::slice::from_ref(&bob_hex));
+        let removal = circle.alice.remove_members_staging(
+            &circle.mls_group_id,
+            std::slice::from_ref(&bob_hex),
+            0,
+        );
         futures::pin_mut!(removal);
         assert!(
             futures::poll!(&mut removal).is_pending(),
@@ -6435,9 +7971,9 @@ mod tests {
         // message at epoch ≥ tip−5 — a circle's whole location history, because
         // a circle's epoch only advances on a membership commit — per circle,
         // per pass, under the session mutex. A peer leaving a circle of M
-        // produces up to M−1 competing auto-commits, and `confirm_published` is
-        // awaited inline from Dart, so an un-coalesced walk lands on the visible
-        // latency of Add / Remove / Create Member.
+        // produces up to M−1 competing auto-commits, and the fanout driver's
+        // confirm is awaited inline from Dart, so an un-coalesced walk lands on
+        // the visible latency of Add / Remove / Create Member.
         let dir = TempDir::new().unwrap();
         let keys = Keys::generate();
         let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
@@ -6672,9 +8208,9 @@ mod tests {
             .unwrap());
         assert!(directory_row(&circle.alice, &bob_hex).is_some());
 
-        let commit = circle
+        circle
             .alice
-            .remove_members(&circle.mls_group_id, std::slice::from_ref(&bob_hex))
+            .remove_members_staging(&circle.mls_group_id, std::slice::from_ref(&bob_hex), 0)
             .await
             .expect("stage removal");
 
@@ -6682,7 +8218,6 @@ mod tests {
             directory_row(&circle.alice, &bob_hex).is_none(),
             "the removal must not wait for a relay ack, and must not age out"
         );
-        drop(commit);
     }
 
     #[tokio::test]
@@ -6708,20 +8243,15 @@ mod tests {
 
         let commit = circle
             .alice
-            .remove_members(
+            .remove_members_for_test(
                 &circle.mls_group_id,
                 &[circle.bob_keys.public_key().to_hex()],
             )
             .await
             .expect("stage removal");
         circle
-            .alice
-            .confirm_published(commit.pending)
-            .await
-            .expect("confirm removal");
-        circle
             .bob
-            .decrypt_location(&commit.commit_event)
+            .ingest_for_test(&commit)
             .await
             .expect("bob applies his own eviction");
 
@@ -6762,12 +8292,7 @@ mod tests {
         let send = || async {
             circle
                 .bob
-                .encrypt_location(
-                    &circle.mls_group_id,
-                    &circle.bob_keys.public_key(),
-                    &LocationMessage::new(1.0, 2.0),
-                    60,
-                )
+                .seal_location_for_test(&circle.mls_group_id, &LocationMessage::new(1.0, 2.0))
                 .await
                 .expect("bob sends")
                 .0
@@ -6784,7 +8309,7 @@ mod tests {
             .sync_co_members(&[bob_hex.clone(), tripwire.clone()], DIR_NOW)
             .unwrap();
 
-        let results = circle.alice.decrypt_location(&live).await.unwrap();
+        let results = circle.alice.ingest_for_test(&live).await.unwrap();
         assert!(
             results
                 .iter()
@@ -6799,21 +8324,16 @@ mod tests {
 
         // Now Bob is removed and his row is gone; the message he sealed at the
         // earlier epoch cannot bring it back.
-        let commit = circle
-            .alice
-            .remove_members(&circle.mls_group_id, std::slice::from_ref(&bob_hex))
-            .await
-            .expect("stage removal");
         circle
             .alice
-            .confirm_published(commit.pending)
+            .remove_members_for_test(&circle.mls_group_id, std::slice::from_ref(&bob_hex))
             .await
-            .expect("confirm removal");
+            .expect("stage removal");
         assert!(directory_row(&circle.alice, &bob_hex).is_none());
 
         circle
             .alice
-            .decrypt_location(&held_back)
+            .ingest_for_test(&held_back)
             .await
             .expect("the past-epoch message is handled, whatever the verdict");
         assert!(
@@ -6895,14 +8415,9 @@ mod tests {
                     nip65_relays: vec![],
                 }],
                 &config,
-                &relays,
             )
             .await
             .expect("create circle");
-        alice
-            .confirm_published(creation.pending)
-            .await
-            .expect("confirm create");
         let welcome = creation.welcome_events.first().expect("one welcome");
 
         bob.process_gift_wrapped_invitation(&bob_keys, &welcome.event)
@@ -7053,34 +8568,82 @@ mod tests {
     // ── Welcome-delivery cascade ─────────────────────────────────────────────
 
     #[tokio::test]
-    async fn welcome_delivery_uses_creator_inbox_as_tier3() {
+    async fn welcome_delivery_goes_to_the_invitees_inbox_relays_alone() {
+        // Haven listens for gift wraps only on its kind-10050 inbox relays, so a
+        // Welcome sent to a NIP-65 relay or to the sender's own inbox is lost.
         let dir = TempDir::new().unwrap();
         let alice_keys = Keys::generate();
         let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
-
-        // Member advertises NO relays (empty inbox + empty NIP-65), forcing the
-        // cascade down to the creator's own inbox relays (tier 3).
-        let member = make_member_with_relays(vec![], vec![]).await;
-        let config = CircleConfig::new("Tier3 Circle")
+        alice
+            .add_user_relay(
+                "wss://creator-inbox.example.com",
+                crate::circle::relay_prefs::RelayType::Inbox,
+            )
+            .unwrap();
+        let config = CircleConfig::new("Inbox Circle")
             .with_relays(vec!["wss://group.example.com".to_string()]);
-        let creator_inbox = vec!["wss://creator-inbox.example.com".to_string()];
 
+        let member = make_member_with_relays(
+            vec!["wss://member-inbox.example.com".to_string()],
+            vec!["wss://member-nip65.example.com".to_string()],
+        )
+        .await;
         let result = alice
-            .create_circle(&alice_keys, vec![member], &config, &creator_inbox)
+            .create_circle(&alice_keys, vec![member], &config)
             .await
-            .expect("creation should succeed using the creator's inbox as tier 3");
+            .expect("creation routes the Welcome to the invitee's inbox");
+        assert_eq!(
+            result.welcome_events[0].recipient_relays,
+            vec!["wss://member-inbox.example.com".to_string()]
+        );
 
-        assert_eq!(result.welcome_events.len(), 1);
-        assert_eq!(result.welcome_events[0].recipient_relays, creator_inbox);
-        for d in crate::circle::PRODUCTION_DEFAULT_RELAYS {
-            assert!(
-                !result.welcome_events[0]
-                    .recipient_relays
-                    .iter()
-                    .any(|r| r.starts_with(d)),
-                "welcome delivery must never fall back to a public default ({d})"
-            );
-        }
+        let without_inbox =
+            make_member_with_relays(vec![], vec!["wss://member-nip65.example.com".to_string()])
+                .await;
+        let err = alice
+            .create_circle(&alice_keys, vec![without_inbox], &config)
+            .await
+            .expect_err("neither a NIP-65 relay nor the creator's inbox is a route");
+        assert!(matches!(err, CircleError::MissingWelcomeRelays));
+        assert_eq!(alice.get_circles().await.expect("get_circles").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn welcome_delivery_drops_an_inbox_relay_haven_may_not_dial() {
+        // The invitee wrote that list, not this device's user: an entry that
+        // steers a socket at a plain-text, private or loopback host is dropped
+        // whatever the caller resolved.
+        let dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
+        let config = CircleConfig::new("Filtered Circle")
+            .with_relays(vec!["wss://group.example.com".to_string()]);
+        let undialable = [
+            "ws://plain.example.com",
+            "wss://10.0.0.1",
+            "wss://127.0.0.1",
+            "https://not-a-relay.example.com",
+        ]
+        .map(String::from);
+
+        let mut inbox = undialable.to_vec();
+        inbox.push("wss://member-inbox.example.com".to_string());
+        let member = make_member_with_relays(inbox, vec![]).await;
+        let result = alice
+            .create_circle(&alice_keys, vec![member], &config)
+            .await
+            .expect("the dialable inbox relay is a route");
+        assert_eq!(
+            result.welcome_events[0].recipient_relays,
+            vec!["wss://member-inbox.example.com".to_string()]
+        );
+
+        let member = make_member_with_relays(undialable.to_vec(), vec![]).await;
+        let err = alice
+            .create_circle(&alice_keys, vec![member], &config)
+            .await
+            .expect_err("no inbox relay Haven may dial is no route");
+        assert!(matches!(err, CircleError::MissingWelcomeRelays));
     }
 
     #[tokio::test]
@@ -7094,7 +8657,7 @@ mod tests {
             .with_relays(vec!["wss://group.example.com".to_string()]);
 
         let err = alice
-            .create_circle(&alice_keys, vec![member], &config, &[])
+            .create_circle(&alice_keys, vec![member], &config)
             .await
             .expect_err("creation must fail closed when no delivery relay exists");
         assert!(matches!(err, CircleError::MissingWelcomeRelays));
@@ -7145,7 +8708,7 @@ mod tests {
             CircleConfig::new("Invitee Relay Circle").with_relays(vec![INVITEE_RELAY.to_string()]);
 
         let creation = alice
-            .create_circle(&alice_keys, vec![member], &config, &[])
+            .create_circle(&alice_keys, vec![member], &config)
             .await
             .expect("create");
 
@@ -7168,12 +8731,8 @@ mod tests {
     async fn create_circle_falls_back_to_stored_creator_inbox_when_relays_empty() {
         // No invitee supplied a relay (config.relays is empty, matching Dart
         // passing memberRelays == []). The fallback reads the creator's inbox
-        // relays from LOCAL STORAGE — not from the `creator_fallback_relays`
-        // parameter, which is deliberately set to a DIFFERENT URL here so a
-        // passing assertion can only be explained by the storage read, never
-        // by an accidental echo of that parameter.
+        // relays from LOCAL STORAGE.
         const STORED_INBOX_RELAY: &str = "wss://creator-inbox-storage.example.com";
-        const WELCOME_TIER3_PARAM_RELAY: &str = "wss://different-tier3-param.example.com";
 
         let dir = TempDir::new().unwrap();
         let alice_keys = Keys::generate();
@@ -7185,16 +8744,13 @@ mod tests {
             )
             .unwrap();
 
-        let member = make_member_with_relays(vec![], vec![]).await; // no relays
+        let member =
+            make_member_with_relays(vec!["wss://member-inbox.example.com".to_string()], vec![])
+                .await;
         let config = CircleConfig::new("Fallback Circle"); // relays left empty
 
         let creation = alice
-            .create_circle(
-                &alice_keys,
-                vec![member],
-                &config,
-                &[WELCOME_TIER3_PARAM_RELAY.to_string()],
-            )
+            .create_circle(&alice_keys, vec![member], &config)
             .await
             .expect("create using the stored creator inbox as the group relay set");
 
@@ -7203,12 +8759,6 @@ mod tests {
             vec![STORED_INBOX_RELAY.to_string()],
             "an empty passed-in relay set must fall back to the creator's \
              LOCALLY STORED inbox relays"
-        );
-        assert_ne!(
-            creation.circle.relays,
-            vec![WELCOME_TIER3_PARAM_RELAY.to_string()],
-            "the group relay set must come from storage, not from the \
-             creator_fallback_relays parameter"
         );
     }
 
@@ -7222,12 +8772,13 @@ mod tests {
         // Deliberately never seeded / never called add_user_relay: the
         // creator's stored inbox relay list stays empty.
 
-        let member = make_member_with_relays(vec![], vec![]).await; // no relays
+        let member =
+            make_member_with_relays(vec!["wss://member-inbox.example.com".to_string()], vec![])
+                .await;
         let config = CircleConfig::new("Default Fallback Circle"); // relays empty
-        let welcome_tier3 = vec!["wss://tier3.example.com".to_string()];
 
         let creation = alice
-            .create_circle(&alice_keys, vec![member], &config, &welcome_tier3)
+            .create_circle(&alice_keys, vec![member], &config)
             .await
             .expect("create using the production default relays");
 
@@ -7256,7 +8807,7 @@ mod tests {
         let config = CircleConfig::new(TYPED).with_relays(relays.clone());
 
         let creation = alice
-            .create_circle(&alice_keys, vec![member], &config, &relays)
+            .create_circle(&alice_keys, vec![member], &config)
             .await
             .expect("create");
 
@@ -7267,83 +8818,56 @@ mod tests {
         );
     }
 
-    // ── Create rollback / ghost-row cleanup (F2/F3) ──────────────────────────
+    // ── Founding create: canonical on return (Rule 13) ───────────────────────
 
     #[tokio::test]
-    async fn create_then_publish_failed_removes_orphan_circle_row() {
-        // F2: create succeeds (deliverable member) and eagerly persists a circle
-        // row; then all welcomes zero-ack and the caller calls `publish_failed`.
-        // The circle row MUST be rolled back — no ghost circle backed by an
-        // unconfirmed group survives.
+    async fn create_circle_is_canonical_without_a_confirm() {
+        // A current-profile create returns `FoundingGroupCreated` with no
+        // pending ref (MDK `cgka-session/src/lib.rs:268-270`): the group is
+        // live and Stable at once, with nothing confirmed, and it survives a
+        // restart — at MDK v0.9.4 an unconfirmed create was a staged commit
+        // hydrate cleared.
         let relays = vec!["wss://relay.test.com".to_string()];
         let dir = TempDir::new().unwrap();
         let alice_keys = Keys::generate();
         let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
 
         let member = make_member_with_relays(relays.clone(), vec![]).await;
-        let config = CircleConfig::new("Rollback Circle").with_relays(relays.clone());
+        let config = CircleConfig::new("Founded Circle").with_relays(relays.clone());
         let creation = alice
-            .create_circle(&alice_keys, vec![member], &config, &relays)
+            .create_circle(&alice_keys, vec![member], &config)
             .await
             .expect("create");
+        let gid = creation.circle.mls_group_id.clone();
 
-        // Before rollback the row exists (eager persistence is unchanged).
         assert_eq!(alice.get_circles().await.unwrap().len(), 1);
-
-        alice
-            .publish_failed(creation.pending)
-            .await
-            .expect("rollback the unconfirmed create");
-
         assert!(
-            alice.get_circles().await.unwrap().is_empty(),
-            "publish_failed on a create must remove the orphan circle row"
+            matches!(
+                alice.session.epoch_state(&gid).await,
+                Some(crate::nostr::mls::types::EpochState::Stable { .. })
+            ),
+            "a founded group is Stable on return — nothing is pending"
+        );
+
+        drop(alice);
+        let reopened = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
+        assert_eq!(reopened.get_circles().await.unwrap().len(), 1);
+        assert!(
+            matches!(
+                reopened.session.epoch_state(&gid).await,
+                Some(crate::nostr::mls::types::EpochState::Stable { .. })
+            ),
+            "the founded group survives a restart: hydrate has nothing to roll back"
         );
     }
 
     #[tokio::test]
-    async fn create_then_confirm_persists_exactly_one_circle() {
-        // The happy path is unchanged: a confirmed create keeps exactly one row.
-        let relays = vec!["wss://relay.test.com".to_string()];
-        let dir = TempDir::new().unwrap();
-        let alice_keys = Keys::generate();
-        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
-
-        let member = make_member_with_relays(relays.clone(), vec![]).await;
-        let config = CircleConfig::new("Confirmed Circle").with_relays(relays.clone());
-        let creation = alice
-            .create_circle(&alice_keys, vec![member], &config, &relays)
-            .await
-            .expect("create");
-        assert_eq!(alice.get_circles().await.unwrap().len(), 1);
-
-        alice
-            .confirm_published(creation.pending)
-            .await
-            .expect("confirm");
-        assert_eq!(
-            alice.get_circles().await.unwrap().len(),
-            1,
-            "a confirmed create persists exactly one circle"
-        );
-
-        // A stray publish_failed after confirm must NOT delete the now-live row
-        // (the create binding was dropped on confirm). It errors on the unknown
-        // pending; the circle survives.
-        let _ = alice.publish_failed(creation.pending).await;
-        assert_eq!(
-            alice.get_circles().await.unwrap().len(),
-            1,
-            "a confirmed circle must survive a stray publish_failed"
-        );
-    }
-
-    #[tokio::test]
-    async fn create_route_error_rolls_back_pending_and_leaves_no_row() {
-        // F3: exercise the internal helper directly so `route_welcomes_with_cascade`
-        // fails AFTER the MLS group + storage rows are staged (a member with no
-        // delivery relay and no creator fallback). The post-stage error path MUST
-        // roll the pending back and leave NO orphan circle row.
+    async fn create_route_error_abandons_the_founded_group_and_leaves_no_row() {
+        // Exercise the internal helper directly so `route_welcomes_with_cascade`
+        // fails AFTER the MLS group is founded and the rows saved (a member with
+        // no delivery relay and no creator fallback). A founded group cannot be
+        // rolled back, so the error path must forget it locally and leave NO
+        // orphan circle row and no MLS group.
         let dir = TempDir::new().unwrap();
         let alice_keys = Keys::generate();
         let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
@@ -7357,7 +8881,7 @@ mod tests {
         let kp_events = vec![member.key_package_event.clone()];
 
         let result = alice
-            .create_circle_with_config(&[member], kp_events, mls_config, &config, &[])
+            .create_circle_with_config(&[member], kp_events, mls_config, &config, 0)
             .await;
         assert!(
             matches!(result, Err(CircleError::MissingWelcomeRelays)),
@@ -7366,24 +8890,215 @@ mod tests {
 
         assert!(
             alice.get_circles().await.unwrap().is_empty(),
-            "a post-stage route error must roll back the ghost circle row (F2/F3)"
+            "a post-create route error must leave no ghost circle row"
         );
-        // The create binding was consumed by the rollback, so nothing lingers to
-        // re-delete: a fresh, deliverable create then works cleanly.
+        assert!(
+            alice.session.live_group_ids().await.unwrap().is_empty(),
+            "the founded group's MLS state must be forgotten, not left orphaned"
+        );
+        // A fresh, deliverable create then works cleanly.
         let ok_member =
             make_member_with_relays(vec!["wss://relay.test.com".to_string()], vec![]).await;
         let ok_config = CircleConfig::new("Recovered Circle")
             .with_relays(vec!["wss://relay.test.com".to_string()]);
         alice
+            .create_circle(&alice_keys, vec![ok_member], &ok_config)
+            .await
+            .expect("a subsequent create is unaffected by the abandoned one");
+        assert_eq!(alice.get_circles().await.unwrap().len(), 1);
+    }
+
+    /// The remedy the partial-send copy offers: an invitee whose invitation was
+    /// never sent is still in the circle's tree (the commit that added them is
+    /// applied), so they are removed, then invited again with a fresh
+    /// `KeyPackage`, and that second invitation joins them.
+    #[tokio::test]
+    async fn an_invitee_whose_invitation_was_never_sent_can_be_removed_and_invited_again() {
+        remove_an_unsent_invitee_and_invite_again(false).await;
+    }
+
+    /// The remedy as the app runs it: re-adding fetches the invitee's package
+    /// again, and a last-resort package is the very same event.
+    #[tokio::test]
+    async fn re_inviting_with_the_same_key_package_event_joins_the_invitee() {
+        remove_an_unsent_invitee_and_invite_again(true).await;
+    }
+
+    async fn remove_an_unsent_invitee_and_invite_again(same_event: bool) {
+        let relays = vec!["wss://relay.test.com".to_string()];
+        let alice_dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap();
+        let bob_dir = TempDir::new().unwrap();
+        let bob_keys = Keys::generate();
+        let bob = CircleManager::new_unencrypted(bob_dir.path(), &bob_keys).unwrap();
+        let bob_hex = bob_keys.public_key().to_hex();
+        let member = |event| MemberKeyPackage {
+            key_package_event: event,
+            inbox_relays: relays.clone(),
+            nip65_relays: vec![],
+        };
+
+        let first_kp = make_kp_event(&bob, &bob_keys, &relays).await;
+        let created = alice
             .create_circle(
                 &alice_keys,
-                vec![ok_member],
-                &ok_config,
-                &["wss://relay.test.com".to_string()],
+                vec![member(first_kp.clone())],
+                &CircleConfig::new("Remedy Circle").with_relays(relays.clone()),
             )
             .await
-            .expect("a subsequent create is unaffected by the prior rollback");
-        assert_eq!(alice.get_circles().await.unwrap().len(), 1);
+            .expect("create");
+        let gid = created.circle.mls_group_id.clone();
+        // The Welcome is never published: Bob never hears of the circle.
+
+        alice
+            .remove_members_for_test(&gid, std::slice::from_ref(&bob_hex))
+            .await
+            .expect("an unsent invitee can be removed");
+        assert!(!alice
+            .session
+            .member_pubkeys(&gid)
+            .await
+            .unwrap()
+            .contains(&bob_hex));
+
+        let second_kp = if same_event {
+            first_kp
+        } else {
+            make_kp_event(&bob, &bob_keys, &relays).await
+        };
+        let readded = alice
+            .add_members_for_test(&gid, &[member(second_kp)])
+            .await
+            .expect("and invited again");
+        let welcome = &readded.1[0];
+        bob.process_gift_wrapped_invitation(&bob_keys, welcome)
+            .await
+            .expect("bob receives the new invitation");
+        bob.accept_invitation(&welcome.id)
+            .await
+            .expect("and the second invitation joins him");
+        assert!(bob
+            .session
+            .member_pubkeys(&gid)
+            .await
+            .unwrap()
+            .contains(&bob_hex));
+    }
+
+    #[tokio::test]
+    async fn a_founded_group_whose_rows_do_not_save_is_abandoned() {
+        let dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
+        alice
+            .storage
+            .conn()
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER test_membership_fault BEFORE INSERT ON circle_memberships
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        let relays = vec!["wss://relay.test.com".to_string()];
+        let member = make_member_with_relays(relays.clone(), vec![]).await;
+
+        let result = alice
+            .create_circle(
+                &alice_keys,
+                vec![member],
+                &CircleConfig::new("Unsaved Circle").with_relays(relays.clone()),
+            )
+            .await;
+
+        assert!(result.is_err(), "a create whose rows cannot be saved fails");
+        assert!(
+            alice.get_circles().await.unwrap().is_empty(),
+            "and leaves no half-saved circle row"
+        );
+        assert!(
+            alice.session.live_group_ids().await.unwrap().is_empty(),
+            "nor the founded group's MLS state, which no one else knows about"
+        );
+    }
+
+    /// The abandon path's two warnings say which half failed, by code alone.
+    #[tokio::test]
+    async fn abandoning_reports_each_failed_half_without_an_identifier() {
+        use crate::nostr::mls::storage::{set_engine_write_fault_for_test, EngineWrite};
+        let tp = setup_two_party_circle().await;
+        let key = crate::nostr::mls::StorageConfig::test_sqlcipher_key().unwrap();
+        let db = crate::nostr::mls::StorageConfig::new(tp.alice_dir.path()).database_path();
+        set_engine_write_fault_for_test(&db, &key, EngineWrite::ForgetGroup, true).unwrap();
+        tp.alice
+            .storage
+            .conn()
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER test_circle_delete_fault BEFORE DELETE ON circles
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+
+        let lines =
+            crate::test_log::capture_log_lines(tp.alice.abandon_founded_group(&tp.mls_group_id))
+                .await;
+        set_engine_write_fault_for_test(&db, &key, EngineWrite::ForgetGroup, false).unwrap();
+
+        for half in ["MLS forget failed", "circle-row cleanup failed"] {
+            assert!(
+                lines.iter().any(|line| line.contains(half)),
+                "the failure of each half is reported: {half}"
+            );
+        }
+        assert_no_identifier(&lines, &two_party_needles(&tp));
+    }
+
+    #[tokio::test]
+    async fn a_failed_intent_retirement_says_so_without_an_identifier() {
+        let tp = setup_two_party_circle().await;
+        let unknown = QueuedIntentRef {
+            group_id: tp.mls_group_id.clone(),
+            intent_id: cgka_traits::types::MessageId::new(vec![0xAB; 32]),
+        };
+        let lines =
+            crate::test_log::capture_log_lines(tp.alice.retire_released_intent(Some(&unknown)))
+                .await;
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("retiring a released queued intent failed")),
+            "a retirement the engine refused is reported"
+        );
+        let mut needles = two_party_needles(&tp);
+        needles.push("ab".repeat(32));
+        assert_no_identifier(&lines, &needles);
+    }
+
+    /// Every identifier a two-party circle's log lines could leak.
+    fn two_party_needles(tp: &TwoPartyCircle) -> Vec<String> {
+        vec![
+            hex::encode(tp.mls_group_id.as_slice()),
+            hex::encode(tp.nostr_group_id),
+            tp.alice_keys.public_key().to_hex(),
+            tp.bob_keys.public_key().to_hex(),
+            "relay.test.com".to_string(),
+        ]
+    }
+
+    /// No line carries a needle or its first eight characters.
+    fn assert_no_identifier(lines: &[String], needles: &[String]) {
+        for line in lines {
+            for needle in needles {
+                let prefix: String = needle.chars().take(8).collect();
+                assert!(
+                    !line.contains(needle.as_str()) && !line.contains(&prefix),
+                    "a log line carries an identifier: {line}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -7424,6 +9139,127 @@ mod tests {
         assert!(manager.get_visible_circles().await.unwrap().is_empty());
     }
 
+    /// A manager that held an invitation before a restart: only the durable
+    /// marker says so.
+    fn manager_with_a_held_invitation() -> (CircleManager, Keys, TempDir) {
+        let (manager, keys, dir) = create_test_manager();
+        manager
+            .storage
+            .set_held_invitation_outstanding(true)
+            .unwrap();
+        (manager, keys, dir)
+    }
+
+    fn waits(manager: &CircleManager, now_secs: u64) -> bool {
+        manager
+            .consumed_key_package_replacement_waits(now_secs)
+            .unwrap()
+    }
+
+    /// The hold a held invitation puts on a consumed `KeyPackage` is counted
+    /// from the first call that waited, ends after 72 hours whatever is still
+    /// held, and is over once a replacement was acknowledged.
+    #[test]
+    fn a_consumed_key_package_waits_for_a_held_invitation_for_72_hours_from_the_first_wait() {
+        let (manager, _keys, _dir) = create_test_manager();
+        assert!(
+            !waits(&manager, 1_000),
+            "nothing is held: nothing to wait for"
+        );
+        assert_eq!(manager.storage.consumed_hold_since().unwrap(), None);
+
+        manager
+            .storage
+            .set_held_invitation_outstanding(true)
+            .unwrap();
+        let first = 1_000_000;
+        for inside in [first, first + 1, first + CONSUMED_KEY_PACKAGE_HOLD_SECS - 1] {
+            assert!(waits(&manager, inside));
+        }
+        assert_eq!(manager.storage.consumed_hold_since().unwrap(), Some(first));
+        for past in [first + CONSUMED_KEY_PACKAGE_HOLD_SECS, u64::MAX] {
+            assert!(
+                !waits(&manager, past),
+                "at the bound the wait is over, an invitation still held or not"
+            );
+        }
+
+        // A replacement that was itself consumed in flight ends this hold and
+        // keeps the marker: the next consumption gets a hold of its own. Any
+        // other acknowledged replacement clears both.
+        manager.note_key_package_replaced(true);
+        assert_eq!(manager.storage.consumed_hold_since().unwrap(), None);
+        assert!(manager.held_invitations_outstanding().unwrap());
+        let next = first + 10 * CONSUMED_KEY_PACKAGE_HOLD_SECS;
+        assert!(waits(&manager, next));
+        assert_eq!(manager.storage.consumed_hold_since().unwrap(), Some(next));
+        manager.note_key_package_replaced(false);
+        assert!(!manager.held_invitations_outstanding().unwrap());
+        assert!(!waits(&manager, next));
+    }
+
+    /// No clock movement buys a consumed key more time. A clock that reads
+    /// earlier than the hold's start ends the hold instead of restarting it,
+    /// and a hold that has ended does not resume wherever the clock goes
+    /// next: only an acknowledged replacement lets a new one start.
+    #[test]
+    fn a_clock_set_back_ends_the_hold_and_nothing_resumes_or_restarts_it() {
+        const HOLD: u64 = CONSUMED_KEY_PACKAGE_HOLD_SECS;
+        let first = 1_000_000;
+
+        // Behind the start: over at once, and still over after every further
+        // step — back again, and forward into what was the hold's window.
+        let (manager, _keys, _dir) = manager_with_a_held_invitation();
+        assert!(waits(&manager, first));
+        for now in [
+            first - 1,
+            first - 500_000,
+            first - 1,
+            first,
+            first + 1,
+            first + HOLD - 1,
+        ] {
+            assert!(
+                !waits(&manager, now),
+                "a clock set back behind the start ended the hold for good"
+            );
+        }
+
+        // Run out but not yet acknowledged: a step back does not resume it,
+        // into the window or behind the start.
+        let (manager, _keys, _dir) = manager_with_a_held_invitation();
+        assert!(waits(&manager, first));
+        assert!(!waits(&manager, first + HOLD));
+        for now in [first + HOLD - 1, first + 1, first, first - 1] {
+            assert!(!waits(&manager, now), "a hold that ran out stays over");
+        }
+
+        // The acknowledged replacement ends it; the next consumption's hold is
+        // counted from its own first wait, wherever the clock is by then.
+        manager.note_key_package_replaced(true);
+        let earlier = first - 500_000;
+        assert!(waits(&manager, earlier));
+        assert!(waits(&manager, earlier + HOLD - 1));
+        assert!(!waits(&manager, earlier + HOLD));
+    }
+
+    /// A hold start that cannot be read is no start: it gives the one bounded
+    /// hold an absent one gives, never an unbounded one and never a second.
+    #[test]
+    fn an_unreadable_hold_start_gives_exactly_one_bounded_hold() {
+        const HOLD: u64 = CONSUMED_KEY_PACKAGE_HOLD_SECS;
+        let (manager, _keys, _dir) = manager_with_a_held_invitation();
+        crate::circle::storage_key_packages::plant_hold_start(&manager.storage, "not a second");
+
+        let first = 1_000_000;
+        assert!(waits(&manager, first));
+        assert_eq!(manager.storage.consumed_hold_since().unwrap(), Some(first));
+        assert!(waits(&manager, first + HOLD - 1));
+        for past in [first + HOLD, first + HOLD + 1, first + 2 * HOLD] {
+            assert!(!waits(&manager, past));
+        }
+    }
+
     #[test]
     fn get_pending_invitations_returns_empty_initially() {
         let (manager, _keys, _dir) = create_test_manager();
@@ -7452,7 +9288,7 @@ mod tests {
         };
         let config = CircleConfig::new("Test Circle").with_relays(relays.clone());
         let creation = alice
-            .create_circle(&alice_keys, vec![bob_member], &config, &relays)
+            .create_circle(&alice_keys, vec![bob_member], &config)
             .await
             .expect("create circle");
         let welcome = creation.welcome_events.first().expect("one welcome");
@@ -7503,7 +9339,7 @@ mod tests {
 
         let config = CircleConfig::new("Cascade Circle").with_relays(circle_relays.clone());
         let creation = alice
-            .create_circle(&alice_keys, vec![bob_member], &config, &circle_relays)
+            .create_circle(&alice_keys, vec![bob_member], &config)
             .await
             .expect("create circle");
 
@@ -7626,13 +9462,13 @@ mod tests {
             "wss://relay2.test.com".to_string(),
         ];
 
-        let update = tp
-            .alice
-            .update_circle_relays(&tp.mls_group_id, &new_relays)
+        tp.alice
+            .update_circle_relays_staging(&tp.mls_group_id, &new_relays, 0)
             .await
             .expect("admin must be allowed to update relays");
 
-        // Publish-before-apply: before finalize, the admin's app row is unchanged.
+        // Publish-before-apply: before a relay takes it, the admin's app row is
+        // unchanged.
         let alice_before = tp
             .alice
             .storage
@@ -7644,10 +9480,12 @@ mod tests {
             "circle.relays must not change before the commit is confirmed"
         );
 
-        tp.alice
-            .finalize_relay_update(update.pending, &tp.mls_group_id)
+        let update = tp
+            .alice
+            .land_staged_for_test()
             .await
-            .expect("admin finalize");
+            .pop()
+            .expect("the update lands");
 
         let expected = sorted_relays(&new_relays);
         let alice_after = tp
@@ -7664,7 +9502,7 @@ mod tests {
         // The member (Bob) processes the commit through the REAL consumer path.
         let results = tp
             .bob
-            .decrypt_location(&update.commit_event)
+            .ingest_for_test(&update)
             .await
             .expect("bob processes the relay-update commit");
         assert!(
@@ -7696,13 +9534,9 @@ mod tests {
 
         let update = tp
             .alice
-            .update_circle_relays(&tp.mls_group_id, &new_relays)
+            .update_relays_for_test(&tp.mls_group_id, &new_relays)
             .await
             .expect("admin replaces the relay set");
-        tp.alice
-            .finalize_relay_update(update.pending, &tp.mls_group_id)
-            .await
-            .expect("admin finalize");
 
         let expected = sorted_relays(&new_relays);
         let dropped = "wss://relay.test.com".to_string();
@@ -7718,7 +9552,7 @@ mod tests {
 
         let results = tp
             .bob
-            .decrypt_location(&update.commit_event)
+            .ingest_for_test(&update)
             .await
             .expect("bob processes the replacement commit");
         assert!(results
@@ -7741,7 +9575,11 @@ mod tests {
         // Bob is a plain member — the engine enforces admin-only routing commits.
         let result = tp
             .bob
-            .update_circle_relays(&tp.mls_group_id, &["wss://relay2.test.com".to_string()])
+            .update_circle_relays_staging(
+                &tp.mls_group_id,
+                &["wss://relay2.test.com".to_string()],
+                0,
+            )
             .await;
         assert!(
             matches!(result, Err(CircleError::Mls(_))),
@@ -7760,7 +9598,9 @@ mod tests {
     async fn update_circle_relays_rejects_empty_set() {
         let tp = setup_two_party_circle().await;
         assert!(matches!(
-            tp.alice.update_circle_relays(&tp.mls_group_id, &[]).await,
+            tp.alice
+                .update_circle_relays_staging(&tp.mls_group_id, &[], 0)
+                .await,
             Err(CircleError::InvalidData(_))
         ));
         let circle = tp
@@ -7775,14 +9615,121 @@ mod tests {
     #[tokio::test]
     async fn update_circle_relays_rejects_oversized_set() {
         let tp = setup_two_party_circle().await;
-        let many: Vec<String> = (0..=CircleManager::MAX_CIRCLE_RELAYS)
+        let ledger = tp.alice.storage.list_contaminated_relays().unwrap();
+        let many: Vec<String> = (0..17)
             .map(|i| format!("wss://relay{i}.test.com"))
             .collect();
-        assert!(many.len() > CircleManager::MAX_CIRCLE_RELAYS);
         assert!(matches!(
-            tp.alice.update_circle_relays(&tp.mls_group_id, &many).await,
+            tp.alice
+                .update_circle_relays_staging(&tp.mls_group_id, &many, 0)
+                .await,
             Err(CircleError::InvalidData(_))
         ));
+        assert_eq!(
+            tp.alice.storage.list_contaminated_relays().unwrap(),
+            ledger,
+            "a refused relay set was recorded as carrying group traffic",
+        );
+    }
+
+    /// A relay set MDK's routing component would refuse — more than 16
+    /// relays, the old 20-relay cap included, or an entry too long to carry —
+    /// is refused typed, before anything is recorded or staged; 16 is taken.
+    #[tokio::test]
+    async fn a_relay_set_the_engine_would_refuse_is_refused_typed_before_anything_is_recorded() {
+        let tp = setup_two_party_circle().await;
+        let ledger = tp.alice.storage.list_contaminated_relays().unwrap();
+        let named = |count: usize| -> Vec<String> {
+            (0..count)
+                .map(|i| format!("wss://relay{i}.test.com"))
+                .collect()
+        };
+        let long = vec![format!("wss://{}.test.com", "r".repeat(512))];
+        for refused in [named(17), named(20), long] {
+            assert!(
+                matches!(
+                    tp.alice
+                        .update_circle_relays_staging(&tp.mls_group_id, &refused, 0)
+                        .await,
+                    Err(CircleError::InvalidData(_))
+                ),
+                "a set the engine would refuse was not refused typed",
+            );
+            assert_eq!(
+                tp.alice.storage.list_contaminated_relays().unwrap(),
+                ledger,
+                "a refused relay set was recorded as carrying group traffic",
+            );
+            assert!(
+                tp.alice
+                    .session()
+                    .fanout_ids_for_test(&tp.mls_group_id)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "a refused relay set staged a commit",
+            );
+        }
+        assert!(circle_relays(&named(16)).is_ok_and(|set| set.len() == 16));
+    }
+
+    /// One relay entry an admin might type: valid, upper-case and slashed,
+    /// plaintext, another scheme, with credentials or a fragment, hostless,
+    /// too long, a duplicate, or on a loopback, private or link-local host.
+    fn relay_entry() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        prop_oneof![
+            "[a-z]{1,8}".prop_map(|h| format!("wss://{h}.example.com")),
+            "[a-z]{1,8}".prop_map(|h| format!("WSS://{h}.Example.com/")),
+            "[a-z]{1,8}".prop_map(|h| format!("ws://{h}.example.com")),
+            "[a-z]{1,8}".prop_map(|h| format!("https://{h}.example.com")),
+            "[a-z]{1,8}".prop_map(|h| format!("wss://user:pw@{h}.example.com")),
+            "[a-z]{1,8}".prop_map(|h| format!("wss://{h}.example.com/#frag")),
+            Just("wss://".to_string()),
+            Just(format!("wss://{}.example.com", "r".repeat(500))),
+            Just("wss://dup.example.com".to_string()),
+            "[a-z]{1,8}".prop_map(|h| format!("wss://{h}.localhost")),
+            Just("wss://10.0.0.1".to_string()),
+            Just("wss://[fe80::1]".to_string()),
+        ]
+    }
+
+    proptest::proptest! {
+        /// The circle's relay check accepts exactly what every entry's
+        /// normalization, Haven's rule for a relay another client dials and
+        /// MDK's routing component accept, and what it accepts round-trips
+        /// MDK's codec (V17).
+        #[test]
+        fn routing_validation_matches_the_engine(
+            entries in proptest::collection::vec(relay_entry(), 0..=24)
+        ) {
+            use cgka_traits::app_components::{
+                decode_nostr_routing_v1, encode_nostr_routing_v1, NostrRoutingV1,
+            };
+            let normalized: Option<Vec<String>> = entries
+                .iter()
+                .map(|entry| super::super::storage_relay_prefs::normalize_url(entry).ok())
+                .collect();
+            let expected = normalized.and_then(|set| {
+                let mut set = set;
+                set.sort();
+                set.dedup();
+                (!set.is_empty()
+                    && set.iter().all(|relay| crate::relay::foreign_relay_dialable(relay)))
+                .then_some(set)
+                .and_then(|set| NostrRoutingV1::new([7; 32], set).ok())
+            });
+            let got = circle_relays(&entries);
+            proptest::prop_assert_eq!(got.is_ok(), expected.is_some());
+            if let (Ok(set), Some(routing)) = (got, expected) {
+                proptest::prop_assert_eq!(&set, &routing.relays);
+                let decoded = decode_nostr_routing_v1(
+                    &encode_nostr_routing_v1(&routing).expect("an accepted set encodes"),
+                )
+                .expect("an accepted set decodes");
+                proptest::prop_assert_eq!(decoded.relays, set);
+            }
+        }
     }
 
     #[tokio::test]
@@ -7792,7 +9739,7 @@ mod tests {
         // the typed, user-presentable one rather than the opaque bucket.
         let err = tp
             .alice
-            .update_circle_relays(&tp.mls_group_id, &["ws://relay.test.com".to_string()])
+            .update_circle_relays_staging(&tp.mls_group_id, &["ws://relay.test.com".to_string()], 0)
             .await
             .expect_err("a plaintext ws:// circle relay must be rejected");
         assert!(
@@ -7825,10 +9772,614 @@ mod tests {
             .unwrap();
         assert_eq!(before.relays, after.relays);
     }
+
+    /// A circle whose routing changed keeps the relays it left as an address
+    /// its traffic is fetched at — on the member that applied the change and
+    /// on the admin that made it — for as long as an epoch that used them can
+    /// still be fetched (the wider retained-history window), and no longer
+    /// (`app-components/nostr-routing-v1.md` 56-62). The change here is of
+    /// relays; a rotated routing id is kept the same way
+    /// (`foreign_routing_entry_e2e`).
+    #[tokio::test]
+    async fn a_prior_routing_is_an_address_until_its_epochs_age_out() {
+        let tp = setup_two_party_circle().await;
+        let before = tp
+            .alice
+            .get_circle(&tp.mls_group_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .circle
+            .relays;
+        let renamed = vec!["wss://renamed.relay-canary7d2a.example.com".to_string()];
+        let update = tp
+            .alice
+            .update_relays_for_test(&tp.mls_group_id, &renamed)
+            .await
+            .expect("alice stages the relay change");
+        tp.bob
+            .ingest_for_test(&update)
+            .await
+            .expect("bob applies it");
+        let mut both = [before.clone(), renamed.clone()].concat();
+        both.sort();
+        for (who, member) in [("the admin", &tp.alice), ("the member", &tp.bob)] {
+            assert_eq!(
+                member.routing_addresses(&tp.mls_group_id, &renamed).await,
+                both,
+                "{who} does not fetch at the relays the circle left",
+            );
+        }
+        for _ in 0..=routing_retained_epochs() {
+            let effects = tp
+                .alice
+                .session()
+                .send(crate::nostr::mls::types::SendIntent::SelfUpdate {
+                    group_id: tp.mls_group_id.clone(),
+                })
+                .await
+                .expect("a self-update");
+            let pending = effects
+                .publish
+                .iter()
+                .find_map(|work| match work {
+                    PublishWork::GroupEvolution { pending, .. } => Some(*pending),
+                    _ => None,
+                })
+                .expect("the commit is staged");
+            tp.alice
+                .session()
+                .confirm_published(pending)
+                .await
+                .expect("applied");
+        }
+        assert_eq!(
+            tp.alice.routing_addresses(&tp.mls_group_id, &renamed).await,
+            renamed,
+            "a prior routing outlived the epochs that used it",
+        );
+    }
+
+    /// A routing id is taken when another circle holds it — as its routing id
+    /// or a prior routing's — and not when only the circle itself used it
+    /// before: a rotation back to its own prior id is followed.
+    #[tokio::test]
+    async fn a_routing_id_another_circle_used_is_taken_and_ones_own_prior_is_not() {
+        let tp = setup_two_party_circle().await;
+        let other = Circle {
+            mls_group_id: GroupId::from_slice(&[0x5A; 32]),
+            nostr_group_id: [0x5B; 32],
+            display_name: "Other".to_string(),
+            circle_type: CircleType::LocationSharing,
+            relays: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        tp.alice.storage.save_circle(&other).unwrap();
+        let relays = vec!["wss://prior.example.com".to_string()];
+        let prior = |nostr_group_id| PriorRouting {
+            nostr_group_id,
+            relays: &relays,
+            until_epoch: 1,
+            oldest_kept: 0,
+            written_at: 1,
+        };
+        tp.alice
+            .storage
+            .keep_prior_routing(&other.mls_group_id, &prior([0x5C; 32]))
+            .unwrap();
+        tp.alice
+            .storage
+            .keep_prior_routing(&tp.mls_group_id, &prior([0x5D; 32]))
+            .unwrap();
+        for (id, taken) in [
+            ([0x5B; 32], true),
+            ([0x5C; 32], true),
+            ([0x5D; 32], false),
+            ([0x5E; 32], false),
+        ] {
+            assert_eq!(
+                tp.alice
+                    .other_circle_with_routing_id(&id, &tp.mls_group_id, UnreadEpoch::Holds)
+                    .await
+                    .unwrap(),
+                taken.then(|| other.mls_group_id.clone()),
+                "{id:?}"
+            );
+        }
+    }
+
+    /// A leave whose proposal was recorded at one epoch and never
+    /// acknowledged, in a circle a peer's commit has since moved on — the
+    /// engine re-minting the leave for the new epoch and nothing recording
+    /// it — is answered unrecorded, never as already proposed, and nothing
+    /// notes the new epoch's proposal as recorded: the earlier epoch's record,
+    /// still standing, says nothing of a proposal no relay was handed.
+    #[tokio::test]
+    async fn an_earlier_epochs_standing_record_answers_no_later_leave_as_proposed() {
+        use crate::relay::fanout::{DriveMode, Still};
+        let tp = setup_two_party_circle().await;
+        let full = DriveMode::Full;
+        let first = tp
+            .bob
+            .propose_leave_staging(&tp.mls_group_id, 0, Still::always(&full))
+            .await
+            .expect("the leave is staged");
+        assert!(
+            matches!(first, LeaveStep::Recorded(_)),
+            "premise: recorded at the first epoch, no relay called"
+        );
+        let changed = tp
+            .alice
+            .session()
+            .update_relays(&tp.mls_group_id, vec!["wss://moved.test.com".to_string()])
+            .await
+            .expect("the admin changes the relays");
+        let (msg, pending) = changed
+            .publish
+            .iter()
+            .find_map(|work| match work {
+                PublishWork::GroupEvolution { msg, pending, .. } => Some((msg, *pending)),
+                _ => None,
+            })
+            .expect("a commit");
+        tp.alice.session().confirm_published(pending).await.unwrap();
+        let commit = crate::nostr::mls::SessionManager::transport_message_to_event(msg).unwrap();
+        let _ = tp.bob.session().process_event(&commit).await.unwrap();
+        let applied = tp
+            .bob
+            .session()
+            .settle_receive_for_test(&tp.mls_group_id)
+            .await
+            .unwrap();
+        // A receive advance takes inputs only; the full one re-mints the leave.
+        let reminted = tp
+            .bob
+            .session()
+            .advance_convergence(&tp.mls_group_id)
+            .await
+            .unwrap();
+        assert!(
+            applied
+                .publish
+                .iter()
+                .chain(&reminted.publish)
+                .any(|work| matches!(work, PublishWork::Proposal { .. })),
+            "premise: the engine re-minted the leave for the new epoch, handed to nobody"
+        );
+        let later = tp.bob.session().leave_proposed_epoch(&tp.mls_group_id);
+        assert!(
+            !tp.bob
+                .session()
+                .fanout_ids_for_test(&tp.mls_group_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "premise: the earlier epoch's record still stands"
+        );
+
+        let again = tp
+            .bob
+            .propose_leave_staging(&tp.mls_group_id, 0, Still::always(&full))
+            .await
+            .expect("the leave is asked again");
+        let marked = tp
+            .bob
+            .storage
+            .leave_recorded_epoch(&tp.mls_group_id)
+            .unwrap();
+        assert!(
+            matches!(again, LeaveStep::Unrecorded(_)) && marked != later,
+            "an earlier epoch's record answered a later epoch's unrecorded leave as proposed, \
+             or noted it as recorded"
+        );
+    }
+
+    /// A prior routing id past the window an epoch that used it is retained
+    /// for is nobody's — nothing sent under it can be peeled any more — and a
+    /// rotation or a Welcome onto it holds nothing; one inside the window is
+    /// its circle's.
+    #[tokio::test]
+    async fn a_prior_routing_id_past_its_epochs_is_nobodys() {
+        let tp = setup_two_party_circle().await;
+        for step in 0..=routing_retained_epochs() {
+            let relays = vec![format!("wss://step{step}.example.com")];
+            tp.alice
+                .update_relays_for_test(&tp.mls_group_id, &relays)
+                .await
+                .expect("alice changes the relays");
+        }
+        let epoch = tp.alice.session.epoch(&tp.mls_group_id).await.unwrap();
+        assert!(
+            epoch > routing_retained_epochs(),
+            "premise: the circle is past its window"
+        );
+        let relays = vec!["wss://prior.example.com".to_string()];
+        for (id, until_epoch) in [([0x71; 32], 0), ([0x72; 32], epoch)] {
+            tp.alice
+                .storage
+                .keep_prior_routing(
+                    &tp.mls_group_id,
+                    &PriorRouting {
+                        nostr_group_id: id,
+                        relays: &relays,
+                        until_epoch,
+                        oldest_kept: 0,
+                        written_at: 1,
+                    },
+                )
+                .unwrap();
+        }
+        let asking = GroupId::from_slice(&[0x70; 32]);
+        assert_eq!(
+            tp.alice
+                .other_circle_with_routing_id(&[0x71; 32], &asking, UnreadEpoch::Holds)
+                .await
+                .unwrap(),
+            None,
+            "a prior routing past its epochs held a circle",
+        );
+        assert_eq!(
+            tp.alice
+                .other_circle_with_routing_id(&[0x72; 32], &asking, UnreadEpoch::Holds)
+                .await
+                .unwrap(),
+            Some(tp.mls_group_id.clone()),
+            "a prior routing inside its epochs was nobody's",
+        );
+    }
+
+    /// A prior routing that names a circle's routing id, for a circle whose
+    /// epoch cannot be read, holds nothing at a reconcile: the read is asked
+    /// again at the next one. A hold that ends only with a leave is never set
+    /// on two healthy circles for a read that failed once.
+    #[tokio::test]
+    async fn a_reconcile_that_cannot_read_a_holders_epoch_holds_nothing() {
+        let tp = setup_two_party_circle().await;
+        // A prior routing of a group the engine does not hold: its epoch
+        // cannot be read.
+        let unreadable = GroupId::from_slice(&[0x7c; 32]);
+        tp.alice
+            .storage
+            .conn()
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO routing_history
+                 (mls_group_id, until_epoch, nostr_group_id, relays, written_at)
+                 VALUES (?1, 5, ?2, '[]', 1)",
+                rusqlite::params![unreadable.as_slice(), &tp.nostr_group_id[..]],
+            )
+            .unwrap();
+        tp.alice.reconcile_routing().await;
+        assert!(
+            !tp.alice.session().routing_collided(&tp.mls_group_id),
+            "a holder whose epoch could not be read held a circle until it is left",
+        );
+    }
+
+    /// A routing whose prior cannot be kept is not followed at all — the row
+    /// never names a routing whose prior is lost — and that is said in a
+    /// line that names no circle and no relay; once the store can keep it
+    /// again, the next reconcile follows. A prior routing that cannot be
+    /// read is said the same way, and the circle's current relays are still
+    /// its address.
+    #[tokio::test]
+    async fn a_prior_routing_not_kept_or_read_is_said_without_an_identifier() {
+        let tp = setup_two_party_circle().await;
+        let schema: String = tp
+            .alice
+            .storage
+            .conn()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'routing_history'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        tp.alice
+            .storage
+            .conn()
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE routing_history;")
+            .unwrap();
+        let renamed = vec!["wss://renamed.relay-canary8f3b.example.com".to_string()];
+        let relays_now = || {
+            tp.alice
+                .storage
+                .get_circle(&tp.mls_group_id)
+                .unwrap()
+                .unwrap()
+                .relays
+        };
+        let lines = Box::pin(crate::test_log::capture_log_lines(async {
+            tp.alice
+                .update_relays_for_test(&tp.mls_group_id, &renamed)
+                .await
+                .expect("alice changes the relays");
+            assert_eq!(
+                tp.alice.routing_addresses(&tp.mls_group_id, &renamed).await,
+                renamed,
+            );
+        }))
+        .await;
+        assert_ne!(
+            relays_now(),
+            renamed,
+            "the row followed a routing whose prior was not kept",
+        );
+        for expected in [
+            "relay re-sync failed",
+            "a circle's prior routing was not read",
+        ] {
+            assert!(
+                lines.iter().any(|line| line.contains(expected)),
+                "a prior routing's failure was not said: {expected}",
+            );
+        }
+        let mut needles = two_party_needles(&tp);
+        needles.push("relay-canary8f3b".to_string());
+        assert_no_identifier(&lines, &needles);
+
+        tp.alice
+            .storage
+            .conn()
+            .lock()
+            .unwrap()
+            .execute_batch(&schema)
+            .unwrap();
+        tp.alice.reconcile_routing().await;
+        assert_eq!(relays_now(), renamed, "the reconcile did not follow");
+    }
+
+    /// A resync that finds the circle's routing as its row has it writes
+    /// nothing: a contamination ledger that cannot be written fails no
+    /// reconcile of a circle that did not move.
+    #[tokio::test]
+    async fn a_resync_that_changes_nothing_writes_nothing() {
+        let tp = setup_two_party_circle().await;
+        tp.bob
+            .storage
+            .conn()
+            .lock()
+            .unwrap()
+            .execute_batch("ALTER TABLE contaminated_relays RENAME TO contaminated_unwritable;")
+            .unwrap();
+        assert!(
+            !tp.bob
+                .resync_circle_relays_from_mdk(&tp.mls_group_id)
+                .await
+                .expect("a resync of an unmoved circle needs no write"),
+            "an unmoved circle was followed",
+        );
+    }
+
+    /// The routing reconcile's two lines name no circle, member or relay:
+    /// one circle whose follow fails beside one that follows, and a store
+    /// whose circles cannot be read at all.
+    #[tokio::test]
+    async fn the_routing_reconcile_says_what_failed_without_an_identifier() {
+        let tp = setup_two_party_circle().await;
+        // A row with no engine group behind it: its follow cannot be made.
+        let stray = [0x5e; 32];
+        tp.alice.keep_circle_row_for_test(stray);
+        let mut needles = two_party_needles(&tp);
+        needles.push(hex::encode(stray));
+
+        let lines =
+            crate::test_log::capture_log_lines(async { tp.alice.reconcile_routing().await }).await;
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("routing reconcile:") && line.contains("not followed")),
+            "a reconcile with a circle it could not follow did not say so",
+        );
+        assert_no_identifier(&lines, &needles);
+
+        tp.alice
+            .storage
+            .conn()
+            .lock()
+            .unwrap()
+            .execute_batch("ALTER TABLE circles RENAME TO circles_unread;")
+            .unwrap();
+        let lines =
+            crate::test_log::capture_log_lines(async { tp.alice.reconcile_routing().await }).await;
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("routing reconcile: the circles were not read")),
+            "a reconcile that could not read the circles did not say so",
+        );
+        assert_no_identifier(&lines, &needles);
+    }
+
+    /// Alice's commit rotating the circle's routing id to `rotated`, as
+    /// another client's admin would make it, confirmed on her side.
+    async fn alice_rotates_to(tp: &TwoPartyCircle, rotated: [u8; 32]) -> nostr::Event {
+        use crate::nostr::mls::types::{AppComponentData, SendIntent};
+        use cgka_traits::app_components::{
+            encode_nostr_routing_v1, NostrRoutingV1, NOSTR_ROUTING_COMPONENT_ID,
+        };
+        let effects = tp
+            .alice
+            .session()
+            .send(SendIntent::UpdateAppComponents {
+                group_id: tp.mls_group_id.clone(),
+                updates: vec![AppComponentData {
+                    component_id: NOSTR_ROUTING_COMPONENT_ID,
+                    data: encode_nostr_routing_v1(
+                        &NostrRoutingV1::new(rotated, tp.relays.clone()).unwrap(),
+                    )
+                    .unwrap(),
+                }],
+            })
+            .await
+            .expect("alice rotates the routing id, as another client would");
+        let (msg, pending) = effects
+            .publish
+            .iter()
+            .find_map(|work| match work {
+                PublishWork::GroupEvolution { msg, pending, .. } => Some((msg.clone(), *pending)),
+                _ => None,
+            })
+            .expect("staged");
+        tp.alice.session().confirm_published(pending).await.unwrap();
+        SessionManager::transport_message_to_event(&msg).unwrap()
+    }
+
+    /// A store that cannot say whether a rotated id is another circle's is
+    /// answered as an error: nothing is followed, no collision is claimed in
+    /// a line, the rotated circle IS held — MDK has moved its route, and the
+    /// circle it may have taken it from cannot be named — and once the store
+    /// answers again the next reconcile follows.
+    #[tokio::test]
+    async fn a_store_that_cannot_say_whether_an_id_is_taken_follows_nothing_and_holds_the_circle() {
+        let tp = setup_two_party_circle().await;
+        let schema: String = tp
+            .bob
+            .storage
+            .conn()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'routing_history'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        tp.bob
+            .storage
+            .conn()
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE routing_history;")
+            .unwrap();
+        let rotated = [0x6Bu8; 32];
+        let commit = alice_rotates_to(&tp, rotated).await;
+        let lines = Box::pin(crate::test_log::capture_log_lines(async {
+            tp.bob
+                .ingest_for_test(&commit)
+                .await
+                .expect("bob applies the rotation");
+        }))
+        .await;
+        let row_id = || {
+            tp.bob
+                .storage
+                .get_circle(&tp.mls_group_id)
+                .unwrap()
+                .unwrap()
+                .nostr_group_id
+        };
+        assert_eq!(
+            row_id(),
+            tp.nostr_group_id,
+            "a rotation was followed unread"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("could not be read; its sends are held"))
+                && !lines
+                    .iter()
+                    .any(|line| line.contains("onto one another circle holds")),
+            "a store error was not said, or was said as a collision",
+        );
+        let held = || async {
+            matches!(
+                tp.bob
+                    .session()
+                    .held_away(&tp.mls_group_id, DriveMode::Full)
+                    .await,
+                Some(crate::nostr::mls::AwayHold::RoutingCollision)
+            )
+        };
+        assert!(
+            held().await,
+            "a routing id MDK gave the circle that the store could not check left it sharing",
+        );
+        let mut needles = two_party_needles(&tp);
+        needles.push(hex::encode(rotated));
+        assert_no_identifier(&lines, &needles);
+
+        tp.bob
+            .storage
+            .conn()
+            .lock()
+            .unwrap()
+            .execute_batch(&schema)
+            .unwrap();
+        tp.bob.reconcile_routing().await;
+        assert_eq!(row_id(), rotated, "the reconcile did not follow");
+        assert!(held().await, "the hold ended before the circle was left");
+    }
+
+    /// A member learns an admin's relay change from the commit, and the fold
+    /// that applied it writes the circle's row. When that write fails the
+    /// commit stands, the fold goes on, and one line says so — naming no
+    /// circle and no relay.
+    #[tokio::test]
+    async fn a_relay_resync_that_fails_in_the_fold_is_said_without_an_identifier() {
+        let tp = setup_two_party_circle().await;
+        let renamed = vec!["wss://renamed.relay-canary5e1c.example.com".to_string()];
+        let update = tp
+            .alice
+            .update_relays_for_test(&tp.mls_group_id, &renamed)
+            .await
+            .expect("alice stages the relay change");
+        tp.bob
+            .storage
+            .conn()
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER test_circle_update_fault BEFORE UPDATE ON circles
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+
+        let lines = Box::pin(crate::test_log::capture_log_lines(async {
+            tp.bob
+                .ingest_for_test(&update)
+                .await
+                .expect("the commit is applied whatever becomes of the row");
+        }))
+        .await;
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("relay re-sync failed (will retry on next commit)")),
+            "a circle row that could not follow its commit was not reported"
+        );
+        let mut needles = two_party_needles(&tp);
+        needles.push("relay-canary5e1c".to_string());
+        assert_no_identifier(&lines, &needles);
+        assert_eq!(
+            tp.bob.session.group_relays(&tp.mls_group_id).await.unwrap(),
+            renamed,
+            "premise: the engine holds the new list"
+        );
+        assert_eq!(
+            tp.bob
+                .storage
+                .get_circle(&tp.mls_group_id)
+                .unwrap()
+                .unwrap()
+                .relays,
+            tp.relays,
+            "premise: the row could not follow"
+        );
+    }
+
     // DELETED-WITH-SUBJECT: `resync_never_overwrites_nonempty_relays_with_empty`
     // drove the hazard via `mdk.update_relays(&[])` — the UNVALIDATED empty relay
-    // update. The session's `validate_group_relays` now rejects an empty set at
-    // the source (both `update_relays` and `create_group`), so the engine never
+    // update. The session's `routing_of` (MDK's `NostrRoutingV1::new`) now rejects
+    // an empty set at the source (both `update_relays` and `create_group`), so the engine never
     // holds an empty routing set and the hazard is unreachable from the public
     // API. The defensive `if engine_relays.is_empty()` guard in
     // `resync_circle_relays_from_mdk` remains but cannot be driven.
@@ -7895,15 +10446,11 @@ mod tests {
         // the group is never admin-less at an intermediate epoch.
         let promote = tp
             .alice
-            .propose_admin_handoff(&tp.mls_group_id, &tp.bob_keys.public_key())
+            .admin_handoff_for_test(&tp.mls_group_id, &tp.bob_keys.public_key())
             .await
             .expect("promote successor");
-        tp.alice
-            .confirm_published(promote.pending)
-            .await
-            .expect("confirm promote");
         tp.bob
-            .decrypt_location(&promote.commit_event)
+            .ingest_for_test(&promote)
             .await
             .expect("bob ingests the promote commit");
         for (who, mgr) in [("alice", &tp.alice), ("bob", &tp.bob)] {
@@ -7921,15 +10468,11 @@ mod tests {
         // Step 2 — Alice demotes herself, leaving Bob as sole admin.
         let demote = tp
             .alice
-            .propose_self_demote(&tp.mls_group_id)
+            .self_demote_for_test(&tp.mls_group_id)
             .await
             .expect("self demote");
-        tp.alice
-            .confirm_published(demote.pending)
-            .await
-            .expect("confirm demote");
         tp.bob
-            .decrypt_location(&demote.commit_event)
+            .ingest_for_test(&demote)
             .await
             .expect("bob ingests the demote commit");
         for (who, mgr) in [("alice", &tp.alice), ("bob", &tp.bob)] {
@@ -7949,7 +10492,8 @@ mod tests {
         tp.alice
             .propose_leave(&tp.mls_group_id)
             .await
-            .expect("a demoted admin may finally SelfRemove");
+            .expect("a demoted admin may finally SelfRemove")
+            .expect("a first leave in this epoch proposes");
     }
 
     #[tokio::test]
@@ -7960,7 +10504,7 @@ mod tests {
         let tp = setup_two_party_circle().await;
         let err = tp
             .alice
-            .propose_self_demote(&tp.mls_group_id)
+            .self_demote_for_test(&tp.mls_group_id)
             .await
             .expect_err("the last admin must not be able to demote herself");
         assert!(matches!(err, CircleError::Mls(_)));
@@ -8002,7 +10546,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_sole_admin_repairs_a_quiet_circle_and_the_peer_applies_the_commit() {
+    async fn a_member_repairs_a_quiet_circle_and_the_peer_applies_the_commit() {
         let tp = setup_two_party_circle().await;
         let before = tp
             .alice
@@ -8011,21 +10555,17 @@ mod tests {
             .await
             .expect("alice epoch");
 
-        let RepairRotationOutcome::Rotated(commit) = tp
+        let (RepairOutcome::Rotated(_), Some(commit)) = tp
             .alice
-            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+            .repair_rotation_for_test(&tp.mls_group_id, past_every_rotation_window())
             .await
-            .expect("the repair must not fail for the sole admin of a quiet circle")
+            .expect("the repair must not fail for a member of a quiet circle")
         else {
-            panic!("the sole admin of a quiet circle must stage a rotation");
+            panic!("a member of a quiet circle must rotate");
         };
 
-        tp.alice
-            .confirm_published(commit.pending)
-            .await
-            .expect("confirm the rotation on a relay ack");
         tp.bob
-            .decrypt_location(&commit.commit_event)
+            .ingest_for_test(&commit)
             .await
             .expect("bob ingests the rotation commit");
 
@@ -8039,8 +10579,8 @@ mod tests {
                 "{who} must have applied the rotation"
             );
         }
-        // The commit is byte-identical policy, so the admin set is unchanged —
-        // this is a ratchet reset, not a membership or permission change.
+        // A self-update changes this device's leaf alone, so the admin set is
+        // unchanged — not a membership or permission change.
         assert_eq!(
             tp.bob
                 .session()
@@ -8066,18 +10606,19 @@ mod tests {
             .await
             .expect("alice epoch");
 
-        let RepairRotationOutcome::Rotated(commit) = tp
+        let RepairOutcome::Rotated(rolled_back) = tp
             .alice
-            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+            .repair_rotation_refused_for_test(&tp.mls_group_id, past_every_rotation_window())
             .await
             .expect("repair")
         else {
-            panic!("expected a staged rotation");
+            panic!("expected a rotation");
         };
-        tp.alice
-            .publish_failed(commit.pending)
-            .await
-            .expect("zero acks roll the rotation back");
+        assert_eq!(
+            rolled_back.status,
+            crate::relay::fanout::EvolutionStatus::RolledBack,
+            "premise: every relay refused the rotation",
+        );
 
         assert_eq!(
             tp.alice
@@ -8102,18 +10643,13 @@ mod tests {
         // group pinned in `PendingPublish`, where every later send would fail.
         let (event, ngid, _relays) = tp
             .alice
-            .encrypt_location(
-                &tp.mls_group_id,
-                &tp.alice_keys.public_key(),
-                &LocationMessage::new(51.5, -0.12),
-                60,
-            )
+            .seal_location_for_test(&tp.mls_group_id, &LocationMessage::new(51.5, -0.12))
             .await
             .expect("a rolled-back rotation must not gate the next location send");
         assert_eq!(ngid, tp.nostr_group_id);
         let results = tp
             .bob
-            .decrypt_location(&event)
+            .ingest_for_test(&event)
             .await
             .expect("bob ingests the location");
         assert!(
@@ -8126,25 +10662,44 @@ mod tests {
 
     #[tokio::test]
     async fn the_repair_emits_no_phantom_group_state_change_on_either_side() {
-        // A byte-identical admin policy diffs to nothing, so neither the author
-        // nor the peer may synthesize a kind-1210 "admins changed" row. A phantom
-        // one would tell every member that somebody's permissions changed when
-        // nothing did — a documentation-accuracy failure the user reads directly.
+        // A self-update changes no membership, admin or group datum, so neither
+        // the author nor the peer may synthesize a kind-1210 state-change row. A
+        // phantom one would tell every member that something about the circle
+        // changed when nothing did — a documentation-accuracy failure the user
+        // reads directly.
         let tp = setup_two_party_circle().await;
-        let RepairRotationOutcome::Rotated(commit) = tp
+        let StagedRepair::Rotated(staged) = tp
             .alice
-            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+            .repair_epoch_rotation_staging(
+                &tp.mls_group_id,
+                past_every_rotation_window(),
+                0,
+                Still::new(&DriveMode::Full, DriveMode::Full),
+            )
             .await
             .expect("repair")
         else {
             panic!("expected a staged rotation");
+        };
+        let record = tp
+            .alice
+            .session()
+            .fanout_probe_for_test(&staged.commit.expect("the rotation is recorded"))
+            .await
+            .expect("the record reads")
+            .expect("the record is stored");
+        let commit = Event::from_json(&record.payload).expect("the frozen commit");
+        let Some(crate::nostr::mls::types::EpochState::PendingPublish(pending)) =
+            tp.alice.session().epoch_state(&tp.mls_group_id).await
+        else {
+            panic!("premise: the rotation is staged");
         };
 
         // Author side: the session's own confirm effects, unfolded.
         let author = tp
             .alice
             .session()
-            .confirm_published(commit.pending)
+            .confirm_published_past_its_fanout_for_test(pending.pending_ref())
             .await
             .expect("confirm");
         assert!(
@@ -8163,26 +10718,36 @@ mod tests {
             "control: the confirm must still report the epoch change"
         );
 
-        // Peer side: the raw ingest effects, before any folding.
+        // Peer side: the raw ingest effects and the advances that apply the
+        // commit once its convergence pass closes, before any folding.
         let peer = tp
             .bob
             .session()
-            .process_event(&commit.commit_event)
+            .process_event(&commit)
             .await
             .expect("bob ingests");
-        let peer = peer.ingested().expect("the commit reached the engine");
-        assert!(
-            !peer
-                .effects
-                .events
-                .iter()
-                .any(|e| matches!(e, GroupEvent::GroupStateChanged { .. })),
-            "the peer's ingest must emit no GroupStateChanged: {:?}",
-            peer.effects.events
+        let mut events = peer
+            .ingested()
+            .expect("the commit reached the engine")
+            .effects
+            .events
+            .clone();
+        events.extend(
+            tp.bob
+                .session()
+                .settle_receive_for_test(&tp.mls_group_id)
+                .await
+                .expect("bob settles the commit")
+                .events,
         );
         assert!(
-            peer.effects
-                .events
+            !events
+                .iter()
+                .any(|e| matches!(e, GroupEvent::GroupStateChanged { .. })),
+            "the peer's apply must emit no GroupStateChanged: {events:?}"
+        );
+        assert!(
+            events
                 .iter()
                 .any(|e| matches!(e, GroupEvent::EpochChanged { .. })),
             "control: the peer must still report the epoch change"
@@ -8206,48 +10771,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repair_rotation_outcome_debug_redacts_the_staged_work() {
-        // `Rotated` wraps a `CommitToPublish` whose commit event's `h` tag is the
-        // circle's `nostr_group_id`; a derived `Debug` would print it through any
-        // stray log line (Rules 4/8). Structural, so a later payload addition has
-        // to face this assertion.
-        assert_eq!(
-            format!(
-                "{:?}",
-                RepairRotationOutcome::Skipped(SkipReason::NotSoleAdmin)
-            ),
-            "Skipped(NotSoleAdmin)"
-        );
-        let deferred = RepairRotationOutcome::Deferred {
-            unresolved_inputs: 2,
-            discarded_intents: 1,
-            repaired: false,
-            work: DeferredWork {
-                commits: vec![],
-                proposals: vec![leaky_proposal()],
-            },
-        };
-        crate::assert_debug_redacted!(
-            &deferred,
-            "RepairRotationOutcome",
-            marker = "Deferred",
-            &[PROPOSAL_CONTENT, PROPOSAL_H_TAG]
-        );
-        // Counts are bucketed: how many rows gate a circle is a per-circle
-        // magnitude, and the bucket carries the triage signal (Rule 15).
-        assert_eq!(
-            format!("{deferred:?}"),
-            "Deferred { unresolved_inputs: \"2-4\", discarded_intents: \"1\", repaired: false, \
-             work: DeferredWork { commits: \"0\", proposals: \"1\" } }"
-        );
-        let work = DeferredWork {
-            commits: vec![],
-            proposals: vec![leaky_proposal()],
-        };
-        crate::assert_debug_redacted!(&work, "DeferredWork", &[PROPOSAL_CONTENT, PROPOSAL_H_TAG]);
-    }
-
-    #[tokio::test]
     async fn decrypted_ingest_debug_redacts_the_fold_it_carries() {
         // The fold it carries holds a sender pubkey, the decrypted location
         // JSON and the MLS group id; only the magnitude may render, and
@@ -8260,7 +10783,6 @@ mod tests {
                 group_id: GroupId::from_slice(&[0x7A; 32]),
                 epoch: 14,
             }],
-            auto_commits: vec![],
             proposals: vec![leaky_proposal()],
         };
         crate::assert_debug_redacted!(
@@ -8277,15 +10799,14 @@ mod tests {
         );
         assert_eq!(
             format!("{ingest:?}"),
-            "DecryptedIngest { results: \"1\", auto_commits: \"0\", proposals: \"1\" }"
+            "DecryptedIngest { results: \"1\", proposals: \"1\" }"
         );
     }
 
     #[tokio::test]
     async fn publish_work_debug_redacts_the_circle_it_belongs_to() {
-        // These three are what the FFI logs after a create / an add / a
-        // handoff, and each wraps a real event whose `h` tag is the circle's
-        // `nostr_group_id` and whose welcomes name the invitee.
+        // What the FFI logs after a create wraps real events whose `h` tag is
+        // the circle's `nostr_group_id` and whose welcomes name the invitee.
         let relays = vec!["wss://relay.test.com".to_string()];
         let dir = TempDir::new().unwrap();
         let keys = Keys::generate();
@@ -8295,94 +10816,114 @@ mod tests {
         let first_hex = first.key_package_event.pubkey.to_hex();
         let config = CircleConfig::new("Bramble Family").with_relays(relays.clone());
         let creation: CircleCreationResult = manager
-            .create_circle(&keys, vec![first], &config, &relays)
+            .create_circle(&keys, vec![first], &config)
             .await
             .expect("create circle");
         let group_hex = hex::encode(creation.circle.nostr_group_id);
+        let welcome_hex = hex::encode(creation.founding_welcomes[0].as_slice());
         let needles = [
             "Bramble Family",
             "wss://relay.test.com",
             first_hex.as_str(),
             group_hex.as_str(),
+            welcome_hex.as_str(),
         ];
         crate::assert_debug_redacted!(&creation, "CircleCreationResult", &needles);
-        let group_id = creation.circle.mls_group_id.clone();
-        manager
-            .confirm_published(creation.pending)
-            .await
-            .expect("confirm create");
-
-        let second = make_member_with_relays(relays.clone(), vec![]).await;
-        let second_hex = second.key_package_event.pubkey.to_hex();
-        let added: AddMembersResult = manager
-            .add_members_with_welcomes(&keys, &group_id, vec![second], &relays)
-            .await
-            .expect("add a member");
-        crate::assert_debug_redacted!(
-            &added,
-            "AddMembersResult",
-            &[
-                "Bramble Family",
-                "wss://relay.test.com",
-                second_hex.as_str(),
-                group_hex.as_str(),
-            ]
-        );
-        manager
-            .confirm_published(added.pending)
-            .await
-            .expect("confirm add");
-
-        let handoff: CommitToPublish = manager
-            .propose_admin_handoff(
-                &group_id,
-                &PublicKey::parse(&first_hex).expect("hex pubkey"),
-            )
-            .await
-            .expect("stage a handoff commit");
-        crate::assert_debug_redacted!(&handoff, "CommitToPublish", &needles);
     }
 
     #[tokio::test]
-    async fn a_non_admin_is_declined_the_repair() {
-        // The honest limit of this unit, pinned: a stuck NON-admin has no
-        // self-service repair, because every commit-producing intent is
-        // admin-gated. It must be told so, not handed an opaque engine error.
+    async fn a_non_admin_can_rotate() {
+        // A self-update needs no admin (`protocol-core/group-setup.md` 92): a
+        // stuck member repairs their own circle. Staged under a record,
+        // confirmed on the relay's acknowledgement, applied by the admin, and
+        // both sides read each other afterwards.
         let tp = setup_two_party_circle().await;
-        assert!(matches!(
+        let before = tp
+            .bob
+            .session()
+            .epoch(&tp.mls_group_id)
+            .await
+            .expect("epoch");
+        let leaf_before = tp
+            .bob
+            .session()
+            .own_leaf_hash_for_test(&tp.mls_group_id)
+            .await
+            .expect("bob's leaf");
+        let (RepairOutcome::Rotated(made), Some(commit)) = tp
+            .bob
+            .repair_rotation_for_test(&tp.mls_group_id, past_every_rotation_window())
+            .await
+            .expect("a non-admin's repair is an outcome, not a failure")
+        else {
+            panic!("a non-admin with every gate open must rotate");
+        };
+        assert_eq!(
+            made.status,
+            crate::relay::fanout::EvolutionStatus::Confirmed,
+            "the repair is confirmed on the relay's acknowledgement",
+        );
+        assert_ne!(
             tp.bob
-                .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+                .session()
+                .own_leaf_hash_for_test(&tp.mls_group_id)
                 .await
-                .expect("a declined repair is an outcome, not a failure"),
-            RepairRotationOutcome::Skipped(SkipReason::NotSoleAdmin)
-        ));
+                .expect("bob's leaf"),
+            leaf_before,
+            "the repair is a self-update: it rotates the repairer's leaf",
+        );
+        tp.alice
+            .ingest_for_test(&commit)
+            .await
+            .expect("the admin takes in the repair");
+        for (who, mgr) in [("alice", &tp.alice), ("bob", &tp.bob)] {
+            assert_eq!(
+                mgr.session().epoch(&tp.mls_group_id).await.expect("epoch"),
+                before + 1,
+                "{who} applied the repair",
+            );
+        }
+        for (from, to, latitude) in [(&tp.bob, &tp.alice, 12.5), (&tp.alice, &tp.bob, 13.5)] {
+            let (event, _, _) = from
+                .seal_location_for_test(&tp.mls_group_id, &LocationMessage::new(latitude, 1.0))
+                .await
+                .expect("a seal after the repair");
+            let results = to.ingest_for_test(&event).await.expect("ingest");
+            assert!(
+                results
+                    .iter()
+                    .any(|r| matches!(r, LocationMessageResult::Location { .. })),
+                "each side reads the other after a non-admin's repair",
+            );
+        }
     }
 
     #[tokio::test]
     async fn a_group_with_a_commit_already_staged_declines_the_repair_as_busy() {
-        // Gate 2's interim mechanism, end to end. `AccountDeviceSession` exposes
-        // no epoch-state getter at MDK `e391adc`, so a non-`Stable` group is only
-        // discoverable by attempting the send: the engine answers
-        // `InvalidTransition { from: "PendingPublish", .. }`, which
-        // `SessionManager::update_admin_policy` maps to the typed
-        // `NostrError::EpochNotStable` BEFORE `map_mls_err` stringifies it.
+        // Gate 2 end to end: `SessionManager::update_admin_policy` reads the
+        // engine's `epoch_state` under the send's own lock and answers a
+        // `PendingPublish` group with the typed `NostrError::EpochNotStable`.
         // Reaching that arm requires a real staged commit, which is what this
-        // test manufactures — the token-set tests pin the classifier, and this
-        // pins that the classifier is actually on the path.
+        // test manufactures.
         let tp = setup_two_party_circle().await;
-        let staged = tp
-            .alice
-            .propose_admin_handoff(&tp.mls_group_id, &tp.bob_keys.public_key())
+        let full = Still::new(&DriveMode::Full, DriveMode::Full);
+        tp.alice
+            .propose_admin_handoff_staging(&tp.mls_group_id, &tp.bob_keys.public_key(), 0, full)
             .await
-            .expect("stage a handoff commit and leave it unconfirmed");
+            .expect("stage a handoff commit and leave it unresolved");
 
         assert!(
             matches!(
                 tp.alice
-                    .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+                    .repair_epoch_rotation_staging(
+                        &tp.mls_group_id,
+                        past_every_rotation_window(),
+                        0,
+                        full,
+                    )
                     .await
                     .expect("a busy group is a typed outcome, never an opaque MLS error"),
-                RepairRotationOutcome::Skipped(SkipReason::EpochNotStable)
+                StagedRepair::Skipped(SkipReason::EpochNotStable)
             ),
             "a group with a commit already staged must decline the repair as busy"
         );
@@ -8390,22 +10931,17 @@ mod tests {
         // Control, so the assertion above is attributable to the epoch state and
         // not to some other gate: resolving the staged commit makes the very same
         // call succeed.
-        tp.alice
-            .publish_failed(staged.pending)
-            .await
-            .expect("roll the staged handoff back");
-        let RepairRotationOutcome::Rotated(commit) = tp
-            .alice
-            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
-            .await
-            .expect("outcome")
-        else {
-            panic!("once the group is Stable again the repair must go through");
-        };
-        tp.alice
-            .publish_failed(commit.pending)
-            .await
-            .expect("leave nothing staged");
+        tp.alice.refuse_staged_for_test().await;
+        assert!(
+            matches!(
+                tp.alice
+                    .repair_rotation_for_test(&tp.mls_group_id, past_every_rotation_window())
+                    .await
+                    .expect("outcome"),
+                (RepairOutcome::Rotated(_), Some(_))
+            ),
+            "once the group is Stable again the repair must go through"
+        );
     }
 
     #[tokio::test]
@@ -8416,37 +10952,34 @@ mod tests {
         let tp = setup_two_party_circle().await;
         let now = past_every_rotation_window();
 
-        let RepairRotationOutcome::Rotated(rolled_back) = tp
+        let RepairOutcome::Rotated(rolled_back) = tp
             .alice
-            .repair_epoch_rotation(&tp.mls_group_id, now)
+            .repair_rotation_refused_for_test(&tp.mls_group_id, now)
             .await
             .expect("repair")
         else {
-            panic!("expected a staged rotation");
+            panic!("expected a rotation");
         };
-        tp.alice
-            .publish_failed(rolled_back.pending)
-            .await
-            .expect("roll the rotation back");
+        assert_eq!(
+            rolled_back.status,
+            crate::relay::fanout::EvolutionStatus::RolledBack,
+            "premise: every relay refused the rotation",
+        );
         assert_eq!(
             rotation_state(&tp.alice, &tp.nostr_group_id).last_rotation_at_ms,
             None,
             "a rolled-back repair must spend nothing"
         );
 
-        let RepairRotationOutcome::Rotated(confirmed) = tp
+        let wall_clock_before_confirm = chrono::Utc::now().timestamp_millis();
+        let (RepairOutcome::Rotated(_), Some(_)) = tp
             .alice
-            .repair_epoch_rotation(&tp.mls_group_id, now)
+            .repair_rotation_for_test(&tp.mls_group_id, now)
             .await
             .expect("the rolled-back repair must be immediately retryable")
         else {
-            panic!("expected a second staged rotation");
+            panic!("expected a second rotation, confirmed");
         };
-        let wall_clock_before_confirm = chrono::Utc::now().timestamp_millis();
-        tp.alice
-            .confirm_published(confirmed.pending)
-            .await
-            .expect("confirm");
         let recorded = rotation_state(&tp.alice, &tp.nostr_group_id)
             .last_rotation_at_ms
             .expect("a confirmed repair must spend the circle's rate limit");
@@ -8473,10 +11006,11 @@ mod tests {
 
         assert!(matches!(
             tp.alice
-                .repair_epoch_rotation(&tp.mls_group_id, now)
+                .repair_rotation_for_test(&tp.mls_group_id, now)
                 .await
-                .expect("outcome"),
-            RepairRotationOutcome::Skipped(SkipReason::RotatedRecently)
+                .expect("outcome")
+                .0,
+            RepairOutcome::Skipped(SkipReason::RotatedRecently)
         ));
     }
 
@@ -8495,22 +11029,15 @@ mod tests {
             None,
         );
 
-        let RepairRotationOutcome::Rotated(commit) = tp
+        let (RepairOutcome::Rotated(_), Some(commit)) = tp
             .alice
-            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+            .repair_rotation_for_test(&tp.mls_group_id, past_every_rotation_window())
             .await
             .expect("repair")
         else {
             panic!("expected a staged rotation");
         };
-        tp.alice
-            .confirm_published(commit.pending)
-            .await
-            .expect("confirm");
-        tp.bob
-            .decrypt_location(&commit.commit_event)
-            .await
-            .expect("bob ingests");
+        tp.bob.ingest_for_test(&commit).await.expect("bob ingests");
 
         assert!(
             rotation_state(&tp.alice, &tp.nostr_group_id)
@@ -8529,10 +11056,11 @@ mod tests {
         // rotation record: an epoch that just moved has fresh ratchets.
         assert!(matches!(
             tp.alice
-                .repair_epoch_rotation(&tp.mls_group_id, now_secs())
+                .repair_rotation_for_test(&tp.mls_group_id, now_secs())
                 .await
-                .expect("outcome"),
-            RepairRotationOutcome::Skipped(SkipReason::RecentEpochChange)
+                .expect("outcome")
+                .0,
+            RepairOutcome::Skipped(SkipReason::RecentEpochChange)
         ));
     }
 
@@ -8548,10 +11076,11 @@ mod tests {
 
         assert!(matches!(
             tp.alice
-                .repair_epoch_rotation(&tp.mls_group_id, now)
+                .repair_rotation_for_test(&tp.mls_group_id, now)
                 .await
-                .expect("outcome"),
-            RepairRotationOutcome::Skipped(SkipReason::RecentInboundTraffic)
+                .expect("outcome")
+                .0,
+            RepairOutcome::Skipped(SkipReason::RecentInboundTraffic)
         ));
     }
 
@@ -8571,16 +11100,11 @@ mod tests {
 
         let (event, _ngid, _relays) = tp
             .bob
-            .encrypt_location(
-                &tp.mls_group_id,
-                &tp.bob_keys.public_key(),
-                &LocationMessage::new(48.85, 2.35),
-                60,
-            )
+            .seal_location_for_test(&tp.mls_group_id, &LocationMessage::new(48.85, 2.35))
             .await
             .expect("bob sends");
         tp.alice
-            .decrypt_location(&event)
+            .ingest_for_test(&event)
             .await
             .expect("alice receives");
 
@@ -8592,10 +11116,11 @@ mod tests {
         let now = secs_from_ms(Some(stamped)).expect("a positive stamp");
         assert!(matches!(
             tp.alice
-                .repair_epoch_rotation(&tp.mls_group_id, now)
+                .repair_rotation_for_test(&tp.mls_group_id, now)
                 .await
-                .expect("outcome"),
-            RepairRotationOutcome::Skipped(SkipReason::RecentInboundTraffic)
+                .expect("outcome")
+                .0,
+            RepairOutcome::Skipped(SkipReason::RecentInboundTraffic)
         ));
     }
 
@@ -8612,7 +11137,8 @@ mod tests {
             .bob
             .propose_leave(&tp.mls_group_id)
             .await
-            .expect("bob proposes to leave");
+            .expect("bob proposes to leave")
+            .expect("a first leave in this epoch proposes");
         tp.alice
             .session()
             .process_event(&proposal)
@@ -8621,79 +11147,79 @@ mod tests {
 
         assert!(matches!(
             tp.alice
-                .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+                .repair_rotation_for_test(&tp.mls_group_id, past_every_rotation_window())
                 .await
-                .expect("outcome"),
-            RepairRotationOutcome::Skipped(SkipReason::PendingProposal)
+                .expect("outcome")
+                .0,
+            RepairOutcome::Skipped(SkipReason::PendingProposal)
         ));
     }
 
-    /// Leaves Alice — still the circle's sole admin — one epoch BEHIND Bob with
-    /// a real future-epoch application row in her store, which is the one shape
-    /// the engine deliberately never resolves and therefore the one that gates
-    /// every send for the circle.
-    ///
-    /// The divergence is produced the way production produces it: a commit the
-    /// relays actually accepted (so Bob applied it) that this device never
-    /// learned of and rolled back — `docs/EPOCH_ROTATION_REPAIR_PLAN.md` §2,
-    /// the cross-restart twin fork. A rolled-back rotation spends no rate limit
-    /// and records no epoch change, so every rotation gate is still open
-    /// afterwards.
-    async fn send_gated_sole_admin_circle() -> TwoPartyCircle {
-        let tp = setup_two_party_circle().await;
-        let RepairRotationOutcome::Rotated(delivered) = tp
-            .alice
-            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
-            .await
-            .expect("repair")
-        else {
-            panic!("expected a staged rotation");
-        };
-        tp.bob
-            .decrypt_location(&delivered.commit_event)
-            .await
-            .expect("bob applies the commit the relays accepted");
-        tp.alice
-            .publish_failed(delivered.pending)
-            .await
-            .expect("alice never learned of the ack and rolls back");
-
-        let ahead = tp
+    /// One confirmed `SelfUpdate` commit from Bob, as the relays carry it.
+    async fn bob_self_update(tp: &TwoPartyCircle) -> Event {
+        let effects = tp
             .bob
+            .session()
+            .send(crate::nostr::mls::types::SendIntent::SelfUpdate {
+                group_id: tp.mls_group_id.clone(),
+            })
+            .await
+            .expect("bob self-updates");
+        let (msg, pending) = effects
+            .publish
+            .iter()
+            .find_map(|work| match work {
+                PublishWork::GroupEvolution { msg, pending, .. } => Some((msg.clone(), *pending)),
+                _ => None,
+            })
+            .expect("a self-update stages one group evolution");
+        tp.bob
+            .session()
+            .confirm_published(pending)
+            .await
+            .expect("bob's relays acked his commit");
+        SessionManager::transport_message_to_event(&msg).expect("commit event")
+    }
+
+    /// Leaves Alice — still the circle's sole admin — with a real future-epoch
+    /// commit row in her store, and returns the commit that row depends on.
+    ///
+    /// Bob commits twice; Alice holds only the second, whose source epoch is
+    /// one above her tip. A commit always gates outbound work (MDK v0.10.4
+    /// `ConvergenceInputContext::gates_outbound`), and one that cannot chain
+    /// from the tip stays unresolved, so every send for the circle queues until
+    /// the returned predecessor is delivered. The row is copied from Bob's own
+    /// store because a commit sealed at an epoch Alice has not reached cannot be
+    /// peeled into one.
+    async fn send_gated_sole_admin_circle() -> (TwoPartyCircle, Event) {
+        let tp = setup_two_party_circle().await;
+        let behind = tp
+            .alice
             .session()
             .epoch(&tp.mls_group_id)
             .await
-            .expect("bob epoch");
+            .expect("alice epoch");
+        let predecessor = bob_self_update(&tp).await;
+        bob_self_update(&tp).await;
         assert_eq!(
-            ahead,
-            tp.alice
+            tp.bob
                 .session()
                 .epoch(&tp.mls_group_id)
                 .await
-                .expect("alice epoch")
-                + 1,
-            "fixture: bob must be exactly one epoch ahead of the sole admin"
+                .expect("bob epoch"),
+            behind + 2,
+            "fixture: bob must be two commits ahead of the sole admin"
         );
-
-        tp.bob
-            .encrypt_location(
-                &tp.mls_group_id,
-                &tp.bob_keys.public_key(),
-                &LocationMessage::new(9.0, 9.0),
-                60,
-            )
-            .await
-            .expect("bob sends at the higher epoch");
         let row = tp
             .bob
             .session()
             .stored_convergence_input_for_test(
                 &tp.mls_group_id,
-                crate::nostr::mls::types::OpenMlsContentKind::Application,
-                ahead,
+                crate::nostr::mls::types::OpenMlsContentKind::Commit,
+                behind + 1,
             )
             .await
-            .expect("bob's own row at the higher epoch");
+            .expect("bob's own commit row at the higher epoch");
         tp.alice
             .session()
             .stage_convergence_input_for_test(
@@ -8702,28 +11228,48 @@ mod tests {
                 0,
             )
             .await
-            .expect("alice stores the future-epoch row she could not decrypt");
-        tp
+            .expect("alice stores the future-epoch commit she could not peel");
+        (tp, predecessor)
+    }
+
+    /// Stores Bob's future-epoch commit in Alice's buffer again as
+    /// `Retryable`: the row that gates her sends.
+    async fn regate(tp: &TwoPartyCircle) {
+        let tip = tp
+            .alice
+            .session()
+            .epoch(&tp.mls_group_id)
+            .await
+            .expect("alice epoch");
+        let row = tp
+            .bob
+            .session()
+            .stored_convergence_input_for_test(
+                &tp.mls_group_id,
+                crate::nostr::mls::types::OpenMlsContentKind::Commit,
+                tip + 1,
+            )
+            .await
+            .expect("bob's own commit row at the higher epoch");
+        tp.alice
+            .session()
+            .stage_convergence_input_for_test(
+                &row,
+                crate::nostr::mls::types::MessageState::Retryable,
+                0,
+            )
+            .await
+            .expect("alice stores the future-epoch commit again");
     }
 
     #[tokio::test]
     async fn a_rotation_racing_a_departure_at_one_epoch_resolves_to_the_rotation() {
         // What ACTUALLY closes the same-epoch race for a proposal that reached a
-        // peer but not us — the engine, not gate 4's clock.
-        //
-        // Both commits carry the same `source_epoch`, so `CommitOrderingKey::cmp`
-        // breaks the tie on `priority`, and the LOWEST key wins
-        // (`fork_recovery.rs`: a candidate `>=` the incumbent loses). The repair
-        // is an `UpdateAppComponents(admin-policy.v1)`, which
-        // `commit_ordering_priority_for_staged` classifies `Privileged`; a
-        // SelfRemove-only auto-commit is `Ordinary`, and `Privileged` is declared
-        // first so it sorts below. The rotation therefore wins on EVERY replica,
+        // peer but not us — the engine, not gate 4's clock. The repair is a
+        // commit at the epoch and the departure only a proposal: the commit
+        // takes the epoch on every replica, the proposal goes stale with it,
         // and the departure is re-driven one epoch later from the durable
-        // `LeaveRequest`.
-        //
-        // This is the test that fails if MDK ever reorders
-        // `CommitOrderingPriority` — at which point the residual stops being
-        // "one extra epoch" and the gate-4 reasoning has to be redone.
+        // `LeaveRequest`. The cost is the one extra epoch, never a fork.
         let tp = setup_two_party_circle().await;
         let start = tp
             .alice
@@ -8734,43 +11280,36 @@ mod tests {
 
         // Alice stages her repair FIRST, at the current epoch, without having
         // seen Bob's proposal — the exact case gate 4 cannot cover.
-        let RepairRotationOutcome::Rotated(rotation) = tp
+        let (RepairOutcome::Rotated(_), Some(rotation)) = tp
             .alice
-            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+            .repair_rotation_for_test(&tp.mls_group_id, past_every_rotation_window())
             .await
             .expect("repair")
         else {
-            panic!("expected a staged rotation");
+            panic!("expected a rotation, acked and applied");
         };
 
-        // Bob departs; the auto-committer stages the eviction at the SAME source
-        // epoch on a peer that has not seen the rotation.
+        // Bob departs at the SAME source epoch, on a device that has not seen
+        // the rotation.
         let proposal = tp
             .bob
             .propose_leave(&tp.mls_group_id)
             .await
-            .expect("bob proposes to leave");
+            .expect("bob proposes to leave")
+            .expect("a first leave in this epoch proposes");
 
-        // Both commits are now published and both members ingest both.
-        tp.alice
-            .confirm_published(rotation.pending)
-            .await
-            .expect("alice's rotation is acked and applied");
-        let bob_saw_rotation = tp
+        // Both members ingest what the other published.
+        let (_, redriven) = tp
             .bob
-            .decrypt_location_collecting_commits(&rotation.commit_event)
+            .ingest_landing_for_test(&rotation)
             .await
             .expect("bob ingests the rotation");
-        for staged in bob_saw_rotation.auto_commits {
-            // Bob may have staged his own eviction alongside; it lost, so it is
-            // rolled back rather than published.
-            let _ = tp.bob.publish_failed(staged.pending).await;
-        }
         let alice_saw_departure = tp
             .alice
-            .decrypt_location_collecting_commits(&proposal)
+            .ingest_landing_for_test(&proposal)
             .await
-            .expect("alice ingests the departure proposal");
+            .expect("alice ingests the departure proposal")
+            .1;
 
         // The rotation is the branch BOTH devices are on.
         let alice_epoch = tp
@@ -8793,20 +11332,22 @@ mod tests {
             "the peer must land on the rotation's epoch, not on a competing branch"
         );
 
-        assert_departure_completes_one_epoch_later(&tp, &alice_saw_departure).await;
+        assert_departure_completes_one_epoch_later(&tp, &alice_saw_departure, &redriven).await;
     }
 
     /// The second half of the race test: the losing departure is not dropped —
-    /// Bob's durable `LeaveRequest` re-proposes it at the new epoch on his next
-    /// convergence drain, and Alice commits that.
+    /// Bob's durable `LeaveRequest` re-proposes it at the new epoch in the drain
+    /// his ingest of the rotation runs, that ingest records and sends it, and
+    /// Alice commits that.
     async fn assert_departure_completes_one_epoch_later(
         tp: &TwoPartyCircle,
-        alice_saw_departure: &DecryptedIngest,
+        alice_saw_departure: &[Event],
+        redriven: &[Event],
     ) {
         // Bob's proposal was made at the OLD epoch, so the rotation superseded
         // it — nothing Alice can commit.
         assert!(
-            alice_saw_departure.auto_commits.is_empty(),
+            alice_saw_departure.is_empty(),
             "a proposal below the tip is superseded, not committable"
         );
         let bob_hex = hex::encode(tp.bob_keys.public_key().to_bytes());
@@ -8820,38 +11361,23 @@ mod tests {
             "control: bob is still a member at this point, so the assertion below is real"
         );
 
-        // And the departure is not LOST: Bob's durable `LeaveRequest` re-proposes
-        // it at the new epoch on his next convergence drain, which is the
-        // engine's own re-drive, not anything Haven schedules.
-        let redriven = {
-            let effects = tp
-                .bob
-                .session()
-                .advance_convergence(&tp.mls_group_id)
-                .await
-                .expect("bob's convergence re-drives his leave request");
-            effects
-                .publish
-                .iter()
-                .find_map(|work| match work {
-                    PublishWork::Proposal { msg } => {
-                        SessionManager::transport_message_to_event(msg).ok()
-                    }
-                    _ => None,
-                })
-                .expect("the durable LeaveRequest must be re-proposed at the new epoch")
+        // And the departure is not LOST: the rotation's epoch change owes Bob's
+        // group an advance, the engine re-mints his durable `LeaveRequest` for
+        // the new epoch inside it — once per epoch, so a receive path that
+        // dropped it would wedge the leave — and his ingest hands it back.
+        let [redriven] = redriven else {
+            panic!(
+                "the durable LeaveRequest must be re-proposed at the new epoch and \
+                 handed back exactly once, got {}",
+                redriven.len()
+            );
         };
-        let staged = tp
+        let (_, evicted) = tp
             .alice
-            .decrypt_location_collecting_commits(&redriven)
+            .ingest_landing_for_test(redriven)
             .await
             .expect("alice ingests the re-proposed departure");
-        for eviction in staged.auto_commits {
-            tp.alice
-                .confirm_published(eviction.pending)
-                .await
-                .expect("alice publishes and confirms the eviction");
-        }
+        assert_eq!(evicted.len(), 1, "alice commits the departure, on an ack");
         assert!(
             !tp.alice
                 .session()
@@ -8877,33 +11403,38 @@ mod tests {
             .bob
             .propose_leave(&tp.mls_group_id)
             .await
-            .expect("bob proposes to leave");
+            .expect("bob proposes to leave")
+            .expect("a first leave in this epoch proposes");
 
-        // The real receive path: ingesting the proposal STAGES the eviction the
-        // auto-committer scheduled, so the engine is now mid-commit.
-        let ingest = tp
-            .alice
-            .decrypt_location_collecting_commits(&proposal)
+        // The foreground's receive path: ingesting the proposal STAGES the
+        // eviction the auto-committer scheduled, under its record, so the
+        // engine is now mid-commit.
+        tp.alice
+            .ingest_staging_for_test(&proposal)
             .await
             .expect("alice ingests the proposal");
-        let [eviction] = <[CommitToPublish; 1]>::try_from(ingest.auto_commits)
-            .unwrap_or_else(|c| panic!("expected exactly one staged eviction, got {}", c.len()));
         assert!(
             matches!(
                 tp.alice
-                    .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+                    .repair_epoch_rotation_staging(
+                        &tp.mls_group_id,
+                        past_every_rotation_window(),
+                        0,
+                        Still::new(&DriveMode::Full, DriveMode::Full),
+                    )
                     .await
                     .expect("outcome"),
-                RepairRotationOutcome::Skipped(SkipReason::EpochNotStable)
+                StagedRepair::Skipped(SkipReason::EpochNotStable)
             ),
             "a circle with an eviction already staged must not also stage a rotation"
         );
 
-        // Resolve the departure through the real Rule-13 ladder.
-        tp.alice
-            .confirm_published(eviction.pending)
-            .await
-            .expect("confirm the eviction on a relay ack");
+        // Resolve the departure on a relay's acknowledgement.
+        assert_eq!(
+            tp.alice.land_staged_for_test().await.len(),
+            1,
+            "premise: the eviction lands"
+        );
 
         assert!(
             !tp.alice
@@ -8915,10 +11446,11 @@ mod tests {
         );
         assert!(matches!(
             tp.alice
-                .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+                .repair_rotation_for_test(&tp.mls_group_id, past_every_rotation_window())
                 .await
-                .expect("outcome"),
-            RepairRotationOutcome::Rotated(_)
+                .expect("outcome")
+                .0,
+            RepairOutcome::Rotated(_)
         ));
     }
 
@@ -8933,22 +11465,21 @@ mod tests {
         // Built the way Unit B builds its future-epoch fixtures: a REAL row a
         // real device really stored, copied verbatim into a device whose tip is
         // below it.
-        let tp = send_gated_sole_admin_circle().await;
+        let (tp, _) = send_gated_sole_admin_circle().await;
         let ahead = tp
             .bob
             .session()
             .epoch(&tp.mls_group_id)
             .await
             .expect("bob epoch");
-        assert_eq!(
-            ahead,
-            tp.alice
-                .session()
-                .epoch(&tp.mls_group_id)
-                .await
-                .expect("alice epoch")
-                + 1,
-            "fixture: bob must be one epoch ahead of alice"
+        assert!(
+            ahead
+                > tp.alice
+                    .session()
+                    .epoch(&tp.mls_group_id)
+                    .await
+                    .expect("alice epoch"),
+            "fixture: bob must be ahead of alice, so his proposal is sealed above her tip"
         );
         assert!(
             !tp.alice
@@ -8962,7 +11493,8 @@ mod tests {
         tp.bob
             .propose_leave(&tp.mls_group_id)
             .await
-            .expect("bob proposes to leave at his own, higher epoch");
+            .expect("bob proposes to leave at his own, higher epoch")
+            .expect("a first leave in this epoch proposes");
         let row = tp
             .bob
             .session()
@@ -9017,14 +11549,9 @@ mod tests {
                         nip65_relays: vec![],
                     }],
                     &CircleConfig::new("Restart Circle").with_relays(relays.clone()),
-                    &relays,
                 )
                 .await
                 .expect("create");
-            alice
-                .confirm_published(creation.pending)
-                .await
-                .expect("confirm create");
             let welcome = creation.welcome_events.first().expect("one welcome");
             bob.process_gift_wrapped_invitation(&bob_keys, &welcome.event)
                 .await
@@ -9037,7 +11564,8 @@ mod tests {
             let proposal = bob
                 .propose_leave(&gid)
                 .await
-                .expect("bob proposes to leave");
+                .expect("bob proposes to leave")
+                .expect("a first leave in this epoch proposes");
             // Ingest the proposal and stop there — no convergence drain, so the
             // eviction auto-commit is scheduled but never becomes due. That is
             // exactly the state a process killed mid-departure leaves: a stored
@@ -9067,81 +11595,12 @@ mod tests {
         );
         assert!(matches!(
             alice
-                .repair_epoch_rotation(&mls_group_id, past_every_rotation_window())
+                .repair_rotation_for_test(&mls_group_id, past_every_rotation_window())
                 .await
-                .expect("outcome"),
-            RepairRotationOutcome::Skipped(SkipReason::PendingProposal)
+                .expect("outcome")
+                .0,
+            RepairOutcome::Skipped(SkipReason::PendingProposal)
         ));
-    }
-
-    #[tokio::test]
-    async fn a_rotation_whose_commit_cannot_be_serialized_is_rolled_back() {
-        // Rule 13's other edge. If the staged commit's transport message will
-        // not turn into an event, dropping the `PendingStateRef` would leave the
-        // group in `PendingPublish` — where every later send fails the engine's
-        // "requires Stable" gate, permanently, for a serialization error.
-        use cgka_traits::transport::{TransportEnvelope, TransportSource};
-
-        let tp = setup_two_party_circle().await;
-        let effects = tp
-            .alice
-            .session()
-            .update_admin_policy(
-                &tp.mls_group_id,
-                &tp.alice
-                    .session()
-                    .admin_pubkeys(&tp.mls_group_id)
-                    .await
-                    .expect("admins"),
-            )
-            .await
-            .expect("stage a real rotation");
-        let pending = effects
-            .publish
-            .iter()
-            .find_map(|work| match work {
-                PublishWork::GroupEvolution { pending, .. } => Some(*pending),
-                _ => None,
-            })
-            .expect("the engine staged a commit");
-
-        // The SAME pending ref the engine really holds, carried by a message
-        // whose payload is not the JSON the peeler DTO parses.
-        let unserializable = SessionEffects {
-            events: Vec::new(),
-            publish: vec![PublishWork::GroupEvolution {
-                msg: TransportMessage {
-                    id: cgka_traits::types::MessageId::new(vec![7; 32]),
-                    payload: b"not json".to_vec(),
-                    timestamp: cgka_traits::transport::Timestamp(0),
-                    causal_deps: Vec::new(),
-                    source: TransportSource("test".to_string()),
-                    envelope: TransportEnvelope::GroupMessage {
-                        transport_group_id: tp.nostr_group_id.to_vec(),
-                    },
-                },
-                welcomes: Vec::new(),
-                pending,
-            }],
-            queued: Vec::new(),
-            pending_convergence: Vec::new(),
-        };
-
-        tp.alice
-            .take_rotation_commit(unserializable)
-            .await
-            .expect_err("an unserializable commit must not be reported as staged");
-
-        // The promise: the group is Stable again, so the circle still sends.
-        tp.alice
-            .encrypt_location(
-                &tp.mls_group_id,
-                &tp.alice_keys.public_key(),
-                &LocationMessage::new(51.5, -0.12),
-                60,
-            )
-            .await
-            .expect("a rolled-back rotation must leave the circle able to send");
     }
 
     #[tokio::test]
@@ -9157,19 +11616,14 @@ mod tests {
         // kind, ciphertext the engine cannot peel.
         let (real, _ngid, _relays) = tp
             .bob
-            .encrypt_location(
-                &tp.mls_group_id,
-                &tp.bob_keys.public_key(),
-                &LocationMessage::new(1.0, 2.0),
-                60,
-            )
+            .seal_location_for_test(&tp.mls_group_id, &LocationMessage::new(1.0, 2.0))
             .await
             .expect("bob sends");
         let forged = nostr::EventBuilder::new(real.kind, "ZGVmaW5pdGVseSBub3QgY2lwaGVydGV4dA==")
             .tags(real.tags.clone())
             .sign_with_keys(&Keys::generate())
             .expect("sign the undecryptable event");
-        let _ = tp.alice.decrypt_location(&forged).await;
+        let _ = tp.alice.ingest_for_test(&forged).await;
 
         assert_eq!(
             rotation_state(&tp.alice, &tp.nostr_group_id).last_inbound_event_at_ms,
@@ -9179,107 +11633,111 @@ mod tests {
         );
         assert!(matches!(
             tp.alice
-                .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+                .repair_rotation_for_test(&tp.mls_group_id, past_every_rotation_window())
                 .await
-                .expect("outcome"),
-            RepairRotationOutcome::Rotated(_)
+                .expect("outcome")
+                .0,
+            RepairOutcome::Rotated(_)
         ));
     }
 
     #[tokio::test]
-    async fn the_repair_discard_removes_the_no_op_policy_and_nothing_else() {
-        // The DIRECT test of the take-back. Reaching it through
-        // `repair_epoch_rotation` cannot exercise its discriminator, because the
-        // pre-check returns first on every send-gated shape a test can build —
-        // so a `panic!` on entry to the discard used to stay green.
-        let tp = setup_two_party_circle().await;
-        let alice = tp.alice_keys.public_key().to_bytes();
-        let bob = tp.bob_keys.public_key().to_bytes();
-
-        // The repair's own payload: the CURRENT policy, re-stated.
-        let no_op = SessionManager::admin_policy_payload_for_test(&[alice])
-            .expect("encode the current policy");
-        // A real membership change: durable user intent parked behind the same
-        // send gate, which must survive.
-        let handoff =
-            SessionManager::admin_policy_payload_for_test(&[alice, bob]).expect("encode a handoff");
-        assert_ne!(no_op, handoff, "fixture: the two payloads must differ");
-
-        for data in [no_op, handoff.clone()] {
+    async fn a_full_advance_drains_no_self_update_the_engine_queued_and_nothing_else_is_lost() {
+        // AM-R3-1(b), the defence in depth: whatever left a self-update in
+        // the engine's queue, the full advance that would drain it into a
+        // commit nobody asked for retires it first, in the same hold — the
+        // drive's advance and the user-facing one alike. A real change of the
+        // circle queued beside it is the user's and is made.
+        for drive in [true, false] {
+            let tp = setup_two_party_circle().await;
+            let alice = tp.alice_keys.public_key().to_bytes();
+            let bob = tp.bob_keys.public_key().to_bytes();
+            let handoff = SessionManager::admin_policy_payload_for_test(&[alice, bob])
+                .expect("encode a handoff");
             tp.alice
                 .session()
-                .queue_admin_policy_intent_for_test(&tp.mls_group_id, data)
+                .queue_self_update_intent_for_test(&tp.mls_group_id)
                 .await
-                .expect("queue an intent");
+                .expect("queue a self-update");
+            tp.alice
+                .session()
+                .queue_admin_policy_intent_for_test(&tp.mls_group_id, handoff)
+                .await
+                .expect("queue a handoff");
+
+            let made = if drive {
+                tp.alice
+                    .session()
+                    .advance_for_drive(&tp.mls_group_id, 0)
+                    .await
+                    .expect("the drive's full advance")
+                    .fanouts
+                    .len()
+            } else {
+                tp.alice
+                    .session()
+                    .advance_convergence(&tp.mls_group_id)
+                    .await
+                    .expect("the full advance")
+                    .publish
+                    .iter()
+                    .filter(|work| matches!(work, PublishWork::GroupEvolution { .. }))
+                    .count()
+            };
+
+            assert_eq!(
+                tp.alice
+                    .session()
+                    .queued_self_update_count_for_test(&tp.mls_group_id)
+                    .await
+                    .expect("read the queue"),
+                0,
+                "the queued self-update is retired (drive: {drive})"
+            );
+            assert_eq!(
+                tp.alice
+                    .session()
+                    .group_evolution_count_for_test()
+                    .await
+                    .expect("read the evolutions"),
+                0,
+                "no self-update was made: only a self-update writes a durable evolution \
+                 (drive: {drive})"
+            );
+            assert_eq!(
+                made, 1,
+                "the queued handoff is made: the user's change is not lost with it (drive: {drive})"
+            );
         }
-        assert_eq!(
-            tp.alice
-                .session()
-                .queued_admin_policy_payloads_for_test(&tp.mls_group_id)
-                .await
-                .expect("read the queue")
-                .len(),
-            2,
-            "fixture: both intents must be queued before the discard runs"
-        );
-
-        let removed = tp
-            .alice
-            .session()
-            .discard_queued_repair_rotation_intents(&tp.mls_group_id, &[alice])
-            .await
-            .expect("discard");
-
-        assert_eq!(removed, 1, "exactly the repair's own intent is taken back");
-        assert_eq!(
-            tp.alice
-                .session()
-                .queued_admin_policy_payloads_for_test(&tp.mls_group_id)
-                .await
-                .expect("read the queue"),
-            vec![handoff],
-            "the survivor must be the membership change, byte for byte"
-        );
     }
 
     #[tokio::test]
     async fn the_pre_check_keeps_a_send_gated_repair_out_of_the_engines_send_path() {
-        // MUST-1's first defence, pinned independently of its second.
-        //
-        // The probe is a decoy intent carrying the repair's own payload. If the
-        // pre-check fires, the repair never issues an intent and therefore never
-        // runs the take-back, so the decoy survives untouched. If the pre-check
-        // is removed, the repair queues its own rotation, reaches the take-back,
-        // and the take-back removes the decoy along with it — because the bytes
-        // are identical. That difference is the only externally visible trace of
-        // which of the two defences ran.
-        let tp = send_gated_sole_admin_circle().await;
-        let alice = tp.alice_keys.public_key().to_bytes();
-        let decoy = SessionManager::admin_policy_payload_for_test(&[alice])
-            .expect("encode the current policy");
-        tp.alice
-            .session()
-            .queue_admin_policy_intent_for_test(&tp.mls_group_id, decoy.clone())
+        // MUST-1's first defence, pinned independently of its second (the
+        // retirement inside the send's own hold): a send-gated circle's
+        // repair never asks the engine for a self-update at all.
+        let (tp, _) = send_gated_sole_admin_circle().await;
+        let asks = tp.alice.session().self_update_asks_for_test();
+
+        let (outcome, _) = tp
+            .alice
+            .repair_rotation_for_test(&tp.mls_group_id, now_secs())
             .await
-            .expect("queue the decoy");
-
-        assert!(matches!(
-            tp.alice
-                .repair_epoch_rotation(&tp.mls_group_id, now_secs())
-                .await
-                .expect("outcome"),
-            RepairRotationOutcome::Deferred { .. }
-        ));
-
+            .expect("outcome");
+        assert!(matches!(outcome, RepairOutcome::Deferred { .. }));
+        assert_eq!(
+            tp.alice.session().self_update_asks_for_test(),
+            asks,
+            "a repair the pre-check declined must never reach the engine's send path"
+        );
         assert_eq!(
             tp.alice
                 .session()
-                .queued_admin_policy_payloads_for_test(&tp.mls_group_id)
+                .queued_self_update_count_for_test(&tp.mls_group_id)
                 .await
                 .expect("read the queue"),
-            vec![decoy],
-            "a repair the pre-check declined must never reach the engine's send path, so it \
-             has nothing to take back"
+            0,
+            "nothing was banked"
         );
     }
 
@@ -9290,23 +11748,19 @@ mod tests {
         // "produced no GroupEvolution publish work" error, which is exactly the
         // string every caller used to drop on the floor while the device
         // silently stopped sharing.
-        let tp = send_gated_sole_admin_circle().await;
+        let (tp, _) = send_gated_sole_admin_circle().await;
         match tp
             .alice
-            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+            .repair_rotation_for_test(&tp.mls_group_id, past_every_rotation_window())
             .await
             .expect("a send-gated repair is a typed outcome, never an error")
+            .0
         {
-            RepairRotationOutcome::Deferred { .. } => {}
-            RepairRotationOutcome::Rotated(commit) => {
-                // Leave nothing staged before failing.
-                tp.alice
-                    .publish_failed(commit.pending)
-                    .await
-                    .expect("roll back");
+            RepairOutcome::Deferred { .. } => {}
+            RepairOutcome::Rotated(_) => {
                 panic!("the future-epoch row must gate the rotation send");
             }
-            RepairRotationOutcome::Skipped(reason) => {
+            RepairOutcome::Skipped(reason) => {
                 panic!("expected a deferral, got Skipped({reason:?})")
             }
         }
@@ -9320,87 +11774,166 @@ mod tests {
         // ids are not deduplicated, so a user tapping Repair on a stalled circle
         // would bank one epoch bump per tap, all landing in a burst the moment
         // the circle unblocks. Nothing may be left behind.
-        let tp = send_gated_sole_admin_circle().await;
-        // A clock the sweep's age rule cannot use to retire the gating row, so
-        // the circle stays gated across all three taps and the assertion is
-        // about the banking, not about the repair having quietly succeeded.
+        let (tp, predecessor) = send_gated_sole_admin_circle().await;
         let now = now_secs();
 
-        for tap in 1..=3 {
+        for tap in 1..=5 {
+            // A tap serves the engine's deadline, which parks the row out of
+            // the gate (`ConvergenceDeferred`): each tap is given a gated
+            // circle again, as a redelivery of the row would.
+            regate(&tp).await;
+            assert!(
+                tp.alice.session().send_gated(&tp.mls_group_id).await,
+                "premise: tap {tap} finds the circle send-gated"
+            );
             assert!(
                 matches!(
                     tp.alice
-                        .repair_epoch_rotation(&tp.mls_group_id, now)
+                        .repair_rotation_for_test(&tp.mls_group_id, now)
                         .await
-                        .expect("outcome"),
-                    RepairRotationOutcome::Deferred { .. }
+                        .expect("outcome")
+                        .0,
+                    RepairOutcome::Deferred { .. }
                 ),
                 "tap {tap} must defer"
             );
-            assert!(
+            assert_eq!(
                 tp.alice
                     .session()
-                    .queued_admin_policy_payloads_for_test(&tp.mls_group_id)
+                    .queued_self_update_count_for_test(&tp.mls_group_id)
                     .await
-                    .expect("read the queue")
-                    .is_empty(),
-                "tap {tap} left a rotation banked in the engine's outbound queue"
+                    .expect("read the queue"),
+                0,
+                "tap {tap} left a self-update banked in the engine's outbound queue"
             );
         }
 
-        // Unblock the circle and drain: nothing may come out, and the epoch must
-        // not move. This is the assertion the burst would break.
+        // Unblock the circle — the missing predecessor arrives, so both of
+        // Bob's commits apply — and drain: nothing of Alice's may come out, and
+        // the epoch must land on Bob's. This is the assertion the burst would
+        // break.
         let before = tp
             .alice
             .session()
             .epoch(&tp.mls_group_id)
             .await
             .expect("alice epoch");
-        tp.alice
-            .sweep_unresolvable_inputs(now + 10 * 60)
+        let delivered = tp
+            .alice
+            .session()
+            .process_event_settled_for_test(&predecessor)
             .await
-            .expect("retire the gating row");
-        tp.alice
+            .expect("the predecessor arrives");
+        let drained = tp
+            .alice
             .session()
             .advance_convergence(&tp.mls_group_id)
             .await
             .expect("drain whatever the queue holds");
+        let delivered = delivered.ingested().expect("the commit reached the engine");
+        assert!(
+            delivered
+                .effects
+                .publish
+                .iter()
+                .chain(&drained.publish)
+                .all(|work| !matches!(work, PublishWork::GroupEvolution { .. })),
+            "unblocking a circle that was tapped five times must stage no self-update"
+        );
         assert_eq!(
             tp.alice
                 .session()
                 .epoch(&tp.mls_group_id)
                 .await
                 .expect("alice epoch"),
-            before,
-            "unblocking a circle that was tapped three times must not replay three rotations"
+            before + 2,
+            "the circle converges on Bob's two commits and nothing else"
         );
 
         // And the repair still works once, deliberately, afterwards.
         assert!(matches!(
             tp.alice
-                .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+                .repair_rotation_for_test(&tp.mls_group_id, past_every_rotation_window())
                 .await
-                .expect("outcome"),
-            RepairRotationOutcome::Rotated(_)
+                .expect("outcome")
+                .0,
+            RepairOutcome::Rotated(_)
         ));
     }
 
     #[tokio::test]
-    async fn a_send_gated_repair_leaves_a_queued_membership_change_alone() {
-        // The discard is keyed on the admin-policy payload equalling the CURRENT
-        // policy — which is what makes a repair rotation a no-op re-statement and
-        // a handoff something else entirely. A real membership intent parked
-        // behind the same send gate is durable user intent and must survive.
-        let tp = send_gated_sole_admin_circle().await;
-        let now = now_secs();
+    async fn a_location_queued_behind_the_send_gate_is_discarded_never_sent_later() {
+        // A fix is ephemeral: the engine queues one it cannot send, and a queue
+        // released when the circle unblocks would publish a stale position — one
+        // per publish cycle the circle was stalled for.
+        let (tp, predecessor) = send_gated_sole_admin_circle().await;
 
-        // Queue a REAL admin-policy change (promote Bob) behind the same gate.
-        let handoff = tp
+        let deferred = tp
             .alice
-            .propose_admin_handoff(&tp.mls_group_id, &tp.bob_keys.public_key())
+            .seal_location_for_test(&tp.mls_group_id, &LocationMessage::new(48.85, 2.35))
             .await;
         assert!(
-            handoff.is_err(),
+            matches!(deferred, Err(CircleError::EngineHeld)),
+            "the gated send is deferred"
+        );
+        assert_eq!(
+            tp.alice
+                .session()
+                .queued_intent_count_for_test(&tp.mls_group_id)
+                .await
+                .expect("read the queue"),
+            0
+        );
+
+        let delivered = tp
+            .alice
+            .session()
+            .process_event_settled_for_test(&predecessor)
+            .await
+            .expect("the predecessor arrives");
+        let drained = tp
+            .alice
+            .session()
+            .advance_convergence(&tp.mls_group_id)
+            .await
+            .expect("drain whatever the queue holds");
+        let delivered = delivered.ingested().expect("the commit reached the engine");
+        assert!(
+            delivered
+                .effects
+                .publish
+                .iter()
+                .chain(&drained.publish)
+                .all(|work| !matches!(work, PublishWork::ApplicationMessage { .. })),
+            "unblocking the circle must publish no location it queued while stalled"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_send_gated_repair_leaves_a_queued_membership_change_alone() {
+        // What a repair takes back out of the queue is a self-update, by its
+        // intent kind. A real membership intent parked behind the same send
+        // gate is durable user intent and must survive.
+        let (tp, _) = send_gated_sole_admin_circle().await;
+        let now = now_secs();
+
+        // Queue a REAL admin-policy change (promote Bob) behind the same gate —
+        // through the session, which keeps what the engine queues: the circle
+        // manager's own hand-over reports a queued change as failed and takes
+        // it back out of the queue.
+        let handoff = tp
+            .alice
+            .session()
+            .update_admin_policy(
+                &tp.mls_group_id,
+                &[
+                    tp.alice_keys.public_key().to_bytes(),
+                    tp.bob_keys.public_key().to_bytes(),
+                ],
+            )
+            .await;
+        assert!(
+            handoff.is_ok_and(|effects| !effects.queued.is_empty()),
             "the send gate must queue the handoff rather than stage it"
         );
         let queued_before = tp
@@ -9415,21 +11948,34 @@ mod tests {
             "fixture: exactly one real membership intent must be queued"
         );
 
-        assert!(matches!(
-            tp.alice
-                .repair_epoch_rotation(&tp.mls_group_id, now)
-                .await
-                .expect("outcome"),
-            RepairRotationOutcome::Deferred { .. }
-        ));
+        let (outcome, sent) = tp
+            .alice
+            .repair_rotation_for_test(&tp.mls_group_id, now)
+            .await
+            .expect("outcome");
+        assert!(matches!(outcome, RepairOutcome::Deferred { .. }));
 
-        assert_eq!(
+        // The deferral's served advance gives a queued change its attempt
+        // once the engine parks the gating row: the handoff survives the
+        // repair as its own commit, sent, never as a discard.
+        assert!(sent.is_some(), "the queued handoff is released and sent");
+        assert!(
             tp.alice
                 .session()
                 .queued_admin_policy_payloads_for_test(&tp.mls_group_id)
                 .await
-                .expect("read the queue"),
-            queued_before,
+                .expect("read the queue")
+                .is_empty(),
+            "the released handoff left the queue"
+        );
+        let admins = tp
+            .alice
+            .session()
+            .admin_pubkeys(&tp.mls_group_id)
+            .await
+            .expect("admins");
+        assert!(
+            admins.contains(&tp.bob_keys.public_key().to_bytes()),
             "the repair's discard must not touch a queued membership change"
         );
     }
@@ -9444,7 +11990,7 @@ mod tests {
         let outsider = Keys::generate().public_key();
         let err = tp
             .alice
-            .propose_admin_handoff(&tp.mls_group_id, &outsider)
+            .admin_handoff_for_test(&tp.mls_group_id, &outsider)
             .await
             .expect_err("a non-member must not be promotable to admin");
         assert!(matches!(err, CircleError::Mls(_)));
@@ -9523,8 +12069,377 @@ mod tests {
             .bob
             .propose_leave(&tp.mls_group_id)
             .await
-            .expect("non-admin bob can propose SelfRemove");
+            .expect("non-admin bob can propose SelfRemove")
+            .expect("a first leave in this epoch proposes");
         assert_eq!(ev.kind.as_u16(), 445);
+    }
+
+    #[tokio::test]
+    async fn the_session_never_enrolls_a_group_in_periodic_rotation() {
+        // MDK enrols every new group in periodic self-update by default
+        // (`PeriodicMaintenancePolicy::EnabledForNewGroups`, `group_lifecycle.rs`
+        // `persist_new_group_maintenance`). Haven changes keys on membership
+        // changes and explicit repair only, so neither the founder's create nor
+        // the joiner's Welcome may put the circle on a timer.
+        let tp = setup_two_party_circle().await;
+        for (who, manager) in [("the founder", &tp.alice), ("the joiner", &tp.bob)] {
+            assert!(
+                !manager
+                    .session()
+                    .periodic_rotation_enrolled_for_test(&tp.mls_group_id)
+                    .await
+                    .expect("read the maintenance record"),
+                "{who}'s copy must not be enrolled in periodic rotation"
+            );
+        }
+    }
+
+    /// A mode that is full until it is read with the engine held for the
+    /// `after`-th time more, and finish-only — its lifecycle over — from that
+    /// read on: a pause that lands while a call waits for the engine.
+    struct NarrowsWhenHeld<'a> {
+        session: &'a SessionManager,
+        after: std::sync::atomic::AtomicU64,
+        narrowed: std::sync::atomic::AtomicBool,
+    }
+
+    impl<'a> NarrowsWhenHeld<'a> {
+        const fn after(session: &'a SessionManager, held_reads: u64) -> Self {
+            Self {
+                session,
+                after: std::sync::atomic::AtomicU64::new(held_reads),
+                narrowed: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn narrowed(&self) -> bool {
+            self.narrowed.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl crate::relay::fanout::ModeSource for NarrowsWhenHeld<'_> {
+        fn mode(&self) -> DriveMode {
+            use std::sync::atomic::Ordering::SeqCst;
+            if self.session.session_is_held_for_test()
+                && self
+                    .after
+                    .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+                    .is_err()
+            {
+                self.narrowed.store(true, SeqCst);
+            }
+            if self.narrowed() {
+                DriveMode::FinishOnly
+            } else {
+                DriveMode::Full
+            }
+        }
+
+        fn stands(&self) -> bool {
+            !self.narrowed()
+        }
+    }
+
+    /// A drive's advance is made once, and then again for as long as rows
+    /// the engine could not open are untried — each time in a hold of its
+    /// own, behind a wait for the engine in which the foreground can end.
+    /// The first asks the mode again with the engine held; so does every
+    /// later one, and the call ends where the mode no longer holds: a full
+    /// advance made there could stage a commit behind a pause.
+    #[tokio::test]
+    async fn a_later_advance_of_a_drive_is_not_made_once_its_foreground_has_ended() {
+        use base64::Engine as _;
+
+        let tp = setup_two_party_circle().await;
+        let session = tp.alice.session();
+        // More rows nothing opens than one advance gives a try: the drive
+        // goes on to a second.
+        for index in 0..200_u32 {
+            let content =
+                base64::engine::general_purpose::STANDARD.encode(index.to_be_bytes().repeat(24));
+            let envelope = nostr::EventBuilder::new(nostr::Kind::Custom(445), content)
+                .tag(nostr::Tag::custom(
+                    nostr::TagKind::custom("h"),
+                    [hex::encode(tp.nostr_group_id)],
+                ))
+                .sign_with_keys(&Keys::generate())
+                .expect("sign");
+            let ingest = session
+                .process_event(&envelope)
+                .await
+                .expect("the ingest runs")
+                .ingested()
+                .expect("a well-formed envelope passes the screen");
+            assert!(
+                matches!(
+                    ingest.outcome,
+                    crate::nostr::mls::types::IngestOutcome::TransportDeferred { .. }
+                ),
+                "premise: kept by the engine to be tried again",
+            );
+        }
+        assert!(
+            session.deferred_peels_due(&tp.mls_group_id).await,
+            "premise: rows are untried",
+        );
+
+        let mode = NarrowsWhenHeld::after(session, 1);
+        session
+            .advance_for_drive_while(&tp.mls_group_id, 1, Still::new(&mode, DriveMode::Full))
+            .await
+            .expect("the first advance runs");
+        assert!(
+            mode.narrowed() && session.deferred_peels_due(&tp.mls_group_id).await,
+            "a later advance of a drive was made in the full mode after the foreground it was \
+             decided in had ended",
+        );
+
+        session
+            .advance_for_drive(&tp.mls_group_id, 1)
+            .await
+            .expect("the advance runs");
+        assert!(
+            !session.deferred_peels_due(&tp.mls_group_id).await,
+            "control: a drive whose mode stands goes on until every row has had its try",
+        );
+    }
+
+    /// A circle left waiting for the foreground stops waiting where a full
+    /// drive has completed in a claimed foreground — and nowhere else. Not in
+    /// a process nobody has claimed the foreground for, not beside a session
+    /// only started, not beside a pause; not when the foreground ended
+    /// while the drive waited for the engine to say so; and not for a circle
+    /// whose own record the drive ended on an error in — which holds no
+    /// other circle's.
+    #[tokio::test]
+    async fn only_a_drive_that_is_still_a_claimed_foregrounds_ends_a_circles_wait_for_one() {
+        let tp = setup_two_party_circle().await;
+        let session = tp.alice.session();
+        let group = &tp.mls_group_id;
+        assert!(session.await_foreground(group), "the wait is said");
+        let full = DriveMode::Full;
+        let none = HashSet::new();
+
+        session
+            .foreground_drove(Still::new(&full, full), &none)
+            .await;
+        assert!(
+            session.awaits_foreground(group),
+            "a full drive in a process nobody had claimed the foreground for ended the wait",
+        );
+        for standing in [PlaneStanding::Launched, PlaneStanding::MakesNone] {
+            session.plane_stands(1, standing);
+            session
+                .foreground_drove(Still::new(&full, full), &none)
+                .await;
+            assert!(
+                session.awaits_foreground(group),
+                "a full drive beside a plane that is not a claimed foreground ended the wait",
+            );
+        }
+
+        session.plane_stands(1, PlaneStanding::Foreground);
+        let mode = NarrowsWhenHeld::after(session, 0);
+        session
+            .foreground_drove(Still::new(&mode, DriveMode::Full), &none)
+            .await;
+        assert!(
+            mode.narrowed() && session.awaits_foreground(group),
+            "a drive whose foreground ended while it waited for the engine ended the wait",
+        );
+
+        session
+            .foreground_drove(Still::new(&full, full), &HashSet::from([group.clone()]))
+            .await;
+        assert!(
+            session.awaits_foreground(group),
+            "a full drive that ended on an error of the circle's own record ended its wait",
+        );
+        let elsewhere = HashSet::from([GroupId::from_slice(&[0x3c; 32])]);
+        session
+            .foreground_drove(Still::new(&full, full), &elsewhere)
+            .await;
+        assert!(
+            !session.awaits_foreground(group),
+            "another circle's error held this circle's wait",
+        );
+    }
+
+    /// A bridge call's mode is derived from the live plane's own lifecycle
+    /// where a plane shares the session: its caller's word can narrow it but
+    /// never widen it, so a stale "in front of its user" from a caller that
+    /// has since gone to the background makes no commit beside a plane only
+    /// started, in a burst or a pause. Only a process with no live plane goes
+    /// by the word alone.
+    #[tokio::test]
+    async fn a_bridge_calls_word_widens_nothing_beside_a_live_plane() {
+        use crate::relay::fanout::{Claimed, ModeSource};
+        let tp = setup_two_party_circle().await;
+        let session = tp.alice.session();
+        let mode = |foreground: bool| Claimed::new(&tp.alice, foreground).mode();
+        assert_eq!(
+            (mode(true), mode(false)),
+            (DriveMode::Full, DriveMode::FinishOnly),
+            "with no live plane the word is all there is",
+        );
+        for standing in [PlaneStanding::Launched, PlaneStanding::MakesNone] {
+            session.plane_stands(1, standing);
+            assert_eq!(
+                mode(true),
+                DriveMode::FinishOnly,
+                "a caller's word made commits beside a live plane that is not a claimed \
+                 foreground",
+            );
+        }
+        session.plane_stands(1, PlaneStanding::Foreground);
+        assert_eq!(
+            (mode(true), mode(false)),
+            (DriveMode::Full, DriveMode::FinishOnly),
+            "beside a claimed foreground the word still narrows, and only it widens",
+        );
+    }
+
+    /// What a session is told of the live plane beside it is the newest
+    /// plane's word, and a claim of the foreground is taken only from a plane
+    /// that is still only started: one that a pause or a stop has overtaken
+    /// lowers nothing. With no plane at all nothing has claimed the
+    /// foreground, and that is read as what it is; a plane only started has
+    /// not been claimed either, and is read as one that makes no commit.
+    #[tokio::test]
+    async fn a_planes_standing_is_the_newest_planes_and_a_late_claim_lowers_no_pause() {
+        let tp = setup_two_party_circle().await;
+        let session = tp.alice.session();
+        let reads = || {
+            (
+                if session.beside_a_plane_that_makes_none() {
+                    DriveMode::FinishOnly
+                } else {
+                    DriveMode::Full
+                },
+                session.away_from_the_foreground(),
+            )
+        };
+        assert_eq!(
+            reads(),
+            (DriveMode::Full, true),
+            "a process with no live plane was read as a claimed foreground",
+        );
+
+        session.plane_stands(2, PlaneStanding::Launched);
+        assert_eq!(
+            reads(),
+            (DriveMode::FinishOnly, true),
+            "a plane only started was read as one that makes commits",
+        );
+        session.plane_claimed(2);
+        assert_eq!(reads(), (DriveMode::Full, false), "claimed");
+
+        session.plane_stands(2, PlaneStanding::MakesNone);
+        session.plane_claimed(2);
+        assert_eq!(
+            reads(),
+            (DriveMode::FinishOnly, true),
+            "a claim that a pause had overtaken put the plane back in the foreground",
+        );
+        session.plane_stands(1, PlaneStanding::Gone);
+        assert_eq!(
+            reads(),
+            (DriveMode::FinishOnly, true),
+            "an older plane let go late lowered the hold of the one that replaced it",
+        );
+
+        session.plane_stands(3, PlaneStanding::Launched);
+        session.plane_claimed(2);
+        session.plane_stands(2, PlaneStanding::Foreground);
+        assert_eq!(
+            reads(),
+            (DriveMode::FinishOnly, true),
+            "an older plane spoke last"
+        );
+        session.plane_stands(3, PlaneStanding::Gone);
+        assert_eq!(
+            reads(),
+            (DriveMode::Full, true),
+            "a plane that is gone left its claim of the foreground behind",
+        );
+    }
+
+    /// The repair a deferred location send runs releases nothing the user
+    /// queued in a plane that makes no commit: it settles what was received
+    /// and leaves the change queued. In the full mode it gives the change its
+    /// attempt, recorded in the hold that made it.
+    #[tokio::test]
+    async fn a_bursts_deferred_send_repair_releases_no_queued_change() {
+        for burst in [true, false] {
+            let tp = setup_two_party_circle().await;
+            let payload = SessionManager::admin_policy_payload_for_test(&[
+                tp.alice_keys.public_key().to_bytes(),
+                tp.bob_keys.public_key().to_bytes(),
+            ])
+            .expect("payload");
+            tp.alice
+                .session()
+                .queue_admin_policy_intent_for_test(&tp.mls_group_id, payload)
+                .await
+                .expect("queue the intent");
+            let mode = if burst {
+                DriveMode::FinishOnly
+            } else {
+                DriveMode::Full
+            };
+
+            let (_, recorded) = tp
+                .alice
+                .repair_deferred_send_staging(
+                    &tp.mls_group_id,
+                    now_secs(),
+                    0,
+                    Still::new(&mode, mode),
+                )
+                .await;
+            let queued = tp
+                .alice
+                .session()
+                .queued_admin_policy_payloads_for_test(&tp.mls_group_id)
+                .await
+                .expect("read the queue")
+                .len();
+            if burst {
+                assert!(
+                    recorded.is_empty() && queued == 1,
+                    "a burst's deferred-send repair released a queued change",
+                );
+            } else {
+                assert_eq!(
+                    recorded.len(),
+                    1,
+                    "control: in the full mode the repair makes the queued change",
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_leave_in_the_same_epoch_is_not_an_error() {
+        // MDK answers a second leave in the epoch its proposal already covers
+        // with the typed `LeaveAlreadyRequested`. It must read as "already
+        // leaving, proceed" — an error here makes the leaver backstop and the
+        // resumed-leave path throw on every retry, for ever.
+        let tp = setup_two_party_circle().await;
+        tp.bob
+            .propose_leave(&tp.mls_group_id)
+            .await
+            .expect("non-admin bob can propose SelfRemove")
+            .expect("a first leave in this epoch proposes");
+        let again = tp
+            .bob
+            .propose_leave(&tp.mls_group_id)
+            .await
+            .expect("a second leave in the same epoch is not an error");
+        assert!(
+            again.is_none(),
+            "nothing new is published: the first proposal already covers this epoch"
+        );
     }
 
     #[tokio::test]
@@ -9565,10 +12480,7 @@ mod tests {
         let (manager, _keys, _dir) = create_test_manager();
         let member = make_member_with_relays(vec!["wss://r.test".to_string()], vec![]).await;
         let res = manager
-            .add_members(
-                &GroupId::from_slice(&[0u8; 32]),
-                &[member.key_package_event],
-            )
+            .add_members_staging(&GroupId::from_slice(&[0u8; 32]), &[member], 0)
             .await;
         assert!(res.is_err());
     }
@@ -9577,26 +12489,27 @@ mod tests {
     async fn remove_members_nonexistent_group_fails() {
         let (manager, _keys, _dir) = create_test_manager();
         let res = manager
-            .remove_members(
+            .remove_members_staging(
                 &GroupId::from_slice(&[0u8; 32]),
                 &[Keys::generate().public_key().to_hex()],
+                0,
             )
             .await;
         assert!(res.is_err());
     }
 
-    /// The `GroupCreated` publish item, for the two fixtures that drive a bare
+    /// The founding create's Welcomes, for the two fixtures that drive a bare
     /// [`SessionManager`] and so cannot call `CircleManager`'s draining
-    /// extractors.
-    fn first_group_created(effects: SessionEffects) -> (Vec<TransportMessage>, PendingStateRef) {
+    /// extractors. A founding create stages nothing, so there is no ref.
+    fn first_group_created(effects: SessionEffects) -> Vec<TransportMessage> {
         effects
             .publish
             .into_iter()
             .find_map(|work| match work {
-                PublishWork::GroupCreated { welcomes, pending } => Some((welcomes, pending)),
+                PublishWork::FoundingGroupCreated { welcomes } => Some(welcomes),
                 _ => None,
             })
-            .expect("create_group stages a GroupCreated")
+            .expect("create_group returns FoundingGroupCreated")
     }
 
     /// [`first_group_created`]'s evolution twin.
@@ -9626,219 +12539,25 @@ mod tests {
         });
         GroupEvent::MessageReceived {
             group_id: group_id.clone(),
+            message_id: crate::nostr::mls::types::MessageId::new(vec![0x5A; 32]),
             sender: crate::nostr::mls::types::MemberId::new(
                 hex::decode(sender_hex).expect("sender hex"),
             ),
             epoch: crate::nostr::mls::types::EpochId(1),
             payload: serde_json::to_vec(&rumor).expect("rumor bytes"),
+            retention: None,
+            authority: None,
         }
-    }
-
-    #[tokio::test]
-    async fn a_co_drained_auto_commit_on_the_send_path_is_recorded_not_dropped() {
-        // The engine's publish buffer is global, so a send can drain an eviction
-        // auto-commit it was not after. Dropping it would leave a live
-        // `PendingStateRef` with nothing recording the debt — the silent wedge —
-        // while rolling it back would discard a peer's removal permanently. The
-        // disposition is neither: record the obligation and leave the commit
-        // staged, so the next foreground redemption publishes it.
-        let tp = setup_two_party_circle().await;
-        let proposal = tp
-            .bob
-            .propose_leave(&tp.mls_group_id)
-            .await
-            .expect("bob proposes leave");
-        tp.alice
-            .session()
-            .process_event(&proposal)
-            .await
-            .expect("alice ingests the proposal");
-        let mut staged = None;
-        for _ in 0..40 {
-            let effects = tp
-                .alice
-                .session()
-                .advance_convergence(&tp.mls_group_id)
-                .await
-                .expect("advance convergence");
-            if let Some(item) = effects
-                .publish
-                .into_iter()
-                .find(|w| matches!(w, PublishWork::AutoPublish { .. }))
-            {
-                staged = Some(item);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        let item = staged.expect("the eviction auto-commit surfaces within the jitter window");
-
-        tp.alice
-            .surface_co_drained_auto_commits(std::slice::from_ref(&item))
-            .await;
-
-        assert!(
-            tp.alice.owed_removal_commits().contains(&tp.nostr_group_id),
-            "the obligation is RECORDED, so a session that dies here reports the \
-             wedge instead of hiding it"
-        );
-        assert!(
-            tp.alice.orphaned_removal_deferrals().is_empty(),
-            "and this session still holds the ref that can publish it"
-        );
-        assert!(
-            tp.alice
-                .encrypt_location(
-                    &tp.mls_group_id,
-                    &tp.alice_keys.public_key(),
-                    &LocationMessage::new(1.0, 2.0),
-                    60,
-                )
-                .await
-                .is_err(),
-            "nothing was rolled back: the commit is still staged, which is what \
-             keeps the removal from being dropped"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_send_extractor_itself_records_a_co_drained_eviction() {
-        // The test above proves the DISPOSITION; this one proves the send path
-        // actually asks for it. `take_app_message` is the one extractor every
-        // location publish goes through, and the engine's publish buffer is
-        // global, so an eviction for another circle rides back in the same
-        // vector. Deleting that one call leaves a live `PendingStateRef` with no
-        // durable row behind it — invisible to `orphaned_removal_deferrals`, so
-        // the wedge stops being reportable — while every other test on this path
-        // stays green, because the helper it calls still works when called
-        // directly.
-        let tp = setup_two_party_circle().await;
-        let proposal = tp
-            .bob
-            .propose_leave(&tp.mls_group_id)
-            .await
-            .expect("bob proposes leave");
-        tp.alice
-            .session()
-            .process_event(&proposal)
-            .await
-            .expect("alice ingests the proposal");
-        let mut staged = None;
-        for _ in 0..40 {
-            let effects = tp
-                .alice
-                .session()
-                .advance_convergence(&tp.mls_group_id)
-                .await
-                .expect("advance convergence");
-            if let Some(item) = effects
-                .publish
-                .into_iter()
-                .find(|w| matches!(w, PublishWork::AutoPublish { .. }))
-            {
-                staged = Some(item);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        let item = staged.expect("the eviction auto-commit surfaces within the jitter window");
-        assert!(
-            tp.alice.owed_removal_commits().is_empty(),
-            "precondition: nothing is owed yet, so the assertion below is this \
-             call's doing"
-        );
-
-        // The shape a send is handed when the buffer held someone else's
-        // eviction and no location of its own: the extractor must still have
-        // recorded the obligation before it reports the miss.
-        let co_drained = SessionEffects {
-            events: Vec::new(),
-            publish: vec![item],
-            queued: Vec::new(),
-            pending_convergence: Vec::new(),
-        };
-        tp.alice
-            .take_app_message(co_drained)
-            .await
-            .expect_err("there was no application message to extract");
-
-        assert!(
-            tp.alice.owed_removal_commits().contains(&tp.nostr_group_id),
-            "the send extractor records the obligation for a commit it did not \
-             ask for, so the ref it leaves staged is one a redemption pass can \
-             still publish"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_drained_group_evolution_is_surfaced_with_its_welcomes_noted() {
-        // O3. A queued Invite released by a convergence drain comes back as a
-        // `GroupEvolution` carrying WELCOMES, and `CommitToPublish` has nowhere
-        // to put them — pre-existing, and the one thing this fold must not do is
-        // make it silent. So the commit is surfaced (never rolled back: that
-        // would discard a membership change the engine has already queued and
-        // whose durable row it has already deleted), and the dropped welcomes
-        // get a bucketed warn. The warn's own emission is pinned at source by
-        // `security_rule_gates::drained_group_evolution_welcomes_are_never_dropped_silently`.
-        let tp = setup_two_party_circle().await;
-        let invitee = make_member_with_relays(tp.relays.clone(), vec![]).await;
-        let effects = tp
-            .alice
-            .session()
-            .add_members(
-                &tp.mls_group_id,
-                parse_key_packages(&[invitee.key_package_event]).unwrap(),
-            )
-            .await
-            .expect("stage an add");
-        let item = effects
-            .publish
-            .into_iter()
-            .find(|w| matches!(w, PublishWork::GroupEvolution { .. }))
-            .expect("an add stages a GroupEvolution");
-        let PublishWork::GroupEvolution {
-            welcomes, pending, ..
-        } = &item
-        else {
-            unreachable!("just matched")
-        };
-        assert!(
-            !welcomes.is_empty(),
-            "precondition: an add really does carry welcomes, or the arm under \
-             test is about nothing"
-        );
-        let pending = *pending;
-
-        let mut out = DecryptedIngest::default();
-        let mut resolved = HashSet::new();
-        let rolled_back = tp
-            .alice
-            .dispose_publish_work(item, BatchOrigin::Drained, &mut out, &mut resolved)
-            .await;
-
-        assert!(
-            rolled_back.is_none(),
-            "a drained evolution is NOT rolled back: the engine deleted its queued \
-             row when it released it, so a rollback destroys the change"
-        );
-        assert_eq!(
-            out.auto_commits.len(),
-            1,
-            "it is handed to the caller to publish"
-        );
-        assert_eq!(out.auto_commits[0].pending, pending);
-        // Leave the group sendable for the fixture's drop.
-        let _ = tp.alice.publish_failed(pending).await;
     }
 
     /// The batch cap stops the fold GENERATING work — it never drops a batch
     /// the engine has already handed back.
     ///
     /// Dropping one would be this whole packet's defect one layer down: the
-    /// `AutoPublish` inside carries a live `PendingStateRef` that nothing but
-    /// [`CircleManager::surface_auto_commit`] records an obligation for, so a
-    /// cap that returned early would leave a staged, unpublished, unrecorded
-    /// and unreported eviction — invisible, and permanent for that session.
+    /// eviction inside is staged in the advance's hold and recorded there, and
+    /// its handle comes back with the batch; a cap that returned early would
+    /// leave a staged eviction nobody drives — invisible, and permanent for
+    /// that session.
     /// Everything else in the pop rides the same decision: `persist_and_fold`
     /// is its first statement, so a disposal that ran is a pop that ran whole.
     ///
@@ -9866,7 +12585,8 @@ mod tests {
             .bob
             .propose_leave(&tp.mls_group_id)
             .await
-            .expect("bob proposes leave");
+            .expect("bob proposes leave")
+            .expect("a first leave in this epoch proposes");
         tp.alice
             .session()
             .process_event(&proposal)
@@ -9882,14 +12602,9 @@ mod tests {
                     vec![],
                     &CircleConfig::new(format!("Cap Filler {index}"))
                         .with_relays(tp.relays.clone()),
-                    &tp.relays,
                 )
                 .await
                 .expect("create a filler circle");
-            tp.alice
-                .confirm_published(filler.pending)
-                .await
-                .expect("confirm the filler create");
             pending_convergence.push(filler.circle.mls_group_id.clone());
         }
         // Nothing the setup left in the engine's buffers may ride into the
@@ -9906,25 +12621,15 @@ mod tests {
         // Seed + one advance per group = MAX_FOLD_BATCHES + 2 pops, so the cap
         // falls on the second-to-last and the eviction's batch is the one after
         // it. Before this fix both were discarded unread.
-        let (out, _) = tp
+        let (_, recorded) = tp
             .alice
-            .fold_resolved_publish(seed, BatchOrigin::Drained)
+            .fold_staged(seed, true, 0, Still::new(&DriveMode::Full, DriveMode::Full))
             .await;
 
-        assert_eq!(
-            out.auto_commits.len(),
-            1,
-            "the batch past the cap was still folded, so the eviction it carried \
-             reaches the caller instead of vanishing with a live ref"
-        );
         assert!(
-            tp.alice.owed_removal_commits().contains(&tp.nostr_group_id),
-            "and it was surfaced through the obligation, not around it: a staged \
-             removal commit with no durable row is a wedge nothing reports"
-        );
-        assert!(
-            tp.alice.orphaned_removal_deferrals().is_empty(),
-            "the obligation is this session's to redeem, not an orphan"
+            recorded.iter().any(|id| id.group() == &tp.mls_group_id),
+            "the batch past the cap was not folded: the eviction it carried was \
+             staged and left with no record for anything to drive"
         );
         assert!(
             !tp.alice
@@ -10069,14 +12774,10 @@ mod tests {
         let bob_hex = tp.bob_keys.public_key().to_hex();
         let commit = tp
             .alice
-            .remove_members(&tp.mls_group_id, std::slice::from_ref(&bob_hex))
+            .remove_members_for_test(&tp.mls_group_id, std::slice::from_ref(&bob_hex))
             .await
             .expect("admin removes bob");
-        assert_eq!(commit.commit_event.kind.as_u16(), 445);
-        tp.alice
-            .confirm_published(commit.pending)
-            .await
-            .expect("confirm remove");
+        assert_eq!(commit.kind.as_u16(), 445);
         let members = tp.alice.get_members(&tp.mls_group_id).await.unwrap();
         assert!(
             members.iter().all(|m| m.pubkey != bob_hex),
@@ -10088,13 +12789,13 @@ mod tests {
     async fn add_members_with_welcomes_produces_one_welcome_per_member() {
         let tp = setup_two_party_circle().await;
         let carol = make_member_with_relays(vec!["wss://carol.test".to_string()], vec![]).await;
-        let result = tp
+        let (commit, welcomes) = tp
             .alice
-            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![carol], &tp.relays)
+            .add_members_for_test(&tp.mls_group_id, &[carol])
             .await
             .expect("admin adds carol");
-        assert_eq!(result.welcome_events.len(), 1);
-        assert_eq!(result.commit_event.kind.as_u16(), 445);
+        assert_eq!(welcomes.len(), 1);
+        assert_eq!(commit.kind.as_u16(), 445);
     }
 
     #[tokio::test]
@@ -10103,7 +12804,7 @@ mod tests {
         let carol = make_member_with_relays(vec![], vec![]).await;
         let err = tp
             .alice
-            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![carol], &[])
+            .add_members_staging(&tp.mls_group_id, &[carol], 0)
             .await
             .expect_err("no delivery relay must fail closed");
         assert!(matches!(err, CircleError::MissingWelcomeRelays));
@@ -10115,7 +12816,7 @@ mod tests {
         let carol = make_member_with_relays(vec!["wss://carol.test".to_string()], vec![]).await;
         let res = tp
             .bob
-            .add_members_with_welcomes(&tp.bob_keys, &tp.mls_group_id, vec![carol], &tp.relays)
+            .add_members_staging(&tp.mls_group_id, &[carol], 0)
             .await;
         assert!(matches!(res, Err(CircleError::Mls(_))));
     }
@@ -10129,12 +12830,15 @@ mod tests {
         assert!(matches!(res, Err(CircleError::NotFound(_))));
     }
 
-    #[test]
-    fn decline_invitation_nonexistent_is_idempotent() {
+    #[tokio::test]
+    async fn decline_invitation_nonexistent_is_idempotent() {
         // Decline is a local drop + resolution sentinel; it never touches the
         // wire (Rule 10) and is idempotent even with nothing held.
         let (manager, _keys, _dir) = create_test_manager();
-        manager.decline_invitation(&EventId::all_zeros()).unwrap();
+        manager
+            .decline_invitation(&EventId::all_zeros())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -10174,10 +12878,9 @@ mod tests {
         };
         let config = CircleConfig::new("Dedup Circle").with_relays(relays.clone());
         let creation = alice
-            .create_circle(&alice_keys, vec![member], &config, &relays)
+            .create_circle(&alice_keys, vec![member], &config)
             .await
             .unwrap();
-        alice.confirm_published(creation.pending).await.unwrap();
         let welcome = &creation.welcome_events[0];
 
         bob.process_gift_wrapped_invitation(&bob_keys, &welcome.event)
@@ -10195,27 +12898,22 @@ mod tests {
     // ── Location sharing ─────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn encrypt_location_nonexistent_circle_fails() {
-        let (manager, keys, _dir) = create_test_manager();
+    async fn seal_location_nonexistent_circle_fails() {
+        let (manager, _keys, _dir) = create_test_manager();
         let loc = crate::location::LocationMessage::new(1.0, 2.0);
         let res = manager
-            .encrypt_location(
-                &GroupId::from_slice(&[0u8; 32]),
-                &keys.public_key(),
-                &loc,
-                60,
-            )
+            .seal_location_for_test(&GroupId::from_slice(&[0u8; 32]), &loc)
             .await;
         assert!(matches!(res, Err(CircleError::NotFound(_))));
     }
 
     #[tokio::test]
-    async fn encrypt_location_returns_correct_metadata() {
+    async fn seal_location_returns_correct_metadata() {
         let tp = setup_two_party_circle().await;
         let loc = crate::location::LocationMessage::new(37.7, -122.4);
         let (event, nostr_group_id, relays) = tp
             .alice
-            .encrypt_location(&tp.mls_group_id, &tp.alice_keys.public_key(), &loc, 60)
+            .seal_location_for_test(&tp.mls_group_id, &loc)
             .await
             .expect("encrypt");
         assert_eq!(event.kind.as_u16(), 445);
@@ -10224,16 +12922,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encrypt_location_and_decrypt_roundtrip() {
+    async fn seal_location_and_decrypt_roundtrip() {
         let tp = setup_two_party_circle().await;
         let loc = crate::location::LocationMessage::new(51.5, -0.12);
         let (event, _ngid, _relays) = tp
             .alice
-            .encrypt_location(&tp.mls_group_id, &tp.alice_keys.public_key(), &loc, 60)
+            .seal_location_for_test(&tp.mls_group_id, &loc)
             .await
             .expect("alice encrypts");
 
-        let results = tp.bob.decrypt_location(&event).await.expect("bob decrypts");
+        let results = tp.bob.ingest_for_test(&event).await.expect("bob decrypts");
         let (sender, content) = expect_location(&results);
         assert_eq!(sender, tp.alice_keys.public_key().to_hex());
         let decoded = crate::location::LocationMessage::from_string(content).expect("parse");
@@ -10247,12 +12945,12 @@ mod tests {
         let loc = crate::location::LocationMessage::new(10.0, 20.0);
         let (event, _n, _r) = tp
             .bob
-            .encrypt_location(&tp.mls_group_id, &tp.bob_keys.public_key(), &loc, 60)
+            .seal_location_for_test(&tp.mls_group_id, &loc)
             .await
             .expect("bob encrypts");
         let results = tp
             .alice
-            .decrypt_location(&event)
+            .ingest_for_test(&event)
             .await
             .expect("alice decrypts");
         let (sender, _content) = expect_location(&results);
@@ -10260,14 +12958,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encrypt_location_inner_event_carries_no_group_identifier() {
+    async fn seal_location_inner_event_carries_no_group_identifier() {
         // Rule 4: a published kind:445 must carry the pseudonymous
         // nostr_group_id, never the real MLS GroupId.
         let tp = setup_two_party_circle().await;
         let loc = crate::location::LocationMessage::new(1.0, 2.0);
         let (event, nostr_group_id, _relays) = tp
             .alice
-            .encrypt_location(&tp.mls_group_id, &tp.alice_keys.public_key(), &loc, 60)
+            .seal_location_for_test(&tp.mls_group_id, &loc)
             .await
             .expect("encrypt");
 
@@ -10286,7 +12984,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encrypt_location_attaches_group_retention_expiration() {
+    async fn seal_location_attaches_group_retention_expiration() {
         // DM-2 deviation #2 re-wired: kind-445 APPLICATION messages carry a
         // NIP-40 `expiration` derived from the group's `message-retention.v1`
         // component — `inner_created_at + LOCATION_MESSAGE_RETENTION_SECS`,
@@ -10296,7 +12994,7 @@ mod tests {
         let loc = crate::location::LocationMessage::new(10.0, 20.0);
         let (event, _n, _r) = tp
             .alice
-            .encrypt_location(&tp.mls_group_id, &tp.alice_keys.public_key(), &loc, 60)
+            .seal_location_for_test(&tp.mls_group_id, &loc)
             .await
             .expect("encrypt");
         let expiration = event
@@ -10315,7 +13013,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encrypt_location_publishes_neither_coordinate_nor_geohash() {
+    async fn seal_location_publishes_neither_coordinate_nor_geohash() {
         // The WHOLE serialized 445 is searched — content and every tag — because
         // the falsification this guards is a coordinate, or the geohash derived
         // from one, reaching event content OR a tag. The geohash is the half a
@@ -10324,7 +13022,7 @@ mod tests {
         let loc = crate::location::LocationMessage::new(37.7749, -122.4194);
         let (event, _n, _r) = tp
             .alice
-            .encrypt_location(&tp.mls_group_id, &tp.alice_keys.public_key(), &loc, 60)
+            .seal_location_for_test(&tp.mls_group_id, &loc)
             .await
             .expect("encrypt");
 
@@ -10357,51 +13055,44 @@ mod tests {
         let tp = setup_two_party_circle().await;
         let update = tp
             .alice
-            .update_circle_relays(&tp.mls_group_id, &["wss://relay3.test.com".to_string()])
+            .update_relays_for_test(&tp.mls_group_id, &["wss://relay3.test.com".to_string()])
             .await
             .expect("relay update");
         assert!(
             !update
-                .commit_event
                 .tags
                 .iter()
                 .any(|t| matches!(t.as_standardized(), Some(nostr::TagStandard::Expiration(_)))),
             "an MLS evolution commit must not carry a NIP-40 expiration tag"
         );
-        tp.alice
-            .confirm_published(update.pending)
-            .await
-            .expect("confirm");
     }
 
+    /// The NIP-40 `expiration` tag is not a validity signal (Marmot
+    /// `transports/nostr.md:190-192`): an authentic location whose tag has
+    /// passed is decrypted and returned on the poll path like any other, and
+    /// presentation judges its age on the MLS-authenticated inner timestamp.
     #[tokio::test]
-    async fn decrypt_location_drops_expired_event() {
-        // Receiver-side NIP-40 enforcement (defense-in-depth vs relay
-        // replay, restored post-Dark-Matter): an otherwise-valid kind-445
-        // whose expiration (+60s grace) has passed is dropped before any
-        // engine processing — no results, no error.
+    async fn expired_tag_does_not_block_ingest() {
         let tp = setup_two_party_circle().await;
         let loc = crate::location::LocationMessage::new(10.0, 20.0);
         let (event, _n, _r) = tp
             .bob
-            .encrypt_location(&tp.mls_group_id, &tp.bob_keys.public_key(), &loc, 60)
+            .seal_location_for_test(&tp.mls_group_id, &loc)
             .await
             .expect("bob encrypts");
         // Precondition: the rewrite below only maps an Expiration tag that is
-        // already there, so without one it is a silent no-op and this test would
-        // fail somewhere far from its cause. Two independent things now supply
-        // the tag — the circle's 0x8005 component and the send-side bound — so
-        // this pins the rewrite's input rather than either supplier.
+        // already there, so without one it is a silent no-op. Two independent
+        // things supply the tag — the circle's 0x8005 component and the
+        // send-side bound — so this pins the rewrite's input rather than either
+        // supplier.
         assert!(
             expiration_of(&event).is_some(),
-            "the source location 445 must carry an expiration for the replay rewrite to bite"
+            "the source location 445 must carry an expiration for the rewrite to bite"
         );
-        // Rebuild the event with its expiration forced into the past (beyond
-        // the 60s grace), re-signed by a fresh throwaway key — the guard runs
-        // before any signature/AAD validation, mirroring a replaying relay.
-        let past = nostr::Timestamp::now().as_secs()
-            - crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS
-            - 120;
+        // The same ciphertext with its expiration an hour in the past,
+        // re-signed by a throwaway key — the shape a replaying relay, or a
+        // member stamping a past expiration, produces.
+        let past = nostr::Timestamp::now().as_secs() - 3600;
         let tags: Vec<nostr::Tag> = event
             .tags
             .iter()
@@ -10415,48 +13106,16 @@ mod tests {
         let replayed = nostr::EventBuilder::new(event.kind, event.content.clone())
             .tags(tags)
             .sign_with_keys(&Keys::generate())
-            .expect("re-sign replayed event");
-        // Session-level oracle: only the receiver-side guard yields
-        // `RejectedBeforeAuth` for this event — without the guard the engine
-        // would either decrypt it (an `Ingested` with non-empty effects) or
-        // classify it `Stale { PeelFailed }` (an `Ingested` either way), so this
-        // cannot pass vacuously.
-        //
-        // The variant matters as much as the drop: the guard used to report a
-        // synthetic `Stale`, which both cursor planes read as "advance past
-        // this". Since NOTHING about this replay is authenticated — it is
-        // re-signed here by a throwaway key precisely to model that — its
-        // `created_at` must never be able to move a sync cursor.
-        let screened = tp
-            .alice
-            .session()
-            .process_event(&replayed)
-            .await
-            .expect("expired event is dropped, not an error");
-        assert!(
-            matches!(
-                screened,
-                crate::nostr::mls::types::ScreenedIngest::RejectedBeforeAuth(
-                    crate::nostr::mls::types::PreAuthRejection::Expired
-                )
-            ),
-            "the expiration guard must report a PRE-AUTHENTICATION rejection, \
-             never an engine outcome the cursor planes would advance past"
-        );
-        assert!(
-            screened.ingested().is_none(),
-            "a pre-auth rejection carries no engine effects at all"
-        );
-        // Behavior-level check through the production drain API.
+            .expect("re-sign the event");
         let results = tp
             .alice
-            .decrypt_location(&replayed)
+            .ingest_for_test(&replayed)
             .await
-            .expect("expired event is dropped, not an error");
-        assert!(
-            results.is_empty(),
-            "an expired kind-445 must be dropped before decryption"
-        );
+            .expect("an expired kind-445 is ingested, not an error");
+        let [LocationMessageResult::Location { sender_pubkey, .. }] = results.as_slice() else {
+            panic!("the authentic location is returned, alone");
+        };
+        assert_eq!(*sender_pubkey, tp.bob_keys.public_key().to_hex());
     }
 
     // ── Joined circles whose creator declared a different retention ──────────
@@ -10483,7 +13142,6 @@ mod tests {
         _creator_dir: TempDir,
         joiner: CircleManager,
         _joiner_dir: TempDir,
-        joiner_keys: Keys,
         mls_group_id: GroupId,
     }
 
@@ -10510,8 +13168,7 @@ mod tests {
             .await
             .expect("create a circle declaring the fixture's retention policy");
         let mls_group_id = creation.group_id.clone();
-        let (welcomes, pending) = first_group_created(creation.effects);
-        creator.confirm_published(pending).await.expect("confirm");
+        let welcomes = first_group_created(creation.effects);
 
         let welcome_event =
             SessionManager::transport_message_to_event(welcomes.first().expect("one welcome"))
@@ -10530,7 +13187,6 @@ mod tests {
             _creator_dir: creator_dir,
             joiner,
             _joiner_dir: joiner_dir,
-            joiner_keys,
             mls_group_id,
         }
     }
@@ -10606,12 +13262,7 @@ mod tests {
         let loc = crate::location::LocationMessage::new(51.5, -0.12);
         let (event, _n, _r) = joined
             .joiner
-            .encrypt_location(
-                &joined.mls_group_id,
-                &joined.joiner_keys.public_key(),
-                &loc,
-                60,
-            )
+            .seal_location_for_test(&joined.mls_group_id, &loc)
             .await
             .expect("encrypt");
 
@@ -10657,12 +13308,7 @@ mod tests {
         let loc = crate::location::LocationMessage::new(48.86, 2.35);
         let (event, _n, _r) = joined
             .joiner
-            .encrypt_location(
-                &joined.mls_group_id,
-                &joined.joiner_keys.public_key(),
-                &loc,
-                60,
-            )
+            .seal_location_for_test(&joined.mls_group_id, &loc)
             .await
             .expect("encrypt");
 
@@ -10713,12 +13359,7 @@ mod tests {
             let loc = crate::location::LocationMessage::new(35.68, 139.69);
             let (event, _n, _r) = joined
                 .joiner
-                .encrypt_location(
-                    &joined.mls_group_id,
-                    &joined.joiner_keys.public_key(),
-                    &loc,
-                    60,
-                )
+                .seal_location_for_test(&joined.mls_group_id, &loc)
                 .await
                 .expect("encrypt");
 
@@ -10764,12 +13405,7 @@ mod tests {
         let loc = crate::location::LocationMessage::new(1.0, 2.0);
         let (app_event, _n, _r) = joined
             .joiner
-            .encrypt_location(
-                &joined.mls_group_id,
-                &joined.joiner_keys.public_key(),
-                &loc,
-                60,
-            )
+            .seal_location_for_test(&joined.mls_group_id, &loc)
             .await
             .expect("encrypt");
 
@@ -10813,21 +13449,80 @@ mod tests {
         );
     }
 
+    /// Every kind of kind-445 a Haven circle puts on a relay, with its whole
+    /// tag list: a location carries `h` and the retention-derived `expiration`
+    /// (the circle's 0x8005 window, measured from the event's own
+    /// `created_at`), a commit and a proposal carry `h` alone, each tag once
+    /// and with one value. A peer on MDK v0.10.4 rejects anything else
+    /// (`transport-nostr-peeler/src/event.rs:78-139`).
+    #[tokio::test]
+    async fn emitted_445_tags_subset_of_h_expiration() {
+        let tp = setup_two_party_circle().await;
+        let routing = hex::encode(tp.nostr_group_id);
+        let retention = tp
+            .alice
+            .session()
+            .group_message_retention_secs(&tp.mls_group_id)
+            .await
+            .expect("read the circle's retention component")
+            .expect("a Haven circle declares 0x8005");
+
+        let loc = crate::location::LocationMessage::new(10.0, 20.0);
+        let (location, _n, _r) = tp
+            .alice
+            .seal_location_for_test(&tp.mls_group_id, &loc)
+            .await
+            .expect("encrypt");
+        let commit = tp
+            .alice
+            .update_relays_for_test(&tp.mls_group_id, &["wss://relay3.test.com".to_string()])
+            .await
+            .expect("relay update");
+        let proposal = tp
+            .bob
+            .propose_leave(&tp.mls_group_id)
+            .await
+            .expect("bob proposes to leave")
+            .expect("a first leave in this epoch proposes");
+
+        let h = vec!["h".to_string(), routing];
+        let tags = |event: &Event| -> Vec<Vec<String>> {
+            let mut tags: Vec<_> = event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+            tags.sort();
+            tags
+        };
+        assert_eq!(
+            tags(&location),
+            vec![
+                vec![
+                    "expiration".to_string(),
+                    (location.created_at.as_secs() + retention).to_string()
+                ],
+                h.clone()
+            ],
+            "a location 445 carries exactly the expiry request and the routing tag"
+        );
+        for (what, event) in [("commit", &commit), ("proposal", &proposal)] {
+            assert_eq!(event.kind, nostr::Kind::Custom(445));
+            assert_eq!(
+                tags(event),
+                vec![h.clone()],
+                "a {what} carries the routing tag alone"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn decrypt_relay_commit_surfaces_group_update() {
         let tp = setup_two_party_circle().await;
         let update = tp
             .alice
-            .update_circle_relays(&tp.mls_group_id, &["wss://relay3.test.com".to_string()])
+            .update_relays_for_test(&tp.mls_group_id, &["wss://relay3.test.com".to_string()])
             .await
             .expect("relay update");
-        tp.alice
-            .confirm_published(update.pending)
-            .await
-            .expect("confirm");
         let results = tp
             .bob
-            .decrypt_location(&update.commit_event)
+            .ingest_for_test(&update)
             .await
             .expect("bob ingests the commit");
         assert!(results
@@ -10847,6 +13542,7 @@ mod tests {
         // passing the field through unchanged, this row would read back as
         // already purged instead of retained for a day.
         let (manager, keys, _dir) = create_test_manager();
+        manager.keep_circle_row_for_test([7; 32]);
         let timestamp = 1_000_000_i64;
         let location = LastKnownLocation {
             nostr_group_id: [7; 32],
@@ -10885,16 +13581,25 @@ mod tests {
     #[tokio::test]
     async fn fresh_key_package_produces_bytes() {
         let (manager, _keys, _dir) = create_test_manager();
-        let kp = manager.fresh_key_package().await.expect("fresh kp");
+        let kp = manager
+            .session()
+            .fresh_key_package()
+            .await
+            .expect("fresh kp");
         assert!(!kp.bytes().is_empty());
     }
 
     #[tokio::test]
     async fn delete_key_package_is_idempotent() {
         let (manager, _keys, _dir) = create_test_manager();
-        let kp = manager.fresh_key_package().await.expect("fresh kp");
-        manager.delete_key_package(&kp).await.expect("first delete");
-        manager
+        let kp = manager
+            .session()
+            .fresh_key_package()
+            .await
+            .expect("fresh kp");
+        let session = manager.session();
+        session.delete_key_package(&kp).await.expect("first delete");
+        session
             .delete_key_package(&kp)
             .await
             .expect("idempotent delete");
@@ -10902,44 +13607,7 @@ mod tests {
 
     // ── Publish-before-apply (Rule 13) unknown-ref rejection ─────────────────
 
-    #[tokio::test]
-    async fn confirm_published_unknown_pending_fails() {
-        let (manager, _keys, _dir) = create_test_manager();
-        let bogus = PendingStateRef::new(u64::MAX);
-        assert!(manager.confirm_published(bogus).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn publish_failed_unknown_pending_fails() {
-        let (manager, _keys, _dir) = create_test_manager();
-        let bogus = PendingStateRef::new(u64::MAX);
-        assert!(manager.publish_failed(bogus).await.is_err());
-    }
-
     // ── Rule 14 (single-session) — RE-EXPRESSED write-site guard ─────────────
-
-    /// Recursively collects `path:line` sites where `needle` appears in a
-    /// non-comment source line under `dir`.
-    fn walk_for_sites(dir: &std::path::Path, needle: &str, sites: &mut Vec<String>) {
-        for entry in std::fs::read_dir(dir).expect("read_dir") {
-            let path = entry.expect("entry").path();
-            if path.is_dir() {
-                walk_for_sites(&path, needle, sites);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                let src = std::fs::read_to_string(&path).expect("read source");
-                for (i, line) in src.lines().enumerate() {
-                    let t = line.trim_start();
-                    // Skip comment / doc lines that merely name the type.
-                    if t.starts_with("//") || t.starts_with('*') {
-                        continue;
-                    }
-                    if line.contains(needle) {
-                        sites.push(format!("{}:{}", path.display(), i + 1));
-                    }
-                }
-            }
-        }
-    }
 
     #[test]
     fn single_account_device_session_construction_site() {
@@ -10957,29 +13625,396 @@ mod tests {
         // `SessionManager::open_session`; every other access reuses that one
         // handle (`Arc<SessionManager>`), never opening a second session.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        // Built by concatenation so THIS scanner's own source line does not
-        // contain the literal needle and thus never self-matches.
-        let needle = concat!("AccountDeviceSession", "::open(");
-        let mut sites: Vec<String> = Vec::new();
-        walk_for_sites(&root, needle, &mut sites);
-        assert_eq!(
-            sites.len(),
-            1,
-            "exactly one AccountDeviceSession::open construction site is allowed \
-             (Rule 14: one live session per DB file); found: {sites:?}"
-        );
+        let mut files = Vec::new();
+        production_sources(&root, &mut files);
+        for (needle, what) in [
+            ("AccountDeviceSession::open", "session open"),
+            ("SessionConfig::new", "session configuration"),
+        ] {
+            let sites = production_sites(&files, needle);
+            assert_eq!(
+                sites.len(),
+                1,
+                "exactly one {what} site is allowed (Rule 14: one live session per \
+                 DB file); found: {sites:?}"
+            );
+            assert!(
+                sites[0].contains("/src/nostr/mls/manager.rs:"),
+                "the single {what} site must live in SessionManager::open_session, found {}",
+                sites[0]
+            );
+        }
+        // A rename would hide a second open from those needles: the type is
+        // named only in the session manager, and never aliased.
+        let named = production_sites(&files, "AccountDeviceSession");
         assert!(
-            sites[0].replace('\\', "/").contains("nostr/mls/manager.rs"),
-            "the single session construction site must live in \
-             SessionManager::open_session, found {}",
-            sites[0]
+            named
+                .iter()
+                .all(|site| site.contains("/src/nostr/mls/manager.rs:")),
+            "`AccountDeviceSession` is named only in nostr/mls/manager.rs, found {named:?}"
+        );
+        assert_eq!(
+            aliases(&files, "AccountDeviceSession"),
+            Vec::<String>::new(),
+            "an alias would let a second session go unnamed"
         );
     }
+    /// `src` with every comment, every string and char literal's contents, and
+    /// every `#[cfg(test)]`-annotated item blanked to spaces — newlines kept, so
+    /// whatever a needle matches in the result is production code on its own
+    /// line. Only the annotated item is skipped — to its closing brace, or to
+    /// the `;` or `,` that ends an item, field, variant or arm with no body —
+    /// and never past the brace that encloses it: crate files put
+    /// `#[cfg(test)]` items mid-file (`circle/storage.rs`, `keyring_policy.rs`,
+    /// `nostr/mls/mod.rs`), and on fields and arms.
+    ///
+    /// Every ambiguity errs loud: a bare `>` or `|` in a body-less test item (a
+    /// comparison, a bitwise or) ends the skip early, so the rest of that item
+    /// is scanned as production — a needle there fails the guard visibly,
+    /// never hides.
+    fn production_text(src: &str) -> String {
+        let code: Vec<char> = strip_comments_and_literals(src).chars().collect();
+        let marker: Vec<char> = "#[cfg(test)]".chars().collect();
+        let mut out = code.clone();
+        let mut i = 0;
+        while i < code.len() {
+            if !code[i..].starts_with(&marker) {
+                i += 1;
+                continue;
+            }
+            let mut end = i + marker.len();
+            let mut braces = 0usize;
+            let mut nested = 0usize;
+            let mut angles = 0usize;
+            while end < code.len() {
+                let ch = code[end];
+                let enclosing = braces == 0 && nested == 0;
+                match ch {
+                    '{' => braces += 1,
+                    // The enclosing item's brace, paren or bracket, or the
+                    // `>` / `|` closing a generic or closure parameter list:
+                    // the annotated thing ended without a separator (a last
+                    // field, arm or parameter). Never `->` or `=>`.
+                    '}' if braces == 0 => break,
+                    ')' | ']' | '|' if enclosing => break,
+                    '<' if enclosing => angles += 1,
+                    '>' if enclosing && !matches!(code[end - 1], '-' | '=') => {
+                        if angles == 0 {
+                            break;
+                        }
+                        angles -= 1;
+                    }
+                    '}' => {
+                        braces -= 1;
+                        if braces == 0 {
+                            end += 1;
+                            break;
+                        }
+                    }
+                    '(' | '[' => nested += 1,
+                    ')' | ']' => nested = nested.saturating_sub(1),
+                    ';' | ',' if braces == 0 && nested == 0 => {
+                        end += 1;
+                        break;
+                    }
+                    _ => {}
+                }
+                end += 1;
+            }
+            for ch in &mut out[i..end] {
+                if *ch != '\n' {
+                    *ch = ' ';
+                }
+            }
+            i = end;
+        }
+        out.into_iter().collect()
+    }
+
+    /// `src` with comments and the contents of string and char literals blanked
+    /// (one space per character, newlines kept), so braces and needles inside
+    /// them neither count nor match.
+    fn strip_comments_and_literals(src: &str) -> String {
+        let c: Vec<char> = src.chars().collect();
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0;
+        while i < c.len() {
+            let ch = c[i];
+            let next = c.get(i + 1).copied();
+            let ident_before = i > 0 && (c[i - 1].is_alphanumeric() || c[i - 1] == '_');
+            i = if ch == '/' && next == Some('/') {
+                blank_until(&c, i, &mut out, |at| c[at] == '\n', 0)
+            } else if ch == '/' && next == Some('*') {
+                blank_block_comment(&c, i, &mut out)
+            } else if let Some(hashes) = raw_string_hashes(&c, i).filter(|_| !ident_before) {
+                blank_raw_string(&c, i, hashes, &mut out)
+            } else if ch == '"' {
+                out.push('"');
+                let mut at = i + 1;
+                while at < c.len() && c[at] != '"' {
+                    if c[at] == '\\' {
+                        out.push(' ');
+                        at += 1;
+                    }
+                    if at < c.len() {
+                        out.push(blank(c[at]));
+                        at += 1;
+                    }
+                }
+                blank_until(&c, at, &mut out, |_| true, 1)
+            } else if ch == '\'' && (next == Some('\\') || c.get(i + 2) == Some(&'\'')) {
+                // A char literal; a lone `'` is a lifetime and is left alone.
+                out.push('\'');
+                let start = i + if next == Some('\\') { 3 } else { 2 };
+                out.push(' ');
+                if next == Some('\\') {
+                    out.push(' ');
+                }
+                blank_until(&c, start, &mut out, |at| c[at] == '\'', 1)
+            } else {
+                out.push(ch);
+                i + 1
+            };
+        }
+        out
+    }
+
+    fn blank(ch: char) -> char {
+        if ch == '\n' {
+            '\n'
+        } else {
+            ' '
+        }
+    }
+
+    /// Blanks from `at` until `stop` holds, then copies `keep` characters as
+    /// they are (the closing delimiter); returns the index after them.
+    fn blank_until(
+        c: &[char],
+        mut at: usize,
+        out: &mut String,
+        stop: impl Fn(usize) -> bool,
+        keep: usize,
+    ) -> usize {
+        while at < c.len() && !stop(at) {
+            out.push(blank(c[at]));
+            at += 1;
+        }
+        for _ in 0..keep {
+            if at < c.len() {
+                out.push(c[at]);
+                at += 1;
+            }
+        }
+        at
+    }
+
+    fn blank_block_comment(c: &[char], mut at: usize, out: &mut String) -> usize {
+        let mut depth = 0usize;
+        while at < c.len() {
+            if c[at] == '/' && c.get(at + 1) == Some(&'*') {
+                depth += 1;
+                out.push_str("  ");
+                at += 2;
+            } else if c[at] == '*' && c.get(at + 1) == Some(&'/') {
+                depth -= 1;
+                out.push_str("  ");
+                at += 2;
+                if depth == 0 {
+                    break;
+                }
+            } else {
+                out.push(blank(c[at]));
+                at += 1;
+            }
+        }
+        at
+    }
+
+    /// The `#` count of a raw string (`r"…"`, `r#"…"#`, `br#"…"#`) opening at
+    /// `at`, if one does.
+    fn raw_string_hashes(c: &[char], at: usize) -> Option<usize> {
+        let mut j = match (c.get(at), c.get(at + 1)) {
+            (Some('r'), _) => at + 1,
+            (Some('b'), Some('r')) => at + 2,
+            _ => return None,
+        };
+        let open = j;
+        while c.get(j) == Some(&'#') {
+            j += 1;
+        }
+        (c.get(j) == Some(&'"')).then_some(j - open)
+    }
+
+    fn blank_raw_string(c: &[char], at: usize, hashes: usize, out: &mut String) -> usize {
+        let quote = c[at..]
+            .iter()
+            .position(|ch| *ch == '"')
+            .map_or(c.len(), |p| at + p);
+        out.extend(&c[at..=quote]);
+        let closes = |i: usize| c[i] == '"' && (1..=hashes).all(|h| c.get(i + h) == Some(&'#'));
+        blank_until(c, quote + 1, out, closes, hashes + 1)
+    }
+
+    /// Every `.rs` file under `dir`, recursively, as `(path, production text)`.
+    fn production_sources(dir: &std::path::Path, files: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).expect("read_dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                production_sources(&path, files);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                let src = std::fs::read_to_string(&path).expect("read source");
+                files.push((
+                    path.display().to_string().replace('\\', "/"),
+                    production_text(&src),
+                ));
+            }
+        }
+    }
+
+    /// `path:line` for every production line of `files` containing `needle`.
+    fn production_sites(files: &[(String, String)], needle: &str) -> Vec<String> {
+        files
+            .iter()
+            .flat_map(|(path, text)| {
+                text.lines()
+                    .enumerate()
+                    .filter(|(_, line)| line.contains(needle))
+                    .map(move |(i, _)| format!("{path}:{}", i + 1))
+            })
+            .collect()
+    }
+
+    /// Each case: what it pins, a source, and how many production opens the
+    /// scanner must find in it.
+    fn scanner_cases() -> Vec<(&'static str, String, usize)> {
+        let open = "SqliteAccountStorage::open_encrypted(p, k);";
+        vec![
+            ("plain production", format!("fn a() {{ {open} }}"), 1),
+            (
+                "a test fn before production is skipped alone",
+                format!("#[cfg(test)]\nfn x() {{}}\nfn a() {{ {open} }}"),
+                1,
+            ),
+            (
+                "a test use before production is skipped alone",
+                format!("#[cfg(test)]\nuse foo::bar;\nfn a() {{ {open} }}"),
+                1,
+            ),
+            (
+                "a test module is skipped",
+                format!("#[cfg(test)]\nmod tests {{\n    fn t() {{ {open} }}\n}}"),
+                0,
+            ),
+            (
+                "braces in literals do not end a test module early",
+                format!(
+                    "#[cfg(test)]\nmod tests {{\n    const A: &str = \"}}\";\n    const B: char = '}}';\n    \
+                     const C: &str = r#\"say \"}}\" here\"#;\n    fn t() {{ {open} }}\n}}\nfn a() {{ {open} }}"
+                ),
+                1,
+            ),
+            ("a commented-out open", format!("// {open}\n/* {open} */"), 0),
+            ("an open inside a string", format!("const S: &str = \"{open}\";"), 0),
+            (
+                "a lifetime is not a char literal",
+                format!("fn a<'x>(v: &'x str) {{ {open} }}"),
+                1,
+            ),
+            (
+                "a last test parameter ends at the enclosing paren",
+                format!("fn a(x: u8, #[cfg(test)] y: u8) {{ {open} }}"),
+                1,
+            ),
+            (
+                "a last test closure parameter ends at the closing bar",
+                format!("fn a() {{ let f = |x: u8, #[cfg(test)] y: u8| {{ {open} }}; }}"),
+                1,
+            ),
+            (
+                "a last test generic parameter ends at the closing angle",
+                format!("fn a<T, #[cfg(test)] U>() {{ {open} }}"),
+                1,
+            ),
+            (
+                "a generic test fn is skipped whole",
+                format!("#[cfg(test)]\nfn x<T: Into<u8>>(t: T) -> u8 {{ {open} }}"),
+                0,
+            ),
+            (
+                "a test fn's return arrow does not end it",
+                format!("#[cfg(test)]\nfn x() -> u8 {{ {open} }}"),
+                0,
+            ),
+            (
+                "a test fn's parameter commas do not end it",
+                format!("#[cfg(test)]\nfn x(a: u8, b: u8) {{ {open} }}"),
+                0,
+            ),
+            (
+                "a test field ends at its comma",
+                format!("struct S {{\n    #[cfg(test)]\n    t: u8,\n    p: u8,\n}}\nfn a() {{ {open} }}"),
+                1,
+            ),
+            (
+                "a last test field ends at the enclosing brace",
+                format!("struct S {{\n    #[cfg(test)]\n    t: u8\n}}\nfn a() {{ {open} }}"),
+                1,
+            ),
+            (
+                "a test match arm ends at its comma, its call's commas aside",
+                format!("fn a() {{ match x {{ #[cfg(test)] 1 => b(c, d), _ => {{ {open} }} }} }}"),
+                1,
+            ),
+            (
+                "an escaped quote does not end a string",
+                format!("#[cfg(test)]\nmod t {{ const A: &str = \"\\\"}}\"; fn t() {{ {open} }} }}\nfn a() {{ {open} }}"),
+                1,
+            ),
+            (
+                "escaped char literals",
+                format!("#[cfg(test)]\nmod t {{ const Q: [char; 3] = ['\\'','\\n','}}']; fn t() {{ {open} }} }}\nfn a() {{ {open} }}"),
+                1,
+            ),
+            (
+                "escaped byte literals",
+                format!("#[cfg(test)]\nmod t {{ const Q: [u8; 3] = [b'\\'',b'\\n',b'}}']; fn t() {{ {open} }} }}\nfn a() {{ {open} }}"),
+                1,
+            ),
+            (
+                "nested block comments",
+                format!("#[cfg(test)]\nmod t {{ /* /* */ }} */ fn t() {{ {open} }} }}\nfn a() {{ {open} }}"),
+                1,
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_production_scanner_skips_test_items_and_nothing_else() {
+        for (name, src, expected) in scanner_cases() {
+            let files = vec![("case.rs".to_string(), production_text(&src))];
+            assert_eq!(
+                production_sites(&files, "SqliteAccountStorage::open_encrypted").len(),
+                expected,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            production_text("#[cfg(test)]\nfn x() {}\nfn y() {}")
+                .lines()
+                .count(),
+            3,
+            "line numbers survive the blanking"
+        );
+    }
+
     #[test]
     fn every_mls_database_open_site_is_sanctioned() {
         // The Rule-14 companion to the test above. That one pins the number of
-        // hydrated SESSIONS; this one pins the number of raw CONNECTIONS to the
-        // same encrypted database, because the stuck-convergence-input sweep
+        // hydrated SESSIONS; this one pins the call sites of MDK's storage
+        // constructor (`SqliteAccountStorage::open_encrypted*`) on the same
+        // encrypted database — not every way a process could open the file
+        // (rusqlite is a direct dependency) — because the stuck-convergence-input sweep
         // needs a second one: neither `AccountDeviceSession` nor
         // `cgka_engine::Engine` exposes its `StorageProvider`, so there is no
         // public way to retire a stored message or discard a queued intent
@@ -10990,59 +14025,385 @@ mod tests {
         // message rows" is a property of the code, not of the type, so it is
         // asserted here rather than left to a reviewer. A THIRD open site is the
         // shape that would quietly break the argument.
-        // Scans PRODUCTION lines only: an in-file `#[cfg(test)] mod tests` may
-        // legitimately open a database (the wrong-key round trip in
-        // `nostr/mls/storage.rs` does), and those opens are not live sessions.
-        // Every file in this crate puts its test module last, so stopping at the
-        // first `#[cfg(test)]` is exact rather than approximate — and a file that
-        // ever stops doing so trips the "found no open sites" guard below rather
-        // than silently under-reporting.
-        fn walk_production_sites(dir: &std::path::Path, needle: &str, sites: &mut Vec<String>) {
-            for entry in std::fs::read_dir(dir).expect("read_dir") {
-                let path = entry.expect("entry").path();
-                if path.is_dir() {
-                    walk_production_sites(&path, needle, sites);
-                    continue;
-                }
-                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                    continue;
-                }
-                let src = std::fs::read_to_string(&path).expect("read source");
-                for (i, line) in src.lines().enumerate() {
-                    let t = line.trim_start();
-                    if t.starts_with("#[cfg(test)]") {
-                        break;
-                    }
-                    if t.starts_with("//") || t.starts_with('*') {
-                        continue;
-                    }
-                    if line.contains(needle) {
-                        sites.push(format!("{}:{}", path.display(), i + 1));
-                    }
-                }
+        //
+        // Every `.rs` file under `src/` is scanned as production text
+        // (`production_text`): comments and literals blanked, and only the
+        // `#[cfg(test)]` items themselves skipped — a test may legitimately open
+        // a database (the wrong-key round trip in `nostr/mls/storage.rs` does),
+        // and a test open is not a live session. The scanner is pinned by
+        // `the_production_scanner_skips_test_items_and_nothing_else`.
+        let mut files = Vec::new();
+        production_sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let in_mls = |site: &str| {
+            site.contains("/src/nostr/mls/storage.rs:")
+                || site.contains("/src/nostr/mls/manager.rs:")
+        };
+        // The wrapper's open is in the set below only because it never runs in
+        // production: its gate must sit directly on it.
+        let storage_rs = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nostr/mls/storage.rs"),
+        )
+        .expect("read storage.rs");
+        let lines: Vec<&str> = storage_rs.lines().map(str::trim).collect();
+        let wrapper = lines
+            .iter()
+            .position(|line| line.starts_with("pub fn open_encrypted_storage("))
+            .expect("the wrapper is defined");
+        assert_eq!(
+            lines[wrapper - 1],
+            "#[cfg(any(test, feature = \"test-utils\"))]",
+            "`open_encrypted_storage` is compiled for tests and test-utils builds only"
+        );
+        let halt = lines
+            .iter()
+            .position(|line| line.starts_with("pub fn set_group_unrecoverable_for_test("))
+            .expect("the halt injector is defined");
+        assert_eq!(
+            lines[halt - 1],
+            "#[cfg(any(test, feature = \"test-utils\"))]",
+            "`set_group_unrecoverable_for_test` is compiled for tests and test-utils builds only"
+        );
+
+        // The exact set, by file: `StorageConfig::open_encrypted_storage` (its
+        // definition and its one open; test and test-utils builds only, no
+        // production caller), `set_group_unrecoverable_for_test`'s open of a
+        // closed database (test and test-utils builds only) and the sweep's
+        // message store
+        // (`SessionManager::open_session`). The session's own connection is
+        // opened inside the engine by `AccountDeviceSession::open`, which
+        // `single_account_device_session_construction_site` pins. Any other
+        // `open_encrypted*` — a third open, a second wrapper, a caller of the
+        // wrapper — changes the set.
+        let mut opens: Vec<(String, usize)> = Vec::new();
+        for site in production_sites(&files, "open_encrypted") {
+            let file = site.rsplit_once(':').map_or(site.as_str(), |(f, _)| f);
+            let file = file[file.find("/src/").unwrap_or(0)..].to_string();
+            match opens.iter_mut().find(|(f, _)| *f == file) {
+                Some((_, n)) => *n += 1,
+                None => opens.push((file, 1)),
             }
         }
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let needle = concat!("SqliteAccountStorage", "::open_encrypted");
-        let mut production: Vec<String> = Vec::new();
-        walk_production_sites(&root, needle, &mut production);
-        // Both sanctioned opens live in the MLS module: the session's own
-        // storage (`StorageConfig::open_encrypted_storage`) and the sweep's
-        // message store (`SessionManager::open_session`).
+        opens.sort();
         assert_eq!(
-            production.len(),
-            2,
-            "exactly two MLS-database open sites are sanctioned (the session's storage \
-             and the sweep's message store); found: {production:?}"
+            opens,
+            vec![
+                ("/src/nostr/mls/manager.rs".to_string(), 1),
+                ("/src/nostr/mls/storage.rs".to_string(), 3),
+            ],
+            "the sanctioned MLS-database opens are the session's storage and the \
+             sweep's message store, nothing else"
         );
-        for site in &production {
-            let site = site.replace('\\', "/");
+        // A rename would hide an open from that needle, so the type may be
+        // named only where both opens live, and never aliased there.
+        let named = production_sites(&files, "SqliteAccountStorage");
+        assert!(
+            named.iter().all(|site| in_mls(site)),
+            "`SqliteAccountStorage` is named only in nostr/mls/{{manager,storage}}.rs, \
+             found {named:?}"
+        );
+        assert_eq!(
+            aliases(&files, "SqliteAccountStorage"),
+            Vec::<String>::new(),
+            "an alias would let an open go unnamed"
+        );
+    }
+
+    /// Files of `files` that rename `ty` — `use … ty as X` or `type X = …ty` —
+    /// read across line breaks.
+    fn aliases(files: &[(String, String)], ty: &str) -> Vec<String> {
+        files
+            .iter()
+            .filter(|(_, text)| {
+                let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                flat.contains(&format!("{ty} as "))
+                    || flat
+                        .split("type ")
+                        .skip(1)
+                        .any(|rest| rest.split(';').next().is_some_and(|decl| decl.contains(ty)))
+            })
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
+    /// How many commits a change staged beside its own is how many members
+    /// left a circle, how many Welcomes it carries is how many were invited,
+    /// and a handle is an MDK id: none is rendered.
+    #[test]
+    fn a_staged_changes_debug_says_only_whether_it_was_staged() {
+        use crate::nostr::mls::types::{FanoutId, MessageId};
+        let id = FanoutId::new(
+            GroupId::from_slice(&[0xab; 16]),
+            MessageId::new(vec![0xcd; 32]),
+        );
+        let change = StagedChange {
+            commit: Some(id.clone()),
+            also: vec![id.clone(), id.clone()],
+            welcomes: vec![MessageId::new(vec![0xef; 32])],
+            unrecorded: false,
+            already: false,
+        };
+        crate::assert_debug_redacted!(
+            change,
+            "StagedChange",
+            &["abab", "cdcd", "efef", "FanoutId"]
+        );
+        let alone = StagedChange {
+            commit: Some(id),
+            also: Vec::new(),
+            welcomes: Vec::new(),
+            unrecorded: false,
+            already: false,
+        };
+        assert_eq!(
+            format!("{change:?}"),
+            format!("{alone:?}"),
+            "the rendering tells how many other commits were staged",
+        );
+    }
+
+    /// "Remove again" is offered for exactly the members a DROPPED removal
+    /// named that the circle still lists: never while no dropped removal
+    /// stands, and never for a member it no longer lists — one kept from an
+    /// earlier copy of the circle.
+    #[tokio::test]
+    async fn unmade_removal_members_are_the_listed_targets_of_a_dropped_removal() {
+        use crate::nostr::mls::types::MemberId;
+        use crate::nostr::mls::{ChangeNote, CommitNotes as _};
+        let fx = setup_two_party_circle().await;
+        let group = &fx.mls_group_id;
+        let bob = MemberId::new(fx.bob_keys.public_key().to_bytes().to_vec());
+        let gone = MemberId::new(vec![0x5a; 32]);
+        let notes = &fx.alice.storage;
+        assert!(notes.keep_removal_targets(group, &[bob, gone], 3, 0));
+        assert!(
+            fx.alice.session().unmade_removal_members(group) == Some(Vec::new()),
+            "a removal kept with no dropped one standing was offered again",
+        );
+        assert!(notes.note(group, ChangeNote::QueuedRemovalDropped));
+        assert!(
+            fx.alice.session().unmade_removal_members(group)
+                == Some(vec![fx.bob_keys.public_key().to_hex()]),
+            "not exactly the listed member a dropped removal named was offered",
+        );
+    }
+
+    #[test]
+    fn aliases_are_found_across_lines() {
+        let files = |src: &str| vec![("case.rs".to_string(), production_text(src))];
+        for (name, src, found) in [
+            ("a use alias", "use x::{Store as S};", true),
+            ("a type alias", "type S =\n    x::Store;", true),
+            ("a plain use", "use x::Store;", false),
+            ("a test alias", "#[cfg(test)]\nuse x::Store as S;", false),
+        ] {
+            assert_eq!(!aliases(&files(src), "Store").is_empty(), found, "{name}");
+        }
+    }
+
+    /// Everything the sweep, its read-only counterpart, and the two test
+    /// fixtures legitimately need from the second connection.
+    /// `convergence_policy` is the READ half of `ConvergencePolicyStorage` (the
+    /// sweep reads the persisted rewind window); `put_convergence_policy` is
+    /// deliberately absent.
+    const SECOND_HANDLE_SURFACE: &[&str] = &[
+        // MDK's NIP-77 inventory and its two cursors
+        // (`storage-sqlite/src/transport_reconciliation.rs`): ids, instants
+        // and routing ids, no key material and no group state. Written at the
+        // ingest funnels for what the engine took in, and read and moved by
+        // the pass (`relay::negentropy`), each with the engine held; never
+        // sent to a relay (`T-SECOND-HANDLE`).
+        "record_transport_reconciliation_item",
+        "transport_reconciliation_inventory",
+        "transport_reconciliation_replay_cursor",
+        "advance_transport_reconciliation_replay_cursor",
+        "transport_reconciliation_route_cursor",
+        "advance_transport_reconciliation_route_cursor",
+        // GroupStorage (reads only)
+        "get_group",
+        "list_groups",
+        // LeaveRequestStorage (read only): whether the engine has minted
+        // this device's leave proposal — an epoch number and an instant, no
+        // key material and nothing a read can move — which decides whether
+        // a press renews the leave's instant (`SessionManager::leave_proposed`).
+        "leave_request",
+        // MessageStorage
+        "get_message",
+        "put_message",
+        "list_messages",
+        "update_message_state",
+        // What the engine left stranded (T-PARKED-REPLAY): the rows in one
+        // state — listed for a test's probe, and visited by MDK's own
+        // streaming call, which stops where its caller has read enough, or
+        // asked of MDK's indexed existence probe, which reads no row —
+        // and whether the engine holds a row's event as processed: reads.
+        // And the ONE release, which is MDK's own way to stop
+        // holding transport bytes without a verdict on them
+        // (`traits/src/storage.rs` 256-262). A stranded row is an event
+        // nobody opened: releasing it moves no epoch, consumes no proposal
+        // and touches no ratchet, and the engine keeps nothing of it in
+        // memory. Held to the hand-back of its circle, after the event is
+        // kept, by
+        // `the_second_connection_releases_a_row_only_in_the_hand_back_with_the_engine_held`.
+        "list_messages_in_states",
+        "visit_messages_in_states",
+        "has_messages_in_states",
+        "has_processed_transport_id",
+        "release_message_for_replay",
+        // OutboundIntentStorage. `put_queued_outbound_intent` is reachable
+        // only from the test-only `queue_admin_policy_intent_for_test`
+        // fixture, for the same reason `put_message` is here: the engine
+        // keeps `queue_outbound_intent` `pub(crate)`, so the discard's
+        // payload discriminator has no other way to be exercised directly.
+        // Still message-shaped — the intent queue holds no key material and
+        // no group state.
+        "list_queued_outbound_intents",
+        "put_queued_outbound_intent",
+        "delete_queued_outbound_intent",
+        // The READ half of the own-commit intents: what a staged commit of
+        // this device's was asked to do. Two readers, both of a record that
+        // names members or carries a key package's public half and no key:
+        // the open-time repair, which gives a record only to a commit known
+        // to be a removal, and the staging hold that retires the queued
+        // change a released commit was made from
+        // (`SessionManager::retire_released_change`, T-QUEUED-INTENT-RESTORE).
+        "own_commit_intent",
+        // The same records, listed: read by the re-issue for what branch
+        // selection withdrew (the read MDK's state-derived form makes,
+        // `SessionManager::reissue_next_withdrawn`, T-REISSUE) and by the
+        // open-time sweep for the twin of a change already made.
+        "list_own_commit_intents",
+        // And the ONE delete of such a record: a withdrawn removal naming a
+        // member whose asks are spent, consumed instead of handed back to
+        // MDK's re-issue, which would remove a member the circle invited back
+        // (`SessionManager::drop_withdrawn_removal`). It is MDK's own
+        // disposition of a record it does not queue again
+        // (`own_commit_intent.rs` 117-129); the engine reads these records
+        // from storage alone and keeps none in memory, and the delete moves no
+        // epoch, consumes no proposal and touches no ratchet. Made once, with
+        // the engine held.
+        "delete_own_commit_intent",
+        // ConvergencePolicyStorage (read half)
+        "convergence_policy",
+        // ConvergencePassStorage (read half): the engine's own record of a
+        // circle's convergence pass — a phase, deadlines, the ids it
+        // collected and whether its fairness slot is still available. No key
+        // and no group state. One reader: the test of whether a queued
+        // change is what holds a circle at its epoch
+        // (`SessionManager::reservation_freezes`), which the session API
+        // answers only through a command that can open a pass.
+        "convergence_pass",
+        // MessageStorage's pending application outputs
+        // (`acknowledge_outputs` and its test-only count). A row is a
+        // decrypted output the engine holds until the host has recorded
+        // it: no key, no group state. MDK's contract is that the HOST
+        // acknowledges, "only after their app projection has committed"
+        // (`traits/src/storage.rs:361-363`), and the session exposes no
+        // call for it (T-SECOND-HANDLE).
+        "list_pending_application_events",
+        "delete_pending_application_events",
+        // KeyPackageBundleStorage — the ONE exception, and it is key
+        // material: the stored private bundle of a `KeyPackage` whose
+        // lifetime has ended (`delete_key_package_bundle`,
+        // T-KP-EXPIRED-DELETE). MDK's own delete validates the lifetime
+        // first and so refuses exactly that bundle. Removing one cannot
+        // move an epoch, consume a proposal or touch a ratchet: a bundle
+        // belongs to no group, and the engine keeps none in memory — it
+        // reads the store when a Welcome arrives, and retires bundles
+        // through these same two calls
+        // (`cgka-engine/src/key_package.rs:315-345`). Held to one call
+        // site below so the exception cannot widen unnoticed.
+        "stored_key_package_bundles",
+        "delete_stored_key_package_bundle",
+        // OutboundFanoutStorage — BEFORE the session opens only
+        // (`settle_fanouts_before_open`), when this handle is the only one
+        // there is: held to that function by exact count below, with ONE
+        // read besides it (the listing in `retry_quarantined_group`, of rows
+        // the engine hides while their circle is quarantined). A fanout row
+        // is the frozen signed event of a commit and where each relay stands
+        // with it: no key, no MLS state. What these change is which row
+        // MDK's hydrate finds — it restores a pending commit from a group's
+        // first pending row without matching the two — so a finished
+        // rollback's row and a row that no longer describes the staged
+        // commit are deleted, and a commit staged with no row is given one
+        // (T-STALE-FANOUT, T-KILL-WINDOW). The engine has no such pass and
+        // its own calls need a hydrated session.
+        "list_outbound_fanouts",
+        "put_outbound_fanout",
+        "delete_outbound_fanout",
+        // MaintenanceStorage's group evolutions — BEFORE the session opens
+        // only, in the same pass (`clear_unrecorded_self_updates`), held there
+        // by exact count below. An evolution is MDK's durable note of a staged
+        // self-update: no key, no MLS state. One no pending fanout row records
+        // is a self-update a kill left with no record, which never left the
+        // device; deleted, hydrate clears its commit instead of restoring it
+        // under a pending ref of its own and handing it out to publish
+        // (T-STALE-FANOUT). The engine has no such pass.
+        "list_group_evolutions",
+        "delete_group_evolution",
+    ];
+
+    /// The order of the session's open, which two promises rest on. A fanout
+    /// row's event is refused by every other publish path only once the row
+    /// is in the relay layer's registry, so the registry is filled before
+    /// anything else the open does — and so before any publisher of this
+    /// process can exist. And MDK's hydrate binds a group's first pending row
+    /// to whatever commit it finds staged, so the rows are put right before
+    /// the engine opens, and what the hydrate made of them is read back the
+    /// moment it has.
+    #[test]
+    fn the_stored_fanouts_are_settled_before_the_engine_opens_and_read_back_after() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nostr/mls/manager.rs"),
+        )
+        .expect("read the session manager source");
+        let flat = tight_code(&source);
+        let body = |name: &str| {
+            let from = flat
+                .find(&format!("fn {name}("))
+                .unwrap_or_else(|| panic!("fn {name} exists"));
+            let rest = &flat[from..];
+            &rest[..rest[1..].find("fn ").map_or(rest.len(), |next| next + 1)]
+        };
+        let at = |text: &str, needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("the open no longer reads `{needle}`"))
+        };
+
+        let open = body("open_session");
+        let before = at(open, "settle_fanouts_before_open(&message_store");
+        let engine = at(open, "AccountDeviceSession::open(config)");
+        let after = at(open, "settle_fanouts_after_open(&message_store,&session)");
+        assert!(
+            before < engine && engine < after,
+            "the stored fanouts are no longer settled before the engine opens \
+             and read back once it has",
+        );
+        assert!(
+            !open[engine..after].contains("lock()"),
+            "something can run between the engine's open and the pass that \
+             reads back what its hydrate decided",
+        );
+
+        let settle = body("settle_fanouts_before_open");
+        let owned = at(settle, "crate::relay::fanout::own(");
+        for change in [
+            "delete_outbound_fanout(",
+            "put_outbound_fanout(",
+            "retire_commit(",
+        ] {
             assert!(
-                site.contains("nostr/mls/storage.rs") || site.contains("nostr/mls/manager.rs"),
-                "an MLS-database open outside the MLS module cannot be reasoned about \
-                 for Rule 14, found {site}"
+                owned < at(settle, change),
+                "a stored fanout is changed before every row's event is the driver's alone",
             );
         }
+        assert!(
+            settle[..owned].matches('?').count() == 1,
+            "something that can fail comes between reading the rows and \
+             refusing their events to every other publisher",
+        );
     }
 
     #[test]
@@ -11055,315 +14416,1257 @@ mod tests {
         // `mls_storage()`, a snapshot, a welcome, or a group WRITE would break
         // that argument instantly and silently, so the reachable surface is
         // pinned by name here.
-        // Everything the sweep, its read-only counterpart, and the two test
-        // fixtures legitimately need. `convergence_policy` is the READ half of
-        // `ConvergencePolicyStorage` (the sweep reads the persisted rewind
-        // window); `put_convergence_policy` is deliberately absent.
-        const ALLOWED: &[&str] = &[
-            // GroupStorage (reads only)
-            "get_group",
-            "list_groups",
-            // MessageStorage
-            "get_message",
-            "put_message",
-            "list_messages",
-            "update_message_state",
-            // OutboundIntentStorage. `put_queued_outbound_intent` is reachable
-            // only from the test-only `queue_admin_policy_intent_for_test`
-            // fixture, for the same reason `put_message` is here: the engine
-            // keeps `queue_outbound_intent` `pub(crate)`, so the discard's
-            // payload discriminator has no other way to be exercised directly.
-            // Still message-shaped — the intent queue holds no key material and
-            // no group state.
-            "list_queued_outbound_intents",
-            "put_queued_outbound_intent",
-            "delete_queued_outbound_intent",
-            // ConvergencePolicyStorage (read half)
-            "convergence_policy",
-        ];
 
         let source = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nostr/mls/manager.rs"),
         )
         .expect("read the session manager source");
-        let mut seen: Vec<String> = Vec::new();
-        for line in source.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") || trimmed.starts_with('*') {
-                continue;
-            }
-            for receiver in ["message_store.", "store."] {
-                let mut rest = line;
-                while let Some(at) = rest.find(receiver) {
-                    // Only a genuine method position: `.foo(` or `.foo()?`.
-                    let tail = &rest[at + receiver.len()..];
-                    let name: String = tail
-                        .chars()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .collect();
-                    if !name.is_empty() {
-                        seen.push(name);
-                    }
-                    rest = &rest[at + receiver.len()..];
-                }
-            }
+        // Read as one line with no space beside punctuation: rustfmt wraps
+        // most of these calls as `self.message_store⏎.method(`, which a
+        // per-line scan cannot see. `store.` also matches `message_store.`,
+        // so one receiver names every call exactly once.
+        let flat = tight_code(&source);
+        let seen = second_handle_calls(&flat);
+        // The receiver scan above reads only `<…store>.method(`. A call can be
+        // written three other ways, so the handle may be NAMED only where that
+        // scan follows it: as a receiver, as a helper's `store` parameter, or
+        // handed whole to such a helper.
+        assert_eq!(
+            unscanned_handle_uses(&flat),
+            Vec::<String>::new(),
+            "the second handle is used in a form the method scan cannot read \
+             (a trait-qualified call, a rebinding, a parameter not named `store`)"
+        );
+        for wrapped in [
+            "delete_pending_application_events",
+            "list_pending_application_events",
+        ] {
+            assert!(
+                seen.iter().any(|name| name == wrapped),
+                "anti-vacuity: `{wrapped}` is written across two lines in the source, \
+                 so a scan that misses it is reading line by line again"
+            );
         }
         assert!(
             !seen.is_empty(),
             "the scanner found no message-store calls at all; the sweep was renamed or \
              removed — update this guard rather than deleting it"
         );
-        let mut forbidden: Vec<&String> = seen
-            .iter()
-            .filter(|name| !ALLOWED.contains(&name.as_str()))
-            .collect();
-        forbidden.sort();
-        forbidden.dedup();
+        let forbidden = outside_the_surface(&seen);
         assert!(
             forbidden.is_empty(),
             "the sweep's second connection reached storage outside the message-shaped \
-             surface that makes it Rule-14-safe: {forbidden:?}. Reaching group writes, \
-             snapshots, welcomes or mls_storage() from a non-session connection is a \
-             confidentiality argument this test exists to protect."
+             surface that makes it Rule-14-safe: {forbidden:?} (an empty name is a call \
+             the scan could not read). Reaching group writes, snapshots, welcomes or \
+             mls_storage() from a non-session connection is a confidentiality argument \
+             this test exists to protect."
         );
-    }
-
-    // ── Owed removal publishes: what discharges one, and what must not ──────
-
-    /// A synthetic `kind:445` carrying `ngid` in its `#h` tag — the only field
-    /// [`CircleManager::owe_removal_publish`] reads, so an obligation can be
-    /// recorded without driving a real peer leave.
-    fn commit_event_for(ngid: &[u8; 32]) -> Event {
-        nostr::EventBuilder::new(nostr::Kind::Custom(445), "ciphertext")
-            .tag(nostr::Tag::custom(
-                nostr::TagKind::custom("h"),
-                [hex::encode(ngid)],
-            ))
-            .sign_with_keys(&Keys::generate())
-            .expect("sign the synthetic commit")
-    }
-
-    fn epoch_changed(group_id: &GroupId) -> GroupEvent {
-        GroupEvent::EpochChanged {
-            group_id: group_id.clone(),
-            from: crate::nostr::mls::types::EpochId(1),
-            to: crate::nostr::mls::types::EpochId(2),
-        }
-    }
-
-    /// D9, direction 1: an `EpochChanged` for a circle whose obligation this
-    /// session CANNOT redeem clears it — otherwise the next foreground open would
-    /// report a circle that has moved on as unrecoverable.
-    ///
-    /// This is the reachable case: an unrelated peer commit landing after an
-    /// orphaned park merges, which empties the proposal store and discards the
-    /// leaver's `SelfRemove`. The row then describes nothing.
-    #[tokio::test]
-    async fn an_epoch_change_clears_an_obligation_this_session_cannot_redeem() {
-        let (manager, keys, _dir) = create_test_manager();
-        let (gid, _member) = create_confirmed_circle(&manager, &keys, "Orphan").await;
-        let ngid = manager
-            .storage
-            .get_circle(&gid)
-            .unwrap()
-            .unwrap()
-            .nostr_group_id;
-        // The durable half ALONE: exactly what a session that died mid-leave
-        // leaves behind.
-        manager
-            .storage
-            .put_deferred_removal_commit(&ngid, 1)
-            .unwrap();
-        assert_eq!(manager.orphaned_removal_deferrals(), vec![ngid]);
-
-        manager.note_inbound_group_events(&[epoch_changed(&gid)]);
-
-        assert!(
-            manager.owed_removal_commits().is_empty(),
-            "an orphaned row must be cleared by an epoch move: the commit that \
-             moved it discarded the leaver's proposal, so the row is evidence of \
-             nothing and would be a false `GroupUnrecoverable`"
+        // The scan reads one file. The field is private, so only this file can
+        // name it — unless a macro or a child module elsewhere does.
+        let mut files = Vec::new();
+        production_sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
         );
-    }
-
-    /// D9, direction 2: an `EpochChanged` must NOT clear an obligation this
-    /// session can still redeem.
-    ///
-    /// The commit is STAGED and its publish is still owed. Dropping the in-memory
-    /// entry here would destroy the only handle that can publish it while leaving
-    /// the commit staged — a silent drop of the removal by another route, and
-    /// invisible because every projected read already shows the post-eviction
-    /// roster.
-    #[tokio::test]
-    async fn an_epoch_change_does_not_clear_an_obligation_this_session_owes() {
-        let (manager, keys, _dir) = create_test_manager();
-        let (gid, _member) = create_confirmed_circle(&manager, &keys, "Owed").await;
-        let ngid = manager
-            .storage
-            .get_circle(&gid)
-            .unwrap()
-            .unwrap()
-            .nostr_group_id;
-        let pending = PendingStateRef::new(4242);
-        assert!(manager.owe_removal_publish(&CommitToPublish {
-            commit_event: commit_event_for(&ngid),
-            pending,
-        }));
-        assert!(
-            manager.orphaned_removal_deferrals().is_empty(),
-            "premise: this obligation IS redeemable by this session"
-        );
-
-        manager.note_inbound_group_events(&[epoch_changed(&gid)]);
-
+        let elsewhere: Vec<String> = production_sites(&files, "message_store")
+            .into_iter()
+            .filter(|site| !site.contains("/src/nostr/mls/manager.rs:"))
+            .collect();
         assert_eq!(
-            manager.owed_removal_commits(),
-            vec![ngid],
-            "a live obligation survives an epoch move"
+            elsewhere,
+            Vec::<String>::new(),
+            "the second handle is named outside the one file this pin scans"
         );
-        assert!(
-            manager.orphaned_removal_deferrals().is_empty(),
-            "and stays REDEEMABLE — the in-memory handle is what \
-             `redeem_removal_deferrals` publishes from, so losing it would wedge \
-             the circle while reporting nothing"
-        );
-    }
-
-    /// A relay plane that OK-acks every publish and records what it was handed,
-    /// so a test can prove the ladder actually reached the confirm rung.
-    struct AckingPublisher {
-        published: Mutex<Vec<Event>>,
-    }
-
-    /// The boxed future shape `AutoCommitPublisher` returns.
-    type AckFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
-
-    impl crate::relay::auto_commit::AutoCommitPublisher for AckingPublisher {
-        fn publish_auto_commit<'a>(
-            &'a self,
-            event: &'a Event,
-            _relays: &'a [String],
-        ) -> AckFuture<'a> {
-            self.published
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(event.clone());
-            Box::pin(async { true })
-        }
-    }
-
-    /// A publish the relay ACKED whose confirm the engine then refuses must leave
-    /// the obligation standing.
-    ///
-    /// `confirm_published` can fail with the staged commit still attached: the
-    /// engine's durable transaction propagates a lock blip BEFORE its in-memory
-    /// state-machine transition, which is exactly why upstream marks the call
-    /// retry-safe. Clearing the row on that error deletes the only record of a
-    /// still-owed eviction — nothing would retry it, `orphaned_removal_deferrals`
-    /// would never name it, and the fail rung would be free to discard the
-    /// removal, which is the permanent silent drop this obligation exists to
-    /// prevent.
-    #[tokio::test]
-    async fn a_refused_confirm_keeps_the_removal_publish_owed() {
-        let (manager, keys, _dir) = create_test_manager();
-        let (gid, _member) = create_confirmed_circle(&manager, &keys, "Refused").await;
-        let ngid = manager
-            .storage
-            .get_circle(&gid)
-            .unwrap()
-            .unwrap()
-            .nostr_group_id;
-        // A ref the engine never issued, standing in for every refusal that
-        // leaves the staged commit attached.
-        assert!(manager.owe_removal_publish(&CommitToPublish {
-            commit_event: commit_event_for(&ngid),
-            pending: PendingStateRef::new(u64::MAX),
-        }));
-
-        let publisher = AckingPublisher {
-            published: Mutex::new(Vec::new()),
-        };
-        let confirmed = manager.redeem_removal_deferrals(&publisher, None).await;
-
         assert_eq!(
-            publisher
-                .published
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .len(),
+            flat.matches("delete_stored_key_package_bundle(").count(),
             1,
-            "premise: the ladder reached the wire and got its ack, so the confirm \
-             rung is what refused — without this the assertion below would also \
-             pass for a publish that never happened"
+            "a KeyPackage bundle is deleted from exactly one place, by its ref"
         );
-        assert_eq!(confirmed, 0, "a refused confirm confirms nothing");
+        for evolution_call in ["list_group_evolutions(", "delete_group_evolution("] {
+            assert_eq!(
+                flat.matches(evolution_call).count(),
+                1,
+                "`{evolution_call}` is made from one place"
+            );
+            let held = flat
+                .find("fn clear_unrecorded_self_updates(")
+                .map(|at| &flat[at..])
+                .map(|body| &body[..body[1..].find("fn ").map_or(body.len(), |next| next + 1)]);
+            assert!(
+                held.is_some_and(|body| body.contains(evolution_call)),
+                "`{evolution_call}` is made only in the pass before the session opens"
+            );
+        }
         assert_eq!(
-            manager.owed_removal_commits(),
-            vec![ngid],
-            "the obligation SURVIVES a refused confirm: the commit may still be \
-             staged, and the row is the only thing that would ever report it"
+            flat.matches("delete_own_commit_intent(").count(),
+            1,
+            "an own-commit intent is deleted from exactly one place, the drop of a \
+             withdrawn removal"
+        );
+        let held = flat
+            .find("fn reissue_next_withdrawn(")
+            .map(|at| &flat[at..])
+            .and_then(|body| {
+                body.find("drop_withdrawn_removal(")
+                    .map(|call| &body[..call])
+            });
+        assert!(
+            held.is_some_and(|before| before.contains("let Ok(mut session)=self.engine().await")),
+            "the drop of a withdrawn removal is made with the engine held"
+        );
+        assert_eq!(
+            flat.matches("stored_key_package_bundles(").count(),
+            2,
+            "the stored bundles — private key material — are read in two places: to \
+             find the one to delete, and by the test-only count"
         );
     }
 
-    /// D10: deleting a circle takes the in-memory half of its obligation with the
-    /// durable row `delete_circle` cascades.
-    #[tokio::test]
-    async fn leaving_a_circle_forgets_the_removal_publish_it_owed() {
-        let (manager, keys, _dir) = create_test_manager();
-        let (gid, _member) = create_confirmed_circle(&manager, &keys, "Left").await;
-        let ngid = manager
-            .storage
-            .get_circle(&gid)
-            .unwrap()
-            .unwrap()
-            .nostr_group_id;
-        assert!(manager.owe_removal_publish(&CommitToPublish {
-            commit_event: commit_event_for(&ngid),
-            pending: PendingStateRef::new(9),
-        }));
-
-        manager.complete_leave(&gid, DIR_NOW).await.unwrap();
-
-        assert!(
-            manager.owed_removal_commits().is_empty(),
-            "the cascade removed the durable row"
+    /// The fanout names are on the second handle's surface for the pass that
+    /// runs BEFORE the session opens, when that handle is the only one there
+    /// is. Under a live session a fanout row is the engine's to write: its
+    /// pending state hangs off it.
+    #[test]
+    fn the_second_connection_writes_a_fanout_row_only_before_the_session_opens() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nostr/mls/manager.rs"),
+        )
+        .expect("read the session manager source");
+        let flat = tight_code(&source);
+        let body = |name: &str| {
+            let from = flat
+                .find(&format!("fn {name}("))
+                .unwrap_or_else(|| panic!("fn {name} exists"));
+            let rest = &flat[from..];
+            &rest[..rest[1..].find("fn ").map_or(rest.len(), |next| next + 1)]
+        };
+        // The pass, the part of it that gives a recordless commit its trial,
+        // and the part that clears a self-update no record names, which only
+        // the pass calls.
+        let before_open = [
+            body("settle_fanouts_before_open"),
+            body("try_recordless_removals"),
+            body("retire_queued_group_changes"),
+            body("clear_unrecorded_self_updates"),
+        ]
+        .concat();
+        assert_eq!(
+            flat.matches("clear_unrecorded_self_updates(").count(),
+            2,
+            "unrecorded self-updates are cleared from somewhere other than the pass \
+             before the open",
         );
+        assert_eq!(
+            flat.matches("retire_queued_group_changes(").count(),
+            2,
+            "queued changes are retired from somewhere other than the pass before the open",
+        );
+        assert_eq!(
+            flat.matches("try_recordless_removals(").count(),
+            2,
+            "the trial is written from somewhere other than the pass before the open",
+        );
+        assert_eq!(
+            flat.matches("settle_fanouts_before_open(").count(),
+            2,
+            "the pass is called from somewhere other than the one place before the open",
+        );
+        for (name, in_the_pass, in_a_live_session) in [
+            ("list_outbound_fanouts", 3, 1),
+            ("put_outbound_fanout", 2, 0),
+            ("delete_outbound_fanout", 2, 0),
+        ] {
+            let call = format!("store.{name}(");
+            assert_eq!(
+                (
+                    before_open.matches(&call).count(),
+                    flat.matches(&call).count()
+                ),
+                (in_the_pass, in_the_pass + in_a_live_session),
+                "`{name}` is called on the second handle somewhere other than the \
+                 pass that runs before the session opens",
+            );
+        }
+        // The one read under a live session: before the engine is asked to
+        // hydrate a quarantined circle, whose rows it does not show.
+        let retry = body("retry_quarantined_group");
+        let listed = retry
+            .find("message_store.list_outbound_fanouts(")
+            .expect("the quarantine retry reads the stored fanouts");
+        let asked = retry
+            .find("retry_hydrate_quarantined_group(")
+            .expect("the quarantine retry asks the engine");
         assert!(
-            !manager.keeps_its_removal_publish_owed(PendingStateRef::new(9)),
-            "and the in-memory entry went with it: leaving it behind would pin an \
-             Event and a dead engine ref to a circle that no longer exists"
+            listed < asked && retry[listed..asked].contains("if pending{return Ok(false);}"),
+            "a quarantined circle with a pending fanout row is hydrated in a \
+             live session",
         );
     }
 
-    /// A confirmed publish discharges the obligation; a REJECTED one does not.
+    /// The writes of the second handle other pins do not already hold to a
+    /// place: the fanout writes run only in the pass before the open
+    /// (`the_second_connection_writes_a_fanout_row_only_before_the_session_opens`)
+    /// and the release only in the hand-back
+    /// (`the_second_connection_releases_a_row_only_in_the_hand_back_with_the_engine_held`).
+    const SECOND_HANDLE_WRITES: [&str; 11] = [
+        "put_message",
+        "update_message_state",
+        "put_queued_outbound_intent",
+        "delete_queued_outbound_intent",
+        "delete_own_commit_intent",
+        "delete_pending_application_events",
+        "delete_stored_key_package_bundle",
+        "record_transport_reconciliation_item",
+        "transport_reconciliation_inventory",
+        "advance_transport_reconciliation_replay_cursor",
+        "advance_transport_reconciliation_route_cursor",
+    ];
+
+    /// What holds the engine in a function's text, in [`tight_code`]'s form:
+    /// either guard taken, or a session guard handed in.
+    const ENGINE_HELD: [&str; 3] = [
+        "self.engine().await",
+        "self.reading().await",
+        "AccountDeviceSession",
+    ];
+
+    /// Every function of `flat` as `(start, name)`, in source order.
+    fn functions(flat: &str) -> Vec<(usize, String)> {
+        flat.match_indices("fn ")
+            .filter(|(at, _)| {
+                flat[..*at]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+            })
+            .filter_map(|(at, _)| {
+                let name: String = flat[at + 3..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                flat[at + 3 + name.len()..]
+                    .starts_with(['(', '<'])
+                    .then_some((at, name))
+            })
+            .collect()
+    }
+
+    /// Whether `holds` is true at `at` in `flat`: of the function around it —
+    /// read as its text before `at` and its text after `at` — or else of
+    /// every caller of that function where it calls, up the chain.
+    fn holds_up_the_chain(
+        flat: &str,
+        fns: &[(usize, String)],
+        at: usize,
+        holds: &dyn Fn(&str, &str, &str) -> bool,
+        seen: &mut Vec<String>,
+    ) -> bool {
+        let Some(index) = fns.iter().rposition(|(start, _)| *start < at) else {
+            return false;
+        };
+        let (start, name) = &fns[index];
+        let end = fns.get(index + 1).map_or(flat.len(), |(next, _)| *next);
+        if holds(name, &flat[*start..at], &flat[at..end]) {
+            return true;
+        }
+        if seen.contains(name) {
+            return true;
+        }
+        seen.push(name.clone());
+        let callers: Vec<usize> = flat
+            .match_indices(&format!("{name}("))
+            .map(|(call, _)| call)
+            .filter(|call| {
+                let before = &flat[..*call];
+                !before.ends_with("fn ")
+                    && before
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| !(c.is_alphanumeric() || c == '_'))
+            })
+            .collect();
+        !callers.is_empty()
+            && callers
+                .into_iter()
+                .all(|call| holds_up_the_chain(flat, fns, call, holds, seen))
+    }
+
+    /// Whether the engine is held at `at` in `flat`: the function around it
+    /// takes or is handed a guard before that point, or runs before the
+    /// session opens, or every caller of it holds the engine where it calls.
+    fn held_at(flat: &str, fns: &[(usize, String)], at: usize) -> bool {
+        holds_up_the_chain(
+            flat,
+            fns,
+            at,
+            &|name, before, _| {
+                ENGINE_HELD.iter().any(|guard| before.contains(guard))
+                    || name == "settle_fanouts_before_open"
+            },
+            &mut Vec::new(),
+        )
+    }
+
+    /// Every write the second connection makes runs with the engine held —
+    /// in the function that makes it, or in every function up the chain of
+    /// its callers — or before the session opens, when that connection is
+    /// the only one: no engine statement is in flight against a row this
+    /// handle writes (T-SECOND-HANDLE). A lexical reading: a guard taken
+    /// earlier in the same function counts even if dropped before the write.
+    #[test]
+    fn every_second_handle_write_runs_with_the_engine_held() {
+        let (_, production) = session_manager_texts();
+        let fns = functions(&production);
+        let mut unheld = Vec::new();
+        let mut found = Vec::new();
+        for write in SECOND_HANDLE_WRITES {
+            for (at, _) in production.match_indices(&format!("store.{write}(")) {
+                found.push(write);
+                if !held_at(&production, &fns, at) {
+                    unheld.push(text_around(&production, at, write.len()));
+                }
+            }
+        }
+        for known in [
+            "update_message_state",
+            "delete_queued_outbound_intent",
+            "delete_pending_application_events",
+            "delete_stored_key_package_bundle",
+            "record_transport_reconciliation_item",
+            "transport_reconciliation_inventory",
+            "advance_transport_reconciliation_replay_cursor",
+            "advance_transport_reconciliation_route_cursor",
+        ] {
+            assert!(
+                found.contains(&known),
+                "anti-vacuity: the scan no longer finds a `{known}` write",
+            );
+        }
+        assert_eq!(
+            unheld,
+            Vec::<String>::new(),
+            "a second-handle write can run with no engine held",
+        );
+    }
+
+    /// The engine calls that hand out a batch of effects — and with it the
+    /// engine's one-shot names of the groups owing an advance. Two names are
+    /// spelled in halves: `check_advance_convergence_sites.sh` and
+    /// `check_e2e_publish_before_apply.sh` read this file for the calls.
+    const EFFECTS_CALLS: [&str; 10] = [
+        "session.create_group(",
+        "session.ingest(",
+        "session.send(",
+        concat!("session.advance_", "convergence("),
+        "session.advance_convergence_inputs(",
+        "session.confirm_published(",
+        "session.confirm_published_fanout(",
+        "session.publish_failed(",
+        concat!("session.publish_", "failed_fanout("),
+        "session.drain()",
+    ];
+
+    /// Every batch of effects the engine hands out reaches the owed-advance
+    /// feed: the engine names a group owing an advance once, in whatever
+    /// call comes next, so a batch whose names were dropped would leave its
+    /// group to nobody (C7, T-SCHEDULER). Each call's result is passed to
+    /// `noted` or `note_effects` after it — in its own function or in every
+    /// caller up the chain — and those two are the feed's only ways in.
+    #[test]
+    fn every_engine_batch_reaches_the_owed_advance_feed() {
+        let (_, production) = session_manager_texts();
+        let fns = functions(&production);
+        let feeds = |_: &str, _: &str, after: &str| {
+            after.contains("self.noted(") || after.contains("self.note_effects(")
+        };
+        let mut unfed = Vec::new();
+        let mut found = Vec::new();
+        for call in EFFECTS_CALLS {
+            for (at, _) in production.match_indices(call) {
+                found.push(call);
+                if !holds_up_the_chain(&production, &fns, at, &feeds, &mut Vec::new()) {
+                    unfed.push(text_around(&production, at, call.len()));
+                }
+            }
+        }
+        assert_eq!(
+            {
+                let mut missing: Vec<&str> = EFFECTS_CALLS
+                    .iter()
+                    .copied()
+                    .filter(|call| !found.contains(call))
+                    .collect();
+                missing.sort_unstable();
+                missing
+            },
+            Vec::<&str>::new(),
+            "anti-vacuity: an effects call is no longer found by the scan",
+        );
+        assert_eq!(
+            unfed,
+            Vec::<String>::new(),
+            "an engine batch never reaches the owed-advance feed",
+        );
+        let generic = |name: &str| {
+            let from = production
+                .find(&format!("fn {name}<"))
+                .unwrap_or_else(|| panic!("fn {name} exists"));
+            let rest = &production[from..];
+            rest[..rest[1..].find("fn ").map_or(rest.len(), |next| next + 1)].to_string()
+        };
+        assert!(
+            generic("note_effects").contains("self.owe_advance(batch.pending());")
+                && generic("noted").contains("self.note_effects(held,batch);")
+                && production.matches("self.note_batch(").count() == 1,
+            "the feed is not the one way an engine batch is noted",
+        );
+    }
+
+    /// Every ingest of a relay's group traffic — each `session.ingest(` but
+    /// the Welcome's — notes what it took in through the one funnel that
+    /// records it for the NIP-77 pass, in the hold that took it in; and the
+    /// funnel records only what the engine took in for a group it knows, so
+    /// a refused or unpersisted object is never on record as held
+    /// (Security Rule 12). Nothing else writes the inventory but a test seam.
+    #[test]
+    fn every_ingest_funnel_records_what_it_took_in_for_negentropy() {
+        let (_, production) = session_manager_texts();
+        let fns = functions(&production);
+        let around = |at: usize| {
+            let index = fns
+                .iter()
+                .rposition(|(start, _)| *start < at)
+                .expect("a call sits in a function");
+            let end = fns
+                .get(index + 1)
+                .map_or(production.len(), |(next, _)| *next);
+            (fns[index].1.clone(), end)
+        };
+        let mut funnels = Vec::new();
+        let mut unnoted = Vec::new();
+        for (at, _) in production.match_indices("session.ingest(") {
+            let (name, end) = around(at);
+            if name == "accept_welcome" {
+                continue;
+            }
+            if !production[at..end].contains("self.note_ingested(") {
+                unnoted.push(name.clone());
+            }
+            funnels.push(name);
+        }
+        funnels.sort();
+        assert_eq!(
+            funnels,
+            ["hand_back", "ingest", "process_event_staging"],
+            "anti-vacuity: the ingest funnels are not the three this pin reads",
+        );
+        assert_eq!(
+            unnoted,
+            Vec::<String>::new(),
+            "a funnel records nothing for the pass"
+        );
+        let funnel = fn_text(&production, "note_ingested");
+        assert!(
+            funnel.contains("self.took_in(id,result)")
+                && funnel.contains("InputRejectionCategory::UnknownGroup")
+                && funnel.contains("record_transport_reconciliation_item(")
+                && funnel.contains("event.tags.expiration().is_none()"),
+            "the funnel records something the engine did not take in, for a group it does \
+             not know, or a location durably",
+        );
+        let writers: Vec<String> = production
+            .match_indices("record_transport_reconciliation_item(")
+            .map(|(at, _)| around(at).0)
+            .filter(|name| name != "note_ingested" && !name.ends_with("_for_test"))
+            .collect();
+        assert_eq!(
+            writers,
+            Vec::<String>::new(),
+            "the inventory is written outside the funnel"
+        );
+    }
+
+    /// The session manager's source as one line with no space beside
+    /// punctuation: all of it, and its production text alone.
+    fn session_manager_texts() -> (String, String) {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nostr/mls/manager.rs"),
+        )
+        .expect("read the session manager source");
+        (tight_code(&source), tight_code(&production_text(&source)))
+    }
+
+    /// The text of `fn name(` in `text`, up to the next function.
+    fn fn_text<'a>(text: &'a str, name: &str) -> &'a str {
+        let from = text
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("fn {name} exists"));
+        let rest = &text[from..];
+        &rest[..rest[1..].find("fn ").map_or(rest.len(), |next| next + 1)]
+    }
+
+    /// The one row the second connection deletes under a live session is a
+    /// stranded one, and only inside the hand-back: with the engine held
+    /// mutably by the caller, after the event is durably kept and verified
+    /// as the event its entry names, of rows in the one state a stranded row
+    /// has, in a circle the open engine reports stable — read again before
+    /// each event. A release anywhere else — before the open, outside the
+    /// hold, ahead of the keep or of the verification, or of a row in
+    /// another state — could take from the engine something its own replay
+    /// or sweep still owns, or leave an event with neither store.
     ///
-    /// Both halves matter. Without the discharge every peer-leave would leave a
-    /// durable row behind and the next foreground open would report a healthy
-    /// circle unrecoverable. And a confirm the engine refused leaves the commit
-    /// exactly as staged as it was, so keeping the row is what makes that wedge
-    /// visible rather than assumed away.
-    #[tokio::test]
-    async fn only_a_confirmed_publish_discharges_an_owed_removal() {
-        let (manager, keys, _dir) = create_test_manager();
-        let (gid, _member) = create_confirmed_circle(&manager, &keys, "Discharge").await;
-        let ngid = manager
-            .storage
-            .get_circle(&gid)
-            .unwrap()
-            .unwrap()
-            .nostr_group_id;
-        let unknown = PendingStateRef::new(u64::MAX);
-        assert!(manager.owe_removal_publish(&CommitToPublish {
-            commit_event: commit_event_for(&ngid),
-            pending: unknown,
-        }));
-
-        // The engine never issued this ref, so the confirm is rejected.
-        assert!(manager.confirm_published(unknown).await.is_err());
+    /// And the hand-back fails closed: a store that cannot say what stands
+    /// is answered for as holding, an event ends only on an answer the
+    /// engine or the refused ledger has on record, and an error ends one
+    /// only where the engine wrote its own record of the event first.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn the_second_connection_releases_a_row_only_in_the_hand_back_with_the_engine_held() {
+        let (flat, _) = session_manager_texts();
+        let body = |name: &str| fn_text(&flat, name);
+        let (one, owed) = (body("hand_back_circle"), body("owed_a_hand_back"));
+        let (beside, taken) = (body("take_up_kept"), body("take_over"));
+        let releases = ".release_message_for_replay(&record)";
         assert_eq!(
-            manager.owed_removal_commits(),
-            vec![ngid],
-            "a rejected confirm applied nothing, so nothing is discharged"
+            (
+                flat.matches("release_message_for_replay(").count(),
+                beside.matches(releases).count(),
+                taken.matches(releases).count(),
+                flat.matches("self.take_up_kept(").count(),
+                one.matches("Owed::Kept(kept)=>self.take_up_kept(group_id,kept),")
+                    .count(),
+                flat.matches("self.take_over(").count(),
+                one.matches("Owed::Row(row)=>self.take_over(group_id,*row,&mut used),")
+                    .count(),
+            ),
+            (2, 1, 1, 1, 1, 1, 1),
+            "a row is released from somewhere other than the hand-back of its circle",
         );
+        assert_eq!(
+            flat.matches("delete_message(").count(),
+            0,
+            "a stored row is deleted outright: a release is MDK's, a delete is nobody's",
+        );
+        // A row the engine still holds is rebuilt as an event, found to
+        // carry the row's id, and kept, durably, before it is released. The
+        // other release is of a row found standing beside a copy an earlier
+        // hold had already kept: the copy is parsed, verified and found to
+        // carry its entry's id first, so a copy that is no longer that event
+        // never costs the engine's row — the only other copy there is.
+        let rebuilt = "Self::transport_message_to_event(&message).ok().filter(|event|\
+                       event.id.as_bytes().as_slice()==record.id.as_slice())else{\
+                       return TakenOver::Left;};";
+        let verified = "Event::from_json(&kept.event).ok().filter(|event|{event.verify().is_ok()\
+                        &&event.id.as_bytes().as_slice()==kept.id.as_slice()})else{";
+        assert!(
+            taken
+                .find(rebuilt)
+                .zip(taken.find(".keep(group_id,&record.id,"))
+                .zip(taken.find(releases))
+                .is_some_and(|((rebuilt, kept), released)| rebuilt < kept && kept < released)
+                && beside
+                    .find(verified)
+                    .zip(beside.find(releases))
+                    .is_some_and(|(verified, released)| verified < released)
+                && beside.contains("stranded_row(&self.message_store,record,&self.examined)"),
+            "a row is released before its event is rebuilt, matched to the row's id and \
+             durably kept, a kept copy is not parsed, verified and matched to its entry's id \
+             before the row beside it is released, or one that is not a stranded row is \
+             released there",
+        );
+        let each = one.find("for owed in owed").expect("the hand-back's loop");
+        assert!(
+            one.starts_with(
+                "fn hand_back_circle(&self,session:&mut AccountDeviceSession,group_id:&GroupId,"
+            ) && one.contains("let nothing=replays_nothing(&self.message_store,session,group_id);")
+                && one[each..]
+                    .find("match replays_nothing(&self.message_store,session,group_id){")
+                    .zip(one[each..].find("self.take_up_kept(group_id,kept)"))
+                    .is_some_and(|(read, released)| read < released),
+            "the hand-back no longer runs with the engine held, or no longer asks the open \
+             engine before each event whether the circle holds a pending commit",
+        );
+        assert!(
+            one.contains(
+                "match nothing{Some(true)=>{}Some(false)=>return drain,\
+                 None=>return Drain::held(),}"
+            ) && one.contains(
+                "let Some((kept,rows,beyond))=self.owed_a_hand_back(group_id,*room)else{\
+                 return Drain::held();};"
+            ) && owed.contains("let kept=kept?;")
+                && owed.contains("let(rows,beyond)=rows?;")
+                && one[each..]
+                    .contains("{Some(true)=>{}Some(false)=>break,None=>return Drain::held(),}")
+                && taken.contains("TakenOver::Stopped{holds:self.commit_notes.durable(),"),
+            "a store the hand-back could not read or write is no longer answered for as \
+             holding: rows nobody looked at would stand with their circle neither told nor \
+             held, and the next seal would go out ahead of them",
+        );
+        assert!(
+            owed.contains(
+                "stranded_rows(&self.message_store,group_id,&kept,room,&self.examined).ok();"
+            ),
+            "the hand-back takes over a row the stranded-row test did not name, or reads \
+             more of them than the call has room for",
+        );
+        let answered = body("hand_back");
+        assert!(
+            answered.contains(
+                "if self.message_store.has_processed_transport_id(id).unwrap_or(false){\
+                 self.commit_notes.end(id);return HandedBack::Answered;}\
+                 self.commit_notes.unanswered(id);return HandedBack::Unanswered;"
+            ) && answered.contains(
+                "let taken=if refused{!unrecorded&&self.refused_ledger.record(group_id,\
+                 &[event.id],self.ledger_now_secs())}else{"
+            ) && answered.contains(
+                "if taken{self.commit_notes.end(id);}else{self.commit_notes.unanswered(id);}"
+            ) && answered.contains(
+                // An unknown route is dropped without a trace by design: no
+                // redelivery changes that, and nothing is owed for it.
+                "let refused=matches!(ingested.outcome,IngestOutcome::ResourceRefused{..})\
+                 ||(ingested.left_object_unpersisted\
+                 &&!matches!(ingested.outcome,IngestOutcome::Ignored{..}));"
+            ),
+            "an event the engine erred on ends without the engine's own record of it, or one \
+             it refused ends without its id on record in the ledger: it would be in neither \
+             store",
+        );
+        assert_eq!(
+            (
+                flat.matches("hand_back_circle(").count(),
+                body("hand_back_stranded")
+                    .matches(".hand_back_circle(session,")
+                    .count(),
+            ),
+            (2, 1),
+            "a circle's stranded rows are handed back from somewhere other than the one \
+             entry the session's engine calls make",
+        );
+        let (unopened, row, rows) = (
+            body("unopened_event"),
+            body("stranded_row"),
+            body("stranded_rows"),
+        );
+        assert!(
+            unopened.contains("if record.state!=MessageState::Retryable{return None;}")
+                && unopened.contains("payload.as_raw_transport().cloned()")
+                && unopened.contains("TransportEnvelope::GroupMessage{..}")
+                && row.contains("let Some(message)=unopened_event(&record)else{")
+                && row.contains(
+                    "Ok((!store.has_processed_transport_id(&record.id)?)\
+                     .then_some((record,message)))"
+                )
+                && rows.contains("&[MessageState::Retryable],EpochId(0),")
+                && rows.contains("if let Some(message)=unopened_event(&record){")
+                && rows.contains(
+                    "if!store.has_processed_transport_id(&record.id)?{\
+                     rows.push((record,message));}"
+                ),
+            "the stranded-row test no longer names exactly an unopened group event stored \
+             `Retryable` that the engine does not hold as processed",
+        );
+        let state = body("replays_nothing");
+        assert!(
+            state.contains("session.epoch_state(group_id),Some(EpochState::Stable{..})")
+                && state.contains("Ok(group)=>Some(!group.is_terminal()&&!group.unrecoverable),")
+                && state.contains("Err(_)=>None,"),
+            "a circle is read as holding no pending commit from something other than the \
+             open engine, or one this device is out of, or a halted one, is read so, or a \
+             store that cannot say is read as saying something",
+        );
+    }
+
+    /// The engine calls that take an event, seal, stage or advance — the
+    /// leave's own send among them, which two entries share. The full
+    /// advance's name is spelled in two halves:
+    /// `check_advance_convergence_sites.sh` reads this file for the call.
+    const ENGINE_CALLS: [&str; 5] = [
+        "session.ingest(",
+        "session.send(",
+        concat!("session.advance_", "convergence("),
+        "session.advance_convergence_inputs(",
+        "Self::send_leave(",
+    ];
+
+    /// Functions that make one of [`ENGINE_CALLS`] and are not entries, each
+    /// asked only where a hand-back has already run: the hand-back's own
+    /// ingest; the send of an admin change or a self-update; the inputs-only advance that
+    /// collects what a failed advance left; the leave's send, which its two
+    /// entries make after their own hand-back. And a Welcome, which is no
+    /// circle's event: it joins one this device holds nothing for.
+    const NOT_ENTRIES: [&str; 6] = [
+        "hand_back",
+        "send_admin_policy_now",
+        "send_self_update_now",
+        "after_a_failed_advance",
+        "send_leave",
+        "accept_welcome",
+    ];
+
+    /// Every session entry that asks the engine to take an event, seal,
+    /// stage or advance hands stranded input back first, and puts what came
+    /// back ahead of its own batch or keeps it for the next — enumerated
+    /// from the source, so a new entry that does not fails here. An entry
+    /// that skipped it would take or seal something new of a circle before
+    /// what that circle was owed; one that dropped it would lose what the
+    /// engine applied.
+    ///
+    /// Three limits of this scan, recorded until they are closed (W9k):
+    ///
+    /// 1. It reads a call written `session.<call>(`. One written through the
+    ///    guard without a binding — `self.engine().await?.<call>(` — is not
+    ///    seen, and would pass with no hand-back.
+    /// 2. `prepare_convergence_cutoff_delay_ms` is not one of
+    ///    [`ENGINE_CALLS`]: it reads a deadline, and MDK may open a
+    ///    convergence pass while answering. It is asked with no hand-back
+    ///    first.
+    /// 3. `accept_welcome` is exempt by NAME ([`NOT_ENTRIES`]) while its
+    ///    body ingests: right for a Welcome, which joins a circle this
+    ///    device holds nothing for, and unchecked for anything else that
+    ///    function comes to take.
+    #[test]
+    fn every_entry_that_takes_seals_stages_or_advances_hands_stranded_input_back_first() {
+        let (_, production) = session_manager_texts();
+        let mut entries = Vec::new();
+        for (at, _) in production.match_indices("fn ") {
+            let rest = &production[at..];
+            let entry = &rest[..rest[1..].find("fn ").map_or(rest.len(), |next| next + 1)];
+            let name = entry[3..]
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .next()
+                .unwrap_or_default();
+            let Some(asked) = ENGINE_CALLS
+                .iter()
+                .filter_map(|call| entry.find(call))
+                .min()
+            else {
+                continue;
+            };
+            if NOT_ENTRIES.contains(&name) || name.ends_with("_for_test") {
+                continue;
+            }
+            assert!(
+                entry
+                    .find("=Box::pin(self.hand_back_stranded(")
+                    .is_some_and(|handed| handed < asked)
+                    && (entry.contains("self.behind_what_was_handed_back(ahead,")
+                        || entry.contains("self.keep_handed_back(ahead)")),
+                "`{name}` asks the engine before it has handed stranded input back, or does \
+                 not put what came back ahead of its own batch",
+            );
+            entries.push(name);
+        }
+        assert_eq!(
+            entries,
+            [
+                "leave_group",
+                "leave_group_staging",
+                "send_inner",
+                "departure_holds_a_send",
+                "ingest",
+                "process_event_staging",
+                "advance_once_for_receive",
+                "advance_convergence",
+                // The staging send's hold, with its hand-back, behind the
+                // one-line `send_staging` and decision 180's ask, which
+                // takes back in that hold what the engine queued.
+                "send_staging_keeping",
+                "send_location_staging",
+                "advance_once_for_drive",
+                "settle_inputs_for_drive",
+            ],
+            "the entries that ask the engine to take, seal, stage or advance are not the ones \
+             this gate was written against",
+        );
+        for caller in ["change_admin_policy_staging", "send_admin_policy"] {
+            let caller_body = fn_text(&production, caller);
+            assert!(
+                caller_body
+                    .find("=Box::pin(self.hand_back_stranded(")
+                    .zip(caller_body.find(".send_admin_policy_now("))
+                    .is_some_and(|(handed, sent)| handed < sent)
+                    && caller_body.contains("self.behind_what_was_handed_back(ahead,"),
+                "`{caller}` sends an admin change before it has handed stranded input back",
+            );
+        }
+        for caller in [
+            "repair_self_update_staging",
+            "post_join_self_update_staging",
+        ] {
+            let caller_body = fn_text(&production, caller);
+            assert!(
+                caller_body
+                    .find("=Box::pin(self.hand_back_stranded(")
+                    .zip(caller_body.find(".send_self_update_now("))
+                    .is_some_and(|(handed, sent)| handed < sent)
+                    && caller_body.contains("self.behind_what_was_handed_back(ahead,"),
+                "`{caller}` sends a self-update before it has handed stranded input back",
+            );
+        }
+        assert_eq!(
+            production.matches("send_self_update_now(").count(),
+            3,
+            "a self-update is sent from somewhere other than its two callers, each of \
+             which hands stranded input back first",
+        );
+        assert_eq!(
+            (
+                production.matches("send_admin_policy_now(").count(),
+                production.matches("self.after_a_failed_advance(").count(),
+                fn_text(&production, "advance_once_for_drive")
+                    .matches("self.after_a_failed_advance(")
+                    .count(),
+                production.matches("self.hand_back(session,").count(),
+                fn_text(&production, "hand_back_circle")
+                    .matches("self.hand_back(session,")
+                    .count(),
+            ),
+            // `send_admin_policy_now`: its definition and its two callers.
+            (3, 1, 1, 1, 1),
+            "an admin change is sent, a failed advance is collected, or one event is handed \
+             back from somewhere no hand-back has run",
+        );
+    }
+
+    /// A stored rolled-back record is finished before any engine call for
+    /// its circle because the engine can be borrowed mutably through one
+    /// accessor only, which finishes it or refuses (T-ROLLBACK-RESURRECT).
+    ///
+    /// The compiler holds most of that: the session's lock is a private
+    /// field of `engine_gate::Gated`, and so is the lock guard inside what
+    /// either accessor hands out, so nothing outside that module can lock
+    /// the session, take a guard apart, or reach the lock back through one
+    /// (`MutexGuard::mutex`); and what is owed can be raised only by a caller
+    /// that holds the session. What the compiler cannot hold
+    /// is pinned here: the shape inside the module, and that the session
+    /// manager reaches the gate through its own two accessors — the gated
+    /// one always with the finisher that retires.
+    #[test]
+    fn the_engine_is_borrowed_mutably_through_the_gated_accessor_alone() {
+        let read = |file: &str| {
+            let source = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file),
+            )
+            .unwrap_or_else(|_| panic!("read {file}"));
+            tight_code(&production_text(&source))
+        };
+        let body_of = |flat: &str, name: &str| {
+            let from = flat
+                .find(&format!("fn {name}"))
+                .unwrap_or_else(|| panic!("fn {name} exists"));
+            let rest = &flat[from..];
+            rest[..rest[1..].find("fn ").map_or(rest.len(), |next| next + 1)].to_string()
+        };
+
+        let gate = read("src/nostr/mls/engine_gate.rs");
+        assert!(
+            gate.contains("session:Mutex<S>,")
+                && !gate.contains("pub session")
+                && !gate.contains("pub(super)session")
+                && !gate.contains("pub(crate)session"),
+            "the session's lock can be named outside the gate's module",
+        );
+        assert!(
+            gate.contains("struct Reading<") && !gate.contains("(pub"),
+            "the read guard can be taken apart outside the gate's module",
+        );
+        assert!(
+            gate.matches("DerefMut").count() == 1
+                && gate.contains("impl<S>std::ops::DerefMut for Engine<'_,S>"),
+            "the read-only guard can be borrowed mutably",
+        );
+        assert!(
+            gate.contains("struct Engine<'a,S>(MutexGuard<'a,S>);")
+                && gate.contains("->Result<Engine<'_,S>,Held>")
+                && gate.matches("MutexGuard<").count() == 2,
+            "the gated accessor hands out tokio's own guard, which gives the lock back \
+             (`MutexGuard::mutex`), or a guard whose inside can be named",
+        );
+        assert!(
+            gate.contains("fn owe_finish(&self,_held:&S)")
+                && gate.contains("fn is_held(&self)->bool{self.session.try_lock().is_err()}")
+                && gate.matches("try_lock()").count() == 1,
+            "what is owed can be raised by a caller that does not hold the session, or the \
+             gate's test seam does more than ask whether the lock is held",
+        );
+        assert_eq!(
+            gate.matches(".lock()").count(),
+            2,
+            "the session is locked somewhere other than the gate's two accessors",
+        );
+        assert!(body_of(&gate, "reading").contains("Reading(self.session.lock().await)"));
+        let gated = body_of(&gate, "engine");
+        let locked = gated.find("self.session.lock().await");
+        let checked = gated.find("if self.unfinished.load(");
+        let refused = gated.find("return Err(Held);");
+        let handed = gated.rfind("Ok(Engine(session))");
+        assert!(
+            locked.is_some() && locked < checked && checked < refused && refused < handed,
+            "the gated accessor hands the engine over before it has finished or refused",
+        );
+        assert_eq!(
+            (
+                gate.matches("Reading(").count(),
+                gate.matches("Engine(").count()
+            ),
+            (1, 1),
+            "a guard is built outside its accessor",
+        );
+
+        let manager = read("src/nostr/mls/manager.rs");
+        assert_eq!(
+            (
+                manager.matches("self.session.").count(),
+                manager.matches("self.session.reading().await").count(),
+                manager
+                    .matches("self.session.engine(|session|self.finish_rollbacks(session))")
+                    .count(),
+                manager.matches("self.session.owe_finish(session)").count()
+                    + manager.matches("self.session.owe_finish(&session)").count(),
+                // A test's question of whether the lock is held: a try-lock
+                // that borrows nothing.
+                manager.matches("self.session.is_held()").count(),
+            ),
+            (5, 1, 1, 2, 1),
+            "the session is reached some other way than through its two accessors, or the \
+             gated one is given a finisher that does not retire",
+        );
+        assert!(
+            body_of(&manager, "finish_rollbacks").contains("retire_commit(")
+                && body_of(&manager, "finish_rollbacks").contains("finish_rolled_back_in("),
+            "the gate's finisher no longer retires what a rollback left stored as sent",
+        );
+        assert_eq!(
+            (
+                manager.matches(".await.held()").count(),
+                body_of(&manager, "hold_session_for_test")
+                    .matches("self.reading().await.held()")
+                    .count()
+            ),
+            (1, 1),
+            "the read-only guard's lock is taken out of it outside the one test seam",
+        );
+    }
+
+    /// The code of `source` — comments and the contents of literals blanked —
+    /// on one line, with no space beside punctuation. Blanked by the lexer
+    /// the production scanner uses, not line by line: a comment can then
+    /// neither hide the code after it nor be read as code.
+    fn tight_code(source: &str) -> String {
+        let spaced = strip_comments_and_literals(source)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let is_punct = |c: char| ".(),&:;={}<>|!?".contains(c);
+        let chars: Vec<char> = spaced.chars().collect();
+        chars
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                **c != ' '
+                    || !(i.checked_sub(1).is_some_and(|p| is_punct(chars[p]))
+                        || chars.get(i + 1).is_some_and(|n| is_punct(*n)))
+            })
+            .map(|(_, c)| *c)
+            .collect()
+    }
+
+    /// The method named after every `…store.` in `flat`. An empty name is
+    /// not a call — `store..` builds a range that carries the handle away —
+    /// and is reported, never skipped.
+    fn second_handle_calls(flat: &str) -> Vec<String> {
+        flat.split("store.")
+            .skip(1)
+            .map(|tail| {
+                tail.chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The calls of `seen` outside [`SECOND_HANDLE_SURFACE`], once each.
+    fn outside_the_surface(seen: &[String]) -> Vec<&String> {
+        let mut forbidden: Vec<&String> = seen
+            .iter()
+            .filter(|name| !SECOND_HANDLE_SURFACE.contains(&name.as_str()))
+            .collect();
+        forbidden.sort();
+        forbidden.dedup();
+        forbidden
+    }
+
+    /// How a helper declares the second handle, in [`tight_code`]'s form.
+    const STORE_PARAM: &str = "(store:&SqliteAccountStorage";
+
+    /// The text of `flat` around the `len` bytes at `at`, for a finding.
+    fn text_around(flat: &str, at: usize, len: usize) -> String {
+        let from = flat[..at]
+            .char_indices()
+            .rev()
+            .nth(30)
+            .map_or(0, |(i, _)| i);
+        let to = flat[at + len..]
+            .char_indices()
+            .nth(12)
+            .map_or(flat.len(), |(i, _)| at + len + i);
+        flat[from..to].to_string()
+    }
+
+    /// Every place a name of `helpers` means something other than that
+    /// helper. A local or a second free function under the name would be
+    /// called exactly like the helper; a method of that name is not — it is
+    /// never called unqualified.
+    fn helper_name_misuses(flat: &str, helpers: &[String]) -> Vec<String> {
+        let ident = |c: char| c.is_alphanumeric() || c == '_';
+        let mut bad = Vec::new();
+        for name in helpers {
+            for (at, _) in flat.match_indices(name.as_str()) {
+                let (before, after) = (&flat[..at], &flat[at + name.len()..]);
+                if before.ends_with(ident) || after.starts_with(ident) {
+                    continue;
+                }
+                let allowed = if before.ends_with("fn ") {
+                    // `(selfish: …` is a parameter, not a receiver.
+                    after.starts_with(STORE_PARAM)
+                        || ["(&self", "(&mut self", "(self"].iter().any(|receiver| {
+                            after
+                                .strip_prefix(receiver)
+                                .is_some_and(|rest| rest.starts_with([')', ',', ':']))
+                        })
+                } else {
+                    after.starts_with('(')
+                };
+                if !allowed {
+                    bad.push(text_around(flat, at, name.len()));
+                }
+            }
+        }
+        bad
+    }
+
+    /// Every place `flat` names the second storage handle in a form the
+    /// receiver scan does not follow, as the text around it.
+    ///
+    /// Allowed, and nothing else: the field and its one constructor; a method
+    /// receiver (`…store.`); a parameter spelled `store: &SqliteAccountStorage`;
+    /// and the handle passed first, unqualified, to a function that declares
+    /// exactly that parameter first — whose name must mean that function
+    /// wherever it appears. A macro definition, an `include!` and a `#[path]`
+    /// are findings wherever they are: each puts code where the scan is not.
+    fn unscanned_handle_uses(flat: &str) -> Vec<String> {
+        const TYPE: &str = "SqliteAccountStorage";
+        let ident = |c: char| c.is_alphanumeric() || c == '_';
+        // The identifier `before` ends with, when it is called unqualified.
+        let callee = |before: &str| -> Option<String> {
+            let name: String = before
+                .chars()
+                .rev()
+                .take_while(|c| ident(*c))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let qualified = before[..before.len() - name.len()].ends_with([':', '.']);
+            (!name.is_empty() && !qualified).then_some(name)
+        };
+        let helpers: Vec<String> = flat
+            .match_indices(STORE_PARAM)
+            .filter_map(|(at, _)| {
+                let name = callee(&flat[..at])?;
+                flat[..at - name.len()].ends_with("fn ").then_some(name)
+            })
+            .collect();
+        let to_helper = |before: &str| {
+            before
+                .strip_suffix('(')
+                .and_then(callee)
+                .is_some_and(|name| helpers.contains(&name))
+        };
+        let around = |at: usize, len: usize| text_around(flat, at, len);
+
+        let mut bad = Vec::new();
+        for (at, _) in flat.match_indices("message_store") {
+            let (before, after) = (&flat[..at], &flat[at + "message_store".len()..]);
+            let allowed = after.starts_with('.')
+                || after.starts_with(":SqliteAccountStorage,")
+                || (before.ends_with("let ") && after.starts_with("=SqliteAccountStorage::open_"))
+                || before
+                    .strip_suffix("&self.")
+                    .or_else(|| before.strip_suffix('&'))
+                    .is_some_and(to_helper)
+                // The constructor's field initialiser.
+                || (before.ends_with("preview_peeler,") && after.starts_with(",_live_guard:"));
+            if !allowed {
+                bad.push(around(at, "message_store".len()));
+            }
+        }
+        for (at, _) in flat.match_indices("store") {
+            let (before, after) = (&flat[..at], &flat[at + "store".len()..]);
+            // Part of a longer name, or a method called `store`.
+            if before.ends_with(|c: char| ident(c) || c == '.') || after.starts_with(ident) {
+                continue;
+            }
+            let allowed = after.starts_with('.')
+                || after.starts_with(":&SqliteAccountStorage")
+                || to_helper(before);
+            if !allowed {
+                bad.push(around(at, "store".len()));
+            }
+        }
+        for (at, _) in flat.match_indices(TYPE) {
+            let (before, after) = (&flat[..at], &flat[at + TYPE.len()..]);
+            let allowed = before.ends_with("(store:&")
+                || before.ends_with(",store:&")
+                || before.ends_with("message_store:")
+                || (before.ends_with("let message_store=") && after.starts_with("::open_"))
+                || before.ends_with("use storage_sqlite::{SqlCipherKey,");
+            if !allowed {
+                bad.push(around(at, TYPE.len()));
+            }
+        }
+        // A call written through one of these is not in the text scanned.
+        for unreadable in ["macro_rules!", "include!(", "#[path"] {
+            if let Some(at) = flat.find(unreadable) {
+                bad.push(around(at, unreadable.len()));
+            }
+        }
+        bad.extend(helper_name_misuses(flat, &helpers));
+        bad
+    }
+
+    /// Uses of the second handle the scans can follow, as `(what, code)`.
+    fn followed_handle_forms() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (
+                "a receiver, wrapped",
+                "self.message_store\n    .get_group(id);",
+            ),
+            (
+                "the handle handed to a helper",
+                "sweep(&self.message_store);",
+            ),
+            (
+                "a helper handing it on",
+                "fn outer(store: &SqliteAccountStorage) { sweep(store); }",
+            ),
+            (
+                "a read assigned through a dereference",
+                "*n = self.message_store.list_groups()?;",
+            ),
+            (
+                "a method under the helper's name, calling it",
+                "impl M { fn sweep(&self) { sweep(&self.message_store); } }\nm.sweep();",
+            ),
+            (
+                "a comment between the handle and an allowed read",
+                "self.message_store. /* c */ get_group(id);",
+            ),
+            (
+                "a write named only in a comment or a string",
+                "self.message_store.get_group(id); // not store.put_group(g)\nlet s = \"store.put_group\";",
+            ),
+        ]
+    }
+
+    /// Uses of the second handle the scans must refuse, as `(what, code)`.
+    fn unfollowed_handle_forms() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (
+                "a trait-qualified call",
+                "GroupStorage::put_group(\n    &self.message_store,\n    g,\n);",
+            ),
+            (
+                "a rebinding",
+                "let h = &self.message_store;\nh.put_group(g);",
+            ),
+            (
+                "a rebinding inside a helper",
+                "fn outer(store: &SqliteAccountStorage) { let h = store; h.put_group(g); }",
+            ),
+            (
+                "a parameter under another name",
+                "fn peek(db: &SqliteAccountStorage) { db.put_group(g); }",
+            ),
+            (
+                "the handle handed to something else",
+                "other(&self.message_store);",
+            ),
+            (
+                "a method path on the helper's name",
+                "Thing::sweep(&self.message_store);",
+            ),
+            (
+                "a write assigned through a dereference",
+                "*n = self.message_store.put_group(g)?;",
+            ),
+            (
+                "a trait-qualified call assigned through a dereference",
+                "*n = GroupStorage::list_groups(&self.message_store)?;",
+            ),
+            (
+                "a comment between the handle and a write",
+                "self.message_store. /* c */ put_group(g);",
+            ),
+            (
+                "a call on the line a block comment makes look commented out",
+                "let _ = /*\n// */ GroupStorage::list_groups(&self.message_store);",
+            ),
+            (
+                "a range that carries the handle away",
+                "fn outer(store: &SqliteAccountStorage) { let r = store..store; r.start.put_group(g); }",
+            ),
+            (
+                "a method that only shares the helper's name",
+                "x.sweep(&self.message_store);",
+            ),
+            (
+                "a local that shadows the helper",
+                "let sweep = <_ as GroupStorage>::put_group;\nsweep(&self.message_store, g);",
+            ),
+            (
+                "a second function under the helper's name",
+                "fn inner() { fn sweep(s: &impl GroupStorage) { s.put_group(g); } }",
+            ),
+            (
+                "a second function whose parameter only begins with `self`",
+                "fn inner() { fn sweep(selfish: &impl GroupStorage) { selfish.put_group(g); } }",
+            ),
+            (
+                "a macro that could write the call",
+                "macro_rules! via { ($s:expr) => { $s.list_groups() }; }",
+            ),
+            (
+                "code included from another file",
+                "include!(\"calls.rs\");",
+            ),
+            (
+                "a module read from another path",
+                "#[path = \"calls.rs\"]\nmod calls;",
+            ),
+            (
+                "a parameter whose name only ends in `store`",
+                "fn peek(kstore: &SqliteAccountStorage) { let h = kstore; h.put_group(g); }",
+            ),
+        ]
+    }
+
+    /// The handle scan refuses each form the receiver scan cannot read, and
+    /// accepts the forms the session manager really uses.
+    #[test]
+    fn the_second_handle_scan_refuses_every_form_it_cannot_follow() {
+        let refuses = |code: &str| {
+            let flat = tight_code(&format!(
+                "fn sweep(store: &SqliteAccountStorage) {{ store.list_groups(); }}\n{code}"
+            ));
+            !(unscanned_handle_uses(&flat).is_empty()
+                && outside_the_surface(&second_handle_calls(&flat)).is_empty())
+        };
+        for (name, code) in followed_handle_forms() {
+            assert!(!refuses(code), "{name}");
+        }
+        for (name, code) in unfollowed_handle_forms() {
+            assert!(refuses(code), "{name}");
+        }
     }
 }

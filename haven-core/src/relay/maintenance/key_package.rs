@@ -10,45 +10,47 @@
 //! [`KpMaintenanceOutcome`]) or takes an injected [`SessionManager`] to mint the
 //! `KeyPackage` material ([`build_kp_maintenance_events`]).
 //!
-//! # No more live-material gate (Dark Matter)
+//! # Where the tracked package lives
 //!
-//! The Dark Matter engine's [`SessionManager::fresh_key_package`] marks every
-//! `KeyPackage` as an MLS **last-resort** package, so its private init-key
-//! material is **never** auto-deleted when a Welcome consumes it — a single KP
-//! serves unlimited joins. The old "is the private material still live?" gate
-//! (M8-2 `has_live_key_material`) therefore dissolves: a published 30443 stays
-//! valid until Haven explicitly rotates it. Health is now pure relay presence
-//! of the user's **tracked stable slot**, not a material-liveness verdict.
+//! In MDK's durable `KeyPackage` lifecycle record
+//! ([`SessionManager::tracked_key_package`]), in the same encrypted database
+//! as the private bundles it names: the slot, the current package, the exact
+//! signed event a relay last acknowledged for it, a staged replacement, and
+//! whether a Welcome has consumed the current package. Haven keeps no second
+//! copy. The engine marks every package an MLS **last-resort** package, so a
+//! join does not delete its private material; health is relay presence of the
+//! tracked event in the tracked slot.
 //!
-//! # Stable `d`, reuse, and rotation (plan §5.4)
+//! # Stable `d`, reuse, and replacement (plan §5.4)
 //!
 //! Kind-30443 is NIP-33 addressable: `(kind, pubkey, d)` is the coordinate a
 //! peer caches. Maintenance reuses a **stable `d`**: on first run it seeds the
 //! `d` from an existing on-relay 30443 ([`KpMaintenanceDecision::SeedD`]);
-//! thereafter it republishes into the same slot so a rotation REPLACES the slot
-//! (NIP-33 same-`d` supersession) instead of piling up orphaned coordinates.
-//! The Nostr transport binding makes this a MUST: "Replacing the `KeyPackage` in
-//! that logical slot MUST reuse the same `d`; a routine replacement MUST NOT
-//! generate a fresh slot id."
+//! thereafter it republishes into the same slot so a replacement REPLACES the
+//! slot (NIP-33 same-`d` supersession) instead of piling up orphaned
+//! coordinates. The Nostr transport binding makes this a MUST: "Replacing the
+//! `KeyPackage` in that logical slot MUST reuse the same `d`; a routine
+//! replacement MUST NOT generate a fresh slot id."
 //!
-//! * **Heal** (a relay dropped the KP): re-publish the SAME cached last-resort
-//!   package verbatim into the same slot — no re-mint (the private material
-//!   still lives in the engine). [`build_kp_maintenance_events_reusing`].
-//! * **Rotation** ([`KpMaintenanceDecision::Rotate`]): the tracked package has
-//!   passed a fraction of its OWN MLS `Lifetime`
-//!   ([`KP_ROTATE_AT_LIFETIME_FRACTION`]) — mint fresh material into the SAME
-//!   `d` and publish it to EVERY responder, because every responder is serving
-//!   the aging package. Without this the account goes silently uninvitable the
-//!   day the lifetime expires (see [`super::kp_lifetime`]).
-//! * **First publish**: mint a fresh package into a fresh slot
-//!   ([`build_kp_maintenance_events`]).
-//! * On any re-mint the FFI feeds the superseded package's cached bytes to
-//!   [`SessionManager::delete_key_package`] (mdk#160) so orphaned private
-//!   material does not accumulate — but only AFTER the replacement is confirmed
-//!   published (`foundation/key-packages.md`'s first deletion bound).
-//! * **Failed publish**: the FFI feeds the just-minted package to
-//!   [`SessionManager::delete_key_package`] so a retry loop against a failing
-//!   relay does not leak private material (mdk#160).
+//! * **Heal** (a relay dropped the KP): re-publish the tracked package's
+//!   signed event, byte for byte — the same id, the same `created_at`, no new
+//!   signature.
+//! * **Replacement** ([`KpMaintenanceDecision::Rotate`],
+//!   [`KpMaintenanceDecision::Replace`]): the tracked package has passed a
+//!   fraction of its OWN MLS `Lifetime` ([`KP_ROTATE_AT_LIFETIME_FRACTION`]),
+//!   a Welcome has consumed it, or its private bundle is gone — mint fresh
+//!   material into the SAME `d` and publish it to EVERY responder. Without
+//!   the first the account goes silently uninvitable the day the lifetime
+//!   expires (see [`super::kp_lifetime`]).
+//! * **First publish**: mint a fresh package into a fresh slot.
+//! * **Every mint** ([`build_kp_maintenance_events`]) is MDK's atomic stage:
+//!   the private bundle and the replacement intent are persisted together,
+//!   and the event is signed once and frozen. A publish no relay acknowledged
+//!   leaves the replacement staged, and the next tick republishes those bytes.
+//! * **A relay's acknowledgement** promotes the replacement
+//!   ([`SessionManager::promote_key_package`]) and deletes the private
+//!   material of every package it supersedes (`foundation/key-packages.md`'s
+//!   first deletion bound).
 //!
 //! # The one-time retirement of a malformed slot
 //!
@@ -76,10 +78,8 @@
 //!
 //! # The 443 twin is RETIRED
 //!
-//! Haven no longer builds a legacy kind-443 twin — kind-30443 natively owns the
-//! addressable slot (W1). [`build_legacy_key_package_retraction`] survives only
-//! as a one-time cutover RETRACTION of a *previously* published 443 (migration
-//! plan §6 step 5, non-optional): it kind-5-deletes a stale twin by event id.
+//! Haven builds no kind-443 twin and no kind-10051 list: kind-30443 natively
+//! owns the addressable slot, and discovery runs on the NIP-65 10002.
 //!
 //! [`RelayManager`]: crate::relay::RelayManager
 
@@ -90,52 +90,22 @@ use rand::RngCore;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 
+use cgka_traits::app_components::PRIVATE_USE_APP_COMPONENT_ID_START;
 use cgka_traits::engine::KeyPackage;
+use cgka_traits::group::ProtocolProfile;
+use cgka_traits::{MemberId, TransportEndpoint};
+use transport_nostr_adapter::NostrKeyPackagePublication;
 
 use super::kp_lifetime::TrackedKpLifetime;
 use crate::log_alias::{self, bucket, EventIdHex};
 use crate::nostr::mls::SessionManager;
-use crate::relay::publishers::{build_unpublish_event, PublisherError, PublisherResult};
+use crate::relay::publishers::{PublisherError, PublisherResult};
 
 /// The Marmot `KeyPackage` event kind (NIP-33 addressable).
 pub const KIND_MARMOT_KEY_PACKAGE: u16 = 30443;
 
-// ── 30443 event tag names (mirrors the v0.9.4 transport-nostr-adapter) ───────
+/// The NIP-33 slot tag of a kind-30443.
 const D_TAG: &str = "d";
-const IDENTITY_TAG: &str = "i";
-const MLS_PROTOCOL_VERSION_TAG: &str = "mls_protocol_version";
-const MLS_CIPHERSUITE_TAG: &str = "mls_ciphersuite";
-const MLS_EXTENSIONS_TAG: &str = "mls_extensions";
-const MLS_PROPOSALS_TAG: &str = "mls_proposals";
-const APP_COMPONENTS_TAG: &str = "app_components";
-
-// ── Descriptive capability metadata ──────────────────────────────────────────
-//
-// These `mls_*` / `app_components` tag VALUES are discovery/filtering metadata:
-// the Marmot receive path (`SessionManager::key_package_from_event`) base64-
-// decodes the event content into the real MLS `KeyPackage` and validates THAT —
-// it never parses these tags. The values below mirror exactly what Haven's
-// engine leaf advertises (single ciphersuite `0x0001`; the leaf extensions
-// required_capabilities / app_data_dictionary / last_resort /
-// account-identity-proof; the app_data_update + self_remove proposals; the
-// profile / admin-policy / nostr-routing app components Haven configures in
-// `SessionManager::open_session`). DM-5 e2e confirms discovery on-wire.
-
-/// MLS protocol version tag value (MLS 1.0).
-const MLS_PROTOCOL_VERSION: &str = "1.0";
-/// The single hard-enforced ciphersuite (W10:
-/// `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`).
-const MLS_CIPHERSUITE: &str = "0x0001";
-/// Leaf extension types Haven's engine advertises: `required_capabilities`
-/// (0x0003), `app_data_dictionary` (0x0006), `last_resort` (0x000a),
-/// account-identity-proof (0xf2f1).
-const MLS_EXTENSIONS: [&str; 4] = ["0x0003", "0x0006", "0x000a", "0xf2f1"];
-/// Non-default proposal types Haven's engine advertises: `app_data_update`
-/// (0x0008), `self_remove` (0x000a).
-const MLS_PROPOSALS: [&str; 2] = ["0x0008", "0x000a"];
-/// App components Haven groups carry: profile (0x8001), admin-policy (0x8003),
-/// nostr-routing (0x8004).
-const APP_COMPONENTS: [&str; 3] = ["0x8001", "0x8003", "0x8004"];
 
 /// One canonical (kind 30443) `KeyPackage` event the FFI found on the user's own
 /// `KeyPackage` relays, reduced to only the fields the decision needs.
@@ -148,6 +118,173 @@ pub struct RelayKpEntry {
     pub d_tag: String,
     /// Lowercase-hex Nostr event id of the on-relay canonical event.
     pub event_id: String,
+    /// The event's `created_at`, unix seconds.
+    pub created_at: u64,
+    /// Whether its package carries the pre-migration (Legacy) account-identity
+    /// proof ([`kp_event_is_pre_migration`]).
+    pub pre_migration: bool,
+}
+
+/// The slot this device tracks and the event it last published into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrackedKpSlot<'a> {
+    /// The stable NIP-33 `d`.
+    pub d_tag: &'a str,
+    /// Lowercase-hex id of the event last published (or adopted) there.
+    pub event_id: &'a str,
+    /// That event's `created_at`, unix seconds.
+    pub created_at: u64,
+    /// The slot was adopted from the relays ([`KpMaintenanceDecision::SeedD`])
+    /// and nothing has been minted into it yet.
+    pub adopted: bool,
+    /// A Welcome consumed the tracked package, or its private bundle is no
+    /// longer held.
+    pub replacement_owed: bool,
+}
+
+/// Whether a kind-30443's package carries the pre-migration (Legacy, MDK
+/// v0.9.x) account-identity proof.
+///
+/// MDK derives the profile from the leaf's proof
+/// (`account_identity_proof.rs:317-361`) and accepts a declared profile only
+/// when it matches. A Haven install that published such a package is this
+/// account's pre-reset self — no v0.10.4 client mints one, and none can open
+/// it.
+#[must_use]
+pub fn kp_event_is_pre_migration(event: &nostr::Event) -> bool {
+    BASE64.decode(&event.content).is_ok_and(|bytes| {
+        cgka_engine::key_package_metadata(
+            &KeyPackage::new(bytes).with_protocol_profile(ProtocolProfile::Legacy),
+        )
+        .is_ok_and(|meta| meta.protocol_profile == ProtocolProfile::Legacy)
+    })
+}
+
+/// A fetched kind-30443 an inviter may rank: it passed every check Marmot
+/// requires before selection (`foundation/key-packages.md:65-75,119-129`).
+#[derive(Clone)]
+pub(crate) struct KeyPackageCandidate {
+    /// The event, as fetched.
+    pub(crate) event: nostr::Event,
+    /// The package it carries, for the target's admission rule.
+    pub(crate) key_package: KeyPackage,
+    last_resort: bool,
+    /// Lowercase hex of the decoded `KeyPackageRef`.
+    key_package_ref: String,
+    /// The event carries a `client` tag: another app published it.
+    client_tagged: bool,
+}
+
+impl KeyPackageCandidate {
+    /// Validates a fetched kind-30443 of `account` the way MDK's receive side
+    /// does (`marmot-app/src/key_package_records.rs:367-455`, which Haven
+    /// cannot call — `docs/MDK_UPSTREAM_TRACKER.md` T-30443-VALIDATE): the
+    /// package decodes as a current, unexpired Current-profile `KeyPackage`
+    /// whose credential is its author, `i` is its decoded ref, and each
+    /// capability tag equals, exactly and without repeats, what the package
+    /// decodes to. Every one of the seven tags appears exactly once
+    /// (`transports/nostr.md:63-65`).
+    pub(crate) fn validate(event: &nostr::Event, account: &nostr::PublicKey) -> Option<Self> {
+        if event.kind != Kind::Custom(KIND_MARMOT_KEY_PACKAGE) || event.pubkey != *account {
+            return None;
+        }
+        let key_package = SessionManager::key_package_from_event(event).ok()?;
+        let meta = cgka_engine::key_package::key_package_metadata(&key_package).ok()?;
+        let last_resort =
+            cgka_engine::key_package::is_last_resort_key_package(&key_package).ok()?;
+        let hex_ids = |ids: &mut dyn Iterator<Item = u16>| -> Vec<String> {
+            let mut ids: Vec<String> = ids.map(|id| format!("0x{id:04x}")).collect();
+            ids.sort_unstable();
+            ids
+        };
+        let list = |name: &str| -> Option<Vec<String>> {
+            let mut values = only_tag(event, name)?.to_vec();
+            values.sort_unstable();
+            Some(values)
+        };
+        let valid = meta.credential_identity_hex == account.to_hex()
+            && only_tag(event, D_TAG).is_some_and(|d| d.len() == 1 && !d[0].is_empty())
+            && only_tag(event, "mls_protocol_version") == Some(&["1.0".to_owned()][..])
+            && only_tag(event, "i") == Some(std::slice::from_ref(&meta.key_package_ref_hex))
+            && only_tag(event, "mls_ciphersuite")
+                == Some(&[format!("0x{:04x}", meta.ciphersuite)][..])
+            && list("mls_extensions") == Some(hex_ids(&mut meta.mls_extensions.iter().copied()))
+            && list("mls_proposals") == Some(hex_ids(&mut meta.mls_proposals.iter().copied()))
+            && list("app_components")
+                == Some(hex_ids(
+                    &mut meta
+                        .app_components
+                        .iter()
+                        .copied()
+                        .filter(|id| *id >= PRIVATE_USE_APP_COMPONENT_ID_START),
+                ));
+        let client_tagged = event.tags.iter().any(|tag| {
+            tag.as_slice().first().map(String::as_str) == Some(transport_nostr_adapter::CLIENT_TAG)
+        });
+        valid.then(|| Self {
+            event: event.clone(),
+            key_package,
+            last_resort,
+            key_package_ref: meta.key_package_ref_hex,
+            client_tagged,
+        })
+    }
+
+    /// The selection order between two admissible candidates of different
+    /// slots. `Greater` is preferred.
+    ///
+    /// First, a package published WITHOUT a `client` tag before one with it.
+    /// Haven publishes none (the tag would name the app on a public event),
+    /// so a tagged package belongs to another app on the same account, and a
+    /// Welcome built on it reaches that app: Haven shows the invitation and
+    /// can never open it. This tier is Haven's own, ahead of the spec's order;
+    /// MDK ranks by the same self-asserted label, also ahead of freshness
+    /// (`marmot-app/src/key_package_records.rs:125-156,214-237`). It only
+    /// orders packages that already passed admission and never revives an
+    /// inadmissible one (`docs/MDK_UPSTREAM_TRACKER.md` T-KP-CLIENT-RANK).
+    ///
+    /// Then the spec's order: a non-last-resort package, then the more
+    /// recently published, then the lower decoded `KeyPackageRef`
+    /// (`foundation/key-packages.md:68-70`, `transports/nostr.md:316-318`).
+    pub(crate) fn rank(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .client_tagged
+            .cmp(&self.client_tagged)
+            .then_with(|| other.last_resort.cmp(&self.last_resort))
+            .then_with(|| self.event.created_at.cmp(&other.event.created_at))
+            .then_with(|| other.key_package_ref.cmp(&self.key_package_ref))
+    }
+}
+
+/// The values of the one tag named `name`, or `None` when the event carries
+/// none or more than one.
+fn only_tag<'a>(event: &'a nostr::Event, name: &str) -> Option<&'a [String]> {
+    let mut tags = event
+        .tags
+        .iter()
+        .map(nostr::Tag::as_slice)
+        .filter(|tag| tag.first().map(String::as_str) == Some(name));
+    let tag = tags.next()?;
+    tags.next().is_none().then(|| &tag[1..])
+}
+
+/// Whether `event` is a kind-30443 of `account` carrying a pre-migration
+/// (Legacy) package of that account: a peer who has not updated yet.
+pub(crate) fn is_pre_migration_key_package_of(
+    event: &nostr::Event,
+    account: &nostr::PublicKey,
+) -> bool {
+    event.kind == Kind::Custom(KIND_MARMOT_KEY_PACKAGE)
+        && event.pubkey == *account
+        && BASE64.decode(&event.content).is_ok_and(|bytes| {
+            cgka_engine::key_package_metadata(
+                &KeyPackage::new(bytes).with_protocol_profile(ProtocolProfile::Legacy),
+            )
+            .is_ok_and(|meta| {
+                meta.protocol_profile == ProtocolProfile::Legacy
+                    && meta.credential_identity_hex == account.to_hex()
+            })
+        })
 }
 
 /// One RESPONDING own-`KeyPackage`-relay's canonical (kind 30443) entries
@@ -168,12 +305,24 @@ pub struct RelayKpPerRelay {
 }
 
 impl RelayKpPerRelay {
-    /// Returns whether this relay serves the user's tracked stable slot — the
-    /// load-bearing per-relay presence gate. A relay serving only a
-    /// *different*-`d` 30443 (an orphaned/old coordinate) does NOT count.
+    /// Returns whether this relay serves ANY event in the slot `d`.
     #[must_use]
-    fn serves_slot(&self, stable_d: &str) -> bool {
-        self.canonical.iter().any(|e| e.d_tag == stable_d)
+    fn serves_slot(&self, d: &str) -> bool {
+        self.canonical.iter().any(|e| e.d_tag == d)
+    }
+
+    /// Returns whether this relay serves the user's tracked package — the
+    /// load-bearing per-relay presence gate: in the tracked slot, the tracked
+    /// event or a replacement at least as new. A relay serving only a
+    /// *different*-`d` 30443 (an orphaned/old coordinate), or an older event
+    /// in the tracked slot (a relay that missed the last publish), does NOT
+    /// count.
+    #[must_use]
+    fn serves_tracked(&self, tracked: &TrackedKpSlot<'_>) -> bool {
+        self.canonical.iter().any(|e| {
+            e.d_tag == tracked.d_tag
+                && (e.event_id == tracked.event_id || e.created_at >= tracked.created_at)
+        })
     }
 
     /// Returns this relay's byte-order-MIN non-empty on-relay `d`, for seed
@@ -238,9 +387,9 @@ pub enum KpMaintenanceDecision {
     /// First-run seeding: no slot is tracked locally yet, but a responder serves
     /// a canonical with a NON-EMPTY `d` — the only test applied; a slot narrower
     /// than [`mint_d`]'s 64-hex width is adopted as found (see [`pick_seed_d`]).
-    /// The FFI records the seed `d` into `published_key_packages` BEFORE any
-    /// future publish, so stability holds from cycle 1. No new material is
-    /// published this tick.
+    /// The FFI records the seed `d` in the lifecycle record BEFORE any future
+    /// publish, so stability holds from cycle 1. No new material is published
+    /// this tick.
     SeedD {
         /// The deterministic stable `d` adopted from the responders' 30443s.
         d: String,
@@ -254,14 +403,25 @@ pub enum KpMaintenanceDecision {
         /// The responding own-relay URLs that lack the tracked slot.
         targets: Vec<String>,
     },
+    /// A Welcome consumed the tracked package, or its private bundle is no
+    /// longer held — **re-mint** into the SAME stable slot and publish to
+    /// EVERY responder, exactly as [`Self::Rotate`] does and for the same
+    /// reasons (`foundation/key-packages.md:86-87`).
+    Replace {
+        /// The stable `d` to re-mint into.
+        existing_d: String,
+        /// Every responding own-relay URL. Always non-empty.
+        targets: Vec<String>,
+    },
     /// The tracked package has passed the rotation point of its OWN MLS
     /// `Lifetime` (or its lifetime could not be read) — **re-mint** into the
     /// SAME stable slot and publish to EVERY responder.
     ///
     /// Distinct from [`Self::Republish`] on both counts that matter:
     ///
-    /// * The FFI MUST NOT reuse the cached bytes here even though they exist —
-    ///   re-advertising aging material is exactly the failure being fixed.
+    /// * The FFI MUST NOT republish the tracked event here even though it
+    ///   exists — re-advertising aging material is exactly the failure being
+    ///   fixed.
     /// * `targets` is **every** responder, not just the ones missing the slot:
     ///   a relay that serves the old package is serving material that is about
     ///   to expire, so it needs the replacement most of all.
@@ -284,10 +444,11 @@ pub enum KpMaintenanceDecision {
 /// Decides the `KeyPackage` maintenance action for this tick (PURE).
 ///
 /// The per-relay presence gate: a responder is healthy iff it serves the user's
-/// tracked stable slot ([`RelayKpPerRelay::serves_slot`]). A responder serving
-/// only a different-`d` (orphaned) 30443, or nothing, is a heal target. So a
-/// package live on relay A but dropped from relay B republishes to B ONLY (A
-/// untouched).
+/// tracked package — the tracked event, or one at least as new in the same slot
+/// ([`RelayKpPerRelay::serves_tracked`]). A responder serving only a
+/// different-`d` (orphaned) 30443, an older event in the slot, or nothing, is a
+/// heal target. So a package live on relay A but dropped from relay B
+/// republishes to B ONLY (A untouched).
 ///
 /// Branch order:
 ///
@@ -297,9 +458,15 @@ pub enum KpMaintenanceDecision {
 ///    * 2a. the tracked package is past the rotation point of its OWN MLS
 ///      `Lifetime` (or its lifetime is unreadable) ⇒
 ///      [`KpMaintenanceDecision::Rotate`] into the same slot, targeting EVERY
-///      responder;
-///    * 2b. otherwise heal the responders NOT serving the slot; if all serve
-///      it, [`KpMaintenanceDecision::NoOp`].
+///      responder; a consumed or no-longer-held package ⇒
+///      [`KpMaintenanceDecision::Replace`], the same way;
+///    * 2b. no material is tracked for the slot (an adopted slot, or one the
+///      `not_after` purge emptied) ⇒ [`KpMaintenanceDecision::Republish`] to
+///      EVERY responder: whatever they serve there, this device cannot open.
+///      Into the same slot, unless it was adopted and the responders do not
+///      prove it this account's pre-reset slot — then into a fresh one;
+///    * 2c. otherwise heal the responders NOT serving the tracked package; if
+///      all serve it, [`KpMaintenanceDecision::NoOp`].
 /// 3. **No slot tracked but a responder serves a non-empty `d`** ⇒
 ///    [`KpMaintenanceDecision::SeedD`] (adopt it before publishing, so cycle 1
 ///    does not fork the address).
@@ -310,9 +477,8 @@ pub enum KpMaintenanceDecision {
 /// # Why 2a sits ABOVE 2b, and why it targets everyone
 ///
 /// A package can be past its threshold AND missing from some relays at the same
-/// time. Healing first would re-publish the *cached, aging* bytes to the
-/// missing relays and then (next tick, or worse: never, because the heal
-/// refreshed the event's `created_at`) rotate — two publishes, and in between,
+/// time. Healing first would re-publish the aging package to the missing
+/// relays and then rotate on the next tick — two publishes, and in between,
 /// relays advertising material that is about to stop validating. Rotating first
 /// collapses that into ONE re-mint published everywhere: the missing relays get
 /// the slot back and the serving relays get material that is not about to die.
@@ -322,16 +488,16 @@ pub enum KpMaintenanceDecision {
 /// material only to delete it again (mdk#160). The ~21 days of slack the 0.75
 /// fraction leaves is exactly the budget for such ticks.
 ///
-/// `stored_stable_d` is the caller's `latest_canonical_d_tag()` and
-/// `tracked_lifetime` the lifetime read from the same row's cached bytes (see
-/// [`read_kp_lifetime`]); `now_secs` is injected so the threshold is testable
-/// without waiting 63 days.
+/// `tracked` is the caller's tracked package and `tracked_lifetime` the
+/// lifetime read from that package's own bytes (see [`read_kp_lifetime`]);
+/// `now_secs` is injected so the threshold is testable without waiting 63
+/// days.
 ///
 /// [`read_kp_lifetime`]: super::kp_lifetime::read_kp_lifetime
 #[must_use]
 pub fn decide_kp_maintenance(
     snapshot: &RelayKpSnapshot,
-    stored_stable_d: Option<&str>,
+    tracked: Option<TrackedKpSlot<'_>>,
     tracked_lifetime: TrackedKpLifetime,
     now_secs: u64,
 ) -> KpMaintenanceDecision {
@@ -341,7 +507,8 @@ pub fn decide_kp_maintenance(
         return KpMaintenanceDecision::NoOp;
     }
 
-    if let Some(stable_d) = stored_stable_d {
+    if let Some(tracked) = tracked {
+        let stable_d = tracked.d_tag;
         // Branch 2a: the tracked material has aged out of its own lifetime (or
         // we cannot tell). Re-mint into the SAME slot, everywhere.
         if tracked_lifetime.is_rotation_due(now_secs) {
@@ -355,11 +522,40 @@ pub fn decide_kp_maintenance(
                 lifetime_unreadable: tracked_lifetime.is_unreadable(),
             };
         }
-        // Branch 2b: heal the responders that do not serve the tracked slot.
+        if tracked.replacement_owed {
+            return KpMaintenanceDecision::Replace {
+                existing_d: stable_d.to_owned(),
+                targets: snapshot
+                    .responders
+                    .iter()
+                    .map(|r| r.relay_url.clone())
+                    .collect(),
+            };
+        }
+        // Branch 2b: the slot serves a package this device holds no private
+        // material for — the `not_after` purge emptied it, or the slot was
+        // adopted. A relay serving it is therefore NOT healthy: mint a fresh
+        // package, everywhere. Into the same slot unless it was adopted from a
+        // client other than this account's pre-reset self: a slot belongs to
+        // the client that minted its `d` (`transports/nostr.md:310-314`), and
+        // writing into another live client's slot — the same account in White
+        // Noise, say — makes the two replace each other's package for ever.
+        if matches!(tracked_lifetime, TrackedKpLifetime::Absent) {
+            let reusable = !tracked.adopted || adopted_slot_is_pre_reset(snapshot, stable_d);
+            return KpMaintenanceDecision::Republish {
+                existing_d: reusable.then(|| stable_d.to_owned()),
+                targets: snapshot
+                    .responders
+                    .iter()
+                    .map(|r| r.relay_url.clone())
+                    .collect(),
+            };
+        }
+        // Branch 2c: heal the responders that do not serve the tracked package.
         let targets: Vec<String> = snapshot
             .responders
             .iter()
-            .filter(|r| !r.serves_slot(stable_d))
+            .filter(|r| !r.serves_tracked(&tracked))
             .map(|r| r.relay_url.clone())
             .collect();
         if targets.is_empty() {
@@ -385,6 +581,19 @@ pub fn decide_kp_maintenance(
             .map(|r| r.relay_url.clone())
             .collect(),
     }
+}
+
+/// Whether the responders prove an adopted slot is this account's own,
+/// pre-reset: some responder serves it, and every package served there carries
+/// the pre-migration proof.
+fn adopted_slot_is_pre_reset(snapshot: &RelayKpSnapshot, stable_d: &str) -> bool {
+    let mut served = snapshot
+        .responders
+        .iter()
+        .flat_map(|r| r.canonical.iter())
+        .filter(|e| e.d_tag == stable_d)
+        .peekable();
+    served.peek().is_some() && served.all(|e| e.pre_migration)
 }
 
 /// What the ONE-TIME retirement of a malformed `KeyPackage` slot must do this
@@ -577,12 +786,9 @@ pub fn decide_kp_slot_retirement(
     }
 }
 
-/// A minted-or-reused `KeyPackage` publication for a [`KpMaintenanceDecision::Republish`].
-///
-/// Carries the SIGNED kind-30443 event to publish, the engine [`KeyPackage`]
-/// handle (so the FFI can [`SessionManager::delete_key_package`] it on a FAILED
-/// publish or on rotation of a superseded package — mdk#160), the stable `d`
-/// (to record on success), and the resolved own-relay targets.
+/// A `KeyPackage` publication: the SIGNED kind-30443 event to publish, the
+/// package it carries, the stable `d` it was built for, and the resolved
+/// own-relay targets.
 ///
 /// The `d_tag` + `relays` fields WOULD leak (a NIP-33 `d` and relay URLs) under
 /// a derived `Debug`, and `key_package` is MLS wire material, so `Debug` is
@@ -591,9 +797,9 @@ pub fn decide_kp_slot_retirement(
 pub struct KpMaintenanceEvents {
     /// The signed kind-30443 event to publish.
     pub event: nostr::Event,
-    /// The engine `KeyPackage` handle (delete-on-failure / delete-on-rotation).
+    /// The package the event carries.
     pub key_package: KeyPackage,
-    /// The stable NIP-33 `d` the event was built with (to record on publish).
+    /// The stable NIP-33 `d` the event was built with.
     pub d_tag: String,
     /// The own-relay targets — own-relays-only, never a default union.
     pub relays: Vec<String>,
@@ -665,12 +871,10 @@ pub fn is_conformant_slot_id(d: &str) -> bool {
 /// it means to replace therefore fails to replace it roughly half the time, and
 /// fails **silently** — the relay accepts the event and then serves the old one.
 ///
-/// `prev_max` is the `created_at` recorded for the slot in
-/// `published_key_packages`. Flooring the new stamp at `prev_max + 1` removes
-/// the tie by construction. A row written before this floor existed holds the
-/// record-time clock rather than the event's own stamp; that value is `>=` the
-/// event's `created_at` (it is sampled after the relay round-trip), so it is a
-/// conservative floor and the invariant still holds across the upgrade.
+/// `prev_max` is the `created_at` the lifecycle record holds for the slot.
+/// Flooring the new stamp at `prev_max + 1` removes the tie by construction.
+/// For an adopted slot the record holds the adoption time, which is at or
+/// after the adopted event's own stamp, so it is a conservative floor.
 ///
 /// Negative or absent `prev_max` falls through to `now` (a pre-epoch stamp is
 /// not a meaningful floor).
@@ -688,12 +892,15 @@ pub fn monotonic_kp_created_at(prev_max: Option<i64>, now_secs: u64) -> nostr::T
 
 /// Builds a signed kind-30443 `KeyPackage` event from raw MLS wire bytes.
 ///
-/// Mirrors the v0.9.4 `transport-nostr-adapter` tag set exactly: `d` slot,
-/// `mls_protocol_version`, `i` (the `KeyPackage` ref, derived from the bytes),
-/// `mls_ciphersuite`, `mls_extensions`, `mls_proposals`, `app_components`;
-/// base64 content; NO `encoding` tag; NO `relays` tag. Unlike the adapter's
-/// transport-agnostic unsigned event, Haven signs with the identity key (30443
-/// is identity-signed, W1).
+/// The event is MDK's own template, `NostrKeyPackagePublication::to_event_at`
+/// (`transport-nostr-adapter/src/key_package.rs:43-110`), filled the way MDK's
+/// publisher fills it (`marmot-app/src/lib.rs:6535-6580`): every capability
+/// value is read off the package's own decoded metadata, `app_components`
+/// restricted to private-use ids, because receivers reject a package whose
+/// tags differ from what it decodes to
+/// (`marmot-app/src/key_package_records.rs:376-394,836-857`). No `client` tag:
+/// it would name the app on a public, identity-signed event. The template is
+/// unsigned; Haven signs it with the identity key (30443 is identity-signed).
 ///
 /// `created_at` is the slot-monotonic stamp from [`monotonic_kp_created_at`],
 /// NOT the builder's default `now` — see that function for why a same-second
@@ -703,36 +910,61 @@ fn build_key_package_event(
     kp_bytes: &[u8],
     d: &str,
     created_at: nostr::Timestamp,
+    own_kp_relays: &[String],
 ) -> PublisherResult<nostr::Event> {
-    if d.is_empty() {
+    let key_package =
+        KeyPackage::new(kp_bytes.to_vec()).with_protocol_profile(ProtocolProfile::Current);
+    // Decoding also validates the leaf (incl. the account-identity proof), and
+    // refuses bytes that are not the Current profile.
+    let meta = cgka_engine::key_package::key_package_metadata(&key_package).map_err(|e| {
+        PublisherError::Build(format!("key package metadata: {}", e.privacy_safe_kind()))
+    })?;
+    if meta.credential_identity_hex != keys.public_key().to_hex() {
         return Err(PublisherError::Build(
-            "key package d must not be empty".into(),
+            "key package is not this account's".into(),
         ));
     }
-    // The `i` tag is the MLS KeyPackage ref, derived from the wire bytes. This
-    // also validates the leaf (incl. the account-identity proof) as a side
-    // effect — a fresh Haven package always passes.
-    let meta = cgka_engine::key_package::key_package_metadata(&KeyPackage::new(kp_bytes.to_vec()))
-        .map_err(|e| PublisherError::Build(format!("key package metadata: {e}")))?;
 
-    let tags: Vec<Tag> = vec![
-        parse_tag(&[D_TAG, d])?,
-        parse_tag(&[MLS_PROTOCOL_VERSION_TAG, MLS_PROTOCOL_VERSION])?,
-        parse_tag(&[IDENTITY_TAG, &meta.key_package_ref_hex])?,
-        parse_tag(&[MLS_CIPHERSUITE_TAG, MLS_CIPHERSUITE])?,
-        values_tag(MLS_EXTENSIONS_TAG, &MLS_EXTENSIONS)?,
-        values_tag(MLS_PROPOSALS_TAG, &MLS_PROPOSALS)?,
-        values_tag(APP_COMPONENTS_TAG, &APP_COMPONENTS)?,
-    ];
+    let hex_ids = |ids: &mut dyn Iterator<Item = u16>| -> Vec<String> {
+        ids.map(|id| format!("0x{id:04x}")).collect()
+    };
+    let template = NostrKeyPackagePublication {
+        client_name: None,
+        account_id: MemberId::new(keys.public_key().to_bytes().to_vec()),
+        key_package,
+        key_package_slot_id: d.to_owned(),
+        key_package_ref: meta.key_package_ref_hex,
+        mls_ciphersuite: format!("0x{:04x}", meta.ciphersuite),
+        mls_extensions: hex_ids(&mut meta.mls_extensions.iter().copied()),
+        mls_proposals: hex_ids(&mut meta.mls_proposals.iter().copied()),
+        app_components: hex_ids(
+            &mut meta
+                .app_components
+                .iter()
+                .copied()
+                .filter(|id| *id >= PRIVATE_USE_APP_COMPONENT_ID_START),
+        ),
+        publish_endpoints: own_kp_relays
+            .iter()
+            .cloned()
+            .map(TransportEndpoint)
+            .collect(),
+    }
+    .to_event_at(created_at.as_secs())
+    // MDK's refusal text is never rendered (Security Rule 15).
+    .map_err(|_| PublisherError::Build("key package template refused".into()))?;
 
-    EventBuilder::new(
-        Kind::Custom(KIND_MARMOT_KEY_PACKAGE),
-        BASE64.encode(kp_bytes),
-    )
-    .tags(tags)
-    .custom_created_at(created_at)
-    .sign_with_keys(keys)
-    .map_err(|e| PublisherError::Build(format!("sign key package: {e}")))
+    let tags = template
+        .tags
+        .into_iter()
+        .map(Tag::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| PublisherError::Build(format!("tag: {e}")))?;
+    EventBuilder::new(Kind::Custom(KIND_MARMOT_KEY_PACKAGE), template.content)
+        .tags(tags)
+        .custom_created_at(created_at)
+        .sign_with_keys(keys)
+        .map_err(|e| PublisherError::Build(format!("sign key package: {e}")))
 }
 
 /// Parses a fixed-arity string tag, mapping failure to [`PublisherError::Build`].
@@ -740,22 +972,17 @@ fn parse_tag(parts: &[&str]) -> PublisherResult<Tag> {
     Tag::parse(parts.iter().copied()).map_err(|e| PublisherError::Build(format!("tag: {e}")))
 }
 
-/// Builds a multi-value tag `[name, v0, v1, ...]`.
-fn values_tag(name: &str, values: &[&str]) -> PublisherResult<Tag> {
-    let mut parts = Vec::with_capacity(values.len() + 1);
-    parts.push(name);
-    parts.extend_from_slice(values);
-    parse_tag(&parts)
-}
-
-/// Mints a FRESH `KeyPackage` and builds its signed kind-30443 event — the
-/// rotation ([`KpMaintenanceDecision::Rotate`]) / first-publish path.
+/// Mints a FRESH `KeyPackage` and freezes its signed kind-30443 event — every
+/// replacement and the first publish.
 ///
-/// Mints via [`SessionManager::fresh_key_package`], builds+signs the event into
-/// `existing_d` (or a freshly minted stable slot when `None`), and returns the
-/// [`KeyPackage`] handle so the FFI can delete it on a failed publish (mdk#160).
-/// The returned [`KpMaintenanceEvents::relays`] is exactly `own_kp_relays` — no
-/// default set is unioned in (own-relays-only invariant).
+/// The mint is MDK's atomic stage ([`SessionManager::stage_key_package`]): the
+/// private bundle and the replacement intent are persisted together, and the
+/// event — built into `existing_d`, or a freshly minted stable slot when
+/// `None` — is signed once and stored with it. The caller publishes the
+/// returned event and, on a relay's acknowledgement, promotes it
+/// ([`SessionManager::promote_key_package`]). The returned
+/// [`KpMaintenanceEvents::relays`] is exactly `own_kp_relays` — no default set
+/// is unioned in (own-relays-only invariant).
 ///
 /// `prev_created_at` is the slot's last recorded `created_at`; the new event is
 /// stamped `max(now, prev + 1)` so a same-second rotation cannot lose the NIP-01
@@ -772,13 +999,26 @@ pub async fn build_kp_maintenance_events(
     existing_d: Option<&str>,
     prev_created_at: Option<i64>,
 ) -> PublisherResult<KpMaintenanceEvents> {
-    let key_package = session
-        .fresh_key_package()
-        .await
-        .map_err(|e| PublisherError::Build(format!("mint key package: {e}")))?;
     let d_tag = existing_d.map_or_else(mint_d, str::to_owned);
     let created_at = monotonic_kp_created_at(prev_created_at, super::kp_lifetime::now_secs());
-    let event = build_key_package_event(keys, key_package.bytes(), &d_tag, created_at)?;
+    let (key_package, event) = session
+        .stage_key_package(
+            &d_tag,
+            created_at.as_secs(),
+            own_kp_relays,
+            |package, created_at| {
+                build_key_package_event(
+                    keys,
+                    package.bytes(),
+                    &d_tag,
+                    nostr::Timestamp::from_secs(created_at),
+                    own_kp_relays,
+                )
+                .ok()
+            },
+        )
+        .await
+        .map_err(|e| PublisherError::Build(format!("mint key package: {e}")))?;
     Ok(KpMaintenanceEvents {
         event,
         key_package,
@@ -787,22 +1027,12 @@ pub async fn build_kp_maintenance_events(
     })
 }
 
-/// Rebuilds the signed kind-30443 event for a CACHED last-resort `KeyPackage` —
-/// the heal path (a relay dropped the KP), with NO re-mint.
+/// Signs a NEW kind-30443 for a package this device already holds, into slot
+/// `d`.
 ///
-/// `cached_kp_bytes` are the public MLS wire bytes tracked in
-/// `published_key_packages`; the private material still lives in the engine
-/// (last-resort packages are never auto-deleted), so re-publishing the same
-/// bytes into the same slot re-advertises a package peers can still consume.
-/// The returned [`KeyPackage`] handle mirrors the cached bytes.
-///
-/// # This path is why rotation cannot be timed off `created_at`
-///
-/// A heal stamps a **fresh** `created_at` on **old** material. Any age check
-/// keyed on the event timestamp would therefore reset every time a flaky relay
-/// is healed, while the package's real `not_after` kept ticking. The rotation
-/// clock is read from the `KeyPackage` itself ([`super::kp_lifetime`]) precisely
-/// so this function cannot move it.
+/// A new event for the same material: the product uses it only to move a
+/// package into another slot ([`build_kp_slot_repoint_event`]). A heal never
+/// comes here — it republishes the tracked event's own bytes.
 ///
 /// # Errors
 ///
@@ -815,10 +1045,11 @@ pub fn build_kp_maintenance_events_reusing(
     prev_created_at: Option<i64>,
 ) -> PublisherResult<KpMaintenanceEvents> {
     let created_at = monotonic_kp_created_at(prev_created_at, super::kp_lifetime::now_secs());
-    let event = build_key_package_event(keys, cached_kp_bytes, d, created_at)?;
+    let event = build_key_package_event(keys, cached_kp_bytes, d, created_at, own_kp_relays)?;
     Ok(KpMaintenanceEvents {
         event,
-        key_package: KeyPackage::new(cached_kp_bytes.to_vec()),
+        key_package: KeyPackage::new(cached_kp_bytes.to_vec())
+            .with_protocol_profile(ProtocolProfile::Current),
         d_tag: d.to_owned(),
         relays: own_kp_relays.to_vec(),
     })
@@ -928,82 +1159,6 @@ pub fn build_kp_slot_retraction(
         .map_err(|e| PublisherError::Build(format!("sign deletion: {e}")))
 }
 
-/// Builds a self-authored NIP-09 (kind 5) retraction for a LEGACY 443
-/// `KeyPackage` — the one-time cutover cleanup (migration plan §6 step 5,
-/// NON-OPTIONAL).
-///
-/// The retired 443 is a NON-addressable regular event with no stable slot, so a
-/// stale twin must be scrubbed explicitly. This refuses unless the event author
-/// is the user themselves (`author == keys.public_key()`, the self-authorship
-/// guard) — we never author a deletion of someone else's event.
-///
-/// The deletion references the 443 **by event id only** (a single `e` tag) and
-/// deliberately carries **NO** `a`-coordinate: kind 443 is non-addressable, so a
-/// `443:<pubkey>:` coordinate (empty identifier) would tell cooperative relays
-/// to delete EVERY kind-443 the author has with `created_at <= deletion` — which
-/// is exactly the wrong scope. An id-only `e`-tag deletion scrubs the one stale
-/// event. (Contrast the addressable relay-list retraction below, whose
-/// coordinate form is well-defined.)
-///
-/// # Errors
-///
-/// Returns [`PublisherError::Build`] if the self-authorship guard fails, the
-/// event id is malformed, or signing fails.
-pub fn build_legacy_key_package_retraction(
-    keys: &Keys,
-    legacy_event_id_hex: &str,
-    event_author_hex: &str,
-) -> PublisherResult<nostr::Event> {
-    // Self-authorship guard: never author a deletion of an event we did not
-    // sign. Compared as lowercase hex to defeat case skew.
-    let own_hex = keys.public_key().to_hex();
-    if !event_author_hex.eq_ignore_ascii_case(&own_hex) {
-        return Err(PublisherError::Build(
-            "refusing to delete an event authored by another key".to_owned(),
-        ));
-    }
-
-    let event_id = nostr::EventId::from_hex(legacy_event_id_hex)
-        .map_err(|e| PublisherError::Build(format!("bad legacy event id: {e}")))?;
-
-    // Id-only (`e`-tag) deletion — NO `a`-coordinate for the non-addressable
-    // 443.
-    let request = nostr::nips::nip09::EventDeletionRequest::new().ids(vec![event_id]);
-    EventBuilder::delete(request)
-        .sign_with_keys(keys)
-        .map_err(|e| PublisherError::Build(format!("sign deletion: {e}")))
-}
-
-/// Builds the retraction of the user's kind-10051 `KeyPackage`-relay list — the
-/// one-time cutover cleanup (migration plan §6 W2 / §6 step 5, NON-OPTIONAL).
-///
-/// Kind 10051 is abolished under Dark Matter (`KeyPackages` are discovered on the
-/// account's NIP-65 kind-10002 relays now). A live 10051 lets an old-stack
-/// client build a Welcome the new client cannot process, so it must be retired.
-/// This emits an **empty replaceable** kind-10051 (no `relay` tags): per
-/// NIP-01 replaceable semantics, relays supersede the previous list with the
-/// empty one. `last_published_at` (the previous list's `created_at`, if known)
-/// floors the new `created_at` to strictly supersede across clock skew.
-///
-/// The FFI MAY additionally emit a kind-5 coordinate deletion
-/// ([`crate::relay::publishers::build_nip09_deletion`] with
-/// [`Kind::MlsKeyPackageRelays`]) for relays that honor NIP-09 over replaceable
-/// supersession.
-///
-/// # Errors
-///
-/// Returns [`PublisherError::Build`] if signing fails.
-pub fn build_key_package_relay_list_retraction(
-    keys: &Keys,
-    last_published_at: Option<i64>,
-) -> PublisherResult<nostr::Event> {
-    build_unpublish_event(
-        keys,
-        crate::circle::relay_prefs::RelayType::KeyPackage,
-        last_published_at,
-    )
-}
-
 /// The terminal action a `KeyPackage` maintenance tick carried out.
 ///
 /// Fieldless (Copy) and payload-free — no `d`, url, hex, or group id — so its
@@ -1034,6 +1189,10 @@ pub enum KpMaintenanceAction {
     /// the reader itself is broken and every tick is burning init-key material.
     /// Surfacing it separately is what makes that loud instead of silent.
     RotatedUnreadableLifetime,
+    /// Nothing was probed or published: the storage-reset notice has not been
+    /// acknowledged, and a `KeyPackage` is discoverable only through the NIP-65
+    /// list that waits for it (`crate::storage_reset`).
+    AwaitingResetAcknowledgement,
 }
 
 /// Presence-only tally of a `KeyPackage` maintenance tick.
@@ -1084,8 +1243,8 @@ pub struct KpMaintenanceOutcome {
     pub relay_errors: usize,
     /// Whether this tick deleted the tracked package's private `init_key`
     /// because it reached `Lifetime.not_after` — the spec's second, transport-
-    /// independent deletion bound (see
-    /// [`kp_init_key_purge_due`](super::kp_lifetime::kp_init_key_purge_due)).
+    /// independent deletion bound
+    /// ([`SessionManager::sweep_expired_key_packages`]).
     ///
     /// A boolean, not a key or an id, so the derived `Debug` stays leak-free.
     pub expired_init_key_purged: bool,
@@ -1154,6 +1313,20 @@ mod tests {
         RelayKpEntry {
             d_tag: d.to_owned(),
             event_id: id.to_owned(),
+            created_at: 0,
+            pre_migration: false,
+        }
+    }
+
+    /// A tracked slot whose last event any served event in the slot is at
+    /// least as new as — the slot-presence view most tests pin.
+    const fn tracked(d: &str) -> TrackedKpSlot<'_> {
+        TrackedKpSlot {
+            d_tag: d,
+            event_id: "",
+            created_at: 0,
+            adopted: false,
+            replacement_owed: false,
         }
     }
 
@@ -1171,7 +1344,7 @@ mod tests {
     /// Decision for a tracked package that is nowhere near its rotation point —
     /// the pre-existing (lifetime-agnostic) behaviour these tests pin.
     fn decide_fresh(snap: &RelayKpSnapshot, stored_d: Option<&str>) -> KpMaintenanceDecision {
-        decide_kp_maintenance(snap, stored_d, fresh_lifetime(), NOW)
+        decide_kp_maintenance(snap, stored_d.map(tracked), fresh_lifetime(), NOW)
     }
 
     #[test]
@@ -1238,13 +1411,18 @@ mod tests {
         // not mint material only to delete it again (mdk#160). The 0.75 fraction
         // exists precisely to leave slack for these ticks.
         assert_eq!(
-            decide_kp_maintenance(&snapshot(vec![]), Some("d-x"), expiring_lifetime(), NOW),
+            decide_kp_maintenance(
+                &snapshot(vec![]),
+                Some(tracked("d-x")),
+                expiring_lifetime(),
+                NOW
+            ),
             KpMaintenanceDecision::NoOp
         );
         assert_eq!(
             decide_kp_maintenance(
                 &snapshot(vec![]),
-                Some("d-x"),
+                Some(tracked("d-x")),
                 TrackedKpLifetime::NotCurrent,
                 NOW
             ),
@@ -1484,7 +1662,7 @@ mod tests {
             vec![entry("d-slot", "ev1")],
         )]);
         assert_eq!(
-            decide_kp_maintenance(&snap, Some("d-slot"), expiring_lifetime(), NOW),
+            decide_kp_maintenance(&snap, Some(tracked("d-slot")), expiring_lifetime(), NOW),
             KpMaintenanceDecision::Rotate {
                 existing_d: "d-slot".to_owned(),
                 targets: vec!["wss://a.example.com".to_owned()],
@@ -1500,7 +1678,7 @@ mod tests {
             vec![entry("d-slot", "ev1")],
         )]);
         assert_eq!(
-            decide_kp_maintenance(&snap, Some("d-slot"), expiring_lifetime(), NOW - 1),
+            decide_kp_maintenance(&snap, Some(tracked("d-slot")), expiring_lifetime(), NOW - 1),
             KpMaintenanceDecision::NoOp,
             "one second early must still be a no-op"
         );
@@ -1516,7 +1694,8 @@ mod tests {
             per("wss://b.example.com", vec![]),
             per("wss://c.example.com", vec![entry("d-other", "ev2")]),
         ]);
-        let decision = decide_kp_maintenance(&snap, Some("d-slot"), expiring_lifetime(), NOW);
+        let decision =
+            decide_kp_maintenance(&snap, Some(tracked("d-slot")), expiring_lifetime(), NOW);
         let KpMaintenanceDecision::Rotate { targets, .. } = decision else {
             panic!("past-threshold + partial drop must Rotate, not Republish: {decision:?}");
         };
@@ -1539,7 +1718,12 @@ mod tests {
             vec![entry("d-slot", "ev1")],
         )]);
         assert_eq!(
-            decide_kp_maintenance(&snap, Some("d-slot"), TrackedKpLifetime::Unreadable, NOW),
+            decide_kp_maintenance(
+                &snap,
+                Some(tracked("d-slot")),
+                TrackedKpLifetime::Unreadable,
+                NOW
+            ),
             KpMaintenanceDecision::Rotate {
                 existing_d: "d-slot".to_owned(),
                 targets: vec!["wss://a.example.com".to_owned()],
@@ -1558,12 +1742,239 @@ mod tests {
             vec![entry("d-slot", "ev1")],
         )]);
         assert_eq!(
-            decide_kp_maintenance(&snap, Some("d-slot"), TrackedKpLifetime::NotCurrent, NOW),
+            decide_kp_maintenance(
+                &snap,
+                Some(tracked("d-slot")),
+                TrackedKpLifetime::NotCurrent,
+                NOW
+            ),
             KpMaintenanceDecision::Rotate {
                 existing_d: "d-slot".to_owned(),
                 targets: vec!["wss://a.example.com".to_owned()],
                 lifetime_unreadable: false,
             }
+        );
+    }
+
+    fn served(d: &str, id: &str, created_at: u64, pre_migration: bool) -> RelayKpEntry {
+        RelayKpEntry {
+            d_tag: d.to_owned(),
+            event_id: id.to_owned(),
+            created_at,
+            pre_migration,
+        }
+    }
+
+    const fn adopted(d: &str) -> TrackedKpSlot<'_> {
+        TrackedKpSlot {
+            adopted: true,
+            ..tracked(d)
+        }
+    }
+
+    const BOTH: [&str; 2] = ["wss://a.example.com", "wss://b.example.com"];
+
+    fn both() -> Vec<String> {
+        BOTH.iter().map(|url| (*url).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_slot_whose_material_was_purged_is_refilled_in_place_everywhere() {
+        // Our own slot, its init key deleted at `not_after`: what the relays
+        // serve there this device can no longer open, so every responder gets
+        // a fresh package — into the same slot, as a routine replacement must.
+        let snap = snapshot(vec![
+            per(BOTH[0], vec![served("d-slot", "ev1", 10, false)]),
+            per(BOTH[1], vec![]),
+        ]);
+        assert_eq!(
+            decide_kp_maintenance(
+                &snap,
+                Some(tracked("d-slot")),
+                TrackedKpLifetime::Absent,
+                NOW
+            ),
+            KpMaintenanceDecision::Republish {
+                existing_d: Some("d-slot".to_owned()),
+                targets: both(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_adopted_slot_holding_this_accounts_pre_reset_package_is_refilled_in_place() {
+        // After the storage reset the relays still serve the package this
+        // install published before it: the pre-migration proof says so, and
+        // no v0.10.4 client mints one. The slot is ours; refill it.
+        let snap = snapshot(vec![
+            per(BOTH[0], vec![served("d-slot", "ev1", 10, true)]),
+            per(BOTH[1], vec![served("d-slot", "ev1", 10, true)]),
+        ]);
+        assert_eq!(
+            decide_kp_maintenance(
+                &snap,
+                Some(adopted("d-slot")),
+                TrackedKpLifetime::Absent,
+                NOW
+            ),
+            KpMaintenanceDecision::Republish {
+                existing_d: Some("d-slot".to_owned()),
+                targets: both(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_adopted_slot_another_client_keeps_live_gets_a_fresh_slot_of_our_own() {
+        // A current package in the adopted slot is another live client's —
+        // the same account in White Noise, or another Haven install. Writing
+        // into its slot would make the two replace each other for ever
+        // (`transports/nostr.md:310-314`): mint a slot of our own instead.
+        let snap = snapshot(vec![
+            per(BOTH[0], vec![served("d-slot", "ev1", 10, true)]),
+            per(BOTH[1], vec![served("d-slot", "ev2", 20, false)]),
+        ]);
+        assert_eq!(
+            decide_kp_maintenance(
+                &snap,
+                Some(adopted("d-slot")),
+                TrackedKpLifetime::Absent,
+                NOW
+            ),
+            KpMaintenanceDecision::Republish {
+                existing_d: None,
+                targets: both(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_adopted_slot_no_responder_serves_any_more_is_not_proven_ours() {
+        let snap = snapshot(vec![per(BOTH[0], vec![served("d-other", "ev9", 10, true)])]);
+        assert_eq!(
+            decide_kp_maintenance(
+                &snap,
+                Some(adopted("d-slot")),
+                TrackedKpLifetime::Absent,
+                NOW
+            ),
+            KpMaintenanceDecision::Republish {
+                existing_d: None,
+                targets: vec![BOTH[0].to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_relay_that_was_down_while_the_slot_was_refilled_is_healed_when_it_returns() {
+        // Tick 1: B is unreachable while the pre-reset slot is refilled.
+        let tick_one = snapshot(vec![per(
+            BOTH[0],
+            vec![served("d-slot", "legacy-ev", 50, true)],
+        )]);
+        assert_eq!(
+            decide_kp_maintenance(
+                &tick_one,
+                Some(adopted("d-slot")),
+                TrackedKpLifetime::Absent,
+                NOW
+            ),
+            KpMaintenanceDecision::Republish {
+                existing_d: Some("d-slot".to_owned()),
+                targets: vec![BOTH[0].to_owned()],
+            }
+        );
+
+        // Tick 2: B is back, still serving the pre-reset package in the slot.
+        // Serving the slot is not serving our package: B is healed, A is not.
+        let tick_two = snapshot(vec![
+            per(BOTH[0], vec![served("d-slot", "fresh-ev", 200, false)]),
+            per(BOTH[1], vec![served("d-slot", "legacy-ev", 50, true)]),
+        ]);
+        let now_tracked = TrackedKpSlot {
+            d_tag: "d-slot",
+            event_id: "fresh-ev",
+            created_at: 200,
+            adopted: false,
+            replacement_owed: false,
+        };
+        assert_eq!(
+            decide_kp_maintenance(&tick_two, Some(now_tracked), fresh_lifetime(), NOW),
+            KpMaintenanceDecision::Republish {
+                existing_d: Some("d-slot".to_owned()),
+                targets: vec![BOTH[1].to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_relay_serving_a_newer_package_in_the_slot_is_left_alone() {
+        let snap = snapshot(vec![per(
+            BOTH[0],
+            vec![served("d-slot", "newer", 300, false)],
+        )]);
+        let now_tracked = TrackedKpSlot {
+            d_tag: "d-slot",
+            event_id: "mine",
+            created_at: 200,
+            adopted: false,
+            replacement_owed: false,
+        };
+        assert_eq!(
+            decide_kp_maintenance(&snap, Some(now_tracked), fresh_lifetime(), NOW),
+            KpMaintenanceDecision::NoOp
+        );
+    }
+
+    /// `foundation/key-packages.md:86-87`: a package a Welcome consumed is
+    /// replaced — into the same slot, on every responder, however fresh its
+    /// lifetime and however many relays already serve it.
+    #[test]
+    fn consumed_kp_triggers_replacement() {
+        let snap = snapshot(vec![
+            per(BOTH[0], vec![served("d-slot", "mine", 200, false)]),
+            per(BOTH[1], vec![served("d-slot", "mine", 200, false)]),
+        ]);
+        let healthy = TrackedKpSlot {
+            d_tag: "d-slot",
+            event_id: "mine",
+            created_at: 200,
+            adopted: false,
+            replacement_owed: false,
+        };
+        assert_eq!(
+            decide_kp_maintenance(&snap, Some(healthy), fresh_lifetime(), NOW),
+            KpMaintenanceDecision::NoOp,
+            "control: the same slot with nothing owed is left alone"
+        );
+        assert_eq!(
+            decide_kp_maintenance(
+                &snap,
+                Some(TrackedKpSlot {
+                    replacement_owed: true,
+                    ..healthy
+                }),
+                fresh_lifetime(),
+                NOW
+            ),
+            KpMaintenanceDecision::Replace {
+                existing_d: "d-slot".to_owned(),
+                targets: both(),
+            }
+        );
+    }
+
+    /// A replacement that is owed never mints on a tick no relay answered:
+    /// nothing could be published.
+    #[test]
+    fn an_owed_replacement_waits_for_a_responder() {
+        let owed = TrackedKpSlot {
+            replacement_owed: true,
+            ..tracked("d-slot")
+        };
+        assert_eq!(
+            decide_kp_maintenance(&snapshot(vec![]), Some(owed), fresh_lifetime(), NOW),
+            KpMaintenanceDecision::NoOp
         );
     }
 
@@ -1573,7 +1984,12 @@ mod tests {
         // nothing to age out, so branch 2a must not fire; branch 2b heals.
         let snap = snapshot(vec![per("wss://a.example.com", vec![])]);
         assert_eq!(
-            decide_kp_maintenance(&snap, Some("d-slot"), TrackedKpLifetime::Absent, u64::MAX),
+            decide_kp_maintenance(
+                &snap,
+                Some(tracked("d-slot")),
+                TrackedKpLifetime::Absent,
+                u64::MAX
+            ),
             KpMaintenanceDecision::Republish {
                 existing_d: Some("d-slot".to_owned()),
                 targets: vec!["wss://a.example.com".to_owned()],
@@ -1595,7 +2011,7 @@ mod tests {
         )]);
         let decision = decide_kp_maintenance(
             &snap,
-            Some("d-slot"),
+            Some(tracked("d-slot")),
             TrackedKpLifetime::Known(minted_70_days_ago),
             NOW,
         );
@@ -1618,7 +2034,7 @@ mod tests {
         assert_eq!(
             decide_kp_maintenance(
                 &snap,
-                Some("d-slot"),
+                Some(tracked("d-slot")),
                 TrackedKpLifetime::Known(minted_yesterday),
                 NOW
             ),
@@ -1674,6 +2090,17 @@ mod tests {
     // ── Event building ───────────────────────────────────────────────────────
 
     fn kp_bytes_from_session() -> (Keys, Vec<u8>) {
+        let keys = Keys::generate();
+        let kp = kp_bytes_for(&keys);
+        (keys, kp)
+    }
+
+    /// The relay set the builder's template requires and never renders.
+    fn own() -> Vec<String> {
+        vec!["wss://own.example.com".to_string()]
+    }
+
+    fn kp_bytes_for(keys: &Keys) -> Vec<u8> {
         // A real minted KeyPackage is required so `key_package_metadata`
         // validates (incl. the account-identity proof). Build one via an
         // in-memory session.
@@ -1685,20 +2112,19 @@ mod tests {
         // (`HAVEN_E_SESSION_BUSY`) — a flake, not a real defect, but one that
         // gets likelier with every test added here.
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let keys = Keys::generate();
         let dir = std::env::temp_dir().join(format!(
             "haven_kp_evt_{}_{}",
             std::process::id(),
             SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        let session = SessionManager::new_unencrypted(&dir, &keys).expect("session");
+        let session = SessionManager::new_unencrypted(&dir, keys).expect("session");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let kp = rt.block_on(session.fresh_key_package()).expect("mint");
         let _ = std::fs::remove_dir_all(&dir);
-        (keys, kp.bytes().to_vec())
+        kp.bytes().to_vec()
     }
 
     fn tag_value<'a>(event: &'a nostr::Event, name: &str) -> Option<&'a str> {
@@ -1713,9 +2139,14 @@ mod tests {
     #[test]
     fn build_key_package_event_has_marmot_tag_set_and_no_encoding_or_relays() {
         let (keys, kp) = kp_bytes_from_session();
-        let event =
-            build_key_package_event(&keys, &kp, "d-stable", nostr::Timestamp::from_secs(7_000))
-                .expect("build");
+        let event = build_key_package_event(
+            &keys,
+            &kp,
+            "d-stable",
+            nostr::Timestamp::from_secs(7_000),
+            &own(),
+        )
+        .expect("build");
         assert_eq!(
             event.created_at.as_secs(),
             7_000,
@@ -1728,25 +2159,236 @@ mod tests {
         assert_eq!(event.content, BASE64.encode(&kp));
         assert_eq!(tag_value(&event, "d"), Some("d-stable"));
         assert_eq!(tag_value(&event, "mls_protocol_version"), Some("1.0"));
-        assert_eq!(tag_value(&event, "mls_ciphersuite"), Some("0x0001"));
         // `i` is the KeyPackage ref (64 hex chars).
         assert_eq!(tag_value(&event, "i").map(str::len), Some(64));
         // Retired / never-present tags.
         assert_eq!(tag_value(&event, "encoding"), None);
         assert_eq!(tag_value(&event, "relays"), None);
-        // app_components carries the three configured component ids.
-        let comp = event
+        // Every component a Haven circle requires, the identity proof 0x8009
+        // included (Marmot `transports/nostr.md`: `app_components` MUST list it).
+        let components = multi_value_tag(&event, "app_components");
+        for id in ["0x8001", "0x8003", "0x8004", "0x8005", "0x8009", "0x800c"] {
+            assert!(components.contains(id), "app_components lacks {id}");
+        }
+        // The values the wire oracle holds every lane's 30443 to
+        // (`tooling/e2e/ci/check-wire-correlation.sh` C5.11; Marmot
+        // `foundation/registries.md:41-46`): the two proposal types, and none
+        // of the default or retired extension ids.
+        assert_eq!(
+            multi_value_tag(&event, "mls_proposals"),
+            ["0x0008", "0x000a"].map(str::to_owned).into()
+        );
+        let extensions = multi_value_tag(&event, "mls_extensions");
+        for id in ["0x0003", "0x000a", "0xf2f1"] {
+            assert!(!extensions.contains(id), "mls_extensions lists {id}");
+        }
+    }
+
+    /// The values of the one tag named `name`, which must appear exactly once.
+    fn multi_value_tag(event: &nostr::Event, name: &str) -> std::collections::BTreeSet<String> {
+        let tags: Vec<_> = event
             .tags
             .iter()
-            .find(|t| t.as_slice().first().map(String::as_str) == Some("app_components"))
-            .expect("app_components tag");
-        assert_eq!(&comp.as_slice()[1..], &["0x8001", "0x8003", "0x8004"]);
+            .filter(|t| t.as_slice().first().map(String::as_str) == Some(name))
+            .collect();
+        assert_eq!(tags.len(), 1, "exactly one {name} tag");
+        let values = &tags[0].as_slice()[1..];
+        let set: std::collections::BTreeSet<String> = values.iter().cloned().collect();
+        assert_eq!(set.len(), values.len(), "{name} repeats a value");
+        set
+    }
+
+    /// A Haven `KeyPackage` passes MDK's own receive rule: each capability tag
+    /// equals, exactly and without repeats, what the package decodes to —
+    /// mirrored from `marmot-app/src/key_package_records.rs:369-400,836-857`
+    /// (`marmot-app` is not a Haven dependency). A package that fails it is
+    /// rejected by every MDK-based client, White Noise included.
+    #[test]
+    fn kp_event_tags_equal_decoded_metadata() {
+        let (keys, kp) = kp_bytes_from_session();
+        let event =
+            build_key_package_event(&keys, &kp, "d-stable", nostr::Timestamp::now(), &own())
+                .expect("build");
+        let meta = cgka_engine::key_package::key_package_metadata(
+            &KeyPackage::new(kp).with_protocol_profile(ProtocolProfile::Current),
+        )
+        .expect("a Haven package decodes");
+        let hex = |ids: &mut dyn Iterator<Item = u16>| -> std::collections::BTreeSet<String> {
+            ids.map(|id| format!("0x{id:04x}")).collect()
+        };
+
+        assert_eq!(tag_value(&event, "mls_protocol_version"), Some("1.0"));
+        assert_eq!(
+            multi_value_tag(&event, "mls_ciphersuite"),
+            hex(&mut std::iter::once(meta.ciphersuite))
+        );
+        assert_eq!(
+            multi_value_tag(&event, "mls_extensions"),
+            hex(&mut meta.mls_extensions.iter().copied())
+        );
+        assert_eq!(
+            multi_value_tag(&event, "mls_proposals"),
+            hex(&mut meta.mls_proposals.iter().copied())
+        );
+        assert_eq!(
+            multi_value_tag(&event, "app_components"),
+            hex(&mut meta.app_components.iter().copied().filter(
+                |id| *id >= cgka_traits::app_components::PRIVATE_USE_APP_COMPONENT_ID_START
+            ))
+        );
+        assert_eq!(
+            tag_value(&event, "i"),
+            Some(meta.key_package_ref_hex.as_str())
+        );
+        assert_eq!(
+            event.pubkey.to_hex(),
+            meta.credential_identity_hex,
+            "the transport author is the package's credential identity"
+        );
+    }
+
+    /// The whole tag list, by name: the seven the binding defines, each exactly
+    /// once (`transports/nostr.md:63-65,268-275`), and nothing else.
+    #[test]
+    fn kp_event_has_each_required_tag_exactly_once_and_no_extras() {
+        let (keys, kp) = kp_bytes_from_session();
+        let event =
+            build_key_package_event(&keys, &kp, "d-stable", nostr::Timestamp::now(), &own())
+                .expect("build");
+        let mut names: Vec<&str> = event
+            .tags
+            .iter()
+            .filter_map(|t| t.as_slice().first().map(String::as_str))
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "app_components",
+                "d",
+                "i",
+                "mls_ciphersuite",
+                "mls_extensions",
+                "mls_proposals",
+                "mls_protocol_version",
+            ]
+        );
+        for singleton in ["d", "i", "mls_ciphersuite", "mls_protocol_version"] {
+            assert_eq!(
+                only_tag(&event, singleton).map(<[String]>::len),
+                Some(1),
+                "{singleton} carries exactly one value"
+            );
+        }
+    }
+
+    /// A `client` tag would name the app on a public, identity-signed event,
+    /// and neither `encoding` nor `relays` is part of the binding; the relay
+    /// set the template is handed never reaches the event either.
+    #[test]
+    fn kp_event_has_no_client_or_encoding_tag() {
+        let (keys, kp) = kp_bytes_from_session();
+        let relays = vec!["wss://secret-own-relay.example.com".to_string()];
+        let event =
+            build_key_package_event(&keys, &kp, "d-stable", nostr::Timestamp::now(), &relays)
+                .expect("build");
+        for absent in ["client", "encoding", "relays"] {
+            assert_eq!(tag_value(&event, absent), None, "{absent} tag");
+        }
+        assert!(!nostr::JsonUtil::as_json(&event).contains("secret-own-relay"));
+    }
+
+    /// What Haven publishes passes what Haven requires of others: its own
+    /// event is a valid candidate, and a copy whose tags say otherwise is not.
+    #[test]
+    fn a_built_event_is_a_valid_candidate_and_a_retagged_copy_is_not() {
+        type Retag<'a> = &'a dyn Fn(Vec<Vec<String>>) -> Vec<Vec<String>>;
+        let (keys, kp) = kp_bytes_from_session();
+        let event =
+            build_key_package_event(&keys, &kp, "d-stable", nostr::Timestamp::now(), &own())
+                .expect("build");
+        assert!(KeyPackageCandidate::validate(&event, &keys.public_key()).is_some());
+
+        let retagged = |edit: &dyn Fn(Vec<Vec<String>>) -> Vec<Vec<String>>| {
+            let tags = edit(event.tags.iter().map(|t| t.as_slice().to_vec()).collect());
+            EventBuilder::new(event.kind, event.content.clone())
+                .tags(tags.into_iter().map(|t| Tag::parse(t).expect("tag")))
+                .sign_with_keys(&keys)
+                .expect("sign")
+        };
+        let named = |tags: &[Vec<String>], name: &str| -> usize {
+            tags.iter().position(|t| t[0] == name).expect("tag present")
+        };
+        let cases: [(&str, Retag<'_>); 7] = [
+            (
+                "an extra capability the package does not carry",
+                &|mut t| {
+                    let i = named(&t, "app_components");
+                    t[i].push("0x8fff".into());
+                    t
+                },
+            ),
+            ("a capability the package carries left out", &|mut t| {
+                let i = named(&t, "app_components");
+                t[i].pop();
+                t
+            }),
+            ("a repeated value", &|mut t| {
+                let i = named(&t, "mls_proposals");
+                let repeat = t[i][1].clone();
+                t[i].push(repeat);
+                t
+            }),
+            ("an id-list split across two tags", &|mut t| {
+                let i = named(&t, "mls_extensions");
+                t.push(t[i].clone());
+                t
+            }),
+            ("an `i` that is not the decoded ref", &|mut t| {
+                let i = named(&t, "i");
+                t[i][1] = "00".repeat(32);
+                t
+            }),
+            ("no slot", &|mut t| {
+                let i = named(&t, "d");
+                t.remove(i);
+                t
+            }),
+            ("another protocol version", &|mut t| {
+                let i = named(&t, "mls_protocol_version");
+                t[i][1] = "2.0".into();
+                t
+            }),
+        ];
+        for (what, edit) in cases {
+            assert!(
+                KeyPackageCandidate::validate(&retagged(edit), &keys.public_key()).is_none(),
+                "{what} must not be a candidate"
+            );
+        }
+    }
+
+    /// Haven signs a package only as the account its credential names: a
+    /// receiver rejects any other pairing, so publishing one would advertise
+    /// an account nobody can invite.
+    #[test]
+    fn kp_publish_refuses_a_package_of_another_account() {
+        let (_, kp) = kp_bytes_from_session();
+        let err = build_key_package_event(
+            &Keys::generate(),
+            &kp,
+            "d-stable",
+            nostr::Timestamp::now(),
+            &own(),
+        )
+        .expect_err("another account's package must not be signed");
+        assert_eq!(err.to_string(), "failed to build event");
     }
 
     #[test]
     fn build_key_package_event_rejects_empty_d() {
         let (keys, kp) = kp_bytes_from_session();
-        let err = build_key_package_event(&keys, &kp, "", nostr::Timestamp::now())
+        let err = build_key_package_event(&keys, &kp, "", nostr::Timestamp::now(), &own())
             .expect_err("empty d must fail");
         assert_eq!(err.to_string(), "failed to build event");
     }
@@ -1781,53 +2423,6 @@ mod tests {
             events,
             "KpMaintenanceEvents",
             &["secret-own-relay.example.com", stable, &event_id]
-        );
-    }
-
-    // ── Retraction builders ──────────────────────────────────────────────────
-
-    #[test]
-    fn legacy_retraction_requires_self_authorship() {
-        let keys = Keys::generate();
-        let other = Keys::generate();
-        let dummy = EventBuilder::new(Kind::Custom(443), "")
-            .sign_with_keys(&other)
-            .unwrap();
-        let err = build_legacy_key_package_retraction(
-            &keys,
-            &dummy.id.to_hex(),
-            &other.public_key().to_hex(),
-        )
-        .expect_err("must refuse foreign-authored deletion");
-        assert_eq!(err.to_string(), "failed to build event");
-    }
-
-    #[test]
-    fn legacy_retraction_is_e_tag_only_no_coordinate() {
-        let keys = Keys::generate();
-        let dummy = EventBuilder::new(Kind::Custom(443), "")
-            .sign_with_keys(&keys)
-            .unwrap();
-        let deletion = build_legacy_key_package_retraction(
-            &keys,
-            &dummy.id.to_hex(),
-            &keys.public_key().to_hex(),
-        )
-        .expect("self-authored deletion builds");
-        assert_eq!(deletion.kind, Kind::EventDeletion);
-        let has_e = deletion.tags.iter().any(|t| {
-            let s = t.as_slice();
-            s.len() >= 2 && s[0] == "e" && s[1] == dummy.id.to_hex()
-        });
-        assert!(has_e, "deletion must reference the legacy event id via 'e'");
-        let has_a = deletion
-            .tags
-            .iter()
-            .any(|t| t.as_slice().first().map(String::as_str) == Some("a"));
-        assert!(
-            !has_a,
-            "deletion must NOT carry an 'a' coordinate: {:?}",
-            deletion.tags
         );
     }
 
@@ -1896,6 +2491,44 @@ mod tests {
         let d = conformant_d(7);
         let snap = snapshot(vec![per("wss://a.example.com", vec![entry(&d, "ev1")])]);
         assert_eq!(retire(&snap, Some(&d), None), KpSlotRetirement::Complete);
+    }
+
+    #[test]
+    fn slot_retirement_refire_after_reset_is_a_noop_on_a_binding_slot_and_retires_a_malformed_one()
+    {
+        // The MDK v0.10.4 storage reset wipes the one-shot's sentinel along with
+        // the tracked slot, so the retirement runs again on every reset account
+        // with nothing tracked, against whatever the relays still serve.
+        let served = conformant_d(9);
+        let snap = snapshot(vec![per(
+            "wss://a.example.com",
+            vec![entry(&served, "ev1")],
+        )]);
+        assert_eq!(
+            retire(&snap, None, None),
+            KpSlotRetirement::Complete,
+            "a binding-shaped slot from before the reset is left alone"
+        );
+
+        let malformed = legacy_d(9);
+        let fresh = conformant_d(10);
+        let snap = snapshot(vec![per(
+            "wss://a.example.com",
+            vec![entry(&malformed, "ev1"), entry(&fresh, "ev2")],
+        )]);
+        assert_eq!(
+            retire(&snap, None, None),
+            KpSlotRetirement::Defer,
+            "nothing is retracted before the reset account has published"
+        );
+        assert_eq!(
+            retire(&snap, Some(&fresh), None),
+            KpSlotRetirement::Retract {
+                orphans: vec![malformed],
+                targets: vec!["wss://a.example.com".to_string()],
+            },
+            "once its new slot is served, the malformed one is retired"
+        );
     }
 
     #[test]
@@ -2093,16 +2726,18 @@ mod tests {
     fn the_adoptable_slot_is_the_one_carrying_our_own_package() {
         let (keys, kp) = kp_bytes_from_session();
         let fresh = conformant_d(0x77);
-        let ours = build_key_package_event(&keys, &kp, &fresh, nostr::Timestamp::from_secs(10))
-            .expect("ours");
+        let ours =
+            build_key_package_event(&keys, &kp, &fresh, nostr::Timestamp::from_secs(10), &own())
+                .expect("ours");
         // Same account, DIFFERENT package, also in a conformant slot: adopting
         // it would point tracking at material this engine does not hold.
-        let (_, other_kp) = kp_bytes_from_session();
+        let other_kp = kp_bytes_for(&keys);
         let other = build_key_package_event(
             &keys,
             &other_kp,
             &conformant_d(0x78),
             nostr::Timestamp::from_secs(11),
+            &own(),
         )
         .expect("other");
 
@@ -2123,9 +2758,14 @@ mod tests {
         // The pre-fix event itself carries the tracked package; adopting it
         // would "complete" the migration onto the malformed coordinate.
         let (keys, kp) = kp_bytes_from_session();
-        let legacy =
-            build_key_package_event(&keys, &kp, &legacy_d(0x79), nostr::Timestamp::from_secs(10))
-                .expect("legacy");
+        let legacy = build_key_package_event(
+            &keys,
+            &kp,
+            &legacy_d(0x79),
+            nostr::Timestamp::from_secs(10),
+            &own(),
+        )
+        .expect("legacy");
         assert_eq!(find_adoptable_kp_slot([&legacy], &kp), None);
     }
 
@@ -2139,6 +2779,7 @@ mod tests {
             &kp,
             &conformant_d(0x7a),
             nostr::Timestamp::from_secs(1),
+            &own(),
         )
         .expect("ours");
         assert_eq!(find_adoptable_kp_slot([&ours], &[]), None);
@@ -2228,18 +2869,5 @@ mod tests {
                 .any(|t| t.as_slice().first().map(String::as_str) == Some("a")),
             "the orphan's coordinate must still be addressed"
         );
-    }
-
-    #[test]
-    fn key_package_relay_list_retraction_is_empty_replaceable_10051() {
-        let keys = Keys::generate();
-        let event = build_key_package_relay_list_retraction(&keys, None).expect("retraction");
-        assert_eq!(event.kind, Kind::MlsKeyPackageRelays);
-        assert_eq!(event.content, "");
-        let has_relay = event
-            .tags
-            .iter()
-            .any(|t| t.as_slice().first().map(String::as_str) == Some("relay"));
-        assert!(!has_relay, "retraction must have no relay tags");
     }
 }

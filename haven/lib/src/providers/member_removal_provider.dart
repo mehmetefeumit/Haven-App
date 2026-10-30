@@ -17,6 +17,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 
@@ -33,6 +34,10 @@ enum MemberRemovalOutcome {
   /// Nothing changed. The service rolls its pending commit back on any
   /// failure, so this is a genuine no-op rather than an unknown state.
   failed,
+
+  /// Staged and sent again until a relay acknowledges it: not made yet, and
+  /// not a failure. The member is still in the circle until it is applied.
+  awaitingRelays,
 
   /// Another removal was already in flight, so this one was not attempted.
   /// The UI disables the affordance while that is true, so reaching this is
@@ -69,17 +74,30 @@ class MemberRemovalController extends Notifier<String?> {
     if (state != null) return MemberRemovalOutcome.busy;
     state = memberPubkeyHex;
     try {
-      await ref
+      final delivery = await ref
           .read(circleServiceProvider)
           .removeMember(
             mlsGroupId: circle.mlsGroupId,
             memberPubkeyHex: memberPubkeyHex,
           );
-      await _forgetLocationsOf(circle, memberPubkeyHex);
-      ref
-        ..invalidate(circlesProvider)
-        ..invalidate(memberLocationsProvider);
-      return MemberRemovalOutcome.removed;
+      switch (delivery) {
+        case ChangeDelivery.rejected:
+          return MemberRemovalOutcome.failed;
+        case ChangeDelivery.awaitingRelays:
+          // The circle waits behind it: its sharing card says so at once,
+          // since the user's own action made the hold — never an error.
+          ref
+              .read(sharingHealthProvider.notifier)
+              .recordDeferredSend(sharingCircleKey(circle), byUser: true);
+          ref.invalidate(circlesProvider);
+          return MemberRemovalOutcome.awaitingRelays;
+        case ChangeDelivery.applied:
+          await _forgetLocationsOf(circle, memberPubkeyHex);
+          ref
+            ..invalidate(circlesProvider)
+            ..invalidate(memberLocationsProvider);
+          return MemberRemovalOutcome.removed;
+      }
     } on Object catch (e) {
       // Type only — an FFI error message can carry the MLS group id (Rule 8).
       debugPrint('[RemoveMember] failed: ${e.runtimeType}');

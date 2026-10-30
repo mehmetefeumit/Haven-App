@@ -6,7 +6,10 @@
 /// Run with: flutter test integration_test/keyring_test.dart
 library;
 
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/providers/storage_reset_notice_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:integration_test/integration_test.dart';
@@ -39,6 +42,64 @@ void main() {
       // implementation caches success in a static Mutex<Option<()>>.
       await initKeyringStore();
       await expectLater(initKeyringStore(), completes);
+    });
+  });
+
+  // The MDK v0.10.4 storage reset over the real FFI and the platform
+  // keyring: every pre-migration store is deleted, the notice stays owed
+  // until it is acknowledged, and a fresh install owes nothing. The keyring
+  // half (old key ids destroyed, new ones used) is proved against a fake
+  // store in haven-core/tests/hard_reset_first_open.rs.
+  group('Storage reset', () {
+    const preMigration = [
+      'session.sqlite',
+      'circles.db',
+      'tiles.db',
+      'haven_mdk.db',
+    ];
+
+    Future<Directory> dataDir() async {
+      final dir = await Directory.systemTemp.createTemp('haven_reset_');
+      addTearDown(() => dir.delete(recursive: true));
+      return dir;
+    }
+
+    testWidgets('deletes every pre-migration store, and the notice stays '
+        'owed until it is acknowledged', (tester) async {
+      installThrowTimeErrorLogging();
+      await initKeyringStore();
+      final dir = await dataDir();
+      final planted = [
+        for (final name in preMigration)
+          for (final suffix in const ['', '-wal', '-shm', '-journal'])
+            File('${dir.path}/$name$suffix'),
+      ];
+      for (final file in planted) {
+        file.writeAsBytesSync(List<int>.generate(64, (i) => (i * 37) & 0xff));
+      }
+
+      expect(decideStorageResetNotice(dir.path), isTrue);
+      expect(
+        planted.where((file) => file.existsSync()).map((file) => file.path),
+        isEmpty,
+        reason: 'no pre-migration store may survive to be opened',
+      );
+      expect(
+        decideStorageResetNotice(dir.path),
+        isTrue,
+        reason: 'an unanswered notice is owed again on the next launch',
+      );
+
+      acknowledgeStorageReset(dataDir: dir.path);
+      expect(decideStorageResetNotice(dir.path), isFalse);
+    });
+
+    testWidgets('a fresh install owes no notice', (tester) async {
+      installThrowTimeErrorLogging();
+      await initKeyringStore();
+      final dir = await dataDir();
+
+      expect(decideStorageResetNotice(dir.path), isFalse);
     });
   });
 }

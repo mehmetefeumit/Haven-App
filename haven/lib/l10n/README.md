@@ -9,7 +9,7 @@ dependency. Config lives in `../../l10n.yaml`.
 ```
 lib/l10n/
   app_en.arb              ← English template / source of truth (edit this)
-  app_<locale>.arb        ← translations (es/fr/de/ar — added in M3)
+  app_<locale>.arb        ← translations (ar/de/es/fa/fr/hi/ja/ne/pt/ru/tr/ur)
   app_localizations*.dart ← GENERATED (committed); never hand-edit
 ```
 
@@ -56,11 +56,3 @@ rm lib/l10n/app_en_XA.arb && flutter gen-l10n
 ```
 
 `app_en_XA.arb` is gitignored — it is a local-only aid and must never ship.
-
-## Known deferred item
-
-`lib/src/widgets/identity/avatar.dart`'s composed semantics label
-(`"User avatar"` / `"online"` / `"offline"`) is **not yet localized** — it was
-held back because that file carries unrelated in-progress work. Localize it
-(thread `AppLocalizations` into `_buildSemanticLabel` and add delegates to
-`haven_avatar_test.dart` / `haven_avatar_image_test.dart`) once that work lands.

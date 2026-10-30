@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # CI guard: the two relay pools each keep the options they need and neither
-# adopts the other's; the background burst closes cleanly; and the FFI bridge
-# forwards the burst lifecycle to the engine rather than answering for it.
+# adopts the other's; the background burst closes cleanly; the FFI bridge
+# forwards the burst lifecycle to the engine rather than answering for it; and
+# every relay client is built by the one constructor that verifies what a relay
+# sends.
 #
 # Haven runs two pools with opposite duty cycles:
 #
@@ -167,7 +169,7 @@
 #      sleeping AND re-create the C3 silent-drop class on the one pool that has
 #      no keepalive to detect it.
 #   9. `api.rs` is a PURE FORWARDER for the whole burst lifecycle: each of the
-#      seven `LiveSyncFfi` methods named in `FFI_DELEGATIONS` calls
+#      eight `LiveSyncFfi` methods named in `FFI_DELEGATIONS` calls
 #      `core.<same-name>()`, makes exactly ONE call on the core handle, and
 #      contains no `return` but the session gate's `return Err(`. The last rule
 #      is what makes it a reachability check rather than a substring one — a
@@ -177,6 +179,18 @@
 #      answer from `SESSION`, ask the core for the flag they name, and contain
 #      no panic token — a sync FFI read unwinds into Dart, and `unwrap_used` /
 #      `expect_used` are restriction lints this repo does not enable.
+#  11. Every relay client is built by `relay/verified.rs`'s `verified_client`,
+#      which installs the policy that verifies each relay event's id AND
+#      signature before the pool acts on it. No other source file under
+#      haven-core/src, haven/rust_builder/src or tooling/soak/src names a
+#      `Client` or `RelayPool` construction, other than the test witnesses
+#      marked `// test witness` in the files and test modules listed for them;
+#      nothing reads a client's database; no source gives a relay client a
+#      signer; and MDK's relay client, which builds no client and is handed
+#      one, is handed the publish client and nothing else, at one site. It is a
+#      text scan: integration tests under `tests/` are not read, and a
+#      construction it cannot spell is not seen. See check 11's own block for
+#      what that leaves open.
 #
 # # Why check 7 reads every spelling, and how the one legitimate call is told apart
 #
@@ -237,10 +251,13 @@
 #   2  expected paths missing (misconfiguration)
 
 set -uo pipefail
+LITERAL_FREE="$(cat "$(dirname "${BASH_SOURCE[0]}")/lib/literal_free.awk")"
+readonly LITERAL_FREE
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CORE_SRC_DIR="${REPO_ROOT}/haven-core/src"
 FFI_SRC_DIR="${REPO_ROOT}/haven/rust_builder/src"
+SOAK_SRC_DIR="${REPO_ROOT}/tooling/soak/src"
 SESSION_FILE="${CORE_SRC_DIR}/relay/live_sync/session.rs"
 MANAGER_FILE="${CORE_SRC_DIR}/relay/manager.rs"
 API_FILE="${FFI_SRC_DIR}/api.rs"
@@ -290,11 +307,11 @@ code_view() {
 # The body of `fn <name>`, comment-stripped and flattened onto one line, so a
 # chain rustfmt split (or joined) reads the same either way.
 fn_body_flat() { # <fn-name> <file>
-  code_view "$2" | awk -v sig="fn $1" '
+  code_view "$2" | awk -v sig="fn $1" "${LITERAL_FREE}"'
     index($0, sig) > 0 { inbody = 1 }
     inbody {
       print
-      o = gsub(/[{]/, "&"); c = gsub(/[}]/, "&")
+      lfree = literal_free($0); o = gsub(/[{]/, "&", lfree); c = gsub(/[}]/, "&", lfree)
       depth += o - c
       if (seen && depth <= 0) exit
       if (o > 0) seen = 1
@@ -599,14 +616,14 @@ check_ffi_add_relay() { # <api.rs>
 #    skip past the forwarding with a success.
 #
 #    Rules (a) and (b) read the handle by NAME, so the engine `Arc` must stay
-#    bound as `core` in these seven methods. That is a convention this guard
+#    bound as `core` in these eight methods. That is a convention this guard
 #    imposes and cannot infer — a rename fails rule (a) with "does not forward",
 #    which is the right place to learn about it.
 #
 #    Whitespace is squeezed out before matching, so rustfmt may split or join
 #    the builder chain freely without moving this check either way.
 #
-#    Two of the seven are also each other's most plausible wrong destination, and
+#    Two of the eight are also each other's most plausible wrong destination, and
 #    each direction is silent in its own way. `LiveSyncCore` deliberately splits
 #    `resume_after_background` (the foreground re-anchor — app resume and the
 #    health tick's whole-session repair, which must always carry the inbox REQ)
@@ -632,6 +649,7 @@ FFI_DELEGATIONS=(
   'pause_subscriptions'
   'pool_subscription_count'
   'in_flight_publishes'
+  'drive_pool_connected_relays'
 )
 
 check_ffi_core_delegations() { # <api.rs>
@@ -700,6 +718,8 @@ _delegation_why() { # <name>
       printf '%s' "This is the direct read of the burst promise 'no standing REQ between publish ticks'; a body that answers a constant makes the e2e oracle built on it pass VACUOUSLY, which is worse than having no oracle." ;;
     in_flight_publishes)
       printf '%s' "This is the Rule-13 gauge read; a body that answers a constant makes 'no publish was cut off' assert nothing." ;;
+    drive_pool_connected_relays)
+      printf '%s' "This is the read of 'no NIP-77 session and no drive socket stands between bursts'; a body that answers a constant makes P2c's socket half pass VACUOUSLY." ;;
     *)
       printf '%s' "Unknown delegation — add its reason to _delegation_why alongside the name." ;;
   esac
@@ -761,6 +781,335 @@ check_ffi_sync_reads_cannot_panic() { # <api.rs>
 }
 
 # ---------------------------------------------------------------------------
+# 11. Every relay event is verified by Haven before anything acts on it.
+#
+#     `nostr-relay-pool` 0.44.3 skips verification for an event whose CLAIMED
+#     id it has verified before (`SharedState::verify_and_cache`), so a relay
+#     that holds no key can replay a seen id over another author, other content
+#     or another signature and be believed — on every plane Haven reads a relay.
+#     The policy in `relay/verified.rs` re-verifies each event in the pool's
+#     admission hook, which runs before the pool's database, before its
+#     id-keyed stream de-duplication and before every notification. It only
+#     runs on a client that was built with it, so the whole guarantee is "no
+#     client is built anywhere else" — and a second construction is one
+#     plausible line (`Client::builder().build()`) that passes every test,
+#     because an honest relay never forges.
+#
+#     What is pinned:
+#       * the constructor still installs THAT policy (`.admit_policy(VerifiedEvents)`),
+#         names `admit_policy` exactly once, and holds the file's only
+#         construction outside its test module — above the module or below
+#         it. Once, because the builder keeps the LAST policy it is given, so a
+#         second `.admit_policy(...)` after the first silently replaces it; and
+#         never as an assignment, because the builder's field is public and
+#         `builder.admit_policy = None` unsets it;
+#       * the client is given no gossip store: the file's product code does
+#         not say `gossip` at all, so neither the builder call (`.gossip(`)
+#         nor an assignment to the builder's public field passes. The SDK
+#         hands every event to a gossip store BEFORE it asks the policy
+#         (`nostr-sdk-0.44.1/src/client/middleware.rs:34-46`), so a forged
+#         relay list would be taken in there and refused only afterwards;
+#       * the policy still calls `verify()` — id AND signature — and neither
+#         half alone: a signature covers only the claimed id, so
+#         `verify_signature()` passes any fields swapped under a genuine id;
+#       * the policy says nothing: no log macro and no rejection reason. It runs
+#         once per frame a relay chooses to send, and anything it rendered would
+#         be relay-chosen (Security Rule 15);
+#       * no other file constructs a `Client`, a `RelayPool` or a `Relay`. Read
+#         over a comment-stripped view flattened onto one line with no space
+#         beside punctuation, so a chain rustfmt wrapped (`Client::⏎builder(`)
+#         is one token; an import alias, a type alias and the `<Client>::`
+#         form are refused because the scan could not follow them;
+#       * no `.database()` read: the pool's database is a second source of
+#         events this guard does not reason about;
+#       * no signer on any relay client: the words `set_signer` and
+#         `unset_signer`, and `.signer(` / `::signer(` with or without a
+#         turbofish (`.signer::<Keys>(`), appear nowhere in the three trees —
+#         so `set_signer::<Keys>(`, the path-qualified call
+#         (`ClientBuilder::signer(b, k)`) and a method reference to
+#         `set_signer` or to a builder's `signer` (`ClientBuilder::signer`,
+#         passed as a function) are refused with the plain call, and so is a
+#         write to a builder's public `signer` field (`builder.signer = …`,
+#         `nostr-sdk-0.44.1/src/client/builder.rs:26`); a path THROUGH a
+#         module named `signer` (`nostr::signer::…`) is not one, and neither
+#         is a comparison (`.signer == …`). With a signer the pool
+#         answers a relay's NIP-42 challenge with the identity key on a socket
+#         that carries a circle's routing id, and MDK's relay client signs an
+#         unsigned non-445 event it is handed
+#         (`transport-nostr-adapter/src/sdk_client.rs:668-682`);
+#       * no relay client is told to authenticate: every
+#         `automatic_authentication(` is `automatic_authentication(false)`.
+#         Two things can be changed on a client AFTER it is built — its signer
+#         (`Client::set_signer`) and this switch
+#         (`Client::automatic_authentication(&self, enable)`,
+#         `nostr-sdk-0.44.1/src/client/mod.rs:116`) — so both are held here,
+#         and the publish client's values are read back by the test
+#         `the_publish_client_holds_no_signer_and_never_authenticates`. Either
+#         alone keeps the pool from answering a challenge;
+#       * NOT read: `tests/`. The NIP-42 control client there holds a signer
+#         and authenticates on purpose; a macro that spells either call is
+#         not followed either;
+#       * MDK's relay client is handed the publish client, once. MDK's adapter
+#         is linked with its `sdk` feature, and `NostrSdkRelayClient` builds no
+#         client: its only constructor outside its own tests is
+#         `NostrSdkRelayClient::new(client: Client)`
+#         (`transport-nostr-adapter/src/sdk_client.rs:258` at the pinned rev),
+#         and no other linked MDK crate depends on nostr-sdk. So what it reads
+#         from a relay is verified exactly when the client it is given came
+#         from `verified_client`. Pinned: the type is named in
+#         `relay/manager.rs` and no other source file; that file spells
+#         `NostrSdkRelayClient::new(` once, tests included, inside
+#         `fn fanout_transport`, as `NostrSdkRelayClient::new(self.client.clone())`;
+#         and every `Self { client … }` there is `client: verified_client(…)`,
+#         so `self.client` has one origin.
+#
+#     A test that needs a client of its own — a publisher, or a witness of what
+#     a relay broadcasts — declares it with a trailing `// test witness`. The
+#     allowlist is a LOCATION and a count, not a count alone: each file that
+#     may carry the marker is named below with how many lines carry it, pinned
+#     by EQUALITY like the other allowlists here, and in haven-core and the FFI
+#     crate a marked line must sit inside a top-level `#[cfg(test)] mod`. A
+#     bare total would let one witness be deleted and its marker spent on a
+#     client in product code, with the count unchanged. (The soak rig's two are
+#     in rig code: that crate is a test instrument throughout and never ships —
+#     `check_soak_test_only.sh`.)
+#
+#     NOT pinned: who calls the constructor. A further caller still gets the
+#     policy; only a construction that bypasses it is a defect.
+#
+#     What this scan cannot see, so nobody reads more into a green run:
+#       * a construction it cannot spell — `let c: Client = Default::default()`
+#         or a `#[derive(Default)]` on a struct holding a `Client`, where the
+#         compiler infers the type; a `macro_rules!` that takes the type as an
+#         identifier; a constructor a trait provides (`trait Fresh: Default`
+#         implemented for `Client`). A `Client` newtype with no `Default`,
+#         constructible only by `verified_client`, would close these
+#         structurally; it is not done;
+#       * a client built in a crate outside the three scanned trees. MDK's
+#         relay adapter is such a crate and is linked with its `sdk` feature;
+#         that it builds no client outside its own tests is read from its
+#         source at the pinned rev, not by this scan, and has to be re-read on
+#         every MDK bump (tracker `T-FORGED-COPY-SEEN`);
+#       * a `RelayManager` given its client some other way than a `Self { … }`
+#         literal — a field assignment after construction, or a second struct
+#         in `manager.rs` whose own `self.client` reaches `fanout_transport`'s
+#         spelling through a method of the same name;
+#       * integration tests under `tests/`, which build bare clients freely and
+#         cannot reach the product's;
+#       * text inside a string literal, which reads as code here — and the
+#         reverse: the comment-stripped view is not string-aware, so a string
+#         literal holding `/*` makes the code after it read as a comment until
+#         the next `*/`, and a construction in between is not seen.
+#     The behavioural tests are what catch a call site that stops using the
+#     constructor (`forged_relay_event_e2e.rs`, `forged_group_event_e2e.rs`).
+#
+#     What it refuses although nothing is built, and why it stays that way:
+#     the `<Client>::` token also fires on a turbofish that only NAMES the
+#     type — `Arc::<Client>::new(client)`, `OnceLock::<Client>::new()`,
+#     `Vec::<Relay>::new()`. It is not narrowed: `Box::<Client>::default()`
+#     and `Arc::<Client>::default()` are the same spelling and DO build a
+#     client with no policy, and telling `::new(` from `::default(` would also
+#     pass a local generic whose `new` builds its parameter. Write the holder
+#     without the turbofish (`let shared: Arc<Client> = Arc::new(client);`).
+# ---------------------------------------------------------------------------
+readonly TEST_WITNESS_MARKER='// test witness'
+# <tree>:<path under that tree's src>:<marked lines>. `core` and `ffi` entries
+# must also sit inside a top-level `#[cfg(test)] mod`.
+readonly -a TEST_WITNESS_FILES=(
+  'core:relay/live_sync/session.rs:2'
+  'ffi:api.rs:1'
+  'soak:rig/doubles.rs:1'
+  'soak:scenarios/s09_cursor_poisoning.rs:1'
+)
+# `reqwest::Client` is the Blossom HTTP client and reads no relay; it is
+# renamed out of the view before the scan rather than excused after it.
+readonly _CLIENT_CONSTRUCTION='(^|[^A-Za-z0-9_])(Client::(builder|new|default)|ClientBuilder|RelayPoolBuilder|RelayPool::(builder|new|default)|Relay::new|(Client|RelayPool|Relay)>::)'
+readonly _SDK_RELAY_CLIENT='(^|[^A-Za-z0-9_])NostrSdkRelayClient([^A-Za-z0-9_]|$)'
+readonly _CLIENT_ALIAS='(^|[^A-Za-z0-9_])(Client|ClientBuilder|RelayPool|RelayPoolBuilder|Relay) as |=([A-Za-z0-9_]+::)*(Client|RelayPool|Relay);'
+
+# stdin, flattened onto one line with no space beside punctuation.
+_tight() {
+  tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/ ?([^A-Za-z0-9_ ]) ?/\1/g; s/reqwest::Client/reqwest::Http/g'
+}
+
+# A top-level `#[cfg(test)] mod`: an item starting in column 0 that is a `mod`
+# with `#[cfg(test)]` among the attributes directly on it, through its closing
+# brace in column 0. Both readers below take the comment-stripped view, so a
+# block comment that spells such a module opens none. ANY line that starts in
+# column 0 and is neither an attribute nor a closing brace or parenthesis is
+# taken for the item the attributes belonged to — not only one that starts
+# with a letter — so a `#[cfg(test)]` on `::std::thread_local! { … }` is spent
+# there and does not make the next `mod` a test module. A `)]` in column 0 is
+# the end of an attribute rustfmt wrapped, and spends nothing.
+readonly _TEST_MODULE_AWK='
+  /^#\[cfg\(test\)\]/ { armed = 1; next }
+  /^#!?\[/ { if (!inside && want == 0) print; next }
+  /^[^[:space:]})]/ { inside = (armed && $0 ~ /^(pub(\([a-z]+\))? )?mod [A-Za-z_0-9]+ \{/); armed = 0 }
+  want == 0 && !inside { print }
+  want == NR { found = inside }
+  /^\}/ { inside = 0; armed = 0 }
+  END { if (want != 0) exit found ? 0 : 1 }'
+
+# Whether <line> of <file> sits inside a top-level `#[cfg(test)] mod`.
+_in_test_module() { # <file> <line>
+  code_view "$1" | awk -v want="$2" "${_TEST_MODULE_AWK}"
+}
+
+# <file> without its top-level `#[cfg(test)] mod`s: everything that ships,
+# whether it stands above a test module or below one.
+_outside_test_modules() { # <file>
+  code_view "$1" | awk -v want=0 "${_TEST_MODULE_AWK}"
+}
+
+check_relay_events_verified() { # <core-src-dir> <ffi-src-dir> <soak-src-dir>
+  local core_dir="$1" ffi_dir="$2" soak_dir="$3" verified="$1/relay/verified.rs"
+  _lf=0
+
+  if [[ ! -f "${verified}" ]]; then
+    lfail "(11) relay/verified.rs is gone. It holds the one relay-client constructor and the policy that verifies every relay event; without it nothing below reads anything."
+    return "$_lf"
+  fi
+
+  # The file outside its tests: the policy and the constructor.
+  local product
+  product="$(_outside_test_modules "${verified}" | _tight)"
+
+  local constructor
+  constructor="$(fn_body_flat 'verified_client' "${verified}" | _tight)"
+  if [[ -z "${constructor}" ]]; then
+    lfail "(11) relay/verified.rs defines no verified_client(). That function is the one place a relay client is built, so that none can be built without the policy."
+  elif [[ "${constructor}" != *".admit_policy(VerifiedEvents)"* ]]; then
+    lfail "(11) verified_client() no longer installs the policy (\`.admit_policy(VerifiedEvents)\`). nostr-relay-pool 0.44.3 hands on an event whose claimed id it has seen before without checking it, so every client built here would act on a relay's forgery — and no test with an honest relay can tell."
+  elif (( $(grep -o 'admit_policy' <<<"${constructor}" | wc -l) != 1 )); then
+    lfail "(11) verified_client() names admit_policy more than once. The builder keeps the LAST policy it is given and its field is public, so a second \`.admit_policy(...)\` or an assignment after the first replaces VerifiedEvents while the first call still reads as installed."
+  fi
+  local disarm
+  for disarm in 'gossip' 'admit_policy='; do
+    if [[ "${product}" == *"${disarm}"* ]]; then
+      lfail "(11) relay/verified.rs disarms the policy (\`${disarm}\`). The SDK hands every event to a gossip store BEFORE it asks the admission policy, so a client given one — by the builder's call or by assigning its public field — takes in a forged relay list and refuses it only afterwards; and assigning the builder's admit_policy field replaces or unsets what verified_client() installs."
+    fi
+  done
+  if (( $(grep -oE "${_CLIENT_CONSTRUCTION}" <<<"${product}" | wc -l) != 1 )); then
+    lfail "(11) relay/verified.rs must hold exactly one client construction outside its test module — verified_client()'s. A second one, above the tests or below them, is a client built without the policy, in the one file this check does not scan for them."
+  fi
+
+  local policy
+  policy="$(fn_body_flat 'admit_event' "${verified}" | _tight)"
+  if [[ "${policy}" != *"event.verify()"* ]]; then
+    lfail "(11) the policy's admit_event() no longer calls event.verify(). verify() checks the id AND the signature; nothing else in Haven or in the pool does once an id has been seen."
+  fi
+  if [[ "${policy}" == *"verify_signature"* || "${policy}" == *"verify_id"* ]]; then
+    lfail "(11) the policy's admit_event() checks half an event. A signature covers the claimed id alone, so verify_signature() passes any author, content, kind, tag or timestamp swapped under a genuine id; verify_id() alone passes any signature. Only verify() is both."
+  fi
+  if [[ "${product}" != *"struct VerifiedEvents;"* ]]; then
+    lfail "(11) VerifiedEvents is no longer a field-less struct. It must hold no state: anything it kept would be state a relay can reach, one frame at a time."
+  fi
+  local said
+  for said in 'log::' 'println!' 'eprintln!' 'dbg!' 'tracing::' 'reason:Some' 'AdmitStatus::rejected('; do
+    if [[ "${product}" == *"${said}"* ]]; then
+      lfail "(11) relay/verified.rs says something about an event it refused (\`${said}\`). The policy runs once per frame a relay chooses to send; whatever it logs or gives as a reason is relay-chosen text, at a rate the relay chooses (Security Rule 15). A refused event is dropped as if withheld."
+    fi
+  done
+
+  # Everywhere else: no construction, no alias, no database read.
+  local file rel marked view hits entry root tree want
+  while IFS= read -r file; do
+    [[ "${file}" == "${verified}" ]] && continue
+    rel="${file#"${REPO_ROOT}/"}"
+    marked="$(grep -nF -- "${TEST_WITNESS_MARKER}" "${file}" | cut -d: -f1 | tr '\n' ' ')"
+
+    # Which allowlisted witness file this is, if any.
+    tree='' want=0
+    for entry in "${TEST_WITNESS_FILES[@]}"; do
+      case "${entry%%:*}" in
+        core) root="${core_dir}" ;;
+        ffi) root="${ffi_dir}" ;;
+        *) root="${soak_dir}" ;;
+      esac
+      entry="${entry#*:}"
+      if [[ "${file}" == "${root}/${entry%:*}" ]]; then
+        tree="${root}" want="${entry##*:}"
+      fi
+    done
+    if (( $(wc -w <<<"${marked}") != want )); then
+      lfail "(11) ${rel} carries $(wc -w <<<"${marked}") '${TEST_WITNESS_MARKER}' marker(s), expected exactly ${want}. The marker is allowed in the files TEST_WITNESS_FILES names and nowhere else: more, or one in another file, means it is being used to wave a client through; fewer means a witness this check knows about is gone. Change the list only with the test that needs it."
+    fi
+
+    # A marker must sit on a line that constructs something, or the pinned
+    # count could be met by decoration; and in a crate that ships, inside a
+    # test module, or it could be spent on a product client.
+    local n
+    for n in ${marked}; do
+      if ! code_view "${file}" | sed -n "${n}p" | _tight | grep -qE "${_CLIENT_CONSTRUCTION}"; then
+        lfail "(11) ${rel}:${n} carries '${TEST_WITNESS_MARKER}' on a line that builds no client. The marker excuses one construction on its own line and nothing else."
+      fi
+      if [[ -n "${tree}" && "${tree}" != "${soak_dir}" ]] && ! _in_test_module "${file}" "${n}"; then
+        lfail "(11) ${rel}:${n} carries '${TEST_WITNESS_MARKER}' outside a top-level #[cfg(test)] mod. In a crate that ships the marker excuses a TEST's own client; on a line of product code it would excuse a client built without the policy."
+      fi
+    done
+
+    view="$(code_view "${file}" \
+      | awk -v skip="${marked}" 'BEGIN { n = split(skip, a, " "); for (i = 1; i <= n; i++) s[a[i]] = 1 } !(NR in s)' \
+      | _tight)"
+
+    hits="$(grep -oE "${_CLIENT_CONSTRUCTION}" <<<"${view}" | sort -u | tr '\n' ' ')"
+    if [[ -n "${hits}" ]]; then
+      lfail "(11) ${rel} builds a relay client of its own (${hits}). Only relay/verified.rs may: a client built anywhere else carries no policy, so it acts on an event a relay forged under an id it has seen. Call verified_client(); a test's own publisher or witness is declared with a trailing '${TEST_WITNESS_MARKER}'."
+    fi
+    if grep -qE "${_CLIENT_ALIAS}" <<<"${view}"; then
+      lfail "(11) ${rel} renames a relay client type (an \`as\` import or a type alias of Client / RelayPool / Relay). This scan reads constructions by the type's own name, so a renamed one would be built unseen."
+    fi
+    if [[ "${view}" == *".database()"* ]]; then
+      lfail "(11) ${rel} reads a client's database (\`.database()\`). The pool's database is a second source of relay events; Haven reads a relay only through a fetch or a notification of a client verified_client() built."
+    fi
+    if grep -qE '(^|[^A-Za-z0-9_])(un)?set_signer([^A-Za-z0-9_]|$)|\.signer(::<|\(|=[^=])|::signer(::<|[^A-Za-z0-9_:]|$)' <<<"${view}"; then
+      lfail "(11) ${rel} gives a relay client a signer (\`set_signer\` / \`.signer(\` / \`::signer(\` / \`.signer =\`). No relay client of Haven's holds a key: with one the pool answers a relay's NIP-42 challenge with it — on the publish client that is the identity key, bound by its signature to a circle's routing id, the device's address and the time — and MDK's relay client signs an unsigned non-445 event it is handed. Events are signed where they are built, never by a client."
+    fi
+    if (( $(grep -o 'automatic_authentication(' <<<"${view}" | wc -l) != $(grep -o 'automatic_authentication(false)' <<<"${view}" | wc -l) )); then
+      lfail "(11) ${rel} sets a relay client's \`automatic_authentication\` to something other than the literal \`false\`. It can be switched on a built client (\`Client::automatic_authentication(&self, enable)\`), and a client that authenticates answers a relay's NIP-42 challenge the day it holds a signer. Every relay client of Haven's is built with \`automatic_authentication(false)\` and none is ever told otherwise."
+    fi
+  done < <(grep -rlE --include='*.rs' 'Client|RelayPool|Relay|database|signer|automatic_authentication' "$@" 2>/dev/null | sort)
+
+  # MDK's relay client: handed the publish client, once, in manager.rs.
+  local manager="${core_dir}/relay/manager.rs" named handover mgr_all mgr_product
+  named="$(grep -rlE --include='*.rs' "${_SDK_RELAY_CLIENT}" "$@" 2>/dev/null | sort | tr '\n' ' ')"
+  for file in ${named}; do
+    if [[ "${file}" != "${manager}" ]] && grep -qE "${_SDK_RELAY_CLIENT}" <<<"$(code_view "${file}")"; then
+      lfail "(11) ${file#"${REPO_ROOT}/"} names MDK's relay client (NostrSdkRelayClient). It builds no client and acts on whichever one it is handed, so it is handed one in relay/manager.rs alone — RelayManager::fanout_transport(), over the publish client verified_client() built. Take the transport from there."
+    fi
+  done
+  if [[ -f "${manager}" ]]; then
+    mgr_all="$(code_view "${manager}" | _tight)"
+    mgr_product="$(_outside_test_modules "${manager}" | _tight)"
+    handover="$(fn_body_flat 'fanout_transport' "${manager}" | _tight)"
+    if (( $(grep -o 'NostrSdkRelayClient::new(' <<<"${mgr_all}" | wc -l) != 1 )) \
+      || [[ "${handover}" != *'NostrSdkRelayClient::new(self.client.clone())'* ]]; then
+      lfail "(11) relay/manager.rs must hand MDK's relay client the publish client exactly once: \`NostrSdkRelayClient::new(self.client.clone())\` inside fn fanout_transport, and nowhere else in the file, tests included. MDK's client verifies nothing itself (it forwards what the client it holds admits), so handed any other client it would act on a relay's forgery, and send on sockets the publish pool does not own."
+    fi
+    if (( $(grep -o 'Self{client' <<<"${mgr_product}" | wc -l) != $(grep -o 'Self{client:verified_client(' <<<"${mgr_product}" | wc -l) )) \
+      || [[ "${mgr_product}" != *'Self{client:verified_client('* ]]; then
+      lfail "(11) relay/manager.rs builds a value whose \`client\` is not \`verified_client(…)\`. fanout_transport() hands \`self.client\` to MDK's relay client, so every \`Self { client … }\` in this file has to spell where that client came from."
+    fi
+  fi
+
+  # A witness file that is gone, or no longer names a client at all, was never
+  # visited above.
+  for entry in "${TEST_WITNESS_FILES[@]}"; do
+    case "${entry%%:*}" in
+      core) tree="${core_dir}" ;;
+      ffi) tree="${ffi_dir}" ;;
+      *) tree="${soak_dir}" ;;
+    esac
+    entry="${entry#*:}"
+    if ! grep -qF -- "${TEST_WITNESS_MARKER}" "${tree}/${entry%:*}" 2>/dev/null; then
+      lfail "(11) ${entry%:*} carries no '${TEST_WITNESS_MARKER}' marker, expected exactly ${entry##*:}. A witness this check knows about is gone; change TEST_WITNESS_FILES with the test that removed it."
+    fi
+  done
+
+  return "$_lf"
+}
+
+# ---------------------------------------------------------------------------
 # THE REGISTRY. One list, driven by BOTH the production run and `--self-test`.
 #
 # It used to be two: the production block enumerated the checks, and the
@@ -774,27 +1123,29 @@ check_ffi_sync_reads_cannot_panic() { # <api.rs>
 # closed by the self-test's wiring fixture, which asserts that every `check_*`
 # function defined in this file is invoked from here.
 # ---------------------------------------------------------------------------
-run_all_checks() { # <core-src-dir> <ffi-src-dir> <manager.rs> <session.rs> <api.rs>
-  local core_dir="$1" ffi_dir="$2" manager="$3" session="$4" api="$5" rc=0
+run_all_checks() { # <core-src-dir> <ffi-src-dir> <manager.rs> <session.rs> <api.rs> <soak-src-dir>
+  local core_dir="$1" ffi_dir="$2" manager="$3" session="$4" api="$5" soak_dir="$6" rc=0
   check_no_verify_subscriptions_enabled "${core_dir}" "${ffi_dir}" || rc=1
   check_publish_pool_options "${manager}" || rc=1
   check_engine_pool_options "${session}" || rc=1
   check_ffi_add_relay "${api}" || rc=1
   check_ffi_core_delegations "${api}" || rc=1
   check_ffi_sync_reads_cannot_panic "${api}" || rc=1
+  check_relay_events_verified "${core_dir}" "${ffi_dir}" "${soak_dir}" || rc=1
   return "${rc}"
 }
 
 if [[ "${1:-}" != "--self-test" ]]; then
-  for p in "${CORE_SRC_DIR}" "${FFI_SRC_DIR}"; do
+  for p in "${CORE_SRC_DIR}" "${FFI_SRC_DIR}" "${SOAK_SRC_DIR}"; do
     [[ -d "${p}" ]] || { echo "ERROR: ${p} not found" >&2; exit 2; }
   done
   for p in "${SESSION_FILE}" "${MANAGER_FILE}" "${API_FILE}"; do
     [[ -f "${p}" ]] || { echo "ERROR: ${p} not found" >&2; exit 2; }
   done
 
-  log "Checking both pools' options, the burst close path and the bridge's forwarding ..."
-  run_all_checks "${CORE_SRC_DIR}" "${FFI_SRC_DIR}" "${MANAGER_FILE}" "${SESSION_FILE}"     "${API_FILE}" || FAILED=1
+  log "Checking both pools' options, the burst close path, the bridge's forwarding and the one verifying client constructor ..."
+  run_all_checks "${CORE_SRC_DIR}" "${FFI_SRC_DIR}" "${MANAGER_FILE}" "${SESSION_FILE}" \
+    "${API_FILE}" "${SOAK_SRC_DIR}" || FAILED=1
 fi
 
 # ---------------------------------------------------------------------------
@@ -811,20 +1162,94 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=44
+  local -r SELF_TEST_FIXTURES=100
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
-  local core="${tmp}/core" ffi="${tmp}/ffi"
+  local core="${tmp}/core" ffi="${tmp}/ffi" soak="${tmp}/soak"
   local manager="${core}/relay/manager.rs"
   local session="${core}/relay/live_sync/session.rs"
+  local verified="${core}/relay/verified.rs"
   local api="${ffi}/api.rs"
+  local doubles="${soak}/rig/doubles.rs"
 
   _clean_tree() {
-    rm -rf "${core}" "${ffi}"
-    mkdir -p "${core}/relay/live_sync" "${ffi}"
+    rm -rf "${core}" "${ffi}" "${soak}"
+    mkdir -p "${core}/relay/live_sync" "${core}/profile" "${ffi}" "${soak}/rig" "${soak}/scenarios"
+
+    cat >"${verified}" <<'RS'
+//! A comment naming Client::builder() and verify_signature() constructs and
+//! checks nothing.
+#[derive(Debug)]
+struct VerifiedEvents;
+
+impl AdmitPolicy for VerifiedEvents {
+    fn admit_event<'a>(
+        &'a self,
+        _relay_url: &'a RelayUrl,
+        _subscription_id: &'a SubscriptionId,
+        event: &'a Event,
+    ) -> BoxedFuture<'a, Result<AdmitStatus, PolicyError>> {
+        // `verify`, never `verify_signature`.
+        let status = if event.verify().is_ok() {
+            AdmitStatus::Success
+        } else {
+            AdmitStatus::Rejected { reason: None }
+        };
+        Box::pin(async move { Ok(status) })
+    }
+}
+
+pub fn verified_client(opts: ClientOptions, monitor: Option<Monitor>) -> Client {
+    let builder = Client::builder().opts(opts).admit_policy(VerifiedEvents);
+    match monitor {
+        Some(monitor) => builder.monitor(monitor),
+        None => builder,
+    }
+    .build()
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn a_pool_client_without_the_policy_hands_back_a_forgery() {
+        let events = fetched(&Client::builder().build()).await;
+    }
+}
+RS
+
+    # The Blossom HTTP client and an in-process test relay: neither is a relay
+    # client, and both spell a token the scan looks for.
+    cat >"${core}/profile/blossom.rs" <<'RS'
+fn http() -> reqwest::Client {
+    reqwest::Client::builder().build().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    async fn relay() -> LocalRelay {
+        nostr_relay_builder::prelude::LocalRelay::new(RelayBuilder::default())
+    }
+}
+RS
+
+    cat >"${doubles}" <<'RS'
+impl TestRelay {
+    pub async fn start(tag: RelayTag) -> Self {
+        let witness = Client::builder().build(); // test witness
+        witness.subscribe(Filter::new(), None).await.expect("witness subscribes");
+    }
+}
+RS
+
+    cat >"${soak}/scenarios/s09_cursor_poisoning.rs" <<'RS'
+async fn witness_on(url: &str) -> Client {
+    let witness = Client::builder().build(); // test witness
+    witness
+}
+RS
 
     cat >"${manager}" <<'RS'
 const PUBLISH_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -839,6 +1264,27 @@ fn publish_relay_options() -> RelayOptions {
 }
 
 impl RelayManager {
+    pub fn new() -> Self {
+        Self {
+            client: verified_client(
+                ClientOptions::default().automatic_authentication(false),
+                None,
+            ),
+            relay_client: OnceLock::new(),
+        }
+    }
+
+    // A comment naming NostrSdkRelayClient::new(other) hands nothing over.
+    pub fn fanout_transport(&self) -> FanoutTransport {
+        let relay_client = self
+            .relay_client
+            .get_or_init(|| Arc::new(NostrSdkRelayClient::new(self.client.clone())));
+        FanoutTransport {
+            client: self.client.clone(),
+            relay_client: Arc::clone(relay_client),
+        }
+    }
+
     async fn add_relays_and_connect(client: &Client, relay_urls: &[RelayUrl]) {
         for url in relay_urls {
             match client
@@ -886,7 +1332,7 @@ fn build_engine_client() -> Client {
     let client_opts = ClientOptions::default()
         .verify_subscriptions(false)
         .automatic_authentication(false);
-    Client::builder().opts(client_opts).build()
+    verified_client(client_opts, Some(Monitor::new(64)))
 }
 
 impl LiveSyncCore {
@@ -958,6 +1404,19 @@ impl LiveSyncCore {
             RelayStatus::Sleeping => None,
             _ => Some(Bucket::Other),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    async fn a_circle_added_mid_session_is_delivered() {
+        let publisher = Client::builder().build(); // test witness
+        let _ = publisher.add_relay(url.as_str()).await;
+    }
+
+    async fn a_burst_still_receives() {
+        let publisher = Client::builder().build(); // test witness
+        let _ = publisher.add_relay(url.as_str()).await;
     }
 }
 RS
@@ -1035,6 +1494,17 @@ impl LiveSyncFfi {
         Ok(u32::try_from(core.in_flight_publishes()).unwrap_or(u32::MAX))
     }
 
+    /// Presence-only: the drive pool's connected relays.
+    pub async fn drive_pool_connected_relays() -> Result<u32, String> {
+        let Some(core) = live_session_core()? else {
+            return Err("no active live-sync session".to_string());
+        };
+        core.drive_pool_connected_relays()
+            .await
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+            .ok_or_else(|| "no drive pool in this live-sync session".to_string())
+    }
+
     #[frb(sync)]
     #[must_use]
     pub fn is_running(&self) -> bool {
@@ -1061,7 +1531,7 @@ mod tests {
     /// Fetches every event of `kind` from a single relay via its own throwaway
     /// client — never the publish pool.
     pub(super) async fn fetch_by_kind(relay: &str) -> Vec<nostr::Event> {
-        let client = nostr_sdk::Client::builder().build();
+        let client = nostr_sdk::Client::builder().build(); // test witness
         client.add_relay(relay).await.expect("add relay"); // e2e helper
         client.connect().await;
         Vec::new()
@@ -1074,7 +1544,7 @@ RS
   # unwired there is unwired here, so its fixtures go red instead of continuing
   # to certify a check that no longer runs.
   _run_all() {
-    run_all_checks "${core}" "${ffi}" "${manager}" "${session}" "${api}"
+    run_all_checks "${core}" "${ffi}" "${manager}" "${session}" "${api}" "${soak}"
   }
 
   _fixture() { # <label> <want-rc> <want-msg-substring> <mutation...>
@@ -1322,6 +1792,10 @@ RS
     '(9) api.rs: in_flight_publishes() does not forward' \
     _sed 's@Ok(u32::try_from(core.in_flight_publishes()).unwrap_or(u32::MAX))@Ok(0)@' "${api}"
 
+  _fixture 'drive_pool_connected_relays answering a constant fails' 1 \
+    '(9) api.rs: drive_pool_connected_relays() does not forward' \
+    _sed 's@        core.drive_pool_connected_relays()@        Some(0_usize)@' "${api}"
+
   # 30. Reachability ISOLATED: the required call is present and unchanged, the
   #     core-call count is still exactly one, and only the early `return Ok(())`
   #     is wrong. Nothing but rule (c) can catch this.
@@ -1369,6 +1843,245 @@ RS
     '(10) api.rs: is_paused() never asks the core for is_paused()' \
     _sed '/fn is_paused/,/^    }/ s@c.is_paused()@true@' "${api}"
 
+  # 45-46. The constructor without the policy, and with some other policy: a
+  #        client that acts on a relay's forgery, with every test of an honest
+  #        relay still green.
+  _fixture 'deleting .admit_policy( fails' 1 '(11) verified_client() no longer installs the policy' \
+    _sed 's/\.admit_policy(VerifiedEvents)//' "${verified}"
+
+  _fixture 'installing some other policy fails' 1 '(11) verified_client() no longer installs the policy' \
+    _sed 's/\.admit_policy(VerifiedEvents)/.admit_policy(AdmitEverything)/' "${verified}"
+
+  # 47-48. Half a check. Each compiles, and each passes an honest relay.
+  _fixture 'verify() replaced by verify_signature() fails' 1 '(11) the policy'"'"'s admit_event() checks half an event' \
+    _sed 's/event\.verify()\.is_ok()/event.verify_signature()/' "${verified}"
+
+  _fixture 'verify() replaced by verify_id() fails' 1 '(11) the policy'"'"'s admit_event() checks half an event' \
+    _sed 's/event\.verify()\.is_ok()/event.verify_id()/' "${verified}"
+
+  # 49-51. The policy growing state or a voice.
+  _fixture 'a policy with a field fails' 1 '(11) VerifiedEvents is no longer a field-less struct' \
+    _sed 's/^struct VerifiedEvents;/struct VerifiedEvents { refused: AtomicU64 }/' "${verified}"
+
+  _fixture 'a log line in the policy fails' 1 '(11) relay/verified.rs says something about an event it refused (`log::`)' \
+    _sed 's/^        let status = if/        log::debug!("refused {}", event.id);\n        let status = if/' "${verified}"
+
+  _fixture 'a rejection reason fails' 1 '(11) relay/verified.rs says something about an event it refused (`reason:Some`)' \
+    _sed 's/reason: None/reason: Some(event.id.to_hex())/' "${verified}"
+
+  # 52-53. The constructor's own file: gone, or holding a second construction.
+  _fixture 'a missing verified.rs fails' 1 '(11) relay/verified.rs is gone' \
+    rm "${verified}"
+
+  _fixture 'a second construction beside the constructor fails' 1 '(11) relay/verified.rs must hold exactly one client construction' \
+    _sed 's/^#\[cfg(test)\]/pub fn plain_client() -> Client { Client::builder().build() }\n\n#[cfg(test)]/' "${verified}"
+
+  # 53b. ...and below the test module, where a view that stops at the first
+  #      `#[cfg(test)]` never looks.
+  _fixture 'a second construction below the test module fails' 1 '(11) relay/verified.rs must hold exactly one client construction' \
+    _append "${verified}" 'pub fn plain_client() -> Client { Client::builder().build() }'
+
+  # 54-59. A client built somewhere else, in each crate and each spelling.
+  _fixture 'a second Client::builder() in manager.rs fails' 1 'manager.rs builds a relay client of its own' \
+    _sed 's/^            client: verified_client($/            client: Client::builder().opts(/' "${manager}"
+
+  _fixture 'a construction rustfmt wrapped across lines fails' 1 'session.rs builds a relay client of its own' \
+    _append "${session}" 'fn lookup_client() -> Client {
+    Client::
+        builder()
+        .build()
+}'
+
+  _fixture 'a fully qualified Client::new in api.rs fails' 1 'api.rs builds a relay client of its own' \
+    _append "${api}" 'fn signing_client(keys: Keys) -> nostr_sdk::Client { nostr_sdk::Client::new(keys) }'
+
+  _fixture 'a RelayPool built in the soak rig fails' 1 'doubles.rs builds a relay client of its own' \
+    _append "${doubles}" 'fn pool() -> RelayPool { RelayPool::new(RelayPoolOptions::default()) }'
+
+  _fixture 'a bare Relay::new fails' 1 'manager.rs builds a relay client of its own' \
+    _append "${manager}" 'fn one(url: RelayUrl, state: SharedState) -> Relay { Relay::new(url, state, RelayOptions::default()) }'
+
+  _fixture 'the <Client>::default() form fails' 1 'session.rs builds a relay client of its own' \
+    _append "${session}" 'fn fallback() -> Client { <Client>::default() }'
+
+  # 60-61. A rename the scan could not follow.
+  _fixture 'an aliased import fails' 1 '(11) '"${manager#"${REPO_ROOT}/"}"' renames a relay client type' \
+    _append "${manager}" 'use nostr_sdk::Client as Sdk;'
+
+  _fixture 'a type alias fails' 1 'renames a relay client type' \
+    _append "${api}" 'type Sdk = nostr_sdk::Client;'
+
+  # 62. The pool's database as a second read path.
+  _fixture 'a .database() read fails' 1 '(11) '"${manager#"${REPO_ROOT}/"}"' reads a client'"'"'s database' \
+    _append "${manager}" '    async fn cached(&self) -> Events { self.client.database().query(Filter::new()).await.unwrap_or_default() }'
+
+  # 63-65. The witness allowlist: an unmarked witness, a marker too many, and a
+  #        marker that marks nothing.
+  _fixture 'an unmarked test client fails' 1 'api.rs builds a relay client of its own' \
+    _sed 's@ // test witness@@' "${api}"
+
+  _fixture 'a witness marker in a file that has no witnesses fails' 1 'manager.rs carries 1 '"'"'// test witness'"'"' marker(s), expected exactly 0' \
+    _append "${manager}" '    fn publisher() -> Client { Client::builder().build() } // test witness'
+
+  _fixture 'a marker on a line that builds nothing fails' 1 'on a line that builds no client' \
+    _append "${manager}" '    const PUBLISHERS: usize = 1; // test witness'
+
+  # 66-68. The allowlist is a location, not a count. One witness deleted and
+  #        its marker spent on a product client — in the same file, where the
+  #        file's count is unchanged, and in another file, where the total is —
+  #        and a witness file that is gone altogether.
+  _spend_a_marker_in() { # <file that receives the product client>
+    sed -i '0,/        let publisher = Client::builder().build(); \/\/ test witness/{//d}' "${session}"
+    if [[ "$1" == "${session}" ]]; then
+      sed -i '0,/^#\[cfg(test)\]/s//fn lookup_client() -> Client { Client::builder().build() } \/\/ test witness\n\n#[cfg(test)]/' "${session}"
+    else
+      printf '%s\n' 'fn lookup_client() -> Client { Client::builder().build() } // test witness' >>"$1"
+    fi
+  }
+
+  _fixture 'a marker moved onto a product client in the same file fails' 1 'outside a top-level #[cfg(test)] mod' \
+    _spend_a_marker_in "${session}"
+
+  _fixture 'a marker moved onto a product client in another file fails' 1 'session.rs carries 1 '"'"'// test witness'"'"' marker(s), expected exactly 2' \
+    _spend_a_marker_in "${manager}"
+
+  _fixture 'a witness file that is gone fails' 1 'rig/doubles.rs carries no '"'"'// test witness'"'"' marker' \
+    rm "${doubles}"
+
+  # 68b. A test module that exists only inside a block comment. rustfmt leaves
+  #      a comment's inner lines in column 0, so read from the raw file the
+  #      product method below it would sit "inside a test module".
+  _spend_a_marker_behind_a_comment() {
+    sed -i '0,/        let publisher = Client::builder().build(); \/\/ test witness/{//d}' "${session}"
+    sed -i '0,/^#\[cfg(test)\]/s//impl Lookup {\n\/*\n#[cfg(test)]\nmod fake {\n*\/\n    fn client() -> Client { Client::builder().build() } \/\/ test witness\n}\n\n#[cfg(test)]/' "${session}"
+  }
+
+  _fixture 'a marker behind a commented-out test module fails' 1 'outside a top-level #[cfg(test)] mod' \
+    _spend_a_marker_behind_a_comment
+
+  # 68c. A `#[cfg(test)]` that belongs to an item starting with something other
+  #      than a letter. It is spent on that item; the plain `mod` after it ships.
+  _spend_a_marker_after_a_spent_attribute() {
+    sed -i '0,/        let publisher = Client::builder().build(); \/\/ test witness/{//d}' "${session}"
+    sed -i '0,/^#\[cfg(test)\]/s//#[cfg(test)]\n::std::thread_local! { static SEEN: Cell<bool> = const { Cell::new(false) }; }\nmod lookup {\n    pub fn client() -> Client { Client::builder().build() } \/\/ test witness\n}\n\n#[cfg(test)]/' "${session}"
+  }
+
+  _fixture 'a marker in a module after a spent #[cfg(test)] fails' 1 'outside a top-level #[cfg(test)] mod' \
+    _spend_a_marker_after_a_spent_attribute
+
+  # 68d. Anti-vacuity for 68c: an attribute rustfmt wrapped ends on a `)]` in
+  #      column 0, between `#[cfg(test)]` and its `mod`. That line is no item,
+  #      so the module under it is still the test module and its witnesses
+  #      still stand inside one.
+  _fixture 'a test module under a wrapped attribute still passes' 0 '' \
+    _sed '0,/^#\[cfg(test)\]/s//#[cfg(test)]\n#[allow(\n    clippy::too_many_lines,\n    clippy::cognitive_complexity\n)]/' "${session}"
+
+  # 69-71b. Four ways to disarm the policy inside the constructor while the
+  #         `.admit_policy(VerifiedEvents)` call is still there to be read.
+  _fixture 'a gossip store on the client fails' 1 '(11) relay/verified.rs disarms the policy (`gossip`)' \
+    _sed 's/\.admit_policy(VerifiedEvents);/.admit_policy(VerifiedEvents).gossip(NostrGossipMemory::unbounded());/' "${verified}"
+
+  _fixture 'a gossip store assigned to the builder'"'"'s field fails' 1 '(11) relay/verified.rs disarms the policy (`gossip`)' \
+    _sed 's/^    match monitor {/    builder.gossip = Some(NostrGossipMemory::unbounded().into_nostr_gossip());\n    match monitor {/' "${verified}"
+
+  _fixture 'a second admit_policy after the first fails' 1 '(11) verified_client() names admit_policy more than once' \
+    _sed 's/\.admit_policy(VerifiedEvents);/.admit_policy(VerifiedEvents).admit_policy(AdmitEverything);/' "${verified}"
+
+  _fixture 'assigning the builder'"'"'s admit_policy field fails' 1 '(11) relay/verified.rs disarms the policy (`admit_policy=`)' \
+    _sed 's/^    match monitor {/    builder.admit_policy = None;\n    match monitor {/' "${verified}"
+
+  # MDK's relay client: handed anything but the publish client, handed it a
+  # second time, named in another file, or riding a client RelayManager was
+  # given rather than built with.
+  _fixture 'MDK'"'"'s relay client handed some other client fails' 1 '(11) relay/manager.rs must hand MDK'"'"'s relay client the publish client exactly once' \
+    _sed 's/NostrSdkRelayClient::new(self.client.clone())/NostrSdkRelayClient::new(spare_client())/' "${manager}"
+
+  _fixture 'a second handover in a test fails' 1 '(11) relay/manager.rs must hand MDK'"'"'s relay client the publish client exactly once' \
+    _append "${manager}" '#[cfg(test)]
+mod more {
+    fn transport(manager: &RelayManager) -> NostrSdkRelayClient { NostrSdkRelayClient::new(manager.client.clone()) }
+}'
+
+  _fixture 'the handover moved out of fanout_transport fails' 1 '(11) relay/manager.rs must hand MDK'"'"'s relay client the publish client exactly once' \
+    _sed 's/pub fn fanout_transport(&self)/pub fn another_transport(\&self)/' "${manager}"
+
+  _fixture 'MDK'"'"'s relay client named in another file fails' 1 'session.rs names MDK'"'"'s relay client' \
+    _append "${session}" 'fn sdk(client: Client) -> NostrSdkRelayClient { NostrSdkRelayClient::new(client) }'
+
+  _fixture 'a RelayManager built around a client it was given fails' 1 '(11) relay/manager.rs builds a value whose `client` is not `verified_client' \
+    _sed 's/^impl RelayManager {/impl RelayManager {\n    pub fn over(client: Client) -> Self {\n        Self { client }\n    }\n/' "${manager}"
+
+  # A signer on a relay client: set after the build, given to a builder, or
+  # taken away again (which only something that set one would do).
+  _fixture 'a signer set on the publish client fails' 1 'manager.rs gives a relay client a signer' \
+    _sed 's/^impl RelayManager {/impl RelayManager {\n    pub async fn arm(\&self, keys: Keys) {\n        self.client.set_signer(keys).await;\n    }\n/' "${manager}"
+
+  _fixture 'a signer given to a builder in another file fails' 1 'session.rs gives a relay client a signer' \
+    _append "${session}" 'fn signing(builder: Builder, keys: Keys) -> Builder {
+    builder
+        .signer(keys)
+}'
+
+  _fixture 'a signer taken off a client in the FFI crate fails' 1 'api.rs gives a relay client a signer' \
+    _append "${api}" 'async fn disarm(c: &Handle) { c.unset_signer().await }'
+
+  _fixture 'a comment naming set_signer( and a designer( call still pass' 0 '' \
+    _append "${session}" '// Never `client.set_signer(keys)` here.
+fn styled(d: &Design) -> Look { d.designer().look() }'
+
+  # The spellings a `set_signer(` / `.signer(` text match walks past.
+  _fixture 'a signer set through a turbofish fails' 1 'session.rs gives a relay client a signer' \
+    _append "${session}" 'async fn arm(c: &Handle, keys: Keys) { c.set_signer::<Keys>(keys).await }'
+
+  _fixture 'a signer given through a path-qualified builder call fails' 1 'session.rs gives a relay client a signer' \
+    _append "${session}" 'fn signing(builder: Builder, keys: Keys) -> Builder { Builder::signer(builder, keys) }'
+
+  _fixture 'a signer given to a builder through a turbofish fails' 1 'session.rs gives a relay client a signer' \
+    _append "${session}" 'fn signing(builder: Builder, keys: Keys) -> Builder { builder.signer::<Keys>(keys) }'
+
+  _fixture 'a method reference to set_signer fails' 1 'api.rs gives a relay client a signer' \
+    _append "${api}" 'fn arming() -> impl Fn(&Handle, Keys) -> Armed { Handle::set_signer }'
+
+  _fixture 'a method reference to a builder'"'"'s signer fails' 1 'session.rs gives a relay client a signer' \
+    _append "${session}" 'fn signing() -> impl Fn(Builder, Keys) -> Builder { Builder::signer }'
+
+  _fixture 'a path through a module named signer still passes' 0 '' \
+    _append "${session}" 'fn kind(s: &nostr::signer::SignerBackend) -> bool { s.is_local() }'
+
+  # The builder's `signer` is a public field: no call spells this one.
+  _fixture 'a signer written to a builder'"'"'s field fails' 1 'session.rs gives a relay client a signer' \
+    _append "${session}" 'fn signing(mut builder: Builder, keys: Keys) -> Builder {
+    builder.signer = Some(keys.into_nostr_signer());
+    builder
+}'
+
+  _fixture 'a comparison of two signer fields still passes' 0 '' \
+    _append "${session}" 'fn same(a: &Options, b: &Options) -> bool { a.signer == b.signer }'
+
+  # Authentication switched on: at the build, or on a built client.
+  _fixture 'a relay client built to authenticate fails' 1 'manager.rs sets a relay client'"'"'s `automatic_authentication`' \
+    _sed 's/automatic_authentication(false)/automatic_authentication(true)/' "${manager}"
+
+  _fixture 'authentication switched on a built client fails' 1 'session.rs sets a relay client'"'"'s `automatic_authentication`' \
+    _append "${session}" 'fn answer(c: &Handle, on: bool) { c.automatic_authentication(on) }'
+
+  _fixture 'a second automatic_authentication(false) still passes' 0 '' \
+    _append "${session}" 'fn refuse(c: &Handle) { c.automatic_authentication(false) }'
+
+  _fixture 'a comment naming NostrSdkRelayClient in another file still passes' 0 '' \
+    _append "${session}" '// MDK'"'"'s NostrSdkRelayClient::new(client) is handed a client in manager.rs.'
+
+  # 72-73. Anti-vacuity: what must NOT fail. The clean tree already carries the
+  #        Blossom `reqwest::Client::builder()`, an in-process `LocalRelay::new`,
+  #        a bare client inside verified.rs's own tests, and a comment naming
+  #        `Client::builder()`; these add the same shapes where they are scanned.
+  _fixture 'reqwest::Client and LocalRelay::new elsewhere still pass' 0 '' \
+    _append "${manager}" 'fn http() -> reqwest::Client { reqwest::Client::new() }
+async fn relay() -> LocalRelay { LocalRelay::new(RelayBuilder::default()) }'
+
+  _fixture 'a comment naming Client::builder() and .database() still passes' 0 '' \
+    _append "${session}" '// Never `Client::builder().build()` here, and never `client.database()`.'
+
   # 37. STRUCTURAL, not a tree mutation — the hole every fixture above shared.
   #     Production and this self-test used to enumerate the checks separately,
   #     so deleting a check from the production block left all 23 fixtures
@@ -1413,4 +2126,4 @@ if [[ "${FAILED}" -ne 0 ]]; then
   echo "check_engine_client_options.sh: FAILED" >&2
   exit 1
 fi
-log "OK: the publish pool sends no keepalive and holds no REQ; the engine pool keeps both the ping its standing REQ needs and the pool-side filter check off; the burst close path drains before it disconnects; and the bridge forwards every burst-lifecycle call to the core instead of answering for it."
+log "OK: the publish pool sends no keepalive and holds no REQ; the engine pool keeps both the ping its standing REQ needs and the pool-side filter check off; the burst close path drains before it disconnects; the bridge forwards every burst-lifecycle call to the core instead of answering for it; and every relay client is built by the one constructor that verifies each relay event."

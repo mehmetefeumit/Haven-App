@@ -93,12 +93,12 @@ jobs:
     env:
       # R1 carries the whole scenario.
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
-      # R2 exists only for the final phase: a responder that does NOT serve
+      # R2 exists only for the heal phase: a responder that does NOT serve
       # Alice's KeyPackage slot, which is what makes the maintenance tick take
-      # the heal branch (republish the CACHED bytes under a fresh `created_at`)
-      # rather than the rotate branch. Reading both copies back is the direct
-      # wire evidence that a heal moves the event timestamp and leaves the
-      # package's `not_before` — and therefore the rotation clock — alone.
+      # the heal branch (republish the signed event the account froze at mint
+      # time) rather than the rotate branch. Reading both copies back is the
+      # direct wire evidence that a heal puts the SAME event on the second
+      # relay — nothing re-signed, restamped or re-minted.
       HAVEN_E2E_RELAY_2: ws://10.0.2.2:7778
       # The runtime identifier scanner (Security Rule 15): the orchestrator
       # seals this run's needle manifest from the host-known needles
@@ -338,10 +338,11 @@ jobs:
       #                                                      = 31m57s -> 32m.
       # It was 30m — the drive plus 6 for everything else, which held until the
       # install barrier.
-      # Sizing evidence: the drive target's own worst case is ~10 min
+      # Sizing evidence: the drive target's own worst case is ~11 min
       # (bootstrap + first mint, a 180s clock rendezvous, two discovery-cascade
-      # fetches, circle creation and the Welcome round trip, a 120s peer-decrypt
-      # wait, and the heal phase) under a 20-minute in-test Timeout; revise
+      # fetches, the heal phase, circle creation and the Welcome round trip, a
+      # 120s peer-decrypt wait, and the replacement of the package that Welcome
+      # consumed with its re-fetch) under a 20-minute in-test Timeout; revise
       # against p95 once this lane has green history.
       #
       # -memory 6144 matches the sibling Android lanes: RustLib + SQLCipher

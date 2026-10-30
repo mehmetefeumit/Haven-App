@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_deferred_send`, `convert_ingest`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_superseded_kp`, `delete_tile_db_files`, `ensure_own_identity`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `live_event_to_ffi`, `live_session_core`, `logscan_plant_token`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `max_log_level`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `now_secs`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `purge_key_package_past_not_after`, `record_retired_slot`, `redact_directory_err`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`, `KpPublishPlan`, `KpRetirementInputs`, `KpRetirementTick`, `ProfileStampLists`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These functions are ignored because they are not marked as `pub`: `acknowledged_by`, `answer_standing`, `answer`, `answer`, `answer`, `answer`, `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_location_result`, `count`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `ensure_own_identity`, `fetch_my_profile_at`, `foreground_claim`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `leave_intent_stands`, `lifecycle_in`, `live_event_to_ffi`, `live_lifecycle_of`, `live_session_core`, `logscan_plant_token`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `max_log_level`, `member_key_packages`, `mint_key_package`, `new`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `now_secs`, `own_cached_view`, `own_profile_to_retract`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `pubkey_of`, `publish_and_promote`, `publishing`, `redact_directory_err`, `redact_profile_err`, `refusal_of`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_entry`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `retain_own_events`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `start_session_as`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Driving`, `InMemoryStorage`, `KpMintPlan`, `KpRetirementInputs`, `KpRetirementTick`, `ProfileStampLists`, `StagedPublish`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
 /// Returns the per-process log handle for `value`, e.g. `circle#a91f3c`.
@@ -69,16 +69,17 @@ Future<void> initKeyringStore() =>
 Future<void> useInMemoryKeyringForTest() =>
     RustLib.instance.api.crateApiUseInMemoryKeyringForTest();
 
-/// Wipes ALL local NEW-STACK MLS state on logout: deletes both encrypted
-/// databases' files (`circles.db` and the Dark Matter `session.sqlite`, plus
-/// every WAL/SHM/journal sidecar) and then removes both keyring keys.
+/// Wipes ALL local MLS state on logout: deletes both encrypted databases' files
+/// (the circle-metadata DB and the MLS session DB, plus every WAL/SHM/journal
+/// sidecar), removes both keyring keys and this identity's part of the storage
+/// reset (its pending notice, and the record that its preferences were cleared).
 ///
 /// This is the highest-severity teardown in the logout path: it guarantees a
 /// returning (or different) identity never inherits the prior identity's MLS
-/// group state, circle metadata, dedup cache, sync cursors, or DB keys. It
-/// targets the NEW Dark Matter stack (`session.sqlite` +
-/// `mls.session.key.default`); the PRE-Dark-Matter legacy DB/key are handled
-/// separately by the one-time first-launch cutover ([`destroy_legacy_mls_state`]).
+/// group state, circle metadata, dedup cache, sync cursors, or DB keys. The
+/// reset notice goes with them: it discloses what the MDK v0.10.4 reset removed
+/// from THIS identity's data, which a returning or different identity never
+/// had (`haven_core::storage_reset`).
 ///
 /// # Ordering and safety
 ///
@@ -115,34 +116,59 @@ Future<void> useInMemoryKeyringForTest() =>
 /// opposed to "already gone", which is success. Surfacing a genuine failure is
 /// load-bearing: it tells the Dart M10.1 logout to KEEP its durable retry
 /// marker and re-attempt on the next launch, instead of clearing it and leaving
-/// a decryptable `circles.db` / `session.sqlite` + keyring key at rest. The
+/// a decryptable `circles-v2.db` / `session-v2.sqlite` + keyring key at rest. The
 /// error string is generic/opaque — no path, key id, or backend detail (Security).
 Future<void> wipeAllMlsState({required String dataDir}) =>
     RustLib.instance.api.crateApiWipeAllMlsState(dataDir: dataDir);
 
-/// First-launch cutover hook (Dark Matter §6 step 2 / security F6): destroys ALL
-/// PRE-Dark-Matter MLS state so the new stack starts on a clean slate and the
-/// old key material is gone.
+/// Runs the one-time MDK v0.10.4 storage reset
+/// ([`haven_core::storage_reset::reset_pre_v2_storage`]) and reports whether its
+/// notice is owed — `true` from the first pass that deleted a pre-migration
+/// store, in any isolate, until [`acknowledge_storage_reset`].
 ///
-/// Deletes the legacy `haven_mdk.db` (+ WAL/SHM/journal sidecars) AND destroys
-/// the legacy keyring entry `mdk.db.key.default` (via the core helper). The old
-/// DB was NOT written with `secure_delete` and flash wear-leveling can leave
-/// residual ciphertext, so key destruction is the practical secure-erase for
-/// the abandoned SQLCipher DB (F6). Distinct from [`wipe_all_mls_state`]: THIS
-/// destroys LEGACY state (a one-time migration), that wipes NEW-stack state on
-/// logout.
-///
-/// Idempotent and fail-soft on "already gone"; the Dart cutover guard should
-/// call this ONCE on the first launch of the Dark Matter build (before opening
-/// the new `CircleManagerFfi`), keyed off a persisted one-time flag.
+/// Sync, so `main.dart` decides the notice before `runApp`. The store openers
+/// (`CircleManager::new` and [`tile_cache_init`]) also run it, because a
+/// background isolate may open first; it is idempotent. A fresh install has no
+/// pre-migration circle data and is never shown the notice.
+bool resetPreV2Storage({required String dataDir}) =>
+    RustLib.instance.api.crateApiResetPreV2Storage(dataDir: dataDir);
+
+/// Whether the storage-reset notice is owed: its marker stands, whichever
+/// isolate's reset wrote it, or a pre-migration user store survives. Reads
+/// files and deletes nothing — the answer `main.dart` falls back to when
+/// [`reset_pre_v2_storage`] itself failed.
+bool storageResetNoticeOwed({required String dataDir}) =>
+    RustLib.instance.api.crateApiStorageResetNoticeOwed(dataDir: dataDir);
+
+/// Whether the app still owes clearing its preferences that name what the reset
+/// deleted — the circles, and a display name the deleted outbox may never have
+/// published: `true` from the pass that removed the user's data, in any
+/// isolate, until [`storage_reset_prefs_cleared`]
+/// ([`haven_core::storage_reset::storage_reset_prefs_owed`]).
+bool storageResetPrefsOwed({required String dataDir}) =>
+    RustLib.instance.api.crateApiStorageResetPrefsOwed(dataDir: dataDir);
+
+/// Records that the app cleared those preferences, so no later launch clears
+/// them again ([`haven_core::storage_reset::storage_reset_prefs_cleared`]).
 ///
 /// # Errors
 ///
-/// Returns `Err` (generic/opaque) if deleting a legacy DB file or destroying the
-/// legacy keyring key hit a GENUINE failure (locked file / unavailable keyring),
-/// so the Dart guard KEEPS its "cutover pending" flag and retries next launch.
-Future<void> destroyLegacyMlsState({required String dataDir}) =>
-    RustLib.instance.api.crateApiDestroyLegacyMlsState(dataDir: dataDir);
+/// Returns an opaque error when the record cannot be written — the preferences
+/// are then cleared again on the next launch — or the marker cannot be
+/// removed, which the record already makes harmless.
+void storageResetPrefsCleared({required String dataDir}) =>
+    RustLib.instance.api.crateApiStorageResetPrefsCleared(dataDir: dataDir);
+
+/// Records that the user has seen the storage-reset notice, which lets
+/// relay-list publishing resume
+/// ([`haven_core::storage_reset::acknowledge_storage_reset`]).
+///
+/// # Errors
+///
+/// Returns an opaque error when the notice marker cannot be removed; the notice
+/// shows again on the next launch.
+void acknowledgeStorageReset({required String dataDir}) =>
+    RustLib.instance.api.crateApiAcknowledgeStorageReset(dataDir: dataDir);
 
 /// Initializes the encrypted tile cache at `data_dir`/`tiles.db`.
 ///
@@ -497,6 +523,15 @@ void allowPrivateBlossomForTest() =>
 void setBlossomServerForTest({required String url}) =>
     RustLib.instance.api.crateApiSetBlossomServerForTest(url: url);
 
+/// The signed event a sealed location carries, as JSON, for an integration
+/// test that has to check what reached a relay — and `None` in any build
+/// without debug assertions, a release among them, where the event never
+/// leaves Rust. No app path calls it (`a_sealed_locations_test_accessor_is_debug_only_and_unused_by_the_app`);
+/// it returns the very event the location's send hands every relay, writes
+/// no log and renders through no `Debug`.
+String? sealedLocationEventJsonForTest({required SealedLocationFfi sealed}) =>
+    RustLib.instance.api.crateApiSealedLocationEventJsonForTest(sealed: sealed);
+
 /// M8-4 subscription-health maintenance tick (Dart-timer-driven, no secret).
 ///
 /// Reads the `SESSION` global: with no live engine session it returns the inert
@@ -505,6 +540,15 @@ void setBlossomServerForTest({required String url}) =>
 /// always empty). Once the engine is live it snapshots relay connectivity and,
 /// if any relay has dropped, re-anchors every subscription at its persisted
 /// cursor via `resume_after_background` — self-healing dropped subscriptions.
+///
+/// `foreground` is the caller's claim: `true` ONLY when the app's lifecycle
+/// state reads `resumed` at the moment of the call. Three things happen on
+/// `true` alone — that whole-session re-anchor, the promotion of a session
+/// that had only been started, and the request for a drive of the stored
+/// fanout records. On `false` the tick
+/// still probes and still re-issues the endpoints that went quiet, changes no
+/// lifecycle, and answers [`SubscriptionHealthActionFfi::AwaitingForeground`]
+/// where the whole-session repair was due.
 ///
 /// The `SESSION` read snapshots the `Arc` and drops the lock guard BEFORE any
 /// `.await` (via [`live_session_core`]), so the returned future is `Send` and
@@ -517,8 +561,11 @@ void setBlossomServerForTest({required String url}) =>
 ///
 /// Returns a redacted error string if the `SESSION` lock is poisoned or a
 /// re-anchor's re-subscription fails.
-Future<SubscriptionHealthOutcomeFfi> maintainSubscriptionHealth() =>
-    RustLib.instance.api.crateApiMaintainSubscriptionHealth();
+Future<SubscriptionHealthOutcomeFfi> maintainSubscriptionHealth({
+  required bool foreground,
+}) => RustLib.instance.api.crateApiMaintainSubscriptionHealth(
+  foreground: foreground,
+);
 
 /// Reports whether a live MLS session is currently registered for `data_dir`
 /// (Security Rule 14) — i.e. whether an open would be refused right now.
@@ -605,6 +652,12 @@ Future<bool> isSessionLive({required String dataDir}) =>
 Future<ForceReleaseOutcomeFfi> forceReleaseLiveSession() =>
     RustLib.instance.api.crateApiForceReleaseLiveSession();
 
+// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<ChangeNoticeFfi>>
+abstract class ChangeNoticeFfi implements RustOpaqueInterface {
+  /// What the circle is to be shown.
+  List<ChangeNoteFfi> notes();
+}
+
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
 abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Wipes local state for the `Abandon` plan — sole-member cleanup with
@@ -616,50 +669,24 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// Feeds the still-encrypted 1059 held for `gift_wrap_id` (the stand-in
   /// `mlsGroupId` bytes from [`process_gift_wrapped_invitation`]) to the
-  /// engine, which peels + joins and yields the real circle.
-  Future<CircleWithMembersFfi> acceptInvitation({
+  /// engine, which peels + joins and yields the real circle. An invitation
+  /// that can never be accepted on this device comes back as the typed
+  /// [`AcceptFailureFfi::NeedsNewInvite`], already resolved like a decline;
+  /// one that would replace a circle this device still holds comes back as
+  /// [`AcceptFailureFfi::RejoinConfirmationRequired`], still held.
+  Future<AcceptInvitationOutcomeFfi> acceptInvitation({
     required List<int> giftWrapId,
   });
 
-  /// Adds members to an existing circle and gift-wraps their Welcomes.
-  ///
-  /// The add-time counterpart to [`create_circle`]: stages an MLS Add commit
-  /// (kind 445, advances existing members on finalize) and gift-wraps the
-  /// resulting per-member Welcome rumors (kind 444) for delivery, resolving
-  /// each recipient's relays through the same fail-closed cascade.
-  ///
-  /// The caller owns the publish/finalize cycle: publish
-  /// `evolution_event_json` to the circle's relays, finalize the pending
-  /// commit on success (or clear it on failure), then publish each
-  /// gift-wrapped Welcome only after a successful finalize.
-  ///
-  /// # Arguments
-  ///
-  /// * `identity_secret_bytes` - The admin's 32-byte Nostr secret key.
-  /// * `mls_group_id` - The circle's MLS group ID.
-  /// * `members` - Key packages and inbox/NIP-65 relays for the new members.
-  /// * `creator_fallback_relays` - The admin's own inbox relays (kind 10050),
-  ///   used as the third tier in the Welcome delivery cascade (member 10050 →
-  ///   member 10002 → admin inbox → FAIL CLOSED). Pass an empty list if the
-  ///   admin has no inbox relays; delivery then fails closed (no
-  ///   public-default fallback) when tiers 1–2 are also empty.
-  ///
-  /// # Security
-  ///
-  /// The Welcome events are gift-wrapped per NIP-59, hiding the sender's
-  /// identity behind a fresh ephemeral key. The secret bytes are zeroized.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the secret bytes are invalid, a key package fails to
-  /// parse, the caller is not an admin, or a member has no reachable Welcome
-  /// relay (fail-closed).
-  Future<AddMembersResultFfi> addMembersToCircle({
-    required List<int> identitySecretBytes,
-    required List<int> mlsGroupId,
-    required List<MemberKeyPackageFfi> members,
-    required List<String> creatorFallbackRelays,
-  });
+  /// Drops what `notice` read from what its circle has not been told: call
+  /// it once the notice has been SHOWN. Only while nothing was written for
+  /// the circle since the read; otherwise nothing is dropped and the next
+  /// notice shows it all again. A second call with the same notice drops
+  /// nothing more. The notes that say what is (unread input, a relay change
+  /// awaiting the foreground) are not dropped; they end when it does.
+  /// Returns `false` when a write since the read superseded the notice:
+  /// read and show the next one.
+  bool acknowledgeShownNotice({required ChangeNoticeFfi notice});
 
   /// Adds a relay to one category (idempotent).
   ///
@@ -733,6 +760,27 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required RelayTypeFfi relayType,
   });
 
+  /// What `mls_group_id`'s circle has not been told about its changes, to be
+  /// shown. Reading takes nothing: a process that dies before the notice is
+  /// acknowledged reads it again.
+  ChangeNoticeFfi changeNotice({required List<int> mlsGroupId});
+
+  /// Whether a fetched KeyPackage event (JSON) can be invited: into the
+  /// existing circle `mls_group_id`, or — `None` — into a new circle.
+  ///
+  /// MDK's own admission check decides
+  /// ([`haven_core::nostr::mls::SessionManager::key_package_admission`]), so
+  /// the pickers can say "needs to update Haven" or "can't be invited right
+  /// now" before an invite that the engine would refuse.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error only for event JSON that does not parse.
+  Future<KeyPackageAdmissionFfi> checkMemberKeyPackage({
+    required String keyPackageJson,
+    Uint8List? mlsGroupId,
+  });
+
   /// Reads a circle's delivery-health timestamps.
   Future<CircleHealthFfi> circleHealth({required List<int> nostrGroupId});
 
@@ -744,56 +792,15 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// deleting the circle row does not cascade to the directory.
   Future<void> completeLeave({required List<int> mlsGroupId});
 
-  /// Confirms a staged commit was published (≥1-relay OK-ack) so the engine
-  /// applies it and advances the epoch.
-  ///
-  /// "Acked" MUST mean a relay returned OK — never merely "sent" — to avoid
-  /// optimistic-merge forks (Rule 13, security F13). Pass the `pending` token
-  /// carried in a [`CircleCreationResultFfi`] / [`AddMembersResultFfi`] /
-  /// [`CommitToPublishFfi`].
-  ///
-  /// Returns everything the engine replayed out of the buffer it filled while
-  /// that commit was in flight — peer locations included. The locations are
-  /// already persisted by the core; the caller routes them for DISPLAY, and
-  /// must run [`DecryptLocationOutcomeFfi::auto_commits`] through this same
-  /// ladder and publish its `proposals`.
-  Future<DecryptLocationOutcomeFfi> confirmPublished({
-    required PendingStateRefFfi pending,
-  });
-
-  /// Creates a new circle with gift-wrapped Welcome events.
-  ///
-  /// Returns the created circle and gift-wrapped Welcome events ready
-  /// to publish to the invited members' inbox relays.
-  ///
-  /// # Arguments
-  ///
-  /// * `identity_secret_bytes` - The creator's identity secret bytes (32 bytes,
-  ///   from `NostrIdentityManager.get_secret_bytes()`)
-  /// * `members` - Key packages and inbox relays for each member
-  /// * `name` - Circle name
-  /// * `description` - Optional circle description
-  /// * `circle_type` - Circle type: "location_sharing" or "direct_share"
-  /// * `relays` - Relay URLs for the circle's messages
-  /// * `creator_fallback_relays` - The creator's own inbox relays (kind
-  ///   10050), used as the third tier in the Welcome delivery cascade
-  ///   (member 10050 → member 10002 → creator inbox → FAIL CLOSED). Pass an
-  ///   empty list if the creator has no inbox relays; delivery then fails
-  ///   closed (no public-default fallback) when tiers 1–2 are also empty.
-  ///
-  /// # Security
-  ///
-  /// The Welcome events are gift-wrapped per NIP-59, hiding the sender's
-  /// identity behind an ephemeral key. Each Welcome uses a fresh ephemeral
-  /// keypair and randomized timestamp.
-  Future<CircleCreationResultFfi> createCircle({
-    required List<int> identitySecretBytes,
-    required List<MemberKeyPackageFfi> members,
-    required String name,
-    String? description,
-    required String circleType,
-    required List<String> relays,
-    required List<String> creatorFallbackRelays,
+  /// The user's consent to the offer of the held invitation `gift_wrap_id`
+  /// whose token is `local_state_token`, as
+  /// [`Self::rejoin_offers_for_invitation`] showed it. A branch that moved
+  /// since comes back as [`AcceptFailureFfi::RejoinConfirmationRequired`]
+  /// (read the offers again); an offer no longer held, or one now declined,
+  /// as [`AcceptFailureFfi::NeedsNewInvite`].
+  Future<AcceptInvitationOutcomeFfi> confirmGroupRejoin({
+    required List<int> giftWrapId,
+    required List<int> localStateToken,
   });
 
   /// Reads the persisted relay sync cursor (raw ms) for `stream`.
@@ -821,81 +828,17 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Returns a redacted error string if the storage write fails.
   Future<void> cursorReset({required String stream});
 
+  /// Declines every replacement offer of the held invitation
+  /// `gift_wrap_id`, and the invitation with them: nothing on the wire,
+  /// and redelivery opens none again.
+  Future<void> declineGroupRejoin({required List<int> giftWrapId});
+
   /// Declines an invitation, keyed by the gift-wrap event id.
   ///
   /// Drops the held 1059 locally (never ingested → nothing on the wire,
-  /// Rule 10) and marks the gift wrap resolved so a re-poll never re-surfaces
-  /// it. (Storage-only; sync in the core.)
+  /// Rule 10), with the replacement offer MDK holds for that gift wrap, and
+  /// marks the gift wrap resolved so a re-poll never re-surfaces it.
   Future<void> declineInvitation({required List<int> giftWrapId});
-
-  /// Decrypts / ingests a received `kind:445` event, returning the folded
-  /// engine results (Dark Matter five-variant taxonomy).
-  ///
-  /// A single ingest can yield SEVERAL [`LocationMessageResultFfi`] — the
-  /// engine's `advance_convergence` may release buffered inbound after the
-  /// outer event — so this returns a `Vec`. The engine owns stale / duplicate
-  /// / out-of-order handling internally (a future-epoch event is durably
-  /// buffered and re-surfaced once the gap fills), so there is no
-  /// `Unprocessable` / `PreviouslyFailed` outcome anymore.
-  ///
-  /// # Peer `SelfRemove` eviction (auto-commit) — Rule 13
-  ///
-  /// This variant does NOT surface receive-side auto-commits (a peer
-  /// `SelfRemove` eviction the engine staged): to stay Rule-13-safe the core
-  /// rolls back any that surfaced rather than confirm an unpublished commit.
-  /// The eviction still propagates via the background catch-up sweep (which
-  /// publishes it). Callers that own relay publishing in poll mode SHOULD
-  /// migrate to [`Self::decrypt_location_collecting_commits`], which surfaces the
-  /// auto-commit so the caller can publish-then-confirm it in the foreground.
-  ///
-  /// # Cursor contract (DM-4b)
-  ///
-  /// The engine owns retry/buffering, so the caller advances its relay sync
-  /// cursor on the OUTER event's `created_at` (which the Dart caller already
-  /// holds — it passed `event_json` in). A buffered event is re-delivered by
-  /// the engine when the epoch gap fills; the caller never re-fetches it.
-  ///
-  /// # Concurrency
-  ///
-  /// The session is `&mut`-serialized behind a `tokio` mutex, so concurrent
-  /// calls are serialized by the engine; this awaits directly.
-  ///
-  /// # Arguments
-  ///
-  /// * `event_json` - JSON-serialized `kind:445` event.
-  ///
-  /// # Errors
-  ///
-  /// Returns a redacted error string if the event JSON is invalid or the
-  /// engine ingest fails hard.
-  Future<List<LocationMessageResultFfi>> decryptLocation({
-    required String eventJson,
-  });
-
-  /// Decrypts / ingests a received `kind:445`, returning the folded results AND
-  /// any receive-side auto-commit the engine staged (publish-before-apply).
-  ///
-  /// Identical ingest to [`Self::decrypt_location`], but surfaces a peer
-  /// `SelfRemove` eviction the engine auto-committed instead of dropping it.
-  /// Rule 13 / security F13: for EACH
-  /// [`DecryptLocationOutcomeFfi::auto_commits`] entry, publish
-  /// `commit_event_json` to the circle's relays, then
-  /// [`confirm_published`](Self::confirm_published) on a ≥1-relay ACK (or
-  /// [`publish_failed`](Self::publish_failed) on failure) — exactly like the
-  /// [`CommitToPublishFfi`] from remove / relay-update. Confirming before an
-  /// ACK, or dropping an entry, re-forks the group the leaver departed. The
-  /// foreground poll receive path SHOULD call this in place of
-  /// [`Self::decrypt_location`].
-  ///
-  /// The cursor contract of [`Self::decrypt_location`] applies unchanged.
-  ///
-  /// # Errors
-  ///
-  /// Returns a redacted error string if the event JSON is invalid or the
-  /// engine ingest fails hard.
-  Future<DecryptLocationOutcomeFfi> decryptLocationCollectingCommits({
-    required String eventJson,
-  });
 
   /// Deletes a contact.
   Future<void> deleteContact({required String pubkey});
@@ -904,7 +847,9 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// A **no-op unless a profile was published** (`has_published_profile`).
   /// Otherwise it republishes a blank kind-0, best-effort NIP-09-deletes the
-  /// last published kind-0, and clears the local profile cache. The Blossom
+  /// last published kind-0, and clears the local profile cache, keeping one
+  /// row: the dated record of the blank, so that nothing a relay still
+  /// serves of the deleted profile is cached again or built on. The Blossom
   /// blob DELETE is deferred (no delete helper in the profile module;
   /// documented best-effort).
   ///
@@ -913,11 +858,20 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// the no-op branch changes — a pubkey that never published keeps its local
   /// rows.
   ///
+  /// A blank some pool relay did not acknowledge is not a finished deletion:
+  /// that relay still serves the profile. The blank is left pending, partly
+  /// published, with the retry ladder advanced, for
+  /// [`Self::sync_my_profile`] to publish a blank to the whole pool again.
+  ///
   /// # Errors
   ///
   /// Returns a redacted error string on a secret that is not this account's
   /// identity, or on relay or database failure.
   Future<void> deleteMyPublicProfile({required List<int> identitySecretBytes});
+
+  /// Who disbanded the circle `mls_group_id`, as hex, for the notice the
+  /// user is shown; `None` for a circle not disbanded. Never logged.
+  Future<String?> disbandedBy({required List<int> mlsGroupId});
 
   /// Reconciles a member's cached profile-picture bytes with their current
   /// kind-0 `picture` URL (authoritative; never driven by Dart).
@@ -983,77 +937,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required List<String> pubkeysHex,
   });
 
-  /// Encrypts a location for a circle.
-  ///
-  /// Creates an MLS-encrypted kind 445 event containing the location data.
-  /// The returned event is ready to publish to the circle's relays.
-  ///
-  /// # Concurrency
-  ///
-  /// Concurrent calls for the same group are **safe**. Every engine write
-  /// funnels through one `tokio::sync::Mutex<AccountDeviceSession>`
-  /// (`haven-core/src/nostr/mls/manager.rs:99-101`, taken in `send` at
-  /// `:494-501`), which `encrypt_location` reaches via `send_location` →
-  /// `create_message` → `send`. Application messages advance no epoch and
-  /// carry no `PendingStateRef`, and past-epoch app messages are tolerated to
-  /// `app_message_past_epoch_limit`, so the encrypt→publish gap is covered
-  /// too.
-  ///
-  /// This paragraph previously said the opposite — that `create_message`
-  /// races on the epoch counter and callers "must not" invoke it
-  /// concurrently, naming a `locationPublisherProvider` that no longer owns
-  /// publishing. That described PRE-Dark-Matter MDK, before the session
-  /// mutex existed. It is corrected rather than deleted because acting on it
-  /// is expensive in a specific way: it invites building a cross-isolate lock
-  /// for a problem upstream already solved, while the REAL hazard sits
-  /// elsewhere.
-  ///
-  /// **The real hazard: compound sequences, not this call.** The mutex is
-  /// released between FFI calls, so a Rule-13 publish-before-apply cycle —
-  /// stage → publish → `confirm_published`/`publish_failed` — spans three
-  /// round-trips with the lock dropped in between (`manager.rs:651-658`,
-  /// `:667-674`). Two concurrent commit-producing flows CAN interleave there.
-  /// The engine refuses a second send while the group is non-`Stable`, so the
-  /// result is a wedged group rather than a fork — a liveness failure, not a
-  /// confidentiality one — but callers must still serialize the whole
-  /// TRANSACTION, which is what `LocationPublishSchedulerNotifier`'s
-  /// `_publishChain` does. Location publishing produces no commits and needs
-  /// no such fence.
-  ///
-  /// # Arguments
-  ///
-  /// * `mls_group_id` - The circle's MLS group ID
-  /// * `sender_pubkey_hex` - The sender's Nostr public key (hex)
-  /// * `latitude` - GPS latitude (exact)
-  /// * `longitude` - GPS longitude (exact)
-  /// * `update_interval_secs` - **Retired, and no longer reaches the wire.**
-  ///   It once seeded a per-send jittered NIP-40 TTL; since the Dark Matter
-  ///   cutover the expiration is stamped by the ENGINE from the group-level
-  ///   `marmot.group.message-retention.v1` component (0x8005) as
-  ///   `inner_created_at + LOCATION_MESSAGE_RETENTION_SECS` (228 s), so
-  ///   `CircleManager::encrypt_location` binds this argument as
-  ///   `_update_interval_secs` and discards it. The `[60, 3600]` range check
-  ///   below is therefore the parameter's only remaining effect. Kept because
-  ///   removing it is an FFI signature change; do NOT reintroduce a per-send
-  ///   TTL path here without re-reading `haven-core/SECURITY.md`, "Outer
-  ///   kind:445 metadata".
-  ///
-  /// # The deferred outcome
-  ///
-  /// Returns [`EncryptLocationOutcomeFfi`], not a bare event: the engine can
-  /// QUEUE the update instead of encrypting it, and that is a distinct,
-  /// actionable state rather than a failure. It is detected by matching the
-  /// `CircleError::SendDeferred` VARIANT — never by inspecting error prose,
-  /// which interpolates remote-authored text and would hand a remote party a
-  /// classification channel (see `nostr::mls::storage::is_session_live`).
-  Future<EncryptLocationOutcomeFfi> encryptLocation({
-    required List<int> mlsGroupId,
-    required String senderPubkeyHex,
-    required double latitude,
-    required double longitude,
-    required BigInt updateIntervalSecs,
-  });
-
   /// Resolves public profiles for the given member pubkeys, fetching stale or
   /// missing ones, and returns the merged set.
   ///
@@ -1102,28 +985,24 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// profile; no secret crosses the FFI. A missing kind-0 yields an `Unknown`
   /// result rather than an error (offline-tolerant, plan D7).
   ///
-  /// Reads from the WHOLE profile pool rather than one salted-assignment
-  /// relay, concurrently — see [`fetch_own_profile`].
+  /// Unless `force`d, asks nothing while the own row's miss backoff runs —
+  /// the schedule [`Self::fetch_member_profiles`] keeps for a profile no
+  /// relay served — so a caller that repeats it until the relays settle the
+  /// answer (the storage-reset name reseed) is not asking on every
+  /// foreground. It then reads EVERY relay of the profile pool, not one
+  /// salted-assignment relay ([`read_own_profile_on_relays`]), and
+  /// `relay_answer` says what they answered.
+  ///
+  /// The row returned with [`OwnProfileRelayAnswerFfi::Published`] is the
+  /// cache WINNER: the relays' newest copy, unless this device holds a newer
+  /// one, and with any edit still waiting to publish re-applied on top.
   ///
   /// # Errors
   ///
   /// Returns a redacted error string on relay or database failure.
-  Future<ProfileMetadataFfi> fetchMyProfile({required String pubkeyHex});
-
-  /// Finalizes an admin relay update: confirms the pending commit, then
-  /// re-syncs the admin's own `circle.relays` from the engine's routing
-  /// component so the admin converges on the new set immediately.
-  ///
-  /// Use this instead of a bare [`confirm_published`](Self::confirm_published)
-  /// for the [`update_circle_relays`](Self::update_circle_relays) flow
-  /// (members converge via the receive path). Pass the `pending` token from
-  /// the [`CommitToPublishFfi`] and the circle's `mls_group_id`.
-  ///
-  /// Returns the confirm's replayed outcome, exactly as
-  /// [`confirm_published`](Self::confirm_published) does.
-  Future<DecryptLocationOutcomeFfi> finalizeRelayUpdate({
-    required PendingStateRefFfi pending,
-    required List<int> mlsGroupId,
+  Future<ProfileMetadataFfi> fetchMyProfile({
+    required String pubkeyHex,
+    required bool force,
   });
 
   /// Gets all contacts.
@@ -1338,8 +1217,8 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///   accept or decline.
   /// * `Ok(None)` — the gift wrap has already been processed on a prior
   ///   poll cycle and should be silently skipped. This is the expected
-  ///   outcome for NIP-59's 2-day lookback window repeatedly surfacing
-  ///   the same wrapper events.
+  ///   outcome for the inbox lookback (96 h, wider than NIP-59's 2-day
+  ///   backdating) repeatedly surfacing the same wrapper events.
   /// * `Err(msg)` — a real failure (malformed event, MDK error, etc.).
   ///   The message is already sanitized via `redact_hex_sequences`.
   Future<InvitationFfi?> processGiftWrappedInvitation({
@@ -1370,38 +1249,16 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Returns a redacted error string on database failure.
   Future<ProfilePoolStatusFfi> profilePoolStatus();
 
-  /// Step 1 of admin handoff: propose promoting `successor_hex` to admin via
-  /// an `UpdateAppComponents(admin-policy.v1)` commit.
-  ///
-  /// Additive — the caller stays admin, so the group is admin-covered at every
-  /// intermediate epoch. Returns a [`CommitToPublishFfi`]: publish
-  /// `commit_event_json` to the circle's relays, then
-  /// [`confirm_published`](Self::confirm_published) on a ≥1-relay ACK or
-  /// [`publish_failed`](Self::publish_failed) on failure (Rule 13). Admin
-  /// authorization and the "an admin must hold a member leaf" rule are both
-  /// enforced by the engine against live MLS state.
-  Future<CommitToPublishFfi> proposeAdminHandoff({
-    required List<int> mlsGroupId,
-    required String successorHex,
-  });
-
   /// Returns a `SelfRemove` proposal event JSON. Publish it, then call
   /// [`complete_leave`](Self::complete_leave).
   ///
   /// A bare `SelfRemove` proposal has NO `PendingStateRef` — a remaining
   /// member commits it later (RFC 9420 §12.1.2), so there is nothing to
   /// confirm or roll back. The returned string is the signed kind:445 event
-  /// JSON to publish to the circle's relays.
-  Future<String> proposeLeave({required List<int> mlsGroupId});
-
-  /// Step 2 of admin handoff (or the sole step on the `AdminDemote` path):
-  /// demote self from admin.
-  ///
-  /// Same publish-then-confirm contract as
-  /// [`propose_admin_handoff`](Self::propose_admin_handoff). Fails closed when
-  /// the caller is the last admin — a sole admin must promote a successor
-  /// first, so a circle can never be left with an empty admin set.
-  Future<CommitToPublishFfi> proposeSelfDemote({required List<int> mlsGroupId});
+  /// JSON to publish to the circle's relays. `None` when this epoch's
+  /// proposal already exists: the leave stands, there is nothing new to
+  /// publish, and the caller proceeds as after a publish.
+  Future<String?> proposeLeave({required List<int> mlsGroupId});
 
   /// Deletes every row whose `purge_after < now_unix_secs`.
   ///
@@ -1414,16 +1271,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// cycle. `now_unix_secs` is the current Unix **seconds** clock. Errors are
   /// redacted.
   Future<BigInt> pruneProcessedGiftWraps({required PlatformInt64 nowUnixSecs});
-
-  /// Reports that a staged publish FAILED; the engine discards the staged
-  /// commit and returns the group to `Stable` at the prior epoch.
-  ///
-  /// The publish-failure counterpart to [`confirm_published`](Self::confirm_published);
-  /// pass the same `pending` token. It replays the same buffer, so it returns
-  /// the same outcome — a no-ack must not cost the peer's fix either.
-  Future<DecryptLocationOutcomeFfi> publishFailed({
-    required PendingStateRefFfi pending,
-  });
 
   /// The local member directory in picker order: current co-members first,
   /// then people who shared a circle within the retention window, each block
@@ -1477,6 +1324,17 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required PlatformInt64 publishedAtSecs,
   });
 
+  /// The replacement offers of the held invitation `gift_wrap_id` that an
+  /// accept answered [`AcceptFailureFfi::RejoinConfirmationRequired`] for:
+  /// joining would discard this device's still-active copy of the circle,
+  /// which happens only on the user's press
+  /// ([`Self::confirm_group_rejoin`]). An offer whose author is not the
+  /// inviter shown, or for a circle being left, is declined with the
+  /// invitation: [`AcceptFailureFfi::NeedsNewInvite`].
+  Future<RejoinOffersOutcomeFfi> rejoinOffersForInvitation({
+    required List<int> giftWrapId,
+  });
+
   /// Returns the deduplicated publish targets for `relay_type` — the
   /// user's own configured relays and nothing else.
   ///
@@ -1511,31 +1369,33 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required String senderPubkey,
   });
 
-  /// Removes members from a circle.
-  ///
-  /// Returns a [`CommitToPublishFfi`] (publish-before-apply, Rule 13):
-  /// publish `commit_event_json`, then [`confirm_published`](Self::confirm_published)
-  /// on a ≥1-relay ACK or [`publish_failed`](Self::publish_failed) on failure.
-  Future<CommitToPublishFfi> removeMembers({
-    required List<int> mlsGroupId,
-    required List<String> memberPubkeys,
-  });
-
   /// Removes the local user's OWN profile picture (retraction republish).
   ///
   /// A **no-op unless a profile was published** (`has_published_profile`) — a
   /// retraction must never mint a first public event for a pubkey that never
   /// published. Otherwise it clears the `picture` field on the freshest kind-0
-  /// and republishes.
+  /// — the relays' copy, or the cached one when that is newer or no relay
+  /// served one — and republishes. With neither a relay copy nor a dated
+  /// cached one it publishes nothing and fails: an empty profile is never
+  /// published over one this device cannot see.
   ///
   /// Either way, a photo still QUEUED for upload is cancelled: it was going
-  /// to publish the picture the user is removing. A queued NAME edit is left
-  /// alone — it has nothing to do with the photo.
+  /// to publish the picture the user is removing. One saved while the
+  /// removal is running is kept, and stays queued. A queued NAME edit has
+  /// nothing to do with the photo and stays queued — unless the removal is
+  /// built on the cached row, which already carries it: the name is then
+  /// published with the removal and recorded as published.
+  ///
+  /// A removal some pool relay did not acknowledge is not finished: that
+  /// relay still serves the photo. It is left pending, partly published,
+  /// with the retry ladder advanced, for [`Self::sync_my_profile`] to
+  /// republish to the whole pool.
   ///
   /// # Errors
   ///
   /// Returns a redacted error string on a secret that is not this account's
-  /// identity, or on relay or database failure.
+  /// identity, when no copy of the profile could be read to build on, or on
+  /// relay or database failure.
   Future<ProfileMetadataFfi> removeMyProfilePicture({
     required List<int> identitySecretBytes,
   });
@@ -1552,50 +1412,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   Future<bool> removeUserRelay({
     required String url,
     required RelayTypeFfi relayType,
-  });
-
-  /// Repairs a circle whose sender ratchets are exhausted, by committing a
-  /// byte-identical `UpdateAppComponents(admin-policy.v1)`.
-  ///
-  /// This is a **ratchet reset**, not key rotation: applying the commit
-  /// derives a fresh `encryption_secret`, so every sender ratchet in the group
-  /// restarts at generation 0 and a peer whose messages had run past
-  /// `maximum_forward_distance` becomes decryptable again. The commit carries
-  /// no `UpdatePath`, so it rotates no leaf key and provides **no**
-  /// post-compromise security. Never describe it as key rotation in code, in
-  /// logs, or in user copy.
-  ///
-  /// # The caller MUST fetch first
-  ///
-  /// Await one relay fetch / live-sync drain for this circle and let it settle
-  /// BEFORE calling this. A departure proposal sitting on a relay that has not
-  /// yet reached this device turns into a same-epoch race; the same proposal
-  /// ingested first turns into a clean `PendingProposal` decline. The engine's
-  /// deterministic ordering makes the race survivable (one extra epoch, never
-  /// a fork), but the fetch converts a race into a decline for free.
-  ///
-  /// # Rule 14 / gate 5
-  ///
-  /// Foreground service layer ONLY — never from a background isolate. Enforced
-  /// by `scripts/ci/check_epoch_repair_isolation.sh`, not by this comment.
-  ///
-  /// # Outcomes
-  ///
-  /// Exactly one field of [`RepairRotationOutcomeFfi`] is `Some`:
-  /// `rotated` → publish then confirm on a ≥1-relay ACK (or roll back);
-  /// `deferred_send` → run that same ladder over its `commits`;
-  /// `skipped` → a normal, user-visible answer, NOT a failure.
-  ///
-  /// `now_secs` is the wall clock in Unix seconds.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error string only for a real failure — no circle row, an
-  /// unreadable store, or an engine rejection that is not about epoch state
-  /// (a non-`Stable` epoch is a `skipped` outcome, not an error).
-  Future<RepairRotationOutcomeFfi> repairEpochRotation({
-    required List<int> mlsGroupId,
-    required BigInt nowSecs,
   });
 
   /// Resets ALL sync cursors (bulk) for the wipe-on-logout path, so a
@@ -1659,6 +1475,14 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// user-added custom relays are preserved. Use
   /// [`Self::wipe_and_reset_defaults_for`] for the destructive variant.
   Future<void> restoreDefaultsFor({required RelayTypeFfi relayType});
+
+  /// Retries a quarantined circle's hydration (non-destructive; never
+  /// re-joins). `true` when the circle is live again.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the circle is not quarantined or the retry failed.
+  Future<bool> retryQuarantinedCircle({required List<int> mlsGroupId});
 
   /// Saves a display-name / bio edit LOCALLY and queues it for publication.
   ///
@@ -1813,21 +1637,15 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required List<int> identitySecretBytes,
   });
 
-  /// Admin: replace this circle's group relay list (MIP-01) via an
-  /// `UpdateAppComponents(nostr-routing.v1)` commit.
+  /// Who a removal the user asked for named, dropped unmade, that is still
+  /// in the circle of `mls_group_id`, as lowercase hex: the members a
+  /// "Remove again" is offered for. Read-only; never logged.
   ///
-  /// Returns a [`CommitToPublishFfi`]. Publish `commit_event_json` to the
-  /// **union of the circle's current relays and `new_relays`** (so a member
-  /// only listening on a relay being removed still receives the commit), then
-  /// call [`finalize_relay_update`](Self::finalize_relay_update) on a ≥1-relay
-  /// ACK or [`publish_failed`](Self::publish_failed) on failure. `new_relays`
-  /// MUST be non-empty, `wss://` (or the debug loopback test seam),
-  /// credential-free, and at most 20 entries; admin authorization is enforced
-  /// by the engine against live MLS state.
-  Future<CommitToPublishFfi> updateCircleRelays({
-    required List<int> mlsGroupId,
-    required List<String> newRelays,
-  });
+  /// # Errors
+  ///
+  /// A fixed message when the circle store cannot be read: an empty list
+  /// would hide a member the user tried to remove.
+  List<String> unmadeRemovalMembers({required List<int> mlsGroupId});
 
   /// Persists a last-known location row.
   ///
@@ -1886,6 +1704,45 @@ abstract class HavenCore implements RustOpaqueInterface {
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LiveSyncFfi>>
 abstract class LiveSyncFfi implements RustOpaqueInterface {
+  /// Tells a started session that the app's lifecycle reads `resumed`:
+  /// the session is in the foreground from here and is served as one,
+  /// once — a removal whose publish an earlier pass left owed is published
+  /// again, a circle that can no longer move is reported, and one drive of
+  /// the stored records is asked for. Every start is followed by this, once
+  /// the caller holds the handle; a start itself claims nothing. Nothing is
+  /// re-anchored, and no relay is contacted unless a publish is owed or a
+  /// stored record is due one.
+  ///
+  /// `foreground` is the caller's claim: `true` ONLY when the app's
+  /// lifecycle state reads `resumed` at the moment of the call. On `false`,
+  /// for a session already in the foreground, and for one that is paused or
+  /// in a background burst, the call does nothing.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if there is no active session or the lock is
+  /// poisoned.
+  Future<void> claimForeground({required bool foreground});
+
+  /// How many of this session's drive-pool relays are connected right now.
+  ///
+  /// The socket half of the burst promise: every NIP-77 session of a burst
+  /// runs on the drive pool and cannot outlive its socket, and the pause
+  /// closes the pool, so zero between publish ticks means no reconciliation
+  /// and no drive socket stands. Associated, not a method, so the iOS
+  /// background drive can read it without a handle.
+  ///
+  /// Presence-only: a COUNT, which a caller renders bucketed. Never a relay
+  /// url. Test and diagnostic surface.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if there is no active session, the lock is poisoned,
+  /// or the session holds no drive pool, so a caller can never read "nothing
+  /// to ask" as "no socket".
+  static Future<int> drivePoolConnectedRelays() =>
+      RustLib.instance.api.crateApiLiveSyncFfiDrivePoolConnectedRelays();
+
   /// How many publishes this session has between SEND and OK right now.
   ///
   /// The other half of the same promise: presence on a relay is permitted
@@ -1914,6 +1771,11 @@ abstract class LiveSyncFfi implements RustOpaqueInterface {
 
   /// Whether a live session is currently running.
   bool isRunning();
+
+  /// Where the live session stands, typed: the read a caller decides a
+  /// stop, a claim or a burst on, rather than inferring it from calls it
+  /// made.
+  LiveLifecycleFfi lifecycle();
 
   /// Streams decrypted live events to Dart for the lifetime of the session.
   ///
@@ -1951,11 +1813,28 @@ abstract class LiveSyncFfi implements RustOpaqueInterface {
   /// the fold permanently un-applied — every burst would re-request the
   /// bounded inbox window, which is the metadata cost the fold exists to cut.
   ///
+  /// A burst makes no commit. What it receives is applied without staging
+  /// anything, and what is stored is driven only as far as finishing it: a
+  /// commit sent before goes again to a relay that is due, and one a relay
+  /// has acknowledged is confirmed.
+  ///
   /// # Errors
   ///
   /// Returns an error if there is no active session, the lock is poisoned, or
   /// a re-subscription fails.
   Future<void> openBackgroundBurst();
+
+  /// [`Self::open_background_burst`] for a caller that measured the OS
+  /// budget the burst has, `budget_ms` from now: no drive of the burst
+  /// begins a relay call it would not have the room to finish, so the OS
+  /// ending the process never leaves one stored as possibly exposed.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::open_background_burst`], except that no session — none
+  /// installed, or one that has stopped — is the typed
+  /// [`BurstOpenFfi::NoSession`].
+  Future<BurstOpenFfi> openBackgroundBurstWithin({required BigInt budgetMs});
 
   /// Closes whatever is open: drops every standing REQ and disconnects the
   /// engine's sockets, leaving the session alive and re-openable.
@@ -2014,11 +1893,16 @@ abstract class LiveSyncFfi implements RustOpaqueInterface {
   /// consume a position in the inbox fold, and Rust cannot tell the callers
   /// apart through one entry point.
   ///
+  /// `foreground` is the caller's claim that the app's lifecycle state
+  /// reads `resumed`: `true` ONLY when it does at the moment of the call.
+  /// On `false` the call is refused before it touches the session — this is
+  /// a foreground open, and nothing else may make one.
+  ///
   /// # Errors
   ///
-  /// Returns an error if there is no active session, the lock is poisoned, or
-  /// a re-subscription fails.
-  Future<void> resumeAfterBackground();
+  /// Returns an error if there is no active session, the lock is poisoned,
+  /// the caller did not claim the foreground, or a re-subscription fails.
+  Future<void> resumeAfterBackground({required bool foreground});
 
   /// Holds the sockets open until the engine's commit traffic has quiesced,
   /// so the pause that follows cannot cut a commit between SEND and OK
@@ -2035,8 +1919,16 @@ abstract class LiveSyncFfi implements RustOpaqueInterface {
   /// Returns an error if there is no active session or the lock is poisoned.
   Future<void> settleBeforePause();
 
-  /// Starts the live session over `groups` + `inbox_relays`. Idempotent — a
-  /// second call while a session is live returns `Ok` without rebuilding.
+  /// Starts the live session over `groups` + `inbox_relays`, replacing any
+  /// session already installed.
+  ///
+  /// A start carries no claim that the app's lifecycle reads `resumed`,
+  /// and the session it leaves is only started: it records nothing it stages
+  /// as a durable fanout, and drives a stored one only as far as finishing
+  /// it — no first send, nothing undone. A start takes seconds,
+  /// and a claim read when it was asked would be acted on after the app
+  /// may have left. The caller claims once this has returned
+  /// ([`Self::claim_foreground`]), from a fresh read of the lifecycle.
   ///
   /// # Errors
   ///
@@ -2045,6 +1937,23 @@ abstract class LiveSyncFfi implements RustOpaqueInterface {
   Future<void> startSession({
     required List<FfiGroupSpec> groups,
     required List<String> inboxRelays,
+  });
+
+  /// [`Self::start_session`] for a background wake that finds no session
+  /// (decision 190): the session it installs is in a background burst —
+  /// subscribed, making no commit — and the caller waits out its backlog
+  /// and pauses it as it does any burst
+  /// (`LiveSyncCore::start_into_burst`). `budget_ms` is the OS budget the
+  /// caller measured for the burst, from now
+  /// ([`Self::open_background_burst_within`]).
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::start_session`].
+  Future<void> startSessionIntoBurst({
+    required List<FfiGroupSpec> groups,
+    required List<String> inboxRelays,
+    required BigInt budgetMs,
   });
 
   /// Stops + drops the live session (logout/teardown). Idempotent.
@@ -2101,8 +2010,9 @@ abstract class LocationEventService implements RustOpaqueInterface {
   ///
   /// Callers pass the nominal interval (typically 120 s) and rearm their
   /// timer with the returned value. This is NOT the TTL window — the
-  /// `expiration` tag sampled inside `encrypt_location` is independent
-  /// and intentionally decoupled (see `haven-core/SECURITY.md`).
+  /// `expiration` tag a sealed location carries is the circle's retention
+  /// window, independent and intentionally decoupled (see
+  /// `haven-core/SECURITY.md`).
   ///
   /// On `nominal_secs == 0` the call falls back to `nominal_secs` rather
   /// than panicking, so a zero at the boundary does not silently
@@ -2225,6 +2135,29 @@ abstract class NostrIdentityManager implements RustOpaqueInterface {
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<RelayManagerFfi>>
 abstract class RelayManagerFfi implements RustOpaqueInterface {
+  /// Invites `members` to the circle through the fanout driver: the circle's
+  /// older records are driven first, the invite is staged under a record of
+  /// its own and driven, and each Welcome goes from a record of its own to
+  /// its invitee's inbox relays once a relay takes the commit.
+  ///
+  /// `foreground` is the caller's word that the app is in front of its user;
+  /// a change is made only then ([`RefusalFfi::ForegroundOnly`]).
+  Future<EvolutionOutcomeFfi> addMembersDriven({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required List<MemberKeyPackageFfi> members,
+    required bool foreground,
+  });
+
+  /// Makes `successor` an admin beside this device: a leaving admin's first
+  /// step.
+  Future<EvolutionOutcomeFfi> adminHandoffDriven({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required String successor,
+    required bool foreground,
+  });
+
   /// Checks whether events of a given kind by an author exist on a relay.
   ///
   /// Queries a single relay for events matching the given kind and author.
@@ -2234,6 +2167,42 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
     required String relayUrl,
     required String authorPubkey,
     required int eventKind,
+  });
+
+  /// What the user needs to know first about the circle of
+  /// `mls_group_id`, worst first; `None` when nothing holds it. One standing
+  /// read: what holds its sends is read in the caller's claimed mode, so
+  /// pass whether the app is in front of its user.
+  ///
+  /// # Errors
+  ///
+  /// A fixed, redacted message when no circle row names the group or the
+  /// store cannot be read.
+  Future<RecoveryCauseFfi?> circleRecovery({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required bool foreground,
+  });
+
+  /// Creates a circle through the fanout driver: the create writes a
+  /// delivery record for each founding Welcome before it returns, and each
+  /// is then sent from it — the exact stored gift wrap, to its invitee's
+  /// inbox relays alone, until one acknowledges it. A Welcome no relay took
+  /// is sent again by later foreground drives, for a day.
+  ///
+  /// `foreground` is the caller's word that the app is in front of its
+  /// user; a circle is created only then ([`RefusalFfi::ForegroundOnly`]).
+  /// An invitee with no inbox relay a Welcome could reach refuses the
+  /// create before anything exists ([`RefusalFfi::MissingWelcomeRelays`]).
+  Future<CircleCreationOutcomeFfi> createCircleDriven({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+    required List<MemberKeyPackageFfi> members,
+    required String name,
+    String? description,
+    required String circleType,
+    required List<String> relays,
+    required bool foreground,
   });
 
   /// Removes a single relay from the persistent connection pool by URL
@@ -2315,61 +2284,45 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
     int? limit,
   });
 
-  /// Fetches a user's key package (kind 30443; legacy 443 is detected but
-  /// never returned).
-  ///
-  /// Resolves the user's relay lists (legacy kind 10051, then NIP-65 kind
-  /// 10002), then fetches the most recent key package from those relays,
-  /// falling back to the read-only discovery plane.
-  ///
-  /// # Arguments
-  ///
-  /// * `pubkey` - The user's public key (hex or npub format)
-  ///
-  /// # Returns
-  ///
-  /// The KeyPackage event as JSON, or `None` if not found.
-  /// Returns the event JSON so Flutter can cache and use it for circle creation.
-  Future<String?> fetchKeypackage({required String pubkey});
-
-  /// Fetches a user's `KeyPackage` relay list (kind 10051).
-  ///
-  /// Returns the relay URLs where the user publishes their KeyPackages.
-  /// Used to discover where to fetch a user's KeyPackage for inviting them.
-  ///
-  /// # Arguments
-  ///
-  /// * `pubkey` - The user's public key (hex or npub format)
-  ///
-  /// # Returns
-  ///
-  /// List of relay URLs, or empty if no relay list is published.
-  Future<List<String>> fetchKeypackageRelays({required String pubkey});
-
   /// Fetches a user's `KeyPackage` with their relay lists.
   ///
-  /// Concurrently fetches three replaceable relay-list events:
-  /// - kind 10051 for `KeyPackage` discovery
+  /// Concurrently fetches two replaceable relay-list events:
   /// - kind 10050 for Welcome delivery (NIP-17 inbox)
-  /// - kind 10002 for Welcome delivery fallback (NIP-65)
+  /// - kind 10002 (NIP-65): its write-capable set for `KeyPackage`
+  ///   discovery, its read-capable set for the Welcome delivery fallback
   ///
-  /// Then runs the shared `KeyPackage` discovery cascade
-  /// (`fetch_keypackage_with_cascade`): 10051 → NIP-65 → defaults.
+  /// Then runs the `KeyPackage` discovery cascade for one invite target
+  /// (`RelayManager::fetch_keypackage_for_invite`): the person's NIP-65
+  /// write set, then the read-only discovery relays.
   ///
   /// Each relay-list fetch is tolerated independently: a transient failure
   /// on one list does not abort the whole call. The returned
-  /// `MemberKeyPackageFfi` carries the 10050 and 10002 lists so the caller
-  /// can run the Welcome delivery cascade (10050 → 10002 → defaults).
+  /// `MemberKeyPackageFfi` carries the 10050 list — the one place a Welcome
+  /// goes — and the 10002 read set.
+  ///
+  /// The selection is made for one invite target: `circle`'s existing circle
+  /// `mls_group_id`, or — `None` — a new circle. MDK's own admission rule for
+  /// that target is read once and applied to every candidate BEFORE they are
+  /// ranked, so a fresher package the target cannot admit never hides an
+  /// older one it can. When nothing is admissible the best valid candidate
+  /// is still returned, so [`CircleManagerFfi::check_member_key_package`]
+  /// can say why the person cannot be invited.
   ///
   /// # Arguments
   ///
   /// * `pubkey` - The user's public key (hex or npub format)
+  /// * `circle` - The inviter's circle manager
+  /// * `mls_group_id` - The circle the person is being added to, if it exists
   ///
   /// # Returns
   ///
   /// A `MemberKeyPackageFfi` with the key package, inbox relays,
   /// and NIP-65 relays, or `None` if no `KeyPackage` was found.
-  Future<MemberKeyPackageFfi?> fetchMemberKeypackage({required String pubkey});
+  Future<MemberKeyPackageFfi?> fetchMemberKeypackage({
+    required String pubkey,
+    required CircleManagerFfi circle,
+    Uint8List? mlsGroupId,
+  });
 
   /// Fetches a user's NIP-65 relay list (kind 10002).
   ///
@@ -2388,31 +2341,50 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   /// Gets the connection status of all relays.
   Future<List<RelayConnectionStatusFfi>> getRelayStatus();
 
-  /// `KeyPackage` maintenance (Dark Matter DM-2b) — republish-if-missing into
-  /// a stable NIP-33 `d` slot on the user's own NIP-65 relays. Also the
-  /// FIRST-publish path (onboarding / login): a responding relay serving
-  /// nothing + no tracked slot mints a fresh package.
+  /// Ingests one received `kind:445` (a poll's) through the fanout driver:
+  /// its circle's records are driven first, and whatever the engine stages
+  /// on the way is recorded and driven.
+  Future<IngestOutcomeFfi> ingestDriven({
+    required CircleManagerFfi circle,
+    required String eventJson,
+    required bool foreground,
+  });
+
+  /// Leaves the circle: the intent is written first, and from then nothing
+  /// is shared with the circle; the proposal is recorded and driven.
+  Future<LeaveOutcomeFfi> leaveDriven({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required bool foreground,
+  });
+
+  /// `KeyPackage` maintenance — republish-if-missing into a stable NIP-33 `d`
+  /// slot on the user's own NIP-65 relays. Also the FIRST-publish path
+  /// (onboarding / login): a responding relay serving nothing + no tracked
+  /// slot mints a fresh package.
   ///
   /// Dart-timer-driven (the identity secret lives only in Dart, Security Rule
   /// 9): the secret bytes are consumed per-call and zeroized. Fail-soft and
   /// idempotent — one tick of the periodic maintenance loop.
   ///
-  /// Steps:
+  /// The tracked package lives in MDK's durable lifecycle record
+  /// (`SessionManager::tracked_key_package`); this is the scheduler over it
+  /// (`docs/MDK_UPSTREAM_TRACKER.md` T-KP-DRIVER). Steps:
   /// 1. Derive `Keys`/pubkey from the secret bytes (zeroized after).
-  /// 2. Probe the user's OWN NIP-65 relays (dedup'd, own-relays-only — never a
-  ///    default union) for kind-30443 events authored by self.
-  /// 3. Build the presence snapshot (`(d, event_id)` per responder) — under
-  ///    Dark Matter a published 30443 is a last-resort package that never dies
-  ///    on join, so the presence gate is pure relay presence of the tracked
-  ///    stable slot (the M8-2 live-material gate is gone).
-  /// 4. Read the tracked package's OWN MLS `Lifetime` and honour the spec's
-  ///    `not_after` init-key deletion bound (step 4a below) — unconditionally,
-  ///    before any relay decision, because that bound does not depend on the
-  ///    transport.
-  /// 5. Decide via [`decide_kp_maintenance`]; on `SeedD` record the seed row;
-  ///    on `Republish`/`Rotate` reuse-or-mint the single kind-30443 event,
-  ///    publish to OWN relays only (publish-first), record the row, and delete
-  ///    minted material on a failed publish (mdk#160).
+  /// 2. Honour the spec's `not_after` init-key deletion bound (4a below) —
+  ///    unconditionally, before any relay decision, because that bound does
+  ///    not depend on the transport.
+  /// 3. Probe the user's OWN NIP-65 relays (dedup'd, own-relays-only — never a
+  ///    default union) for kind-30443 events authored by self, and build the
+  ///    presence snapshot.
+  /// 4. A replacement staged by an earlier tick that no relay acknowledged is
+  ///    republished, byte for byte, and promoted on the first acknowledgement.
+  /// 5. Otherwise decide via [`decide_kp_maintenance`]: on `SeedD` record the
+  ///    slot; on a heal republish the tracked event's own bytes; on a
+  ///    replacement stage a fresh package (minted and frozen in one MDK
+  ///    transaction), publish it to OWN relays only, and promote it on the
+  ///    first acknowledgement — which deletes the private material of every
+  ///    package it supersedes.
   ///
   /// # Lifetime-aware rotation
   ///
@@ -2422,21 +2394,18 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   /// relay and still fetchable, but every `Add` referencing it fails
   /// validation — the account is **silently uninvitable**. So the tick asks
   /// the package itself, never a Nostr timestamp, whether it is past
-  /// `KP_ROTATE_AT_LIFETIME_FRACTION` of its own window. Timing this off
-  /// `event.created_at` would be wrong here even though the reference app
-  /// does it: Haven's heal path re-publishes CACHED bytes under a FRESH
-  /// `created_at`, so an event-age timer would reset on every relay heal
-  /// while the real `not_after` kept ticking.
+  /// `KP_ROTATE_AT_LIFETIME_FRACTION` of its own window.
   ///
   /// # 4a. The `not_after` deletion bound
   ///
   /// `foundation/key-packages.md`: a last-resort `KeyPackage` MUST delete its
   /// private `init_key` at the earlier of (a) confirmed publication of a
-  /// replacement — handled by the publish-then-delete step in
-  /// [`Self::republish_key_package`] — or (b) `Lifetime.not_after`. Bound (b)
-  /// is transport-independent, so it runs here even when no relay responded
-  /// and nothing can be published. Retaining it would mean a compromise of
-  /// that one key decrypts *every recorded Welcome* ever sent to it.
+  /// replacement — the promotion in [`Self::mint_key_package`] — or (b)
+  /// `Lifetime.not_after`. Bound (b) is transport-independent, so it runs
+  /// here even when no relay responded and nothing can be published.
+  /// Retaining it would mean a compromise of that one key decrypts *every
+  /// recorded Welcome* ever sent to it. The slot survives, so the
+  /// replacement reuses it.
   ///
   /// Returns a presence-only [`KpMaintenanceOutcomeFfi`] (counters + enum).
   ///
@@ -2474,7 +2443,20 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   static Future<RelayManagerFfi> newInstance() =>
       RustLib.instance.api.crateApiRelayManagerFfiNewInstance();
 
-  /// Publishes a signed event to the specified relays.
+  /// Publishes a signed event that is neither a group message nor a gift
+  /// wrap — the relay-removal scrub, a relay list — to the specified
+  /// relays.
+  ///
+  /// A group message (kind 445) is refused before any relay is asked: a
+  /// commit, a proposal and a location leave the device only under a
+  /// durable fanout record, through the fanout driver (Security Rule 13).
+  /// So is a gift wrap (kind 1059): every Welcome, a founding one included,
+  /// is sent from its delivery record by the driver
+  /// ([`Self::create_circle_driven`]).
+  ///
+  /// # Errors
+  ///
+  /// A [`PublishFailureFfi`], read by its fields, never its text (Rule 8).
   ///
   /// # Arguments
   ///
@@ -2485,67 +2467,54 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
     required List<String> relays,
   });
 
-  /// Publishes an event in the background without waiting for relay acknowledgment.
-  ///
-  /// Spawns a background task. Suitable for location updates and key package
-  /// re-publishes where periodic timers ensure eventual delivery.
-  Future<void> publishEventFireAndForget({
-    required String eventJson,
-    required List<String> relays,
-  });
-
-  /// Publishes a kind-445 LOCATION event: one bounded fan-out, no retry.
-  ///
-  /// The location plane's publish, and the only one that may take it. One
-  /// connect and one 5 s per-relay window — 10 s worst case against the
-  /// ~49 s [`RelayManagerFfi::publish_event`] ladder — succeeding as soon as
-  /// one relay returns `OK`. A location that misses is superseded by the next
-  /// tick; a commit is not, so commits, welcomes, proposals, key packages,
-  /// relay lists and profiles keep `publish_event` (Security Rule 13). Never
-  /// call this for anything whose outcome resolves a `PendingStateRef`.
-  ///
-  /// # Arguments
-  ///
-  /// * `event_json` - JSON-serialized signed kind-445 event
-  /// * `relays` - List of relay URLs (must be wss://)
-  ///
-  /// # Errors
-  ///
-  /// The error string keeps `RelayError`'s `Display`, so the
-  /// `haven.clock.device_clock_rejected:` token a fast device clock produces
-  /// still reaches `nostr_relay_service.dart` and still becomes a
-  /// `RelayClockRejectionException` — the one publish failure the user can
-  /// act on. No relay prose and no key material is ever in it (Rule 8).
-  Future<PublishResultFfi> publishLocationEvent({
-    required String eventJson,
-    required List<String> relays,
-  });
-
-  /// Once-only legacy relay hygiene (Dark Matter §6 step 5 / F10a): retracts
-  /// this account's stale pre-migration KeyPackage advertisements so an
-  /// old-stack client cannot mint a Welcome the new stack can't process.
-  ///
-  /// NON-OPTIONAL cutover cleanup, guarded by a persisted sentinel
-  /// (`legacy_kp_retraction_done`) so it fires at most once:
-  /// 1. If the sentinel is already set → no-op (`already_done = true`).
-  /// 2. Probe the user's OWN NIP-65 (KeyPackage-discovery) relays for their
-  ///    own kind-443 KeyPackages AND their kind-10051 relay list.
-  /// 3. For each 443, publish a self-authored NIP-09 (kind-5) id-only deletion
-  ///    ([`build_legacy_key_package_retraction`]). For a present 10051, publish
-  ///    an empty-replacement retraction ([`build_key_package_relay_list_retraction`])
-  ///    plus a best-effort NIP-09 coordinate deletion.
-  /// 4. On ≥1-relay ACK of ANY retraction, set the sentinel
-  ///    ([`mark_legacy_kp_retraction_done`]) so it never re-runs.
-  ///
-  /// Dart-driven (the identity secret lives only in Dart, Rule 9); the secret
-  /// bytes are consumed per-call and zeroized. Fail-soft: relay errors are
-  /// tallied, never fatal. Returns a presence-only [`LegacyRetractionOutcomeFfi`].
-  ///
-  /// [`build_legacy_key_package_retraction`]: haven_core::relay::maintenance::build_legacy_key_package_retraction
-  /// [`build_key_package_relay_list_retraction`]: haven_core::relay::maintenance::build_key_package_relay_list_retraction
-  Future<LegacyRetractionOutcomeFfi> retractLegacyKeyMaterial({
+  /// Sends a location [`Self::seal_location_driven`] sealed, once, to the
+  /// relays its record names, and ends its record whatever was answered.
+  Future<LocationPublishFfi> publishLocationDriven({
     required CircleManagerFfi circle,
-    required List<int> identitySecretBytes,
+    required SealedLocationFfi sealed,
+  });
+
+  /// Drives the re-invites MDK owes — fresh key packages looked up through
+  /// this manager's invite lookup, on MDK's own pacing (5 s, 30 s, 2 min,
+  /// 10 min, 1 h, 6 h, then daily, eight lookups in all) — and then the
+  /// stored records, so a re-invite staged here is sent in the same call;
+  /// that drive's outcome, its wait included, comes back with the
+  /// re-invites. Only in the foreground.
+  Future<ReinviteDrivenFfi> reinviteDriven({
+    required CircleManagerFfi circle,
+    required bool foreground,
+  });
+
+  /// Removes members (hex or npub) through the fanout driver.
+  Future<EvolutionOutcomeFfi> removeMembersDriven({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required List<String> memberPubkeys,
+    required bool foreground,
+  });
+
+  /// The epoch-repair rotation through the fanout driver: a self-update of
+  /// this device's leaf, which any member may make.
+  Future<RepairOutcomeFfi> repairRotationDriven({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required bool foreground,
+  });
+
+  /// Drives every stored record that has something due, in every circle: for
+  /// a process the live-sync engine does not drive (no live plane — the
+  /// flag-off configuration, and Android's background service).
+  Future<ResumeOutcomeFfi> resumeDriven({
+    required CircleManagerFfi circle,
+    required bool foreground,
+  });
+
+  /// Carries a leave on: what a start and every drive call for each circle a
+  /// leave was asked for in.
+  Future<LeaveOutcomeFfi> resumeLeaveDriven({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required bool foreground,
   });
 
   /// Runs an M7 receive-only catch-up sweep over every visible circle.
@@ -2560,47 +2529,82 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
     required BigInt maxDurationSecs,
   });
 
-  /// Disconnects from all relays.
-  Future<void> shutdown();
-}
-
-/// Result of adding members to an existing circle (FFI-friendly).
-///
-/// Publish-before-apply (Rule 13): publish `commit_event_json`, confirm
-/// `pending`, THEN publish `welcome_events` (a welcome for a losing/unconfirmed
-/// commit references an epoch that never applied).
-class AddMembersResultFfi {
-  /// JSON-serialized kind 445 evolution (Add commit) event, to publish to
-  /// the circle's relays before confirming `pending`.
-  final String commitEventJson;
-
-  /// Gift-wrapped Welcome events for the newly added members.
-  /// Each is a kind 1059 event containing an encrypted kind 444 Welcome.
-  /// Publish these only after `commit_event_json` is published and `pending`
-  /// is confirmed.
-  final List<GiftWrappedWelcomeFfi> welcomeEvents;
-
-  /// The pending commit to confirm after ≥1-relay commit ACK.
-  final PendingStateRefFfi pending;
-
-  const AddMembersResultFfi({
-    required this.commitEventJson,
-    required this.welcomeEvents,
-    required this.pending,
+  /// Runs only the refused-object redelivery, for only the circles that owe
+  /// one ([`haven_core::relay::catchup::run_refused_refetch`]): what the live
+  /// plane's `RefetchOwed` asks for. Sweeps no window and moves no cursor.
+  /// Returns presence-only counters.
+  Future<CatchupResultFfi> runRefusedRefetch({
+    required CircleManagerFfi circle,
+    required BigInt maxDurationSecs,
   });
 
+  /// Seals a fix for the circle and records it, in one engine hold, after
+  /// its records are driven. The sealed event goes to
+  /// [`Self::publish_location_driven`] and nowhere else.
+  Future<SealOutcomeFfi> sealLocationDriven({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required LocationMessage location,
+    required bool foreground,
+  });
+
+  /// Steps this device down from admin: a leaving admin's second step.
+  Future<EvolutionOutcomeFfi> selfDemoteDriven({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required bool foreground,
+  });
+
+  /// Disconnects from all relays.
+  Future<void> shutdown();
+
+  /// Replaces the circle's relays through the fanout driver.
+  Future<EvolutionOutcomeFfi> updateCircleRelaysDriven({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required List<String> relays,
+    required bool foreground,
+  });
+}
+
+// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<SealedLocationFfi>>
+abstract class SealedLocationFfi implements RustOpaqueInterface {}
+
+/// A typed reason an invitation cannot be accepted.
+enum AcceptFailureFfi {
+  /// The invitation can never be accepted on this device (its KeyPackage's
+  /// private bundle is gone, or the Welcome is invalid or already
+  /// processed); only a new invitation can add this device. The invitation
+  /// has already been resolved like a decline.
+  needsNewInvite,
+
+  /// The invitation would replace a circle this device still holds (a
+  /// removal it never saw, or a fork), which needs the user's explicit
+  /// confirmation. The invitation stays held.
+  rejoinConfirmationRequired,
+}
+
+/// What [`CircleManagerFfi::accept_invitation`] did. Exactly one of the two is
+/// `Some`.
+class AcceptInvitationOutcomeFfi {
+  /// The joined circle.
+  final CircleWithMembersFfi? joined;
+
+  /// Why the invitation cannot be accepted, when it cannot.
+  final AcceptFailureFfi? failure;
+
+  const AcceptInvitationOutcomeFfi({this.joined, this.failure});
+
   @override
-  int get hashCode =>
-      commitEventJson.hashCode ^ welcomeEvents.hashCode ^ pending.hashCode;
+  int get hashCode => joined.hashCode ^ failure.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is AddMembersResultFfi &&
+      other is AcceptInvitationOutcomeFfi &&
           runtimeType == other.runtimeType &&
-          commitEventJson == other.commitEventJson &&
-          welcomeEvents == other.welcomeEvents &&
-          pending == other.pending;
+          joined == other.joined &&
+          failure == other.failure;
 }
 
 /// Whether a background burst's backlog wait saw every endpoint it opened
@@ -2663,6 +2667,11 @@ class BuiltRelayListEventFfi {
   /// the caller must NOT publish anything in this case.
   final bool suppressed;
 
+  /// `true` when nothing was built because the storage-reset notice has not
+  /// been acknowledged yet; the caller must NOT publish anything, and
+  /// publishes the list once the notice is acknowledged.
+  final bool awaitingResetAcknowledgement;
+
   const BuiltRelayListEventFfi({
     this.eventJson,
     this.eventIdHex,
@@ -2670,6 +2679,7 @@ class BuiltRelayListEventFfi {
     this.kind,
     this.createdAtSecs,
     required this.suppressed,
+    required this.awaitingResetAcknowledgement,
   });
 
   @override
@@ -2679,7 +2689,8 @@ class BuiltRelayListEventFfi {
       targets.hashCode ^
       kind.hashCode ^
       createdAtSecs.hashCode ^
-      suppressed.hashCode;
+      suppressed.hashCode ^
+      awaitingResetAcknowledgement.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -2691,7 +2702,8 @@ class BuiltRelayListEventFfi {
           targets == other.targets &&
           kind == other.kind &&
           createdAtSecs == other.createdAtSecs &&
-          suppressed == other.suppressed;
+          suppressed == other.suppressed &&
+          awaitingResetAcknowledgement == other.awaitingResetAcknowledgement;
 }
 
 /// Outcome of [`CircleManagerFfi::build_unpublish_relay_list`].
@@ -2740,6 +2752,15 @@ class BuiltUnpublishFfi {
           deletionEventJson == other.deletionEventJson &&
           targets == other.targets &&
           suppressed == other.suppressed;
+}
+
+/// What a background burst's open did.
+enum BurstOpenFfi {
+  /// The burst is open.
+  opened,
+
+  /// No live-sync session runs: nothing was opened.
+  noSession,
 }
 
 /// Presence-only result of an M7 receive-only catch-up sweep. All counters —
@@ -2796,40 +2817,123 @@ class CatchupResultFfi {
           relayErrors == other.relayErrors;
 }
 
-/// Result of circle creation (FFI-friendly).
-///
-/// Publish-before-apply (Rule 13): publish `welcome_events`, then confirm
-/// `pending` via [`CircleManagerFfi::confirm_published`] once ≥1 relay ACKs a
-/// welcome (or roll back via [`CircleManagerFfi::publish_failed`]).
-class CircleCreationResultFfi {
-  /// The created circle.
-  final CircleFfi circle;
+/// What a circle has not been told about its changes (FFI mirror of
+/// `haven_core::nostr::mls::ChangeNote`): each is fixed copy.
+enum ChangeNoteFfi {
+  /// A removal was undone: the member is still in the circle.
+  removalUndone,
 
-  /// Gift-wrapped Welcome events ready to publish to recipients.
-  /// Each is a kind 1059 event containing an encrypted kind 444 Welcome.
-  final List<GiftWrappedWelcomeFfi> welcomeEvents;
+  /// A change that removed nobody was undone.
+  changeUndone,
 
-  /// The pending group-creation state to confirm after ≥1-relay welcome ACK.
-  final PendingStateRefFfi pending;
+  /// The circle may be out of step with its other members.
+  mayBeOutOfStep,
 
-  const CircleCreationResultFfi({
-    required this.circle,
-    required this.welcomeEvents,
-    required this.pending,
+  /// An invitee is on the roster with no Welcome left: invite again.
+  reinviteOwed,
+
+  /// A change was staged and neither recorded nor undone.
+  changeUnrecorded,
+
+  /// A queued change was retired unmade.
+  queuedChangeDropped,
+
+  /// Queued changes are held behind a failed advance.
+  queuedChangesHeld,
+
+  /// The circle holds a change this device has not applied.
+  unreadChange,
+
+  /// Fixes of this circle were not delivered.
+  unreadLocation,
+
+  /// A change of the circle's relays waits for the app to be opened.
+  awaitsForeground,
+
+  /// A removal the user asked for was not made: ask again.
+  queuedRemovalDropped,
+
+  /// A change the user made was withdrawn: ask again.
+  changeWithdrawn,
+
+  /// An invitee's Welcome is not delivered yet.
+  welcomeOwed,
+
+  /// The circle's routing id is another circle's on this device too: each
+  /// circle is held until it itself is left; leaving one does not release
+  /// the other.
+  routingCollision,
+}
+
+/// What [`RelayManagerFfi::create_circle_driven`] did: the circle, unless
+/// a refusal the UI tells apart stopped the create, and its founding
+/// Welcomes — how many an inbox relay acknowledged during the call, how many
+/// there are, and whose are still owed (later foreground drives send them
+/// from their records).
+class CircleCreationOutcomeFfi {
+  /// The circle, as stored; `None` when refused.
+  final CircleFfi? circle;
+
+  /// Why nothing was created, when the UI must tell it apart.
+  final RefusalFfi? refusal;
+
+  /// Founding Welcomes an inbox relay acknowledged during the call.
+  final int welcomesSent;
+
+  /// Founding Welcomes: one per invitee.
+  final int welcomesTotal;
+
+  /// The invitees (hex) whose founding Welcome is still owed.
+  final List<String> unsentRecipients;
+
+  const CircleCreationOutcomeFfi({
+    this.circle,
+    this.refusal,
+    required this.welcomesSent,
+    required this.welcomesTotal,
+    required this.unsentRecipients,
   });
 
   @override
   int get hashCode =>
-      circle.hashCode ^ welcomeEvents.hashCode ^ pending.hashCode;
+      circle.hashCode ^
+      refusal.hashCode ^
+      welcomesSent.hashCode ^
+      welcomesTotal.hashCode ^
+      unsentRecipients.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is CircleCreationResultFfi &&
+      other is CircleCreationOutcomeFfi &&
           runtimeType == other.runtimeType &&
           circle == other.circle &&
-          welcomeEvents == other.welcomeEvents &&
-          pending == other.pending;
+          refusal == other.refusal &&
+          welcomesSent == other.welcomesSent &&
+          welcomesTotal == other.welcomesTotal &&
+          unsentRecipients == other.unsentRecipients;
+}
+
+/// Whether the engine holds a circle's MLS state live (FFI mirror of
+/// [`haven_core::circle::CircleEngineState`]). A quarantined circle can neither
+/// send nor receive until [`CircleManagerFfi::retry_quarantined_circle`]
+/// re-hydrates it; nothing about it is lost, so it is never offered a
+/// destructive remedy.
+enum CircleEngineStateFfi {
+  /// The engine holds the group live.
+  live,
+
+  /// The group failed session-open hydration and awaits a retry.
+  quarantined,
+
+  /// An admin disbanded the circle: nothing is sent or received for it,
+  /// and it can only be left.
+  disbanded,
+
+  /// MDK halted the circle at its last stable epoch and applies nothing it
+  /// receives: read from its persisted flag on every read, so it holds
+  /// across a restart and ends when an admin adds this device again.
+  unrecoverable,
 }
 
 /// Circle information (FFI-friendly).
@@ -2974,14 +3078,18 @@ class CircleWithMembersFfi {
   /// Public key of who invited us (if known).
   final String? inviterPubkey;
 
-  /// Members with resolved contact info.
+  /// Members with resolved contact info. Empty for a quarantined circle.
   final List<CircleMemberFfi> members;
+
+  /// Whether the engine holds this circle's MLS state live.
+  final CircleEngineStateFfi engineState;
 
   const CircleWithMembersFfi({
     required this.circle,
     required this.membershipStatus,
     this.inviterPubkey,
     required this.members,
+    required this.engineState,
   });
 
   @override
@@ -2989,7 +3097,8 @@ class CircleWithMembersFfi {
       circle.hashCode ^
       membershipStatus.hashCode ^
       inviterPubkey.hashCode ^
-      members.hashCode;
+      members.hashCode ^
+      engineState.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -2999,37 +3108,8 @@ class CircleWithMembersFfi {
           circle == other.circle &&
           membershipStatus == other.membershipStatus &&
           inviterPubkey == other.inviterPubkey &&
-          members == other.members;
-}
-
-/// A group-evolving commit awaiting publish + confirm (remove / relay update /
-/// admin change) — FFI mirror of `haven_core::circle::CommitToPublish`.
-///
-/// Publish-before-apply (Rule 13): publish `commit_event_json` to the circle's
-/// relays, then confirm `pending` via [`CircleManagerFfi::confirm_published`]
-/// on ≥1-relay ACK (or roll back via [`CircleManagerFfi::publish_failed`]).
-class CommitToPublishFfi {
-  /// JSON-serialized kind 445 commit event to publish to the circle's relays.
-  final String commitEventJson;
-
-  /// The pending commit to confirm after ≥1-relay ACK.
-  final PendingStateRefFfi pending;
-
-  const CommitToPublishFfi({
-    required this.commitEventJson,
-    required this.pending,
-  });
-
-  @override
-  int get hashCode => commitEventJson.hashCode ^ pending.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is CommitToPublishFfi &&
-          runtimeType == other.runtimeType &&
-          commitEventJson == other.commitEventJson &&
-          pending == other.pending;
+          members == other.members &&
+          engineState == other.engineState;
 }
 
 /// Local contact information (FFI-friendly).
@@ -3129,61 +3209,6 @@ class ConvergenceSweepFfi {
           settled == other.settled;
 }
 
-/// What the engine folded out of one call — FFI mirror of
-/// `haven_core::circle::DecryptedIngest`.
-///
-/// Two origins, one shape: ingesting one received `kind:445`
-/// ([`CircleManagerFfi::decrypt_location_collecting_commits`]), and RESOLVING a
-/// staged commit ([`CircleManagerFfi::confirm_published`] /
-/// [`CircleManagerFfi::publish_failed`] / [`CircleManagerFfi::finalize_relay_update`]),
-/// which replays everything the engine buffered while that commit was in flight.
-///
-/// Carries the folded location results, any receive-side auto-commit the engine
-/// staged (a peer `SelfRemove` eviction), and any bare proposal.
-/// Publish-before-apply (Rule 13 / security F13): for EACH [`Self::auto_commits`]
-/// entry, publish `commit_event_json` to the circle's relays, then
-/// [`CircleManagerFfi::confirm_published`] on a ≥1-relay ACK (or
-/// [`CircleManagerFfi::publish_failed`] on failure) — exactly like the
-/// [`CommitToPublishFfi`] returned by remove / relay-update. NEVER confirm before
-/// a relay ACKs, and NEVER drop an entry silently (that re-forks the group the
-/// leaver departed).
-///
-/// Every location it carries is ALREADY persisted to the last-known store by the
-/// core before the call returns; the caller routes them for DISPLAY and for the
-/// receive-liveness stamp, never for durability.
-class DecryptLocationOutcomeFfi {
-  /// The folded location-facing results (locations, joins, updates, …).
-  final List<LocationMessageResultFfi> results;
-
-  /// Receive-side auto-commits the caller MUST publish then confirm/fail.
-  final List<CommitToPublishFfi> autoCommits;
-
-  /// JSON-serialized bare proposal events to publish (no confirm), mirroring
-  /// [`DeferredSendFfi::proposals`]: publish-or-lose, and recoverable — a
-  /// re-proposed `SelfRemove` is driven by the durable leave request, so a
-  /// later convergence pass re-emits it.
-  final List<String> proposals;
-
-  const DecryptLocationOutcomeFfi({
-    required this.results,
-    required this.autoCommits,
-    required this.proposals,
-  });
-
-  @override
-  int get hashCode =>
-      results.hashCode ^ autoCommits.hashCode ^ proposals.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is DecryptLocationOutcomeFfi &&
-          runtimeType == other.runtimeType &&
-          results == other.results &&
-          autoCommits == other.autoCommits &&
-          proposals == other.proposals;
-}
-
 /// Decrypted location from a peer (FFI-friendly).
 ///
 /// Contains the sender identity and location data.
@@ -3237,69 +3262,17 @@ class DecryptedLocationFfi {
           expiresAt == other.expiresAt;
 }
 
-/// Publish work handed back by a DEFERRED location send — FFI mirror of
-/// `haven_core::circle::DeferredWork` plus the outcome's counters.
-///
-/// The engine QUEUED the location update instead of encrypting it, so there is
-/// no event to publish for the location itself. Two things still need doing,
-/// and both are the caller's:
-///
-/// 1. **Rule 13.** [`Self::commits`] carries any commit the engine STAGED
-///    inside that same call — a peer `SelfRemove` eviction that came due. Each
-///    MUST be published and then confirmed via
-///    [`CircleManagerFfi::confirm_published`] on a ≥1-relay ACK (or rolled back
-///    via [`CircleManagerFfi::publish_failed`]). Dropping one leaves the group
-///    in `PendingPublish`, where every later send fails.
-/// 2. [`Self::proposals`] carries bare proposals (no staged state, nothing to
-///    confirm): publish-or-lose, and recoverable — a re-proposed `SelfRemove`
-///    is driven by the durable leave request, so a later convergence pass
-///    re-emits it.
-///
-/// The three scalars are presence-only counters for the sharing-health model.
-class DeferredSendFfi {
-  /// Stored rows still gating outbound sends for this circle, read after the
-  /// in-place repair. `0` means the next send should encrypt.
-  final int unresolvedInputs;
+/// Which way the relays said this device's clock is off (FFI mirror of
+/// `haven_core::relay::clock_skew::DeviceClockComplaint`).
+enum DeviceClockComplaintFfi {
+  /// The event is in the relays' future: the clock runs fast.
+  ahead,
 
-  /// Queued location intents the repair discarded so a stalled circle cannot
-  /// bank one stale fix per publish cycle.
-  final int discardedIntents;
+  /// The event is too far in the relays' past: the clock runs slow.
+  behind,
 
-  /// Whether the circle was left with nothing gating.
-  final bool repaired;
-
-  /// Staged commits awaiting the publish → confirm ladder (Rule 13).
-  final List<CommitToPublishFfi> commits;
-
-  /// JSON-serialized bare proposal events to publish (no confirm).
-  final List<String> proposals;
-
-  const DeferredSendFfi({
-    required this.unresolvedInputs,
-    required this.discardedIntents,
-    required this.repaired,
-    required this.commits,
-    required this.proposals,
-  });
-
-  @override
-  int get hashCode =>
-      unresolvedInputs.hashCode ^
-      discardedIntents.hashCode ^
-      repaired.hashCode ^
-      commits.hashCode ^
-      proposals.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is DeferredSendFfi &&
-          runtimeType == other.runtimeType &&
-          unresolvedInputs == other.unresolvedInputs &&
-          discardedIntents == other.discardedIntents &&
-          repaired == other.repaired &&
-          commits == other.commits &&
-          proposals == other.proposals;
+  /// The timestamp was blamed with no direction.
+  unspecified,
 }
 
 /// One member-directory row, as the picker reads it.
@@ -3355,72 +3328,77 @@ enum DirectoryTierFfi {
   recent,
 }
 
-/// What [`CircleManagerFfi::encrypt_location`] produced: either an event to
-/// publish, or a typed deferral.
-///
-/// Struct shape with two `Option`s rather than a tagged enum, following the
-/// same convention as [`LeavePlanFfi`] and [`DecryptOutcomeFfi`] — it avoids
-/// pulling Dart `freezed` into the bindings while preserving all the
-/// information. **Exactly one of the two is `Some`**; the Dart wrapper narrows
-/// that into a sealed type so call sites cannot forget a case.
-///
-/// This exists because the deferral used to be flattened to an error STRING.
-/// Classifying it in Dart would then have meant substring-matching error prose,
-/// which Haven forbids: error strings interpolate remote-authored text (a relay
-/// URL, a peer's component), so a `contains` over them is a control channel a
-/// remote party can write. The variant is matched in Rust instead.
-class EncryptLocationOutcomeFfi {
-  /// The signed kind-445 event and its routing, when the engine encrypted.
-  final EncryptedLocationFfi? sent;
+/// What a send-side change did (plan X2).
+class EvolutionOutcomeFfi {
+  /// Where the change stands.
+  final PublishStatusFfi status;
 
-  /// The typed deferral, when the engine queued instead.
-  final DeferredSendFfi? deferredSend;
+  /// Why nothing was asked of the engine, when `status` is `Refused`.
+  final RefusalFfi? refusal;
 
-  const EncryptLocationOutcomeFfi({this.sent, this.deferredSend});
+  /// How many of this change's Welcomes an inbox relay acknowledged.
+  final int welcomesDelivered;
 
-  @override
-  int get hashCode => sent.hashCode ^ deferredSend.hashCode;
+  /// How many Welcomes this change carries: one per invitee.
+  final int welcomesTotal;
 
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is EncryptLocationOutcomeFfi &&
-          runtimeType == other.runtimeType &&
-          sent == other.sent &&
-          deferredSend == other.deferredSend;
-}
+  /// An invite was applied with no Welcome left to deliver: the invitee must
+  /// be invited again.
+  final bool reinviteOwed;
 
-/// Encrypted location event ready for relay publishing (FFI-friendly).
-///
-/// Contains the signed kind 445 event and routing metadata.
-class EncryptedLocationFfi {
-  /// JSON-serialized signed Nostr event (kind 445).
-  final String eventJson;
+  /// When to drive again (`resume_driven`), relative; never shown.
+  final BigInt? retryAfterMs;
 
-  /// Nostr group ID (32 bytes, for h-tag relay routing).
-  final Uint8List nostrGroupId;
+  /// What resolving it handed back; every location is already stored.
+  final List<LocationMessageResultFfi> replayed;
 
-  /// Relay URLs to publish to.
-  final List<String> relays;
+  /// What a relay's refusal during the call blamed on this device's clock:
+  /// evidence for the clock check, never the relay's words.
+  final DeviceClockComplaintFfi? clockRejected;
 
-  const EncryptedLocationFfi({
-    required this.eventJson,
-    required this.nostrGroupId,
-    required this.relays,
+  /// `Some(true)` when the circle already was as the change asks: the
+  /// status reads `Confirmed`, nothing was staged and no relay was asked,
+  /// so it is no relay's acknowledgement. `None` otherwise.
+  final bool? alreadySo;
+
+  const EvolutionOutcomeFfi({
+    required this.status,
+    this.refusal,
+    required this.welcomesDelivered,
+    required this.welcomesTotal,
+    required this.reinviteOwed,
+    this.retryAfterMs,
+    required this.replayed,
+    this.clockRejected,
+    this.alreadySo,
   });
 
   @override
   int get hashCode =>
-      eventJson.hashCode ^ nostrGroupId.hashCode ^ relays.hashCode;
+      status.hashCode ^
+      refusal.hashCode ^
+      welcomesDelivered.hashCode ^
+      welcomesTotal.hashCode ^
+      reinviteOwed.hashCode ^
+      retryAfterMs.hashCode ^
+      replayed.hashCode ^
+      clockRejected.hashCode ^
+      alreadySo.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is EncryptedLocationFfi &&
+      other is EvolutionOutcomeFfi &&
           runtimeType == other.runtimeType &&
-          eventJson == other.eventJson &&
-          nostrGroupId == other.nostrGroupId &&
-          relays == other.relays;
+          status == other.status &&
+          refusal == other.refusal &&
+          welcomesDelivered == other.welcomesDelivered &&
+          welcomesTotal == other.welcomesTotal &&
+          reinviteOwed == other.reinviteOwed &&
+          retryAfterMs == other.retryAfterMs &&
+          replayed == other.replayed &&
+          clockRejected == other.clockRejected &&
+          alreadySo == other.alreadySo;
 }
 
 /// A circle to subscribe the live-sync engine to. `nostr_group_id` is the raw
@@ -3467,10 +3445,6 @@ class FfiRelayEvent {
   /// Source event `created_at` seconds (Location).
   final PlatformInt64? eventCreatedAtSecs;
 
-  /// Outbound commit the consumer must publish+merge (GroupUpdate; `Some`
-  /// only for an auto-committed peer `SelfRemove`).
-  final String? evolutionEventJson;
-
   /// Raw `kind:1059` gift-wrap JSON (Welcome).
   ///
   /// The wrapper's `created_at` is deliberately NOT surfaced alongside it. Its
@@ -3486,14 +3460,15 @@ class FfiRelayEvent {
   /// carries [`Self::unrecoverable_nostr_group_id`] instead.
   final FfiSyncStatusReason? statusReason;
 
-  /// The pseudonymous `nostr_group_id` of a circle that CANNOT RECOVER on its
-  /// own and has to be re-created (Status).
+  /// The pseudonymous `nostr_group_id` of a circle MDK halted (Status): a
+  /// refresh nudge, emitted when MDK announces the halt — at the transition
+  /// and at each open. The state itself is `CircleEngineStateFfi::Unrecoverable`
+  /// and `RecoveryCauseFfi::Unrecoverable`, read on every circle read; act on
+  /// those, not on this.
   ///
-  /// A TERMINAL, per-circle verdict, and the only thing on this stream a
-  /// consumer may act on destructively. It means this device holds group state
-  /// no code path will move again: waiting cannot help and neither can a
-  /// retry, so a "reconnecting" banner is the wrong response and a re-invite
-  /// is the right one.
+  /// The halt is per-circle and outlasts waiting and retries — only joining a
+  /// replacement Welcome (a re-invite) clears it — so a "reconnecting" banner
+  /// is the wrong response to it.
   ///
   /// Deliberately NOT a [`FfiSyncStatusReason`]. Every reason in that enum is
   /// self-clearing and names no circle — a relay outage, a pause, one message
@@ -3501,15 +3476,14 @@ class FfiRelayEvent {
   /// spelling a terminal per-circle verdict the same way is how a user gets
   /// told to re-create a working circle. `status_reason` is `None` whenever
   /// this is `Some`, so the two can never be read as one event.
-  ///
-  /// It REPEATS — on every foreground re-anchor that finds either an
-  /// unpublishable deferral or a group the engine declared unrecoverable; the
-  /// engine itself announces its verdict only once per session, so that sweep
-  /// is what repeats it. No event ever clears it. Do NOT act on the first: a
-  /// parked deferral a peer already healed is reported once, and only that
-  /// circle's next successful send discharges it, so a SECOND verdict from a
-  /// LATER re-anchor is the proof that the circle is genuinely wedged.
   final Uint8List? unrecoverableNostrGroupId;
+
+  /// What a live drive's relays blamed on this device's clock (Status): the
+  /// same evidence a bridge driver entry's outcome carries, never the
+  /// relays' words. Like the verdict above, not a [`FfiSyncStatusReason`]:
+  /// it says nothing about the connection. `status_reason` is `None` when
+  /// this is `Some`.
+  final DeviceClockComplaintFfi? clockRejected;
 
   const FfiRelayEvent({
     required this.kind,
@@ -3517,10 +3491,10 @@ class FfiRelayEvent {
     this.senderPubkey,
     this.content,
     this.eventCreatedAtSecs,
-    this.evolutionEventJson,
     this.giftWrapJson,
     this.statusReason,
     this.unrecoverableNostrGroupId,
+    this.clockRejected,
   });
 
   @override
@@ -3530,10 +3504,10 @@ class FfiRelayEvent {
       senderPubkey.hashCode ^
       content.hashCode ^
       eventCreatedAtSecs.hashCode ^
-      evolutionEventJson.hashCode ^
       giftWrapJson.hashCode ^
       statusReason.hashCode ^
-      unrecoverableNostrGroupId.hashCode;
+      unrecoverableNostrGroupId.hashCode ^
+      clockRejected.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -3545,10 +3519,10 @@ class FfiRelayEvent {
           senderPubkey == other.senderPubkey &&
           content == other.content &&
           eventCreatedAtSecs == other.eventCreatedAtSecs &&
-          evolutionEventJson == other.evolutionEventJson &&
           giftWrapJson == other.giftWrapJson &&
           statusReason == other.statusReason &&
-          unrecoverableNostrGroupId == other.unrecoverableNostrGroupId;
+          unrecoverableNostrGroupId == other.unrecoverableNostrGroupId &&
+          clockRejected == other.clockRejected;
 }
 
 /// Discriminator for [`FfiRelayEvent`] (struct-of-discriminant, like
@@ -3611,6 +3585,11 @@ enum FfiSyncStatusReason {
   /// threshold, so a health model fed this as an outage would confirm a relay
   /// fault on a deliberate pause.
   paused,
+
+  /// The engine refused a group message for a local resource bound and
+  /// recorded it for a refetch by id, which only the catch-up sweep performs:
+  /// the consumer should run one.
+  refetchOwed,
 }
 
 /// Outcome of [`force_release_live_session`].
@@ -3621,8 +3600,10 @@ enum ForceReleaseOutcomeFfi {
   /// No live session was installed; nothing to release.
   noSession,
 
-  /// The session was stopped and every supervisor task joined, so every
-  /// `Arc<CircleManager>` the ENGINE held has been dropped.
+  /// The session was stopped and every supervisor task joined, so no task
+  /// of the ENGINE holds an `Arc<CircleManager>`. A call still inside the
+  /// stopped core — a start or a pause the stop tore down beside — keeps
+  /// its manager until that call returns.
   ///
   /// This does NOT mean the guard is free. Other holders — most importantly a
   /// `CircleManagerFfi` handle in another isolate — are untouched by this call,
@@ -3636,38 +3617,57 @@ enum ForceReleaseOutcomeFfi {
   stopTimedOut,
 }
 
-/// A gift-wrapped Welcome ready for publishing (FFI-friendly).
-///
-/// Contains the kind 1059 gift-wrapped event along with recipient
-/// information needed for relay publishing.
-class GiftWrappedWelcomeFfi {
-  /// The recipient's Nostr public key (hex).
-  final String recipientPubkey;
+/// What [`RelayManagerFfi::ingest_driven`] did with one event.
+class IngestOutcomeFfi {
+  /// Whether a cursor may pass it.
+  final ReceiveVerdictFfi verdict;
 
-  /// Relay URLs to publish this Welcome to (recipient's inbox relays).
-  final List<String> recipientRelays;
+  /// What it and the drives it made handed back; every location is stored.
+  final List<LocationMessageResultFfi> replayed;
 
-  /// The gift-wrapped event JSON (kind 1059), ready to publish.
-  final String eventJson;
+  /// When to drive again, relative.
+  final BigInt? retryAfterMs;
 
-  const GiftWrappedWelcomeFfi({
-    required this.recipientPubkey,
-    required this.recipientRelays,
-    required this.eventJson,
+  /// Whether a drive ended on an error; what it did stands.
+  final bool errored;
+
+  /// Why nothing was taken in, when the engine was not asked: the event is
+  /// held ([`ReceiveVerdictFfi::Deferred`]) and fetched again.
+  final RefusalFfi? refusal;
+
+  /// What a relay's refusal during the call blamed on this device's clock:
+  /// evidence for the clock check, never the relay's words.
+  final DeviceClockComplaintFfi? clockRejected;
+
+  const IngestOutcomeFfi({
+    required this.verdict,
+    required this.replayed,
+    this.retryAfterMs,
+    required this.errored,
+    this.refusal,
+    this.clockRejected,
   });
 
   @override
   int get hashCode =>
-      recipientPubkey.hashCode ^ recipientRelays.hashCode ^ eventJson.hashCode;
+      verdict.hashCode ^
+      replayed.hashCode ^
+      retryAfterMs.hashCode ^
+      errored.hashCode ^
+      refusal.hashCode ^
+      clockRejected.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is GiftWrappedWelcomeFfi &&
+      other is IngestOutcomeFfi &&
           runtimeType == other.runtimeType &&
-          recipientPubkey == other.recipientPubkey &&
-          recipientRelays == other.recipientRelays &&
-          eventJson == other.eventJson;
+          verdict == other.verdict &&
+          replayed == other.replayed &&
+          retryAfterMs == other.retryAfterMs &&
+          errored == other.errored &&
+          refusal == other.refusal &&
+          clockRejected == other.clockRejected;
 }
 
 /// Pending invitation to join a circle (FFI-friendly).
@@ -3721,6 +3721,19 @@ class InvitationFfi {
           invitedAt == other.invitedAt;
 }
 
+/// Whether a fetched KeyPackage can be invited (FFI mirror of
+/// [`haven_core::nostr::mls::types::KeyPackageAdmission`]).
+enum KeyPackageAdmissionFfi {
+  /// MDK admits it for the target.
+  admissible,
+
+  /// A pre-migration package: the person needs to update Haven.
+  needsUpdate,
+
+  /// It cannot be invited for any other reason.
+  unusable,
+}
+
 /// What an M8-2 `KeyPackage` maintenance tick did (FFI mirror of
 /// [`haven_core::relay::maintenance::KpMaintenanceAction`]).
 ///
@@ -3755,6 +3768,10 @@ enum KpMaintenanceActionFfi {
   /// why it is a distinct value rather than folded into
   /// [`Self::RotatedExpiringMaterial`].
   rotatedUnreadableLifetime,
+
+  /// No relay was probed or published to: the storage-reset notice has not
+  /// been acknowledged yet (the `not_after` purge still ran).
+  awaitingResetAcknowledgement,
 }
 
 /// Presence-only result of an M8-2 `KeyPackage` maintenance tick.
@@ -3934,6 +3951,37 @@ class LastKnownLocationFfi {
           updatedAt == other.updatedAt;
 }
 
+/// What a leave call did.
+class LeaveOutcomeFfi {
+  /// Where the leave stands.
+  final LeaveStatusFfi status;
+
+  /// When to call `resume_leave_driven` again, relative.
+  final BigInt? retryAfterMs;
+
+  /// What a relay's refusal during the call blamed on this device's clock.
+  final DeviceClockComplaintFfi? clockRejected;
+
+  const LeaveOutcomeFfi({
+    required this.status,
+    this.retryAfterMs,
+    this.clockRejected,
+  });
+
+  @override
+  int get hashCode =>
+      status.hashCode ^ retryAfterMs.hashCode ^ clockRejected.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LeaveOutcomeFfi &&
+          runtimeType == other.runtimeType &&
+          status == other.status &&
+          retryAfterMs == other.retryAfterMs &&
+          clockRejected == other.clockRejected;
+}
+
 /// FFI mirror of [`haven_core::circle::LeavePlan`].
 ///
 /// Struct shape (rather than tagged enum) avoids pulling in Dart `freezed`
@@ -3984,61 +4032,70 @@ enum LeavePlanKindFfi {
   orphanLocalOnly,
 }
 
-/// Presence-only result of the one-time legacy KeyPackage retraction (F10a).
-///
-/// Counters only — no relay urls, event ids, or `d` values — so a derived
-/// `Debug` is leak-free (Security Rule 4/6).
-class LegacyRetractionOutcomeFfi {
-  /// `true` when the sentinel was already set (no work done this call).
-  final bool alreadyDone;
+/// Where a leave stands (FFI mirror of `haven_core::relay::fanout::LeaveStatus`).
+enum LeaveStatusFfi {
+  /// The proposal is recorded and driven; a peer commits it.
+  proposed,
 
-  /// Stale legacy kind-443 KeyPackage twins scrubbed (kind-5 deletions ACKed).
-  final int legacy443Scrubbed;
+  /// Not proposed yet; nothing is shared with the circle meanwhile.
+  pending,
 
-  /// `true` when the kind-10051 KeyPackage-relay list was retracted (≥1 ACK).
-  final bool relayListRetracted;
+  /// Left on this device.
+  completed,
 
-  /// Relay probes / publishes that errored (tallied, never fatal).
-  final int relayErrors;
+  /// No leave was asked for.
+  notLeaving,
 
-  const LegacyRetractionOutcomeFfi({
-    required this.alreadyDone,
-    required this.legacy443Scrubbed,
-    required this.relayListRetracted,
-    required this.relayErrors,
-  });
+  /// A leave step is made only by the app in front of its user.
+  foregroundOnly,
 
-  static Future<LegacyRetractionOutcomeFfi> default_() =>
-      RustLib.instance.api.crateApiLegacyRetractionOutcomeFfiDefault();
+  /// Refused for good, the leave's intent ended: this device is an admin
+  /// and must step down first.
+  adminMustStepDown,
 
-  @override
-  int get hashCode =>
-      alreadyDone.hashCode ^
-      legacy443Scrubbed.hashCode ^
-      relayListRetracted.hashCode ^
-      relayErrors.hashCode;
+  /// Refused for good, the leave's intent ended: the circle is not on this
+  /// device.
+  circleNotFound,
 
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is LegacyRetractionOutcomeFfi &&
-          runtimeType == other.runtimeType &&
-          alreadyDone == other.alreadyDone &&
-          legacy443Scrubbed == other.legacy443Scrubbed &&
-          relayListRetracted == other.relayListRetracted &&
-          relayErrors == other.relayErrors;
+  /// Input the engine still holds for the circle comes first; the intent
+  /// stands and the next call carries on.
+  engineHeld,
+}
+
+/// Where the live session stands ([`LiveSyncFfi::lifecycle`]).
+enum LiveLifecycleFfi {
+  /// No session is installed.
+  noSession,
+
+  /// A session is installed and no longer running: stopped, or its worker
+  /// gone. A stop that answered `stillHolding` leaves one here.
+  stopped,
+
+  /// Started, and claimed for by nobody yet: it makes no commit.
+  launched,
+
+  /// Claimed for the foreground: the one lifecycle that makes commits.
+  foreground,
+
+  /// In a background burst: subscribed, making no commit.
+  burst,
+
+  /// Paused between bursts: no REQ and no socket.
+  paused,
 }
 
 /// One folded engine [`haven_core::nostr::mls::types::LocationMessageResult`],
 /// FFI-friendly. A single `kind:445` ingest can yield SEVERAL of these (an
 /// engine `advance_convergence` may release buffered inbound after the outer
-/// event), so [`CircleManagerFfi::decrypt_location`] returns a `Vec` of them.
+/// event), so a driven ingest's outcome carries a `Vec` of them
+/// ([`IngestOutcomeFfi::replayed`]).
 ///
-/// Cursor contract (DM-4b): the engine now owns out-of-order buffering, so the
-/// caller advances its relay sync cursor on the OUTER event's `created_at`
-/// (which Dart already holds — it passed `event_json` in), NOT per result.
-/// A buffered future-epoch event is re-surfaced by the engine once the gap
-/// fills; the caller never needs to re-fetch it.
+/// No result moves a sync cursor, and the caller may not move one from them:
+/// the group cursor is raised only in haven-core, from the local instant an
+/// observation window opened (`haven_core::relay::cursor`), never from an
+/// event's `created_at`, which the sender chose. A buffered future-epoch event
+/// is re-surfaced by the engine once the gap fills; the caller never needs to
+/// re-fetch it.
 class LocationMessageResultFfi {
   /// Which of the five outcomes this result is.
   final LocationMessageResultKindFfi kind;
@@ -4114,6 +4171,44 @@ enum LocationMessageResultKindFfi {
   unrecoverable,
 }
 
+/// What the one send of a recorded location did (FFI mirror of
+/// `haven_core::relay::fanout::LocationPublish`). A relay's own words never
+/// cross: an `OK false` is [`Self::Refused`] whatever it said.
+enum LocationPublishFfi {
+  /// A relay acknowledged it.
+  accepted,
+
+  /// Every relay that answered refused it.
+  refused,
+
+  /// No relay could be reached.
+  unreachable,
+
+  /// Not sent: it had expired.
+  expired,
+
+  /// Not sent: a fresh seal would not be made for its circle now.
+  superseded,
+
+  /// Not sent: no record of it is stored.
+  ended,
+
+  /// Not sent by this call: a send of it is under way.
+  inFlight,
+
+  /// No relay took it, and a relay's `invalid:`, `blocked:` or unprefixed
+  /// refusal blamed its timestamp (`clock_skew::classify_publish_outcome`): this
+  /// device's clock runs fast, as the relays judged it.
+  clockAhead,
+
+  /// As [`Self::ClockAhead`]: the clock runs slow.
+  clockBehind,
+
+  /// As [`Self::ClockAhead`], with no direction, or with relays that
+  /// disagreed on it.
+  clockUnspecified,
+}
+
 /// Which kind of value a [`log_alias`] call is aliasing.
 ///
 /// Mirrors [`haven_core::log_alias::LogAliasClass`]. The class is part of the
@@ -4146,24 +4241,36 @@ enum LogAliasClassFfi {
 /// Used when adding members to a circle. Relay resolution follows a
 /// cascading fallback: inbox (kind 10050) → NIP-65 (kind 10002) → defaults.
 class MemberKeyPackageFfi {
-  /// The key package event JSON (kind 30443 or legacy kind 443).
+  /// The key package event JSON (kind 30443).
   final String keyPackageJson;
 
   /// Relay URLs from the member's inbox relay list (kind 10050).
   final List<String> inboxRelays;
 
-  /// Fallback relay URLs from NIP-65 relay list (kind 10002).
+  /// Fallback relay URLs: the read-capable set of the NIP-65 relay list
+  /// (kind 10002).
   final List<String> nip65Relays;
+
+  /// The account the key package was verified to belong to, as an npub: its
+  /// signer, its MLS credential and the pubkey that was asked for, all one
+  /// (`fetch_member_keypackage` sets it, never from the request). Passed back
+  /// into `create_circle` / `add_members_to_circle`, it must name the
+  /// package's signer, because that is who the Welcome reaches.
+  final String authorNpub;
 
   const MemberKeyPackageFfi({
     required this.keyPackageJson,
     required this.inboxRelays,
     required this.nip65Relays,
+    required this.authorNpub,
   });
 
   @override
   int get hashCode =>
-      keyPackageJson.hashCode ^ inboxRelays.hashCode ^ nip65Relays.hashCode;
+      keyPackageJson.hashCode ^
+      inboxRelays.hashCode ^
+      nip65Relays.hashCode ^
+      authorNpub.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -4172,34 +4279,24 @@ class MemberKeyPackageFfi {
           runtimeType == other.runtimeType &&
           keyPackageJson == other.keyPackageJson &&
           inboxRelays == other.inboxRelays &&
-          nip65Relays == other.nip65Relays;
+          nip65Relays == other.nip65Relays &&
+          authorNpub == other.authorNpub;
 }
 
-/// A publish-before-apply token (FFI mirror of `PendingStateRef`).
+/// What the profile relays answered about the local user's OWN kind-0 on one
+/// [`CircleManagerFfi::fetch_my_profile`] call.
 ///
-/// The Dark Matter engine stages a group-evolving commit and returns an opaque
-/// `PendingStateRef` (a `u64` newtype). Haven publishes the commit (and, for an
-/// Add, the welcomes), and ONLY after ≥1 relay returns OK confirms the token via
-/// [`CircleManagerFfi::confirm_published`] so the engine applies the commit and
-/// advances the epoch (Rule 13, publish-before-apply). On publish FAILURE the
-/// token is rolled back via [`CircleManagerFfi::publish_failed`]. The `token` is
-/// an in-memory session handle — meaningless across a process restart, never
-/// persisted, never published.
-class PendingStateRefFfi {
-  /// The opaque engine token (a `PendingStateRef` `u64`).
-  final BigInt token;
+/// No catch-all variant, for the reason [`ProfileSyncOutcomeFfi`] has none.
+enum OwnProfileRelayAnswerFfi {
+  /// Nothing settled it: a cache read, a fetch that was not due, or one that
+  /// found no kind-0 while a relay had yet to answer.
+  unanswered,
 
-  const PendingStateRefFfi({required this.token});
+  /// A relay served the kind-0.
+  published,
 
-  @override
-  int get hashCode => token.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is PendingStateRefFfi &&
-          runtimeType == other.runtimeType &&
-          token == other.token;
+  /// EVERY relay answered, and none has one: no profile is published.
+  absent,
 }
 
 /// A member's public Nostr profile (kind-0 metadata), FFI-friendly.
@@ -4235,6 +4332,11 @@ class ProfileMetadataFfi {
   /// Unix seconds when this profile was last fetched (TTL base; `0` = never).
   final PlatformInt64 fetchedAt;
 
+  /// What the relays answered on THIS call — only
+  /// [`CircleManagerFfi::fetch_my_profile`] sets it. A cache read is always
+  /// [`OwnProfileRelayAnswerFfi::Unanswered`].
+  final OwnProfileRelayAnswerFfi relayAnswer;
+
   /// Hex SHA-256 of the cached picture bytes, or `None` when no CURRENT bytes
   /// are cached (always `None` whenever `has_picture` is false, so it can never
   /// key a decode of stale bytes).
@@ -4253,6 +4355,7 @@ class ProfileMetadataFfi {
     required this.hasPicture,
     required this.isKnown,
     required this.fetchedAt,
+    required this.relayAnswer,
     this.pictureSha256Hex,
   });
 
@@ -4266,6 +4369,7 @@ class ProfileMetadataFfi {
       hasPicture.hashCode ^
       isKnown.hashCode ^
       fetchedAt.hashCode ^
+      relayAnswer.hashCode ^
       pictureSha256Hex.hashCode;
 
   @override
@@ -4281,6 +4385,7 @@ class ProfileMetadataFfi {
           hasPicture == other.hasPicture &&
           isKnown == other.isKnown &&
           fetchedAt == other.fetchedAt &&
+          relayAnswer == other.relayAnswer &&
           pictureSha256Hex == other.pictureSha256Hex;
 }
 
@@ -4499,6 +4604,48 @@ class PublicIdentity {
           createdAt == other.createdAt;
 }
 
+/// Why [`RelayManagerFfi::publish_event`] published nothing: thrown in the
+/// result's place, so a caller that treats a throw as "not sent" goes on
+/// doing so, and read by its fields.
+class PublishFailureFfi implements FrbException {
+  /// The event was refused before any relay was asked.
+  final PublishRefusalFfi? refused;
+
+  /// The relays that answered refused it on timestamp grounds, as this
+  /// device's clock: the one failure the user can act on.
+  final DeviceClockComplaintFfi? clockRejected;
+
+  const PublishFailureFfi({this.refused, this.clockRejected});
+
+  @override
+  int get hashCode => refused.hashCode ^ clockRejected.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PublishFailureFfi &&
+          runtimeType == other.runtimeType &&
+          refused == other.refused &&
+          clockRejected == other.clockRejected;
+}
+
+/// Why [`RelayManagerFfi::publish_event`] asked no relay.
+enum PublishRefusalFfi {
+  /// A group message (kind 445): it leaves the device only under a durable
+  /// fanout record (Security Rule 13).
+  groupMessage,
+
+  /// A gift wrap (kind 1059): a Welcome leaves the device only from its
+  /// delivery record, through the fanout driver.
+  giftWrap,
+
+  /// The JSON is not a signed event.
+  invalidEvent,
+
+  /// A relay URL may not be dialled.
+  invalidRelay,
+}
+
 /// Result of publishing an event (FFI-friendly).
 class PublishResultFfi {
   /// The event ID that was published (64-char hex).
@@ -4542,6 +4689,269 @@ class PublishResultFfi {
           rejectedBy == other.rejectedBy &&
           failed == other.failed &&
           isSuccess == other.isSuccess;
+}
+
+/// Where a send-side change stands when the call returns (FFI mirror of
+/// `haven_core::relay::fanout::EvolutionStatus`).
+///
+/// Only [`Self::RolledBack`] says the circle is as it was. [`Self::Unresolved`]
+/// is "awaiting relays", never a failure.
+enum PublishStatusFfi {
+  /// The engine applied the commit and a relay acknowledged it — or, with
+  /// the outcome's `already_so`, the circle already was as the change asks
+  /// and no relay was asked.
+  confirmed,
+
+  /// Staged and recorded; no relay has acknowledged it yet: awaiting
+  /// relays. Every later drive sends the same bytes again.
+  unresolved,
+
+  /// Every relay proved it refused the commit: the circle is as it was.
+  rolledBack,
+
+  /// Not made: queued behind what the circle is still resolving, and
+  /// retired, said dropped, at the next open if nothing makes it first.
+  queued,
+
+  /// The engine set the commit aside by a path of its own; the circle may
+  /// be out of step with its other members.
+  stale,
+
+  /// Staged and neither recorded nor undone: not sent.
+  unrecorded,
+
+  /// Not asked of the engine at all: see the outcome's `refusal`.
+  refused,
+}
+
+/// Whether a cursor may pass a received event (Security Rule 12): FFI mirror
+/// of `haven_core::relay::ReceiveOnlyOutcome`.
+enum ReceiveVerdictFfi {
+  /// Applied or terminally handled: it does not hold the cursor.
+  applied,
+
+  /// Held: the cursor stays at or below it and it is fetched again.
+  deferred_,
+
+  /// Rejected before any authentication: neither applied nor a hold.
+  noEvidence,
+
+  /// Answered from a row the engine holds stranded: not applied and not a
+  /// hold; the circle is told.
+  stranded,
+}
+
+/// What a user needs to know first about a circle that is not sharing,
+/// worst first ([`RelayManagerFfi::circle_recovery`]) — FFI mirror of
+/// `haven_core::relay::fanout::RecoveryCause`. Fieldless: each maps to fixed
+/// copy and its remedy.
+enum RecoveryCauseFfi {
+  /// An admin disbanded the circle: nothing is ever sent for it again.
+  disbanded,
+
+  /// MDK halted the circle: an admin adding this device again repairs it in
+  /// place; re-creating it is the other way out.
+  unrecoverable,
+
+  /// The circle failed to load; a retry may bring it back.
+  quarantined,
+
+  /// The circle's routing id is another circle's on this device too: it can
+  /// only be left.
+  routingCollision,
+
+  /// This device asked to leave the circle.
+  leaving,
+
+  /// This device cannot read its peers: walks of the circle's history the
+  /// relays answered in full brought back nothing that moves it. No retry
+  /// helps; an admin removing and re-adding this device does.
+  stalled,
+
+  /// A removal the user asked for was dropped unmade and a member it named
+  /// is still in the circle.
+  removalUnmade,
+
+  /// The removal of a member who left is due and not made yet.
+  departureDue,
+
+  /// A change of the circle's relays waits for the app's foreground.
+  awaitsForeground,
+
+  /// A change of the circle awaits a relay's acknowledgement.
+  awaitingRelays,
+
+  /// A change a relay acknowledged awaits its confirm.
+  acknowledged,
+
+  /// A commit is staged in the circle with no record.
+  stagedWithoutRecord,
+
+  /// Stored input still holds the circle's sends; the next call carries on.
+  storedInput,
+}
+
+/// Why an entry asked nothing of the engine: each is fixed copy the UI
+/// chooses by variant (Security Rule 8).
+enum RefusalFfi {
+  /// This device asked to leave the circle: nothing else is made for it.
+  leaveInProgress,
+
+  /// A change is made only by the app in front of its user.
+  foregroundOnly,
+
+  /// An invitee lists no inbox relay a Welcome could reach.
+  missingWelcomeRelays,
+
+  /// Input the engine still holds for the circle comes first; the next call
+  /// carries on.
+  engineHeld,
+
+  /// The circle cannot share from this device until a member's departure
+  /// is finished.
+  sendBlockedByDeparture,
+
+  /// The circle's routing id is another circle's on this device too: of
+  /// its commits, only what its leave needs is made until it is left.
+  routingCollision,
+}
+
+/// What [`RelayManagerFfi::reinvite_driven`] did: the re-invites MDK owed,
+/// and the drive of the stored records that followed them.
+class ReinviteDrivenFfi {
+  /// The re-invites, each with what became of it.
+  final List<ReinviteFfi> reinvites;
+
+  /// The drive that followed them, and when to drive again.
+  final ResumeOutcomeFfi drive;
+
+  const ReinviteDrivenFfi({required this.reinvites, required this.drive});
+
+  @override
+  int get hashCode => reinvites.hashCode ^ drive.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ReinviteDrivenFfi &&
+          runtimeType == other.runtimeType &&
+          reinvites == other.reinvites &&
+          drive == other.drive;
+}
+
+/// One re-invite and what became of it.
+class ReinviteFfi {
+  /// The circle.
+  final Uint8List mlsGroupId;
+
+  /// What became of it.
+  final ReinviteResultFfi result;
+
+  const ReinviteFfi({required this.mlsGroupId, required this.result});
+
+  @override
+  int get hashCode => mlsGroupId.hashCode ^ result.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ReinviteFfi &&
+          runtimeType == other.runtimeType &&
+          mlsGroupId == other.mlsGroupId &&
+          result == other.result;
+}
+
+/// What became of one re-invite MDK owed (FFI mirror of
+/// `haven_core::relay::fanout::ReinviteResult`). None of these is "made":
+/// the one on its way says so in its name.
+enum ReinviteResultFfi {
+  /// Staged under a record with a fresh package: awaiting its relays.
+  reissuedAwaitingRelays,
+
+  /// Not made: queued with a fresh package; a later advance makes it.
+  queued,
+
+  /// Its next lookup is not due yet.
+  notDue,
+
+  /// Not looked for: its circle is not settled yet; nothing was spent.
+  unsettled,
+
+  /// No admissible package was found, or the one found was refused; looked
+  /// for again later.
+  keyPackageMissing,
+
+  /// The invitee lists no inbox relay a Welcome could reach.
+  noInbox,
+
+  /// Given up: the user invites again.
+  gaveUp,
+
+  /// Ended by MDK: this device is no member, the invitees are already in,
+  /// or a conflict.
+  ended,
+
+  /// Not made this time: the engine or the store failed; it is still owed
+  /// and tried again at its next lookup.
+  unmade,
+}
+
+/// A replacement Welcome awaiting the user's consent
+/// ([`CircleManagerFfi::rejoin_offers_for_invitation`]).
+class RejoinOfferFfi {
+  /// The circle it would join again.
+  final Uint8List mlsGroupId;
+
+  /// Its MLS-authenticated author, as hex: the inviter the invitation
+  /// showed.
+  final String welcomerPubkey;
+
+  /// The token of the local branch the consent discards; handed back to
+  /// [`CircleManagerFfi::confirm_group_rejoin`] unchanged.
+  final Uint8List localStateToken;
+
+  const RejoinOfferFfi({
+    required this.mlsGroupId,
+    required this.welcomerPubkey,
+    required this.localStateToken,
+  });
+
+  @override
+  int get hashCode =>
+      mlsGroupId.hashCode ^ welcomerPubkey.hashCode ^ localStateToken.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RejoinOfferFfi &&
+          runtimeType == other.runtimeType &&
+          mlsGroupId == other.mlsGroupId &&
+          welcomerPubkey == other.welcomerPubkey &&
+          localStateToken == other.localStateToken;
+}
+
+/// The replacement offers of a held invitation, or why there are none to
+/// show: the invitation was resolved as a decline and only a new one can
+/// add this device ([`AcceptFailureFfi::NeedsNewInvite`]).
+class RejoinOffersOutcomeFfi {
+  /// The offers to show.
+  final List<RejoinOfferFfi> offers;
+
+  /// Why none is shown, when that is not merely "none held".
+  final AcceptFailureFfi? failure;
+
+  const RejoinOffersOutcomeFfi({required this.offers, this.failure});
+
+  @override
+  int get hashCode => offers.hashCode ^ failure.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RejoinOffersOutcomeFfi &&
+          runtimeType == other.runtimeType &&
+          offers == other.offers &&
+          failure == other.failure;
 }
 
 /// Relay connection status (FFI-friendly).
@@ -4662,6 +5072,10 @@ enum RelayListActionFfi {
 
   /// The list was (re)published to own relays this tick.
   republished,
+
+  /// Nothing was published: the storage-reset notice has not been
+  /// acknowledged yet.
+  awaitingResetAcknowledgement,
 }
 
 /// Presence-only per-category tally of an M8-1 relay-list maintenance tick.
@@ -4738,10 +5152,19 @@ class RelayRejectionFfi {
   /// Rejection reason.
   final String reason;
 
-  const RelayRejectionFfi({required this.url, required this.reason});
+  /// What the refusal said about the event's timestamp, read in Rust
+  /// (`clock_skew::classify_clock_refusal`); `None` when it is not a
+  /// timestamp refusal. A caller reads this, never `reason` (Rule 8).
+  final DeviceClockComplaintFfi? clock;
+
+  const RelayRejectionFfi({
+    required this.url,
+    required this.reason,
+    this.clock,
+  });
 
   @override
-  int get hashCode => url.hashCode ^ reason.hashCode;
+  int get hashCode => url.hashCode ^ reason.hashCode ^ clock.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -4749,7 +5172,8 @@ class RelayRejectionFfi {
       other is RelayRejectionFfi &&
           runtimeType == other.runtimeType &&
           url == other.url &&
-          reason == other.reason;
+          reason == other.reason &&
+          clock == other.clock;
 }
 
 /// Category of relay preference managed per user.
@@ -4785,53 +5209,261 @@ enum RelayTypeFfi {
   profile,
 }
 
-/// What [`CircleManagerFfi::repair_epoch_rotation`] did — FFI mirror of
-/// `haven_core::circle::RepairRotationOutcome`.
-///
-/// Struct shape with three `Option`s rather than a tagged enum, following the
-/// same convention as [`EncryptLocationOutcomeFfi`] and [`LeavePlanFfi`] — it
-/// keeps Dart `freezed` out of the bindings while preserving all the
-/// information. **Exactly one of the three is `Some`**; the Dart wrapper narrows
-/// that into a sealed type so call sites cannot forget a case.
-///
-/// Matched by VARIANT in Rust, never by testing error prose: Haven's error
-/// strings interpolate remote-authored text, so a `contains` over one is a
-/// channel a remote party can write.
-class RepairRotationOutcomeFfi {
-  /// The staged ratchet-reset commit, when every gate was open. Publish
-  /// `commit_event_json`, then confirm on a ≥1-relay ACK or roll back.
-  final CommitToPublishFfi? rotated;
+/// What [`RelayManagerFfi::repair_rotation_driven`] did.
+enum RepairKindFfi {
+  /// The repair — a self-update of this device's leaf — was staged: see
+  /// `rotated`.
+  rotated,
 
-  /// The gate that declined, when nothing was staged and nothing changed.
+  /// A gate declined it: see `skipped`.
+  skipped,
+
+  /// The circle is send-gated; the deferred-send repair ran: see `held_by`.
+  deferred_,
+
+  /// Not asked of the engine: see `refusal`.
+  refused,
+}
+
+/// What a repair did.
+class RepairOutcomeFfi {
+  /// Which of the fields below says it.
+  final RepairKindFfi kind;
+
+  /// The rotation's outcome.
+  final EvolutionOutcomeFfi? rotated;
+
+  /// Why a gate declined it.
   final SkipReasonFfi? skipped;
 
-  /// The circle is send-gated: nothing was staged, and any work the engine
-  /// surfaced during the in-place repair is here for the same Rule-13 ladder a
-  /// deferred location send uses.
-  ///
-  /// Named `deferred_send`, not `deferred`, for the reason Unit B's field is:
-  /// FRB mangles `deferred` to `deferred_` in Dart, where it collides with
-  /// deferred imports.
-  final DeferredSendFfi? deferredSend;
+  /// What still holds the circle's sends.
+  final SendHeldFfi? heldBy;
 
-  const RepairRotationOutcomeFfi({
+  /// Why nothing was asked of the engine.
+  final RefusalFfi? refusal;
+
+  const RepairOutcomeFfi({
+    required this.kind,
     this.rotated,
     this.skipped,
-    this.deferredSend,
+    this.heldBy,
+    this.refusal,
   });
 
   @override
   int get hashCode =>
-      rotated.hashCode ^ skipped.hashCode ^ deferredSend.hashCode;
+      kind.hashCode ^
+      rotated.hashCode ^
+      skipped.hashCode ^
+      heldBy.hashCode ^
+      refusal.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is RepairRotationOutcomeFfi &&
+      other is RepairOutcomeFfi &&
           runtimeType == other.runtimeType &&
+          kind == other.kind &&
           rotated == other.rotated &&
           skipped == other.skipped &&
-          deferredSend == other.deferredSend;
+          heldBy == other.heldBy &&
+          refusal == other.refusal;
+}
+
+/// What became of a removal set aside unmade and asked for again (decision
+/// 180). Only [`Self::Made`] and [`Self::AlreadyMade`] mean nobody it named is
+/// still in the circle.
+enum RequeueOutcomeFfi {
+  /// Made.
+  made,
+
+  /// Staged under a record: awaiting its relays, not made.
+  pendingAwaitingRelays,
+
+  /// Undone before it took effect.
+  undone,
+
+  /// Not staged; nothing was sent.
+  notMade,
+
+  /// Nobody it named is listed any more.
+  alreadyMade,
+
+  /// Asked for as often as Haven allows: the user asks again.
+  abandoned,
+
+  /// Too late to ask for: the user asks again.
+  expired,
+}
+
+/// One re-queued removal and what became of it.
+class RequeuedRemovalFfi {
+  /// The circle.
+  final Uint8List mlsGroupId;
+
+  /// What became of it.
+  final RequeueOutcomeFfi outcome;
+
+  const RequeuedRemovalFfi({required this.mlsGroupId, required this.outcome});
+
+  @override
+  int get hashCode => mlsGroupId.hashCode ^ outcome.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RequeuedRemovalFfi &&
+          runtimeType == other.runtimeType &&
+          mlsGroupId == other.mlsGroupId &&
+          outcome == other.outcome;
+}
+
+/// What a drive of the stored records did ([`RelayManagerFfi::resume_driven`]).
+class ResumeOutcomeFfi {
+  /// The withdrawn changes it asked MDK about.
+  final List<WithdrawnChangeFfi> withdrawn;
+
+  /// The set-aside removals it took up.
+  final List<RequeuedRemovalFfi> requeued;
+
+  /// What it handed back; every location is stored.
+  final List<LocationMessageResultFfi> replayed;
+
+  /// When to drive again, relative.
+  final BigInt? retryAfterMs;
+
+  /// Whether a drive ended on an error; what it did stands.
+  final bool errored;
+
+  /// What a relay's refusal during the call blamed on this device's clock:
+  /// evidence for the clock check, never the relay's words.
+  final DeviceClockComplaintFfi? clockRejected;
+
+  const ResumeOutcomeFfi({
+    required this.withdrawn,
+    required this.requeued,
+    required this.replayed,
+    this.retryAfterMs,
+    required this.errored,
+    this.clockRejected,
+  });
+
+  @override
+  int get hashCode =>
+      withdrawn.hashCode ^
+      requeued.hashCode ^
+      replayed.hashCode ^
+      retryAfterMs.hashCode ^
+      errored.hashCode ^
+      clockRejected.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ResumeOutcomeFfi &&
+          runtimeType == other.runtimeType &&
+          withdrawn == other.withdrawn &&
+          requeued == other.requeued &&
+          replayed == other.replayed &&
+          retryAfterMs == other.retryAfterMs &&
+          errored == other.errored &&
+          clockRejected == other.clockRejected;
+}
+
+/// What [`RelayManagerFfi::seal_location_driven`] made of a fix.
+class SealOutcomeFfi {
+  /// The sealed location, recorded.
+  final SealedLocationFfi? sealed;
+
+  /// What holds the circle's sends, when nothing was sealed.
+  final SendHeldFfi? heldBy;
+
+  /// Why nothing was asked of the engine.
+  final RefusalFfi? refusal;
+
+  /// What the call's drives handed back; every location is stored.
+  final List<LocationMessageResultFfi> replayed;
+
+  /// When to drive again, relative.
+  final BigInt? retryAfterMs;
+
+  /// Whether a drive ended on an error.
+  final bool errored;
+
+  /// What a relay's refusal during the call's drives blamed on this
+  /// device's clock.
+  final DeviceClockComplaintFfi? clockRejected;
+
+  const SealOutcomeFfi({
+    this.sealed,
+    this.heldBy,
+    this.refusal,
+    required this.replayed,
+    this.retryAfterMs,
+    required this.errored,
+    this.clockRejected,
+  });
+
+  @override
+  int get hashCode =>
+      sealed.hashCode ^
+      heldBy.hashCode ^
+      refusal.hashCode ^
+      replayed.hashCode ^
+      retryAfterMs.hashCode ^
+      errored.hashCode ^
+      clockRejected.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SealOutcomeFfi &&
+          runtimeType == other.runtimeType &&
+          sealed == other.sealed &&
+          heldBy == other.heldBy &&
+          refusal == other.refusal &&
+          replayed == other.replayed &&
+          retryAfterMs == other.retryAfterMs &&
+          errored == other.errored &&
+          clockRejected == other.clockRejected;
+}
+
+/// What holds a circle's location sends (FFI mirror of
+/// `haven_core::relay::fanout::SendHeld`): fixed copy chosen by variant.
+enum SendHeldFfi {
+  /// A change of the circle awaits its relays.
+  awaitingRelays,
+
+  /// A change of the circle was acknowledged and awaits its confirm.
+  acknowledged,
+
+  /// A commit is staged with no record.
+  stagedWithoutRecord,
+
+  /// The removal of a member who left is due and not made by this call.
+  departureDue,
+
+  /// A change of the circle's relays was applied while the app was away.
+  awaitsForeground,
+
+  /// A removal the user asked for was set aside or dropped unmade.
+  removalUnmade,
+
+  /// This device asked to leave the circle.
+  leaving,
+
+  /// An admin disbanded the circle: nothing is sealed for it again.
+  disbanded,
+
+  /// The circle's routing id is another circle's on this device too: held
+  /// until this circle itself is left.
+  routingCollision,
+
+  /// Stored input the engine cannot settle still gates the circle.
+  storedInput,
+
+  /// Nothing holds it.
+  nothing,
 }
 
 /// Signed location event (FFI wrapper for outer event kind 445).
@@ -4902,23 +5534,19 @@ class SignedLocationEventFfi {
 /// Fieldless by construction: a skip is surfaced to the UI and to logs, and no
 /// variant may carry a group id, a pubkey or an epoch (Security Rules 4/6/8).
 ///
-/// **Three of these route differently and the UI must not collapse them.**
-/// [`Self::NotSoleAdmin`] and [`Self::EpochUnrecoverable`] are terminal for this
-/// device — offering a retry would be a loop that cannot succeed — while every
-/// other variant means "try again shortly".
+/// **The UI must not collapse them.** [`Self::EpochUnrecoverable`] is the one
+/// terminal reason — offering a retry would be a loop that cannot succeed —
+/// while every other variant means "try again shortly". Any member may
+/// repair: the repair is a self-update, which needs no admin.
 enum SkipReasonFfi {
-  /// This device is not the circle's ONLY admin, so it must not commit. Either
-  /// somebody else can, or an admin handoff is mid-flight. Terminal for this
-  /// device: the remedy is to ask the circle's owner to remove and re-add you.
-  notSoleAdmin,
-
   /// The engine's epoch state is not `Stable` but will settle on its own (a
   /// commit is staged, merging, or recovering). Retryable.
   epochNotStable,
 
   /// The engine has frozen this group at its last stable epoch and refuses
-  /// further group state. NEVER clears by waiting — the circle has to be
-  /// re-created, or this member re-added.
+  /// further group state. NEVER clears by waiting — this member has to be
+  /// added again (MDK repairs the circle in place), or the circle
+  /// re-created.
   epochUnrecoverable,
 
   /// The group's epoch changed too recently for a ratchet to be exhausted.
@@ -4970,6 +5598,15 @@ enum SubscriptionHealthActionFfi {
   /// as "the receive plane is whole". The next burst re-issues every REQ at
   /// its persisted cursor, which is what a healer would have done anyway.
   paused,
+
+  /// A relay had dropped, or a REQ the session expects was missing, and the
+  /// tick was not told the app is in the foreground: NOTHING was
+  /// re-anchored. The whole-session repair is the foreground's, and waits
+  /// for a caller that can claim it.
+  ///
+  /// The opposite of proof: the tick saw a receive plane that is not whole
+  /// and left it so. A consumer must never read it as healthy.
+  awaitingForeground,
 }
 
 /// Presence-only result of an M8-4 subscription-health maintenance tick.
@@ -5084,4 +5721,78 @@ class TileCacheEntryFfi {
           staleAtMs == other.staleAtMs &&
           lastModifiedMs == other.lastModifiedMs &&
           etag == other.etag;
+}
+
+/// One withdrawn change and what became of it.
+class WithdrawnChangeFfi {
+  /// The circle.
+  final Uint8List mlsGroupId;
+
+  /// What the change was.
+  final WithdrawnKindFfi kind;
+
+  /// What became of it.
+  final WithdrawnOutcomeFfi outcome;
+
+  const WithdrawnChangeFfi({
+    required this.mlsGroupId,
+    required this.kind,
+    required this.outcome,
+  });
+
+  @override
+  int get hashCode => mlsGroupId.hashCode ^ kind.hashCode ^ outcome.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WithdrawnChangeFfi &&
+          runtimeType == other.runtimeType &&
+          mlsGroupId == other.mlsGroupId &&
+          kind == other.kind &&
+          outcome == other.outcome;
+}
+
+/// What a change of this device's that branch selection withdrew was.
+enum WithdrawnKindFfi {
+  /// The circle's name or description.
+  groupProfile,
+
+  /// The relays, the admins or a disband.
+  appComponents,
+
+  /// A removal.
+  removeMembers,
+
+  /// An invite.
+  invite,
+}
+
+/// What became of a withdrawn change. None of these is "made": the two that
+/// are on their way say so in their names.
+enum WithdrawnOutcomeFfi {
+  /// Asked for again and staged under a record: awaiting its relays.
+  reissuedAwaitingRelays,
+
+  /// Asked for again and queued, not staged: a later advance makes it.
+  queuedAgain,
+
+  /// The winning change touched the same thing: the user asks again.
+  conflict,
+
+  /// What it asked for is already so.
+  alreadySatisfied,
+
+  /// An invite whose key packages are spent: invited again
+  /// ([`RelayManagerFfi::reinvite_driven`]) or by the user.
+  reinviteRequired,
+
+  /// Given up: the user asks again.
+  abandoned,
+
+  /// This device is no longer in the circle.
+  notMember,
+
+  /// The circle is being left; it was taken back, not failed.
+  retiredForLeave,
 }

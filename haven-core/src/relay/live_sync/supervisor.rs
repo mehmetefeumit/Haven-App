@@ -30,6 +30,20 @@
 //! advance of every generation open at that moment instead, which is as narrow
 //! as an unattributable skip allows (see the `Lagged` arm).
 //!
+//! # The stored replay
+//!
+//! What an endpoint sends ahead of its `EOSE` is held per REQ, not ingested
+//! on arrival, and the REQ's whole batch is taken in at any of its
+//! endpoints' `EOSE` or `CLOSED`, ordered so a current-epoch proposal goes
+//! ahead of the commit that commits it ([`flush_stored`]): MDK drops for
+//! good a commit it takes in first (`docs/MDK_UPSTREAM_TRACKER.md`
+//! T-COMMIT-BEFORE-PROPOSAL). Every REQ's batch is taken in at a pause, at
+//! the release of a relay silent past the `EOSE` wait, at the worker's exit,
+//! and when [`WORKER_QUEUE_CAP`] events are held: never dropped, and always
+//! before the cursor anchor, the settle a burst waits on, or the pause ack
+//! that vouches for it. What arrives after an endpoint's `EOSE` is taken in
+//! as it comes.
+//!
 //! # Write serialization (Rule 14)
 //!
 //! Every MLS-mutating call runs through the one process-global
@@ -47,7 +61,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch, RwLock};
 
 use crate::relay::circle_handle;
 
-use super::config::WORKER_QUEUE_CAP;
+use super::config::{STORED_REPLAY_BYTE_CAP, WORKER_QUEUE_CAP};
 use super::event::SyncStatusReason;
 use super::planes::{group::GROUP_EVENT_KIND, PlaneKind};
 use super::processor::EngineProcessor;
@@ -163,7 +177,7 @@ pub enum RawSignal {
 /// What the receiver loop should do with one pool notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotifDisposition {
-    /// A first-seen `Event`: extract + forward to the worker.
+    /// A relay's `EVENT`: extract + forward to the worker.
     Forward,
     /// A relay's `EOSE`: forward to the worker as a cursor-anchor signal.
     ForwardEose,
@@ -178,7 +192,16 @@ pub enum NotifDisposition {
 
 /// Classifies one pool notification (pure; testable without a runtime).
 ///
-/// Two relay messages are singled out of the `Message` arm.
+/// Three relay messages are singled out of the `Message` arm.
+///
+/// `Event` is forwarded from HERE, every time a relay sends it, and the pool's
+/// own `Event` notification is ignored. The pool raises that one only for an id
+/// its per-client tracker has not seen (`nostr-relay-pool` 0.44
+/// `relay/inner.rs:1211-1243`), so it drops every redelivery for the life of the
+/// session — including the one a held cursor exists to obtain, for an object the
+/// engine refused and kept nothing of (Security Rule 12; Marmot
+/// `transports/nostr.md`, `resource_refused`). The engine is the one dedupe: it
+/// answers a repeat of an object it did keep as a duplicate.
 ///
 /// `EndOfStoredEvents` is the only one the live plane trusts for anything: it is
 /// the relay stating that it has handed over everything it stored for a REQ,
@@ -201,9 +224,10 @@ pub enum NotifDisposition {
 #[must_use]
 pub const fn notification_disposition(n: &RelayPoolNotification) -> NotifDisposition {
     match n {
-        RelayPoolNotification::Event { .. } => NotifDisposition::Forward,
+        RelayPoolNotification::Event { .. } => NotifDisposition::Ignore,
         RelayPoolNotification::Shutdown => NotifDisposition::Stop,
         RelayPoolNotification::Message { message, .. } => match message {
+            RelayMessage::Event { .. } => NotifDisposition::Forward,
             RelayMessage::EndOfStoredEvents(_) => NotifDisposition::ForwardEose,
             RelayMessage::Closed { .. } => NotifDisposition::ForwardClosed,
             _ => NotifDisposition::Ignore,
@@ -283,7 +307,7 @@ pub fn intake_queue() -> (mpsc::Sender<RawSignal>, mpsc::Receiver<RawSignal>) {
 /// load-bearing rather than belt-and-braces: the inbox REQ filters on kind and
 /// `#p` alone, so a fully conformant relay will deliver a `kind:1059` carrying
 /// whatever `#h` its author chose. A dropped gift wrap needs no hold-back of its
-/// own — the inbox stream's multi-day lookback re-requests it (49 h on a
+/// own — the inbox stream's multi-day lookback re-requests it (96 h on a
 /// re-anchor, 7 d on a cold start; see [`super::anchor::InboxAnchor`]).
 ///
 /// [`CursorAnchors::note_unapplied`]: super::anchor::CursorAnchors::note_unapplied
@@ -399,10 +423,13 @@ pub async fn run_receiver(
         match notification {
             Ok(n) => match notification_disposition(&n) {
                 NotifDisposition::Forward => {
-                    if let RelayPoolNotification::Event {
+                    if let RelayPoolNotification::Message {
                         relay_url,
-                        subscription_id,
-                        event,
+                        message:
+                            RelayMessage::Event {
+                                subscription_id,
+                                event,
+                            },
                     } = n
                     {
                         // try_send (never await) so the notification consumer
@@ -413,8 +440,8 @@ pub async fn run_receiver(
                         // would otherwise advance the cursor straight over it.
                         match tx.try_send(RawSignal::Event(Box::new(RawEvent {
                             relay_url,
-                            subscription_id,
-                            event: *event,
+                            subscription_id: subscription_id.into_owned(),
+                            event: event.into_owned(),
                         }))) {
                             Err(mpsc::error::TrySendError::Full(RawSignal::Event(dropped))) => {
                                 note_intake_drop(&processor, &dropped.event);
@@ -589,14 +616,15 @@ pub(crate) fn note_subscription_closed(
 ///
 /// The inbox is deliberately left on the first `EOSE`. Its recovery window is
 /// the lookback, not the buffer: every re-subscribe asks for
-/// `cursor − INBOX_RESUBSCRIBE_LOOKBACK_SECS` (49 h), so a wrap a slow inbox
-/// relay had not yet replayed is re-requested by the next REQ for two days —
+/// `cursor − INBOX_RESUBSCRIBE_LOOKBACK_SECS` (96 h), so a wrap a slow inbox
+/// relay had not yet replayed is re-requested by every REQ for 96 h —
 /// there is no permanent skip to close. Waiting instead would pin the inbox
-/// cursor on one silent relay and make every REQ replay that 49-hour window,
+/// cursor on one silent relay and make every REQ replay that 96-hour window,
 /// which is the cost P1 bounded it to avoid.
 fn anchor_end_of_stored_events(processor: &EngineProcessor, ctx: &SubCtx, key: &RepairKey) {
     match ctx.plane {
         PlaneKind::Group => {
+            processor.settle_floors(key, ctx.group_ids_hex.iter());
             if !processor.note_eose_endpoint(key) {
                 // Presence-only: some relay that accepted this REQ has not
                 // finished replaying, so no circle on it may advance yet.
@@ -607,6 +635,7 @@ fn anchor_end_of_stored_events(processor: &EngineProcessor, ctx: &SubCtx, key: &
                 return;
             }
             for group_hex in &ctx.group_ids_hex {
+                processor.note_caught_up(group_hex);
                 if processor.note_end_of_stored_events(group_hex) {
                     log::debug!(
                         "[live_sync::worker] EOSE anchored cursor for {}",
@@ -614,6 +643,10 @@ fn anchor_end_of_stored_events(processor: &EngineProcessor, ctx: &SubCtx, key: &
                     );
                 }
             }
+            // An eviction left due is staged by the drive alone, once its
+            // circle is caught up (`SessionManager::may_stage_left_due`):
+            // nothing else would ask for that drive now.
+            processor.request_drive();
         }
         // The inbox cursor used to be advanced by the FOREGROUND, from the gift
         // wrap's own `created_at` — a field anyone who knows this user's
@@ -680,11 +713,34 @@ async fn resolve_pause_marker(
 /// `repair` is where a `CLOSED` for one of OUR subscriptions is recorded; the
 /// session's repair task re-issues it under the lifecycle lock.
 pub async fn run_worker(
+    rx: mpsc::Receiver<RawSignal>,
+    router: Arc<RwLock<Router>>,
+    processor: Arc<EngineProcessor>,
+    repair: Arc<RepairQueue>,
+    own_pubkey: PublicKey,
+) {
+    work(
+        rx,
+        router,
+        processor,
+        repair,
+        own_pubkey,
+        WORKER_QUEUE_CAP,
+        STORED_REPLAY_BYTE_CAP,
+    )
+    .await;
+}
+
+/// [`run_worker`], taking in what it holds of the stored replay once
+/// `hold_cap` events, or `hold_bytes` bytes of their content, are held.
+async fn work(
     mut rx: mpsc::Receiver<RawSignal>,
     router: Arc<RwLock<Router>>,
     processor: Arc<EngineProcessor>,
     repair: Arc<RepairQueue>,
     own_pubkey: PublicKey,
+    hold_cap: usize,
+    hold_bytes: usize,
 ) {
     while let Some(signal) = rx.recv().await {
         // The pause marker carries no `(relay, sub)` and must be handled BEFORE
@@ -693,6 +749,7 @@ pub async fn run_worker(
         // by the time we get here (this loop is serial), which is the whole
         // content of the ack.
         if let RawSignal::Pause { registrations, ack } = signal {
+            flush_stored(&processor, None).await;
             resolve_pause_marker(&router, &processor, registrations, ack).await;
             continue;
         }
@@ -742,17 +799,20 @@ pub async fn run_worker(
                 // This endpoint will send nothing more on this REQ, so a burst
                 // waiting on it has its answer — waiting for an `EOSE` that can
                 // no longer come would spend the whole backlog budget.
+                flush_stored(&processor, Some(&key.sub_id)).await;
                 processor.note_endpoint_settled(&key);
                 note_subscription_closed(&processor, &repair, &key, kind);
                 continue;
             }
             RawSignal::EndOfStoredEvents { .. } => {
+                flush_stored(&processor, Some(&key.sub_id)).await;
                 anchor_end_of_stored_events(&processor, &ctx, &key);
                 // Recorded AFTER the anchor, and after every stored event this
                 // relay sent ahead of the EOSE was ingested by this serial loop:
                 // that ordering is what lets a burst treat a settled endpoint as
                 // "its backlog is applied" rather than merely "downloaded".
                 processor.note_endpoint_settled(&key);
+                processor.come_back_if_owed().await;
                 continue;
             }
             // Unreachable: handled at the top of the loop.
@@ -795,43 +855,152 @@ pub async fn run_worker(
                 let Ok(nostr_group_id) = hex::decode(&routed_hex) else {
                     continue;
                 };
-                let group_hex = canonical_group_hex(&nostr_group_id);
+                #[cfg(any(test, feature = "test-utils"))]
+                processor.note_taken_in_for_test(raw.event.id);
 
-                // Panic isolation: run the async ingest on a spawned task and join
-                // it, so a panic deep in a MLS decrypt on adversarial ciphertext
-                // is contained to this one event instead of killing the worker.
-                let process_started = std::time::Instant::now();
-                let processor_task = Arc::clone(&processor);
-                let event = raw.event.clone();
-                let joined = tokio::spawn(async move {
-                    processor_task
-                        .process_group_event(&event, &nostr_group_id)
-                        .await
-                })
-                .await;
-
-                // Diagnostic: the circle's per-process alias handle, the
-                // duration, and the outcome VARIANT only (Security Rule 15 —
-                // `GroupProcessOutcome` is payload-free, so its `Debug` is a
-                // variant name and nothing else).
-                let outcome_label = joined
-                    .as_ref()
-                    .map_or_else(|_| "panic".to_string(), |o| format!("{o:?}"));
-                log::debug!(
-                    "[live_sync::worker] process_group_event {} took {}ms → {}",
-                    circle_handle(&group_hex),
-                    process_started.elapsed().as_millis(),
-                    outcome_label
-                );
-
-                if joined.is_err() {
-                    // The ingest task panicked; surface a status so the consumer
-                    // is not silently blinded. The cursor did not advance, so the
-                    // event is re-fetched on the next catch-up.
-                    processor.emit_status(SyncStatusReason::Unprocessable);
+                if processor.in_stored_replay(&key) {
+                    let circle = processor.circle_routed_by(&nostr_group_id);
+                    let mut stored = processor.stored.lock().await;
+                    // Read again under the lock: a release whose flush ran
+                    // since the first read would leave this event held
+                    // until some later flush.
+                    if processor.in_stored_replay(&key) {
+                        let held = stored.hold(&key.sub_id, nostr_group_id, raw.event, circle);
+                        // Counted under the lock a flush releases under, so
+                        // no release can come before the count it ends.
+                        if let Some(circle) = &held.began {
+                            processor.session().hold_live_replay(circle);
+                        }
+                        drop(stored);
+                        if held.count >= hold_cap || held.bytes >= hold_bytes {
+                            flush_stored(&processor, None).await;
+                        }
+                        continue;
+                    }
                 }
+                ingest_group_event(&processor, raw.event, nostr_group_id).await;
             }
         }
+    }
+    // The channel is closed: what it carried has been taken in, and so is
+    // what is held.
+    flush_stored(&processor, None).await;
+}
+
+/// Takes in, ordered, what the live group REQs hold of their stored replay:
+/// `sub_id`'s batch, or every REQ's.
+///
+/// Each batch is split by routing id, each circle's events ordered by
+/// [`EngineProcessor::order_stored`] — which fails open to the order they
+/// arrived in — and each event ingested on the worker's own panic-isolated
+/// path. The lock is held to the end, so whoever finds a batch taken waits
+/// until it is in.
+pub(super) async fn flush_stored(
+    processor: &Arc<EngineProcessor>,
+    sub_id: Option<&SubscriptionId>,
+) {
+    let mut stored = processor.stored.lock().await;
+    let (batches, held_circles) = stored.take(sub_id);
+    for batch in batches {
+        let mut circles: Vec<(Vec<u8>, Vec<Event>)> = Vec::new();
+        for (routing_id, event) in batch {
+            match circles.iter_mut().find(|(id, _)| *id == routing_id) {
+                Some((_, events)) => events.push(event),
+                None => circles.push((routing_id, vec![event])),
+            }
+        }
+        for (routing_id, events) in circles {
+            for event in processor.order_stored(&routing_id, events).await {
+                ingest_group_event(processor, event, routing_id.clone()).await;
+            }
+        }
+    }
+    // Only once what they held is in may their circles seal again.
+    for circle in &held_circles {
+        processor.session().release_live_replay(circle);
+    }
+    drop(stored);
+}
+
+/// Takes what the live plane's NIP-77 pass recovered in, on the worker's own
+/// panic-isolated ingest, in the lifecycle's mode, while the session serves
+/// `serves` and until `ends`. What it does not reach is asked for again by a
+/// later pass. Every current-epoch commit among it is held unread before the
+/// first ingest, and each stays held until an ingest takes it in (Security
+/// Rule 10): a cut, or a pass dropped part-way, leaves the rest held. The live
+/// plane composes no window on the answer, so it claims nothing.
+pub(super) struct LiveSink<'a> {
+    pub(super) processor: &'a Arc<EngineProcessor>,
+    pub(super) serves: super::drive::Lifecycle,
+    pub(super) ends: std::time::Instant,
+}
+
+#[async_trait::async_trait]
+impl crate::relay::negentropy::NegSink for LiveSink<'_> {
+    async fn take_in(
+        &self,
+        route: &crate::relay::negentropy::NegRoute,
+        events: Vec<(crate::nostr::mls::IngestClass, Event)>,
+    ) -> bool {
+        self.processor.session().hold_pager_commits(
+            &route.group_id,
+            events
+                .iter()
+                .filter(|(class, _)| *class == crate::nostr::mls::IngestClass::Commit)
+                .map(|(_, event)| &event.id),
+        );
+        for (_, event) in events {
+            if std::time::Instant::now() >= self.ends || !self.stands() {
+                break;
+            }
+            ingest_group_event(self.processor, event, route.routing_id.to_vec()).await;
+        }
+        false
+    }
+
+    fn stands(&self) -> bool {
+        self.processor.still_serves(self.serves)
+    }
+}
+
+/// Ingests one group event routed under `nostr_group_id`.
+async fn ingest_group_event(
+    processor: &Arc<EngineProcessor>,
+    event: Event,
+    nostr_group_id: Vec<u8>,
+) {
+    let group_hex = canonical_group_hex(&nostr_group_id);
+    // Panic isolation: run the async ingest on a spawned task and join
+    // it, so a panic deep in a MLS decrypt on adversarial ciphertext
+    // is contained to this one event instead of killing the worker.
+    let process_started = std::time::Instant::now();
+    let processor_task = Arc::clone(processor);
+    let joined = tokio::spawn(async move {
+        processor_task
+            .process_group_event(&event, &nostr_group_id)
+            .await
+    })
+    .await;
+
+    // Diagnostic: the circle's per-process alias handle, the
+    // duration, and the outcome VARIANT only (Security Rule 15 —
+    // `GroupProcessOutcome` is payload-free, so its `Debug` is a
+    // variant name and nothing else).
+    let outcome_label = joined
+        .as_ref()
+        .map_or_else(|_| "panic".to_string(), |o| format!("{o:?}"));
+    log::debug!(
+        "[live_sync::worker] process_group_event {} took {}ms → {}",
+        circle_handle(&group_hex),
+        process_started.elapsed().as_millis(),
+        outcome_label
+    );
+
+    if joined.is_err() {
+        // The ingest task panicked; surface a status so the consumer is not
+        // silently blinded. The cursor did not advance, so the event is
+        // re-fetched on the next catch-up.
+        processor.emit_status(SyncStatusReason::Unprocessable);
     }
 }
 
@@ -982,15 +1151,29 @@ mod tests {
 
     #[test]
     fn notification_disposition_classifies_each_arm() {
+        let relay_url = RelayUrl::parse("wss://relay.example").unwrap();
         let ev = commit_event_with_h("aa00");
-        let event_notif = RelayPoolNotification::Event {
-            relay_url: RelayUrl::parse("wss://relay.example").unwrap(),
+        let relay_event = RelayPoolNotification::Message {
+            relay_url: relay_url.clone(),
+            message: RelayMessage::Event {
+                subscription_id: std::borrow::Cow::Owned(SubscriptionId::new("sub")),
+                event: std::borrow::Cow::Owned(ev.clone()),
+            },
+        };
+        assert_eq!(
+            notification_disposition(&relay_event),
+            NotifDisposition::Forward,
+            "every EVENT a relay sends is forwarded, a redelivery included"
+        );
+        let first_seen = RelayPoolNotification::Event {
+            relay_url,
             subscription_id: SubscriptionId::new("sub"),
             event: Box::new(ev),
         };
         assert_eq!(
-            notification_disposition(&event_notif),
-            NotifDisposition::Forward
+            notification_disposition(&first_seen),
+            NotifDisposition::Ignore,
+            "the pool's first-seen copy of the same EVENT is not forwarded twice"
         );
         assert_eq!(
             notification_disposition(&RelayPoolNotification::Shutdown),
@@ -1092,6 +1275,44 @@ mod supervisor_isolation_tests {
         (Arc::new(EngineProcessor::new(circle, EventBus::new())), dir)
     }
 
+    /// The live plane's NIP-77 sink holds, at its cut, every current-epoch
+    /// commit it did not reach: no location is sealed for the circle until
+    /// an ingest on any plane takes it in (Security Rule 10).
+    #[tokio::test]
+    async fn the_live_sinks_cut_holds_the_commits_it_did_not_reach() {
+        use crate::nostr::mls::IngestClass;
+        use crate::relay::negentropy::{NegRoute, NegSink};
+
+        let (processor, _dir) = bare_processor();
+        let routing = [0x42u8; 32];
+        let group = crate::nostr::mls::types::GroupId::new(vec![0x24; 32]);
+        let commit = event_445(&hex::encode(routing), "Y29tbWl0");
+        let route = NegRoute {
+            group_id: group.clone(),
+            routing_id: routing,
+            relays: Vec::new(),
+        };
+        let sink = super::LiveSink {
+            processor: &processor,
+            serves: crate::relay::live_sync::Lifecycle::Foreground,
+            ends: std::time::Instant::now(),
+        };
+        assert!(
+            !sink
+                .take_in(&route, vec![(IngestClass::Commit, commit.clone())])
+                .await
+        );
+        assert!(
+            processor.session().holds_unread_input_for_test(&group),
+            "a fetched commit the sink did not reach left the circle's seals free"
+        );
+        let _ = processor.session().process_event(&commit).await;
+        assert!(
+            !processor.session().holds_unread_input_for_test(&group),
+            "an ingest that takes the commit in ends the hold"
+        );
+    }
+
     /// A `kind:445` carrying `#h = group_hex`, with `content`.
     fn event_445(group_hex: &str, content: &str) -> nostr::Event {
         EventBuilder::new(Kind::Custom(445), content)
@@ -1101,6 +1322,17 @@ mod supervisor_isolation_tests {
             )])
             .sign_with_keys(&Keys::generate())
             .unwrap()
+    }
+
+    /// `event` as the relay-message notification the receiver forwards.
+    fn relay_event_notification(event: nostr::Event) -> RelayPoolNotification {
+        RelayPoolNotification::Message {
+            relay_url: RelayUrl::parse("wss://relay.example").unwrap(),
+            message: nostr::RelayMessage::Event {
+                subscription_id: std::borrow::Cow::Owned(SubscriptionId::new("s")),
+                event: std::borrow::Cow::Owned(event),
+            },
+        }
     }
 
     /// The worker is the ONLY thing holding a relay to the filter its REQ was
@@ -1758,12 +1990,8 @@ mod supervisor_isolation_tests {
             cancel_rx,
         ));
 
-        btx.send(RelayPoolNotification::Event {
-            relay_url: RelayUrl::parse("wss://relay.example").unwrap(),
-            subscription_id: SubscriptionId::new("s"),
-            event: Box::new(event_445("aa00", "x")),
-        })
-        .unwrap();
+        btx.send(relay_event_notification(event_445("aa00", "x")))
+            .unwrap();
 
         tokio::time::timeout(Duration::from_secs(5), handle)
             .await
@@ -1805,14 +2033,7 @@ mod supervisor_isolation_tests {
         let notif = |content: &str| {
             let ev = event_445("aa00", content);
             let id = ev.id;
-            (
-                id,
-                RelayPoolNotification::Event {
-                    relay_url: RelayUrl::parse("wss://relay.example").unwrap(),
-                    subscription_id: SubscriptionId::new("s"),
-                    event: Box::new(ev),
-                },
-            )
+            (id, relay_event_notification(ev))
         };
 
         // Overfill the cap-4 channel with the receiver un-polled ⇒ first recv() = Lagged.
@@ -1952,5 +2173,292 @@ mod supervisor_isolation_tests {
             .expect("a pre-existing cancel must still be observed")
             .expect("the receiver task must join cleanly");
         drop(btx);
+    }
+}
+
+/// The stored replay's batch is taken in at each point the worker vouches for
+/// what it has applied — a pause's ack, an endpoint's `CLOSED` — and when
+/// its cap is reached, never dropped. Driven through the real worker loop
+/// over in-process channels; an inbox gift wrap routed at us is the probe,
+/// since the worker is serial: every status ahead of its `Welcome` on the bus
+/// was emitted before the worker reached it.
+#[cfg(test)]
+mod stored_replay_tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use nostr::{
+        Alphabet, EventBuilder, Keys, Kind, RelayUrl, SingleLetterTag, SubscriptionId, Tag, TagKind,
+    };
+    use tempfile::TempDir;
+    use tokio::sync::{broadcast, mpsc, RwLock};
+
+    use super::{work, RawEvent, RawSignal};
+    use crate::circle::CircleManager;
+    use crate::relay::live_sync::repair::{ClosedKind, RepairKey, RepairQueue};
+    use crate::relay::live_sync::{
+        EngineProcessor, EventBus, LiveSyncEvent, PlaneKind, Router, SubCtx, SyncStatusReason,
+    };
+
+    const RELAY: &str = "wss://relay.example";
+
+    /// A worker whose group REQ endpoint is open and unanswered — so what it
+    /// sends is held — and whose inbox REQ carries the probes.
+    struct Worker {
+        tx: mpsc::Sender<RawSignal>,
+        task: tokio::task::JoinHandle<()>,
+        bus: broadcast::Receiver<LiveSyncEvent>,
+        router: Arc<RwLock<Router>>,
+        group_hex: String,
+        group: RepairKey,
+        inbox: SubscriptionId,
+        own: Keys,
+        _dir: TempDir,
+    }
+
+    impl Worker {
+        async fn start(hold_cap: usize) -> Self {
+            Self::start_holding(hold_cap, usize::MAX).await
+        }
+
+        async fn start_holding(hold_cap: usize, hold_bytes: usize) -> Self {
+            let dir = TempDir::new().unwrap();
+            let circle =
+                Arc::new(CircleManager::new_unencrypted(dir.path(), &Keys::generate()).unwrap());
+            let events = EventBus::new();
+            let bus = events.subscribe();
+            let processor = Arc::new(EngineProcessor::new(circle, events));
+            let group_hex = hex::encode([0x6du8; 32]);
+            let group = RepairKey {
+                relay_url: RelayUrl::parse(RELAY).unwrap(),
+                sub_id: SubscriptionId::new("s_group_held"),
+            };
+            let inbox = SubscriptionId::new("s_inbox_probe");
+            let router = Arc::new(RwLock::new(Router::new()));
+            router.write().await.register_group(
+                &[RELAY.to_string()],
+                &group.sub_id,
+                &HashSet::from([group_hex.clone()]),
+            );
+            router.write().await.register(
+                RELAY,
+                &inbox,
+                SubCtx {
+                    plane: PlaneKind::Inbox,
+                    group_ids_hex: HashSet::new(),
+                },
+            );
+            processor.open_delivery_window(&group, chrono::Utc::now().timestamp());
+            let own = Keys::generate();
+            let (tx, rx) = mpsc::channel::<RawSignal>(64);
+            let task = tokio::spawn(work(
+                rx,
+                Arc::clone(&router),
+                processor,
+                Arc::new(RepairQueue::default()),
+                own.public_key(),
+                hold_cap,
+                hold_bytes,
+            ));
+            Self {
+                tx,
+                task,
+                bus,
+                router,
+                group_hex,
+                group,
+                inbox,
+                own,
+                _dir: dir,
+            }
+        }
+
+        /// Sends `count` group events the engine panics on, each surfacing
+        /// one `Unprocessable` when it is ingested.
+        async fn send_held(&self, count: usize) {
+            for _ in 0..count {
+                let event = EventBuilder::new(Kind::Custom(445), "__panic_for_test__")
+                    .tags(vec![Tag::custom(
+                        TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+                        [self.group_hex.clone()],
+                    )])
+                    .sign_with_keys(&Keys::generate())
+                    .unwrap();
+                self.tx
+                    .send(RawSignal::Event(Box::new(RawEvent {
+                        relay_url: self.group.relay_url.clone(),
+                        subscription_id: self.group.sub_id.clone(),
+                        event,
+                    })))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        /// How many events were ingested between the last probe and this one.
+        async fn ingested_by_probe(&mut self) -> usize {
+            let probe = EventBuilder::new(Kind::GiftWrap, "sealed")
+                .tags(vec![Tag::public_key(self.own.public_key())])
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            let id = probe.id.to_hex();
+            self.tx
+                .send(RawSignal::Event(Box::new(RawEvent {
+                    relay_url: self.group.relay_url.clone(),
+                    subscription_id: self.inbox.clone(),
+                    event: probe,
+                })))
+                .await
+                .unwrap();
+            let mut ingested = 0;
+            loop {
+                match tokio::time::timeout(Duration::from_secs(20), self.bus.recv())
+                    .await
+                    .expect("the probe reaches the bus")
+                {
+                    Ok(LiveSyncEvent::Welcome { gift_wrap_json })
+                        if gift_wrap_json.contains(&id) =>
+                    {
+                        return ingested;
+                    }
+                    Ok(LiveSyncEvent::Status {
+                        reason: SyncStatusReason::Unprocessable,
+                    }) => ingested += 1,
+                    Ok(_) => {}
+                    Err(error) => panic!("the bus fell behind or closed: {error:?}"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pause_takes_in_the_held_stored_replay_before_its_ack() {
+        let mut worker = Worker::start(64).await;
+        worker.send_held(5).await;
+        assert_eq!(
+            worker.ingested_by_probe().await,
+            0,
+            "premise: stored replay is held, not ingested on arrival"
+        );
+        let (ack, acked) = tokio::sync::oneshot::channel();
+        worker
+            .tx
+            .send(RawSignal::Pause {
+                registrations: worker.router.read().await.registrations(),
+                ack,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), acked)
+            .await
+            .expect("the pause is acked")
+            .expect("the ack is sent");
+        let mut ingested = 0;
+        while let Ok(event) = worker.bus.try_recv() {
+            if matches!(
+                event,
+                LiveSyncEvent::Status {
+                    reason: SyncStatusReason::Unprocessable
+                }
+            ) {
+                ingested += 1;
+            }
+        }
+        assert_eq!(
+            ingested, 5,
+            "a pause acked with stored replay still held: what it vouches for as processed \
+             was never taken in (Security Rule 12)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_takes_in_its_reqs_held_stored_replay() {
+        let mut worker = Worker::start(64).await;
+        worker.send_held(4).await;
+        assert_eq!(worker.ingested_by_probe().await, 0, "premise: held");
+        worker
+            .tx
+            .send(RawSignal::SubscriptionClosed {
+                relay_url: worker.group.relay_url.clone(),
+                subscription_id: worker.group.sub_id.clone(),
+                kind: ClosedKind::classify("error: shutting down"),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            worker.ingested_by_probe().await,
+            4,
+            "a relay that ended the REQ settles it: what it sent before must be taken in"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_held_stored_replay_is_taken_in_at_its_cap_and_never_dropped() {
+        let mut worker = Worker::start(3).await;
+        worker.send_held(2).await;
+        assert_eq!(
+            worker.ingested_by_probe().await,
+            0,
+            "premise: below the cap, held"
+        );
+        worker.send_held(1).await;
+        assert_eq!(
+            worker.ingested_by_probe().await,
+            3,
+            "the stored replay reached its cap and was neither taken in nor bounded"
+        );
+    }
+
+    /// Each held event's content is the 18 bytes `__panic_for_test__`: a
+    /// budget of 40 bytes holds two and takes in all three at the third.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_held_stored_replay_is_taken_in_at_its_byte_budget_and_never_dropped() {
+        let mut worker = Worker::start_holding(64, 40).await;
+        worker.send_held(2).await;
+        assert_eq!(
+            worker.ingested_by_probe().await,
+            0,
+            "premise: below the byte budget, held"
+        );
+        worker.send_held(1).await;
+        assert_eq!(
+            worker.ingested_by_probe().await,
+            3,
+            "the stored replay reached its byte budget and was neither taken in nor bounded"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_worker_takes_in_what_it_holds_when_its_channel_closes() {
+        let mut worker = Worker::start(64).await;
+        worker.send_held(3).await;
+        assert_eq!(worker.ingested_by_probe().await, 0, "premise: held");
+        let Worker {
+            tx,
+            task: handle,
+            mut bus,
+            ..
+        } = worker;
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(20), handle)
+            .await
+            .expect("the worker exits once its channel closes")
+            .expect("the worker joins");
+        let mut ingested = 0;
+        while let Ok(event) = bus.try_recv() {
+            if matches!(
+                event,
+                LiveSyncEvent::Status {
+                    reason: SyncStatusReason::Unprocessable
+                }
+            ) {
+                ingested += 1;
+            }
+        }
+        assert_eq!(
+            ingested, 3,
+            "a worker that exits drops what it held of the stored replay"
+        );
     }
 }

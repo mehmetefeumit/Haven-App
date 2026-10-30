@@ -140,7 +140,6 @@ import 'package:haven/src/providers/service_providers.dart'
         locationServiceProvider;
 import 'package:haven/src/rust/api.dart'
     show
-        CircleCreationResultFfi,
         CircleManagerFfi,
         MemberKeyPackageFfi,
         RelayManagerFfi;
@@ -155,7 +154,8 @@ import 'package:haven/src/test_keys.dart' show WidgetKeys;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
+import 'e2e/_lib/circle_creation.dart'
+    show DeliveredCircle, createCircleDelivered;
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
 import 'e2e/_lib/fake_location_service.dart'
     show FakeLocationService, aliceFakeLatitude, aliceFakeLongitude;
@@ -703,10 +703,11 @@ void main() {
       await waitForKeyPackage(relay: relay, authorPubkeyHex: bob.pubkeyHex);
 
       final relayManager = await RelayManagerFfi.newInstance();
-      final CircleCreationResultFfi creation;
+      final DeliveredCircle creation;
       try {
         final bobKp = await relayManager.fetchMemberKeypackage(
           pubkey: bob.pubkeyHex,
+          circle: aliceManager,
         );
         if (bobKp == null) {
           throw StateError(
@@ -720,13 +721,12 @@ void main() {
           () => container
               .read(identityNotifierProvider.notifier)
               .getSecretBytes(),
-          // Publishes Bob's gift-wrapped Welcome and CONFIRMS the staged
-          // create (Security Rule 13) — an unconfirmed create pins the group
-          // in MDK's PendingPublish, where every inbound kind-445 buffers
-          // forever.
-          (aliceSecret) => createCircleConfirmed(
+          // Publishes Bob's gift-wrapped Welcome and requires every relay ack:
+          // an invitee whose Welcome never landed never joins. See
+          // `createCircleDelivered`'s doc.
+          (aliceSecret) => createCircleDelivered(
             manager: aliceManager,
-            relay: relay,
+            relayManager: relayManager,
             identitySecretBytes: aliceSecret,
             members: <MemberKeyPackageFfi>[bobKp],
             name: 'B7 iOS Auth Tier Circle',
@@ -734,7 +734,6 @@ void main() {
             relays: <String>[defaultStrfryUrl],
             // Bob advertises no inbox relays, so the Welcome-delivery cascade
             // needs the admin's own relay as a fallback.
-            creatorFallbackRelays: <String>[defaultStrfryUrl],
             scenario: 'b7',
           ),
         );
@@ -742,11 +741,6 @@ void main() {
         await relayManager.shutdown();
       }
 
-      if (!creation.welcomeEvents.any(
-        (e) => e.recipientPubkey.toLowerCase() == bob.pubkeyHex.toLowerCase(),
-      )) {
-        throw StateError('[b7] createCircle produced no gift-wrap for Bob.');
-      }
 
       final bobCircle = await bob.acceptInvitationViaRelay(relay: relay);
       expect(

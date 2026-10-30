@@ -700,9 +700,6 @@ class AppLocalizationsFa extends AppLocalizations {
   String get nameCircleStageCreatingGroup => 'در حال ساختن گروه امن...';
 
   @override
-  String get nameCircleStageSendingInvites => 'در حال فرستادن دعوت‌ها...';
-
-  @override
   String get nameCircleStageComplete => 'انجام شد!';
 
   @override
@@ -720,7 +717,7 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
-  String nameCircleCreatedPartialSnack(String name, int sent, int total) {
+  String nameCircleCreatedSentSoFarSnack(String name, int sent, int total) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -729,7 +726,15 @@ class AppLocalizationsFa extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'حلقهٔ «$name» ساخته شد. دعوت‌ها فرستاده شدند ($sentString از $totalString)؛ تحویل بقیه در انتظار است.';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          'حلقهٔ «$name» ساخته شد. تاکنون $sentString از $totalString دعوت فرستاده شده است. Haven تا وقتی برنامه باز است، حداکثر تا یک روز به فرستادن بقیه ادامه می‌دهد.',
+      one:
+          'حلقهٔ «$name» ساخته شد. تاکنون $sentString از $totalString دعوت فرستاده شده است. Haven تا وقتی برنامه باز است، حداکثر تا یک روز به فرستادن آن ادامه می‌دهد.',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -810,7 +815,7 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
-  String addMemberPartialDelivery(int sent, int total) {
+  String addMemberSentSoFar(int sent, int total, String circleName) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -819,7 +824,38 @@ class AppLocalizationsFa extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'دعوت‌ها فرستاده شدند ($sentString از $totalString). تحویل بقیه در انتظار است.';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          'تاکنون $sentString از $totalString دعوت برای پیوستن به $circleName فرستاده شده است. Haven تا وقتی برنامه باز است، حداکثر تا یک روز به فرستادن بقیه ادامه می‌دهد.',
+      one:
+          'تاکنون $sentString از $totalString دعوت برای پیوستن به $circleName فرستاده شده است. Haven تا وقتی برنامه باز است، حداکثر تا یک روز به فرستادن آن ادامه می‌دهد.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String addMemberReinviteNeeded(String circleName) {
+    return 'Haven نمی‌تواند دعوت را برای پیوستن به $circleName بفرستد. آن شخص را حذف کن و دوباره اضافه‌اش کن.';
+  }
+
+  @override
+  String get memberCannotReceiveInvitations =>
+      'Haven نمی‌تواند همهٔ کسانی را که انتخاب کردی دعوت کند، چون نتوانست جایی برای فرستادن دست‌کم یکی از دعوت‌هایشان پیدا کند. از کسانی که انتخاب کردی بخواه بررسی کنند که برنامه‌شان می‌تواند دعوت دریافت کند، بعد دوباره تلاش کن.';
+
+  @override
+  String get missedInvitationsShowWho => 'نمایش افراد';
+
+  @override
+  String missedInvitationsTitle(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'دعوت‌ها فرستاده نشد',
+      one: 'دعوت فرستاده نشد',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -874,6 +910,11 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
+  String circleMemberRemoveAwaitingAnnouncement(String name) {
+    return 'هنوز در حال حذف $name: در انتظار رله‌ها. تا وقتی این کار تمام نشده، چیزی با این حلقه به اشتراک گذاشته نمی‌شود.';
+  }
+
+  @override
   String get circleMemberAdmin => 'مدیر';
 
   @override
@@ -909,7 +950,12 @@ class AppLocalizationsFa extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'آمادهٔ دعوت';
 
   @override
-  String get pendingMemberNeedsUpdate => 'نیاز به به‌روزرسانی Haven دارد';
+  String get pendingMemberNeedsUpdate =>
+      'باید Haven را به‌روزرسانی کند یا باز کند';
+
+  @override
+  String get memberKeyPackageStale =>
+      'Haven فعلاً نمی‌تواند این فرد را دعوت کند. از او بخواه Haven را باز کند، بعد دوباره تلاش کن.';
 
   @override
   String get memberSearchHint => 'شناسهٔ عضو را وارد کن...';
@@ -1061,6 +1107,27 @@ class AppLocalizationsFa extends AppLocalizations {
       'پذیرفتن دعوت ناموفق بود. لطفاً دوباره تلاش کن.';
 
   @override
+  String invitationNeedsNewInviteError(String name) {
+    return 'این دعوت دیگر قابل استفاده نیست. از $name بخواه دوباره دعوتت کند. شاید اول لازم باشد Haven را به‌روزرسانی کند.';
+  }
+
+  @override
+  String get rejoinDialogTitle => 'دوباره به این حلقه می‌پیوندی؟';
+
+  @override
+  String rejoinDialogBody(String inviterName, String circleName) {
+    return '$inviterName تو را به «$circleName» دعوت کرده، حلقه‌ای که از قبل روی این گوشی هست. این ممکن است وقتی پیش بیاید که از آن حذف شده‌ای و دوباره دعوت شده‌ای. با پیوستن دوباره، نسخهٔ این گوشی از حلقه جایگزین می‌شود. با «رد کردن»، این دعوت برای همیشه پایان می‌یابد؛ با «لغو»، برای بعد می‌ماند.';
+  }
+
+  @override
+  String rejoinDialogBodyUnnamed(String circleName) {
+    return 'به «$circleName» دعوت شده‌ای، حلقه‌ای که از قبل روی این گوشی هست. این ممکن است وقتی پیش بیاید که از آن حذف شده‌ای و دوباره دعوت شده‌ای. با پیوستن دوباره، نسخهٔ این گوشی از حلقه جایگزین می‌شود. با «رد کردن»، این دعوت برای همیشه پایان می‌یابد؛ با «لغو»، برای بعد می‌ماند.';
+  }
+
+  @override
+  String get rejoinDialogConfirm => 'پیوستن دوباره';
+
+  @override
   String invitationRosterFullError(int limit) {
     final intl.NumberFormat limitNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1193,11 +1260,22 @@ class AppLocalizationsFa extends AppLocalizations {
   String get circleDetailsLeaveCircle => 'ترک حلقه';
 
   @override
+  String get circleDetailsLeavingInProgress => 'در حال ترک حلقه…';
+
+  @override
   String get leaveCircleDialogTitle => 'ترک حلقه';
 
   @override
   String get leaveCircleDialogBody =>
       'این حلقه ترک شود؟ دیگر موقعیت مکانی‌ات را برای اعضایش نمی‌فرستی و موقعیت آن‌ها را هم نمی‌بینی. آخرین موقعیتی که فرستاده‌ای تا یک روز روی گوشی‌هایشان می‌ماند. این کار قابل بازگشت نیست: برای پیوستن دوباره به دعوت تازه‌ای نیاز داری.';
+
+  @override
+  String get leaveDisbandedCircleDialogBody =>
+      'این حلقه به پایان رسیده است، پس دیگر چیزی با آن به اشتراک گذاشته نمی‌شود. ترک حلقه آن را از این گوشی حذف می‌کند.';
+
+  @override
+  String get leaveCircleDialogAdminNote =>
+      'تو مدیر این حلقه‌ای. پیش از اینکه حلقه را ترک کنی، Haven تلاش می‌کند یکی دیگر از اعضا را مدیر کند تا حلقه بتواند به کارش ادامه دهد.';
 
   @override
   String get leaveCircleConfirm => 'ترک';
@@ -1212,52 +1290,32 @@ class AppLocalizationsFa extends AppLocalizations {
   String get leaveCircleError => 'ترک حلقه ناموفق بود';
 
   @override
-  String get circleBlockedBannerTitle => 'این حلقه قابل به‌روزرسانی نیست';
-
-  @override
-  String get circleBlockedBannerBody =>
-      'مشکلی در رمزگذاری این حلقه پیش آمده، بنابراین Haven دیگر نمی‌تواند در آن به‌روزرسانی ارسال یا دریافت کند. هنوز می‌توانی آخرین چیزی را که می‌دانستی در پایین ببینی، یا حلقه را ترک کنی.';
-
-  @override
-  String get legacyCircleBannerTitle => 'این حلقه باید دوباره ساخته شود';
-
-  @override
-  String get legacyCircleBannerBody =>
-      'موتور رمزگذاری Haven ارتقا یافته، بنابراین این حلقه دیگر قابل استفاده نیست. آن را دوباره بساز تا بتوانی موقعیت مکانی را همچنان با همان افراد به اشتراک بگذاری. باید دوباره دعوتشان کنی.';
-
-  @override
   String get legacyCircleRecreateCta => 'بازسازی حلقه';
 
   @override
-  String get legacyCircleRemoveCta => 'حذف';
+  String get storageResetTitle => 'Haven به‌روزرسانی شده است';
 
   @override
-  String get legacyCircleRemoveDialogTitle => 'حلقه حذف شود؟';
+  String get storageResetKept =>
+      'هویتت تغییری نکرده است و نمایهٔ عمومی‌ای که پیش‌تر منتشر کرده‌ای همان‌طور باقی می‌ماند.';
 
   @override
-  String get legacyCircleRemoveDialogBody =>
-      'این حلقه دیگر قابل استفاده نیست و از فهرستت حذف خواهد شد. این کار روی هیچ حلقهٔ جدیدی که برای جایگزینی آن می‌سازی اثر نمی‌گذارد.';
+  String get storageResetLost =>
+      'برای انتقال به موتور رمزگذاری جدید Haven، حلقه‌هایی که پیش از این به‌روزرسانی ساخته شده بودند حذف شدند. آن‌ها را از نو بساز و اعضایشان را دوباره دعوت کن. نام‌های مستعاری که پیش از این به‌روزرسانی برای افراد گذاشته بودی و هر تغییری در نمایه که تا آن زمان ذخیره‌اش تمام نشده بود هم حذف شدند.';
 
   @override
-  String get legacyCircleRemoveConfirm => 'حذف';
+  String get storageResetRelays =>
+      'این به‌روزرسانی تنظیمات رله‌هایت را به پیش‌فرض‌های Haven برگرداند. تا وقتی ادامه ندهی یا از تنظیمات رله‌ها برنگردی، این تنظیمات منتشر نمی‌شوند؛ پس می‌توانی اول رله‌های خودت را اضافه کنی.';
 
   @override
-  String get legacyCutoverExplainerTitle => 'Haven به‌روزرسانی شده است';
+  String get storageResetContinue => 'ادامه';
 
   @override
-  String get legacyCutoverExplainerIdentityUnchanged =>
-      'هویت و نمایهٔ عمومی‌ات بدون تغییر مانده‌اند. نیازی نیست برای آن‌ها کاری بکنی.';
+  String get storageResetOpenRelaySettings => 'تنظیمات رله‌ها';
 
   @override
-  String get legacyCutoverExplainerCirclesNeedRecreation =>
-      'برای امنیت بیشتر، باید حلقه‌هایت را از نو بسازی و اعضایشان را دوباره دعوت کنی تا بتوانی باز هم موقعیت مکانی‌ات را در آن‌ها به اشتراک بگذاری.';
-
-  @override
-  String get legacyCutoverExplainerAcknowledge => 'متوجه شدم';
-
-  @override
-  String get relaySettingsLegacyRetractionPending =>
-      'Haven هنوز از رله‌ها می‌خواهد برخی داده‌های قدیمی به‌جامانده از به‌روزرسانی امنیتی اخیر را دور بیندازند.';
+  String get storageResetAcknowledgeFailed =>
+      'Haven نتوانست پاسخت را ذخیره کند. تا وقتی ذخیره نشود، Haven تنظیمات رله‌ها و کلید دعوتت را منتشر نمی‌کند، پس فعلاً کسی نمی‌تواند دعوتت کند. دوباره تلاش کن، وگرنه Haven دفعهٔ بعد که باز شود دوباره می‌پرسد.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'پنل حلقه‌ها بسته شد';
@@ -1475,6 +1533,9 @@ class AppLocalizationsFa extends AppLocalizations {
   @override
   String get identityAdvancedDeleteError =>
       'حذف هویت ناموفق بود. لطفاً دوباره تلاش کن.';
+
+  @override
+  String get identityAdvancedDeletingProgress => 'در حال حذف هویتت…';
 
   @override
   String identityAdvancedCopiedToClipboard(String label) {
@@ -1761,7 +1822,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get clockSkewBodyBehind =>
-      'ساعت این گوشی از بقیهٔ حلقه‌هایت عقب است، پس موقعیت مکانی‌ات فرستاده می‌شود، اما پیش از آنکه کسی بتواند آن را ببیند منقضی می‌شود. برای رفع این مشکل، در تنظیمات سیستم تنظیم خودکار تاریخ و ساعت را روشن کن.';
+      'ساعت این گوشی از بقیهٔ حلقه‌هایت عقب است، پس موقعیت‌هایی که این گوشی می‌فرستد زودتر از موعد منقضی می‌شوند و ممکن است حلقه‌هایت برخی یا همهٔ آن‌ها را نبینند. برای رفع این مشکل، در تنظیمات سیستم تنظیم خودکار تاریخ و ساعت را روشن کن.';
 
   @override
   String get clockSkewResolvedAnnouncement =>
@@ -1840,24 +1901,8 @@ class AppLocalizationsFa extends AppLocalizations {
   String get sharingHealthRepairAction => 'رفع مشکل';
 
   @override
-  String get sharingHealthRepairUnavailableHint =>
-      'رفع مشکل برای این حلقه در دسترس نیست';
-
-  @override
-  String get sharingHealthRepairHint =>
-      'دوباره به رله‌ها وصل می‌شود و موقعیت مکانی‌ات را دوباره می‌فرستد، و اگر مدیر این حلقه باشی، ممکن است کلید تازه‌ای به آن بدهد';
-
-  @override
   String get sharingHealthRepairSent =>
       'پیامِ رفع مشکل فرستاده شد. دیگران وقتی گوشی‌هایشان آن را دریافت کنند، هماهنگ می‌شوند.';
-
-  @override
-  String get sharingHealthRepairNotOwner =>
-      'فقط مدیر این حلقه می‌تواند مشکلش را رفع کند. از او بخواه تو را حذف کند و دوباره اضافه کند.';
-
-  @override
-  String get sharingHealthRepairNeedsNewCircle =>
-      'مشکل این حلقه روی این گوشی رفع نمی‌شود. یک حلقهٔ تازه با همان افراد بساز.';
 
   @override
   String get sharingHealthRepairNothingToDo =>
@@ -1870,6 +1915,194 @@ class AppLocalizationsFa extends AppLocalizations {
   @override
   String get sharingHealthResumedAnnouncement =>
       'اشتراک‌گذاری موقعیت مکانی دوباره کار می‌کند.';
+
+  @override
+  String get sharingHealthTitleQuarantined =>
+      'Haven فعلاً نمی‌تواند این حلقه را باز کند';
+
+  @override
+  String get sharingHealthBodyQuarantined =>
+      'هنگام بارگذاری این حلقه روی این گوشی مشکلی پیش آمد. حلقه هنوز اینجاست.';
+
+  @override
+  String get sharingHealthTitleDisbanded => 'این حلقه به پایان رسیده است';
+
+  @override
+  String get sharingHealthBodyDisbanded =>
+      'یکی از مدیران، این حلقه را به پایان رسانده است، پس دیگر چیزی با آن به اشتراک گذاشته نمی‌شود. برای حذف آن از این گوشی، حلقه را ترک کن.';
+
+  @override
+  String get sharingHealthQuarantineRetryHint =>
+      'دوباره برای بارگذاری این حلقه تلاش می‌کند';
+
+  @override
+  String get sharingHealthQuarantineRetryFailedAnnouncement =>
+      'Haven هنوز نمی‌تواند این حلقه را باز کند.';
+
+  @override
+  String get sharingHealthTitleUnrecoverable =>
+      'این حلقه روی این گوشی از کار افتاده است';
+
+  @override
+  String get sharingHealthBodyUnrecoverable =>
+      'Haven دیگر نمی‌تواند روی این گوشی در این حلقه به‌روزرسانی بفرستد یا دریافت کند. از یکی از مدیران حلقه بخواه تو را حذف کند و دوباره اضافه کند. اگر هیچ‌کس نتواند، یک حلقهٔ تازه با همان افراد بساز.';
+
+  @override
+  String get sharingHealthTitleStalled =>
+      'Haven نمی‌تواند به‌روزرسانی‌های این حلقه را بخواند';
+
+  @override
+  String get sharingHealthBodyStalled =>
+      'به نظر می‌رسد این گوشی یکی از تغییرات حلقه را از دست داده و نتوانسته آن را روی رله‌ها پیدا کند. از یکی از مدیران حلقه بخواه تو را حذف کند و دوباره اضافه کند. اگر هیچ‌کس نتواند، یک حلقهٔ تازه با همان افراد بساز.';
+
+  @override
+  String get sharingHealthTitlePaused =>
+      'Haven این حلقه را به حالت تعلیق درآورده است';
+
+  @override
+  String get sharingHealthBodyCollision =>
+      'Haven روی این گوشی مشکلی در این حلقه پیدا کرد و برای اینکه موقعیت مکانی‌ات خصوصی بماند، اشتراک‌گذاری با آن را متوقف کرد. تنها راه رفع این مشکل، ترک حلقه است. برای پیوستن دوباره به آن، به دعوت تازه‌ای نیاز داری.';
+
+  @override
+  String get sharingHealthBodyCannotCheck =>
+      'Haven نتوانست این حلقه را روی این گوشی بررسی کند، پس برای اینکه موقعیت مکانی‌ات خصوصی بماند، اشتراک‌گذاری با آن را موقتاً متوقف کرد. خودش دوباره آن را بررسی می‌کند.';
+
+  @override
+  String get sharingHealthTitleLeaving => 'در حال ترک این حلقه هستی';
+
+  @override
+  String get sharingHealthBodyLeaving =>
+      'تا وقتی Haven کار ترک این حلقه را تمام نکرده، چیزی با آن به اشتراک گذاشته نمی‌شود. این کار ممکن است حدود یک روز طول بکشد. وقتی تمام شد، حلقه از این گوشی حذف می‌شود.';
+
+  @override
+  String get sharingHealthBodyRemovalUnmade =>
+      'حذفی که خواسته بودی انجام نشد، برای همین Haven اشتراک‌گذاری موقعیت مکانی‌ات با این حلقه را متوقف کرده است تا موقعیتت به هر کسی که خواستی حذفش کنی نرسد.';
+
+  @override
+  String get sharingHealthBodyRemovalUnmadeNoNotice =>
+      'حذفی که خواسته بودی انجام نشد، برای همین Haven اشتراک‌گذاری موقعیت مکانی‌ات با این حلقه را متوقف کرده است تا موقعیتت به هر کسی که خواستی حذفش کنی نرسد. فهرست اعضا را باز کن تا ببینی چه کسانی هنوز در حلقه‌اند.';
+
+  @override
+  String get sharingHealthBodyDepartureDue =>
+      'کسی این حلقه را ترک کرده و خروجش هنوز کامل نشده است. تا وقتی کامل نشده، Haven موقعیت مکانی‌ات را با این حلقه به اشتراک نمی‌گذارد.';
+
+  @override
+  String get sharingHealthTitleBackgroundPaused =>
+      'اشتراک‌گذاری در پس‌زمینه برای این حلقه متوقف شده است';
+
+  @override
+  String get sharingHealthBodyAwaitsForeground =>
+      'رله‌های این حلقه وقتی Haven در پس‌زمینه بود تغییر کردند. Haven این جابه‌جایی را زمانی کامل می‌کند که باز باشد؛ تا آن موقع، اشتراک‌گذاری با این حلقه در پس‌زمینه انجام نمی‌شود.';
+
+  @override
+  String get sharingHealthBodyAwaitingRelays =>
+      'تغییری در این حلقه منتظر تأیید یک رله است. تا آن موقع، Haven موقعیت مکانی‌ات را برای این حلقه نمی‌فرستد و موقعیت‌های تازه را هم از آن نشان نمی‌دهد. Haven تا وقتی برنامه باز است، به تلاش ادامه می‌دهد.';
+
+  @override
+  String get sharingHealthBodyAcknowledged =>
+      'یک رله تغییری در این حلقه را پذیرفته و Haven در حال نهایی کردن آن است. تا آن موقع، به‌روزرسانی‌های این حلقه در انتظار می‌مانند.';
+
+  @override
+  String get sharingHealthBodyStagedWithoutRecord =>
+      'ذخیرهٔ تغییری در این حلقه ممکن نشد، پس فرستاده هم نشد. Haven به آن رسیدگی می‌کند، حداکثر تا دفعهٔ بعد که راه‌اندازی شود؛ تا آن موقع، به‌روزرسانی‌های این حلقه در انتظار می‌مانند.';
+
+  @override
+  String get sharingHealthBodyStoredInput =>
+      'این گوشی به‌روزرسانی‌هایی برای این حلقه دارد که نتوانسته پردازششان کند. تا وقتی این کار را نکرده، Haven موقعیت مکانی‌ات را با این حلقه به اشتراک نمی‌گذارد.';
+
+  @override
+  String get sharingHealthBodySessionHeld =>
+      'Haven هنوز در حال بستن آخرین اتصالش است، برای همین اشتراک‌گذاری موقعیت مکانی موقتاً متوقف شده است. وقتی این کار تمام شود، اشتراک‌گذاری از سر گرفته می‌شود. راه‌اندازی دوبارهٔ گوشی‌ات همیشه این وضعیت را برطرف می‌کند.';
+
+  @override
+  String get sharingHealthRepairHintAnyMember =>
+      'دوباره به رله‌ها وصل می‌شود، فرستادن موقعیت مکانی‌ات را دوباره امتحان می‌کند و ممکن است کلیدهای رمزگذاری تازه‌ای به این حلقه بدهد';
+
+  @override
+  String get sharingHealthAttentionAnnouncement =>
+      'اشتراک‌گذاری موقعیت مکانی در این حلقه نیازمند توجه است. برای دیدن دلیلش، جزئیات حلقه را باز کن.';
+
+  @override
+  String changeNoticeArrivedAnnouncement(String circleName) {
+    return 'موردی دربارهٔ تغییرات اخیر حلقهٔ $circleName نیازمند توجه توست. جزئیات آن حلقه را باز کن تا آن را بخوانی.';
+  }
+
+  @override
+  String get circleDetailsAttentionTooltip => 'جزئیات حلقه، نیازمند توجه';
+
+  @override
+  String circleRowAttentionSemantics(String circleName) {
+    return '$circleName، نیازمند توجه';
+  }
+
+  @override
+  String get changeNoticeHeading => 'تغییرات این حلقه';
+
+  @override
+  String get changeNoteRemovalUndone =>
+      'تغییری در این حلقه به نتیجه نرسید. اگر این تغییر کسی را حذف می‌کرد، آن شخص هنوز در حلقه است و می‌تواند آنچه را با این حلقه به اشتراک گذاشته می‌شود ببیند.';
+
+  @override
+  String get changeNoteChangeUndone =>
+      'تغییری در این حلقه به نتیجه نرسید، پس چیزی تغییر نکرد. اگر این تغییر از طرف تو بود و هنوز آن را می‌خواهی، دوباره انجامش بده.';
+
+  @override
+  String get changeNoteMayBeOutOfStep =>
+      'ممکن است تغییری در این حلقه بی‌آنکه این گوشی بداند به دیگران رسیده باشد، پس ممکن است این گوشی با آن‌ها هماهنگ نباشد.';
+
+  @override
+  String get changeNoteReinviteOwed =>
+      'کسی که دعوتش کردی در فهرست این حلقه هست، اما نمی‌تواند بپیوندد، چون Haven نمی‌تواند دعوتش را بفرستد. او را حذف کن و دوباره اضافه کن.';
+
+  @override
+  String get changeNoteChangeUnrecorded =>
+      'ذخیرهٔ تغییری در این حلقه ممکن نشد، پس فرستاده هم نشد.';
+
+  @override
+  String get changeNoteQueuedChangeDropped =>
+      'تغییری که در این حلقه در انتظار انجام بود لغو شد، چون دیگر نمی‌شد آن را همان‌طور که خواسته شده بود انجام داد. ممکن است پیش‌تر از راه دیگری انجام شده باشد.';
+
+  @override
+  String get changeNoteQueuedChangesHeld =>
+      'برخی تغییرات این حلقه هنوز در انتظار انجام‌اند.';
+
+  @override
+  String get changeNoteQueuedRemovalDropped =>
+      'حذفی که در این حلقه خواسته بودی انجام نشد. ممکن است هر کسی که خواستی حذفش کنی هنوز در حلقه باشد.';
+
+  @override
+  String get changeNoteChangeWithdrawn =>
+      'تغییر یکی دیگر از اعضا در این حلقه جای یکی از تغییرهای تو را گرفت، پس تغییر تو انجام نشد. اگر هنوز آن را می‌خواهی، دوباره انجامش بده.';
+
+  @override
+  String get changeNoteWelcomeOwed =>
+      'دعوتی به این حلقه هنوز به نتیجه نرسیده است. Haven تا وقتی برنامه باز است به فرستادن آن ادامه می‌دهد، حداکثر تا یک روز پس از آنکه دعوتش کردی. اگر آن شخص تا آن موقع نپیوسته باشد، او را حذف کن و دوباره اضافه کن.';
+
+  @override
+  String get changeNoteUnreadLocation =>
+      'برخی از به‌روزرسانی‌های اخیری که به این حلقه فرستاده شده‌اند، روی این گوشی قابل باز کردن نبودند.';
+
+  @override
+  String get changeNoticeStillInCircleLabel => 'هنوز در حلقه:';
+
+  @override
+  String get changeNoticeRemoveAgain => 'حذف دوباره';
+
+  @override
+  String get changeNoticeReviewMembers => 'بررسی اعضا';
+
+  @override
+  String get changeNoticeKeepMembers => 'در حلقه نگهشان دار';
+
+  @override
+  String get changeNoticeKeepConfirmTitle => 'در حلقه نگهشان می‌داری؟';
+
+  @override
+  String get changeNoticeKeepConfirmBody =>
+      'Haven دیگر به‌خاطر این حذف، اشتراک‌گذاری با این حلقه را متوقف نمی‌کند. هر کسی که خواستی حذفش کنی و هنوز در حلقه است، در آن می‌ماند و هر وقت Haven موقعیت مکانی‌ات را با این حلقه به اشتراک بگذارد، می‌تواند آن را ببیند.';
+
+  @override
+  String get changeNoticeKeepConfirmAction => 'نگهشان دار';
 
   @override
   String circleMemberLastSeenMinutes(int count) {

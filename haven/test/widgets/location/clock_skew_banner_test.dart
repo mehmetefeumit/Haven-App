@@ -13,6 +13,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/rust/api.dart' show LocationPublishFfi;
 import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/widgets/location/clock_skew_banner.dart';
 
@@ -80,8 +81,8 @@ void main() {
       // observers — a peer running fast makes THIS device fire while the
       // peer's own detector stays silent — so the corroborated title would
       // accuse the innocent device and never the guilty one. (b) WHETHER
-      // anything is lost: both sides tolerate 228 s + 60 s, so nothing is
-      // dropped until the gap passes kClockSkewTotalLossThreshold (288 s),
+      // anything is lost here: an online member still receives every
+      // location until the gap reaches kClockSkewTotalLossThreshold (228 s),
       // while this fires at kClockSkewAlertThreshold (120 s).
       final sole = resolveClockSkewCopy(
         const ClockSkewStatus(
@@ -104,14 +105,14 @@ void main() {
         sole.message,
         isNot(l10n.clockSkewBodyBehind),
         reason:
-            'the corroborated body asserts the locations DO expire, which is '
-            'false across the whole 120-288 s band',
+            'the corroborated body asserts a loss on THIS phone, which one '
+            'member cannot place there',
       );
     });
 
     test('a CORROBORATED peer verdict still uses the accusing copy', () {
       // The negative twin: two independent members agreeing IS evidence about
-      // this device, so the hedged copy would under-state a real, total loss.
+      // this device, so the hedged copy would under-state a real loss.
       for (final sources in <int>[2, 3]) {
         final copy = resolveClockSkewCopy(
           ClockSkewStatus(
@@ -190,7 +191,7 @@ void main() {
       addTearDown(detector.dispose);
 
       await pump(tester, detector);
-      detector.recordPublishClockRejection('ahead');
+      detector.recordLocationPublish(LocationPublishFfi.clockAhead);
       await tester.pumpAndSettle();
 
       expect(find.text(l10n.clockSkewTitle), findsOneWidget);
@@ -202,7 +203,7 @@ void main() {
       addTearDown(detector.dispose);
 
       await pump(tester, detector);
-      detector.recordPublishClockRejection('ahead');
+      detector.recordLocationPublish(LocationPublishFfi.clockAhead);
       await tester.pumpAndSettle();
       expect(find.text(l10n.clockSkewTitle), findsOneWidget);
 
@@ -217,7 +218,7 @@ void main() {
       addTearDown(detector.dispose);
 
       await pump(tester, detector);
-      detector.recordPublishClockRejection('ahead');
+      detector.recordLocationPublish(LocationPublishFfi.clockAhead);
       await tester.pumpAndSettle();
 
       // A single node carrying BOTH sentences: a screen-reader user must not
@@ -263,7 +264,7 @@ void main() {
       addTearDown(detector.dispose);
 
       await pump(tester, detector);
-      detector.recordPublishClockRejection('ahead');
+      detector.recordLocationPublish(LocationPublishFfi.clockAhead);
       await tester.pumpAndSettle();
       expect(announcements, isEmpty, reason: 'nothing to un-say yet');
 
@@ -277,8 +278,9 @@ void main() {
         'resumed', (tester) async {
       // The general announcement says Haven "is sharing your location again".
       // For the one-member fault that is an over-claim in the same direction
-      // the banner body avoids: sharing may never have stopped, because
-      // nothing is dropped until the gap passes 288 s. The announcement is
+      // the banner body avoids: sharing may never have stopped, because an
+      // online member receives every location until the gap reaches 228 s
+      // (kClockSkewTotalLossThreshold). The announcement is
       // spoken to someone who cannot see the screen to check, so it is the
       // last place to guess.
       final announcements = <String>[];
@@ -341,7 +343,7 @@ void main() {
       addTearDown(tester.view.resetDevicePixelRatio);
 
       final detector = ClockSkewDetector()
-        ..recordPublishClockRejection('ahead');
+        ..recordLocationPublish(LocationPublishFfi.clockAhead);
       addTearDown(detector.dispose);
 
       await pumpLocalized(

@@ -24,61 +24,53 @@
 /// a property of HOW the observation was taken, not of the predicate.
 library;
 
+import 'package:haven/src/rust/api.dart' show LocationPublishFfi;
 import 'package:haven/src/services/clock_skew_detector.dart';
-import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 
-/// The wire tokens `DeviceClockComplaint::wire_token` can produce.
-///
-/// Mirrored from `haven-core/src/relay/clock_skew.rs`. The *prefix* those
-/// tokens ride on (`haven.clock.device_clock_rejected`) is pinned across the
-/// two languages by `scripts/ci/check_clock_skew_policy_parity.sh`; this set
-/// pins the suffix vocabulary the lane is willing to accept, so a rejection
-/// that arrives classified-but-unrecognised is reported rather than silently
-/// degraded.
-const Set<String> kDeviceClockWireTokens = <String>{
-  'ahead',
-  'behind',
-  'unspecified',
-};
-
-/// Holds when a publish the relays refused on timestamp grounds reached Dart
+/// Holds when a location the relays refused on timestamp grounds reached Dart
 /// as a *classified* device-clock fault rather than as a generic failure.
 ///
-/// [publishError] is whatever the production publish path threw, or `null` if
-/// it did not throw at all.
+/// [publish] is what the production send answered — the fanout driver's one
+/// send of a sealed location — or `null` when [error] says it never answered.
 ///
-/// This is the single predicate that a revert of the `publish_with_retry`
-/// change fails: before it, a fully-unacknowledged publish collapsed to
-/// `RelayError::AllRelaysFailed`, the per-relay reasons were dropped inside
-/// Rust, and `NostrRelayService` had nothing to recognise — so the only thing
-/// reaching Dart was `RelayServiceException('Failed to publish event')`.
-String? checkFastClockRejectionClassified(Object? publishError) {
-  if (publishError == null) {
-    return 'the production publish path REPORTED SUCCESS for an event signed '
-        '6 h in the future. The lane cannot judge the classification of a '
-        'rejection that never happened.';
+/// This is the single predicate a revert of the typed clock refusal fails:
+/// without it a send every relay refused for its time folds into
+/// `unreachable`, the per-relay reasons are dropped inside Rust, and nothing
+/// reaching Dart says the clock is wrong.
+String? checkFastClockRejectionClassified(
+  LocationPublishFfi? publish, {
+  Object? error,
+}) {
+  if (publish == null) {
+    return 'the production send never answered '
+        '(threw ${error?.runtimeType ?? 'nothing'}), so the lane cannot judge '
+        'the classification of its refusal.';
   }
-  if (publishError is RelayClockRejectionException) {
-    final token = publishError.complaintToken;
-    if (kDeviceClockWireTokens.contains(token)) return null;
-    return 'the refusal was classified as a device-clock fault but carries an '
-        'unrecognised direction token "$token" — Dart and Rust disagree about '
-        'the wire vocabulary, so the verdict degrades to "unspecified" and the '
-        'direction is lost.';
-  }
-  if (ClockSkewDetector.complaintFromError(publishError) != null) {
-    return 'the FFI error still carries the device-clock token, but the relay '
-        'service no longer converts it into a RelayClockRejectionException '
-        '(saw ${publishError.runtimeType}), so every caller above it sees an '
-        'untyped failure.';
-  }
-  return 'the relays refused the event on timestamp grounds and the refusal '
-      'reached Dart as ${publishError.runtimeType} with NO device-clock '
-      'classification. This is the pre-fix behaviour: publish_with_retry '
-      'collapsing a fully-unacknowledged publish into a generic failure and '
-      'discarding the per-relay reasons, which is what made a fast clock a '
-      'silent outage.';
+  return switch (publish) {
+    LocationPublishFfi.clockAhead ||
+    LocationPublishFfi.clockBehind ||
+    LocationPublishFfi.clockUnspecified => null,
+    LocationPublishFfi.accepted =>
+      'the production send REPORTED SUCCESS for an event signed 6 h in the '
+          'future. The lane cannot judge the classification of a rejection '
+          'that never happened.',
+    LocationPublishFfi.unreachable =>
+      'the relays refused the event on timestamp grounds and the send '
+          'answered `unreachable` with NO device-clock classification. This '
+          'is the pre-fix behaviour: a refusal blamed on the timestamp folded '
+          'into a generic failure, which is what made a fast clock a silent '
+          'outage.',
+    LocationPublishFfi.refused =>
+      'the send answered `refused` with no device-clock classification: the '
+          'refusal was read, and its timestamp blame dropped.',
+    LocationPublishFfi.expired ||
+    LocationPublishFfi.superseded ||
+    LocationPublishFfi.ended ||
+    LocationPublishFfi.inFlight =>
+      'the sealed location was not sent (${publish.name}), so the lane '
+          'cannot judge the classification of a refusal.',
+  };
 }
 
 /// Holds when the classified rejection actually reached something that can act
@@ -219,11 +211,13 @@ String? checkFaultSurfaced({
 ///   silent (negative offsets are structurally uninformative) — so
 ///   `clockSkewTitle` ("this phone's clock is wrong") would accuse the
 ///   innocent device and never the guilty one.
-/// * **Whether anything is lost.** Both sides tolerate 228 s of retention plus
-///   60 s of receiver grace, so nothing is dropped until the gap passes 288 s,
-///   while the signal fires at 120 s. Across that band `clockSkewBodyBehind`
-///   ("the locations it sends expire before anyone can see them") is false,
-///   and its remedy cannot clear it.
+/// * **Whether anything is lost.** An online member still receives every
+///   location until the gap reaches 228 s (the relay pool drops a location
+///   once it has expired, with no grace), while the signal fires at 120 s, and
+///   one member cannot say which side lags. So `clockSkewBodyBehind` ("the
+///   locations it sends expire early, and your circles can miss some or all
+///   of them") asserts a loss on this phone the evidence does not place
+///   there, and its remedy cannot clear it.
 ///
 /// So this is not a style check: the two corroborated strings are the exact
 /// user-visible false claims, and the oracle names them.
@@ -242,8 +236,9 @@ String? checkSoleSourceCopyHedged({
     if (renderedTexts.contains(banned)) {
       return 'a verdict resting on ONE member rendered the corroborated '
           'copy, which asserts both that this phone is the wrong one and that '
-          'its locations are already expiring. Neither follows from one '
-          'sample, and the second is false anywhere under a 288 s gap.';
+          'its locations are expiring early. Neither follows from one '
+          'sample: under a 228 s gap an online member still receives every '
+          'location, and one member cannot say which side lags.';
     }
   }
   if (!renderedTexts.contains(hedgedTitle) ||
@@ -258,7 +253,7 @@ String? checkSoleSourceCopyHedged({
 /// Holds when the two faults say DIFFERENT things.
 ///
 /// A relay rejection means nothing is being shared at all; the peer signal
-/// means the send succeeded and the data was then discarded. Collapsing them
+/// means the send succeeded and the data then expired early. Collapsing them
 /// into one sentence makes the second one a lie in the direction that matters,
 /// because it implies the send itself failed.
 ///
@@ -280,6 +275,25 @@ String? checkFaultCopyDistinct({
         'anyone" and "your location is being sent and discarded" are '
         'different situations with different consequences, and one shared '
         'sentence necessarily misstates one of them.';
+  }
+  return null;
+}
+
+/// Holds when a peer location did NOT reach a device whose clock runs past the
+/// total-loss point ahead.
+///
+/// The caller has already shown the relay still held the location when the
+/// device fetched it, so a missing location was dropped on the device: by the
+/// relay pool, on receipt, because its NIP-40 expiration was behind the
+/// device's clock. `kClockSkewTotalLossThreshold`, the alert threshold's upper
+/// bound and the banner copy are all derived from that drop point.
+String? checkPoolDropsPastTotalLoss({required bool delivered}) {
+  if (delivered) {
+    return 'a peer location reached a device whose clock runs past the '
+        'total-loss point ahead, while its expiration was behind that clock. '
+        'The relay pool no longer drops an expired event on receipt, so '
+        'kClockSkewTotalLossThreshold is not the drop point and every '
+        'threshold and banner derived from it is wrong.';
   }
   return null;
 }

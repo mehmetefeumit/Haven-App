@@ -56,12 +56,13 @@
 //! The catalogue's "the victim recovers no location published during the
 //! partition" needs the TTL horizon — `UNRESOLVABLE_INPUT_MAX_AGE_SECS`
 //! (`bounds::unresolvable_input_max_age`). In a minutes-long run the relay still
-//! holds those 445s and the resume's replay delivers them. The expiry screen is
-//! a WALL read (`PreAuthRejection::Expired` in `nostr/mls/manager.rs`) on the
+//! holds those 445s and the resume's replay delivers them. Expiry is judged on
+//! WALL clocks — the relay double stops serving an event past its
+//! `expiration`, and `nostr-relay-pool` drops one before notifying — on the
 //! wall side of the rig's clock partition, so no policy step can age an event
 //! into it — do not "fix" this by stepping the policy clock; that is exactly
 //! what `check_soak_clock_partition.sh` exists to catch. The escape hatch is
-//! closed too: `encrypt_location`'s retention argument is unused and the
+//! closed too: the seal takes no retention argument and the
 //! `expiration` is derived by the engine from the group's own component, so a
 //! short-retention 445 cannot be minted through the public API at all. This
 //! scenario asserts absence DURING the partition and convergence AFTER it; the
@@ -69,7 +70,6 @@
 
 use std::time::Duration;
 
-use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
 use haven_core::nostr::mls::types::GroupId;
 use haven_core::relay::live_sync::group_cursor_stream;
 use nostr::{Event, EventId};
@@ -461,7 +461,8 @@ fn cursor_of<T: TimelineSink, L: LogDrain>(
 }
 
 /// One confirmed relay-list commit from `device`, carrying a relay list the
-/// group does not already hold — a repeat is a no-op and advances no epoch.
+/// group does not already hold: the product answers a repeat already so,
+/// staging nothing and advancing no epoch.
 async fn confirmed_commit<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     device: DeviceTag,
@@ -515,12 +516,7 @@ async fn publish_fix<T: TimelineSink, L: LogDrain>(
     let device = world.device(sender)?;
     let (event, _, _) = device
         .manager()?
-        .encrypt_location(
-            &group,
-            &device.keys.public_key(),
-            &ProbeToken::mint(FIX_ROUND, index).as_location(),
-            LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(&group, &ProbeToken::mint(FIX_ROUND, index).as_location())
         .await
         .map_err(|_| RigError::Core(Step::Publish))?;
     if world

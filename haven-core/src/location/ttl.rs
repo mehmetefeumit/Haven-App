@@ -29,23 +29,27 @@ use rand::Rng;
 /// Minimum allowed publish-interval (1 minute).
 ///
 /// This is a safety floor to prevent pathological hammering of relays.
-/// The Dart call site samples the publish cadence from a jittered window
+/// The Dart scheduler samples the publish cadence from a jittered window
 /// centred on `kLocationUpdateInterval` (see `haven/lib/src/constants/location.dart`),
-/// and forwards `publish_max + 30 s` as the TTL floor — both of which
-/// must stay at or above this value for `validate_update_interval_secs`
-/// to be a no-op on legitimate input.
+/// which must stay at or above this value for `validate_update_interval_secs`
+/// to be a no-op on legitimate input. No TTL crosses from Dart since the seal
+/// moved onto the driver: a location's expiry is the circle's retention
+/// ([`LOCATION_MESSAGE_RETENTION_SECS`]).
 pub const MIN_UPDATE_INTERVAL_SECS: u64 = 60;
 
 /// Maximum allowed publish-interval (60 minutes).
 pub const MAX_UPDATE_INTERVAL_SECS: u64 = 60 * 60;
 
-/// Clock-skew grace window applied at the receiver side (60 seconds).
+/// Clock-skew slack (60 seconds) Haven allows on top of a kind-445's NIP-40
+/// expiration when it reasons about how long a relay can still serve the event:
+/// the stored-input sweep's horizon
+/// ([`crate::nostr::mls::types::UNRESOLVABLE_INPUT_MAX_AGE_SECS`]).
 ///
-/// Events whose NIP-40 expiration is more than this window in the past
-/// are dropped before decryption, as defense-in-depth against relay replay.
-/// Enforced in `SessionManager::process_event`, the choke point every
-/// receive plane (poll drain, live-sync, background catch-up) funnels
-/// through.
+/// Nothing inbound is dropped on it, and nothing inbound is spared by it:
+/// Haven does not judge a message's validity by its `expiration` (Marmot
+/// `transports/nostr.md:190-192`), while `nostr-relay-pool` drops an expired
+/// event on receipt with no grace at all
+/// ([`crate::relay::clock_skew::TOTAL_LOSS_SKEW_SECS`]).
 pub const RECEIVER_EXPIRATION_GRACE_SECS: u64 = 60;
 
 /// Group-level `message-retention.v1` value (seconds) stamped into every

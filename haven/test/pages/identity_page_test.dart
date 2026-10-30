@@ -294,6 +294,65 @@ void main() {
         await tester.pumpAndSettle();
       },
     );
+
+    testWidgets(
+      'a removal a relay did not take is reported as still syncing beside '
+      '"Photo removed.", and is not republished at once',
+      (tester) async {
+        final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
+        final svc = MockProfileService(
+          ownProfile: Profile(
+            pubkeyHex: _FakeIdentityService._identity.pubkeyHex,
+            pictureBytes: jpegHeader,
+            pictureHash: 'mock-hash',
+          ),
+        );
+        await tester.pumpWidget(
+          build(
+            profileService: svc,
+            syncController: OwnProfileSyncController.new,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.text('Public profile up to date'),
+          findsOneWidget,
+          reason: 'anti-vacuity: nothing is waiting before the removal',
+        );
+
+        // Some relay of the pool did not take the removal: the core leaves
+        // it waiting, partly published, with its first retry not yet due.
+        svc.nextPendingState = const ProfilePendingState(
+          pending: true,
+          partial: true,
+          retryDue: false,
+        );
+        await tester.tap(find.widgetWithText(TextButton, 'Remove'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.widgetWithText(TextButton, 'Remove'),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Photo removed.'), findsOneWidget);
+        expect(
+          find.text('Published — still syncing to some relays'),
+          findsOneWidget,
+          reason: 'a relay still serves the photo, and the page must say '
+              'the removal has not reached every relay',
+        );
+        expect(find.text('Public profile up to date'), findsNothing);
+        expect(
+          svc.methodCalls.map((c) => c.method),
+          isNot(contains('syncOwnProfile')),
+          reason: 'the retry waits for the backoff; nothing is published '
+              'again at once',
+        );
+      },
+    );
   });
 }
 

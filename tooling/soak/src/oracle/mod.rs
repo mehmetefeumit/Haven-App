@@ -46,8 +46,8 @@
 //!
 //! [`Invariant::LocationRoundTrip`] publishes a real location and
 //! [`Invariant::SendPathLiveness`] attempts a real send. A send that the engine
-//! QUEUES rather than encrypts runs `repair_deferred_send` inside
-//! `encrypt_location` — a sweep that retires stored rows. So neither of these
+//! QUEUES rather than encrypts runs the deferred-send repair inside the seal
+//! (`Publishing::seal_location`) — a sweep that retires stored rows. So neither of these
 //! two may be run against a circle a scenario has deliberately gated: it would
 //! repair the very row the scenario planted and then report the world healthy.
 //! S06 grades O5 and the gating count for exactly that reason.
@@ -60,7 +60,7 @@ pub mod vacuity;
 use std::fmt;
 use std::time::Duration;
 
-use haven_core::location::{LocationMessage, LOCATION_MESSAGE_RETENTION_SECS};
+use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::ConvergedRoster;
 use haven_core::relay::live_sync::LiveSyncEvent;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -328,15 +328,59 @@ pub enum Finding {
         /// Which circle.
         circle: CircleTag,
     },
-    /// A durable eviction obligation is unredeemed.
-    RemovalOwed {
+    /// A commit is pending on its relays: the device holds a commit record
+    /// whose MLS half is unresolved.
+    CommitPending {
         /// Whose store.
         device: DeviceTag,
     },
-    /// A durable eviction obligation outlived the session that staged it, so
-    /// nothing can publish or clear it.
-    RemovalOrphaned {
-        /// Whose store.
+    /// A catch-up sweep left a circle's cursor where it stood although every
+    /// relay of the circle could say what it held: C10's frozen window.
+    CursorHeld {
+        /// Whose cursor.
+        device: DeviceTag,
+        /// Which circle.
+        circle: CircleTag,
+    },
+    /// A circle held for a routing collision sealed a location.
+    HeldCircleSealed {
+        /// Who sealed it.
+        device: DeviceTag,
+        /// In which held circle.
+        circle: CircleTag,
+    },
+    /// An event of one of two collided circles reached a relay only the
+    /// other circle names.
+    CircleTrafficCrossed {
+        /// Whose event.
+        circle: CircleTag,
+    },
+    /// A collided circle's relays carry a handshake event the arm never sent:
+    /// Haven made something for a circle it holds.
+    UnaskedHandshake {
+        /// Whose relays.
+        circle: CircleTag,
+    },
+    /// A circle stayed held — not caught up, or its cursor not advanced —
+    /// past the backlog wait behind a relay that never answered or never
+    /// ended its replay.
+    SilentRelayStalled {
+        /// Whose engine.
+        device: DeviceTag,
+        /// Which circle.
+        circle: CircleTag,
+    },
+    /// An event one of a circle's relays held never reached a member once
+    /// that relay answered.
+    HeldEventLost {
+        /// Who never got it.
+        device: DeviceTag,
+        /// In which circle.
+        circle: CircleTag,
+    },
+    /// A health tick re-issued subscriptions for a relay that was only down.
+    ResubscribeUnbounded {
+        /// Whose engine.
         device: DeviceTag,
     },
     /// The engine refused a send, classified.
@@ -438,8 +482,14 @@ impl Finding {
             Self::BranchDiverged { .. } => "branch-diverged",
             Self::ConvergenceGated { .. } => "convergence-gated",
             Self::ProposalUncommitted { .. } => "proposal-uncommitted",
-            Self::RemovalOwed { .. } => "removal-owed",
-            Self::RemovalOrphaned { .. } => "removal-orphaned",
+            Self::CommitPending { .. } => "commit-pending",
+            Self::HeldCircleSealed { .. } => "held-circle-sealed",
+            Self::CursorHeld { .. } => "cursor-held",
+            Self::CircleTrafficCrossed { .. } => "circle-traffic-crossed",
+            Self::UnaskedHandshake { .. } => "unasked-handshake",
+            Self::SilentRelayStalled { .. } => "silent-relay-stalled",
+            Self::HeldEventLost { .. } => "held-event-lost",
+            Self::ResubscribeUnbounded { .. } => "resubscribe-unbounded",
             Self::SendRefused { .. } => "send-refused",
             Self::RetentionEdgeRefused { .. } => "retention-edge-refused",
             Self::RetentionWindowOverrun { .. } => "retention-window-overrun",
@@ -476,12 +526,14 @@ impl Finding {
             | Self::NotQuiescent(_)
             | Self::FloorUnmet(_) => Vec::new(),
             Self::DeliveryEvidenceLost { to } => vec![to.to_string()],
-            Self::RemovalOwed { device }
-            | Self::RemovalOrphaned { device }
-            | Self::BacklogUnsettled { device } => vec![device.to_string()],
+            Self::CommitPending { device }
+            | Self::BacklogUnsettled { device }
+            | Self::ResubscribeUnbounded { device } => vec![device.to_string()],
             Self::RosterDiverged { circle }
             | Self::EpochDiverged { circle }
-            | Self::BranchDiverged { circle } => {
+            | Self::BranchDiverged { circle }
+            | Self::CircleTrafficCrossed { circle }
+            | Self::UnaskedHandshake { circle } => {
                 vec![circle.to_string()]
             }
             Self::ProbeNotPublished { device, circle }
@@ -494,6 +546,10 @@ impl Finding {
             | Self::RemovalReadable { device, circle }
             | Self::RemovalProbeShortCircuited { device, circle }
             | Self::RemovalProbeInconclusive { device, circle }
+            | Self::HeldCircleSealed { device, circle }
+            | Self::CursorHeld { device, circle }
+            | Self::SilentRelayStalled { device, circle }
+            | Self::HeldEventLost { device, circle }
             | Self::SendRefused { device, circle, .. } => {
                 vec![device.to_string(), circle.to_string()]
             }
@@ -519,8 +575,14 @@ impl Finding {
             | Self::BranchDiverged { .. }
             | Self::ConvergenceGated { .. }
             | Self::ProposalUncommitted { .. }
-            | Self::RemovalOwed { .. }
-            | Self::RemovalOrphaned { .. }
+            | Self::CommitPending { .. }
+            | Self::HeldCircleSealed { .. }
+            | Self::CursorHeld { .. }
+            | Self::CircleTrafficCrossed { .. }
+            | Self::UnaskedHandshake { .. }
+            | Self::SilentRelayStalled { .. }
+            | Self::HeldEventLost { .. }
+            | Self::ResubscribeUnbounded { .. }
             | Self::SendRefused { .. }
             | Self::RetentionEdgeRefused { .. }
             | Self::RetentionWindowOverrun { .. }
@@ -577,9 +639,27 @@ impl fmt::Display for Finding {
             Self::ProposalUncommitted { device, circle } => {
                 write!(f, "a proposal is still uncommitted ({device}, {circle})")
             }
-            Self::RemovalOwed { device } => write!(f, "an eviction commit is owed ({device})"),
-            Self::RemovalOrphaned { device } => {
-                write!(f, "an eviction commit is orphaned ({device})")
+            Self::CommitPending { device } => write!(f, "a commit is pending on its relays ({device})"),
+            Self::HeldCircleSealed { device, circle } => {
+                write!(f, "a circle held for a routing collision sealed ({device}, {circle})")
+            }
+            Self::CursorHeld { device, circle } => {
+                write!(f, "a sweep left a window it could finish held ({device}, {circle})")
+            }
+            Self::CircleTrafficCrossed { circle } => {
+                write!(f, "a collided circle's event reached the other's relays ({circle})")
+            }
+            Self::UnaskedHandshake { circle } => {
+                write!(f, "a collided circle's relays carry a handshake nothing asked for ({circle})")
+            }
+            Self::SilentRelayStalled { device, circle } => {
+                write!(f, "a dead or silent relay held the circle ({device}, {circle})")
+            }
+            Self::HeldEventLost { device, circle } => {
+                write!(f, "an event a relay held never arrived ({device}, {circle})")
+            }
+            Self::ResubscribeUnbounded { device } => {
+                write!(f, "a health tick re-subscribed for a relay that was down ({device})")
             }
             Self::SendRefused {
                 device,
@@ -915,14 +995,16 @@ async fn probe_once<R: RelayPlane, T: TimelineSink, L: LogDrain>(
     let mut deliveries = world.device(to)?.engine()?.bus().subscribe();
 
     let sender = world.device(from)?;
+    // A device brought to the foreground holds its seals while the NIP-77
+    // pass its entry is owed fetches by id (Security Rule 10): a probe sealed
+    // inside that pass would grade the hold, not the device. Bounded: a pass
+    // that never ends is graded by the seal it then holds.
+    let _ = sender
+        .entry_pass_ended(bounds::round_trip(round.recovery))
+        .await?;
     let sent = sender
         .manager()?
-        .encrypt_location(
-            circle.mls_group_id(),
-            &sender.keys.public_key(),
-            &probe.as_location(),
-            LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(circle.mls_group_id(), &probe.as_location())
         .await;
     let event = match sent {
         Ok((event, _, _)) => event,
@@ -1073,16 +1155,13 @@ async fn send_path_liveness<R: RelayPlane, T: TimelineSink, L: LogDrain>(
         }
     }
 
-    // BEFORE the send attempts, deliberately: an accepted send discharges a
-    // removal deferral (`discharge_removal_deferral_after_send`), so grading
-    // these afterwards would read a row the oracle itself had just cleared.
+    // BEFORE the send attempts, deliberately: a send drives the circle's
+    // records first, so grading afterwards would read a record the oracle
+    // itself had just resolved. The commit obligation is read where the
+    // product records it: a commit record whose MLS half is still pending.
     for device in &online {
-        let manager = device.manager()?;
-        if !manager.owed_removal_commits().is_empty() {
-            return Ok(Verdict::Failed(Finding::RemovalOwed { device: device.tag }));
-        }
-        if !manager.orphaned_removal_deferrals().is_empty() {
-            return Ok(Verdict::Failed(Finding::RemovalOrphaned {
+        if !crate::rig::no_pending_fanout(device).await? {
+            return Ok(Verdict::Failed(Finding::CommitPending {
                 device: device.tag,
             }));
         }
@@ -1178,14 +1257,13 @@ async fn send_attempt(device: &SimDevice, circle: &SimCircle) -> Result<Verdict,
     // Distinct from every O1 probe: a scenario reading its peers' buses must
     // never mistake a liveness attempt for a round's own probe.
     let attempt = ProbeToken::mint(PROBE_SPAN - 1, PROBE_SPAN - 1);
+    // As O1's probe: not inside the pass a foreground entry holds seals for.
+    let _ = device
+        .entry_pass_ended(bounds::round_trip(Recovery::Undisturbed))
+        .await?;
     match device
         .manager()?
-        .encrypt_location(
-            circle.mls_group_id(),
-            &device.keys.public_key(),
-            &attempt.as_location(),
-            LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(circle.mls_group_id(), &attempt.as_location())
         .await
     {
         Ok(_) => Ok(Verdict::Holds),
@@ -1318,7 +1396,7 @@ fn removal_unreadability_holds(round: &Round<'_>) -> Verdict {
                             circle,
                         });
                     }
-                    // CommitGap, Duplicate, Expired, Defect, PeelDeferredCapped,
+                    // CommitGap, Duplicate, PreAuth, Defect, PeelDeferredCapped,
                     // Routing, Quarantined, Fork, … — the arm did not produce its
                     // condition.
                     _ => {
@@ -1863,8 +1941,14 @@ mod tests {
             | Finding::BranchDiverged { .. }
             | Finding::ConvergenceGated { .. }
             | Finding::ProposalUncommitted { .. }
-            | Finding::RemovalOwed { .. }
-            | Finding::RemovalOrphaned { .. }
+            | Finding::CommitPending { .. }
+            | Finding::HeldCircleSealed { .. }
+            | Finding::CursorHeld { .. }
+            | Finding::CircleTrafficCrossed { .. }
+            | Finding::UnaskedHandshake { .. }
+            | Finding::SilentRelayStalled { .. }
+            | Finding::HeldEventLost { .. }
+            | Finding::ResubscribeUnbounded { .. }
             | Finding::SendRefused { .. }
             | Finding::UnaccountedOutcome
             | Finding::UnnamedRow
@@ -1885,6 +1969,7 @@ mod tests {
     /// One value of every `Finding` variant, checked exhaustive by
     /// [`assert_listed`].
     fn every_finding() -> Vec<Finding> {
+        let (device, circle) = (DeviceTag::new(1), CircleTag::new(0));
         let findings = vec![
             Finding::ProbeNotPublished {
                 device: DeviceTag::new(0),
@@ -1924,12 +2009,21 @@ mod tests {
                 device: DeviceTag::new(0),
                 circle: CircleTag::new(0),
             },
-            Finding::RemovalOwed {
+            Finding::CommitPending {
                 device: DeviceTag::new(0),
             },
-            Finding::RemovalOrphaned {
+            Finding::HeldCircleSealed {
                 device: DeviceTag::new(0),
+                circle: CircleTag::new(0),
             },
+            Finding::CursorHeld { device, circle },
+            Finding::CircleTrafficCrossed {
+                circle: CircleTag::new(0),
+            },
+            Finding::UnaskedHandshake { circle },
+            Finding::SilentRelayStalled { device, circle },
+            Finding::HeldEventLost { device, circle },
+            Finding::ResubscribeUnbounded { device },
             Finding::SendRefused {
                 device: DeviceTag::new(0),
                 circle: CircleTag::new(0),

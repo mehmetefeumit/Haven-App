@@ -287,6 +287,27 @@ void main() {
   // Group: null identity edge case
   // ---------------------------------------------------------------------------
 
+  group('memberLocationsProvider — roster', () {
+    test('a member no longer on the roster is not shown', () async {
+      // A removal the fanout driver applied after it answered "awaiting
+      // relays" reaches Dart through the roster alone: nothing forgot the
+      // member's cached or persisted location then.
+      final circle = TestCircleFactory.createCircle(
+        members: [TestCircleFactory.createMember(pubkey: _otherPubkey)],
+      );
+      final container = await buildContainer(
+        identity: null,
+        locations: [_makeLoc(_otherPubkey), _makeLoc(_selfPubkey)],
+        circle: circle,
+      );
+      addTearDown(container.dispose);
+
+      final result = await container.read(memberLocationsProvider.future);
+
+      expect([for (final l in result) l.pubkey], [_otherPubkey]);
+    });
+  });
+
   group('memberLocationsProvider — null identity', () {
     test(
       'returns all locations when identity is null (no filtering applied)',
@@ -400,12 +421,12 @@ void main() {
     );
 
     test(
-      'a DEFERRED circle is not counted as published',
+      'a circle the core holds is sent nothing and not counted as published',
       () async {
         // MINOR-4. The return value is what the burst reports as delivered.
-        // A deferral delivered nothing — the MLS engine never encrypted — so
-        // counting it would make a wholly stalled burst indistinguishable
-        // from a complete one in the only number the caller gets back.
+        // A held send delivered nothing — the core sealed nothing for a
+        // circle whose sends it holds — so counting it would make a wholly
+        // stalled burst indistinguishable from a complete one.
         SharedPreferences.setMockInitialValues({
           kLocationDisclosureAcceptedKey: true,
         });
@@ -415,14 +436,7 @@ void main() {
           nostrGroupId: const [10],
           members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
         );
-        final mock = MockCircleService(circles: [circle])
-          ..deferNextEncrypt = const LocationSendDeferred(
-            unresolvedInputs: 1,
-            discardedIntents: 1,
-            repaired: false,
-            commits: [],
-            proposals: [],
-          );
+        final mock = MockCircleService(circles: [circle])..holdNextSeal = true;
 
         final container = ProviderContainer(
           overrides: [
@@ -448,9 +462,14 @@ void main() {
 
         expect(
           mock.methodCalls,
-          contains('encryptLocation'),
+          contains('sealLocation'),
           reason: 'anti-vacuity: the burst must have reached the publish loop, '
               'or the 0 below would prove nothing',
+        );
+        expect(
+          mock.methodCalls,
+          isNot(contains('publishSealedLocation')),
+          reason: 'a location was sent for a circle whose sends are held',
         );
         expect(
           result,
@@ -611,21 +630,21 @@ void main() {
     });
 
     test(
-      'excludes a legacy-orphaned (accepted, no members) circle from publish',
+      'excludes a quarantined circle (its state failed to load) from publish',
       () async {
         final healthy = TestCircleFactory.createCircle(
           mlsGroupId: const [1],
           nostrGroupId: const [1],
           members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
         );
-        // Default TestCircleFactory.createCircle(): accepted + no members —
-        // exactly the legacy-orphaned signature (Circle.isLegacyOrphaned).
-        final legacy = TestCircleFactory.createCircle(
+        final quarantined = TestCircleFactory.createCircle(
           mlsGroupId: const [2],
           nostrGroupId: const [2],
+          members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+          engineState: CircleEngineState.quarantined,
         );
 
-        final mockCircle = MockCircleService(circles: [healthy, legacy]);
+        final mockCircle = MockCircleService(circles: [healthy, quarantined]);
         final locationService = LocationSharingService(
           circleService: mockCircle,
           relayService: MockRelayService(),
@@ -653,13 +672,54 @@ void main() {
           reason: 'only the healthy circle should be published to',
         );
         expect(
-          mockCircle.methodCalls.where((m) => m == 'encryptLocation').length,
+          mockCircle.methodCalls.where((m) => m == 'sealLocation').length,
           1,
-          reason:
-              'the legacy-orphaned circle must never reach encryptLocation',
+          reason: 'a quarantined circle has no group state to encrypt with, '
+              'so it must never reach the seal',
         );
       },
     );
+
+    test('excludes a disbanded circle from publish', () async {
+      final healthy = TestCircleFactory.createCircle(
+        mlsGroupId: const [1],
+        nostrGroupId: const [1],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+      );
+      final disbanded = TestCircleFactory.createCircle(
+        mlsGroupId: const [3],
+        nostrGroupId: const [3],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+        engineState: CircleEngineState.disbanded,
+      );
+
+      final mockCircle = MockCircleService(circles: [healthy, disbanded]);
+      final locationService = LocationSharingService(
+        circleService: mockCircle,
+        relayService: MockRelayService(),
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            _MockIdentityService(identity: gateIdentity),
+          ),
+          locationServiceProvider.overrideWithValue(_FixedLocationService()),
+          circleServiceProvider.overrideWithValue(mockCircle),
+          locationSharingServiceProvider.overrideWithValue(locationService),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final result = await container.read(locationPublisherProvider.future);
+
+      expect(result, 1);
+      expect(
+        mockCircle.methodCalls.where((m) => m == 'sealLocation').length,
+        1,
+        reason: 'nothing is sealed for a disbanded circle again',
+      );
+    });
 
     test(
       'excludes a circle marked blocked (MLS Unrecoverable) from publish',
@@ -676,7 +736,7 @@ void main() {
         );
 
         final mockCircle = MockCircleService(circles: [healthy, blocked])
-          ..markCircleBlocked(blocked.mlsGroupId);
+          ..setEngineState(blocked.mlsGroupId, CircleEngineState.unrecoverable);
         final locationService = LocationSharingService(
           circleService: mockCircle,
           relayService: MockRelayService(),
@@ -700,9 +760,9 @@ void main() {
 
         expect(result, 1);
         expect(
-          mockCircle.methodCalls.where((m) => m == 'encryptLocation').length,
+          mockCircle.methodCalls.where((m) => m == 'sealLocation').length,
           1,
-          reason: 'the blocked circle must never reach encryptLocation',
+          reason: 'the blocked circle must never reach the seal',
         );
       },
     );
@@ -714,16 +774,17 @@ void main() {
 
   group('memberLocationsProvider — commit-gap replay', () {
     test(
-      'surfaces a location that arrived ONLY on a confirm outcome, under '
+      "surfaces a location that arrived ONLY in a drive's replay, under "
       'either live-sync setting',
       () async {
-        // The one event the poll fetches stages an auto-commit and folds NO
-        // result of its own: the peer's fix exists only in the buffer the
-        // engine replays when that commit is confirmed. Written to hold under
-        // BOTH compile-time branches of `liveSyncEnabled` — the flag-on read
-        // takes `cachedLocations`, the flag-off read re-polls and returns the
-        // same cache — because the flag is a `bool.fromEnvironment` const and
-        // the coverage gate runs the suite in both configurations.
+        // The one event the poll fetches folds NO result of its own: the
+        // peer's fix exists only in the buffer the engine replays when the
+        // driver's own drive confirms a staged commit, and it comes back in
+        // the ingest's outcome. Written to hold under BOTH compile-time
+        // branches of `liveSyncEnabled` — the flag-on read takes
+        // `cachedLocations`, the flag-off read re-polls and returns the same
+        // cache — because the flag is a `bool.fromEnvironment` const and the
+        // coverage gate runs the suite in both configurations.
         final peerFix = DecryptedLocation(
           senderPubkey: _otherPubkey,
           latitude: 51.5,
@@ -739,18 +800,8 @@ void main() {
           ],
         );
         final mockCircle = MockCircleService()
-          ..decryptLocationResults = [const []]
-          ..decryptLocationAutoCommits[0] = [
-            PendingAutoCommit(
-              // The `h` names `selectedCircle` (nostrGroupId `[5,6,7,8]`), the
-              // ambient circle this commit resolves against.
-              commitEventJson:
-                  '{"id":"commit","kind":445,"tags":[["h","05060708"]]}',
-              pendingToken: PendingCommitToken(BigInt.from(5)),
-            ),
-          ]
-          ..confirmPendingCommitOutcomes[0] = DecryptLocationOutcome(
-            results: [
+          ..decryptLocationResults = [
+            [
               LocationEventResult(
                 kind: LocationEventKind.location,
                 location: peerFix,
@@ -758,17 +809,14 @@ void main() {
                 epoch: 0,
               ),
             ],
-            autoCommits: const [],
-            proposals: const [],
-          );
+          ];
 
         final locationService = LocationSharingService(
           circleService: mockCircle,
           relayService: mockRelay,
         );
-        // The receive pass that resolves the staged commit. In production this
-        // is the poll cycle (flag-off) or the deferred-send plane (flag-on);
-        // either way it runs on the service, not in the provider.
+        // The receive pass whose ingest hands the replay back. It runs on the
+        // service, not in the provider.
         await locationService.fetchMemberLocations(circle: selectedCircle);
 
         final container = ProviderContainer(

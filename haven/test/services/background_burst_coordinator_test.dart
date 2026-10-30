@@ -16,15 +16,19 @@ import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart'
     show kLocationPublishMaxInterval;
+import 'package:haven/src/pages/map_shell.dart' show MapShell;
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart'
     show kPublishLinkTimeout;
 import 'package:haven/src/rust/api.dart'
-    show BacklogOutcomeFfi, FfiGroupSpec;
+    show BacklogOutcomeFfi, BurstOpenFfi, FfiGroupSpec, LiveLifecycleFfi;
 import 'package:haven/src/services/background_burst_coordinator.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/live_sync_resubscriber.dart';
+import 'package:haven/src/services/nostr_subscription_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:haven/src/services/subscription_service.dart';
 
+import '../helpers/fake_live_sync_engine.dart';
 import '../helpers/log_capture.dart';
 import '../mocks/mock_circle_service.dart';
 
@@ -37,10 +41,17 @@ import '../mocks/mock_circle_service.dart';
 class _RecordingEngine implements SubscriptionService {
   _RecordingEngine(this.log);
 
+  /// What [lifecycle] answers: a session between bursts unless set.
+  LiveLifecycleFfi lifecycleAnswer = LiveLifecycleFfi.paused;
+
+  @override
+  LiveLifecycleFfi lifecycle() => lifecycleAnswer;
+
   final List<String> log;
 
-  /// Fails [openBackgroundBurst], the way the real wrapper does (it THROWS —
-  /// a burst open has no redundancy, so it is never swallowed for the caller).
+  /// Fails [openBackgroundBurstWithin], the way the real wrapper does (it
+  /// THROWS — a burst open has no redundancy, so it is never swallowed for the
+  /// caller).
   bool throwOnOpen = false;
 
   /// Throws from [waitBacklogSettled]. The real service documents that it
@@ -51,10 +62,10 @@ class _RecordingEngine implements SubscriptionService {
   /// If a throw here skipped the pause, the sockets would stay open.
   bool throwOnSettle = false;
 
-  /// Throws from [pauseSubscriptions] — the link between the settle and the
-  /// publish pool's shutdown. The real one throws on `NoSession` (a logout
-  /// that raced the burst).
-  bool throwOnPause = false;
+  /// When set, [pauseSubscriptions] throws it — the link between the settle
+  /// and the publish pool's shutdown. The real one throws on `NoSession` (a
+  /// logout that raced the burst); a test may plant identifiers in its text.
+  Error? pauseError;
 
   BacklogOutcomeFfi backlogOutcome = BacklogOutcomeFfi.settled;
 
@@ -76,9 +87,38 @@ class _RecordingEngine implements SubscriptionService {
   int pauses = 0;
   bool _paused = false;
 
+  /// The budget each open was handed.
+  final List<Duration> openBudgets = [];
+
+  /// Fails [startIntoBurst], with identifiers in the error.
+  bool throwOnStart = false;
+
+  /// What each [startIntoBurst] was handed.
+  final List<({List<FfiGroupSpec> groups, List<String> inbox, Duration budget})>
+  burstStarts = [];
+
   @override
-  Future<void> openBackgroundBurst() async {
+  Future<void> startIntoBurst({
+    required List<FfiGroupSpec> groups,
+    required List<String> inboxRelays,
+    required Duration budget,
+  }) async {
+    burstStarts.add((groups: groups, inbox: inboxRelays, budget: budget));
+    log.add('start into burst');
+    if (throwOnStart) {
+      throw StateError('no session for group 0xdeadbeefcafe at wss://x.test');
+    }
+    lifecycleAnswer = LiveLifecycleFfi.burst;
+    _paused = false;
+  }
+
+  /// What a burst open answers when it does not throw.
+  BurstOpenFfi openAnswer = BurstOpenFfi.opened;
+
+  @override
+  Future<BurstOpenFfi> openBackgroundBurstWithin(Duration budget) async {
     opens++;
+    openBudgets.add(budget);
     log.add('open');
     // Faithful to the engine: `paused` is cleared BEFORE anything touches a
     // socket, because every gate reads it and a burst that connected while
@@ -96,6 +136,8 @@ class _RecordingEngine implements SubscriptionService {
       _paused = true;
       throw const SubscriptionServiceException('failed to open burst');
     }
+    if (openAnswer == BurstOpenFfi.noSession) _paused = true;
+    return openAnswer;
   }
 
   @override
@@ -123,7 +165,8 @@ class _RecordingEngine implements SubscriptionService {
     pauses++;
     log.add('pause');
     if (pauseGate != null) await pauseGate!.future;
-    if (throwOnPause) throw StateError('pause boom');
+    final error = pauseError;
+    if (error != null) throw error;
   }
 
   @override
@@ -136,6 +179,10 @@ class _RecordingEngine implements SubscriptionService {
   Future<void> resumeAfterBackground() async =>
       throw UnimplementedError('a burst must never re-anchor as a foreground '
           'resume: that entry point always carries the inbox REQ');
+
+  @override
+  Future<void> claimForeground() async =>
+      throw UnimplementedError('a burst must never claim the foreground');
 
   @override
   Future<void> start({
@@ -152,7 +199,7 @@ class _RecordingEngine implements SubscriptionService {
       throw UnimplementedError('not reachable from a burst');
 
   @override
-  Future<LiveSyncStopOutcome> stop() async =>
+  Future<LiveSyncStopOutcome> stop({Future<void>? givenUp}) async =>
       throw UnimplementedError('not reachable from a burst');
 }
 
@@ -253,16 +300,28 @@ class _RecordingMaintenance implements BurstMaintenance {
     relayListAt.add(now);
     log.add('relayList');
   }
+
+  /// The burst's log as each leave carry-on began: kept apart from [log] so
+  /// the order every other test pins is untouched.
+  final List<List<String>> leavesAfter = [];
+
+  /// When set, the leave carry-on throws it.
+  Error? carryOnThrows;
+
+  @override
+  Future<void> carryOnLeaves() async {
+    leavesAfter.add(List.of(log));
+    final boom = carryOnThrows;
+    if (boom != null) throw boom;
+  }
 }
 
-/// The commit-critical publishes the SHARED publish pool carries for someone
-/// else — on iOS, the motion trigger's deferred-send ladder, which the burst
-/// neither started nor awaits.
+/// The drives the SHARED publish pool carries for someone else — on iOS, the
+/// motion trigger's, which the burst neither started nor awaits.
 ///
-/// Models the field shape the drain's contract asks for: non-null while the
-/// ladder is between `publishEvent` and `confirmPublished`, null the instant
-/// it reaches its own conclusion — the `finally` the foreground service's
-/// `_inFlightCommitCritical` already has.
+/// Models the field shape the drain's contract asks for: non-null while a
+/// drive is between its send and its ack, null the instant it reaches its own
+/// conclusion — the `finally` `NostrRelayService.inFlightDrives` has.
 class _PublishPoolWork {
   /// How many times the coordinator read the field.
   int reads = 0;
@@ -339,6 +398,8 @@ void main() {
     PublishStagger? stagger,
     DateTime Function()? now,
     bool throwOnShutdown = false,
+    Future<BurstStart?> Function(Duration budget)? prepareStartIntoBurst,
+    Future<bool> Function()? receiveWithoutSession,
   }) {
     final log = <String>[];
     final engine = _RecordingEngine(log);
@@ -362,6 +423,8 @@ void main() {
       foregrounded: foregrounded ?? () => false,
       pendingCommitCritical: pendingCommitCritical ?? () => null,
       onOpenOutcome: openOutcomes.add,
+      prepareStartIntoBurst: prepareStartIntoBurst ?? (_) async => null,
+      receiveWithoutSession: receiveWithoutSession,
       now: now ?? () => DateTime(2026, 9, 7, 12),
     );
     return _Env(
@@ -407,11 +470,303 @@ void main() {
       ]);
     });
 
+    test('a burst that finds no session opens nothing and publishes nothing',
+        () async {
+      // With no session there is no open and no backlog wait, so a removal
+      // made meanwhile would not be applied before the locations are sealed.
+      final logs = LogCapture.install();
+      addTearDown(logs.restore);
+      for (final absent in [
+        LiveLifecycleFfi.noSession,
+        LiveLifecycleFfi.stopped,
+      ]) {
+        final env = build()..engine.lifecycleAnswer = absent;
+
+        await tick(env, _circle('Quiet Wanderer', 0xab));
+
+        expect(env.engine.opens, 0, reason: '$absent');
+        expect(
+          env.publisher.published,
+          isEmpty,
+          reason: '$absent: a location was sealed with no session to receive '
+              'a removal first',
+        );
+        // Before (W9n): nothing told the health model, and background
+        // sharing stopped silently until the next resume.
+        expect(
+          env.openOutcomes,
+          [1],
+          reason: '$absent: the user was shown nothing',
+        );
+      }
+      // Rule 15: the line names no circle, group id or count.
+      logs
+        ..assertContains('no session: nothing published')
+        ..assertNoNeedles(['Quiet Wanderer', 'abab', '171']);
+    });
+
+    test('a burst that finds no session starts one into the burst, with the '
+        "burst's budget, and publishes behind its backlog", () async {
+      for (final absent in [
+        LiveLifecycleFfi.noSession,
+        LiveLifecycleFfi.stopped,
+      ]) {
+        late _Env env;
+        final readied = <Duration>[];
+        env = build(
+          prepareStartIntoBurst: (budget) async {
+            readied.add(budget);
+            return () => env.engine.startIntoBurst(
+              groups: const [],
+              inboxRelays: const ['wss://inbox.example'],
+              budget: budget,
+            );
+          },
+        )..engine.lifecycleAnswer = absent;
+
+        await tick(env, _circle('a', 1));
+
+        expect(readied, [burstBound(1, PublishStagger.none())]);
+        expect(env.engine.burstStarts, hasLength(1), reason: '$absent');
+        expect(
+          env.log.take(4),
+          ['start into burst', 'backlog', 'window', 'publish:a'],
+          reason: '$absent: a session started into the burst is opened '
+              'already; the backlog wait comes before any seal',
+        );
+        expect(env.engine.opens, 0);
+        expect(env.openOutcomes, [0]);
+        expect(env.log, contains('pause'));
+      }
+    });
+
+    test('a session that ended after the lifecycle read answers the open with '
+        'no session, and a start into the burst takes its place', () async {
+      late _Env env;
+      env = build(
+        prepareStartIntoBurst: (budget) async => () => env.engine
+            .startIntoBurst(
+              groups: const [],
+              inboxRelays: const ['wss://inbox.example'],
+              budget: budget,
+            ),
+      )
+        ..engine.lifecycleAnswer = LiveLifecycleFfi.paused
+        ..engine.openAnswer = BurstOpenFfi.noSession;
+
+      await tick(env, _circle('a', 1));
+
+      expect(
+        env.log.take(5),
+        ['open', 'start into burst', 'backlog', 'window', 'publish:a'],
+        reason: 'a location was sealed before the started session received',
+      );
+      expect(env.openOutcomes, [0]);
+    });
+
+    test('a start that takes the place of a no-session open has what the '
+        'open left of the one budget', () async {
+      var now = DateTime(2026, 10, 17, 12);
+      final budgets = <Duration>[];
+      late _Env env;
+      env = build(
+        now: () => now,
+        prepareStartIntoBurst: (budget) async {
+          budgets.add(budget);
+          return () => env.engine.startIntoBurst(
+            groups: const [],
+            inboxRelays: const ['wss://inbox.example'],
+            budget: budget,
+          );
+        },
+      )
+        ..engine.lifecycleAnswer = LiveLifecycleFfi.paused
+        ..engine.openAnswer = BurstOpenFfi.noSession
+        ..engine.openGate = Completer<void>();
+
+      final ticking = tick(env, _circle('a', 1));
+      await pumpEventQueue();
+      final opened = env.engine.openBudgets.single;
+      now = now.add(const Duration(seconds: 7));
+      env.engine.openGate!.complete();
+      await ticking;
+
+      expect(budgets, [opened - const Duration(seconds: 7)]);
+    });
+
+    test('a start that takes the place of a no-session open and fails '
+        'publishes nothing, and tells the health model', () async {
+      late _Env env;
+      env = build(
+        prepareStartIntoBurst: (budget) async => () => env.engine
+            .startIntoBurst(
+              groups: const [],
+              inboxRelays: const ['wss://inbox.example'],
+              budget: budget,
+            ),
+      )
+        ..engine.lifecycleAnswer = LiveLifecycleFfi.paused
+        ..engine.openAnswer = BurstOpenFfi.noSession
+        ..engine.throwOnStart = true;
+
+      await tick(env, _circle('a', 1));
+
+      expect(env.publisher.published, isEmpty);
+      expect(env.openOutcomes, [1]);
+    });
+
+    test('a start into the burst that fails publishes nothing, tells the '
+        'health model, and its log line names nothing', () async {
+      final logs = LogCapture.install();
+      late _Env env;
+      env = build(
+        prepareStartIntoBurst: (budget) async => () => env.engine
+            .startIntoBurst(
+              groups: const [],
+              inboxRelays: const ['wss://inbox.example'],
+              budget: budget,
+            ),
+      )
+        ..engine.lifecycleAnswer = LiveLifecycleFfi.noSession
+        ..engine.throwOnStart = true;
+
+      await tick(env, _circle('Quiet Wanderer', 0xab));
+
+      expect(env.publisher.published, isEmpty);
+      expect(env.openOutcomes, [1]);
+      logs
+        ..assertContains('start into burst failed')
+        ..assertNoNeedles([
+          'Quiet Wanderer',
+          'deadbeefcafe',
+          'wss://x.test',
+          'wss://inbox.example',
+        ]);
+    });
+
+    test('a burst the foreground takes back while the start is readied '
+        'starts nothing', () async {
+      var foregrounded = false;
+      var started = false;
+      final env = build(
+        foregrounded: () => foregrounded,
+        prepareStartIntoBurst: (_) async {
+          foregrounded = true;
+          return () async => started = true;
+        },
+      )..engine.lifecycleAnswer = LiveLifecycleFfi.noSession;
+
+      await tick(env, _circle('a', 1));
+
+      expect(started, isFalse);
+      expect(env.publisher.published, isEmpty);
+      expect(
+        env.openOutcomes,
+        isEmpty,
+        reason: 'a burst handed back to the foreground is no receive fault',
+      );
+    });
+
+    test('with no live plane a burst receives first, and seals only once the '
+        'receive completed', () async {
+      // Before (W9n-W9o-1): the live-sync-off build's burst found no session,
+      // published nothing and, from W9o-1, raised a false fault (decision 244).
+      late _Env env;
+      env = build(
+        receiveWithoutSession: () async {
+          env.log.add('receive');
+          return true;
+        },
+      )..engine.lifecycleAnswer = LiveLifecycleFfi.noSession;
+
+      await tick(env, _circle('a', 1));
+
+      expect(env.log.take(3), ['receive', 'window', 'publish:a']);
+      expect(env.engine.opens, 0);
+      expect(env.engine.burstStarts, isEmpty);
+      expect(env.openOutcomes, isEmpty, reason: 'no subscription to lose');
+    });
+
+    test('with no live plane a receive that did not complete publishes '
+        'nothing and raises no fault', () async {
+      final logs = LogCapture.install();
+      for (final receive in <Future<bool> Function()>[
+        () async => false,
+        () async => throw StateError('relay wss://x.test for 0xdeadbeefcafe'),
+      ]) {
+        final env = build(receiveWithoutSession: receive);
+
+        await tick(env, _circle('Quiet Wanderer', 0xab));
+
+        expect(env.publisher.published, isEmpty);
+        expect(env.openOutcomes, isEmpty);
+      }
+      logs
+        ..assertContains('receive not completed: nothing published')
+        ..assertContains('receive failed')
+        ..assertNoNeedles(['Quiet Wanderer', 'wss://x.test', 'deadbeefcafe']);
+    });
+
+    test('a burst is running from before its start, so a resume orders '
+        'behind it', () async {
+      final gate = Completer<void>();
+      late _Env env;
+      env = build(
+        prepareStartIntoBurst: (budget) async {
+          await gate.future;
+          return null;
+        },
+      )..engine.lifecycleAnswer = LiveLifecycleFfi.noSession;
+
+      final burst = tick(env, _circle('a', 1));
+      await pumpEventQueue();
+      expect(
+        env.coordinator.runningBurst,
+        isNotNull,
+        reason: 'a resume landing during the start raced it for the engine',
+      );
+      gate.complete();
+      await burst;
+      expect(env.coordinator.runningBurst, isNull);
+    });
+
+    test('a burst handed back while its start ran publishes nothing',
+        () async {
+      var foregrounded = false;
+      late _Env env;
+      env = build(
+        foregrounded: () => foregrounded,
+        prepareStartIntoBurst: (budget) async => () async {
+          await env.engine.startIntoBurst(
+            groups: const [],
+            inboxRelays: const [],
+            budget: budget,
+          );
+          foregrounded = true;
+        },
+      )..engine.lifecycleAnswer = LiveLifecycleFfi.noSession;
+
+      await tick(env, _circle('a', 1));
+
+      expect(env.engine.burstStarts, hasLength(1), reason: 'premise');
+      expect(env.publisher.published, isEmpty);
+      expect(env.openOutcomes, isEmpty);
+    });
+
+    test("a burst opens with its own links' bound as the drives' budget",
+        () async {
+      final env = build();
+
+      await tick(env, _circle('a', 1));
+
+      expect(env.engine.openBudgets, [burstBound(1, PublishStagger.none())]);
+    });
+
     test('the burst opens with openBackgroundBurst, never the foreground '
         're-anchor', () async {
       // `resumeAfterBackground()` re-anchors and ALWAYS carries the inbox REQ,
       // so routing bursts through it would leave the k-th-burst inbox fold
-      // permanently un-applied and re-request 49 h of `#p` gift wraps every
+      // permanently un-applied and re-request 96 h of `#p` gift wraps every
       // 72-168 s. Nothing about that is visible at runtime: no error, no
       // failing publish. The engine fake throws if the wrong entry point is
       // ever used, which is the only place this can be caught in Dart.
@@ -805,7 +1160,7 @@ void main() {
       // skipped leaves the PUBLISH pool's socket up for the whole gap to the
       // next tick — the presence signal this phase exists to remove, on the
       // pool nothing else closes.
-      final env = build()..engine.throwOnPause = true;
+      final env = build()..engine.pauseError = StateError('pause boom');
 
       await tick(env, _circle('a', 1));
 
@@ -855,7 +1210,7 @@ void main() {
       // a throw out of `_closeBurst` cannot skip it. Latched true,
       // `runningBurst` answers non-null for the life of the coordinator, and
       // every resume from then on takes the burst-in-flight bypass past the
-      // 60 s re-anchor throttle: a pool reconnect and a 49 h `#p` gift-wrap
+      // 60 s re-anchor throttle: a pool reconnect and a 96 h `#p` gift-wrap
       // replay for every glance, forever.
       var handbackReads = 0;
       final env = build(
@@ -1142,6 +1497,49 @@ void main() {
     });
   });
 
+  group('leave carry-on', () {
+    // Nothing calls the core's leave on a timer: each burst is one of its
+    // wakes, on the pool the publish warmed, before the settle and pause.
+    test('runs once per burst, inside the fold', () async {
+      final env = build();
+
+      await tick(env, _circle('a', 1));
+
+      expect(env.maintenance.leavesAfter, hasLength(1));
+      expect(env.maintenance.leavesAfter.single, contains('relayList'));
+      expect(env.maintenance.leavesAfter.single, isNot(contains('settle')));
+    });
+
+    test('a carry-on that throws costs the burst nothing, and its line names '
+        'nothing', () async {
+      final logs = LogCapture.install();
+      addTearDown(logs.restore);
+      final env = build()
+        ..maintenance.carryOnThrows = StateError(
+          'circle ${'cd' * 16} at wss://planted.example',
+        );
+
+      await tick(env, _circle('Quiet Wanderer', 0xab));
+
+      expect(env.engine.pauses, 1);
+      logs
+        ..assertContains('[BackgroundBurst] leave carry-on failed')
+        ..assertNoNeedles(['cd' * 16, 'wss://planted.example', 'Quiet Wanderer']);
+    });
+
+    test('is not run once consent is withdrawn', () async {
+      var enabled = true;
+      final env = build(burstEnabled: () => enabled);
+      env.publisher.duringPublish = () async {
+        enabled = false;
+      };
+
+      await tick(env, _circle('a', 1));
+
+      expect(env.maintenance.leavesAfter, isEmpty);
+    });
+  });
+
   group('decorrelation inside a burst', () {
     test('consecutive publishes in one burst are separated by more than a '
         'second', () {
@@ -1326,7 +1724,7 @@ void main() {
     // window refuses — no identity yet, disclosure not accepted, permission
     // revoked, or a one-shot fix that timed out — every circle stayed due, so
     // the burst queued behind opened again, refused again, and so on: one cold
-    // connect, one REQ set replaying 49 h of `#p` gift wraps and one pool
+    // connect, one REQ set replaying 96 h of `#p` gift wraps and one pool
     // cycle PER DUE CIRCLE, publishing nothing, on the branch this phase
     // exists to keep quiet.
 
@@ -1743,14 +2141,13 @@ void main() {
     // The burst awaits its OWN publishes, so its own work is drained by
     // structure. The pool is not its own: while backgrounded on iOS the motion
     // trigger keeps running and publishes over the same pool, unawaited by and
-    // invisible to the coordinator, and that path reaches the deferred-send
-    // ladder — `publishEvent`, then `confirmPublished` on an ack or
-    // `publishFailed` without one. `shutdownPublishPool` reaches
-    // `RelayManager::shutdown`, i.e. `client.disconnect()` with no drain at
-    // all (the engine's settle and pause drain a DIFFERENT pool), so a burst
-    // that ends mid-ladder makes `wait_for_ok` fail on a commit a relay may
-    // already have stored and served. The sender then rolls back a commit its
-    // peers have applied: a roster fork, not a lost location sample.
+    // invisible to the coordinator, and that path drives commits through the
+    // fanout driver, which sends and waits for an ack inside one call.
+    // `shutdownPublishPool` reaches `RelayManager::shutdown`, i.e.
+    // `client.disconnect()` with no drain at all (the engine's settle and
+    // pause drain a DIFFERENT pool), so a burst that ends mid-drive cuts it
+    // short: the core keeps the commit recorded and awaiting, and its send
+    // waits for the next wake.
 
     test('the shutdown waits, unbounded, for a ladder in flight', () async {
       final pool = _PublishPoolWork();
@@ -1925,7 +2322,7 @@ void main() {
       ]);
       expect(
         printed.lines.where(
-          (l) => l != null && l.contains('draining commit-critical'),
+          (l) => l != null && l.contains('draining driver entries'),
         ),
         isEmpty,
         reason: 'with nothing wired there is nothing in flight to wait for, '
@@ -2024,6 +2421,51 @@ void main() {
       expect(env.shutdownCount, 0);
     });
 
+    test('a resume inside the PAUSE says it stopped before the drive drain, '
+        'naming nothing the pause failed with', () async {
+      final logs = LogCapture.install();
+      var foregrounded = false;
+      final env = build(foregrounded: () => foregrounded);
+      final gate = Completer<void>();
+      env.engine
+        ..pauseGate = gate
+        ..pauseError = StateError('group ${'ab' * 32} at wss://planted.example');
+
+      final burst = tick(env, _circle('a', 1));
+      await pumpEventQueue();
+      foregrounded = true;
+      gate.complete();
+      await burst;
+
+      logs
+        ..assertContains(
+          '[BackgroundBurst] teardown stopped before the drive drain',
+        )
+        ..assertNoNeedles(['ab' * 32, 'wss://planted.example']);
+    });
+
+    test('a resume inside the DRIVE DRAIN stops before the pool shutdown',
+        () async {
+      // The drain waits on drives the burst does not own and can last as long
+      // as the core's drive budget; the foreground can take the engine back
+      // inside it, and the pool is then the one it publishes over.
+      var foregrounded = false;
+      final drives = Completer<void>();
+      final env = build(
+        foregrounded: () => foregrounded,
+        pendingCommitCritical: () => drives.isCompleted ? null : drives.future,
+      );
+
+      final burst = tick(env, _circle('a', 1));
+      await pumpEventQueue();
+      expect(env.engine.pauses, 1, reason: 'premise: draining');
+      foregrounded = true;
+      drives.complete();
+      await burst;
+
+      expect(env.shutdownCount, 0);
+    });
+
     test('a burst queued behind one opens nothing after the handback',
         () async {
       // A tick that arrived while paused can still be sitting on the chain at
@@ -2096,7 +2538,7 @@ void main() {
         0,
         reason: 'a close must not REVEAL presence to close a socket: an open '
             'unsubscribes, reconnects and re-issues every REQ, and at the '
-            'shipped INBOX_BURSTS_PER_REQ the 49 h `#p` gift-wrap query with '
+            'shipped INBOX_BURSTS_PER_REQ the 96 h `#p` gift-wrap query with '
             'it — presence at an instant that is not a publish, on exactly '
             'the plane this phase keeps quiet',
       );
@@ -2265,7 +2707,7 @@ void main() {
       // lifecycle path (`unawaited(coordinator.closeIdle())`), and a
       // `_bursting` left latched — after which `runningBurst` answers non-null
       // forever and every resume takes the burst-in-flight bypass, spending a
-      // pool reconnect and a 49 h `#p` gift-wrap replay per glance.
+      // pool reconnect and a 96 h `#p` gift-wrap replay per glance.
       final env = build(
         foregrounded: () => throw StateError('handback read boom'),
       );
@@ -2320,6 +2762,29 @@ void main() {
       expect(env.shutdownCount, 1);
     });
 
+    test('the drive drain says what failed with fixed text, naming nothing',
+        () async {
+      final logs = LogCapture.install();
+      final planted = 'group ${'ef' * 32} at wss://planted.example';
+      await build(
+        pendingCommitCritical: () => throw StateError(planted),
+      ).coordinator.closeIdle();
+      var asked = false;
+      await build(
+        pendingCommitCritical: () {
+          if (asked) return null;
+          asked = true;
+          return Future<void>.error(StateError(planted));
+        },
+      ).coordinator.closeIdle();
+
+      logs
+        ..assertContains('[BackgroundBurst] drive read failed')
+        ..assertContains('[BackgroundBurst] draining driver entries')
+        ..assertContains('[BackgroundBurst] drive drain failed')
+        ..assertNoNeedles(['ef' * 32, 'wss://planted.example']);
+    });
+
     test('a handback followed by another pause closes the pool', () async {
       // The teardown that stops at a handback leaves the publish pool open —
       // correct, the foreground is publishing over it. What used to make that
@@ -2345,6 +2810,234 @@ void main() {
 
       expect(env.engine.pauses, 1);
       expect(env.shutdownCount, 1);
+    });
+  });
+
+  // The engine is the REAL service here, over a fake FFI handle: what is
+  // under test is the teardown's pause against a session that is still
+  // coming up. Nothing bounds the teardown, and it holds `runningBurst` —
+  // which a resume and a mid-pause opt-out both wait on — until it returns.
+  group('a teardown that finds a start in flight', () {
+    late FakeLiveSyncEngine engine;
+    late NostrSubscriptionService service;
+    late BackgroundBurstCoordinator coordinator;
+    late int shutdowns;
+    late bool foregroundOwnsEngine;
+
+    setUp(() {
+      foregroundOwnsEngine = false;
+      engine = FakeLiveSyncEngine()..startGate = Completer<void>();
+      service = NostrSubscriptionService(
+        router: LiveEventRouter(
+          circleService: MockCircleService.new,
+          circlesSnapshot: () async => const [],
+          secretBytes: () async => const [],
+          parseLocation: (_, _) async => null,
+          ingestLocation: (_, _) async {},
+          reconcileRoster: (_) async {},
+          onLocationsChanged: () {},
+          onGroupUpdated: (_) {},
+          onInvitationReceived: () {},
+          onStatus: (_) {},
+        ),
+        engineFactory: () async => engine,
+      );
+      shutdowns = 0;
+      final log = <String>[];
+      coordinator = BackgroundBurstCoordinator(
+        engine: service,
+        publisher: _RecordingPublisher(log),
+        maintenance: _RecordingMaintenance(log),
+        stagger: PublishStagger.none(),
+        shutdownPublishPool: () async => shutdowns++,
+        burstEnabled: () => true,
+        foregrounded: () => foregroundOwnsEngine,
+        onOpenOutcome: (_) {},
+      );
+    });
+
+    test('it waits for the start, then pauses the session it produced',
+        () async {
+      final starting = service.start(groups: const [], inboxRelays: const []);
+      await pumpEventQueue();
+      final closing = coordinator.closeIdle();
+      await pumpEventQueue();
+      expect(engine.pauseCalls, 0, reason: 'premise: no engine to pause yet');
+      expect(coordinator.runningBurst, isNotNull);
+
+      engine.startGate!.complete();
+      await starting;
+      await closing;
+
+      expect(
+        engine.pauseCalls,
+        1,
+        reason: 'the session came up, un-paused, behind a teardown that '
+            'believed it had closed the plane',
+      );
+      expect(
+        engine.calls.indexOf('started'),
+        lessThan(engine.calls.indexOf('pause')),
+      );
+      expect(shutdowns, 1);
+      expect(coordinator.runningBurst, isNull);
+      await service.stop();
+    });
+
+    test('a resume that lands while it waits leaves no paused engine in '
+        'front of the user', () async {
+      final starting = service.start(groups: const [], inboxRelays: const []);
+      await pumpEventQueue();
+      final closing = coordinator.closeIdle();
+      await pumpEventQueue();
+
+      // The user comes back: the foreground takes the engine, and its
+      // re-anchor is ordered behind the teardown still in flight.
+      foregroundOwnsEngine = true;
+      final reanchoring = MapShell.reanchorOnResume(
+        engine: service,
+        burstInFlight: coordinator.runningBurst,
+      );
+      await pumpEventQueue();
+      expect(engine.resumeCalls, 0, reason: 'premise: no engine yet');
+
+      engine.startGate!.complete();
+      await starting;
+      await closing;
+      await reanchoring;
+
+      expect(engine.pauseCalls, 1, reason: 'the pause was already waiting');
+      expect(
+        service.isPaused,
+        isFalse,
+        reason: 'no heal sees a paused engine, and the banner holds at its '
+            'last verdict while the map receives nothing',
+      );
+      expect(engine.resumeCalls, 1);
+      expect(shutdowns, 0, reason: 'the foreground keeps the publish pool');
+      await service.stop();
+    });
+
+    test('it completes when a stop ends that start instead', () async {
+      final starting = service
+          .start(groups: const [], inboxRelays: const [])
+          .then<Object?>((_) => null, onError: (Object e) => e);
+      await pumpEventQueue();
+      final closing = coordinator.closeIdle();
+      await pumpEventQueue();
+
+      // A logout: the gate is never opened, so only the stop can end it.
+      expect(await service.stop(), LiveSyncStopOutcome.stopped);
+      await closing;
+
+      expect(await starting, isA<SubscriptionServiceException>());
+      expect(engine.calls, ['start', 'stop']);
+      expect(engine.pauseCalls, 0, reason: 'there was nothing left to pause');
+      expect(shutdowns, 1, reason: 'the pool is still shut');
+      expect(
+        coordinator.runningBurst,
+        isNull,
+        reason: 'a teardown left parked on a start holds every later resume '
+            'and opt-out behind it',
+      );
+    });
+  });
+
+  // The R1 consent edge on iOS: a pause that read a stale "sharing off"
+  // stopped the engine, and the consent then resolves on. The session has to
+  // come back BEFORE the close that is there to pause it — and the stop it
+  // comes back behind can outlast the heal's own budget.
+  group('the session the consent edge brings back, behind a slow stop', () {
+    test('is up before the close that pauses it, and ends paused and '
+        'unclaimed', () {
+      fakeAsync((async) {
+        final slow = FakeLiveSyncEngine()..stopGate = Completer<void>();
+        final queued = [slow];
+        final engines = <FakeLiveSyncEngine>[];
+        final service = NostrSubscriptionService(
+          router: LiveEventRouter(
+            circleService: MockCircleService.new,
+            circlesSnapshot: () async => const [],
+            secretBytes: () async => const [],
+            parseLocation: (_, _) async => null,
+            ingestLocation: (_, _) async {},
+            reconcileRoster: (_) async {},
+            onLocationsChanged: () {},
+            onGroupUpdated: (_) {},
+            onInvitationReceived: () {},
+            onStatus: (_) {},
+          ),
+          engineFactory: () async {
+            final engine =
+                queued.isEmpty ? FakeLiveSyncEngine() : queued.removeAt(0);
+            engines.add(engine);
+            return engine;
+          },
+        );
+        // The iOS sharing-on pause wants a session (`MapShell.liveSyncWanted`).
+        final resubscriber = LiveSyncResubscriber(
+          engine: service,
+          inboxRelays: () async => const ['wss://inbox.test'],
+          initialCircles: const [],
+          sessionWanted: () => true,
+        );
+        final log = <String>[];
+        var shutdowns = 0;
+        final coordinator = BackgroundBurstCoordinator(
+          engine: service,
+          publisher: _RecordingPublisher(log),
+          maintenance: _RecordingMaintenance(log),
+          stagger: PublishStagger.none(),
+          shutdownPublishPool: () async => shutdowns++,
+          burstEnabled: () => true,
+          onOpenOutcome: (_) {},
+        );
+        unawaited(resubscriber.ensureRunning());
+        async.flushMicrotasks();
+        expect(service.isRunning, isTrue, reason: 'premise');
+
+        // The pause's stop, still unwinding when the consent resolves.
+        unawaited(service.stop());
+        async.flushMicrotasks();
+        expect(slow.stopCalls, 1, reason: 'premise: the teardown is out');
+
+        var closed = false;
+        final receiving = MapShell.healBehindStop(
+          stop: service.stop(),
+          heal: resubscriber.ensureRunning,
+        );
+        unawaited(
+          receiving
+              .then((_) => coordinator.closeIdle())
+              .then((_) => closed = true),
+        );
+        async.elapse(kLiveSyncRestartBudget + const Duration(seconds: 30));
+
+        expect(
+          closed,
+          isFalse,
+          reason: "the heal's own budget ran out with its leg still queued, "
+              'and the close ran first: it paused nothing, and the leg then '
+              'started a session in the background that nothing pauses',
+        );
+        expect(engines, hasLength(1));
+
+        slow.stopGate!.complete();
+        async.flushMicrotasks();
+
+        expect(closed, isTrue);
+        expect(engines, hasLength(2));
+        expect(engines.last.calls.indexOf('started'), isNonNegative);
+        expect(engines.last.pauseCalls, 1);
+        expect(service.isPaused, isTrue);
+        expect(
+          engines.last.foregroundClaims,
+          isEmpty,
+          reason: "started for the bursts, in nobody's foreground",
+        );
+        expect(shutdowns, 1);
+        resubscriber.dispose();
+      });
     });
   });
 }

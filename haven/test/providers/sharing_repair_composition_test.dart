@@ -152,7 +152,7 @@ void main() {
     // helps, so one failure must not cancel the rest of the chain.
     final service = _RecordingCircleService()
       ..repairCircleEpochResult =
-          const EpochRepairSkipped(SkipReasonFfi.notSoleAdmin);
+          const EpochRepairSkipped(SkipReasonFfi.epochUnrecoverable);
     final container = _container(service: service, throwOnResume: true);
     addTearDown(container.dispose);
     await container.read(identityProvider.future);

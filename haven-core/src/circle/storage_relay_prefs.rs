@@ -76,7 +76,9 @@ pub const SEEDED_KEY: &str = "relay_prefs_seeded_v1";
 /// set. That property holds structurally rather than by careful coding.
 pub const PROFILE_SEEDED_KEY: &str = "relay_prefs_profile_seeded_v1";
 
-/// `user_settings` key that toggles publishing of kind 10051.
+/// `user_settings` key that toggles publishing of the NIP-65 relay list
+/// (kind 10002), built from the `KeyPackage` relay slot. The key's name
+/// predates the retirement of kind 10051.
 pub const PUBLISH_KP_RELAY_LIST_KEY: &str = "publish_keypackage_relay_list";
 
 /// `user_settings` key that toggles publishing of kind 10050.
@@ -116,13 +118,14 @@ pub struct PublishedEventRecord {
 ///
 /// 1. Trims surrounding whitespace.
 /// 2. Rejects empty input with [`CircleError::InvalidRelayInput`].
-/// 3. Rejects plaintext `ws://` (defense-in-depth — `nostr::RelayUrl` would
-///    accept it but the relay manager rejects it at publish time). The
-///    debug-only [`crate::relay::allow_ws_loopback_for_test`] opt-in relaxes
-///    this for loopback / emulator hosts only; release builds always reject.
-/// 4. Rejects URLs containing `user:pass@` to avoid credential leakage.
-/// 5. Delegates to [`nostr::RelayUrl::parse`] for canonical handling of IDN,
+/// 3. Rejects URLs containing `user:pass@` to avoid credential leakage.
+/// 4. Delegates to [`nostr::RelayUrl::parse`] for canonical handling of IDN,
 ///    case, ports, and trailing slashes on the root.
+/// 5. Rejects a URL whose PARSED scheme is plaintext `ws`, however the input
+///    spelled it ([`crate::relay::url_norm::may_dial`], the policy every
+///    connect path uses). The debug-only
+///    [`crate::relay::allow_ws_loopback_for_test`] opt-in relaxes this for
+///    loopback / emulator hosts only; release builds always reject.
 ///
 /// The returned string is the canonical form returned by `RelayUrl::parse`.
 ///
@@ -136,31 +139,21 @@ pub fn normalize_url(input: &str) -> Result<String> {
     if trimmed.is_empty() {
         return Err(RelayInputRejection::Empty.into());
     }
-    // Reject ws:// (case-insensitive) before parsing — RelayUrl::parse
-    // accepts both schemes.
-    //
-    // The sole exception is the debug-only hermetic-test path: a `ws://`
-    // loopback / emulator-host URL is accepted IFF the install-once
-    // `allow_ws_loopback_for_test` opt-in is armed. This consults the SAME
-    // flag and the SAME host allowlist that the relay manager's
-    // `validate_relay_urls` uses at publish/connect time, so the storage
-    // add path and the publish path relax `ws://` together, never
-    // independently. In release builds `ws_loopback_allowed_for_test` is a
-    // `const fn` returning `false`, so this collapses to the unconditional
-    // rejection — byte-for-byte identical to production: no plaintext
-    // `ws://` relay can ever be stored.
-    let lower_prefix = trimmed
-        .chars()
-        .take(5)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    if lower_prefix.starts_with("ws://") && !crate::relay::ws_loopback_allowed_for_test(trimmed) {
-        return Err(RelayInputRejection::PlaintextWs.into());
-    }
     if trimmed.contains('@') {
         // RelayUrl::parse accepts `user:pass@host` — reject up front so
         // credentials never reach storage, logs, or error messages.
         return Err(RelayInputRejection::Credentials.into());
+    }
+    let parsed = RelayUrl::parse(trimmed)
+        .map_err(|_| CircleError::from(RelayInputRejection::Unparseable))?;
+    // Plaintext is refused on the PARSED scheme, by the one policy the relay
+    // manager and the live-sync engine dial by, so the storage add path and
+    // the connect paths relax `ws` together (debug-only loopback opt-in) and
+    // never independently: no plaintext relay can be stored, and so none can
+    // be advertised in a relay list or a circle's routing. `RelayUrl::parse`
+    // accepts both schemes and several spellings of each.
+    if !crate::relay::url_norm::may_dial(&parsed) {
+        return Err(RelayInputRejection::PlaintextWs.into());
     }
     // Defense in depth — lowercase the scheme + authority ourselves so
     // case-only differing URLs deduplicate on the UNIQUE (url, relay_type)
@@ -168,9 +161,7 @@ pub fn normalize_url(input: &str) -> Result<String> {
     // not always lowercase the host on every nostr-sdk version, and may
     // preserve a trailing slash on the root path which would also defeat
     // the UNIQUE constraint.
-    let canonical = RelayUrl::parse(trimmed)
-        .map_err(|_| CircleError::from(RelayInputRejection::Unparseable))?
-        .to_string();
+    let canonical = parsed.to_string();
     // Delegate the final form to the SINGLE shared implementation. Relay URLs
     // are compared as set members both here (the `UNIQUE (url, relay_type)`
     // index) and in the profile plane's contamination exclusion; a second
@@ -547,7 +538,8 @@ impl CircleStorage {
         Ok(())
     }
 
-    /// Returns whether this user wants to publish kind 10051.
+    /// Returns whether this user wants to publish their NIP-65 relay list
+    /// (kind 10002).
     ///
     /// Defaults to `true` (publish) when the setting has never been written.
     ///
@@ -558,7 +550,8 @@ impl CircleStorage {
         self.get_bool_setting(PUBLISH_KP_RELAY_LIST_KEY)
     }
 
-    /// Sets whether this user wants to publish kind 10051.
+    /// Sets whether this user wants to publish their NIP-65 relay list
+    /// (kind 10002).
     ///
     /// # Errors
     ///

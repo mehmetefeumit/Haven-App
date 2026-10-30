@@ -42,6 +42,14 @@
 //! strictly more precise than a full re-fan-out, gives an honest
 //! `relays_healed` count, and reduces write/correlation surface (PSI-8).
 //!
+//! # Reset notice first
+//!
+//! After the MDK v0.10.4 storage reset returned the relay-list publishing
+//! choices to their defaults, no relay list (or `KeyPackage`) is published until
+//! the user has seen the reset notice ([`RelayListSnapshot::reset_acknowledged`], read from
+//! [`crate::storage_reset`]), so an opt-out they chose before the reset can be
+//! restored before any list leaves the device.
+//!
 //! # Privacy toggle
 //!
 //! When the user has opted OUT of publishing a category
@@ -92,6 +100,10 @@ pub struct RelayListPerRelay {
 /// (see the `wss://`-absence test on the outcome).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RelayListSnapshot {
+    /// Whether the storage-reset notice has been acknowledged
+    /// ([`crate::storage_reset::storage_reset_acknowledged`]). While it has
+    /// not, maintenance never publishes.
+    pub reset_acknowledged: bool,
     /// Whether the user has opted IN to publishing this category (the privacy
     /// toggle). When `false`, maintenance is always a no-op.
     pub publish_enabled: bool,
@@ -111,6 +123,8 @@ pub struct RelayListSnapshot {
 /// crosses the FFI).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayListDecision {
+    /// The storage-reset notice has not been acknowledged yet.
+    AwaitingResetAcknowledgement,
     /// Publishing is suppressed by the privacy toggle (or nothing configured).
     Suppressed,
     /// Every responding relay already serves a current, non-drifted list (or no
@@ -128,6 +142,9 @@ pub enum RelayListDecision {
 ///
 /// Ordering of the branches:
 ///
+/// 0. **Reset notice not yet acknowledged** ⇒
+///    [`RelayListDecision::AwaitingResetAcknowledgement`], before anything else:
+///    the toggle it would read is the post-reset default, not the user's choice.
 /// 1. **Toggle OFF or nothing configured** ⇒ [`RelayListDecision::Suppressed`].
 ///    We never publish a list the user opted out of, we never *unpublish* here
 ///    (that is a separate user-initiated flow), and with nothing configured
@@ -140,6 +157,9 @@ pub enum RelayListDecision {
 /// 4. **Every responder healthy** ⇒ [`RelayListDecision::NoOp`].
 #[must_use]
 pub fn decide_relay_list(snapshot: &RelayListSnapshot) -> RelayListDecision {
+    if !snapshot.reset_acknowledged {
+        return RelayListDecision::AwaitingResetAcknowledgement;
+    }
     if !snapshot.publish_enabled || snapshot.configured_relays.is_empty() {
         return RelayListDecision::Suppressed;
     }
@@ -199,6 +219,9 @@ pub enum RelayListAction {
     AlreadyCurrent,
     /// The list was (re)published to one or more own relays this tick.
     Republished,
+    /// Nothing was published: the storage-reset notice has not been
+    /// acknowledged yet.
+    AwaitingResetAcknowledgement,
 }
 
 /// Presence-only tally of a relay-list maintenance tick, per category (one for
@@ -263,10 +286,33 @@ mod tests {
         configured: &[&str],
     ) -> RelayListSnapshot {
         RelayListSnapshot {
+            reset_acknowledged: true,
             publish_enabled,
             responders,
             configured_relays: configured.iter().map(|s| (*s).to_owned()).collect(),
         }
+    }
+
+    #[test]
+    fn nothing_is_published_before_the_reset_notice_is_acknowledged() {
+        // Every other input says "republish": a missing list on a responding
+        // relay, publishing enabled. Only the unacknowledged reset stands in
+        // the way, and it must win — the toggle is the post-reset default, not
+        // a choice the user has had the chance to make.
+        let mut s = snap(
+            true,
+            vec![per("wss://a.example", false)],
+            &["wss://a.example"],
+        );
+        assert!(matches!(
+            decide_relay_list(&s),
+            RelayListDecision::Republish { .. }
+        ));
+        s.reset_acknowledged = false;
+        assert_eq!(
+            decide_relay_list(&s),
+            RelayListDecision::AwaitingResetAcknowledgement
+        );
     }
 
     // ---- Test 1: all responders healthy ⇒ NoOp ----------------------------

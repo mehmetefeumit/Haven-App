@@ -36,12 +36,13 @@
 //! only by the app layer — so at this tier haven-core records nothing about
 //! the strand at all.
 //!
-//! At this commit Haven raises no per-circle verdict for a device stranded
-//! behind a lost commit. This arm asserts that silence. OD-1 is DECIDED — a
-//! per-circle verdict inside the circle's details sheet — and is NOT BUILT.
-//! When it lands, this arm's absence assertion becomes a presence assertion
-//! within `silence_window()`; changing it in either direction without citing
-//! OD-1 is a regression.
+//! At this commit no terminal verdict names a device stranded behind a lost
+//! commit. This arm asserts that silence. OD-1 is BUILT — one per-circle card
+//! inside the circle's details sheet, read from `circle_recovery`, whose
+//! `Stalled` cause is the epoch-stall detector's for this shape — and no arm
+//! reads `circle_recovery` yet. When one does, this arm's absence assertion
+//! becomes a presence assertion within `silence_window()`; changing it in
+//! either direction without citing OD-1 is a regression.
 //!
 //! # The control cycle runs FIRST
 //!
@@ -69,8 +70,8 @@
 
 use std::time::Duration;
 
-use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
 use haven_core::nostr::mls::types::GroupId;
+use haven_core::relay::live_sync::Claim;
 use nostr::{Event, EventId};
 
 use crate::nemesis::types::{DropClass, Fault};
@@ -353,9 +354,9 @@ async fn strand<T: TimelineSink, L: LogDrain>(
         canaries += 1;
     }
 
-    // 6. …and Haven says nothing about it. The OD-1 gap, recorded.
+    // 6. …and no surface the rig reads says anything about it, recorded.
     world.drain_buses();
-    if silent_about_the_strand(world, stranded, circle_tag) {
+    if silent_about_the_strand(world, stranded, circle_tag).await {
         canaries += 1;
     }
     Ok(canaries)
@@ -379,10 +380,10 @@ async fn silence_held<T: TimelineSink, L: LogDrain>(
         let _ = world
             .device(stranded)?
             .engine()?
-            .maintain_subscription_health()
+            .maintain_subscription_health(Claim::Foreground)
             .await;
         world.drain_buses();
-        if !silent_about_the_strand(world, stranded, circle_tag) {
+        if !silent_about_the_strand(world, stranded, circle_tag).await {
             return Ok(0);
         }
         if started.elapsed() >= bounds::silence_window() {
@@ -406,17 +407,19 @@ async fn silence_held<T: TimelineSink, L: LogDrain>(
 /// a stamp that stops moving, and haven-core itself keeps none. A stamp
 /// appearing here means haven-core started recording what it receives, and the
 /// recorded expectation is stale.
-fn silent_about_the_strand<T: TimelineSink, L: LogDrain>(
+async fn silent_about_the_strand<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     stranded: DeviceTag,
     circle_tag: CircleTag,
 ) -> bool {
-    let nobody_says_so = world.devices().iter().all(|device| {
-        device.ledger().unrecoverable() == 0
-            && device
-                .manager()
-                .is_ok_and(|manager| manager.unrecoverable_circles().is_empty())
-    });
+    let mut nobody_says_so = true;
+    for device in world.devices() {
+        nobody_says_so &= device.ledger().unrecoverable() == 0
+            && match device.manager() {
+                Ok(manager) => manager.unrecoverable_circles().await.is_empty(),
+                Err(_) => false,
+            };
+    }
     let core_recorded_nothing = world.circle(circle_tag).is_ok_and(|circle| {
         world.device(stranded).is_ok_and(|device| {
             device.manager().is_ok_and(|manager| {
@@ -468,7 +471,8 @@ async fn stored_on_any_plane<T: TimelineSink, L: LogDrain>(
 }
 
 /// One confirmed relay-list commit from `device`, carrying a relay list the
-/// group does not already hold — a repeat is a no-op and advances no epoch.
+/// group does not already hold: the product answers a repeat already so,
+/// staging nothing and advancing no epoch.
 async fn confirmed_commit<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     device: DeviceTag,
@@ -496,12 +500,7 @@ async fn seal<T: TimelineSink, L: LogDrain>(
     let sender = world.device(device)?;
     sender
         .manager()?
-        .encrypt_location(
-            group,
-            &sender.keys.public_key(),
-            &ProbeToken::mint(PROBE_ROUND, index).as_location(),
-            LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(group, &ProbeToken::mint(PROBE_ROUND, index).as_location())
         .await
         .map(|(event, _, _)| event)
         .map_err(|_| RigError::Core(Step::Publish))

@@ -47,6 +47,13 @@ pub const BUS_CAP: usize = 8192;
 /// [`GROUP_RESUBSCRIBE_BUFFER_SECS`]: crate::relay::cursor::GROUP_RESUBSCRIBE_BUFFER_SECS
 pub const WORKER_QUEUE_CAP: usize = 8192;
 
+/// How many bytes of held events' content the live plane's stored replay
+/// keeps before it takes them in, beside [`WORKER_QUEUE_CAP`]'s count.
+///
+/// A kind-445 may be megabytes, and 8 MiB stays well inside what a low-end
+/// phone keeps resident without pressure.
+pub const STORED_REPLAY_BYTE_CAP: usize = 8 * 1024 * 1024;
+
 /// Capacity of the nostr pool's notification broadcast channel.
 ///
 /// Matches [`BUS_CAP`]: the raw notifications receiver must not lag while a slow
@@ -280,7 +287,7 @@ pub const DELIVERY_SILENCE_RETENTION_MULTIPLE: i64 = 3;
 /// re-issue's own `EOSE` resets that endpoint's window.
 ///
 /// It applies to GROUP REQs only. A silent inbox REQ is the normal state, and
-/// re-issuing it means asking for a 49-hour gift-wrap replay keyed on this
+/// re-issuing it means asking for a 96-hour gift-wrap replay keyed on this
 /// device's `#p`, every quarter of an hour, forever; see [`super::health`] for
 /// why that arm was removed rather than tuned.
 #[must_use]

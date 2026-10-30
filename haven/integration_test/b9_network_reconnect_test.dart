@@ -134,8 +134,8 @@
 ///
 /// The kind-445 wire TTL is a fixed `created_at + 228 s` NIP-40 `expiration`
 /// (group component 0x8005, `LOCATION_MESSAGE_RETENTION_SECS`), strfry
-/// deletes expired events on a 9-second cron, and Haven's own receiver-side
-/// screen drops them anyway (`RECEIVER_EXPIRATION_GRACE_SECS`). Recovery
+/// deletes expired events on a 9-second cron, and the receiving device's relay
+/// pool drops any it is still served, on receipt, with no grace. Recovery
 /// path (3) can legitimately take longer than that, in which case the relay
 /// has GC'd the backlog event before there is any subscription to serve it
 /// to. That is correct behaviour on both sides, so the lane must not score
@@ -213,7 +213,12 @@ import 'package:haven/src/providers/service_providers.dart'
         relayServiceProvider,
         subscriptionServiceProvider;
 import 'package:haven/src/rust/api.dart'
-    show CircleCreationResultFfi, MemberKeyPackageFfi, RelayManagerFfi;
+    show
+        LocationPublishFfi,
+        MemberKeyPackageFfi,
+        RelayManagerFfi;
+import 'package:haven/src/services/circle_change_driver.dart'
+    show CircleChangeDriver;
 import 'package:haven/src/services/fresh_secret.dart' show withFreshSecret;
 import 'package:haven/src/services/nostr_circle_service.dart'
     show NostrCircleService;
@@ -223,7 +228,9 @@ import 'package:path_provider/path_provider.dart'
     show getApplicationDocumentsDirectory;
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
+import 'e2e/_lib/app_lifecycle.dart';
+import 'e2e/_lib/circle_creation.dart'
+    show DeliveredCircle, createCircleDelivered;
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
 import 'e2e/_lib/fake_location_service.dart'
     show
@@ -573,6 +580,11 @@ Future<bool> _pumpUntilAsync(
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  // The binding forgets the lifecycle after every test and never reads it
+  // back from the platform, so without this the launch session's foreground
+  // claim rests on whether the engine's own lifecycle message has arrived.
+  // See `e2e/_lib/app_lifecycle.dart`.
+  resumeAppBeforeEachTest();
 
   testWidgets(
     'B9: a network drop mid-session must not silently end live location '
@@ -621,6 +633,7 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       final introSeen = prefs.getBool(kOnboardingIntroSeenKey) ?? false;
       final completed = prefs.getBool(kOnboardingCompletedKey) ?? false;
+      expectAppResumed();
       await tester.pumpWidget(
         ProviderScope(
           overrides: <Override>[
@@ -669,7 +682,6 @@ void main() {
             'startup (including _startLiveSync) on it, so there would be no '
             'receive plane to disconnect.',
       );
-      final alicePubkeyHex = aliceIdentity!.pubkeyHex;
 
       // Also the first use of the app's own publish pool: the KeyPackage
       // publish is what connects it, so the post-outage publish below is
@@ -698,12 +710,13 @@ void main() {
       await waitForKeyPackage(relay: relay, authorPubkeyHex: carol.pubkeyHex);
 
       final relayManager = await RelayManagerFfi.newInstance();
-      final CircleCreationResultFfi creation;
+      final DeliveredCircle creation;
       try {
         final peerKps = <MemberKeyPackageFfi>[];
         for (final invitee in <SyntheticUser>[bob, carol]) {
           final kp = await relayManager.fetchMemberKeypackage(
             pubkey: invitee.pubkeyHex,
+            circle: manager,
           );
           if (kp == null) {
             throw StateError(
@@ -718,14 +731,12 @@ void main() {
           () => container
               .read(identityNotifierProvider.notifier)
               .getSecretBytes(),
-          // Publishes both gift-wrapped Welcomes and CONFIRMS the staged
-          // create (Security Rule 13). Without the confirm the group stays
-          // in MDK's PendingPublish, where every inbound kind-445 returns
-          // `Buffered` — the baseline receive would time out and the lane
-          // would report a reconnect defect that never happened.
-          (aliceSecret) => createCircleConfirmed(
+          // Publishes both gift-wrapped Welcomes and requires every relay ack:
+          // an invitee whose Welcome never landed never joins. See
+          // `createCircleDelivered`'s doc.
+          (aliceSecret) => createCircleDelivered(
             manager: manager,
-            relay: relay,
+            relayManager: relayManager,
             identitySecretBytes: aliceSecret,
             members: peerKps,
             name: 'B9 Network Reconnect Circle',
@@ -733,7 +744,6 @@ void main() {
             relays: <String>[defaultStrfryUrl],
             // Synthetic peers advertise no inbox relays, so the admin's own
             // relay is the Welcome-delivery fallback (production admin flow).
-            creatorFallbackRelays: <String>[defaultStrfryUrl],
             scenario: 'b9',
           ),
         );
@@ -907,24 +917,22 @@ void main() {
       }
       debugPrint('$kEngineDuringOutageMarker running=${engine.isRunning}');
 
-      // Stage the BACKLOG event WHILE STILL OFFLINE. Encryption is purely
-      // local MLS work, so it needs no relay; the event is written to disk
-      // and never published from this process, because the shell is about to
-      // put it on the relay from OUTSIDE the partition (class doc).
+      // Stage the BACKLOG event WHILE STILL OFFLINE. Sealing is local MLS
+      // work, so it needs no relay; the event is written to disk and never
+      // published from this process, because the shell is about to put it on
+      // the relay from OUTSIDE the partition (class doc).
       //
       // Staged as late as possible inside the blackout: the wire TTL is a
       // fixed `created_at + 228 s`, and every second spent here is a second
       // the app's recovery does not get.
       String? backlogEventId;
       try {
-        final encrypted = (await bob.user.circleManager.encryptLocation(
-          mlsGroupId: bobCircle.circle.mlsGroupId,
-          senderPubkeyHex: bob.pubkeyHex,
+        final eventJson = await bob.sealLocationEvent(
+          circle: bobCircle,
           latitude: _backlogLatitude,
           longitude: _backlogLongitude,
-          updateIntervalSecs: BigInt.from(198),
-        )).sent!;
-        final decoded = jsonDecode(encrypted.eventJson);
+        );
+        final decoded = jsonDecode(eventJson);
         final id = decoded is Map<String, dynamic>
             ? decoded['id'] as String?
             : null;
@@ -935,7 +943,7 @@ void main() {
         final file = File('${dir.path}/$_backlogFileName');
         // flush: true — the shell reads this from another process seconds
         // later, and a buffered write would export a truncated event.
-        await file.writeAsString(encrypted.eventJson, flush: true);
+        await file.writeAsString(eventJson, flush: true);
         backlogEventId = id;
         // Re-probe rather than reuse the earlier reading: the shell imports
         // this event on the grounds that the app could not have received it
@@ -1206,32 +1214,31 @@ void main() {
         // `RelayManagerFfi` (a new manager would connect for the first time
         // and prove nothing about waking a pool that went idle).
         try {
-          final outcome = await manager.encryptLocation(
+          // The production driver: seal, then its one send.
+          final driver = container.read(relayServiceProvider)
+              as CircleChangeDriver;
+          final seal = await driver.sealLocation(
+            circle: manager,
             mlsGroupId: creation.circle.mlsGroupId,
-            senderPubkeyHex: alicePubkeyHex,
             latitude: _postLatitude,
             longitude: _postLongitude,
-            // Matches the production call site: kLocationPublishMaxInterval
-            // 168 s + kTtlNetworkBufferSeconds 30 s.
-            updateIntervalSecs: BigInt.from(198),
+            foreground: true,
           );
-          final sent = outcome.sent;
-          if (sent == null) {
+          final sealed = seal.sealed;
+          if (sealed == null) {
             debugPrint('$kPublishAfterIdleDeadMarker reason=deferred');
             failures.add(
-              'the MLS engine DEFERRED the post-outage location instead of '
-              'encrypting it, so the publish pool was never asked to wake '
-              'and the liveness proof could not run. Nothing here is a '
-              'statement about the socket',
+              'the core HELD the post-outage location instead of sealing '
+              'it, so the publish pool was never asked to wake and the '
+              'liveness proof could not run. Nothing here is a statement '
+              'about the socket',
             );
           } else {
-            final result = await container
-                .read(relayServiceProvider)
-                .publishLocationEvent(
-                  eventJson: sent.eventJson,
-                  relays: sent.relays,
-                );
-            if (result.acceptedBy.isEmpty) {
+            final answer = await driver.publishLocation(
+              circle: manager,
+              sealed: sealed,
+            );
+            if (answer != LocationPublishFfi.accepted) {
               debugPrint('$kPublishAfterIdleDeadMarker reason=unacked');
               failures.add(
                 'a location published after connectivity returned reached NO '
@@ -1242,11 +1249,9 @@ void main() {
                 'network blip',
               );
             } else {
+              // The driver answers whether a relay accepted, not how many.
               // harness-log-ok: accepted= parsed by b9_marker_number.
-              debugPrint(
-                '$kPublishAfterIdleMarker '
-                'accepted=${result.acceptedBy.length}',
-              );
+              debugPrint('$kPublishAfterIdleMarker accepted=1');
             }
           }
         } on Object catch (e) {

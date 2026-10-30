@@ -21,10 +21,9 @@ class SelectedMembersSummary extends StatelessWidget {
   /// Identifiers of the staged members, each shortened by
   /// [NpubValidator.shortenForDisplay].
   ///
-  /// The only caller (`name_circle_page.dart`) passes KeyPackage **hex**
-  /// pubkeys rather than npubs, so what a user reads here is a hex fragment:
-  /// enough to tell two staged members apart, but not something they can
-  /// cross-check against the npub they were handed
+  /// The only caller (`name_circle_page.dart`) passes each KeyPackage's
+  /// verified author as an npub, so what a user reads here can be
+  /// cross-checked against the npub they were handed
   /// (docs/MEMBER_PICKER_PLAN.md §7.1).
   final List<String> members;
 

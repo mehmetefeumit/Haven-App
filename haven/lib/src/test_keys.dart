@@ -86,6 +86,15 @@ abstract final class WidgetKeys {
   static Key invitationDecline(String discriminator) =>
       ValueKey('invitation_decline_$discriminator');
 
+  /// The rejoin consent dialog's Cancel: its default, which changes nothing.
+  static const Key rejoinDialogCancel = Key('rejoin_dialog_cancel');
+
+  /// The rejoin consent dialog's Decline.
+  static const Key rejoinDialogDecline = Key('rejoin_dialog_decline');
+
+  /// The rejoin consent dialog's Join again.
+  static const Key rejoinDialogConfirm = Key('rejoin_dialog_confirm');
+
   // ---------------------------------------------------------------------------
   // Circle management
   // ---------------------------------------------------------------------------
@@ -117,22 +126,19 @@ abstract final class WidgetKeys {
   /// also collides with the dialog title text under a text finder.
   static const Key leaveCircleConfirm = Key('leave_circle_confirm');
 
-  /// "Re-create Circle" CTA on the Dark Matter cutover legacy-circle banner
-  /// (DM-4c).
-  static const Key legacyCircleRecreateCta = Key('legacy_circle_recreate_cta');
-
-  /// "Re-create Circle" CTA on the blocked-circle banner (OD4-c (i)).
-  ///
-  /// Distinct from [legacyCircleRecreateCta] even though both render the same
-  /// label: a blocked circle whose member lookup was swallowed to an empty
-  /// list is ALSO `isLegacyOrphaned`, so both banners can be on screen at
-  /// once and a text finder would be ambiguous.
-  static const Key blockedCircleRecreateCta = Key(
-    'blocked_circle_recreate_cta',
+  /// "Re-create Circle" remedy of the sharing status card for a circle MDK
+  /// halted on this device.
+  static const Key sharingHealthRecreateCta = Key(
+    'sharing_health_recreate_cta',
   );
 
-  /// "Remove" CTA on the Dark Matter cutover legacy-circle banner (DM-4c).
-  static const Key legacyCircleRemoveCta = Key('legacy_circle_remove_cta');
+  /// "Continue" on the one-time storage-reset notice.
+  static const Key storageResetContinue = Key('storage_reset_continue');
+
+  /// "Relay settings" on the one-time storage-reset notice.
+  static const Key storageResetOpenRelaySettings = Key(
+    'storage_reset_open_relay_settings',
+  );
 
   /// Root [ListTile] of a [CircleMemberTile], keyed by the member's pubkey hex.
   static Key memberTile(String pubkeyHex) => ValueKey('member_tile_$pubkeyHex');
@@ -154,7 +160,9 @@ abstract final class WidgetKeys {
   /// Present only when the identified circle is the active selection;
   /// absent when the "Select a circle" placeholder is shown or when a
   /// different circle is selected. Circle names are NOT unique, so the
-  /// key is scoped to [nostrGroupIdHex] (the circle's stable identity).
+  /// key is scoped to [nostrGroupIdHex] — the circle's CURRENT routing id,
+  /// which another client's routing rotation changes (Haven never rotates
+  /// its own), so a finder built from it holds only until then.
   ///
   /// E2E tests use this to wait for a specific circle to appear (after
   /// creation) or disappear (after leave) without text-matching, which
@@ -199,6 +207,37 @@ abstract final class WidgetKeys {
   static const Key sharingHealthRepairButton = Key(
     'sharing_health_repair_button',
   );
+
+  /// "Delete Identity" on the advanced identity page.
+  static const Key identityDeleteCta = Key('identity_delete_cta');
+
+  /// The change card in Circle details.
+  static const Key changeNoticeCard = Key('change_notice_card');
+
+  /// The change card's Dismiss, which acknowledges the notice.
+  static const Key changeNoticeDismiss = Key('change_notice_dismiss');
+
+  /// The change card's "Remove again" after a dropped removal.
+  static const Key changeNoticeRemoveAgain = Key('change_notice_remove_again');
+
+  /// The change card's "Keep them in the circle" after a dropped removal.
+  static const Key changeNoticeKeepMembers = Key('change_notice_keep_members');
+
+  /// The confirming button of the keep-them dialog.
+  static const Key changeNoticeKeepConfirm = Key('change_notice_keep_confirm');
+
+  /// The change card's "Review members" beside an undone removal.
+  static const Key changeNoticeReviewMembers = Key(
+    'change_notice_review_members',
+  );
+
+  /// The attention cue on the circle selector's trigger row.
+  static const Key circleAttentionCue = Key('circle_attention_cue');
+
+  /// The attention cue on a circle's row in the selector list, keyed by the
+  /// circle's `nostrGroupId` hex as [circleTile] is.
+  static Key circleRowAttentionCue(String nostrGroupIdHex) =>
+      ValueKey('circle_row_attention_cue_$nostrGroupIdHex');
 
   // ---------------------------------------------------------------------------
   // Location disclosure

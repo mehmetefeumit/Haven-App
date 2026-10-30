@@ -18,7 +18,6 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
-import 'package:haven/src/providers/legacy_retraction_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -417,79 +416,6 @@ void main() {
           findsOneWidget,
           reason: "the top-up must win even when the notifier's own "
               'initial read is slow to resolve',
-        );
-      },
-    );
-
-    // -------------------------------------------------------------------
-    // DM-4c: the legacy-retraction "pending" note (plan §6 F10b).
-    // -------------------------------------------------------------------
-
-    testWidgets(
-      'shows the legacy-retraction pending note when the tick has not '
-      'completed yet',
-      (tester) async {
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              identityProvider.overrideWith((ref) async => _stubIdentity()),
-              relayPreferencesServiceProvider.overrideWith(
-                (ref) async => seededMock(),
-              ),
-              relayServiceProvider.overrideWithValue(MockRelayService()),
-              circleServiceProvider.overrideWithValue(MockCircleService()),
-              legacyRetractionProvider.overrideWith(
-                (ref) async => LegacyRetractionUiStatus.pending,
-              ),
-            ],
-            child: const MaterialApp(
-              localizationsDelegates: AppLocalizations.localizationsDelegates,
-              supportedLocales: AppLocalizations.supportedLocales,
-              home: RelaySettingsPage(),
-            ),
-          ),
-        );
-        await tester.pumpAndSettle();
-
-        // The note now sits below three sections instead of two, so it can
-        // fall outside the default test-viewport + cache-extent window and
-        // never get inflated into the element tree until scrolled to (same
-        // reason the caption/Learn-more checks below already scroll first).
-        final note = find.textContaining('still asking relays to drop');
-        await tester.scrollUntilVisible(note, 300);
-        expect(note, findsOneWidget);
-      },
-    );
-
-    testWidgets(
-      'hides the legacy-retraction pending note once the tick has '
-      'completed',
-      (tester) async {
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              identityProvider.overrideWith((ref) async => _stubIdentity()),
-              relayPreferencesServiceProvider.overrideWith(
-                (ref) async => seededMock(),
-              ),
-              relayServiceProvider.overrideWithValue(MockRelayService()),
-              circleServiceProvider.overrideWithValue(MockCircleService()),
-              legacyRetractionProvider.overrideWith(
-                (ref) async => LegacyRetractionUiStatus.done,
-              ),
-            ],
-            child: const MaterialApp(
-              localizationsDelegates: AppLocalizations.localizationsDelegates,
-              supportedLocales: AppLocalizations.supportedLocales,
-              home: RelaySettingsPage(),
-            ),
-          ),
-        );
-        await tester.pumpAndSettle();
-
-        expect(
-          find.textContaining('still asking relays to drop'),
-          findsNothing,
         );
       },
     );

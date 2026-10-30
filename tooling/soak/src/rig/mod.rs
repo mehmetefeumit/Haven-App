@@ -20,7 +20,7 @@
 //! [`sim_magnitude`] is the other minting function, and it delegates to
 //! haven-core's bucket policy rather than inventing a second one.
 
-mod auto_commit;
+mod address_map;
 pub mod circle;
 pub mod declare;
 pub mod device;
@@ -37,7 +37,7 @@ use std::time::Duration;
 use serde::{Serialize, Serializer};
 use tokio::time::{Instant, MissedTickBehavior};
 
-pub use circle::{PublishVerdict, SimCircle};
+pub use circle::{PacingClock, PublishVerdict, SimCircle};
 pub use declare::DeclareSink;
 pub use device::{DeviceLedger, SimDevice};
 pub use plane::{
@@ -47,8 +47,9 @@ pub use plane::{
 };
 pub use restart::{kill_and_reopen, KillKind, ReopenReport};
 pub use world::{
-    install_process_globals, CircleFingerprint, DeviceFingerprint, PendingGuard, RosterDigest,
-    SessionStoreUse, SimWorld, TickReport, WorldFingerprint, SESSION_STORE_CEILING_BYTES,
+    install_process_globals, no_pending_fanout, Change, Changed, CircleFingerprint,
+    DeviceFingerprint, PendingGuard, RosterDigest, SessionStoreUse, SimWorld, TickReport,
+    WorldFingerprint, SESSION_STORE_CEILING_BYTES,
 };
 
 /// The kinds of thing the rig names.
@@ -228,6 +229,8 @@ pub enum Step {
     /// because they are one question asked three ways, and three near-synonyms
     /// would be a vocabulary nobody could grep.
     ReadConvergenceState,
+    /// Serving a group's convergence deadlines the way a receive plane does.
+    ServeConvergence,
     /// Reading a session's liveness.
     ReadSessionLiveness,
     /// Measuring a session store's size on disk.
@@ -238,6 +241,9 @@ pub enum Step {
     SessionStoreCeiling,
     /// Applying a fault to a relay plane.
     ApplyFault,
+    /// A joiner's post-join self-update, made and taken in by every device
+    /// before a scenario measures anything.
+    PostJoin,
 }
 
 /// Which bounded wait ran out.
@@ -332,7 +338,7 @@ impl fmt::Display for RigError {
             Self::SessionNotLive => f.write_str("rig: session was not live before the kill"),
             Self::SessionStillLive => f.write_str("rig: session still live after the kill"),
             Self::StopTimedOut => f.write_str("rig: engine stop timed out"),
-            Self::WelcomeNeverAcked => f.write_str("rig: no welcome was acked, create rolled back"),
+            Self::WelcomeNeverAcked => f.write_str("rig: no welcome was acked"),
             Self::PublishNeverAcked => f.write_str("rig: no relay acked a staged commit"),
             Self::UnknownTarget => f.write_str("rig: schedule named a target the world lacks"),
             Self::ShapeMismatch => f.write_str("rig: relay planes do not match the world shape"),
@@ -471,6 +477,7 @@ mod tests {
             RigError::Core(Step::CreateCircle).rc(),
             crate::rc::Rc::Unusable
         );
+        assert_eq!(RigError::WelcomeNeverAcked.rc(), crate::rc::Rc::Unusable);
         assert_eq!(
             RigError::SessionStillLive.rc(),
             crate::rc::Rc::RigBroken,

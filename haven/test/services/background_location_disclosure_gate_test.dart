@@ -129,21 +129,21 @@ void main() {
         'if (!backgroundPublishDisclosureAccepted(',
       );
       final collectAt = source.indexOf('getCurrentLocation(');
-      final encryptAt = source.indexOf('encryptLocation(');
+      final sealAt = source.indexOf('.sealLocation(');
 
       expect(gateAt, greaterThan(0), reason: 'no call-site form found');
       expect(collectAt, greaterThan(0));
-      expect(encryptAt, greaterThan(0));
+      expect(sealAt, greaterThan(0));
 
       // "Disclosure before COLLECTION" is the actual Play rule, and collection
-      // is the GPS read — which happens before the encrypt. Pinning only the
-      // encrypt would leave a gate that reads the user's position first.
+      // is the GPS read — which happens before the seal. Pinning only the
+      // seal would leave a gate that reads the user's position first.
       expect(
         gateAt,
         lessThan(collectAt),
         reason: 'the gate must run BEFORE the GPS fix is acquired',
       );
-      expect(gateAt, lessThan(encryptAt));
+      expect(gateAt, lessThan(sealAt));
     });
 
     test('the gate precedes the stream registration as well as the one-shot',

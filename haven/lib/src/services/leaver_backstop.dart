@@ -1,65 +1,168 @@
-/// Default bound on leaver-backstop SelfRemove re-issues (REV-1, driver 2).
+/// Carries every leave this device asked for on, at each wake.
 ///
-/// Convergence of a departing member's leave has two drivers: any member not in
-/// an open settle window auto-commits the SelfRemove (driver 1, no code), and —
-/// for the vanishingly-rare case where EVERY member is windowed at once — the
-/// leaver itself re-issues a fresh SelfRemove until it observes its own removal
-/// (driver 2, this loop). The budget bounds the re-issue tail so the leaver's
-/// key-material wipe is never delayed indefinitely; the residual (crash + all-
-/// windowed + never-returns) is disclosed in `haven-core/SECURITY.md`.
-const int kDefaultLeaverReissueBudget = 3;
+/// The leave itself lives in Rust: its intent is written before anything
+/// else, holds every send to the circle from that instant, and ends on this
+/// device once a peer commits the leave, the copy is marked removed, or the
+/// day's bound from the intent passes (`haven-core`
+/// `Publishing::resume_leave`). Nothing calls `resume_leave` on a timer, so
+/// each plane calls [LeaverBackstop.carryOn] at each of its wakes — the
+/// foreground's health tick, start-up and resume, a group update an ingest
+/// reports, the one follow-up a standing leave arms in front of the user,
+/// the Android service's cycle, an iOS burst, a WorkManager wake — and the
+/// core answers
+/// which circles have a leave at all: a circle with none answers
+/// [LeaveStatusFfi.notLeaving] from a store read, contacting nothing.
+library;
 
-/// Runs the REV-1 leaver backstop after an initial `propose_leave` SelfRemove
-/// has been published.
-///
-/// The loop, once per iteration (up to [maxReissues]):
-/// 1. polls [stillAMember] — the leaver's own removal-liveness predicate;
-/// 2. if the eviction has landed (`false`) → runs [completeLeave] (the wipe)
-///    and returns immediately, re-issuing nothing;
-/// 3. otherwise re-issues a FRESH `propose_leave` via [reissue];
-/// 4. waits [waitBetween] before the next poll.
-///
-/// On budget exhaustion (the leaver was never removed within the budget) the
-/// loop still runs [completeLeave] — it never spins unbounded and never delays
-/// the wipe indefinitely. This is the disclosed bounded residual.
-///
-/// The loop touches NO secret material. `propose_leave` publishes under an
-/// ephemeral per-message key and consumes no identity secret, so [reissue]
-/// takes none — there is nothing to materialise or scrub (Rule 9). A concurrent
-/// logout mid-backstop is the CALLER's responsibility: its injected
-/// [stillAMember], [reissue], and [completeLeave] each throw (via the service's
-/// synchronous wipe latch) before any MLS write once logout latches, and this
-/// loop propagates that throw — so the caller's durable leave marker persists
-/// for a launch-resume retry rather than a write landing against a wiped
-/// identity.
-///
-/// Every operation is injected, so the loop is unit-testable without the FFI
-/// bridge, the `liveSyncEnabled` flag, or a real MLS group.
-Future<void> runLeaverBackstop({
-  required Future<bool> Function() stillAMember,
-  required Future<void> Function() reissue,
-  required Future<void> Function() completeLeave,
-  required Future<void> Function(int attempt) waitBetween,
-  int maxReissues = kDefaultLeaverReissueBudget,
-}) async {
-  for (var attempt = 0; attempt < maxReissues; attempt++) {
-    // Has the eviction landed yet? `stillAMember` fails SAFE to false at the
-    // FFI boundary (group gone / self-evicted), so a removed leaver stops here.
-    if (!await stillAMember()) {
-      await completeLeave();
-      return;
-    }
+import 'package:flutter/foundation.dart';
+import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/circle_change_driver.dart';
 
-    // Still a member → re-issue a fresh SelfRemove. No secret is touched: the
-    // re-issue publishes under an ephemeral key. A concurrent-logout wipe makes
-    // this fail closed (throws, which propagates out of the loop) instead of
-    // writing MLS state against a wiped identity.
-    await reissue();
+/// A circle a carry-on found its leave ended for, by both of its ids.
+typedef LeftCircle = ({List<int> mlsGroupId, List<int> nostrGroupId});
 
-    await waitBetween(attempt);
+/// What one carry-on found.
+class LeaveCarryOn {
+  /// Creates a [LeaveCarryOn].
+  const LeaveCarryOn({
+    this.left = const [],
+    this.namedWait,
+    this.unnamedStanding = false,
+  });
+
+  /// Nothing carried on.
+  static const LeaveCarryOn none = LeaveCarryOn();
+
+  /// Each circle the leave ended for, so the caller forgets it.
+  final List<LeftCircle> left;
+
+  /// The soonest wait the core named for a leave still standing.
+  final Duration? namedWait;
+
+  /// Whether a leave still stands whose answer named no wait.
+  final bool unnamedStanding;
+
+  /// Whether any leave still stands.
+  bool get standing => namedWait != null || unnamedStanding;
+
+  /// What a standing leave whose answer named no wait is first asked again
+  /// after, in front of the user.
+  static const Duration unnamedWait = Duration(seconds: 15);
+}
+
+/// Carries leaves on for one plane, never asking a circle again before the
+/// wait its last answer named.
+class LeaverBackstop {
+  /// Creates a backstop reading [clock] (the wall clock unless injected).
+  LeaverBackstop({DateTime Function()? clock}) : _clock = clock ?? DateTime.now;
+
+  final DateTime Function() _clock;
+
+  /// When each circle (by its MLS group id's bytes) may be asked again.
+  final Map<String, DateTime> _notBefore = {};
+
+  /// Bumped by [forget]: a carry-on begun before it writes no wait after it.
+  int _forgets = 0;
+
+  /// Forgets every wait: an identity's circles are not the next one's.
+  void forget() {
+    _forgets++;
+    _notBefore.clear();
   }
 
-  // Budget exhausted: wipe anyway (the disclosed residual — never spin, never
-  // delay the wipe indefinitely).
-  await completeLeave();
+  /// Carries on every circle's leave, once per circle. A background plane
+  /// passes no [inFront] and claims no foreground; a foreground plane passes
+  /// its lifecycle read, which is read again before each circle — a pause
+  /// stops the carry-on at the next circle, so a paused process begins no
+  /// leave step — and read again as each call's claim (a leaving admin's
+  /// steps are made only in front of the user). [stopped], read before each
+  /// circle as well, ends the carry-on there for a plane whose teardown has
+  /// begun. [pastWaits] asks every circle whatever wait its last answer
+  /// named: a group update may be the commit that ends a leave. Never
+  /// throws.
+  Future<LeaveCarryOn> carryOn({
+    required CircleManagerFfi manager,
+    required CircleChangeDriver driver,
+    bool Function()? inFront,
+    bool Function()? stopped,
+    bool pastWaits = false,
+  }) async {
+    final forgets = _forgets;
+    final List<CircleWithMembersFfi> circles;
+    try {
+      circles = await manager.getVisibleCircles();
+    } on Object catch (e) {
+      debugPrint('[Leave] carry-on: circles unreadable: ${e.runtimeType}');
+      return LeaveCarryOn.none;
+    }
+    final left = <LeftCircle>[];
+    Duration? named;
+    var unnamed = false;
+    void standing(Duration wait) {
+      if (named == null || wait < named!) named = wait;
+    }
+
+    for (final circle in circles) {
+      if (inFront != null && !inFront()) break;
+      if (stopped != null && stopped()) break;
+      final groupId = circle.circle.mlsGroupId;
+      final key = groupId.join(',');
+      final notBefore = _notBefore[key];
+      if (!pastWaits && notBefore != null && _clock().isBefore(notBefore)) {
+        standing(notBefore.difference(_clock()));
+        continue;
+      }
+      final LeaveOutcomeFfi outcome;
+      try {
+        outcome = await driver.resumeLeave(
+          circle: manager,
+          mlsGroupId: groupId,
+          foreground: inFront?.call() ?? false,
+        );
+      } on Object catch (e) {
+        debugPrint('[Leave] carry-on failed: ${e.runtimeType}');
+        continue;
+      }
+      // Forgotten meanwhile (a logout): the answer is the previous identity's.
+      if (forgets != _forgets) break;
+      switch (outcome.status) {
+        case LeaveStatusFfi.completed:
+        case LeaveStatusFfi.circleNotFound:
+          _notBefore.remove(key);
+          left.add((
+            mlsGroupId: groupId.toList(),
+            nostrGroupId: circle.circle.nostrGroupId.toList(),
+          ));
+        case LeaveStatusFfi.notLeaving:
+          _notBefore.remove(key);
+        case LeaveStatusFfi.adminMustStepDown:
+          // Answered only off the driver now (the core keeps the intent and
+          // re-plans there); mapped, never re-issued here.
+          _notBefore.remove(key);
+          debugPrint(
+            '[Leave] carry-on ended unmade: an admin step comes first',
+          );
+        case LeaveStatusFfi.proposed:
+        case LeaveStatusFfi.pending:
+        case LeaveStatusFfi.foregroundOnly:
+        case LeaveStatusFfi.engineHeld:
+          // `Some(0)` means "at the next call", which is the next wake: one
+          // call per circle per wake is what keeps it from spinning.
+          final wait = outcome.retryAfterMs;
+          if (wait == null || wait == BigInt.zero) {
+            _notBefore.remove(key);
+            unnamed = true;
+          } else {
+            final asked = Duration(milliseconds: wait.toInt());
+            _notBefore[key] = _clock().add(asked);
+            standing(asked);
+          }
+      }
+    }
+    return LeaveCarryOn(
+      left: left,
+      namedWait: named,
+      unnamedStanding: unnamed,
+    );
+  }
 }

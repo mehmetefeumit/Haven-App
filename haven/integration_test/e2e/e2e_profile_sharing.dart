@@ -52,8 +52,8 @@
 ///     *distinct* pool is a terminal `PoolUnderflow` and the plane stops
 ///     resolving entirely (fail-closed by design — there is no fallback).
 ///   * **Discovery plane.** Still installed, but now serving only the CIRCLE
-///     plane: `fetchMemberKeypackage` resolves Bob's kind-10002 / 10050 / 10051
-///     relay lists off `discovery_relays()` (haven-core `relay/manager.rs`), so
+///     plane: `fetchMemberKeypackage` resolves Bob's kind-10002 / 10050 relay
+///     lists off `discovery_relays()` (haven-core `relay/manager.rs`), so
 ///     without the override step 0 cannot find his KeyPackage.
 ///     `setDiscoveryRelaysForTest` is INERT for kind-0.
 ///   * **Blossom.** A's picture upload targets the server returned by
@@ -141,7 +141,8 @@ import 'package:haven/src/utils/log_alias.dart'
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '_lib/circle_creation.dart' show createCircleConfirmed;
+import '_lib/app_lifecycle.dart';
+import '_lib/circle_creation.dart' show createCircleDelivered;
 import '_lib/coordination.dart';
 import '_lib/fake_location_service.dart';
 import '_lib/pump_helpers.dart';
@@ -485,6 +486,11 @@ Future<List<TestRelayEvent>> _awaitKind0AcrossPool(
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  // The binding forgets the lifecycle after every test and never reads it
+  // back from the platform, so without this the launch session's foreground
+  // claim rests on whether the engine's own lifecycle message has arrived.
+  // See `_lib/app_lifecycle.dart`.
+  resumeAppBeforeEachTest();
 
   late ScenarioContext ctx;
   late SyntheticUser bob;
@@ -540,8 +546,8 @@ void main() {
     didInitCtx = true;
 
     // The discovery plane still serves the CIRCLE plane:
-    // `fetchMemberKeypackage` resolves Bob's kind-10002 / 10050 / 10051 relay
-    // lists through `discovery_relays()`, so step 0 cannot find his KeyPackage
+    // `fetchMemberKeypackage` resolves Bob's kind-10002 / 10050 relay lists
+    // through `discovery_relays()`, so step 0 cannot find his KeyPackage
     // without this. It is INERT for kind-0 — kept for what it still does.
     setDiscoveryRelaysForTest(relays: <String>[defaultStrfryUrl]);
 
@@ -713,6 +719,7 @@ void main() {
           completed: prefs.getBool(kOnboardingCompletedKey) ?? false,
         );
 
+        expectAppResumed();
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
@@ -759,6 +766,7 @@ void main() {
         final relayManager = await RelayManagerFfi.newInstance();
         final bobKp = await relayManager.fetchMemberKeypackage(
           pubkey: bob.pubkeyHex,
+          circle: aliceManager,
         );
         if (bobKp == null) {
           throw StateError(
@@ -767,28 +775,19 @@ void main() {
           );
         }
 
-        // Publishes Bob's Welcome and CONFIRMS the staged create (Security
-        // Rule 13) — an unconfirmed create pins the group in MDK's
-        // `PendingPublish`, where every inbound kind-445 buffers forever. See
-        // `createCircleConfirmed`'s doc.
-        final creation = await createCircleConfirmed(
+        // Publishes Bob's Welcome and requires every relay ack: an invitee
+        // whose Welcome never landed never joins. See `createCircleDelivered`'s
+        // doc.
+        await createCircleDelivered(
           manager: aliceManager,
-          relay: ctx.relay,
+          relayManager: relayManager,
           identitySecretBytes: Uint8List.fromList(aliceSeed),
           members: <MemberKeyPackageFfi>[bobKp],
           name: _circleName,
           circleType: 'location_sharing',
           relays: <String>[ctx.relay.url],
-          creatorFallbackRelays: <String>[ctx.relay.url],
           scenario: 'e2e_profile',
         );
-        if (!creation.welcomeEvents.any(
-          (e) => e.recipientPubkey.toLowerCase() == bob.pubkeyHex.toLowerCase(),
-        )) {
-          throw StateError(
-            '[e2e_profile] createCircle produced no Welcome for Bob.',
-          );
-        }
         // Default accept timeout is already 90 s (== _kind0WaitDeadline).
         final bobCircle = await bob.acceptInvitationViaRelay(relay: ctx.relay);
         expect(

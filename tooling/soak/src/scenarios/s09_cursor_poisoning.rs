@@ -23,50 +23,55 @@
 //!
 //! # Where the evidence for each half comes from
 //!
-//! The WIRE half is the plane's ledger, never the client: a conformant
-//! `nostr_sdk` drops an already-expired event before it emits any notification,
-//! so for one of the three recipes there is nothing a subscriber could report.
-//! What the plane records is that the forged frame was written towards a
-//! subscribed client — and an injection no open subscription matched is refused
-//! as a fault that did not fire, which is this arm's anti-vacuity floor.
+//! The WIRE half is the plane's ledger, never the client: `nostr-relay-pool`
+//! drops an already-expired event before it emits any notification, so for one
+//! of the three recipes there is nothing a subscriber could report (the
+//! `past-expiration-dropped-by-the-relay-pool` arm records exactly that). What
+//! the plane records is that the forged frame was written towards a subscribed
+//! client — and an injection no open subscription matched is refused as a fault
+//! that did not fire, which is this arm's anti-vacuity floor.
 //!
 //! The CLASSIFICATION half is `EngineProcessor::process_group_event`, handed an
 //! equivalent forgery this module minted from the same recipe. The recipe is the
 //! subject: the plane's copy proves a forgery of that shape really crosses a
 //! socket to a subscriber, and the processor's copy says what the product makes
 //! of one. They are two events because a plane mints its own — an injected event
-//! is never stored, so there is no third place to read one back from.
+//! is never stored, so there is no third place to read one back from. The
+//! NIP-40 `expiration` is not a screen (receivers must not judge validity by it,
+//! Marmot `transports/nostr.md:190-192`): an expired forgery reaches the engine
+//! and is classified by its content, and `member-commit-past-expiration-applied`
+//! proves a member's commit stamped with a past `expiration` is applied.
 //!
 //! # What the catch-up half can and cannot be
 //!
 //! The relay double is NIP-40-conformant: it refuses to store an expired event
 //! and filters expired events out of every query, so the catch-up plane can
-//! never be handed the expired case end to end. That is the screen's own premise
-//! — only a malicious or non-conformant relay replays past a TTL — and it is why
-//! every forgery here is injected live rather than seeded. What the catch-up
-//! plane IS graded on is its advance's PROVENANCE: the sweep's own open time,
-//! bracketed by two readings of the same wall clock the sweep uses, and never
-//! any event's `created_at`.
+//! never be handed the expired case end to end, and every forgery here is
+//! injected live rather than seeded. What the catch-up plane IS graded on is its
+//! advance's PROVENANCE: the sweep's own open time, bracketed by two readings of
+//! the same wall clock the sweep uses, and never any event's `created_at`.
 
 use std::time::Duration;
 
-use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
 use haven_core::nostr::mls::types::GroupId;
 use haven_core::relay::catchup::run_catchup_all_circles;
+use haven_core::relay::live_sync::planes::group::group_filter;
 use haven_core::relay::live_sync::{group_cursor_stream, GroupProcessOutcome};
-use nostr::{Event, EventId};
+use nostr::{Event, EventId, RelayMessage};
+use nostr_sdk::{Client, RelayPoolNotification};
 
 use crate::clock::WallNow;
-use crate::nemesis::types::Fault;
+use crate::nemesis::types::{DropClass, Fault};
 use crate::oracle::vacuity::{ExpectationFloor, Observed};
 use crate::oracle::{bounds, Invariant, ProbeToken, Reach, Recovery};
-use crate::relay::{mint, Forgery};
+use crate::relay::{mint, past_expiration, Forgery, SimRelay};
 use crate::rig::{
-    CircleTag, DeviceTag, LogDrain, RelayPlane, RelayTag, RigError, Step, TimelineSink,
+    CircleTag, DeviceTag, LogDrain, PublishVerdict, RelayPlane, RelayTag, RigError, Step,
+    TimelineSink,
 };
 use crate::scenarios::{
-    await_condition, chain_pairs, closing_pairs, deliveries_for, grade_round, round, Absence, Arm,
-    ArmOutcome, ScenarioWorld, WithheldAcks, NO_GATING_ROWS,
+    await_condition, chain_pairs, closing_pairs, deliveries_for, grade_round, relay_update, round,
+    Absence, Arm, ArmOutcome, ScenarioWorld, WithheldAcks, NO_GATING_ROWS,
 };
 
 /// How many times the standing adversary cycles its three recipes.
@@ -83,8 +88,9 @@ const CYCLES: usize = 4;
 /// one whose content no decoder accepts. Every one of them is mintable from a
 /// circle's PUBLIC routing id and a key belonging to nobody, which is the whole
 /// adversary this scenario is written against — and they are three rather than
-/// one because they are refused in three different places, on two sides of the
-/// authentication boundary.
+/// one because they sit on two sides of the authentication boundary: the
+/// malformed one is refused before it, the other two by the engine — the expired
+/// one on its content, never on its tag.
 const RECIPES_PER_CYCLE: usize = 3;
 
 /// How far ahead of its source a rewrap is dated.
@@ -101,7 +107,7 @@ const REWRAP_AHEAD_SECS: i64 = 86_400;
 const DELIVERY_POLL: Duration = Duration::from_millis(20);
 
 /// The arms this scenario offers.
-pub const ARMS: [Arm; 2] = [
+pub const ARMS: [Arm; 4] = [
     Arm {
         label: "standing-adversary",
         recovery: Recovery::Undisturbed,
@@ -135,6 +141,37 @@ pub const ARMS: [Arm; 2] = [
             epochs_crossed: 0,
             deliveries_observed: 2,
             canaries_caught: 2,
+        },
+    },
+    Arm {
+        label: "member-commit-past-expiration-applied",
+        recovery: Recovery::Undisturbed,
+        probe_rounds: 2,
+        resubscribes: false,
+        absence: Absence::None,
+        withheld_acks: WithheldAcks::None,
+        floor: ExpectationFloor {
+            // Nothing is injected: the commit never reaches a plane (see the
+            // arm's own docs).
+            faults_applied: 0,
+            epochs_crossed: 1,
+            deliveries_observed: 2,
+            canaries_caught: 2,
+        },
+    },
+    Arm {
+        label: "past-expiration-dropped-by-the-relay-pool",
+        recovery: Recovery::Undisturbed,
+        probe_rounds: 2,
+        resubscribes: false,
+        absence: Absence::None,
+        withheld_acks: WithheldAcks::None,
+        floor: ExpectationFloor {
+            // The expired forgery and the fence behind it.
+            faults_applied: 2,
+            epochs_crossed: 0,
+            deliveries_observed: 2,
+            canaries_caught: 3,
         },
     },
 ];
@@ -182,6 +219,8 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
     let canaries = match arm.label {
         "standing-adversary" => standing(world, publisher, victim, circle_tag, plane).await?,
         "rewrap-created-at-binding" => rewrap(world, publisher, victim, circle_tag, plane).await?,
+        "member-commit-past-expiration-applied" => expired_commit(world, circle_tag).await?,
+        "past-expiration-dropped-by-the-relay-pool" => pool_drop(world, circle_tag, plane).await?,
         _ => return Err(RigError::UnknownTarget),
     };
 
@@ -263,6 +302,7 @@ async fn standing<T: TimelineSink, L: LogDrain>(
     ];
 
     let mut outcomes: Vec<GroupProcessOutcome> = Vec::with_capacity(RECIPES_PER_CYCLE * CYCLES);
+    let mut expired: Vec<GroupProcessOutcome> = Vec::with_capacity(CYCLES);
     let mut held_every_round = true;
     let mut delivered_every_round = true;
     let mut injected = 0_usize;
@@ -272,7 +312,11 @@ async fn standing<T: TimelineSink, L: LogDrain>(
         for recipe in recipes {
             inject(world, plane, recipe).await?;
             injected += 1;
-            outcomes.push(classify_on_the_live_plane(world, victim, recipe, &routing).await?);
+            let outcome = classify_on_the_live_plane(world, victim, recipe, &routing).await?;
+            if matches!(recipe, Forgery::Expired { .. }) {
+                expired.push(outcome);
+            }
+            outcomes.push(outcome);
         }
         held_every_round &= anchors(world, victim, &stream)? == before;
 
@@ -289,16 +333,22 @@ async fn standing<T: TimelineSink, L: LogDrain>(
     if wire_carried_them_all(world, plane, injected) {
         canaries += 1;
     }
-    // 2. The two pre-authentication recipes are refused BEFORE the signature,
-    //    the ephemeral author or the ciphertext are looked at — every cycle.
-    if pre_auth_rejections(&outcomes) == 2 * CYCLES {
+    // 2. The malformed envelope — and only it — is refused BEFORE the
+    //    signature, the ephemeral author or the ciphertext are looked at, every
+    //    cycle. The expired one is not screened on its tag.
+    if pre_auth_rejections(&outcomes) == CYCLES
+        && expired.len() == CYCLES
+        && !expired.contains(&GroupProcessOutcome::RejectedBeforeAuth)
+    {
         canaries += 1;
     }
-    // 3. …and the third is not: an envelope the parse CAN read is an engine-side
-    //    failure, which is a different classification and a different cursor
-    //    disposition. An arm where all three collapsed into one would be
-    //    grading a boundary that no longer exists.
-    if engine_side_refusals(&outcomes) == CYCLES {
+    // 3. …and the other two are not: an envelope the parse CAN read — the
+    //    undecodable one, and the expired one whose opaque content the engine
+    //    refuses — is judged by the ENGINE, which at MDK v0.10.4 answers with a
+    //    verdict that holds no cursor (an invalid encoding is terminal, a
+    //    deferral is retained by the engine itself). An arm where every recipe
+    //    collapsed into one would be grading a boundary that no longer exists.
+    if engine_verdicts(&outcomes) == 2 * CYCLES {
         canaries += 1;
     }
     // 4. No injection round moved either anchor.
@@ -404,6 +454,244 @@ async fn rewrap<T: TimelineSink, L: LogDrain>(
     Ok(canaries)
 }
 
+/// A member's genuine commit, stamped with a past `expiration`, is applied by
+/// every co-member.
+///
+/// Receivers must not judge validity by the tag (Marmot
+/// `transports/nostr.md:190-192`), so a device that dropped such a commit would
+/// sit one epoch behind a circle every conformant peer moved on. The copy never
+/// reaches a plane: the relay double refuses to store it and
+/// `nostr-relay-pool` drops it before notifying (the next arm records that), so
+/// each co-member's processor — where Haven's own judgement is — is handed it
+/// directly. The admin makes the genuine commit through the product driver,
+/// and every plane withholds the commit class from each co-member's endpoint
+/// while it does: the relays store and acknowledge it, so the admin confirms,
+/// and the expired copy is the only one a co-member is handed. The closing
+/// round then proves the circle still delivers at the new epoch.
+async fn expired_commit<T: TimelineSink, L: LogDrain>(
+    world: &mut ScenarioWorld<T, L>,
+    circle_tag: CircleTag,
+) -> Result<usize, RigError> {
+    let circle = world.circle(circle_tag)?;
+    let admin = circle.admin();
+    let routing = *circle.nostr_group_id();
+    let group = circle.mls_group_id().clone();
+    let mut relays = world.relay_urls();
+    relays.push("wss://s09-expired-commit.example.com".to_owned());
+
+    let co_members: Vec<DeviceTag> = world
+        .devices()
+        .iter()
+        .map(|device| device.tag)
+        .filter(|tag| *tag != admin)
+        .collect();
+    withhold_commits_from(world, &co_members, Fault::DropClass(DropClass::Handshake)).await?;
+    let circle = world.circle(circle_tag)?;
+    let (commit, verdict) = relay_update(world, admin, circle, &relays).await?;
+    withhold_commits_from(world, &co_members, Fault::Heal).await?;
+    if verdict != PublishVerdict::Confirmed {
+        return Err(RigError::PublishNeverAcked);
+    }
+    let forged = past_expiration(&commit)?;
+
+    let mut applied_by_all = true;
+    for member in co_members {
+        applied_by_all &= world
+            .device(member)?
+            .engine()?
+            .processor()
+            .process_group_event(&forged, &routing)
+            .await
+            == GroupProcessOutcome::Applied;
+    }
+
+    let mut canaries = 0_usize;
+    // 1. Every co-member's processor applied the expired commit.
+    if applied_by_all {
+        canaries += 1;
+    }
+    // 2. …and every device now stands on the admin's epoch.
+    let admin_epoch = epoch_of(world, admin, &group).await?;
+    let mut agreed = true;
+    for device in world.devices() {
+        agreed &= epoch_of(world, device.tag, &group).await? == admin_epoch;
+    }
+    if agreed {
+        canaries += 1;
+    }
+    Ok(canaries)
+}
+
+/// Arms (or heals) `fault` on each of `devices`' endpoints of every plane.
+async fn withhold_commits_from<T: TimelineSink, L: LogDrain>(
+    world: &mut ScenarioWorld<T, L>,
+    devices: &[DeviceTag],
+    fault: Fault,
+) -> Result<(), RigError> {
+    for plane in world.relays_mut() {
+        for device in devices {
+            plane.apply_for(*device, fault).await?;
+        }
+    }
+    Ok(())
+}
+
+/// The recorded expectation: `nostr-relay-pool` drops an expired event before
+/// any subscriber sees it (`nostr-relay-pool-0.44.3/src/relay/inner.rs:1192-1195`),
+/// judged by the local clock.
+///
+/// A witness client — the same pool the product runs — subscribes to the
+/// circle's `#h` on the plane and, once the plane has answered its REQ, the
+/// plane injects an expired forgery and then an unexpired one behind it on the
+/// same socket. The fence reaching the witness proves the expired frame, which
+/// the plane wrote first, would have been notified before it. If the pool ever
+/// stops dropping, canary 2 is unmet and the arm is rc 3: the expectation is
+/// stale, and the tracker row T-NIP40-POOL's removal condition is what to
+/// check.
+async fn pool_drop<T: TimelineSink, L: LogDrain>(
+    world: &mut ScenarioWorld<T, L>,
+    circle_tag: CircleTag,
+    plane: RelayTag,
+) -> Result<usize, RigError> {
+    let routing = *world.circle(circle_tag)?.nostr_group_id();
+    let url = plane_of(world, plane)?.url().to_owned();
+    let bound = bounds::round_trip(Recovery::Undisturbed);
+    let (witness, mut notifications) = witness_on(&url, &routing, bound).await?;
+
+    let before = plane_of(world, plane)?.ledger().injected_ids().len();
+    inject(world, plane, Forgery::Expired { group_id: routing }).await?;
+    inject(
+        world,
+        plane,
+        Forgery::MalformedDoubleH { group_id: routing },
+    )
+    .await?;
+    let injected = plane_of(world, plane)?.ledger().injected_ids();
+    let Some(&[expired_id, fence_id]) = injected.get(before..) else {
+        witness.shutdown().await;
+        return Err(RigError::Core(Step::ApplyFault));
+    };
+    let (fenced, expired_seen) = tokio::time::timeout(bound, async {
+        let mut expired_seen = false;
+        while let Ok(notification) = notifications.recv().await {
+            let id = match notification {
+                RelayPoolNotification::Event { event, .. } => event.id,
+                RelayPoolNotification::Message {
+                    message: RelayMessage::Event { event, .. },
+                    ..
+                } => event.id,
+                _ => continue,
+            };
+            expired_seen |= id == expired_id;
+            if id == fence_id {
+                return (true, expired_seen);
+            }
+        }
+        (false, expired_seen)
+    })
+    .await
+    .unwrap_or((false, false));
+    witness.shutdown().await;
+
+    let mut canaries = 0_usize;
+    // 1. The fence reached the witness, so its socket carried the plane's
+    //    frames in order and the witness was listening.
+    if fenced {
+        canaries += 1;
+    }
+    // 2. The recorded expectation: the expired frame, written ahead of the
+    //    fence, was never notified.
+    if fenced && !expired_seen {
+        canaries += 1;
+    }
+    // 3. The plane really wrote the expired frame towards a client, so the
+    //    drop is the client's and not the plane's.
+    if plane_of(world, plane)?.ledger().delivered(&expired_id) >= 1 {
+        canaries += 1;
+    }
+    Ok(canaries)
+}
+
+/// A client on the product's own pool, subscribed to the circle's `#h` on the
+/// plane at `url` and answered: the plane's `EOSE` for the REQ is what says the
+/// subscription is registered, so a live injection after it has somewhere to
+/// go.
+async fn witness_on(
+    url: &str,
+    routing: &[u8; 32],
+    bound: Duration,
+) -> Result<
+    (
+        Client,
+        tokio::sync::broadcast::Receiver<RelayPoolNotification>,
+    ),
+    RigError,
+> {
+    let witness = Client::builder().build(); // test witness
+    witness
+        .add_relay(url)
+        .await
+        .map_err(|_| RigError::Core(Step::ApplyFault))?;
+    witness.connect().await;
+    let mut notifications = witness.notifications();
+    let Ok(output) = witness
+        .subscribe(group_filter(&[hex::encode(routing)], 0), None)
+        .await
+    else {
+        witness.shutdown().await;
+        return Err(RigError::Core(Step::ApplyFault));
+    };
+    let subscription = output.val;
+    let answered = tokio::time::timeout(bound, async {
+        while let Ok(notification) = notifications.recv().await {
+            if let RelayPoolNotification::Message {
+                message: RelayMessage::EndOfStoredEvents(id),
+                ..
+            } = notification
+            {
+                if id.as_ref() == &subscription {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    if answered {
+        Ok((witness, notifications))
+    } else {
+        witness.shutdown().await;
+        Err(RigError::Core(Step::ApplyFault))
+    }
+}
+
+/// The plane tagged `plane`.
+fn plane_of<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    plane: RelayTag,
+) -> Result<&SimRelay, RigError> {
+    world
+        .relays()
+        .iter()
+        .find(|candidate| candidate.tag() == plane)
+        .ok_or(RigError::UnknownTarget)
+}
+
+/// `device`'s epoch for `group`.
+async fn epoch_of<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    device: DeviceTag,
+    group: &GroupId,
+) -> Result<u64, RigError> {
+    world
+        .device(device)?
+        .manager()?
+        .group_epoch(group)
+        .await
+        .map_err(|_| RigError::Core(Step::ReadEpoch))
+}
+
 /// Hands `victim` an equivalent forgery and reads what the live plane made of
 /// it.
 ///
@@ -433,12 +721,18 @@ fn pre_auth_rejections(outcomes: &[GroupProcessOutcome]) -> usize {
         .count()
 }
 
-/// How many outcomes are an ENGINE-side refusal — the authenticated path
-/// failing, which is the disposition that legitimately holds a generation back.
-fn engine_side_refusals(outcomes: &[GroupProcessOutcome]) -> usize {
+/// How many outcomes are the ENGINE's own verdict on an envelope it took:
+/// terminal (`Stale`) or retained for its own re-peel (`Deferred`) — neither of
+/// which holds a generation back.
+fn engine_verdicts(outcomes: &[GroupProcessOutcome]) -> usize {
     outcomes
         .iter()
-        .filter(|outcome| **outcome == GroupProcessOutcome::Unprocessable)
+        .filter(|outcome| {
+            matches!(
+                outcome,
+                GroupProcessOutcome::Stale | GroupProcessOutcome::Deferred
+            )
+        })
         .count()
 }
 
@@ -619,12 +913,7 @@ async fn seal<T: TimelineSink, L: LogDrain>(
     let sender = world.device(device)?;
     sender
         .manager()?
-        .encrypt_location(
-            group,
-            &sender.keys.public_key(),
-            &ProbeToken::mint(9, index).as_location(),
-            LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(group, &ProbeToken::mint(9, index).as_location())
         .await
         .map(|(event, _, _)| event)
         .map_err(|_| RigError::Core(Step::Publish))
@@ -636,7 +925,7 @@ mod tests {
     use crate::oracle::Recovery;
 
     #[test]
-    fn neither_arm_disturbs_a_socket_or_crosses_an_epoch() {
+    fn no_arm_disturbs_a_socket_and_only_the_members_commit_crosses_an_epoch() {
         for arm in &ARMS {
             assert!(
                 arm.recovery == Recovery::Undisturbed,
@@ -647,8 +936,10 @@ mod tests {
                 "a resubscribe would re-anchor the very cursor the arm is watching"
             );
             assert!(
-                arm.floor.epochs_crossed == 0,
-                "a forgery that advanced an epoch would be a forgery that authenticated"
+                arm.floor.epochs_crossed
+                    == u64::from(arm.label == "member-commit-past-expiration-applied"),
+                "a forgery that advanced an epoch would be a forgery that \
+                 authenticated; only a member's own commit may, and must"
             );
             assert!(
                 arm.floor.deliveries_observed >= 2,
@@ -667,8 +958,9 @@ mod tests {
         );
         assert!(
             ARMS[0].floor.canaries_caught == 6,
-            "the wire, the two pre-auth refusals, the engine-side one, the anchors \
-             that held, the matched positive, and the advance that still happens"
+            "the wire, the one pre-auth refusal beside the expired recipe that is \
+             not screened, the two engine-side ones, the anchors that held, the \
+             matched positive, and the advance that still happens"
         );
     }
 
@@ -683,6 +975,20 @@ mod tests {
         assert!(
             ARMS[1].floor.canaries_caught == 2,
             "the refusal that moved no anchor, and the advance that still happens"
+        );
+    }
+
+    #[test]
+    fn the_expiration_arms_inject_only_what_a_plane_can_carry() {
+        assert!(
+            ARMS[2].floor.faults_applied == 0 && ARMS[2].floor.canaries_caught == 2,
+            "an expired commit never reaches a plane; every co-member applies it, \
+             and every device then agrees on the epoch"
+        );
+        assert!(
+            ARMS[3].floor.faults_applied == 2 && ARMS[3].floor.canaries_caught == 3,
+            "the expired forgery and the fence behind it; the fence arrived, the \
+             forgery did not, and the plane really wrote it"
         );
     }
 }

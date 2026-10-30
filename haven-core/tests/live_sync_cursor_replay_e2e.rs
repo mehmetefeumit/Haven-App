@@ -191,6 +191,8 @@ async fn delivered_445_never_sets_the_cursor_but_eose_does() {
     let dir = TempDir::new().unwrap();
     let circle =
         Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
+    // A session lists the ids of circles its manager holds.
+    circle.keep_circle_row_for_test([0x8A; 32]);
     let group_hex = hex::encode([0x8Au8; 32]);
     let cursor_key = group_cursor_stream(&group_hex);
     let spec = CircleSpec {
@@ -212,7 +214,11 @@ async fn delivered_445_never_sets_the_cursor_but_eose_does() {
         "precondition: this circle has never synced, so its cursor is unset"
     );
     let opened_at = now_secs();
-    let engine1 = LiveSyncCore::new_local(Arc::clone(&circle), Keys::generate().public_key());
+    let engine1 = LiveSyncCore::new_local(
+        Arc::clone(&circle),
+        Keys::generate().public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     engine1
         .start(std::slice::from_ref(&spec), &[])
         .await
@@ -286,7 +292,11 @@ async fn delivered_445_never_sets_the_cursor_but_eose_does() {
         "the anchored cursor must persist across a session teardown"
     );
 
-    let engine2 = LiveSyncCore::new_local(Arc::clone(&circle), Keys::generate().public_key());
+    let engine2 = LiveSyncCore::new_local(
+        Arc::clone(&circle),
+        Keys::generate().public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     engine2
         .start(std::slice::from_ref(&spec), &[])
         .await
@@ -346,15 +356,14 @@ async fn build_real_circle(
 
     let config = CircleConfig::new("Multiplex Circle").with_relays(relays.to_vec());
     let result = alice
-        .create_circle(alice_keys, vec![member], &config, relays)
+        .create_circle(alice_keys, vec![member], &config)
         .await
         .expect("create circle");
+    // As the app's driven create leaves it: the founding Welcomes sent from
+    // their records and acknowledged, so no later drive sends them.
+    let _ = alice.land_staged_for_test().await;
     let mls_group_id = result.circle.mls_group_id.clone();
     let nostr_group_id = result.circle.nostr_group_id;
-    alice
-        .confirm_published(result.pending)
-        .await
-        .expect("confirm creation");
 
     let welcome = result
         .welcome_events
@@ -438,12 +447,7 @@ async fn busy_circle_high_cursor_does_not_bury_a_quiet_co_multiplexed_circle() {
     // B's event: a genuine location from Bob, re-wrapped so the OUTER envelope
     // is dated an hour ago — below A's cursor, above B's seed.
     let observed = bob
-        .encrypt_location(
-            &mls_group_id,
-            &bob_keys.public_key(),
-            &LocationMessage::new(48.85, 2.35),
-            600,
-        )
+        .seal_location_for_test(&mls_group_id, &LocationMessage::new(48.85, 2.35))
         .await
         .expect("bob encrypts a location")
         .0;
@@ -453,12 +457,17 @@ async fn busy_circle_high_cursor_does_not_bury_a_quiet_co_multiplexed_circle() {
             .iter()
             .any(|t| matches!(t.as_standardized(), Some(TagStandard::Expiration(_)))),
         "precondition: the location carries a NIP-40 expiration, so the backdated \
-         re-wrap below must keep it or the receiver-side screen would drop it"
+         re-wrap below must keep it: one recomputed from the backdated created_at \
+         would be long past, and the relay and the relay pool both drop that"
     );
     let backdated = backdate(&observed, now - 3600);
     publish(&url, &backdated).await;
 
-    let engine = LiveSyncCore::new_local(Arc::clone(&alice), alice_keys.public_key());
+    let engine = LiveSyncCore::new_local(
+        Arc::clone(&alice),
+        alice_keys.public_key(),
+        Arc::new(haven_core::relay::RelayManager::new()),
+    );
     let mut bus = engine.bus().subscribe();
     engine.start(&specs, &[]).await.expect("start session");
 

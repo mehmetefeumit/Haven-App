@@ -20,6 +20,22 @@ class SubscriptionServiceException implements Exception {
   String toString() => 'SubscriptionServiceException: $message';
 }
 
+/// A [SubscriptionService.start] that a stop ended, and no session is
+/// running.
+///
+/// A type, so that a caller that counts failed starts can tell it apart
+/// without reading a message.
+class SubscriptionStartEnded extends SubscriptionServiceException {
+  /// Creates the exception.
+  const SubscriptionStartEnded({this.endedByEngine = false})
+    : super('live session start ended by a stop');
+
+  /// The only stop was the one the service made when the engine's event
+  /// stream closed under the start: the engine died, nobody asked for no
+  /// session. A failure, unlike a stop somebody asked for.
+  final bool endedByEngine;
+}
+
 /// Whether stopping the live-sync session actually let go of the engine's
 /// `Arc<CircleManager>` — and with it the MLS database's Rule-14 guard.
 ///
@@ -45,10 +61,23 @@ enum LiveSyncStopOutcome {
 /// Consumes the Rust live-sync engine's event stream for the session lifetime.
 ///
 /// Started on login, resumed on app-resume, stopped on logout. Gated behind
-/// `liveSyncEnabled` (default OFF) by its callers, so this is inert until M11.
+/// `liveSyncEnabled` by its callers: on by default since M11, and compiled
+/// out — nothing starts it — in the `HAVEN_LIVE_SYNC=false` rollback build.
 abstract class SubscriptionService {
   /// Builds the engine + starts the session for `groups` (accepted circles) and
   /// the user's `inboxRelays`, then begins consuming `liveEvents()`.
+  ///
+  /// A start claims nothing: the engine leaves the session only started.
+  /// Once the service holds the engine it claims the foreground itself
+  /// ([claimForeground]) if the app is resumed at THAT moment — a start takes
+  /// seconds, and the app may have left since it was asked.
+  ///
+  /// While a start is in flight a second [start] joins it, and a
+  /// [pauseSubscriptions] waits for it and then pauses the session it
+  /// produced. A [stop] ends it, at any point up to its return — its claim
+  /// included: the start throws [SubscriptionStartEnded], and no session is
+  /// left running. A start issued while a [stop] is in flight ends the same
+  /// way.
   Future<void> start({
     required List<FfiGroupSpec> groups,
     required List<String> inboxRelays,
@@ -58,8 +87,23 @@ abstract class SubscriptionService {
   ///
   /// The FOREGROUND re-anchor (app resume, whole-session repair): it always
   /// carries the inbox REQ, so an open app can always receive an invitation.
-  /// A background burst must use [openBackgroundBurst] instead.
+  /// A background burst must use [openBackgroundBurstWithin] instead.
+  ///
+  /// The engine refuses it unless the app is resumed at the moment of the
+  /// call (`appIsResumed`): a re-anchor issued from a process that has since
+  /// gone to the background re-opens nothing.
   Future<void> resumeAfterBackground();
+
+  /// Tells a running session that the app's lifecycle reads `resumed`, when
+  /// — and only when — it does (`appIsResumed`).
+  ///
+  /// For a session that is only started: it enters the engine's foreground
+  /// lifecycle and one drive of its stored records is asked for. Nothing is
+  /// re-anchored and no relay is contacted unless a stored record is due
+  /// one. A no-op for a session already in the foreground, a paused one and
+  /// a stopped one, and the engine is not asked at all while the app is not
+  /// resumed. Never throws.
+  Future<void> claimForeground();
 
   /// Opens ONE background burst — the same re-anchor, plus the inbox fold that
   /// puts the inbox REQ on only every k-th burst and advances the counter
@@ -86,7 +130,26 @@ abstract class SubscriptionService {
   /// and deliberately leaves the radio alone. So a failed open leaves a
   /// session that READS paused and may still hold sockets, and which of those
   /// exits it took is not observable from here.
-  Future<void> openBackgroundBurst();
+  ///
+  /// [budget] is how long the burst's drives have, from now: no drive the
+  /// burst makes begins a relay call it would not have the room to finish.
+  ///
+  /// No session — none installed, or one that has stopped — answers
+  /// [BurstOpenFfi.noSession], typed, and opens nothing.
+  Future<BurstOpenFfi> openBackgroundBurstWithin(Duration budget);
+
+  /// Starts a session directly into a background burst (decision 190), for a
+  /// burst that finds no session: subscribed, making no commit, claiming no
+  /// foreground. The caller then waits out its backlog and pauses it as it
+  /// does any burst. [budget] is as [openBackgroundBurstWithin]'s.
+  ///
+  /// THROWS on failure, as a burst open does; a stop ends it as it ends a
+  /// [start] ([SubscriptionStartEnded]).
+  Future<void> startIntoBurst({
+    required List<FfiGroupSpec> groups,
+    required List<String> inboxRelays,
+    required Duration budget,
+  });
 
   /// Waits for every endpoint the current burst opened to finish its stored
   /// replay, so a peer commit received while paused is APPLIED before the burst
@@ -128,8 +191,8 @@ abstract class SubscriptionService {
 
   /// Subscribes the running session to ONE additional circle incrementally
   /// (delta only), without re-anchoring any other circle's subscription. Used
-  /// by the live-sync resubscriber to re-anchor an added / relay-rotated
-  /// circle without a full stop+start.
+  /// by the live-sync resubscriber to listen for an added circle without a
+  /// full stop+start.
   ///
   /// Throws if there is no active session (the caller falls back to a full
   /// restart) or on a hard error.
@@ -141,15 +204,28 @@ abstract class SubscriptionService {
   /// error.
   Future<void> unsubscribeCircle(Uint8List nostrGroupId);
 
-  /// Stops + drops the session (logout / teardown). Idempotent.
+  /// Stops + drops the session (logout / teardown). Idempotent, and a stop
+  /// issued while another is in flight joins it and reports its outcome.
   ///
   /// Reports whether the engine actually released its manager `Arc` — see
   /// [LiveSyncStopOutcome]. Callers that only tear down may ignore it; the
   /// pause-time handoff must not.
-  Future<LiveSyncStopOutcome> stop();
+  ///
+  /// When [givenUp] completes first, the caller has given up on the stop: it
+  /// answers [LiveSyncStopOutcome.stillHolding] at once and the session
+  /// delivers nothing more, while the engine's stop runs on and no session is
+  /// adopted until it returns. A stop that joins one in flight is given up on
+  /// when either deadline completes.
+  Future<LiveSyncStopOutcome> stop({Future<void>? givenUp});
 
   /// Whether a live session is currently running.
   bool get isRunning;
+
+  /// Where the session stands, read from the engine. No engine held, or a
+  /// read that fails, answers [LiveLifecycleFfi.noSession] — and the engine
+  /// itself reads a poisoned lock that way: never take it as leave to do what
+  /// a running session would refuse.
+  LiveLifecycleFfi lifecycle();
 
   /// Whether the session has ENTERED the paused state.
   ///
@@ -197,12 +273,18 @@ class LiveEventRouter {
     required this.onGroupUpdated,
     required this.onInvitationReceived,
     required this.onStatus,
+    this.onClockRejected,
   });
 
-  /// Circle service (for invitation processing) — mockable.
-  final CircleService circleService;
+  /// The circle service, read at each use (invitation processing, resolving
+  /// a circle). Never an instance captured once: a login retires the previous
+  /// identity's, wiped and latched, and a router holding it would hand the
+  /// next identity's Welcomes to a service that refuses them.
+  final CircleService Function() circleService;
 
   /// Snapshot of the user's joined circles (to resolve a `nostr_group_id`).
+  /// It can hold a circle's row from before its routing id rotated; a miss is
+  /// asked of [circleService] itself ([_resolveCircle]).
   final Future<List<Circle>> Function() circlesSnapshot;
 
   /// Provides the identity secret bytes for invitation unwrapping. Ownership
@@ -229,7 +311,7 @@ class LiveEventRouter {
   /// Invalidate the member-locations provider (a new location landed).
   final void Function() onLocationsChanged;
 
-  /// A circle's roster changed — invalidate circles + locations.
+  /// A circle's roster or routing changed — invalidate circles + locations.
   final void Function(Circle circle) onGroupUpdated;
 
   /// A new invitation was processed — invalidate invitations + circles.
@@ -238,7 +320,10 @@ class LiveEventRouter {
   /// A non-content status/lifecycle signal from the engine.
   final void Function(FfiSyncStatusReason reason) onStatus;
 
-  /// Routes one engine event to its side effects. Never throws.
+  /// What a live drive's relays blamed on this device's clock: the clock
+  /// check's evidence, as a bridge driver entry's outcome carries it.
+  final void Function(DeviceClockComplaintFfi complaint)? onClockRejected;
+
   /// Per-process log-alias handle for a `nostr_group_id` (Security Rule 15 —
   /// even the pseudonymous `nostr_group_id` may not reach a log, full or
   /// truncated; a prefix of an identifier is still an identifier).
@@ -247,20 +332,43 @@ class LiveEventRouter {
 
   /// Full hex of a `nostr_group_id`, for map keys (`Uint8List` has identity
   /// equality, so the bytes themselves cannot key a map).
-  static String _groupKey(Uint8List g) =>
+  static String _groupKey(List<int> g) =>
       g.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
-  /// Circles that have produced ONE unconfirmed wedge verdict, keyed by
-  /// [_groupKey], valued by the [_reanchorGeneration] it arrived in. Bounded by
-  /// the circle roster, and an entry leaves the moment its circle is blocked.
-  /// See [_handleUnrecoverable].
-  final Map<String, int> _unconfirmedWedges = {};
+  /// How many identities a logout has ended ([forgetIdentity]).
+  int _identitiesEnded = 0;
 
-  /// Counts engine re-anchors seen on this stream. Two wedge verdicts for one
-  /// circle only agree if they land in DIFFERENT generations.
-  int _reanchorGeneration = 0;
+  /// Forgets what was gathered under an identity a logout has deleted: every
+  /// location still in a handler is dropped ([identityEndedSince]).
+  void forgetIdentity() {
+    _identitiesEnded++;
+  }
 
-  Future<void> handleEvent(FfiRelayEvent event) async {
+  /// Answers, when called later, whether the identity current NOW has been
+  /// forgotten since. Taken when an event ARRIVES: handlers run one after
+  /// another, so one can start after the logout that ended its identity.
+  bool Function() identityEndedSince() {
+    final at = _identitiesEnded;
+    return () => at != _identitiesEnded;
+  }
+
+  /// Routes one engine event to its side effects. Never throws.
+  ///
+  /// [identityEnded] answers whether the identity [event] arrived under has
+  /// since been forgotten (default: the identity current at this call). A
+  /// location its handler had not yet handed to the location service by then
+  /// is dropped whole: the service it would reach is the next identity's.
+  /// Any other stop — a pause, a detach, a full restart — drops nothing: the
+  /// location service's own fences decide: a paused one persists the fix where
+  /// it still holds the store (not on Android with background sharing on,
+  /// where the store has been handed to the foreground service), and merges
+  /// nothing into its closed cache. The other kinds still run — a
+  /// status says how the session ended, and a Welcome is persisted, not shown.
+  Future<void> handleEvent(
+    FfiRelayEvent event, {
+    bool Function()? identityEnded,
+  }) async {
+    final ended = identityEnded ?? identityEndedSince();
     // Diagnostic (M11 e2e triage): confirm the engine's bus event actually
     // reaches the Dart consumer (the Rust side logs `process_group_event …
     // Processed`; this proves the FFI stream → router hop). Circle handle
@@ -272,7 +380,7 @@ class LiveEventRouter {
     }
     switch (event.kind) {
       case FfiRelayEventKind.location:
-        await _handleLocation(event);
+        await _handleLocation(event, ended);
       case FfiRelayEventKind.groupUpdate:
         await _handleGroupUpdate(event);
       case FfiRelayEventKind.welcome:
@@ -282,19 +390,39 @@ class LiveEventRouter {
     }
   }
 
+  /// The joined circle routed as [nostrGroupId]. A circle's routing id moves
+  /// when its routing rotates, and the snapshot keeps the prior row until it
+  /// is refreshed: a miss there is asked of the circle service, and a circle
+  /// found that way refreshes the snapshot ([onGroupUpdated]).
   Future<Circle?> _resolveCircle(Uint8List nostrGroupId) async {
+    Circle? routedAs(List<Circle> circles) => circles
+        .where((c) => listEquals(c.nostrGroupId, nostrGroupId))
+        .firstOrNull;
+    final Circle? moved;
     try {
-      final circles = await circlesSnapshot();
-      return circles
-          .where((c) => listEquals(c.nostrGroupId, nostrGroupId))
-          .firstOrNull;
+      final known = routedAs(await circlesSnapshot());
+      if (known != null) return known;
+      moved = routedAs(await circleService().getVisibleCircles());
     } on Object catch (e) {
       debugPrint('[Subscription] circle resolve failed: ${e.runtimeType}');
       return null;
     }
+    if (moved != null) {
+      try {
+        onGroupUpdated(moved);
+      } on Object catch (e) {
+        debugPrint(
+          '[Subscription] circle refresh failed: ${e.runtimeType}',
+        );
+      }
+    }
+    return moved;
   }
 
-  Future<void> _handleLocation(FfiRelayEvent event) async {
+  Future<void> _handleLocation(
+    FfiRelayEvent event,
+    bool Function() identityEnded,
+  ) async {
     final content = event.content;
     final sender = event.senderPubkey;
     final nostrGroupId = event.nostrGroupId;
@@ -303,15 +431,13 @@ class LiveEventRouter {
     final circle = await _resolveCircle(nostrGroupId);
     if (circle == null) {
       // Diagnostic (M11 e2e triage): a live location the engine `Processed` was
-      // DROPPED here because its group is not in the circles snapshot — the
-      // prime suspect for "engine processed it fast but memberLocationsProvider
-      // never surfaces it" after a mid-session circle-create / resubscribe (a
-      // stale snapshot). Circle handle only, never the group id (Rule 15).
+      // DROPPED here because neither the circles snapshot nor the circle
+      // service knows its group. Circle handle only, never the group id
+      // (Rule 15).
       if (kDebugMode) {
         debugPrint(
           '[Subscription] location DROPPED — '
-          'group=${_circleHandle(nostrGroupId)} '
-          'not in the circles snapshot (stale resubscribe?)',
+          'group=${_circleHandle(nostrGroupId)} not a joined circle',
         );
       }
       return; // not a joined circle
@@ -326,6 +452,9 @@ class LiveEventRouter {
       return;
     }
     if (decrypted == null) return;
+    // Read in the same turn the ingest is called in: from here the location
+    // service's own fence is what holds a pause, or a wipe.
+    if (identityEnded()) return;
 
     try {
       await ingestLocation(circle, decrypted);
@@ -383,7 +512,7 @@ class LiveEventRouter {
     Uint8List? secret;
     try {
       secret = takeSecretOwnership(await secretBytes());
-      final invitation = await circleService.processGiftWrappedInvitation(
+      final invitation = await circleService().processGiftWrappedInvitation(
         identitySecretBytes: secret,
         giftWrapEventJson: giftWrapJson,
       );
@@ -413,13 +542,18 @@ class LiveEventRouter {
       await _handleUnrecoverable(wedged);
       return;
     }
+    // Neither a session reason nor a circle's (it never carries one): it
+    // says nothing about the connection.
+    final clock = event.clockRejected;
+    if (clock != null) {
+      try {
+        onClockRejected?.call(clock);
+      } on Object catch (e) {
+        debugPrint('[Subscription] clock callback failed: ${e.runtimeType}');
+      }
+    }
     final reason = event.statusReason;
     if (reason == null) return;
-    // OUTSIDE the guard below on purpose: a throwing `onStatus` must not cost
-    // the re-anchor boundary that `_handleUnrecoverable` counts on.
-    if (reason == FfiSyncStatusReason.backgroundResumed) {
-      _reanchorGeneration++;
-    }
     try {
       onStatus(reason);
     } on Object catch (e) {
@@ -427,93 +561,14 @@ class LiveEventRouter {
     }
   }
 
-  /// Routes ONE terminal per-circle wedge verdict to the blocked-circle
-  /// marker, which is what stops send/mutate for that circle alone and shows
-  /// the user the re-invite (`CircleService.isCircleBlocked`).
-  ///
-  /// ## Why TWO verdicts and not one
-  ///
-  /// A single verdict has a documented false positive. The engine reports a
-  /// circle whose parked eviction commit a peer has ALREADY healed but whose
-  /// next publish — the only thing that discharges the durable row — has not
-  /// run yet; the report sweep runs immediately after a re-anchor subscribes,
-  /// so it can race that healing commit. Acting on that one report would tell
-  /// the user to rebuild a circle that works, which is its own harm: the
-  /// repair costs them the whole roster's invitations.
-  ///
-  /// Two observations SHRINK that false positive; they do not eliminate it.
-  /// The row is discharged by a successful send for that circle
-  /// (`discharge_removal_deferral_after_send`), so a healed circle is reported
-  /// only once WHEN a publish lands between the two re-anchors — which is the
-  /// normal case, because `locationPublisherProvider` fires on cold start. It
-  /// is not the only case: with sharing off, with no usable fix, or with every
-  /// relay refusing, no send happens, the row survives, and a healed circle is
-  /// named again on the next foreground open and blocked. Nothing cheaper
-  /// closes it — at the pinned MDK rev no accessor reports whether a staged
-  /// commit is still present (`report_unrecoverable_circles`) — so the residual
-  /// is recorded here rather than described away.
-  ///
-  /// ## Why a generation counter and not a clock
-  ///
-  /// The engine emits [FfiSyncStatusReason.backgroundResumed] on THIS stream,
-  /// in order, at the head of every re-anchor, and one sweep names any circle
-  /// at most once — so "a verdict in a later generation" is exactly "a verdict
-  /// from a later re-anchor", with no wall clock, no timer and no ordering
-  /// assumption beyond the stream's own.
-  ///
-  /// ## What it costs
-  ///
-  /// The second verdict arrives on the next re-anchor: the next app resume for
-  /// the parked-eviction case (a healthy foregrounded session does not
-  /// re-anchor on its own), or the next background burst for a group the engine
-  /// itself declared terminal. So a real wedge can stay unannounced until the
-  /// user opens Haven again — which is also how long the state itself takes to
-  /// become redeemable, so nothing is lost by waiting for proof.
+  /// Refreshes the circle MDK halted, so every surface reading its engine
+  /// state follows. MDK's verdict is durable and authoritative, so the first
+  /// nudge refreshes.
   Future<void> _handleUnrecoverable(Uint8List nostrGroupId) async {
     final circle = await _resolveCircle(nostrGroupId);
-    // Not a joined circle: nothing to block, and nothing to tell the user
+    // Not a joined circle: nothing to refresh, and nothing to tell the user
     // about. Dropped as quietly as an unknown circle's location is.
     if (circle == null) return;
-
-    final key = _groupKey(nostrGroupId);
-    final bool alreadyBlocked;
-    try {
-      alreadyBlocked = circleService.isCircleBlocked(circle.mlsGroupId);
-    } on Object catch (e) {
-      debugPrint('[Subscription] blocked read failed: ${e.runtimeType}');
-      return;
-    }
-    if (alreadyBlocked) {
-      // Idempotent per circle, never counted: the poll path may have latched
-      // this circle already, and a wedge is terminal, so every later verdict
-      // for it is inert.
-      _unconfirmedWedges.remove(key);
-      return;
-    }
-
-    final firstSeen = _unconfirmedWedges[key];
-    if (firstSeen == null) {
-      _unconfirmedWedges[key] = _reanchorGeneration;
-      if (kDebugMode) {
-        debugPrint(
-          '[Subscription] wedge verdict unconfirmed — '
-          'group=${_circleHandle(nostrGroupId)}',
-        );
-      }
-      return;
-    }
-    // A repeat inside the same re-anchor is the SAME observation.
-    if (firstSeen == _reanchorGeneration) return;
-
-    _unconfirmedWedges.remove(key);
-    try {
-      circleService.markCircleBlocked(circle.mlsGroupId);
-    } on Object catch (e) {
-      debugPrint('[Subscription] wedge mark failed: ${e.runtimeType}');
-      return;
-    }
-    // Rebuilds the circle surfaces that read the marker, so the banner and its
-    // re-invite appear without waiting for another user action.
     try {
       onGroupUpdated(circle);
     } on Object catch (e) {

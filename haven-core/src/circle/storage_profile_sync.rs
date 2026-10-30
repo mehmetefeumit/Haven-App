@@ -10,8 +10,12 @@
 //!
 //! # The versioning contract
 //!
-//! Every save bumps `local_version`. A publish reports back TWO coverage facts,
-//! because "it published" and "every peer can read it" are different:
+//! Every save bumps `local_version`, and so does a publish that carried no
+//! saved version and that some relay did not take (a photo removal, or the
+//! blank of a profile deletion): what it published is then the version still
+//! owed. A publish reports back TWO
+//! coverage facts, because "it published" and "every peer can read it" are
+//! different:
 //!
 //! * `published_version` — the newest version at least ONE relay acknowledged;
 //! * `synced_version` — the newest version EVERY attempted relay acknowledged.
@@ -31,7 +35,8 @@
 //! # The row is never deleted
 //!
 //! Both destructive paths ([`CircleStorage::wipe_all_profiles`] and
-//! [`Self::clear_profile_sync_state`]) RESET the row in place. Deleting it would
+//! [`Self::clear_profile_sync_state`]) RESET the row in place (the wipe then
+//! leaves a blank some relay refused owed on it). Deleting it would
 //! restart `local_version` at 0, so a save made afterwards would look older than
 //! a publish recorded before it and the compare-and-set would clear a pending
 //! edit it never published.
@@ -75,8 +80,10 @@ pub struct ProfileSyncCommit<'a> {
     /// The local user's identity pubkey. Its hex is the key for every profile
     /// row, derived here so the two can never disagree.
     pub pubkey: &'a PublicKey,
-    /// The `local_version` this publish carried — the compare-and-set subject.
-    pub published_version: i64,
+    /// The `local_version` this publish carried — the compare-and-set subject
+    /// — or `None` when it carried nothing the outbox was holding: a photo
+    /// removal with nothing queued, or with a queued edit it was not built on.
+    pub published_version: Option<i64>,
     /// The metadata that was actually published.
     pub merged: &'a ProfileMetadata,
     /// The published kind-0's event id (for a future NIP-09 retraction).
@@ -340,6 +347,7 @@ impl CircleStorage {
 
     /// Records one successful own-profile publish: the metadata, the picture
     /// URL, the published-event row, and how far the publish's coverage got.
+    /// Returns the profile row as it was stored.
     ///
     /// One transaction, so the cache, the publication record and the coverage
     /// counters can never disagree about what was published. Every write goes
@@ -353,27 +361,35 @@ impl CircleStorage {
     /// A partial acknowledgement leaves the edit pending and advances the retry
     /// ladder instead, so an opportunistic re-publish paces itself.
     ///
+    /// # A partial acknowledgement is always owed
+    ///
+    /// A publish that carried no outbox version and that some relay did not
+    /// take would otherwise read as done, with nothing left to send it again
+    /// — and the relay that refused a photo removal goes on serving the photo.
+    /// So with nothing else pending, the published profile itself becomes the
+    /// pending version, partly published, on the same ladder. With an edit
+    /// pending nothing is added: that edit's sync republishes the whole
+    /// profile to the whole pool, and marking it would report an edit no relay
+    /// was sent as partly published.
+    ///
+    /// # The row keeps what is still pending
+    ///
+    /// An edit saved while the publish was in flight is on the row already.
+    /// The row is written from `merged` with whatever is pending at that
+    /// moment re-applied, under the lock that reads it, as
+    /// [`Self::upsert_profile_if_newer`] does — or the name field would lose
+    /// the edit until the next sync.
+    ///
     /// # Errors
     ///
     /// As [`Self::stage_own_profile_edits`].
-    pub fn commit_profile_sync(&self, c: &ProfileSyncCommit<'_>) -> Result<()> {
+    pub fn commit_profile_sync(&self, c: &ProfileSyncCommit<'_>) -> Result<CachedProfile> {
         let pubkey_hex = c.pubkey.to_hex();
         let mut conn = self
             .conn()
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
         let tx = conn.transaction()?;
-
-        Self::write_profile_row(
-            &tx,
-            &CachedProfile {
-                pubkey_hex: pubkey_hex.clone(),
-                metadata: c.merged.clone(),
-                state: ProfileState::Known,
-                event_created_at: c.event_created_at,
-                fetched_at: c.now,
-            },
-        )?;
 
         if let Some(url) = c.uploaded_picture_url {
             // Re-stamp the staged row (cached with an empty `url`) with the URL
@@ -401,30 +417,50 @@ impl CircleStorage {
 
         Self::write_published_event_row(&tx, 0, "", c.event_id, c.pubkey, c.now)?;
 
-        if c.fully_acked {
-            tx.execute(
-                "UPDATE profile_sync_state SET
-                    published_version = MAX(published_version, ?2),
-                    synced_version    = MAX(synced_version, ?2),
-                    edits_json     = CASE WHEN local_version = ?2 THEN '{}' ELSE edits_json END,
-                    picture_staged = CASE WHEN local_version = ?2 THEN 0 ELSE picture_staged END,
-                    sync_attempts     = 0,
-                    next_retry_at     = 0
-                 WHERE pubkey = ?1",
-                params![pubkey_hex, c.published_version],
-            )?;
-        } else {
-            tx.execute(
-                "UPDATE profile_sync_state
-                 SET published_version = MAX(published_version, ?2)
-                 WHERE pubkey = ?1",
-                params![pubkey_hex, c.published_version],
-            )?;
-            Self::write_sync_attempt_row(&tx, &pubkey_hex, c.now)?;
+        match (c.published_version, c.fully_acked) {
+            (Some(version), true) => {
+                tx.execute(
+                    "UPDATE profile_sync_state SET
+                        published_version = MAX(published_version, ?2),
+                        synced_version    = MAX(synced_version, ?2),
+                        edits_json     = CASE WHEN local_version = ?2 THEN '{}' ELSE edits_json END,
+                        picture_staged = CASE WHEN local_version = ?2 THEN 0 ELSE picture_staged END,
+                        sync_attempts     = 0,
+                        next_retry_at     = 0
+                     WHERE pubkey = ?1",
+                    params![pubkey_hex, version],
+                )?;
+            }
+            (Some(version), false) => {
+                tx.execute(
+                    "UPDATE profile_sync_state
+                     SET published_version = MAX(published_version, ?2)
+                     WHERE pubkey = ?1",
+                    params![pubkey_hex, version],
+                )?;
+                Self::write_sync_attempt_row(&tx, &pubkey_hex, c.now)?;
+            }
+            (None, true) => {}
+            (None, false) => Self::write_unqueued_publish_owed(&tx, &pubkey_hex, c.now)?,
         }
 
+        let metadata = Self::read_pending_edits(&tx, &pubkey_hex)?.map_or_else(
+            || c.merged.clone(),
+            |pending| merge_edits(c.merged, &pending.to_edits(None)),
+        );
+        let stored = Self::write_profile_row(
+            &tx,
+            &CachedProfile {
+                pubkey_hex,
+                metadata,
+                state: ProfileState::Known,
+                event_created_at: c.event_created_at,
+                fetched_at: c.now,
+            },
+        )?;
+
         tx.commit()?;
-        Ok(())
+        Ok(stored)
     }
 
     /// Cancels a STAGED picture upload and nothing else.
@@ -512,6 +548,33 @@ impl CircleStorage {
              WHERE ?1 IS NULL OR pubkey = ?1",
             params![pubkey_hex],
         )?;
+        Ok(())
+    }
+
+    /// Leaves the profile just published as the version the outbox owes, on an
+    /// ALREADY-LOCKED connection: for a publish that carried no saved version
+    /// and that some relay did not take — a photo removal, or the blank of a
+    /// profile deletion.
+    ///
+    /// A compare-and-set: only a row with nothing pending takes the new
+    /// version, and the retry ladder advances only when one did.
+    pub(super) fn write_unqueued_publish_owed(
+        conn: &Connection,
+        pubkey_hex: &str,
+        now: i64,
+    ) -> rusqlite::Result<()> {
+        let owed = conn.execute(
+            "INSERT INTO profile_sync_state (pubkey, local_version, published_version)
+             VALUES (?1, 1, 1)
+             ON CONFLICT(pubkey) DO UPDATE SET
+                local_version     = local_version + 1,
+                published_version = local_version + 1
+             WHERE local_version <= synced_version",
+            params![pubkey_hex],
+        )?;
+        if owed > 0 {
+            Self::write_sync_attempt_row(conn, pubkey_hex, now)?;
+        }
         Ok(())
     }
 
@@ -651,11 +714,31 @@ mod tests {
         version: i64,
         fully_acked: bool,
         now: i64,
-    ) -> Result<()> {
+    ) -> Result<CachedProfile> {
         let merged = ProfileMetadata::from_metadata(nostr::Metadata::new().display_name("Synced"));
         storage.commit_profile_sync(&ProfileSyncCommit {
             pubkey: &keys.public_key(),
-            published_version: version,
+            published_version: Some(version),
+            merged: &merged,
+            event_id: &any_event_id(keys),
+            event_created_at: now,
+            uploaded_picture_url: None,
+            fully_acked,
+            now,
+        })
+    }
+
+    /// A publish that carried nothing the outbox held: a photo removal.
+    fn commit_unqueued(
+        storage: &CircleStorage,
+        keys: &Keys,
+        fully_acked: bool,
+        now: i64,
+    ) -> Result<CachedProfile> {
+        let merged = ProfileMetadata::from_metadata(nostr::Metadata::new().display_name("Synced"));
+        storage.commit_profile_sync(&ProfileSyncCommit {
+            pubkey: &keys.public_key(),
+            published_version: None,
             merged: &merged,
             event_id: &any_event_id(keys),
             event_created_at: now,
@@ -697,6 +780,41 @@ mod tests {
             storage.get_profile(&hex()).unwrap().unwrap().metadata,
             row.metadata,
             "returned row must equal the stored row"
+        );
+    }
+
+    #[test]
+    fn commit_profile_sync_returns_the_row_it_stored() {
+        // The photo removal renders what this hands back. Its base is normally
+        // a RELAY copy, so the assembled metadata can carry a name the
+        // sanitizer rewrites on the way into the row.
+        let storage = storage();
+        let keys = Keys::generate();
+        let merged = ProfileMetadata::from_metadata(
+            nostr::Metadata::new().display_name("Ada\u{202E}  Lovelace"),
+        );
+        let row = storage
+            .commit_profile_sync(&ProfileSyncCommit {
+                pubkey: &keys.public_key(),
+                published_version: Some(1),
+                merged: &merged,
+                event_id: &any_event_id(&keys),
+                event_created_at: 1_000,
+                uploaded_picture_url: None,
+                fully_acked: true,
+                now: 1_001,
+            })
+            .unwrap();
+
+        assert_eq!(row.metadata.display_name(), Some("Ada Lovelace"));
+        let stored = storage
+            .get_profile(&keys.public_key().to_hex())
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.metadata, row.metadata);
+        assert_eq!(
+            (stored.event_created_at, stored.fetched_at),
+            (row.event_created_at, row.fetched_at)
         );
     }
 
@@ -946,6 +1064,190 @@ mod tests {
     }
 
     #[test]
+    fn a_commit_keeps_an_edit_saved_while_it_was_published_on_the_row() {
+        // The publish carried v1; the bio was saved while it was in flight and
+        // is on the row already. A commit that wrote only what it published
+        // would take the bio off the row the user's field reads until the
+        // next sync put it back.
+        let storage = storage();
+        let keys = Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+        storage
+            .stage_own_profile_edits(&pubkey_hex, &name_edit("Alice"), 1_000)
+            .unwrap();
+        storage
+            .stage_own_profile_edits(&pubkey_hex, &bio_edit("new bio"), 1_001)
+            .unwrap();
+        let published = ProfileMetadata::from_metadata(
+            nostr::Metadata::new()
+                .display_name("Alice")
+                .website(nostr::Url::parse("https://w.example.com").unwrap()),
+        );
+
+        let row = storage
+            .commit_profile_sync(&ProfileSyncCommit {
+                pubkey: &keys.public_key(),
+                published_version: Some(1),
+                merged: &published,
+                event_id: &any_event_id(&keys),
+                event_created_at: 1_002,
+                uploaded_picture_url: None,
+                fully_acked: true,
+                now: 1_002,
+            })
+            .unwrap();
+
+        let stored = storage.get_profile(&pubkey_hex).unwrap().unwrap();
+        for row in [&row, &stored] {
+            assert_eq!(
+                row.metadata.about(),
+                Some("new bio"),
+                "the edit saved during the publish must stay on the row",
+            );
+            assert_eq!(row.metadata.display_name(), Some("Alice"));
+            assert_eq!(
+                row.metadata.as_metadata().website,
+                published.as_metadata().website,
+                "everything else is what was published",
+            );
+            assert_eq!(row.event_created_at, 1_002);
+        }
+    }
+
+    // ---- a publish that carried no saved version ---------------------------
+
+    #[test]
+    fn an_unqueued_publish_a_relay_refused_becomes_the_version_owed() {
+        // A photo removal with nothing queued, taken by two relays of three.
+        // The third still serves the photo, so the profile just published is
+        // itself what the outbox owes — partly published, and paced by the
+        // ladder like any other partial publish.
+        let storage = storage();
+        let keys = Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+        storage
+            .stage_own_profile_edits(&pubkey_hex, &name_edit("Alice"), 1_000)
+            .unwrap();
+        commit(&storage, &keys, 1, true, 1_001).unwrap();
+        assert!(storage.pending_profile_sync(&pubkey_hex).unwrap().is_none());
+
+        commit_unqueued(&storage, &keys, false, 2_000).unwrap();
+
+        let state = storage.profile_pending_state(&pubkey_hex, 2_000).unwrap();
+        assert!(state.pending && state.partial);
+        assert!(!state.retry_due, "the re-publish waits out the ladder");
+        assert_eq!(
+            raw(&storage, &pubkey_hex).unwrap(),
+            (2, 1, 2, 1, 2_000 + PROFILE_SYNC_BACKOFF_SECS[0]),
+        );
+        let owed = storage
+            .pending_profile_sync(&pubkey_hex)
+            .unwrap()
+            .expect("a sync has something to publish");
+        assert_eq!(owed.local_version, 2);
+        assert!(owed.edits.is_empty() && !owed.picture_staged);
+
+        // The sync that follows publishes that version; a full acknowledgement
+        // settles it.
+        commit(&storage, &keys, 2, true, 2_031).unwrap();
+        assert!(
+            !storage
+                .profile_pending_state(&pubkey_hex, 2_031)
+                .unwrap()
+                .pending
+        );
+        assert_eq!(raw(&storage, &pubkey_hex).unwrap(), (2, 2, 2, 0, 0));
+    }
+
+    #[test]
+    fn an_unqueued_publish_a_relay_refused_is_owed_with_no_outbox_row_yet() {
+        // An account that never saved an edit here (an imported key) has no
+        // outbox row. Its removal is owed all the same.
+        let storage = storage();
+        let keys = Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+        assert!(raw(&storage, &pubkey_hex).is_none());
+
+        commit_unqueued(&storage, &keys, false, 2_000).unwrap();
+
+        let state = storage.profile_pending_state(&pubkey_hex, 2_000).unwrap();
+        assert!(state.pending && state.partial && !state.retry_due);
+        assert_eq!(
+            raw(&storage, &pubkey_hex).unwrap(),
+            (1, 0, 1, 1, 2_000 + PROFILE_SYNC_BACKOFF_SECS[0]),
+        );
+    }
+
+    #[test]
+    fn an_unqueued_publish_never_marks_a_pending_edit_published() {
+        // The compare-and-set of the arm above. A name is queued — saved
+        // before the removal or while it was published — and the removal did
+        // not carry it. No relay has been sent the name: it must not read as
+        // partly published, and its own retry must not be put off. Its sync
+        // republishes the whole profile to the whole pool anyway.
+        let storage = storage();
+        let keys = Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+        storage
+            .stage_own_profile_edits(&pubkey_hex, &name_edit("Alice"), 1_000)
+            .unwrap();
+
+        let row = commit_unqueued(&storage, &keys, false, 2_000).unwrap();
+
+        let state = storage.profile_pending_state(&pubkey_hex, 2_000).unwrap();
+        assert!(state.pending, "the name is still to be published");
+        assert!(!state.partial, "and no relay has been sent it");
+        assert!(state.retry_due);
+        assert_eq!(raw(&storage, &pubkey_hex).unwrap(), (1, 0, 0, 0, 0));
+        assert_eq!(
+            row.metadata.display_name(),
+            Some("Alice"),
+            "the queued name stays on the row",
+        );
+    }
+
+    #[test]
+    fn an_unqueued_publish_every_relay_took_leaves_the_outbox_as_it_was() {
+        // Nothing is owed for it. And it is not a sync of what IS queued, so
+        // it neither clears that nor resets the backoff that paces it.
+        let storage = storage();
+        let keys = Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+        commit_unqueued(&storage, &keys, true, 900).unwrap();
+        assert!(
+            raw(&storage, &pubkey_hex).is_none(),
+            "nothing owed seeds no outbox row",
+        );
+
+        storage
+            .stage_own_profile_edits(&pubkey_hex, &name_edit("Alice"), 1_000)
+            .unwrap();
+        storage
+            .record_profile_sync_attempt(&pubkey_hex, 1_000)
+            .unwrap();
+        let before = raw(&storage, &pubkey_hex).unwrap();
+
+        commit_unqueued(&storage, &keys, true, 1_001).unwrap();
+
+        assert_eq!(raw(&storage, &pubkey_hex).unwrap(), before);
+        assert_eq!(
+            storage
+                .pending_profile_sync(&pubkey_hex)
+                .unwrap()
+                .expect("the name is still queued")
+                .edits,
+            name_edit("Alice"),
+        );
+        assert!(
+            !storage
+                .profile_pending_state(&pubkey_hex, 1_001)
+                .unwrap()
+                .retry_due,
+            "the queued name's backoff still stands",
+        );
+    }
+
+    #[test]
     fn a_commit_records_the_kind0_publication_and_arms_the_retraction_gate() {
         let storage = storage();
         let keys = Keys::generate();
@@ -981,7 +1283,7 @@ mod tests {
         storage
             .commit_profile_sync(&ProfileSyncCommit {
                 pubkey: &keys.public_key(),
-                published_version: 1,
+                published_version: Some(1),
                 merged: &merged,
                 event_id: &any_event_id(&keys),
                 event_created_at: 1_001,
@@ -1157,7 +1459,9 @@ mod tests {
             .stage_own_profile_edits(&pubkey_hex, &name_edit("Alice v2"), 1_002)
             .unwrap();
 
-        storage.wipe_all_profiles().unwrap();
+        storage
+            .wipe_all_profiles(&keys.public_key(), &any_event_id(&keys), 1_003, true, 1_003)
+            .unwrap();
 
         let (local, synced, published, _, _) =
             raw(&storage, &pubkey_hex).expect("the outbox row survives a wipe");

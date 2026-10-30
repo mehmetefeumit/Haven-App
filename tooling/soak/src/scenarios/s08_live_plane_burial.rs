@@ -1,18 +1,32 @@
 //! **S08** — a commit buried on the live plane past the relay's replay cap,
-//! and the device that missed it never converges again.
+//! and whether the device that missed it converges again.
 //!
 //! A co-member's commit is pushed off the only page the relay serves by
-//! outsider forgeries. `buried-past-the-cap` is **EXPECTED RED at rc 1** until
-//! the product fix lands: C8 in `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`.
+//! outsider forgeries. `buried-past-the-cap` was **EXPECTED RED at rc 1** until
+//! R4's NIP-77 pass fixed C8 (`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`):
+//! the victim's foreground entry and catch-up sweep reconcile the circle's
+//! window against each relay (`haven-core/src/relay/negentropy.rs`), learn the
+//! commit's id the capped page left out, and fetch it by id. The arm now grades
+//! rc 0, and its sixth canary is that a reconciliation crossed the wire.
 //!
-//! The user-visible consequence: a device that was paused while a commit
-//! landed — backgrounded, asleep, out of coverage — comes back, re-subscribes,
-//! and is handed a page that does not contain the commit. It stays one epoch
-//! behind for good: every later fix from its peers is sealed above it, the
-//! map's other markers stop moving, and nothing says so. A buried COMMIT is a
-//! permanent strand; a buried location merely ages out.
+//! The user-visible consequence it guards: a device that was paused while a
+//! commit landed — backgrounded, asleep, out of coverage — comes back,
+//! re-subscribes, and is handed a page that does not contain the commit.
+//! Without the pass it stays one epoch behind for good: every later fix from
+//! its peers is sealed above it, the map's other markers stop moving, and
+//! nothing says so. A buried COMMIT is a permanent strand; a buried location
+//! merely ages out.
 //!
-//! # The mechanism, at haven-core as it stands
+//! `buried-on-a-relay-without-negentropy` is that strand where the pass cannot
+//! reach: every plane refuses NIP-77 (`Fault::RefusesNegentropy`, the reply
+//! strfry gives with negentropy off), so the burial still strands the victim.
+//! It is RECORDED, not graded — the residual `T-NIP77-FALLBACK` tracks — on a
+//! circle built outside the world's, so the closing round grades the world's
+//! circle and the strand is a canary: the day a relay without NIP-77 stops
+//! stranding, the arm goes unusable and is re-decided rather than silently
+//! passing.
+//!
+//! # The mechanism the pass answers
 //!
 //! 1. The live group REQ carries no `limit`
 //!    (`haven-core/src/relay/live_sync/planes/group.rs:33-42`, `group_filter`):
@@ -82,7 +96,7 @@
 //! re-subscribed on every plane, and the sweep finished its window cleanly. The
 //! strand itself — the commit never reaching the victim, its cursor passing
 //! over it — is NOT a canary: a fixed product grades rc 0 rather than rc 3,
-//! which is what lets `tests/oracles.rs` pin the day C8 is fixed. For the same
+//! which is how `tests/oracles.rs` saw the day C8 was fixed. For the same
 //! reason the arm waits for the first page's cursor advance without counting
 //! it: a fix that HOLDS the cursor on a capped page is the other honest
 //! answer, and a canary there would grade it unusable.
@@ -90,10 +104,11 @@
 //! # Graded, not recorded
 //!
 //! The closing round asks O6, O1 and O2 after both the second REQ and the
-//! sweep, so the strand is GRADED: O1 reports the probe that never reaches the
+//! sweep, so a strand is GRADED: O1 reports the probe that never reaches the
 //! victim and O2 the diverged epoch, both at rc 1 — S23's shape, for S23's
 //! reason: the defect is neither decided nor intended. The WITNESS leads, so
-//! the victim's first probe is a receive.
+//! the victim's first probe is a receive. The one recorded strand is the
+//! relay-without-NIP-77 arm's, above.
 //!
 //! # `packed-window` is not in Tier 1, measured
 //!
@@ -121,9 +136,11 @@
 //! drives the re-anchor itself (`go_offline`/`come_online`) and asserts the
 //! core's half. The schedule half is Tier 2's.
 //!
-//! The product fix — a follow-up page on the live plane when a replay comes
-//! back at a relay's cap, or a hold that the next REQ re-asks — is NOT
-//! designed here. It is a product change with its own plan.
+//! The product fix is not a follow-up page on the live plane: a relay that
+//! caps one page caps the next, and a page the forgeries fill is no evidence
+//! of what lies under it. It is NIP-77 reconciliation, which compares the
+//! relay's set of ids over the window with the device's own and fetches only
+//! the difference, by id — R4's plan.
 //!
 //! # `offline` is a paused engine, not an unplugged socket
 //!
@@ -141,10 +158,13 @@ use nostr::{Event, EventId, Filter};
 use tokio::time::Instant;
 
 use crate::clock::WallNow;
+use crate::nemesis::types::Fault;
 use crate::oracle::vacuity::{ExpectationFloor, Observed};
 use crate::oracle::{bounds, Invariant, Reach, Recovery};
-use crate::relay::{mint, Forgery, SimRelay, RELAY_DEFAULT_REPLAY_CAP};
-use crate::rig::{DeviceTag, LogDrain, PublishVerdict, RigError, Step, TimelineSink};
+use crate::relay::{mint, Forgery, NegFrame, SimRelay, RELAY_DEFAULT_REPLAY_CAP};
+use crate::rig::{
+    DeviceTag, LogDrain, PublishVerdict, RelayPlane, RigError, SimCircle, Step, TimelineSink,
+};
 use crate::scenarios::{
     await_condition, closing_pairs, grade_round, hand_off_admin, round, Absence, Arm, ArmOutcome,
     Scenario, ScenarioReport, ScenarioWorld, WithheldAcks, NO_GATING_ROWS,
@@ -168,7 +188,7 @@ const UNPACKED_SEED: usize = 16;
 const SEED_PER_SECOND: usize = CATCHUP_MAX_EVENTS_PER_PAGE / 2;
 
 /// The arms this scenario offers.
-pub const ARMS: [Arm; 2] = [
+pub const ARMS: [Arm; 3] = [
     Arm {
         label: "buried-past-the-cap",
         recovery: Recovery::Undisturbed,
@@ -182,7 +202,7 @@ pub const ARMS: [Arm; 2] = [
             faults_applied: 0,
             epochs_crossed: 1,
             deliveries_observed: 2,
-            canaries_caught: 5,
+            canaries_caught: 6,
         },
     },
     Arm {
@@ -197,6 +217,23 @@ pub const ARMS: [Arm; 2] = [
             epochs_crossed: 1,
             deliveries_observed: 2,
             canaries_caught: 5,
+        },
+    },
+    Arm {
+        label: "buried-on-a-relay-without-negentropy",
+        recovery: Recovery::Undisturbed,
+        probe_rounds: 1,
+        resubscribes: true,
+        absence: Absence::ResubscribeLookback,
+        withheld_acks: WithheldAcks::None,
+        floor: ExpectationFloor {
+            // `RefusesNegentropy`, once per plane.
+            faults_applied: 1,
+            // The world's circle crosses no epoch here: the burial is the
+            // extra circle's, and the closing round grades the world's.
+            epochs_crossed: 0,
+            deliveries_observed: 2,
+            canaries_caught: 7,
         },
     },
 ];
@@ -215,18 +252,33 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
     arm: &Arm,
     tick: Duration,
 ) -> Result<ArmOutcome, RigError> {
-    let (seed, packed) = match arm.label {
-        "buried-past-the-cap" => (PACKED_SEED, true),
-        "unpacked-control" => (UNPACKED_SEED, false),
+    let canaries = match arm.label {
+        "buried-past-the-cap" => {
+            let cast = cast(world)?;
+            let evidence = bury(world, cast, PACKED_SEED, None).await?;
+            evidence.burial_canaries() + usize::from(evidence.reconciled)
+        }
+        "unpacked-control" => {
+            let cast = cast(world)?;
+            bury(world, cast, UNPACKED_SEED, None)
+                .await?
+                .unpacked_canaries()
+        }
+        "buried-on-a-relay-without-negentropy" => {
+            for plane in world.relays_mut() {
+                plane.apply(Fault::RefusesNegentropy).await?;
+            }
+            let extra = world.build_extra_circle().await?;
+            let cast = cast_of(world, extra.admin())?;
+            listen_to(world, &extra, cast).await?;
+            let evidence = bury(world, cast, PACKED_SEED, Some(&extra)).await?;
+            evidence.burial_canaries()
+                + usize::from(evidence.negentropy_refused)
+                + usize::from(evidence.stranded)
+        }
         _ => return Err(RigError::UnknownTarget),
     };
     let cast = cast(world)?;
-    let evidence = bury(world, cast, seed).await?;
-    let canaries = if packed {
-        evidence.burial_canaries()
-    } else {
-        evidence.unpacked_canaries()
-    };
     close(world, cast, tick, canaries).await
 }
 
@@ -246,7 +298,7 @@ pub async fn below_the_cap_control<T: TimelineSink, L: LogDrain>(
 ) -> Result<ScenarioReport, RigError> {
     let started = Instant::now();
     let cast = cast(world)?;
-    let evidence = bury(world, cast, UNPACKED_SEED).await?;
+    let evidence = bury(world, cast, UNPACKED_SEED, None).await?;
     let outcome = close(world, cast, tick, evidence.burial_canaries()).await?;
     Ok(Scenario::LivePlaneBurial.report(world, &ARMS[0], outcome, started))
 }
@@ -267,6 +319,15 @@ fn cast<T: TimelineSink, L: LogDrain>(world: &ScenarioWorld<T, L>) -> Result<Cas
         .first()
         .ok_or(RigError::ShapeMismatch)?
         .admin();
+    cast_of(world, admin)
+}
+
+/// The cast around `admin`: the first other device takes the commit live,
+/// the next one misses it.
+fn cast_of<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    admin: DeviceTag,
+) -> Result<Cast, RigError> {
     let others: Vec<DeviceTag> = world
         .devices()
         .iter()
@@ -318,6 +379,16 @@ struct Evidence {
     /// The sweep swept every circle and finished every window: no truncation,
     /// no deadline, no relay error.
     sweep_clean: bool,
+    /// The victim opened a NIP-77 session on every plane, its own endpoint,
+    /// between its first re-anchor and the end of the sweep: what recovers
+    /// the buried commit, said on the wire.
+    reconciled: bool,
+    /// Every plane answered the victim's NIP-77 opening as a relay that does
+    /// not speak it.
+    negentropy_refused: bool,
+    /// The victim is still behind the commit after the second re-anchor and
+    /// the sweep.
+    stranded: bool,
 }
 
 impl Evidence {
@@ -360,22 +431,31 @@ async fn bury<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     cast: Cast,
     seed_len: usize,
+    extra: Option<&SimCircle>,
 ) -> Result<Evidence, RigError> {
     let Cast {
         admin,
         witness,
         victim,
     } = cast;
-    let circle = world.circles().first().ok_or(RigError::ShapeMismatch)?;
+    let circle = match extra {
+        Some(circle) => circle,
+        None => world.circles().first().ok_or(RigError::ShapeMismatch)?,
+    };
     let circle_tag = circle.tag;
     let group = circle.mls_group_id().clone();
     let routing = *circle.nostr_group_id();
     let stream = group_cursor_stream(circle.group_id_hex());
-    let hexes: Vec<String> = world
-        .circles()
-        .iter()
-        .map(|circle| circle.group_id_hex().to_string())
-        .collect();
+    let hexes: Vec<String> = extra.map_or_else(
+        || {
+            world
+                .circles()
+                .iter()
+                .map(|circle| circle.group_id_hex().to_string())
+                .collect()
+        },
+        |circle| vec![circle.group_id_hex().to_string()],
+    );
     let bound = bounds::round_trip(Recovery::Undisturbed);
     let page = seed_len.min(RELAY_DEFAULT_REPLAY_CAP);
     let turnover = bounds::wall_second_turnover();
@@ -388,7 +468,10 @@ async fn bury<T: TimelineSink, L: LogDrain>(
         await_condition(turnover, || async { Ok(WallNow::now().secs() > named) }).await?;
     }
     let commit = {
-        let circle = world.circle(circle_tag)?;
+        let circle = match extra {
+            Some(circle) => circle,
+            None => world.circle(circle_tag)?,
+        };
         let (commit, verdict) = hand_off_admin(world, admin, circle, witness).await?;
         if verdict != PublishVerdict::Confirmed {
             return Err(RigError::PublishNeverAcked);
@@ -446,6 +529,7 @@ async fn bury<T: TimelineSink, L: LogDrain>(
     // otherwise pass for a fix of C8.
     let commit_landed =
         commit_landed && tip.saturating_sub(epoch_of(world, victim, &group).await?) == 1;
+    let neg_before = negentropy_frames(world, victim);
     world.device_mut(victim)?.come_online().await?;
     let page_served = await_condition(bound + bounds::subscribe_ladder(), || async {
         Ok(world
@@ -479,6 +563,10 @@ async fn bury<T: TimelineSink, L: LogDrain>(
         cursor_of(world, victim, &stream)?.is_some_and(|ms| ms >= oldest_seed * 1_000);
 
     // 4. The second re-anchor: a fresh REQ on every plane, each answered.
+    //    Not before the first entry's NIP-77 pass has ended: a pause that cut
+    //    it after it began would leave its spacing spent, and the second entry
+    //    and the sweep, both inside that spacing, would run no pass.
+    world.device(victim)?.entry_pass_ended(bound).await?;
     world.device_mut(victim)?.go_offline().await?;
     let replayed_before: Vec<usize> = world
         .relays()
@@ -502,13 +590,22 @@ async fn bury<T: TimelineSink, L: LogDrain>(
     .await?;
 
     // 5. The sweep a background wake runs, over the victim's own manager.
-    let circles = world.circles().len();
+    let circles = world.circles().len() + usize::from(extra.is_some());
     let device = world.device(victim)?;
     let swept = run_catchup_all_circles(device.manager()?, &device.relays, bound.as_secs()).await;
     let sweep_clean = swept.circles_swept == circles
         && swept.windows_truncated == 0
         && !swept.deadline_hit
         && swept.relay_errors == 0;
+    let neg_after = negentropy_frames(world, victim);
+    let reconciled = neg_before
+        .iter()
+        .zip(&neg_after)
+        .all(|(before, after)| after.0 > before.0);
+    // Counted since the fault was armed, not since the re-anchor: a refused
+    // relay is written off for the process, so it is refused once.
+    let negentropy_refused = neg_after.iter().all(|after| after.1 > 0);
+    let stranded = epoch_of(world, victim, &group).await? < tip;
 
     Ok(Evidence {
         seed: seed_len,
@@ -523,7 +620,59 @@ async fn bury<T: TimelineSink, L: LogDrain>(
         re_anchored,
         subscriptions_whole,
         sweep_clean,
+        reconciled,
+        negentropy_refused,
+        stranded,
     })
+}
+
+/// Has every device's engine list `circle` where it lives, and waits until
+/// the witness and the victim hold a cursor for it: the state a circle the
+/// devices have been in for a while is in, where a burial can form.
+async fn listen_to<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    circle: &SimCircle,
+    cast: Cast,
+) -> Result<(), RigError> {
+    for device in world.devices() {
+        device
+            .engine()?
+            .follow_routing()
+            .await
+            .map_err(|_| RigError::Core(Step::ResumeEngine))?;
+    }
+    let stream = group_cursor_stream(circle.group_id_hex());
+    let anchored = await_condition(
+        bounds::round_trip(Recovery::Undisturbed) + bounds::subscribe_ladder(),
+        || async {
+            Ok(cursor_of(world, cast.witness, &stream)?.is_some()
+                && cursor_of(world, cast.victim, &stream)?.is_some())
+        },
+    )
+    .await?;
+    if anchored {
+        Ok(())
+    } else {
+        Err(RigError::Core(Step::ReadCursor))
+    }
+}
+
+/// Per plane, the NIP-77 openings `device`'s own endpoint passed on and the
+/// ones it refused.
+fn negentropy_frames<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    device: DeviceTag,
+) -> Vec<(usize, usize)> {
+    world
+        .relays()
+        .iter()
+        .map(|plane| {
+            (
+                plane.ledger().neg(Some(device), NegFrame::Open),
+                plane.ledger().neg(Some(device), NegFrame::Refused),
+            )
+        })
+        .collect()
 }
 
 /// The closing round, graded with the standard invariants after the second REQ
@@ -711,13 +860,32 @@ mod tests {
 
     #[test]
     fn the_floors_are_pinned_beside_their_labels() {
-        for (arm, label) in ARMS.iter().zip(["buried-past-the-cap", "unpacked-control"]) {
+        let expected = [
+            (
+                "buried-past-the-cap",
+                ExpectationFloor {
+                    canaries_caught: 6,
+                    ..FLOOR
+                },
+            ),
+            ("unpacked-control", FLOOR),
+            (
+                "buried-on-a-relay-without-negentropy",
+                ExpectationFloor {
+                    faults_applied: 1,
+                    epochs_crossed: 0,
+                    canaries_caught: 7,
+                    ..FLOOR
+                },
+            ),
+        ];
+        for (arm, (label, floor)) in ARMS.iter().zip(expected) {
             assert!(
                 arm.label == label,
                 "the arms, in the order the docs list them"
             );
             assert!(
-                arm.floor == FLOOR,
+                arm.floor == floor,
                 "each arm's floor, pinned beside its label"
             );
         }

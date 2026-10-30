@@ -128,7 +128,8 @@ import 'package:haven/src/providers/onboarding_provider.dart'
         onboardingControllerProvider;
 import 'package:haven/src/providers/service_providers.dart'
     show circleServiceProvider, locationServiceProvider;
-import 'package:haven/src/rust/api.dart' show MemberKeyPackageFfi;
+import 'package:haven/src/rust/api.dart'
+    show MemberKeyPackageFfi, RelayManagerFfi;
 import 'package:haven/src/services/fresh_secret.dart' show withFreshSecret;
 import 'package:haven/src/services/location_service.dart'
     show LocationServiceException;
@@ -139,7 +140,7 @@ import 'package:haven/src/widgets/common/error_display.dart'
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
+import 'e2e/_lib/circle_creation.dart' show createCircleDelivered;
 import 'e2e/_lib/pump_helpers.dart' show pumpUntilFound, waitUntilAsync;
 import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
 import 'e2e/_lib/test_relay.dart' show defaultStrfryUrl;
@@ -282,8 +283,7 @@ void main() {
       final failures = <String>[];
 
       // --- Harness: Rust bridge, in-memory keyring, hermetic relay.
-      final ctx = await ScenarioHarness.bootstrap();
-      final relay = ctx.relay;
+      await ScenarioHarness.bootstrap();
 
       // Alice under the PRODUCTION secure-storage key, with onboarding and
       // both location disclosures pre-accepted (the publisher self-skips
@@ -370,21 +370,27 @@ void main() {
       // device PUBLISHES, and `publishLocation` resolves only once a relay
       // OK-acked (Security Rule 13), so no second party is needed to make
       // that a delivery claim rather than a liveness one.
-      await withFreshSecret(
-        () =>
-            container.read(identityNotifierProvider.notifier).getSecretBytes(),
-        (aliceSecret) => createCircleConfirmed(
-          manager: manager,
-          relay: relay,
-          identitySecretBytes: aliceSecret,
-          members: const <MemberKeyPackageFfi>[],
-          name: 'B6 Provider Toggle Circle',
-          circleType: 'location_sharing',
-          relays: <String>[defaultStrfryUrl],
-          creatorFallbackRelays: <String>[defaultStrfryUrl],
-          scenario: 'b6',
-        ),
-      );
+      final relayManager = await RelayManagerFfi.newInstance();
+      try {
+        await withFreshSecret(
+          () =>
+              container
+                  .read(identityNotifierProvider.notifier)
+                  .getSecretBytes(),
+          (aliceSecret) => createCircleDelivered(
+            manager: manager,
+            relayManager: relayManager,
+            identitySecretBytes: aliceSecret,
+            members: const <MemberKeyPackageFfi>[],
+            name: 'B6 Provider Toggle Circle',
+            circleType: 'location_sharing',
+            relays: <String>[defaultStrfryUrl],
+            scenario: 'b6',
+          ),
+        );
+      } finally {
+        await relayManager.shutdown();
+      }
 
       final locationService = container.read(locationServiceProvider);
 

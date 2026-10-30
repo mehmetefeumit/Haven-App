@@ -373,7 +373,7 @@ class S {
         ),
         (
           file: 'lib/src/widgets/circles/invitation_card.dart',
-          member: '_handleAccept',
+          member: '_acceptOrRejoin',
           method: 'acceptInvitation',
         ),
       }, reason:

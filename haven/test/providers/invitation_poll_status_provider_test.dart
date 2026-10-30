@@ -14,6 +14,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/models/relay_ring_slot.dart';
 import 'package:haven/src/providers/invitation_poll_status_provider.dart';
+import 'package:haven/src/providers/invitation_provider.dart'
+    show invitationClockProvider;
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -111,9 +113,11 @@ void main() {
       MockRelayService? relayService,
       MockCircleService? circleService,
       _MockIdentityService? identityService,
+      DateTime Function()? now,
     }) {
       final container = ProviderContainer(
         overrides: [
+          if (now != null) invitationClockProvider.overrideWithValue(now),
           identityServiceProvider.overrideWithValue(
             identityService ??
                 _MockIdentityService(identityExists: identityExists),
@@ -147,6 +151,43 @@ void main() {
       expect(state.total, 0);
       // Privacy: an empty inbox must NOT trigger any relay ping.
       expect(relay.methodCalls, isNot(contains('fetchGiftWrapsPerRelay')));
+    });
+
+    test('asks each inbox relay for gift wraps, and no other relay', () async {
+      final asked = <String>[];
+      final relay = MockRelayService()
+        ..fetchGiftWrapsPerRelayHandler = (relays) async {
+          asked.addAll(relays);
+          return [for (final r in relays) _ok(r)];
+        };
+      final container = makeContainer(
+        inboxRelays: const ['wss://inbox-a', 'wss://inbox-b'],
+        identityExists: true,
+        relayService: relay,
+      );
+
+      await container.read(invitationPollStatusProvider.notifier).refresh();
+
+      expect(asked..sort(), ['wss://inbox-a', 'wss://inbox-b']);
+    });
+
+    test('looks back 96 h, as the poller and the engine do', () async {
+      final relay = MockRelayService();
+      final now = DateTime.utc(2026, 10, 16, 12);
+      final container = makeContainer(
+        inboxRelays: const ['wss://a'],
+        identityExists: true,
+        relayService: relay,
+        now: () => now,
+      );
+
+      await container.read(invitationPollStatusProvider.notifier).refresh();
+
+      expect(
+        relay.lastGiftWrapSince,
+        now.subtract(const Duration(hours: 96)),
+        reason: 'a manual refresh asks for a window other than the poller',
+      );
     });
 
     test('no identity -> stays idle', () async {

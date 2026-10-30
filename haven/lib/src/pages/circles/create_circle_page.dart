@@ -17,7 +17,6 @@ import 'package:haven/src/services/member_directory_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
-import 'package:haven/src/utils/key_package_kind.dart';
 import 'package:haven/src/utils/member_pick_state.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/member_picker.dart';
@@ -29,11 +28,10 @@ class CreateCirclePage extends ConsumerStatefulWidget {
   /// Creates a [CreateCirclePage].
   ///
   /// [initialName] pre-fills the circle name on the naming step — used by
-  /// the Dark Matter cutover "re-create circle" flow (DM-4c) so re-creating
-  /// an orphaned legacy circle does not require retyping its old name. The
-  /// member list still starts empty: a legacy circle's roster is not
-  /// recoverable (see `Circle.isLegacyOrphaned`), so every member must be
-  /// re-added and re-invited regardless.
+  /// the sharing status card's "re-create circle" remedy so re-creating an
+  /// unrecoverable circle does not require retyping its old name. The member
+  /// list still starts empty: every member must be re-added and re-invited
+  /// regardless.
   const CreateCirclePage({this.initialName, super.key});
 
   /// Pre-filled circle name for the naming step, or `null` for the normal
@@ -62,8 +60,10 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   /// Error messages per member.
   final Map<String, String> _memberErrors = {};
 
-  /// Members whose validation failed due to a network error (retryable).
-  final Set<String> _networkFailures = {};
+  /// Members a Retry can still turn valid: a lookup that failed, a package
+  /// that could not be used, or one from a Haven that needs updating — which
+  /// opening Haven replaces with a current one.
+  final Set<String> _retryable = {};
 
   /// General error message.
   String? _errorMessage;
@@ -219,14 +219,14 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
     final npub = _selectedMembers[index];
     final status = _memberStatus[npub] ?? ValidationStatus.validating;
     final error = _memberErrors[npub];
-    final isNetworkFailure = _networkFailures.contains(npub);
+    final retryable = _retryable.contains(npub);
 
     return PendingMemberTile(
       npub: npub,
       status: status,
       errorMessage: error,
       onRemove: () => _onMemberRemoved(npub),
-      onRetry: isNetworkFailure ? () => _retryMember(npub) : null,
+      onRetry: retryable ? () => _retryMember(npub) : null,
     );
   }
 
@@ -258,7 +258,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       _memberStatus.remove(npub);
       _memberKeyPackages.remove(npub);
       _memberErrors.remove(npub);
-      _networkFailures.remove(npub);
+      _retryable.remove(npub);
     });
   }
 
@@ -269,7 +269,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       _memberStatus.clear();
       _memberKeyPackages.clear();
       _memberErrors.clear();
-      _networkFailures.clear();
+      _retryable.clear();
     });
   }
 
@@ -277,23 +277,32 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
     final relayService = ref.read(relayServiceProvider);
     try {
       final keyPackage = await relayService.fetchKeyPackage(npub);
+      // MDK's own admission check for a new circle decides, so a person this
+      // page admits is one the create will accept.
+      final admission = keyPackage == null
+          ? null
+          : await ref
+                .read(circleServiceProvider)
+                .checkMemberKeyPackage(keyPackageJson: keyPackage.eventJson);
       if (!mounted || !_selectedMembers.contains(npub)) return;
       final l10n = AppLocalizations.of(context);
       setState(() {
-        if (keyPackage == null) {
-          _memberStatus[npub] = ValidationStatus.invalid;
-          _memberErrors[npub] = l10n.createCircleNoAccountFound;
-        } else if (isLegacyKeyPackageJson(keyPackage.eventJson)) {
-          // Dark Matter migration (DM-4c, plan §6 F11): a legacy (kind 443)
-          // KeyPackage means this person is still on a pre-migration Haven
-          // build and cannot be invited into a circle on the new engine
-          // until they update.
-          _memberStatus[npub] = ValidationStatus.needsUpdate;
-          _memberErrors[npub] = l10n.pendingMemberNeedsUpdate;
-        } else {
-          _memberStatus[npub] = ValidationStatus.valid;
-          _memberKeyPackages[npub] = keyPackage;
-          _networkFailures.remove(npub);
+        switch (admission) {
+          case null:
+            _memberStatus[npub] = ValidationStatus.invalid;
+            _memberErrors[npub] = l10n.createCircleNoAccountFound;
+          case KeyPackageAdmission.needsUpdate:
+            _memberStatus[npub] = ValidationStatus.needsUpdate;
+            _memberErrors[npub] = l10n.pendingMemberNeedsUpdate;
+            _retryable.add(npub);
+          case KeyPackageAdmission.unusable:
+            _memberStatus[npub] = ValidationStatus.invalid;
+            _memberErrors[npub] = l10n.memberKeyPackageStale;
+            _retryable.add(npub);
+          case KeyPackageAdmission.admissible:
+            _memberStatus[npub] = ValidationStatus.valid;
+            _memberKeyPackages[npub] = keyPackage!;
+            _retryable.remove(npub);
         }
       });
     } on RelayServiceException catch (e) {
@@ -305,7 +314,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;
         _memberErrors[npub] = l10n.createCircleCouldNotVerify;
-        _networkFailures.add(npub);
+        _retryable.add(npub);
       });
     } on Object catch (e) {
       debugPrint('Unexpected error fetching KeyPackage: ${e.runtimeType}');
@@ -314,7 +323,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;
         _memberErrors[npub] = l10n.createCircleSomethingWentWrong;
-        _networkFailures.add(npub);
+        _retryable.add(npub);
       });
     }
   }
@@ -323,7 +332,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
     setState(() {
       _memberStatus[npub] = ValidationStatus.validating;
       _memberErrors.remove(npub);
-      _networkFailures.remove(npub);
+      _retryable.remove(npub);
     });
     _validateMember(npub);
   }

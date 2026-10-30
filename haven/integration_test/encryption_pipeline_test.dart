@@ -60,6 +60,9 @@ import 'package:haven/src/utils/log_alias.dart'
     show LogAliasClass, logAliasHandle;
 import 'package:integration_test/integration_test.dart';
 
+import 'e2e/_lib/circle_creation.dart'
+    show createCircleDelivered, joinDeliveredWelcome;
+import 'e2e/_lib/driven_location.dart';
 import 'e2e/_lib/test_user.dart';
 import 'e2e/_lib/throw_time_error_capture.dart';
 
@@ -163,7 +166,7 @@ void main() {
     // local strfry. Dark Matter made both mandatory here: `addUserRelay`
     // (the NIP-65 seeding step before `maintainKeyPackage`) rejects a plain
     // `ws://` URL with "Use wss:// for security" unless the opt-in is armed,
-    // and `fetchKeypackage`'s discovery-plane fallback would consult the
+    // and `fetchMemberKeypackage`'s discovery-plane fallback would consult the
     // PUBLIC indexers (non-hermetic) without the override.
     //
     // The in-memory keyring means the plaintext-absence proof below runs
@@ -229,7 +232,7 @@ void main() {
         final alicePubkeyHex = aliceIdManager.pubkeyHex();
 
         final bobIdManager = await NostrIdentityManager.newInstance();
-        await bobIdManager.createIdentity();
+        final bobIdentity = await bobIdManager.createIdentity();
         final bobSecretBytes = await bobIdManager.getSecretBytes();
 
         // --------------------------------------------------------------
@@ -263,9 +266,10 @@ void main() {
           circle: bobManager,
           identitySecretBytes: bobSecretBytes,
         );
-        final bobKpJson = await bobRelayManager.fetchKeypackage(
+        final bobKpJson = (await bobRelayManager.fetchMemberKeypackage(
           pubkey: bobIdManager.pubkeyHex(),
-        );
+          circle: aliceManager,
+        ))?.keyPackageJson;
         expect(
           bobKpJson,
           isNotNull,
@@ -277,11 +281,14 @@ void main() {
         //    Pass Bob's KeyPackage event JSON inside a MemberKeyPackageFfi
         //    so the Rust layer can consume it.
         // --------------------------------------------------------------
-        final creationResult = await aliceManager.createCircle(
+        final creationResult = await createCircleDelivered(
+          manager: aliceManager,
+          relayManager: bobRelayManager,
           identitySecretBytes: aliceSecretBytes,
           members: [
             MemberKeyPackageFfi(
               keyPackageJson: bobKpJson!,
+              authorNpub: bobIdentity.npub,
               inboxRelays: const [_testRelayUrl],
               nip65Relays: const [_testRelayUrl],
             ),
@@ -289,7 +296,7 @@ void main() {
           name: 'Enc Pipeline Test Circle',
           circleType: 'location_sharing',
           relays: const [_testRelayUrl],
-          creatorFallbackRelays: const [_testRelayUrl],
+          scenario: 'pipeline',
         );
 
         final mlsGroupId = creationResult.circle.mlsGroupId;
@@ -298,46 +305,25 @@ void main() {
           Uint8List.fromList(creationResult.circle.nostrGroupId),
         );
 
-        // Alice's pending group-creation state (from adding Bob) must be
-        // confirmed before she can send messages — publish-before-apply
-        // (Rule 13). This test hands the Welcome to Bob in-process (not via
-        // a real relay round-trip), so it confirms directly rather than
-        // gating on a relay ack.
-        await aliceManager.confirmPublished(pending: creationResult.pending);
-
         // --------------------------------------------------------------
-        // 7. Bob processes the gift-wrapped Welcome and accepts it so
-        //    both parties share the same MLS epoch.
+        // 7. Bob takes the gift-wrapped Welcome off the relay and accepts
+        //    it so both parties share the same MLS epoch.
         //
-        //    Note: encryptLocation does NOT require the recipient to
-        //    have accepted yet (the sender only needs their own group
-        //    state). However we also want to keep the test semantically
-        //    correct — a group where the creator has merged their commit.
-        //    Bob must accept before he can decryptLocation (FN-2).
+        //    Note: sealing does NOT require the recipient to have
+        //    accepted yet (the sender only needs their own group state).
+        //    However we also want to keep the test semantically correct —
+        //    a group where the creator has merged their commit. Bob must
+        //    accept before he can take a location in (FN-2).
         // --------------------------------------------------------------
-        expect(
-          creationResult.welcomeEvents,
-          isNotEmpty,
-          reason: 'createCircle must emit at least one Welcome event for Bob',
-        );
-
-        final welcomeJson = creationResult.welcomeEvents.first.eventJson;
-        InvitationFfi? bobInvitation;
-
         try {
-          bobInvitation = await bobManager.processGiftWrappedInvitation(
-            identitySecretBytes: bobSecretBytes,
-            giftWrapEventJson: welcomeJson,
+          await joinDeliveredWelcome(
+            relayManager: bobRelayManager,
+            invitee: bobManager,
+            inviteeSecretBytes: bobSecretBytes,
+            inviteePubkeyHex: bobIdManager.pubkeyHex(),
+            relays: const [_testRelayUrl],
+            scenario: 'pipeline',
           );
-          // `null` means the wrapper was already processed on a prior
-          // iteration of this test — safe to skip the accept.
-          if (bobInvitation != null) {
-            // `bobInvitation.mlsGroupId` is the pre-join stand-in id —
-            // actually the gift-wrap event id the invitation was keyed by.
-            await bobManager.acceptInvitation(
-              giftWrapId: bobInvitation.mlsGroupId,
-            );
-          }
         } on Object catch (e) {
           // Invitation processing is best-effort for the opacity/shape
           // assertions. However FN-2 (decrypt round-trip) requires a
@@ -354,17 +340,17 @@ void main() {
         final nowSecs = DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
         // --------------------------------------------------------------
-        // 8. Alice encrypts the sentinel location (first message).
+        // 8. Alice seals the sentinel location (first message) through the
+        //    fanout driver, as production does.
         // --------------------------------------------------------------
-        final encrypted = (await aliceManager.encryptLocation(
-          mlsGroupId: Uint8List.fromList(mlsGroupId),
-          senderPubkeyHex: alicePubkeyHex,
+        final aliceRelayManager = await RelayManagerFfi.newInstance();
+        final encrypted = await sealLocationForTest(
+          relay: aliceRelayManager,
+          circle: aliceManager,
+          mlsGroupId: mlsGroupId,
           latitude: _sentinelLat,
           longitude: _sentinelLon,
-          updateIntervalSecs: BigInt.from(
-            kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
-          ),
-        )).sent!;
+        );
 
         final eventJson = encrypted.eventJson;
 
@@ -385,11 +371,17 @@ void main() {
           reason: 'kind 445 event must carry an h-tag for relay routing',
         );
 
-        // nostrGroupId from the FFI result must be 32 bytes (non-empty).
+        // The h-tag names the circle's 32-byte nostrGroupId, never the
+        // MLS group id.
         expect(
-          encrypted.nostrGroupId.length,
+          creationResult.circle.nostrGroupId.length,
           equals(32),
           reason: 'nostrGroupId must be exactly 32 bytes',
+        );
+        expect(
+          RegExp('"h"\\s*,\\s*"$nostrGroupIdHex"').hasMatch(eventJson),
+          isTrue,
+          reason: "the h-tag must carry the circle's nostrGroupId",
         );
 
         // ---- Assertion 3: no plaintext latitude ----
@@ -494,9 +486,8 @@ void main() {
         // 2 * kTtlNetworkBufferSeconds` = 228 s (the data-minimizing point
         // that still clears the 168 s max per-circle publish gap with a 60 s
         // no-gap margin; mirrors LOCATION_MESSAGE_RETENTION_SECS in
-        // haven-core/src/location/ttl.rs). (`updateIntervalSecs` passed to
-        // encryptLocation is retained for signature stability but no longer
-        // drives the TTL.) The event's own `created_at` anchors the exact
+        // haven-core/src/location/ttl.rs). The event's own `created_at`
+        // anchors the exact
         // check; the nowSecs bound catches a stale/backdated created_at.
         final retentionSecs =
             kLocationPublishMaxInterval.inSeconds +
@@ -538,7 +529,7 @@ void main() {
         // ---- Assertion 10: positive ciphertext shape check ----
         // Extract the "content" field and verify it looks like base64 /
         // URL-safe base64 with at least 32 characters.  This catches a
-        // regression where encryptLocation silently no-ops and the
+        // regression where the seal silently no-ops and the
         // plaintext-absence checks pass vacuously on empty content.
         final contentMatch = RegExp(
           r'"content"\s*:\s*"([^"]+)"',
@@ -559,18 +550,16 @@ void main() {
         );
 
         // --------------------------------------------------------------
-        // 11. Alice encrypts a SECOND location with different sentinel
+        // 11. Alice seals a SECOND location with different sentinel
         //     coordinates to verify ephemeral-key uniqueness per message.
         // --------------------------------------------------------------
-        final encrypted2 = (await aliceManager.encryptLocation(
-          mlsGroupId: Uint8List.fromList(mlsGroupId),
-          senderPubkeyHex: alicePubkeyHex,
+        final encrypted2 = await sealLocationForTest(
+          relay: aliceRelayManager,
+          circle: aliceManager,
+          mlsGroupId: mlsGroupId,
           latitude: _sentinelLat2,
           longitude: _sentinelLon2,
-          updateIntervalSecs: BigInt.from(
-            kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
-          ),
-        )).sent!;
+        );
 
         final eventJson2 = encrypted2.eventJson;
 
@@ -658,8 +647,8 @@ void main() {
     //
     // After Alice encrypts a location, Bob decrypts it and the recovered
     // coordinates must match the sentinels within 1e-5. A wrong-recipient
-    // (Carol, a third identity not in the group) must receive null from
-    // decryptLocation, proving cross-group isolation.
+    // (Carol, a third identity not in the group) must recover no location
+    // from taking it in, proving cross-group isolation.
     // =========================================================================
     testWidgets("Bob can decrypt Alice's location and wrong recipient gets "
         'null (encrypt→decrypt round-trip + cross-group isolation)', (
@@ -698,7 +687,7 @@ void main() {
         final alicePubkeyHex = aliceIdManager.pubkeyHex();
 
         final bobIdManager = await NostrIdentityManager.newInstance();
-        await bobIdManager.createIdentity();
+        final bobIdentity = await bobIdManager.createIdentity();
         final bobSecretBytes = await bobIdManager.getSecretBytes();
 
         // Carol is a completely independent identity — never added to the
@@ -737,9 +726,10 @@ void main() {
           circle: bobManager,
           identitySecretBytes: bobSecretBytes,
         );
-        final bobKpJson = await bobRelayManager.fetchKeypackage(
+        final bobKpJson = (await bobRelayManager.fetchMemberKeypackage(
           pubkey: bobIdManager.pubkeyHex(),
-        );
+          circle: aliceManager,
+        ))?.keyPackageJson;
         expect(
           bobKpJson,
           isNotNull,
@@ -749,11 +739,14 @@ void main() {
         // ----------------------------------------------------------------
         // Alice creates the circle with Bob as the sole member.
         // ----------------------------------------------------------------
-        final creation = await aliceManager.createCircle(
+        final creation = await createCircleDelivered(
+          manager: aliceManager,
+          relayManager: bobRelayManager,
           identitySecretBytes: aliceSecretBytes,
           members: [
             MemberKeyPackageFfi(
               keyPackageJson: bobKpJson!,
+              authorNpub: bobIdentity.npub,
               inboxRelays: const [_testRelayUrl],
               nip65Relays: const [_testRelayUrl],
             ),
@@ -761,54 +754,34 @@ void main() {
           name: 'Round-trip Test Circle',
           circleType: 'location_sharing',
           relays: const [_testRelayUrl],
-          creatorFallbackRelays: const [_testRelayUrl],
+          scenario: 'pipeline',
         );
 
         final mlsGroupId = Uint8List.fromList(creation.circle.mlsGroupId);
 
-        // Alice confirms her pending group-creation state before encrypting
-        // (publish-before-apply, Rule 13) — the Welcome is handed to Bob
-        // in-process here, not via a real relay round-trip.
-        await aliceManager.confirmPublished(pending: creation.pending);
-
         // ----------------------------------------------------------------
-        // Bob processes the gift-wrap and accepts the invitation.
+        // Bob takes the gift-wrap off the relay and accepts the invitation.
         // Both parties must share the same epoch for decryption to work.
         // ----------------------------------------------------------------
-        expect(
-          creation.welcomeEvents,
-          isNotEmpty,
-          reason: 'createCircle must emit at least one Welcome event for Bob',
+        await joinDeliveredWelcome(
+          relayManager: bobRelayManager,
+          invitee: bobManager,
+          inviteeSecretBytes: bobSecretBytes,
+          inviteePubkeyHex: bobIdManager.pubkeyHex(),
+          relays: const [_testRelayUrl],
+          scenario: 'pipeline',
         );
 
-        final invitation = await bobManager.processGiftWrappedInvitation(
-          identitySecretBytes: bobSecretBytes,
-          giftWrapEventJson: creation.welcomeEvents.first.eventJson,
-        );
-        expect(
-          invitation,
-          isNotNull,
-          reason:
-              'Bob must receive a pending invitation from the gift-wrap; '
-              'null means the gift-wrap was already processed, which is '
-              'impossible for a freshly-created group in a fresh temp dir.',
-        );
-        // `invitation.mlsGroupId` is the pre-join stand-in id — actually
-        // the gift-wrap event id the invitation was keyed by.
-        await bobManager.acceptInvitation(giftWrapId: invitation!.mlsGroupId);
-
         // ----------------------------------------------------------------
-        // Alice encrypts a location with the sentinel coordinates.
+        // Alice seals a location with the sentinel coordinates.
         // ----------------------------------------------------------------
-        final encrypted = (await aliceManager.encryptLocation(
+        final encrypted = await sealLocationForTest(
+          relay: await RelayManagerFfi.newInstance(),
+          circle: aliceManager,
           mlsGroupId: mlsGroupId,
-          senderPubkeyHex: alicePubkeyHex,
           latitude: _sentinelLat,
           longitude: _sentinelLon,
-          updateIntervalSecs: BigInt.from(
-            kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
-          ),
-        )).sent!;
+        );
 
         // Sanity: the event is still opaque (no plaintext coords).
         for (final forbidden in _forbiddenLatSubstrings) {
@@ -824,11 +797,13 @@ void main() {
 
         // ----------------------------------------------------------------
         // FN-2 POSITIVE: Bob decrypts Alice's event.
-        // This is the primary regression guard: if decryptLocation is a
-        // no-op or the MLS group states diverged, the result is null and
-        // the expect below fails, surfacing the bug.
+        // This is the primary regression guard: if the ingest is a no-op
+        // or the MLS group states diverged, the result is empty and the
+        // expect below fails, surfacing the bug.
         // ----------------------------------------------------------------
-        final decryptResults = await bobManager.decryptLocation(
+        final decryptResults = await ingestForTest(
+          relay: bobRelayManager,
+          circle: bobManager,
           eventJson: encrypted.eventJson,
         );
 
@@ -838,7 +813,7 @@ void main() {
           reason:
               "Bob must be able to decrypt Alice's location event. "
               "An empty result means either Bob's acceptInvitation did not "
-              "converge to Alice's epoch, or decryptLocation is a no-op — "
+              "converge to Alice's epoch, or the ingest is a no-op — "
               'both are regressions in the MLS pipeline.',
         );
 
@@ -891,8 +866,8 @@ void main() {
         // FN-2 NEGATIVE: Carol (outside the group) must NOT decrypt.
         //
         // Carol's CircleManagerFfi has no knowledge of the Alice-Bob group:
-        // no MLS state, no circle row. decryptLocation on her instance
-        // must return null — it cannot process a message for a group it
+        // no MLS state, no circle row. Taking the event in on her instance
+        // must recover nothing — it cannot process a message for a group it
         // has never joined. If it returns a non-null value that is a
         // cross-group key-isolation regression.
         // ----------------------------------------------------------------
@@ -902,16 +877,17 @@ void main() {
         //   * throw an MLS error (e.g. "group not found") — `process_message`
         //     propagates as Err for an unknown group (manager.rs:2272), which
         //     the raw FFI surfaces as a thrown exception. The production
-        //     service layer already catches this (nostr_circle_service.dart
-        //     decryptLocation try/catch); the FN-2 callers swallow it and move
-        //     on (location_sharing_service.dart). A throw is therefore an
+        //     receive path catches it per event and moves on
+        //     (location_sharing_service.dart). A throw is therefore an
         //     ACCEPTABLE isolation outcome — it yields no plaintext.
         // The load-bearing invariant is the same either way: Carol recovers NO
         // plaintext location. We assert exactly that, so a real regression — a
         // non-null *location* for a non-member — still fails loudly.
         List<LocationMessageResultFfi> carolResults = const [];
         try {
-          carolResults = await carolManager.decryptLocation(
+          carolResults = await ingestForTest(
+            relay: await RelayManagerFfi.newInstance(),
+            circle: carolManager,
             eventJson: encrypted.eventJson,
           );
         } on Object catch (e) {
@@ -930,9 +906,10 @@ void main() {
           isNull,
           reason:
               "Carol (not a member of Alice's group) must NOT recover a "
-              'plaintext location from decryptLocation. A non-null location '
-              'here is a critical cross-group key-isolation failure: it means '
-              'MLS keys are not properly scoped to group membership.',
+              'plaintext location from taking the event in. A non-null '
+              'location here is a critical cross-group key-isolation '
+              'failure: it means MLS keys are not properly scoped to group '
+              'membership.',
         );
 
         debugPrint(
@@ -1061,7 +1038,7 @@ void main() {
       // The production parse, wired exactly as subscriptionServiceProvider
       // wires it — the pairing under test is closure + Rust parser.
       final router = LiveEventRouter(
-        circleService: _UnusedCircleService(),
+        circleService: _UnusedCircleService.new,
         circlesSnapshot: () async => <Circle>[circle],
         secretBytes: () async => const <int>[],
         parseLocation: parseStreamedLocation,

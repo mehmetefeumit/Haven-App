@@ -45,6 +45,10 @@ typedef StartServiceFn =
 /// [BackgroundLocationManager.stopService].
 typedef StopServiceFn = Future<void> Function();
 
+/// How long [BackgroundSharingNotifier.loaded] waits on the iOS background
+/// session's arm before it completes with the consent still reading `false`.
+const Duration kConsentArmBound = Duration(seconds: 5);
+
 /// Notifier for the background sharing preference.
 ///
 /// Loads the persisted value on construction (defaulting to `false`)
@@ -83,7 +87,22 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
            iosBackgroundSession ?? createIosBackgroundSessionService(),
        _isIOS = isIOS ?? Platform.isIOS,
        super(false) {
-    _load();
+    unawaited(_load().whenComplete(_markLoaded));
+    loaded = _loaded.future;
+  }
+
+  /// Completes once the persisted consent has been read into [state] (or the
+  /// read has failed, leaving it `false`) — or [kConsentArmBound] after the
+  /// iOS session arm began, if the platform has not answered it by then: the
+  /// state still reads `false`, so a pause waiting on this takes the branch
+  /// that stops everything rather than wait on a call that may never answer.
+  /// Never completes with an error.
+  late final Future<void> loaded;
+
+  final Completer<void> _loaded = Completer<void>();
+
+  void _markLoaded() {
+    if (!_loaded.isCompleted) _loaded.complete();
   }
 
   final EnsurePermissionsFn _ensurePermissions;
@@ -161,7 +180,12 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
       // and BEFORE the state flip so the session is held when the flip
       // rebuilds the position stream (session-before-updates rule).
       if (enabled && _isIOS) {
-        await _iosBackgroundSession.arm();
+        final bound = Timer(kConsentArmBound, _markLoaded);
+        try {
+          await _iosBackgroundSession.arm();
+        } finally {
+          bound.cancel();
+        }
       }
 
       state = enabled;

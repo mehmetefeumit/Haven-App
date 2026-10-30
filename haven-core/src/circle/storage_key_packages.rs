@@ -1,37 +1,14 @@
-//! Storage methods for the `published_key_packages` table (Dark Matter DM-2b).
+//! The two `KeyPackage` facts that are Haven's own.
 //!
-//! Extends [`CircleStorage`] with tracking of the CURRENT `KeyPackage` event
-//! this device has published. This powers the periodic `KeyPackageMaintenance`
-//! task (see [`crate::relay::maintenance::key_package`]): the stored NIP-33
-//! `d_tag` lets a heal/rotation REPLACE the same addressable coordinate (so the
-//! user stays reachable at a stable address), and the stored public
-//! `key_package` wire bytes let a heal re-publish the SAME last-resort package
-//! verbatim (no re-mint) and let a rotation feed the superseded bundle to
-//! `session.delete_key_package` (mdk#160).
-//!
-//! # What changed at the Dark Matter cutover
-//!
-//! The pre-migration model tracked an MLS `hash_ref` (to run the deleted M8-2
-//! live-material gate) and a `kind` column (30443 canonical + 443 legacy twin).
-//! Both are gone: last-resort `KeyPackages` never die on join (so there is no
-//! "dead material" to detect), and the 443 twin is RETIRED (single kind 30443).
-//! The legacy rows are cleared at cutover by
-//! `CircleStorage::migrate_reset_published_key_packages`.
-//!
-//! # Scope
-//!
-//! The table is **identity-scoped**, not per-circle: `KeyPackages` are pre-group
-//! init material that outlives any single circle, so there is deliberately no
-//! `delete_circle` cascade into it.
-//!
-//! # Privacy and security notes
-//!
-//! * `event_id` and `d_tag` are public Nostr identifiers — no secret material.
-//! * `key_package` is the PUBLIC MLS `KeyPackage` wire bytes (the same bytes
-//!   published to relays as the event's base64 content); the private HPKE init
-//!   key lives only in the engine's encrypted storage. Even so, these bytes are
-//!   redacted from [`PublishedKeyPackageRow`]'s `Debug` (Security Rule 6,
-//!   defence in depth) and never logged.
+//! The `KeyPackage` this device tracks — its slot, its bytes, the signed
+//! event a relay acknowledged — lives in MDK's lifecycle record
+//! ([`crate::nostr::mls::SessionManager::tracked_key_package`]), not here.
+//! What stays in `circles-v2.db` is what MDK has no notion of: whether the
+//! retirement of a pre-width-fix `d` slot has completed
+//! ([`crate::relay::maintenance::decide_kp_slot_retirement`]), and whether an
+//! invitation is being held for the user's answer — which a consumed package's
+//! replacement waits for, for a bounded time counted from an instant kept
+//! here.
 
 // Single-shot SQLite ops naturally hold the lock to completion; the parent
 // module already disables this lint at the file level for storage.rs.
@@ -41,15 +18,9 @@ use rusqlite::{params, OptionalExtension};
 
 use super::error::{CircleError, Result};
 use super::storage::CircleStorage;
-use crate::log_alias::{self, EventIdHex, KeyPackageSlot};
 
 /// The Marmot `KeyPackage` event kind (NIP-33 addressable, single kind).
 pub const KEY_PACKAGE_KIND: u16 = 30443;
-
-/// `user_settings` key recording that the one-time legacy (443 / kind-10051)
-/// retraction has been published, so the non-optional cutover retraction runs
-/// at most once (migration plan §6 step 5).
-pub const LEGACY_KP_RETRACTION_DONE_KEY: &str = "legacy_kp_retraction_done_v1";
 
 /// `user_settings` key recording that the one-time retirement of a malformed
 /// (pre-width-fix) kind-30443 `d` slot has COMPLETED — the account publishes a
@@ -61,168 +32,33 @@ pub const LEGACY_KP_RETRACTION_DONE_KEY: &str = "legacy_kp_retraction_done_v1";
 /// [`crate::relay::maintenance::decide_kp_slot_retirement`]).
 pub const KP_SLOT_RETIREMENT_DONE_KEY: &str = "kp_slot_retirement_done_v1";
 
-/// One row of the `published_key_packages` table: the current published KP.
+/// `user_settings` key recording that an invitation was held and not every
+/// held invitation has been answered since.
 ///
-/// The `Debug` impl is hand-written: the MLS wire bytes must never reach a log
-/// line (Security Rule 6), and the event id and the `d` slot are identifiers, so
-/// they render as [`log_alias`] handles (Security Rule 15).
-#[derive(Clone, PartialEq, Eq)]
-pub struct PublishedKeyPackageRow {
-    /// Lowercase-hex Nostr event id of the published kind-30443 event.
-    pub event_id: String,
-    /// Stable NIP-33 `d` tag (the addressable slot) of the published event.
-    pub d_tag: String,
-    /// Public MLS `KeyPackage` wire bytes (re-published verbatim on a heal; fed
-    /// to `delete_key_package` on rotation).
-    pub key_package: Vec<u8>,
-    /// Unix seconds when the event was published.
-    pub created_at: i64,
-}
+/// The held invitations themselves live in memory only; this survives a
+/// restart, when they are gone until the next poll finds them again.
+pub const KP_HELD_INVITATION_KEY: &str = "kp_held_invitation_outstanding_v1";
 
-impl std::fmt::Debug for PublishedKeyPackageRow {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PublishedKeyPackageRow")
-            .field("event_id", &log_alias::event(EventIdHex(&self.event_id)))
-            .field(
-                "d_tag",
-                &log_alias::key_package(KeyPackageSlot(&self.d_tag)),
-            )
-            .field("key_package", &"<redacted>")
-            .finish_non_exhaustive()
-    }
-}
+/// `user_settings` key holding the consumed-package hold's record: the Unix
+/// second of the first maintenance tick that left a consumed `KeyPackage` in
+/// place for a held invitation, from which the hold is counted — or
+/// [`CONSUMED_HOLD_OVER`] once that hold has ended. The next acknowledged
+/// replacement deletes it.
+pub const KP_CONSUMED_HOLD_SINCE_KEY: &str = "kp_consumed_hold_since_v1";
+
+/// The hold start recorded once a hold has ended: no clock reaches it, so no
+/// clock movement resumes the hold before the replacement is acknowledged.
+pub const CONSUMED_HOLD_OVER: u64 = u64::MAX;
 
 impl CircleStorage {
-    /// Records the CURRENT published `KeyPackage` event for its stable slot.
-    ///
-    /// Single-row-per-slot: any prior tracking row for the same `d_tag` is
-    /// removed first, so the table holds exactly the latest publication into
-    /// each addressable coordinate. A heal (re-publish of the same bytes into
-    /// the same slot) and a rotation (new bytes into the same slot) therefore
-    /// both leave one authoritative row.
-    ///
-    /// The FFI orchestration MUST read [`Self::latest_published_key_package`]
-    /// (to capture the superseded bytes for `delete_key_package`) BEFORE calling
-    /// this, since recording drops the prior row for the slot.
+    /// The consumed-package hold's record: when the hold began, or
+    /// [`CONSUMED_HOLD_OVER`] if it has ended; `None` when there is none, or
+    /// what is stored cannot be read.
     ///
     /// # Errors
     ///
     /// Returns a database error on failure.
-    pub fn record_published_key_package(&self, row: &PublishedKeyPackageRow) -> Result<()> {
-        let conn = self
-            .conn()
-            .lock()
-            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        let kp: &[u8] = &row.key_package;
-        conn.execute(
-            "DELETE FROM published_key_packages WHERE d_tag = ?1",
-            params![row.d_tag],
-        )?;
-        conn.execute(
-            "INSERT OR IGNORE INTO published_key_packages
-                 (event_id, d_tag, key_package, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![row.event_id, row.d_tag, kp, row.created_at],
-        )?;
-        Ok(())
-    }
-
-    /// Returns the most-recently-published tracking row, if any.
-    ///
-    /// This is the current `KeyPackage` the maintenance task reuses: its `d_tag`
-    /// is the stable slot to re-publish into, and its `key_package` bytes are
-    /// the last-resort package to re-publish verbatim (heal) or to hand to
-    /// `delete_key_package` (rotation). Newest wins by `created_at` then `id`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a database error on failure.
-    pub fn latest_published_key_package(&self) -> Result<Option<PublishedKeyPackageRow>> {
-        let conn = self
-            .conn()
-            .lock()
-            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        conn.query_row(
-            "SELECT event_id, d_tag, key_package, created_at
-             FROM published_key_packages
-             ORDER BY created_at DESC, id DESC
-             LIMIT 1",
-            [],
-            |r| {
-                Ok(PublishedKeyPackageRow {
-                    event_id: r.get(0)?,
-                    d_tag: r.get(1)?,
-                    key_package: r.get(2)?,
-                    created_at: r.get(3)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(Into::into)
-    }
-
-    /// Returns the NIP-33 `d` tag of the most-recently-published `KeyPackage`.
-    ///
-    /// The stable slot identifier the maintenance task reuses so a heal/rotation
-    /// replaces the same addressable coordinate instead of minting a fresh one.
-    ///
-    /// # Errors
-    ///
-    /// Returns a database error on failure.
-    pub fn latest_canonical_d_tag(&self) -> Result<Option<String>> {
-        Ok(self.latest_published_key_package()?.map(|r| r.d_tag))
-    }
-
-    /// Drops the tracking row for ONE slot — the retired coordinate, after the
-    /// slot retirement re-pointed tracking onto a conformant one.
-    ///
-    /// Only safe for a slot this device has stopped publishing: the row is what
-    /// makes the tracked package's `Lifetime.not_after` init-key purge reachable
-    /// ([`Self::latest_published_key_package`] reads the newest row only), so
-    /// dropping a row whose material is still tracked nowhere else would retain
-    /// that material past the spec's deletion bound. The retirement re-publishes
-    /// the SAME package bytes under the new slot before calling this, so the
-    /// material stays tracked by the surviving row.
-    ///
-    /// # Errors
-    ///
-    /// Returns a database error on failure.
-    pub fn delete_published_key_package(&self, d_tag: &str) -> Result<()> {
-        let conn = self
-            .conn()
-            .lock()
-            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        conn.execute(
-            "DELETE FROM published_key_packages WHERE d_tag = ?1",
-            params![d_tag],
-        )?;
-        Ok(())
-    }
-
-    /// Clears all published-`KeyPackage` tracking (cutover / logout wipe).
-    ///
-    /// # Errors
-    ///
-    /// Returns a database error on failure.
-    pub fn wipe_published_key_packages(&self) -> Result<()> {
-        let conn = self
-            .conn()
-            .lock()
-            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        conn.execute("DELETE FROM published_key_packages", [])?;
-        Ok(())
-    }
-
-    /// Returns whether the one-time legacy (443 / kind-10051) retraction has run.
-    ///
-    /// Defaults to `false` (not yet run) when the sentinel has never been
-    /// written, so the non-optional cutover retraction (migration plan §6 step
-    /// 5) fires exactly once on the first new-stack maintenance run.
-    ///
-    /// # Errors
-    ///
-    /// Returns a database error on failure.
-    pub fn legacy_kp_retraction_done(&self) -> Result<bool> {
+    pub fn consumed_hold_since(&self) -> Result<Option<u64>> {
         let conn = self
             .conn()
             .lock()
@@ -230,27 +66,108 @@ impl CircleStorage {
         let raw: Option<String> = conn
             .query_row(
                 "SELECT value FROM user_settings WHERE key = ?1",
-                params![LEGACY_KP_RETRACTION_DONE_KEY],
+                params![KP_CONSUMED_HOLD_SINCE_KEY],
                 |r| r.get::<_, String>(0),
             )
             .optional()?;
-        Ok(raw.as_deref() == Some("1"))
+        Ok(raw.and_then(|secs| secs.parse().ok()))
     }
 
-    /// Marks the one-time legacy (443 / kind-10051) retraction as complete.
+    /// Records when the consumed-package hold began, that it has ended
+    /// ([`CONSUMED_HOLD_OVER`]), or — `None` — that there is no hold.
     ///
     /// # Errors
     ///
     /// Returns a database error on failure.
-    pub fn mark_legacy_kp_retraction_done(&self) -> Result<()> {
+    pub fn set_consumed_hold_since(&self, since_secs: Option<u64>) -> Result<()> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        match since_secs {
+            Some(secs) => conn.execute(
+                "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, ?2)",
+                params![KP_CONSUMED_HOLD_SINCE_KEY, secs.to_string()],
+            )?,
+            None => conn.execute(
+                "DELETE FROM user_settings WHERE key = ?1",
+                params![KP_CONSUMED_HOLD_SINCE_KEY],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// Whether an invitation was held that the user has not answered.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn held_invitation_outstanding(&self) -> Result<bool> {
+        Ok(self.held_invitation_count()? > 0)
+    }
+
+    /// How many invitations were held unanswered at the last write. A
+    /// value this build cannot read counts as one.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn held_invitation_count(&self) -> Result<usize> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM user_settings WHERE key = ?1",
+                params![KP_HELD_INVITATION_KEY],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(raw.map_or(0, |value| value.parse().unwrap_or(1)))
+    }
+
+    /// Records how many invitations are held unanswered; none clears it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn set_held_invitation_count(&self, held: usize) -> Result<()> {
+        if held == 0 {
+            return self.set_held_invitation_outstanding(false);
+        }
         let conn = self
             .conn()
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
         conn.execute(
-            "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, '1')",
-            params![LEGACY_KP_RETRACTION_DONE_KEY],
+            "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, ?2)",
+            params![KP_HELD_INVITATION_KEY, held.to_string()],
         )?;
+        Ok(())
+    }
+
+    /// Records whether an unanswered held invitation is outstanding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn set_held_invitation_outstanding(&self, outstanding: bool) -> Result<()> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        if outstanding {
+            conn.execute(
+                "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, '1')",
+                params![KP_HELD_INVITATION_KEY],
+            )?;
+        } else {
+            conn.execute(
+                "DELETE FROM user_settings WHERE key = ?1",
+                params![KP_HELD_INVITATION_KEY],
+            )?;
+        }
         Ok(())
     }
 
@@ -295,141 +212,25 @@ impl CircleStorage {
         )?;
         Ok(())
     }
+}
 
-    /// Test-only: returns the number of rows in `published_key_packages`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database lock is poisoned or the count query
-    /// fails.
-    #[cfg(test)]
-    pub fn count_published_key_packages(&self) -> Result<i64> {
-        let conn = self
-            .conn()
-            .lock()
-            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        conn.query_row("SELECT COUNT(*) FROM published_key_packages", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .map_err(Into::into)
-    }
+/// Writes `raw` where the hold start is kept, as a damaged row would hold it.
+#[cfg(test)]
+pub fn plant_hold_start(storage: &CircleStorage, raw: &str) {
+    storage
+        .conn()
+        .lock()
+        .expect("lock")
+        .execute(
+            "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, ?2)",
+            params![KP_CONSUMED_HOLD_SINCE_KEY, raw],
+        )
+        .expect("plant");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn row(event_id: &str, d_tag: &str, kp: &[u8], at: i64) -> PublishedKeyPackageRow {
-        PublishedKeyPackageRow {
-            event_id: event_id.to_string(),
-            d_tag: d_tag.to_string(),
-            key_package: kp.to_vec(),
-            created_at: at,
-        }
-    }
-
-    #[test]
-    fn record_and_latest_round_trip() {
-        let storage = CircleStorage::in_memory().expect("in_memory");
-        assert!(storage
-            .latest_published_key_package()
-            .expect("latest")
-            .is_none());
-
-        storage
-            .record_published_key_package(&row("aa", "d-first", &[1, 2, 3], 100))
-            .expect("record");
-        let latest = storage
-            .latest_published_key_package()
-            .expect("latest")
-            .expect("some");
-        assert_eq!(latest.event_id, "aa");
-        assert_eq!(latest.d_tag, "d-first");
-        assert_eq!(latest.key_package, vec![1, 2, 3]);
-        assert_eq!(
-            storage.latest_canonical_d_tag().expect("d"),
-            Some("d-first".to_string())
-        );
-    }
-
-    #[test]
-    fn record_is_single_row_per_slot() {
-        // A heal re-publishes the SAME slot; only the latest row survives.
-        let storage = CircleStorage::in_memory().expect("in_memory");
-        storage
-            .record_published_key_package(&row("old", "d-slot", &[1], 100))
-            .expect("old");
-        storage
-            .record_published_key_package(&row("new", "d-slot", &[2], 200))
-            .expect("new");
-        assert_eq!(storage.count_published_key_packages().expect("count"), 1);
-        let latest = storage
-            .latest_published_key_package()
-            .expect("latest")
-            .expect("some");
-        assert_eq!(latest.event_id, "new");
-        assert_eq!(latest.key_package, vec![2]);
-    }
-
-    #[test]
-    fn latest_picks_newest_across_slots() {
-        let storage = CircleStorage::in_memory().expect("in_memory");
-        storage
-            .record_published_key_package(&row("a", "d-a", &[1], 100))
-            .expect("a");
-        storage
-            .record_published_key_package(&row("b", "d-b", &[2], 200))
-            .expect("b");
-        assert_eq!(
-            storage.latest_canonical_d_tag().expect("d"),
-            Some("d-b".to_string())
-        );
-    }
-
-    #[test]
-    fn wipe_clears_all_tracking() {
-        let storage = CircleStorage::in_memory().expect("in_memory");
-        storage
-            .record_published_key_package(&row("a", "d-a", &[1], 100))
-            .expect("a");
-        storage.wipe_published_key_packages().expect("wipe");
-        assert_eq!(storage.count_published_key_packages().expect("count"), 0);
-    }
-
-    #[test]
-    fn delete_drops_only_the_named_slot() {
-        // The retirement drops the RETIRED coordinate's row after re-pointing
-        // tracking; the surviving row is what keeps the package's `not_after`
-        // purge reachable, so it must not be touched.
-        let storage = CircleStorage::in_memory().expect("in_memory");
-        storage
-            .record_published_key_package(&row("legacy", "d-legacy", &[1], 100))
-            .expect("legacy");
-        storage
-            .record_published_key_package(&row("fresh", "d-fresh", &[1], 200))
-            .expect("fresh");
-        storage
-            .delete_published_key_package("d-legacy")
-            .expect("delete");
-        assert_eq!(storage.count_published_key_packages().expect("count"), 1);
-        assert_eq!(
-            storage.latest_canonical_d_tag().expect("d"),
-            Some("d-fresh".to_string())
-        );
-    }
-
-    #[test]
-    fn delete_of_an_absent_slot_is_a_noop() {
-        // Crash-resume calls it again after the row is already gone.
-        let storage = CircleStorage::in_memory().expect("in_memory");
-        storage
-            .record_published_key_package(&row("fresh", "d-fresh", &[1], 200))
-            .expect("fresh");
-        storage
-            .delete_published_key_package("d-legacy")
-            .expect("delete absent");
-        assert_eq!(storage.count_published_key_packages().expect("count"), 1);
-    }
 
     #[test]
     fn slot_retirement_marker_defaults_false_then_sticks() {
@@ -443,45 +244,63 @@ mod tests {
     }
 
     #[test]
-    fn slot_retirement_marker_is_independent_of_the_legacy_one() {
-        // Two one-time migrations, two sentinels: the Dark Matter 443/10051
-        // cutover completing must not skip the slot retirement.
+    fn held_invitation_marker_defaults_false_sets_and_clears() {
         let storage = CircleStorage::in_memory().expect("in_memory");
-        storage.mark_legacy_kp_retraction_done().expect("mark 443");
-        assert!(!storage.kp_slot_retirement_done().expect("slot marker"));
-        storage.mark_kp_slot_retirement_done().expect("mark slot");
-        assert!(storage.legacy_kp_retraction_done().expect("443 marker"));
-    }
-
-    #[test]
-    fn retraction_marker_defaults_false_then_sticks() {
-        let storage = CircleStorage::in_memory().expect("in_memory");
-        assert!(!storage.legacy_kp_retraction_done().expect("default"));
-        storage.mark_legacy_kp_retraction_done().expect("mark");
-        assert!(storage.legacy_kp_retraction_done().expect("after mark"));
-    }
-
-    #[test]
-    fn published_key_package_row_debug_redacts_bytes_and_identifiers() {
-        let event_id = "7c1f0a9b8d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e";
-        let r: PublishedKeyPackageRow = row(
-            event_id,
-            "haven-kp-slot-0",
-            &[0xde, 0xad, 0xbe, 0xef],
-            1_757_000_000,
-        );
-        crate::assert_debug_redacted!(
-            &r,
-            "PublishedKeyPackageRow",
-            &[event_id, "haven-kp-slot-0", "deadbeef", "1757000000"]
-        );
-        let dbg = format!("{r:?}");
+        assert!(!storage.held_invitation_outstanding().expect("default"));
+        storage.set_held_invitation_outstanding(true).expect("set");
+        assert!(storage.held_invitation_outstanding().expect("set"));
+        storage
+            .set_held_invitation_outstanding(false)
+            .expect("clear");
+        assert!(!storage.held_invitation_outstanding().expect("cleared"));
         assert!(
-            dbg.contains("<redacted>"),
-            "kp bytes must be redacted: {dbg}"
+            !storage.kp_slot_retirement_done().expect("other key"),
+            "the two markers are separate keys"
         );
-        // Correlatable across log lines, resolvable by nobody.
-        assert!(dbg.contains("event#"), "{dbg}");
-        assert!(dbg.contains("key_package#"), "{dbg}");
+    }
+
+    #[test]
+    fn the_hold_start_is_absent_until_set_and_gone_once_cleared() {
+        let storage = CircleStorage::in_memory().expect("in_memory");
+        assert_eq!(storage.consumed_hold_since().expect("default"), None);
+        storage
+            .set_consumed_hold_since(Some(1_700_000_123))
+            .expect("set");
+        assert_eq!(
+            storage.consumed_hold_since().expect("set"),
+            Some(1_700_000_123)
+        );
+        storage
+            .set_consumed_hold_since(Some(1_700_000_456))
+            .expect("replace");
+        assert_eq!(
+            storage.consumed_hold_since().expect("replaced"),
+            Some(1_700_000_456)
+        );
+        storage.set_consumed_hold_since(None).expect("clear");
+        assert_eq!(storage.consumed_hold_since().expect("cleared"), None);
+        assert!(!storage.held_invitation_outstanding().expect("other key"));
+    }
+
+    /// A value that is not a Unix second reads as no hold at all, and the
+    /// ended-hold mark reads back as itself.
+    #[test]
+    fn an_unparsable_hold_start_reads_as_absent() {
+        let storage = CircleStorage::in_memory().expect("in_memory");
+        for unparsable in ["", "soon", "-5", "1.5", "18446744073709551616"] {
+            plant_hold_start(&storage, unparsable);
+            assert_eq!(
+                storage.consumed_hold_since().expect("read"),
+                None,
+                "{unparsable:?}"
+            );
+        }
+        storage
+            .set_consumed_hold_since(Some(CONSUMED_HOLD_OVER))
+            .expect("end");
+        assert_eq!(
+            storage.consumed_hold_since().expect("ended"),
+            Some(CONSUMED_HOLD_OVER)
+        );
     }
 }

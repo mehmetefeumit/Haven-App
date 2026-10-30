@@ -181,58 +181,76 @@ pub enum CircleError {
     #[error("No reachable relay for welcome delivery")]
     MissingWelcomeRelays,
 
-    /// The MLS engine QUEUED the location update instead of encrypting it, so
-    /// there is no event to publish.
-    ///
-    /// `cgka-engine`'s `do_send` persists a `QueuedOutboundIntent` and returns
-    /// `SendResult::Queued` whenever any stored message inside the group's
-    /// convergence window is still `Created` or `Retryable`. A Haven circle's
-    /// epoch only advances on a membership change, so that window is the
-    /// circle's entire life: ONE inbound row that can never be resolved — a
-    /// `Created` row orphaned by a kill mid-ingest, or a `Retryable` row left
-    /// by a decrypt that can never succeed — silently stops the device sending
-    /// for that circle, permanently and across restarts.
-    ///
-    /// This is a distinct, ACTIONABLE outcome, not the opaque
-    /// [`Self::Mls`] string it replaced. It is an `Err` because the caller has
-    /// no event to publish; it is TYPED so the FFI can classify it by matching
-    /// a Rust variant instead of testing the flattened error prose — a test
-    /// Haven forbids elsewhere for good reason (error strings interpolate
-    /// remote-authored text, so a substring match is a remotely-influenceable
-    /// control channel; see `nostr::mls::storage::is_session_live`).
-    ///
-    /// Every field is a count, a flag, or a type whose own `Debug` is
-    /// presence-only ([`crate::circle::DeferredWork`]). The variant carries no
-    /// group id, no message id, no epoch and no payload, so the hand-written
-    /// `Debug` below (which renders only [`Self::code`]) and the `Display` above
-    /// are leak-free by construction (Security Rules 4/8) —
-    /// the same posture as [`Self::LastMemberAbandon`] and
-    /// [`Self::AlreadyProcessed`]. The caller already knows which circle it
-    /// asked about, so naming it here would add nothing but exposure.
-    #[error(
-        "Send deferred: {} unresolved convergence input(s), \
-         {} queued intent(s) discarded, repaired={repaired}, work={work:?}",
-        crate::log_alias::bucket(*unresolved_inputs),
-        crate::log_alias::bucket(*discarded_intents)
-    )]
-    SendDeferred {
-        /// Stored rows still gating outbound sends for this circle, read AFTER
-        /// everything else this outcome describes. Zero means the next send
-        /// should encrypt.
-        unresolved_inputs: usize,
-        /// Queued location intents dropped so a stalled circle cannot
-        /// accumulate one stale fix per publish cycle.
-        discarded_intents: usize,
-        /// Whether the circle was left with nothing gating.
-        repaired: bool,
-        /// Publish work the engine staged or emitted during this deferral.
-        /// **The caller MUST run the Rule-13 ladder over
-        /// [`work.commits`](crate::circle::DeferredWork::commits)** — publish,
-        /// then confirm on a ≥1-relay ack — or the group stays in
-        /// `PendingPublish` and stops sending entirely. Empty in the ordinary
-        /// stuck-row case.
-        work: crate::circle::DeferredWork,
-    },
+    /// The invitation can never be accepted on this device: its `KeyPackage`'s
+    /// private bundle is gone (every pre-reset invitation, or one sent to a
+    /// replaced `KeyPackage`), the Welcome is invalid, or it was already
+    /// processed. Only a new invitation can add this device. Typed so the UI
+    /// routes on the variant, and payload-free (Security Rule 15).
+    #[error("Invitation can no longer be accepted; ask for a new invitation")]
+    NeedsNewInvite,
+
+    /// The invitation would replace a circle this device still holds (a
+    /// removal it never saw, or a fork), which the engine does only on the
+    /// user's explicit confirmation. The invitation stays held. Typed so the UI
+    /// routes on the variant, and payload-free (Security Rule 15).
+    #[error("This invitation would replace a circle already on this device")]
+    RejoinConfirmationRequired,
+
+    /// The commit is under a durable fanout: only the fanout driver may
+    /// confirm it or roll it back. Nothing was changed. Payload-free
+    /// (Security Rule 15).
+    #[error("Commit is resolved by its durable fanout only")]
+    FanoutOwned,
+
+    /// The MLS engine was not asked for what this call was for. One of two
+    /// things holds it: a commit it rolled back is not yet retired, and
+    /// until it is no call that could merge it is made, for any circle; or
+    /// the call's circle still holds input the engine left unread, and
+    /// nothing new of that circle is taken, sealed or staged ahead of it.
+    /// Nothing was changed and nothing is lost — what was being ingested is
+    /// held, not dropped — and the next call carries on: it tries the
+    /// retirement again, or hands back more of what is unread. A location
+    /// send never answers with this: it is deferred
+    /// ([`crate::relay::fanout::LocationSeal::Deferred`]). Typed so the UI
+    /// routes on the variant, and payload-free (Security Rule 15).
+    #[error("The circle is held until what it has not yet read is cleared; try again shortly")]
+    EngineHeld,
+
+    /// This device asked to leave the circle, and from that instant shares
+    /// nothing with it, on any plane. Ends when the leave ends — the circle
+    /// is left — or is refused for good. Typed so the UI routes on the
+    /// variant; payload-free (Security Rule 15).
+    #[error("Leaving this circle: nothing is shared with it")]
+    LeaveInProgress,
+
+    /// The circle cannot share from this device: the engine refuses to seal
+    /// for it while it is stable and holds a member's departure that nobody
+    /// has committed. That is what a departure left half-made in this
+    /// device's group state looks like (an eviction a kill interrupted); it
+    /// ends when another member's commit for the departure arrives, or a
+    /// change this device's admin makes is applied. Any other outright
+    /// refusal of a send during an unresolved departure reads the same.
+    /// Typed so the UI routes on the variant, and payload-free (Security
+    /// Rule 15).
+    #[error("This circle cannot share from this device until a member's departure is finished")]
+    SendBlockedByDeparture,
+
+    /// The change was not made: it was asked of a drive that makes no new
+    /// commit (`relay::fanout::DriveMode::FinishOnly`), which a caller
+    /// uses while no claim that the app is `resumed` stands. Nothing was staged
+    /// and nothing was queued. Typed so the caller routes on the variant,
+    /// and payload-free (Security Rule 15).
+    #[error("This change can be made only while the app is open")]
+    ForegroundOnly,
+
+    /// The change was not made: the circle's routing id is another circle's
+    /// on this device too (`ChangeNote::RoutingCollision`), so the engine may
+    /// not be applying its commits, and an invite, a removal or a change of
+    /// its admins or relays would be made at an epoch it may not be at.
+    /// Nothing was staged. Of this device's commits, only what the circle's
+    /// leave needs is made for it.
+    #[error("This circle shares a routing id with another circle on this device")]
+    RoutingCollision,
 }
 
 impl CircleError {
@@ -258,7 +276,14 @@ impl CircleError {
             Self::AdminSelfDemoteRequired => "admin-self-demote-required",
             Self::AlreadyProcessed => "already-processed",
             Self::MissingWelcomeRelays => "missing-welcome-relays",
-            Self::SendDeferred { .. } => "send-deferred",
+            Self::NeedsNewInvite => "needs-new-invite",
+            Self::RejoinConfirmationRequired => "rejoin-confirmation-required",
+            Self::FanoutOwned => "fanout-owned",
+            Self::EngineHeld => "engine-held",
+            Self::LeaveInProgress => "leave-in-progress",
+            Self::SendBlockedByDeparture => "send-blocked-by-departure",
+            Self::ForegroundOnly => "foreground-only",
+            Self::RoutingCollision => "routing-collision",
         }
     }
 }
@@ -283,6 +308,20 @@ impl From<crate::nostr::NostrError> for CircleError {
             // is no longer rendered anywhere, and `Display` is what the FFI
             // hands to Dart.
             crate::nostr::NostrError::AdminSelfDemoteRequired => Self::AdminSelfDemoteRequired,
+            other => Self::from_session(other),
+        }
+    }
+}
+
+impl CircleError {
+    /// A session error at the circle boundary. The refusals the UI must
+    /// tell apart stay variants; everything else is flattened to its
+    /// sentence, which carries no payload.
+    pub(crate) fn from_session(err: crate::nostr::NostrError) -> Self {
+        match err {
+            crate::nostr::NostrError::EngineHeld => Self::EngineHeld,
+            crate::nostr::NostrError::LeaveInProgress => Self::LeaveInProgress,
+            crate::nostr::NostrError::SendBlockedByDeparture => Self::SendBlockedByDeparture,
             other => Self::Mls(crate::nostr::mls::redact_hex_sequences(&other.to_string())),
         }
     }
@@ -384,24 +423,6 @@ mod tests {
     }
 
     #[test]
-    fn send_deferred_display_buckets_its_counts() {
-        let err = CircleError::SendDeferred {
-            unresolved_inputs: 2,
-            discarded_intents: 1,
-            repaired: false,
-            work: crate::circle::DeferredWork::default(),
-        };
-        // An exact count of gating rows is a per-circle magnitude; the bucket
-        // keeps the triage signal (none / one / a few / many) without it.
-        assert_eq!(
-            err.to_string(),
-            "Send deferred: 2-4 unresolved convergence input(s), \
-             1 queued intent(s) discarded, repaired=false, \
-             work=DeferredWork { commits: \"0\", proposals: \"0\" }"
-        );
-    }
-
-    #[test]
     fn circle_error_debug_redacts_every_payload() {
         // Structural, not incidental: the derived `Debug` printed each
         // variant's payload, so a SQLite message that echoed a bound pubkey
@@ -414,15 +435,6 @@ mod tests {
             (
                 CircleError::Mls("no group a1b2c3d4e5f60718".to_string()),
                 "CircleError(mls)",
-            ),
-            (
-                CircleError::SendDeferred {
-                    unresolved_inputs: 3,
-                    discarded_intents: 0,
-                    repaired: true,
-                    work: crate::circle::DeferredWork::default(),
-                },
-                "CircleError(send-deferred)",
             ),
         ];
         for (err, expected) in cases {
@@ -457,13 +469,14 @@ mod tests {
             CircleError::AdminSelfDemoteRequired.code(),
             CircleError::AlreadyProcessed.code(),
             CircleError::MissingWelcomeRelays.code(),
-            CircleError::SendDeferred {
-                unresolved_inputs: 0,
-                discarded_intents: 0,
-                repaired: true,
-                work: crate::circle::DeferredWork::default(),
-            }
-            .code(),
+            CircleError::NeedsNewInvite.code(),
+            CircleError::RejoinConfirmationRequired.code(),
+            CircleError::FanoutOwned.code(),
+            CircleError::EngineHeld.code(),
+            CircleError::LeaveInProgress.code(),
+            CircleError::SendBlockedByDeparture.code(),
+            CircleError::ForegroundOnly.code(),
+            CircleError::RoutingCollision.code(),
         ]);
         let unique: std::collections::BTreeSet<&str> = codes.iter().copied().collect();
         assert_eq!(unique.len(), codes.len(), "a code is reused: {codes:?}");
@@ -691,10 +704,9 @@ mod tests {
         // FFI renders to a String shown to developers/users). It MUST redact
         // every variant's Display so a raw MDK/group error can never reach the
         // surface carrying key material (Security Rule #6/#8).
-        let cases = [
-            NostrError::MdkError(format!("decryption failed for group {secret_hex}")),
-            NostrError::GroupNotFound(secret_hex.to_string()),
-        ];
+        // `MdkError` is not a case: it carries only a `&'static str` code, so no
+        // runtime MDK text can reach it at all.
+        let cases = [NostrError::GroupNotFound(secret_hex.to_string())];
         for nostr_err in cases {
             let surfaced = CircleError::from(nostr_err).to_string();
             assert!(

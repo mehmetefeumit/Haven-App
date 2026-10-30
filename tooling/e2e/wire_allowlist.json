@@ -35,7 +35,8 @@
   "version": 1,
 
   "frame_verbs": {
-    "allowed": ["EVENT", "REQ", "CLOSE", "CLOSED", "OK", "EOSE", "NOTICE", "HAVEN_WIRE_SENTINEL"],
+    "allowed": ["EVENT", "REQ", "CLOSE", "CLOSED", "OK", "EOSE", "NOTICE", "HAVEN_WIRE_SENTINEL",
+                "NEG-OPEN", "NEG-MSG", "NEG-CLOSE", "NEG-ERR"],
     "required": ["EVENT", "REQ", "HAVEN_WIRE_SENTINEL"],
     "_why": [
       "AUTH (NIP-42) and COUNT (NIP-45) are deliberately EXCLUDED even though the journal",
@@ -50,7 +51,27 @@
       "no relay ever sees it — but it IS journalled as a c2r frame, so a closed verb set has to",
       "admit it. It is also REQUIRED: a journal with no marker cannot be anchored, and having the",
       "verb set say so keeps that fact visible in the same place the rest of the closed world is",
-      "declared, rather than only inside the script."
+      "declared, rather than only inside the script.",
+      "",
+      "NEG-OPEN, NEG-MSG, NEG-CLOSE and NEG-ERR (NIP-77) are ALLOWED and never REQUIRED: Haven's",
+      "own dry-run reconciliation (haven-core/src/relay/manager.rs neg_remote_ids) runs only inside",
+      "a burst, a live foreground entry or a catch-up sweep, and a relay without NIP-77 (strfry with",
+      "negentropy off, tooling/e2e/strfry.conf) answers NEG-OPEN with a NOTICE and nothing more. What",
+      "a NEG-OPEN may carry is `neg_filters` below and check C-NEG in the script."
+    ]
+  },
+
+  "neg_filters": {
+    "allowed_keys": ["kinds", "since", "until", "limit", "#h"],
+    "_why": [
+      "The filter of a NIP-77 NEG-OPEN, closed-world over KEY names like `req_filters`. Derived from",
+      "the one construction site, haven-core/src/relay/negentropy.rs (the circle's window): kind 445,",
+      "the circle's `#h`, `since` (the clock-only until - 30 days, never the local inventory floor),",
+      "`until` and `limit`. `until` is admitted here and NOT in `req_filters`, because a NEG window",
+      "is the one filter Haven builds with a ceiling. `authors`, `#p` and `ids` are absent on",
+      "purpose: an author or recipient on a reconciliation names a person, and an id list would be",
+      "the device telling the relay what it holds. The initial message itself is checked by C-NEG:",
+      "it must be the empty set (6100000200), so the relay learns the filter alone."
     ]
   },
 
@@ -214,12 +235,14 @@
         "allowed": ["d", "mls_protocol_version", "i", "mls_ciphersuite", "mls_extensions", "mls_proposals", "app_components"],
         "required": ["d", "mls_protocol_version", "i", "mls_ciphersuite", "mls_extensions", "mls_proposals", "app_components"]
       },
-      "_site": "haven-core/src/relay/maintenance/key_package.rs:479-486 build_key_package_event (constants at :88-94)",
+      "_site": "haven-core/src/relay/maintenance/key_package.rs build_key_package_event, which fills MDK's NostrKeyPackagePublication template (transport-nostr-adapter/src/key_package.rs to_event_at) from the package's decoded metadata",
       "_why": [
-        "All seven are unconditional in Haven's own builder, so all seven are required — this is a",
-        "kind Haven constructs itself rather than inheriting from MDK, which makes the strict form",
-        "safe. Note there is NO `relays` and NO `encoding` tag: an earlier draft of this file",
-        "assumed both, and the code says otherwise."
+        "All seven are unconditional in MDK's publication template, so all seven are required. The",
+        "template adds an eighth, `client`, only when it is handed a name; Haven passes",
+        "`client_name: None` (scripts/ci/check_key_package_wire_shape.sh K2), because a `client` tag",
+        "would name the app on a public, identity-signed event. There is NO `relays` and NO",
+        "`encoding` tag. This entry pins the NAMES; the VALUES (each tag exactly once, the id",
+        "lists, the 64-hex slot id) are check-wire-correlation.sh C5.11."
       ]
     }
   },

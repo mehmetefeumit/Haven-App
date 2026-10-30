@@ -21,6 +21,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/profile_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/profile_service.dart';
@@ -342,6 +343,112 @@ void main() {
         );
         expect(find.text('Remove'), findsNothing);
         expect(find.byType(CircularProgressIndicator), findsNothing);
+      },
+    );
+  });
+
+  group('IdentityPhotoHeader — what a removal leaves in view', () {
+    Future<void> confirmRemove(WidgetTester tester) async {
+      await tester.tap(find.widgetWithText(TextButton, 'Remove'));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.widgetWithText(TextButton, 'Remove'),
+        ),
+      );
+    }
+
+    testWidgets(
+      'a removal that published what was waiting is reflected in the sync '
+      'status at once',
+      (tester) async {
+        final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
+        // A name save that failed is waiting, and its backoff is not due.
+        final svc =
+            MockProfileService(
+                ownProfile: Profile(
+                  pubkeyHex: _fakeIdentity.pubkeyHex,
+                  pictureBytes: jpegHeader,
+                  pictureHash: 'mock-hash',
+                ),
+              )
+              ..nextPendingState = const ProfilePendingState(
+                pending: true,
+                partial: false,
+                retryDue: false,
+              );
+        await tester.pumpWidget(_buildHeader(profileService: svc));
+        await tester.pumpAndSettle();
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(IdentityPhotoHeader)),
+        )..read(ownProfileSyncProvider);
+        await tester.pumpAndSettle();
+        expect(
+          container.read(ownProfileSyncProvider),
+          ProfileSyncStatus.failed,
+          reason: 'anti-vacuity: the status rests on the failed save',
+        );
+
+        // The removal carries the waiting name and the outbox records it.
+        svc.nextPendingState = const ProfilePendingState(
+          pending: false,
+          partial: false,
+          retryDue: false,
+        );
+        await confirmRemove(tester);
+        await tester.pumpAndSettle();
+
+        expect(find.text('Photo removed.'), findsOneWidget);
+        expect(
+          container.read(ownProfileSyncProvider),
+          ProfileSyncStatus.synced,
+        );
+        expect(
+          svc.methodCalls.map((c) => c.method),
+          isNot(contains('syncOwnProfile')),
+          reason: 'the status is re-read; nothing is published for it',
+        );
+      },
+    );
+
+    testWidgets(
+      'a removal that failed does not leave a photo in view that the '
+      'device no longer holds',
+      (tester) async {
+        final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
+        final gate = Completer<void>();
+        final svc = MockProfileService(
+          ownProfile: Profile(
+            pubkeyHex: _fakeIdentity.pubkeyHex,
+            pictureBytes: jpegHeader,
+            pictureHash: 'mock-hash',
+          ),
+        )..removeOwnAvatarGate = gate;
+        await tester.pumpWidget(_buildHeader(profileService: svc));
+        await tester.pumpAndSettle();
+
+        await confirmRemove(tester);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+        // The removal cancels a photo waiting to upload before it reaches
+        // the relays, and then fails there.
+        svc
+          ..ownProfile = Profile(pubkeyHex: _fakeIdentity.pubkeyHex)
+          ..shouldThrowOnRemoveOwnAvatar = true;
+        gate.complete();
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text('Could not remove your photo. Please try again.'),
+          findsOneWidget,
+        );
+        expect(
+          find.widgetWithText(TextButton, 'Remove'),
+          findsNothing,
+          reason: 'the photo is gone from the device, so nothing is left to '
+              'remove',
+        );
       },
     );
   });

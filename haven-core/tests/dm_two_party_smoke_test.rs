@@ -46,7 +46,7 @@ async fn two_party_location_round_trips_alice_to_bob() {
         .publish
         .iter()
         .find_map(|w| match w {
-            haven_core::nostr::mls::types::PublishWork::ApplicationMessage { msg } => Some(msg),
+            haven_core::nostr::mls::types::PublishWork::ApplicationMessage { msg, .. } => Some(msg),
             _ => None,
         })
         .expect("application message");

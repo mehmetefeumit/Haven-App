@@ -1,116 +1,165 @@
-/// Publish-before-apply (Security Rule 13) circle creation for E2E harnesses.
+/// Circle creation with every Welcome delivered, for E2E harnesses.
 ///
 /// Scenarios that need a circle on a REAL [CircleManagerFfi] — rather than
-/// through `NostrCircleService` — must still honour the same publish-then-
-/// confirm contract the production service implements
-/// (`nostr_circle_service.dart`'s `createCircle`). [createCircleConfirmed]
-/// is that contract, factored out so no harness can quietly omit it.
+/// through `NostrCircleService` — create it through the product's own driven
+/// create: each founding Welcome is recorded before the call returns and sent
+/// from that record to its invitee's inbox relays. [createCircleDelivered] is
+/// that call plus the one thing a harness must not let slide: a Welcome no
+/// relay acknowledged during the call.
 ///
-/// **Why omitting the confirm is not a benign shortcut.** `createCircle`
-/// stages a `GroupCreated` pending state and leaves the group in MDK's
-/// `EpochState::PendingPublish`. Per the engine contract
-/// (`cgka-traits`, `CgkaEngine::ingest`):
-///
-/// > Calls while the group is in `EpochState::PendingPublish` or
-/// > `EpochState::Merging` return `IngestOutcome::Buffered` and replay once
-/// > the state returns to `Stable`.
-///
-/// A harness that stages the create and never confirms therefore pins the
-/// group in `PendingPublish` for the rest of the process: EVERY inbound
-/// kind-445 for it buffers forever, the live-sync processor deliberately
-/// withholds the per-circle cursor on `Buffered`, and the scenario times out
-/// waiting for a peer location that the engine is holding on purpose. The
-/// failure surfaces far from its cause — as a receive-path timeout, not as a
-/// creation error — so route every direct-FFI create through here.
+/// A founded circle is canonical the moment the create returns (MDK v0.10.4
+/// `PublishWork::FoundingGroupCreated`): there is no staged state to confirm
+/// or roll back, and nothing here may try to.
 library;
 
+import 'dart:convert';
+
 import 'package:haven/src/rust/api.dart'
-    show CircleCreationResultFfi, CircleManagerFfi, MemberKeyPackageFfi;
+    show
+        CircleCreationOutcomeFfi,
+        CircleFfi,
+        CircleManagerFfi,
+        CircleWithMembersFfi,
+        InvitationFfi,
+        MemberKeyPackageFfi,
+        RelayManagerFfi;
 
-import 'test_relay.dart' show TestRelay;
+/// A circle [createCircleDelivered] founded, every Welcome acknowledged.
+class DeliveredCircle {
+  const DeliveredCircle._(this.circle);
 
-/// Creates a circle on [manager], publishes every gift-wrapped Welcome to
-/// [relay], then resolves the staged create per Security Rule 13: confirmed
-/// once EVERY Welcome is relay-acked, rolled back otherwise.
-///
-/// With zero [members] there is no Welcome to ack, so the create is confirmed
-/// unconditionally — a circle holding only its creator is still valid.
+  /// The circle, as stored.
+  final CircleFfi circle;
+}
+
+/// Creates a circle on [manager] through [relayManager]'s driven create and
+/// requires every founding Welcome to be relay-acked during the call.
 ///
 /// **Stricter than production on purpose.** `NostrCircleService.createCircle`
-/// confirms on `total == 0 || sentCount > 0`, because in the field a Welcome
-/// may legitimately fail to reach one peer's relays. The hermetic E2E relay
-/// has no such excuse: a rejected Welcome there is a harness defect, and
-/// letting it slide would silently under-populate a multi-invitee circle (the
-/// 3-member M11 scenarios would then fail later, on an unrelated assertion).
-/// So any rejection rolls the create back and throws immediately.
+/// keeps the circle and reports how many Welcomes were acknowledged, because
+/// in the field an invitee's relays may be unreachable for a while (later
+/// foreground drives send the rest). The hermetic E2E relay has no such
+/// excuse: an unacknowledged Welcome there is a harness defect, and letting it
+/// slide would silently under-populate a multi-invitee circle (the 3-member
+/// M11 scenarios would then fail later, on an unrelated assertion). So a
+/// refusal, a missing Welcome or an unacknowledged one throws immediately.
 ///
-/// [scenario] prefixes the [StateError]s raised on a rejected Welcome or a
-/// failed confirm so a harness failure names the scenario that caused it —
-/// a fixed harness tag (e.g. `'M11'`, `'FE-2'`), never circle/user data.
-///
-/// Returns the [CircleCreationResultFfi] whose `pending` has already been
-/// resolved; callers must not confirm it a second time.
-///
-/// Throws a [StateError] if the relay rejects any Welcome (the create is
-/// rolled back first) or if the engine refuses the confirm.
-Future<CircleCreationResultFfi> createCircleConfirmed({
+/// [scenario] prefixes the [StateError] so a harness failure names the
+/// scenario that caused it — a fixed harness tag (e.g. `'M11'`, `'FE-2'`),
+/// never circle/user data.
+Future<DeliveredCircle> createCircleDelivered({
   required CircleManagerFfi manager,
-  required TestRelay relay,
+  required RelayManagerFfi relayManager,
   required List<int> identitySecretBytes,
   required List<MemberKeyPackageFfi> members,
   required String name,
   required String circleType,
   required List<String> relays,
-  required List<String> creatorFallbackRelays,
   String scenario = 'e2e',
 }) async {
-  final result = await manager.createCircle(
+  final outcome = await relayManager.createCircleDriven(
+    circle: manager,
     identitySecretBytes: identitySecretBytes,
     members: members,
     name: name,
     circleType: circleType,
     relays: relays,
-    creatorFallbackRelays: creatorFallbackRelays,
+    // A harness drives the app in front of its user; nothing here is a
+    // background path.
+    foreground: true,
   );
-
-  // Publish every Welcome first — the engine may only apply the staged create
-  // once the network has had a chance to observe it. Never the relay's OK
-  // reason text (remote-authored prose, Security Rule 15) — only the
-  // rejection boolean and, best-effort, the exception's runtimeType.
-  var rejected = false;
-  String? exceptionType;
-  for (final welcome in result.welcomeEvents) {
-    try {
-      final (ok, _) = await relay.publishAndAwaitOk(welcome.eventJson);
-      if (!ok) rejected = true;
-    } on Object catch (e) {
-      // Security Rule 8: runtimeType only — a raw error can carry MLS state.
-      rejected = true;
-      exceptionType ??= '${e.runtimeType}';
-    }
+  final circle = outcome.circle;
+  if (circle == null) {
+    // The refusal by variant name only (Rule 15).
+    throw StateError('[$scenario] create refused: ${outcome.refusal}');
   }
-
-  if (rejected) {
-    final suffix = exceptionType == null ? '' : ' ($exceptionType)';
-    // Roll the staged create back so the group does not linger in
-    // PendingPublish and silently buffer every later inbound message.
-    try {
-      await manager.publishFailed(pending: result.pending);
-    } on Object catch (e) {
-      throw StateError(
-        '[$scenario] a Welcome was rejected$suffix and the create '
-        'rollback also failed: ${e.runtimeType}',
-      );
-    }
-    throw StateError('[$scenario] relay rejected a Welcome$suffix');
+  if (outcome.welcomesTotal != members.length ||
+      outcome.welcomesSent != outcome.welcomesTotal) {
+    // No count (Rule 15): only that the delivery fell short.
+    throw StateError('[$scenario] a founding Welcome was not acknowledged');
   }
-
-  try {
-    await manager.confirmPublished(pending: result.pending);
-  } on Object catch (e) {
-    throw StateError(
-      '[$scenario] createCircle confirmPublished failed: ${e.runtimeType}',
-    );
-  }
-  return result;
+  return DeliveredCircle._(circle);
 }
+
+/// Creates a circle on [manager] through [relayManager]'s driven create, as
+/// [createCircleDelivered] does, but takes an unacknowledged founding Welcome
+/// as what it is in the field — owed, and sent again from its record by later
+/// foreground drives — and hands the outcome back. Only a refusal throws.
+///
+/// For the scenarios about that redelivery; every other harness wants
+/// [createCircleDelivered].
+Future<CircleCreationOutcomeFfi> createCircleOwingWelcomes({
+  required CircleManagerFfi manager,
+  required RelayManagerFfi relayManager,
+  required List<int> identitySecretBytes,
+  required List<MemberKeyPackageFfi> members,
+  required String name,
+  required String circleType,
+  required List<String> relays,
+  String scenario = 'e2e',
+}) async {
+  final outcome = await relayManager.createCircleDriven(
+    circle: manager,
+    identitySecretBytes: identitySecretBytes,
+    members: members,
+    name: name,
+    circleType: circleType,
+    relays: relays,
+    foreground: true,
+  );
+  if (outcome.circle == null) {
+    throw StateError('[$scenario] create refused: ${outcome.refusal}');
+  }
+  return outcome;
+}
+
+/// Joins [invitee] to the circle a driven create invited it to, from the gift
+/// wrap the create sent to [relays]: how an invitee in the same process
+/// receives its Welcome rather than being handed it. A wrap an earlier run
+/// left for the same identity cannot be accepted by this fresh store and is
+/// passed over.
+Future<CircleWithMembersFfi> joinDeliveredWelcome({
+  required RelayManagerFfi relayManager,
+  required CircleManagerFfi invitee,
+  required List<int> inviteeSecretBytes,
+  required String inviteePubkeyHex,
+  required List<String> relays,
+  String scenario = 'e2e',
+}) async {
+  final wraps = await relayManager.fetchGiftWraps(
+    recipientPubkey: inviteePubkeyHex,
+    relays: relays,
+  );
+  for (final wrap in wraps) {
+    final InvitationFfi? invitation;
+    try {
+      invitation = await invitee.processGiftWrappedInvitation(
+        identitySecretBytes: inviteeSecretBytes,
+        giftWrapEventJson: wrap,
+      );
+    } on Object catch (_) {
+      continue;
+    }
+    if (invitation == null) continue;
+    // The invitation's `mlsGroupId` is the gift-wrap id it is keyed by.
+    final outcome = await invitee.acceptInvitation(
+      giftWrapId: invitation.mlsGroupId,
+    );
+    if (outcome.joined case final joined?) return joined;
+  }
+  throw StateError('[$scenario] no delivered Welcome could be accepted');
+}
+
+/// The ids of every gift wrap [relays] hold for [recipientPubkeyHex]: taken
+/// before and after a driven create, their difference is the wrap it sent.
+Future<Set<String>> giftWrapIdsFor({
+  required RelayManagerFfi relayManager,
+  required String recipientPubkeyHex,
+  required List<String> relays,
+}) async => {
+  for (final wrap in await relayManager.fetchGiftWraps(
+    recipientPubkey: recipientPubkeyHex,
+    relays: relays,
+  ))
+    (jsonDecode(wrap) as Map<String, dynamic>)['id'] as String,
+};

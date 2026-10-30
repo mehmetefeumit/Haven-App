@@ -140,6 +140,7 @@ ProfileMetadataFfi _profileMetadata({
     hasPicture: hasPicture,
     isKnown: true,
     fetchedAt: 0,
+    relayAnswer: OwnProfileRelayAnswerFfi.unanswered,
   );
 }
 

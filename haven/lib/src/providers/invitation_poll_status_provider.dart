@@ -26,10 +26,10 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/relay_service.dart';
 
-/// NIP-59 gift wraps randomize `created_at` up to 2 days in the past, so the
-/// fetch must always look back beyond that window (plus a clock-skew buffer).
+/// The poller's window ([invitationPollerProvider]): NIP-59 backdates a wrap
+/// up to 2 days, and a Welcome is re-sent for up to a day after its hand-over.
 /// Re-fetching old wraps is harmless — Rust dedups already-processed ones.
-const _giftWrapLookback = Duration(days: 2, hours: 1);
+const _giftWrapLookback = Duration(hours: 96);
 
 /// Lifecycle phase of an inbox refresh.
 enum InvitationPollPhase {
@@ -209,7 +209,9 @@ class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
     // segment flips to ok/error the instant it resolves. Dart is
     // single-threaded, so the index-based mutation of `slots`/`responded`
     // inside these closures is race-free (one microtask runs at a time).
-    final since = DateTime.now().subtract(_giftWrapLookback);
+    final since = ref.read(invitationClockProvider)().subtract(
+      _giftWrapLookback,
+    );
     // Only responding relays carry events to de-duplicate; an unreachable
     // relay yields nothing, so there is no reason to collect it here.
     final responding = <RelayGiftWrapFetch>[];

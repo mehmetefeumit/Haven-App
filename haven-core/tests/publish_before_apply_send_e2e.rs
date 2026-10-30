@@ -8,36 +8,38 @@
 //!
 //! # What is under test, and what is not
 //!
-//! The decision itself is [`publish_then_resolve`]: publish through the injected
-//! relay plane ([`AutoCommitPublisher`], which production's `RelayManager` and
-//! the live-sync `nostr_sdk::Client` both implement), then confirm iff that
-//! plane reports a ≥1-relay OK-ack, else roll back.
-//!
 //! Two tiers, because the two halves fail in different ways:
 //!
-//! 1. **The wire tells the truth** — the production `RelayManager` plane is
-//!    driven against real in-process relays that ack / reject / swallow / break
-//!    the connection, pinning the boolean it reports for each. The third of
-//!    those is the whole rule: an event the relay accepted onto the socket but
-//!    never acknowledged must NOT count.
-//! 2. **The decision follows the truth** — the four outcomes crossed with the
-//!    four publish-bearing send operations, asserting what the engine actually
-//!    did: an epoch/roster that moved only on an ack, and no staged remnant left
-//!    behind when it did not.
-//!
-//! Boundary worth stating plainly: the FFI callers that drive these four ops in
-//! the shipped app live in Dart (`nostr_circle_service.dart`), so this file pins
-//! the Rust decision and its engine consequences, not the Dart call sites.
+//! 1. **The wire tells the truth** — the production `RelayManager` plane, which
+//!    publishes what has no record ([`UnrecordedPublisher`]: Welcomes and
+//!    proposals), is driven against real in-process relays that ack / reject /
+//!    swallow / break the connection, pinning the boolean it reports for each.
+//!    The third of those is the whole rule: an event the relay accepted onto
+//!    the socket but never acknowledged must NOT count. The fanout transport a
+//!    commit is sent through is pinned the same way in
+//!    `fanout_transport_matrix.rs`.
+//! 2. **The decision follows the truth** — the fanout driver's three
+//!    commit-bearing changes, each crossed with the four outcomes, asserting
+//!    what the engine actually did: an epoch, roster or relay list that moved
+//!    only on an ack, a commit discarded only when its relay proved it refused
+//!    it, and one that may have landed kept. The founding create is crossed
+//!    with the same four outcomes to pin the opposite promise: it has no
+//!    commit to confirm, so no outcome rolls it back.
+
+mod helpers;
 
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Mutex;
 
 use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
-use haven_core::nostr::mls::types::{GroupId, PendingStateRef};
+use haven_core::nostr::mls::types::{EpochState, GroupId};
+use haven_core::relay::allow_ws_loopback_for_test;
+use haven_core::relay::fanout::scripted::{Answer, ScriptedFanout};
+use haven_core::relay::fanout::{
+    DriveMode, EvolutionOutcome, EvolutionStatus, UnrecordedPublisher,
+};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use haven_core::relay::{allow_ws_loopback_for_test, publish_then_resolve, AutoCommitPublisher};
 use haven_core::relay::{RelayManager, RelayResult};
 use nostr::util::BoxedFuture;
 use nostr::{Event, Keys};
@@ -69,11 +71,11 @@ impl WireOutcome {
         matches!(self, Self::Acked)
     }
 
-    /// Whether the event reached a relay at all. Distinguishes [`Self::Timeout`]
-    /// — where the commit IS on the wire and could still land — from
-    /// [`Self::Throw`], where nothing was transmitted. Both roll back.
-    const fn reached_a_relay(self) -> bool {
-        !matches!(self, Self::Throw)
+    /// Whether the relay's answer settles the commit: an ack applies it and a
+    /// proven refusal discards it. Silence may hide a landed commit, and a
+    /// relay never reached proves nothing, so either leaves it staged.
+    const fn settles(self) -> bool {
+        matches!(self, Self::Acked | Self::Nak)
     }
 }
 
@@ -158,20 +160,18 @@ async fn broken_transport() -> (String, tokio::task::JoinHandle<()>) {
 /// The verdict the production send plane reports for `event` → `relays`.
 async fn relay_manager_verdict(event: &Event, relays: &[String]) -> bool {
     let manager = RelayManager::new();
-    let publisher: &dyn AutoCommitPublisher = &manager;
-    publisher.publish_auto_commit(event, relays).await
+    let publisher: &dyn UnrecordedPublisher = &manager;
+    publisher.publish_unrecorded(event, relays).await
 }
 
 /// A real staged `kind:445` commit, so the relays see the event shape this path
 /// actually carries rather than a synthetic note.
 async fn a_real_commit_event() -> Event {
     let fx = TwoPartyCircle::build(&["wss://group.example.com".to_string()]).await;
-    let staged = fx
-        .alice
-        .remove_members(&fx.gid, std::slice::from_ref(&fx.bob_hex))
+    fx.alice
+        .remove_members_for_test(&fx.gid, std::slice::from_ref(&fx.bob_hex))
         .await
-        .expect("stage a removal commit");
-    staged.commit_event
+        .expect("a removal commit")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -267,47 +267,25 @@ async fn an_unacked_publish_surfaces_as_an_error_not_an_empty_ok() {
 /// behaviours. What the fake adds is determinism and speed — a `Timeout` cell
 /// driven through a real socket costs the full production retry budget, so it is
 /// paid once above instead of once per operation.
-struct OutcomePublisher {
-    outcome: WireOutcome,
-    sent: Mutex<Vec<Event>>,
-}
+struct OutcomePublisher(WireOutcome);
 
-impl OutcomePublisher {
-    const fn new(outcome: WireOutcome) -> Self {
-        Self {
-            outcome,
-            sent: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn sent(&self) -> Vec<Event> {
-        self.sent.lock().unwrap().clone()
-    }
-}
-
-impl AutoCommitPublisher for OutcomePublisher {
-    fn publish_auto_commit<'a>(
+impl UnrecordedPublisher for OutcomePublisher {
+    fn publish_unrecorded<'a>(
         &'a self,
-        event: &'a Event,
+        _event: &'a Event,
         _relays: &'a [String],
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            if self.outcome.reached_a_relay() {
-                self.sent.lock().unwrap().push(event.clone());
-            }
-            self.outcome.is_ack()
-        })
+        Box::pin(async move { self.0.is_ack() })
     }
 }
 
-/// Alice (admin) with Bob on the roster, created and confirmed.
+/// Alice (admin) with Bob on the roster, created (a founding create is canonical).
 ///
 /// Bob never processes his Welcome: the ops under test are all admin-side, and
 /// his leaf is on the roster from creation either way, so joining would only add
 /// fixture cost.
 struct TwoPartyCircle {
     alice: CircleManager,
-    alice_keys: Keys,
     bob_hex: String,
     gid: GroupId,
     _dirs: Vec<TempDir>,
@@ -322,18 +300,16 @@ impl TwoPartyCircle {
 
         let config = CircleConfig::new("Rule 13 Circle").with_relays(relays.to_vec());
         let created = alice
-            .create_circle(&alice_keys, vec![bob_member], &config, relays)
+            .create_circle(&alice_keys, vec![bob_member], &config)
             .await
             .expect("create circle");
-        let gid = created.circle.mls_group_id.clone();
-        alice
-            .confirm_published(created.pending)
-            .await
-            .expect("confirm the create");
+        // As the app's driven create leaves it: the founding Welcomes sent from
+        // their records and acknowledged, so no later drive sends them.
+        let _ = alice.land_staged_for_test().await;
+        let gid = created.circle.mls_group_id;
 
         Self {
             alice,
-            alice_keys,
             bob_hex: bob_keys.public_key().to_hex(),
             gid,
             _dirs: vec![alice_dir, bob_dir],
@@ -381,43 +357,100 @@ async fn mint_member() -> (Keys, MemberKeyPackage, TempDir) {
     (keys, member, dir)
 }
 
-/// The half of every cell that does not depend on which operation staged the
-/// commit: the verdict matches the wire, the transport saw the event exactly
-/// when it should have, and the staged reference is spent either way — nothing
-/// is left dangling that a later stray confirm could apply.
-async fn assert_resolution_contract(
-    circle: &CircleManager,
-    publisher: &OutcomePublisher,
+/// What the fanout transport answers for a relay that behaved as `outcome`
+/// did — the classification tier 1 and `fanout_transport_matrix.rs` pin.
+const fn answer_for(outcome: WireOutcome) -> Answer {
+    match outcome {
+        WireOutcome::Acked => Answer::Accepted,
+        WireOutcome::Nak => Answer::Refused,
+        WireOutcome::Timeout => Answer::Silent,
+        WireOutcome::Throw => Answer::Unreachable,
+    }
+}
+
+/// `change` made through the fanout driver in the full mode, every relay
+/// answering as `outcome` scripts: what the driver said of it, and whether it
+/// put the commit on a relay's socket.
+async fn made(
+    fx: &TwoPartyCircle,
     outcome: WireOutcome,
-    confirmed: bool,
-    pending: PendingStateRef,
+    change: impl AsyncFnOnce(
+        &haven_core::relay::fanout::Publishing<'_, ScriptedFanout>,
+        &CircleManager,
+        &GroupId,
+    ) -> Result<EvolutionOutcome, haven_core::circle::CircleError>,
+) -> (EvolutionStatus, bool) {
+    let transport = ScriptedFanout::default();
+    for relay in TARGETS {
+        transport.answer(relay, [answer_for(outcome)]);
+    }
+    let outbox = helpers::drive::Recorder::acking(true);
+    let clock = helpers::drive::ManualClock::at(0);
+    let driver = helpers::drive::through(&transport, &outbox, &clock, &DriveMode::Full);
+    let status = change(&driver, &fx.alice, &fx.gid)
+        .await
+        .expect("the change is made")
+        .status;
+    (status, !transport.calls().is_empty())
+}
+
+/// Every relay a cell's change can be sent to: the circle's own, and the one a
+/// relay change moves it to.
+const TARGETS: [&str; 2] = ["wss://group.example.com", "wss://replacement.example.com"];
+
+/// The half of every cell that does not depend on which operation made the
+/// commit: the commit was put to its relays before anything applied it, it
+/// is applied if and only if a relay acknowledged it, it is discarded only
+/// when its relay proved it refused it, and a commit that may have landed —
+/// or was never sent — is kept staged for the next drive.
+async fn assert_resolution_contract(
+    fx: &TwoPartyCircle,
+    outcome: WireOutcome,
+    (status, sent): (EvolutionStatus, bool),
 ) {
-    assert_eq!(
-        confirmed,
-        outcome.is_ack(),
-        "{outcome:?}: the staged commit must be confirmed if and ONLY if a relay \
-         OK-acked it"
+    assert!(
+        sent,
+        "{outcome:?}: the commit was not put to its relays — publish-BEFORE-apply"
     );
+    let expected = match outcome {
+        WireOutcome::Acked => EvolutionStatus::Confirmed,
+        WireOutcome::Nak => EvolutionStatus::RolledBack,
+        WireOutcome::Timeout | WireOutcome::Throw => EvolutionStatus::Unresolved,
+    };
     assert_eq!(
-        publisher.sent().len(),
-        usize::from(outcome.reached_a_relay()),
-        "{outcome:?}: the commit must be handed to the transport exactly when the \
-         transport was usable — publish-BEFORE-apply, never the reverse"
+        status, expected,
+        "{outcome:?}: the commit must be confirmed if and ONLY if a relay OK-acked \
+         it, and rolled back only on a proven refusal"
     );
     assert!(
-        circle.confirm_published(pending).await.is_err(),
-        "{outcome:?}: the staged reference must be spent, so a stray confirm can \
-         never resurrect a commit the relays never took"
+        !fx.alice
+            .session()
+            .staged_without_fanout_for_test(&fx.gid)
+            .await,
+        "{outcome:?}: a commit was left staged with no record",
+    );
+    assert_eq!(
+        matches!(
+            fx.alice.session().epoch_state(&fx.gid).await,
+            Some(EpochState::PendingPublish(_))
+        ),
+        !outcome.settles(),
+        "{outcome:?}: a commit no relay settled was not kept staged — neither \
+         applied nor discarded — or a settled one was",
     );
 }
 
-/// Operation 1 of 4 — `create_circle`: the group-creation state is confirmed
-/// only once a Welcome reached a relay, and a rollback leaves NO circle row.
+/// Operation 1 of 4 — `create_circle`: a founding create has no group-message
+/// obligation, so whatever the wire does with its Welcome, the circle is never
+/// rolled back.
 ///
-/// One invitee, so the op stages exactly one Welcome and "≥1 welcome acked" is
-/// the single publish this resolver expresses.
+/// MDK v0.10.4 returns `PublishWork::FoundingGroupCreated` with no pending ref
+/// (`cgka-session/src/lib.rs:268-270`): the group is canonical before anything
+/// is published, and there is nothing to confirm. A Welcome no relay accepted
+/// leaves the invitee not yet joined — it must not take the creator's circle
+/// with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_circle_confirms_only_on_an_ack() {
+async fn create_never_rolls_back() {
     for outcome in WireOutcome::ALL {
         let (bob_keys, bob_member, _bob_dir) = mint_member().await;
         let alice_dir = TempDir::new().unwrap();
@@ -427,77 +460,74 @@ async fn create_circle_confirms_only_on_an_ack() {
 
         let config = CircleConfig::new("Rule 13 Create").with_relays(relays.clone());
         let created = alice
-            .create_circle(&alice_keys, vec![bob_member], &config, &relays)
+            .create_circle(&alice_keys, vec![bob_member], &config)
             .await
-            .expect("stage the create");
+            .expect("create");
         let gid = created.circle.mls_group_id.clone();
         let welcome = created
             .welcome_events
             .first()
             .expect("the invitee's gift-wrapped Welcome");
 
-        let publisher = OutcomePublisher::new(outcome);
-        let (confirmed, _ingest) = publish_then_resolve(
-            &alice,
-            &publisher,
-            &welcome.event,
-            &welcome.recipient_relays,
-            created.pending,
-        )
-        .await;
+        let publisher = OutcomePublisher(outcome);
+        let acked = publisher
+            .publish_unrecorded(&welcome.event, &welcome.recipient_relays)
+            .await;
+        assert_eq!(
+            acked,
+            outcome.is_ack(),
+            "{outcome:?}: the fake reports its own outcome"
+        );
 
-        assert_resolution_contract(&alice, &publisher, outcome, confirmed, created.pending).await;
-
-        let row = alice.get_circle(&gid).await.expect("circle lookup");
-        if outcome.is_ack() {
-            assert!(
-                row.is_some(),
-                "{outcome:?}: an acked create keeps its circle"
-            );
-            let roster = alice.session().member_pubkeys(&gid).await.unwrap();
-            assert!(
-                roster.contains(&bob_keys.public_key().to_hex()),
-                "{outcome:?}: the confirmed group must hold the invitee"
-            );
-        } else {
-            assert!(
-                row.is_none(),
-                "{outcome:?}: a create nobody acked must leave no circle row — a \
-                 ghost circle backed by no confirmed group is partial state"
-            );
-        }
+        assert!(
+            alice
+                .get_circle(&gid)
+                .await
+                .expect("circle lookup")
+                .is_some(),
+            "{outcome:?}: a founding create keeps its circle whatever became of its Welcome"
+        );
+        let roster = alice.session().member_pubkeys(&gid).await.unwrap();
+        assert!(
+            roster.contains(&bob_keys.public_key().to_hex()),
+            "{outcome:?}: the founded group already holds the invitee"
+        );
+        let staged = alice
+            .session()
+            .update_relays(&gid, relays.clone())
+            .await
+            .expect("stage a commit on the founded group");
+        assert!(
+            staged.publish.iter().any(|work| matches!(
+                work,
+                haven_core::nostr::mls::types::PublishWork::GroupEvolution { .. }
+            )),
+            "{outcome:?}: nothing is pending, so the group accepts its next commit at once"
+        );
     }
 }
 
-/// Operation 2 of 4 — `add_members_with_welcomes`: the Add commit is confirmed
-/// only on an ack, so a new member joins the roster only at an epoch the group
-/// actually received.
+/// Operation 2 of 4 — an invite: the Add commit is confirmed only on an ack,
+/// so a new member joins the roster only at an epoch the group actually
+/// received.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn add_members_confirms_only_on_an_ack() {
     for outcome in WireOutcome::ALL {
-        let relays = vec!["wss://group.example.com".to_string()];
-        let fx = TwoPartyCircle::build(&relays).await;
+        let fx = TwoPartyCircle::build(&[TARGETS[0].to_string()]).await;
         let (carol_keys, carol_member, _carol_dir) = mint_member().await;
         let carol_hex = carol_keys.public_key().to_hex();
         let epoch_before = fx.epoch().await;
 
-        let staged = fx
-            .alice
-            .add_members_with_welcomes(&fx.alice_keys, &fx.gid, vec![carol_member], &relays)
-            .await
-            .expect("stage the add");
-
-        let publisher = OutcomePublisher::new(outcome);
-        let (confirmed, _ingest) = publish_then_resolve(
-            &fx.alice,
-            &publisher,
-            &staged.commit_event,
-            &relays,
-            staged.pending,
-        )
+        let made = made(&fx, outcome, async |driver, circle, group| {
+            driver
+                .add_members(circle, group, std::slice::from_ref(&carol_member))
+                .await
+        })
         .await;
-
-        assert_resolution_contract(&fx.alice, &publisher, outcome, confirmed, staged.pending).await;
+        assert_resolution_contract(&fx, outcome, made).await;
+        if !outcome.settles() {
+            continue;
+        }
 
         assert_eq!(
             fx.roster().await.contains(&carol_hex),
@@ -512,7 +542,7 @@ async fn add_members_confirms_only_on_an_ack() {
     }
 }
 
-/// Operation 3 of 4 — `remove_members`: an eviction is applied only on an ack.
+/// Operation 3 of 4 — a removal: an eviction is applied only on an ack.
 ///
 /// The failure direction is the dangerous one: a local epoch past an eviction no
 /// peer received means the removed member still holds the key material every
@@ -520,28 +550,21 @@ async fn add_members_confirms_only_on_an_ack() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remove_members_confirms_only_on_an_ack() {
     for outcome in WireOutcome::ALL {
-        let relays = vec!["wss://group.example.com".to_string()];
-        let fx = TwoPartyCircle::build(&relays).await;
+        let fx = TwoPartyCircle::build(&[TARGETS[0].to_string()]).await;
         let epoch_before = fx.epoch().await;
         assert!(fx.roster().await.contains(&fx.bob_hex));
 
-        let staged = fx
-            .alice
-            .remove_members(&fx.gid, std::slice::from_ref(&fx.bob_hex))
-            .await
-            .expect("stage the removal");
-
-        let publisher = OutcomePublisher::new(outcome);
-        let (confirmed, _ingest) = publish_then_resolve(
-            &fx.alice,
-            &publisher,
-            &staged.commit_event,
-            &relays,
-            staged.pending,
-        )
+        let bob = fx.bob_hex.clone();
+        let made = made(&fx, outcome, async |driver, circle, group| {
+            driver
+                .remove_members(circle, group, std::slice::from_ref(&bob))
+                .await
+        })
         .await;
-
-        assert_resolution_contract(&fx.alice, &publisher, outcome, confirmed, staged.pending).await;
+        assert_resolution_contract(&fx, outcome, made).await;
+        if !outcome.settles() {
+            continue;
+        }
 
         assert_eq!(
             fx.roster().await.contains(&fx.bob_hex),
@@ -551,45 +574,31 @@ async fn remove_members_confirms_only_on_an_ack() {
         assert_eq!(
             fx.epoch().await,
             epoch_before + u64::from(outcome.is_ack()),
-            "{outcome:?}: an unacked eviction must return the group to its prior \
+            "{outcome:?}: an unacked eviction must leave the group at its prior \
              epoch, not advance past a commit the evicted member never saw"
         );
     }
 }
 
-/// Operation 4 of 4 — `update_circle_relays`: the routing component moves only
-/// on an ack, so the group never starts publishing to a relay set its members
-/// were never told about.
+/// Operation 4 of 4 — a relay change: the routing component moves only on an
+/// ack, so the group never starts publishing to a relay set its members were
+/// never told about.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_circle_relays_confirms_only_on_an_ack() {
     for outcome in WireOutcome::ALL {
-        let relays = vec!["wss://group.example.com".to_string()];
+        let relays = vec![TARGETS[0].to_string()];
         let fx = TwoPartyCircle::build(&relays).await;
         let epoch_before = fx.epoch().await;
-        let new_relays = vec!["wss://replacement.example.com".to_string()];
+        let new_relays = vec![TARGETS[1].to_string()];
 
-        let staged = fx
-            .alice
-            .update_circle_relays(&fx.gid, &new_relays)
-            .await
-            .expect("stage the relay update");
-
-        // Published to the UNION of old and new, as the caller must: the members
-        // still on the old set have to receive the commit that moves them.
-        let mut targets = relays.clone();
-        targets.extend(new_relays.clone());
-
-        let publisher = OutcomePublisher::new(outcome);
-        let (confirmed, _ingest) = publish_then_resolve(
-            &fx.alice,
-            &publisher,
-            &staged.commit_event,
-            &targets,
-            staged.pending,
-        )
+        let made = made(&fx, outcome, async |driver, circle, group| {
+            driver.update_relays(circle, group, &new_relays).await
+        })
         .await;
-
-        assert_resolution_contract(&fx.alice, &publisher, outcome, confirmed, staged.pending).await;
+        assert_resolution_contract(&fx, outcome, made).await;
+        if !outcome.settles() {
+            continue;
+        }
 
         let expected = if outcome.is_ack() {
             &new_relays

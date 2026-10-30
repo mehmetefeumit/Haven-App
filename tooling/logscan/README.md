@@ -722,6 +722,22 @@ hundreds of times per transcript · `S13` an `https?://` URL on a line that says
 a **dial failed**, or alone on a line — see below, because that is S7's blind
 spot rather than a second URL rule.
 
+`S-SQLC` is the one rule that reads lines Haven does not own: a record written
+by SQLCipher's own logger from inside Haven's process — on a logcat, a
+`sqlcipher`-tagged line whose pid also wrote a Haven-owned line (either order),
+so it fires only when the same capture holds a Haven-owned line from that pid:
+the tag alone cannot tell Haven from another app linking SQLCipher; on `ios`, a
+`Runner` record whose message opens the way SQLCipher's do — with 4.17's level
+and source words (`ERROR CORE `, `WARN MEMORY `, …), or with the logging
+function's name and a colon (`sqlcipher_page_cipher:`, `sqlite3Codec:`, …),
+which is all 4.5.7, the pin before 4.17, writes (it logs the bare message; the function
+list and the messages it leaves out are in `src/rules.rs` `SQLCIPHER_RECORD`).
+That logger is compiled out of
+every build (`-DSQLCIPHER_OMIT_LOG`, Security Rule 15, proved on the built
+artifacts by `scripts/ci/check_sqlcipher_logger_omitted.sh`) and writes page
+numbers, pointers and database filenames beneath every Haven log filter, so one
+record means the flag missed a build. No allowlist entry can name it.
+
 ### S13: the relay host in the spelling S7 cannot see
 
 `dart:io`'s `WebSocket.connect` re-schemes before it dials: `wss://host` becomes
@@ -932,7 +948,8 @@ citation means the same thing under `cargo test` and under
   refuses to load a class with no ledger table.
 * **encoding** — add the label to the expander's label list AND to the ledger.
   The expander must emit a term or a recorded drop for it on every value, and
-  `every_label_renders_exactly` needs a literal expected value computed
+  its `every_<kind>_label_renders_exactly` test (byte, string, coordinate,
+  geohash, url) needs a literal expected value computed
   **independently** of the implementation (the existing table was computed in
   Python from the label definitions; do the same).
 * **rule** — add it to `RULES`, add its positive AND negative fixture to

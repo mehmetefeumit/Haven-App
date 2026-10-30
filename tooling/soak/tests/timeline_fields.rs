@@ -194,6 +194,8 @@ fn vocabulary() -> BTreeSet<String> {
         "clamp-limit",
         "refuse-page",
         "cold-first-connect",
+        "unanswering",
+        "withhold-eose",
         "heal",
         "probe",
         "restart-soft",

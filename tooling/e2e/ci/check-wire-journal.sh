@@ -23,6 +23,14 @@
 #                        or location material (NIP-50 `search` puts plaintext
 #                        query terms on the wire; a `#g` geohash filter tells
 #                        the relay which area the user is watching).
+#   C-NEG NIP-77 shape   every client->relay NEG-OPEN carries one filter whose
+#                        keys are in `neg_filters.allowed_keys` (never `#p` or
+#                        `authors`), opens with the EMPTY set (`6100000200`:
+#                        the device advertises no id it holds), and ends on its
+#                        connection — a NEG-CLOSE from the client, a NEG-ERR or
+#                        a refusing NOTICE from the relay, or no later client
+#                        frame on that connection. A session that stands while
+#                        its socket carries more traffic is a finding.
 #
 # The allow-list itself is DATA, not code: `tooling/e2e/wire_allowlist.json`.
 # Anything absent from it is forbidden — that is what makes this closed-world,
@@ -550,8 +558,8 @@ sentinel_token_present() {
 # `verbs [… REQ …]` as if the frame had been examined. The filter KEY names are
 # now extracted and closed over in `evaluate`.
 normalize() {
-  local f="$1" boundary="$2"
-  jq -c --argjson b "${boundary}" '
+  local f="$1" boundary="$2" jidx="${3:-0}"
+  jq -c --argjson b "${boundary}" --argjson j "${jidx}" '
     # defects($ev) — the list of reasons this object cannot be trusted to be a
     # Nostr event. Empty list == safe to decode. Every subsequent filter in the
     # `else` branch depends on this having returned empty.
@@ -596,7 +604,7 @@ normalize() {
               # handled, and `evaluate` then appended a synthetic "EVENT" —
               # which made `frame_verbs.required` containing "EVENT" vacuously
               # true over a snapshot with no EVENT frame in it.
-              {t:"verb", seq:.wire_seq, dir:.dir, conn:.conn_id, verb:$verb},
+              {t:"verb", seq:.wire_seq, dir:.dir, conn:.conn_id, j:$j, verb:$verb},
               ( if $verb == "EVENT" then
                   ( [ .frame[1:][] | select(type == "object") | select(has("kind")) ] ) as $evs
                   | if ($evs | length) == 0 then
@@ -629,6 +637,19 @@ normalize() {
                      keys:( [ $rest[] | select(type == "object") | keys[] ] | unique ),
                      nfilters:( [ $rest[] | select(type == "object") ] | length ),
                      nonobj:( [ $rest[] | select(type != "object") ] | length )}
+                elif $verb == "NEG-OPEN" then
+                  # `["NEG-OPEN", <subid>, <filter>, <initial message>]` (NIP-77):
+                  # exactly one filter, at index 2, then the hex message.
+                  {t:"negopen", seq:$line.wire_seq, dir:$line.dir, conn:$line.conn_id, j:$j,
+                   sub:((.frame[1] // "") | tostring),
+                   filterok:((.frame[2] | type) == "object"),
+                   keys:(if (.frame[2] | type) == "object" then (.frame[2] | keys) else [] end),
+                   init:(.frame[3] // null)}
+                elif ($verb == "NEG-CLOSE" or $verb == "NEG-ERR" or $verb == "NEG-MSG") then
+                  {t:"neg", seq:$line.wire_seq, dir:$line.dir, conn:$line.conn_id, j:$j,
+                   verb:$verb, sub:((.frame[1] // "") | tostring)}
+                elif $verb == "NOTICE" then
+                  {t:"notice", seq:$line.wire_seq, dir:$line.dir, conn:$line.conn_id, j:$j}
                 else empty end )
             end
         else
@@ -646,6 +667,24 @@ normalize() {
         {t:"badevent", seq:($line.wire_seq), dir:($line.dir), conn:($line.conn_id),
          why:"the decoder could not classify this line (the payload is deliberately NOT echoed — read it from the on-runner journal at this wire_seq)"}
       )
+  ' -- "${f}"
+}
+
+# neg_tail <path> <boundary> <jidx> — the NIP-77 session ends recorded ABOVE
+# the boundary, and nothing else: a NEG-CLOSE, a NEG-ERR, or a relay NOTICE,
+# which C-NEG reads as a refusal only before the client's first reply. A
+# session the sentinel cut in half ended after the snapshot did, so C-NEG
+# reads its end from the whole journal; every other assertion stays below the
+# boundary.
+neg_tail() {
+  local f="$1" boundary="$2" jidx="$3"
+  jq -c --argjson b "${boundary}" --argjson j "${jidx}" '
+    select(.wire_seq > $b and .type == "frame" and ((.frame | type) == "array"))
+    | if (.frame[0] == "NEG-CLOSE" and .dir == "c2r") or (.frame[0] == "NEG-ERR" and .dir == "r2c") then
+        {t:"negend", seq:.wire_seq, conn:.conn_id, j:$j, sub:((.frame[1] // "") | tostring)}
+      elif (.frame[0] == "NOTICE" and .dir == "r2c") then
+        {t:"notice", seq:.wire_seq, dir:.dir, conn:.conn_id, j:$j}
+      else empty end
   ' -- "${f}"
 }
 
@@ -854,9 +893,53 @@ evaluate() {
             else empty end )
       ] as $reqFindings
 
+    # ---- C-NEG NIP-77 sessions ---------------------------------------------
+    # Over every connection, like the REQ filter keys: a reconciliation is the
+    # third thing a client puts on a relay, and no exclusion may hide one.
+    | ( $A.neg_filters.allowed_keys // [] ) as $negKeys
+    | [ .[] | select(.t == "neg") ] as $negs
+    | [ .[] | select(.t == "negend") ] as $negEnds
+    | [ .[] | select(.t == "notice" and .dir == "r2c") ] as $notices
+    | [ .[] | select(.t == "verb" and .dir == "c2r") ] as $c2rVerbs
+    | [ .[] | select(.t == "negopen" and .dir == "c2r")
+        | . as $o
+        | (
+            ( if ($o.filterok | not) then
+                "C-NEG shape: the NEG-OPEN at wire_seq \($o.seq) on \($o.conn) carried no filter object at index 2. A reconciliation whose filter this oracle cannot read cannot be shown to ask for the circle window alone."
+              else empty end ),
+            ( $o.keys[] | . as $k | select(($negKeys | index($k)) == null)
+              | "C-NEG filter: a NEG-OPEN carried the filter key \"\($k)\", which is not in the allow-list (tooling/e2e/wire_allowlist.json `neg_filters.allowed_keys`). Haven reconciles one circle window — kind 445, its `#h`, since, until, limit — and nothing wider." ),
+            ( if (($o.keys | index("#p")) != null) or (($o.keys | index("authors")) != null) then
+                "C-NEG person: the NEG-OPEN at wire_seq \($o.seq) on \($o.conn) named a person (`#p` or `authors`). A reconciliation keyed on a person tells the relay whose traffic this device holds."
+              else empty end ),
+            ( if $o.init != "6100000200" then
+                "C-NEG advertised: the NEG-OPEN at wire_seq \($o.seq) on \($o.conn) opened with a message other than the empty set (6100000200). Haven reconciles advertising nothing it holds; any other initial message is a fingerprint of the ids on the device, handed to the relay."
+              else empty end ),
+            ( ( [ ($negs[] | select(.j == $o.j and .conn == $o.conn and .sub == $o.sub and .seq > $o.seq
+                                    and ((.verb == "NEG-CLOSE" and .dir == "c2r") or (.verb == "NEG-ERR" and .dir == "r2c")))),
+                  ($negEnds[] | select(.j == $o.j and .conn == $o.conn and .sub == $o.sub)) ]
+                | length > 0 ) as $closed
+              | ( [ $negs[] | select(.j == $o.j and .conn == $o.conn and .sub == $o.sub and .seq > $o.seq
+                                     and .verb == "NEG-MSG" and .dir == "c2r") | .seq ]
+                  | min ) as $firstReply
+              # A NOTICE ends only a session the client never answered: once it
+              # sent a NEG-MSG the relay had opened the session, and a NOTICE
+              # after that (about anything) does not close it.
+              | ( [ $notices[] | select(.j == $o.j and .conn == $o.conn and .seq > $o.seq
+                                        and ($firstReply == null or .seq < $firstReply)) ]
+                  | length > 0 ) as $refused
+              | ( [ $c2rVerbs[] | select(.j == $o.j and .conn == $o.conn and .seq > $o.seq) | .seq ] ) as $later
+              | ( [ $negs[] | select(.j == $o.j and .conn == $o.conn and .sub == $o.sub and .dir == "c2r") | .seq ] ) as $own
+              | ( [ $later[] | . as $q | select(($own | index($q)) == null) ] | length == 0 ) as $socketDone
+              | if ($closed or $refused or $socketDone) then empty
+                else "C-NEG standing session: the NEG-OPEN at wire_seq \($o.seq) on \($o.conn) was never ended — no NEG-CLOSE from the client, no NEG-ERR or refusing NOTICE from the relay — while that connection carried more client traffic. A session left standing keeps the circle window open on the relay past the pass that asked for it."
+                end )
+          )
+      ] as $negFindings
+
     | {
         meta: $meta,
-        violations: ($kindFindings + $tagFindings + $reqFindings),
+        violations: ($kindFindings + $tagFindings + $reqFindings + $negFindings),
         summary: {
           sent_event_frames: ($sent | length),
           inbound_event_frames: ($inbound | length),
@@ -866,6 +949,7 @@ evaluate() {
           inbound_kinds: ( $inbound | map(.kind) | unique ),
           verbs: $observedVerbs,
           req_filter_keys: $observedFilterKeys,
+          neg_opens: ( [ .[] | select(.t == "negopen" and .dir == "c2r") ] | length ),
           publishers: ($publishers | length),
           sending_conns: ($sendingConns | length),
           excluded_conns: $EXCL,
@@ -954,6 +1038,11 @@ lint_allowlist() {
         (if (.req_filters | type) != "object" then "`req_filters` is \(.req_filters | type), not an object — the REQ filter-key check has no closed set to compare against"
          elif ((.req_filters.allowed_keys | strArray) | not) then "`req_filters.allowed_keys` is not an array of strings"
          elif ((.req_filters.allowed_keys | length) == 0) then "`req_filters.allowed_keys` is empty — every REQ would be a violation"
+         else empty end),
+
+        (if (.neg_filters | type) != "object" then "`neg_filters` is \(.neg_filters | type), not an object — the NEG-OPEN filter-key check has no closed set to compare against"
+         elif ((.neg_filters.allowed_keys | strArray) | not) then "`neg_filters.allowed_keys` is not an array of strings"
+         elif ((.neg_filters.allowed_keys | length) == 0) then "`neg_filters.allowed_keys` is empty — every NEG-OPEN would be a violation"
          else empty end),
 
         (if (._forbidden_by_omission | type) == "null" then empty
@@ -1138,9 +1227,10 @@ main() {
   local stream="${tmp}/normalized.ndjson"
   : > "${stream}"
 
-  local j rc=0 boundary
+  local j rc=0 boundary jidx=0
   local unusable=0 metafloor=0
   for j in "${journals[@]}"; do
+    jidx=$(( jidx + 1 ))
     rc=0; journal_usable "${j}" || rc=$?
     if (( rc != 0 )); then unusable=1; continue; fi
     rc=0; journal_wellformed "${j}" || rc=$?
@@ -1173,7 +1263,7 @@ main() {
     # input, and the sentinel line is by construction the last parseable input
     # at or below the boundary, so a success always followed the error. Two
     # layers, because the laundering had two independent mechanisms.
-    rc=0; normalize "${j}" "${boundary}" >> "${stream}" || rc=$?
+    rc=0; { normalize "${j}" "${boundary}" "${jidx}" && neg_tail "${j}" "${boundary}" "${jidx}"; } >> "${stream}" || rc=$?
     if (( rc != 0 )); then
       echo "UNUSABLE: ${j} [decoder] — the journal decoder exited ${rc}; the sample" >&2
       echo "          could not be read, so this run proves nothing either way." >&2
@@ -1216,6 +1306,7 @@ main() {
     "wire-journal summary: \(.summary.unique_events) unique SENT event(s) from " +
     "\(.summary.sent_event_frames) client->relay EVENT frame(s); kinds \(.summary.kinds); " +
     "verbs \(.summary.verbs); REQ filter keys \(.summary.req_filter_keys); " +
+    "\(.summary.neg_opens) client NEG-OPEN(s); " +
     "\(.summary.publishers) identity-key publisher(s) over " +
     "\(.summary.sending_conns) connection(s)"' >&2
   printf '%s' "${verdict}" | jq -r '.summary.tags_by_kind | to_entries[] | "  kind \(.key) tags: \(.value)"' >&2
@@ -1464,12 +1555,14 @@ readonly PK_EPH1="11111111111111111111111111111111111111111111111111111111111111
 readonly PK_EPH2="2222222222222222222222222222222222222222222222222222222222222222"
 readonly SENTINEL="HAVEN_WIRE_SENTINEL:selftest0001"
 
-# The real kind-30443 tag set, copied from
-# haven-core/src/relay/maintenance/key_package.rs:479-486. An unfaithful test
-# double is how a self-test comes to prove something other than what it claims:
-# a fixture carrying invented tag names would pass the allow-list only because
-# the allow-list had been written from the same invention.
-readonly KP_TAGS='[["d","haven-kp-0"],["mls_protocol_version","1.0"],["i","0001"],["mls_ciphersuite","0x0001"],["mls_extensions","0x0002"],["mls_proposals","0x0003"],["app_components","0x8005"]]'
+# The kind-30443 tag set a Haven package really publishes (the same double
+# check-wire-correlation.sh judges VALUES on; the Rust half is
+# `build_key_package_event_has_marmot_tag_set_and_no_encoding_or_relays`). An
+# unfaithful test double is how a self-test comes to prove something other than
+# what it claims: a fixture carrying invented tag names would pass the
+# allow-list only because the allow-list had been written from the same
+# invention.
+readonly KP_TAGS='[["d","0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"],["mls_protocol_version","1.0"],["i","1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e"],["mls_ciphersuite","0x0001"],["mls_extensions","0x0006"],["mls_proposals","0x0008","0x000a"],["app_components","0x8001","0x8003","0x8004","0x8005","0x8009","0x800c"]]'
 
 # write_healthy <path> — a journal a healthy full scenario would produce.
 #
@@ -2519,6 +2612,181 @@ self_test() {
     --min-distinct-conns 2 || fail=1
 
   # -------------------------------------------------------------------------
+  # C-NEG — the NIP-77 session shape. Each fixture puts its NEG lines on c1
+  # AHEAD of the healthy journal, so the connection goes on carrying client
+  # traffic after the session (the shape the standing-session rule judges),
+  # unless the case is about a socket that carries nothing more.
+  # -------------------------------------------------------------------------
+  local negopen='["NEG-OPEN","neg-1",{"kinds":[445],"#h":["cafebabe"],"since":1783294144,"until":1785886144,"limit":16384},"6100000200"]'
+  local negreply='["NEG-MSG","neg-1","6100000200"]'
+  neg_case() {
+    local out="$1"; shift
+    fx_begin "${out}.raw"
+    local spec
+    for spec in "$@"; do jline "${spec%%|*}" c1 "${spec#*|}"; done
+    cat "${healthy}" >> "${out}.raw"
+    renumber "${out}.raw" "${out}"
+  }
+
+  local negdone="${tmp}/neg-done.ndjson"
+  neg_case "${negdone}" "c2r|${negopen}" "r2c|${negreply}" 'c2r|["NEG-CLOSE","neg-1"]'
+  expect_rc 0 "a NIP-77 session that opens empty and ends with NEG-CLOSE is clean" \
+    --journal "${negdone}" "${base[@]}" || fail=1
+
+  local negrefused="${tmp}/neg-refused.ndjson"
+  neg_case "${negrefused}" "c2r|${negopen}" 'r2c|["NOTICE","ERROR: bad msg: negentropy disabled"]'
+  expect_rc 0 "a NEG-OPEN a relay without NIP-77 refuses by NOTICE stands open nowhere" \
+    --journal "${negrefused}" "${base[@]}" || fail=1
+
+  local negerr="${tmp}/neg-err.ndjson"
+  neg_case "${negerr}" "c2r|${negopen}" 'r2c|["NEG-ERR","neg-1","blocked: too many records"]'
+  expect_rc 0 "a session the relay ends with NEG-ERR is ended" \
+    --journal "${negerr}" "${base[@]}" || fail=1
+
+  # The socket closed mid-session: nothing but the session's own replies
+  # follows on that connection, which is how a pause ends a session.
+  local negdropped="${tmp}/neg-dropped.ndjson"
+  fx_begin "${tmp}/neg-dropped.raw"
+  jline c2r c7 "${negopen}"
+  jline r2c c7 "${negreply}"
+  jline c2r c7 "${negreply}"
+  cat "${healthy}" >> "${tmp}/neg-dropped.raw"
+  renumber "${tmp}/neg-dropped.raw" "${negdropped}"
+  expect_rc 0 "a session whose socket carries nothing more is ended by the close" \
+    --journal "${negdropped}" "${base[@]}" || fail=1
+
+  local negstanding="${tmp}/neg-standing.ndjson"
+  neg_case "${negstanding}" "c2r|${negopen}" "r2c|${negreply}"
+  expect_rc 1 "a session left standing while its socket carries more traffic is a finding" \
+    --journal "${negstanding}" "${base[@]}" || fail=1
+  expect_msg "C-NEG standing session" "...naming the standing-session rule" \
+    --journal "${negstanding}" "${base[@]}" || fail=1
+
+  local negnoticelate="${tmp}/neg-notice-late.ndjson"
+  neg_case "${negnoticelate}" "c2r|${negopen}" "r2c|${negreply}" "c2r|${negreply}" \
+    'r2c|["NOTICE","rate limited"]'
+  expect_msg "C-NEG standing session" \
+    "a NOTICE after the client answered does not end the session it answered" \
+    --journal "${negnoticelate}" "${base[@]}" || fail=1
+
+  local negothersub="${tmp}/neg-other-sub.ndjson"
+  neg_case "${negothersub}" "c2r|${negopen}" 'c2r|["NEG-CLOSE","neg-2"]'
+  expect_msg "C-NEG standing session" "a NEG-CLOSE for another subscription ends nothing" \
+    --journal "${negothersub}" "${base[@]}" || fail=1
+
+  local negotherconn="${tmp}/neg-other-conn.ndjson"
+  fx_begin "${tmp}/neg-other-conn.raw"
+  jline c2r c1 "${negopen}"
+  jline c2r c2 '["NEG-CLOSE","neg-1"]'
+  cat "${healthy}" >> "${tmp}/neg-other-conn.raw"
+  renumber "${tmp}/neg-other-conn.raw" "${negotherconn}"
+  expect_msg "C-NEG standing session" "a NEG-CLOSE on another connection ends nothing" \
+    --journal "${negotherconn}" "${base[@]}" || fail=1
+
+  # The sentinel cut the session in half: its NEG-CLOSE lands above the
+  # boundary, after the snapshot. Read from the whole journal it is ended; the
+  # same journal without that line is the control.
+  local negcut="${tmp}/neg-cut.ndjson" negcutopen="${tmp}/neg-cut-open.ndjson"
+  neg_case "${negcutopen}" "c2r|${negopen}" "r2c|${negreply}"
+  cp "${negcutopen}" "${tmp}/neg-cut.raw"
+  printf '%s\n' '{"wire_seq":0,"type":"frame","conn_id":"c1","ts_ms":1785886149000,"dir":"c2r","relay_url":"ws://127.0.0.1:7777","listen":"127.0.0.1:7877","frame":["NEG-CLOSE","neg-1"],"raw_len":22}' \
+    >> "${tmp}/neg-cut.raw"
+  renumber "${tmp}/neg-cut.raw" "${negcut}"
+  expect_rc 0 "a session whose NEG-CLOSE lands above the sentinel is ended" \
+    --journal "${negcut}" "${base[@]}" || fail=1
+  expect_rc 1 "...and the same journal without it is a standing session" \
+    --journal "${negcutopen}" "${base[@]}" || fail=1
+
+  # Two sessions on one connection, each refused by a NOTICE the sentinel
+  # cut off: read from the whole journal both are ended; the same journal
+  # without the NOTICEs is the control.
+  local negopen2='["NEG-OPEN","neg-2",{"kinds":[445],"#h":["cafebabe"],"since":1783294144,"until":1785886144,"limit":16384},"6100000200"]'
+  local negcutn="${tmp}/neg-cut-notices.ndjson" negcutnopen="${tmp}/neg-cut-notices-open.ndjson"
+  neg_case "${negcutnopen}" "c2r|${negopen}" "c2r|${negopen2}"
+  cp "${negcutnopen}" "${tmp}/neg-cut-notices.raw"
+  printf '%s\n' \
+    '{"wire_seq":0,"type":"frame","conn_id":"c1","ts_ms":1785886149000,"dir":"r2c","relay_url":"ws://127.0.0.1:7777","listen":"127.0.0.1:7877","frame":["NOTICE","ERROR: bad msg: unknown cmd"],"raw_len":41}' \
+    '{"wire_seq":0,"type":"frame","conn_id":"c1","ts_ms":1785886149001,"dir":"r2c","relay_url":"ws://127.0.0.1:7777","listen":"127.0.0.1:7877","frame":["NOTICE","ERROR: bad msg: unknown cmd"],"raw_len":41}' \
+    >> "${tmp}/neg-cut-notices.raw"
+  renumber "${tmp}/neg-cut-notices.raw" "${negcutn}"
+  expect_rc 0 "two sessions on one connection refused by NOTICEs above the sentinel are ended" \
+    --journal "${negcutn}" "${base[@]}" || fail=1
+  expect_rc 1 "...and the same journal without the NOTICEs leaves them standing" \
+    --journal "${negcutnopen}" "${base[@]}" || fail=1
+
+  # Two journals reuse connection ids; a close in one ends nothing in the
+  # other, whether it lies below that journal's sentinel or above it.
+  local negjb="${tmp}/neg-journal-b.ndjson"
+  sed '$d' "${healthy}" > "${negjb}"
+  FIXTURE_FILE="${negjb}"; FIXTURE_SEQ="$(wc -l < "${negjb}")"
+  jline c2r c1 '["NEG-CLOSE","neg-1"]'
+  jsentinel c0
+  jline c2r c1 '["NEG-CLOSE","neg-1"]'
+  expect_msg "C-NEG standing session" "a NEG-CLOSE in another journal ends nothing in this one" \
+    --journal "${negstanding}" --journal "${negjb}" "${base[@]}" || fail=1
+
+  local negadvertised="${tmp}/neg-advertised.ndjson"
+  neg_case "${negadvertised}" \
+    'c2r|["NEG-OPEN","neg-1",{"kinds":[445],"#h":["cafebabe"]},"61000002013a"]' \
+    'c2r|["NEG-CLOSE","neg-1"]'
+  expect_rc 1 "a NEG-OPEN that advertises a held id is a finding" \
+    --journal "${negadvertised}" "${base[@]}" || fail=1
+  expect_msg "C-NEG advertised" "...naming the advertise-nothing rule" \
+    --journal "${negadvertised}" "${base[@]}" || fail=1
+
+  local negp="${tmp}/neg-p.ndjson"
+  neg_case "${negp}" \
+    "c2r|[\"NEG-OPEN\",\"neg-1\",{\"kinds\":[445],\"#p\":[\"${PK_A}\"]},\"6100000200\"]" \
+    'c2r|["NEG-CLOSE","neg-1"]'
+  expect_msg "C-NEG person" "a NEG-OPEN keyed on a recipient names a person" \
+    --journal "${negp}" "${base[@]}" || fail=1
+
+  local negauthors="${tmp}/neg-authors.ndjson"
+  neg_case "${negauthors}" \
+    "c2r|[\"NEG-OPEN\",\"neg-1\",{\"kinds\":[445],\"authors\":[\"${PK_A}\"]},\"6100000200\"]" \
+    'c2r|["NEG-CLOSE","neg-1"]'
+  expect_msg "C-NEG person" "a NEG-OPEN keyed on an author names a person" \
+    --journal "${negauthors}" "${base[@]}" || fail=1
+
+  local negids="${tmp}/neg-ids.ndjson"
+  neg_case "${negids}" \
+    'c2r|["NEG-OPEN","neg-1",{"kinds":[445],"ids":["e09"]},"6100000200"]' \
+    'c2r|["NEG-CLOSE","neg-1"]'
+  expect_msg "C-NEG filter: a NEG-OPEN carried the filter key \"ids\"" \
+    "a NEG-OPEN filter key outside neg_filters is a finding" \
+    --journal "${negids}" "${base[@]}" || fail=1
+  expect_no_msg "C-NEG person" "...and an id list is not a person" \
+    --journal "${negids}" "${base[@]}" || fail=1
+
+  local negnofilter="${tmp}/neg-no-filter.ndjson"
+  neg_case "${negnofilter}" 'c2r|["NEG-OPEN","neg-1","6100000200"]' 'c2r|["NEG-CLOSE","neg-1"]'
+  expect_msg "C-NEG shape" "a NEG-OPEN with no filter object is a finding" \
+    --journal "${negnofilter}" "${base[@]}" || fail=1
+
+  # A harness-declared socket hides no reconciliation: C-NEG reads every
+  # connection, as the REQ filter-key check does.
+  local negharness="${tmp}/neg-harness.ndjson"
+  fx_begin "${tmp}/neg-harness.raw"
+  jline c2r c0 '["NEG-OPEN","neg-1",{"kinds":[445],"#h":["cafebabe"]},"6100000201"]'
+  jline c2r c0 '["NEG-CLOSE","neg-1"]'
+  cat "${healthy}" >> "${tmp}/neg-harness.raw"
+  renumber "${tmp}/neg-harness.raw" "${negharness}"
+  expect_msg "C-NEG advertised" "a NEG-OPEN on a harness-declared socket is still read" \
+    --journal "${negharness}" "${base[@]}" || fail=1
+
+  local al_noneg="${tmp}/al-noneg.json"
+  jq -c 'del(.neg_filters)' "${allow}" > "${al_noneg}"
+  expect_msg "the NEG-OPEN filter-key check has no closed set to compare against" \
+    "an allow-list with no neg_filters section is UNUSABLE, named" \
+    --journal "${healthy}" "${base[@]:0:2}" --allowlist "${al_noneg}" \
+    --min-distinct-conns 2 || fail=1
+  local al_emptyneg="${tmp}/al-emptyneg.json"
+  jq -c '.neg_filters.allowed_keys = []' "${allow}" > "${al_emptyneg}"
+  expect_rc 3 "an allow-list with an EMPTY neg_filters.allowed_keys is UNUSABLE" \
+    --journal "${healthy}" "${base[@]:0:2}" --allowlist "${al_emptyneg}" \
+    --min-distinct-conns 2 || fail=1
+
+  # -------------------------------------------------------------------------
   # A floor on the fixture COUNT, not just on their verdicts. Every assertion
   # in this file is a set operation that passes over an empty input, and the
   # self-test is no exception: deleting cases would leave it green while the
@@ -2542,7 +2810,7 @@ self_test() {
   # it exactly, and deleting any case still trips it. If a case is genuinely
   # retired, lower this number in the same commit and say why.
   # -------------------------------------------------------------------------
-  readonly MIN_CASES=128
+  readonly MIN_CASES=150
   if (( CASES_RUN + CASES_SKIPPED < MIN_CASES )); then
     echo "SELF-TEST FAIL: only $(( CASES_RUN + CASES_SKIPPED )) fixture(s) accounted for" >&2
     echo "  (${CASES_RUN} run + ${CASES_SKIPPED} skipped); at least ${MIN_CASES} expected." >&2
@@ -2560,7 +2828,8 @@ self_test() {
        "carrying traffic fields, and an allow-list that does not lint all fail as UNUSABLE;" \
        "unanchored, empty-snapshot, one-sided and ephemeral-key-inflated runs fail as" \
        "META-FLOOR; unexpected kinds (including kinds forbidden by omission), unexpected" \
-       "tags, missing required kinds/tags, unknown REQ filter keys and MALFORMED records" \
+       "tags, missing required kinds/tags, unknown REQ filter keys, a NIP-77 session that" \
+       "advertises, names a person or stands open, and MALFORMED records" \
        "fail as VIOLATIONs; inbound traffic never answers for a send-side assertion;" \
        "duplicate event ids, optional absences, an echoed sentinel token and traffic above" \
        "the sentinel do not)."

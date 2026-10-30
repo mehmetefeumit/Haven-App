@@ -44,10 +44,9 @@ const _disprovedClaims = <String>[
 /// that carries the corrected mechanism; deleting it is as much a regression as
 /// restoring the claim.
 const _requiredCorrections = <String, String>{
-  'lib/src/services/location_auto_commit.dart':
-      'It is not re-surfaced by a later tick.',
-  'lib/src/services/background_deferred_send.dart':
-      'That failure report is NOT a rollback.',
+  // The deferred-send ladders that stated it too (`location_auto_commit.dart`,
+  // `background_deferred_send.dart`) are gone: a seal's commits are driven in
+  // Rust.
   'lib/src/services/background_location_task.dart':
       'does NOT roll the commit back',
 };

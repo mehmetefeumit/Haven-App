@@ -12,10 +12,9 @@ void main() {
   group('location constants', () {
     test('kLocationUpdateInterval is 2 minutes (120 seconds)', () {
       // Drift guard: this constant is threaded through the FFI as the
-      // nominal for `jitteredPublishIntervalSecs()` and influences the
-      // TTL floor passed to `encryptLocation`. A silent change here
-      // shifts the NIP-40 expiration window on every published kind:445
-      // event.
+      // nominal for `jitteredPublishIntervalSecs()`, so a silent change
+      // here shifts the publish cadence the 228 s retention every seal
+      // stamps is sized against.
       expect(kLocationUpdateInterval.inSeconds, 120);
     });
 

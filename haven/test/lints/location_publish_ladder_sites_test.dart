@@ -1,20 +1,16 @@
 // Static guard for Security Rule 13's newest edge: which publish LADDER each
 // call site takes.
 //
-// `RelayService` now offers two publishes with the same signature —
-// `publishEvent` (three attempts, ~49 s worst case) and `publishLocationEvent`
-// (one connect, one 5 s per-relay ack window, no retry). Nothing in the type
-// system tells them apart: both take an event JSON and a relay list and both
-// return a `PublishResult`. The difference is what a miss costs. A location
-// nobody acked is superseded by the next tick within
-// `kLocationPublishMaxInterval`; a COMMIT is not superseded by anything, and
-// one that is neither confirmed nor rolled back leaves the group at an epoch
-// its peers never received.
+// `RelayService.publishEvent` (three attempts, ~49 s worst case) is the one
+// signed-event publish left in Dart; the one-shot `publishLocationEvent` is
+// retired — every location is sealed and sent through the fanout driver —
+// and must not come back: a commit on a one-shot ladder would be neither
+// confirmed nor rolled back after a single missed ack.
 //
-// So "only a location may take the one-shot ladder" is a property of the CALL
-// SITES, and this file pins the inventory of both ladders by exact equality —
-// a floor would let a new caller appear silently, which is the whole failure
-// mode. The behavioural halves live where they can be executed:
+// So this file pins the inventory of `publishEvent` callers, and the absence
+// of any `publishLocationEvent` caller, by exact equality — a floor would let
+// a new caller appear silently, which is the whole failure mode. The
+// behavioural halves live where they can be executed:
 // `test/services/location_sharing_service_test.dart` (the foreground publish
 // and its clock-rejection contract) and
 // `test/services/background_location_task_publish_cycle_test.dart` (the
@@ -174,28 +170,12 @@ void go() {
       expect(sites, isNotEmpty);
     });
 
-    test('only the two location publishes take the one-shot ladder', () {
+    test('nothing takes the one-shot ladder', () {
+      // Every plane seals through the fanout driver and sends the sealed
+      // record once (`publishLocation`); the forwarder went with the method.
       expect(
         sites.where((s) => s.method == 'publishLocationEvent').toSet(),
-        {
-          // The forwarder: the interface implementation that hands the call to
-          // the FFI. Not a decision, but it must exist for the two below.
-          (
-            file: 'lib/src/services/nostr_relay_service.dart',
-            member: 'publishLocationEvent',
-            method: 'publishLocationEvent',
-          ),
-          (
-            file: 'lib/src/services/location_sharing_service.dart',
-            member: 'publishLocation',
-            method: 'publishLocationEvent',
-          ),
-          (
-            file: 'lib/src/services/background_location_task.dart',
-            member: '_publishCycle',
-            method: 'publishLocationEvent',
-          ),
-        },
+        isEmpty,
         reason:
             'the one-shot ladder gives up after a single 5 s per-relay ack '
             'window. That is only safe for an event a later send supersedes — '
@@ -206,41 +186,11 @@ void go() {
       );
     });
 
-    test('the commit, welcome and proposal publishers keep the ladder', () {
+    test('the plain publishers keep the ladder', () {
       expect(sites.where((s) => s.method == 'publishEvent').toSet(), {
         (
           file: 'lib/src/services/nostr_relay_service.dart',
-          member: 'publishWelcome',
-          method: 'publishEvent',
-        ),
-        (
-          file: 'lib/src/services/nostr_relay_service.dart',
           member: 'publishEvent',
-          method: 'publishEvent',
-        ),
-        (
-          file: 'lib/src/services/nostr_circle_service.dart',
-          member: '_publishEvolutionEvent',
-          method: 'publishEvent',
-        ),
-        (
-          file: 'lib/src/services/location_sharing_service.dart',
-          member: '_publishDeferredProposals',
-          method: 'publishEvent',
-        ),
-        (
-          file: 'lib/src/services/location_auto_commit.dart',
-          member: '_publishAndConfirmAutoCommit',
-          method: 'publishEvent',
-        ),
-        (
-          file: 'lib/src/services/background_deferred_send.dart',
-          member: 'publishStagedCommits',
-          method: 'publishEvent',
-        ),
-        (
-          file: 'lib/src/services/background_deferred_send.dart',
-          member: 'publishDeferredProposals',
           method: 'publishEvent',
         ),
         (
@@ -249,23 +199,17 @@ void go() {
           method: 'publishEvent',
         ),
       }, reason: 'a ladder site that disappeared either lost its retries or '
-          'moved to the one-shot path; both are Rule-13 regressions');
+          'moved to the one-shot path; both are Rule-13 regressions. (The '
+          'legacy leave, the deferred-send ladders, their proposals and the '
+          'founding Welcome send are gone: the fanout driver records and '
+          'drives each in Rust.)');
     });
   });
 
-  group('the one-shot ladder keeps the retry ladder’s error contract', () {
-    // `NostrRelayService` reaches the core through `RelayManagerFfi`, which
-    // cannot be constructed without the native library, so neither publish can
-    // be driven on the host — `publishEvent`'s own mapping has always been
-    // pinned by the Rust side plus `clock_skew_detector_test.dart`. What is
-    // NEW here is a second method that could quietly differ: written with a
-    // plain catch, a fast device clock would become the generic failure on the
-    // location plane alone — the one plane the user watches — and the
-    // actionable "your clock is wrong" would never be shown.
-    //
-    // `location_sharing_service_test.dart` proves the far end (a typed
-    // rejection reaches the detector); this proves the near end raises the
-    // typed rejection at all.
+  group("the retry ladder's error contract", () {
+    // What each failure becomes is driven on the host
+    // (`test/services/nostr_relay_service_publish_event_test.dart`); this pins
+    // the shape that keeps it typed and surfaces no raw error.
     late Map<String, String> bodies;
 
     setUpAll(() {
@@ -275,33 +219,27 @@ void go() {
         ).readAsStringSync(),
         throwIfDiagnostics: false,
       ).unit;
-      final finder = _MethodSourceFinder({
-        'publishEvent',
-        'publishLocationEvent',
-      });
+      final finder = _MethodSourceFinder({'publishEvent'});
       unit.accept(finder);
       bodies = finder.sources;
     });
 
-    test('both publishes were found (anti-vacuity)', () {
-      expect(
-        bodies.keys,
-        containsAll(['publishEvent', 'publishLocationEvent']),
-      );
+    test('the publish was found (anti-vacuity)', () {
+      expect(bodies.keys, contains('publishEvent'));
     });
 
-    test('a device-clock rejection stays typed on both ladders', () {
-      for (final method in ['publishEvent', 'publishLocationEvent']) {
+    test('a device-clock rejection stays typed', () {
+      for (final method in ['publishEvent']) {
         expect(
           bodies[method],
-          contains('_deviceClockComplaintToken(e)'),
+          contains('on PublishFailureFfi catch (failure)'),
           reason:
-              '$method must classify the FFI error by the Haven-authored '
-              'token, not by relay prose',
+              '$method must classify the FFI error by its typed fields, '
+              'never by its text',
         );
         expect(
           bodies[method],
-          contains('throw RelayClockRejectionException(complaintToken)'),
+          contains('throw RelayClockRejectionException(verdict)'),
           reason:
               '$method must rethrow the one publish failure a user can act '
               'on as its own type; flattening it is what made a fast clock a '
@@ -310,8 +248,8 @@ void go() {
       }
     });
 
-    test('neither ladder surfaces the raw error (Security Rule 8)', () {
-      for (final method in ['publishEvent', 'publishLocationEvent']) {
+    test('the raw error is not surfaced (Security Rule 8)', () {
+      for (final method in ['publishEvent']) {
         for (final leak in [r'$e', 'e.toString()', 'e.message']) {
           expect(
             bodies[method],

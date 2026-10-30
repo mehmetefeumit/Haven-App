@@ -308,7 +308,7 @@ class AppLocalizationsRu extends AppLocalizations {
       few:
           'Ваши текущие $countString реле будут заменены реле Haven по умолчанию. Это действие нельзя отменить.',
       one:
-          'Ваше текущее $countString реле будет заменено реле Haven по умолчанию. Это действие нельзя отменить.',
+          'Ваш текущий список из $countString реле будет заменён реле Haven по умолчанию. Это действие нельзя отменить.',
     );
     return '$_temp0';
   }
@@ -709,9 +709,6 @@ class AppLocalizationsRu extends AppLocalizations {
   String get nameCircleStageCreatingGroup => 'Создаём защищённую группу...';
 
   @override
-  String get nameCircleStageSendingInvites => 'Отправляем приглашения...';
-
-  @override
   String get nameCircleStageComplete => 'Готово!';
 
   @override
@@ -729,7 +726,7 @@ class AppLocalizationsRu extends AppLocalizations {
   }
 
   @override
-  String nameCircleCreatedPartialSnack(String name, int sent, int total) {
+  String nameCircleCreatedSentSoFarSnack(String name, int sent, int total) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -738,7 +735,19 @@ class AppLocalizationsRu extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Круг «$name» создан. Приглашения отправлены ($sentString из $totalString); доставка остальных ожидается.';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          'Круг «$name» создан. Пока отправлено приглашений: $sentString из $totalString. Haven продолжит отправку, пока приложение открыто, но не дольше суток.',
+      many:
+          'Круг «$name» создан. Пока отправлено приглашений: $sentString из $totalString. Haven продолжит отправку, пока приложение открыто, но не дольше суток.',
+      few:
+          'Круг «$name» создан. Пока отправлено приглашений: $sentString из $totalString. Haven продолжит отправку, пока приложение открыто, но не дольше суток.',
+      one:
+          'Круг «$name» создан. Пока отправлено приглашений: $sentString из $totalString. Haven продолжит отправку, пока приложение открыто, но не дольше суток.',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -777,7 +786,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String addMemberTitle(String circleName) {
-    return 'Добавить в $circleName';
+    return 'Добавить в круг «$circleName»';
   }
 
   @override
@@ -792,10 +801,10 @@ class AppLocalizationsRu extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: 'Отправить приглашения',
-      many: 'Отправить приглашения',
-      few: 'Отправить приглашения',
-      one: 'Отправить приглашение',
+      other: 'Пригласить',
+      many: 'Пригласить',
+      few: 'Пригласить',
+      one: 'Пригласить',
     );
     return '$_temp0';
   }
@@ -805,10 +814,10 @@ class AppLocalizationsRu extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: 'Отправляем приглашения...',
-      many: 'Отправляем приглашения...',
-      few: 'Отправляем приглашения...',
-      one: 'Отправляем приглашение...',
+      other: 'Приглашаем...',
+      many: 'Приглашаем...',
+      few: 'Приглашаем...',
+      one: 'Приглашаем...',
     );
     return '$_temp0';
   }
@@ -818,16 +827,16 @@ class AppLocalizationsRu extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: 'Приглашения отправлены в $circleName',
-      many: 'Приглашения отправлены в $circleName',
-      few: 'Приглашения отправлены в $circleName',
-      one: 'Приглашение отправлено в $circleName',
+      other: 'Отправлено приглашений в круг «$circleName»: $count',
+      many: 'Отправлено приглашений в круг «$circleName»: $count',
+      few: 'Отправлено приглашений в круг «$circleName»: $count',
+      one: 'Отправлено приглашений в круг «$circleName»: $count',
     );
     return '$_temp0';
   }
 
   @override
-  String addMemberPartialDelivery(int sent, int total) {
+  String addMemberSentSoFar(int sent, int total, String circleName) {
     final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
       localeName,
     );
@@ -836,7 +845,44 @@ class AppLocalizationsRu extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Приглашения отправлены ($sentString из $totalString). Доставка остальных ожидается.';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other:
+          'Пока отправлено приглашений в круг «$circleName»: $sentString из $totalString. Haven продолжит отправку, пока приложение открыто, но не дольше суток.',
+      many:
+          'Пока отправлено приглашений в круг «$circleName»: $sentString из $totalString. Haven продолжит отправку, пока приложение открыто, но не дольше суток.',
+      few:
+          'Пока отправлено приглашений в круг «$circleName»: $sentString из $totalString. Haven продолжит отправку, пока приложение открыто, но не дольше суток.',
+      one:
+          'Пока отправлено приглашений в круг «$circleName»: $sentString из $totalString. Haven продолжит отправку, пока приложение открыто, но не дольше суток.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String addMemberReinviteNeeded(String circleName) {
+    return 'Haven не может отправить приглашение в круг «$circleName». Удалите этого человека и добавьте его снова.';
+  }
+
+  @override
+  String get memberCannotReceiveInvitations =>
+      'Haven не может пригласить всех выбранных вами людей: не удалось найти, куда отправить как минимум одно из приглашений. Попросите выбранных вами людей проверить, может ли их приложение получать приглашения, а затем попробуйте снова.';
+
+  @override
+  String get missedInvitationsShowWho => 'Показать, кому';
+
+  @override
+  String missedInvitationsTitle(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Кому не отправлено приглашение',
+      many: 'Кому не отправлено приглашение',
+      few: 'Кому не отправлено приглашение',
+      one: 'Кому не отправлено приглашение',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -892,6 +938,11 @@ class AppLocalizationsRu extends AppLocalizations {
   }
 
   @override
+  String circleMemberRemoveAwaitingAnnouncement(String name) {
+    return 'Всё ещё удаляем участника $name: ждём подтверждения от реле. Пока это не завершится, в этом круге ничего не передаётся.';
+  }
+
+  @override
   String get circleMemberAdmin => 'Админ';
 
   @override
@@ -926,7 +977,11 @@ class AppLocalizationsRu extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'Готово к приглашению';
 
   @override
-  String get pendingMemberNeedsUpdate => 'Требуется обновить Haven';
+  String get pendingMemberNeedsUpdate => 'Требуется обновить или открыть Haven';
+
+  @override
+  String get memberKeyPackageStale =>
+      'Haven сейчас не может пригласить этого человека. Попросите его открыть Haven, а затем повторите попытку.';
 
   @override
   String get memberSearchHint => 'Введите ID участника...';
@@ -1078,6 +1133,27 @@ class AppLocalizationsRu extends AppLocalizations {
       'Не удалось принять приглашение. Пожалуйста, повторите попытку.';
 
   @override
+  String invitationNeedsNewInviteError(String name) {
+    return 'Это приглашение больше нельзя использовать. Попросите $name пригласить вас снова. Возможно, этому человеку сначала нужно обновить Haven.';
+  }
+
+  @override
+  String get rejoinDialogTitle => 'Снова вступить в этот круг?';
+
+  @override
+  String rejoinDialogBody(String inviterName, String circleName) {
+    return '$inviterName приглашает вас в круг «$circleName», который уже есть на этом телефоне. Так бывает, если вас удалили из круга, а потом пригласили снова. Если вступить снова, копия круга на этом телефоне будет заменена. «Отклонить» навсегда закрывает это приглашение, а «Отмена» сохраняет его на потом.';
+  }
+
+  @override
+  String rejoinDialogBodyUnnamed(String circleName) {
+    return 'Вас пригласили в круг «$circleName», который уже есть на этом телефоне. Так бывает, если вас удалили из круга, а потом пригласили снова. Если вступить снова, копия круга на этом телефоне будет заменена. «Отклонить» навсегда закрывает это приглашение, а «Отмена» сохраняет его на потом.';
+  }
+
+  @override
+  String get rejoinDialogConfirm => 'Вступить снова';
+
+  @override
   String invitationRosterFullError(int limit) {
     final intl.NumberFormat limitNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1218,11 +1294,22 @@ class AppLocalizationsRu extends AppLocalizations {
   String get circleDetailsLeaveCircle => 'Покинуть круг';
 
   @override
+  String get circleDetailsLeavingInProgress => 'Покидаем круг…';
+
+  @override
   String get leaveCircleDialogTitle => 'Покинуть круг';
 
   @override
   String get leaveCircleDialogBody =>
       'Покинуть этот круг? Вы перестанете отправлять своё местоположение его участникам и перестанете видеть их местоположение. Последняя отправленная вами точка останется на их телефонах до суток. Отменить это нельзя: чтобы вернуться, вам понадобится новое приглашение.';
+
+  @override
+  String get leaveDisbandedCircleDialogBody =>
+      'Этот круг закрыт, поэтому в нём больше ничего не передаётся. Если покинуть его, он будет удалён с этого телефона.';
+
+  @override
+  String get leaveCircleDialogAdminNote =>
+      'Вы админ этого круга. Прежде чем вы его покинете, Haven попытается сделать админом другого участника, чтобы круг продолжал работать.';
 
   @override
   String get leaveCircleConfirm => 'Покинуть';
@@ -1237,52 +1324,32 @@ class AppLocalizationsRu extends AppLocalizations {
   String get leaveCircleError => 'Не удалось покинуть круг';
 
   @override
-  String get circleBlockedBannerTitle => 'Этот круг нельзя обновить';
-
-  @override
-  String get circleBlockedBannerBody =>
-      'Что-то пошло не так с шифрованием этого круга, поэтому Haven больше не может отправлять и получать в нём обновления. Ниже по-прежнему доступно последнее известное состояние, или вы можете покинуть круг.';
-
-  @override
-  String get legacyCircleBannerTitle => 'Этот круг нужно создать заново';
-
-  @override
-  String get legacyCircleBannerBody =>
-      'Механизм шифрования Haven был обновлён, поэтому этот круг больше нельзя использовать. Создайте его заново, чтобы продолжить делиться местоположением с теми же людьми. Вам нужно будет пригласить их снова.';
-
-  @override
   String get legacyCircleRecreateCta => 'Создать круг заново';
 
   @override
-  String get legacyCircleRemoveCta => 'Удалить';
+  String get storageResetTitle => 'Haven обновлён';
 
   @override
-  String get legacyCircleRemoveDialogTitle => 'Удалить круг?';
+  String get storageResetKept =>
+      'Ваша личность не изменилась, а уже опубликованный вами публичный профиль остаётся прежним.';
 
   @override
-  String get legacyCircleRemoveDialogBody =>
-      'Этот круг больше нельзя использовать, и он будет удалён из вашего списка. Это не повлияет на новый круг, который вы создадите взамен.';
+  String get storageResetLost =>
+      'Для перехода на новый механизм шифрования Haven круги, созданные до этого обновления, удалены. Создайте их заново и снова пригласите участников. Также удалены псевдонимы, которые вы дали людям до этого обновления, и изменения профиля, сохранение которых к тому моменту не завершилось.';
 
   @override
-  String get legacyCircleRemoveConfirm => 'Удалить';
+  String get storageResetRelays =>
+      'Это обновление сбросило настройки реле к значениям Haven по умолчанию. Они не будут опубликованы, пока вы не продолжите или не вернётесь из настроек реле, поэтому сначала можно добавить свои реле.';
 
   @override
-  String get legacyCutoverExplainerTitle => 'Haven обновлён';
+  String get storageResetContinue => 'Продолжить';
 
   @override
-  String get legacyCutoverExplainerIdentityUnchanged =>
-      'Ваша личность и публичный профиль не изменились. Ничего делать с ними не нужно.';
+  String get storageResetOpenRelaySettings => 'Настройки реле';
 
   @override
-  String get legacyCutoverExplainerCirclesNeedRecreation =>
-      'Для большей безопасности ваши круги нужно создать заново, а их участников — пригласить повторно, прежде чем вы снова сможете делиться местоположением в них.';
-
-  @override
-  String get legacyCutoverExplainerAcknowledge => 'Понятно';
-
-  @override
-  String get relaySettingsLegacyRetractionPending =>
-      'Haven всё ещё просит реле удалить часть старых данных, оставшихся после недавнего обновления безопасности.';
+  String get storageResetAcknowledgeFailed =>
+      'Haven не удалось сохранить ваш ответ. Пока он не сохранён, Haven не будет публиковать ваши настройки реле и ключ приглашения, а без них пригласить вас никто не сможет. Повторите попытку — иначе Haven спросит снова при следующем запуске.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'Панель кругов свёрнута';
@@ -1344,7 +1411,7 @@ class AppLocalizationsRu extends AppLocalizations {
       other: 'Ответили все $totalString реле',
       many: 'Ответили все $totalString реле',
       few: 'Ответили все $totalString реле',
-      one: 'Реле ответило',
+      one: 'Ответили все реле: $totalString',
     );
     return '$_temp0';
   }
@@ -1400,10 +1467,10 @@ class AppLocalizationsRu extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'Ваши данные есть на всех $totalString реле',
-      many: 'Ваши данные есть на всех $totalString реле',
-      few: 'Ваши данные есть на всех $totalString реле',
-      one: 'Ваши данные есть на реле',
+      other: 'Ваши данные есть на всех реле: $totalString',
+      many: 'Ваши данные есть на всех реле: $totalString',
+      few: 'Ваши данные есть на всех реле: $totalString',
+      one: 'Ваши данные есть на всех реле: $totalString',
     );
     return '$_temp0';
   }
@@ -1505,6 +1572,9 @@ class AppLocalizationsRu extends AppLocalizations {
   @override
   String get identityAdvancedDeleteError =>
       'Не удалось удалить личность. Пожалуйста, повторите попытку.';
+
+  @override
+  String get identityAdvancedDeletingProgress => 'Удаляем вашу личность…';
 
   @override
   String identityAdvancedCopiedToClipboard(String label) {
@@ -1794,7 +1864,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get clockSkewBodyBehind =>
-      'Этот телефон отстаёт по времени от остальных участников ваших кругов: местоположение отправляется, но срок его жизни истекает раньше, чем его успевают увидеть. Включите в системных настройках автоматическую установку даты и времени, чтобы это исправить.';
+      'Этот телефон отстаёт по времени от остальных участников ваших кругов: обновления местоположения отправляются, но их срок жизни истекает слишком рано, и участники ваших кругов могут пропустить часть из них или все. Включите в системных настройках автоматическую установку даты и времени, чтобы это исправить.';
 
   @override
   String get clockSkewResolvedAnnouncement =>
@@ -1878,24 +1948,8 @@ class AppLocalizationsRu extends AppLocalizations {
   String get sharingHealthRepairAction => 'Исправить';
 
   @override
-  String get sharingHealthRepairUnavailableHint =>
-      'Кнопка «Исправить» недоступна для этого круга';
-
-  @override
-  String get sharingHealthRepairHint =>
-      'Переподключается к реле, повторяет отправку вашего местоположения и, если вы админ этого круга, может выдать ему новый ключ';
-
-  @override
   String get sharingHealthRepairSent =>
       'Исправление отправлено. Остальные участники подхватят его, когда оно дойдёт до их телефонов.';
-
-  @override
-  String get sharingHealthRepairNotOwner =>
-      'Исправить этот круг может только его админ. Попросите админа удалить вас и добавить снова.';
-
-  @override
-  String get sharingHealthRepairNeedsNewCircle =>
-      'Этот круг нельзя исправить на этом телефоне. Создайте новый круг с теми же людьми.';
 
   @override
   String get sharingHealthRepairNothingToDo =>
@@ -1908,6 +1962,195 @@ class AppLocalizationsRu extends AppLocalizations {
   @override
   String get sharingHealthResumedAnnouncement =>
       'Обмен местоположением снова работает.';
+
+  @override
+  String get sharingHealthTitleQuarantined =>
+      'Haven сейчас не может открыть этот круг';
+
+  @override
+  String get sharingHealthBodyQuarantined =>
+      'Не удалось загрузить этот круг на этом телефоне. Круг по-прежнему на месте.';
+
+  @override
+  String get sharingHealthTitleDisbanded => 'Этот круг закрыт';
+
+  @override
+  String get sharingHealthBodyDisbanded =>
+      'Круг закрыт одним из админов, поэтому в нём больше ничего не передаётся. Покиньте его, чтобы удалить с этого телефона.';
+
+  @override
+  String get sharingHealthQuarantineRetryHint =>
+      'Повторяет попытку загрузить этот круг';
+
+  @override
+  String get sharingHealthQuarantineRetryFailedAnnouncement =>
+      'Haven по-прежнему не может открыть этот круг.';
+
+  @override
+  String get sharingHealthTitleUnrecoverable =>
+      'Круг перестал работать на этом телефоне';
+
+  @override
+  String get sharingHealthBodyUnrecoverable =>
+      'Haven больше не может ни отправлять, ни получать обновления этого круга на этом телефоне. Попросите одного из админов круга удалить вас и снова добавить. Если никто не может, создайте новый круг с теми же людьми.';
+
+  @override
+  String get sharingHealthTitleStalled =>
+      'Haven не может прочитать обновления этого круга';
+
+  @override
+  String get sharingHealthBodyStalled =>
+      'Похоже, этот телефон пропустил изменение в круге, а найти его на реле не удалось. Попросите одного из админов круга удалить вас и снова добавить. Если никто не может, создайте новый круг с теми же людьми.';
+
+  @override
+  String get sharingHealthTitlePaused =>
+      'Haven приостановил обмен с этим кругом';
+
+  @override
+  String get sharingHealthBodyCollision =>
+      'Haven обнаружил проблему с этим кругом на этом телефоне и прекратил обмен с ним, чтобы ваше местоположение оставалось приватным. Исправить это можно, только покинув круг. Чтобы снова вступить в него, понадобится новое приглашение.';
+
+  @override
+  String get sharingHealthBodyCannotCheck =>
+      'Haven не смог проверить этот круг на этом телефоне, поэтому приостановил обмен с ним, чтобы ваше местоположение оставалось приватным. Haven сам проверит его ещё раз.';
+
+  @override
+  String get sharingHealthTitleLeaving => 'Вы покидаете этот круг';
+
+  @override
+  String get sharingHealthBodyLeaving =>
+      'Пока Haven завершает выход из круга, в этот круг ничего не отправляется. Это может занять около суток. Когда выход завершится, круг исчезнет с этого телефона.';
+
+  @override
+  String get sharingHealthBodyRemovalUnmade =>
+      'Запрошенное вами удаление не выполнено, поэтому Haven приостановил отправку вашего местоположения в этот круг, чтобы его не увидел никто из тех, кого вы пытались удалить.';
+
+  @override
+  String get sharingHealthBodyRemovalUnmadeNoNotice =>
+      'Запрошенное вами удаление не выполнено, поэтому Haven приостановил отправку вашего местоположения в этот круг, чтобы его не увидел никто из тех, кого вы пытались удалить. Откройте список участников, чтобы увидеть, кто всё ещё в круге.';
+
+  @override
+  String get sharingHealthBodyDepartureDue =>
+      'Кто-то покинул этот круг, но выход из него ещё не завершён. Пока этого не произойдёт, Haven не отправляет ваше местоположение в этот круг.';
+
+  @override
+  String get sharingHealthTitleBackgroundPaused =>
+      'Фоновый обмен для этого круга приостановлен';
+
+  @override
+  String get sharingHealthBodyAwaitsForeground =>
+      'Реле этого круга изменились, пока Haven работал в фоне. Haven завершит переключение, когда приложение будет открыто, а до тех пор фоновый обмен с этим кругом не работает.';
+
+  @override
+  String get sharingHealthBodyAwaitingRelays =>
+      'Изменение в этом круге ждёт подтверждения от реле. До тех пор Haven не отправляет ваше местоположение в этот круг и не показывает новые местоположения его участников. Пока приложение открыто, Haven продолжает попытки.';
+
+  @override
+  String get sharingHealthBodyAcknowledged =>
+      'Реле приняло изменение в этом круге, и Haven его завершает. Пока Haven не закончит, обновления этого круга ожидают.';
+
+  @override
+  String get sharingHealthBodyStagedWithoutRecord =>
+      'Изменение в этом круге не удалось сохранить, поэтому оно не отправлено. Haven уладит это самое позднее при следующем запуске, а до тех пор обновления этого круга ожидают.';
+
+  @override
+  String get sharingHealthBodyStoredInput =>
+      'На этом телефоне есть обновления этого круга, которые пока не удалось обработать. Пока они не обработаны, Haven не отправляет ваше местоположение в этот круг.';
+
+  @override
+  String get sharingHealthBodySessionHeld =>
+      'Haven ещё закрывает предыдущее соединение, поэтому обмен местоположением приостановлен. Он возобновится, как только это завершится. Перезагрузка телефона всегда снимает эту паузу.';
+
+  @override
+  String get sharingHealthRepairHintAnyMember =>
+      'Переподключается к реле, повторяет отправку вашего местоположения и может выдать этому кругу новые ключи шифрования';
+
+  @override
+  String get sharingHealthAttentionAnnouncement =>
+      'Обмен местоположением в этом круге требует внимания. Откройте «Сведения о круге», чтобы узнать причину.';
+
+  @override
+  String changeNoticeArrivedAnnouncement(String circleName) {
+    return 'Появилась заметка о недавних изменениях в круге «$circleName», которая требует вашего внимания. Откройте сведения об этом круге, чтобы её прочитать.';
+  }
+
+  @override
+  String get circleDetailsAttentionTooltip =>
+      'Сведения о круге, требуется внимание';
+
+  @override
+  String circleRowAttentionSemantics(String circleName) {
+    return '$circleName, требуется внимание';
+  }
+
+  @override
+  String get changeNoticeHeading => 'Изменения в этом круге';
+
+  @override
+  String get changeNoteRemovalUndone =>
+      'Изменение в этом круге не прошло. Если оно кого-то удаляло, те, кого оно должно было удалить, по-прежнему в круге и могут видеть то, чем в нём делятся.';
+
+  @override
+  String get changeNoteChangeUndone =>
+      'Изменение в этом круге не прошло, поэтому ничего не изменилось. Если это ваше изменение и оно всё ещё нужно, внесите его снова.';
+
+  @override
+  String get changeNoteMayBeOutOfStep =>
+      'Изменение в этом круге могло дойти до остальных участников незаметно для этого телефона, поэтому этот телефон может быть с ними не синхронизирован.';
+
+  @override
+  String get changeNoteReinviteOwed =>
+      'Кто-то из приглашённых вами числится в этом круге, но не может вступить, потому что Haven не может отправить этому человеку приглашение. Удалите этого человека из круга и добавьте снова.';
+
+  @override
+  String get changeNoteChangeUnrecorded =>
+      'Изменение в этом круге не удалось сохранить, поэтому оно не отправлено.';
+
+  @override
+  String get changeNoteQueuedChangeDropped =>
+      'Изменение, ожидавшее внесения в этом круге, отменено, потому что его больше нельзя было внести так, как было запрошено. Возможно, оно уже внесено другим способом.';
+
+  @override
+  String get changeNoteQueuedChangesHeld =>
+      'Некоторые изменения в этом круге всё ещё ждут внесения.';
+
+  @override
+  String get changeNoteQueuedRemovalDropped =>
+      'Запрошенное вами удаление в этом круге не выполнено. Те, кого вы пытались удалить, возможно, всё ещё в круге.';
+
+  @override
+  String get changeNoteChangeWithdrawn =>
+      'Изменение другого участника в этом круге заменило одно из ваших, поэтому ваше не было внесено. Внесите его снова, если оно всё ещё нужно.';
+
+  @override
+  String get changeNoteWelcomeOwed =>
+      'Приглашение в этот круг не прошло. Пока приложение открыто, Haven продолжает его отправлять, но не дольше суток с момента приглашения. Если человек к тому времени не вступит, удалите его из круга и добавьте снова.';
+
+  @override
+  String get changeNoteUnreadLocation =>
+      'Некоторые недавние обновления, отправленные в этот круг, не удалось открыть на этом телефоне.';
+
+  @override
+  String get changeNoticeStillInCircleLabel => 'Всё ещё в круге:';
+
+  @override
+  String get changeNoticeRemoveAgain => 'Удалить снова';
+
+  @override
+  String get changeNoticeReviewMembers => 'Просмотреть участников';
+
+  @override
+  String get changeNoticeKeepMembers => 'Оставить в круге';
+
+  @override
+  String get changeNoticeKeepConfirmTitle => 'Оставить в круге?';
+
+  @override
+  String get changeNoticeKeepConfirmBody =>
+      'Haven больше не будет приостанавливать отправку вашего местоположения в этот круг из-за этого удаления. Те, кого вы пытались удалить и кто всё ещё в круге, останутся в нём и будут видеть ваше местоположение всякий раз, когда Haven будет отправлять его в этот круг.';
+
+  @override
+  String get changeNoticeKeepConfirmAction => 'Оставить';
 
   @override
   String circleMemberLastSeenMinutes(int count) {

@@ -168,6 +168,7 @@ fn concurrent_last_known_upserts_are_idempotent() {
     );
 
     let ngid = [42u8; 32];
+    manager.keep_circle_row_for_test(ngid);
     let sender = pubkey(7);
 
     // 16 threads × 50 writes for the SAME (circle, sender). The store ranks a
@@ -213,6 +214,7 @@ fn concurrent_prune_and_upsert_do_not_deadlock() {
     );
 
     let ngid = [9u8; 32];
+    manager.keep_circle_row_for_test(ngid);
 
     // Writers insert rows whose `purge_after` is sometimes in the past so
     // the parallel pruner has actual work to do.

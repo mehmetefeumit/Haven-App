@@ -1,51 +1,45 @@
-//! One stuck inbound row must not silently kill a circle's OUTBOUND sends —
-//! and a deferred send must never strand a commit the engine staged.
+//! One stuck inbound row must not silently kill a circle's OUTBOUND sends.
 //!
 //! `cgka-engine`'s `do_send` does not encrypt while
 //! `should_queue_outbound_intent` holds: it persists a `QueuedOutboundIntent`
 //! and returns `SendResult::Queued`. That predicate is true for exactly two
-//! reasons, and these tests cover both.
+//! reasons; these tests cover the first.
 //!
 //! # 1. A stored row the convergence gate cannot settle
 //!
-//! `has_unresolved_convergence_inputs` counts any stored message inside
-//! `[epoch - max_rewind, epoch + max_rewind]` that is `Created` or `Retryable`.
+//! `has_unresolved_convergence_inputs` looks at stored messages inside
+//! `[epoch - max_rewind, epoch + max_rewind]` that are `Created` or `Retryable`.
 //! A Haven circle's epoch only advances on a membership change, so for a stable
 //! circle that window is its entire life.
 //!
-//! What actually stays stuck is narrower than it first appears, and these tests
-//! pin the boundary rather than assuming it (all measured at MDK rev
-//! `e391adc`):
+//! At MDK v0.10.4 a commit there always gates, but an APPLICATION row gates
+//! only while retained competing commit edges make it a branch witness
+//! (`ConvergenceInputContext::gates_outbound`): unresolved delivery alone no
+//! longer makes group state ambiguous. So the shape these tests were written
+//! for at `e391adc` — one undecryptable location row silently stopping every
+//! send for the circle — no longer happens, and the tests pin that it does not:
 //!
-//! - a **current-epoch** application row is resolved by the engine ITSELF —
-//!   but only at the next session open, where hydration re-runs canonicalization
-//!   and writes the terminal `EpochInvalidated`. In-process it just gates.
+//! - a **current-epoch** application row no longer gates, and the engine leaves
+//!   its disposition alone;
 //! - a **future-epoch** application row (`tip < source_epoch <= tip + max_rewind`)
-//!   is kept `Retryable` deliberately, so the commit that would make it
-//!   decryptable can still arrive — and it survives a session open unchanged.
-//!   When that commit never comes, this is permanent, and the age-based sweep
-//!   is the only thing that clears it.
+//!   no longer gates either, and it is still kept `Retryable` across a session
+//!   open, so the commit that would make it decryptable can still arrive.
 //!
-//! That distinction is why BOTH entry points exist: an Android foreground
-//! reopen is not a process restart, so the runtime repair is what an unstuck
-//! circle needs without one, and the session-open sweep is what a force-stop
-//! and relaunch needs for the shape hydration cannot fix.
+//! Haven's age-based sweep still retires an application row the relay can no
+//! longer redeliver, at runtime and at every session open: the row would
+//! otherwise sit in the store for the circle's life, and it gates again the
+//! moment a competing commit makes it a witness.
 //!
-//! # 2. A staged `SelfRemove` auto-commit
 //!
-//! `should_queue_outbound_intent` also returns true precisely when
-//! `stage_due_self_remove_auto_commit` has just STAGED an eviction commit,
-//! which `collect_effects` drains into the deferred send's own effects. That
-//! `PendingStateRef` must be handed to the caller, never confirmed (applying a
-//! commit no relay acked), never rolled back (the engine drops the retry
-//! schedule and the leaver stays forever), and never dropped (the group stays
-//! in `PendingPublish` and stops sending altogether).
+//! The second reason — a staged `SelfRemove` eviction in the send's own
+//! preflight — is the fanout driver's: the staging hold records it, and
+//! `poll_send_drive_e2e` pins that.
 
-use haven_core::circle::{CircleConfig, CircleError, CircleManager, MemberKeyPackage};
+use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::{
-    ConvergedRoster, GroupId, LocationMessageResult, MessageRecord, MessageState,
-    OpenMlsContentKind, UNRESOLVABLE_INPUT_MAX_AGE_SECS,
+    GroupId, LocationMessageResult, MessageRecord, MessageState, OpenMlsContentKind,
+    UNRESOLVABLE_INPUT_MAX_AGE_SECS,
 };
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use nostr::Keys;
@@ -94,7 +88,6 @@ async fn new_member() -> Member {
 /// under test is one the production path actually wrote.
 struct TwoMemberCircle {
     alice: CircleManager,
-    alice_keys: Keys,
     bob: CircleManager,
     bob_keys: Keys,
     bob_dir: TempDir,
@@ -112,15 +105,11 @@ async fn build_two_member_circle() -> TwoMemberCircle {
 
     let config = CircleConfig::new("Deferred Send Repair Circle").with_relays(relays.clone());
     let result = alice
-        .create_circle(&alice_keys, vec![bob.key_package], &config, &relays)
+        .create_circle(&alice_keys, vec![bob.key_package], &config)
         .await
         .expect("create circle");
     let mls_group_id = result.circle.mls_group_id.clone();
     let nostr_group_id = result.circle.nostr_group_id;
-    alice
-        .confirm_published(result.pending)
-        .await
-        .expect("alice confirms creation");
 
     let welcome = &result.welcome_events[0];
     bob.manager
@@ -134,7 +123,6 @@ async fn build_two_member_circle() -> TwoMemberCircle {
 
     TwoMemberCircle {
         alice,
-        alice_keys,
         bob: bob.manager,
         bob_keys: bob.keys,
         bob_dir: bob.dir,
@@ -147,23 +135,17 @@ async fn build_two_member_circle() -> TwoMemberCircle {
 /// Sends one location from `from` and asserts `to` decrypts it.
 async fn send_and_receive(
     from: &CircleManager,
-    from_keys: &Keys,
     to: &CircleManager,
     group_id: &GroupId,
     lat: f64,
     lon: f64,
 ) -> (nostr::Event, [u8; 32], Vec<String>) {
     let sent = from
-        .encrypt_location(
-            group_id,
-            &from_keys.public_key(),
-            &LocationMessage::new(lat, lon),
-            60,
-        )
+        .seal_location_for_test(group_id, &LocationMessage::new(lat, lon))
         .await
         .expect("the sender must encrypt rather than queue");
     let results = to
-        .decrypt_location(&sent.0)
+        .ingest_for_test(&sent.0)
         .await
         .expect("the peer must ingest the location");
     assert!(
@@ -173,40 +155,6 @@ async fn send_and_receive(
         "the peer must decrypt the location, not merely accept the envelope"
     );
     sent
-}
-
-/// Sends one location and requires the engine to have DEFERRED it, returning
-/// `(unresolved_inputs, discarded_intents, repaired, staged_commit_count)`.
-async fn expect_deferred(
-    manager: &CircleManager,
-    keys: &Keys,
-    group_id: &GroupId,
-) -> (usize, usize, bool, usize) {
-    let err = manager
-        .encrypt_location(
-            group_id,
-            &keys.public_key(),
-            &LocationMessage::new(51.5, -0.12),
-            60,
-        )
-        .await
-        .expect_err("a stuck convergence input must stop the engine encrypting");
-    match err {
-        CircleError::SendDeferred {
-            unresolved_inputs,
-            discarded_intents,
-            repaired,
-            work,
-        } => (
-            unresolved_inputs,
-            discarded_intents,
-            repaired,
-            work.commits.len(),
-        ),
-        other => {
-            panic!("a queued send must surface as SendDeferred, not an opaque error: {other:?}")
-        }
-    }
 }
 
 /// Asserts a recovered send is a real routed kind-445, not merely a value the
@@ -242,20 +190,10 @@ fn assert_well_formed_445(sent: &(nostr::Event, [u8; 32], Vec<String>), nostr_gr
 /// wire bytes at a real epoch above Bob's tip, with the id production writes.
 async fn alice_row_one_epoch_ahead(c: &TwoMemberCircle) -> MessageRecord {
     let carol = new_member().await;
-    let added = c
-        .alice
-        .add_members_with_welcomes(
-            &c.alice_keys,
-            &c.mls_group_id,
-            vec![carol.key_package],
-            &[GROUP_RELAY.to_string()],
-        )
-        .await
-        .expect("alice stages the add");
     c.alice
-        .confirm_published(added.pending)
+        .add_members_for_test(&c.mls_group_id, &[carol.key_package])
         .await
-        .expect("alice confirms the add on a relay ack");
+        .expect("alice adds carol");
     let ahead = c
         .alice
         .session()
@@ -273,12 +211,7 @@ async fn alice_row_one_epoch_ahead(c: &TwoMemberCircle) -> MessageRecord {
         "the fixture requires alice exactly one epoch ahead of bob"
     );
     c.alice
-        .encrypt_location(
-            &c.mls_group_id,
-            &c.alice_keys.public_key(),
-            &LocationMessage::new(5.0, 6.0),
-            60,
-        )
+        .seal_location_for_test(&c.mls_group_id, &LocationMessage::new(5.0, 6.0))
         .await
         .expect("alice sends at the higher epoch");
     c.alice
@@ -289,30 +222,14 @@ async fn alice_row_one_epoch_ahead(c: &TwoMemberCircle) -> MessageRecord {
 }
 
 #[tokio::test]
-async fn the_engine_itself_clears_a_current_epoch_orphan_without_the_sweep() {
-    // THE PREMISE, pinned — and the reason this unit's sweep is scoped the way
-    // it is. A row orphaned by a kill mid-ingest, or left `Retryable` by a
-    // decrypt that can never succeed (an exhausted sender ratchet), is NOT what
-    // needs Haven's help when it sits at or below the group tip: the engine's
-    // own canonicalization finds it undecryptable on the canonical branch and
-    // writes the terminal `EpochInvalidated`
-    // (`openmls_projection::message_state_for_invalidated_reason`), inside the
-    // very `do_send` that hit it.
-    //
-    // If this test ever goes red, the sweep's scope is wrong — either it is
-    // claiming rows that were never its to claim, or the engine has stopped
-    // self-healing and the sweep needs to cover this shape too.
+async fn a_current_epoch_orphan_row_neither_gates_nor_is_claimed_by_the_sweep() {
+    // A row orphaned by a kill mid-ingest, or left `Retryable` by a decrypt that
+    // can never succeed (an exhausted sender ratchet), at or below the group
+    // tip: at MDK v0.10.4 it no longer gates the circle's sends, and Haven's
+    // sweep must not claim it while the relay still holds its event.
     for state in [MessageState::Created, MessageState::Retryable] {
         let c = build_two_member_circle().await;
-        send_and_receive(
-            &c.alice,
-            &c.alice_keys,
-            &c.bob,
-            &c.mls_group_id,
-            37.77,
-            -122.41,
-        )
-        .await;
+        send_and_receive(&c.alice, &c.bob, &c.mls_group_id, 37.77, -122.41).await;
 
         // A row Bob has NEVER delivered, sealed at his CURRENT epoch: Alice's
         // second send, which never reached him.
@@ -323,12 +240,7 @@ async fn the_engine_itself_clears_a_current_epoch_orphan_without_the_sweep() {
             .await
             .expect("bob's epoch");
         c.alice
-            .encrypt_location(
-                &c.mls_group_id,
-                &c.alice_keys.public_key(),
-                &LocationMessage::new(9.0, 9.0),
-                60,
-            )
+            .seal_location_for_test(&c.mls_group_id, &LocationMessage::new(9.0, 9.0))
             .await
             .expect("alice's undelivered send");
         let orphan = c
@@ -345,16 +257,14 @@ async fn the_engine_itself_clears_a_current_epoch_orphan_without_the_sweep() {
             .bob
             .session()
             // NOT backdated: the sweep's age rule must not be able to claim
-            // this row, so whatever clears it is provably the engine.
+            // this row.
             .stage_convergence_input_for_test(&orphan, state, 0)
             .await
             .expect("stage the orphan");
 
         // Run the sweep FIRST, at the real wall clock, so the age rule is
-        // exercised and provably DECLINES this row. Without this the second
-        // half of the oracle below is unreachable: a sweep that never ran
-        // cannot be shown not to have retired anything, so dropping the age
-        // rule would leave this test green.
+        // exercised and provably DECLINES this row: a sweep that never ran
+        // cannot be shown not to have retired anything.
         let swept = c
             .bob
             .sweep_unresolvable_inputs(
@@ -367,8 +277,7 @@ async fn the_engine_itself_clears_a_current_epoch_orphan_without_the_sweep() {
             "a row the relay still holds is not the sweep's to retire"
         );
 
-        let sent =
-            send_and_receive(&c.bob, &c.bob_keys, &c.alice, &c.mls_group_id, 48.85, 2.35).await;
+        let sent = send_and_receive(&c.bob, &c.alice, &c.mls_group_id, 48.85, 2.35).await;
         assert_well_formed_445(&sent, c.nostr_group_id);
         assert_eq!(
             c.bob
@@ -377,31 +286,22 @@ async fn the_engine_itself_clears_a_current_epoch_orphan_without_the_sweep() {
                 .await
                 .expect("read the row")
                 .map(|probe| probe.state),
-            Some(MessageState::EpochInvalidated),
-            "the ENGINE must resolve a current-epoch {state:?} orphan; reading `Failed` \
-             would mean Haven's sweep claimed a row that was never its to claim, and \
-             reading {state:?} would mean this shape now needs the sweep too"
+            Some(state),
+            "the {state:?} orphan did not stop the send, and nothing claimed it: \
+             `Failed` would mean Haven's sweep took a row that was never its to take"
         );
     }
 }
 
 #[tokio::test]
-async fn a_future_epoch_row_stays_stuck_across_a_reopen_and_only_the_sweep_clears_it() {
-    // THE SHAPE THE SWEEP EXISTS FOR. An application row sealed one epoch above
-    // this device's tip is kept `Retryable` on purpose, so the commit that would
-    // make it decryptable can still arrive. When it never does, the row gates
-    // every send for the circle forever — through restarts, because hydration
-    // keeps it for the same reason.
+async fn a_future_epoch_row_no_longer_gates_and_the_sweep_still_retires_it() {
+    // An application row sealed one epoch above this device's tip is kept
+    // `Retryable` on purpose, so the commit that would make it decryptable can
+    // still arrive. At MDK v0.10.4 it does not gate the circle's sends while it
+    // waits, through a restart too; once the relay can no longer redeliver it,
+    // the sweep gives it its terminal disposition.
     let c = build_two_member_circle().await;
-    send_and_receive(
-        &c.alice,
-        &c.alice_keys,
-        &c.bob,
-        &c.mls_group_id,
-        37.77,
-        -122.41,
-    )
-    .await;
+    send_and_receive(&c.alice, &c.bob, &c.mls_group_id, 37.77, -122.41).await;
 
     let ahead = alice_row_one_epoch_ahead(&c).await;
     let stuck = c
@@ -410,30 +310,13 @@ async fn a_future_epoch_row_stays_stuck_across_a_reopen_and_only_the_sweep_clear
         .stage_convergence_input_for_test(&ahead, MessageState::Retryable, 0)
         .await
         .expect("stage the future-epoch row");
+    let sent = c
+        .bob
+        .seal_location_for_test(&c.mls_group_id, &LocationMessage::new(51.5, -0.12))
+        .await
+        .expect("a lone future-epoch application row does not gate the send");
+    assert_well_formed_445(&sent, c.nostr_group_id);
 
-    let (unresolved, discarded, repaired, staged) =
-        expect_deferred(&c.bob, &c.bob_keys, &c.mls_group_id).await;
-    assert_eq!(unresolved, 1, "the future-epoch row gates the send");
-    assert_eq!(
-        discarded, 1,
-        "the ephemeral location intent the engine queued must be dropped, not banked"
-    );
-    assert!(
-        !repaired,
-        "convergence deliberately keeps this row retryable; only the age rule can retire it"
-    );
-    assert_eq!(staged, 0);
-    assert_eq!(
-        c.bob
-            .session()
-            .queued_intent_count_for_test(&c.mls_group_id)
-            .await
-            .expect("read the intent queue"),
-        0,
-        "the discarded intent must be gone from storage"
-    );
-
-    // A restart does not help — the distinguishing property of this shape.
     let TwoMemberCircle {
         alice,
         bob,
@@ -454,11 +337,6 @@ async fn a_future_epoch_row_stays_stuck_across_a_reopen_and_only_the_sweep_clear
             .map(|probe| probe.state),
         Some(MessageState::Retryable),
         "hydration must not resolve a future-epoch row — it is waiting for a commit"
-    );
-    let (_, _, repaired_after_restart, _) = expect_deferred(&bob, &bob_keys, &mls_group_id).await;
-    assert!(
-        !repaired_after_restart,
-        "this is the shape that survives the force-stop-and-relaunch the owner tried"
     );
 
     // The sweep, run past the point where the relay still holds the event.
@@ -487,7 +365,7 @@ async fn a_future_epoch_row_stays_stuck_across_a_reopen_and_only_the_sweep_clear
         "the row must carry a TERMINAL disposition, not be deleted or left retryable"
     );
 
-    let sent = send_and_receive(&bob, &bob_keys, &alice, &mls_group_id, 48.85, 2.35).await;
+    let sent = send_and_receive(&bob, &alice, &mls_group_id, 48.85, 2.35).await;
     assert_well_formed_445(&sent, nostr_group_id);
 }
 
@@ -496,15 +374,7 @@ async fn a_future_epoch_row_past_the_horizon_is_retired_at_the_next_session_open
     // The force-stop-and-relaunch path: no explicit repair call, no Dart, just
     // the sweep that every session open runs.
     let c = build_two_member_circle().await;
-    send_and_receive(
-        &c.alice,
-        &c.alice_keys,
-        &c.bob,
-        &c.mls_group_id,
-        37.77,
-        -122.41,
-    )
-    .await;
+    send_and_receive(&c.alice, &c.bob, &c.mls_group_id, 37.77, -122.41).await;
 
     let ahead = alice_row_one_epoch_ahead(&c).await;
     let stuck = c
@@ -539,7 +409,7 @@ async fn a_future_epoch_row_past_the_horizon_is_retired_at_the_next_session_open
         Some(MessageState::Failed),
         "opening the session must retire a row the relay can no longer redeliver"
     );
-    send_and_receive(&bob, &bob_keys, &alice, &mls_group_id, 48.85, 2.35).await;
+    send_and_receive(&bob, &alice, &mls_group_id, 48.85, 2.35).await;
 }
 
 #[tokio::test]
@@ -549,22 +419,13 @@ async fn the_sweep_never_retires_a_commit_at_any_age() {
     // Give Bob a real INBOUND commit: Alice adds a third member, publishes the
     // evolution commit (confirmed on the ack Rule 13 requires), Bob applies it.
     let carol = new_member().await;
-    let added = c
+    let (added, _) = c
         .alice
-        .add_members_with_welcomes(
-            &c.alice_keys,
-            &c.mls_group_id,
-            vec![carol.key_package],
-            &[GROUP_RELAY.to_string()],
-        )
+        .add_members_for_test(&c.mls_group_id, &[carol.key_package])
         .await
-        .expect("alice stages the add");
-    c.alice
-        .confirm_published(added.pending)
-        .await
-        .expect("alice confirms the add");
+        .expect("alice adds carol");
     c.bob
-        .decrypt_location(&added.commit_event)
+        .ingest_for_test(&added)
         .await
         .expect("bob applies the add commit");
 
@@ -627,118 +488,5 @@ async fn the_sweep_never_retires_a_commit_at_any_age() {
     assert!(
         sweep.gating_rows >= 1,
         "the un-retired commit must still be counted as gating"
-    );
-}
-
-#[tokio::test]
-async fn a_deferral_that_staged_an_eviction_commit_hands_it_back_unresolved() {
-    // Rule 13 on the send path. `should_queue_outbound_intent` returns true
-    // PRECISELY when `stage_due_self_remove_auto_commit` just staged a peer's
-    // eviction, and `collect_effects` drains that commit into the deferred
-    // send's own effects. Confirming it would apply a commit no relay acked;
-    // rolling it back would lose the engine's retry schedule and strand the
-    // leaver forever; dropping it would pin the group in `PendingPublish` and
-    // stop sending entirely. It must come back to the caller intact.
-    let c = build_two_member_circle().await;
-    let bob_hex = c.bob_keys.public_key().to_hex();
-
-    let proposal = c
-        .bob
-        .propose_leave(&c.mls_group_id)
-        .await
-        .expect("bob proposes leave");
-    // Raw ingest: `decrypt_location_collecting_commits` would re-tick
-    // convergence and drain the auto-commit itself, which is the path this test
-    // is NOT about.
-    c.alice
-        .session()
-        .process_event(&proposal)
-        .await
-        .expect("alice ingests the self-remove proposal");
-
-    // The engine schedules the auto-commit with a 10–50 ms jitter, so the first
-    // send after the proposal may still encrypt normally. Retry until the
-    // deferral appears — a bounded loop on a monotonic clock that always
-    // advances, exactly like the production re-tick in
-    // `decrypt_location_collecting_commits`. No sleep, and the bound is
-    // asserted rather than assumed.
-    let mut staged = None;
-    for _ in 0..5_000 {
-        match c
-            .alice
-            .encrypt_location(
-                &c.mls_group_id,
-                &c.alice_keys.public_key(),
-                &LocationMessage::new(1.0, 2.0),
-                60,
-            )
-            .await
-        {
-            Ok(_) => {}
-            Err(CircleError::SendDeferred { work, .. }) => {
-                staged = Some(work);
-                break;
-            }
-            Err(other) => panic!("unexpected send failure: {other:?}"),
-        }
-    }
-    let work = staged.expect(
-        "the due self-remove auto-commit must surface as a deferred send within the \
-         engine's 50 ms jitter window",
-    );
-    assert_eq!(
-        work.commits.len(),
-        1,
-        "the staged eviction commit must be handed back, not swallowed"
-    );
-    assert_eq!(
-        c.alice
-            .session()
-            .queued_intent_count_for_test(&c.mls_group_id)
-            .await
-            .expect("read the intent queue"),
-        0,
-        "the location fix the engine queued to trigger this deferral must be discarded \
-         here too — banking it until the next session open is the stale-position leak \
-         `SendDeferred` promises not to have"
-    );
-
-    // The commit must be exactly where the engine left it: STAGED, with its
-    // `PendingStateRef` still live. `confirm_published` is the oracle, because
-    // its contract is precisely "errors if the pending ref is unknown —
-    // already confirmed, rolled back, or never issued". That single call
-    // therefore rules out BOTH wrong dispositions at once:
-    //
-    // - confirmed inside the repair → the ref is spent, and this errors;
-    // - rolled back inside the repair → the ref is discarded, and this errors;
-    // - left staged (correct) → this succeeds and the eviction lands.
-    //
-    // `epoch()` and the roster verdict are deliberately NOT the oracle: the
-    // engine already reports the projected post-staging epoch and roster while
-    // the commit is merely staged, so neither says anything about whether the
-    // ref was resolved behind the caller's back.
-    let commit = work.commits.into_iter().next().expect("one staged commit");
-    c.alice.confirm_published(commit.pending).await.expect(
-        "the deferred send must hand the staged eviction back UNRESOLVED: confirming it \
-             applies a commit no relay acked, and rolling it back drops the engine's \
-             self-remove schedule (it is removed before staging and never re-armed) so the \
-             leaver never leaves",
-    );
-
-    let roster = match c
-        .alice
-        .session()
-        .converged_member_pubkeys(&c.mls_group_id)
-        .await
-        .expect("roster after confirm")
-    {
-        ConvergedRoster::Converged {
-            member_pubkeys_hex, ..
-        } => member_pubkeys_hex,
-        other => panic!("the group must be converged after the confirm: {other:?}"),
-    };
-    assert!(
-        !roster.contains(&bob_hex),
-        "confirming the handed-back commit must actually evict the leaver"
     );
 }

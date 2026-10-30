@@ -1,89 +1,78 @@
-//! **S23** — a device misses TWO chained commits and never converges again.
-//! **EXPECTED RED at rc 1** until the product fix lands: C7 in
-//! `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`.
+//! **S23** — a device misses TWO chained commits and still converges.
 //!
-//! The user-visible consequence: a device that was away long enough for two
-//! commits to land stops receiving its peers' fixes and never resumes. The
-//! map's other markers simply stop moving. Nothing says so — its own publishes
-//! keep succeeding, the circle reports a healthy send path and
-//! `unrecoverable_circles()` is empty throughout. **Sharing stops.**
+//! It converges without sending anything. The arm grades C7's fix
+//! (`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`), which is Haven's mitigation
+//! of an MDK gap — row C7 of `docs/MDK_UPSTREAM_TRACKER.md`, whose removal
+//! condition is this arm staying green with Haven's drain removed. MDK PR #1206
+//! (first in v0.9.11) adds deferral- and hydrate-scheduling, which may cover C7
+//! — unverified; no upstream issue describes the epoch-change edge.
 //!
-//! # The mechanism, at the pinned MDK rev (`e391adc`)
+//! The user-visible consequence it guards: before the fix, a device that was
+//! away long enough for two commits to land stopped receiving its peers' fixes
+//! and never resumed. The map's other markers simply stopped moving. Nothing
+//! said so — its own publishes kept succeeding, the circle reported a healthy
+//! send path and `unrecoverable_circles()` was empty throughout.
+//!
+//! # The mechanism
 //!
 //! 1. A relay serves a stored page NEWEST FIRST (`nostr::Event`'s `Ord` is
 //!    `created_at` descending, ties by id), so the returning device ingests
 //!    the newer commit of the pair before the older.
 //! 2. A kind-445 commit's outer layer is keyed at its committer's PRE-commit
-//!    epoch — the wrap "reads exporter from the still-current (pre-stage)
-//!    epoch" (`cgka-engine/src/message_processor/send.rs:151-155`) — so the
-//!    newer sibling cannot be peeled by a device that has not applied the
-//!    older one.
-//! 3. The unpeelable sibling is retained rather than dropped: `PeelFailed`
-//!    persists the raw transport as a `PeelDeferred` row
-//!    (`cgka-engine/src/message_processor/ingest.rs:313-327`).
-//! 4. Those rows are retried only by `retry_deferred_peels`
-//!    (`cgka-engine/src/message_processor/mod.rs:475`), reached only from
-//!    `advance_convergence_inputs_until_settled` (`mod.rs:340`, the call at
-//!    `:359`), which Haven drives through `advance_convergence` over an
-//!    ingest's `pending_convergence` alone
-//!    (`haven-core/src/relay/live_sync/processor.rs:819`,
-//!    `haven-core/src/relay/catchup.rs:1002`). A `PeelDeferred` row is not a
-//!    convergence input, so nothing schedules the sweep.
-//! 5. So the sweep needs a PEELABLE inbound event, and a device one epoch
-//!    behind its peers never receives one: every later fix is sealed above it.
+//!    epoch, so the newer sibling cannot be peeled by a device that has not
+//!    applied the older one.
+//! 3. The unpeelable sibling is retained rather than dropped, as a
+//!    `PeelDeferred` row.
+//! 4. At MDK v0.9.4 (`e391adc`) such rows were retried only from inside an
+//!    advance nothing scheduled, so the device stayed one epoch behind until
+//!    it next sent something. Haven then drained them with two edges of its
+//!    own (an epoch change left its group owing an advance; the first plane
+//!    of a session advanced every circle).
+//! 5. At v0.10.4 (mdk#1206) a deferral and the hydrate name the group in the
+//!    engine's `pending_convergence`, the advance that settles a pass retries
+//!    the deferred-peel sweep itself (`cgka-engine/src/message_processor/
+//!    mod.rs` 1537-1545), and the peel-context fingerprint moves on every
+//!    stored commit (`:62-76`), so the cutoff reads zero. Since R2 the first
+//!    plane of a session drains the engine's own pending set
+//!    (`SessionManager::take_owed_advance`) in place of advancing every
+//!    circle, and this arm is the end-of-migration nightly that decides
+//!    whether that stands; the epoch-change edge
+//!    (`SessionManager::groups_owing_advance`) is kept (tracker rows C7,
+//!    T-SCHEDULER).
 //!
-//! # What DOES drain it, measured here (2026-09-25), and what that means
+//! # What drained it before the fix, and why the closing round is shaped so
 //!
-//! The stranded device's OWN next seal. `encrypt_location` — the seal alone,
+//! The stranded device's OWN next seal. `Publishing::seal_location` — the seal alone,
 //! nothing published — runs the send path's settle, which reaches the
-//! deferred-peel sweep the receive path never does: the retained commit peels,
-//! applies, and the device converges. Three fixes from a peer do not move it;
-//! one seal of its own does. So the blackout C7 records is bounded by the
-//! victim's own publish cadence while it is sharing, and unbounded only for a
-//! device that receives without sending — sharing off, or its publisher
-//! wedged (the very shapes `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md` is
-//! about). That is still a defect: a receive plane that depends on the local
-//! send plane to recover is not a receive plane, and C7's "permanent" reads as
-//! "until this device next publishes".
-//!
-//! It also decides the closing round's shape. The standard closing round has
-//! the resumed device SEND first, which here is the lever that drains the
-//! backlog — a closing round in that order grades the send-side recovery and
-//! calls the world converged. So the WITNESS leads: the victim's first probe
-//! is a receive, O1 reports it undelivered before the victim has sent
-//! anything, O2 reads the epochs before it attempts a send, and the send-side
-//! recovery is then RECORDED as the arm's last canary rather than allowed to
-//! pre-empt the grade.
+//! deferred-peel sweep (measured 2026-09-25). A closing round in the standard
+//! order, with the resumed device SENDING first, would therefore grade that
+//! send-side recovery and call the world converged even with the receive-side
+//! drain missing. So the WITNESS leads: the victim's first probe is a receive,
+//! O1 grades it before the victim has sent anything, and O2 reads the epochs
+//! before it attempts a send. The victim's own seal is RECORDED as the arm's
+//! last canary, after the grade, and cannot pre-empt it. Remove Haven's drain
+//! and this arm grades rc 1 again, with O2 reporting the divergence and O1 the
+//! undelivered probe.
 //!
 //! # The page order is pinned, so the strand is not a coin toss
 //!
 //! Two commits sealed inside one wall second carry one `created_at`, and the
-//! store then orders them by event id — minted from a per-message ephemeral
-//! key, so different every run. That is the "coin toss" the first measurement
-//! saw. This arm reads the first commit's stored `created_at` back off the
-//! relay and waits, bounded, for the WALL second to turn over before it stages
-//! the next, so the pair's timestamps are strictly increasing and the page is
-//! newest-first by construction: the victim is always stranded, and the
-//! verdict is the same every night. The wait is a bounded condition on the
-//! relay's own store, never a sleep and never a policy-clock step
-//! (`check_soak_clock_partition.sh`: the page order is a WALL fact).
+//! store then orders them by event id. The id is minted from a per-message
+//! ephemeral key, so it differs on every run. That is the "coin toss" the first
+//! measurement saw. This arm reads the first commit's stored `created_at` back
+//! off the relay and waits, bounded, for the WALL second to turn over before it
+//! stages the next. So the pair's timestamps strictly increase, the page is
+//! newest-first by construction, and every night the victim is handed the
+//! strand's shape. The wait is a bounded condition on the relay's own store,
+//! never a sleep and never a policy-clock step (`check_soak_clock_partition.sh`:
+//! the page order is a WALL fact).
 //!
 //! # Graded, not recorded
 //!
-//! The closing round asks the standard invariants — O6, O1 and O2 — so the
-//! strand is GRADED: O2 reports the epoch divergence and O1 the probe that
-//! never reaches the victim, both at rc 1. That is deliberate and it is the
-//! difference from S03 and S14's recorded expectations: their subjects are
-//! decided and not built (OD-1); this one is neither decided nor intended, so
-//! the honest grade is a finding. `tests/oracles.rs` names this arm in
-//! `EXPECTED_RED` and requires rc 1 with those two findings; the day it grades
-//! rc 0, C7 is fixed and the arm is promoted to `SWEPT` in the same change.
-//!
-//! The product fix — a sweep of deferred peels on resume or on a timer,
-//! independent of whether a peelable event arrived — is NOT designed here. It
-//! is a product change with its own plan. S04 works around this defect by
-//! spanning exactly one commit (`COMMITS_WHILE_AWAY` there); this arm is the
-//! scenario that grades it.
+//! The closing round asks the standard invariants — O6, O1 and O2 — so a
+//! regression is GRADED at rc 1, not recorded as a canary. This arm was
+//! `EXPECTED_RED` in `tests/oracles.rs` until C7's fix made it grade rc 0. It
+//! is now `SWEPT`, and it runs in the nightly again.
 //!
 //! # `offline` is a paused engine, not an unplugged socket
 //!
@@ -92,7 +81,6 @@
 
 use std::time::Duration;
 
-use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
 use haven_core::nostr::mls::types::GroupId;
 use nostr::{Event, EventId, Filter};
 
@@ -108,11 +96,11 @@ use crate::scenarios::{
 use tokio::time::{Instant, MissedTickBehavior};
 
 /// How many confirmed commits land while the victim is away: the smallest
-/// chained backlog, and the one the first measurement showed never drains.
+/// chained backlog, and the one C7's first measurement showed never drained.
 const COMMITS_WHILE_AWAY: u64 = 2;
 
-/// How many fixes the admin publishes after the victim resumes. Three, as the
-/// measurement was made: none of them reaches the stranded device.
+/// How many fixes the admin publishes after the victim resumes. Three, as C7's
+/// measurement was made, when none of them reached the stranded device.
 const FIXES_AFTER_RESUME: u32 = 3;
 
 /// The round the arm's own fixes are stamped with: neither graded round's
@@ -210,9 +198,9 @@ async fn spanning<T: TimelineSink, L: LogDrain>(
     let mut canaries = strand(world, admin, witness, victim, circle_tag, commits).await?;
 
     // The closing round, graded with the standard invariants: this is where
-    // the strand is GRADED. The WITNESS leads, so the victim's first probe is
-    // a receive — a victim send would drain the backlog first (see the module
-    // docs), and O1 stops at the first probe that never arrives.
+    // a strand would be GRADED. The WITNESS leads, so the victim's first probe
+    // is a receive — a victim send would drain the backlog by itself (see the
+    // module docs), and O1 stops at the first probe that never arrives.
     let pairs = closing_pairs(world, witness);
     let opened = [victim];
     let closing = round(
@@ -237,11 +225,9 @@ async fn spanning<T: TimelineSink, L: LogDrain>(
         .await?,
     );
 
-    // 5. The lever that drains it, recorded: one seal of the victim's own,
-    //    unpublished, and the epochs agree. Read AFTER the grade, so the
-    //    recovery is evidence beside the finding rather than a substitute for
-    //    it — and still true the day the sweep runs on resume, so the floor
-    //    stays met when the arm turns green.
+    // 5. The send-side lever, recorded: one seal of the victim's own,
+    //    unpublished, and the epochs agree. Read AFTER the grade, so it can
+    //    never stand in for the receive-side drain the grade is about.
     seal(world, victim, &group, FIXES_AFTER_RESUME).await?;
     if await_condition(bound, || async {
         Ok(epoch_of(world, victim, &group).await? == epoch_of(world, admin, &group).await?)
@@ -336,7 +322,8 @@ async fn strand<T: TimelineSink, L: LogDrain>(
 }
 
 /// One confirmed relay-list commit from `device`, carrying a relay list the
-/// group does not already hold — a repeat is a no-op and advances no epoch.
+/// group does not already hold: the product answers a repeat already so,
+/// staging nothing and advancing no epoch.
 async fn confirmed_commit<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     device: DeviceTag,
@@ -479,12 +466,7 @@ async fn seal<T: TimelineSink, L: LogDrain>(
     let sender = world.device(device)?;
     sender
         .manager()?
-        .encrypt_location(
-            group,
-            &sender.keys.public_key(),
-            &ProbeToken::mint(FIX_ROUND, index).as_location(),
-            LOCATION_MESSAGE_RETENTION_SECS,
-        )
+        .seal_location_for_test(group, &ProbeToken::mint(FIX_ROUND, index).as_location())
         .await
         .map(|(event, _, _)| event)
         .map_err(|_| RigError::Core(Step::Publish))
@@ -532,7 +514,7 @@ mod tests {
         assert!(
             arm.floor.canaries_caught == 5,
             "the pinned page order, the missed chain, the served backlog, the \
-             witnessed fixes, and the victim's own seal converging it"
+             witnessed fixes, and the epochs agreeing after the victim's own seal"
         );
     }
 

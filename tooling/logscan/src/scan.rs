@@ -280,6 +280,11 @@ struct FileReport {
     /// Needle classes the line's own EMITTER is the source of, for the lines
     /// that produced a needle finding. Bounded the same way.
     emitter_scoped: BTreeMap<u64, Vec<String>>,
+    /// The pids of a logcat's Haven-owned lines, and the `sqlcipher`-tagged
+    /// lines awaiting them: S-SQLC is scoped to Haven's process, and its own
+    /// first line may precede the `SQLCipher` one or follow it.
+    haven_pids: std::collections::BTreeSet<String>,
+    sqlcipher_lines: Vec<(String, u64)>,
 }
 
 /// The accumulator that re-joins a chunked logcat record.
@@ -1023,6 +1028,7 @@ fn scan_file(
         report.lines += 1;
     }
     flush_reassembly(&mut reassembly, needles, disclose, &mut report);
+    settle_sqlcipher(&mut report);
     Ok(report)
 }
 
@@ -1061,6 +1067,9 @@ fn handle_line(
     }
     for found in ctx.plant_shape.find_iter(framed.body) {
         *report.plants.entry(found.as_str().to_owned()).or_default() += 1;
+    }
+    if ctx.spec.structural_rules {
+        note_sqlcipher(ctx, &framed, line_no, report);
     }
     if ctx.spec.structural_rules && framed.owned {
         for segment in rule_segments(ctx.spec, framed.body) {
@@ -1129,6 +1138,57 @@ fn handle_line(
         reassembly
             .buf
             .extend_from_slice(collapse_whitespace(framed.body, leading).as_bytes());
+    }
+}
+
+/// S-SQLC's half of one line ([`crate::rules::SQLCIPHER_RULE`]).
+///
+/// On a logcat the record is `SQLCipher`'s by its tag and Haven's by its pid,
+/// which only the file's Haven-owned lines can name — so it is settled once the
+/// file ends ([`settle_sqlcipher`]), and a pid that wrote no Haven-owned line in
+/// the same capture never fires it. On `ios` Haven's process is the capture's
+/// own `Runner` (an owned emitter name), and the record is `SQLCipher`'s by its
+/// opening words, in either version's form
+/// ([`crate::rules::RuleSet::is_sqlcipher_record`]).
+fn note_sqlcipher(ctx: &LineCtx<'_>, framed: &Framed<'_>, line_no: u64, report: &mut FileReport) {
+    let (Some(raw_tag), Some(pid)) = (framed.raw_tag.as_deref(), framed.pid.as_ref()) else {
+        return;
+    };
+    match ctx.spec.entry_format {
+        EntryFormat::Logcat => {
+            if framed.owned {
+                report.haven_pids.insert(pid.clone());
+            }
+            if ctx.rules.is_sqlcipher_tag(raw_tag) {
+                report.sqlcipher_lines.push((pid.clone(), line_no));
+            }
+        }
+        EntryFormat::Ios => {
+            if ctx.spec.owned_emitters.iter().any(|own| own == raw_tag)
+                && ctx.rules.is_sqlcipher_record(framed.body)
+            {
+                report
+                    .rules
+                    .entry((crate::rules::SQLCIPHER_RULE, line_no, framed.tag.clone()))
+                    .or_insert((0, String::new()))
+                    .0 += 1;
+            }
+        }
+        EntryFormat::Plain => {}
+    }
+}
+
+/// Reports every `sqlcipher`-tagged logcat line whose pid also wrote a
+/// Haven-owned line.
+fn settle_sqlcipher(report: &mut FileReport) {
+    for (pid, line) in std::mem::take(&mut report.sqlcipher_lines) {
+        if report.haven_pids.contains(&pid) {
+            report
+                .rules
+                .entry((crate::rules::SQLCIPHER_RULE, line, None))
+                .or_insert((0, String::new()))
+                .0 += 1;
+        }
     }
 }
 
@@ -1729,6 +1789,15 @@ mod tests {
     }
 
     fn run(manifest: &Manifest, class: &str, paths: &[PathBuf]) -> super::Outcome {
+        run_with(manifest, class, paths, &rules())
+    }
+
+    fn run_with(
+        manifest: &Manifest,
+        class: &str,
+        paths: &[PathBuf],
+        rules: &RuleSet,
+    ) -> super::Outcome {
         scan_sinks(
             manifest,
             &[SinkArg {
@@ -1737,7 +1806,7 @@ mod tests {
             }],
             &BTreeMap::new(),
             &BTreeMap::new(),
-            &rules(),
+            rules,
             false,
             super::ScanMode::Full,
         )
@@ -2104,6 +2173,106 @@ mod tests {
             outcome.findings[0].tag.as_deref(),
             Some("Runner/frb_user"),
             "the report's handle names the process and the record's own subsystem"
+        );
+    }
+
+    /// `SQLCipher`'s own logger, compiled out of every Haven build, is caught if
+    /// it ever reaches a logcat from Haven's process: by its tag, and by the pid
+    /// Haven's own lines carry, whichever comes first. The same record from
+    /// another app's process is not Haven's to answer for.
+    #[test]
+    fn a_sqlcipher_logcat_record_from_havens_process_is_s_sqlc() {
+        let dir = Dir::new("sqlclogcat");
+        let manifest = manifest(&[]);
+        let path = dir.write(
+            "logcat.log",
+            "09-12 10:00:00.001  1234  1250 D sqlcipher: ERROR CORE sqlcipher_page_cipher: hmac check failed for pgno=1 returning SQLITE_ERROR\n\
+             09-12 10:00:00.002  1234  1290 I flutter: map ready\n\
+             09-12 10:00:00.003   999   999 D sqlcipher: ERROR CORE sqlcipher_page_cipher: hmac check failed for pgno=1 returning SQLITE_ERROR\n\
+             09-12 10:00:00.004  1234  1251 D sqlcipher: WARN CORE sqlcipher_codec_ctx_migrate: attempting migration\n",
+        );
+        let found = |rules: &RuleSet| -> Vec<(u64, Option<String>)> {
+            run_with(&manifest, "logcat", std::slice::from_ref(&path), rules)
+                .findings
+                .iter()
+                .filter(|f| f.rule.as_deref() == Some(crate::rules::SQLCIPHER_RULE))
+                .map(|f| (f.line, f.tag.clone()))
+                .collect()
+        };
+        assert_eq!(
+            found(&rules()),
+            [(1, None), (4, None)],
+            "Haven's pid, before and after its first own line; never the vendor's, and the tag is not Haven's to print"
+        );
+        assert!(
+            found(&rules().with_rule_disabled(crate::rules::SQLCIPHER_RULE)).is_empty(),
+            "mutation: without the rule the capture reads clean"
+        );
+    }
+
+    /// The Apple twin: `SQLCipher` writes through `OS_LOG_DEFAULT` from inside
+    /// Haven's `Runner`, so the record is marked only by its opening level and
+    /// source words — and those words mid-message, or in another process, are
+    /// not it.
+    #[test]
+    fn a_sqlcipher_record_in_havens_ios_process_is_s_sqlc() {
+        let dir = Dir::new("sqlcios");
+        let manifest = manifest(&[]);
+        let path = dir.write(
+            "ios.log",
+            "2026-09-17 22:45:47.709581+0000  localhost Runner[17463]: (rust_lib_haven) ERROR CORE sqlcipher_page_cipher: hmac check failed for pgno=1 returning SQLITE_ERROR\n\
+             2026-09-17 22:45:47.709582+0000  localhost Runner[17463]: (rust_lib_haven) [frb_user:rust_lib_haven::api] relay ERROR CORE reached\n\
+             2026-09-17 22:45:47.709583+0000  localhost Notes[400]: (libsqlcipher.dylib) WARN CORE sqlcipher_codec_ctx_migrate: attempting migration\n\
+             2026-09-17 22:45:47.709584+0000  localhost Runner[17463]: (rust_lib_haven) WARN MEMORY sqlcipher_mem_lock: mlock failed\n",
+        );
+        let found = |rules: &RuleSet| -> Vec<u64> {
+            run_with(&manifest, "ios", std::slice::from_ref(&path), rules)
+                .findings
+                .iter()
+                .filter(|f| f.rule.as_deref() == Some(crate::rules::SQLCIPHER_RULE))
+                .map(|f| f.line)
+                .collect()
+        };
+        assert_eq!(found(&rules()), [1, 4]);
+        assert!(
+            found(&rules().with_rule_disabled(crate::rules::SQLCIPHER_RULE)).is_empty(),
+            "mutation: without the rule the capture reads clean"
+        );
+    }
+
+    /// The shipped pin's form: `SQLCipher` 4.5.7 hands `os_log` the bare message
+    /// (libsqlite3-sys 0.30.1 sqlcipher/sqlite3.c:109863-109873), so the record
+    /// opens with the logging function's own name, not a level and source.
+    #[test]
+    fn a_bare_4_5_7_sqlcipher_record_in_havens_ios_process_is_s_sqlc() {
+        let dir = Dir::new("sqlcios457");
+        let manifest = manifest(&[]);
+        let path = dir.write(
+            "ios.log",
+            "2026-09-17 22:45:47.709581+0000  localhost Runner[17463]: (rust_lib_haven) sqlcipher_page_cipher: hmac check failed for pgno=1 returning SQLITE_ERROR\n\
+             2026-09-17 22:45:47.709582+0000  localhost Runner[17463]: (rust_lib_haven) sqlite3Codec: error decrypting page 1 data: 1\n\
+             2026-09-17 22:45:47.709583+0000  localhost Runner[17463]: (rust_lib_haven) sqlcipherCodecGetKey:db=0x1, nDb=0\n\
+             2026-09-17 22:45:47.709584+0000  localhost Runner[17463]: (rust_lib_haven) codec_set_pass_key: db=0x1 nDb=0\n\
+             2026-09-17 22:45:47.709585+0000  localhost Runner[17463]: (rust_lib_haven) [frb_user:rust_lib_haven::api] relay sqlcipher_page_cipher: reached\n\
+             2026-09-17 22:45:47.709586+0000  localhost Runner[17463]: (rust_lib_haven) sqlcipher: store opened\n\
+             2026-09-17 22:45:47.709587+0000  localhost Notes[400]: (libsqlcipher.dylib) sqlcipher_page_cipher: hmac check failed for pgno=1 returning SQLITE_ERROR\n",
+        );
+        let found = |rules: &RuleSet| -> Vec<u64> {
+            run_with(&manifest, "ios", std::slice::from_ref(&path), rules)
+                .findings
+                .iter()
+                .filter(|f| f.rule.as_deref() == Some(crate::rules::SQLCIPHER_RULE))
+                .map(|f| f.line)
+                .collect()
+        };
+        assert_eq!(
+            found(&rules()),
+            [1, 2, 3, 4],
+            "a SQLCipher function name opening a Runner record; never mid-message, never a bare word, never another process"
+        );
+        assert!(
+            found(&rules().with_rule_disabled(crate::rules::SQLCIPHER_RULE)).is_empty(),
+            "mutation: without the rule the capture reads clean"
         );
     }
 
