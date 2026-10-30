@@ -2552,7 +2552,7 @@ impl SessionManager {
     pub(crate) fn plane_stands(&self, plane: u64, standing: PlaneStanding) {
         let _ = self
             .live_plane
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
                 (plane >= current >> 2).then_some(plane << 2 | standing as u64)
             });
     }
@@ -2662,7 +2662,7 @@ impl SessionManager {
     pub(crate) fn release_claim(&self) {
         let _ = self
             .bridge_claims
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |held| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |held| {
                 held.checked_sub(1)
             });
     }

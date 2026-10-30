@@ -2012,7 +2012,10 @@ void main() {
       var opened = false;
       final opening = service
           .openBackgroundBurstWithin(const Duration(seconds: 30))
-          .then((_) => opened = true, onError: (Object e) => openError = e);
+          .then<void>(
+            (_) => opened = true,
+            onError: (Object e) => openError = e,
+          );
       await pumpEventQueue();
       expect(openError, isNull, reason: 'refused while the session came up');
       expect(opened, isFalse, reason: 'premise: there is no engine yet');

@@ -280,9 +280,12 @@ libsqlite3-sys = { git = "https://github.com/rusqlite/rusqlite.git", rev = "5ae7
 unsafe_code = "deny"
 
 [lints.clippy]
-all = "warn"
-pedantic = "warn"
-nursery = "warn"
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# Not `assert_eq!`: it prints the collection on failure, and a panic names no
+# identifier (Security Rule 15).
+assert_is_empty = "allow"
 
 # Coverage Configuration
 # Run coverage locally with:

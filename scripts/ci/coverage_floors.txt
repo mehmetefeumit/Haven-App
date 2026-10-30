@@ -247,7 +247,7 @@ rust|src/tiles/|96                           # measured 98.44% (695/706)
 # percentage point is 42 lines, so a single new uncovered file still moves this
 # row several points. That is exactly what the two points of headroom are for,
 # and why this row must never be pinned tight.
-flutter|lib/src/services/|73                 # measured 75.11% (3332/4436); was 46 (48.96%) before the
+flutter|lib/src/services/|81                 # measured 83.73% (3814/4555); was 46 (48.96%) before the
                                              # location-access gate, clock-skew detector and
                                              # session/cursor work brought their own tests
 
@@ -259,11 +259,11 @@ flutter|lib/src/services/|73                 # measured 75.11% (3332/4436); was 
 # responder that decides whether the foreground service may reclaim a session.
 # Both are P0-1's fix surface, and 60.98% is how much of the probe runs today.
 flutter|lib/src/services/fresh_secret.dart|100              # measured 100.00% (8/8)
-flutter|lib/src/services/mls_session_handover.dart|91       # measured 93.75% (15/16)
+flutter|lib/src/services/mls_session_handover.dart|92       # measured 94.74% (18/19)
 flutter|lib/src/services/foreground_liveness_probe.dart|58  # measured 60.98% (25/41)
 
 # --- Location send/receive pipeline -----------------------------------------
-flutter|lib/src/services/location_sharing_service.dart|88   # measured 90.80% (444/489)
+flutter|lib/src/services/location_sharing_service.dart|93   # measured 95.14% (450/473)
 flutter|lib/src/services/geolocator_location_service.dart|94 # measured 96.98% (193/199)
 flutter|lib/src/services/live_sync_resubscriber.dart|100    # measured 100.00% (117/117)
 flutter|lib/src/services/subscription_service.dart|100      # measured 100.00% (58/58)
@@ -278,7 +278,7 @@ flutter|lib/src/services/subscription_service.dart|100      # measured 100.00% (
 # behavioural tests. What remains uncovered is `onStart`'s bridge-bound
 # prologue (RustLib init, keyring, data dir, identity load) and
 # `backgroundCallback`.
-flutter|lib/src/services/background_location_task.dart|85   # measured 87.32% (420/481)
+flutter|lib/src/services/background_location_task.dart|86   # measured 88.30% (498/564)
 # NO ROW YET for lib/src/services/background_burst_coordinator.dart either,
 # for the same reason and with the same instruction. It is P4's whole receive
 # plane on iOS — one bounded burst per publish tick, and the file whose ORDER
@@ -309,10 +309,10 @@ flutter|lib/src/services/background_catchup_worker.dart|30  # measured 32.94% (2
 # nostr_relay_preferences_service.dart sat at literal 0.00% when first pinned
 # — 88 instrumented lines, none executed by any test, invisible to the 50%
 # gate — and has since been fully covered, so it is pinned exactly at 100.
-flutter|lib/src/services/nostr_circle_service.dart|38       # measured 40.21% (263/654)
-flutter|lib/src/services/nostr_identity_service.dart|53     # measured 55.56% (65/117)
-flutter|lib/src/services/nostr_profile_service.dart|41      # measured 43.61% (58/133)
-flutter|lib/src/services/nostr_relay_service.dart|18        # measured 20.31% (39/192); was 0 (0.63%, 1/158)
+flutter|lib/src/services/nostr_circle_service.dart|66       # measured 68.19% (358/525)
+flutter|lib/src/services/nostr_identity_service.dart|61     # measured 63.56% (75/118)
+flutter|lib/src/services/nostr_profile_service.dart|57      # measured 59.21% (90/152)
+flutter|lib/src/services/nostr_relay_service.dart|67        # measured 69.23% (207/299); was 0 (0.63%, 1/158)
                                                             # before classifyKeyPackageMaintenance was lifted
                                                             # out of the class. It decides whether a KeyPackage
                                                             # tick counts as reachable, and every branch of it is
@@ -324,7 +324,7 @@ flutter|lib/src/services/nostr_relay_preferences_service.dart|100 # measured 100
 
 # --- Leave / wipe paths -----------------------------------------------------
 # The proofs that leaving a circle and logging out actually destroy state.
-flutter|lib/src/services/pending_leave_service.dart|87      # measured 89.47% (34/38)
+flutter|lib/src/services/pending_leave_service.dart|100     # measured 100.00% (20/20)
 flutter|lib/src/services/pending_mls_wipe_service.dart|76   # measured 78.95% (15/19)
 
 # --- Tile privacy -----------------------------------------------------------
@@ -337,7 +337,7 @@ flutter|lib/src/network/pinned_tile_client.dart|59|10       # measured 61.54% (8
 # --- Riverpod state and validators ------------------------------------------
 # The providers layer is where service results become UI state; the validators
 # are the input filters on relay URLs and npubs.
-flutter|lib/src/providers/|84                # measured 86.13% (1590/1846)
-flutter|lib/src/utils/|91                    # measured 93.43% (270/289)
+flutter|lib/src/providers/|87                # measured 89.47% (2167/2422)
+flutter|lib/src/utils/|92                    # measured 94.04% (268/285)
 flutter|lib/src/utils/relay_url_validator.dart|93           # measured 95.83% (23/24)
 flutter|lib/src/utils/npub_validator.dart|82                # measured 84.38% (27/32)

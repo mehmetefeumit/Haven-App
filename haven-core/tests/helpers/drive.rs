@@ -52,7 +52,7 @@ impl ModeSource for NarrowsWhenHeld<'_> {
         if self.member.session().session_is_held_for_test()
             && self
                 .after
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
                     left.checked_sub(1)
                 })
                 .is_err()

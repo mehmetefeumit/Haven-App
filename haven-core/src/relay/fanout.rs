@@ -7792,8 +7792,20 @@ mod tests {
     /// cargo resolved the MDK crates this one links from. Haven does not
     /// depend on that crate; its source ships in the same repository.
     fn mdk_host_source() -> String {
+        // For the host alone: the whole graph also needs every other platform's
+        // crates, which a cache filled by building the tests for the host lacks.
+        let version = std::process::Command::new(env!("CARGO"))
+            .arg("-vV")
+            .output()
+            .expect("run cargo -vV");
+        let version = String::from_utf8(version.stdout).expect("cargo -vV is UTF-8");
+        let host = version
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .expect("cargo names its host");
         let metadata = std::process::Command::new(env!("CARGO"))
             .args(["metadata", "--format-version", "1", "--offline"])
+            .args(["--filter-platform", host])
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .output()
             .expect("run cargo metadata");

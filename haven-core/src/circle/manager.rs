@@ -12123,7 +12123,7 @@ mod tests {
             if self.session.session_is_held_for_test()
                 && self
                     .after
-                    .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+                    .try_update(SeqCst, SeqCst, |left| left.checked_sub(1))
                     .is_err()
             {
                 self.narrowed.store(true, SeqCst);

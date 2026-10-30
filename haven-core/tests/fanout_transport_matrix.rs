@@ -18,6 +18,8 @@
 //! timeouts that are then refused. Every other case is answered at once and
 //! pays at most two 600 ms adapter backoffs.
 
+mod cargo_graph;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -544,14 +546,7 @@ async fn held_copies(client: &Client, url: &str, id: nostr::EventId) -> usize {
 /// `file` of the MDK crate `package`, from the checkout cargo resolved for
 /// this crate.
 fn mdk_source(package: &str, file: &str) -> String {
-    let metadata = std::process::Command::new(env!("CARGO"))
-        .args(["metadata", "--format-version", "1", "--offline"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("run cargo metadata");
-    assert!(metadata.status.success(), "cargo metadata failed");
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&metadata.stdout).expect("cargo metadata JSON");
+    let metadata = cargo_graph::host_metadata();
     let manifest = metadata["packages"]
         .as_array()
         .expect("packages")

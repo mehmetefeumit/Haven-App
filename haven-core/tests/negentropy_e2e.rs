@@ -12,6 +12,7 @@
 //! on a condition, or on the wall clock crossing a second the test needs
 //! crossed.
 
+mod cargo_graph;
 mod helpers;
 
 use std::collections::HashSet;
@@ -368,14 +369,7 @@ async fn bury(pair: &Pair, circle: &Joined, relays: &[&SeededRelay], urls: &[Str
 }
 
 fn crate_source(package: &str, file: &str) -> String {
-    let metadata = std::process::Command::new(env!("CARGO"))
-        .args(["metadata", "--format-version", "1", "--offline"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("run cargo metadata");
-    assert!(metadata.status.success(), "cargo metadata failed");
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&metadata.stdout).expect("cargo metadata JSON");
+    let metadata = cargo_graph::host_metadata();
     let manifest = metadata["packages"]
         .as_array()
         .expect("packages")

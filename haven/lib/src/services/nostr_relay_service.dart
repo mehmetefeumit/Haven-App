@@ -983,7 +983,7 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
         location: fix,
         foreground: foreground,
       );
-      return _heard(outcome, outcome.clockRejected);
+      return _heard<SealOutcomeFfi>(outcome, outcome.clockRejected);
     } finally {
       // The exact coordinates: held no longer than the seal that read them.
       fix.dispose();

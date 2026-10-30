@@ -168,12 +168,6 @@
       ]
     }
   },
-  "ratchet_override": {
-    "reason": "Owner decision V2-5 (MDK v0.10.4 migration, W7): the one-time legacy 443/10051 KeyPackage retraction, its pending note (relaySettingsLegacyRetractionPending, deleted from all thirteen ARBs) and LEGACY_KP_RETRACTION_DONE_KEY are deleted, because the wipe-everything storage reset would re-fire it on every account and both kinds are retired protocol objects Haven no longer mints or reads for invitation.",
-    "items": [
-      "INV-O-LEGACY-KEY-ADVERTISEMENT-RETRACTION.deleted"
-    ]
-  },
   "invariants": [
     {
       "id": "INV-L-CIPHERTEXT-ONLY-EGRESS",

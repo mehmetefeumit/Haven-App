@@ -644,10 +644,10 @@ pub fn seal_from_declarations(
     };
 
     for sink in inputs.floors.keys() {
-        policy.sink(sink).map_err(&guard)?;
+        policy.sink(sink).map_err(guard)?;
     }
     for class in inputs.expect.keys() {
-        policy.class(class).map_err(&guard)?;
+        policy.class(class).map_err(guard)?;
     }
 
     let plants = if inputs.declared_plants == DeclaredPlants::None {
@@ -659,7 +659,7 @@ pub fn seal_from_declarations(
         }
         Vec::new()
     } else {
-        resolve_slots(&declarations.plants).map_err(&guard)?
+        resolve_slots(&declarations.plants).map_err(guard)?
     };
     let inertness = RuleSet::new(
         policy.base64_entropy_bits,
@@ -667,9 +667,9 @@ pub fn seal_from_declarations(
         &inputs.exempt,
         Vec::new(),
     )
-    .map_err(&guard)?;
+    .map_err(guard)?;
     for slot in &plants {
-        assert_inert(&slot.token, &inertness).map_err(&guard)?;
+        assert_inert(&slot.token, &inertness).map_err(guard)?;
     }
 
     let declared: Vec<Declared> = declarations
@@ -677,7 +677,7 @@ pub fn seal_from_declarations(
         .iter()
         .map(|(declared, _)| declared.clone())
         .collect();
-    let expansion = expand(policy, &declared).map_err(&guard)?;
+    let expansion = expand(policy, &declared).map_err(guard)?;
 
     for mismatch in reconcile(policy, &expansion) {
         refusal.note(crate::RC_UNUSABLE, mismatch.message());

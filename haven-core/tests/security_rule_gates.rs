@@ -50,6 +50,7 @@
 //! The reader itself fails loudly rather than hide code: a test module it
 //! cannot see the end of stops the gate that asked (`production_text`).
 
+mod cargo_graph;
 mod helpers;
 
 use std::collections::HashSet;
@@ -958,7 +959,7 @@ fn od4c_a_background_burst_cannot_publish_a_removal_bearing_auto_commit() {
     let away = squash(fn_body(&manager, "fn away_hold(").expect("away_hold"));
     assert!(
         squash(fn_body(&manager, "pub(crate) fn plane_stands(").expect("plane_stands"))
-            == "{let_=self.live_plane.fetch_update(Ordering::SeqCst,Ordering::SeqCst,\
+            == "{let_=self.live_plane.try_update(Ordering::SeqCst,Ordering::SeqCst,\
                 |current|{(plane>=current>>2).then_some(plane<<2|standingasu64)});}"
             // A claim is taken only from a plane that is still only started:
             // one a pause or a stop has overtaken lowers nothing.
@@ -4813,14 +4814,7 @@ fn mdk_host_source() -> String {
 /// A file of MDK's, by its path under the crates directory of the checkout
 /// cargo resolved the MDK crates this one links from.
 fn mdk_source(file: &str) -> String {
-    let metadata = std::process::Command::new(env!("CARGO"))
-        .args(["metadata", "--format-version", "1", "--offline"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("run cargo metadata");
-    assert!(metadata.status.success(), "cargo metadata failed");
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&metadata.stdout).expect("cargo metadata JSON");
+    let metadata = cargo_graph::host_metadata();
     let manifest = metadata["packages"]
         .as_array()
         .expect("packages")

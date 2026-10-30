@@ -3,9 +3,6 @@
 //! Core functionality for Haven - private family location sharing.
 //! This crate provides the Rust implementation for core Haven operations.
 
-#![warn(clippy::all)]
-#![warn(clippy::pedantic)]
-#![warn(clippy::nursery)]
 #![deny(unsafe_code)]
 
 // Prevent accidental release builds with test-utils enabled.

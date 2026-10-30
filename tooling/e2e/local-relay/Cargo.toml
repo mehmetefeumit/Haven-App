@@ -58,3 +58,6 @@ unsafe_code = "deny"
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+# Not `assert_eq!`: it prints the collection on failure, and a panic names no
+# identifier (Security Rule 15).
+assert_is_empty = "allow"

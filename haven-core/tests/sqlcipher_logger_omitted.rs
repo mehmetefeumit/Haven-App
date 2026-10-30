@@ -9,6 +9,8 @@
 //! `SQLCipher` (`libsqlite3-sys` is `links = "sqlite3"`, so a graph can hold
 //! only one), so a connection in this binary proves the build all three use.
 
+mod cargo_graph;
+
 use std::process::Command;
 
 use rusqlite::Connection;
@@ -128,14 +130,7 @@ fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 #[test]
 fn no_haven_or_mdk_source_issues_cipher_profile() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let metadata = Command::new(env!("CARGO"))
-        .args(["metadata", "--format-version", "1", "--offline"])
-        .current_dir(manifest_dir)
-        .output()
-        .expect("run cargo metadata");
-    assert!(metadata.status.success(), "cargo metadata failed");
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&metadata.stdout).expect("cargo metadata JSON");
+    let metadata = cargo_graph::host_metadata();
 
     let mut mdk_roots: Vec<std::path::PathBuf> = metadata["packages"]
         .as_array()
