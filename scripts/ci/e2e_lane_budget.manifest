@@ -162,7 +162,8 @@ unit tooling/e2e/ci/run-b8-clock-skew.sh
 strfry bash:start-strfry.sh#1 charge @
 device wait-for-device#* allowance
 install lib:install_fresh#1 charge @
-clock-servo clock_servo#1/sleep:SERVO_POLL_SECS#1 concurrent
+# Joined by stop_servo after the drive: the loop sees SERVO_STOP within a poll.
+clock-servo clock_servo#1/sleep:SERVO_POLL_SECS#1 poll
 drive timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
 # The log-privacy gate after the drive and over the whole evidence directory
 # at exit: files already on disk, no wait of its own (logscan-gate.sh).

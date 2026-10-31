@@ -305,6 +305,52 @@ auto_time_restore_cmds() {
     'settings put global auto_time_zone 1'
 }
 
+# Background servo: fulfils `REQ_CLOCK` requests as the drive emits them.
+#
+# Polls the growing logcat capture rather than consuming a pipe, so a servo
+# restart or a slow reader can never lose a request, and the same file the
+# oracle later reads is the one the servo acted on. Defined above the
+# --self-test dispatch, as `auto_time_restore_cmds` is, so fixture group 21 can
+# run it.
+clock_servo() {
+  local handled=" " seq offset
+  local -a pending
+  while [[ ! -f "${SERVO_STOP}" ]]; do
+    # Snapshot into an ARRAY rather than iterating a `read` loop fed by a
+    # process substitution. `apply_clock_offset` shells out to `adb shell`,
+    # which reads stdin — inside a read loop it would swallow the rest of the
+    # request list and the servo would silently fulfil only the first jump.
+    pending=()
+    mapfile -t pending < <(req_clock_seqs "${LOGCAT_FILE}")
+    for seq in "${pending[@]}"; do
+      [[ -z "${seq}" ]] && continue
+      [[ "${handled}" == *" ${seq} "* ]] && continue
+      offset="$(req_clock_offset "${LOGCAT_FILE}" "${seq}")"
+      if [[ -z "${offset}" ]]; then
+        continue
+      fi
+      handled+="${seq} "
+      apply_clock_offset "${seq}" "${offset}" </dev/null
+    done
+    sleep "${SERVO_POLL_SECS}"
+  done
+}
+
+# Stops the servo and WAITS for it to exit, so neither the record the oracle
+# reads nor the device clock can change under the phases after the drive.
+#
+# The stop file alone is not a stop: the servo checks it once per poll, never
+# mid-attempt. In CI run 41208625864 the drive finished while the servo was
+# still inside seq 5's adb calls, with the clock already moved and observed;
+# phase 4 then set the clock back, and the servo's read-back saw true time and
+# recorded the jump as never landed (run-kp-rotation.sh's `stop_servo` has the
+# same fix for run 34488512808). Unbounded, like every adb call in this
+# script: the step deadline bounds it.
+stop_servo() {
+  touch "${SERVO_STOP}"
+  wait "${SERVO_PID}" || true
+}
+
 # ---------------------------------------------------------------------------
 # --self-test — hermetic parser validation, no device.
 #
@@ -316,7 +362,7 @@ run_self_test() {
   # Pinned by EQUALITY, never printed as prose: this used to end with a
   # hard-coded "all 18 fixture groups passed" while 17 ran. Each numbered
   # group counts itself.
-  local -r SELF_TEST_GROUPS=20
+  local -r SELF_TEST_GROUPS=21
   local tmp fail=0 got checked=0
   _group() { checked=$(( checked + 1 )); }
   tmp="$(mktemp -d)"
@@ -971,6 +1017,96 @@ run_self_test() {
     fail=1
   fi
 
+  # --- (21) THE STOP waits for an in-flight jump. --------------------------
+  # CI run 41208625864: the drive finished inside seq 5's attempt, and phase 4
+  # restored the clock before that attempt's read-back. The attempt is held
+  # open on a FIFO, the stand-in for its adb calls, and released only by a
+  # `wait` on the servo's own PID, so the outcome is decided by the stop alone,
+  # with no sleep: a stop that only signals reads the record while the attempt
+  # is provably open, and `stop_servo` cannot return before it is written. A
+  # poll budget turns a stop that waits without signalling into a mark, not a
+  # hang.
+  _group
+  _signal_only_stop() { touch "${SERVO_STOP}"; }
+  _stop_fixture() { # _stop_fixture <stop-fn> -> the seqs the oracle would read
+    local dir="${tmp}/stop$1"
+    mkdir -p "${dir}"
+    (
+      SERVO_STOP="${dir}/.stop"
+      JUMP_LOG="${dir}/jumps.log"
+      LOGCAT_FILE="${dir}/logcat.log"
+      SERVO_POLL_SECS=0
+      : > "${JUMP_LOG}"
+      : > "${dir}/polls"
+      mkfifo "${dir}/entered" "${dir}/gate"
+      # File-backed: this runs inside a process substitution, so a shell
+      # counter would never advance.
+      req_clock_seqs() {
+        echo p >> "${dir}/polls"
+        if (( $(wc -l < "${dir}/polls") > 3 )); then
+          touch "${SERVO_STOP}" "${dir}/never-stopped"
+          return 0
+        fi
+        echo 1
+      }
+      req_clock_offset() { echo 318; }
+      apply_clock_offset() {
+        printf 'in\n' > "${dir}/entered"
+        read -r _ < "${dir}/gate"
+        echo "seq=$1 offset=$2 expected=1 device=1 drift=0 status=ok" >> "${JUMP_LOG}"
+      }
+      ( trap - EXIT; clock_servo ) >/dev/null &
+      SERVO_PID=$!
+      read -r _ < "${dir}/entered"
+      # Defined only now, after the fork, so the servo itself never sees it.
+      wait() {
+        [[ "$*" == "${SERVO_PID}" ]] || return 127
+        printf 'go\n' > "${dir}/gate"
+        builtin wait "$@"
+      }
+      "$1"
+      jump_ok_seqs "${JUMP_LOG}" | tr '\n' ' '
+      # A stop that did not wait left the servo blocked; end it as cleanup()
+      # does, so the fixture leaves nothing running.
+      if kill -0 "${SERVO_PID}" 2>/dev/null; then
+        kill "${SERVO_PID}" 2>/dev/null || true
+        builtin wait "${SERVO_PID}" 2>/dev/null || true
+      fi
+      if [[ -f "${dir}/never-stopped" ]]; then
+        printf 'never-stopped'
+      fi
+    )
+  }
+  got="$(_stop_fixture _signal_only_stop)"
+  if [[ -n "${got}" ]]; then
+    echo "SELF-TEST FAIL (21): a stop that only signals must read the in-flight" \
+         "jump as never landed — the fixture no longer reproduces the race" \
+         "(got '${got}')" >&2
+    fail=1
+  fi
+  got="$(_stop_fixture stop_servo)"
+  if [[ "${got}" != "1 " ]]; then
+    echo "SELF-TEST FAIL (21b): stop_servo returned before the in-flight jump" \
+         "was recorded (got '${got}')" >&2
+    fail=1
+  fi
+  # (21c) THE WIRING. Nothing above fails if the orchestrator goes back to
+  # touching the stop file and restoring the clock at once, or stops recording
+  # the servo's PID, which turns `wait ""` into a swallowed error.
+  local stop_at restore_at launch_at
+  stop_at="$(grep -m1 -nE '^stop_servo$' "${self}" | cut -d: -f1 || true)"
+  restore_at="$(grep -m1 -nE '^apply_clock_offset "final" 0$' "${self}" | cut -d: -f1 || true)"
+  launch_at="$(grep -m1 -nE '^\( *trap - EXIT; *clock_servo *\) *&$' "${self}" | cut -d: -f1 || true)"
+  if [[ -z "${stop_at}" || -z "${restore_at}" || -z "${launch_at}" ]] \
+     || (( stop_at > restore_at )) \
+     || grep -qE '^touch "\$\{SERVO_STOP\}"' "${self}" \
+     || [[ "$(sed -n "$(( launch_at + 1 ))p" "${self}")" != 'SERVO_PID=$!' ]]; then
+    echo "SELF-TEST FAIL (21c): the servo must be launched with its PID recorded," \
+         "and stopped AND waited for before phase 4 restores the clock" \
+         "(stop='${stop_at}', restore='${restore_at}', launch='${launch_at}')" >&2
+    fail=1
+  fi
+
   if (( checked != SELF_TEST_GROUPS )); then
     echo "SELF-TEST FAIL: ran ${checked} fixture group(s), expected ${SELF_TEST_GROUPS}" >&2
     fail=1
@@ -1112,35 +1248,6 @@ restore_auto_time_pin() {
     [[ -n "${cmd}" ]] || continue
     adb -s "${DEVICE}" shell "${cmd}" >/dev/null 2>&1 || true
   done < <(auto_time_restore_cmds)
-}
-
-# Background servo: fulfils `REQ_CLOCK` requests as the drive emits them.
-#
-# Polls the growing logcat capture rather than consuming a pipe, so a servo
-# restart or a slow reader can never lose a request, and the same file the
-# oracle later reads is the one the servo acted on.
-clock_servo() {
-  local handled=" " seq offset
-  local -a pending
-  while [[ ! -f "${SERVO_STOP}" ]]; do
-    # Snapshot into an ARRAY rather than iterating a `read` loop fed by a
-    # process substitution. `apply_clock_offset` shells out to `adb shell`,
-    # which reads stdin — inside a read loop it would swallow the rest of the
-    # request list and the servo would silently fulfil only the first jump.
-    pending=()
-    mapfile -t pending < <(req_clock_seqs "${LOGCAT_FILE}")
-    for seq in "${pending[@]}"; do
-      [[ -z "${seq}" ]] && continue
-      [[ "${handled}" == *" ${seq} "* ]] && continue
-      offset="$(req_clock_offset "${LOGCAT_FILE}" "${seq}")"
-      if [[ -z "${offset}" ]]; then
-        continue
-      fi
-      handled+="${seq} "
-      apply_clock_offset "${seq}" "${offset}" </dev/null
-    done
-    sleep "${SERVO_POLL_SECS}"
-  done
 }
 
 # ---------------------------------------------------------------------------
@@ -1367,7 +1474,7 @@ drc=0
     --driver "${DRIVER_FILE}" \
     --target "${TARGET}" ) > "${DRIVE_LOG}" 2>&1 || drc=$?
 
-touch "${SERVO_STOP}"
+stop_servo
 
 # Scan BEFORE echoing. The EXIT trap's scan runs far too late to protect the
 # STEP log, which has no retention control and cannot be redacted after the
