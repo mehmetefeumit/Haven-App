@@ -181,6 +181,7 @@ async fn package_of(mgr: &CircleManager, keys: &Keys, inbox: &[String]) -> Membe
         key_package_event: kp_event,
         inbox_relays: inbox.to_vec(),
         nip65_relays: vec![],
+        nip65_write_relays: vec![],
     }
 }
 

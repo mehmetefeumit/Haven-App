@@ -117,7 +117,7 @@ class AppLocalizationsJa extends AppLocalizations {
   String get onboardingValueProp1Summary => '端末上で暗号化。あなたが選んだサークルだけが読めます。';
 
   @override
-  String get onboardingValueProp2Summary => '中央サーバーなし。あなたが選ぶリレーネットワークで動作します。';
+  String get onboardingValueProp2Summary => '中央サーバーなし。独立したリレーで動作します。';
 
   @override
   String get onboardingValueProp3Summary =>
@@ -732,6 +732,10 @@ class AppLocalizationsJa extends AppLocalizations {
   }
 
   @override
+  String get circleCreateRefusedNoLocationRelay =>
+      'Haven はこのサークルを作成できません。Haven がサークルに使うリレーはすべて、あなた自身のリレーのリストに現在含まれているか、以前に含まれていたため、どのリレーもこのサークルを中継できません。';
+
+  @override
   String addMemberTitle(String circleName) {
     return '$circleName に追加';
   }
@@ -1196,7 +1200,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'これらのリレーは、招待されたメンバーが公開したリストから取り込まれました。公開したメンバーがいなければ、あなたの受信トレイのリレーか Haven が選んだリレーが使われました。まだ変更できず、あとからリレーのリストを編集しても変わりません。';
+      'このサークルの暗号化された更新は、これらのリレーを経由します。リレーはサークルの作成時に決まり、Haven ではまだ変更できません。あなたのリレーのリストを編集しても、これらには影響しません。';
 
   @override
   String get circleDetailsAddMember => 'メンバーを追加';

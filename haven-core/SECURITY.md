@@ -133,15 +133,97 @@ save — see *Public Nostr Profiles* below), three additional exposures apply:
   resolution, redirects disabled), but a legitimate-looking public host still
   sees viewer IPs — irreducible for public hosting; use a VPN.
 - **Roster-association leak on fetch.** A relay serving profile fetches sees
-  which pubkey set a client asks about. Haven batches the union of ALL known
-  member pubkeys across all circles into one TTL-cached REQ on the AUTH-free
-  discovery plane (never per-circle partitions, never circle relays, no
-  standing subscription, no NIP-42 AUTH answer) — this blurs per-circle
-  clustering and bounds request count, but does not eliminate the association
-  leak.
+  which pubkeys a client asks about. Haven asks the curated profile pool
+  (`profile::relay_pool`) — never a circle's relays, never the discovery plane —
+  ONE author per REQ, each from the one pool relay a salted rendezvous hash
+  assigns it and at most one more on a miss, in one-shot REQs with no standing
+  subscription and no NIP-42 AUTH answer. No relay sees a roster in one request,
+  but each sees an install-specific slice of the union of all circles' members,
+  and two members of one circle can land on the same relay (P1, under
+  *Profile-plane relay separation* below).
 - **Permanence.** A published kind-0 is effectively permanent: replaceable ≠
   erasable — indexers and archives keep revisions, and NIP-09 deletion is
   best-effort. The pubkey ↔ name/photo binding survives "delete".
+
+**Relay planes.** Haven keeps four relay lists apart: the account plane (the
+user's Inbox and KeyPackage lists, seeded from `PRODUCTION_DEFAULT_RELAYS`:
+kinds 10050, 10002 and 30443, the inbound kind 1059 and the inbox REQ — the
+user's pubkey is visible there by design), the read-only discovery plane
+(`PRODUCTION_DISCOVERY_RELAYS`: other accounts' relay lists and KeyPackages),
+the profile plane (`PRODUCTION_PROFILE_RELAYS`: kind 0) and, since 2026-10-31,
+the location plane (`PRODUCTION_LOCATION_RELAYS`: the kind 445 of the circles
+Haven creates). The seed and discovery lists share hosts; the profile and
+location pools share none with any other built-in list
+(`tests/profile_plane_separation.rs`).
+
+### The location relay pool
+
+A circle created without named relays — every create the app's UI makes — gets
+`min(3, n)` distinct relays drawn with `OsRng` from `PRODUCTION_LOCATION_RELAYS`
+(eight entries, `circle::location_pool`; a debug build may install a test list
+with `set_location_relays_for_test`, which release builds compile out). Each
+entry is normalised, de-duplicated by authority (host and port) and kept only
+if `foreign_relay_dialable` admits it and the hard tier below leaves it in; `n`
+is how many are left. Two exclusion tiers decide which:
+
+- **Hard — the creator's own identity relays.** No relay whose authority
+  appears in the user's Inbox, KeyPackage or Profile lists, the curated profile
+  pool, the retired profile relays, the discovery plane, or a contamination-ledger
+  row recorded as an inbox, key-package or discovery relay
+  (`CircleStorage::identity_relay_authorities`) is ever picked, however it is
+  spelled. A Welcome row is not in the tier: that relay took an ephemeral-key
+  gift wrap `p`-tagged to an invitee and never saw this account's pubkey. When nothing is left the create is
+  refused with the typed `CircleError::NoLocationRelay`
+  (`RefusalFfi::NoLocationRelay`, fixed copy telling the user their own lists
+  cover every relay Haven uses for circles) before anything is persisted. There
+  is no fallback to the full pool, the inbox or the seed.
+- **Soft — the invitees' relays.** An entry an invitee lists as an inbox relay
+  or a NIP-65 read or write relay is taken only to fill up to `min(3, n)` when
+  too few others are left, so a crafted invitee list can neither steer the
+  circle onto one relay — the creator's identity relay included — nor block the
+  create.
+
+On default settings a location relay therefore receives the circle's kind-445
+events, its `#h` REQs, catch-up fetches and NIP-77 passes, and never the inbox
+REQ (`#p` = the user's pubkey), a gift wrap, a relay list, a KeyPackage or a
+kind 0 of this account. The picked set is the circle's routing component and is
+recorded in the contamination ledger as `CircleRouting`, so it never enters the
+profile pool. The pick logs nothing. Tests: `tests/location_pool_e2e.rs`,
+`tests/location_pool_override.rs` and the unit tests in
+`circle/location_pool.rs`; `check_profile_privacy_boundaries.sh` checks 9b
+(CSPRNG only), 11 (the named tests exist), 12b (no library test installs the
+override) and 14b (every entry has a dated vetting row).
+
+**What remains.**
+
+- One device IP across all four planes, and an iOS background burst that opens
+  and closes the whole relay union in the same seconds (P6, RC1).
+- Welcome delivery and the KeyPackage fetch still go to the invitee's own
+  10050/10002 relays, and an invitee added later whose lists name one of the
+  circle's relays causes no re-pick.
+- Circles created before 2026-10-31 and circles other clients create keep their
+  relays: a change is a commit every member must receive.
+- A relay the user removed from their inbox is excluded only best-effort,
+  because the ledger keeps a relay's first source only (P7).
+- Smaller operators make "all three relays dark" likelier; only an admin's
+  relay change rescues such a circle, and `circleRecovery` names the condition
+  only while a change awaits a relay's acknowledgement (`AwaitingRelays`).
+- A user who puts every pool relay on their own lists cannot create a circle
+  until they remove one; the typed refusal says so.
+
+#### The location pool is Haven-specific (LOCATION-POOL)
+
+`PRODUCTION_LOCATION_RELAYS` is a list only Haven uses, and every member of a
+circle Haven creates dials the same three of its relays. A network observer who
+sees DNS queries or TLS SNI (an ISP, a Wi-Fi operator) can therefore infer from
+those hostnames that a device runs Haven and that devices dialling the same
+three are probably in one circle, where a default circle used to ride the
+account seed (`relay.damus.io`, `relay.primal.net`, `nos.lol`) that most Nostr
+clients dial. The pool's operators, together, can enumerate Haven users' IP
+addresses, because the pool is Haven-specific. Accepted with the relay-plane
+segregation (owner-approved 2026-10-31); there is no mitigation beyond the
+recorded absence of network-level unlinkability (P6), and copy must not present
+Haven's choice of circle relays as hiding Haven use from the network.
 
 ### Relay events are verified by Haven before anything acts on them
 
@@ -2544,13 +2626,16 @@ cannot point a member's sockets at `wss://10.…`, `wss://169.254.169.254` or
 entry: a relay update naming one is refused in fixed text naming no relay
 (`circle_relays`), and so is a create whose caller named one (`routing_of`),
 before anything is recorded or staged. A create whose caller named no relays
-takes them from the user's own inbox list, which may name a relay only the
-user can reach: such an entry is left out, and the create is refused only when
-none is left. Residual: a domain that resolves to a private address, as
+draws them from Haven's location pool (`circle::location_pool::pick_circle_relays`,
+*The location relay pool* above) or a debug build's installed test list, which
+may name a relay only the device can reach: such an entry is left out with the
+pick's other exclusions, and the create is refused (`CircleError::NoLocationRelay`)
+only when none is left. Residual: a domain that resolves to a private address, as
 for MDK's own `reject_unsafe_relay_host` (tracker T-GROUP-RELAY-HOSTS). Tests:
 `a_routing_entry_on_a_non_public_host_is_dropped_on_every_read_path`,
 `haven_never_writes_a_routing_relay_on_a_non_public_host`,
-`a_create_from_the_own_inbox_list_leaves_out_a_non_public_host`,
+`installed_override_reaches_the_pick_and_stays_subject_to_exclusion_and_the_host_rule`,
+`pick_leaves_out_a_pool_entry_on_a_non_public_host`,
 `a_routing_component_haven_writes_never_names_a_non_public_host`.
 
 A routing component is another client's to write, and what it names that
@@ -4632,7 +4717,17 @@ threat model is honest:
   though kind-445 events themselves carry only ephemeral author keys.
   Protocol design already separates inbox relays (1059) from circle relays
   (445), so this only bites when the *same* relay serves both roles for a
-  user. Full mitigation needs per-fetch ephemeral connections or onion
+  user. Until 2026-10-31 that was the default: a new circle took the invitees'
+  inbox relays, on a default install the same three seed relays as the user's
+  own inbox. A circle created since then without named relays takes its relays
+  from the location pool, never one on its creator's own lists and, while
+  enough others are left, none an invitee lists (*The location relay pool*
+  above), so on default lists the join no longer applies to it. It still
+  applies to every circle created before that change, to circles other clients
+  create, and wherever a member's own lists name one of the circle's relays — a
+  user who later adds one to their inbox (the exclusion is applied at create,
+  not retroactively), an invitee the pick had to fill from, or a member added
+  later. Full mitigation needs per-fetch ephemeral connections or onion
   routing (out of scope for v1). Since M11 (live-sync enabled by default) the
   engine holds this as a **standing** connection rather than a per-fetch one
   while the app is in the **foreground**, on both platforms, so the `#p`↔`#h`
@@ -5355,10 +5450,10 @@ the FFI, and `Image.network` stays banned.
   profile module).
 - **kind-24242 never reaches a relay.** Blossom authorization events travel
   only in the HTTP `Authorization` header.
-- **Fetch-side minimization.** Reads use the AUTH-free discovery relays with
-  bounded one-shot batched fetches (union of all circles' members, TTL cache,
-  no standing kind-0 subscription) and never answer NIP-42 AUTH, so the relay
-  cannot attribute the fetcher.
+- **Fetch-side minimization.** Reads use the curated profile pool, one author
+  per one-shot REQ from that author's assigned pool relay (no standing kind-0
+  subscription; cached rows refreshed on tiered staleness), and never answer
+  NIP-42 AUTH, so the relay cannot attribute the fetcher.
 
 **Residual risks (honest limits):**
 
@@ -5369,8 +5464,8 @@ the FFI, and `Image.network` stays banned.
   contacts their chosen host (see *Network Threat Model*), including the
   attacker-chosen-host variant. Bounded by the anti-SSRF filter; not
   eliminated for legitimate public hosts. VPN recommended.
-- **Roster-association leak.** Profile fetches reveal to the discovery relay
-  which pubkeys a client is interested in (see *Network Threat Model*).
+- **Roster-association leak.** Profile fetches reveal to each assigned pool
+  relay which pubkeys a client is interested in (see *Network Threat Model*).
 - **Best-effort delete, and the photo is NOT part of it.** "Delete public
   profile" republishes a blank kind-0 and emits a NIP-09 kind-5 deletion —
   both cooperative-server best-effort, and per the retraction no-op gate they
@@ -5415,8 +5510,20 @@ Haven routes kind-0 profile traffic to a curated relay pool
 kind-445 / kind-1059 traffic, and requests each member's kind-0 from exactly
 ONE pool relay chosen by a stable salted rendezvous hash
 (`profile::assignment`). A relay therefore sees either the user's encrypted
-location traffic or their profile queries — never both. The residuals below are
-owner-accepted; they are deviations of record, not open bugs.
+location traffic or their profile queries — never both. The pool is
+host-disjoint from the account seed, the discovery plane and, since 2026-10-31,
+the location pool (`tests/profile_plane_separation.rs`). The same day four
+entries moved to `RETIRED_PROFILE_RELAYS`: `wss://nostr.mom`, run by nos.lol's
+operator — nos.lol is on the account seed, so one operator saw both planes;
+`wss://nostr.bitcoiner.social`, a second slot for offchain.pub's operator;
+`wss://nostr.data.haus`, for falling reliability; and `wss://yabu.me`, which
+the probe caught refusing kind-0 writes from whole networks by ASN. Their slots
+went to `wss://nostr.sathoarder.com`, `wss://user.kindpag.es`,
+`wss://relay.nostr.net` and `wss://relay.coinos.io`, so the pool still has
+eight entries, and the startup prune removes the retired rows from upgraded
+installs. Operator overlap is recorded at vetting; no test can check it. The
+residuals below are owner-accepted; they are deviations of record, not open
+bugs.
 
 #### The guarantee is bounded — collisions are expected (P1)
 

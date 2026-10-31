@@ -55,7 +55,9 @@
 #          `negentropy_items(` anywhere: each reads a local set from the
 #          pool's database, or addresses every relay;
 #      (d) no `SyncDirection::Up` / `SyncDirection::Both`;
-#      (e) `neg_remote_ids(` is called only from `relay/negentropy.rs`.
+#      (e) `neg_remote_ids(` is called only from `relay/negentropy.rs` and,
+#          under `test-utils` alone, from `RelayManager::neg_probe_ids` in
+#          `relay/manager.rs` (the vetting probe's wrapper; it cannot ship).
 #
 # What this scan covers, and no more. It bans the `subscribe` / `unsubscribe`
 # spellings above and the named entry points of MDK's subscription plane. It

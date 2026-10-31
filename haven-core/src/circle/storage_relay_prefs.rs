@@ -33,11 +33,15 @@
 // module already disables this lint at the file level for storage.rs.
 #![allow(clippy::significant_drop_tightening)]
 
+use std::collections::BTreeSet;
+
 use chrono::Utc;
 use nostr::{EventId, PublicKey, RelayUrl};
 use rusqlite::{params, Connection, OptionalExtension};
 
+use super::contamination::ContaminationSource;
 use super::error::{CircleError, RelayInputRejection, Result};
+use super::location_pool::relay_authority;
 use super::relay_prefs::RelayType;
 use super::storage::CircleStorage;
 use super::storage_contamination::record_relay_category_on;
@@ -385,6 +389,50 @@ impl CircleStorage {
             .query_map(params![relay_type.as_str()], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// The servers ([`relay_authority`]s) that carry, or carried, this
+    /// account's identity traffic: its Inbox, `KeyPackage` and Profile rows, the
+    /// curated profile pool and the relays retired from it (their seeded rows
+    /// are pruned, but they served this account's kind 0), the discovery plane,
+    /// and every contamination ledger row recorded as an inbox, key-package or
+    /// discovery relay — so one the user has since removed still counts. A Welcome row is not: that
+    /// relay took an ephemeral-key gift wrap `p`-tagged to an invitee and never
+    /// saw this account's pubkey. A new circle never takes one of these.
+    ///
+    /// # Errors
+    ///
+    /// Any read failure: an exclusion set read as empty would fail open.
+    pub(crate) fn identity_relay_authorities(&self) -> Result<BTreeSet<String>> {
+        let mut relays = Vec::new();
+        for relay_type in [RelayType::Inbox, RelayType::KeyPackage, RelayType::Profile] {
+            relays.extend(self.list_user_relays(relay_type)?);
+        }
+        relays.extend(crate::profile::profile_relay_pool_default());
+        relays.extend(crate::profile::retired_profile_relays());
+        relays.extend(crate::relay::discovery_relays());
+        {
+            let conn = self.conn().lock().map_err(|e| {
+                CircleError::Storage(format!("Failed to acquire database lock: {e}"))
+            })?;
+            let mut stmt =
+                conn.prepare("SELECT url FROM contaminated_relays WHERE source IN (?1, ?2, ?3)")?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        ContaminationSource::Inbox.as_str(),
+                        ContaminationSource::KeyPackage.as_str(),
+                        ContaminationSource::Discovery.as_str(),
+                    ],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            relays.extend(rows);
+        }
+        Ok(relays
+            .iter()
+            .filter_map(|url| relay_authority(url))
+            .collect())
     }
 
     /// Adds a relay to one category.
@@ -1296,6 +1344,74 @@ mod tests {
             after_seed.len(),
             crate::circle::PRODUCTION_DEFAULT_RELAYS.len() - 1
         );
+    }
+
+    #[test]
+    fn identity_relay_authorities_cover_every_identity_category_and_both_curated_planes() {
+        let storage = make_storage();
+        storage
+            .add_user_relay("wss://Inbox-Only.Example/", RelayType::Inbox)
+            .unwrap();
+        storage
+            .add_user_relay("wss://kp-only.example/path", RelayType::KeyPackage)
+            .unwrap();
+        storage
+            .add_user_relay("wss://profile-only.example", RelayType::Profile)
+            .unwrap();
+        // Removed from the inbox, still in the ledger: it has seen the pubkey.
+        storage
+            .add_user_relay("wss://removed-inbox.example", RelayType::Inbox)
+            .unwrap();
+        assert!(storage
+            .remove_user_relay("wss://removed-inbox.example", RelayType::Inbox)
+            .unwrap());
+        storage
+            .add_user_relay("wss://removed-kp.example", RelayType::KeyPackage)
+            .unwrap();
+        assert!(storage
+            .remove_user_relay("wss://removed-kp.example", RelayType::KeyPackage)
+            .unwrap());
+        for (url, source) in [
+            ("wss://welcome-ledger.example", ContaminationSource::Welcome),
+            (
+                "wss://discovery-ledger.example",
+                ContaminationSource::Discovery,
+            ),
+            (
+                "wss://circle-routing.example",
+                ContaminationSource::CircleRouting,
+            ),
+        ] {
+            storage
+                .record_contaminated_relays(&[url.to_string()], source, 1)
+                .unwrap();
+        }
+
+        let identity = storage.identity_relay_authorities().unwrap();
+
+        for authority in [
+            "inbox-only.example:443",
+            "kp-only.example:443",
+            "profile-only.example:443",
+            "removed-inbox.example:443",
+            "removed-kp.example:443",
+            "discovery-ledger.example:443",
+        ] {
+            assert!(identity.contains(authority), "{authority} is not excluded");
+        }
+        for relay in profile_pool()
+            .into_iter()
+            .chain(crate::profile::retired_profile_relays())
+            .chain(crate::relay::discovery_relays())
+        {
+            let authority = relay_authority(&relay).unwrap();
+            assert!(identity.contains(&authority), "{authority} is not excluded");
+        }
+        // Neither a circle's own relays nor an invitee's Welcome relay saw
+        // this account's pubkey: excluding them would shrink the pool with
+        // every circle created.
+        assert!(!identity.contains("circle-routing.example:443"));
+        assert!(!identity.contains("welcome-ledger.example:443"));
     }
 
     #[test]

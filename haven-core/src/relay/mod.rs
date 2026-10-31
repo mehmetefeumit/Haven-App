@@ -56,6 +56,8 @@ pub use cursor::{
 };
 pub use discovery::{discovery_relays, set_discovery_relays_for_test, PRODUCTION_DISCOVERY_RELAYS};
 pub use error::{InvalidUrlReason, RelayError, RelayResult};
+#[cfg(feature = "test-utils")]
+pub use manager::NegProbe;
 pub use manager::{
     allow_ws_loopback_for_test, ws_loopback_allowed_for_test, FanoutTransport, Nip65Relays,
     RelayManager,

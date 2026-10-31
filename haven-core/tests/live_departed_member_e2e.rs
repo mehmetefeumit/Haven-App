@@ -65,6 +65,7 @@ async fn a_fix_in_flight_from_a_removed_member() -> InFlightFromRemoved {
                 key_package_event,
                 inbox_relays: vec!["wss://inbox.example.com".to_string()],
                 nip65_relays: vec![],
+                nip65_write_relays: vec![],
             }],
             &CircleConfig::new("Roster Circle").with_relays(relays.clone()),
         )

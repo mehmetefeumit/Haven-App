@@ -13,7 +13,9 @@ import 'package:haven/src/rust/api.dart';
 abstract interface class CircleChangeDriver {
   /// Creates a circle of [members]: a delivery record is written for each
   /// founding Welcome before this returns, and each is sent from it to its
-  /// invitee's inbox relays until one acknowledges it.
+  /// invitee's inbox relays until one acknowledges it. [relays] is the
+  /// circle's relay list as the caller named it, empty for Rust to pick; it
+  /// is never the Welcome route.
   Future<CircleCreationOutcomeFfi> createCircle({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,

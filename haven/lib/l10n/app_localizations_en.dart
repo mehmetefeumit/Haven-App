@@ -120,7 +120,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Summary =>
-      'No central server . It runs on a relay network you choose.';
+      'No central server. It runs on independent relays.';
 
   @override
   String get onboardingValueProp3Summary =>
@@ -765,6 +765,10 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
+  String get circleCreateRefusedNoLocationRelay =>
+      'Haven can\'t create this circle: every relay it uses for circles is, or once was, on your own relay lists, so none of them can carry it.';
+
+  @override
   String addMemberTitle(String circleName) {
     return 'Add to $circleName';
   }
@@ -1243,7 +1247,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'These relays came from the lists the invited members published — or, if they had none, from your inbox relays or ones Haven chose. They cannot be changed yet, and later edits to your relay list do not affect them.';
+      'This circle\'s encrypted updates travel over these relays. They were set when the circle was created and cannot be changed in Haven yet; edits to your relay list do not affect them.';
 
   @override
   String get circleDetailsAddMember => 'Add member';

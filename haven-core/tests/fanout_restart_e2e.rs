@@ -1962,6 +1962,7 @@ async fn second_circle(admin: &CircleMember, relays: &[&str]) -> (GroupId, Circl
         .await,
         inbox_relays: inbox.clone(),
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     }];
     let created = admin
         .circle

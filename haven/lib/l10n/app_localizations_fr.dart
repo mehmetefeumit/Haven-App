@@ -122,7 +122,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Summary =>
-      'Pas de serveur central. Haven fonctionne sur un réseau de relais que vous choisissez.';
+      'Pas de serveur central. Haven s\'appuie sur des relais indépendants.';
 
   @override
   String get onboardingValueProp3Summary =>
@@ -784,6 +784,10 @@ class AppLocalizationsFr extends AppLocalizations {
   }
 
   @override
+  String get circleCreateRefusedNoLocationRelay =>
+      'Haven ne peut pas créer ce cercle : tous les relais qu\'il utilise pour les cercles figurent, ou ont figuré, dans vos propres listes de relais, si bien qu\'aucun ne peut accueillir ce cercle.';
+
+  @override
   String addMemberTitle(String circleName) {
     return 'Ajouter à $circleName';
   }
@@ -1276,7 +1280,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'Ces relais proviennent des listes publiées par les membres invités — si ces membres n\'en avaient aucune, de vos relais de réception ou de relais choisis par Haven. Ils ne sont pas encore modifiables, et les modifications ultérieures de votre liste de relais ne les changent pas.';
+      'Les mises à jour chiffrées de ce cercle passent par ces relais. Ils ont été fixés à la création du cercle et ne sont pas encore modifiables dans Haven ; les modifications de votre liste de relais n\'ont aucun effet sur eux.';
 
   @override
   String get circleDetailsAddMember => 'Ajouter un membre';

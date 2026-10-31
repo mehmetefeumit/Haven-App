@@ -1227,7 +1227,7 @@ mod mls_dependent_tests {
     //! create/add/remove/get-member/invitation/finalize/clear tests (covered by
     //! the `src/circle/manager.rs` inline suite). The UNIQUE, high-value coverage
     //! kept + re-expressed here is the welcome-delivery cascade, the `create_circle`
-    //! relay defaulting, and the two crown-jewel cross-party gates: forward
+    //! explicit relays, and the two crown-jewel cross-party gates: forward
     //! secrecy on removal (RC-1) and add/remove convergence (RC-3/RC-4).
 
     use super::*;
@@ -1260,6 +1260,7 @@ mod mls_dependent_tests {
             key_package_event: kp,
             inbox_relays: inbox,
             nip65_relays: nip65,
+            nip65_write_relays: Vec::new(),
         }
     }
 
@@ -1975,80 +1976,8 @@ mod mls_dependent_tests {
         cleanup_dir(&bob_dir);
     }
 
-    // ── create_circle relay defaulting ────────────────────────────────────────
-
-    #[tokio::test]
-    async fn create_circle_uses_user_inbox_relays_when_config_empty() {
-        use haven_core::circle::RelayType;
-        let relays = vec!["wss://relay.test.com".to_string()];
-        let (alice, alice_keys, alice_dir) = make_manager("subst_inbox");
-        alice.seed_relay_defaults_if_unseeded().expect("seed");
-        alice
-            .add_user_relay("wss://alice-custom-inbox.example.com", RelayType::Inbox)
-            .expect("add inbox");
-        alice
-            .add_user_relay("wss://alice-kp-only.example.com", RelayType::KeyPackage)
-            .expect("add kp");
-
-        let (bob, bob_keys, bob_dir) = make_manager("subst_inbox_bob");
-        let bob_kp = kp_event(&bob, &bob_keys, &relays).await;
-        let members = vec![member(
-            bob_kp,
-            vec!["wss://bob-inbox.example.com".to_string()],
-            vec![],
-        )];
-        let config = CircleConfig::new("Subst Inbox").with_type(CircleType::LocationSharing);
-        assert!(config.relays.is_empty());
-
-        let result = alice
-            .create_circle(&alice_keys, members, &config)
-            .await
-            .expect("create circle");
-        let alice_inbox = alice
-            .list_user_relays(RelayType::Inbox)
-            .expect("list inbox");
-        assert_eq!(result.circle.relays, alice_inbox);
-        assert!(result
-            .circle
-            .relays
-            .iter()
-            .any(|u| u.contains("alice-custom-inbox")));
-        assert!(!result
-            .circle
-            .relays
-            .iter()
-            .any(|u| u.contains("alice-kp-only")));
-        cleanup_dir(&alice_dir);
-        cleanup_dir(&bob_dir);
-    }
-
-    #[tokio::test]
-    async fn create_circle_falls_back_to_defaults_when_user_inbox_empty() {
-        let relays = vec!["wss://relay.test.com".to_string()];
-        let (alice, alice_keys, alice_dir) = make_manager("subst_defaults");
-        // Intentionally NOT seeding relay defaults — leave Inbox empty.
-        let (bob, bob_keys, bob_dir) = make_manager("subst_defaults_bob");
-        let bob_kp = kp_event(&bob, &bob_keys, &relays).await;
-        let members = vec![member(
-            bob_kp,
-            vec!["wss://bob-inbox.example.com".to_string()],
-            vec![],
-        )];
-        let config = CircleConfig::new("Subst Defaults").with_type(CircleType::LocationSharing);
-        assert!(config.relays.is_empty());
-
-        let result = alice
-            .create_circle(&alice_keys, members, &config)
-            .await
-            .expect("create via defensive fallback");
-        let expected: Vec<String> = haven_core::circle::PRODUCTION_DEFAULT_RELAYS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-        assert_eq!(result.circle.relays, expected);
-        cleanup_dir(&alice_dir);
-        cleanup_dir(&bob_dir);
-    }
+    // ── create_circle relays named by the caller ─────────────────────────────
+    // (An empty set is drawn from the location pool: `tests/location_pool_e2e.rs`.)
 
     #[tokio::test]
     async fn create_circle_uses_explicit_relays_when_provided() {

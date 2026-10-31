@@ -4,8 +4,9 @@
 
 Haven is an end-to-end encrypted location sharing app that requires no personal information at sign-up and uses no central server. 
 Your location is encrypted on your device before it is sent to decentralized Nostr relays. It can only be decrypted by members of 
-your location sharing circle after they fetch your latest location information from the relays. You can select the relays you
-want to send location updates through, and/or run and use your own relays. Haven requires no phone numbers, emails, 
+your location sharing circle after they fetch your latest location information from the relays. Haven picks each new circle's
+relays at random from a curated pool kept apart from the relays that carry your identity; you choose the relays for your invitations
+and public relay lists, and can run and use your own. Haven requires no phone numbers, emails, 
 or any personally identifiable information before you can start using it.
 
 ## AI Disclaimer

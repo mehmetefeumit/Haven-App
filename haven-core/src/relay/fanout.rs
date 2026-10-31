@@ -3341,6 +3341,7 @@ impl ReinviteLookup for super::RelayManager {
                 key_package_event: event,
                 inbox_relays: inbox.unwrap_or_default(),
                 nip65_relays: nip65.read,
+                nip65_write_relays: nip65.write,
             })
         })
     }

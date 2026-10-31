@@ -1425,6 +1425,7 @@ async fn a_reinvite_mdk_owes_is_made_with_a_fresh_package_and_its_welcome_reache
             .await,
             inbox_relays: vec![INBOX.to_string()],
             nip65_relays: Vec::new(),
+            nip65_write_relays: Vec::new(),
         }),
         asked: std::sync::atomic::AtomicUsize::new(0),
     };
@@ -1556,6 +1557,7 @@ fn finding(package: nostr::Event) -> Lookup {
             key_package_event: package,
             inbox_relays: vec![INBOX.to_string()],
             nip65_relays: Vec::new(),
+            nip65_write_relays: Vec::new(),
         }),
         asked: std::sync::atomic::AtomicUsize::new(0),
     }
@@ -1761,6 +1763,7 @@ async fn a_reinvite_whose_newcomer_lists_no_inbox_is_said_so_and_stays_owed() {
             key_package_event: package.clone(),
             inbox_relays: Vec::new(),
             nip65_relays: Vec::new(),
+            nip65_write_relays: Vec::new(),
         }),
         asked: std::sync::atomic::AtomicUsize::new(0),
     };

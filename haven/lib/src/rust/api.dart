@@ -454,6 +454,26 @@ void setDiscoveryRelaysForTest({required List<String> relays}) =>
 void setProfileRelaysForTest({required List<String> relays}) =>
     RustLib.instance.api.crateApiSetProfileRelaysForTest(relays: relays);
 
+/// Overrides the location pool a new circle's relays are drawn from, for E2E
+/// tests.
+///
+/// Forwards to [`haven_core::circle::set_location_relays_for_test`] (debug
+/// builds) or returns an error in release builds. A hermetic lane installs a
+/// relay whose server differs from its inbox relay: the pick never takes a
+/// relay carrying the account's identity traffic, and the installed list is
+/// not exempt from that or from the public-host rule. There is no read
+/// accessor; `Ok` is the proof that this list, and nothing else, is the pool.
+///
+/// # Errors
+///
+/// * Returns an error if the override has already been installed (the
+///   underlying `OnceLock` is install-once per process).
+/// * Returns an error if `relays` is empty.
+/// * In release builds this function is unreachable; the sibling stub always
+///   returns an error.
+void setLocationRelaysForTest({required List<String> relays}) =>
+    RustLib.instance.api.crateApiSetLocationRelaysForTest(relays: relays);
+
 /// Opt in to plaintext `ws://` URLs targeting loopback / emulator-host
 /// aliases for hermetic E2E tests.
 ///
@@ -2193,7 +2213,9 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   /// `foreground` is the caller's word that the app is in front of its
   /// user; a circle is created only then ([`RefusalFfi::ForegroundOnly`]).
   /// An invitee with no inbox relay a Welcome could reach refuses the
-  /// create before anything exists ([`RefusalFfi::MissingWelcomeRelays`]).
+  /// create before anything exists ([`RefusalFfi::MissingWelcomeRelays`]),
+  /// as does an empty `relays` the location pool cannot serve once the
+  /// user's own relays are left out ([`RefusalFfi::NoLocationRelay`]).
   Future<CircleCreationOutcomeFfi> createCircleDriven({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
@@ -4238,8 +4260,8 @@ enum LogAliasClassFfi {
 ///
 /// A member's key package with their inbox relay list (FFI-friendly).
 ///
-/// Used when adding members to a circle. Relay resolution follows a
-/// cascading fallback: inbox (kind 10050) → NIP-65 (kind 10002) → defaults.
+/// Used when adding members to a circle. The Welcome goes to the inbox relays
+/// alone; all three lists are relays a new circle avoids.
 class MemberKeyPackageFfi {
   /// The key package event JSON (kind 30443).
   final String keyPackageJson;
@@ -4250,6 +4272,10 @@ class MemberKeyPackageFfi {
   /// Fallback relay URLs: the read-capable set of the NIP-65 relay list
   /// (kind 10002).
   final List<String> nip65Relays;
+
+  /// The write-capable set of the same NIP-65 list. With the other two, the
+  /// relays a create that names none avoids for the circle.
+  final List<String> nip65WriteRelays;
 
   /// The account the key package was verified to belong to, as an npub: its
   /// signer, its MLS credential and the pubkey that was asked for, all one
@@ -4262,6 +4288,7 @@ class MemberKeyPackageFfi {
     required this.keyPackageJson,
     required this.inboxRelays,
     required this.nip65Relays,
+    required this.nip65WriteRelays,
     required this.authorNpub,
   });
 
@@ -4270,6 +4297,7 @@ class MemberKeyPackageFfi {
       keyPackageJson.hashCode ^
       inboxRelays.hashCode ^
       nip65Relays.hashCode ^
+      nip65WriteRelays.hashCode ^
       authorNpub.hashCode;
 
   @override
@@ -4280,6 +4308,7 @@ class MemberKeyPackageFfi {
           keyPackageJson == other.keyPackageJson &&
           inboxRelays == other.inboxRelays &&
           nip65Relays == other.nip65Relays &&
+          nip65WriteRelays == other.nip65WriteRelays &&
           authorNpub == other.authorNpub;
 }
 
@@ -4814,6 +4843,9 @@ enum RefusalFfi {
   /// The circle's routing id is another circle's on this device too: of
   /// its commits, only what its leave needs is made until it is left.
   routingCollision,
+
+  /// The user's own relay lists cover every relay a new circle may use.
+  noLocationRelay,
 }
 
 /// What [`RelayManagerFfi::reinvite_driven`] did: the re-invites MDK owed,

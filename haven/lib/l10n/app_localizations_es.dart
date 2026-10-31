@@ -122,7 +122,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Summary =>
-      'Sin servidor central. Funciona en una red de relés que tú eliges.';
+      'Sin servidor central. Funciona con relés independientes.';
 
   @override
   String get onboardingValueProp3Summary =>
@@ -790,6 +790,10 @@ class AppLocalizationsEs extends AppLocalizations {
   }
 
   @override
+  String get circleCreateRefusedNoLocationRelay =>
+      'Haven no puede crear este círculo: todos los relés que usa para los círculos están, o estuvieron alguna vez, en tus propias listas de relés, así que no puede usar ninguno.';
+
+  @override
   String addMemberTitle(String circleName) {
     return 'Añadir a $circleName';
   }
@@ -1285,7 +1289,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'Estos relés vienen de las listas publicadas por los miembros invitados; si esos miembros no tenían ninguna, de tus relés de bandeja de entrada o de algunos que eligió Haven. Aún no se pueden cambiar, y los cambios posteriores en tu lista de relés no los afectan.';
+      'Las actualizaciones cifradas de este círculo viajan por estos relés. Se fijaron al crear el círculo y aún no se pueden cambiar en Haven; los cambios en tu lista de relés no los afectan.';
 
   @override
   String get circleDetailsAddMember => 'Añadir miembro';

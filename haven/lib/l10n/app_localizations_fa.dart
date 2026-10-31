@@ -121,7 +121,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Summary =>
-      'بدون سرور مرکزی. روی شبکه‌ای از رله‌ها که خودت انتخاب می‌کنی اجرا می‌شود.';
+      'بدون سرور مرکزی. روی رله‌های مستقل اجرا می‌شود.';
 
   @override
   String get onboardingValueProp3Summary =>
@@ -770,6 +770,10 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
+  String get circleCreateRefusedNoLocationRelay =>
+      'Haven نمی‌تواند این حلقه را بسازد: همهٔ رله‌هایی که برای حلقه‌ها به کار می‌برد، در فهرست‌های رلهٔ خودت هستند یا زمانی بوده‌اند، پس به‌روزرسانی‌های این حلقه از هیچ‌کدامشان نمی‌توانند بگذرند.';
+
+  @override
   String addMemberTitle(String circleName) {
     return 'افزودن به $circleName';
   }
@@ -1251,7 +1255,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'این رله‌ها از فهرست‌های منتشرشدهٔ اعضای دعوت‌شده آمده‌اند، و اگر آن اعضا فهرستی نداشتند، از رله‌های صندوق ورودی خودت یا رله‌های انتخابی Haven. هنوز نمی‌شود عوضشان کرد، و ویرایش‌های بعدیِ فهرست رله‌ات روی آن‌ها اثری ندارد.';
+      'به‌روزرسانی‌های رمزگذاری‌شدهٔ این حلقه از میان این رله‌ها می‌گذرند. این رله‌ها هنگام ساختن حلقه تعیین شده‌اند و فعلاً در Haven نمی‌شود عوضشان کرد؛ ویرایش فهرست رله‌هایت روی آن‌ها اثری ندارد.';
 
   @override
   String get circleDetailsAddMember => 'افزودن عضو';

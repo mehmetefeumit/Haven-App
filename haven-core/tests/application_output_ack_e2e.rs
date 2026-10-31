@@ -60,6 +60,7 @@ async fn bob_sends_into_alices_circle() -> Fixture {
                 key_package_event: kp_event,
                 inbox_relays: vec!["wss://inbox.example.com".to_string()],
                 nip65_relays: vec![],
+                nip65_write_relays: vec![],
             }],
             &CircleConfig::new("Ack Circle").with_relays(relays.clone()),
         )
@@ -328,6 +329,7 @@ async fn bob_accepts_and_the_circle_row_fails() -> InterruptedJoin {
                 key_package_event: kp_event,
                 inbox_relays: vec!["wss://inbox.example.com".to_string()],
                 nip65_relays: vec![],
+                nip65_write_relays: vec![],
             }],
             &CircleConfig::new("Owed Join").with_relays(relays.clone()),
         )
@@ -481,6 +483,7 @@ async fn a_group_founded_with_bob() -> Lure {
                 key_package_event: kp_event,
                 inbox_relays: vec!["wss://inbox.example.com".to_string()],
                 nip65_relays: vec![],
+                nip65_write_relays: vec![],
             }],
             &CircleConfig::new("Lure").with_relays(relays.clone()),
         )
@@ -575,6 +578,7 @@ async fn a_left_circle_whose_join_is_handed_back_stays_gone() {
                 key_package_event: second_package,
                 inbox_relays: vec!["wss://inbox.example.com".to_string()],
                 nip65_relays: vec![],
+                nip65_write_relays: vec![],
             }],
             &CircleConfig::new("Another").with_relays(vec!["wss://group.example.com".to_string()]),
         )

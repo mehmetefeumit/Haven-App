@@ -11,11 +11,14 @@
 //! Two mechanisms enforce it:
 //!
 //! 1. **Disjoint by construction.** [`PRODUCTION_PROFILE_RELAYS`] shares no
-//!    entry with the account seed (`crate::circle::PRODUCTION_DEFAULT_RELAYS`)
-//!    or the discovery plane (`crate::relay::PRODUCTION_DISCOVERY_RELAYS`), so
-//!    a default-configured user contaminates ZERO pool relays. Unit-pinned by
-//!    `pool_is_disjoint_from_account_seed_defaults` and
-//!    `pool_is_disjoint_from_discovery_plane`.
+//!    registrable domain with the account seed
+//!    (`crate::circle::PRODUCTION_DEFAULT_RELAYS`), the discovery plane
+//!    (`crate::relay::PRODUCTION_DISCOVERY_RELAYS`) or the location pool
+//!    (`crate::circle::PRODUCTION_LOCATION_RELAYS`), so a default-configured
+//!    user contaminates ZERO pool relays. Pinned by
+//!    `pool_is_disjoint_from_account_seed_defaults`,
+//!    `pool_is_disjoint_from_discovery_plane` and
+//!    `location_pool_is_host_disjoint_from_profile_pool`.
 //! 2. **Excluded at runtime.** A user may add relays by hand, and a circle
 //!    joined from someone else carries the INVITER's routing relays — either
 //!    can drag a pool relay onto the location plane. [`resolve_profile_pool`]
@@ -63,7 +66,11 @@ use crate::profile::error::{ProfileError, Result};
 ///
 /// Selection criteria, in priority order:
 ///
-/// 1. disjoint from the account seed AND the discovery plane (test-pinned);
+/// 1. disjoint by registrable domain from the account seed, the discovery
+///    plane AND the location pool (test-pinned), and operator-disjoint from the
+///    account, discovery AND location planes, one slot per operator — an
+///    operator is NIP-66/NIP-11 data no code can see, so that half is
+///    hand-recorded at vetting;
 /// 2. accepts UNAUTHENTICATED kind-0 writes from an arbitrary pubkey — a relay
 ///    that silently rejects our publish makes us invisible to every peer whose
 ///    assignment lands there;
@@ -80,7 +87,7 @@ use crate::profile::error::{ProfileError, Result};
 /// Criteria 2 and 3 are behavioural and cannot be verified by reading code —
 /// they require probing each host, which is why no CI lane can settle them (it
 /// would be non-hermetic AND would announce Haven's build cadence to eight
-/// third parties). Every entry here passed both probes on 2026-08-21:
+/// third parties). Every entry must pass both probes before it ships:
 /// `haven-core/tests/profile_relay_vetting.rs` is the probe, opt-in and
 /// `#[ignore]`d, and `docs/PROFILE_RELAY_VETTING.md` is the procedure plus the
 /// dated findings — read it before changing this list, and re-run it before
@@ -98,21 +105,25 @@ use crate::profile::error::{ProfileError, Result};
 /// plane-separation proofs are stated over them.
 pub const PRODUCTION_PROFILE_RELAYS: &[&str] = &[
     "wss://purplepag.es",
-    "wss://nostr.mom",
+    "wss://nostr.sathoarder.com",
     "wss://offchain.pub",
     "wss://nostr.oxtr.dev",
-    "wss://nostr.bitcoiner.social",
-    "wss://yabu.me",
+    "wss://user.kindpag.es",
+    "wss://relay.coinos.io",
     "wss://soloco.nl",
-    "wss://nostr.data.haus",
+    "wss://relay.nostr.net",
 ];
 
-/// Pool entries retired after failing behavioural vetting (2026-08-21).
+/// Pool entries retired for failing behavioural vetting, for sharing an
+/// operator with a relay on another plane, or for unreliability.
 ///
-/// `relay.nostr.band` and `relay.nostr.bg` are gone from the network (the
-/// latter no longer resolves in DNS), `relay.nostrplebs.com` and
-/// `eden.nostr.land` are members-only relays that reject unauthenticated
-/// kind-0 writes. Details in `docs/PROFILE_RELAY_VETTING.md`.
+/// `relay.nostr.band` and `relay.nostr.bg` left the network and
+/// `relay.nostrplebs.com` and `eden.nostr.land` refuse unauthenticated kind-0
+/// writes (2026-08-21); `nostr.mom` is run by `nos.lol`'s operator (the account
+/// plane) and `nostr.bitcoiner.social` by `offchain.pub`'s (one operator, two
+/// slots); `nostr.data.haus` fell to 60 in 90-day reliability with ~414 ms
+/// reads (2026-10-30); `yabu.me` refuses kind-0 writes from whole networks by
+/// ASN (2026-10-31). Details in `docs/PROFILE_RELAY_VETTING.md`.
 ///
 /// The list exists because the seeded Profile rows OUTLIVE the constant:
 /// `usable_profile_relays` unions the stored rows with the curated pool, so on
@@ -122,14 +133,18 @@ pub const PRODUCTION_PROFILE_RELAYS: &[&str] = &[
 /// rendezvous hashing guarantees the removal moves ONLY the authors that were
 /// assigned to them.
 ///
-/// Append-only in spirit: an entry leaves this list only if it demonstrably
-/// recovers AND re-passes vetting — while listed here it cannot be re-added
-/// even by hand, since the prune runs every launch.
+/// Append-only in spirit: an entry leaves this list only if its reason no
+/// longer holds AND it re-passes vetting — while listed here it cannot be
+/// re-added even by hand, since the prune runs every launch.
 pub const RETIRED_PROFILE_RELAYS: &[&str] = &[
     "wss://relay.nostr.band",
     "wss://relay.nostr.bg",
     "wss://relay.nostrplebs.com",
     "wss://eden.nostr.land",
+    "wss://nostr.mom",
+    "wss://nostr.bitcoiner.social",
+    "wss://nostr.data.haus",
+    "wss://yabu.me",
 ];
 
 /// Returns the retired entries as owned, normalized strings (storage compares
@@ -344,10 +359,10 @@ mod tests {
 
     #[test]
     fn retired_relays_never_reappear_in_the_pool() {
-        // A relay is retired because vetting proved it dead or write-rejecting;
-        // re-listing it in the pool would hand it a rendezvous slot again and
-        // silently re-create the field failure (authors assigned to it become
-        // unresolvable). The two constants must stay disjoint.
+        // A retired relay is dead, write-rejecting, run by an operator another
+        // plane uses, or unreliable; re-listing it would hand it a rendezvous
+        // slot again and re-create what retired it. The two constants must stay
+        // disjoint.
         let pool = production_profile_relays();
         for retired in retired_profile_relays() {
             assert!(

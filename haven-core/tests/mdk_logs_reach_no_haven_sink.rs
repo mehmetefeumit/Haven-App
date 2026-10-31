@@ -54,6 +54,7 @@ async fn no_mdk_log_record_reaches_the_haven_log_sink() {
                     key_package_event: bob_kp,
                     inbox_relays: relays.clone(),
                     nip65_relays: vec![],
+                    nip65_write_relays: vec![],
                 }],
                 &CircleConfig::new(CIRCLE_NAME).with_relays(relays.clone()),
             )

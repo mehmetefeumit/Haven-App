@@ -121,7 +121,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Summary =>
-      'کوئی مرکزی سرور نہیں۔ یہ آپ کے منتخب کردہ ریلے نیٹ ورک پر چلتا ہے۔';
+      'کوئی مرکزی سرور نہیں۔ یہ آزاد ریلے پر چلتا ہے۔';
 
   @override
   String get onboardingValueProp3Summary =>
@@ -766,6 +766,10 @@ class AppLocalizationsUr extends AppLocalizations {
   }
 
   @override
+  String get circleCreateRefusedNoLocationRelay =>
+      'Haven یہ حلقہ نہیں بنا سکتا۔ جو ریلے Haven حلقوں کے لیے استعمال کرتا ہے، وہ سب آپ کی اپنی ریلے فہرستوں میں شامل ہیں یا کبھی شامل رہے ہیں، اس لیے ان میں سے کوئی بھی اس حلقے کا ٹریفک نہیں لے جا سکتا۔';
+
+  @override
   String addMemberTitle(String circleName) {
     return '$circleName میں شامل کریں';
   }
@@ -1247,7 +1251,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'یہ ریلے مدعو ارکان کی شائع کردہ فہرستوں سے آئے ہیں، اُن ارکان کی فہرست نہ ہونے پر آپ کے اِن باکس ریلے یا Haven کے چنے ریلے استعمال ہوئے۔ انہیں ابھی بدلا نہیں جا سکتا، اور آپ کی ریلے فہرست میں بعد کی ترامیم انہیں نہیں بدلتیں۔';
+      'اس حلقے کی خفیہ کردہ اپ ڈیٹس انہی ریلے سے گزرتی ہیں۔ انہیں حلقہ بنتے وقت طے کیا گیا تھا اور ابھی Haven میں بدلا نہیں جا سکتا۔ آپ کی ریلے فہرست میں ترامیم ان پر اثر نہیں ڈالتیں۔';
 
   @override
   String get circleDetailsAddMember => 'رکن شامل کریں';

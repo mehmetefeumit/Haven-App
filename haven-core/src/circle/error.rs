@@ -181,6 +181,14 @@ pub enum CircleError {
     #[error("No reachable relay for welcome delivery")]
     MissingWelcomeRelays,
 
+    /// A create named no relays, and the location pool has none left once
+    /// every relay carrying this account's identity traffic is excluded: the
+    /// user's own relay lists cover the pool. Nothing was created. Never
+    /// answered by falling back to the whole pool or the account seed.
+    /// Payload-free (Security Rule 15).
+    #[error("No relay is available for a new circle")]
+    NoLocationRelay,
+
     /// The invitation can never be accepted on this device: its `KeyPackage`'s
     /// private bundle is gone (every pre-reset invitation, or one sent to a
     /// replaced `KeyPackage`), the Welcome is invalid, or it was already
@@ -276,6 +284,7 @@ impl CircleError {
             Self::AdminSelfDemoteRequired => "admin-self-demote-required",
             Self::AlreadyProcessed => "already-processed",
             Self::MissingWelcomeRelays => "missing-welcome-relays",
+            Self::NoLocationRelay => "no-location-relay",
             Self::NeedsNewInvite => "needs-new-invite",
             Self::RejoinConfirmationRequired => "rejoin-confirmation-required",
             Self::FanoutOwned => "fanout-owned",
@@ -469,6 +478,7 @@ mod tests {
             CircleError::AdminSelfDemoteRequired.code(),
             CircleError::AlreadyProcessed.code(),
             CircleError::MissingWelcomeRelays.code(),
+            CircleError::NoLocationRelay.code(),
             CircleError::NeedsNewInvite.code(),
             CircleError::RejoinConfirmationRequired.code(),
             CircleError::FanoutOwned.code(),
@@ -529,6 +539,33 @@ mod tests {
                 "welcome-relay error must not leak '{needle}'"
             );
         }
+    }
+
+    #[test]
+    fn no_location_relay_names_no_relay() {
+        // The refusal crosses the FFI typed and its text reaches the debug
+        // console: neither rendering may name a pool relay (Security Rule 15).
+        let err = CircleError::NoLocationRelay;
+        assert_eq!(err.to_string(), "No relay is available for a new circle");
+        assert_eq!(format!("{err:?}"), "CircleError(no-location-relay)");
+        let mut needles: Vec<String> = crate::circle::PRODUCTION_LOCATION_RELAYS
+            .iter()
+            .map(|relay| (*relay).to_string())
+            .collect();
+        needles.extend(
+            crate::circle::PRODUCTION_LOCATION_RELAYS
+                .iter()
+                .map(|relay| relay.trim_start_matches("wss://").to_string()),
+        );
+        needles.extend(["wss:".to_string(), "ws://".to_string()]);
+        let needles: Vec<&str> = needles.iter().map(String::as_str).collect();
+        crate::assert_display_redacted!(
+            &err,
+            "CircleError",
+            marker = "No relay is available for a new circle",
+            &needles
+        );
+        crate::assert_debug_redacted!(&err, "CircleError", &needles);
     }
 
     #[test]

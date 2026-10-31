@@ -2691,6 +2691,7 @@ async fn an_invite_recorded_and_unsent(
         .await,
         inbox_relays: inbox,
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     };
     let busy = ScriptedFanout::default();
     busy.answer(RELAY, [Answer::Busy]);
@@ -2815,6 +2816,7 @@ async fn a_welcome_released_before_the_foreground_ended_keeps_its_route_for_the_
         .await,
         inbox_relays: inbox,
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     };
     let transport = Arc::new(ScriptedFanout::default());
     transport.answer(RELAY, [Answer::Accepted, Answer::Unreachable]);

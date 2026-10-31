@@ -18,7 +18,7 @@ anyone looked.
 
 | # | Criterion | How it is checked |
 |---|---|---|
-| 1 | Disjoint from the account seed AND the discovery plane | `haven-core/tests/profile_plane_separation.rs` — `pool_is_disjoint_from_account_seed_defaults`, `pool_is_disjoint_from_discovery_plane`. Runs in CI. |
+| 1 | Disjoint from the account seed, the discovery plane AND the location pool by registrable domain; operator-disjoint from the account, discovery AND location planes, one slot per operator | Domains: `haven-core/tests/profile_plane_separation.rs` — `pool_is_disjoint_from_account_seed_defaults`, `pool_is_disjoint_from_discovery_plane`, `location_pool_is_host_disjoint_from_profile_pool`. Runs in CI. Operators: by hand, from NIP-66 `p` / NIP-11 `pubkey` (notes below) — no code can see who runs a host. |
 | 2 | Accepts an **unauthenticated kind-0 write** from an arbitrary pubkey | **Probe only.** See below. |
 | 3 | **No NIP-42 AUTH requirement on read** | **Probe only.** See below. |
 | 4 | `wss://` only | `haven-core/src/profile/relay_pool.rs` — `pool_entries_are_wss_and_unique`. Runs in CI. |
@@ -137,22 +137,60 @@ this file exists to stop anyone assuming away.
 ## Findings
 
 **Status: VETTED — every pool entry passed both criteria.**
-**Last run: 2026-08-21.**
+**Last run: 2026-10-31.**
 
 | relay | accepts unauthenticated kind-0 write (criterion 2) | no NIP-42 AUTH on read (criterion 3) |
 |---|---|---|
-| `wss://nostr.bitcoiner.social` | pass | pass |
-| `wss://nostr.data.haus` | pass | pass |
-| `wss://nostr.mom` | pass | pass |
 | `wss://nostr.oxtr.dev` | pass | pass |
+| `wss://nostr.sathoarder.com` | pass | pass |
 | `wss://offchain.pub` | pass | pass |
 | `wss://purplepag.es` | pass | pass |
+| `wss://relay.coinos.io` | pass | pass |
+| `wss://relay.nostr.net` | pass | pass |
 | `wss://soloco.nl` | pass | pass |
-| `wss://yabu.me` | pass | pass |
+| `wss://user.kindpag.es` | pass | pass |
 
-Vantage: maintainer's development machine, residential connection.
+Vantage: maintainer's development machine, residential connection (EU).
 
-Notes:
+Operators (NIP-11 `pubkey` / NIP-66 `p`, recorded 2026-10-31; pairwise distinct,
+none on the account seed, discovery or location plane): purplepag.es
+`fa984bd7…` (pablof7z; Hetzner FI); nostr.sathoarder.com `dd363393…`
+(velia.net, FR); offchain.pub `ece3317b…` (IncogNet, US); nostr.oxtr.dev
+`b2d670de…` (Hetzner DE); user.kindpag.es `e771af0b…` (sandwich / nostr.watch;
+Vultr NL); relay.coinos.io `72bdbc57…` (coinos; Cloudflare-fronted);
+soloco.nl `9e456e00…` (Cloudflare-fronted); relay.nostr.net `efe5d120…`
+(aljaz; Cloudflare-fronted). A Cloudflare front is acceptable on THIS plane,
+which carries the pubkey anyway; it is excluded from the location pool.
+
+Notes on the 2026-10-31 run (operator overlap, reliability and one probe
+failure):
+
+* `wss://nostr.mom` — retired: its operator also runs `wss://nos.lol`, an
+  account-seed relay (one operator pubkey in both relays' NIP-11 `pubkey` and
+  NIP-66 `p`), so one party saw this account's identity traffic and its kind-0
+  lookups. Replaced by `wss://nostr.sathoarder.com`.
+* `wss://nostr.bitcoiner.social` — retired: run by `wss://offchain.pub`'s
+  operator, which gave one operator two of the eight slots. Replaced by
+  `wss://user.kindpag.es`.
+* `wss://nostr.data.haus` — retired: 90-day reliability 60 and falling, with a
+  median read round trip near 414 ms against ~150 ms for its peers. Replaced by
+  `wss://relay.nostr.net`.
+* `wss://yabu.me` — retired: **FAIL** criterion 2 on this run — it rejected the
+  publish as "blocked: ASN … not allowed", i.e. it refuses writes from whole
+  networks by ASN, so users on such a network can never publish a profile
+  there. Replaced by `wss://relay.coinos.io`.
+* All four are appended to `RETIRED_PROFILE_RELAYS`, so upgraded installs
+  prune their seeded rows at the next launch.
+* `wss://relay.satlantis.io` was pencilled in for this pool and passed both
+  criteria, but it also passed the location probe including Haven's NIP-77
+  pass, so it serves the location pool instead (a relay sits on one plane).
+* Probed but not selected: `wss://nostr.lopp.social` (**FAIL** criterion 2 —
+  "blocked: not on white-list"); `wss://nostr.carroarmato0.be`,
+  `wss://relay.artx.market`, `wss://relay.nostr.wirednet.jp` and
+  `wss://nostr.data.haus` (all `pass`/`pass`; the first three went to the
+  location pool or its bench, the last is retired for reliability).
+
+Notes on the 2026-08-21 run:
 
 * This run replaced HALF the original pool, and the field incident that
   triggered it was exactly the symptom §"Why criteria 2 and 3 matter"
@@ -171,12 +209,12 @@ Notes:
   hosts in the rendezvous ranking forever.
 * Probed but not selected in the same run (all `pass`/`pass` unless noted):
   `wss://relay.nostr.net` and `wss://nostr.sathoarder.com` (bench candidates
-  for the next replacement); `wss://user.kindpag.es` (passed, but its operator
-  also runs `wss://index.hzrd149.com` on the discovery plane — URL-level
-  disjointness would hold while one operator saw both this account's
-  KeyPackage/NIP-65 lookups and its kind-0 lookups, so it is excluded on the
-  spirit of criterion 1); `wss://nostr21.com` (**FAIL** criterion 2 — rejected
-  the publish with an empty OK-false reason).
+  for the next replacement); `wss://user.kindpag.es` (passed, but excluded on
+  the belief that its operator also ran `wss://index.hzrd149.com` on the
+  discovery plane. **Corrected 2026-10-30:** `kindpag.es` is operated by
+  sandwich (dskvr, nostr.watch), not hzrd149; the exclusion rested on a wrong
+  attribution, and it entered the pool on 2026-10-31); `wss://nostr21.com`
+  (**FAIL** criterion 2 — rejected the publish with an empty OK-false reason).
 
 ### After a run
 

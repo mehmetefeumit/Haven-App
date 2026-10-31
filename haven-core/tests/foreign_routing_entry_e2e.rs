@@ -21,7 +21,7 @@ use std::sync::Arc;
 use cgka_traits::app_components::{
     encode_nostr_routing_v1, NostrRoutingV1, NOSTR_ROUTING_COMPONENT_ID,
 };
-use haven_core::circle::{CircleConfig, CircleError, CircleManager, RelayType};
+use haven_core::circle::{CircleConfig, CircleError, CircleManager};
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::{
     AppComponentData, GroupId, LocationGroupConfig, PublishWork, SendIntent, SessionEffects,
@@ -652,81 +652,6 @@ async fn haven_never_writes_a_routing_relay_on_a_non_public_host() {
     helpers::assert_no_needles(&lines, &NON_PUBLIC_NEEDLES);
 }
 
-/// A create the caller names no relays for takes them from the user's own
-/// inbox list, which may name a relay only the user can reach: such an entry
-/// is left out — the entry, never the list — so no member is ever told of it,
-/// and a list with no entry on a public host refuses the create. No line
-/// names the host.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_create_from_the_own_inbox_list_leaves_out_a_non_public_host() {
-    let lines = Box::pin(helpers::capture_haven_log(async {
-        let device = member();
-        for relay in [PUBLIC, "wss://192.168.1.1"] {
-            device
-                .circle
-                .add_user_relay(relay, RelayType::Inbox)
-                .expect("an inbox relay is stored");
-        }
-        let own = device
-            .circle
-            .create_circle(&device.keys, Vec::new(), &CircleConfig::new("Own"))
-            .await
-            .expect("the circle is founded on the inbox relay on a public host")
-            .circle
-            .mls_group_id;
-        assert_eq!(
-            device
-                .circle
-                .session()
-                .group_relays(&own)
-                .await
-                .expect("the component is read"),
-            vec![PUBLIC.to_string()],
-            "the routing component names a relay on a non-public host",
-        );
-        assert_eq!(
-            relays_of(&device, &own).await,
-            vec![PUBLIC.to_string()],
-            "the circle's relays name a relay on a non-public host",
-        );
-        assert_eq!(
-            location_targets(&device, &own).await,
-            vec![PUBLIC.to_string()],
-            "a location was frozen for a relay on a non-public host",
-        );
-
-        let private = member();
-        for relay in ["wss://192.168.1.1", "wss://10.0.0.1"] {
-            private
-                .circle
-                .add_user_relay(relay, RelayType::Inbox)
-                .expect("an inbox relay is stored");
-        }
-        assert!(
-            matches!(
-                private
-                    .circle
-                    .create_circle(&private.keys, Vec::new(), &CircleConfig::new("None"))
-                    .await,
-                Err(CircleError::Mls(_))
-            ),
-            "a circle was founded with no inbox relay on a public host",
-        );
-        assert!(
-            private
-                .circle
-                .get_circles()
-                .await
-                .expect("the circles")
-                .is_empty(),
-            "a refused create left a circle behind",
-        );
-    }))
-    .await;
-    helpers::assert_some_line_from(&lines, "haven_core");
-    helpers::assert_no_needles(&lines, &NON_PUBLIC_NEEDLES);
-}
-
 /// A foreign admin — another client's, straight on the engine — and the
 /// circle it founded on `relay` with `device` joined.
 struct Foreign {
@@ -1114,6 +1039,7 @@ async fn own_circle_with_a_member(device: &Member, relay: &str) -> haven_core::c
         .event,
         inbox_relays: vec![relay.to_string()],
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     };
     let own = device
         .circle

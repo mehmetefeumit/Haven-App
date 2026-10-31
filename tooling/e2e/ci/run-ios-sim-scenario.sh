@@ -38,6 +38,10 @@
 #                    when UNSET (every other lane), no such define is added, so
 #                    those lanes' compiled builds stay byte-identical
 #                    (backward-compatible).
+#   HAVEN_E2E_LOCATION_RELAY  ws:// URL of the hermetic location relay pool's
+#                    one entry, where a circle created without named relays is
+#                    placed (e2e-ios.yml: a second proxy route to the same
+#                    relay). Same opt-in shape as HAVEN_E2E_BLOSSOM_URL.
 #   HAVEN_E2E_PROFILE_RELAY   ws:// URL of the FIRST profile-plane relay, and
 #   HAVEN_E2E_PROFILE_RELAYS  the comma-separated URL list of the whole
 #                    profile-plane pool (tooling/e2e/ci/start-profile-relays.sh).
@@ -426,6 +430,14 @@ scan_log_or_contain() {
   # an accident that would end with the next change to the proxy's port.
   [[ -z "${HAVEN_E2E_BLOSSOM_URL:-}" ]] \
     || lane+=(--exempt-endpoint "http://127.0.0.1:${HAVEN_E2E_BLOSSOM_URL##*:}")
+  # The location relay, and on a proxy lane the recorder's own spelling of its
+  # route: the proxy log, scanned before upload, names every route it binds as
+  # `ws://127.0.0.1:<port>`.
+  if [[ -n "${HAVEN_E2E_LOCATION_RELAY:-}" ]]; then
+    lane+=(--exempt-endpoint "${HAVEN_E2E_LOCATION_RELAY}")
+    [[ -z "${WIRE_UPSTREAM:-}" ]] \
+      || lane+=(--exempt-endpoint "ws://127.0.0.1:${HAVEN_E2E_LOCATION_RELAY##*:}")
+  fi
   local rc=0
   logscan_gate "${profile}" /tmp/haven-soak/needles \
     ${lane[@]+"${lane[@]}"} -- \
@@ -481,7 +493,7 @@ scenario_transcript() {
 # over a case somebody deleted, which is how the floor cases added in
 # 2026-09 went in with nothing pinning them.
 # ---------------------------------------------------------------------------
-readonly IOS_SIM_SELF_TEST_FIXTURES=33
+readonly IOS_SIM_SELF_TEST_FIXTURES=35
 readonly IOS_SIM_WATCHDOG_CASES=12
 
 run_self_test() {
@@ -1025,7 +1037,7 @@ run_self_test() {
   rm -f "${tmp}"/gate.*.log
   SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
     HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=proxy HAVEN_LOGSCAN_HOST_COORDINATE= \
-    HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
+    HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= HAVEN_E2E_LOCATION_RELAY= \
     FAKE_GATE_RC=4 scan_log_or_contain "${gate_log}" || rc=$?
   if (( rc != 4 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
     echo "SELF-TEST FAIL (S3): wanted rc 4 with argv '${want_argv[*]}', got rc" \
@@ -1040,7 +1052,7 @@ run_self_test() {
   SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
     HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host \
     HAVEN_LOGSCAN_HOST_COORDINATE='-63.076429,-141.927821' \
-    HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
+    HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= HAVEN_E2E_LOCATION_RELAY= \
     FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
   if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
     echo "SELF-TEST FAIL (S3): a seeded position must be declared as one" \
@@ -1122,7 +1134,7 @@ run_self_test() {
   rm -f "${tmp}"/gate.*.log "${gate_argv}"
   SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
     HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host HAVEN_LOGSCAN_HOST_COORDINATE= \
-    HAVEN_LOGSCAN_DRIVE_FLOOR=99 HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
+    HAVEN_LOGSCAN_DRIVE_FLOOR=99 HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= HAVEN_E2E_LOCATION_RELAY= \
     FAKE_GATE_RC=1 scan_log_or_contain "${gate_log}" || rc=$?
   if (( rc != 1 )) || [[ ! -e "${gate_argv}" ]] \
      || [[ -e "${tmp}/gate.e2e_combined.log" ]]; then
@@ -1138,7 +1150,7 @@ run_self_test() {
   rm -f "${tmp}"/gate.*.log
   SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
     HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host HAVEN_LOGSCAN_HOST_COORDINATE= \
-    HAVEN_LOGSCAN_DRIVE_FLOOR="${IOS_HOST_SKELETON_LINES}" HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
+    HAVEN_LOGSCAN_DRIVE_FLOOR="${IOS_HOST_SKELETON_LINES}" HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= HAVEN_E2E_LOCATION_RELAY= \
     FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
   if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
     echo "SELF-TEST FAIL (S3): a lane's drive floor must be one --floor seal" \
@@ -1166,7 +1178,7 @@ run_self_test() {
     SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
     HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host HAVEN_LOGSCAN_HOST_COORDINATE= \
       HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS="${spelling}" \
-      HAVEN_E2E_BLOSSOM_URL=http://localhost:3000 \
+      HAVEN_E2E_BLOSSOM_URL=http://localhost:3000 HAVEN_E2E_LOCATION_RELAY= \
       FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
     if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
       echo "SELF-TEST FAIL (S3): a lane's own endpoints must each be one" \
@@ -1185,13 +1197,36 @@ run_self_test() {
   rm -f "${tmp}"/gate.*.log
   SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
     HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host HAVEN_LOGSCAN_HOST_COORDINATE= \
-    HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
+    HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= HAVEN_E2E_LOCATION_RELAY= \
     FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
   if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
     echo "SELF-TEST FAIL (S3): a lane that sets no endpoint must exempt none;" \
          "got rc ${rc} with '$(tr '\n' ' ' < "${gate_argv}")'" >&2
     fail=1
   fi
+  # The location relay is exempted as the app spells it, and on a proxy lane
+  # also as the recorder's log spells its route — never that one without a
+  # recorder.
+  local upstream want_proxy
+  for upstream in ws://127.0.0.1:7777 ''; do
+    ran=$(( ran + 1 ))
+    want_argv=(host /tmp/haven-soak/needles --exempt-endpoint ws://localhost:7789)
+    [[ -z "${upstream}" ]] || want_argv+=(--exempt-endpoint ws://127.0.0.1:7789)
+    want_argv+=(-- --sink "drive=${gate_drive}" --report /tmp/ios-logscan/sim.ndjson)
+    want_proxy="${upstream:-none}"
+    rc=0
+    rm -f "${tmp}"/gate.*.log
+    SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
+      HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host HAVEN_LOGSCAN_HOST_COORDINATE= \
+      HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
+      HAVEN_E2E_LOCATION_RELAY=ws://localhost:7789 WIRE_UPSTREAM="${upstream}" \
+      FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
+    if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
+      echo "SELF-TEST FAIL (S3): the location relay's exemptions (upstream" \
+           "${want_proxy}); got rc ${rc} with '$(tr '\n' ' ' < "${gate_argv}")'" >&2
+      fail=1
+    fi
+  done
 
   # A SECOND scenario in the same job: e2e-ios.yml drives e2e_combined and then
   # ios_bg_mirror_test through this script, which truncates the one fixed
@@ -1209,7 +1244,7 @@ run_self_test() {
   rc=0
   SCENARIO_FILE=integration_test/ios_bg_mirror_test.dart \
     HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host HAVEN_LOGSCAN_HOST_COORDINATE= \
-    HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
+    HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= HAVEN_E2E_LOCATION_RELAY= \
     FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
   if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
     echo "SELF-TEST FAIL (S3): a second scenario's gate must weigh the first" \
@@ -1240,7 +1275,7 @@ run_self_test() {
     rm -f "${tmp}"/gate.*.log
     SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
       HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE= HAVEN_LOGSCAN_HOST_COORDINATE= \
-      HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
+      HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= HAVEN_E2E_LOCATION_RELAY= \
       HAVEN_WIRE_SENTINEL="${sentinel}" WIRE_UPSTREAM="${upstream}" \
       FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
     inferred="$(head -n 1 "${gate_argv}")"
@@ -1414,6 +1449,11 @@ fi
 if [[ -n "${HAVEN_E2E_PROFILE_RELAY:-}" ]]; then
   EXTRA_DART_DEFINES+=(--dart-define=HAVEN_E2E_PROFILE_RELAY="${HAVEN_E2E_PROFILE_RELAY}")
   echo "iOS E2E — profile relay=${HAVEN_E2E_PROFILE_RELAY}"
+fi
+
+# Optional location-relay passthrough (e2e-ios.yml only), same opt-in shape.
+if [[ -n "${HAVEN_E2E_LOCATION_RELAY:-}" ]]; then
+  EXTRA_DART_DEFINES+=(--dart-define=HAVEN_E2E_LOCATION_RELAY="${HAVEN_E2E_LOCATION_RELAY}")
 fi
 if [[ -n "${HAVEN_E2E_PROFILE_RELAYS:-}" ]]; then
   EXTRA_DART_DEFINES+=(--dart-define=HAVEN_E2E_PROFILE_RELAYS="${HAVEN_E2E_PROFILE_RELAYS}")

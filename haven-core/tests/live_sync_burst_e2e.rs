@@ -308,6 +308,7 @@ async fn mint_member(inbox: &[String]) -> (Arc<CircleManager>, Keys, MemberKeyPa
         key_package_event: kp_event,
         inbox_relays: inbox.to_vec(),
         nip65_relays: vec![],
+        nip65_write_relays: vec![],
     };
     (Arc::new(mgr), keys, member, dir)
 }

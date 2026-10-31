@@ -206,7 +206,7 @@ import '_lib/sheet_helpers.dart';
 import '_lib/sqlcipher_wrong_key.dart' show provokeSqlcipherWrongKeyOpen;
 import '_lib/synthetic_user.dart' show DecryptedCoords, SyntheticUser;
 import '_lib/test_relay.dart'
-    show TestRelay, TestRelayEvent, wireRecorderDeclared;
+    show TestRelay, TestRelayEvent, locationRelayUrl, wireRecorderDeclared;
 import '_lib/test_user.dart';
 import '_lib/wire_canaries.dart' show CanaryId, WireCanaryPlant;
 import '_lib/throw_time_error_capture.dart';
@@ -3051,6 +3051,18 @@ Future<String> _aliceCreatesTwoMemberCircle({
     reason:
         'circlesProvider must have at least one circle immediately '
         'after Create Circle returns to MapShell.',
+  );
+  // The UI names no relays, so this is the location-pool pick end to end: the
+  // hermetic pool's one entry, never the invitee's inbox relay or a fallback.
+  // Compared as a bool so a failure prints no relay URL (Rule 15).
+  expect(
+    listEquals(smokeCircles.first.relays, const <String>[locationRelayUrl]),
+    isTrue,
+    reason:
+        'a UI-driven create must take its relays from the location relay '
+        'pool, which the harness pins to its one hermetic entry; got '
+        '${magnitudeBucket(smokeCircles.first.relays.length)} relay(s) '
+        'that are not exactly that entry.',
   );
   final familyHex = smokeCircles.first.nostrGroupId
       .map((b) => b.toRadixString(16).padLeft(2, '0'))

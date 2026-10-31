@@ -701,6 +701,7 @@ pub async fn found_circle(
                 .await,
             inbox_relays: inbox.clone(),
             nip65_relays: Vec::new(),
+            nip65_write_relays: Vec::new(),
         });
     }
     let transport = haven_core::relay::fanout::scripted::ScriptedFanout::default();

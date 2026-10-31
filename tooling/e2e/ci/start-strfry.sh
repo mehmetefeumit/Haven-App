@@ -33,6 +33,11 @@
 #                        the container (default: /tmp/strfry-data).
 #   STRFRY_CONTAINER     Container name (default: strfry).
 #   STRFRY_PORT          Host port to publish 7777 on (default: 7777).
+#   STRFRY_ALIAS_PORT    A second host port publishing the SAME relay (unset:
+#                        none). One store under a second authority: the
+#                        location relay override must differ from the inbox
+#                        relay by host:port yet hold the events the harness
+#                        reads through the first port (e2e-flakiness-stress).
 #   STRFRY_CONFIG        Config file name under tooling/e2e (default:
 #                        strfry.conf, NIP-77 off). `strfry-negentropy.conf`
 #                        is the same with NIP-77 on, for the
@@ -54,6 +59,7 @@ readonly IMAGE="${STRFRY_IMAGE:-dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159
 readonly DATA_DIR="${STRFRY_DATA_DIR:-/tmp/strfry-data}"
 readonly CONTAINER="${STRFRY_CONTAINER:-strfry}"
 readonly PORT="${STRFRY_PORT:-7777}"
+readonly ALIAS_PORT="${STRFRY_ALIAS_PORT:-}"
 readonly READY_TIMEOUT="${STRFRY_READY_TIMEOUT:-60}"
 # The re-check after the port first opens (see the wait below). With
 # READY_TIMEOUT, the bound a lane that restarts the relay inside its deadline
@@ -328,10 +334,12 @@ else
   fi
 fi
 
-echo "Starting strfry: image=${IMAGE} port=${PORT} data=${DATA_DIR}"
+echo "Starting strfry: image=${IMAGE} port=${PORT} alias=${ALIAS_PORT:-none} data=${DATA_DIR}"
+publish=(-p "${PORT}:7777")
+[[ -z "${ALIAS_PORT}" ]] || publish+=(-p "${ALIAS_PORT}:7777")
 docker run -d \
   --name "${CONTAINER}" \
-  -p "${PORT}:7777" \
+  "${publish[@]}" \
   -v "${DATA_DIR}:/var/lib/strfry" \
   -v "${CONFIG_FILE}:/etc/strfry.conf:ro" \
   "${IMAGE}" \
@@ -347,7 +355,8 @@ while (( SECONDS < deadline )); do
     docker logs "${CONTAINER}" >&2 || true
     exit 1
   fi
-  if nc -z 127.0.0.1 "${PORT}" 2>/dev/null; then
+  if nc -z 127.0.0.1 "${PORT}" 2>/dev/null \
+     && { [[ -z "${ALIAS_PORT}" ]] || nc -z 127.0.0.1 "${ALIAS_PORT}" 2>/dev/null; }; then
     # Don't trust a single port-open: strfry's image opens the
     # listener briefly before mdb_env_open(), so confirm after a
     # short delay that the container is still up AND no fatal
@@ -366,6 +375,6 @@ while (( SECONDS < deadline )); do
   sleep 1
 done
 
-echo "ERROR: strfry never became reachable on port ${PORT} within ${READY_TIMEOUT}s. Logs:" >&2
+echo "ERROR: strfry never became reachable on port ${PORT}${ALIAS_PORT:+ and ${ALIAS_PORT}} within ${READY_TIMEOUT}s. Logs:" >&2
 docker logs "${CONTAINER}" >&2 || true
 exit 1

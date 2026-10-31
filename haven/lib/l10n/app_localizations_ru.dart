@@ -122,7 +122,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Summary =>
-      'Без центрального сервера. Работает через сеть реле, которую выбираете вы.';
+      'Без центрального сервера. Работает через независимые реле.';
 
   @override
   String get onboardingValueProp3Summary =>
@@ -785,6 +785,10 @@ class AppLocalizationsRu extends AppLocalizations {
   }
 
   @override
+  String get circleCreateRefusedNoLocationRelay =>
+      'Haven не может создать этот круг: все реле, которые он использует для кругов, входят или раньше входили в ваши собственные списки реле, поэтому ни одно из них не годится для нового круга.';
+
+  @override
   String addMemberTitle(String circleName) {
     return 'Добавить в круг «$circleName»';
   }
@@ -1285,7 +1289,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'Эти реле взяты из списков, опубликованных приглашёнными участниками; если у этих участников списков не было — из ваших входящих реле или из тех, что выбрал Haven. Изменить их пока нельзя, а последующие правки вашего списка реле на них не влияют.';
+      'Через эти реле проходят зашифрованные обновления круга. Их набор задан при создании круга, и изменить его в Haven пока нельзя; правки вашего списка реле на него не влияют.';
 
   @override
   String get circleDetailsAddMember => 'Добавить участника';

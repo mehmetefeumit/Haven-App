@@ -1210,6 +1210,7 @@ async fn a_welcome_is_not_handed_over_once_the_engine_is_had_after_the_foregroun
         .await,
         inbox_relays: inbox.clone(),
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     };
     let transport = ScriptedFanout::default();
     transport.answer(ONE, [Answer::Silent]);
@@ -1521,6 +1522,7 @@ async fn a_welcome_whose_send_was_not_begun_keeps_its_route_wherever_the_foregro
         .await,
         inbox_relays: inbox.clone(),
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     };
     let transport = ScriptedFanout::default();
     transport.answer(ONE, [Answer::Accepted]);
@@ -1585,6 +1587,7 @@ async fn a_finish_only_call_delivers_no_welcome_and_publishes_nothing_unrecorded
         .await,
         inbox_relays: inbox.clone(),
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     };
     let transport = ScriptedFanout::default();
     transport.answer(ONE, [Answer::Accepted]);
@@ -1653,6 +1656,7 @@ async fn an_invite_a_finish_only_call_confirms_keeps_its_welcome_for_a_full_driv
         .await,
         inbox_relays: inbox.clone(),
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     };
     let transport = ScriptedFanout::default();
     transport.answer(ONE, [Answer::Silent]);

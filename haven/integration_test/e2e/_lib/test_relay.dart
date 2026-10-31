@@ -44,6 +44,20 @@ const String secondStrfryUrl = String.fromEnvironment(
   defaultValue: 'ws://localhost:7778',
 );
 
+/// URL of the hermetic location relay pool's one entry: where a circle created
+/// without named relays (the UI create in `e2e_combined.dart`) is placed.
+///
+/// It must differ from [defaultStrfryUrl] by AUTHORITY (host and port), or
+/// Rust leaves the account's own inbox relay out of the pick and refuses the
+/// create. It must reach the SAME relay store, because the harness reads that
+/// circle's kind-445 stream through [defaultStrfryUrl]. CI points it at a
+/// second recording-proxy route (or a second published port) in front of the
+/// one relay; the default is that relay under its other loopback spelling.
+const String locationRelayUrl = String.fromEnvironment(
+  'HAVEN_E2E_LOCATION_RELAY',
+  defaultValue: 'ws://127.0.0.1:7777',
+);
+
 /// The compiled-in value when a lane passes no `--dart-define`. Named so the
 /// "is this an instrumented run?" test below is a comparison against one
 /// constant rather than a magic string repeated at each call site.

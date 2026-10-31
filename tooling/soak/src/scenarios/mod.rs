@@ -977,11 +977,11 @@ pub async fn add_member<T: TimelineSink, L: LogDrain>(
             .map_err(|_| RigError::Core(Step::MintKeyPackage))?;
     let members = [MemberKeyPackage {
         key_package_event: key_package.event,
-        // Explicit, always: an empty relay set falls back to the PRODUCTION
-        // default pool, which would take the welcome off this world's relay
-        // and onto the public network.
+        // Explicit, always: an invitee with no inbox relay has no Welcome
+        // route, so the invite would be refused.
         inbox_relays: urls.clone(),
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     }];
     let changed = world
         .change(

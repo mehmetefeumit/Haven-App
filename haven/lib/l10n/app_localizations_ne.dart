@@ -123,7 +123,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Summary =>
-      'कुनै केन्द्रीय सर्भर छैन। यो तपाईंले छानेको रिले सञ्जालमा चल्छ।';
+      'कुनै केन्द्रीय सर्भर छैन। यो स्वतन्त्र रिलेहरूमा चल्छ।';
 
   @override
   String get onboardingValueProp3Summary =>
@@ -772,6 +772,10 @@ class AppLocalizationsNe extends AppLocalizations {
   }
 
   @override
+  String get circleCreateRefusedNoLocationRelay =>
+      'Haven ले यो सर्कल बनाउन सक्दैन। सर्कलका लागि Haven ले प्रयोग गर्ने हरेक रिले तपाईंका आफ्नै रिले सूचीहरूमा छ, वा पहिले कुनै बेला थियो, त्यसैले तीमध्ये कुनै पनि रिलेमा यो सर्कल चलाउन मिल्दैन।';
+
+  @override
   String addMemberTitle(String circleName) {
     return '$circleName मा थप्नुहोस्';
   }
@@ -1253,7 +1257,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'यी रिले निमन्त्रित सदस्यहरूका प्रकाशित सूचीबाट आएका हुन्; ती सदस्यहरूको सूची नभए तपाईंका इनबक्स रिले वा Haven ले रोजेका रिले प्रयोग भए। यिनलाई अहिलेसम्म बदल्न मिल्दैन, र तपाईंको रिले सूचीमा पछिका सम्पादनले यिनलाई बदल्दैन।';
+      'यस सर्कलका इन्क्रिप्टेड अपडेट यिनै रिलेहरूमार्फत जान्छन्। यी रिले सर्कल बन्दा नै तोकिएका थिए, र यिनलाई Haven मा अहिलेसम्म बदल्न मिल्दैन। तपाईंको रिले सूचीमा गरिने सम्पादनले यिनलाई असर गर्दैन।';
 
   @override
   String get circleDetailsAddMember => 'सदस्य थप्नुहोस्';

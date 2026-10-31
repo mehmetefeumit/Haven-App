@@ -132,6 +132,7 @@ async fn build_two_member_circle(relays: &[String]) -> TwoMemberCircle {
         key_package_event: bob_kp_event,
         inbox_relays: vec!["wss://member-inbox.example.com".to_string()],
         nip65_relays: vec![],
+        nip65_write_relays: vec![],
     };
 
     let alice_dir = TempDir::new().unwrap();

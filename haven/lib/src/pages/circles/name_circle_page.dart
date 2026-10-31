@@ -447,6 +447,18 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
           _stage = CreationStage.idle;
         });
       }
+    } on CircleNoLocationRelayException catch (_) {
+      // Definitive: no retry or remedy changes it, so neither the generic
+      // "please try again" copy nor any hint of one. Precedes the
+      // CircleServiceException clause — it is a subtype.
+      debugPrint('[CircleCreate] no location relay');
+      if (mounted) {
+        setState(() {
+          _errorMessage = l10n.circleCreateRefusedNoLocationRelay;
+          _isCreating = false;
+          _stage = CreationStage.idle;
+        });
+      }
     } on CircleRosterFullException catch (_) {
       // A refusal, not a failure: the generic "please try again" copy below
       // would send the user back to a button that can never succeed. Must

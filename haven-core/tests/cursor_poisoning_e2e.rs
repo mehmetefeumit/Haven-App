@@ -181,6 +181,7 @@ async fn mint_member(
         key_package_event: kp_event,
         inbox_relays: inbox_relays.to_vec(),
         nip65_relays: vec![],
+        nip65_write_relays: vec![],
     };
     (Arc::new(mgr), keys, member, dir)
 }

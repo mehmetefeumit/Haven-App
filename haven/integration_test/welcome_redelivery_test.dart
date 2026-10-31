@@ -262,6 +262,7 @@ Future<MemberKeyPackageFfi> _inboxBehind(
     authorNpub: fetched.authorNpub,
     inboxRelays: <String>[gate.url],
     nip65Relays: fetched.nip65Relays,
+    nip65WriteRelays: fetched.nip65WriteRelays,
   );
 }
 

@@ -121,7 +121,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Summary =>
-      'Kein zentraler Server. Es läuft über ein Relay-Netzwerk deiner Wahl.';
+      'Kein zentraler Server. Es läuft über unabhängige Relays.';
 
   @override
   String get onboardingValueProp3Summary =>
@@ -780,6 +780,10 @@ class AppLocalizationsDe extends AppLocalizations {
   }
 
   @override
+  String get circleCreateRefusedNoLocationRelay =>
+      'Haven kann diesen Kreis nicht erstellen: Alle Relays, die Haven für Kreise nutzt, stehen auf deinen eigenen Relay-Listen oder standen früher dort, deshalb kann keines davon den Kreis übertragen.';
+
+  @override
   String addMemberTitle(String circleName) {
     return 'Zu $circleName hinzufügen';
   }
@@ -1263,7 +1267,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'Diese Relays stammen aus den veröffentlichten Listen der eingeladenen Mitglieder – bei fehlender Liste aus deinen Posteingangs-Relays oder Haven-Relays. Noch nicht änderbar; spätere Änderungen deiner Relay-Liste wirken sich nicht auf sie aus.';
+      'Über diese Relays laufen die verschlüsselten Aktualisierungen dieses Kreises. Sie wurden beim Erstellen festgelegt und lassen sich in Haven noch nicht ändern; Änderungen an deiner Relay-Liste wirken sich nicht auf sie aus.';
 
   @override
   String get circleDetailsAddMember => 'Mitglied hinzufügen';

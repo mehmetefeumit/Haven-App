@@ -600,6 +600,19 @@ fn age_on<'a>(clock: &'a SecondsClock, event: &Event) -> impl Fn() -> u64 + 'a {
 /// [`FanoutTransport`] of one manager.
 type FanoutGates = Arc<std::sync::Mutex<HashMap<RelayUrl, Arc<tokio::sync::Mutex<()>>>>>;
 
+/// What [`RelayManager::neg_probe_ids`] heard from one relay. No formatter:
+/// it holds event ids.
+#[cfg(feature = "test-utils")]
+pub enum NegProbe {
+    /// The ids the relay reported for the window.
+    Ids(HashSet<EventId>),
+    /// The relay refused NIP-77 outright.
+    Unsupported,
+    /// No answer in time, a socket that went away, or a refusal of this one
+    /// session.
+    NoAnswer,
+}
+
 impl RelayManager {
     /// Creates a new relay manager.
     ///
@@ -1861,6 +1874,33 @@ impl RelayManager {
             return NegAnswer::Failed;
         }
         NegAnswer::from_remote(output.val.remote)
+    }
+
+    /// [`Self::neg_prepare`] and [`Self::neg_remote_ids`] for one relay over
+    /// `routing_id`'s window `[since, until]`, within [`NEG_ROUTE_WAIT`]: the
+    /// location-pool vetting probe gates on the session a circle's catch-up
+    /// runs, not on a copy of it.
+    ///
+    /// [`NEG_ROUTE_WAIT`]: super::negentropy::NEG_ROUTE_WAIT
+    #[cfg(feature = "test-utils")]
+    pub async fn neg_probe_ids(
+        &self,
+        relay: &str,
+        routing_id: &[u8; 32],
+        since: u64,
+        until: u64,
+    ) -> NegProbe {
+        use super::negentropy::{NegAnswer, NEG_ROUTE_WAIT};
+        self.neg_prepare(&[relay.to_string()]).await;
+        let ends = tokio::time::Instant::now() + NEG_ROUTE_WAIT;
+        match self
+            .neg_remote_ids(routing_id, relay, since, until, ends)
+            .await
+        {
+            NegAnswer::Complete(ids) | NegAnswer::Saturated(ids) => NegProbe::Ids(ids),
+            NegAnswer::Unsupported => NegProbe::Unsupported,
+            NegAnswer::Failed => NegProbe::NoAnswer,
+        }
     }
 
     /// Issues ONE REQ to ONE relay and reads that relay's own answer, reporting

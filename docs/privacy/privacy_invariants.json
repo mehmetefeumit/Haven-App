@@ -41,6 +41,12 @@
       "forbidden_claim": "Copy must make no network-level unlinkability or anonymity claim, and must never say Haven hides your IP address. A VPN may be described as the mitigation, attributed to the VPN, never to Haven."
     },
     {
+      "id": "LOCATION-POOL",
+      "source": "haven-core/SECURITY.md#the-location-pool-is-haven-specific-location-pool",
+      "summary": "Owner-approved with the relay-plane segregation on 2026-10-31 (plan D11). Every circle Haven creates without named relays sits on three relays drawn from PRODUCTION_LOCATION_RELAYS, a list only Haven uses, and every member of that circle dials the same three. A network observer who sees DNS queries or TLS SNI can therefore infer from those hostnames that a device runs Haven and that devices dialling the same three are probably in one circle, where a default circle used to ride the account seed (relay.damus.io, relay.primal.net, nos.lol) that most Nostr clients dial; and the pool's operators together can enumerate Haven users' IP addresses, because the pool is Haven-specific. The same-IP-across-planes residual is unchanged (P6). Mitigation: none beyond the recorded absence of network-level unlinkability.",
+      "forbidden_claim": "Copy must not claim that the relays a circle uses reveal nothing about which app you use or about who shares a circle with you, and must not present Haven's choice of circle relays as hiding Haven use from the network. A VPN may be described as hiding the destination from the local network, attributed to the VPN, never to Haven."
+    },
+    {
       "id": "P7",
       "source": "haven-core/SECURITY.md#historical-contamination-is-unrecoverable-p7",
       "summary": "The contamination ledger is append-only because contamination is historical — a relay that routed a circle's kind-445 last month saw those events, and leaving does not un-see them. Welcome-delivery relays were persisted nowhere before the change, so refresh_contamination_ledger cannot fold them in and will not exclude them.",
@@ -55,7 +61,7 @@
     {
       "id": "RC1",
       "source": "haven-core/SECURITY.md#relay-observable-metadata-and-correlation-accepted",
-      "summary": "NOT one connection per relay: Haven opens at least TWO long-lived nostr-sdk Clients per process — the live-sync engine's receive client (build_engine_client, haven-core/src/relay/live_sync/session.rs:111) and the publish client (RelayManager::new, haven-core/src/relay/manager.rs:613) — plus the live session's own fanout drive pool while one runs (LiveSyncCore::new_local) and one more for every isolate that builds its own RelayManager, which the Android background-sharing foreground service does. A shared relay therefore sees up to three connections from the foreground isolate alone, not one, and can join them by source address without any protocol help. A relay serving BOTH the gift-wrap inbox (kind 1059 by #p = user pubkey) and group messages (kind 445 by #h = nostr_group_id) over the same connection can correlate the real identity pubkey with circle membership by connection continuity. Since M11 the receive connection is STANDING while the app is FOREGROUNDED, on both platforms, so the correlation is continuous rather than bursty for as long as that socket is held. Since P4 it is no longer standing while backgrounded on iOS either: with background sharing on the engine is PAUSED between publishes and both filters ride one bounded burst per publish tick, so for a CIRCLE relay the join is per-burst rather than continuous. Per-burst is NOT per-publish, though since PUB-COALESCE it is close to it: a burst re-anchors every circle's #h REQ, connects the whole relay union AND publishes every publish-eligible circle, so a circle relay sees a REQ/CLOSE pair on every burst and this device's kind-445 for its own circle on essentially every burst too. The join stays wider than the send in three cases only — a burst whose publish window refuses publishes nothing at all; a subscribed circle that is not publish-eligible (quarantined because its encrypted state failed to load, or engine-flagged Unrecoverable) is re-anchored on every burst and never published to; a send that fails, is deferred by the engine, or is the tail of a roster past kMaxCirclesPerBurst. What coalescing ADDS to this deviation is a duration: the union connection is held across the whole staggered publish pass, so its connect-to-disconnect span grows with the number of eligible circles and hands EVERY relay in the union — one carrying a single circle, or an inbox relay carrying none — an estimator of that count, which the per-circle schedules leaked only as a rate and only to relays that already read the circle set off the multiplexed #h filter (PUB-COALESCE). That NARROWS the deviation for circle relays without strictly narrowing it: an inbox-ONLY relay (kind-10050 inbox, none of this account's circles — an independent set) carries no kind-445 to correlate with, and where it used to see one continuous socket it now sees a REQ/CLOSE pair every 72-168 s (the 120 s nominal cadence, jittered ±40 %), which is itself the inference \"this pubkey is background-sharing right now\". The lever is INBOX_BURSTS_PER_REQ (OD4-b, accepted, blocked on a separate defect and not yet raised); at the shipped value that inference is a named, disclosed residual, not a mitigated one. The residuals P4 carries are enumerated in SECURITY.md under \"iOS background sharing: presence only at publish instants (P4)\". On Android it no longer outlives the foreground: since P1 the pause path stops the engine in BOTH toggle states (with sharing ON it stops first to hand the MLS session to the foreground service; with sharing OFF `_stopLiveSyncBounded()` stops it and deliberately does not release the guard, since no isolate reclaims it), and the resume heal restarts it. Not protocol-forced: the kind-10050 inbox list and the group's 0x8004 relay set are independent, and seeding them disjointly — as the profile pool already is — would remove the single-socket join. Declined because it doubles connection count and because P6 (no Tor/proxy) leaves IP-level joining intact; recorded so the trade-off stays re-decidable.",
+      "summary": "NOT one connection per relay: Haven opens at least TWO long-lived nostr-sdk Clients per process — the live-sync engine's receive client (build_engine_client, haven-core/src/relay/live_sync/session.rs:111) and the publish client (RelayManager::new, haven-core/src/relay/manager.rs:613) — plus the live session's own fanout drive pool while one runs (LiveSyncCore::new_local) and one more for every isolate that builds its own RelayManager, which the Android background-sharing foreground service does. A shared relay therefore sees up to three connections from the foreground isolate alone, not one, and can join them by source address without any protocol help. A relay serving BOTH the gift-wrap inbox (kind 1059 by #p = user pubkey) and group messages (kind 445 by #h = nostr_group_id) over the same connection can correlate the real identity pubkey with circle membership by connection continuity. Since M11 the receive connection is STANDING while the app is FOREGROUNDED, on both platforms, so the correlation is continuous rather than bursty for as long as that socket is held. Since P4 it is no longer standing while backgrounded on iOS either: with background sharing on the engine is PAUSED between publishes and both filters ride one bounded burst per publish tick, so for a CIRCLE relay the join is per-burst rather than continuous. Per-burst is NOT per-publish, though since PUB-COALESCE it is close to it: a burst re-anchors every circle's #h REQ, connects the whole relay union AND publishes every publish-eligible circle, so a circle relay sees a REQ/CLOSE pair on every burst and this device's kind-445 for its own circle on essentially every burst too. The join stays wider than the send in three cases only — a burst whose publish window refuses publishes nothing at all; a subscribed circle that is not publish-eligible (quarantined because its encrypted state failed to load, or engine-flagged Unrecoverable) is re-anchored on every burst and never published to; a send that fails, is deferred by the engine, or is the tail of a roster past kMaxCirclesPerBurst. What coalescing ADDS to this deviation is a duration: the union connection is held across the whole staggered publish pass, so its connect-to-disconnect span grows with the number of eligible circles and hands EVERY relay in the union — one carrying a single circle, or an inbox relay carrying none — an estimator of that count, which the per-circle schedules leaked only as a rate and only to relays that already read the circle set off the multiplexed #h filter (PUB-COALESCE). That NARROWS the deviation for circle relays without strictly narrowing it: an inbox-ONLY relay (kind-10050 inbox, none of this account's circles — an independent set) carries no kind-445 to correlate with, and where it used to see one continuous socket it now sees a REQ/CLOSE pair every 72-168 s (the 120 s nominal cadence, jittered ±40 %), which is itself the inference \"this pubkey is background-sharing right now\". The lever is INBOX_BURSTS_PER_REQ (OD4-b, accepted, blocked on a separate defect and not yet raised); at the shipped value that inference is a named, disclosed residual, not a mitigated one. The residuals P4 carries are enumerated in SECURITY.md under \"iOS background sharing: presence only at publish instants (P4)\". On Android it no longer outlives the foreground: since P1 the pause path stops the engine in BOTH toggle states (with sharing ON it stops first to hand the MLS session to the foreground service; with sharing OFF `_stopLiveSyncBounded()` stops it and deliberately does not release the guard, since no isolate reclaims it), and the resume heal restarts it. Not protocol-forced: the kind-10050 inbox list and the group's 0x8004 relay set are independent. Seeding them disjointly was declined at first, for the connection count and because P6 (no Tor/proxy) leaves IP-level joining intact, and re-decided on 2026-10-31 (the relay-plane segregation, whose owner decision OD-3 accepted the extra sockets, ESTIMATED in POWER_EFFICIENCY_PLAN.md §6.5a): a circle Haven creates without named relays now takes its relays from the location pool, never one on its creator's own lists, so for such a circle the single-socket join is gone unless a member's own lists name one of its relays. It remains for every circle created before that change and for circles other clients create; P6 still leaves IP-level joining intact.",
       "forbidden_claim": "Copy must not claim relays cannot link your identity to your circle membership, and must not present the ephemeral per-message kind-445 author keys as making you unlinkable at the relay."
     },
     {
@@ -167,6 +173,12 @@
         "no one else"
       ]
     }
+  },
+  "ratchet_override": {
+    "reason": "Relay-plane segregation (owner-approved 2026-10-31): a create with no relays named no longer takes the invitees' inbox union with a fallback to the creator's inbox and the seed, so the derivation INV-R-CIRCLE-RELAYS-FROM-INVITEES pinned is false by design and its fallback tests are deleted with it. INV-R-CIRCLE-RELAYS-FROM-LOCATION-POOL replaces it, pinning the location-pool pick and both exclusion tiers, and carries circleDetailsRelaysNote, reworded the same day, as a disclosure.",
+    "items": [
+      "INV-R-CIRCLE-RELAYS-FROM-INVITEES.deleted"
+    ]
   },
   "invariants": [
     {
@@ -3236,8 +3248,8 @@
     },
     {
       "id": "INV-R-MULTI-RELAY-NO-SINGLE-POINT",
-      "title": "More than one relay is seeded, so no single relay can cut a user off",
-      "statement": "PRODUCTION_DEFAULT_RELAYS holds exactly three wss:// relays run by independent operators, and no relay in that set is Haven-operated or individually required; shrinking the set to one — or to two, which is thinner than the copy discloses — falsifies the \"several relays, so no single one can cut you off\" promise.",
+      "title": "More than one relay is seeded, and a new circle gets three, so no single relay can cut a user off",
+      "statement": "PRODUCTION_DEFAULT_RELAYS holds exactly three wss:// relays run by independent operators, and no relay in that set is Haven-operated or individually required; shrinking the set to one — or to two, which is thinner than the copy discloses — falsifies the \"several relays, so no single one can cut you off\" promise. A circle Haven creates without named relays gets min(3, n) distinct relays from the eight-entry location pool (PRODUCTION_LOCATION_RELAYS, one registrable domain per entry): three, unless the user's own identity lists or a non-public host leave fewer than three entries eligible (INV-R-CIRCLE-RELAYS-FROM-LOCATION-POOL).",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
@@ -3248,50 +3260,154 @@
         {
           "file": "haven-core/src/circle/types.rs",
           "symbol": "PRODUCTION_DEFAULT_RELAYS"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "symbol": "PRODUCTION_LOCATION_RELAYS"
         }
       ],
       "tests": [
         {
           "file": "haven-core/src/circle/types.rs",
           "name": "production_default_relays_count_is_pinned"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "name": "pick_takes_three_or_the_whole_pool_when_smaller"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "name": "production_location_relays_count_is_pinned"
         }
       ],
       "guards": []
     },
     {
-      "id": "INV-R-CIRCLE-RELAYS-FROM-INVITEES",
-      "title": "A circle's relay set comes from the invitees, not from the creator's list",
-      "statement": "create_circle uses the relays supplied by the invited members' fetched KeyPackages; only when that union is empty does it fall back to the creator's stored inbox relays, and only when those are also empty does it fall back to the built-in defaults. Restoring a \"copied from your inbox relays\" derivation would make the circle-details note false in the normal case.",
+      "id": "INV-R-CIRCLE-RELAYS-FROM-LOCATION-POOL",
+      "title": "A new circle's relays are drawn at random from Haven's location pool, never from anyone's inbox",
+      "statement": "A create the caller names no relays for (every create the app's UI makes: NostrCircleService.createCircle hands the driver the relays its own caller named, or none, and never the invitees' inbox relays, which serve only to deliver their Welcomes) takes min(3, n) distinct relays, drawn with OsRng (pick_location_relays, the one OsRng use in circle/location_pool.rs, over the pure pick_circle_relays), from PRODUCTION_LOCATION_RELAYS or, in a debug build, the list set_location_relays_for_test installed — n being the entries left once each is normalised, de-duplicated by authority (lower-cased host and port), kept only if foreign_relay_dialable admits it and passed through the hard tier. HARD exclusion: no relay whose authority appears in the user's Inbox, KeyPackage or Profile lists, the curated profile pool, the discovery plane or a contamination-ledger row recorded as an inbox, key-package or discovery relay, or a relay retired from the profile pool (CircleStorage::identity_relay_authorities, whose read errors fail the create) is ever picked, however it is spelled; a Welcome ledger row is not in the tier, because that relay took only an ephemeral-key gift wrap p-tagged to an invitee; when no entry is left the create is refused with the fieldless CircleError::NoLocationRelay (RefusalFfi::NoLocationRelay, shown as fixed copy) and nothing is persisted. SOFT exclusion: an entry one of the invitees lists as an inbox relay or a NIP-65 read or write relay is taken only to fill up to min(3, n) when too few others are left, so a crafted invitee list can neither steer the circle onto one relay nor block the create, and the fill never reaches past the hard tier. The pick never falls back to the full pool, to the inbox union or to the account seed. A caller that names relays gets them verbatim, never merged with the invitees' (the harnesses do this). The picked relays are the circle's routing component, sorted, and are recorded in the contamination ledger as CircleRouting before any Welcome is sent. No picked relay reaches a log line. check_profile_privacy_boundaries.sh holds the file to a CSPRNG (9b), the named tests to existence (11), the override out of library tests (12b) and every pool entry to a dated vetting row (14b). This becomes false if a create with no relays named takes the invitees' inbox relays, the user's own lists or the seed, if the draw stops being OsRng-backed, or if the hard tier is relaxed.",
       "status": "enforced",
-      "assertion_arb_keys": [
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
         "circleDetailsRelaysNote"
       ],
-      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "symbols": [
         {
-          "file": "haven/lib/src/services/nostr_circle_service.dart",
-          "symbol": "memberRelays"
+          "file": "haven-core/src/circle/location_pool.rs",
+          "symbol": "PRODUCTION_LOCATION_RELAYS"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "symbol": "pick_circle_relays"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "symbol": "pick_location_relays"
+        },
+        {
+          "file": "haven-core/src/circle/storage_relay_prefs.rs",
+          "symbol": "identity_relay_authorities"
         },
         {
           "file": "haven-core/src/circle/manager.rs",
-          "symbol": "create_circle"
+          "symbol": "create_circle_at"
+        },
+        {
+          "file": "haven/lib/src/services/nostr_circle_service.dart",
+          "symbol": "createCircle"
         }
       ],
       "tests": [
+        {
+          "file": "haven-core/tests/location_pool_e2e.rs",
+          "name": "create_with_no_relays_named_picks_three_distinct_relays_from_the_location_pool"
+        },
+        {
+          "file": "haven-core/tests/location_pool_e2e.rs",
+          "name": "create_never_picks_a_relay_the_account_uses_for_its_identity"
+        },
+        {
+          "file": "haven-core/tests/location_pool_e2e.rs",
+          "name": "create_prefers_relays_no_invitee_lists_including_nip65_write_relays"
+        },
+        {
+          "file": "haven-core/tests/location_pool_e2e.rs",
+          "name": "create_is_refused_when_the_accounts_own_lists_cover_the_whole_pool"
+        },
+        {
+          "file": "haven-core/tests/location_pool_e2e.rs",
+          "name": "a_picked_circle_relay_never_reaches_a_log_line"
+        },
+        {
+          "file": "haven-core/tests/location_pool_override.rs",
+          "name": "installed_override_reaches_the_pick_and_stays_subject_to_exclusion_and_the_host_rule"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "name": "pick_fails_closed_when_the_hard_tier_is_empty"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "name": "fallback_never_drops_the_creators_own_exclusion"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "name": "pick_is_drawn_from_the_rng_it_is_handed"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "name": "pick_never_returns_a_hard_excluded_relay_however_it_is_spelled"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "name": "pick_prefers_relays_no_invitee_lists_and_fills_from_the_rest"
+        },
+        {
+          "file": "haven-core/src/circle/storage_relay_prefs.rs",
+          "name": "identity_relay_authorities_cover_every_identity_category_and_both_curated_planes"
+        },
         {
           "file": "haven-core/src/circle/manager.rs",
           "name": "create_circle_relays_are_the_passed_relays_not_the_creator_inbox"
         },
         {
-          "file": "haven-core/src/circle/manager.rs",
-          "name": "create_circle_falls_back_to_stored_creator_inbox_when_relays_empty"
+          "file": "haven/test/services/nostr_circle_service_test.dart",
+          "name": "a create that names no relays never makes the invitees' inbox relays the circle's, and still routes each Welcome to them"
         },
         {
-          "file": "haven-core/src/circle/manager.rs",
-          "name": "create_circle_falls_back_to_default_relays_when_relays_and_creator_inbox_empty"
+          "file": "haven/test/services/nostr_circle_service_test.dart",
+          "name": "named relays reach the driver verbatim, not merged with the invitees' inbox relays"
+        },
+        {
+          "file": "haven/test/services/nostr_circle_service_test.dart",
+          "name": "an empty relays list is the same request as none"
         }
       ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-R-LOCATION-POOL-IS-HAVEN-SPECIFIC",
+      "title": "The location pool is Haven's own list, so its hostnames mark Haven users and probable co-members",
+      "statement": "PRODUCTION_LOCATION_RELAYS is a list only Haven uses, and every member of a circle Haven creates without named relays dials the same three of its eight relays. A DNS or TLS SNI observer (an ISP, a Wi-Fi operator) can infer from those hostnames that a device runs Haven and that devices dialling the same three are probably in one circle; the pool's operators, together, can enumerate Haven users' IP addresses. Nothing in Haven mitigates either beyond the recorded absence of network-level unlinkability (P6).",
+      "status": "accepted_deviation",
+      "accepted_deviation_id": "LOCATION-POOL",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#the-location-pool-is-haven-specific-location-pool",
+        "haven-core/SECURITY.md#ip-level-linkage-is-out-of-scope-p6"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "symbol": "PRODUCTION_LOCATION_RELAYS"
+        }
+      ],
+      "tests": [],
       "guards": []
     },
     {
@@ -4489,7 +4605,7 @@
     {
       "id": "INV-R-CROSS-PLANE-CORRELATION",
       "title": "One standing connection lets a relay link identity to circle membership",
-      "statement": "While the app is FOREGROUNDED, a single persistent socket per relay carries both the inbox filter naming the user's own pubkey (gift-wrap #p) and every subscribed circle's routing-tag filter (#h), so a relay serving both planes can correlate identity to circle membership by connection continuity — the ephemeral per-message 445 author keys do not prevent this, and on a new install the inbox and per-circle relay sets seed from the same defaults so the overlap is the default configuration. For CIRCLE relays the standing form is now foreground-only: backgrounded on iOS with sharing on the two filters ride ONE BOUNDED BURST PER PUBLISH TICK and the join is per-burst rather than continuous, and every other pause stops the engine outright. Per-burst is not per-publish, but since PUB-COALESCE it is much closer to it: a burst re-anchors EVERY circle's #h REQ, connects the whole relay union, AND publishes every publish-eligible circle, so for an eligible circle the join now coincides with that circle's own kind-445 on essentially every burst. It stays strictly wider in three cases — a burst whose publish window refuses publishes nothing at all; a subscribed circle that is not publish-eligible (quarantined because its encrypted state failed to load, or engine-flagged Unrecoverable) is re-anchored on every burst and never publishes; a deferred or failed send, and the tail of a roster past kMaxCirclesPerBurst, re-anchors without a kind-445 — and the join is no longer instantaneous: the connection is held across the coalesced publish pass, whose length grows with the number of eligible circles and is therefore itself a single-relay estimator of that count. That is a narrowing, NOT a strict one: an inbox-ONLY relay — one holding the user's kind-10050 inbox but none of their circles, an independent set — carries no kind-445 to correlate with, and where it used to see one continuous socket it now sees a REQ/CLOSE pair every 72-168 s (the 120 s nominal cadence, jittered ±40 %), which is itself the inference that this pubkey is background-sharing right now. Raising INBOX_BURSTS_PER_REQ removes that cadence at the cost of background invitation latency (OD4-b, accepted, not yet raised); at the shipped value the inference is disclosed rather than mitigated. Both planes still open from the same address in the same seconds, so the two-socket join by source address is unchanged. In the foreground a third socket can join them: the session's drive pool dials a circle's relay to send a commit or a leave it has recorded — an event that carries that circle's routing tag — from the same address, and sleeps about a minute after its last send as every publish pool does; and, only while its pass is in the full mode, it dials an invitee's inbox relays to deliver a Welcome an applied invite released, and a circle's relays for a proposal no record could be written for. After the foreground has ended it begins no call for a record that was never sent, and takes no further relay; a publish of something with no record that was already under way runs out its own retries.",
+      "statement": "While the app is FOREGROUNDED, a single persistent socket per relay carries both the inbox filter naming the user's own pubkey (gift-wrap #p) and every subscribed circle's routing-tag filter (#h), so a relay serving both planes can correlate identity to circle membership by connection continuity — the ephemeral per-message 445 author keys do not prevent this. The overlap remains the default configuration for a circle created before the 2026-10-31 relay-plane change, whose relays were the invitees' inbox union — on a default install the same three seed relays as the user's own inbox — and a circle another client created carries whatever relays its creator chose. A circle Haven creates without named relays shares no relay with its creator's own Inbox, KeyPackage or Profile lists (INV-R-CIRCLE-RELAYS-FROM-LOCATION-POOL) and avoids every invitee's inbox and NIP-65 relays unless too few other pool entries are left; the join returns for it only when a member's lists name one of its relays — a user who later adds it to their own inbox (the exclusion is applied at create, never retroactively), an invitee the pick had to fill from, or a member added later, for whom nothing is re-picked. For CIRCLE relays the standing form is now foreground-only: backgrounded on iOS with sharing on the two filters ride ONE BOUNDED BURST PER PUBLISH TICK and the join is per-burst rather than continuous, and every other pause stops the engine outright. Per-burst is not per-publish, but since PUB-COALESCE it is much closer to it: a burst re-anchors EVERY circle's #h REQ, connects the whole relay union, AND publishes every publish-eligible circle, so for an eligible circle the join now coincides with that circle's own kind-445 on essentially every burst. It stays strictly wider in three cases — a burst whose publish window refuses publishes nothing at all; a subscribed circle that is not publish-eligible (quarantined because its encrypted state failed to load, or engine-flagged Unrecoverable) is re-anchored on every burst and never publishes; a deferred or failed send, and the tail of a roster past kMaxCirclesPerBurst, re-anchors without a kind-445 — and the join is no longer instantaneous: the connection is held across the coalesced publish pass, whose length grows with the number of eligible circles and is therefore itself a single-relay estimator of that count. That is a narrowing, NOT a strict one: an inbox-ONLY relay — one holding the user's kind-10050 inbox but none of their circles, an independent set — carries no kind-445 to correlate with, and where it used to see one continuous socket it now sees a REQ/CLOSE pair every 72-168 s (the 120 s nominal cadence, jittered ±40 %), which is itself the inference that this pubkey is background-sharing right now. Raising INBOX_BURSTS_PER_REQ removes that cadence at the cost of background invitation latency (OD4-b, accepted, not yet raised); at the shipped value the inference is disclosed rather than mitigated. Both planes still open from the same address in the same seconds, so the two-socket join by source address is unchanged. In the foreground a third socket can join them: the session's drive pool dials a circle's relay to send a commit or a leave it has recorded — an event that carries that circle's routing tag — from the same address, and sleeps about a minute after its last send as every publish pool does; and, only while its pass is in the full mode, it dials an invitee's inbox relays to deliver a Welcome an applied invite released, and a circle's relays for a proposal no record could be written for. After the foreground has ended it begins no call for a record that was never sent, and takes no further relay; a publish of something with no record that was already under way runs out its own retries.",
       "status": "accepted_deviation",
       "accepted_deviation_id": "RC1",
       "assertion_arb_keys": [],
@@ -4562,7 +4678,7 @@
     {
       "id": "INV-R-PER-CIRCLE-PUBLISH-DECORRELATED",
       "title": "One burst publishes every eligible circle; only the CSPRNG stagger keeps their created_at stamps apart, and how much it buys shrinks with the roster",
-      "statement": "Circles publish in ONE jittered burst per interval — up to kMaxCirclesPerBurst (11) of them, the rest deferred to the next tick, a branch kMaxCirclesPerAccount (10) keeps out of production reach — with consecutive encrypts at least kPublishStaggerMinGap (2 s) apart, so no two circles share a kind-445 created_at. The per-gap CEILING is kPublishStaggerMaxGap (9 s) only for small bursts: PublishStagger.maxGapFor prices each gap at the burst's own size, so it shrinks to 3333 ms at kMaxCirclesPerAccount (10) — the largest burst a bounded roster produces — and to a flat 3 s one circle further on, at the cap. The per-circle schedules this invariant used to enforce are gone, and so is the claim they carried: every relay carrying ANY of your circles now sees the same burst rhythm, so relays each holding only ONE of your circles can match the timing and tell those circles belong to the same phone. Two costs the record did not previously carry, both stated here rather than in the deviation alone. FIRST, the surviving archive claim is NARROWER than 'the stagger is the archive-adversary defence': after coalescing the archive reader gets the link anyway, from the shared inter-burst interval sequence. What the stagger still buys is ROSTER-SCOPED, because the observer reads no milliseconds — only floor(created_at) — so its alphabet is the whole-second delta, and maxGapFor thins that alphabet monotonically as the burst grows: {2..9} (eight values) at n <= 4, {2..6} at n = 6, {2..5} at n = 8, and {2,3,4} at n = kMaxCirclesPerAccount (10), the largest burst a bounded roster produces; {2,3} is maxGapFor's answer one circle further on and no observer reaches it while the bound holds. Both production call sites price the gap at the real burst size — the foreground tick through sampleGaps(count), the background pass through sampleGap(totalPublishes: total) where total is _encrypted.length + pending.length. COALESCING CAUSED THE THINNING: pre-P5 every gap was priced at the default totalPublishes = 2, so the alphabet was always eight. At small rosters the downgrade in KIND is real — a byte-identical created_at is a zero-cost equality join over a whole-network index (created_at_A == created_at_B, decisive on a single burst), while eight admissible offsets force a windowed correlation that must first hypothesise WHICH two circles share a device and then test that against a sequence of offsets. AT THE ROSTER BOUND IT BARELY IS: a three-element alphabet is three shifted equality joins over that same whole-network index, still un-targeted mass linkage, so what survives at ten circles is a constant factor rather than a change in kind. SECOND, coalescing makes the NUMBER of circles you are in a SINGLE-RELAY observable. Backgrounded on iOS the burst's engine socket connects the WHOLE relay union — every circle's relays AND the inbox relays (relay_union) — at the open and disconnects at the pause after the staggered pass, so the connect-to-disconnect span grows by one stagger gap per additional eligible circle (mean 5.5 s while the per-gap ceiling is the full 9 s, narrowing toward 2.5 s as the burst approaches the cap, the pass bounded by kPublishStaggerMaxSpread = 30 s) and is measurable server-side by ANY relay in that union: one carrying a single circle of yours, or an inbox relay carrying none of them. Sharply: the old scheme leaked the circle count only as a RATE, to shared relays that already read it off the multiplexed #h filter; the new one leaks it as a DURATION, to relays that previously could not know it at all. The account bound caps that estimator at ten, one circle under where the per-gap ceiling saturates. Restoring per-circle schedules is not the fix and is not proposed (it never decorrelated anything at a shared relay, and cost one radio wake per circle per interval); what falsifies THIS entry is a burst that publishes two circles inside one whole second, a stagger drawn from anything but a CSPRNG, or a per-gap floor at or below one second.",
+      "statement": "Circles publish in ONE jittered burst per interval — up to kMaxCirclesPerBurst (11) of them, the rest deferred to the next tick, a branch kMaxCirclesPerAccount (10) keeps out of production reach — with consecutive encrypts at least kPublishStaggerMinGap (2 s) apart, so no two circles share a kind-445 created_at. The per-gap CEILING is kPublishStaggerMaxGap (9 s) only for small bursts: PublishStagger.maxGapFor prices each gap at the burst's own size, so it shrinks to 3333 ms at kMaxCirclesPerAccount (10) — the largest burst a bounded roster produces — and to a flat 3 s one circle further on, at the cap. The per-circle schedules this invariant used to enforce are gone, and so is the claim they carried: every relay carrying ANY of your circles now sees the same burst rhythm, so relays each holding only ONE of your circles can match the timing and tell those circles belong to the same phone. Two costs the record did not previously carry, both stated here rather than in the deviation alone. FIRST, the surviving archive claim is NARROWER than 'the stagger is the archive-adversary defence': after coalescing the archive reader gets the link anyway, from the shared inter-burst interval sequence. What the stagger still buys is ROSTER-SCOPED, because the observer reads no milliseconds — only floor(created_at) — so its alphabet is the whole-second delta, and maxGapFor thins that alphabet monotonically as the burst grows: {2..9} (eight values) at n <= 4, {2..6} at n = 6, {2..5} at n = 8, and {2,3,4} at n = kMaxCirclesPerAccount (10), the largest burst a bounded roster produces; {2,3} is maxGapFor's answer one circle further on and no observer reaches it while the bound holds. Both production call sites price the gap at the real burst size — the foreground tick through sampleGaps(count), the background pass through sampleGap(totalPublishes: total) where total is _encrypted.length + pending.length. COALESCING CAUSED THE THINNING: pre-P5 every gap was priced at the default totalPublishes = 2, so the alphabet was always eight. At small rosters the downgrade in KIND is real — a byte-identical created_at is a zero-cost equality join over a whole-network index (created_at_A == created_at_B, decisive on a single burst), while eight admissible offsets force a windowed correlation that must first hypothesise WHICH two circles share a device and then test that against a sequence of offsets. AT THE ROSTER BOUND IT BARELY IS: a three-element alphabet is three shifted equality joins over that same whole-network index, still un-targeted mass linkage, so what survives at ten circles is a constant factor rather than a change in kind. SECOND, coalescing makes the NUMBER of circles you are in a SINGLE-RELAY observable. Backgrounded on iOS the burst's engine socket connects the WHOLE relay union — every circle's relays AND the inbox relays (relay_union) — at the open and disconnects at the pause after the staggered pass, so the connect-to-disconnect span grows by one stagger gap per additional eligible circle (mean 5.5 s while the per-gap ceiling is the full 9 s, narrowing toward 2.5 s as the burst approaches the cap, the pass bounded by kPublishStaggerMaxSpread = 30 s) and is measurable server-side by ANY relay in that union: one carrying a single circle of yours, or an inbox relay carrying none of them. Sharply: the old scheme leaked the circle count only as a RATE, to shared relays that already read it off the multiplexed #h filter; the new one leaks it as a DURATION, to relays that previously could not know it at all. The account bound caps that estimator at ten, one circle under where the per-gap ceiling saturates. Since 2026-10-31 each circle Haven creates gets its own three relays from the eight-entry location pool, none of them an inbox relay, so a device in several such circles holds a wider union than when every default circle rode the inbox's seed relays: more operators can read that duration estimator, and circles on disjoint relay sets — the case PUB-COALESCE's cost (1) links by their shared rhythm — become the common case. Restoring per-circle schedules is not the fix and is not proposed (it never decorrelated anything at a shared relay, and cost one radio wake per circle per interval); what falsifies THIS entry is a burst that publishes two circles inside one whole second, a stagger drawn from anything but a CSPRNG, or a per-gap floor at or below one second.",
       "status": "accepted_deviation",
       "accepted_deviation_id": "PUB-COALESCE",
       "assertion_arb_keys": [],
@@ -4639,7 +4755,7 @@
     {
       "id": "INV-R-IP-VISIBLE-TO-EVERY-SERVER",
       "title": "Every server Haven contacts observes the device IP",
-      "statement": "Haven ships no Tor, proxy or onion transport, so each relay it publishes to or reads from, the map tile provider, and whatever host a co-member chose for their profile picture all observe the device's IP address on every request — including the eight profile relays and six discovery relays the user did not choose and cannot remove. Any copy implying network-level unlinkability, anonymity or IP hiding is false.",
+      "statement": "Haven ships no Tor, proxy or onion transport, so each relay it publishes to or reads from, the map tile provider, and whatever host a co-member chose for their profile picture all observe the device's IP address on every request — including the eight profile relays and six discovery relays the user did not choose and cannot remove, and the three relays Haven picks from its eight-entry location pool for each circle it creates, which the user does not choose either and cannot change in the app. Any copy implying network-level unlinkability, anonymity or IP hiding is false.",
       "status": "accepted_deviation",
       "accepted_deviation_id": "P6",
       "assertion_arb_keys": [],
@@ -4658,6 +4774,10 @@
         {
           "file": "haven-core/src/relay/discovery.rs",
           "symbol": "PRODUCTION_DISCOVERY_RELAYS"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "symbol": "PRODUCTION_LOCATION_RELAYS"
         }
       ],
       "tests": [],
@@ -4665,8 +4785,8 @@
     },
     {
       "id": "INV-R-DISCOVERY-POOL-DISJOINT-AND-NOT-USER-CHOSEN",
-      "title": "The eight profile relays and six discovery relays never overlap, and the user cannot remove them",
-      "statement": "PRODUCTION_PROFILE_RELAYS (8) and PRODUCTION_DISCOVERY_RELAYS (6) are disjoint by construction and disjoint from the account seed defaults, and both are contacted unconditionally even when every relay the user chose is private; the curated eight cannot be taken out of the profile group at EITHER layer — Settings offers no remove control on a curated Profile row (matched across URL spelling variants, so a case or trailing-slash difference cannot bring the control back), and usable_profile_relays() unions the defaults back in on every resolution, so a row deleted by any other route still leaves the relay dialled. The copy must therefore keep saying \"that you do not choose\". Resizing either pool without updating the paragraph that spells both counts fails the copy tie.",
+      "title": "The eight profile relays never overlap the six discovery relays, the eight location relays overlap neither, and the user cannot remove them",
+      "statement": "PRODUCTION_PROFILE_RELAYS (8) and PRODUCTION_DISCOVERY_RELAYS (6) are disjoint by construction and disjoint from the account seed defaults, and both are contacted unconditionally even when every relay the user chose is private; the curated eight cannot be taken out of the profile group at EITHER layer — Settings offers no remove control on a curated Profile row (matched across URL spelling variants, so a case or trailing-slash difference cannot bring the control back), and usable_profile_relays() unions the defaults back in on every resolution, so a row deleted by any other route still leaves the relay dialled. PRODUCTION_LOCATION_RELAYS (8) is host-disjoint from the account seed, the discovery plane and the profile pool, each of its entries is on its own registrable domain, and it is not user-chosen either: no Settings category lists it and nothing in the app edits it, and Haven itself dials a pool entry only as a relay of a circle it was picked for. The profile pool also shares no operator with the account seed any more: wss://nostr.mom, run by nos.lol's operator, was retired on 2026-10-31 (RETIRED_PROFILE_RELAYS) — an operator overlap is recorded at vetting, which no test can check. The copy must therefore keep saying \"that you do not choose\". Resizing either pool without updating the paragraph that spells both counts fails the copy tie.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
@@ -4693,6 +4813,10 @@
         {
           "file": "haven/lib/src/pages/settings/relay_settings_page.dart",
           "symbol": "unremovable"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "symbol": "PRODUCTION_LOCATION_RELAYS"
         }
       ],
       "tests": [
@@ -4719,6 +4843,18 @@
         {
           "file": "haven/test/pages/settings/relay_settings_page_test.dart",
           "name": "still offers removal for the same URL in the Inbox category"
+        },
+        {
+          "file": "haven-core/tests/profile_plane_separation.rs",
+          "name": "location_pool_is_host_disjoint_from_account_seed_and_discovery"
+        },
+        {
+          "file": "haven-core/tests/profile_plane_separation.rs",
+          "name": "location_pool_is_host_disjoint_from_profile_pool"
+        },
+        {
+          "file": "haven-core/tests/profile_plane_separation.rs",
+          "name": "location_pool_entries_have_distinct_registrable_domains"
         }
       ],
       "guards": [
@@ -5841,8 +5977,8 @@
     },
     {
       "id": "INV-P-PROFILE-POOL-DISJOINT-FROM-TRANSPORT-RELAYS",
-      "title": "The eight profile relays and the six discovery relays never overlap, and neither carries circle traffic",
-      "statement": "profile_relay_pool_default() has exactly eight entries, PRODUCTION_DISCOVERY_RELAYS exactly six, the two sets are disjoint by construction, and the profile pool is disjoint from the account seed defaults that carry kind-445/1059 traffic; this becomes false if a URL is added to one pool that already appears in the other, or if a pool relay is seeded into the circle plane.",
+      "title": "The profile pool overlaps no other relay plane, and the location pool none either",
+      "statement": "profile_relay_pool_default() has exactly eight entries, PRODUCTION_DISCOVERY_RELAYS exactly six and PRODUCTION_LOCATION_RELAYS exactly eight. The profile and discovery sets are disjoint by construction; the profile pool is disjoint from the account seed defaults, which carry kind-1059 traffic and the kind-445 of circles whose relays came from them, and host-disjoint from the location pool, which carries the kind-445 of the circles Haven creates; and the location pool is host-disjoint from the seed and the discovery plane too, one registrable domain per entry. Since 2026-10-31 the profile pool also shares no operator with the account seed (wss://nostr.mom, nos.lol's operator, retired) and gives no operator two slots (wss://nostr.bitcoiner.social, offchain.pub's operator, retired) — recorded, not tested. This becomes false if a URL is added to one pool that already appears in another, or if a profile or discovery relay is seeded into the circle plane.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
@@ -5857,6 +5993,10 @@
         {
           "file": "haven-core/src/relay/discovery.rs",
           "symbol": "PRODUCTION_DISCOVERY_RELAYS"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "symbol": "PRODUCTION_LOCATION_RELAYS"
         }
       ],
       "tests": [
@@ -5875,6 +6015,22 @@
         {
           "file": "haven-core/src/relay/discovery.rs",
           "name": "discovery_plane_size_is_exactly_six"
+        },
+        {
+          "file": "haven-core/tests/profile_plane_separation.rs",
+          "name": "location_pool_is_host_disjoint_from_account_seed_and_discovery"
+        },
+        {
+          "file": "haven-core/tests/profile_plane_separation.rs",
+          "name": "location_pool_is_host_disjoint_from_profile_pool"
+        },
+        {
+          "file": "haven-core/tests/profile_plane_separation.rs",
+          "name": "location_pool_entries_have_distinct_registrable_domains"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "name": "production_location_relays_count_is_pinned"
         }
       ],
       "guards": [
@@ -6061,7 +6217,7 @@
     {
       "id": "INV-P-P3-POOL-RELAYS-SEE-THE-PROFILE-PLANE",
       "title": "The eight profile relays are contacted unconditionally and see the device's IP (P3)",
-      "statement": "usable_profile_relays() unions the eight defaults back in on every resolution, so the pool is contacted even when every user-chosen relay is private and a removal in Settings does not take effect; what the missing kind-10002 buys is only that relays OUTSIDE the pool get no public pointer to it.",
+      "statement": "usable_profile_relays() unions the eight defaults back in on every resolution, so the pool is contacted even when every user-chosen relay is private and a removal in Settings does not take effect; what the missing kind-10002 buys is only that relays OUTSIDE the pool get no public pointer to it. The relays Haven picks for a new circle from the location pool are recorded in the contamination ledger as CircleRouting, like any circle's relays, so none of them can enter the resolved profile pool; the curated eight are host-disjoint from the location pool, so that record never removes one of them.",
       "status": "accepted_deviation",
       "accepted_deviation_id": "P3",
       "assertion_arb_keys": [],
@@ -6132,7 +6288,7 @@
     {
       "id": "INV-P-P7-CONTAMINATION-IS-HISTORICAL",
       "title": "Relay exposure already incurred cannot be undone (P7)",
-      "statement": "The contamination ledger is append-only, and Welcome-delivery relays from before the change were never persisted so refresh_contamination_ledger cannot fold them in; the UI can therefore only warn about an overlap it knows of, and excluding relays can shrink the profile pool below its usable floor.",
+      "statement": "The contamination ledger is append-only, and Welcome-delivery relays from before the change were never persisted so refresh_contamination_ledger cannot fold them in; the UI can therefore only warn about an overlap it knows of, and excluding relays can shrink the profile pool below its usable floor. The relays Haven picks for a new circle from the location pool are recorded as CircleRouting at the create, before any Welcome is sent, as any circle's relays are; a pool entry never picked is never recorded. The pick's hard exclusion reads the ledger's non-CircleRouting rows, and the ledger keeps only the FIRST source a relay was recorded under, so a relay first recorded as a circle's that the user later put on — and then removed from — their inbox is excluded only while it stays on a list: best-effort.",
       "status": "accepted_deviation",
       "accepted_deviation_id": "P7",
       "assertion_arb_keys": [],
@@ -6768,9 +6924,9 @@
     {
       "id": "INV-O-NO-FIRST-PARTY-SERVER",
       "title": "Haven runs no server of its own for circle traffic",
-      "statement": "Publishes target exactly the user's own relay list and the live-sync engine connects only to configured relays, never a gossip-discovered one — there is no Haven-operated endpoint in the location path. This becomes false if any publisher or engine client acquires a hardcoded first-party destination.",
+      "statement": "Identity-plane publishes (the kind-10050 and kind-10002 lists, KeyPackages) target exactly the user's own stored relay lists; a circle's kind-445 goes to that circle's relays, which for a circle Haven creates without named relays are three third-party relays drawn from the curated location pool (PRODUCTION_LOCATION_RELAYS, INV-R-CIRCLE-RELAYS-FROM-LOCATION-POOL) and for any other circle the relays its creator chose; and the live-sync engine connects only to configured relays — each circle's relays and the inbox list — never a gossip-discovered one. There is no Haven-operated endpoint in the location path. This becomes false if any publisher, engine client or curated relay list acquires a first-party destination.",
       "status": "ratcheted",
-      "residual": "The 'you choose which ones to use' half is NOT true of the whole app: the eight profile relays and six discovery relays are contacted unconditionally and cannot be removed (INV-P-P3), the Blossom host is hardcoded to blossom.primal.net, and the tile provider is hardcoded to Stadia. Nothing fails if that gap widens. See the report's copy-defect section — onboardingValueProp2Summary's 'a relay network you choose' is contradicted by the code (usable_profile_relays() re-unions the curated pool); the Privacy-page paragraph that said so in the user's own words was removed on 2026-08-29, so nothing in the app corrects the onboarding claim any more.",
+      "residual": "Nothing proves that no curated list holds a Haven-operated relay: the location and profile pools' operators are recorded when the pools are vetted, not tested. And the user chooses none of: the eight profile relays and six discovery relays (contacted unconditionally, not removable, INV-P-P3), the three location-pool relays Haven picks for each circle it creates (no setting edits them), the Blossom host (hardcoded to blossom.primal.net) and the tile provider (hardcoded to Stadia). The copy claims no such choice: onboardingValueProp2Summary was reworded on 2026-10-31 from 'It runs on a relay network you choose.' — false once Haven picks a circle's relays — to 'No central server. It runs on independent relays.', and relaySettingsBackendCaption names no choice either. Nothing fails if a curated list grows.",
       "assertion_arb_keys": [
         "onboardingValueProp2Title",
         "onboardingValueProp2Summary",
@@ -6867,7 +7023,7 @@
     {
       "id": "INV-R-ROUTING-RELAYS-ON-PUBLIC-HOSTS",
       "title": "A circle's relays are never on a loopback, private or link-local host",
-      "statement": "Every path that takes a circle's relays from its routing component keeps only an entry another account's relay list may name (relay::manager::foreign_relay_dialable: wss to a host MDK's is_loopback_host and is_public_ip admit, a domain accepted unresolved apart from the loopback names; a debug build's ws loopback opt-in is the one exception): the join and every later re-derivation of the circle's own relay list (circle::manager::usable_relays) and the relays a commit or a location is frozen for (fanout_targets). A failing entry is dropped — the entry, never the list and never the component — and a circle none of whose entries pass has no relay. Haven never writes such an entry: a relay update naming one is refused (circle_relays) and so is a create whose caller named one (routing_of), in fixed text naming no relay and no host, before anything is recorded or staged; a create whose caller named no relays leaves such an entry out of the user's own inbox list it falls back to, and is refused only when none is left; no log line names the host. This becomes false if any of these paths goes back to judging the scheme alone.",
+      "statement": "Every path that takes a circle's relays from its routing component keeps only an entry another account's relay list may name (relay::manager::foreign_relay_dialable: wss to a host MDK's is_loopback_host and is_public_ip admit, a domain accepted unresolved apart from the loopback names; a debug build's ws loopback opt-in is the one exception): the join and every later re-derivation of the circle's own relay list (circle::manager::usable_relays) and the relays a commit or a location is frozen for (fanout_targets). A failing entry is dropped — the entry, never the list and never the component — and a circle none of whose entries pass has no relay. Haven never writes such an entry: a relay update naming one is refused (circle_relays) and so is a create whose caller named one (routing_of), in fixed text naming no relay and no host, before anything is recorded or staged; a create whose caller named no relays draws from the location pool (or its debug override) and leaves out every entry that fails the rule, and is refused (NoLocationRelay) only when no entry is left once that rule and the creator's own identity relays are applied; no log line names the host. This becomes false if any of these paths goes back to judging the scheme alone.",
       "status": "ratcheted",
       "residual": "A domain is accepted unresolved, so a name that resolves to a private address is still dialled, as it is for MDK's own reject_unsafe_relay_host (tracker T-GROUP-RELAY-HOSTS).",
       "assertion_arb_keys": [],
@@ -6888,6 +7044,10 @@
         {
           "file": "haven-core/src/nostr/mls/manager.rs",
           "symbol": "fanout_targets"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "symbol": "pick_circle_relays"
         }
       ],
       "tests": [
@@ -6900,8 +7060,12 @@
           "name": "haven_never_writes_a_routing_relay_on_a_non_public_host"
         },
         {
-          "file": "haven-core/tests/foreign_routing_entry_e2e.rs",
-          "name": "a_create_from_the_own_inbox_list_leaves_out_a_non_public_host"
+          "file": "haven-core/tests/location_pool_override.rs",
+          "name": "installed_override_reaches_the_pick_and_stays_subject_to_exclusion_and_the_host_rule"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "name": "pick_leaves_out_a_pool_entry_on_a_non_public_host"
         },
         {
           "file": "haven-core/src/nostr/mls/manager.rs",

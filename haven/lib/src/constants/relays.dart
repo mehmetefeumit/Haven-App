@@ -62,13 +62,13 @@ List<String> get defaultRelays {
 /// direct CRUD reads/writes, so this constant is the only source.
 const fallbackDefaultProfileRelays = <String>[
   'wss://purplepag.es',
-  'wss://nostr.mom',
+  'wss://nostr.sathoarder.com',
   'wss://offchain.pub',
   'wss://nostr.oxtr.dev',
-  'wss://nostr.bitcoiner.social',
-  'wss://yabu.me',
+  'wss://user.kindpag.es',
+  'wss://relay.coinos.io',
   'wss://soloco.nl',
-  'wss://nostr.data.haus',
+  'wss://relay.nostr.net',
 ];
 
 /// Compile-time fallback list of read-only discovery relay URLs.

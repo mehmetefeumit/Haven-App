@@ -485,6 +485,10 @@ Recorded here rather than papered over:
   contradicts the onboarding claim, and onboarding is where a user forms their
   threat model. Recorded as `ratcheted` with the three exceptions named. Owner
   decision: scope the copy to the location plane, or withdraw the claim.
+  *2026-10-31:* withdrawn. With the relay-plane segregation Haven picks a new
+  circle's relays from its location pool, so the claim stopped being backable
+  on the location plane too; `onboardingValueProp2Summary` now reads "No
+  central server. It runs on independent relays." (`INV-O-NO-FIRST-PARTY-SERVER`).
 * **`relay_settings_page.dart` shows raw English error text** from
   `_mapStorageError` while the add-relay sheet localizes the same three errors
   correctly. A UI defect, not a copy defect.

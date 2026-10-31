@@ -2051,6 +2051,7 @@ fn member_key_packages(
                 key_package_event,
                 inbox_relays: m.inbox_relays,
                 nip65_relays: m.nip65_relays,
+                nip65_write_relays: m.nip65_write_relays,
             })
         })
         .collect()
@@ -2252,8 +2253,8 @@ impl From<CoreInvitation> for InvitationFfi {
 ///
 /// A member's key package with their inbox relay list (FFI-friendly).
 ///
-/// Used when adding members to a circle. Relay resolution follows a
-/// cascading fallback: inbox (kind 10050) → NIP-65 (kind 10002) → defaults.
+/// Used when adding members to a circle. The Welcome goes to the inbox relays
+/// alone; all three lists are relays a new circle avoids.
 #[derive(Clone)]
 pub struct MemberKeyPackageFfi {
     /// The key package event JSON (kind 30443).
@@ -2263,6 +2264,9 @@ pub struct MemberKeyPackageFfi {
     /// Fallback relay URLs: the read-capable set of the NIP-65 relay list
     /// (kind 10002).
     pub nip65_relays: Vec<String>,
+    /// The write-capable set of the same NIP-65 list. With the other two, the
+    /// relays a create that names none avoids for the circle.
+    pub nip65_write_relays: Vec<String>,
     /// The account the key package was verified to belong to, as an npub: its
     /// signer, its MLS credential and the pubkey that was asked for, all one
     /// (`fetch_member_keypackage` sets it, never from the request). Passed back
@@ -2279,6 +2283,10 @@ impl std::fmt::Debug for MemberKeyPackageFfi {
             .field("key_package_json", &"<redacted>")
             .field("has_inbox_relays", &!self.inbox_relays.is_empty())
             .field("has_nip65_relays", &!self.nip65_relays.is_empty())
+            .field(
+                "has_nip65_write_relays",
+                &!self.nip65_write_relays.is_empty(),
+            )
             .finish()
     }
 }
@@ -6701,6 +6709,42 @@ pub fn set_profile_relays_for_test(_relays: Vec<String>) -> Result<(), String> {
     Err("set_profile_relays_for_test is disabled in release builds".to_string())
 }
 
+/// Overrides the location pool a new circle's relays are drawn from, for E2E
+/// tests.
+///
+/// Forwards to [`haven_core::circle::set_location_relays_for_test`] (debug
+/// builds) or returns an error in release builds. A hermetic lane installs a
+/// relay whose server differs from its inbox relay: the pick never takes a
+/// relay carrying the account's identity traffic, and the installed list is
+/// not exempt from that or from the public-host rule. There is no read
+/// accessor; `Ok` is the proof that this list, and nothing else, is the pool.
+///
+/// # Errors
+///
+/// * Returns an error if the override has already been installed (the
+///   underlying `OnceLock` is install-once per process).
+/// * Returns an error if `relays` is empty.
+/// * In release builds this function is unreachable; the sibling stub always
+///   returns an error.
+#[cfg(debug_assertions)]
+#[frb(sync)]
+pub fn set_location_relays_for_test(relays: Vec<String>) -> Result<(), String> {
+    haven_core::circle::set_location_relays_for_test(relays)
+}
+
+/// Release-build stub for [`set_location_relays_for_test`], gated at the FFI
+/// wrapper so a release binary carries no path that retargets circle relays.
+/// Mirrors [`set_profile_relays_for_test`]'s release stub.
+///
+/// # Errors
+///
+/// Always returns an error.
+#[cfg(not(debug_assertions))]
+#[frb(sync)]
+pub fn set_location_relays_for_test(_relays: Vec<String>) -> Result<(), String> {
+    Err("set_location_relays_for_test is disabled in release builds".to_string())
+}
+
 /// Opt in to plaintext `ws://` URLs targeting loopback / emulator-host
 /// aliases for hermetic E2E tests.
 ///
@@ -7218,6 +7262,8 @@ pub enum RefusalFfi {
     /// The circle's routing id is another circle's on this device too: of
     /// its commits, only what its leave needs is made until it is left.
     RoutingCollision,
+    /// The user's own relay lists cover every relay a new circle may use.
+    NoLocationRelay,
 }
 
 /// The typed refusal `error` is, if the UI must tell it apart.
@@ -7230,6 +7276,7 @@ fn refusal_of(error: &haven_core::circle::CircleError) -> Option<RefusalFfi> {
         E::EngineHeld => Some(RefusalFfi::EngineHeld),
         E::SendBlockedByDeparture => Some(RefusalFfi::SendBlockedByDeparture),
         E::RoutingCollision => Some(RefusalFfi::RoutingCollision),
+        E::NoLocationRelay => Some(RefusalFfi::NoLocationRelay),
         _ => None,
     }
 }
@@ -8308,7 +8355,9 @@ impl RelayManagerFfi {
     /// `foreground` is the caller's word that the app is in front of its
     /// user; a circle is created only then ([`RefusalFfi::ForegroundOnly`]).
     /// An invitee with no inbox relay a Welcome could reach refuses the
-    /// create before anything exists ([`RefusalFfi::MissingWelcomeRelays`]).
+    /// create before anything exists ([`RefusalFfi::MissingWelcomeRelays`]),
+    /// as does an empty `relays` the location pool cannot serve once the
+    /// user's own relays are left out ([`RefusalFfi::NoLocationRelay`]).
     // One Dart argument per Rust parameter (the FRB contract).
     #[allow(clippy::too_many_arguments)]
     pub async fn create_circle_driven(
@@ -9254,6 +9303,7 @@ impl RelayManagerFfi {
                     key_package_json,
                     inbox_relays,
                     nip65_relays: nip65.read,
+                    nip65_write_relays: nip65.write,
                 }))
             }
             None => Ok(None),
@@ -10591,6 +10641,16 @@ impl std::fmt::Debug for RelayManagerFfi {
 /// headless CI environments (Docker, SSH without a session bus).
 #[cfg(test)]
 mod tests {
+    /// A create the location pool cannot serve answers with the typed refusal
+    /// the UI maps to fixed copy, never with an error string (Security Rule 8).
+    #[test]
+    fn a_create_the_location_pool_cannot_serve_crosses_typed() {
+        assert_eq!(
+            super::refusal_of(&haven_core::circle::CircleError::NoLocationRelay),
+            Some(super::RefusalFfi::NoLocationRelay)
+        );
+    }
+
     /// Every refusal the caller of a driver entry must tell apart crosses as a
     /// typed field, from each entry that can meet it — the seal, the ingest
     /// and the leave — and every other error crosses as its redacted text,
@@ -11275,6 +11335,7 @@ mod tests {
             key_package_json: serde_json::to_string(&event).expect("serialize"),
             inbox_relays: Vec::new(),
             nip65_relays: Vec::new(),
+            nip65_write_relays: Vec::new(),
             author_npub,
         };
         let npub = |keys: &nostr::Keys| hex_to_npub(&keys.public_key().to_hex());
@@ -14852,6 +14913,7 @@ mod maintenance_real_ffi_tests {
                     key_package_event: bobs_package,
                     inbox_relays: relays.clone(),
                     nip65_relays: vec![],
+                    nip65_write_relays: vec![],
                 }],
                 &haven_core::circle::CircleConfig::new("Lure").with_relays(relays.clone()),
             )
@@ -21636,6 +21698,7 @@ mod member_directory_real_ffi_tests {
             .expect("serialize the key package event"),
             inbox_relays: vec![url.to_string()],
             nip65_relays: Vec::new(),
+            nip65_write_relays: Vec::new(),
             author_npub: crate::api::hex_to_npub(&keys.public_key().to_hex()),
         }
     }
@@ -22215,6 +22278,7 @@ mod log_anonymity_tests {
             key_package_json: TEXT.to_string(),
             inbox_relays: vec![RELAY.to_string(); relays],
             nip65_relays: vec![RELAY.to_string(); relays],
+            nip65_write_relays: vec![RELAY.to_string(); relays],
             author_npub: NPUB.to_string(),
         }
     }
@@ -23056,6 +23120,7 @@ mod driver_real_ffi_tests {
                     key_package_event: bob_package,
                     inbox_relays: vec![url.clone()],
                     nip65_relays: Vec::new(),
+                    nip65_write_relays: Vec::new(),
                 }],
                 &haven_core::circle::CircleConfig::new("Driven").with_relays(vec![url.clone()]),
             )
@@ -23084,6 +23149,7 @@ mod driver_real_ffi_tests {
             key_package_json: serde_json::to_string(event).expect("json"),
             inbox_relays: vec![url.clone()],
             nip65_relays: Vec::new(),
+            nip65_write_relays: Vec::new(),
             author_npub: hex_to_npub(&carol.public_key().to_hex()),
         };
         let carol_package = package_of(&carol, &url).await;

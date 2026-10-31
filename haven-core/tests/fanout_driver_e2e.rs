@@ -2021,6 +2021,7 @@ async fn an_invites_welcome_is_handed_over_by_its_commits_confirm_and_by_nothing
                     key_package_event: event,
                     inbox_relays: vec![JOINER_INBOX.to_string()],
                     nip65_relays: Vec::new(),
+                    nip65_write_relays: Vec::new(),
                 }],
                 STAGED_AT,
             )

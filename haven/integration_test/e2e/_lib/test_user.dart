@@ -28,6 +28,8 @@ import 'package:haven/src/utils/log_alias.dart'
     show LogAliasClass, logAliasHandle;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'test_relay.dart' show locationRelayUrl;
+
 /// Convenience: lowercase hex encoding of [bytes].
 String bytesToHex(List<int> bytes) =>
     bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
@@ -89,7 +91,7 @@ class TestUser {
   });
 
   /// Boots the global Rust bridge, installs the in-memory keyring and
-  /// the relay override, and prepares for [TestUser] construction.
+  /// the relay overrides, and prepares for [TestUser] construction.
   ///
   /// Call once per test process, before any `TestUser.bootstrap(...)` calls.
   /// The keyring install is idempotent; the relay overrides are install-once
@@ -97,16 +99,22 @@ class TestUser {
   /// `setDefaultRelaysForTest` — that is deliberate and must not be guarded
   /// away.
   ///
-  /// This is also the ONLY place the kind-0 (profile-plane) override may be
-  /// installed — enforced by `scripts/ci/check_profile_override_single_site.sh`.
-  /// A scenario that needs its own profile pool passes it as [profileRelays]
-  /// rather than calling `setProfileRelaysForTest` itself; two install sites
-  /// race on the same `OnceLock` and the loser throws (CI run 30753193231).
+  /// This is also the ONLY place the kind-0 (profile-plane) override and the
+  /// location-pool override may be installed — enforced by
+  /// `scripts/ci/check_profile_override_single_site.sh`. A scenario that
+  /// needs its own profile pool passes it as [profileRelays] rather than
+  /// calling `setProfileRelaysForTest` itself; two install sites race on the
+  /// same `OnceLock` and the loser throws (CI run 30753193231). The location
+  /// pool is always [locationRelayUrl] alone: a circle created without named
+  /// relays (the UI create) is placed there, a different authority from the
+  /// inbox relay so Rust's exclusion of the account's own relays leaves it
+  /// pickable.
   ///
   /// ## Privacy guard
   ///
-  /// Every URL in [relays] must resolve to a loopback / emulator-host
-  /// address. Public relays are rejected to prevent a misconfigured
+  /// Every URL in [relays], [profileRelays] and [locationRelayUrl] must
+  /// resolve to a loopback / emulator-host address. Public relays are
+  /// rejected to prevent a misconfigured
   /// `--dart-define=HAVEN_E2E_RELAY=wss://relay.damus.io` from publishing
   /// test seed pubkeys to a public relay. Override the guard by passing
   /// `allowPublicRelay: true`, only with explicit user authorization and
@@ -117,7 +125,8 @@ class TestUser {
     List<String>? profileRelays,
   }) async {
     if (!allowPublicRelay) {
-      // Both planes, not just the circle plane. `profileRelays` is installed
+      // Every plane, not just the circle plane: the location pool is where a
+      // UI-created circle's traffic goes. `profileRelays` is installed
       // verbatim below, so leaving it out of this guard would make the single
       // choke point the ONE place that does not check — and the profile plane
       // is the plane that PUBLISHES (kind-0 carrying a display name and a
@@ -127,7 +136,7 @@ class TestUser {
       // `_parseProfileRelayPool` also enforces >= PROFILE_POOL_MIN distinct
       // entries and disjointness from the circle relay); this is the floor
       // every caller gets for free.
-      final allUrls = <String>[...relays, ...?profileRelays];
+      final allUrls = <String>[...relays, ...?profileRelays, locationRelayUrl];
       for (var i = 0; i < allUrls.length; i++) {
         if (!_isLoopback(allUrls[i])) {
           throw StateError(
@@ -184,6 +193,9 @@ class TestUser {
     allowWsLoopbackForTest();
     // Redirect every relay-resolution call site to the hermetic strfry.
     setDefaultRelaysForTest(relays: relays);
+    // Without it every UI-created circle is picked from the real public
+    // location pool. Unguarded like the default override: install-once.
+    setLocationRelaysForTest(relays: const [locationRelayUrl]);
     // Redirect the PROFILE plane too, or it is not hermetic.
     //
     // The profile pool (`PRODUCTION_PROFILE_RELAYS`) is disjoint from the

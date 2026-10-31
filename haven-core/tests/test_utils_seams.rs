@@ -139,6 +139,7 @@ impl Device {
             key_package_event,
             inbox_relays: vec![GROUP_RELAY.to_string()],
             nip65_relays: vec![],
+            nip65_write_relays: vec![],
         }
     }
 }

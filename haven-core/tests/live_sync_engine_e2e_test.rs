@@ -127,6 +127,7 @@ async fn real_circle(
         key_package_event: kp_event,
         inbox_relays: vec!["wss://inbox.example.com".to_string()],
         nip65_relays: vec![],
+        nip65_write_relays: vec![],
     };
 
     let config = CircleConfig::new("Engine E2E Circle").with_relays(relays.to_vec());

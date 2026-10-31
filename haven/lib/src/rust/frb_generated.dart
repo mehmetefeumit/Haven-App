@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 1719174645;
+  int get rustContentHash => 1986744494;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -928,6 +928,8 @@ abstract class RustLibApi extends BaseApi {
   void crateApiSetDefaultRelaysForTest({required List<String> relays});
 
   void crateApiSetDiscoveryRelaysForTest({required List<String> relays});
+
+  void crateApiSetLocationRelaysForTest({required List<String> relays});
 
   void crateApiSetProfileRelaysForTest({required List<String> relays});
 
@@ -7823,7 +7825,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  void crateApiSetProfileRelaysForTest({required List<String> relays}) {
+  void crateApiSetLocationRelaysForTest({required List<String> relays}) {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
@@ -7833,6 +7835,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             generalizedFrbRustBinding,
             serializer,
             funcId: 182,
+          )!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiSetLocationRelaysForTestConstMeta,
+        argValues: [relays],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSetLocationRelaysForTestConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_location_relays_for_test",
+        argNames: ["relays"],
+      );
+
+  @override
+  void crateApiSetProfileRelaysForTest({required List<String> relays}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_list_String(relays, serializer);
+          return pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 183,
           )!;
         },
         codec: SseCodec(
@@ -7862,7 +7894,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 183,
+            funcId: 184,
           )!;
         },
         codec: SseCodec(
@@ -7892,7 +7924,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 184,
+            funcId: 185,
           )!;
         },
         codec: SseCodec(
@@ -7922,7 +7954,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 185,
+            funcId: 186,
           )!;
         },
         codec: SseCodec(
@@ -7958,7 +7990,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 186,
+            funcId: 187,
             port: port_,
           );
         },
@@ -7998,7 +8030,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 187,
+            funcId: 188,
             port: port_,
           );
         },
@@ -8028,7 +8060,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 188,
+            funcId: 189,
             port: port_,
           );
         },
@@ -8074,7 +8106,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 189,
+            funcId: 190,
             port: port_,
           );
         },
@@ -8140,7 +8172,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 190,
+            funcId: 191,
             port: port_,
           );
         },
@@ -8179,7 +8211,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 191,
+            funcId: 192,
             port: port_,
           );
         },
@@ -8206,7 +8238,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 192,
+            funcId: 193,
             port: port_,
           );
         },
@@ -8237,7 +8269,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 193,
+            funcId: 194,
             port: port_,
           );
         },
@@ -9471,13 +9503,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   MemberKeyPackageFfi dco_decode_member_key_package_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return MemberKeyPackageFfi(
       keyPackageJson: dco_decode_String(arr[0]),
       inboxRelays: dco_decode_list_String(arr[1]),
       nip65Relays: dco_decode_list_String(arr[2]),
-      authorNpub: dco_decode_String(arr[3]),
+      nip65WriteRelays: dco_decode_list_String(arr[3]),
+      authorNpub: dco_decode_String(arr[4]),
     );
   }
 
@@ -11693,11 +11726,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_keyPackageJson = sse_decode_String(deserializer);
     var var_inboxRelays = sse_decode_list_String(deserializer);
     var var_nip65Relays = sse_decode_list_String(deserializer);
+    var var_nip65WriteRelays = sse_decode_list_String(deserializer);
     var var_authorNpub = sse_decode_String(deserializer);
     return MemberKeyPackageFfi(
       keyPackageJson: var_keyPackageJson,
       inboxRelays: var_inboxRelays,
       nip65Relays: var_nip65Relays,
+      nip65WriteRelays: var_nip65WriteRelays,
       authorNpub: var_authorNpub,
     );
   }
@@ -14063,6 +14098,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.keyPackageJson, serializer);
     sse_encode_list_String(self.inboxRelays, serializer);
     sse_encode_list_String(self.nip65Relays, serializer);
+    sse_encode_list_String(self.nip65WriteRelays, serializer);
     sse_encode_String(self.authorNpub, serializer);
   }
 
@@ -16887,7 +16923,9 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   /// `foreground` is the caller's word that the app is in front of its
   /// user; a circle is created only then ([`RefusalFfi::ForegroundOnly`]).
   /// An invitee with no inbox relay a Welcome could reach refuses the
-  /// create before anything exists ([`RefusalFfi::MissingWelcomeRelays`]).
+  /// create before anything exists ([`RefusalFfi::MissingWelcomeRelays`]),
+  /// as does an empty `relays` the location pool cannot serve once the
+  /// user's own relays are left out ([`RefusalFfi::NoLocationRelay`]).
   Future<CircleCreationOutcomeFfi> createCircleDriven({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,

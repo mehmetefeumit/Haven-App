@@ -19,9 +19,23 @@
 //! The pool's self-contained properties (wss-only, unique, exclusion filtering,
 //! underflow fail-closed) are unit-tested in `src/profile/relay_pool.rs`.
 //!
+//! The location pool (`PRODUCTION_LOCATION_RELAYS`, the relays a new circle is
+//! drawn from) is held apart from all three other planes here too, for the same
+//! reason seen from the other side: a location relay that also carried a
+//! member's identity or profile traffic could join a circle's routing id to
+//! that member's pubkey.
+//!
+//! # Registrable domains, not URLs
+//!
+//! Disjointness is asserted on the last two DNS labels of each host. Two hosts
+//! under one domain are one operator as far as code can tell, so a URL-level
+//! comparison would pass `relay.example.com` beside `nos.example.com` while one
+//! party saw both planes. Over-strict for a multi-label public suffix
+//! (`co.uk`), which can only ever turn a test red, never green.
+//!
 //! # Constants versus sockets
 //!
-//! The four tests above the divider compare relay *constants*, which is a
+//! The tests above the divider compare relay *constants*, which is a
 //! statement about how the pool is configured. It is not a statement about what
 //! the fetch path actually dials — a fetch that ignored the pool would leave
 //! them all green. `profile_plane_never_touches_circle_relays_e2e` closes that
@@ -33,7 +47,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::collections::BTreeSet;
+
 use haven_core::circle::types::PRODUCTION_DEFAULT_RELAYS;
+use haven_core::circle::PRODUCTION_LOCATION_RELAYS;
 use haven_core::profile::{
     assigned_relay, build_metadata_event, fetch_profiles_assigned, production_profile_relays,
     publish_metadata, resolve_profile_pool, ProfileMetadata, ProfileRelaySalt, PROFILE_POOL_MIN,
@@ -49,6 +66,31 @@ use nostr_relay_builder::builder::RelayBuilder;
 use nostr_relay_builder::prelude::{PolicyResult, QueryPolicy};
 use nostr_relay_builder::LocalRelay;
 
+/// The last two DNS labels of `url`'s host.
+fn registrable_domain(url: &str) -> String {
+    let parsed = url::Url::parse(url).expect("a curated relay is a URL");
+    let host = parsed
+        .host_str()
+        .expect("a curated relay names a host")
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let mut labels: Vec<&str> = host.rsplit('.').take(2).collect();
+    labels.reverse();
+    labels.join(".")
+}
+
+fn registrable_domains<'a>(urls: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
+    urls.into_iter().map(registrable_domain).collect()
+}
+
+/// Whether `left` and `right` share a registrable domain.
+fn share_a_domain<'a>(
+    left: impl IntoIterator<Item = &'a str>,
+    right: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    !registrable_domains(left).is_disjoint(&registrable_domains(right))
+}
+
 /// The account-seed relays receive kind-445 and kind-1059 for a
 /// default-configured user. Any overlap with the profile pool means that user's
 /// profile reads land on a relay already holding their encrypted location
@@ -57,13 +99,13 @@ use nostr_relay_builder::LocalRelay;
 fn pool_is_disjoint_from_account_seed_defaults() {
     let pool = production_profile_relays();
     assert!(!pool.is_empty(), "pool must not be empty (non-vacuity)");
-    for seed in PRODUCTION_DEFAULT_RELAYS {
-        let normalized = normalize_relay_url(seed).expect("seed relays are valid URLs");
-        assert!(
-            !pool.contains(&normalized),
-            "profile pool contains account-seed relay {seed} — plane separation broken",
-        );
-    }
+    assert!(
+        !share_a_domain(
+            pool.iter().map(String::as_str),
+            PRODUCTION_DEFAULT_RELAYS.iter().copied(),
+        ),
+        "profile pool shares a domain with the account seed — plane separation broken",
+    );
 }
 
 /// The discovery plane is a strict superset of the account seed (pinned by
@@ -74,17 +116,59 @@ fn pool_is_disjoint_from_account_seed_defaults() {
 fn pool_is_disjoint_from_discovery_plane() {
     let pool = production_profile_relays();
     assert!(!pool.is_empty(), "pool must not be empty (non-vacuity)");
-    for relay in PRODUCTION_DISCOVERY_RELAYS {
-        let normalized = normalize_relay_url(relay).expect("discovery relays are valid URLs");
-        assert!(
-            !pool.contains(&normalized),
-            "profile pool contains discovery relay {relay} — plane separation broken",
-        );
-    }
+    assert!(
+        !share_a_domain(
+            pool.iter().map(String::as_str),
+            PRODUCTION_DISCOVERY_RELAYS.iter().copied(),
+        ),
+        "profile pool shares a domain with the discovery plane — plane separation broken",
+    );
 }
 
-/// Guards the anti-vacuity precondition of the two tests above: if the seed and
-/// discovery sets were ever emptied, disjointness would hold trivially and stop
+/// A location relay sees a circle's `#h` traffic; the account seed and the
+/// discovery plane see each member's pubkey. One domain on both sides is one
+/// party holding both halves of the join.
+#[test]
+fn location_pool_is_host_disjoint_from_account_seed_and_discovery() {
+    assert!(!PRODUCTION_LOCATION_RELAYS.is_empty(), "non-vacuity");
+    let identity_planes = PRODUCTION_DEFAULT_RELAYS
+        .iter()
+        .chain(PRODUCTION_DISCOVERY_RELAYS)
+        .copied();
+    assert!(
+        !share_a_domain(PRODUCTION_LOCATION_RELAYS.iter().copied(), identity_planes),
+        "location pool shares a domain with the account seed or discovery plane",
+    );
+}
+
+/// A kind 0 is authored by the member's pubkey, so the profile plane is an
+/// identity plane to a location relay.
+#[test]
+fn location_pool_is_host_disjoint_from_profile_pool() {
+    assert!(
+        !share_a_domain(
+            PRODUCTION_LOCATION_RELAYS.iter().copied(),
+            production_profile_relays().iter().map(String::as_str),
+        ),
+        "location pool shares a domain with the profile pool",
+    );
+}
+
+/// A circle draws three distinct relays; two entries under one domain would let
+/// one party hold two of a circle's three relays, and the pool's
+/// one-slot-per-operator rule, as far as code can see it, would be broken.
+#[test]
+fn location_pool_entries_have_distinct_registrable_domains() {
+    let domains = registrable_domains(PRODUCTION_LOCATION_RELAYS.iter().copied());
+    assert_eq!(
+        domains.len(),
+        PRODUCTION_LOCATION_RELAYS.len(),
+        "two location pool entries share a registrable domain",
+    );
+}
+
+/// Guards the anti-vacuity precondition of the disjointness tests above: if a
+/// reference set were ever emptied, disjointness would hold trivially and stop
 /// proving anything.
 #[test]
 fn contaminated_reference_sets_are_non_empty() {
@@ -95,6 +179,10 @@ fn contaminated_reference_sets_are_non_empty() {
     assert!(
         !PRODUCTION_DISCOVERY_RELAYS.is_empty(),
         "discovery plane empty — the disjointness tests would pass vacuously",
+    );
+    assert!(
+        !PRODUCTION_LOCATION_RELAYS.is_empty(),
+        "location pool empty — the disjointness tests would pass vacuously",
     );
 }
 

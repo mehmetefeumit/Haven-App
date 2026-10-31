@@ -29,6 +29,7 @@ List<KeyPackageData> _packages() => [
       pubkey: author,
       eventJson: '{"kind":30443}',
       relays: const ['wss://relay.example.com'],
+      nip65WriteRelays: const [],
     ),
 ];
 
@@ -86,6 +87,7 @@ class _VerifyingRelayManager implements RelayManagerFfi {
       keyPackageJson: '{"kind":30443}',
       inboxRelays: const ['wss://inbox.example.com'],
       nip65Relays: const ['wss://nip65.example.com'],
+      nip65WriteRelays: const ['wss://nip65-write.example.com'],
       authorNpub: verifiedAuthor,
     );
   }
@@ -179,6 +181,7 @@ void main() {
           keyPackageJson: p.eventJson,
           inboxRelays: p.relays,
           nip65Relays: p.nip65Relays,
+          nip65WriteRelays: p.nip65WriteRelays,
           authorNpub: p.pubkey,
         ),
     ];
@@ -208,6 +211,48 @@ void main() {
     final fetched = await relay.fetchKeyPackage(_authors.last);
 
     expect(fetched?.pubkey, _authors.first);
+  });
+
+  test("a fetched key package carries the invitee's three relay lists, and "
+      'each reaches the driver on a create and on an add', () async {
+    final fetched = await NostrRelayService.withInjectedManager(
+      _VerifyingRelayManager(_authors.first),
+      circleManagerFactory: () async => _CapturingManager(),
+    ).fetchKeyPackage(_authors.first);
+    expect(fetched?.relays, ['wss://inbox.example.com']);
+    expect(fetched?.nip65Relays, ['wss://nip65.example.com']);
+    expect(
+      fetched?.nip65WriteRelays,
+      ['wss://nip65-write.example.com'],
+      reason:
+          'the write set is one of the lists a picked circle avoids; '
+          'dropped here, nothing later can restore it',
+    );
+
+    final driver = FakeChangeDriver();
+    final service = NostrCircleService.withInjectedManager(
+      relayService: MockRelayService(),
+      injectedManager: _CapturingManager(),
+      changeDriver: driver,
+    );
+    await service.createCircle(
+      identitySecretBytes: List<int>.filled(32, 7),
+      memberKeyPackages: [fetched!],
+      name: 'New Circle',
+      circleType: CircleType.locationSharing,
+    );
+    await service.addMember(
+      mlsGroupId: const [9, 9, 9],
+      memberKeyPackages: [fetched],
+    );
+
+    for (final members in [driver.created!.members, driver.members!]) {
+      expect(members.single.inboxRelays, ['wss://inbox.example.com']);
+      expect(members.single.nip65Relays, ['wss://nip65.example.com']);
+      expect(members.single.nip65WriteRelays, [
+        'wss://nip65-write.example.com',
+      ]);
+    }
   });
 
   test("a key package is fetched for the inviter's own circle manager and "

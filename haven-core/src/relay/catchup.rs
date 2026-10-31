@@ -4074,6 +4074,7 @@ mod tests {
             key_package_event: event,
             inbox_relays: relays,
             nip65_relays: vec![],
+            nip65_write_relays: vec![],
         }
     }
 
@@ -4105,6 +4106,7 @@ mod tests {
             key_package_event: bob_kp_event,
             inbox_relays: relays.clone(),
             nip65_relays: vec![],
+            nip65_write_relays: vec![],
         };
 
         let config = CircleConfig::new("Test Circle").with_relays(relays.clone());

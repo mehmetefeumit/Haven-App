@@ -74,6 +74,7 @@ KeyPackageData _makeKeyPackage(String pubkey) => KeyPackageData(
   pubkey: pubkey,
   eventJson: '{"kind":30443}',
   relays: const ['wss://relay.example.com'],
+  nip65WriteRelays: const [],
 );
 
 /// Builds the test app with a Material 2 theme to avoid the ink_sparkle

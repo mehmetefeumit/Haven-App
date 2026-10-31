@@ -569,6 +569,7 @@ async fn a_stall_survives_a_restart_and_a_join_ends_it() {
                 key_package_event: package,
                 inbox_relays: vec!["wss://member-inbox.example.com".to_string()],
                 nip65_relays: Vec::new(),
+                nip65_write_relays: Vec::new(),
             }],
         )
         .await

@@ -401,6 +401,7 @@ void main() {
         pubkey: npub,
         eventJson: '{"kind":30443,"pubkey":"$hex"}',
         relays: const [],
+        nip65WriteRelays: const [],
       );
 
       test('names, in the order the core gave, each invitee whose founding '
@@ -435,6 +436,7 @@ void main() {
                 pubkey: 'npub1a',
                 eventJson: 'not json',
                 relays: [],
+                nip65WriteRelays: [],
               ),
             ],
           ),
@@ -497,6 +499,7 @@ void main() {
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
           eventJson: '{"kind":30443,"content":"key_package_bytes"}',
           relays: ['wss://relay.example.com'],
+          nip65WriteRelays: [],
         );
 
         expect(keyPackage.pubkey.length, 64);
@@ -510,6 +513,7 @@ void main() {
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
           eventJson: '{"kind":30443}',
           relays: ['wss://relay.example.com'],
+          nip65WriteRelays: [],
         );
 
         // Kind 30443 is the Marmot v2 addressable KeyPackage (legacy 443
@@ -523,6 +527,7 @@ void main() {
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
           eventJson: '{"kind":30443}',
           relays: ['wss://relay.example.com'],
+          nip65WriteRelays: [],
         );
 
         expect(keyPackage.nip65Relays, isEmpty);
@@ -534,11 +539,13 @@ void main() {
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
           eventJson: '{"kind":30443}',
           relays: ['wss://inbox.example.com'],
+          nip65WriteRelays: ['wss://nip65-write.example.com'],
           nip65Relays: ['wss://nip65.example.com'],
         );
 
         expect(keyPackage.relays, ['wss://inbox.example.com']);
         expect(keyPackage.nip65Relays, ['wss://nip65.example.com']);
+        expect(keyPackage.nip65WriteRelays, ['wss://nip65-write.example.com']);
       });
     });
 
@@ -1321,12 +1328,94 @@ void _publishResolutionTests() {
     Future<CircleCreationResult> create(
       NostrCircleService service, {
       List<KeyPackageData> invited = const [],
+      List<String>? relays,
     }) => service.createCircle(
       identitySecretBytes: List<int>.filled(32, 7),
       memberKeyPackages: invited,
       name: 'Founded',
       circleType: CircleType.locationSharing,
+      relays: relays,
     );
+
+    // Two invitees whose inbox relays see their pubkeys: the circle's relays
+    // must never be drawn from them.
+    final invitees = [
+      KeyPackageData(
+        pubkey: 'npub1a',
+        eventJson: '{"kind":30443,"pubkey":"${'aa' * 32}"}',
+        relays: const ['wss://inbox-a.example'],
+        nip65WriteRelays: const ['wss://nip65-write-a.example'],
+        nip65Relays: const ['wss://nip65-a.example'],
+      ),
+      KeyPackageData(
+        pubkey: 'npub1b',
+        eventJson: '{"kind":30443,"pubkey":"${'bb' * 32}"}',
+        relays: const ['wss://inbox-b.example'],
+        nip65WriteRelays: const ['wss://nip65-write-b.example'],
+      ),
+    ];
+
+    test("a create that names no relays never makes the invitees' inbox "
+        "relays the circle's, and still routes each Welcome to them", () async {
+      final t = build();
+      await create(t.service, invited: invitees);
+
+      expect(
+        t.driver.created?.relays,
+        isEmpty,
+        reason: 'empty is the request for Rust to pick from the location pool',
+      );
+      expect(
+        t.driver.created?.members.map((m) => m.inboxRelays).toList(),
+        [
+          ['wss://inbox-a.example'],
+          ['wss://inbox-b.example'],
+        ],
+      );
+      expect(
+        t.driver.created?.members.map((m) => m.nip65Relays).toList(),
+        [
+          ['wss://nip65-a.example'],
+          <String>[],
+        ],
+      );
+      expect(
+        t.driver.created?.members.map((m) => m.nip65WriteRelays).toList(),
+        [
+          ['wss://nip65-write-a.example'],
+          ['wss://nip65-write-b.example'],
+        ],
+        reason:
+            'the write set is one of the lists a picked circle avoids; '
+            'dropped here, Rust could place the circle on a relay an invitee '
+            'writes to while another was free',
+      );
+    });
+
+    test('named relays reach the driver verbatim, not merged with the '
+        "invitees' inbox relays", () async {
+      final t = build();
+      await create(
+        t.service,
+        invited: invitees,
+        relays: const ['wss://named-2.example', 'wss://named-1.example'],
+      );
+
+      expect(t.driver.created?.relays, [
+        'wss://named-2.example',
+        'wss://named-1.example',
+      ]);
+    });
+
+    test('an empty relays list is the same request as none', () async {
+      final omitted = build();
+      await create(omitted.service, invited: invitees);
+      final empty = build();
+      await create(empty.service, invited: invitees, relays: const []);
+
+      expect(omitted.driver.created?.relays, isEmpty);
+      expect(empty.driver.created?.relays, isEmpty);
+    });
 
     test("a create is the driver's create: the circle it founded and its "
         'Welcome counts, the owed invitees named by npub', () async {
@@ -1346,11 +1435,13 @@ void _publishResolutionTests() {
             pubkey: 'npub1a',
             eventJson: '{"kind":30443,"pubkey":"${'aa' * 32}"}',
             relays: const ['wss://inbox-a.example'],
+            nip65WriteRelays: const [],
           ),
           KeyPackageData(
             pubkey: 'npub1b',
             eventJson: '{"kind":30443,"pubkey":"${'bb' * 32}"}',
             relays: const ['wss://inbox-b.example'],
+            nip65WriteRelays: const [],
           ),
         ],
       );
@@ -1393,28 +1484,40 @@ void _publishResolutionTests() {
                 pubkey: 'npub1planted',
                 eventJson: '{"kind":30443,"pubkey":"${'cd' * 32}"}',
                 relays: const ['wss://planted.example'],
+                nip65WriteRelays: const [],
               ),
             ],
             name: 'Planted Circle Name',
             circleType: CircleType.locationSharing,
           ),
           throwsA(
-            // An invitee no Welcome can reach is its own type, so the page
-            // names the invitee's remedy instead of "try again"; by variant,
-            // never by text (Rule 8).
-            refusal == RefusalFfi.missingWelcomeRelays
-                ? isA<CircleInviteesUnreachableException>()
-                : isA<CircleServiceException>()
-                      .having(
-                        (e) => e.message,
-                        'message',
-                        'Failed to create circle',
-                      )
-                      .having(
-                        (e) => e,
-                        'type',
-                        isNot(isA<CircleInviteesUnreachableException>()),
+            // An invitee no Welcome can reach, and a location pool the
+            // creator's own lists cover, are each their own type, so the page
+            // shows their own copy instead of "try again"; by variant, never
+            // by text (Rule 8).
+            switch (refusal) {
+              RefusalFfi.missingWelcomeRelays =>
+                isA<CircleInviteesUnreachableException>(),
+              RefusalFfi.noLocationRelay =>
+                isA<CircleNoLocationRelayException>(),
+              _ =>
+                isA<CircleServiceException>()
+                    .having(
+                      (e) => e.message,
+                      'message',
+                      'Failed to create circle',
+                    )
+                    .having(
+                      (e) => e,
+                      'type',
+                      isNot(
+                        anyOf(
+                          isA<CircleInviteesUnreachableException>(),
+                          isA<CircleNoLocationRelayException>(),
+                        ),
                       ),
+                    ),
+            },
           ),
           reason: refusal.name,
         );
@@ -1423,6 +1526,7 @@ void _publishResolutionTests() {
         ..assertContains(
           '[Circle] Create refused: RefusalFfi.missingWelcomeRelays',
         )
+        ..assertContains('[Circle] Create refused: RefusalFfi.noLocationRelay')
         ..assertNoNeedles([
           'cd' * 32,
           'npub1planted',
@@ -1442,7 +1546,12 @@ void _publishResolutionTests() {
         t.service.addMember(
           mlsGroupId: groupId,
           memberKeyPackages: const [
-            KeyPackageData(pubkey: 'npub1x', eventJson: '{}', relays: []),
+            KeyPackageData(
+              pubkey: 'npub1x',
+              eventJson: '{}',
+              relays: [],
+              nip65WriteRelays: [],
+            ),
           ],
         ),
         throwsA(isA<CircleInviteesUnreachableException>()),
@@ -1454,7 +1563,12 @@ void _publishResolutionTests() {
       final other = await t.service.addMember(
         mlsGroupId: groupId,
         memberKeyPackages: const [
-          KeyPackageData(pubkey: 'npub1x', eventJson: '{}', relays: []),
+          KeyPackageData(
+            pubkey: 'npub1x',
+            eventJson: '{}',
+            relays: [],
+            nip65WriteRelays: [],
+          ),
         ],
       );
       expect(other.delivery, ChangeDelivery.rejected);

@@ -309,6 +309,7 @@ async fn a_disbanded_circles_leftovers_are_cleared_at_the_next_open() {
         .await,
         inbox_relays: inbox,
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     };
     let transport = ScriptedFanout::default();
     let outbox = Recorder::acking(false);

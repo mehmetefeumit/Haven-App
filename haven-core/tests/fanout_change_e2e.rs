@@ -438,6 +438,7 @@ async fn an_invitee() -> (CircleMember, MemberKeyPackage) {
             key_package_event,
             inbox_relays: inbox,
             nip65_relays: Vec::new(),
+            nip65_write_relays: Vec::new(),
         },
     )
 }
@@ -2118,6 +2119,7 @@ async fn a_member_invited_back_is_not_removed_by_a_removal_queued_before_they_le
         key_package_event: create_key_package_event(carol.session(), &carol.keys, &inbox).await,
         inbox_relays: inbox,
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     };
     let invited = through(&transport, &outbox, &clock)
         .add_members(&bob.circle, &group, &[package])
@@ -3205,6 +3207,7 @@ async fn one_person_invited_to_two_circles_is_sent_a_welcome_for_each() {
                 .await,
             inbox_relays: inbox.clone(),
             nip65_relays: Vec::new(),
+            nip65_write_relays: Vec::new(),
         };
         let outcome = changes
             .add_members(&admin.circle, group, &[package])
@@ -4638,6 +4641,7 @@ async fn welcome_never_sent_to_sender_inbox() {
         .await,
         inbox_relays: Vec::new(),
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     };
     let roster_before = roster(&admin, &group).await;
     let refused = changes.add_members(&admin.circle, &group, &[package]).await;
@@ -5140,6 +5144,7 @@ async fn a_welcome_is_not_sent_to_its_next_relay_once_its_commit_is_set_aside() 
         key_package_event: create_key_package_event(invitee.session(), &invitee.keys, &inbox).await,
         inbox_relays: inbox,
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     };
     let epoch = admin
         .session()
@@ -5391,6 +5396,7 @@ async fn an_invite_that_stages_nothing_leaves_an_earlier_invites_route_as_it_was
         .await,
         inbox_relays: vec![INBOX_TWO.to_string()],
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     };
     let second = changes.add_members(&admin.circle, &group, &[again]).await;
     assert!(

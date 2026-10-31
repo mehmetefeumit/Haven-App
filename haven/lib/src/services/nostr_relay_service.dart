@@ -466,6 +466,7 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
         eventJson: result.keyPackageJson,
         relays: result.inboxRelays,
         nip65Relays: result.nip65Relays,
+        nip65WriteRelays: result.nip65WriteRelays,
       );
     } on Object catch (e) {
       debugPrint('Failed to fetch KeyPackage: ${e.runtimeType}');

@@ -55,6 +55,17 @@ class CircleInviteesUnreachableException extends CircleServiceException {
     : super('An invitee cannot receive invitations');
 }
 
+/// Thrown when a create that names no relays is refused because the user's
+/// own relay lists cover every relay a new circle may use: nothing was made.
+///
+/// Its own type because no retry or remedy the user can apply changes that,
+/// so the page shows a definitive refusal, not "try again".
+class CircleNoLocationRelayException extends CircleServiceException {
+  /// Creates a [CircleNoLocationRelayException].
+  const CircleNoLocationRelayException()
+    : super('No relay is available for a new circle');
+}
+
 /// Thrown when an invitation can never be accepted on this device: its
 /// Welcome was made for a KeyPackage this device no longer holds (the storage
 /// reset, or a replaced package), is invalid, or was already processed.
@@ -802,9 +813,18 @@ abstract class CircleService {
   /// Returns a [CircleCreationResult] with the created circle and how many
   /// Welcomes were acknowledged during the call.
   ///
+  /// [relays] are taken verbatim when named (nothing in the app names them
+  /// today; a caller that must — a future customisation screen — passes them
+  /// through the driver). Omitted or empty, Rust picks the circle's relays from
+  /// Haven's location relay pool: never one the creator's identity uses, and
+  /// one an invitee lists only when fewer than three others remain.
+  ///
   /// Throws [CircleRosterFullException] when the account already holds
   /// `kMaxCirclesPerAccount` circles — checked before anything is staged, so a
   /// refusal leaves no MLS group and nothing on the wire. Throws
+  /// [CircleInviteesUnreachableException] when an invitee has no inbox relay,
+  /// [CircleNoLocationRelayException] when, [relays] empty, every relay of
+  /// the location pool is one the creator's identity uses or once used, and
   /// [CircleServiceException] if creation fails.
   Future<CircleCreationResult> createCircle({
     required List<int> identitySecretBytes,
@@ -1346,6 +1366,7 @@ class KeyPackageData {
     required this.pubkey,
     required this.eventJson,
     required this.relays,
+    required this.nip65WriteRelays,
     this.nip65Relays = const [],
   });
 
@@ -1359,10 +1380,16 @@ class KeyPackageData {
   /// `add_member_page.dart` / `create_circle_page.dart`).
   final String eventJson;
 
-  /// Inbox relay URLs for Welcome delivery (kind 10050).
+  /// Inbox relay URLs for Welcome delivery (kind 10050). Not used to choose
+  /// the circle's relays: they see this member's pubkey, so a pool relay this
+  /// member also lists is drawn only when fewer than three others remain.
   final List<String> relays;
 
   /// Fallback NIP-65 relay URLs (kind 10002), used when inbox relays
   /// are unavailable for Welcome delivery.
   final List<String> nip65Relays;
+
+  /// The write-capable set of the same NIP-65 list. Required: with the other
+  /// two, the relays a create that names none avoids for the circle.
+  final List<String> nip65WriteRelays;
 }

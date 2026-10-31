@@ -93,6 +93,14 @@ jobs:
     timeout-minutes: 360
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      # The location relay pool's one entry, where the UI-created circle is
+      # placed: the SAME strfry published on a second port (start-strfry.sh,
+      # every iteration's reset included). It must be another authority than
+      # HAVEN_E2E_RELAY, which is the account's inbox relay and so never
+      # picked, yet hold the same events, because the harness reads that
+      # circle's kind-445s through 7777.
+      HAVEN_E2E_LOCATION_RELAY: ws://10.0.2.2:7789
+      STRFRY_ALIAS_PORT: "7789"
       # Receive path, DECLARED — and this lane is the one where the inherited
       # value was actively wrong (CI_HARDENING_BACKLOG.md A7).
       #
@@ -222,6 +230,7 @@ jobs:
           ../scripts/ci/build_apk_with_retry.sh android-x64 \
             --target=integration_test/e2e/e2e_combined.dart \
             --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+            --dart-define=HAVEN_E2E_LOCATION_RELAY="${HAVEN_E2E_LOCATION_RELAY}" \
             --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}"
           cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk
           ls -lh /tmp/scenario.apk

@@ -70,6 +70,7 @@ async fn mint() -> (Member, MemberKeyPackage) {
             key_package_event,
             inbox_relays: vec!["wss://member-inbox.example.com".to_string()],
             nip65_relays: vec![],
+            nip65_write_relays: vec![],
         },
     )
 }

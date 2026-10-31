@@ -113,6 +113,7 @@ KeyPackageData _invitee(String pubkey) => KeyPackageData(
   pubkey: pubkey,
   eventJson: '{"kind":30443,"pubkey":"$pubkey"}',
   relays: const ['wss://relay.example.com'],
+  nip65WriteRelays: const [],
 );
 
 /// Provider overrides shared by every "create flow" test.
@@ -1062,6 +1063,32 @@ void main() {
       handle.dispose();
     });
 
+    testWidgets('a pool the own relay lists cover gets its own fixed copy as '
+        'a live region, never the generic error or the raw one', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      final capture = LogCapture.install();
+      final l10n = await pumpFailedCreate(
+        tester,
+        mockCircle: _NoLocationRelayCircleService(),
+      );
+      expectAnnounced(tester, l10n.circleCreateRefusedNoLocationRelay);
+      expect(find.text(l10n.nameCircleCreateError), findsNothing);
+      expect(
+        find.textContaining(
+          const CircleNoLocationRelayException().message,
+        ),
+        findsNothing,
+        reason: 'Rule 8: the exception text never reaches the screen',
+      );
+      capture
+        ..restore()
+        ..assertContains('[CircleCreate] no location relay')
+        ..assertNoNeedles(['Announce me']);
+      handle.dispose();
+    });
+
     testWidgets('the roster-bound refusal is a live region', (tester) async {
       // Disposed explicitly, not via addTearDown: the end-of-test
       // semantics-handle verification runs before tearDowns.
@@ -1150,6 +1177,23 @@ class _UnreachableInviteeCircleService extends MockCircleService {
   }) async {
     methodCalls.add('createCircle');
     throw const CircleInviteesUnreachableException();
+  }
+}
+
+/// A circle service whose create the core refuses: the user's own relay lists
+/// cover every relay a new circle may use.
+class _NoLocationRelayCircleService extends MockCircleService {
+  @override
+  Future<CircleCreationResult> createCircle({
+    required List<int> identitySecretBytes,
+    required List<KeyPackageData> memberKeyPackages,
+    required String name,
+    required CircleType circleType,
+    String? description,
+    List<String>? relays,
+  }) async {
+    methodCalls.add('createCircle');
+    throw const CircleNoLocationRelayException();
   }
 }
 

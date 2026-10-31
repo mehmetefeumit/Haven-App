@@ -72,6 +72,7 @@ async fn build_circle(num_members: usize) -> BuiltCircle {
             key_package_event: kp_event,
             inbox_relays: vec!["wss://member-inbox.example.com".to_string()],
             nip65_relays: vec![],
+            nip65_write_relays: vec![],
         });
         members.push(mgr);
         member_keys.push(keys);

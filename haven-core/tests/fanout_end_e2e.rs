@@ -2059,6 +2059,7 @@ async fn a_confirm_that_failed_after_the_durable_merge_is_finished_by_the_plain_
                 key_package_event: event,
                 inbox_relays: vec!["wss://joiner-inbox.example.com".to_string()],
                 nip65_relays: Vec::new(),
+                nip65_write_relays: Vec::new(),
             }],
             STAGED_AT,
         )

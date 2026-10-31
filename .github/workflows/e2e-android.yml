@@ -91,6 +91,14 @@ jobs:
       # flows, the journal is empty-but-valid, and all three oracles then
       # certify nothing. scripts/ci/check_wire_oracle_lane_reachable.sh pins it.
       HAVEN_E2E_RELAY: ws://10.0.2.2:7788
+      # The location relay pool's one entry, where the UI-created circle is
+      # placed: the proxy's SECOND route (7789), forwarding to the SAME relay.
+      # It must be another authority than HAVEN_E2E_RELAY, which is the
+      # account's inbox relay and so never picked, yet hold the same events,
+      # because the harness reads that circle's kind-445s through 7788 and C5.1
+      # flags groups whose kind-445s reach disjoint upstreams. Through the
+      # proxy, so the oracles see that circle's traffic too.
+      HAVEN_E2E_LOCATION_RELAY: ws://10.0.2.2:7789
       FLUTTER_SUPPRESS_ANALYTICS: "true"
       # The runtime log scanner is wired into THIS lane (the one that runs the
       # recording proxy, whose control channel carries the run's declared
@@ -241,6 +249,7 @@ jobs:
           ../scripts/ci/build_apk_with_retry.sh android-x64 \
             --target=integration_test/e2e/e2e_combined.dart \
             --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+            --dart-define=HAVEN_E2E_LOCATION_RELAY="${HAVEN_E2E_LOCATION_RELAY}" \
             --dart-define=HAVEN_LIVE_SYNC=${{ inputs.live_sync }} \
             --dart-define=HAVEN_E2E_NO_BACKGROUND=true \
             --dart-define=HAVEN_WIRE_SENTINEL="${WIRE_SENTINEL}"
@@ -344,7 +353,10 @@ jobs:
       # arguments below are derived from it rather than restating it — and
       # check_wire_oracle_lane_reachable.sh reads every OTHER literal `ws://`
       # in this job as a relay URL that must name the proxy's LISTEN port,
-      # which is precisely the mistake a second copy would look like.
+      # which is precisely the mistake a second copy would look like. The
+      # routing table repeats it because BOTH listen ports forward there (the
+      # second is HAVEN_E2E_LOCATION_RELAY's); the guard reads the table's
+      # listen ports, so the table must stay literal.
       #
       # The journal path is CLAIMED by the instance in a sidecar next to its
       # pid file rather than chosen here: `HAVEN_WIRE_JOURNAL` overrides the
@@ -364,7 +376,7 @@ jobs:
           set -euo pipefail
           mkdir -m 0700 -p /tmp/haven-soak/needles
           rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
-          upstream=ws://127.0.0.1:7777; bash tooling/e2e/ci/start-wire-proxy.sh 7788 "${upstream}"
+          upstream=ws://127.0.0.1:7777; HAVEN_WIRE_PROXY_ROUTES='7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7777' bash tooling/e2e/ci/start-wire-proxy.sh
           echo "WIRE_UPSTREAM=${upstream}" >> "${GITHUB_ENV}"
           claim=/tmp/haven-wire-proxy.journalpath
           journal="$(head -n 1 "${claim}" 2>/dev/null || true)"

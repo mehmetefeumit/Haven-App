@@ -31,6 +31,7 @@
 pub mod contamination;
 mod error;
 mod leave;
+pub(crate) mod location_pool;
 mod manager;
 pub mod profile_sync;
 pub mod relay_prefs;
@@ -51,6 +52,10 @@ pub mod types;
 pub use contamination::ContaminationSource;
 pub use error::{CircleError, RelayInputRejection, Result};
 pub use leave::LeavePlan;
+pub use location_pool::{
+    production_location_relays, set_location_relays_for_test, PRODUCTION_LOCATION_RELAYS,
+    RELAYS_PER_NEW_CIRCLE,
+};
 pub(crate) use manager::redact_storage_error;
 pub(crate) use manager::{
     key_packages_of, welcome_routes_of, FanoutResolution, LeaveStep, StagedSeal,

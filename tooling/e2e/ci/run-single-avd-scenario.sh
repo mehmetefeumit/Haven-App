@@ -53,6 +53,10 @@
 #                    ws://10.0.2.2:7777 — host loopback alias from
 #                    inside the emulator).
 # Optional env:
+#   HAVEN_E2E_LOCATION_RELAY  ws:// URL of the hermetic location relay pool's
+#                    one entry (e2e_combined's UI create is placed there).
+#                    Compiled into a locally built APK only when set; the
+#                    workflows bake it into their pre-built one.
 #   HAVEN_LOGSCAN    `true` on a lane that runs the recording wire proxy:
 #                    after the drive the captured logs are sealed against
 #                    the run's declared identifiers and scanned by
@@ -318,10 +322,15 @@ log_privacy_gate() {
             --expect petname=1 --expect nostr_group_id=1 --expect mls_group_id=1
             --expect event_id=3)
   fi
-  IFS=',' read -r -a endpoints <<<"${HAVEN_E2E_RELAY_2:-},${HAVEN_E2E_BLOSSOM_URL:-},${HAVEN_E2E_PROFILE_RELAYS:-}"
+  IFS=',' read -r -a endpoints <<<"${HAVEN_E2E_RELAY_2:-},${HAVEN_E2E_BLOSSOM_URL:-},${HAVEN_E2E_PROFILE_RELAYS:-},${HAVEN_E2E_LOCATION_RELAY:-}"
   for endpoint in "${endpoints[@]}"; do
     [[ -z "${endpoint}" ]] || extra+=(--exempt-endpoint "${endpoint}")
   done
+  # The recorder's log, scanned before upload, names every route it binds as
+  # `ws://127.0.0.1:<port>`, and the location relay is a route of its own.
+  if [[ -n "${WIRE_UPSTREAM:-}" && -n "${HAVEN_E2E_LOCATION_RELAY:-}" ]]; then
+    extra+=(--exempt-endpoint "ws://127.0.0.1:${HAVEN_E2E_LOCATION_RELAY##*:}")
+  fi
   logscan_gate "${profile}" "${needle_dir}" ${extra[@]+"${extra[@]}"} -- \
     --sink "logcat=${logcat}" \
     --sink "drive=${drive_final},${drive_full}" \
@@ -778,6 +787,7 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
     (
       export GITHUB_RUN_ID= GITHUB_RUN_ATTEMPT= \
         HAVEN_E2E_RELAY_2= HAVEN_E2E_BLOSSOM_URL= HAVEN_E2E_PROFILE_RELAYS= \
+        HAVEN_E2E_LOCATION_RELAY= \
         WIRE_UPSTREAM="${upstream}" HAVEN_LOGSCAN_PROFILE="${profile_env}" \
         HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" RELAY_URL=ws://10.0.2.2:7788
       local kv
@@ -849,6 +859,21 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
   if (( rc != 0 )) || [[ "${got[*]}" != *" --exempt-endpoint ws://10.0.2.2:7778 --exempt-endpoint http://10.0.2.2:3000 --exempt-endpoint ws://10.0.2.2:7778 --exempt-endpoint ws://10.0.2.2:7779 --out "* ]] \
      || [[ "${got[*]}" == *"--host-decl relay_url"* || "${got[*]}" == *"--host-decl blossom_url"* ]]; then
     echo "SELF-TEST FAIL (9c caller endpoints): every configured endpoint must be an exempt endpoint and none a needle; got '${got[*]}'" >&2
+    fail=1
+  fi
+  # The location relay as the app spells it; on a proxy lane also as the
+  # recorder's log spells its route, and never that one without a recorder.
+  reset_gate_logs; gate_run ws://127.0.0.1:7777 "" HAVEN_E2E_LOCATION_RELAY=ws://10.0.2.2:7789
+  mapfile -t got < "${seal_argv}"
+  if (( rc != 0 )) || [[ "${got[*]}" != *" --exempt-endpoint ws://10.0.2.2:7789 --exempt-endpoint ws://127.0.0.1:7789 "* ]]; then
+    echo "SELF-TEST FAIL (9c location relay, proxy): both spellings must be exempt; got '${got[*]}'" >&2
+    fail=1
+  fi
+  reset_gate_logs; gate_run "" "" HAVEN_E2E_LOCATION_RELAY=ws://10.0.2.2:7789
+  mapfile -t got < "${seal_argv}"
+  if (( rc != 0 )) || [[ "${got[*]}" != *" --exempt-endpoint ws://10.0.2.2:7789 "* ]] \
+     || [[ "${got[*]}" == *"ws://127.0.0.1:7789"* ]]; then
+    echo "SELF-TEST FAIL (9c location relay, host): only the app's spelling may be exempt; got '${got[*]}'" >&2
     fail=1
   fi
   # The call site contains: a leak verdict deletes every one of its sinks.
@@ -1059,12 +1084,21 @@ else
   # ABI this APK runs on. It keeps cargokit from compiling the large debug
   # Rust lib for every ABI (a multi-ABI build + NDK strip has run the CI
   # runner out of disk). Matches the workflow's pre-built APK build.
+  # Without it the app's default (its own loopback) is baked in, and a circle
+  # the UI creates lands on a relay nothing in the emulator can reach.
+  if [[ -z "${HAVEN_E2E_LOCATION_RELAY:-}" ]]; then
+    echo "run-single-avd-scenario: set HAVEN_E2E_LOCATION_RELAY (e.g. ws://10.0.2.2:7789," \
+         "with the relay also listening there — start-strfry.sh STRFRY_ALIAS_PORT=7789)" >&2
+    exit 2
+  fi
+  location_define=(--dart-define=HAVEN_E2E_LOCATION_RELAY="${HAVEN_E2E_LOCATION_RELAY}")
   flutter build apk \
     --debug \
     --target-platform android-x64 \
     --target="${SCENARIO_FILE}" \
     --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}" \
-    --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}"
+    --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}" \
+    ${location_define[@]+"${location_define[@]}"}
   cp "${BUILD_APK}" "${APK}"
   echo "Phase 1/4 — APK ready at ${APK}"
 fi

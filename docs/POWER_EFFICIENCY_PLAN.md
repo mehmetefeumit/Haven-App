@@ -3723,6 +3723,24 @@ the whole of E-A2 — is unchanged. What it adds inside a wake, per the inputs a
 None of these is measured, and the first two scale with the number of relays a circle uses. The CI proxy for the
 mechanism is in the register below.
 
+**The location relay pool (relay-plane segregation, added 2026-10-31) adds sockets, and what they cost is ESTIMATED
+here. The owner accepted the trade on 2026-10-31 (the relay-plane plan's OD-3, not this plan's OD3).** Before it, a default install's circles took
+the invitees' inbox relays — the same three seed relays the inbox already holds — so a device dialled ≈ 3 distinct
+relays at any circle count. Now each circle Haven creates draws its own three of the eight-entry location pool,
+uniformly and independently, none of them an inbox relay, so after `k` such circles the expected number of distinct
+circle relays is 8·(1 − (5/8)^k) — **3.0 at one circle, 6.0 at three, 7.2 at five** — on top of the three inbox relays,
+≈ 6, 9 and 10 relays in all (every circle created on default lists; circles from before the change keep the seed).
+
+| Plane | What each extra relay costs | **ESTIMATED** |
+|---|---|---|
+| Foreground | one more engine socket pinging every 55 s (E-I8), ≈ 65 keepalives/h | no %/h: the foreground is outside this model's subject (backgrounded, screen off) |
+| iOS background burst | one more TLS handshake inside the burst's own wake (≈ 0.5 J, E-I6), because a burst connects the whole relay union; no wake is added, so E-A2 is unchanged | at ≈ 30 bursts/h (E-I9): 3.0 / 6.0 / 7.2 extra relays × 0.5 J × 30 ≈ 45 / 90 / 108 J/h ≈ **0.07 / 0.14 / 0.17 %/h** (E-P1) at one / three / five circles |
+| Android foreground service | each cycle's publish pool (shut down every cycle) dials every relay of the circles it publishes: 8·(1 − (5/8)^k) where it dialled the 3 seed relays, i.e. 0 / 3.0 / 4.2 more handshakes per cycle | at ≈ 30 cycles/h: 0 / 45 / 63 J/h ≈ **0 / 0.07 / 0.10 %/h** at one / three / five circles, counting circle relays only |
+
+The NIP-77 rows above are per relay, and a default circle has three relays before and after. Spreading
+circles over more relays also means more operators see the device's IP and presence instants — a privacy cost,
+recorded in `haven-core/SECURITY.md` ("The location relay pool"), not an energy one.
+
 **Three findings the model itself produces**, each worth acting on and none of which needed a phone:
 1. **Most of the Android GNSS win is P1's, not P2a's.** Releasing the never-cancelled 1 Hz UI stream at pause takes
    the duty from ≈ 100 % to the FGS one-shot's ≈ 7–42 % (5–30 s per 72 s tick); P2a then takes ≈ 7–42 % to ≈ 4 % and,

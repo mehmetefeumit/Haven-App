@@ -130,6 +130,15 @@ jobs:
       # scripts/ci/check_wire_oracle_lane_reachable.sh cross-checks this port
       # against the proxy's own start invocation.
       HAVEN_E2E_RELAY: ws://localhost:7788
+      # The location relay pool's one entry, where the UI-created circle is
+      # placed: the proxy's SECOND route (7789), forwarding to the SAME relay.
+      # It must be another authority than HAVEN_E2E_RELAY, which is the
+      # account's inbox relay and so never picked, yet hold the same events,
+      # because the harness reads that circle's kind-445s through 7788 and C5.1
+      # flags groups whose kind-445s reach disjoint upstreams. Through the
+      # proxy, so the oracles see that circle's traffic too.
+      # run-ios-sim-scenario.sh compiles it in as a --dart-define.
+      HAVEN_E2E_LOCATION_RELAY: ws://localhost:7789
       FLUTTER_SUPPRESS_ANALYTICS: "true"
       # The runtime log scanner is wired into this lane: run-ios-sim-scenario.sh
       # reads the flag and, after each drive, seals the run's needle manifest
@@ -219,7 +228,10 @@ jobs:
       # entirely. Keeping the one literal where it is recognisable as an
       # upstream (the start invocation) is what makes that check meaningful.
       # The per-attempt restart inside the retry command passes the same
-      # upstream, so this string stays true for the journal the oracles read.
+      # routing table, so this string stays true for the journal the oracles
+      # read. Both routes forward to it (the second is
+      # HAVEN_E2E_LOCATION_RELAY's); the guard reads the table's listen ports,
+      # so the table must stay literal.
       #
       # The needle directory is rotated BEFORE the proxy starts, never after:
       # the proxy creates its declaration sidecar there with O_EXCL on the
@@ -237,7 +249,7 @@ jobs:
           set -euo pipefail
           mkdir -m 0700 -p /tmp/haven-soak/needles
           rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
-          upstream=ws://127.0.0.1:7777; bash tooling/e2e/ci/start-wire-proxy.sh 7788 "${upstream}"
+          upstream=ws://127.0.0.1:7777; HAVEN_WIRE_PROXY_ROUTES='7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7777' bash tooling/e2e/ci/start-wire-proxy.sh
           echo "WIRE_UPSTREAM=${upstream}" >> "${GITHUB_ENV}"
 
       # ONE token, minted ONCE, read by BOTH halves — the drive (as a
@@ -366,7 +378,7 @@ jobs:
           command: >-
             bash tooling/e2e/ci/start-local-relay.sh 7777 &&
             bash tooling/e2e/ci/rotate-needle-dir.sh &&
-            bash tooling/e2e/ci/start-wire-proxy.sh 7788 ws://127.0.0.1:7777 &&
+            HAVEN_WIRE_PROXY_ROUTES='7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7777' bash tooling/e2e/ci/start-wire-proxy.sh &&
             bash tooling/e2e/ci/run-ios-sim-scenario.sh
             integration_test/e2e/e2e_combined.dart
             ${{ steps.sim.outputs.udid }}

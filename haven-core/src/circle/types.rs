@@ -31,6 +31,10 @@ use crate::nostr::mls::types::GroupId;
 /// Force-unioning this set into publishes would leak any private relay the
 /// user configured.
 ///
+/// Never a circle's relays: these carry the account's identity traffic, and a
+/// create the caller names no relays for draws from
+/// [`crate::circle::PRODUCTION_LOCATION_RELAYS`] less them.
+///
 /// Runtime callers should use [`default_relays`], which honors any debug-only
 /// test override installed via [`set_default_relays_for_test`].
 pub const PRODUCTION_DEFAULT_RELAYS: &[&str] = &[
@@ -53,6 +57,8 @@ static DEFAULT_RELAYS_OVERRIDE: OnceLock<Vec<String>> = OnceLock::new();
 /// [`set_default_relays_for_test`] has been called, the override list is
 /// returned instead. The function always returns at least one entry — an
 /// empty override is rejected at install time.
+///
+/// Never a circle's relays (see [`PRODUCTION_DEFAULT_RELAYS`]).
 #[must_use]
 pub fn default_relays() -> Vec<String> {
     if let Some(over) = DEFAULT_RELAYS_OVERRIDE.get() {
@@ -442,7 +448,8 @@ pub struct CircleConfig {
     pub description: Option<String>,
     /// Type of circle.
     pub circle_type: CircleType,
-    /// Relay URLs for the circle.
+    /// Relay URLs for the circle, used verbatim; empty means the create draws
+    /// them from the location pool (`circle::location_pool`).
     pub relays: Vec<String>,
 }
 
@@ -563,9 +570,14 @@ pub struct MemberKeyPackage {
     /// Relay URLs from the member's inbox relay list (kind 10050): where
     /// their Welcome goes.
     pub inbox_relays: Vec<String>,
-    /// Relay URLs from the member's NIP-65 relay list (kind 10002). Not a
-    /// Welcome route: a Haven invitee does not read gift wraps there.
+    /// Relay URLs from the member's NIP-65 relay list (kind 10002), its
+    /// read-capable set. Not a Welcome route: a Haven invitee does not read
+    /// gift wraps there.
     pub nip65_relays: Vec<String>,
+    /// The write-capable set of the same NIP-65 list: with the inbox and read
+    /// sets, the relays a new circle avoids, since each sees this member's
+    /// pubkey.
+    pub nip65_write_relays: Vec<String>,
 }
 
 impl std::fmt::Debug for MemberKeyPackage {
@@ -574,6 +586,10 @@ impl std::fmt::Debug for MemberKeyPackage {
             .field("key_package_event", &"<redacted>")
             .field("inbox_relays", &log_alias::bucket(self.inbox_relays.len()))
             .field("nip65_relays", &log_alias::bucket(self.nip65_relays.len()))
+            .field(
+                "nip65_write_relays",
+                &log_alias::bucket(self.nip65_write_relays.len()),
+            )
             .finish()
     }
 }
@@ -1010,6 +1026,7 @@ mod tests {
             key_package_event: signed_event,
             inbox_relays: vec!["wss://relay.example.com".to_string()],
             nip65_relays: vec!["wss://nip65.example.com".to_string()],
+            nip65_write_relays: vec!["wss://nip65-write.example.com".to_string()],
         };
 
         crate::assert_debug_redacted!(
@@ -1019,6 +1036,7 @@ mod tests {
                 "test-content",
                 "wss://relay.example.com",
                 "wss://nip65.example.com",
+                "wss://nip65-write.example.com",
                 &mkp.key_package_event.pubkey.to_hex(),
                 &mkp.key_package_event.id.to_hex(),
             ]
@@ -1028,6 +1046,10 @@ mod tests {
         assert!(debug_str.contains("<redacted>"));
         assert!(debug_str.contains(r#"inbox_relays: "1""#), "{debug_str}");
         assert!(debug_str.contains(r#"nip65_relays: "1""#), "{debug_str}");
+        assert!(
+            debug_str.contains(r#"nip65_write_relays: "1""#),
+            "{debug_str}"
+        );
         assert!(
             !debug_str.contains("test-content"),
             "key_package_event content should be redacted"

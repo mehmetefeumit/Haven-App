@@ -103,6 +103,29 @@ haven-core|tests/mls_integration_tests.rs::production_storage_tests::storage_enc
 # any release that ships a pool change.
 haven-core|tests/profile_relay_vetting.rs::curated_profile_relays_accept_unauthenticated_kind0_and_serve_reads_without_auth|dials eight third-party relays (HAVEN_PROBE_PROFILE_RELAYS=1)
 
+# The curated location-relay pool, probed for real. A new circle's relays are
+# drawn from `PRODUCTION_LOCATION_RELAYS`, and four of its admission criteria
+# are statements about how eight hosts Haven does not operate BEHAVE — that
+# they serve a signer-less `#h` read, keep an unauthenticated kind-445 in both
+# the location shape and the commit shape and serve it back, and answer Haven's
+# own NIP-77 session with it. Running it per-push is rejected for the profile
+# probe's reasons (docs/LOCATION_RELAY_VETTING.md): red on a third party's
+# outage, and a beacon of Haven's build cadence to eight operators.
+# NOT a lost proof, in the part that is about Haven: five tests in the same file
+# that are NOT ignored — location_probe_passes_a_relay_that_serves_445_reads_
+# and_keeps_both_shapes, location_probe_fails_a_relay_that_refuses_445_writes,
+# location_probe_fails_a_relay_that_acks_445_and_serves_nothing,
+# location_probe_fails_a_relay_that_demands_nip42_auth_on_read and
+# location_probe_reports_nip77_support_of_each_kind — drive the same probe
+# against in-process relays on every `cargo test`, through Haven's own NIP-77
+# session. Host disjointness is pinned by profile_plane_separation.rs, wss and
+# public hosts by location_pool_entries_are_wss_public_and_unique.
+# What IS lost is whether the eight hosts still behave that way — tracked by
+# Check 14b of check_profile_privacy_boundaries.sh, which keeps CI red until
+# docs/LOCATION_RELAY_VETTING.md records a pass row, an operator and a TLS
+# terminator for every entry.
+haven-core|tests/location_relay_vetting.rs::curated_location_relays_serve_445_reads_keep_both_shapes_and_speak_nip77|dials the curated location pool (HAVEN_PROBE_LOCATION_RELAYS=1)
+
 # Doctests written as ```ignore — rustdoc neither compiles nor runs them, so
 # they are prose that merely LOOKS executable. They are listed individually (not
 # globbed) because that is the whole value of declaring them: 13 API examples

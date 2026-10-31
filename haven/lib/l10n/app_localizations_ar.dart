@@ -124,7 +124,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Summary =>
-      'بلا خادم مركزي. يعمل على شبكة مُرحِّلات تختارها بنفسك.';
+      'بلا خادم مركزي. يعمل على مُرحِّلات مستقلة.';
 
   @override
   String get onboardingValueProp3Summary =>
@@ -795,6 +795,10 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
+  String get circleCreateRefusedNoLocationRelay =>
+      'لا يستطيع Haven إنشاء هذه الدائرة، فكل المُرحِّلات التي يستخدمها للدوائر موجودة في قوائم مُرحِّلاتك الخاصة أو كانت فيها من قبل، ولذلك لا يصلح أيٌّ منها لنقلها.';
+
+  @override
   String addMemberTitle(String circleName) {
     return 'إضافة إلى $circleName';
   }
@@ -1313,7 +1317,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'جاءت هذه المُرحِّلات من قوائم نشرها الأعضاء المدعوّون، وإن لم ينشروا قوائم فمن مُرحِّلات صندوق الوارد لديك أو مُرحِّلات اختارها Haven. ولا يمكن تغييرها بعد، والتعديلات اللاحقة على قائمة مُرحِّلاتك لا تؤثّر فيها.';
+      'تمرّ التحديثات المشفّرة لهذه الدائرة عبر هذه المُرحِّلات. وقد حُدِّدت عند إنشاء الدائرة، ولا يمكن تغييرها في Haven بعد، ولا تؤثّر فيها التعديلات على قائمة مُرحِّلاتك.';
 
   @override
   String get circleDetailsAddMember => 'إضافة عضو';

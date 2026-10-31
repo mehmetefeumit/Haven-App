@@ -53,7 +53,7 @@
 #
 # Optional env (forwarded to start-strfry.sh / stop-strfry.sh):
 #   STRFRY_IMAGE, STRFRY_DATA_DIR, STRFRY_CONTAINER, STRFRY_PORT,
-#   STRFRY_READY_TIMEOUT  — see start-strfry.sh.
+#   STRFRY_ALIAS_PORT, STRFRY_READY_TIMEOUT  — see start-strfry.sh.
 #
 # Side effects:
 #   - Per iteration, run-single-avd-scenario.sh overwrites

@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1719174645;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1986744494;
 
 // Section: executor
 
@@ -10132,6 +10132,36 @@ fn wire__crate__api__set_discovery_relays_for_test_impl(
         },
     )
 }
+fn wire__crate__api__set_location_relays_for_test_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_location_relays_for_test",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_relays = <Vec<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, String>((move || {
+                let output_ok = crate::api::set_location_relays_for_test(api_relays)?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__set_profile_relays_for_test_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -11845,11 +11875,13 @@ impl SseDecode for crate::api::MemberKeyPackageFfi {
         let mut var_keyPackageJson = <String>::sse_decode(deserializer);
         let mut var_inboxRelays = <Vec<String>>::sse_decode(deserializer);
         let mut var_nip65Relays = <Vec<String>>::sse_decode(deserializer);
+        let mut var_nip65WriteRelays = <Vec<String>>::sse_decode(deserializer);
         let mut var_authorNpub = <String>::sse_decode(deserializer);
         return crate::api::MemberKeyPackageFfi {
             key_package_json: var_keyPackageJson,
             inbox_relays: var_inboxRelays,
             nip65_relays: var_nip65Relays,
+            nip65_write_relays: var_nip65WriteRelays,
             author_npub: var_authorNpub,
         };
     }
@@ -12381,6 +12413,7 @@ impl SseDecode for crate::api::RefusalFfi {
             3 => crate::api::RefusalFfi::EngineHeld,
             4 => crate::api::RefusalFfi::SendBlockedByDeparture,
             5 => crate::api::RefusalFfi::RoutingCollision,
+            6 => crate::api::RefusalFfi::NoLocationRelay,
             _ => unreachable!("Invalid variant for RefusalFfi: {}", inner),
         };
     }
@@ -13568,16 +13601,16 @@ fn pde_ffi_dispatcher_primary_impl(
             wire__crate__api__maintain_subscription_health_impl(port, ptr, rust_vec_len, data_len)
         }
         175 => wire__crate__api__parse_engine_location_impl(port, ptr, rust_vec_len, data_len),
-        186 => wire__crate__api__tile_cache_evict_impl(port, ptr, rust_vec_len, data_len),
-        187 => wire__crate__api__tile_cache_get_impl(port, ptr, rust_vec_len, data_len),
-        188 => wire__crate__api__tile_cache_init_impl(port, ptr, rust_vec_len, data_len),
-        189 => wire__crate__api__tile_cache_put_impl(port, ptr, rust_vec_len, data_len),
-        190 => wire__crate__api__tile_cache_put_metadata_impl(port, ptr, rust_vec_len, data_len),
-        191 => wire__crate__api__tile_cache_wipe_impl(port, ptr, rust_vec_len, data_len),
-        192 => {
+        187 => wire__crate__api__tile_cache_evict_impl(port, ptr, rust_vec_len, data_len),
+        188 => wire__crate__api__tile_cache_get_impl(port, ptr, rust_vec_len, data_len),
+        189 => wire__crate__api__tile_cache_init_impl(port, ptr, rust_vec_len, data_len),
+        190 => wire__crate__api__tile_cache_put_impl(port, ptr, rust_vec_len, data_len),
+        191 => wire__crate__api__tile_cache_put_metadata_impl(port, ptr, rust_vec_len, data_len),
+        192 => wire__crate__api__tile_cache_wipe_impl(port, ptr, rust_vec_len, data_len),
+        193 => {
             wire__crate__api__use_in_memory_keyring_for_test_impl(port, ptr, rust_vec_len, data_len)
         }
-        193 => wire__crate__api__wipe_all_mls_state_impl(port, ptr, rust_vec_len, data_len),
+        194 => wire__crate__api__wipe_all_mls_state_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -13659,10 +13692,11 @@ fn pde_ffi_dispatcher_sync_impl(
         179 => wire__crate__api__set_blossom_server_for_test_impl(ptr, rust_vec_len, data_len),
         180 => wire__crate__api__set_default_relays_for_test_impl(ptr, rust_vec_len, data_len),
         181 => wire__crate__api__set_discovery_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        182 => wire__crate__api__set_profile_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        183 => wire__crate__api__storage_reset_notice_owed_impl(ptr, rust_vec_len, data_len),
-        184 => wire__crate__api__storage_reset_prefs_cleared_impl(ptr, rust_vec_len, data_len),
-        185 => wire__crate__api__storage_reset_prefs_owed_impl(ptr, rust_vec_len, data_len),
+        182 => wire__crate__api__set_location_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        183 => wire__crate__api__set_profile_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        184 => wire__crate__api__storage_reset_notice_owed_impl(ptr, rust_vec_len, data_len),
+        185 => wire__crate__api__storage_reset_prefs_cleared_impl(ptr, rust_vec_len, data_len),
+        186 => wire__crate__api__storage_reset_prefs_owed_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -14744,6 +14778,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::MemberKeyPackageFfi {
             self.key_package_json.into_into_dart().into_dart(),
             self.inbox_relays.into_into_dart().into_dart(),
             self.nip65_relays.into_into_dart().into_dart(),
+            self.nip65_write_relays.into_into_dart().into_dart(),
             self.author_npub.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -15082,6 +15117,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::RefusalFfi {
             Self::EngineHeld => 3.into_dart(),
             Self::SendBlockedByDeparture => 4.into_dart(),
             Self::RoutingCollision => 5.into_dart(),
+            Self::NoLocationRelay => 6.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -16760,6 +16796,7 @@ impl SseEncode for crate::api::MemberKeyPackageFfi {
         <String>::sse_encode(self.key_package_json, serializer);
         <Vec<String>>::sse_encode(self.inbox_relays, serializer);
         <Vec<String>>::sse_encode(self.nip65_relays, serializer);
+        <Vec<String>>::sse_encode(self.nip65_write_relays, serializer);
         <String>::sse_encode(self.author_npub, serializer);
     }
 }
@@ -17236,6 +17273,7 @@ impl SseEncode for crate::api::RefusalFfi {
                 crate::api::RefusalFfi::EngineHeld => 3,
                 crate::api::RefusalFfi::SendBlockedByDeparture => 4,
                 crate::api::RefusalFfi::RoutingCollision => 5,
+                crate::api::RefusalFfi::NoLocationRelay => 6,
                 _ => {
                     unimplemented!("");
                 }

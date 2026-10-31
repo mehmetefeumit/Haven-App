@@ -353,6 +353,7 @@ async fn mint_member() -> (Keys, MemberKeyPackage, TempDir) {
         key_package_event: event,
         inbox_relays: vec!["wss://member-inbox.example.com".to_string()],
         nip65_relays: vec![],
+        nip65_write_relays: vec![],
     };
     (keys, member, dir)
 }

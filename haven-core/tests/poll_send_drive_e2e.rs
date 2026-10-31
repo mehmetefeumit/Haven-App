@@ -1597,6 +1597,7 @@ async fn an_invitees_inbox_refusing_a_welcome_for_its_timestamp_is_no_clock_evid
         .await,
         inbox_relays,
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     };
     let relay_mgr = haven_core::relay::RelayManager::new();
     let transport = relay_mgr.fanout_transport();

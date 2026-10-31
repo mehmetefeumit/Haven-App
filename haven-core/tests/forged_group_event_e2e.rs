@@ -69,6 +69,7 @@ async fn invite(relays: Vec<String>) -> (Circle, Event) {
         key_package_event,
         inbox_relays: vec!["wss://member-inbox.example.com".to_owned()],
         nip65_relays: vec![],
+        nip65_write_relays: vec![],
     };
 
     let alice_dir = TempDir::new().expect("temp dir");

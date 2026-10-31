@@ -71,6 +71,7 @@ async fn package_of(member: &CircleMember) -> MemberKeyPackage {
         .await,
         inbox_relays: vec![INBOX.to_string()],
         nip65_relays: Vec::new(),
+        nip65_write_relays: Vec::new(),
     }
 }
 

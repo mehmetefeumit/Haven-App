@@ -202,6 +202,7 @@ void main() {
                 authorNpub: bobPub.npub,
                 inboxRelays: const <String>[_testRelayUrl],
                 nip65Relays: const <String>[_testRelayUrl],
+                nip65WriteRelays: const <String>[_testRelayUrl],
               ),
             ],
             name: 'Ghost Admin Test',

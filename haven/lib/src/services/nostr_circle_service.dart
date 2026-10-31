@@ -698,29 +698,11 @@ class NostrCircleService implements CircleService {
               keyPackageJson: kp.eventJson,
               inboxRelays: kp.relays,
               nip65Relays: kp.nip65Relays,
+              nip65WriteRelays: kp.nip65WriteRelays,
               authorNpub: kp.pubkey,
             ),
           )
           .toList();
-
-      // Collect relay URLs from all members. The circle's `relays` field
-      // populates the kind 444 Welcome rumor's `relays` tag, which MIP-02
-      // requires to be non-empty (validated by the engine's welcome wrap).
-      //
-      // When neither the caller nor any member supplies a URL, we pass an
-      // empty list to Rust intentionally — Rust's `create_circle` then
-      // substitutes the user's Inbox relays (kind 10050) and falls back
-      // to DEFAULT_RELAYS if those are also empty. This keeps the
-      // substitution policy in one place (Rust) rather than duplicated
-      // here, and ensures the user's customized inbox relays are picked
-      // up automatically on circle creation.
-      final memberRelays = memberKeyPackages
-          .expand((kp) => kp.relays)
-          .toSet()
-          .toList();
-      final circleRelays = relays?.isNotEmpty ?? false
-          ? relays!
-          : memberRelays; // empty → Rust substitutes user Inbox → defaults
 
       final outcome = await _driver('Failed to create circle').createCircle(
         circle: manager,
@@ -729,7 +711,10 @@ class NostrCircleService implements CircleService {
         name: name,
         description: description,
         circleType: _circleTypeToString(circleType),
-        relays: circleRelays,
+        // Empty lets Rust pick from Haven's location pool: the invitees'
+        // inbox relays see their pubkeys, so Rust avoids them, drawing one
+        // only when fewer than three others remain.
+        relays: relays ?? const [],
         foreground: _appInFront(),
       );
       final created = outcome.circle;
@@ -738,6 +723,9 @@ class NostrCircleService implements CircleService {
         debugPrint('[Circle] Create refused: ${outcome.refusal}');
         if (outcome.refusal == RefusalFfi.missingWelcomeRelays) {
           throw const CircleInviteesUnreachableException();
+        }
+        if (outcome.refusal == RefusalFfi.noLocationRelay) {
+          throw const CircleNoLocationRelayException();
         }
         throw const CircleServiceException('Failed to create circle');
       }
@@ -1062,6 +1050,7 @@ class NostrCircleService implements CircleService {
             keyPackageJson: kp.eventJson,
             inboxRelays: kp.relays,
             nip65Relays: kp.nip65Relays,
+            nip65WriteRelays: kp.nip65WriteRelays,
             authorNpub: kp.pubkey,
           ),
         )

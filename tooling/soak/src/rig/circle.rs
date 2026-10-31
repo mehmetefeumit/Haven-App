@@ -482,11 +482,11 @@ pub async fn build_circle(
             .map_err(|_| RigError::Core(Step::MintKeyPackage))?;
         members.push(MemberKeyPackage {
             key_package_event: kp.event,
-            // Explicit, always: an empty relay set falls back to the PRODUCTION
-            // default pool, which would take the world off its own relay and
-            // onto the public network.
+            // Explicit, always: an invitee with no inbox relay has no Welcome
+            // route, so the create would be refused.
             inbox_relays: urls.to_vec(),
             nip65_relays: Vec::new(),
+            nip65_write_relays: Vec::new(),
         });
     }
 

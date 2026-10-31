@@ -121,7 +121,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Summary =>
-      'Merkezi sunucu yok. Seçtiğiniz bir aktarıcı ağı üzerinde çalışır.';
+      'Merkezi sunucu yok. Bağımsız aktarıcılar üzerinde çalışır.';
 
   @override
   String get onboardingValueProp3Summary =>
@@ -770,6 +770,10 @@ class AppLocalizationsTr extends AppLocalizations {
   }
 
   @override
+  String get circleCreateRefusedNoLocationRelay =>
+      'Haven bu çevreyi oluşturamaz: çevreler için kullandığı aktarıcıların her biri şu anda ya da daha önce kendi aktarıcı listelerinizde bulunduğu için hiçbiri bu çevreyi taşıyamaz.';
+
+  @override
   String addMemberTitle(String circleName) {
     return '$circleName çevresine ekle';
   }
@@ -1252,7 +1256,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'Bu aktarıcılar davetlilerin yayımladığı listelerden ya da (liste yoksa) gelen kutusu aktarıcılarınızdan veya Haven\'ın seçtiği aktarıcılardan alınmıştır. Henüz değiştirilemez; listenizdeki sonraki değişiklikler bunları etkilemez.';
+      'Bu çevrenin şifreli güncellemeleri bu aktarıcılar üzerinden iletilir. Aktarıcılar çevre oluşturulurken belirlendi ve henüz Haven\'da değiştirilemez; aktarıcı listenizdeki değişiklikler bunları etkilemez.';
 
   @override
   String get circleDetailsAddMember => 'Üye ekle';

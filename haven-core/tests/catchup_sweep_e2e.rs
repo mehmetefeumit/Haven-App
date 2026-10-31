@@ -132,6 +132,7 @@ async fn mint_member(relays: &[String]) -> (Arc<CircleManager>, Keys, MemberKeyP
         key_package_event: kp_event,
         inbox_relays: relays.to_vec(),
         nip65_relays: vec![],
+        nip65_write_relays: vec![],
     };
     (Arc::new(mgr), keys, member, dir)
 }
@@ -3537,6 +3538,7 @@ async fn a_welcome_a_relay_slips_into_a_catchup_page_joins_nothing() {
                 key_package_event: bobs_package,
                 inbox_relays: vec![url.clone()],
                 nip65_relays: vec![],
+                nip65_write_relays: vec![],
             }],
             &CircleConfig::new("Lure").with_relays(vec![url.clone()]),
         )

@@ -633,33 +633,12 @@ impl CircleManager {
             welcome_route(member)?;
         }
 
-        // Default the group relay set to the user's Inbox relays when the caller
-        // passed none (the group relay list drives kind-445 routing and the
-        // Welcome metadata; the engine fail-closes on an empty set — W8).
+        // Picked before the group exists, so a refusal leaves nothing behind.
         let effective_relays: Vec<String> = if config.relays.is_empty() {
-            let inbox = self
-                .storage
-                .list_user_relays(crate::circle::relay_prefs::RelayType::Inbox)
-                .unwrap_or_default();
-            if inbox.is_empty() {
-                log::warn!(
-                    "[CircleManager] create_circle: user inbox relays empty, \
-                     falling back to default relays (seed may not have run yet)"
-                );
-                crate::circle::types::default_relays()
-            } else {
-                // The user's own list may name a relay only they can reach, and
-                // a circle names its relays to every member: such an entry is
-                // left out, as `usable_relays` leaves it out of a member's list.
-                // With none left the list goes on whole, so `routing_of`
-                // refuses the create as it refuses a list the caller named.
-                let public = usable_relays(inbox.clone());
-                if public.is_empty() {
-                    inbox
-                } else {
-                    public
-                }
-            }
+            crate::circle::location_pool::pick_location_relays(
+                &self.storage.identity_relay_authorities()?,
+                &invitee_relay_authorities(&members),
+            )?
         } else {
             config.relays.clone()
         };
@@ -4631,17 +4610,14 @@ impl CircleManager {
         } else {
             group.name
         };
-        let effective_relays = if relays.is_empty() {
-            crate::circle::types::default_relays()
-        } else {
-            usable_relays(relays)
-        };
         let circle = Circle {
             mls_group_id: group_id.clone(),
             nostr_group_id,
             display_name: resolved_name,
             circle_type: CircleType::LocationSharing,
-            relays: effective_relays,
+            // Never topped up from the account's own relays: an empty list
+            // is a circle with no relay, not a circle on the identity plane.
+            relays: usable_relays(relays),
             created_at: now,
             updated_at: now,
         };
@@ -6276,6 +6252,25 @@ fn welcome_route(member: &MemberKeyPackage) -> Result<Vec<String>> {
     }
 }
 
+/// The servers ([`location_pool::relay_authority`]s) that see an invitee's
+/// pubkey: their inbox and both halves of their NIP-65 list. A new circle
+/// avoids them while enough other relays remain.
+///
+/// [`location_pool::relay_authority`]: crate::circle::location_pool::relay_authority
+fn invitee_relay_authorities(members: &[MemberKeyPackage]) -> BTreeSet<String> {
+    members
+        .iter()
+        .flat_map(|member| {
+            member
+                .inbox_relays
+                .iter()
+                .chain(&member.nip65_relays)
+                .chain(&member.nip65_write_relays)
+        })
+        .filter_map(|relay| crate::circle::location_pool::relay_authority(relay))
+        .collect()
+}
+
 /// One invitee's Welcome route: the invitee as lowercase hex, their inbox
 /// relays, and their `KeyPackage`'s `not_after` when it can be read.
 pub type WelcomeRoute = (String, Vec<String>, Option<u64>);
@@ -7069,6 +7064,7 @@ mod tests {
             key_package_event: event,
             inbox_relays,
             nip65_relays,
+            nip65_write_relays: Vec::new(),
         }
     }
 
@@ -7104,6 +7100,7 @@ mod tests {
             key_package_event: bob_kp_event,
             inbox_relays: relays.clone(),
             nip65_relays: vec![],
+            nip65_write_relays: vec![],
         };
 
         // Created as the app creates one: its founding Welcome sent from its
@@ -7202,6 +7199,7 @@ mod tests {
             key_package_event: make_kp_event(&carol, &carol_keys, &tp.relays).await,
             inbox_relays: tp.relays.clone(),
             nip65_relays: vec![],
+            nip65_write_relays: vec![],
         };
         let sibling = tp
             .alice
@@ -8413,6 +8411,7 @@ mod tests {
                     key_package_event: bob_kp_event,
                     inbox_relays: relays.clone(),
                     nip65_relays: vec![],
+                    nip65_write_relays: vec![],
                 }],
                 &config,
             )
@@ -8672,24 +8671,16 @@ mod tests {
 
     // ── Group-relay-set derivation (`circle.relays`, `create_circle`) ────────
     //
-    // Pins the exact source of the value the circle-details sheet's
-    // `circleDetailsRelaysNote` describes. The Dart caller
-    // (`NostrCircleService.createCircle`) passes `relays` as the UNION of the
-    // invitees' own published `KeyPackage` relays (their kind 10050 inbox
-    // lists) — never the creator's own relay preferences — and only when that
-    // union is completely empty does `create_circle` substitute anything, in
-    // two tiers: the creator's LOCALLY STORED inbox relays first, then the
-    // hard-coded production default list. These three tests keep that whole
-    // chain honest so the Dart-side copy, which now names both fallbacks,
-    // cannot silently drift from what the code actually does.
+    // A relay set the caller names is the circle's, verbatim; an empty one is
+    // drawn from the location pool (`circle::location_pool`, proved end to end
+    // in `tests/location_pool_e2e.rs`) and never from the creator's own lists.
 
     #[tokio::test]
     async fn create_circle_relays_are_the_passed_relays_not_the_creator_inbox() {
-        // Mirrors the common case: at least one invitee published a relay, so
-        // Dart's `circleRelays` union is non-empty and is passed straight
-        // through. The creator's OWN configured inbox relay is seeded to a
+        // A named set is honoured as-is, even one the pick would avoid (here an
+        // invitee's inbox). The creator's OWN configured inbox relay is a
         // DIFFERENT URL, so a passing assertion can only be explained by the
-        // passed-in value winning — never by a fallback to storage.
+        // passed-in value winning — never by anything read from storage.
         const INVITEE_RELAY: &str = "wss://invitee.example.com";
         const CREATOR_INBOX_RELAY: &str = "wss://creator-inbox.example.com";
 
@@ -8723,69 +8714,7 @@ mod tests {
                 .relays
                 .contains(&CREATOR_INBOX_RELAY.to_string()),
             "the creator's own configured inbox relay must NOT appear when the \
-             invitee already supplied one"
-        );
-    }
-
-    #[tokio::test]
-    async fn create_circle_falls_back_to_stored_creator_inbox_when_relays_empty() {
-        // No invitee supplied a relay (config.relays is empty, matching Dart
-        // passing memberRelays == []). The fallback reads the creator's inbox
-        // relays from LOCAL STORAGE.
-        const STORED_INBOX_RELAY: &str = "wss://creator-inbox-storage.example.com";
-
-        let dir = TempDir::new().unwrap();
-        let alice_keys = Keys::generate();
-        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
-        alice
-            .add_user_relay(
-                STORED_INBOX_RELAY,
-                crate::circle::relay_prefs::RelayType::Inbox,
-            )
-            .unwrap();
-
-        let member =
-            make_member_with_relays(vec!["wss://member-inbox.example.com".to_string()], vec![])
-                .await;
-        let config = CircleConfig::new("Fallback Circle"); // relays left empty
-
-        let creation = alice
-            .create_circle(&alice_keys, vec![member], &config)
-            .await
-            .expect("create using the stored creator inbox as the group relay set");
-
-        assert_eq!(
-            creation.circle.relays,
-            vec![STORED_INBOX_RELAY.to_string()],
-            "an empty passed-in relay set must fall back to the creator's \
-             LOCALLY STORED inbox relays"
-        );
-    }
-
-    #[tokio::test]
-    async fn create_circle_falls_back_to_default_relays_when_relays_and_creator_inbox_empty() {
-        // Neither the passed-in relays nor the creator's stored inbox has
-        // anything — the deepest fallback tier, production DEFAULT_RELAYS.
-        let dir = TempDir::new().unwrap();
-        let alice_keys = Keys::generate();
-        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
-        // Deliberately never seeded / never called add_user_relay: the
-        // creator's stored inbox relay list stays empty.
-
-        let member =
-            make_member_with_relays(vec!["wss://member-inbox.example.com".to_string()], vec![])
-                .await;
-        let config = CircleConfig::new("Default Fallback Circle"); // relays empty
-
-        let creation = alice
-            .create_circle(&alice_keys, vec![member], &config)
-            .await
-            .expect("create using the production default relays");
-
-        assert_eq!(
-            creation.circle.relays,
-            crate::circle::types::default_relays(),
-            "both fallback tiers empty must land on the production default relays"
+             caller named the relays"
         );
     }
 
@@ -8937,6 +8866,7 @@ mod tests {
             key_package_event: event,
             inbox_relays: relays.clone(),
             nip65_relays: vec![],
+            nip65_write_relays: vec![],
         };
 
         let first_kp = make_kp_event(&bob, &bob_keys, &relays).await;
@@ -9285,6 +9215,7 @@ mod tests {
             key_package_event: bob_kp_event,
             inbox_relays: relays.clone(),
             nip65_relays: vec![],
+            nip65_write_relays: vec![],
         };
         let config = CircleConfig::new("Test Circle").with_relays(relays.clone());
         let creation = alice
@@ -11547,6 +11478,7 @@ mod tests {
                         key_package_event: bob_kp_event,
                         inbox_relays: relays.clone(),
                         nip65_relays: vec![],
+                        nip65_write_relays: vec![],
                     }],
                     &CircleConfig::new("Restart Circle").with_relays(relays.clone()),
                 )
@@ -12875,6 +12807,7 @@ mod tests {
             key_package_event: bob_kp,
             inbox_relays: relays.clone(),
             nip65_relays: vec![],
+            nip65_write_relays: vec![],
         };
         let config = CircleConfig::new("Dedup Circle").with_relays(relays.clone());
         let creation = alice

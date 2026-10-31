@@ -109,6 +109,7 @@ KeyPackageData _makeKp(String pubkeyHex) => KeyPackageData(
   pubkey: 'npub1newmember',
   eventJson: jsonEncode({'kind': 30443, 'pubkey': pubkeyHex}),
   relays: const ['wss://relay.example.com'],
+  nip65WriteRelays: const [],
 );
 
 /// Default test circle: has one admin member whose hex == [_existingMemberHex].

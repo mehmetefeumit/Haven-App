@@ -81,6 +81,7 @@ async fn build_circle() -> Circle {
         key_package_event,
         inbox_relays: vec!["wss://member-inbox.example.com".to_string()],
         nip65_relays: vec![],
+        nip65_write_relays: vec![],
     };
 
     let alice_dir = TempDir::new().unwrap();
@@ -401,6 +402,7 @@ async fn a_fix_the_open_advance_releases_is_routed_to_its_own_circle() {
                 key_package_event: bob_kp,
                 inbox_relays: vec!["wss://member-inbox.example.com".to_string()],
                 nip65_relays: vec![],
+                nip65_write_relays: vec![],
             }],
             &CircleConfig::new("Second Circle").with_relays(relays.clone()),
         )
@@ -512,6 +514,7 @@ async fn bob_joins_a_quiet_circle(fx: &Circle) -> GroupId {
                 key_package_event: bob_kp,
                 inbox_relays: vec!["wss://member-inbox.example.com".to_string()],
                 nip65_relays: vec![],
+                nip65_write_relays: vec![],
             }],
             &CircleConfig::new("Quiet Circle").with_relays(vec![GROUP_RELAY.to_string()]),
         )

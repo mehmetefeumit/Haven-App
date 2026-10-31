@@ -138,6 +138,103 @@ readonly -a CONSENT_GATE_EXEMPT_FNS=(
 # ---------------------------------------------------------------------------
 readonly IMPORT_BOUNDARY_PATTERN='crate::circle\b|crate::nostr::mls\b|\bcircle::|\bmls::|\bmdk|Mdk|MDK|\bcgka_|\bstorage_sqlite\b|\btransport_nostr_|\bmarmot_|exporter_secret|discovery_relays|relay::discovery|\bdiscovery\b'
 
+# Extracts the quoted `wss://` entries of a literal list constant, one per
+# line, from the declaration marker down to the closing `];`.
+#
+# Whole-line comments are skipped so a commented-out entry never counts. A
+# char-level `//` stripper is deliberately NOT used: every entry here contains
+# `//` inside its scheme, so that would truncate each URL to `wss:`.
+#
+# $1 = file, $2 = literal declaration marker (matched with grep -F).
+extract_list_entries() {
+  local file="$1" marker="$2" start
+  start="$(grep -nF "${marker}" "${file}" | head -n1 | cut -d: -f1 || true)"
+  [[ -n "${start}" ]] || return 1
+  awk -v s="${start}" "${LITERAL_FREE}"'
+    NR < s { next }
+    /^[[:space:]]*(\/\/|\*)/ { next }
+    { line = $0
+      while (match(line, /["'"'"'][^"'"'"']*["'"'"']/)) {
+        e = substr(line, RSTART + 1, RLENGTH - 2)
+        if (e ~ /^wss:\/\//) print e
+        line = substr(line, RSTART + RLENGTH)
+      }
+    }
+    /\];/ { exit }
+  ' "${file}"
+}
+
+# Check 9's and 9b's ban: randomness a relay observer could predict.
+readonly CSPRNG_BAN='thread_rng|SmallRng|StdRng|ChaCha[0-9]*Rng|from_seed|seed_from_u64'
+
+# Check 9b: emits every code line of $1 (whole-line comments dropped, test
+# modules included) that names a non-CSPRNG generator; empty = OK.
+csprng_violations() {
+  grep -nE "${CSPRNG_BAN}" "$1" | grep -vE '^[0-9]+:[[:space:]]*//' || true
+}
+
+# Check 12b: emits every install of the location-pool override under $1;
+# empty = OK. Allowed: the `fn` definitions and the empty-list probe
+# `set_location_relays_for_test(vec![])`, which returns before the OnceLock is
+# touched.
+location_override_installs() {
+  grep -rnE --include='*.rs' 'set_location_relays_for_test[[:space:]]*\(' "$1" 2>/dev/null \
+    | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \
+    | grep -vE 'fn[[:space:]]+set_location_relays_for_test[[:space:]]*\(' \
+    | grep -vE 'set_location_relays_for_test[[:space:]]*\([[:space:]]*vec!\[[[:space:]]*\][[:space:]]*\)' \
+    || true
+}
+
+# Check 14b: emits one line per way the location pool $1 is not vouched for by
+# the vetting record $2; empty = OK. A row is
+#   | `<url>` | L1 | L2 | L3 | L4 | retention | operator | terminator |
+# and must read `pass` in L1-L4 (retention is evidence, not a gate), with an
+# operator and a terminator recorded by hand (`fill in`, as the probe prints
+# them, is not a record), and no operator twice.
+location_vetting_violations() {
+  local pool_file="$1" doc="$2" entries status url row operator terminator
+  if ! entries="$(extract_list_entries "${pool_file}" 'pub const PRODUCTION_LOCATION_RELAYS')" \
+      || [[ -z "${entries}" ]]; then
+    echo "could not extract PRODUCTION_LOCATION_RELAYS — the check would pass vacuously"
+    return
+  fi
+  status="$(grep -E '^\*\*Status:' "${doc}" | head -n1 || true)"
+  if [[ -z "${status}" ]]; then
+    echo "the location vetting record has no '**Status:' line"
+  elif grep -qi 'UNVERIFIED' <<< "${status}"; then
+    echo "the location vetting record reads UNVERIFIED"
+  fi
+  local -A seen_operator=()
+  while IFS= read -r url; do
+    row="$(grep -F "| \`${url}\` | pass | pass | pass | pass |" "${doc}" | head -n1 || true)"
+    if [[ -z "${row}" ]]; then
+      echo "location relay ${url} has no row passing L1-L4"
+      continue
+    fi
+    operator="$(awk -F'|' '{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $8); print tolower($8) }' <<< "${row}")"
+    terminator="$(awk -F'|' '{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $9); print tolower($9) }' <<< "${row}")"
+    # The operator cell's first token is its key (a pubkey prefix in backticks,
+    # or the first word of a prose cell); the bracketed notes after it differ
+    # per row and must not make one operator read as two.
+    operator_key="${operator%% *}"
+    if [[ -z "${operator}" || "${operator}" == "fill in" || "${operator}" =~ ^[-—?]+$ ]]; then
+      echo "location relay ${url} has no operator recorded"
+    elif [[ -n "${seen_operator[${operator_key}]:-}" ]]; then
+      echo "location relay ${url} shares its operator with ${seen_operator[${operator_key}]}"
+    else
+      seen_operator[${operator_key}]="${url}"
+    fi
+    if [[ -z "${terminator}" || "${terminator}" == "fill in" || "${terminator}" =~ ^[-—?]+$ ]]; then
+      echo "location relay ${url} has no TLS terminator recorded"
+    elif [[ "${terminator}" == *cloudflare* ]]; then
+      # Criterion (f): the account seed's relay.damus.io and relay.primal.net are
+      # Cloudflare-fronted, so a Cloudflare-fronted location relay hands one
+      # party both planes' plaintext frames.
+      echo "location relay ${url} shares its TLS terminator (Cloudflare) with the account seed"
+    fi
+  done <<< "${entries}"
+}
+
 # ---------------------------------------------------------------------------
 # --self-test: check 3's pattern against fixture lines. Every MDK v0.10.4 crate
 # must be caught — the pattern once named only the earlier `mdk` crates, so a
@@ -169,6 +266,74 @@ if [[ "${1:-}" == "--self-test" ]]; then
     fi
   done
   log "self-test OK: check 3 refuses every MDK crate and passes ordinary profile code"
+
+  st_tmp="$(mktemp -d)"
+  trap 'rm -rf "${st_tmp}"' EXIT
+
+  # Check 9b: a seeded generator fails, in production or test code; OsRng and
+  # prose do not.
+  printf '%s\n' 'use rand::rngs::OsRng;' '// never StdRng::seed_from_u64 here' \
+    'pick(&pool, &mut rand::rngs::OsRng)' > "${st_tmp}/pool_clean.rs"
+  [[ -z "$(csprng_violations "${st_tmp}/pool_clean.rs")" ]] \
+    || fail "self-test: check 9b refuses OsRng or a comment"
+  for line in 'let mut rng = StdRng::seed_from_u64(7);' 'let rng = rand::thread_rng();' \
+      'let rng = ChaCha20Rng::from_seed([0; 32]);' '    let rng = SmallRng::from_entropy();'; do
+    printf '%s\n' 'use rand::rngs::OsRng;' "${line}" > "${st_tmp}/pool_seeded.rs"
+    [[ -n "$(csprng_violations "${st_tmp}/pool_seeded.rs")" ]] \
+      || fail "self-test: check 9b lets the location pool write: ${line}"
+  done
+
+  # Check 12b: the definitions and the empty-list probe pass; an install, in
+  # any spelling, fails.
+  mkdir -p "${st_tmp}/src/circle"
+  printf '%s\n' \
+    'pub fn set_location_relays_for_test(relays: Vec<String>) -> Result<(), String> {' \
+    'pub fn set_location_relays_for_test(_relays: Vec<String>) -> Result<(), String> {' \
+    '    let err = set_location_relays_for_test(vec![]).expect_err("empty");' \
+    '    // set_location_relays_for_test(vec!["wss://a".into()]) would install' \
+    '    production_location_relays, set_location_relays_for_test, PRODUCTION_LOCATION_RELAYS,' \
+    > "${st_tmp}/src/circle/location_pool.rs"
+  [[ -z "$(location_override_installs "${st_tmp}/src")" ]] \
+    || fail "self-test: check 12b refuses the definitions, the empty-list probe or a comment"
+  for line in 'set_location_relays_for_test(vec!["wss://a.example".into()]).unwrap();' \
+      'let _ = crate::circle::set_location_relays_for_test (relays);'; do
+    printf '%s\n' "${line}" > "${st_tmp}/src/circle/manager.rs"
+    [[ -n "$(location_override_installs "${st_tmp}/src")" ]] \
+      || fail "self-test: check 12b lets a lib test install the location override: ${line}"
+  done
+
+  # Check 14b: a vetted record passes; each way of not vouching for the pool
+  # fails.
+  printf '%s\n' 'pub const PRODUCTION_LOCATION_RELAYS: &[&str] = &[' \
+    '    "wss://a.example",' '    // "wss://commented.example",' '    "wss://b.example",' '];' \
+    > "${st_tmp}/location_pool.rs"
+  st_row_a='| `wss://a.example` | pass | pass | pass | pass | unknown — none | op-a | AS1 |'
+  st_row_b='| `wss://b.example` | pass | pass | pass | pass | pass | op-b | AS2 |'
+  st_vetting() { # <status> <row a> <row b>
+    printf '%s\n' "**Status: $1**" '' '| relay | L1 | L2 | L3 | L4 | ret | op | term |' \
+      '|---|---|---|---|---|---|---|---|' "$2" "$3" > "${st_tmp}/vetting.md"
+    location_vetting_violations "${st_tmp}/location_pool.rs" "${st_tmp}/vetting.md"
+  }
+  [[ -z "$(st_vetting VETTED "${st_row_a}" "${st_row_b}")" ]] \
+    || fail "self-test: check 14b refuses a vetted record: $(st_vetting VETTED "${st_row_a}" "${st_row_b}")"
+  st_expect_red() { # <what> <status> <row a> <row b>
+    [[ -n "$(st_vetting "$2" "$3" "$4")" ]] || fail "self-test: check 14b passes $1"
+  }
+  st_expect_red 'an UNVERIFIED record' 'UNVERIFIED' "${st_row_a}" "${st_row_b}"
+  st_expect_red 'a pool entry with no row' VETTED "${st_row_a}" ''
+  st_expect_red 'a row whose NIP-77 cell is not pass' VETTED "${st_row_a}" \
+    '| `wss://b.example` | pass | pass | pass | unknown — silent | pass | op-b | AS2 |'
+  st_expect_red 'two entries with one operator' VETTED "${st_row_a}" \
+    '| `wss://b.example` | pass | pass | pass | pass | pass | OP-A | AS2 |'
+  st_expect_red 'one operator key behind two different notes' VETTED "${st_row_a}" \
+    '| `wss://b.example` | pass | pass | pass | pass | pass | op-a (another note) | AS2 |'
+  st_expect_red 'a Cloudflare-fronted entry' VETTED "${st_row_a}" \
+    '| `wss://b.example` | pass | pass | pass | pass | pass | op-b | Cloudflare, Inc. |'
+  st_expect_red 'an operator the probe left as fill in' VETTED "${st_row_a}" \
+    '| `wss://b.example` | pass | pass | pass | pass | pass | fill in | AS2 |'
+  st_expect_red 'an empty terminator' VETTED "${st_row_a}" \
+    '| `wss://b.example` | pass | pass | pass | pass | pass | op-b |  |'
+  log "self-test OK: checks 9b, 12b and 14b refuse every planted violation and pass the clean fixtures"
   exit 0
 fi
 
@@ -838,7 +1003,24 @@ fi
 log "Scanning all profile code paths (core + FFI) for non-CSPRNG randomness ..."
 scan_profile_paths \
   "non-CSPRNG RNG in a profile code path (haven-core/src/profile or the api.rs profile block) — the relay-assignment salt, REQ shuffling and inter-request jitter must be unpredictable to a relay observer; use rand::rngs::OsRng (mirrors haven-core/clippy.toml's thread_rng ban)" \
-  'thread_rng|SmallRng|StdRng|ChaCha[0-9]*Rng|from_seed|seed_from_u64'
+  "${CSPRNG_BAN}"
+
+# ---------------------------------------------------------------------------
+# Check 9b: CSPRNG-ONLY in the location pool, test module included.
+#
+# A new circle's relays are a uniform draw from the pool. A predictable draw
+# lets anyone who knows the generator's state say which three relays a circle
+# sits on — or makes every install draw the same three — so the relays stop
+# being a draw at all. The pick takes `OsRng` in exactly one place.
+# ---------------------------------------------------------------------------
+log "Scanning haven-core/src/circle/location_pool.rs for non-CSPRNG randomness ..."
+LOCATION_POOL_FILE="${REPO_ROOT}/haven-core/src/circle/location_pool.rs"
+[[ -f "${LOCATION_POOL_FILE}" ]] || { echo "ERROR: ${LOCATION_POOL_FILE} not found" >&2; exit 2; }
+seeded="$(csprng_violations "${LOCATION_POOL_FILE}")"
+if [[ -n "${seeded}" ]]; then
+  printf '%s\n' "${seeded}" >&2
+  fail "non-CSPRNG RNG in haven-core/src/circle/location_pool.rs — a circle's relays must be a draw no observer can predict; use rand::rngs::OsRng (and a scripted RngCore + CryptoRng in tests)"
+fi
 
 # ---------------------------------------------------------------------------
 # Check 10: NO NIP-65 RELAY LIST FOR THE PROFILE PLANE.
@@ -943,6 +1125,44 @@ readonly -a REQUIRED_PROFILE_TESTS=(
   # reaches). Nothing else pins that, so this test does: the salt must live in
   # that file and nowhere else.
   profile_relay_salt_does_not_outlive_the_circles_db_file
+  # circle/location_pool.rs — the pool a new circle's relays are drawn from,
+  # and the draw: never a relay the creator's identity traffic touches, never
+  # the full pool as a fallback, never a non-public host, always from the RNG
+  # it is handed.
+  location_pool_entries_are_wss_public_and_unique
+  production_location_relays_count_is_pinned
+  pick_is_a_subset_of_the_pool
+  pick_takes_three_or_the_whole_pool_when_smaller
+  pick_never_repeats_a_relay_even_when_the_pool_spells_one_twice
+  pick_never_returns_a_hard_excluded_relay_however_it_is_spelled
+  pick_prefers_relays_no_invitee_lists_and_fills_from_the_rest
+  fallback_never_drops_the_creators_own_exclusion
+  pick_leaves_out_a_pool_entry_on_a_non_public_host
+  pick_fails_closed_when_the_hard_tier_is_empty
+  pick_is_drawn_from_the_rng_it_is_handed
+  set_location_relays_for_test_rejects_empty_list
+  # circle/storage_relay_prefs.rs — what the hard tier subtracts
+  identity_relay_authorities_cover_every_identity_category_and_both_curated_planes
+  # tests/location_pool_e2e.rs — the draw at the create, over the shipped pool
+  create_with_no_relays_named_picks_three_distinct_relays_from_the_location_pool
+  create_never_picks_a_relay_the_account_uses_for_its_identity
+  create_prefers_relays_no_invitee_lists_including_nip65_write_relays
+  create_is_refused_when_the_accounts_own_lists_cover_the_whole_pool
+  a_picked_circle_relay_never_reaches_a_log_line
+  # tests/location_pool_override.rs — one install, its own process (Check 12b)
+  installed_override_reaches_the_pick_and_stays_subject_to_exclusion_and_the_host_rule
+  # tests/profile_plane_separation.rs — the location pool against the other
+  # three planes, by registrable domain
+  location_pool_is_host_disjoint_from_account_seed_and_discovery
+  location_pool_is_host_disjoint_from_profile_pool
+  location_pool_entries_have_distinct_registrable_domains
+  # tests/location_relay_vetting.rs — the probe Check 14b's record comes from
+  # must be able to fail, on every gating criterion
+  location_probe_passes_a_relay_that_serves_445_reads_and_keeps_both_shapes
+  location_probe_fails_a_relay_that_refuses_445_writes
+  location_probe_fails_a_relay_that_acks_445_and_serves_nothing
+  location_probe_fails_a_relay_that_demands_nip42_auth_on_read
+  location_probe_reports_nip77_support_of_each_kind
 )
 
 log "Verifying the named plane-separation tests still exist ..."
@@ -955,6 +1175,7 @@ for t in "${REQUIRED_PROFILE_TESTS[@]}"; do
       "${REPO_ROOT}/haven-core/src/circle/storage_profile.rs" \
       "${REPO_ROOT}/haven-core/src/circle/relay_prefs.rs" \
       "${REPO_ROOT}/haven-core/src/circle/storage_relay_prefs.rs" \
+      "${REPO_ROOT}/haven-core/src/circle/location_pool.rs" \
       "${REPO_ROOT}/haven-core/src/circle/contamination.rs" \
       "${REPO_ROOT}/haven-core/src/circle/storage_contamination.rs" \
       "${REPO_ROOT}/haven-core/src/circle/manager.rs" 2>/dev/null; then
@@ -1003,6 +1224,22 @@ if [[ -n "${override_installs}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Check 12b: NO LIB UNIT TEST MAY INSTALL THE LOCATION-POOL OVERRIDE.
+#
+# Same reason as Check 12: `set_location_relays_for_test` writes a
+# process-global `OnceLock`, and lib tests that assert a create's relays come
+# from `PRODUCTION_LOCATION_RELAYS` would turn order-dependent. The install
+# belongs to tests/location_pool_override.rs (one process, one install).
+# haven-core/src only, so the FFI forwarder in api.rs is not read as one.
+# ---------------------------------------------------------------------------
+log "Scanning haven-core/src for a lib-test install of the location-pool override ..."
+location_installs="$(location_override_installs "${CORE_SRC_DIR}")"
+if [[ -n "${location_installs}" ]]; then
+  printf '%s\n' "${location_installs}" >&2
+  fail "the location-pool override is installed from haven-core/src — the OnceLock is process-global and the lib tests share ONE parallel binary, so every unit test that reads the shipped location pool turns order-dependent. Install it only from an integration binary: haven-core/tests/location_pool_override.rs"
+fi
+
+# ---------------------------------------------------------------------------
 # Check 13: the Dart fallback relay lists MUST mirror their Rust constants.
 #
 # `haven/lib/src/constants/relays.dart` carries three compile-time lists whose
@@ -1028,32 +1265,6 @@ fi
 DART_RELAY_CONSTANTS="${REPO_ROOT}/haven/lib/src/constants/relays.dart"
 [[ -f "${DART_RELAY_CONSTANTS}" ]] || {
   echo "ERROR: ${DART_RELAY_CONSTANTS} not found" >&2; exit 2; }
-
-# Extracts the quoted `wss://` entries of a literal list constant, one per
-# line, from the declaration marker down to the closing `];`.
-#
-# Whole-line comments are skipped so a commented-out entry never counts. A
-# char-level `//` stripper is deliberately NOT used: every entry here contains
-# `//` inside its scheme, so that would truncate each URL to `wss:`.
-#
-# $1 = file, $2 = literal declaration marker (matched with grep -F).
-extract_list_entries() {
-  local file="$1" marker="$2" start
-  start="$(grep -nF "${marker}" "${file}" | head -n1 | cut -d: -f1 || true)"
-  [[ -n "${start}" ]] || return 1
-  awk -v s="${start}" "${LITERAL_FREE}"'
-    NR < s { next }
-    /^[[:space:]]*(\/\/|\*)/ { next }
-    { line = $0
-      while (match(line, /["'"'"'][^"'"'"']*["'"'"']/)) {
-        e = substr(line, RSTART + 1, RLENGTH - 2)
-        if (e ~ /^wss:\/\//) print e
-        line = substr(line, RSTART + RLENGTH)
-      }
-    }
-    /\];/ { exit }
-  ' "${file}"
-}
 
 check_relay_mirror() {
   # $1 = human label, $2 = dart marker, $3 = rust file, $4 = rust marker
@@ -1114,7 +1325,8 @@ check_relay_mirror \
 #     the findings table of docs/PROFILE_RELAY_VETTING.md;
 #   * the findings Status line must not read UNVERIFIED;
 #   * no RETIRED_PROFILE_RELAYS entry may reappear in the pool (a retired
-#     relay failed vetting; re-listing it re-creates the incident).
+#     relay is dead, refuses writes, shares an operator with another plane, or
+#     is unreliable; re-listing it re-creates what retired it).
 # Editing the pool without re-running the probe and recording it is therefore
 # a red CI, not a silent regression.
 # ---------------------------------------------------------------------------
@@ -1147,9 +1359,37 @@ done <<< "${pool_entries}"
 if [[ -n "${retired_entries}" ]]; then
   while IFS= read -r url; do
     if grep -qFx "${url}" <<< "${pool_entries}"; then
-      fail "retired relay ${url} is back in PRODUCTION_PROFILE_RELAYS — it failed vetting and must re-pass (and leave RETIRED_PROFILE_RELAYS) before it may serve profile traffic again"
+      fail "retired relay ${url} is back in PRODUCTION_PROFILE_RELAYS — it was retired, and may serve profile traffic again only once its reason no longer holds, it re-passes vetting, and it leaves RETIRED_PROFILE_RELAYS"
     fi
   done <<< "${retired_entries}"
+fi
+
+# ---------------------------------------------------------------------------
+# Check 14b: the location pool may only ship VETTED, operator by operator.
+#
+# A new circle's relays are drawn from PRODUCTION_LOCATION_RELAYS, and what
+# makes an entry fit — it serves signer-less `#h` reads, keeps an
+# unauthenticated kind-445 in both shapes, answers Haven's NIP-77 session — is
+# behaviour no hermetic lane sees, since every lane overrides the pool. So, as
+# for Check 14, the RECORD and the CONSTANT are held together: every entry
+# needs a row in docs/LOCATION_RELAY_VETTING.md passing L1-L4 (the probe
+# tests/location_relay_vetting.rs prints it), with its operator and TLS
+# terminator recorded by hand and no operator twice — one party holding two of
+# a circle's three relays is the concentration the pool exists to avoid — and
+# the Status line must not read UNVERIFIED.
+# ---------------------------------------------------------------------------
+log "Checking the location pool constant against its vetting record ..."
+LOCATION_VETTING_DOC="${REPO_ROOT}/docs/LOCATION_RELAY_VETTING.md"
+[[ -f "${LOCATION_VETTING_DOC}" ]] || { echo "ERROR: ${LOCATION_VETTING_DOC} not found" >&2; exit 2; }
+if ! extract_list_entries "${LOCATION_POOL_FILE}" 'pub const PRODUCTION_LOCATION_RELAYS' \
+    | grep -q .; then
+  echo "ERROR: could not extract PRODUCTION_LOCATION_RELAYS — the vetting check would pass vacuously" >&2
+  exit 2
+fi
+location_unvetted="$(location_vetting_violations "${LOCATION_POOL_FILE}" "${LOCATION_VETTING_DOC}")"
+if [[ -n "${location_unvetted}" ]]; then
+  printf '%s\n' "${location_unvetted}" >&2
+  fail "the location pool is not vouched for by docs/LOCATION_RELAY_VETTING.md — run the probe (that file, \"Running the probe\"), record operator and terminator for every entry, and replace any entry that does not pass L1-L4 before shipping the pool"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1398,4 +1638,4 @@ if ! grep -A6 -E 'pub[[:space:]]+fn[[:space:]]+stage_own_profile_picture[[:space
   exit 2
 fi
 
-log "OK: public-profile privacy boundaries hold — no Image.network, no circle/group tokens, import boundary intact (incl. no discovery plane), kind-0 confined to the profile module, HTTPS-only Blossom, retraction no-op gate bound at every retraction call site, union-only kind-0 fetch entry points, one author per kind-0 REQ, CSPRNG-only randomness, no profile-plane NIP-65, every named plane-separation test present, no lib-test install of the profile-pool override, the Dart fallback relay lists still mirror their Rust constants, every pool relay ships with a recorded pass/pass vetting row (retirees stay out), every uploadable picture is constructed by the sanitizer alone, the cache constructor and the staging entry point stay confined to their named callers, and both FFI retractions read their no-op gate under the sync lock."
+log "OK: public-profile privacy boundaries hold — no Image.network, no circle/group tokens, import boundary intact (incl. no discovery plane), kind-0 confined to the profile module, HTTPS-only Blossom, retraction no-op gate bound at every retraction call site, union-only kind-0 fetch entry points, one author per kind-0 REQ, CSPRNG-only randomness (the location pool's included), no profile-plane NIP-65, every named plane-separation test present, no lib-test install of the profile- or location-pool override, the Dart fallback relay lists still mirror their Rust constants, every profile-pool relay ships with a recorded pass/pass vetting row (retirees stay out), every location-pool relay ships with a recorded L1-L4 pass row, operator and terminator (no operator twice), every uploadable picture is constructed by the sanitizer alone, the cache constructor and the staging entry point stay confined to their named callers, and both FFI retractions read their no-op gate under the sync lock."

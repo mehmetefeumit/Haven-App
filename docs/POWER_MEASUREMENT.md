@@ -157,16 +157,17 @@ Each of these changes the result, so each is fixed and each gets written down.
     (provisional), or When-In-Use. Settings → Privacy & Security → Location
     Services → Haven.
 12. **Android fused backend recorded**: `adb shell dumpsys location | grep -i fused`.
-13. **Relay set recorded** (§3). During a measurement campaign the circle sits
-    on the capture relay(s), not on Haven's three default relays
-    (`relay.damus.io`, `relay.primal.net`, `nos.lol`). Record the count in the
-    *relays (count)* column: publish cost scales with it, and baseline and
-    acceptance rows must use the same count or the comparison is void. An
-    Option-A campaign runs on ONE relay, so its absolute figures describe a
-    one-relay configuration and are **not** the shipped 3-relay default's
-    numbers. That is fine — every threshold in §7 is a comparison between rows
-    of the same configuration — but a figure quoted out of this document
-    without its relay count is wrong.
+13. **Relay set recorded** (§3). Since 2026-10-31 a release build puts the
+    measurement circle on three relays Haven draws at random from its location
+    pool (§3.2). Record which three the circle's details list, and their count
+    in the *relays (count)* column: publish cost scales with it, and baseline
+    and acceptance rows must use the same count or the comparison is void.
+    Before that date an Option-A campaign ran on ONE relay, so its absolute
+    figures described a one-relay configuration and **not** the shipped
+    3-relay default's numbers; a release build can no longer put a circle on
+    such a relay (§3.2). Every threshold in §7 is a comparison between rows of
+    the same configuration, and a figure quoted out of this document without
+    its relay count is wrong.
 14. **Both phones on automatic network time**, and the offset recorded. Every
     number in §3 is a `created_at` the *device* stamped, so a phone whose clock
     drifts moves its own gaps. Settings → General → Date & Time → *Set
@@ -244,20 +245,31 @@ Settings → Relays → *My Inbox Relays* and *My KeyPackage Relays* → remove 
 existing entries and add `wss://relay.example.org`. Now create a fresh circle
 from the device under test and invite the peer.
 
-Verify it took: open the circle → details → **"Relays for this circle"**. It
-must list only `wss://relay.example.org`. This matters because a circle's relay
-set is fixed **at creation** from the relay lists the invited members had
-published; changing your relay list afterwards does not move an existing
-circle. If the list is wrong, delete the circle and create it again.
+Verify it took: open the circle → details → **"Relays for this circle"**.
+**Since 2026-10-31 a release build will NOT list `wss://relay.example.org`
+there.** A circle's relay set is still fixed **at creation**, but it no longer
+comes from anyone's relay lists: a create that names no relays — every create
+the app makes — draws three at random from Haven's location pool
+(`PRODUCTION_LOCATION_RELAYS`, `haven-core/src/circle/location_pool.rs`) and
+never picks a relay on your own Inbox, KeyPackage or Profile lists,
+`wss://relay.example.org` included. Only a debug build whose process installed
+the location-relay test list — the E2E harness installs it from
+`HAVEN_E2E_LOCATION_RELAY` in `TestUser.bootstrapProcess`, and the list then
+shows exactly that relay — puts a new circle on a relay of your choosing, and
+§0 rules debug builds out. So Option A cannot carry the measurement circle's
+kind-445 traffic until a release build can name a circle's relays: use
+Option B.
 
-**Option B — capture from Haven's own relays.** No infrastructure needed, at the
+**Option B — capture from the circle's own relays** (the only option for a
+release build since 2026-10-31). No infrastructure needed, at the
 cost of one extra step and a privacy caveat: a bare kind-445 subscription on a
 public relay records other Nostr users' ciphertext as well as yours. Narrow it
 to your own circle with a server-side `#h` filter, which needs the circle's
 public `nostrGroupId`:
 
-1. **Discovery pass.** Start `nak req -k 445 --stream <relays> > discover.ndjson`,
-   then create the measurement circle. Run the grader on `discover.ndjson`
+1. **Discovery pass.** Start `nak req -k 445 --stream <relays> > discover.ndjson`
+   over all eight `PRODUCTION_LOCATION_RELAYS` entries — the circle's three
+   will be among them — then create the measurement circle. Run the grader on `discover.ndjson`
    without `--series` and without `--from`/`--until`:
 
    ```bash
@@ -275,8 +287,10 @@ public `nostrGroupId`:
 3. Capture the real windows with `--tag h=<hex>` (§3.4), so only your circle's
    events are ever written to disk.
 
-Option A is still preferable: it needs no discovery pass, records nothing but
-your own traffic, and its relay is under your control for the end-of-run export.
+Option A was preferable while a release build could put the circle on it: it
+needed no discovery pass, recorded nothing but your own traffic, and its relay
+was under your control for the end-of-run export. Since 2026-10-31 it cannot
+(above).
 
 ### 3.3 The capture file format
 
@@ -324,12 +338,13 @@ run should depend on.
 
 ```bash
 # Start this BEFORE the battery window and leave it running for all of it.
+# Option A (a release build cannot use it since 2026-10-31, §3.2):
 nak req -k 445 --stream wss://relay.example.org > dut-ios-S-cellular.ndjson
 
-# Option B instead — all three default relays, narrowed to your own circle by
-# the `h` value found in the discovery pass of §3.2:
+# Option B — the three relays the circle's details list, narrowed to your own
+# circle by the `h` value found in the discovery pass of §3.2:
 nak req -k 445 --tag h=<32-hex h value> --stream \
-  wss://relay.damus.io wss://relay.primal.net wss://nos.lol \
+  <relay 1> <relay 2> <relay 3> \
   > dut-ios-S-cellular.ndjson
 ```
 
