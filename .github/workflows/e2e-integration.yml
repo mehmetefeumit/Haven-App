@@ -208,7 +208,13 @@ jobs:
         # that sample yet: at the measured max per APK (2.2 min) the step is
         # ESTIMATED at 17.6 min, still ~2x under 35, so the cap is unchanged.
         timeout-minutes: 35
-        run: bash ../tooling/e2e/ci/build-integration-apks.sh
+        # The eight APKs' build tree and cargokit's Rust target left 44 MB for
+        # the system image on a 72 GB runner (CI run 41167769413). The drives
+        # install the copies under /tmp and read neither, so both go here,
+        # inside this step's cap, before the SDK is provisioned.
+        run: |
+          bash ../tooling/e2e/ci/build-integration-apks.sh
+          bash ../tooling/e2e/ci/release-apk-build-outputs.sh /tmp/integration-apks
 
       - name: Enable KVM group perms
         run: |

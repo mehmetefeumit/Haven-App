@@ -245,14 +245,10 @@ jobs:
           done
 
           # The four APKs are now staged under /tmp; the emulator step installs
-          # from there and never reads haven/build or the Gradle caches. Reclaim
-          # them so the emulator's system-image install keeps comfortable
-          # headroom regardless of future APK growth (defense-in-depth on top of
-          # the x64-only constraint above). Best-effort; df printed as evidence.
-          echo "=== Disk before post-build reclaim ==="; df -h /
-          rm -rf build || true
-          rm -rf "${HOME}/.gradle/caches" "${HOME}/.gradle/daemon" || true
-          echo "=== Disk after post-build reclaim ==="; df -h /
+          # from there and never reads haven/build or the Gradle caches, so
+          # they are released before the system image installs (defense-in-
+          # depth on top of the x64-only constraint above).
+          bash ../tooling/e2e/ci/release-apk-build-outputs.sh /tmp/relay-custom-apks
 
       - name: Enable KVM group perms
         run: |
