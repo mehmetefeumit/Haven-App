@@ -53,6 +53,7 @@ import 'package:haven/src/providers/location_access_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart' show ChangeNoteFfi;
+import 'package:haven/src/services/change_notices.dart';
 import 'package:haven/src/services/circle_health_service.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/subscription_service.dart'
@@ -537,6 +538,19 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
 
   @override
   SharingHealth build() {
+    // An identity change rebuilds this same instance: start a fresh lifecycle
+    // with none of the last identity's evidence, and fence out a derivation
+    // the last one left in flight.
+    _disposed = false;
+    ++_generation;
+    _publishFailingSince.clear();
+    _heldSince.clear();
+    _userHeld.clear();
+    _transientSince.clear();
+    _sessionHeldSince = null;
+    _subscriptionLostSince = null;
+    _disconnectedSince = null;
+
     // A disconnect has no timestamp of its own — `SyncStatus` carries a phase,
     // not an instant — so the transition edge is where the clock is read.
     //
@@ -594,10 +608,15 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     // The verdict is about the circle on screen: another circle selected, or
     // none, is re-derived now, not at the next tick. `Circle` equality is its
     // id alone, so the selection does not notify when only the selected
-    // circle's state changed; the circle list does.
+    // circle's state changed; the circle list does. The list notifies from
+    // inside the selection's rebuild, where the selection cannot be read, so
+    // the derivation starts once that build has returned.
+    void refreshAfterBuild() => scheduleMicrotask(() {
+      if (!_disposed) unawaited(refresh());
+    });
     ref
-      ..listen<Circle?>(selectedCircleProvider, (_, _) => unawaited(refresh()))
-      ..listen(circlesProvider, (_, _) => unawaited(refresh()));
+      ..listen<Circle?>(selectedCircleProvider, (_, _) => refreshAfterBuild())
+      ..listen(circlesProvider, (_, _) => refreshAfterBuild());
 
     return SharingHealth.healthy;
   }
@@ -729,8 +748,13 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
       return SharingHealth.healthy;
     }
 
+    // Everything read from `ref` is read before the first await: the
+    // container may be disposed while a read is in flight.
     final now = _now();
     final key = sharingCircleKey(circle);
+    final circles = ref.read(circleServiceProvider);
+    final notices = ref.read(changeNoticesProvider);
+    final selfPubkey = ref.read(identityProvider).valueOrNull?.pubkeyHex;
     final health = await ref
         .read(circleHealthServiceProvider)
         .read(nostrGroupId: circle.nostrGroupId);
@@ -740,12 +764,12 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     // true and specific, and the core reads them in its own worst-first order.
     final SharingPausedReason? cause;
     try {
-      cause = await _coreCause(circle);
+      cause = await _coreCause(circle, circles, notices);
     } on Object catch (_) {
       // The read failed: what the circle list says about the engine is the
       // best evidence left, then inference.
       return _engineStateVerdict(circle, now, health) ??
-          _inferred(circle, key, now, health, ackedAt);
+          _inferred(circle, key, now, health, ackedAt, selfPubkey);
     }
     if (cause == null) {
       _clearHeld(key);
@@ -755,23 +779,31 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
       final shown = _transientVerdict(key, cause, now, health);
       if (shown != null) return shown;
     }
-    return _inferred(circle, key, now, health, ackedAt);
+    return _inferred(circle, key, now, health, ackedAt, selfPubkey);
   }
 
   /// The core's cause for [circle], refined by its notice where the notice
   /// decides what is true to say. Throws when the recovery read fails.
-  Future<SharingPausedReason?> _coreCause(Circle circle) async {
-    final cause = await ref.read(circleServiceProvider).circleRecovery(circle);
+  Future<SharingPausedReason?> _coreCause(
+    Circle circle,
+    CircleService circles,
+    ChangeNotices notices,
+  ) async {
+    final cause = await circles.circleRecovery(circle);
     if (cause == null) return null;
     final reason = pausedReasonOf(cause);
     // A store that cannot answer reads as collided, and that reading is not
     // persisted: without the recorded note, no destructive remedy is named.
     if (reason == SharingPausedReason.routingCollision &&
-        !await _noticeHolds(circle, ChangeNoteFfi.routingCollision)) {
+        !await _noticeHolds(circle, ChangeNoteFfi.routingCollision, notices)) {
       return SharingPausedReason.routingUnchecked;
     }
     if (reason == SharingPausedReason.removalUnmade &&
-        !await _noticeHolds(circle, ChangeNoteFfi.queuedRemovalDropped)) {
+        !await _noticeHolds(
+          circle,
+          ChangeNoteFfi.queuedRemovalDropped,
+          notices,
+        )) {
       return SharingPausedReason.removalUnmadeUntold;
     }
     return reason;
@@ -779,11 +811,13 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
 
   /// Whether the circle's notice holds [note]; `false` when it cannot be
   /// read, the reading that offers nothing destructive.
-  Future<bool> _noticeHolds(Circle circle, ChangeNoteFfi note) async {
+  Future<bool> _noticeHolds(
+    Circle circle,
+    ChangeNoteFfi note,
+    ChangeNotices notices,
+  ) async {
     try {
-      final read = await ref
-          .read(changeNoticesProvider)
-          .read(circle.mlsGroupId);
+      final read = await notices.read(circle.mlsGroupId);
       return read?.notes.contains(note) ?? false;
     } on Object catch (e) {
       debugPrint('[SharingHealth] notice read failed: ${e.runtimeType}');
@@ -844,6 +878,7 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     DateTime now,
     CircleHealthTimestamps health,
     DateTime? ackedAt,
+    String? selfPubkey,
   ) {
     // An ACK recorded by the OTHER isolate (the Android foreground service,
     // which has no Riverpod container and can only leave a persisted stamp)
@@ -863,7 +898,8 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     final publishing = _publishVerdict(key, now, ackedAt);
     if (publishing != null) return publishing;
 
-    return _receiveVerdict(circle, now, health) ?? SharingHealth.healthy;
+    return _receiveVerdict(circle, now, health, selfPubkey) ??
+        SharingHealth.healthy;
   }
 
   SharingHealth? _pausedVerdict(DateTime now, CircleHealthTimestamps health) {
@@ -969,6 +1005,7 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     Circle circle,
     DateTime now,
     CircleHealthTimestamps health,
+    String? selfPubkey,
   ) {
     // Nothing to receive: a solo circle is quiet because it is empty. An
     // unresolved identity (the provider is still loading, or the secure-storage
@@ -976,7 +1013,6 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
     // the verdict is withheld rather than guessed — the tick re-derives it
     // moments later, and a banner shown on a guess is worse than one shown
     // late.
-    final selfPubkey = ref.read(identityProvider).valueOrNull?.pubkeyHex;
     if (selfPubkey == null) return null;
     final others = circle.members.where((m) => m.pubkey != selfPubkey).length;
     if (others == 0) return null;

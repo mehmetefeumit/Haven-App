@@ -139,13 +139,32 @@ class _CoreRecovery extends MockCircleService {
   }
 }
 
+/// Records every verdict the model publishes.
+class _VerdictRecorder extends ProviderObserver {
+  final List<Object?> verdicts = [];
+
+  @override
+  void didUpdateProvider(
+    ProviderBase<Object?> provider,
+    Object? previousValue,
+    Object? newValue,
+    ProviderContainer container,
+  ) {
+    if (provider == sharingHealthProvider) verdicts.add(newValue);
+  }
+}
+
 /// Drives the model with an explicit clock the test moves by hand.
 class _Harness {
-  _Harness({Circle? circle, List<MemberLocation>? locations})
-    : health = _FakeHealthService(),
-      service = _CoreRecovery(circles: [circle ?? _circle()]) {
+  _Harness({
+    Circle? circle,
+    List<MemberLocation>? locations,
+    List<ProviderObserver> observers = const [],
+  }) : health = _FakeHealthService(),
+       service = _CoreRecovery(circles: [circle ?? _circle()]) {
     final selected = circle ?? _circle();
     container = ProviderContainer(
+      observers: observers,
       overrides: [
         sharingHealthClockProvider.overrideWithValue(() => now),
         circleHealthServiceProvider.overrideWithValue(health),
@@ -665,6 +684,28 @@ void main() {
           SharingHealth.healthy,
           reason: 'a live circle shown as ended, with "leave it" as the '
               'remedy, until the next tick',
+        );
+      });
+
+      test('a selection made as the circle list is re-read is derived for '
+          'the new circle', () async {
+        // With nothing selected the selection does not read the list, so the
+        // list's re-read is first run from inside the selection's rebuild and
+        // notifies the model while the selection is still building.
+        final t = build(disbanded);
+        t.container.read(selectedCircleIdProvider.notifier).state = null;
+        expect(await settled(t.container), SharingHealth.healthy);
+
+        t.container.read(selectedCircleIdProvider.notifier).state =
+            live.mlsGroupId;
+        t.container.invalidate(circlesProvider);
+        // The frame's refresh, not a read from here, rebuilds the selection.
+        await t.container.pump();
+        await settled(t.container);
+
+        expect(
+          t.container.read(sharingHealthProvider),
+          SharingHealth.healthy.about(sharingCircleKey(live)),
         );
       });
 
@@ -1424,6 +1465,57 @@ void main() {
         isEmpty,
         reason: 'the stale in-flight derivation must be dropped, not published',
       );
+    });
+
+    test('a container disposed while a derivation reads raises nothing and '
+        'sets no verdict', () async {
+      final recorder = _VerdictRecorder();
+      final h = _Harness(observers: [recorder])
+        ..health.stored = CircleHealthTimestamps(lastPeerEventAt: _t0);
+      expect(await h.settle(), SharingHealth.healthy, reason: 'premise');
+
+      // Held mid-read on evidence that, landed, would say receiveSilent.
+      h
+        ..advance(kReceiveSilenceThreshold + const Duration(seconds: 1))
+        ..health.gate = Completer<void>();
+      final held = h.notifier.refresh();
+      await pumpEventQueue();
+      recorder.verdicts.clear();
+
+      h.container.dispose();
+      h.health.releaseGate();
+
+      await expectLater(held, completes);
+      expect(recorder.verdicts, isEmpty);
+    });
+  });
+
+  group('an identity change (the model invalidated)', () {
+    // Riverpod keeps the notifier instance across an invalidation, so what
+    // the last lifecycle latched survives into the next build unless reset.
+    test('derives again: a verdict lands after the rebuild', () async {
+      final h = _Harness()
+        ..health.stored = CircleHealthTimestamps(lastPublishAckedAt: _t0);
+      expect(await h.settle(), SharingHealth.healthy, reason: 'premise');
+
+      h.container.invalidate(sharingHealthProvider);
+      h.advance(kPublishSilenceThreshold + const Duration(seconds: 1));
+
+      expect(await h.settle(), SharingHealth.publishFailing(_t0));
+    });
+
+    test("carries none of the last identity's evidence", () async {
+      final h = _Harness();
+      await h.settle();
+      h.notifier
+        ..recordRelaySubscriptionLost()
+        ..recordStopOutcome(LiveSyncStopOutcome.stillHolding)
+        ..recordPublishOutcome(sharingCircleKey(_circle()), acked: false);
+
+      h.container.invalidate(sharingHealthProvider);
+      h.advance(kSharingFaultConfirmationWindow * 2);
+
+      expect(await h.settle(), SharingHealth.healthy);
     });
   });
 
