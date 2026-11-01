@@ -184,7 +184,9 @@ class _RelaySection extends ConsumerWidget {
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final relays = ref.watch(_listProviderFor(category));
-    final status = ref.watch(relayStatusProvider).value;
+    // `.value` rethrows a failed first load, which paints the page as an
+    // error box; rows without a status show "Not checked" instead.
+    final status = ref.watch(relayStatusProvider).valueOrNull;
     // Contamination warning is advisory and Profile-only (task requirement):
     // only watch the set when this section IS the Profile category, so the
     // Inbox/KeyPackage sections neither pay for nor rebuild on it.
@@ -323,7 +325,7 @@ class _RelaySection extends ConsumerWidget {
     final scheme = Theme.of(context).colorScheme;
     final messenger = ScaffoldMessenger.of(context);
     final l10n = AppLocalizations.of(context);
-    final list = ref.read(_listProviderFor(category)).value ?? const [];
+    final list = ref.read(_listProviderFor(category)).valueOrNull ?? const [];
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(

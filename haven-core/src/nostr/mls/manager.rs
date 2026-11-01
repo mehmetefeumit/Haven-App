@@ -360,7 +360,8 @@ const fn stall_input(outcome: &IngestOutcome) -> Option<(&GroupId, StallInput)> 
 pub const POST_JOIN_GRACE_MS: u64 = 15_000;
 
 /// MDK's account crate's quiet window before a post-join self-update, which
-/// any epoch change or accepted proposal restarts (`MAINTENANCE_QUIET_SECS`).
+/// any epoch change or accepted proposal restarts, and so does the
+/// obligation's re-arm (`MAINTENANCE_QUIET_SECS`).
 pub const POST_JOIN_QUIET_MS: u64 = 60_000;
 
 /// The least gap between two post-join self-updates of one session: the
@@ -5607,11 +5608,18 @@ impl SessionManager {
     ///   that rotated the leaf;
     /// * a completed one whose leaf is back at its baseline — the
     ///   self-update that completed it withdrawn by branch selection — is
-    ///   opened again (MDK's post-compromise re-arm).
+    ///   opened again (MDK's post-compromise re-arm), and its circle's quiet
+    ///   window restarts at `now_ms`, as MDK's re-arm restarts it
+    ///   (`mark_evolution_superseded`): a switch at the same height moves no
+    ///   epoch, so nothing else would.
     ///
     /// These are the only obligation writes Haven makes, and it never
     /// creates one. A circle the engine does not hold live is left as it is.
-    fn settle_post_join(session: &AccountDeviceSession) -> Vec<MaintenanceObligation> {
+    fn settle_post_join(
+        &self,
+        session: &AccountDeviceSession,
+        now_ms: u64,
+    ) -> Vec<MaintenanceObligation> {
         let Ok(obligations) = session.maintenance_obligations() else {
             return Vec::new();
         };
@@ -5629,11 +5637,13 @@ impl SessionManager {
             else {
                 continue;
             };
+            let mut rearmed = false;
             let phase = if group.is_terminal() || !members.iter().any(|member| member.id == own) {
                 MaintenancePhase::Failed
             } else if Self::leaf_rotated(session, &obligation) {
                 MaintenancePhase::Complete
             } else if obligation.phase == MaintenancePhase::Complete {
+                rearmed = true;
                 MaintenancePhase::CatchUp
             } else {
                 obligation.phase
@@ -5644,6 +5654,16 @@ impl SessionManager {
                     // Not made due on a phase that could not be kept.
                     log::warn!("a post-join obligation was not updated: {}", e.kind());
                     continue;
+                }
+                if rearmed {
+                    // `now_ms` was read before the engine was waited for: an
+                    // input taken in meanwhile is later and stands.
+                    self.state_input_at
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .entry(group_id.clone())
+                        .and_modify(|at| *at = (*at).max(now_ms))
+                        .or_insert(now_ms);
                 }
             }
             if !matches!(
@@ -5695,17 +5715,17 @@ impl SessionManager {
     /// ([`Self::mark_caught_up`]), it may take a staged commit
     /// ([`Self::post_join_may_stage`]), and MDK's account crate's windows
     /// have passed ([`post_join_not_before`]): the 15 s grace after the end
-    /// of stored events, a 60 s quiet window that any epoch change or
-    /// accepted proposal restarts, the obligation's own jitter, and the
-    /// spacing after this session's last post-join self-update. The wait a
-    /// rolled-back commit earned is another such time. These are
+    /// of stored events, a 60 s quiet window that any epoch change,
+    /// accepted proposal or re-arm restarts, the obligation's own jitter, and
+    /// the spacing after this session's last post-join self-update. The wait
+    /// a rolled-back commit earned is another such time. These are
     /// earliest-allowed times that the full drives already running serve;
     /// nothing here arms a timer.
     pub(crate) async fn post_join_due(&self, now_ms: u64) -> (Vec<GroupId>, Option<u64>) {
         let Ok(session) = self.engine().await else {
             return (Vec::new(), None);
         };
-        let open = Self::settle_post_join(&session);
+        let open = self.settle_post_join(&session, now_ms);
         if open.is_empty() {
             return (Vec::new(), None);
         }

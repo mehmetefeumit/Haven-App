@@ -491,7 +491,8 @@ async fn drive_roster(member: &CircleMember, group: &GroupId) -> Vec<String> {
 /// B's post-join self-update is confirmed, then the admin's removal from the
 /// same epoch arrives: privileged, it wins, and B's leaf is back at its
 /// Welcome leaf. The obligation opens again and B's next full resume, once
-/// the quiet window after that epoch change has passed, makes a fresh one.
+/// the quiet window its re-arm restarts and the jitter have passed — the
+/// switch moved no epoch, so nothing else restarts it — makes a fresh one.
 /// In a second circle a repair B makes first completes the obligation, and
 /// no post-join self-update follows it.
 #[tokio::test]
@@ -527,10 +528,21 @@ async fn a_lost_post_join_self_update_is_made_again_and_a_repair_satisfies_it() 
         vec!["catch_up"],
         "the obligation opens again"
     );
+    let jitter = b
+        .session()
+        .post_join_jitter_for_test(&fx.group)
+        .await
+        .expect("the obligation's jitter")
+        .min(30 * SECOND_MS);
+    let not_before = at + SECOND_MS + MINUTE_MS + jitter;
     let before = driver.sent().len();
-    driver
-        .resume(b, &DriveMode::Full, at + PAST_EVERY_WINDOW_MS)
-        .await;
+    driver.resume(b, &DriveMode::Full, not_before - 1).await;
+    assert_eq!(
+        driver.sent().len(),
+        before,
+        "not a millisecond inside the quiet window the re-arm restarted"
+    );
+    driver.resume(b, &DriveMode::Full, not_before).await;
     let sent = driver.sent();
     assert_eq!(sent.len(), before + 1, "a fresh self-update is made");
     assert_ne!(sent.last().map(|event| event.id), Some(lost.id));

@@ -40,13 +40,16 @@ void main() {
   Widget buildApp({
     required MockRelayPreferencesService mock,
     Identity? identity,
+    Future<RelayPreferencesService> Function()? openService,
   }) {
     return ProviderScope(
       overrides: [
         identityProvider.overrideWith(
           (ref) async => identity ?? _stubIdentity(),
         ),
-        relayPreferencesServiceProvider.overrideWith((ref) async => mock),
+        relayPreferencesServiceProvider.overrideWith(
+          (ref) async => openService == null ? mock : await openService(),
+        ),
         // disconnect_relay routes through RelayService now; tests don't
         // exercise the persistent FFI client, but the page still calls
         // it on remove and would otherwise hit production NostrRelayService.
@@ -785,5 +788,100 @@ void main() {
         expect(find.text('Profile lookups paused'), findsOneWidget);
       },
     );
+  });
+
+  // While the Android MLS handoff holds, every manager open fails closed, and
+  // the relay providers cache that as an `AsyncError` with no previous value.
+  // Reading such a value with `.value` throws, and a release build paints the
+  // throwing widget as a grey box filling the page.
+  group('RelaySettingsPage when the relay providers failed to load', () {
+    void growSurface(WidgetTester tester) {
+      final originalSize = tester.view.physicalSize;
+      final originalRatio = tester.view.devicePixelRatio;
+      tester.view.physicalSize = const Size(800, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.physicalSize = originalSize;
+        tester.view.devicePixelRatio = originalRatio;
+      });
+    }
+
+    testWidgets('renders every section instead of an error box', (
+      tester,
+    ) async {
+      growSurface(tester);
+      await tester.pumpWidget(
+        buildApp(
+          mock: seededMock(),
+          openService: () async => throw StateError('handoff'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.byType(ErrorWidget), findsNothing);
+      expect(find.text('My Inbox Relays'), findsOneWidget);
+      expect(find.text('My KeyPackage Relays'), findsOneWidget);
+      expect(find.text('My Profile Relays'), findsOneWidget);
+      expect(find.text('Failed to load relays.'), findsNWidgets(3));
+      expect(find.text('Add relay'), findsNWidgets(3));
+    });
+
+    testWidgets(
+      'lists the relays once they load, though the status is still failed',
+      (tester) async {
+        growSurface(tester);
+        final mock = seededMock();
+        var failing = true;
+        await tester.pumpWidget(
+          buildApp(
+            mock: mock,
+            openService: () async {
+              if (failing) throw StateError('handoff');
+              return mock;
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // The handoff ends and the lists are rebuilt (as MapShell's resume
+        // heal does), but the relay status read them once and keeps its error.
+        failing = false;
+        ProviderScope.containerOf(
+            tester.element(find.byType(RelaySettingsPage)),
+          )
+          ..invalidate(relayPreferencesServiceProvider)
+          ..invalidate(inboxRelaysProvider)
+          ..invalidate(keyPackageRelaysProvider)
+          ..invalidate(profileRelaysProvider);
+        await tester.pumpAndSettle();
+
+        expect(tester.takeException(), isNull);
+        expect(find.byType(ErrorWidget), findsNothing);
+        expect(find.text('inbox.example.com'), findsOneWidget);
+        expect(find.text('kp.example.com'), findsOneWidget);
+        expect(find.text('profile.example.com'), findsOneWidget);
+        expect(find.byTooltip('Not checked'), findsNWidgets(3));
+      },
+    );
+
+    testWidgets('Restore defaults still opens its confirmation', (
+      tester,
+    ) async {
+      growSurface(tester);
+      await tester.pumpWidget(
+        buildApp(
+          mock: seededMock(),
+          openService: () async => throw StateError('handoff'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Restore defaults').first);
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Restore default relays?'), findsOneWidget);
+    });
   });
 }
