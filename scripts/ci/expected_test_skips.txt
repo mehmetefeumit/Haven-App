@@ -7,10 +7,17 @@
 #
 #     <surface>|<test-id>|<skip-reason>|<expected-count>
 #
-#   surface         haven-core | rust_builder | e2e_tooling | logscan |
-#                   haven_soak | flutter
+#   surface         haven-core | haven-core-doc | rust_builder |
+#                   e2e_tooling | logscan | haven_soak | flutter
 #                   — reconciled independently, so a haven-core row is never
-#                   reported stale while checking rust_builder. The three
+#                   reported stale while checking rust_builder. haven-core's
+#                   suite is split across two surfaces: `haven-core`, reconciled
+#                   against rust-check.yml's `cargo test --tests` and
+#                   coverage.yml's instrumented run, neither of which runs a
+#                   doctest, and `haven-core-doc`, against rust-check.yml's
+#                   `cargo test --doc`. A doctest row under `haven-core` is
+#                   stale in the first and undeclared in the second, so a row
+#                   on the wrong surface cannot pass. The three
 #                   tooling crates (tooling/e2e/local-relay, tooling/logscan,
 #                   tooling/soak) have no rows: none declares a skip, and
 #                   rust-check.yml reconciles each against this file so one
@@ -54,7 +61,7 @@
 
 
 # ---------------------------------------------------------------------------
-# haven-core — 21 skips
+# haven-core — 9 skips (`cargo test --tests` and coverage.yml's `cargo llvm-cov`)
 # ---------------------------------------------------------------------------
 
 # Blossom round-trips against a REAL server (BUD-01/02 upload + download +
@@ -126,6 +133,10 @@ haven-core|tests/profile_relay_vetting.rs::curated_profile_relays_accept_unauthe
 # terminator for every entry.
 haven-core|tests/location_relay_vetting.rs::curated_location_relays_serve_445_reads_keep_both_shapes_and_speak_nip77|dials the curated location pool (HAVEN_PROBE_LOCATION_RELAYS=1)
 
+# ---------------------------------------------------------------------------
+# haven-core-doc — 13 skips (rust-check.yml's `cargo test --doc` run)
+# ---------------------------------------------------------------------------
+
 # Doctests written as ```ignore — rustdoc neither compiles nor runs them, so
 # they are prose that merely LOOKS executable. They are listed individually (not
 # globbed) because that is the whole value of declaring them: 13 API examples
@@ -141,19 +152,19 @@ haven-core|tests/location_relay_vetting.rs::curated_location_relays_serve_445_re
 # — most need a live keyring or relay to run. The cheap improvement is
 # ```no_run (compiled, not executed), which would catch API drift; that is a
 # separate change and deliberately not made here.
-haven-core|doc::src/nostr/identity/mod.rs - nostr::identity|
-haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager|
-haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::create_identity|
-haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::delete_identity|
-haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::export_nsec|
-haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::get_identity|
-haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::has_identity|
-haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::import_from_nsec|
-haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::new|
-haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::pubkey_hex|
-haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::sign|
-haven-core|doc::src/nostr/identity/storage.rs - nostr::identity::storage::SecureKeyStorage|
-haven-core|doc::src/relay/manager.rs - relay::manager::RelayManager|
+haven-core-doc|doc::src/nostr/identity/mod.rs - nostr::identity|
+haven-core-doc|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager|
+haven-core-doc|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::create_identity|
+haven-core-doc|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::delete_identity|
+haven-core-doc|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::export_nsec|
+haven-core-doc|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::get_identity|
+haven-core-doc|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::has_identity|
+haven-core-doc|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::import_from_nsec|
+haven-core-doc|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::new|
+haven-core-doc|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::pubkey_hex|
+haven-core-doc|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::sign|
+haven-core-doc|doc::src/nostr/identity/storage.rs - nostr::identity::storage::SecureKeyStorage|
+haven-core-doc|doc::src/relay/manager.rs - relay::manager::RelayManager|
 
 
 # ---------------------------------------------------------------------------

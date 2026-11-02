@@ -96,7 +96,7 @@ fn with_the_record_of(
         let store = storage_sqlite::SqliteAccountStorage::open_encrypted_with_options(
             &db,
             &key,
-            StorageConfig::storage_options(),
+            StorageConfig::test_storage_options(),
         )
         .expect("the closed store opens");
         (store, keys, dir)

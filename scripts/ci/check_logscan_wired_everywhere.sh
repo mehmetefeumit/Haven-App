@@ -22,8 +22,8 @@
 # ## What is checked, per job, derived from the workflow text
 #
 #   (a) WIRED. A job that captures a device, simulator or test log — an
-#       `adb logcat`, `log show` or `flutter drive` command, a `cargo test` or
-#       `flutter test` tee'd to a file, a lane runner (`bash …/run-*.sh` other
+#       `adb logcat`, `log show` or `flutter drive` command, a `cargo test`,
+#       `cargo llvm-cov` or `flutter test` tee'd to a file, a lane runner (`bash …/run-*.sh` other
 #       than the deadline wrapper, and never a `--self-test`), or an
 #       upload-artifact `path:` naming a `.log` — invokes scan-logs.sh at a
 #       command position, or invokes a runner from RUNNER_PINS: the checked-in
@@ -52,15 +52,17 @@
 #       unscanned) unless UPLOAD_ALLOWLIST says why. The `.ndjson`, needle and
 #       bare-wildcard bans stay in check_wire_proxy_test_only.sh.
 #   (f) TEE'D ⇒ SCANNED. Every `| tee <file>.log` capture of a test run is a
-#       `--sink` member later in the same job — the four `cargo test`
-#       transcripts in rust-check.yml and the two `flutter test` transcripts in
-#       coverage.yml — with a floor on how many such captures exist.
+#       `--sink` member later in the same job — the six `cargo test`
+#       transcripts in rust-check.yml, and coverage.yml's `cargo llvm-cov`
+#       transcript and two `flutter test` transcripts — with a floor on how
+#       many such captures exist.
 #   (g) RULES-ONLY IS FOR TRANSCRIPTS. `--rules-only` (no manifest: the rules
 #       ran, nothing declared was searched) appears in rust-check.yml and
 #       coverage.yml only, and in no lane runner; in scripts/ci/ it appears in
 #       file_soak_issue.sh alone, whose composed issue body has no manifest to
 #       scan against (RULES_ONLY_SCRIPTS says why). The `rust-test` SINK CLASS is
-#       confined the same way, to rust-check.yml alone, because that class is
+#       confined the same way, to rust-check.yml and coverage.yml's
+#       rust-coverage job (RUST_TEST_SINK_WORKFLOWS), because that class is
 #       the one that exempts cargo's crate-build line from S2 and S6
 #       (`cargo_status = "exempt"` in tooling/logscan/policy.toml). Typing any
 #       other capture as `rust-test` would carry the exemption to a log cargo
@@ -155,7 +157,7 @@ readonly RUNNER_INVOKE_RE='(^|[[:space:]])bash[[:space:]]+[^[:space:]]*tooling/e
 readonly RUNNER_NAME_RE='run-[A-Za-z0-9._-]+[.]sh'
 readonly DEADLINE_RUNNER='run-with-deadline.sh'
 readonly CAPTURE_CMD_RE='(^|[[:space:]])(adb[[:space:]]+logcat|log[[:space:]]+show|flutter[[:space:]]+drive)([[:space:]]|$)'
-readonly TEST_TEE_RE='(^|[[:space:]])(cargo|flutter)[[:space:]]+test([[:space:]]|$)'
+readonly TEST_TEE_RE='(^|[[:space:]])(cargo[[:space:]]+(test|llvm-cov)|flutter[[:space:]]+test)([[:space:]]|$)'
 readonly READ_CMD_RE='^(cat|tail|head|less|more)([[:space:]]|$)'
 readonly LOG_TOKEN_RE='[^[:space:]"'"'"'=,()]+[.]log'
 readonly PROXY_START_RE='tooling/e2e/ci/start-wire-proxy[.]sh'
@@ -177,8 +179,11 @@ declare -A RULES_ONLY_SCRIPTS=(
   ['file_soak_issue.sh']='the issue body it composes from verdict.log allowlisted fields has no manifest; the scan is the backstop to that allowlist'
 )
 # The `rust-test` sink class carries the cargo-status exemption, so it belongs to
-# the workflow that scans cargo transcripts and nowhere else. coverage.yml's
-# `flutter test` logs are `drive`, which has no exemption of any kind.
+# the captures cargo wrote and nowhere else: rust-check.yml, and in coverage.yml
+# only the `rust-coverage` job, whose `cargo llvm-cov` transcript is the run of
+# haven-core's suite. An entry `<file>:<job-id>` admits that one job of the
+# file; the same file's `flutter test` logs are `drive`, which has no exemption
+# of any kind.
 #
 # rust-check.yml's soak-tooling job types two further captures as `rust-test`:
 # the redirected stdout of `cargo run -- --self-test` and of
@@ -190,15 +195,16 @@ declare -A RULES_ONLY_SCRIPTS=(
 # the rig's per-scenario in-process scan against its sealed manifest is what
 # searches them for a declared value.
 readonly RUST_TEST_SINK_RE='--sink[[:space:]]+rust-test='
-readonly RUST_TEST_SINK_WORKFLOWS=('rust-check.yml')
+readonly RUST_TEST_SINK_WORKFLOWS=('rust-check.yml' 'coverage.yml:rust-coverage')
 
 # Measured 2026-09-18, with the soak lane landed: 21 e2e/soak jobs +
 # rust-check's five cargo jobs + coverage's flutter job = 27 capturing jobs; the
-# floor is 80 % of that. Seven tee'd transcripts (rust-check's five cargo jobs
-# and coverage's two flutter runs) — one fewer is a scan that stopped, which is
-# a decision to record here rather than to absorb.
+# floor is 80 % of that. Nine tee'd transcripts since 2026-11-02 (rust-check's
+# six cargo jobs, haven-core-suite among them, coverage's `cargo llvm-cov` run
+# and its two flutter runs) — one fewer is a scan that stopped, which is a
+# decision to record here rather than to absorb.
 readonly MIN_CAPTURING_JOBS=21
-readonly MIN_TEE_CAPTURES=7
+readonly MIN_TEE_CAPTURES=9
 
 # The gated runners: every `run-*.sh` that sources logscan-gate.sh, paired
 # with the label of the fixture in its own --self-test that pins the gate
@@ -627,6 +633,14 @@ check_job() { # check_job <records> <file> <job> <harness-dir>
     violation "${where}: --rules-only appears in a lane. A rules-only scan has no manifest: it certifies that the structural rules ran, NOT that any value the run minted is absent from the capture. A device, simulator or drive log comes from a run whose identifiers are declarable, so it is scanned against the sealed manifest; --rules-only is for the unit-test transcripts in ${RULES_ONLY_WORKFLOWS[*]} only."
   fi
 
+  # (g) a `<file>:<job-id>` entry admits the rust-test class in that job alone.
+  for w in "${RUST_TEST_SINK_WORKFLOWS[@]}"; do
+    [[ "${w}" == *:* && "${file}" == "${w%%:*}" && "${job}" != "${w#*:}" ]] || continue
+    if grep -qE -- "${RUST_TEST_SINK_RE}" <<<"${cmds}"; then
+      violation "${where}: a --sink rust-test= appears in this job, but ${file} admits that class in its ${w#*:} job only. That class exempts cargo's crate-build line from S2 and S6, which is only true of a capture cargo wrote; type this job's transcript as \`drive\`."
+    fi
+  done
+
 }
 
 # ---------------------------------------------------------------------------
@@ -712,7 +726,7 @@ check_tree() { # check_tree <workflow-dir> <harness-dir> <min-jobs> <min-tees> <
     [[ -f "${f}" ]] || continue
     base="${f##*/}"
     ok=0
-    for w in "${RUST_TEST_SINK_WORKFLOWS[@]}"; do [[ "${base}" == "${w}" ]] && ok=1; done
+    for w in "${RUST_TEST_SINK_WORKFLOWS[@]}"; do [[ "${base}" == "${w%%:*}" ]] && ok=1; done
     (( ok )) && continue
     hits="$(grep -E -- "${RUST_TEST_SINK_RE}" "${f}" | grep -vcE '^[[:space:]]*#' || true)"
     if (( hits > 0 )); then
@@ -748,7 +762,7 @@ check_tree() { # check_tree <workflow-dir> <harness-dir> <min-jobs> <min-tees> <
     broken "only ${CAPTURING_JOBS} capturing job(s) found, expected at least ${min_jobs}. Either lanes were removed (re-pin MIN_CAPTURING_JOBS in the same change) or the capture detector stopped matching, in which case every verdict above is vacuous."
   fi
   if (( TEE_CAPTURES < min_tees )); then
-    broken "only ${TEE_CAPTURES} tee'd test transcript(s) found, expected ${min_tees} (rust-check.yml's four cargo jobs and coverage.yml's two flutter runs). A tee that stopped is a scan that stopped; re-pin MIN_TEE_CAPTURES with the job that stopped capturing."
+    broken "only ${TEE_CAPTURES} tee'd test transcript(s) found, expected ${min_tees} (rust-check.yml's six cargo jobs, coverage.yml's cargo llvm-cov run and its two flutter runs). A tee that stopped is a scan that stopped; re-pin MIN_TEE_CAPTURES with the job that stopped capturing."
   fi
 
   if (( VIOLATIONS == 0 && BROKEN == 0 )); then
@@ -877,6 +891,42 @@ jobs:
 YAML
 }
 
+write_coverage_workflow() { # write_coverage_workflow <wf-dir> — coverage-shaped: a cargo llvm-cov job and a flutter job
+  cat > "$1/coverage.yml" <<'YAML'
+name: coverage
+on:
+  workflow_call:
+jobs:
+  rust-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build the runtime log scanner
+        id: build-scanner
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+      - name: Run tests with coverage
+        run: |
+          set -o pipefail
+          cargo llvm-cov --all-features --lcov --output-path coverage.lcov \
+            --ignore-filename-regex 'frb_generated' 2>&1 | tee "${RUNNER_TEMP}/core-cov-test.log"
+      - name: Scan the test transcript for identifiers
+        if: ${{ !cancelled() && steps.build-scanner.outcome == 'success' }}
+        run: bash tooling/e2e/ci/scan-logs.sh --rules-only --exempt-endpoint 127.0.0.1 --sink rust-test="${RUNNER_TEMP}/core-cov-test.log"
+  flutter-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build the runtime log scanner
+        id: build-scanner
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+      - name: Run tests with coverage
+        run: |
+          set -o pipefail
+          flutter test --coverage 2>&1 | tee "${RUNNER_TEMP}/flutter-test.log"
+      - name: Scan the test transcript for identifiers
+        if: ${{ !cancelled() && steps.build-scanner.outcome == 'success' }}
+        run: bash tooling/e2e/ci/scan-logs.sh --rules-only --exempt-endpoint 127.0.0.1 --sink drive="${RUNNER_TEMP}/flutter-test.log"
+YAML
+}
+
 write_ios_lane() { # write_ios_lane <wf-dir> — a retry-command lane rotating through the script, joining a scalar sink
   cat > "$1/e2e-ios.yml" <<'YAML'
 name: ios
@@ -996,7 +1046,7 @@ YAML
 }
 
 self_test() {
-  local -r SELF_TEST_CASES=62
+  local -r SELF_TEST_CASES=65
   local tmp cases=0 failures=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1135,6 +1185,14 @@ self_test() {
   _expect "(f) a test run that is not tee'd captures nothing (no floor breach at 0 tees)" "${d}" 0 "" 1 0
   _expect "(f) a \${RUNNER_TEMP} tee target survives the fragment split (base names 1 tee'd transcript)" "${b}" 0 "1 tee'd transcript(s)"
   _expect "floor: fewer tee'd transcripts than pinned is BROKEN" "${b}" 2 "tee'd test transcript(s) found" 1 2
+  # coverage.yml: a `cargo llvm-cov … | tee`, joined across its `\`
+  # continuation, is a test transcript like `cargo test`'s, and its job is the
+  # one place in that file the rust-test class is admitted.
+  d="${tmp}/f3"; rm -rf "${d}"; cp -r "${b}" "${d}"; write_coverage_workflow "${d}/wf"
+  _expect "(f) a cargo llvm-cov tee is a tee'd transcript, rust-test in coverage.yml's rust-coverage job passes" "${d}" 0 "3 tee'd transcript(s)"
+  d="${tmp}/f4"; rm -rf "${d}"; cp -r "${b}" "${d}"; write_coverage_workflow "${d}/wf"
+  sed -i -E 's|--sink rust-test="\$\{RUNNER_TEMP\}/core-cov-test.log"|--sink rust-test="${RUNNER_TEMP}/other.log"|' "${d}/wf/coverage.yml"
+  _expect "(f) a cargo llvm-cov transcript no later --sink names fails" "${d}" 1 "core-cov-test.log at line"
   _expect "floor: fewer capturing jobs than pinned is BROKEN" "${b}" 2 "capturing job(s) found" 4 1
 
   # (g)
@@ -1150,6 +1208,9 @@ self_test() {
   _expect "(g) a rust-test sink in a lane fails" "${d}" 1 "outside rust-check.yml"
   d="${tmp}/g4"; rm -rf "${d}"; cp -r "${b}" "${d}"; sed -i 's|--sink drive=/tmp/flutter-drive.log|--sink rust-test=/tmp/flutter-drive.log|' "${d}/harness/run-good.sh"
   _expect "(g) a rust-test sink in a lane runner fails" "${d}" 1 "appears in a lane runner"
+  d="${tmp}/g7"; rm -rf "${d}"; cp -r "${b}" "${d}"; write_coverage_workflow "${d}/wf"
+  sed -i 's|--sink drive="${RUNNER_TEMP}/flutter-test.log"|--sink rust-test="${RUNNER_TEMP}/flutter-test.log"|' "${d}/wf/coverage.yml"
+  _expect "(g) a rust-test sink in coverage.yml's flutter job fails" "${d}" 1 "admits that class in its rust-coverage job only"
   # scripts/ci: the base names --rules-only in file_soak_issue.sh (the passing
   # half) and only in a comment in other.sh.
   _expect "(g) --rules-only in file_soak_issue.sh passes (base)" "${b}" 0

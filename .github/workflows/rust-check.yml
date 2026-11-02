@@ -16,6 +16,18 @@
 # tee'd `cargo test` transcript before anything else reads the file
 # (Security Rule 15; the `Scan the test transcript` steps).
 #
+# haven-core's suite runs twice per push, on purpose: here (`haven-core-suite`)
+# on floating `stable`, uninstrumented and unscaled — the compiler the release
+# and debug builds use — and in coverage.yml on the pinned toolchain,
+# instrumented, for coverage. The `haven-core` job compiles every test target
+# (`cargo test --no-run`) and runs the doctests, which `cargo llvm-cov` cannot
+# run on stable.
+#
+# `group` splits the jobs between three callers in ci.yml: the E2E lanes wait
+# for `core` (haven-core, rust_builder, e2e tooling, logscan tooling) only —
+# not for the suite (`suite`) or the soak rig's build (`tooling`). `all`, the
+# default, is what every other caller gets.
+#
 # Both must pass clippy individually. Until 2026-05-24, rust_builder
 # was not clippy-checked, which masked a `too_many_arguments` issue
 # on `CircleManagerFfi::create_circle` surfaced during the E2E Phase
@@ -25,10 +37,30 @@ name: Rust Check
 
 on:
   workflow_call:
+    inputs:
+      group:
+        description: "Which jobs run: all | core (haven-core, rust_builder, e2e tooling, logscan tooling) | suite (haven-core suite on stable) | tooling (soak tooling)"
+        type: string
+        default: all
 
 jobs:
+  # A misspelt group would skip every job below, and a reusable workflow whose
+  # jobs all skipped reports success to the caller's `needs:`.
+  group:
+    name: group input is known
+    if: ${{ !contains(fromJSON('["all", "core", "suite", "tooling"]'), inputs.group) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse an unknown group
+        env:
+          GROUP: ${{ inputs.group }}
+        run: |
+          echo "::error::rust-check.yml was called with group '${GROUP}'; expected all, core, suite or tooling."
+          exit 1
+
   haven-core:
     name: haven-core
+    if: ${{ inputs.group == 'all' || inputs.group == 'core' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -74,22 +106,29 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      # The scan step after the tests treats an absent scanner as a broken
+      # Every test target compiles on the floating toolchain before an E2E lane
+      # starts. The suite runs in haven-core-suite below, which gates nothing.
+      - name: Compile the tests
+        run: cargo test --no-run
+
+      # The scan step after the doctests treats an absent scanner as a broken
       # guard (rc 2), never as a skipped scan, so the binary is built before
       # the transcript exists; the cache above includes tooling/logscan. `id`
-      # because this step immediately precedes the tests: "it succeeded" is
-      # the one standard-shaped `if:` predicate equal to "the tests started".
+      # because this step immediately precedes the doctests: "it succeeded" is
+      # the one standard-shaped `if:` predicate equal to "the doctests started".
       - name: Build the runtime log scanner
         id: build-scanner
         working-directory: ${{ github.workspace }}
         run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
 
+      # `cargo llvm-cov` runs no doctest on stable (`--doctests` is
+      # nightly-only), so this is the one place they run.
       # `set -o pipefail` so `tee` cannot mask a failing cargo exit code —
       # GitHub's default shell is `bash -e {0}`, which does NOT set it.
-      - name: Run tests
+      - name: Run doctests
         run: |
           set -o pipefail
-          cargo test 2>&1 | tee "${RUNNER_TEMP}/haven-core-cargo-test.log"
+          cargo test --doc 2>&1 | tee "${RUNNER_TEMP}/haven-core-cargo-test.log"
 
       # Security Rule 15 over the transcript, before anything else reads it.
       # `--rules-only`: a unit-test run mints no declarable value, so there is
@@ -109,15 +148,16 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: bash tooling/e2e/ci/scan-logs.sh --rules-only --exempt-endpoint 127.0.0.1 --sink rust-test="${RUNNER_TEMP}/haven-core-cargo-test.log"
 
-      # `cargo test` prints "21 ignored" and exits 0. Nothing asserted that
-      # number, and the reporter never names the tests, so a keyring- or
-      # Blossom-gated proof could stop running with no trace but a digit. The
-      # gate reconciles the run's real skip list against
-      # scripts/ci/expected_test_skips.txt: an undeclared skip fails, and so
-      # does a declaration whose test is gone (a stale allowance is its own
-      # false green).
+      # `cargo test --doc` prints "N ignored" and exits 0. Nothing asserted
+      # that number, and the reporter never names the tests, so a proof could
+      # stop running with no trace but a digit. The gate reconciles the run's
+      # real skip list against scripts/ci/expected_test_skips.txt: an
+      # undeclared skip fails, and so does a declaration whose test is gone (a
+      # stale allowance is its own false green). `haven-core-doc` is the
+      # doctest surface; haven-core-suite and coverage.yml reconcile
+      # `haven-core` against their runs of everything else.
       - name: No undeclared test skips
-        run: bash ../scripts/ci/check_no_undeclared_skips.sh cargo haven-core "${RUNNER_TEMP}/haven-core-cargo-test.log"
+        run: bash ../scripts/ci/check_no_undeclared_skips.sh cargo haven-core-doc "${RUNNER_TEMP}/haven-core-cargo-test.log"
 
       # Release builds disable `debug_assertions`, so a production path that
       # accidentally calls a `#[cfg(any(test, debug_assertions))]`-gated method
@@ -126,8 +166,65 @@ jobs:
       - name: Release build (no debug_assertions)
         run: cargo build --release --lib
 
+  # The suite, uninstrumented and unscaled, on the `stable` the shipped builds
+  # compile with: coverage.yml measures on a pinned rustc, so without this a
+  # behaviour change only a newer compiler causes would ship untested.
+  # `--tests` is the target set `cargo llvm-cov` runs (lib, bins, integration
+  # tests; no doctests), so both runs reconcile the same `haven-core` surface.
+  haven-core-suite:
+    name: haven-core suite (stable)
+    if: ${{ inputs.group == 'all' || inputs.group == 'suite' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: haven-core
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct key so this job and haven-core don't fight over a shared
+          # snapshot.
+          workspaces: |
+            haven-core
+            tooling/logscan
+          key: haven-core-suite
+
+      # As in haven-core: the guarded lock is the built lock.
+      - name: Resolve from the committed lockfile
+        run: cargo metadata --locked --format-version 1 >/dev/null
+
+      # As in haven-core: built before the transcript exists, `id` for the
+      # scan step's `if:`.
+      - name: Build the runtime log scanner
+        id: build-scanner
+        working-directory: ${{ github.workspace }}
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      - name: Run tests
+        run: |
+          set -o pipefail
+          cargo test --tests 2>&1 | tee "${RUNNER_TEMP}/haven-core-suite-cargo-test.log"
+
+      # Security Rule 15 over the transcript, rules-only, before anything else
+      # reads it; the haven-core job's step says why the job log is the sink.
+      - name: Scan the test transcript for identifiers
+        if: ${{ !cancelled() && steps.build-scanner.outcome == 'success' }}
+        working-directory: ${{ github.workspace }}
+        run: bash tooling/e2e/ci/scan-logs.sh --rules-only --exempt-endpoint 127.0.0.1 --sink rust-test="${RUNNER_TEMP}/haven-core-suite-cargo-test.log"
+
+      - name: No undeclared test skips
+        run: bash ../scripts/ci/check_no_undeclared_skips.sh cargo haven-core "${RUNNER_TEMP}/haven-core-suite-cargo-test.log"
+
   rust-builder:
     name: rust_builder (FFI surface)
+    if: ${{ inputs.group == 'all' || inputs.group == 'core' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -218,6 +315,7 @@ jobs:
   # ============================================================================
   e2e-tooling:
     name: e2e tooling (hermetic relay + wire proxy)
+    if: ${{ inputs.group == 'all' || inputs.group == 'core' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -293,6 +391,7 @@ jobs:
   # ============================================================================
   logscan-tooling:
     name: logscan tooling (runtime log-privacy scanner)
+    if: ${{ inputs.group == 'all' || inputs.group == 'core' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -439,8 +538,8 @@ jobs:
   # `test-utils` on. That pulls libsqlite3-sys with
   # bundled-sqlcipher-vendored-openssl, i.e. a vendored OpenSSL and SQLCipher
   # built from source, and `[profile.soak]` is a new target subdirectory on top
-  # of it. A cache miss here is minutes, and because every stage-4 lane waits on
-  # this workflow, a cold build here delays the WHOLE pipeline — hence the
+  # of it. A cache miss here is minutes, and because the soak lane waits on
+  # this job (ci.yml's `rust-tooling`), a cold build here delays it — hence the
   # explicit `timeout-minutes` (this workflow's other jobs have none) and the
   # single `shared-key` shared with soak-core.yml, so the lane reads the cache
   # this job wrote rather than building the crate a second time. `key:` would
@@ -462,6 +561,7 @@ jobs:
   # ============================================================================
   soak-tooling:
     name: soak tooling (Tier-1 soak rig)
+    if: ${{ inputs.group == 'all' || inputs.group == 'tooling' }}
     runs-on: ubuntu-latest
     # 60, not 45: two cold compiles (test, then [profile.soak]) of haven-core with vendored OpenSSL + SQLCipher, then a suite whose own bounded waits are minutes.
     timeout-minutes: 60

@@ -20,24 +20,25 @@
 #     2. floors guard self-test            -> repo-guards.yml
 #     3. lcov filter self-test             -> repo-guards.yml
 #     4. lcov aggregate self-test          -> repo-guards.yml
-#     5. stale test-asset guard self-test  -> local only (see gate 9)
+#     5. stale test-asset guard self-test  -> local only (see gate 10)
 #
 #   RUST (haven-core)
 #     6. suite runs green                  -> "Run tests with coverage"
-#     7. aggregate >= 80%                  -> "Check coverage threshold"
-#     8. per-path floors                   -> "Per-path coverage floors (haven-core)"
+#     7. no undeclared test skips          -> "No undeclared test skips"
+#     8. aggregate >= 80%                  -> "Check coverage threshold"
+#     9. per-path floors                   -> "Per-path coverage floors (haven-core)"
 #
 #   FLUTTER (haven)
-#     9. drop a test-asset bundle compiled by a different Flutter SDK
+#    10. drop a test-asset bundle compiled by a different Flutter SDK
 #                                          -> local only: a CI runner has no
 #                                             bundle to go stale, a developer
 #                                             switching SDKs does
-#    10. suite runs green                  -> "Run tests with coverage"
-#    11. no undeclared test skips          -> "No undeclared test skips"
-#    12. rollback-path flag-off unit run   -> "Rollback-path flag-off unit check"
-#    13. aggregate >= 50% on the FILTERED report
+#    11. suite runs green                  -> "Run tests with coverage"
+#    12. no undeclared test skips          -> "No undeclared test skips"
+#    13. rollback-path flag-off unit run   -> "Rollback-path flag-off unit check"
+#    14. aggregate >= 50% on the FILTERED report
 #                                          -> "Remove generated files" + "Check coverage threshold"
-#    14. per-path floors on the same file  -> "Per-path coverage floors (haven)"
+#    15. per-path floors on the same file  -> "Per-path coverage floors (haven)"
 #
 # The static gates run FIRST and alone. A hand-edited floor — the single most
 # common way this workflow goes red — now costs 50 ms to discover instead of
@@ -58,8 +59,8 @@
 #
 # ## Usage
 #
-#   scripts/ci/check_coverage.sh                 # everything (~6-11 min, stacks in parallel)
-#   scripts/ci/check_coverage.sh --static-only   # gates 1-3 only, instant
+#   scripts/ci/check_coverage.sh                 # everything, stacks in parallel (≈ 31 min, measured 2026-11-02 with --sequential)
+#   scripts/ci/check_coverage.sh --static-only   # gates 1-5 only, instant
 #   scripts/ci/check_coverage.sh --sequential    # one stack at a time
 #   scripts/ci/check_coverage.sh --html          # also write HTML reports
 #
@@ -215,22 +216,34 @@ stack_rust() {
   # gate STRICTER than CI on timing and looser on nothing — so a local red could
   # be a phantom, and the habit that teaches (re-run until green) is the one
   # that hides a real race.
+  # ONE stream: cargo writes its `Running …` headers to stderr and libtest its
+  # verdicts to stdout, and the skip gate attributes each skip to the header
+  # before it.
   local rc=0
   ( cd "$ROOT/haven-core" \
     && HAVEN_TEST_WAIT_SCALE="${HAVEN_TEST_WAIT_SCALE:-4}" \
        "${cargo_bin[@]}" llvm-cov --all-features \
          --ignore-filename-regex 'frb_generated' --summary-only ) \
-    >"$TMP/rust.out" 2>"$TMP/rust.err" || rc=$?
+    >"$TMP/rust.log" 2>&1 || rc=$?
   if [ "$rc" -ne 0 ]; then
     err "Rust tests/coverage run failed (test failure or build error):"
-    tail -n 40 "$TMP/rust.err" >&2 || true
-    tail -n 20 "$TMP/rust.out" >&2 || true
+    tail -n 60 "$TMP/rust.log" >&2 || true
     return 1
   fi
 
   local status=0 rust_cov
-  # TOTAL line, column 10 = line-coverage % (matches coverage.yml's awk).
-  rust_cov="$(grep -m1 'TOTAL' "$TMP/rust.out" | awk '{print $10}' | tr -d '%' || true)"
+  # Gate: coverage.yml's "No undeclared test skips" over the same run. The
+  # doctests' surface (`haven-core-doc`) is rust-check.yml's, not this one's.
+  if "$SCRIPT_DIR/check_no_undeclared_skips.sh" cargo haven-core "$TMP/rust.log"; then
+    ok "No undeclared test skips (cargo/haven-core)"
+  else
+    err "Undeclared test skips — see scripts/ci/expected_test_skips.txt"
+    status=1
+  fi
+
+  # The summary's TOTAL row, column 10 = line-coverage %. Anchored and the
+  # last one, because the same file now carries every test's output.
+  rust_cov="$(grep '^TOTAL' "$TMP/rust.log" | tail -n 1 | awk '{print $10}' | tr -d '%' || true)"
   # Same shape validation coverage.yml does: a parse failure used to pass this
   # gate silently, which is the worst outcome available to a coverage check.
   case "${rust_cov}" in

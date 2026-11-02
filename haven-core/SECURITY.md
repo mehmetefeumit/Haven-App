@@ -2829,7 +2829,12 @@ SQLCipher stretches through PBKDF2 (`cipher_compatibility = 4`) — a pure
 defense-in-depth stretch over already-256-bit material. The passphrase is
 `Zeroizing` end to end and never logged; `session-v2.sqlite` runs **WAL** (the
 pre-Dark-Matter MLS DB was rollback-journal) with `secure_delete` and
-`cipher_memory_security` (see `haven-core/src/nostr/mls/storage.rs`).
+`cipher_memory_security` (see `haven-core/src/nostr/mls/storage.rs`;
+`tests/mls_store_memory_security_on.rs`). A test fixture's store
+(`StorageConfig::test_storage_options`, test and `test-utils` builds only)
+runs it off: the setting is process-wide and one-way, and on it serialises a
+test binary's threads behind SQLite's allocator mutex
+(`tests/mls_store_memory_security_off_in_tests.rs`).
 
 **MDK v0.10.4 storage reset and secure-erase (owner decision D1).** MDK
 v0.10.4 cannot open a v0.9.4 store and Haven carries no importer, so the first

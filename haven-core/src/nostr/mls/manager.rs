@@ -77,7 +77,8 @@ use cgka_traits::transport_adapter::{
 };
 use cgka_traits::types::{EpochId, GroupId, MemberId, MessageId};
 use storage_sqlite::{
-    SqlCipherKey, SqliteAccountStorage, TransportReconciliationItem, TransportReconciliationRoute,
+    SqlCipherKey, SqliteAccountStorage, SqliteStorageOptions, TransportReconciliationItem,
+    TransportReconciliationRoute,
 };
 use transport_nostr_peeler::{NostrMlsPeeler, NostrPeelerError, NostrTransportEvent};
 
@@ -1260,7 +1261,13 @@ impl SessionManager {
         })?;
         let config = StorageConfig::new(data_dir);
         let key = config.sqlcipher_key()?;
-        Self::open_session(config.database_path(), key, keys, notes)
+        Self::open_session(
+            config.database_path(),
+            key,
+            StorageConfig::storage_options(),
+            keys,
+            notes,
+        )
     }
 
     /// Opens a session over a fixed-key encrypted temp database, bypassing the
@@ -1268,7 +1275,8 @@ impl SessionManager {
     ///
     /// The Dark Matter `storage-sqlite` backend always encrypts (`SQLCipher`); the
     /// "unencrypted" name is retained for continuity with the old test API. It
-    /// uses a constant test passphrase so no platform keyring is required.
+    /// uses a constant test key so no platform keyring is required, and
+    /// [`StorageConfig::test_storage_options`].
     ///
     /// # Errors
     ///
@@ -1295,7 +1303,13 @@ impl SessionManager {
         })?;
         let config = StorageConfig::new(data_dir);
         let key = StorageConfig::test_sqlcipher_key()?;
-        Self::open_session(config.database_path(), key, keys, notes)
+        Self::open_session(
+            config.database_path(),
+            key,
+            StorageConfig::test_storage_options(),
+            keys,
+            notes,
+        )
     }
 
     /// Shared open path: wires the peeler, the hardened proof signer, and the
@@ -1305,6 +1319,7 @@ impl SessionManager {
     fn open_session(
         db_path: std::path::PathBuf,
         key: SqlCipherKey,
+        options: SqliteStorageOptions,
         keys: &Keys,
         notes: Option<Arc<dyn CommitNotes>>,
     ) -> Result<Self> {
@@ -1319,17 +1334,13 @@ impl SessionManager {
         // into `SessionConfig` — so the passphrase is never retained by Haven
         // beyond this function. Both opens run `storage-sqlite`'s idempotent
         // migrations; this one simply gets there first on a fresh database.
-        // The SAME options the session's own connection uses
-        // ([`StorageConfig::storage_options`]). `journal_mode` is DB-wide and
-        // PERSISTENT, so two connections opening one file with different
-        // options do not merely differ — the second silently re-writes the
-        // first's journalling mode. One source of truth removes the question.
-        let message_store = SqliteAccountStorage::open_encrypted_with_options(
-            &db_path,
-            &key,
-            StorageConfig::storage_options(),
-        )
-        .map_err(map_storage_err)?;
+        // The SAME options the session's own connection is given below.
+        // `journal_mode` is DB-wide and PERSISTENT, so two connections opening
+        // one file with different options do not merely differ — the second
+        // silently re-writes the first's journalling mode.
+        let message_store =
+            SqliteAccountStorage::open_encrypted_with_options(&db_path, &key, options.clone())
+                .map_err(map_storage_err)?;
         let identity = keys.public_key().to_bytes().to_vec();
         // Before the engine hydrates and before anything can publish: hydrate
         // binds a group's first pending fanout row to WHATEVER commit it finds
@@ -1371,6 +1382,7 @@ impl SessionManager {
         let proof_signer: Arc<_> = HavenIdentityProofSigner::arc(keys);
 
         let config = SessionConfig::new(db_path, key, identity, Box::new(peeler))
+            .storage_options(options)
             .account_identity_proof_signer(proof_signer)
             .supported_app_components(haven_app_components())
             // Enable MIP-03 SelfRemove. The engine's default `FeatureRegistry` is

@@ -65,9 +65,16 @@
 #   check_no_undeclared_skips.sh --self-test
 #
 # `<surface>` selects the manifest rows to reconcile against: `haven-core`,
-# `rust_builder`, `e2e_tooling`, `logscan`, `haven_soak` or `flutter`. Surfaces
-# are reconciled independently so a
+# `haven-core-doc`, `rust_builder`, `e2e_tooling`, `logscan`, `haven_soak` or
+# `flutter`. Surfaces are reconciled independently so a
 # haven-core entry is not reported stale while checking rust_builder.
+#
+# haven-core's suite reaches this script on TWO surfaces: `haven-core`, from
+# rust-check.yml's `cargo test --tests` and coverage.yml's `cargo llvm-cov`
+# (which executes no doctest on stable), and `haven-core-doc`, from
+# rust-check.yml's `cargo test --doc`. A doctest skip in a `haven-core`
+# transcript, or a declaration on the surface whose transcript never shows it,
+# fails like any other undeclared or stale row.
 #
 # Produce the inputs with:
 #   set -o pipefail; cargo test 2>&1 | tee cargo-test.log
@@ -86,7 +93,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="check_no_undeclared_skips"
-readonly SELF_TEST_FIXTURES=16
+readonly SELF_TEST_FIXTURES=20
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEFAULT_MANIFEST="${REPO_ROOT}/scripts/ci/expected_test_skips.txt"
 
@@ -464,13 +471,13 @@ selftest|doc::src/nostr/mod.rs - nostr|
 other-surface|src/lib.rs::not::mine|some other reason
 EOF
 
-  _case() { # _case <label> <expect-rc> <manifest> <kind> <input>
-    local label="$1" want="$2" man="$3" kind="$4" input="$5" got=0
+  _case() { # _case <label> <expect-rc> <manifest> <kind> <input> [surface]
+    local label="$1" want="$2" man="$3" kind="$4" input="$5" surface="${6:-selftest}" got=0
     checked=$(( checked + 1 ))
     # SUBSHELL, not a bare call: run_check exits on failure, which would abort
     # the self-test after its first negative fixture and leave the rest silently
     # unrun — a self-test that only ever proves the happy path.
-    ( HAVEN_SKIP_MANIFEST="${man}" run_check "${kind}" selftest "${input}" ) >/dev/null 2>&1 || got=$?
+    ( HAVEN_SKIP_MANIFEST="${man}" run_check "${kind}" "${surface}" "${input}" ) >/dev/null 2>&1 || got=$?
     if [[ "${got}" -eq "${want}" ]]; then
       printf '  \033[1;32mPASS\033[0m %s (rc=%d)\n' "${label}" "${got}"
     else
@@ -567,6 +574,20 @@ EOF
   grep -vE '^[[:space:]]+(Running|Doc-tests) ' "${tmp}/cargo.ok.log" \
     > "${tmp}/cargo.noctx.log"
   _case "unattributed skips are parser rot, not a policy failure" 2 "${tmp}/manifest.ok" cargo "${tmp}/cargo.noctx.log"
+
+  # (16)-(19) ONE crate, TWO transcripts: the instrumented run executes no
+  #      doctest, so its doctest rows live on a surface of their own that is
+  #      reconciled against the `cargo test --doc` transcript.
+  sed 's/^selftest|doc::/selftest-doc|doc::/' "${tmp}/manifest.ok" > "${tmp}/manifest.split"
+  sed '/Doc-tests /,$d' "${tmp}/cargo.ok.log" > "${tmp}/cargo.nodoc.log"
+  sed -n '/Doc-tests /,$p' "${tmp}/cargo.ok.log" > "${tmp}/cargo.doc.log"
+  _case "split surfaces: the doctest-free run passes its own surface" 0 "${tmp}/manifest.split" cargo "${tmp}/cargo.nodoc.log"
+  _case "split surfaces: the doctest run passes the doc surface" 0 "${tmp}/manifest.split" cargo "${tmp}/cargo.doc.log" selftest-doc
+  # THE MUTATION: a doctest skip hidden in the other transcript is undeclared
+  #      there, never absorbed by the doc surface's row.
+  _case "split surfaces: a doctest skip in the doctest-free transcript fails" 1 "${tmp}/manifest.split" cargo "${tmp}/cargo.ok.log"
+  #      And the doc surface handed the wrong transcript reports its row stale.
+  _case "split surfaces: the doc surface over the doctest-free transcript fails" 1 "${tmp}/manifest.split" cargo "${tmp}/cargo.nodoc.log" selftest-doc
 
   log "self-test: dart surface"
 
@@ -672,7 +693,7 @@ main() {
       esac
       ;;
     -h | --help)
-      sed -n '2,90p' "${BASH_SOURCE[0]}"
+      sed -n '2,91p' "${BASH_SOURCE[0]}"
       ;;
     *)
       misconfig "usage: ${SCRIPT_NAME}.sh {cargo|dart} <surface> <test-output-file> | --self-test"

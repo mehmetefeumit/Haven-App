@@ -62,7 +62,7 @@
 # `POST /repos/{owner}/{repo}/actions/jobs/{job_id}/rerun` is documented as
 # "Re-run a job and its dependent jobs in a workflow run"
 # (https://docs.github.com/en/rest/actions/workflow-runs). Dependents exist only
-# for a job something `needs:` — in ci.yml that is `rust`, `coverage` and
+# for a job something `needs:` — in ci.yml that is `rust`, `rust-tooling` and
 # `guards`. Whatever needed them was skipped when they failed, so re-running
 # those too is the correct result rather than collateral. No ci.yml E2E lane,
 # this incident included, has a dependent.

@@ -379,7 +379,7 @@ fn restate(member: CircleMember, id: &[u8], state: MessageState) -> CircleMember
     let store = storage_sqlite::SqliteAccountStorage::open_encrypted_with_options(
         &db,
         &key,
-        StorageConfig::storage_options(),
+        StorageConfig::test_storage_options(),
     )
     .expect("the closed store opens");
     store
@@ -411,7 +411,7 @@ fn with_closed_store(
     let store = storage_sqlite::SqliteAccountStorage::open_encrypted_with_options(
         &db,
         &key,
-        StorageConfig::storage_options(),
+        StorageConfig::test_storage_options(),
     )
     .expect("the closed store opens");
     edit(&store);

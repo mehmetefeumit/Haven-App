@@ -685,16 +685,13 @@ impl CircleStorage {
     ///
     /// # Debug/release split for `cipher_memory_security`
     ///
-    /// Release (production) builds keep `cipher_memory_security = ON`, byte-for-
-    /// byte unchanged. **Debug builds force it OFF**: the E2E CI Android
-    /// emulator's `RLIMIT_MEMLOCK` is tiny, so every `mlock()` fails `ENOMEM`
-    /// (giving NO protection there anyway) while flooding ~200k+ failed syscalls
-    /// and logcat lines that freeze the emulator into multi-minute frames and
-    /// time later scenarios out. Debug builds are dev/test only and never
-    /// shipped, so no user security is reduced. This mirrors the established
-    /// Haven pattern of gating test-only seams on `#[cfg(debug_assertions)]`
-    /// (which the E2E build compiles with ON), and matches `tiles.db`, which
-    /// runs with `cipher_memory_security` OFF for a related reason.
+    /// Release builds turn it on. Debug builds leave it off because the setting
+    /// is process-wide and one-way (`SQLCipher` ignores `OFF`): in a test
+    /// process, whose MLS stores all open with
+    /// `StorageConfig::test_storage_options`, `circles.db` must not be the
+    /// store that turns it on and serialises every test thread behind
+    /// `SQLite`'s allocator mutex (`tests/mls_store_memory_security_off_in_tests.rs`).
+    /// The app gains nothing from it: its MLS store turns it on in every build.
     ///
     /// # `busy_timeout` (M7-B defense-in-depth — NOT the fork fix)
     ///
@@ -711,11 +708,8 @@ impl CircleStorage {
     /// A failure to apply them is surfaced so the caller fails closed rather
     /// than running with weaker guarantees.
     fn apply_hardening_pragmas(conn: &Connection) -> Result<()> {
-        // Release keeps `cipher_memory_security = ON`; debug forces it OFF so the
-        // E2E emulator does not drown in failing `mlock()` syscalls. See this
-        // function's doc comment ("Debug/release split") for the full rationale.
-        // The Android app process cannot read host env vars, so a compile-time
-        // `cfg` (not a runtime env check) is required to differentiate.
+        // Off in debug so a test process's `circles.db` never turns the
+        // process-wide setting on (doc comment, "Debug/release split").
         #[cfg(debug_assertions)]
         const CIPHER_MEMORY_SECURITY: &str = "OFF";
         #[cfg(not(debug_assertions))]
@@ -891,11 +885,11 @@ impl CircleStorage {
         //
         // `temp_store = MEMORY` keeps SQLite's temp B-trees / sorter spills in
         // RAM instead of an unencrypted on-disk temp file, and
-        // `cipher_memory_security` (ON in release, OFF in debug — see
-        // `apply_hardening_pragmas` for the split rationale) makes SQLCipher
-        // zero sensitive memory (page buffers, allocations) when freed on
-        // shipping builds. Together these stop a multi-byte avatar BLOB write
-        // from spilling cleartext to an unencrypted temp/rollback sidecar.
+        // `cipher_memory_security` (which a release build turns on here; see
+        // `apply_hardening_pragmas`) makes SQLCipher zero sensitive memory
+        // (page buffers, allocations) when freed. Together these stop a
+        // multi-byte avatar BLOB write from spilling cleartext to an
+        // unencrypted temp/rollback sidecar.
         // `busy_timeout = 2000` (M7-B) is marker-table defense-in-depth ONLY —
         // see `apply_hardening_pragmas`.
         //

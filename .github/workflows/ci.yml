@@ -12,8 +12,10 @@
 #                          E2E is a functional signal, not a coverage signal)
 #   5. Build verification— debug builds for every mobile target
 #
-# All E2E lanes run in PARALLEL (each `needs:` only rust), so PR wall-clock is
-# bounded by the slowest lane, not the sum.
+# All E2E lanes run in PARALLEL (each `needs:` only rust; the soak lane only
+# rust-tooling, which writes its cache), so PR wall-clock is bounded by the
+# slowest lane, not the sum. haven-core's suite gates no lane: it runs in
+# rust-suite (stable, uninstrumented) and in coverage (pinned, instrumented).
 
 name: CI
 
@@ -32,11 +34,32 @@ jobs:
   # Stage 1 — code quality
   # ---------------------------------------------------------------------------
 
-  # rustfmt + clippy + tests + release-mode build for both crates
-  # (haven-core and the rust_builder FFI surface).
+  # rustfmt + clippy + release-mode build for both shipped crates (haven-core
+  # and the rust_builder FFI surface); rust_builder's tests, haven-core's
+  # doctests and the compile of its tests; and the e2e relay + wire proxy and
+  # log scanner crates, whose scanner every lane runs over its sinks.
   rust:
     name: Rust Checks
     uses: ./.github/workflows/rust-check.yml
+    with:
+      group: core
+
+  # haven-core's suite on floating stable, uninstrumented and unscaled — the
+  # compiler the shipped builds use. Nothing `needs:` it; it is green or red on
+  # its own. Same display name, so every job keeps the name it had.
+  rust-suite:
+    name: Rust Checks
+    uses: ./.github/workflows/rust-check.yml
+    with:
+      group: suite
+
+  # The soak rig's crate, split from `rust` so no E2E lane waits for its
+  # build; the soak lane needs it for the cache it writes.
+  rust-tooling:
+    name: Rust Checks
+    uses: ./.github/workflows/rust-check.yml
+    with:
+      group: tooling
 
   # `flutter analyze` (errors + warnings gate; pre-existing infos advisory).
   flutter:
@@ -50,7 +73,8 @@ jobs:
     uses: ./.github/workflows/cross-check.yml
 
   # Rust + Flutter unit tests with enforced coverage thresholds (80% / 50%),
-  # plus the flag-off rollback-path unit re-run.
+  # plus the flag-off rollback-path unit re-run. haven-core's suite here is the
+  # instrumented run on the pinned toolchain; rust-suite is the stable one.
   coverage:
     name: Coverage
     uses: ./.github/workflows/coverage.yml
@@ -340,7 +364,7 @@ jobs:
   # 4 — docs/SOAK_LANE.md names which scenarios run where.
   soak-core-pr:
     name: Soak Core (pr profile)
-    needs: [rust]
+    needs: [rust-tooling]
     uses: ./.github/workflows/soak-core.yml
     with:
       profile: pr
@@ -348,10 +372,11 @@ jobs:
   # ---------------------------------------------------------------------------
   # Stage 5 — build verification: debug builds for every mobile target
   # (Android arm64/arm/x64 + iOS), proving the Flutter + Rust + toolchain
-  # wiring end-to-end.
+  # wiring end-to-end. Not gated on coverage: the builds consume nothing
+  # from it.
   # ---------------------------------------------------------------------------
 
   build:
     name: Debug Builds
-    needs: [rust, coverage, guards]
+    needs: [rust, guards]
     uses: ./.github/workflows/build-check.yml

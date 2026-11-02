@@ -135,9 +135,9 @@ reconciled)` rather than `plants 0/0`, which would read as controls that passed.
 
 It exists because the unit-test lanes have nothing to declare. A `cargo test` run
 mints no circle, no identity and no coordinate that any channel could report, so
-the only honest thing a scanner can certify over `rust-check.yml`'s four tee'd
-`cargo test` logs and `coverage.yml`'s `flutter test` log is *that the rules
-ran*. That is worth certifying — S1, S5, S10 and S12 over a transcript nobody
+the only honest thing a scanner can certify over `rust-check.yml`'s six tee'd
+`cargo test` logs and `coverage.yml`'s `cargo llvm-cov` and `flutter test` logs
+is *that the rules ran*. That is worth certifying — S1, S5, S10 and S12 over a transcript nobody
 reads is how a stray `println!` of a group id gets caught — and it is worth
 saying out loud that it is all that was certified.
 

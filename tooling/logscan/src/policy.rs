@@ -776,8 +776,9 @@ ios = { term_floor = 8, declared_plants_expected = false, structural_rules = tru
             ("ios", 2000),
             // The Android core flow's `flutter drive` transcript, 394 lines.
             ("drive", 100),
-            // A `cargo test` transcript: the shortest of rust-check.yml's four
-            // still prints a status block and a result line per target.
+            // A cargo transcript: the shortest of rust-check.yml's six and
+            // coverage.yml's llvm-cov run still prints a status block and a
+            // result line per target.
             ("rust-test", 20),
             // The wire proxy's log: a listen line, a per-role connect and its
             // sidecar summary, so never fewer than a handful.

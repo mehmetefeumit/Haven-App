@@ -615,8 +615,9 @@
 #   Skip-manifest self-test           scripts/ci/check_no_undeclared_skips.sh
 #     The guard that fails a run when a test SKIPS without being declared in
 #     scripts/ci/expected_test_skips.txt. THIS gate must parse real test
-#     output, so it runs where the tests do — rust-check.yml for both cargo
-#     crates, coverage.yml for `flutter test`; only its hermetic --self-test
+#     output, so it runs where the tests do — rust-check.yml for the cargo
+#     crates (haven-core's suite and doctests among them), coverage.yml for
+#     haven-core's instrumented run and `flutter test`; only its hermetic --self-test
 #     belongs in this toolchain-free job. That self-test is what stops the
 #     parser rotting into a vacuous pass: an extractor matching nothing would
 #     otherwise report "0 skips, all declared" forever. Its integration-test
@@ -2389,7 +2390,8 @@ jobs:
       # is the most expensive instance of the failure mode
       # docs/CI_HARDENING_BACKLOG.md catalogues — written, reviewed, green on
       # its own fixtures, executed nowhere. Eight links: ci.yml calls the pr
-      # profile on `needs: [rust]` (L1); the job names are inside the pattern
+      # profile on `needs: [rust-tooling]`, the caller that runs rust-check.yml's
+      # soak-tooling job (L1); the job names are inside the pattern
       # e2e-flakiness.yml counts (read from that file, never restated), and a
       # scheduler's matrix caller carries its slot in its name (L2);
       # rust-check.yml runs the shipped binary's `--self-test` (L3); every job

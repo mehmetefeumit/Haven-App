@@ -27,7 +27,7 @@ use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
 use helpers::drive::{epoch, sealed_by, sealed_in_front_by};
 use helpers::stranded::{
     answer, confirm_and_die, fill_the_deferral_store, held, parks, split, staged, unopenable,
-    unopened_retryable,
+    unopenable_at, unopened_retryable,
 };
 use helpers::{setup_circle, CircleMember};
 use nostr::{Event, EventId};
@@ -344,8 +344,17 @@ async fn an_outsiders_refused_flood_cannot_keep_a_members_commit_from_being_fetc
         .process_event_settled_for_test(&mine)
         .await
         .expect("the circle applies this device's commit");
+    // A second below the commits that follow: more than a page of it in a
+    // commit's own second is the one-second pile-up no `until` reaches past
+    // (`a_pile_up_dated_in_one_second_…`), which a fast machine would mint
+    // here by chance.
+    let below = nostr::Timestamp::from(nostr::Timestamp::now().as_secs() - 1);
     for index in 0..FLOOD {
-        let forged = unopenable(&like, 1_000_000 + u32::try_from(index).expect("small"));
+        let forged = unopenable_at(
+            &like,
+            1_000_000 + u32::try_from(index).expect("small"),
+            below,
+        );
         assert!(
             parks(admin.session(), &forged).await,
             "premise: parked unread"

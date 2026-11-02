@@ -205,7 +205,7 @@ fn edit_closed_store_for_test(
     let store = storage_sqlite::SqliteAccountStorage::open_encrypted_with_options(
         db,
         key,
-        StorageConfig::storage_options(),
+        StorageConfig::test_storage_options(),
     )
     .map_err(|_| ())?;
     match edit {

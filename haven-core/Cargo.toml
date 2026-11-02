@@ -276,6 +276,11 @@ haven-core = { path = ".", features = ["test-utils"] }
 [patch.crates-io]
 libsqlite3-sys = { git = "https://github.com/rusqlite/rusqlite.git", rev = "5ae7fdf83085c595fd54f977b3a56ccacabaf16b" }
 
+# SQLCipher's C code and the MLS crypto would otherwise run at -O0 under every
+# test; haven-core itself stays at the dev opt-level, so coverage is unaffected.
+[profile.dev.package."*"]
+opt-level = 3
+
 [lints.rust]
 unsafe_code = "deny"
 

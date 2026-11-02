@@ -283,7 +283,8 @@ const MLS_DB_FILENAME: &str = "session-v2.sqlite";
 /// onward — inside `AccountDeviceSession::open`, which opens the SAME file from
 /// the [`database_path`](StorageConfig::database_path),
 /// [`sqlcipher_key`](StorageConfig::sqlcipher_key), and
-/// [`storage_options`](StorageConfig::storage_options) this config supplies.
+/// [`storage_options`](StorageConfig::storage_options) this config supplies
+/// (a test fixture's, [`test_storage_options`](StorageConfig::test_storage_options)).
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
     /// Directory where the MLS database (and its sidecars) live. Created on
@@ -314,6 +315,22 @@ impl StorageConfig {
     #[must_use]
     pub fn storage_options() -> SqliteStorageOptions {
         SqliteStorageOptions::default()
+    }
+
+    /// [`Self::storage_options`] with `cipher_memory_security` off: what every
+    /// test open of an MLS store uses.
+    ///
+    /// The setting is process-wide and one-way, and while it is on every
+    /// `SQLite` allocation is `mlock`ed and scrubbed under one process-global
+    /// mutex, which serialises a test binary's threads. Every other field is
+    /// production's: `journal_mode` is persisted in the file.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn test_storage_options() -> SqliteStorageOptions {
+        SqliteStorageOptions {
+            cipher_memory_security: false,
+            ..Self::storage_options()
+        }
     }
 
     /// Resolves the `SQLCipher` key for `session.sqlite`, provisioning it on first
@@ -354,7 +371,8 @@ impl StorageConfig {
     ///
     /// Creates the data directory if missing, resolves the `SQLCipher` key via
     /// [`sqlcipher_key`](StorageConfig::sqlcipher_key), and opens the
-    /// `storage-sqlite` backend with the hardened options.
+    /// `storage-sqlite` backend with the
+    /// [`test_storage_options`](StorageConfig::test_storage_options).
     ///
     /// # Single-session invariant (security F4 / Rule 14)
     ///
@@ -379,7 +397,7 @@ impl StorageConfig {
         SqliteAccountStorage::open_encrypted_with_options(
             self.database_path(),
             &key,
-            Self::storage_options(),
+            Self::test_storage_options(),
         )
         .map_err(super::manager::map_storage_err)
     }
@@ -399,34 +417,37 @@ impl StorageConfig {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn in_memory_storage() -> Result<SqliteAccountStorage> {
         crate::sqlcipher_init::ensure().map_err(|_| storage_err("initialise SQLite"))?;
-        SqliteAccountStorage::in_memory().map_err(super::manager::map_storage_err)
+        SqliteAccountStorage::in_memory_with_options(Self::test_storage_options())
+            .map_err(super::manager::map_storage_err)
     }
 
     /// The fixed `SQLCipher` key every keyring-free test session opens with.
     ///
-    /// The ONE place [`TEST_SQLCIPHER_PASSPHRASE`] is spelled into a key, so a
+    /// The ONE place [`TEST_SQLCIPHER_KEY`] is spelled into a key, so a
     /// fixture that has to reach the same database — `new_unencrypted`'s
     /// session, a fault injector, [`openmls_group_keys_for_test`] — cannot open
-    /// it with a passphrase that has silently drifted from the session's.
+    /// it with a key that has silently drifted from the session's.
     ///
     /// # Errors
     ///
     /// Returns [`NostrError::StorageError`] if the key cannot be constructed.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn test_sqlcipher_key() -> Result<SqlCipherKey> {
-        SqlCipherKey::new(TEST_SQLCIPHER_PASSPHRASE)
+        SqlCipherKey::new(TEST_SQLCIPHER_KEY)
             .map_err(|e| NostrError::StorageError(format!("failed to build test key: {e}")))
     }
 }
 
-/// The constant passphrase of every keyring-free test database.
+/// The constant key of every keyring-free test database.
 ///
 /// Not a secret in any threat model Haven has: it protects nothing, guards no
 /// user data, and exists only because the Dark Matter `storage-sqlite` backend
 /// has no unencrypted mode. It is gated all the same, so no shipped build can
-/// name it.
+/// name it. `SQLCipher`'s raw-key form (`x'` + 64 hex digits + `'`), so no
+/// test open pays for a passphrase's PBKDF2 derivation.
 #[cfg(any(test, feature = "test-utils"))]
-const TEST_SQLCIPHER_PASSPHRASE: &str = "haven-test-mls-passphrase";
+const TEST_SQLCIPHER_KEY: &str =
+    "x'0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'";
 
 /// One `openmls_values.group_key` — an opaque handle to one group's `OpenMLS`
 /// state rows.
@@ -622,7 +643,7 @@ pub fn set_group_unrecoverable_for_test(
     let store = SqliteAccountStorage::open_encrypted_with_options(
         db_path,
         key,
-        StorageConfig::storage_options(),
+        StorageConfig::test_storage_options(),
     )
     .map_err(|_| storage_err("open the MLS database"))?;
     let mut group = store
@@ -1722,6 +1743,73 @@ mod tests {
     }
 
     #[test]
+    fn test_storage_options_differ_from_production_only_in_memory_security() {
+        let production = StorageConfig::storage_options();
+        let test = StorageConfig::test_storage_options();
+        assert!(production.cipher_memory_security && !test.cipher_memory_security);
+        assert_eq!(
+            SqliteStorageOptions {
+                cipher_memory_security: true,
+                ..test
+            },
+            production,
+            "every other field, `journal_mode` (persisted in the file) above all, \
+             is production's"
+        );
+    }
+
+    #[test]
+    fn the_test_key_is_a_raw_key_that_skips_the_passphrase_derivation() {
+        crate::sqlcipher_init::ensure().expect("SQLite initialises");
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Lays a store down through MDK under `key`, then reads it back on a
+        // bare connection whose KDF runs one iteration instead of 256,000: only
+        // a raw key, which skips the KDF, still decrypts.
+        let opens_with_one_kdf_iteration = |name: &str, key: &SqlCipherKey| {
+            let path = dir.path().join(name);
+            let store = SqliteAccountStorage::open_encrypted_with_options(
+                &path,
+                key,
+                StorageConfig::test_storage_options(),
+            )
+            .expect("the store is created");
+            drop(store);
+            SqliteAccountStorage::open_encrypted_with_options(
+                &path,
+                key,
+                StorageConfig::test_storage_options(),
+            )
+            .expect("the store reopens under the same key");
+            let conn = rusqlite::Connection::open(&path).expect("open");
+            conn.pragma_update(None, "cipher_compatibility", 4i64)
+                .expect("compatibility");
+            conn.pragma_update(None, "key", key.as_secret_str())
+                .expect("key");
+            conn.pragma_update(None, "kdf_iter", 1i64)
+                .expect("kdf_iter");
+            conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .is_ok()
+        };
+
+        assert!(
+            !opens_with_one_kdf_iteration(
+                "passphrase.sqlite",
+                &SqlCipherKey::new("a passphrase").expect("key")
+            ),
+            "premise: a passphrase-keyed store depends on the KDF's iteration count"
+        );
+        assert!(
+            opens_with_one_kdf_iteration(
+                "raw.sqlite",
+                &StorageConfig::test_sqlcipher_key().expect("the test key")
+            ),
+            "the test key is a raw key: no test open pays for PBKDF2"
+        );
+    }
+
+    #[test]
     fn in_memory_storage_opens() {
         let storage = StorageConfig::in_memory_storage();
         assert!(storage.is_ok(), "in-memory MLS storage should open");
@@ -1776,7 +1864,7 @@ mod tests {
         let wrong = SqliteAccountStorage::open_encrypted_with_options(
             config.database_path(),
             &wrong_key,
-            StorageConfig::storage_options(),
+            StorageConfig::test_storage_options(),
         );
         assert!(wrong.is_err(), "a wrong key must fail to open the DB");
 

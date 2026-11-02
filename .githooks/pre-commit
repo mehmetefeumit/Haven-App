@@ -16,7 +16,7 @@
 # 51.06%: a verdict that took an 11-minute llvm-cov run to reach, on a defect
 # that is visible in the diff.
 #
-# The full gate (which runs both suites, ~6-11 min) is not a hook at all:
+# The full gate (which runs both suites, ≈ 31 min, measured 2026-11-02 with --sequential) is not a hook at all:
 # run scripts/ci/check_coverage.sh when you want it, and CI enforces it.
 #
 # Enable once per clone:  scripts/ci/install_git_hooks.sh

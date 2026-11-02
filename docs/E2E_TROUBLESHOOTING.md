@@ -871,8 +871,9 @@ the iOS lanes, the runner's own choice elsewhere):
   still a leak, the structural rules never read that emitter's lines anyway,
   and no other sink is affected. A coordinate hit on an iOS capture is still a
   real one.
-* **`rules-only`** — `rust-check.yml`'s four tee'd `cargo test` transcripts
-  and `coverage.yml`'s two tee'd `flutter test` transcripts: no manifest,
+* **`rules-only`** — `rust-check.yml`'s six tee'd `cargo test` transcripts
+  and `coverage.yml`'s tee'd `cargo llvm-cov` transcript and two tee'd
+  `flutter test` transcripts: no manifest,
   because a unit-test run mints nothing declarable. The structural rules and
   the line floors run (`--exempt-endpoint 127.0.0.1`, for the `#[ignore]`
   reason that names a loopback Blossom URL) and the summary says `rules-only`

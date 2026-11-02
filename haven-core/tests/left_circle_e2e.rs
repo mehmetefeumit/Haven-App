@@ -765,7 +765,7 @@ fn stored_fanouts(db: &std::path::Path, key: &storage_sqlite::SqlCipherKey) -> V
     let store = storage_sqlite::SqliteAccountStorage::open_encrypted_with_options(
         db,
         key,
-        haven_core::nostr::mls::StorageConfig::storage_options(),
+        haven_core::nostr::mls::StorageConfig::test_storage_options(),
     )
     .expect("the closed store opens");
     store

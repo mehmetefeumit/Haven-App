@@ -19,8 +19,11 @@
 #
 # ## The chain, and why each link is load-bearing
 #
-#   L1  ci.yml CALLS IT, with the `pr` profile, gated on `rust` only. A
-#       reusable workflow nothing calls runs on no commit.
+#   L1  ci.yml CALLS IT, with the `pr` profile, gated on `rust-tooling` only:
+#       the caller of rust-check.yml's `tooling` group, whose soak-tooling job
+#       writes the cache the lane reads — and that job's own `if:` must still
+#       admit the group the caller passes. A reusable workflow nothing calls
+#       runs on no commit.
 #
 #   L2  THE JOB NAME IS COUNTED. e2e-flakiness.yml selects lane jobs by a regex
 #       over the job display name. A soak job named outside it is invisible to
@@ -141,7 +144,7 @@ readonly SEED_SH='scripts/ci/soak_seed.sh'
 readonly SOAK_WORKFLOWS=2
 # Equality pin: a fixture added or removed without moving this line is a
 # self-test that no longer says what it runs.
-readonly SELF_TEST_FIXTURES=54
+readonly SELF_TEST_FIXTURES=57
 # The scheduler jobs L4/L7 skip by id, and why each has nothing to gate. Any
 # other job in a scheduler either calls the reusable or drives the rig itself.
 declare -A SCHEDULER_JOBS=(
@@ -216,7 +219,7 @@ soak_workflows() { # soak_workflows <root>
   done
 }
 
-# L1 — ci.yml calls the lane with the pr profile, gated on rust only.
+# L1 — ci.yml calls the lane with the pr profile, gated on rust-tooling only.
 check_ci_calls_the_lane() {
   local root="$1" f="${root}/${CI_YML}" body
   [[ -f "${f}" ]] || { broken "${CI_YML} not found."; return 2; }
@@ -234,8 +237,31 @@ check_ci_calls_the_lane() {
   fi
   local pre
   pre="$(grep -B4 -F -- 'uses: ./.github/workflows/soak-core.yml' <<<"${body}")"
-  if ! grep -qE '^[[:space:]]*needs:[[:space:]]*\[rust\][[:space:]]*$' <<<"${pre}"; then
-    fail "${CI_YML}: the soak call is not \`needs: [rust]\`. Stage 4 gates on rust alone (E2E is a functional signal, not a coverage one), and the soak's cache is written by rust-check.yml's soak-tooling job — a different gate would either start the lane cold or serialise it behind coverage."
+  if ! grep -qE '^[[:space:]]*needs:[[:space:]]*\[rust-tooling\][[:space:]]*$' <<<"${pre}"; then
+    fail "${CI_YML}: the soak call is not \`needs: [rust-tooling]\`. The soak's cache is written by rust-check.yml's soak-tooling job, which only the rust-tooling caller runs — a different gate would either start the lane cold or serialise it behind coverage."
+    return 1
+  fi
+  # `all` (also the default when no group is passed) runs soak-tooling too.
+  local tooling groups
+  tooling="$(job_body_of "${f}" rust-tooling || true)"
+  groups="$(grep -E '^[[:space:]]*group:' <<<"${tooling}" || true)"
+  if ! grep -qF -- 'uses: ./.github/workflows/rust-check.yml' <<<"${tooling}" \
+    || { [[ -n "${groups}" ]] && grep -qvE '^[[:space:]]*group:[[:space:]]*(tooling|all)[[:space:]]*$' <<<"${groups}"; }; then
+    fail "${CI_YML}: the rust-tooling job the soak call needs does not run rust-check.yml's soak-tooling job (a \`uses: ./.github/workflows/rust-check.yml\` with \`group: tooling\`), so nothing ahead of the lane writes the cache it reads."
+    return 1
+  fi
+  # The other half of the same link: soak-tooling's own `if:` admits that group.
+  local group="${groups#*group:}" rust="${root}/${RUST_YML}" soak soak_if
+  group="${group//[[:space:]]/}"
+  [[ -n "${group}" ]] || group='all'
+  [[ -f "${rust}" ]] || { broken "${RUST_YML} not found."; return 2; }
+  if ! soak="$(job_body_of "${rust}" soak-tooling)"; then
+    fail "${RUST_YML} has no soak-tooling job, so nothing ahead of the lane writes the cache it reads."
+    return 1
+  fi
+  soak_if="$(grep -E '^    if:' <<<"${soak}" || true)"
+  if [[ -n "${soak_if}" && "${soak_if}" != *"inputs.group == '${group}'"* ]]; then
+    fail "${RUST_YML}: soak-tooling's \`if:\` does not admit group \`${group}\`, the one ci.yml's rust-tooling passes, so that call skips the job that writes the lane's cache."
     return 1
   fi
   return 0
@@ -731,9 +757,15 @@ on: [push]
 jobs:
   rust:
     uses: ./.github/workflows/rust-check.yml
+    with:
+      group: core
+  rust-tooling:
+    uses: ./.github/workflows/rust-check.yml
+    with:
+      group: tooling
   soak-core-pr:
     name: Soak Core (pr profile)
-    needs: [rust]
+    needs: [rust-tooling]
     uses: ./.github/workflows/soak-core.yml
     with:
       profile: pr
@@ -847,6 +879,7 @@ on:
   workflow_call:
 jobs:
   soak-tooling:
+    if: ${{ inputs.group == 'all' || inputs.group == 'tooling' }}
     runs-on: ubuntu-latest
     steps:
       - name: Rig self-test
@@ -932,8 +965,20 @@ TOML
   _case "a call with no profile input fails" 1 check_ci_calls_the_lane "${noprofile}"
 
   local wrongneeds="${tmp}/wrongneeds"; _mk "${wrongneeds}"
-  sed -i 's/needs: \[rust\]/needs: [rust, coverage]/' "${wrongneeds}/${CI_YML}"
-  _case "a call gated on more than rust fails" 1 check_ci_calls_the_lane "${wrongneeds}"
+  sed -i 's/needs: \[rust-tooling\]/needs: [rust-tooling, coverage]/' "${wrongneeds}/${CI_YML}"
+  _case "a call gated on more than rust-tooling fails" 1 check_ci_calls_the_lane "${wrongneeds}"
+
+  local coreneeds="${tmp}/coreneeds"; _mk "${coreneeds}"
+  sed -i 's/needs: \[rust-tooling\]/needs: [rust]/' "${coreneeds}/${CI_YML}"
+  _case "a call gated on the core group, which writes no soak cache, fails" 1 check_ci_calls_the_lane "${coreneeds}"
+
+  local coregroup="${tmp}/coregroup"; _mk "${coregroup}"
+  sed -i 's/group: tooling/group: core/' "${coregroup}/${CI_YML}"
+  _case "a rust-tooling caller that runs the core group fails" 1 check_ci_calls_the_lane "${coregroup}"
+
+  local soakif="${tmp}/soakif"; _mk "${soakif}"
+  sed -i "s/inputs.group == 'tooling'/inputs.group == 'core'/" "${soakif}/${RUST_YML}"
+  _case "a soak-tooling job whose if: no longer admits the tooling group fails" 1 check_ci_calls_the_lane "${soakif}"
 
   local commented="${tmp}/commented"; _mk "${commented}"
   sed -i 's|^    uses: ./.github/workflows/soak-core.yml|#    uses: ./.github/workflows/soak-core.yml|' \

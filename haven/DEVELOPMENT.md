@@ -345,7 +345,7 @@ here means a green run there.
 ```bash
 scripts/ci/install_git_hooks.sh              # once per clone: enables the pre-commit hook
 scripts/ci/check_coverage.sh --static-only   # < 1 s  (runs on pre-commit)
-scripts/ci/check_coverage.sh                 # ~6-11 min, stacks in parallel (on demand)
+scripts/ci/check_coverage.sh                 # stacks in parallel, on demand (≈ 31 min, measured 2026-11-02 with --sequential)
 CHECK_FLUTTER=0 scripts/ci/check_coverage.sh # Rust (haven-core) only
 CHECK_RUST=0    scripts/ci/check_coverage.sh # Flutter (haven) only
 ```

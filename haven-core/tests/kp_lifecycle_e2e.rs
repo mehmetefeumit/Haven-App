@@ -91,7 +91,7 @@ impl Device {
         SqliteAccountStorage::open_encrypted_with_options(
             StorageConfig::new(self.dir.path()).database_path(),
             &StorageConfig::test_sqlcipher_key().expect("the test key"),
-            StorageConfig::storage_options(),
+            StorageConfig::test_storage_options(),
         )
         .expect("open a second handle")
     }

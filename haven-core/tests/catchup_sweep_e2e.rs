@@ -4131,7 +4131,7 @@ async fn a_leave_recorded_for_a_copy_marked_removed_is_not_sent_again_at_its_own
         let store = storage_sqlite::SqliteAccountStorage::open_encrypted_with_options(
             config.database_path(),
             &haven_core::nostr::mls::StorageConfig::test_sqlcipher_key().expect("test key"),
-            haven_core::nostr::mls::StorageConfig::storage_options(),
+            haven_core::nostr::mls::StorageConfig::test_storage_options(),
         )
         .expect("the closed store opens");
         let mut copy = store.get_group(&group).expect("bob's copy");

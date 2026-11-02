@@ -17,7 +17,7 @@ use haven_core::nostr::mls::types::{
     PendingStateRef, PublishWork, ScreenedIngest, SessionEffects,
 };
 use haven_core::nostr::mls::{SessionManager, StorageConfig};
-use nostr::{Event, EventBuilder, Keys};
+use nostr::{Event, EventBuilder, Keys, Timestamp};
 
 use super::drive::{epoch, leave_of, sealed_by, wait_out_the_engine};
 use super::{CircleFixture, CircleMember};
@@ -650,9 +650,15 @@ pub async fn a_fix_from_an_epoch_not_reached_stranded(
 /// which nothing opens: what anyone who knows a circle's routing tag can
 /// send it. `index` makes it one of its own.
 pub fn unopenable(like: &Event, index: u32) -> Event {
+    unopenable_at(like, index, Timestamp::now())
+}
+
+/// [`unopenable`], dated `at`.
+pub fn unopenable_at(like: &Event, index: u32, at: Timestamp) -> Event {
     let content = base64::engine::general_purpose::STANDARD.encode(index.to_be_bytes().repeat(24));
     EventBuilder::new(like.kind, content)
         .tags(like.tags.iter().cloned())
+        .custom_created_at(at)
         .sign_with_keys(&Keys::generate())
         .expect("sign")
 }

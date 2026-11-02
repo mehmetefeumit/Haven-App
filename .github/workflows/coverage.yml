@@ -8,9 +8,17 @@
 # When you add a
 # step here, add it there — the local gate's whole value is the claim that a
 # green run locally means a green run here, and each step that exists in only
-# one of the two erodes it. The two transcript-scan steps in the Flutter job
-# are the exception: they are Security Rule 15's gate over what the tests
-# PRINT, not a coverage gate, and the local script mirrors coverage verdicts.
+# one of the two erodes it. The three transcript-scan steps (one per job's
+# test run, plus the flag-off run) are the exception: they are Security Rule
+# 15's gate over what the tests PRINT, not a coverage gate, and the local
+# script mirrors coverage verdicts.
+#
+# haven-core's suite runs twice per push, on purpose: here on the pin,
+# instrumented and with scaled waits, for coverage; and in rust-check.yml's
+# haven-core-suite job on floating `stable`, uninstrumented and unscaled.
+# Neither gates the E2E lanes. Each run's transcript gets its own identifier
+# scan and skip gate; the doctests run only in rust-check.yml, because
+# `cargo llvm-cov` cannot run them on stable.
 #
 # The measuring toolchains are PINNED (scripts/ci/coverage_toolchain.env),
 # unlike every other workflow, which floats on `stable`. Coverage is a ratio
@@ -18,8 +26,9 @@
 # the tests — so a floating toolchain silently re-measures every path on
 # someone else's release schedule. It did: `stable` moving 1.92 -> 1.97.1
 # tripped seven per-path ratchets in one run with no code change. Compiler
-# breakage still gets caught, by rust-check/flutter-check/build-check, which
-# keep floating deliberately.
+# breakage — and a behaviour change only a newer rustc causes — still gets
+# caught, by rust-check (whose haven-core-suite job runs this suite on
+# `stable`), flutter-check and build-check, which keep floating deliberately.
 #
 # All THREE pieces of the instrument are pinned there: rustc, the Flutter SDK,
 # and cargo-llvm-cov — the last because an unversioned `tool:` resolves to
@@ -78,7 +87,20 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: haven-core
+          workspaces: |
+            haven-core
+            tooling/logscan
+
+      # Before the transcript exists: the wrapper treats an absent scanner as a
+      # broken guard (rc 2), never as a skipped scan. Built on the pinned
+      # toolchain only because it is the one installed here; the scanner reads,
+      # it measures nothing. `id` because this step immediately precedes the
+      # tests: "it succeeded" is the one standard-shaped `if:` predicate equal
+      # to "the tests started".
+      - name: Build the runtime log scanner
+        id: build-scanner
+        working-directory: ${{ github.workspace }}
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
 
       # THE ONLY step in this job that runs the suite, and the only one that
       # measures. Its coverage.lcov is the single artifact every gate below
@@ -113,12 +135,48 @@ jobs:
       # those DELIVERY budgets cannot mask a defect — they assert that something
       # arrived, so a bigger budget only removes a false negative — and it
       # leaves `cargo test` untouched.
+      #
+      # Tee'd for the scan and the skip gate below; `set -o pipefail` because
+      # GitHub's `bash -e` does not set it, and `tee` would otherwise mask a
+      # failing exit code.
       - name: Run tests with coverage
+        id: tests
         env:
           HAVEN_TEST_WAIT_SCALE: '4'
         run: |
+          set -o pipefail
           cargo llvm-cov --all-features --lcov --output-path coverage.lcov \
-            --ignore-filename-regex 'frb_generated'
+            --ignore-filename-regex 'frb_generated' 2>&1 | tee "${RUNNER_TEMP}/haven-core-cargo-test.log"
+
+      # Security Rule 15 over the transcript, before anything else reads it.
+      # `--rules-only`: a unit-test run mints no declarable value, so there is
+      # no manifest — the structural rules and the line floor run, and the
+      # verdict certifies that they ran, not that any declared value is absent.
+      # Containment here is detection only: the run already streamed every
+      # line into the JOB LOG, which nothing can retract, and the file is never
+      # uploaded — the wrapper still deletes it on a leak, but the red job IS
+      # the containment. Keyed on the build, not on the tests, so a failing
+      # test's captured output — exactly where an identifier would surface —
+      # is scanned too. `rust-test` because cargo wrote the transcript (its
+      # crate-build lines are what that class exempts); `--exempt-endpoint
+      # 127.0.0.1` because no manifest exists to carry a sealed exemption, and
+      # the loopback literal cargo prints from an `#[ignore = "…"]` reason would
+      # otherwise be an S12 hit on furniture.
+      - name: Scan the test transcript for identifiers
+        if: ${{ !cancelled() && steps.build-scanner.outcome == 'success' }}
+        working-directory: ${{ github.workspace }}
+        run: bash tooling/e2e/ci/scan-logs.sh --rules-only --exempt-endpoint 127.0.0.1 --sink rust-test="${RUNNER_TEMP}/haven-core-cargo-test.log"
+
+      # The run prints "N ignored" per target and exits 0; the gate
+      # reconciles the named skips against scripts/ci/expected_test_skips.txt
+      # (an undeclared skip fails, and so does a declaration whose test is
+      # gone). `haven-core` is every target but the doctests, whose surface,
+      # `haven-core-doc`, rust-check.yml reconciles against `cargo test --doc`.
+      # Keyed on the tests, not on the scan: a scan that failed without
+      # deleting the transcript must not hide this verdict.
+      - name: No undeclared test skips
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
+        run: bash ../scripts/ci/check_no_undeclared_skips.sh cargo haven-core "${RUNNER_TEMP}/haven-core-cargo-test.log"
 
       # Computed from coverage.lcov — the SAME bytes the per-path floors below
       # read — by the SAME script the Flutter job uses.
@@ -143,7 +201,11 @@ jobs:
       # instrumented lines as exit-2 misconfiguration — never as 0% and never as
       # 100% — and its --self-test pins all three, in repo-guards.yml and in the
       # local gate's static half.
+      #
+      # Keyed on the tests, so a failing scan or skip gate above does not hide
+      # the aggregate's verdict.
       - name: Check coverage threshold
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
         run: bash ../scripts/ci/check_lcov_aggregate.sh coverage.lcov 80 "Rust (haven-core)"
 
       # The gate above is a single AGGREGATE, and an aggregate is a budget the
@@ -153,9 +215,10 @@ jobs:
       # src/nostr/encryption/ could go to zero coverage together and the step
       # above would still print a green check. The floors below are the
       # per-path minimum that cannot express, enforced against the SAME lcov.
-      # `!cancelled()` so a failing aggregate still reports the floors too.
+      # Keyed on the tests, so a failing aggregate, scan or skip gate still
+      # reports the floors too.
       - name: Per-path coverage floors (haven-core)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
         run: bash ../scripts/ci/check_coverage_floors.sh rust coverage.lcov
 
       # `!cancelled()`, not the default success(): a RATCHET violation tells you

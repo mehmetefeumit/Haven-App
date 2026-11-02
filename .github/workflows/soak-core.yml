@@ -9,7 +9,7 @@
 #
 # # Three profiles, one workflow
 #
-# `pr` is the only profile ci.yml calls (stage 4, `needs: [rust]`).
+# `pr` is the only profile ci.yml calls (stage 4, `needs: [rust-tooling]`).
 # `nightly` is called by soak-nightly.yml, once per matrix slot with that
 # slot's `slot` and `seed`; the nightly scenarios have LANE execution only
 # there, never on a pull request, so a green PR lane is not coverage of them.

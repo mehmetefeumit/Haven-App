@@ -14,7 +14,7 @@ result against oracles. There is no emulator, no simulator and no app: the
 subject is `haven-core`.
 
 - The lane: `.github/workflows/soak-core.yml`, called from `ci.yml` stage 4
-  with `profile: pr`, `needs: [rust]`.
+  with `profile: pr`, `needs: [rust-tooling]`.
 - The scheduler: `.github/workflows/soak-nightly.yml` (`Soak Nightly`), which
   calls the same lane with `profile: nightly` on four matrix slots, 00:23 UTC
   Monday to Saturday, each slot with its own seed from `scripts/ci/soak_seed.sh`.
@@ -1154,9 +1154,9 @@ world was built, which has nothing to search for because it minted nothing.
 
 **The ≤ 8 min p95 in PLAN §12 is the lane JOB's own wall time, job-start to
 job-end, on WARM-CACHE runs, excluding queue time.** It is not a
-commit-to-green figure. `soak-core-pr` is `needs: [rust]`, and stage 1's
-`haven-core` job runs about 18 m 49 s, so the lane begins roughly 19 minutes
-into every run no matter how fast it is. A cache-miss run (a cold build is
+commit-to-green figure. `soak-core-pr` is `needs: [rust-tooling]`, so the lane
+begins when stage 1's `soak-tooling` job ends (37 minutes in run 41379633131),
+no matter how fast it is. A cache-miss run (a cold build is
 plausibly 10–25 minutes, bounded by the 40-minute job cap) is recorded with its
 cache-miss evidence line and excluded from the p95 rather than averaged into
 it.
@@ -1216,14 +1216,15 @@ lives.
 
 ### The cost to the whole pipeline
 
-`soak-tooling` lives inside `rust-check.yml`, which **every stage-4 lane waits
-on**. A cold build there delays the entire pipeline, not just this lane. That
-is why it carries an explicit `timeout-minutes: 45` (the only job in that
+`soak-tooling` lives inside `rust-check.yml`'s `tooling` group, which `ci.yml`
+calls as `rust-tooling` and which only this lane waits on; the other stage-4
+lanes wait on the `core` group (`rust`). A cold build there delays this lane.
+That is why it carries an explicit `timeout-minutes: 60` (the only job in that
 workflow that does) and why it shares ONE `shared-key: soak-crate` cache with
 all three `soak-core.yml` jobs — `key:` appends to the automatic job-scoped key,
 which would give four jobs four cold builds of the same crate. `soak-tooling`
-runs inside the `rust` dependency the lane needs, so the cache is written before
-the lane starts.
+runs inside the `rust-tooling` dependency the lane needs, so the cache is written
+before the lane starts.
 
 Measured warm baseline for context (run 35376588206): `haven-core` clippy
 2 m 26 s, `cargo test` 10 m 55 s, `build --release --lib` 4 m 27 s; the two
@@ -1379,7 +1380,7 @@ than resolved silently (owner decision Q4).
 | `scripts/ci/check_soak_test_only.sh` | The rig stays out of the app and out of every build path; `test-utils` stays a DEV edge of `rust_builder` and is in no `[features]` alias of any manifest, `default` included (that one word would open the probe seams on every DEBUG build, where the `compile_error!` never fires); no shipped manifest sets `debug-assertions = true` under any `[profile.*]` (that one line disarms haven-core's `compile_error!`); no `{:?}` of a foreign type in the rig; the timeline field-class test exists and pins its count |
 | `scripts/ci/check_soak_clock_partition.sh` | The two clocks do not convert, and neither reaches the other's seams. Its seam vocabulary is derived from `haven-core`, so a rename is BROKEN rather than clean |
 | `scripts/ci/check_no_kp_lifetime_override.sh` | No shipped Rust path (`haven-core/src`, `haven/rust_builder/src`, comments included) names `key_package_lifetime`: S12's `kp-expired-rejected` sets the lifetime on purpose, and the same call in the product could lengthen `not_after` past the rotation (OD-8) |
-| `scripts/ci/check_soak_lane_reachable.sh` | Something RUNS the rig: `ci.yml` calls the `pr` profile on `needs: [rust]`, the job names are inside the pattern `e2e-flakiness.yml` counts and a scheduler's matrix caller carries its slot in its name, `rust-check.yml` self-tests the shipped binary, every job in every `soak-*.yml` (the count pinned) drives through the gated runner under an inner deadline and uploads only after it — in a scheduler the skip is structural (the job that `uses:` the reusable, and `prepare`/`file-issue` by id with their reasons), so a job running `run_soak_local.sh` or the bare rig is read and fails — every such job also scans in a step of its own whose condition the drive's outcome cannot switch off (L7), the profiles nest over (scenario, arm) pairs, the TOML's deadline equals the workflow's literal, and `soak-nightly.yml` calls the nightly with per-slot seeds, off every other cron, non-cancelling, each checkout granted, one artifact name per slot (L8) |
+| `scripts/ci/check_soak_lane_reachable.sh` | Something RUNS the rig: `ci.yml` calls the `pr` profile on `needs: [rust-tooling]`, the caller of `rust-check.yml`'s `tooling` group, the job names are inside the pattern `e2e-flakiness.yml` counts and a scheduler's matrix caller carries its slot in its name, `rust-check.yml` self-tests the shipped binary, every job in every `soak-*.yml` (the count pinned) drives through the gated runner under an inner deadline and uploads only after it — in a scheduler the skip is structural (the job that `uses:` the reusable, and `prepare`/`file-issue` by id with their reasons), so a job running `run_soak_local.sh` or the bare rig is read and fails — every such job also scans in a step of its own whose condition the drive's outcome cannot switch off (L7), the profiles nest over (scenario, arm) pairs, the TOML's deadline equals the workflow's literal, and `soak-nightly.yml` calls the nightly with per-slot seeds, off every other cron, non-cancelling, each checkout granted, one artifact name per slot (L8) |
 | `scripts/ci/soak_seed.sh` (`--self-test`) | The one seed definition the scheduler and the monitor share: `0x` + 16 hex of `sha256("<profile>\|<date>\|<slot>")`, the date the RUN's `created_at`; a known vector from an independent hash, every refusal printing no seed, and a recording `gh` that reds if `/attempts/<n>` is ever read |
 | `check_e2e_step_timeout_ordering.sh` + `check_e2e_lane_budget.sh` | Extended with `is_soak_body()` (excluding `--self-test`). Before it, a plain `ubuntu-latest` `run:` step got C3 alone: the lane could have driven the rig with no inner deadline at all and both guards would have reported it compliant |
 | `check_no_identifier_logging.sh`, `check_no_key_logging.sh` | `tooling/soak` as its own root with its own floor in each |
