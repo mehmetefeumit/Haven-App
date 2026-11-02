@@ -234,6 +234,11 @@ jobs:
             --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}"
           cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk
           ls -lh /tmp/scenario.apk
+          # One APK's build tree and cargokit's Rust target left 3.3 GB for the
+          # system image on a 72 GB runner (CI run 41322563075). The drive
+          # installs /tmp/scenario.apk and reads neither, so both go here,
+          # inside this step's cap, before the SDK is provisioned.
+          bash ../tooling/e2e/ci/release-apk-build-outputs.sh /tmp
 
       - name: Enable KVM group perms
         run: |

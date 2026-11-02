@@ -89,6 +89,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/app-install-lib.sh"
 # for every runner, so the shape the (9) fixtures pin here is the fleet's.
 # shellcheck source=tooling/e2e/ci/logscan-gate.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/logscan-gate.sh"
+# The guest-network predicates (guest_can_route_to, wifi_is_off), shared with
+# run-kp-rotation.sh so the two Wi-Fi decisions read one parser.
+# shellcheck source=tooling/e2e/ci/guest-net-lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/guest-net-lib.sh"
 
 # attempt_slice_after <accumulated-log> <byte-offset> — emit only the bytes
 # appended after <byte-offset>, i.e. the LAST drive attempt's slice.
@@ -102,126 +106,6 @@ attempt_slice_after() {
   local log="$1" offset="$2"
   [[ -f "${log}" ]] || return 0
   tail -c "+$(( offset + 1 ))" "${log}" 2>/dev/null || true
-}
-
-# -----------------------------------------------------------------
-# guest_can_route_to <text> <ipv4> — exit 0 iff <text> (the guest's
-# /proc/net/route) carries a route that covers <ipv4>.
-#
-# `sys.boot_completed=1` is the ONLY readiness signal the emulator action waits
-# for, and it is not the one that matters here. It fires while the guest's
-# network is still coming up: on a COLD boot the interface has to come up and
-# take its lease afterwards, and until it does the guest has no route to the
-# relay at all. A `connect()` to the host-loopback alias then fails instantly
-# with ENETUNREACH (errno 101) rather than blocking, so nothing in the app
-# retries it — in CI run 30925179141 the e2e_android live-sync lane's
-# `setUpAll` died on exactly that, two seconds into the drive, while its
-# sibling poll lane won the same race on the same cold boot.
-#
-# WHAT THIS CAN AND CANNOT PROVE. It is a NECESSARY-not-sufficient smoke
-# signal, and the difference has cost two CI runs in opposite directions.
-#
-# Not sufficient: `/proc/net/route` is the legacy MAIN table, and Android does
-# not route app sockets through it. netd installs each network's routes into its
-# own table and picks the table from the socket's fwmark, so the main table can
-# carry a covering route while the app's default network has none. In CI run
-# 31667128290 it did exactly that — see the Wi-Fi note at the readiness wait
-# below — and this predicate read READY at 0s against a default network that
-# returned ENETUNREACH for the whole boot. Widening the predicate cannot fix
-# that: the file simply does not carry the answer.
-#
-# Not a hard gate either: demanding `Destination == 00000000` with a non-null
-# gateway asks a different and wrong question. On the api-34 google_apis image
-# the guest settles with on-link routes and no default route in main at all:
-#
-#   eth0   0000000A / 000000FF  ->  10.0.0.0/8    RTF_UP
-#   wlan0  0002000A / 00FFFFFF  ->  10.0.2.0/24   RTF_UP
-#
-# In CI run 30964250098 rejecting that table failed five lanes (e2e_android poll
-# + live-sync, e2e_integration, e2e_relay_customization, e2e_profile_android) on
-# every boot: not a race, a gate that could never pass.
-#
-# So it stays permissive AND stays advisory (warn-and-drive, below). It catches
-# the guest that has no route to the relay at all; it does not certify one that
-# has.
-#
-# It has to be `/proc/net/route`: it exists on every Android image, needs no
-# toybox applet, and reports the kernel's own routing state rather than a
-# framework's opinion of it. Format is one route per line, tab-separated, with
-# addresses as LITTLE-ENDIAN hex:
-#
-#   Iface  Destination  Gateway   Flags  RefCnt  Use  Metric  Mask  ...
-#   wlan0  00000000     0202000A  0003   0       0    0       00000000
-#
-# Loopback is excluded (it is up from the first instant and would make this
-# vacuous), and RTF_UP (0x1) must be set — a route on a downed interface routes
-# nothing. Pure text inspection: takes no device and is unit-tested below.
-#
-# Deliberately pure bash rather than awk arithmetic: `strtonum()` and `and()`
-# are gawk extensions, and `/usr/bin/awk` on the Ubuntu runners is mawk, which
-# has neither. Bash's own `$(( ))` has the bitwise operators and is always
-# present, so the predicate cannot silently degrade on a different runner image.
-
-# _le_hex_to_u32 <8-hex-chars> — decode one little-endian /proc/net/route field.
-_le_hex_to_u32() {
-  local h="$1"
-  [[ "${h}" =~ ^[0-9A-Fa-f]{8}$ ]] || return 1
-  printf '%u' $(( (16#${h:6:2} << 24) | (16#${h:4:2} << 16) \
-                | (16#${h:2:2} << 8)  |  16#${h:0:2} ))
-}
-
-# _ipv4_to_u32 <a.b.c.d> — 1 if the argument is not a dotted-quad IPv4.
-# Octets must be `0` or start with a non-zero digit. Bash arithmetic reads a
-# leading-zero literal as OCTAL, so a permissive pattern would decode
-# `010.0.2.2` as 8.0.2.2 and quietly wait for a route to a network nobody asked
-# about — and `08`/`09` would emit a raw `value too great for base` instead.
-# Rejecting the form outright is the honest answer: it is not a spelling this
-# harness accepts, and "cannot evaluate" is a verdict the caller already handles.
-_ipv4_to_u32() {
-  local ip="$1" a b c d oct='(0|[1-9][0-9]*)'
-  IFS=. read -r a b c d <<<"${ip}"
-  [[ "${a}" =~ ^${oct}$ && "${b}" =~ ^${oct}$ \
-  && "${c}" =~ ^${oct}$ && "${d}" =~ ^${oct}$ ]] || return 1
-  (( a <= 255 && b <= 255 && c <= 255 && d <= 255 )) || return 1
-  printf '%u' $(( (a << 24) | (b << 16) | (c << 8) | d ))
-}
-
-# wifi_is_off <settings-output> — exit 0 iff the guest reports Wi-Fi OFF.
-#
-# `settings get global wifi_on` answers `0` or `1`, `null` when the key was
-# never written, and adb noise ("device offline", "error: closed") when the
-# shell raced the device. ONLY a literal `0` is off. `null` is "the platform has
-# no opinion", which is not evidence the second network is gone — treating it as
-# off would silence the warning in precisely the case that needs it, and the
-# warning is the only thing standing between a silent no-op and a lane that
-# quietly went back to racing two networks. Pure text inspection: takes no
-# device and is unit-tested below.
-wifi_is_off() {
-  [[ "$(printf '%s' "${1:-}" | tr -d '\r' | head -n 1)" == "0" ]]
-}
-
-guest_can_route_to() {
-  local table="$1" target="$2" tgt iface dest gw flags mask dnum mnum
-  tgt="$(_ipv4_to_u32 "${target}")" || return 1
-  while read -r iface dest gw flags _ _ _ mask _; do
-    [[ -z "${iface}" || "${iface}" == "Iface" || "${iface}" == "lo" ]] && continue
-    # Anything that is not three well-formed hex fields is adb noise ("device
-    # offline", "cat: ... No such file"), i.e. not-ready — never a match.
-    [[ "${dest}" =~ ^[0-9A-Fa-f]{8}$ && "${mask}" =~ ^[0-9A-Fa-f]{8}$ \
-    && "${flags}" =~ ^[0-9A-Fa-f]+$ ]] || continue
-    (( 16#${flags} & 1 )) || continue                  # RTF_UP
-    dnum="$(_le_hex_to_u32 "${dest}")" || continue
-    mnum="$(_le_hex_to_u32 "${mask}")" || continue
-    # `if …; then return 0; fi` rather than `(( … )) && return 0`: the latter is
-    # a failing command at the end of a loop body whenever the row does not
-    # match, which is only safe because every current caller happens to invoke
-    # this from an `if` condition (where errexit is suspended). Spelling the
-    # branch out keeps it safe from any caller.
-    if (( (tgt & mnum) == (dnum & mnum) )); then
-      return 0
-    fi
-  done <<<"${table}"
-  return 1
 }
 
 # relay_host_ipv4 <ws-url> — the dotted-quad host of <ws-url>, or empty when the
@@ -310,13 +194,22 @@ is_connect_flake() {
 # (HAVEN_E2E_RELAY_2, the profile-plane pool, the blossom server) is exempted
 # for the same reason the gate exempts RELAY_URL: infrastructure the harness
 # names is not a value the run minted.
+#
+# Under both profiles the drive floor is 18: what `flutter drive` prints on the
+# HOST, 9 per gated slice (the attempt banner, `Installing …`, the six
+# `VMServiceFlutterDriver:` connect lines, the driver's verdict) and the floor
+# sums the pair — never a transcript's length, which device chatter sets. The
+# policy's 100 was that proxy: in CI run 41322563075 a drive that died in
+# setUpAll printed 96 lines, and the floor's rc 4 exited before the drive log or
+# its failure was shown. "A test ran" is the scanner's proof_of_run. A
+# multi-target orchestrator seals first, and its manifest is the one reused.
 log_privacy_gate() {
   local needle_dir="$1" logcat="$2" drive_final="$3" drive_full="$4"
   local profile="${HAVEN_LOGSCAN_PROFILE:-}" endpoint
   if [[ -z "${profile}" ]]; then
     if [[ -n "${WIRE_UPSTREAM:-}" ]]; then profile=proxy; else profile=host; fi
   fi
-  local -a extra=() endpoints=()
+  local -a extra=(--floor drive=18) endpoints=()
   if [[ "${profile}" == proxy ]]; then
     extra+=(--expect pubkey=3 --expect coordinate=4 --expect circle_name=1
             --expect petname=1 --expect nostr_group_id=1 --expect mls_group_id=1
@@ -485,8 +378,8 @@ wlan0	0002000A	00000000	0001	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
   # while the app's default network had no IPv4 route and every socket got
   # ENETUNREACH. That is not a hole to be closed by tightening this predicate —
   # the main table cannot see the per-network tables — which is why the lane
-  # now disables the racy second network outright rather than trying to detect
-  # it here, and why this check stays advisory.
+  # disables the racy second network (once cellular routes) rather than trying
+  # to detect it here, and why this check stays advisory.
   if ! guest_can_route_to "${hdr}
 eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0
 wlan0	0002000A	00000000	0001	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
@@ -567,6 +460,64 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
   fi
   if [[ "$(relay_host_ipv4 'ws://10.0.0.2:7777')" != "10.0.0.2" ]]; then
     echo "SELF-TEST FAIL (6h3): a legitimate bare 0 octet must still parse" >&2
+    fail=1
+  fi
+
+  # (6i) THE NON-WI-FI QUESTION, on CI run 41322563075's own table: cellular
+  # never registered and wlan0 carried the only route. That route still covers
+  # the relay — the readiness read accepted it at 0s, after Wi-Fi was gone —
+  # but it is NOT a route outside Wi-Fi, so it must never license the disable
+  # nor, once Wi-Fi is disabled, read as ready.
+  local only_wifi="${hdr}
+wlan0	0002000A	00000000	0001	0	0	0	00FFFFFF	0	0	0"
+  if guest_can_route_to "${only_wifi}" 10.0.2.2 'wlan*'; then
+    echo "SELF-TEST FAIL (6i): a wlan0-only table must NOT read as a non-Wi-Fi" \
+         "route — run 41322563075's disable would delete the only network" >&2
+    fail=1
+  fi
+  if ! guest_can_route_to "${only_wifi}" 10.0.2.2; then
+    echo "SELF-TEST FAIL (6i2): without the exclusion the same table must still" \
+         "read as ready — the fixture above would prove nothing" >&2
+    fail=1
+  fi
+  # (6j) …while the settled two-network table (6b's) IS one: eth0's 10.0.0.0/8
+  # covers the relay with Wi-Fi excluded, alone or beside wlan0.
+  if ! guest_can_route_to "${hdr}
+eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0
+wlan0	0002000A	00000000	0001	0	0	0	00FFFFFF	0	0	0" 10.0.2.2 'wlan*' \
+     || ! guest_can_route_to "${hdr}
+eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0" 10.0.2.2 'wlan*'; then
+    echo "SELF-TEST FAIL (6j): an eth0 10.0.0.0/8 route must read as a" \
+         "non-Wi-Fi route to 10.0.2.2" >&2
+    fail=1
+  fi
+  # (6k) THE WIRING, which is where run 41322563075's defect lived: the
+  # predicate was right and the disable ran without asking it. Read through the
+  # install library's lexer (as (8) is), so a comment or a message naming the
+  # disable is not a call: exactly one `svc wifi disable` runs, inside the
+  # `cellular == 1` branch alone; `cellular=1` is set once, by the wait's
+  # Wi-Fi-excluding check; and the same branch is what makes the readiness
+  # verdict ignore Wi-Fi routes.
+  local net_code disables gated cell_gate
+  net_code="$(_app_install_code "${BASH_SOURCE[0]}" | cut -f2)"
+  disables="$(grep -cE 'svc[[:space:]]+wifi[[:space:]]+disable' <<<"${net_code}" || true)"
+  gated="$(awk '
+    /^if \(\( cellular == 1 \)\); then$/ { on = 1; next }
+    on && /^(elif|else|fi)([[:space:];]|$)/ { on = 0 }
+    on && /svc[[:space:]]+wifi[[:space:]]+disable/ { d++ }
+    on && /^  route_skip= *$/ { r++ }
+    END { print d + 0, r + 0 }' <<<"${net_code}")"
+  cell_gate="$(grep -B1 -xF '      cellular=1' "${BASH_SOURCE[0]}" | sed -n 1p)"
+  if (( disables != 1 )) || [[ "${gated}" != "1 1" ]] \
+     || [[ "$(grep -cxF '      cellular=1' "${BASH_SOURCE[0]}" || true)" != 1 ]] \
+     || [[ "${cell_gate}" != "    if guest_can_route_to \"\${route_table}\" \"\${RELAY_HOST_IP}\" 'wlan*'; then" ]] \
+     || ! grep -qxF "  route_skip='wlan*'" "${BASH_SOURCE[0]}" \
+     || ! grep -qxF '  if guest_can_route_to "${route_table}" "${RELAY_HOST_IP}" "${route_skip}"; then' \
+          "${BASH_SOURCE[0]}"; then
+    echo "SELF-TEST FAIL (6k): \`svc wifi disable\` must run once, only once a" \
+         "route outside Wi-Fi covers the relay, and the readiness verdict must" \
+         "then ignore Wi-Fi (disables=${disables}, gated='${gated}'," \
+         "gate='${cell_gate}')" >&2
     fail=1
   fi
 
@@ -751,8 +702,8 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
   #      read at call time) parses the real binary's argv contract and records
   #      what it accepted, while the REAL scan-logs.sh and the REAL key-material
   #      floor run. Under test is the profile selection and what this runner
-  #      adds — the proxy lane's floors, the callers' infrastructure endpoints,
-  #      its three sinks — never the gate's arms, which logscan-gate.sh
+  #      adds — the drive floor, the proxy lane's floors, the callers'
+  #      infrastructure endpoints, its three sinks — never the gate's arms, which logscan-gate.sh
   #      --self-test pins. A fake written here could only record what it was
   #      handed, so it would answer a renamed flag exactly as it answers a
   #      working one; tooling/logscan/tests/cli_contract.rs holds the shared one
@@ -804,7 +755,7 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
   local -a got=()
   # The recorder's upstream selects the proxy profile: the sidecar, the host
   # needles added, the Dart plants declared (never `--declared-plants none`),
-  # RELAY_URL and the upstream exempted, e2e_combined's floors. The BARE
+  # RELAY_URL and the upstream exempted, the drive floor, e2e_combined's floors. The BARE
   # loopback host is exempted on its own account under both profiles — the
   # Flutter engine announces its Dart VM service on `http://127.0.0.1:<port>/`
   # in every logcat this runner captures (logscan-gate.sh states the claim).
@@ -816,6 +767,7 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
     --exempt-endpoint ws://127.0.0.1:7788 --exempt-endpoint ws://10.0.2.2:7788
     --exempt-endpoint 127.0.0.1
     --exempt-endpoint ws://127.0.0.1:7777
+    --floor drive=18
     --expect pubkey=3 --expect coordinate=4 --expect circle_name=1
     --expect petname=1 --expect nostr_group_id=1 --expect mls_group_id=1
     --expect event_id=3
@@ -831,13 +783,14 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
     fail=1
   fi
   # No upstream: the host profile — no sidecar read, the host needles and
-  # their own floors, none of e2e_combined's.
+  # their own floors, the same drive floor, none of e2e_combined's.
   reset_gate_logs; gate_run "" ""
   mapfile -t got < "${seal_argv}"
   want_seal=(seal --run-id local-local "${host_floors[@]}" --declared-plants none
     --exempt-endpoint ws://10.0.2.2:7788
     --exempt-endpoint ws://127.0.0.1:7788 --exempt-endpoint ws://10.0.2.2:7788
     --exempt-endpoint 127.0.0.1
+    --floor drive=18
     --out "${needles}/local-local.needles.json")
   if (( rc != 0 )) || [[ "$(printf '%s\n' "${got[@]}")" != "$(printf '%s\n' "${want_seal[@]}")" ]]; then
     echo "SELF-TEST FAIL (9c host seal argv): rc ${rc}; got '${got[*]}', expected '${want_seal[*]}'" >&2
@@ -883,6 +836,53 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
     fail=1
   fi
   unset FAKE_SEAL_ARGV FAKE_SCAN_ARGV
+
+  # (9d) …and that drive floor stays derived from what the HOST prints, never
+  #      from a transcript's length (run-integration-tests.sh holds its seal of
+  #      this runner's slices to the same skeleton). The gate is
+  #      `drive=<final>,<full>` and the floor SUMS a class's files, so the
+  #      fixture is both slices of one attempt: the attempt banner,
+  #      `Installing …`, the six `VMServiceFlutterDriver:` connect lines (two
+  #      the `kPauseStart` branch `--start-paused` guarantees) and the verdict,
+  #      interleaved with forwarded device chatter exactly as a real capture is
+  #      — here CI run 41322563075's own, a drive that died in setUpAll. The
+  #      floor may not exceed that sum, so the policy's 100, which reddened that
+  #      run's 96 lines, cannot come back.
+  local host_printed_re printed_final printed_full drive_floor
+  host_printed_re='^(===== flutter drive attempt |Installing |VMServiceFlutterDriver: |All tests passed\.|Failure Details:)'
+  printf '%s\n' \
+    '===== flutter drive attempt 1/3 (rc=0, preconnect_stall=0) =====' \
+    'Installing ../../../../../../tmp/scenario.apk...                    6.1s' \
+    'D/FlutterGeolocator( 3887): Creating service.' \
+    'VMServiceFlutterDriver: Connecting to Flutter application at <endpoint>' \
+    'VMServiceFlutterDriver: Isolate found with number: <n>' \
+    'VMServiceFlutterDriver: Isolate <n> is runnable.' \
+    'VMServiceFlutterDriver: Isolate is paused at start.' \
+    'VMServiceFlutterDriver: Attempting to resume isolate' \
+    'I/flutter ( 3887): 00:00 +0: (setUpAll)' \
+    'VMServiceFlutterDriver: Connected to Flutter application.' \
+    'I/flutter ( 3887): 00:03 +0: (setUpAll) [E]' \
+    'I/flutter ( 3887): 00:03 +0 -1: (tearDownAll)' \
+    'All tests passed.' \
+    'I/flutter ( 3887): 00:03 +1 -1: Some tests failed.' > "${tmp}/host-printed.full.drive.log"
+  cp "${tmp}/host-printed.full.drive.log" "${tmp}/host-printed.final.drive.log"
+  printed_full="$(grep -cE "${host_printed_re}" "${tmp}/host-printed.full.drive.log" || true)"
+  printed_final="$(grep -cE "${host_printed_re}" "${tmp}/host-printed.final.drive.log" || true)"
+  drive_floor="$(sed -n -E 's/^  local -a extra=\(--floor drive=([0-9]+)\) endpoints=\(\)$/\1/p' "${BASH_SOURCE[0]}")"
+  if (( printed_final != 9 || printed_full != 9 )); then
+    echo "SELF-TEST FAIL (9d drive floor): the two slices carry ${printed_final} and" \
+         "${printed_full} host-printed line(s), not the 9 each every complete" \
+         "transcript carries — the check below would be measuring the wrong thing" >&2
+    fail=1
+  elif [[ -z "${drive_floor}" ]] || (( drive_floor < 1 )) \
+       || (( drive_floor > printed_final + printed_full )); then
+    echo "SELF-TEST FAIL (9d drive floor): drive=${drive_floor:-none} is not within" \
+         "the $(( printed_final + printed_full )) line(s) the host prints for the" \
+         "two gated slices. A drive floor is calibrated to those lines alone; a" \
+         "higher one is a transcript's length, which device chatter sets (CI run" \
+         "41322563075). 'A test ran' is the scanner's proof_of_run, not this number." >&2
+    fail=1
+  fi
 
   # (10) NO RUN INHERITS THE PREVIOUS ONE'S CAPTURE. The shared /tmp paths are
   #      cleared before the earliest thing in this script that can exit, so a
@@ -946,7 +946,7 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
     echo "run-single-avd-scenario: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else; the log-privacy gate is one call into logscan-gate.sh that takes the proxy profile with e2e_combined's floors when the recorder's upstream is exported and the host profile otherwise, honours a stated profile, exempts every endpoint its callers configure without declaring one, hands the logcat and both drive logs to the wrapper, contains on a leak, and the drive log is echoed only after it; a run that dies at an argument guard leaves NEITHER shared capture behind, so no multi-target caller can file the previous target's transcript under this one's name, and the same copy with that removal deleted still inherits it. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
+  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; a wlan0-only table is not a route outside Wi-Fi while an eth0 10.0.0.0/8 one is, Wi-Fi is disabled once and only behind that check, and the readiness verdict then ignores Wi-Fi routes; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else; the log-privacy gate is one call into logscan-gate.sh that seals the host-printed drive floor, within the 9+9 lines of the two gated slices, under both profiles, takes the proxy profile with e2e_combined's floors when the recorder's upstream is exported and the host profile otherwise, honours a stated profile, exempts every endpoint its callers configure without declaring one, hands the logcat and both drive logs to the wrapper, contains on a leak, and the drive log is echoed only after it; a run that dies at an argument guard leaves NEITHER shared capture behind, so no multi-target caller can file the previous target's transcript under this one's name, and the same copy with that removal deleted still inherits it. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
   return 0
 }
 
@@ -1179,13 +1179,20 @@ grant_runtime_permissions
 echo "Phase 3/4 — Permissions ready."
 
 # -----------------------------------------------------------------
-# ONE TRANSPORT, DETERMINISTICALLY.
+# THE GUEST NETWORK: ONE TRANSPORT, CHOSEN FROM WHAT ROUTES.
 #
-# The api-34 google_apis image brings up TWO networks that both NAT to the host
-# alias: CELLULAR on eth0 (10.0.2.15/24) and WIFI on wlan0 (10.0.2.16/24).
-# Either would carry this lane, but Wi-Fi outscores cellular, so
-# ConnectivityService makes it the default network — and its route install is
-# racy. In CI run 31667128290 netd lost that race:
+# Boot-completed is not network-ready (see guest_can_route_to): on a cold boot
+# the app can reach `flutter drive` over adb and still have no route to the
+# relay, which surfaces as an instant ENETUNREACH inside setUpAll rather than
+# as anything the harness would recognise as an infrastructure fault. Wait
+# here, where the message can say so, instead of paying for a whole drive to
+# learn it. Waited for, not slept through: a warm boot pays nothing.
+#
+# The api-34 google_apis image normally brings up TWO networks that both NAT to
+# the host alias: CELLULAR on eth0 (10.0.2.15/24) and WIFI on wlan0
+# (10.0.2.16/24). Either would carry this lane, but Wi-Fi outscores cellular,
+# so ConnectivityService makes it the default network — and its route install
+# is racy. In CI run 31667128290 netd lost that race:
 #
 #   networkSetDefault(101)                                         04:48:29.166
 #   networkAddRouteParcel(101, 0.0.0.0/0 via 10.0.2.2, wlan0)
@@ -1203,61 +1210,38 @@ echo "Phase 3/4 — Permissions ready."
 # cleanly on the failing boot too, and its DNS probe resolved. Nothing here
 # wants Wi-Fi either — the app's only WorkManager constraint is
 # `NetworkType.connected`, which cellular satisfies, and the B9 lane drops
-# connectivity with airplane mode, which is transport-agnostic. So delete the
-# second network rather than keep racing it.
+# connectivity with airplane mode, which is transport-agnostic. So the second
+# network is deleted rather than raced.
+#
+# BUT ONLY WHEN CELLULAR IS THERE TO KEEP. In CI run 41322563075 it never
+# registered: Wi-Fi took the network id cellular holds on every other boot,
+# netd routed wlan0 alone, and the unconditional disable left the guest with no
+# network at all — while the readiness read that followed, "after 0s", found
+# the wlan0 route the kernel had not cleared yet and called the guest ready. So
+# the wait asks for a route OUTSIDE Wi-Fi, Wi-Fi is disabled only once one
+# covers the relay, and from then on a Wi-Fi route is never readiness. A guest
+# whose cellular never comes up pays the whole wait and keeps Wi-Fi, which is
+# then the one network. The cellular wait is the readiness wait, so the worst
+# case is the same two bounds as before: GUEST_NET_TIMEOUT_SECS, then
+# WIFI_OFF_TIMEOUT_SECS.
 #
 # READ BACK, NEVER ASSUMED: `svc wifi disable` exits 0 whether or not it took
-# effect, so the state is re-read from `settings get global wifi_on`. A guest
-# that keeps Wi-Fi is the status quo ante, not a new failure, so a mismatch
-# WARNS and drives on — this must never be the thing that reddens a lane.
-# -----------------------------------------------------------------
-readonly WIFI_OFF_TIMEOUT_SECS="${WIFI_OFF_TIMEOUT_SECS:-20}"
-wifi_state() {
-  adb -s "${DEVICE}" shell settings get global wifi_on 2>/dev/null \
-    | tr -d '\r' | head -n 1
-}
-echo "Disabling guest Wi-Fi on ${DEVICE} so the slirp NAT is the only network..."
-adb -s "${DEVICE}" shell svc wifi disable >/dev/null 2>&1 || true
-wifi_waited=0
-wifi_on="$(wifi_state)"
-while (( wifi_waited < WIFI_OFF_TIMEOUT_SECS )) && ! wifi_is_off "${wifi_on}"; do
-  sleep 2
-  wifi_waited=$(( wifi_waited + 2 ))
-  wifi_on="$(wifi_state)"
-done
-if wifi_is_off "${wifi_on}"; then
-  echo "  Wi-Fi off after ${wifi_waited}s (wifi_on=0); cellular/eth0 is the default network."
-else
-  echo "WARN: guest Wi-Fi did not report off within ${WIFI_OFF_TIMEOUT_SECS}s" \
-       "(wifi_on=${wifi_on:-<unreadable>}). Driving anyway — that restores the" \
-       "two-network behaviour CI run 31667128290 raced, it does not break" \
-       "anything that worked before." >&2
-fi
-
-# -----------------------------------------------------------------
-# The guest network. Boot-completed is not network-ready (see
-# guest_can_route_to): on a cold boot the app can reach
-# `flutter drive` over adb and still have no route to the relay,
-# which surfaces as an instant ENETUNREACH inside setUpAll rather
-# than as anything the harness would recognise as an infrastructure
-# fault. Wait here, where the message can say so, instead of paying
-# for a whole drive to learn it.
+# effect, so the state is re-read from `settings get global wifi_on`.
 #
-# Waited for, not slept through: the wait ends the moment the route
-# appears, so a warm boot pays nothing.
-#
-# WARN-AND-DRIVE, NOT FAIL-CLOSED. This wait is a DIAGNOSTIC: it makes an
+# WARN-AND-DRIVE, NOT FAIL-CLOSED. All of this is a DIAGNOSTIC: it makes an
 # infrastructure fault legible, it does not make the network work. A readiness
 # heuristic that hard-fails can only ever be as correct as its model of the
 # guest's networking — and when that model was wrong (CI run 30964250098) the
 # hard failure turned five healthy lanes red without driving a single test.
 # Driving anyway costs one wasted drive in the genuinely-unready case, and the
 # drive's own ENETUNREACH is caught below and relabelled as infrastructure, so
-# the diagnostic survives while the false-red cannot recur. Skipped entirely
-# when the relay host is not a literal address: the resolver is a different
-# readiness question and inventing a verdict about it would gate on nothing.
+# the diagnostic survives while the false-red cannot recur. A guest that keeps
+# Wi-Fi is the status quo ante, not a new failure. Skipped entirely when the
+# relay host is not a literal address: the resolver is a different readiness
+# question, and with no route to show for cellular, Wi-Fi is kept.
 # -----------------------------------------------------------------
 readonly GUEST_NET_TIMEOUT_SECS="${GUEST_NET_TIMEOUT_SECS:-120}"
+readonly WIFI_OFF_TIMEOUT_SECS="${WIFI_OFF_TIMEOUT_SECS:-20}"
 RELAY_HOST_IP="$(relay_host_ipv4 "${RELAY_URL}")"
 readonly RELAY_HOST_IP
 # 0 = the predicate ran and never saw a covering route; 1 = it ran and did;
@@ -1266,32 +1250,77 @@ readonly RELAY_HOST_IP
 # "judged ready" — that would blame the predicate for a verdict it never gave.
 net_ready=0
 route_table=""
+cellular=0
+# The interfaces the readiness verdict ignores: Wi-Fi's, once it was disabled.
+route_skip=""
+guest_route_table() {
+  # `|| true`d because adb itself fails while the device is still settling
+  # ("device offline"); an unreadable table is simply not-ready, which the
+  # predicate already reports, and the loop retries.
+  adb -s "${DEVICE}" shell cat /proc/net/route 2>&1 | tr -d '\r' || true
+}
 if [[ -z "${RELAY_HOST_IP}" ]]; then
   echo "Guest network: relay host in '${RELAY_URL}' is not a literal IPv4," \
-       "so there is no routing question to ask here — skipping the wait."
+       "so there is no routing question to ask here — skipping the wait and" \
+       "keeping Wi-Fi."
   net_ready=2
 else
-  echo "Waiting for a guest route to ${RELAY_HOST_IP} on ${DEVICE} (up to ${GUEST_NET_TIMEOUT_SECS}s)..."
+  echo "Waiting for a non-Wi-Fi guest route to ${RELAY_HOST_IP} on ${DEVICE} (up to ${GUEST_NET_TIMEOUT_SECS}s)..."
   net_waited=0
   while (( net_waited < GUEST_NET_TIMEOUT_SECS )); do
-    # `|| true`d because adb itself fails while the device is still settling
-    # ("device offline"); an unreadable table is simply not-ready, which the
-    # predicate already reports, and the loop retries.
-    route_table="$(adb -s "${DEVICE}" shell cat /proc/net/route 2>&1 | tr -d '\r' || true)"
-    if guest_can_route_to "${route_table}" "${RELAY_HOST_IP}"; then
-      net_ready=1
+    route_table="$(guest_route_table)"
+    if guest_can_route_to "${route_table}" "${RELAY_HOST_IP}" 'wlan*'; then
+      cellular=1
       break
     fi
     sleep 2
     net_waited=$(( net_waited + 2 ))
   done
+fi
 
+wifi_state() {
+  adb -s "${DEVICE}" shell settings get global wifi_on 2>/dev/null \
+    | tr -d '\r' | head -n 1
+}
+if (( cellular == 1 )); then
+  route_skip='wlan*'
+  echo "A non-Wi-Fi route covers ${RELAY_HOST_IP} after ${net_waited}s;" \
+       "disabling guest Wi-Fi on ${DEVICE} so it is the only network..."
+  adb -s "${DEVICE}" shell svc wifi disable >/dev/null 2>&1 || true
+  wifi_waited=0
+  wifi_on="$(wifi_state)"
+  while (( wifi_waited < WIFI_OFF_TIMEOUT_SECS )) && ! wifi_is_off "${wifi_on}"; do
+    sleep 2
+    wifi_waited=$(( wifi_waited + 2 ))
+    wifi_on="$(wifi_state)"
+  done
+  if wifi_is_off "${wifi_on}"; then
+    echo "  Wi-Fi off after ${wifi_waited}s (wifi_on=0); cellular/eth0 is the default network."
+  else
+    echo "WARN: guest Wi-Fi did not report off within ${WIFI_OFF_TIMEOUT_SECS}s" \
+         "(wifi_on=${wifi_on:-<unreadable>}). Driving anyway — that restores the" \
+         "two-network behaviour CI run 31667128290 raced, it does not break" \
+         "anything that worked before." >&2
+  fi
+elif (( net_ready == 0 )); then
+  echo "WARN: no route outside Wi-Fi covered ${RELAY_HOST_IP} within" \
+       "${GUEST_NET_TIMEOUT_SECS}s — the emulator's cellular network never came" \
+       "up (CI run 41322563075), an infrastructure fault. Keeping Wi-Fi as the" \
+       "guest's one network: disabling it would leave none." >&2
+fi
+
+if (( net_ready == 0 )); then
+  # Read after the disable: the table the drive meets, not the one before it.
+  route_table="$(guest_route_table)"
+  if guest_can_route_to "${route_table}" "${RELAY_HOST_IP}" "${route_skip}"; then
+    net_ready=1
+  fi
   if (( net_ready == 1 )); then
-    echo "Guest network ready after ${net_waited}s — a live route covers ${RELAY_HOST_IP}:"
+    echo "Guest network ready — a live route covers ${RELAY_HOST_IP}${route_skip:+ outside Wi-Fi}:"
     printf '%s\n' "${route_table}" | sed 's/^/  /'
   else
-    echo "WARN: no live guest route covers ${RELAY_HOST_IP} after" \
-         "${GUEST_NET_TIMEOUT_SECS}s, so the relay at ${RELAY_URL} may be" \
+    echo "WARN: no live guest route covers ${RELAY_HOST_IP}${route_skip:+ outside Wi-Fi}," \
+         "so the relay at ${RELAY_URL} may be" \
          "unreachable. Driving anyway — a drive that dies on 'Network is" \
          "unreachable' is reported below as infrastructure, not as a product" \
          "failure. If the suite passes, this warning was the heuristic being" \

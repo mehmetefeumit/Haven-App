@@ -89,11 +89,11 @@
 #
 # # A ONE-NETWORK guest, and why this lane needs one more than any other
 #
-# The AVD boots two networks: Wi-Fi and the slirp NAT that Android presents as
-# cellular. Both reach `10.0.2.2`, so either will do — until the wall clock
-# moves. A discontinuity this large makes Android re-evaluate every connected
-# network at once, whichever revalidates first takes the default, and the loser
-# takes it back a moment later. Sockets already open survive the handover;
+# The AVD normally boots two networks: Wi-Fi and the slirp NAT that Android
+# presents as cellular. Both reach `10.0.2.2`, so either will do — until the
+# wall clock moves. A discontinuity this large makes Android re-evaluate every
+# connected network at once, whichever revalidates first takes the default, and
+# the loser takes it back a moment later. Sockets already open survive the handover;
 # sockets OPENED inside it fail instantly, before any SYN leaves the guest.
 #
 # That is not a hypothetical. In CI run 31868809387 the sequence was:
@@ -108,7 +108,11 @@
 # drop, so it fails closed with `NoOp` — and the lane reported it as a
 # KeyPackage defect. So phase 2 deletes the second network BEFORE the backdate,
 # and fails closed if it cannot: a two-network guest re-arms a race whose red is
-# misattributed to the product every time.
+# misattributed to the product every time. Only when there IS a second one,
+# though: Wi-Fi goes only once a route outside it covers the relay, because in
+# CI run 41322563075 cellular never registered on a cold boot and Wi-Fi was the
+# guest's only network — deleting it leaves none, and a guest left with Wi-Fi
+# alone already has the one network this lane needs.
 #
 # Usage:
 #   run-kp-rotation.sh [<apk> [<target.dart>]]
@@ -124,7 +128,8 @@
 #   KPR_BACKDATE_SECS          how far back the clock goes. Default 6048000 (70d).
 #   KPR_SERVO_POLL_SECS        servo logcat re-read period. Default 1.
 #   KPR_SERVO_MAX_ATTEMPTS     per-request servo retries. Default 3.
-#   KPR_WIFI_OFF_TIMEOUT_SECS  read-back budget for the Wi-Fi disable. Default 20.
+#   KPR_WIFI_OFF_TIMEOUT_SECS  budget for the cellular route and the Wi-Fi
+#                              disable's read-back together. Default 20.
 
 set -Eeuo pipefail
 
@@ -141,6 +146,10 @@ source "${SCRIPT_DIR}/app-install-lib.sh"
 # evidence directory at exit.
 # shellcheck source=tooling/e2e/ci/logscan-gate.sh
 source "${SCRIPT_DIR}/logscan-gate.sh"
+# The guest-network predicates (guest_can_route_to, wifi_is_off), shared with
+# run-single-avd-scenario.sh so the two Wi-Fi decisions read one parser.
+# shellcheck source=tooling/e2e/ci/guest-net-lib.sh
+source "${SCRIPT_DIR}/guest-net-lib.sh"
 
 # ---------------------------------------------------------------------------
 # VERBATIM markers. MUST match the `k*Marker` constants in
@@ -350,19 +359,6 @@ kpr_default_network_handovers() {
     END { print n + 0 }
   ' "${logfile}" 2>/dev/null)" || n=""
   echo "${n:-0}"
-}
-
-# wifi_is_off <settings-output> — exit 0 iff the guest reports Wi-Fi OFF.
-#
-# Mirrors run-single-avd-scenario.sh's predicate because it guards the same
-# trap on the same AVD image: `settings get global wifi_on` answers `0` or `1`,
-# `null` when the key was never written, and adb noise ("device offline",
-# "error: closed") when the shell raced the device. ONLY a literal `0` is off.
-# `null` is "the platform has no opinion", which is not evidence the second
-# network is gone — reading it as off would report success for a disable that
-# never happened, in precisely the case that needs catching.
-wifi_is_off() {
-  [[ "$(printf '%s' "${1:-}" | tr -d '\r' | head -n 1)" == "0" ]]
 }
 
 # The `settings put` commands that UNDO the phase-2 clock pin, one per line.
@@ -915,7 +911,7 @@ run_self_test() {
   # hard-coded "all 50 fixture groups passed" that no counter backed, so a
   # deleted assertion changed neither the message nor the exit code. Every
   # assertion helper below counts itself.
-  local -r SELF_TEST_ASSERTIONS=105
+  local -r SELF_TEST_ASSERTIONS=108
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1447,18 +1443,45 @@ run_self_test() {
   ! wifi_is_off 'adb: device offline' || wifi_pred_rc=1
   _case "only an unambiguous 0 reads as Wi-Fi OFF" 0 "${wifi_pred_rc}"
 
-  # (38) THE WI-FI STATE-RESTORE FIXTURE, twin of (34). Phase 2 turns the radio
-  #      off; every Android lane here shares one AVD cache key, so the disable
-  #      needs a matching re-enable that cleanup() actually issues. Checked
-  #      against the script's own text because nothing else fails when one half
-  #      of the pair is deleted.
-  local wifi_rc=0
-  grep -qE '^adb -s .*shell svc wifi disable' "${self}" || wifi_rc=1
+  # (37b) THE CELLULAR QUESTION phase 2 asks before the disable, on the shared
+  #       predicate. CI run 41322563075's table — cellular never registered,
+  #       wlan0 the only route — covers the relay but is NOT a route outside
+  #       Wi-Fi, so disabling would leave no network; the settled eth0
+  #       10.0.0.0/8 table is one.
+  local rt_hdr=$'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT'
+  local rt_wlan=$'wlan0\t0002000A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0'
+  local rt_eth=$'eth0\t0000000A\t00000000\t0001\t0\t0\t0\t000000FF\t0\t0\t0'
+  rc=0; guest_can_route_to "${rt_hdr}"$'\n'"${rt_wlan}" 10.0.2.2 'wlan*' || rc=$?
+  _case "a wlan0-only table (run 41322563075) is NOT a route outside Wi-Fi" 1 "${rc}"
+  rc=0
+  guest_can_route_to "${rt_hdr}"$'\n'"${rt_eth}"$'\n'"${rt_wlan}" 10.0.2.2 'wlan*' || rc=$?
+  _case "an eth0 10.0.0.0/8 route IS a route outside Wi-Fi" 0 "${rc}"
+
+  # (38) THE WI-FI STATE-RESTORE FIXTURE, twin of (34). Phase 2 may turn the
+  #      radio off; every Android lane here shares one AVD cache key, so the
+  #      disable needs a matching re-enable that cleanup() actually issues.
+  #      Checked against the script's own text because nothing else fails when
+  #      one half of the pair is deleted. And the disable is the one run
+  #      41322563075 made unconditionally: read through the install library's
+  #      lexer, so a comment or message naming it is not a call, it runs once,
+  #      directly behind the cellular check that excludes Wi-Fi.
+  local wifi_rc=0 disable_line wifi_disables cell_line
+  disable_line='      adb -s "${DEVICE}" shell svc wifi disable >/dev/null 2>&1 || true'
   grep -qE 'svc wifi enable' \
     <<<"$(sed -n '/^restore_wifi_radio()/,/^}/p' "${self}")" || wifi_rc=1
   grep -qE '^[[:space:]]+restore_wifi_radio$' \
     <<<"$(sed -n '/^cleanup()/,/^}/p' "${self}")" || wifi_rc=1
-  _case "the Wi-Fi radio is disabled AND restored by cleanup()" 0 "${wifi_rc}"
+  _case "the Wi-Fi radio is restored by cleanup()" 0 "${wifi_rc}"
+  wifi_rc=0
+  wifi_disables="$(_app_install_code "${self}" | cut -f2 \
+                     | grep -cE 'svc[[:space:]]+wifi[[:space:]]+disable' || true)"
+  cell_line="$(grep -B2 -xF "${disable_line}" "${self}" | sed -n 1p)"
+  (( wifi_disables == 1 )) || wifi_rc=1
+  [[ "$(grep -A1 -xF '      cellular=1' "${self}" | sed -n 2p)" == "${disable_line}" ]] \
+    || wifi_rc=1
+  [[ "${cell_line}" == "    if guest_can_route_to \"\$(guest_route_table)\" \"\${RELAY_HOST_IP}\" 'wlan*'; then" ]] \
+    || wifi_rc=1
+  _case "Wi-Fi is disabled once, only behind a route outside Wi-Fi" 0 "${wifi_rc}"
 
   # (39) THE HANDOVER COUNTER. Counts default-network switches only AFTER the
   #      restore marker: the guest legitimately settles its default while the
@@ -1963,8 +1986,11 @@ readonly SERVO_POLL_SECS="${KPR_SERVO_POLL_SECS:-1}"
 # to fail with its own attributable message.
 readonly SERVO_MAX_ATTEMPTS="${KPR_SERVO_MAX_ATTEMPTS:-8}"
 
-# How long phase 2 waits for `wifi_on` to READ BACK as 0. Generous because the
-# radio teardown is asynchronous and this runs once, before the drive.
+# How long phase 2 waits for a cellular route and then for `wifi_on` to READ
+# BACK as 0, together: one bound, so the lane's deadline is what it was.
+# Generous because the radio teardown is asynchronous and this runs once, before
+# the drive — by which time both relay starts and the install's barrier have
+# given cellular its chance to register.
 readonly WIFI_OFF_TIMEOUT_SECS="${KPR_WIFI_OFF_TIMEOUT_SECS:-20}"
 
 # Fail closed on an undeclared receive path. `liveSyncEnabled` is
@@ -2056,13 +2082,23 @@ restore_auto_time_pin() {
   done < <(auto_time_restore_cmds)
 }
 
+# The address both relays listen on from inside the guest (the host alias
+# build-kp-rotation-apk.sh bakes into the APK, and the workflow keeps).
+readonly RELAY_HOST_IP="10.0.2.2"
+
+# The guest's /proc/net/route, verbatim (for [`guest_can_route_to`]). `|| true`
+# because adb fails while the device settles; an unreadable table is no route.
+guest_route_table() {
+  adb -s "${DEVICE}" shell cat /proc/net/route 2>&1 | tr -d '\r' || true
+}
+
 # The guest's current `wifi_on` setting, verbatim (for [`wifi_is_off`]).
 wifi_state() {
   adb -s "${DEVICE}" shell settings get global wifi_on 2>/dev/null \
     | tr -d '\r' | head -n 1
 }
 
-# Re-enables the Wi-Fi radio phase 2 turned off.
+# Re-enables the Wi-Fi radio phase 2 may have turned off.
 #
 # Best-effort for the same reason `restore_auto_time_pin` is: it runs from the
 # EXIT trap, which is also reached when the device was never ready, and a
@@ -2197,8 +2233,10 @@ fail() {
   echo "  ${handovers} recorded after '${MARK_CLOCK_RESTORED}'." >&2
   if (( handovers > 0 )); then
     echo "  The guest changed its DEFAULT NETWORK while the drive was running." \
-         "Phase 2 disables Wi-Fi precisely so this cannot happen, so a nonzero" \
-         "count means that disable did not take. Any socket the app OPENED in" \
+         "Phase 2 leaves one network precisely so this cannot happen, so a" \
+         "nonzero count means a second one came up after it: cellular" \
+         "registering late beside the Wi-Fi it kept, or Wi-Fi coming back." \
+         "Any socket the app OPENED in" \
          "that window failed before a SYN left the guest — read every" \
          "'relay did not respond' below as the handover, not as a defect." >&2
   fi
@@ -2261,28 +2299,56 @@ fi
 # both and hand the default back and forth, and every socket the app opens in
 # that window dies before it reaches the relay.
 #
+# ONLY BEHIND A ROUTE THAT DOES NOT RIDE WI-FI. In CI run 41322563075 cellular
+# never registered and Wi-Fi was the guest's one network, so an unconditional
+# disable leaves none; a guest with no such route within the bound keeps Wi-Fi,
+# which is then the one network this lane needs. The route wait and the
+# read-back share WIFI_OFF_TIMEOUT_SECS, so the lane's deadline is unchanged.
+#
 # READ BACK, NEVER ASSUMED: `svc wifi disable` exits 0 whether or not it took
 # effect. Unlike run-single-avd-scenario.sh — which only PREFERS one network and
-# therefore warns — this lane fails closed, because it is the lane that creates
-# the discontinuity, and a two-network guest here re-arms a race whose red is
-# attributed to the KeyPackage code every time.
-echo "Phase 2/4 — disabling guest Wi-Fi so the slirp NAT is the only network..."
-adb -s "${DEVICE}" shell svc wifi disable >/dev/null 2>&1 || true
+# therefore warns — this lane fails closed once it has disabled Wi-Fi, because
+# it is the lane that creates the discontinuity, and a two-network guest here
+# re-arms a race whose red is attributed to the KeyPackage code every time.
+echo "Phase 2/4 — waiting for a non-Wi-Fi route to ${RELAY_HOST_IP}, to disable guest Wi-Fi behind it..."
+cellular=0
+wifi_on=""
 wifi_waited=0
-wifi_on="$(wifi_state)"
-while (( wifi_waited < WIFI_OFF_TIMEOUT_SECS )) && ! wifi_is_off "${wifi_on}"; do
+while (( wifi_waited < WIFI_OFF_TIMEOUT_SECS )); do
+  if (( cellular == 0 )); then
+    if guest_can_route_to "$(guest_route_table)" "${RELAY_HOST_IP}" 'wlan*'; then
+      cellular=1
+      adb -s "${DEVICE}" shell svc wifi disable >/dev/null 2>&1 || true
+    fi
+  fi
+  if (( cellular == 1 )); then
+    wifi_on="$(wifi_state)"
+    if wifi_is_off "${wifi_on}"; then
+      break
+    fi
+  fi
   sleep 2
   wifi_waited=$(( wifi_waited + 2 ))
-  wifi_on="$(wifi_state)"
 done
-if ! wifi_is_off "${wifi_on}"; then
-  fail "guest Wi-Fi did not report off within ${WIFI_OFF_TIMEOUT_SECS}s \
-(wifi_on='${wifi_on:-<unreadable>}'). Two live networks turn this lane's own \
-70-day clock restore into a default-network handover, and the app sockets \
-opened inside it fail instantly — which this lane would report as a KeyPackage \
-rotation defect. Refusing to run rather than produce that verdict."
+# The last pass slept after its read, so one more read costs no bound.
+if (( cellular == 1 )) && ! wifi_is_off "${wifi_on}"; then
+  wifi_on="$(wifi_state)"
 fi
-echo "Phase 2/4 — Wi-Fi off after ${wifi_waited}s (wifi_on=${wifi_on})."
+if (( cellular == 0 )); then
+  echo "WARN: no route outside Wi-Fi covered ${RELAY_HOST_IP} within" \
+       "${WIFI_OFF_TIMEOUT_SECS}s — the emulator's cellular network never came" \
+       "up (CI run 41322563075), an infrastructure fault. Keeping Wi-Fi: it is" \
+       "the guest's one network." >&2
+elif ! wifi_is_off "${wifi_on}"; then
+  fail "guest Wi-Fi did not report off within the ${WIFI_OFF_TIMEOUT_SECS}s \
+phase 2 allows (wifi_on='${wifi_on:-<unreadable>}'), beside a cellular route. \
+Two live networks turn this lane's own 70-day clock restore into a \
+default-network handover, and the app sockets opened inside it fail instantly \
+— which this lane would report as a KeyPackage rotation defect. Refusing to \
+run rather than produce that verdict."
+else
+  echo "Phase 2/4 — Wi-Fi off after ${wifi_waited}s (wifi_on=${wifi_on}); cellular is the one network."
+fi
 
 # NITZ / NTP would silently undo the backdate. Turn both off BEFORE applying
 # it, and verify: `settings put` exits 0 whether or not it took effect.

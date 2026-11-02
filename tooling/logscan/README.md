@@ -635,18 +635,23 @@ counting them keeps the floor a true lower bound rather than an aspiration.
 Every Android lane's floor is now that number: background-catchup and
 FGS-publish `drive=9` (both keep the app running, so both carry the ninth
 line), KeyPackage-rotation / real-GPS / provider-toggle / clock-skew /
-network-reconnect `drive=8`, integration and
-relay-customization `drive=18` (each target is gated as
+network-reconnect `drive=8`, integration, relay-customization, and the core
+flow and profile Android lanes `drive=18` (each target is gated as
 `--sink drive=<final>,<full>` and a floor sums its class's files, so it is twice
 the per-slice 9, the runner's own `===== flutter drive attempt …` banner
-included), permission-revocation `drive=7` — that lane alone drops the verdict,
+included; the last two are `run-single-avd-scenario.sh`'s own seal, under the
+proxy and host profiles alike, after CI run 41322563075 where a drive that died
+in setUpAll printed 96 lines and the policy's 100 hid its failure),
+permission-revocation `drive=7` — that lane alone drops the verdict,
 because ACT 1's green shape is the app dying under the driver mid-session, so a
-COMPLETE act 1 ends in a `DriverError` and prints none. Every one of them also
-seals `relay=7`. The flake-stress lane is the one that seals `relay=7` ALONE:
-each of its iterations drives the whole core flow onto a device-wide capture,
-which is the shape the policy's own `drive` and `logcat` defaults were sized
-for. Each of the ten runners above builds its own skeleton fixture in its
-`--self-test` and reds if the floor ever exceeds
+COMPLETE act 1 ends in a `DriverError` and prints none. Every one of them but
+the core flow and profile lanes, whose runner gates no relay log, also seals
+`relay=7`. The flake-stress lane is the one that seals `relay=7` ALONE, and
+its seal comes first, so every inner gate reuses that manifest and
+`run-single-avd-scenario.sh`'s `drive=18` never applies there: each of its
+iterations drives the whole core flow onto a device-wide capture, which is the
+shape the policy's own `drive` and `logcat` defaults were sized for. Each of the eleven runners above builds its own
+skeleton fixture in its `--self-test` and reds if the floor ever exceeds
 it, so a red lane cannot be re-pinned from a transcript's length again.
 
 An **iOS floor** is derived the same way, from the four lines a `flutter test

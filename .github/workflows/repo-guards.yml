@@ -1718,7 +1718,9 @@ jobs:
       # system image) and carrying that job's own api/target/arch. It also
       # holds every emulator step to `-no-window`, because the headless binary
       # is the one provisioning ran: in CI run 35536892150 a probe of the
-      # windowed one rejected a sound emulator in every lane.
+      # windowed one rejected a sound emulator in every lane. And a job that
+      # builds an APK first must release its build outputs before provisioning:
+      # in CI run 41322563075 one APK's left the system image too little room.
       - name: Android SDK is provisioned before every emulator step
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_android_sdk_provisioned.sh
@@ -1726,8 +1728,9 @@ jobs:
       # Both directions, since a guard that only ever passes is decoration: a
       # missing step, one placed after the action, a wrong api level, target or
       # arch, a commented-out one, one gated on an `if:` and an emulator step
-      # without the `-no-window` token each fail; a job that boots no emulator
-      # needs none. A step list the reader cannot parse
+      # without the `-no-window` token each fail, as does an APK build whose
+      # outputs are not released after it and before provisioning; a job that
+      # boots no emulator needs none. A step list the reader cannot parse
       # stops the guard rather than passing it, and the case count is pinned by
       # equality.
       - name: Android SDK provisioning guard self-test

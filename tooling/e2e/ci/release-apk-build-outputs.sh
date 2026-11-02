@@ -5,9 +5,10 @@
 # haven/build holds every Gradle intermediate of every APK the lane built and
 # cargokit's Rust target for Android (`--target-dir` is the plugin project's
 # buildDir, haven/build/rust_lib_haven/build): a debug build of the core with
-# full debuginfo. A lane that builds several APKs before provisioning the SDK
-# keeps all of it on disk for nothing, and on a 72 GB runner it left 44 MB for
-# the system image (CI run 41167769413). Nothing after the build reads it, nor
+# full debuginfo. A lane that builds before provisioning the SDK keeps all of it
+# on disk for nothing: on a 72 GB runner eight APKs left 44 MB for the system
+# image (CI run 41167769413), and a single one left 3.3 GB, too little for the
+# image to unpack (CI run 41322563075). Nothing after the build reads it, nor
 # the Gradle caches, which these lanes restore and never save: the drives
 # install the copied APKs with --use-application-binary.
 #

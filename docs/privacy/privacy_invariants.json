@@ -174,12 +174,6 @@
       ]
     }
   },
-  "ratchet_override": {
-    "reason": "Relay-plane segregation (owner-approved 2026-10-31): a create with no relays named no longer takes the invitees' inbox union with a fallback to the creator's inbox and the seed, so the derivation INV-R-CIRCLE-RELAYS-FROM-INVITEES pinned is false by design and its fallback tests are deleted with it. INV-R-CIRCLE-RELAYS-FROM-LOCATION-POOL replaces it, pinning the location-pool pick and both exclusion tiers, and carries circleDetailsRelaysNote, reworded the same day, as a disclosure.",
-    "items": [
-      "INV-R-CIRCLE-RELAYS-FROM-INVITEES.deleted"
-    ]
-  },
   "invariants": [
     {
       "id": "INV-L-CIPHERTEXT-ONLY-EGRESS",

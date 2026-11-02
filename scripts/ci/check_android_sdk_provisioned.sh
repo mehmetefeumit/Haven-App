@@ -54,6 +54,13 @@
 #       indistinguishable, in review, from a backstop.
 #   P7  Every emulator step declares `emulator-options` carrying the token
 #       `-no-window` — the binary the provisioning step verified.
+#   P8  A job that builds an APK before its provisioning step runs
+#       `tooling/e2e/ci/release-apk-build-outputs.sh` after the last such
+#       build and before that step. The build tree and cargokit's Rust target
+#       stay on disk otherwise, and on a 72 GB runner one APK's outputs left
+#       too little room for the system image to unpack (CI run 41322563075):
+#       the provisioning step then fails every attempt, for a reason no retry
+#       can fix.
 #
 # Pure bash/awk over the checked-out tree, no toolchain and no Android SDK —
 # belongs in repo-guards.yml.
@@ -64,7 +71,7 @@
 #
 # Exit codes:
 #   0  every emulator job provisions its SDK first
-#   1  a job violates one of P1-P7
+#   1  a job violates one of P1-P8
 #   2  the extractor cannot read a step list it must grade, or the self-test
 #      failed (the guard itself cannot vouch for the lanes)
 
@@ -92,7 +99,7 @@ note_violation() { fail_msg "$*"; VIOLATIONS=$((VIOLATIONS + 1)); }
 #
 # One TSV record per step:
 #   file  job  index  name  uses  api  target  arch  has_if  headless
-#   provision_args
+#   provision_args  build_at  release_at
 #
 # `headless` is "yes" when the step's `emulator-options` holds the token
 # `-no-window`, "no" when it holds options without it, "-" when the step
@@ -103,22 +110,35 @@ note_violation() { fail_msg "$*"; VIOLATIONS=$((VIOLATIONS + 1)); }
 # step's body, or "-". Full-line comments never reach the body, so a
 # commented-out step is not a step and a commented-out invocation is not one
 # either.
+#
+# `build_at` and `release_at` are the offsets in that body of the LAST APK
+# build and the LAST release of its outputs, or 0, so P8 can order the two
+# within one step as well as across steps.
 # ---------------------------------------------------------------------------
 extract_steps() {
   local file="$1"
   awk -v file="${file}" -v prov="${PROVISION_SH}" '
+    function last_at(s, re,   at, off) {
+      at = 0; off = 0
+      while (match(substr(s, off + 1), re)) { at = off + RSTART; off = at + RLENGTH - 1 }
+      return at
+    }
     function flush_step() {
       if (in_step) {
-        args = "-"
-        if (uses == "-" && match(body, prov " +[0-9]+ +[A-Za-z0-9_-]+ +[A-Za-z0-9_-]+")) {
-          args = substr(body, RSTART + length(prov) + 1, RLENGTH - length(prov) - 1)
-          gsub(/^ +| +$/, "", args)
-          gsub(/ +/, " ", args)
+        args = "-"; build_at = 0; release_at = 0
+        if (uses == "-") {
+          if (match(body, prov " +[0-9]+ +[A-Za-z0-9_-]+ +[A-Za-z0-9_-]+")) {
+            args = substr(body, RSTART + length(prov) + 1, RLENGTH - length(prov) - 1)
+            gsub(/^ +| +$/, "", args)
+            gsub(/ +/, " ", args)
+          }
+          build_at = last_at(body, "build_apk_with_retry\\.sh|tooling/e2e/ci/build-[A-Za-z0-9_-]+-apks?\\.sh|flutter +build +apk")
+          release_at = last_at(body, "tooling/e2e/ci/release-apk-build-outputs\\.sh")
         }
         headless = "-"
         if (has_opts) headless = ((" " opts " ") ~ / -no-window /) ? "yes" : "no"
-        printf "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-          file, job, idx, stepname, uses, api, target, arch, has_if, headless, args
+        printf "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n",
+          file, job, idx, stepname, uses, api, target, arch, has_if, headless, args, build_at, release_at
         idx++
       }
       in_step = 0
@@ -183,6 +203,7 @@ is_emulator_step() {
 # violation and then exit 0.
 EMU_STEPS=0
 GRADED_JOBS=0
+BUILDING_JOBS=0
 check_dir() {
   local dir="$1" f
   local files=()
@@ -191,12 +212,14 @@ check_dir() {
 
   EMU_STEPS=0
   GRADED_JOBS=0
+  BUILDING_JOBS=0
 
-  local file job idx name uses api target arch has_if headless args base
+  local file job idx name uses api target arch has_if headless args build_at release_at base
   for f in "${files[@]}"; do
     base="${f##*/}"
     local -A emu_first=() emu_spec=() emu_mixed=() prov_first=() prov_args=() prov_if=() jobs_seen=()
-    while IFS=$'\t' read -r file job idx name uses api target arch has_if headless args; do
+    local -A build_last=() build_name=() release_last=()
+    while IFS=$'\t' read -r file job idx name uses api target arch has_if headless args build_at release_at; do
       jobs_seen[${job}]=1
       if is_emulator_step "${uses}"; then
         EMU_STEPS=$((EMU_STEPS + 1))
@@ -214,11 +237,18 @@ check_dir() {
         fi
         continue
       fi
-      if [[ "${args}" != "-" && -z "${prov_first[${job}]:-}" ]]; then
+      [[ -z "${prov_first[${job}]:-}" ]] || continue
+      if [[ "${args}" != "-" ]]; then
         prov_first[${job}]="${idx}:${name}"
         prov_args[${job}]="${args}"
         prov_if[${job}]="${has_if}"
+        continue
       fi
+      if (( build_at > 0 )); then
+        build_last[${job}]="${idx} ${build_at}"
+        build_name[${job}]="${name}"
+      fi
+      if (( release_at > 0 )); then release_last[${job}]="${idx} ${release_at}"; fi
     done < <(extract_steps "${f}")
 
     while IFS= read -r job; do
@@ -256,6 +286,16 @@ check_dir() {
       if [[ "${prov_args[${job}]}" != "${want}" ]]; then
         note_violation "P3 ${label}: '${prov_name}' provisions '${prov_args[${job}]}' but '${emu_name}' boots api-level/target/arch '${want}'. Provisioning a different image is a no-op followed by the same red."
       fi
+
+      if [[ -n "${build_last[${job}]:-}" ]]; then
+        BUILDING_JOBS=$((BUILDING_JOBS + 1))
+        local b_idx b_at r_idx=-1 r_at=0
+        read -r b_idx b_at <<<"${build_last[${job}]}"
+        [[ -z "${release_last[${job}]:-}" ]] || read -r r_idx r_at <<<"${release_last[${job}]}"
+        if (( r_idx < b_idx || (r_idx == b_idx && r_at < b_at) )); then
+          note_violation "P8 ${label}: '${build_name[${job}]}' (step ${b_idx}) builds an APK before '${prov_name}' (step ${prov_idx}), and nothing between that build and that step runs tooling/e2e/ci/release-apk-build-outputs.sh. Its build tree and cargokit's Rust target stay on disk while the system image unpacks; on a 72 GB runner one APK's outputs left too little room, and the image failed to verify on every attempt (CI run 41322563075)."
+        fi
+      fi
     done < <(printf '%s\n' "${!jobs_seen[@]}" | sort)
   done
 }
@@ -284,7 +324,7 @@ check_extractor_sees_the_dir() {
 # Self-test (hermetic: synthetic workflows in a temp dir, no repo access)
 # ---------------------------------------------------------------------------
 
-readonly SELF_TEST_FIXTURES=16
+readonly SELF_TEST_FIXTURES=26
 
 write_wf() {
   local path="$1"; shift
@@ -328,6 +368,33 @@ compliant_job() {
     '            echo booted with -no-window'
 }
 
+# build_step <name> <command> [norelease] — a run step that builds an APK,
+# copies it out and, unless told not to, releases the build outputs.
+build_step() {
+  printf '%s\n' \
+    "      - name: $1" \
+    '        working-directory: haven' \
+    '        run: |' \
+    "          $2" \
+    '          cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk'
+  if [[ "${3:-}" != norelease ]]; then
+    printf '%s\n' '          bash ../tooling/e2e/ci/release-apk-build-outputs.sh /tmp'
+  fi
+}
+
+# splice_before <line> <text> — stdin with <text> spliced in above <line>.
+splice_before() {
+  local line
+  while IFS= read -r line; do
+    if [[ "${line}" == "$1" ]]; then printf '%s\n' "$2"; fi
+    printf '%s\n' "${line}"
+  done
+}
+readonly PROV_STEP='      - name: Provision the Android SDK'
+readonly SNAPSHOT_STEP='      - name: Create AVD snapshot'
+readonly BUILD_CMD='../scripts/ci/build_apk_with_retry.sh android-x64 --target=integration_test/e2e/e2e_combined.dart'
+readonly RELEASE_STEP=$'      - name: Release\n        run: bash tooling/e2e/ci/release-apk-build-outputs.sh /tmp'
+
 # run_case <dir> -> rc of a full check over <dir>, with the counters reset.
 run_case() {
   local dir="$1" rc=0
@@ -351,15 +418,15 @@ expect_rc() {
   return 0
 }
 
-# expect_p7 <label> <dir> <step> — rc 1 alone would not do: every check exits 1,
-# so the fixture must fail for P7, on the named job and step, and for nothing
-# else.
-expect_p7() {
-  local label="$1" dir="$2" step="$3" out
+# expect_only <label> <check> <dir> <step> — rc 1 alone would not do: every
+# check exits 1, so the fixture must fail for <check>, on the named job and
+# step, and for nothing else.
+expect_only() {
+  local label="$1" check="$2" dir="$3" step="$4" out
   expect_rc "${label}" 1 "${dir}" || return 1
   out="$(check_dir "${dir}" 2>&1 >/dev/null)"
-  if [[ "$(grep -c 'FAIL:' <<<"${out}" || true)" != 1 || "${out}" != *"P7 lane.yml :: lane: '${step}'"* ]]; then
-    echo "SELF-TEST FAIL (${label}): want exactly one violation, P7 naming lane.yml :: lane: '${step}'" >&2
+  if [[ "$(grep -c 'FAIL:' <<<"${out}" || true)" != 1 || "${out}" != *"${check} lane.yml :: lane: '${step}'"* ]]; then
+    echo "SELF-TEST FAIL (${label}): want exactly one violation, ${check} naming lane.yml :: lane: '${step}'" >&2
     return 1
   fi
   return 0
@@ -467,12 +534,12 @@ run_self_test() {
   # (13) P7 — the drive step drops `-no-window`; the snapshot step keeps it.
   ran=$(( ran + 1 )); d="${tmp}/windowed"; mkdir -p "${d}"
   compliant_job | sed 's/-no-snapshot-save -no-window -gpu/-no-snapshot-save -gpu/' > "${d}/lane.yml"
-  expect_p7 13 "${d}" 'Drive' || fail=1
+  expect_only 13 P7 "${d}" 'Drive' || fail=1
 
   # (14) P7 — an emulator step with no emulator-options at all.
   ran=$(( ran + 1 )); d="${tmp}/defaulted"; mkdir -p "${d}"
   grep -v 'emulator-options: -no-window' <(compliant_job) > "${d}/lane.yml"
-  expect_p7 14 "${d}" 'Create AVD snapshot' || fail=1
+  expect_only 14 P7 "${d}" 'Create AVD snapshot' || fail=1
 
   # (15) The flag on the SECOND continuation line of the folded form counts.
   ran=$(( ran + 1 )); d="${tmp}/secondline"; mkdir -p "${d}"
@@ -484,7 +551,61 @@ run_self_test() {
   # (16) P7 — the token, not a substring.
   ran=$(( ran + 1 )); d="${tmp}/substring"; mkdir -p "${d}"
   compliant_job | sed 's/-no-snapshot-save -no-window -gpu/-no-snapshot-save -no-window-foo -gpu/' > "${d}/lane.yml"
-  expect_p7 16 "${d}" 'Drive' || fail=1
+  expect_only 16 P7 "${d}" 'Drive' || fail=1
+
+  # (17) P8 — the fixed shape: build, copy out, release, then provision.
+  ran=$(( ran + 1 )); d="${tmp}/released"; mkdir -p "${d}"
+  compliant_job | splice_before "${PROV_STEP}" "$(build_step Build "${BUILD_CMD}")" > "${d}/lane.yml"
+  expect_rc 17 0 "${d}" || fail=1
+
+  # (18)-(21) P8 — no release, for each way a lane builds an APK.
+  local cmd
+  label=18
+  for cmd in "${BUILD_CMD}" \
+    'bash ../tooling/e2e/ci/build-integration-apks.sh' \
+    'bash ../tooling/e2e/ci/build-b3-real-gps-apk.sh integration_test/b3_real_gps_test.dart' \
+    'flutter build apk --debug --target-platform android-x64'; do
+    ran=$(( ran + 1 )); d="${tmp}/unreleased${label}"; mkdir -p "${d}"
+    compliant_job | splice_before "${PROV_STEP}" "$(build_step Build "${cmd}" norelease)" > "${d}/lane.yml"
+    expect_only "${label}" P8 "${d}" 'Build' || fail=1
+    label=$(( label + 1 ))
+  done
+
+  # (22) P8 — a release ahead of the build in the same step frees nothing.
+  ran=$(( ran + 1 )); d="${tmp}/earlyrelease"; mkdir -p "${d}"
+  compliant_job \
+    | splice_before "${PROV_STEP}" "$(build_step Build "bash ../tooling/e2e/ci/release-apk-build-outputs.sh /tmp; ${BUILD_CMD}" norelease)" \
+    > "${d}/lane.yml"
+  expect_only 22 P8 "${d}" 'Build' || fail=1
+
+  # (23) P8 — a release after provisioning comes too late.
+  ran=$(( ran + 1 )); d="${tmp}/laterelease"; mkdir -p "${d}"
+  compliant_job \
+    | splice_before "${PROV_STEP}" "$(build_step Build "${BUILD_CMD}" norelease)" \
+    | splice_before "${SNAPSHOT_STEP}" "${RELEASE_STEP}" > "${d}/lane.yml"
+  expect_only 23 P8 "${d}" 'Build' || fail=1
+
+  # (24) P8 — a commented-out release is not a release.
+  ran=$(( ran + 1 )); d="${tmp}/commentedrelease"; mkdir -p "${d}"
+  compliant_job \
+    | splice_before "${PROV_STEP}" "$(build_step Build "${BUILD_CMD}" | sed 's|^          bash \.\./tooling/e2e/ci/release-apk|          # bash ../tooling/e2e/ci/release-apk|')" \
+    > "${d}/lane.yml"
+  expect_only 24 P8 "${d}" 'Build' || fail=1
+
+  # (25) P8 — the release must follow the LAST build: a second build after it
+  #      refills the tree.
+  ran=$(( ran + 1 )); d="${tmp}/rebuilt"; mkdir -p "${d}"
+  compliant_job \
+    | splice_before "${PROV_STEP}" "$(build_step 'Build first' "${BUILD_CMD}"; build_step 'Build second' "${BUILD_CMD}" norelease)" \
+    > "${d}/lane.yml"
+  expect_only 25 P8 "${d}" 'Build second' || fail=1
+
+  # (26) A release in a step of its own, after the last build, counts.
+  ran=$(( ran + 1 )); d="${tmp}/ownstep"; mkdir -p "${d}"
+  compliant_job \
+    | splice_before "${PROV_STEP}" "$(build_step 'Build first' "${BUILD_CMD}" norelease; build_step 'Build second' "${BUILD_CMD}" norelease; printf '%s\n' "${RELEASE_STEP}")" \
+    > "${d}/lane.yml"
+  expect_rc 26 0 "${d}" || fail=1
 
   VIOLATIONS=0
   if (( fail )); then
@@ -495,7 +616,7 @@ run_self_test() {
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: the real lane shape passes; a missing provisioning step, one placed after the first use of the action, a wrong api level, target or arch, a commented-out one, and one gated on an \`if:\` each fail; a job that boots no emulator needs none while a provisioning step left in one fails; two emulator steps asking for different images fail; a step list this reader cannot parse stops the guard rather than passing it; and an emulator step that drops \`-no-window\`, declares no emulator-options, or carries only \`-no-window-foo\` fails P7 naming its job and step, while the flag on the second line of a folded block passes)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: the real lane shape passes; a missing provisioning step, one placed after the first use of the action, a wrong api level, target or arch, a commented-out one, and one gated on an \`if:\` each fail; a job that boots no emulator needs none while a provisioning step left in one fails; two emulator steps asking for different images fail; a step list this reader cannot parse stops the guard rather than passing it; and an emulator step that drops \`-no-window\`, declares no emulator-options, or carries only \`-no-window-foo\` fails P7 naming its job and step, while the flag on the second line of a folded block passes; an APK build released before provisioning passes, in its own step or the build's, while one never released — for each of the four ways a lane builds — one released ahead of the build, after provisioning, only in a comment, or ahead of a second build fails P8 naming that build)."
   return 0
 }
 
@@ -516,7 +637,7 @@ check_extractor_sees_the_dir "${WORKFLOW_DIR}"
 (( GRADED_JOBS > 0 )) || misconfig "no job uses ${EMULATOR_ACTION}; this guard has gone blind rather than found a clean tree."
 
 if (( VIOLATIONS > 0 )); then
-  fail_msg "${VIOLATIONS} violation(s). Every job that boots an emulator must run ${PROVISION_SH} first, unconditionally, with that job's own api/target/arch, and every emulator step must boot with \`-no-window\`."
+  fail_msg "${VIOLATIONS} violation(s). Every job that boots an emulator must run ${PROVISION_SH} first, unconditionally, with that job's own api/target/arch, after releasing the outputs of any APK it built; and every emulator step must boot with \`-no-window\`."
   exit 1
 fi
-log "OK — ${GRADED_JOBS} job(s) with ${EMU_STEPS} emulator step(s); each provisions and verifies its SDK first, and every emulator step boots the headless binary that was verified."
+log "OK — ${GRADED_JOBS} job(s) with ${EMU_STEPS} emulator step(s); each provisions and verifies its SDK first, every emulator step boots the headless binary that was verified, and the ${BUILDING_JOBS} that build an APK first release its build outputs before provisioning."

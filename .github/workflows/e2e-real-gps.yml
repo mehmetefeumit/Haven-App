@@ -207,8 +207,13 @@ jobs:
       - name: Build real-GPS test APK
         working-directory: haven
         timeout-minutes: 30
-        run: bash ../tooling/e2e/ci/build-b3-real-gps-apk.sh
-          integration_test/b3_real_gps_test.dart
+        # One APK's build tree and cargokit's Rust target left 3.3 GB for the
+        # system image on a 72 GB runner (CI run 41322563075). The drive
+        # installs the copy under /tmp and reads neither, so both go here,
+        # inside this step's cap, before the SDK is provisioned.
+        run: |
+          bash ../tooling/e2e/ci/build-b3-real-gps-apk.sh integration_test/b3_real_gps_test.dart
+          bash ../tooling/e2e/ci/release-apk-build-outputs.sh /tmp/integration-apks
 
       - name: Enable KVM group perms
         run: |

@@ -70,8 +70,9 @@ install lib:install_fresh#1 charge @
 # scanner over files already on disk — no wait of its own, so its budget is the
 # wrapper's, which is nothing.
 logscan log_privacy_gate#1/lib:logscan_gate#1 charge @
-wifi-off sleep:2#1 charge WIFI_OFF_TIMEOUT_SECS
-route sleep:2#2 charge GUEST_NET_TIMEOUT_SECS
+# The route wait runs first: Wi-Fi is disabled only once it finds a cellular route.
+route sleep:2#1 charge GUEST_NET_TIMEOUT_SECS
+wifi-off sleep:2#2 charge WIFI_OFF_TIMEOUT_SECS
 # Only the last attempt can reach DRIVE_TIMEOUT: an attempt is retried after a
 # pre-connect stall the watchdog ended or a connect flake, never after a hang.
 drive drive_with_connect_watchdog#1/spawn_flutter_drive#1/timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS once a retried attempt ends at the connect watchdog, charged below
@@ -191,6 +192,7 @@ unit tooling/e2e/ci/run-kp-rotation.sh
 strfry bash:start-strfry.sh#* charge @
 device wait-for-device#* allowance
 install lib:install_fresh#1 charge @
+# One loop: the wait for a cellular route and the Wi-Fi read-back share this bound.
 wifi-off sleep:2#1 charge WIFI_OFF_TIMEOUT_SECS
 # Joined by stop_servo after the drive: the loop sees SERVO_STOP within a poll.
 clock-servo clock_servo#1/sleep:SERVO_POLL_SECS#1 poll
