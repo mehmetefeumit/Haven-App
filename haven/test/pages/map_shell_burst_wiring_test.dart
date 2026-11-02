@@ -150,6 +150,9 @@ class _RecordingEngine implements SubscriptionService {
   Future<void> resumeAfterBackground() async => throw UnimplementedError();
 
   @override
+  Future<void> settleForegroundClaim() async => throw UnimplementedError();
+
+  @override
   Future<void> claimForeground() async => throw UnimplementedError();
 
   @override
@@ -188,6 +191,9 @@ class _ResumeEngine implements SubscriptionService {
     paused = false;
     if (throwOnReanchor) throw const SubscriptionServiceException('no session');
   }
+
+  @override
+  Future<void> settleForegroundClaim() async => throw UnimplementedError();
 
   @override
   Future<void> claimForeground() async => throw UnimplementedError();
@@ -283,6 +289,9 @@ class _BurstEngine implements SubscriptionService {
 
   @override
   Future<void> resumeAfterBackground() async => throw UnimplementedError();
+
+  @override
+  Future<void> settleForegroundClaim() async => throw UnimplementedError();
 
   @override
   Future<void> claimForeground() async => throw UnimplementedError();

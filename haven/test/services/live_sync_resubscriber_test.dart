@@ -154,6 +154,9 @@ class _RecordingEngine implements SubscriptionService {
   bool throwOnClaim = false;
 
   @override
+  Future<void> settleForegroundClaim() async {}
+
+  @override
   Future<void> claimForeground() async {
     claimsWhileRunning.add(_running);
     if (claimGate != null) await claimGate;

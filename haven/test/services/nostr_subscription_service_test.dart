@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/live_sync_resubscriber.dart'
+    show kLiveSyncRestartBudget;
 import 'package:haven/src/services/mls_session_handover.dart';
 import 'package:haven/src/services/nostr_subscription_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
@@ -1390,6 +1393,122 @@ void main() {
       );
       await service.claimForeground();
       expect(engine.foregroundClaims, isEmpty);
+    });
+
+    group('settling the claim before a change the user asked for', () {
+      NostrSubscriptionService serviceOver(_FakeEngine engine) =>
+          NostrSubscriptionService(
+            router: _SpyRouter(),
+            engineFactory: () async => engine,
+          );
+
+      test('waits for the start in flight, then claims', () async {
+        enter(AppLifecycleState.resumed);
+        final engine = _FakeEngine()..startGate = Completer<void>();
+        final service = serviceOver(engine);
+        final starting = service.start(groups: const [], inboxRelays: const []);
+        addTearDown(service.stop);
+        var settled = false;
+        final settle = service.settleForegroundClaim().then((_) {
+          settled = true;
+        });
+        await pumpEventQueue();
+        expect(settled, isFalse, reason: 'the start has not come up');
+        expect(engine.foregroundClaims, isEmpty);
+
+        engine.startGate!.complete();
+        await starting;
+        await settle;
+
+        expect(settled, isTrue);
+        // The start's own claim, then the settle's: the session is claimed
+        // when the settle returns, whichever of them found it first.
+        expect(engine.foregroundClaims, [true, true]);
+      });
+
+      test('claims a session that was started before the app was resumed',
+          () async {
+        enter(AppLifecycleState.inactive);
+        final engine = _FakeEngine();
+        final service = serviceOver(engine);
+        await service.start(groups: const [], inboxRelays: const []);
+        addTearDown(service.stop);
+        expect(engine.foregroundClaims, isEmpty, reason: 'premise');
+
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        await service.settleForegroundClaim();
+
+        expect(engine.foregroundClaims, [true]);
+      });
+
+      test('asks nothing and waits for nothing while the app is not resumed',
+          () async {
+        enter(AppLifecycleState.paused);
+        final engine = _FakeEngine()..startGate = Completer<void>();
+        final service = serviceOver(engine);
+        final starting = service.start(groups: const [], inboxRelays: const []);
+        addTearDown(() async {
+          engine.startGate!.complete();
+          await starting;
+          await service.stop();
+        });
+
+        await service.settleForegroundClaim();
+
+        expect(engine.foregroundClaims, isEmpty);
+      });
+
+      test('with no session it returns and claims nothing', () async {
+        enter(AppLifecycleState.resumed);
+        final engine = _FakeEngine();
+        await serviceOver(engine).settleForegroundClaim();
+        expect(engine.foregroundClaims, isEmpty);
+      });
+
+      test('a start that failed does not fail the settle', () async {
+        enter(AppLifecycleState.resumed);
+        final engine = _FakeEngine(failStart: true);
+        final service = serviceOver(engine);
+        final starting = service.start(groups: const [], inboxRelays: const []);
+        final ended = expectLater(
+          starting,
+          throwsA(isA<SubscriptionServiceException>()),
+        );
+        await service.settleForegroundClaim();
+        await ended;
+        expect(engine.foregroundClaims, isEmpty);
+      });
+
+      test('a claim the engine refuses does not fail the settle', () async {
+        enter(AppLifecycleState.resumed);
+        final engine = _FakeEngine(failClaim: true);
+        final service = serviceOver(engine);
+        await service.start(groups: const [], inboxRelays: const []);
+        addTearDown(service.stop);
+
+        await service.settleForegroundClaim();
+
+        expect(engine.foregroundClaims, [true, true]);
+      });
+
+      test('gives up when the engine never answers the claim', () {
+        enter(AppLifecycleState.resumed);
+        fakeAsync((async) {
+          final engine = _FakeEngine();
+          final service = serviceOver(engine)
+            ..start(groups: const [], inboxRelays: const []);
+          async.flushMicrotasks();
+          engine.claimGate = Completer<void>();
+          var settled = false;
+          service.settleForegroundClaim().then((_) => settled = true);
+          async.flushMicrotasks();
+          expect(settled, isFalse, reason: 'the claim is still out');
+
+          async.elapse(kLiveSyncRestartBudget);
+
+          expect(settled, isTrue);
+        });
+      });
     });
 
     test('a claim the engine refuses never throws and never leaks', () async {

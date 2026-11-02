@@ -3123,6 +3123,9 @@ class _RecordingSubscriptionService implements SubscriptionService {
   Future<void> resumeAfterBackground() async {}
 
   @override
+  Future<void> settleForegroundClaim() async {}
+
+  @override
   Future<void> claimForeground() async {}
 
   @override

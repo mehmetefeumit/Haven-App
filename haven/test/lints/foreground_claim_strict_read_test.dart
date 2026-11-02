@@ -76,14 +76,15 @@ const _claimSites = <String, List<String>>{
     'resume(foreground: foreground)',
     'maintainSubscriptionHealth(foreground: foreground)',
   ],
-  // The circle changes the user makes, handed to the fanout driver.
+  // The circle changes the user makes, handed to the fanout driver once the
+  // live session has settled its own claim (`_foreground`, pinned below).
   'lib/src/services/nostr_circle_service.dart': [
-    'createCircle(foreground: _appInFront())',
-    'leave(foreground: _appInFront())',
-    'removeMembers(foreground: _appInFront())',
-    'addMembers(foreground: _appInFront())',
-    'updateCircleRelays(foreground: _appInFront())',
-    'repairRotation(foreground: _appInFront())',
+    'createCircle(foreground: await _foreground())',
+    'leave(foreground: await _foreground())',
+    'removeMembers(foreground: await _foreground())',
+    'addMembers(foreground: await _foreground())',
+    'updateCircleRelays(foreground: await _foreground())',
+    'repairRotation(foreground: await _foreground())',
     // A location's seal.
     'sealLocation(foreground: _appInFront())',
     // A polled event's ingest.
@@ -354,6 +355,44 @@ class _ClaimCallCollector extends RecursiveAstVisitor<void> {
 
   @override
   void visitComment(Comment node) {}
+}
+
+/// Every expression a named argument [label] is given, as written.
+List<String> _namedArgumentsIn(String source, String label) {
+  final unit = parseString(content: source, throwIfDiagnostics: false).unit;
+  final found = <String>[];
+  unit.accept(_NamedArgumentCollector(label, found.add));
+  return found;
+}
+
+class _NamedArgumentCollector extends RecursiveAstVisitor<void> {
+  _NamedArgumentCollector(this.label, this.onFound);
+
+  final String label;
+  final void Function(String) onFound;
+
+  @override
+  void visitNamedExpression(NamedExpression node) {
+    if (node.name.label.name == label) onFound(node.expression.toSource());
+    super.visitNamedExpression(node);
+  }
+}
+
+/// What the method [name] returns, each `return` as written, in source order.
+class _ReturnCollector extends RecursiveAstVisitor<void> {
+  _ReturnCollector(this.name, this.onReturn);
+
+  final String name;
+  final void Function(String) onReturn;
+
+  @override
+  void visitReturnStatement(ReturnStatement node) {
+    final method = node.thisOrAncestorOfType<MethodDeclaration>();
+    if (method?.name.lexeme == name) {
+      onReturn(node.expression?.toSource() ?? '');
+    }
+    super.visitReturnStatement(node);
+  }
 }
 
 List<String> _claimCallsIn(String source) {
@@ -645,7 +684,7 @@ void main() {
     );
     expect(
       given,
-      ['appIsResumed', '_neverInFront'],
+      ['appIsResumed', 'appInFront ?? _neverInFront'],
       reason: 'the main constructor hands the driver the strict read and the '
           "background isolate's constructor a constant no: anything else is a "
           'claim this file has not seen the source of',
@@ -653,6 +692,25 @@ void main() {
     expect(assigned, isEmpty);
     expect(field, 'final bool Function() _appInFront;');
     expect(never, 'static bool _neverInFront() => false;');
+    final givenInLib = <String, List<String>>{};
+    for (final file in _libFiles()) {
+      final args = _namedArgumentsIn(file.readAsStringSync(), 'appInFront');
+      if (args.isNotEmpty) givenInLib[file.path] = args;
+    }
+    expect(
+      givenInLib,
+      isEmpty,
+      reason: "the background isolate's `appInFront` is a test seam: given "
+          'anything in lib/, that isolate would claim the foreground',
+    );
+    final returns = <String>[];
+    unit.accept(_ReturnCollector('_foreground', returns.add));
+    expect(
+      returns,
+      ['false', '_appInFront()'],
+      reason: 'a change is driven in the foreground only on the strict read, '
+          'taken again after the settle it waits on',
+    );
   });
 
   test('a started session is claimed for by its own start and by the heal, '
@@ -675,12 +733,15 @@ void main() {
           'claimForeground()',
           // The one call that reaches the engine, fed by the strict read.
           'engine.claimForeground(foreground: appIsResumed())',
+          // The settle a user's change waits on (`settleForegroundClaim`).
+          'claimForeground()',
         ],
       },
       reason: 'the foreground claim for a session that is only started is '
-          'made by the service itself once its start holds the engine, and '
-          'by `LiveSyncResubscriber.ensureRunning` — the heal every app '
-          'resume runs — through the service, and by nothing else',
+          'made by the service itself once its start holds the engine, by '
+          'the settle a change the user asked for waits on, and by '
+          '`LiveSyncResubscriber.ensureRunning` — the heal every app resume '
+          'runs — through the service, and by nothing else',
     );
     final resubscriber = _code(
       File('lib/src/services/live_sync_resubscriber.dart').readAsStringSync(),

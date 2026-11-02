@@ -14,6 +14,12 @@ library;
 
 import 'dart:convert';
 
+import 'package:flutter_riverpod/flutter_riverpod.dart' show ProviderContainer;
+import 'package:flutter_test/flutter_test.dart' show WidgetTester;
+import 'package:haven/src/providers/live_sync_provider.dart'
+    show liveSyncEnabled;
+import 'package:haven/src/providers/service_providers.dart'
+    show subscriptionServiceProvider;
 import 'package:haven/src/rust/api.dart'
     show
         CircleCreationOutcomeFfi,
@@ -23,6 +29,32 @@ import 'package:haven/src/rust/api.dart'
         InvitationFfi,
         MemberKeyPackageFfi,
         RelayManagerFfi;
+
+import 'pump_helpers.dart' show pumpUntilCondition;
+
+/// Waits for the app's own live session to hold its foreground claim.
+///
+/// A raw `foreground: true` drive on the app's manager is granted only to a
+/// plane already claimed for the foreground; one still starting is refused
+/// `foregroundOnly`, and a start that begins mid-drive moves the plane under
+/// it. With live sync compiled in, this first waits for the app's first start
+/// to have come up, then for the product's own settle; with it compiled out
+/// there is no plane and it settles at once. Never a sleep.
+Future<void> settleLiveSession(
+  WidgetTester tester,
+  ProviderContainer container,
+) async {
+  final subscriptions = container.read(subscriptionServiceProvider);
+  if (liveSyncEnabled) {
+    await pumpUntilCondition(
+      tester,
+      () => subscriptions.isRunning,
+      description: 'the live session to start',
+      timeout: const Duration(seconds: 60),
+    );
+  }
+  await subscriptions.settleForegroundClaim();
+}
 
 /// A circle [createCircleDelivered] founded, every Welcome acknowledged.
 class DeliveredCircle {

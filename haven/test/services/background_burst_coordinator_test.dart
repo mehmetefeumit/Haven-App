@@ -181,6 +181,9 @@ class _RecordingEngine implements SubscriptionService {
           'resume: that entry point always carries the inbox REQ');
 
   @override
+  Future<void> settleForegroundClaim() async => throw UnimplementedError();
+
+  @override
   Future<void> claimForeground() async =>
       throw UnimplementedError('a burst must never claim the foreground');
 

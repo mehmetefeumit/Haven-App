@@ -142,7 +142,8 @@ import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '_lib/app_lifecycle.dart';
-import '_lib/circle_creation.dart' show createCircleDelivered;
+import '_lib/circle_creation.dart'
+    show createCircleDelivered, settleLiveSession;
 import '_lib/coordination.dart';
 import '_lib/fake_location_service.dart';
 import '_lib/pump_helpers.dart';
@@ -775,6 +776,7 @@ void main() {
           );
         }
 
+        await settleLiveSession(tester, container);
         // Publishes Bob's Welcome and requires every relay ack: an invitee
         // whose Welcome never landed never joins. See `createCircleDelivered`'s
         // doc.

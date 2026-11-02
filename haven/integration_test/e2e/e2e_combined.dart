@@ -195,7 +195,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '_lib/app_lifecycle.dart';
 import '_lib/circle_creation.dart'
-    show DeliveredCircle, createCircleDelivered, giftWrapIdsFor;
+    show
+        DeliveredCircle,
+        createCircleDelivered,
+        giftWrapIdsFor,
+        settleLiveSession;
 import '_lib/coordination.dart';
 import '_lib/diagnostics.dart';
 import '_lib/fake_location_service.dart';
@@ -6237,6 +6241,8 @@ Future<CircleFfi> _m11AliceCreatesCircle({
     }
     members.add(kp);
   }
+
+  await settleLiveSession(tester, container);
 
   // Create on Alice's production manager. Copy the secret into a buffer we own
   // and zeroize it straight after (Security Rule 9); the identity service owns

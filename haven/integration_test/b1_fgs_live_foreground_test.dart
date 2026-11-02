@@ -318,7 +318,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'e2e/_lib/app_lifecycle.dart';
 import 'e2e/_lib/circle_creation.dart'
-    show DeliveredCircle, createCircleDelivered;
+    show DeliveredCircle, createCircleDelivered, settleLiveSession;
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
 import 'e2e/_lib/pump_helpers.dart'
     show pumpUntilCondition, pumpUntilFound, waitUntilAsync;
@@ -664,6 +664,7 @@ void main() {
         // scrub-in-`finally` contract, and it is one of the two forms the
         // repo's planned Rule-9 lint recognises, so this site stays
         // compliant by construction instead of by inspection.
+        await settleLiveSession(tester, container);
         creation = await withFreshSecret(
           () => container
               .read(identityNotifierProvider.notifier)

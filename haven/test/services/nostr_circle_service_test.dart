@@ -1465,6 +1465,129 @@ void _publishResolutionTests() {
       expect(t.driver.foregrounds, [false]);
     });
 
+    group('a change the user asked for', () {
+      // The core grants a foreground drive only to a live plane already
+      // claimed for it, so the app's own session settles its claim first.
+      // `FakeChangeDriver.calls` and the settle share one log: the order is
+      // the promise.
+      final asks = <String, Future<Object?> Function(NostrCircleService)>{
+        'createCircle': create,
+        'leave': (s) => s.leaveCircle(mlsGroupId: groupId),
+        'removeMembers': (s) =>
+            s.removeMember(mlsGroupId: groupId, memberPubkeyHex: 'aa' * 32),
+        'addMembers': (s) => s.addMember(
+          mlsGroupId: groupId,
+          memberKeyPackages: const [
+            KeyPackageData(
+              pubkey: 'npub1x',
+              eventJson: '{}',
+              relays: [],
+              nip65WriteRelays: [],
+            ),
+          ],
+        ),
+        'updateCircleRelays': (s) => s.updateCircleRelays(
+          mlsGroupId: groupId,
+          newRelays: const ['wss://r.example'],
+        ),
+        'repairRotation': (s) =>
+            s.repairCircleEpoch(_circleOf(groupId), selfPubkeyHex: 'aa'),
+      };
+
+      NostrCircleService inFront(
+        FakeChangeDriver driver, {
+        required Future<void> Function() settle,
+        bool Function()? front,
+      }) => NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: _LeaveManager(),
+        changeDriver: driver,
+        appInFront: front ?? () => true,
+        settleForeground: settle,
+      );
+
+      for (final entry in asks.entries) {
+        test('${entry.key} is made only after the live session has settled '
+            'its foreground claim', () async {
+          final driver = FakeChangeDriver();
+          final claim = Completer<void>();
+          final service = inFront(driver, settle: () => claim.future);
+
+          final done = entry.value(service);
+          await pumpEventQueue();
+          expect(driver.calls, isEmpty, reason: 'the claim is still pending');
+
+          claim.complete();
+          await done.then<void>((_) {}, onError: (Object _) {});
+
+          expect(driver.calls, [entry.key]);
+          expect(driver.foregrounds, [true]);
+        });
+
+        test('${entry.key} does not ask the session while the app is not '
+            'in front', () async {
+          final driver = FakeChangeDriver();
+          var settles = 0;
+          final service = inFront(
+            driver,
+            front: () => false,
+            settle: () async => settles++,
+          );
+
+          await entry
+              .value(service)
+              .then<void>((_) {}, onError: (Object _) {});
+
+          expect(settles, 0);
+          expect(driver.foregrounds, [false]);
+        });
+      }
+
+      test('a settle that throws does not stop the change', () async {
+        final driver = FakeChangeDriver();
+        final service = inFront(
+          driver,
+          settle: () async => throw StateError('boom'),
+        );
+
+        await create(service);
+
+        expect(driver.calls, ['createCircle']);
+        expect(driver.foregrounds, [true]);
+      });
+
+      test('the word is read again after the wait: an app that left the '
+          'front meanwhile asks no foreground drive', () async {
+        final driver = FakeChangeDriver();
+        var front = true;
+        final service = inFront(
+          driver,
+          front: () => front,
+          settle: () async => front = false,
+        );
+
+        await create(service);
+
+        expect(driver.foregrounds, [false]);
+      });
+
+      test("the background isolate's service never asks the session", () async {
+        final driver = FakeChangeDriver();
+        var settles = 0;
+        final service = NostrCircleService.withInjectedManager(
+          relayService: _StubRelayService(),
+          injectedManager: _LeaveManager(),
+          changeDriver: driver,
+          settleForeground: () async => settles++,
+        );
+
+        await create(service);
+
+        expect(settles, 0);
+        expect(driver.foregrounds, [false]);
+      });
+    });
+
     test('a create the core refused is no circle: it fails with fixed text, '
         'and its log line names neither the circle nor an invitee', () async {
       final capture = LogCapture.install();

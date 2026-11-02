@@ -155,7 +155,7 @@ import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'e2e/_lib/circle_creation.dart'
-    show DeliveredCircle, createCircleDelivered;
+    show DeliveredCircle, createCircleDelivered, settleLiveSession;
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
 import 'e2e/_lib/fake_location_service.dart'
     show FakeLocationService, aliceFakeLatitude, aliceFakeLongitude;
@@ -717,6 +717,7 @@ void main() {
         }
         // `withFreshSecret` owns the fetch → validate-32-bytes →
         // scrub-in-`finally` contract (Security Rule 9).
+        await settleLiveSession(tester, container);
         creation = await withFreshSecret(
           () => container
               .read(identityNotifierProvider.notifier)

@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/live_sync_resubscriber.dart'
+    show kLiveSyncRestartBudget;
 import 'package:haven/src/services/mls_session_handover.dart'
     show appIsResumed;
 import 'package:haven/src/services/subscription_service.dart';
@@ -385,6 +387,17 @@ class NostrSubscriptionService implements SubscriptionService {
       // Type only (Rule 8). Nothing is lost: the next heal claims again.
       debugPrint('[Subscription] foreground claim failed: ${e.runtimeType}');
     }
+  }
+
+  @override
+  Future<void> settleForegroundClaim() async {
+    if (!appIsResumed()) return;
+    await _startThenClaim().timeout(kLiveSyncRestartBudget, onTimeout: () {});
+  }
+
+  Future<void> _startThenClaim() async {
+    await _startInFlight();
+    await claimForeground();
   }
 
   /// Unlike [resumeAfterBackground], this THROWS on failure.

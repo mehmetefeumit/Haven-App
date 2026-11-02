@@ -130,7 +130,8 @@ import 'package:haven/src/services/nostr_circle_service.dart'
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'e2e/_lib/circle_creation.dart' show createCircleDelivered;
+import 'e2e/_lib/circle_creation.dart'
+    show createCircleDelivered, settleLiveSession;
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
 import 'e2e/_lib/fake_location_service.dart'
     show aliceFakeLatitude, aliceFakeLongitude;
@@ -384,6 +385,7 @@ void main() {
             'KeyPackage was not found on the relay.',
           );
         }
+        await settleLiveSession(tester, container);
         await withFreshSecret(
           () => container
               .read(identityNotifierProvider.notifier)

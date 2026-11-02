@@ -195,10 +195,17 @@ final iosLocationPermissionProvider = FutureProvider<IosAuthStatus>((ref) {
 
 /// Provides the circle service singleton.
 ///
-/// Uses [NostrCircleService] in production.
-final circleServiceProvider = Provider<CircleService>((ref) {
+/// Uses [NostrCircleService] in production. Its type is written out because
+/// the subscription service's provider and this one name each other.
+final Provider<CircleService> circleServiceProvider = Provider<CircleService>((
+  ref,
+) {
   return NostrCircleService(
     relayService: ref.read(relayServiceProvider),
+    // Read at the call, not here: the subscription service's engine factory
+    // reads this provider, so an eager read would form a cycle.
+    settleForeground: () =>
+        ref.read(subscriptionServiceProvider).settleForegroundClaim(),
     // Dark Matter (DM-4): `CircleManagerFfi.newInstance` hard-requires the
     // device identity's secret bytes at construction time (it binds the
     // account identity, the NIP-59 welcome signer, and the

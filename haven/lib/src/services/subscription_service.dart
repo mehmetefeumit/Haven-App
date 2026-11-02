@@ -105,6 +105,13 @@ abstract class SubscriptionService {
   /// resumed. Never throws.
   Future<void> claimForeground();
 
+  /// Waits for a start in flight to end, then [claimForeground]s: after it,
+  /// the session is in the foreground lifecycle if it is going to be. For a
+  /// caller that asks the core for a foreground drive and would otherwise be
+  /// refused while the session is still coming up. Does nothing while the app
+  /// is not resumed, never throws, and gives up after `kLiveSyncRestartBudget`.
+  Future<void> settleForegroundClaim();
+
   /// Opens ONE background burst — the same re-anchor, plus the inbox fold that
   /// puts the inbox REQ on only every k-th burst and advances the counter
   /// deciding it.

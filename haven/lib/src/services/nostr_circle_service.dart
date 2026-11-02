@@ -69,6 +69,7 @@ class NostrCircleService implements CircleService {
     Future<ForceReleaseOutcomeFfi> Function()? forceReleaseLiveSession,
     bool Function()? isForegrounded,
     CircleChangeDriver? changeDriver,
+    Future<void> Function()? settleForeground,
   }) : _relayService = relayService,
        _changeDriver =
            changeDriver ??
@@ -76,6 +77,7 @@ class NostrCircleService implements CircleService {
                ? relayService as CircleChangeDriver
                : null),
        _appInFront = appIsResumed,
+       _settleForeground = settleForeground,
        _sessionHandover = sessionHandover,
        _isSessionLive = isSessionLive,
        _forceReleaseLiveSession = forceReleaseLiveSession,
@@ -102,6 +104,8 @@ class NostrCircleService implements CircleService {
     required RelayService relayService,
     required CircleManagerFfi injectedManager,
     CircleChangeDriver? changeDriver,
+    @visibleForTesting bool Function()? appInFront,
+    @visibleForTesting Future<void> Function()? settleForeground,
   }) : _relayService = relayService,
        _changeDriver =
            changeDriver ??
@@ -111,7 +115,8 @@ class NostrCircleService implements CircleService {
        // A background isolate is never the app in front of its user: every
        // change it could ask for is refused by the engine, whatever the
        // binding of the isolate reads.
-       _appInFront = _neverInFront,
+       _appInFront = appInFront ?? _neverInFront,
+       _settleForeground = settleForeground,
        _dataDirectoryProvider = const PathProviderDataDirectory(),
        _keyringInitializer = initKeyringStore,
        _identitySecretBytesProvider = null,
@@ -142,6 +147,25 @@ class NostrCircleService implements CircleService {
   final bool Function() _appInFront;
 
   static bool _neverInFront() => false;
+
+  /// Lets the app's own live session settle its foreground claim.
+  final Future<void> Function()? _settleForeground;
+
+  /// The `foreground` word for a change the user asked for. The core grants a
+  /// foreground drive only to a live plane already claimed for it, so a change
+  /// asked while the session is still starting or re-claiming is refused as
+  /// `foregroundOnly`; waiting for the claim first leaves the core's rule as
+  /// it is. The word is read again afterwards: the wait can outlast the app
+  /// being in front.
+  Future<bool> _foreground() async {
+    if (!_appInFront()) return false;
+    try {
+      await _settleForeground?.call();
+    } on Object catch (_) {
+      // The change is still asked; the core refuses it if it must.
+    }
+    return _appInFront();
+  }
 
   final DataDirectoryProvider _dataDirectoryProvider;
   final KeyringInitializer _keyringInitializer;
@@ -715,7 +739,7 @@ class NostrCircleService implements CircleService {
         // inbox relays see their pubkeys, so Rust avoids them, drawing one
         // only when fewer than three others remain.
         relays: relays ?? const [],
-        foreground: _appInFront(),
+        foreground: await _foreground(),
       );
       final created = outcome.circle;
       if (created == null) {
@@ -991,7 +1015,7 @@ class NostrCircleService implements CircleService {
       final outcome = await _driver('Failed to leave circle').leave(
         circle: manager,
         mlsGroupId: mlsGroupId,
-        foreground: _appInFront(),
+        foreground: await _foreground(),
       );
       final delivery = leaveDeliveryOf(outcome.status);
       debugPrint('[Leave] ${outcome.status.name}');
@@ -1027,7 +1051,7 @@ class NostrCircleService implements CircleService {
           circle: manager,
           mlsGroupId: mlsGroupId,
           memberPubkeys: [memberPubkeyHex],
-          foreground: _appInFront(),
+          foreground: await _foreground(),
         ),
       );
     } on CircleServiceException {
@@ -1064,7 +1088,7 @@ class NostrCircleService implements CircleService {
         circle: manager,
         mlsGroupId: mlsGroupId,
         members: ffiMembers,
-        foreground: _appInFront(),
+        foreground: await _foreground(),
       );
       if (outcome.refusal == RefusalFfi.missingWelcomeRelays) {
         throw const CircleInviteesUnreachableException();
@@ -1125,7 +1149,7 @@ class NostrCircleService implements CircleService {
           circle: manager,
           mlsGroupId: mlsGroupId,
           relays: newRelays,
-          foreground: _appInFront(),
+          foreground: await _foreground(),
         ),
       );
     } on CircleServiceException {
@@ -1175,7 +1199,7 @@ class NostrCircleService implements CircleService {
       outcome = await _driver('Failed to repair the circle').repairRotation(
         circle: manager,
         mlsGroupId: circle.mlsGroupId,
-        foreground: _appInFront(),
+        foreground: await _foreground(),
       );
     } on Object catch (e) {
       // Rule 8: the type only. Engine text can carry group ids and

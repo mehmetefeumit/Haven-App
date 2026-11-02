@@ -196,7 +196,8 @@ import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'e2e/_lib/circle_creation.dart' show createCircleDelivered;
+import 'e2e/_lib/circle_creation.dart'
+    show createCircleDelivered, settleLiveSession;
 import 'e2e/_lib/pump_helpers.dart' show pumpUntilFound, waitUntilAsync;
 import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
 import 'e2e/_lib/test_relay.dart' show defaultStrfryUrl;
@@ -630,6 +631,7 @@ void main() {
       // DELIVERY claim without needing a second party.
       final relayManager = await RelayManagerFfi.newInstance();
       try {
+        await settleLiveSession(tester, container);
         await withFreshSecret(
           () =>
               container
