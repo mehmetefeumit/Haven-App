@@ -21,17 +21,269 @@
 //! because the oracles need to compare them; it RENDERS none of them. Its
 //! `Debug` is bucketed counts, and the only renderable name for an event is the
 //! [`EventTag`] it mints in observation order.
+//!
+//! # The plane record
+//!
+//! Beside the per-direction counts, every client→relay data frame is kept for
+//! oracle O7 (`oracle/planes.rs`), recorded at the proxy's one choke point
+//! BEFORE anything parses it, under the endpoint and the connection it came
+//! on. A frame is kept as the projection the relay-plane judge reads: an
+//! event without its content and signature, a filter with its `since` and
+//! `until` zeroed, a `NEG-MSG` without its message. The key is (endpoint,
+//! connection, projected text), and the text keeps the subscription id — G6
+//! needs it to match a `CLOSE` — so a REQ re-issued on its connection is one
+//! entry, but every reconnect is a new connection and every
+//! `RelayManager::fetch_events` call a new subscription id: shapes grow with
+//! faults and fetches, i.e. with a world's length. What bounds them is
+//! [`PLANE_SHAPES_CAP`] and [`PLANE_IDS_CAP`], past which the record is FULL
+//! and O7 answers that the rig could not hold its evidence (rc 2), never a
+//! silent drop.
 
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use nostr::filter::MatchEventOptions;
 use nostr::{Event, EventId, Filter, SubscriptionId};
+use serde_json::Value;
 
 use crate::rig::{sim_magnitude, DeviceTag, EventTag};
+
+/// The most distinct non-EVENT frame shapes one plane's record holds.
+///
+/// Shapes grow with reconnects and fetches (module docs). Measured single
+/// arms peak at 66 shapes a plane; the long nemesis worlds are measured by the
+/// nightly run, and the cap is re-pinned only from a measured high-water mark,
+/// never lowered by hand.
+pub const PLANE_SHAPES_CAP: usize = 4096;
+
+/// The most distinct event ids one plane's record holds: the events clients
+/// sent it, the ones seeded into its store and the ones it forged. A 900-s
+/// nightly world sends a plane O(10³).
+pub const PLANE_IDS_CAP: usize = 65_536;
+
+/// One global order over every recorded frame of every plane: the instant O7
+/// judges a frame at, comparable with the instant the rig staged a routing.
+static PLANE_INSTANT: AtomicU64 = AtomicU64::new(0);
+
+/// Connections are numbered across every plane, so two planes' connections
+/// never share the number a `CLOSE` is matched on.
+static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(0);
+
+/// The next instant of the plane record's order.
+#[must_use]
+pub fn plane_instant() -> u64 {
+    PLANE_INSTANT.fetch_add(1, Ordering::AcqRel)
+}
+
+/// A number no other connection of this process carries.
+#[must_use]
+pub fn next_connection() -> u64 {
+    NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Which endpoint of a plane a frame crossed: the canonical one, a device's
+/// own, or one of a device's alias endpoints (by slot).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EndpointId {
+    /// What storage names: catch-up sweeps and the rig's inbox reads dial it.
+    Canonical,
+    /// A device's own endpoint.
+    Own(DeviceTag),
+    /// A device's alias endpoint, by slot (`rig/address_map.rs`).
+    Alias(DeviceTag, u16),
+}
+
+impl EndpointId {
+    /// The device whose endpoint this is; `None` for the canonical one.
+    #[must_use]
+    pub const fn device(self) -> Option<DeviceTag> {
+        match self {
+            Self::Canonical => None,
+            Self::Own(device) | Self::Alias(device, _) => Some(device),
+        }
+    }
+}
+
+/// One recorded frame. No `Debug`: the text holds pubkeys, routing ids and
+/// event ids.
+pub struct PlaneFrame {
+    /// The endpoint it crossed.
+    pub endpoint: EndpointId,
+    /// The connection it came on.
+    pub conn: u64,
+    /// When it first arrived, in [`plane_instant`]'s order.
+    pub at: u64,
+    /// Its judged projection, as JSON text.
+    pub text: String,
+}
+
+/// Everything one plane recorded, ordered by arrival. No `Debug`, for
+/// [`PlaneFrame`]'s reason.
+pub struct PlaneRecord {
+    /// Every distinct frame, first arrival first.
+    pub frames: Vec<PlaneFrame>,
+    /// Every event this plane carried, was seeded with or forged: its id,
+    /// kind and `#h`, for the judge's event index.
+    pub events: Vec<(String, u16, Option<String>)>,
+    /// Whether a cap was hit, so the record is incomplete.
+    pub full: bool,
+}
+
+/// How full one plane's record ran: distinct shapes and distinct event ids.
+/// Compared against the caps in process; rendered only bucketed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PlaneHighWater {
+    /// Distinct non-EVENT shapes.
+    pub shapes: usize,
+    /// Distinct event ids.
+    pub ids: usize,
+}
+
+impl fmt::Debug for PlaneHighWater {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PlaneHighWater")
+            .field("shapes", &sim_magnitude(self.shapes))
+            .field("ids", &sim_magnitude(self.ids))
+            .finish()
+    }
+}
+
+struct PlaneLog {
+    first_seen: HashMap<(EndpointId, u64, String), u64>,
+    events: BTreeMap<String, (u16, Option<String>)>,
+    shapes: usize,
+    shapes_cap: usize,
+    ids_cap: usize,
+    full: bool,
+}
+
+impl Default for PlaneLog {
+    fn default() -> Self {
+        Self {
+            first_seen: HashMap::new(),
+            events: BTreeMap::new(),
+            shapes: 0,
+            shapes_cap: PLANE_SHAPES_CAP,
+            ids_cap: PLANE_IDS_CAP,
+            full: false,
+        }
+    }
+}
+
+impl PlaneLog {
+    fn index(&mut self, id: String, kind: u16, h: Option<String>) {
+        if self.events.contains_key(&id) {
+            return;
+        }
+        if self.events.len() >= self.ids_cap {
+            self.full = true;
+            return;
+        }
+        self.events.insert(id, (kind, h));
+    }
+
+    fn note(
+        &mut self,
+        endpoint: EndpointId,
+        conn: u64,
+        text: String,
+        event: Option<(String, u16, Option<String>)>,
+    ) {
+        if self.full {
+            return;
+        }
+        let key = (endpoint, conn, text);
+        if self.first_seen.contains_key(&key) {
+            return;
+        }
+        match event {
+            Some((id, kind, h)) => {
+                self.index(id, kind, h);
+                if self.full {
+                    return;
+                }
+            }
+            None if self.shapes >= self.shapes_cap => {
+                self.full = true;
+                return;
+            }
+            None => self.shapes += 1,
+        }
+        self.first_seen.insert(key, plane_instant());
+    }
+}
+
+/// The judged projection of a client frame, and the event it carries if it
+/// is an `EVENT`. Total: a frame that is not a JSON array is kept verbatim
+/// (an empty text for a binary one), and the judge calls it unknown.
+fn project(payload: Option<&str>) -> (String, Option<(String, u16, Option<String>)>) {
+    let Some(text) = payload else {
+        return (String::new(), None);
+    };
+    let Ok(Value::Array(mut frame)) = serde_json::from_str::<Value>(text) else {
+        return (text.to_owned(), None);
+    };
+    let mut event = None;
+    match frame.first().and_then(Value::as_str) {
+        Some("EVENT") => {
+            if let Some(Value::Object(object)) = frame.get_mut(1) {
+                object.remove("content");
+                object.remove("sig");
+                event = indexed(object);
+            }
+        }
+        Some("REQ" | "NEG-OPEN") => {
+            for filter in frame.iter_mut().skip(2) {
+                if let Value::Object(filter) = filter {
+                    for key in ["since", "until"] {
+                        if let Some(value) = filter.get_mut(key) {
+                            *value = Value::from(0_u64);
+                        }
+                    }
+                }
+            }
+        }
+        Some("NEG-MSG") => {
+            if let Some(message) = frame.get_mut(2) {
+                *message = Value::String(String::new());
+            }
+        }
+        _ => {}
+    }
+    (Value::Array(frame).to_string(), event)
+}
+
+/// The id, kind and first `h` of an event object, when it has the first two.
+fn indexed(object: &serde_json::Map<String, Value>) -> Option<(String, u16, Option<String>)> {
+    let id = object.get("id")?.as_str()?.to_owned();
+    let kind = u16::try_from(object.get("kind")?.as_u64()?).ok()?;
+    let h = object
+        .get("tags")
+        .and_then(Value::as_array)
+        .and_then(|tags| {
+            tags.iter()
+                .find_map(|tag| match tag.as_array().map(Vec::as_slice) {
+                    Some([name, value, ..]) if name == "h" => value.as_str().map(str::to_owned),
+                    _ => None,
+                })
+        });
+    Some((id, kind, h))
+}
+
+/// The id, kind and first `h` of `event`.
+fn index_of(event: &Event) -> (String, u16, Option<String>) {
+    let h = event.tags.iter().find_map(|tag| {
+        let parts = tag.as_slice();
+        (parts.first().map(String::as_str) == Some("h"))
+            .then(|| parts.get(1).cloned())
+            .flatten()
+    });
+    (event.id.to_hex(), event.kind.as_u16(), h)
+}
 
 /// One NIP-77 frame, by the side that sent it and its verb.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -114,6 +366,8 @@ struct Inner {
     withheld_eose: usize,
     /// NIP-77 frames, per endpoint and kind.
     neg: HashMap<(Option<DeviceTag>, NegFrame), usize>,
+    /// Every client→relay data frame, for O7.
+    planes: PlaneLog,
 }
 
 impl Ledger {
@@ -367,10 +621,76 @@ impl Ledger {
         });
     }
 
-    pub(crate) fn note_injected(&self, event_id: EventId) {
+    pub(crate) fn note_injected(&self, event: &Event) {
         self.with(|inner| {
-            inner.tag(event_id);
-            inner.injected.push(event_id);
+            inner.tag(event.id);
+            inner.injected.push(event.id);
+            let (id, kind, h) = index_of(event);
+            inner.planes.index(id, kind, h);
+        });
+    }
+
+    /// Indexes an event written straight into the plane's store: a by-id
+    /// fetch of it is judged by the circle it carries, as a published one is.
+    pub(crate) fn note_seeded(&self, event: &Event) {
+        self.with(|inner| {
+            let (id, kind, h) = index_of(event);
+            inner.planes.index(id, kind, h);
+        });
+    }
+
+    /// Records one client→relay data frame as it arrived on `endpoint`'s
+    /// connection `conn`, before anything parses it: `payload` is its text,
+    /// `None` for a binary frame.
+    pub(crate) fn note_plane_frame(&self, endpoint: EndpointId, conn: u64, payload: Option<&str>) {
+        let (text, event) = project(payload);
+        self.with(|inner| inner.planes.note(endpoint, conn, text, event));
+    }
+
+    /// Everything the plane record holds, first arrival first.
+    #[must_use]
+    pub fn plane_record(&self) -> PlaneRecord {
+        self.with(|inner| {
+            let mut frames: Vec<PlaneFrame> = inner
+                .planes
+                .first_seen
+                .iter()
+                .map(|((endpoint, conn, text), at)| PlaneFrame {
+                    endpoint: *endpoint,
+                    conn: *conn,
+                    at: *at,
+                    text: text.clone(),
+                })
+                .collect();
+            frames.sort_by_key(|frame| frame.at);
+            PlaneRecord {
+                frames,
+                events: inner
+                    .planes
+                    .events
+                    .iter()
+                    .map(|(id, (kind, h))| (id.clone(), *kind, h.clone()))
+                    .collect(),
+                full: inner.planes.full,
+            }
+        })
+    }
+
+    /// How full the plane record ran.
+    #[must_use]
+    pub fn plane_high_water(&self) -> PlaneHighWater {
+        self.with(|inner| PlaneHighWater {
+            shapes: inner.planes.shapes,
+            ids: inner.planes.events.len(),
+        })
+    }
+
+    /// Lowers the plane record's caps: how a test makes a record full without
+    /// filling it.
+    pub fn set_plane_caps(&self, shapes: usize, ids: usize) {
+        self.with(|inner| {
+            inner.planes.shapes_cap = shapes;
+            inner.planes.ids_cap = ids;
         });
     }
 
@@ -462,6 +782,11 @@ impl fmt::Debug for Ledger {
                 )
                 .field("withheld_eose", &sim_magnitude(inner.withheld_eose))
                 .field("neg", &sim_magnitude(inner.neg.values().sum()))
+                .field(
+                    "plane_frames",
+                    &sim_magnitude(inner.planes.first_seen.len()),
+                )
+                .field("plane_full", &inner.planes.full)
                 .finish_non_exhaustive()
         })
     }
@@ -658,6 +983,17 @@ mod tests {
         assert!(ledger.witnessed_ok(&an_event_id(4)));
     }
 
+    /// A forged 445 under a key belonging to nobody, its `#h` a planted
+    /// routing id.
+    fn an_injected_event() -> Event {
+        nostr::EventBuilder::new(nostr::Kind::Custom(445), "x")
+            .tags(vec![
+                nostr::Tag::parse(["h", &"cd".repeat(32)]).expect("a tag")
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("signs")
+    }
+
     #[test]
     fn rendering_a_ledger_buckets_its_counts_and_names_nothing_it_carried() {
         let ledger = Ledger::new();
@@ -671,7 +1007,23 @@ mod tests {
         // message is relay-authored prose, and an injected id is the only event
         // id that reaches the ledger without a member having published it.
         ledger.note_ok(an_event_id(2), false, "invalid: needle-refusal-prose");
-        ledger.note_injected(an_event_id(3));
+        let injected = an_injected_event();
+        ledger.note_injected(&injected);
+        // And the plane record, which holds whole frames: a relay URL, a
+        // pubkey and a routing id, each planted.
+        let pubkey = "ab".repeat(32);
+        ledger.note_plane_frame(
+            EndpointId::Own(DeviceTag::new(0)),
+            7,
+            Some(&format!(
+                r#"["REQ","needle-sub",{{"kinds":[10050],"authors":["{pubkey}"]}}]"#
+            )),
+        );
+        ledger.note_plane_frame(
+            EndpointId::Alias(DeviceTag::new(0), 3),
+            7,
+            Some(r#"["EVENT",{"id":"x","kind":10002,"tags":[["r","wss://needle.example.com"]]}]"#),
+        );
 
         let rendered = format!("{ledger:?}");
         assert!(rendered.contains("Ledger"), "{rendered}");
@@ -680,22 +1032,150 @@ mod tests {
         // rendering that dropped the two fields instead of bucketing them.
         assert!(rendered.contains(r#"refused: "1""#), "{rendered}");
         assert!(rendered.contains(r#"injected: "1""#), "{rendered}");
+        assert!(rendered.contains(r#"plane_frames: "2-4""#), "{rendered}");
         let event_hex = hex::encode([1u8; 32]);
-        let injected_hex = hex::encode([3u8; 32]);
+        let injected_hex = injected.id.to_hex();
+        let routing = "cd".repeat(32);
         for needle in [
             "needle",
             "npub1",
             "rate-limited",
             "invalid:",
+            "wss://",
             event_hex.as_str(),
             injected_hex.as_str(),
+            pubkey.as_str(),
+            routing.as_str(),
             "0101",
-            "0303",
         ] {
             assert!(
                 !rendered.contains(needle),
                 "a ledger rendering must carry no value it holds"
             );
         }
+        let water = format!("{:?}", ledger.plane_high_water());
+        assert!(water.contains(r#"ids: "2-4""#), "bucketed: {water}");
+    }
+
+    fn texts(ledger: &Ledger) -> Vec<String> {
+        ledger
+            .plane_record()
+            .frames
+            .into_iter()
+            .map(|frame| frame.text)
+            .collect()
+    }
+
+    #[test]
+    fn a_reissued_req_is_one_shape_and_a_new_connection_is_another() {
+        let ledger = Ledger::new();
+        let own = EndpointId::Own(DeviceTag::new(1));
+        for since in [10, 20, 30] {
+            ledger.note_plane_frame(
+                own,
+                1,
+                Some(&format!(
+                    r##"["REQ","s",{{"kinds":[445],"#h":["aa"],"since":{since}}}]"##
+                )),
+            );
+        }
+        assert_eq!(
+            texts(&ledger),
+            vec![r##"["REQ","s",{"#h":["aa"],"kinds":[445],"since":0}]"##.to_owned()],
+            "a re-issue differs only in its window, so it is one entry with its key set kept"
+        );
+        ledger.note_plane_frame(
+            own,
+            2,
+            Some(r##"["REQ","s",{"kinds":[445],"#h":["aa"],"since":40}]"##),
+        );
+        ledger.note_plane_frame(
+            EndpointId::Canonical,
+            2,
+            Some(r##"["REQ","s",{"kinds":[445],"#h":["aa"],"since":40}]"##),
+        );
+        let record = ledger.plane_record();
+        assert_eq!(record.frames.len(), 3, "per (endpoint, connection)");
+        assert!(
+            record.frames.windows(2).all(|pair| pair[0].at < pair[1].at),
+            "kept in arrival order"
+        );
+        assert_eq!(ledger.plane_high_water().shapes, 3);
+    }
+
+    #[test]
+    fn an_event_is_kept_without_its_content_and_signature_and_indexed_by_its_h() {
+        let ledger = Ledger::new();
+        let own = EndpointId::Own(DeviceTag::new(0));
+        let frame = r#"["EVENT",{"id":"e1","pubkey":"p","kind":445,"created_at":5,"content":"secret","sig":"s","tags":[["h","aa"]]}]"#;
+        ledger.note_plane_frame(own, 1, Some(frame));
+        ledger.note_plane_frame(own, 1, Some(frame));
+        let record = ledger.plane_record();
+        assert_eq!(record.frames.len(), 1, "a re-send is the same event");
+        assert!(!record.frames[0].text.contains("secret"));
+        assert!(!record.frames[0].text.contains("\"sig\""));
+        assert!(record.frames[0].text.contains("\"pubkey\":\"p\""));
+        assert_eq!(
+            record.events,
+            vec![("e1".to_owned(), 445, Some("aa".to_owned()))]
+        );
+        assert_eq!(
+            ledger.plane_high_water(),
+            PlaneHighWater { shapes: 0, ids: 1 }
+        );
+    }
+
+    #[test]
+    fn every_frame_is_kept_unparsed_binary_and_continuations_included() {
+        let ledger = Ledger::new();
+        let own = EndpointId::Own(DeviceTag::new(0));
+        ledger.note_plane_frame(own, 1, Some("not json"));
+        ledger.note_plane_frame(own, 1, Some(r#"["COUNT","c",{"kinds":[1]}]"#));
+        ledger.note_plane_frame(own, 1, Some(r#"["AUTH",{}]"#));
+        ledger.note_plane_frame(own, 1, None);
+        ledger.note_plane_frame(own, 1, Some(r#"["NEG-MSG","n","6162"]"#));
+        ledger.note_plane_frame(own, 1, Some(r#"["NEG-MSG","n","6364"]"#));
+        assert_eq!(
+            texts(&ledger),
+            vec![
+                "not json".to_owned(),
+                r#"["COUNT","c",{"kinds":[1]}]"#.to_owned(),
+                r#"["AUTH",{}]"#.to_owned(),
+                String::new(),
+                r#"["NEG-MSG","n",""]"#.to_owned(),
+            ],
+            "nothing is skipped for failing to parse, and a reconciliation round is one shape"
+        );
+    }
+
+    #[test]
+    fn a_full_record_says_so_and_keeps_nothing_further() {
+        let ledger = Ledger::new();
+        ledger.set_plane_caps(1, 1);
+        let own = EndpointId::Own(DeviceTag::new(0));
+        ledger.note_plane_frame(own, 1, Some(r#"["CLOSE","a"]"#));
+        assert!(!ledger.plane_record().full);
+        ledger.note_plane_frame(own, 1, Some(r#"["CLOSE","b"]"#));
+        let record = ledger.plane_record();
+        assert!(record.full, "the cap is never a silent drop");
+        assert_eq!(record.frames.len(), 1);
+
+        let ids = Ledger::new();
+        ids.set_plane_caps(PLANE_SHAPES_CAP, 1);
+        ids.note_injected(&an_injected_event());
+        ids.note_seeded(&an_injected_event());
+        assert!(ids.plane_record().full, "seeded and forged ids count too");
+    }
+
+    #[test]
+    fn an_endpoint_names_its_device_and_the_canonical_one_none() {
+        let dev = DeviceTag::new(2);
+        assert_eq!(EndpointId::Canonical.device(), None);
+        assert_eq!(EndpointId::Own(dev).device(), Some(dev));
+        assert_eq!(EndpointId::Alias(dev, 4).device(), Some(dev));
+        assert_eq!(
+            format!("{:?}", EndpointId::Alias(dev, 4)),
+            "Alias(simdev#2, 4)"
+        );
     }
 }

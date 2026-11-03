@@ -1487,7 +1487,7 @@ check_bg_publish_drive() { # <ios_bg_publish_test.dart>
   catchup_marker_line="$(code_line_of 'debugPrint\(kBackgroundCatchupMarker\)' \
     <<<"$no_strings")"
   if [[ -z "$catchup_verdict_line" ]]; then
-    lfail "ios_bg_publish_test.dart no longer ASSERTS the poll-path catch-up poll's verdict — _pollForStoredPeerFix RETURNS on its deadline with whatever it last read (a null fix included), so a bounded poll that is never expected is a wait, not an oracle, and BACKGROUND_CATCHUP_OK would be printed over a store the sweep never wrote. If the local was merely renamed, re-point this anchor to the new name"
+    lfail "ios_bg_publish_test.dart no longer ASSERTS the poll-path catch-up poll's verdict — pollForStoredPeerFix RETURNS on its deadline with whatever it last read (a null fix included), so a bounded poll that is never expected is a wait, not an oracle, and BACKGROUND_CATCHUP_OK would be printed over a store the sweep never wrote. If the local was merely renamed, re-point this anchor to the new name"
   fi
   if [[ -z "$catchup_marker_line" ]]; then
     lfail "ios_bg_publish_test.dart no longer prints kBackgroundCatchupMarker — the poll leg's completion gate demands it, so that leg would red with 'the drive exited 0 without its terminal proof' instead of naming the phase that went missing"
@@ -1737,18 +1737,20 @@ check_poll_path_background_wake() { # <map_shell.dart>
   return "$_lf"
 }
 
-# check_poll_leg_tier <workflow yml> — the poll leg's authorization tier is a
-# CORRECTNESS constraint on P2d's oracle, not a sampling choice.
+# check_poll_leg_tier <workflow yml> — the poll leg's authorization tier keeps
+# P2d's list of the row's writers exact; it is not a sampling choice.
 #
-# P2d reads the PERSISTED last-known store, and the 90 s receive timer is not
-# the only writer of it: `registerIosBackgroundCatchupHandler` (main.dart,
-# registered regardless of `liveSyncEnabled`) reaches the same
-# `persist_locations` through the same `runCatchup`, driven by the native SLC
-# wake. `HavenSLCHandler.startMonitoring` arms nothing without
-# `.authorizedAlways` — so `tier: when-in-use` is what makes P2d's row
-# attributable to the timer at all. Flip that leg to `always`, or add an
-# (always, poll) leg, and the phase still passes while proving less than its
-# text claims. The lane header states this; nothing read it until here.
+# P2d reads the PERSISTED last-known store, which the 90 s receive timer and a
+# flag-off burst's receive-before-seal both write (decision 244); the timer is
+# attributed by its own sweep count, which only `_runBackgroundCatchUp`
+# advances. `registerIosBackgroundCatchupHandler` (main.dart, registered
+# regardless of `liveSyncEnabled`) reaches the same `persist_locations` through
+# the same `runCatchup`, driven by the native SLC wake, and advances no count.
+# `HavenSLCHandler.startMonitoring` arms nothing without `.authorizedAlways` —
+# so `tier: when-in-use` is what keeps the row's writers to the timer and the
+# burst, the list the drive and the lane header state. Flip that leg to
+# `always`, or add an (always, poll) leg, and the phase passes with a third
+# writer those texts do not name. Nothing read this until here.
 #
 # (The other native wake, `HavenBGTaskHandler`, is not tier-gated and is
 # excluded only by the Simulator's `notPermitted` — a ceiling, not something a
@@ -1789,7 +1791,7 @@ check_poll_leg_tier() { # <workflow yml>
   while IFS=$'\t' read -r leg tier ls; do
     [[ -n "$leg" ]] || continue
     if [[ "$tier" != 'when-in-use' ]]; then
-      lfail "e2e-ios-background-publish.yml's poll leg '${leg}' runs tier '${tier}', not when-in-use. P2d's oracle is the PERSISTED last-known store, and under an Always grant the native SLC wake writes that same store through the same runCatchup — so the row would no longer be attributable to _startIosBackgroundReceiveTimer and P2d would pass while proving less than its own text claims. The tier on a poll leg is a correctness constraint; give P2d a different oracle before changing it"
+      lfail "e2e-ios-background-publish.yml's poll leg '${leg}' runs tier '${tier}', not when-in-use. P2d's oracle is the PERSISTED last-known store, and under an Always grant the native SLC wake writes that same store through the same runCatchup without advancing the receive timer's sweep count — a third writer of the row that the drive's and the lane header's list (the timer and a burst's receive-before-seal) does not name. Keep the poll leg at when-in-use, or restate that list in both before changing it"
     fi
   done <<<"$poll_legs"
   return "$_lf"
@@ -2331,8 +2333,9 @@ check_poll_path_background_wake "$MAP_SHELL" || FAILED=1
 #     catch-up channel handler, registered from main.dart regardless of the
 #     flag, reaching the same `persist_locations`. Its SLC driver arms nothing
 #     without `.authorizedAlways`, so a `when-in-use` poll leg is what keeps
-#     P2d's row attributable to the receive timer. That constraint is stated in
-#     the lane header and in the drive; this is what reads it.
+#     P2d's row to the two writers the lane header and the drive name (the
+#     receive timer and a burst). That constraint is stated there; this is what
+#     reads it.
 # ---------------------------------------------------------------------------
 check_poll_leg_tier "$BG_PUBLISH_WORKFLOW" || FAILED=1
 
@@ -4761,7 +4764,7 @@ EOF
   # …and surviving only as prose about itself, the same way the P2c reads can.
   _drive 'drive: the P2d store read survives only inside a reason string' 1 \
     "${drive_good/final rows = await circleService.snapshotLastKnownForCircle(nostrGroupId: gid);/expect(rows, isNotNull, reason: \"read via snapshotLastKnownForCircle()\");}"
-  # The verdict never asserted: `_pollForStoredPeerFix` RETURNS on its deadline
+  # The verdict never asserted: `pollForStoredPeerFix` RETURNS on its deadline
   # with whatever it last read — a null fix included — so a drive that drops the
   # `expect` keeps a bounded wait, loses the oracle, and prints the terminal
   # proof over it.

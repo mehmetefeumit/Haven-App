@@ -420,7 +420,7 @@ if [[ -n "${CONFLICT}" ]]; then
 fi
 
 echo "Building recording wire proxy (release)..."
-cargo build --release --manifest-path "${CRATE_DIR}/Cargo.toml" --bin haven-wire-proxy
+cargo build --release --manifest-path "${CRATE_DIR}/Cargo.toml" --bin haven-wire-proxy --bin haven-wire-planes
 readonly BIN="${CRATE_DIR}/target/release/haven-wire-proxy"
 
 if [[ "${HAVEN_WIRE_PROXY_SKIP_SELFTEST:-0}" == "1" ]]; then

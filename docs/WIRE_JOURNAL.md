@@ -73,6 +73,22 @@ HAVEN_WIRE_PROXY_ROUTES='7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7778' \
 Running one proxy per relay instead would give each file its own sequence
 space, and no consumer could establish a total order across them.
 
+On the core-flow lanes every route forwards to the SAME upstream: 7788 is the
+account's inbox and key-package relay (and, through the default-relay
+fallback, discovery's), 7789 the location pool's one entry. `relay_url` is
+therefore identical on every line, and only `listen` tells one relay plane
+from another — which is what the relay-plane oracle (C8) keys on.
+
+### Consumers
+
+Four oracles read the journal, all post-drive, all anchored on one sentinel:
+`tooling/e2e/ci/check-wire-journal.sh` (C2–C4, the closed world of kinds, tag
+names, verbs and filter keys), `check-wire-correlation.sh` (C5, values and the
+relations between events), `check-wire-canaries.dart` (C6, planted content),
+and `check-wire-planes.sh` (C8, a wrapper over the `haven-wire-planes` binary:
+every client→relay EVENT, REQ filter and NEG-OPEN on a listen whose declared
+role admits it).
+
 Each `<listen>` is a bare port (bound on 127.0.0.1) or an IP literal and port.
 A non-loopback one — `0.0.0.0:7788`, a LAN address — fails at startup and cannot
 be overridden: the journal is a full transcript of ciphertext, event ids and the
@@ -326,6 +342,37 @@ satisfy a pending `HAVEN_WIRE_SENTINEL_ACK` wait, handing the emitter the
 declaration's `wire_seq` for the marker it thought it sent. Both failures are
 silent and both narrow what a green run covers.
 
+### The third job: declaring a circle's routing
+
+C8 holds every kind-445 EVENT, `#h` REQ and NEG-OPEN of a circle to the relays
+that circle is routed to, and the journal cannot say which those are:
+inferring them from the circle's first 445 would bless whatever that first
+send got wrong. So the drive declares each circle's routing, on the same verb,
+with the routing as a THIRD element:
+
+```json
+["HAVEN_WIRE_SENTINEL","HAVEN_WIRE_ROUTING:<n>",{"h":"<64 lowercase hex>","relays":["ws://…:<port>",…]}]
+```
+
+`TestRelay.declareCircleRouting` sends it from `_announceMlsGroupId`, the one
+helper every circle-creation path in `e2e_combined.dart` calls, with Rust's
+view of the circle (`CircleFfi.nostrGroupId`, `CircleFfi.relays`). The proxy
+intercepts it like any sentinel: journalled verbatim, acked with its token,
+never forwarded. Why it rides the journal and not a sidecar: the `h` and the
+relays are already on the wire in every `#h` and every connection, so
+journalling them discloses nothing new, and a declaration inside the journal
+is inside the sentinel snapshot by construction. Why the token is numbered:
+the ack echoes the token, so each pending declaration matches exactly one ack.
+Like the harness-socket declaration it is not the run's token, so it can never
+move the boundary; the summary (`src/summarize.rs`) keeps a control frame's
+verb only, so the payload never reaches an uploaded artifact.
+
+`haven-wire-planes` reads exactly two keys, `h` (64 lowercase hex) and
+`relays` (a non-empty list of URLs with explicit ports, mapped to listens by
+port); anything else is a malformed declaration and the run is UNUSABLE (rc 3).
+A circle with traffic and no declaration is a META-FLOOR (rc 4). Gated, like
+every declaration, on a lane that declared a recorder.
+
 ### How a drive target emits one
 
 `TestRelay.emitWireJournalSentinel()`
@@ -435,6 +482,10 @@ reported as "nothing leaked".
   bodies collapse to whichever the recorder saw first and leaves the survivor
   answering for both. That is the one way de-duplication turns from a
   determinism fix into a blindfold.
+* **A plane-scoped assertion keys on `listen`, never on `relay_url`.** On a
+  lane whose routes share one upstream, `relay_url` is the same on every line
+  and cannot tell one relay plane from another; `listen` is the only
+  per-authority signal the journal carries.
 * **An endpoint-scoped assertion keys on (body, endpoint).** Fan-out of one
   event to N relays under ONE id is the normal publishing shape, and it is
   exactly the shape in which a containment breach occurs — the copy that
@@ -567,7 +618,7 @@ than it claims.
 haven-wire-proxy
 
 # Prove the instrument on this machine: relay + proxy + client on loopback,
-# six named cases, refuses to pass if it executed fewer than it declares
+# ten named cases, refuses to pass if it executed fewer than it declares
 haven-wire-proxy --self-test
 
 # Redacted, upload-safe transcript

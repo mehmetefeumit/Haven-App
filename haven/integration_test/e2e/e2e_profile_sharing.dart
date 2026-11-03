@@ -146,6 +146,7 @@ import '_lib/circle_creation.dart'
     show createCircleDelivered, settleLiveSession;
 import '_lib/coordination.dart';
 import '_lib/fake_location_service.dart';
+import '_lib/plane_store_check.dart';
 import '_lib/pump_helpers.dart';
 import '_lib/scenario_harness.dart';
 import '_lib/synthetic_user.dart' show SyntheticUser;
@@ -680,18 +681,18 @@ void main() {
     'name-only edit (photo preserved) → delete → npub fallback',
     (tester) async {
       installThrowTimeErrorLogging();
-      // Plane-separation watch: buffer EVERY kind-0 the CIRCLE relay sees
-      // authored by Alice, from before anything is pumped. That relay carries
-      // her Welcome and kind-445, so a kind-0 landing there is exactly the
-      // cross-plane join the pool exists to break — this buffer must be empty
-      // at step 1 AND still empty after the publish/edit/delete cycle.
-      final aliceKind0OnCircleRelay = <TestRelayEvent>[];
+      // Plane-separation watch: buffer EVERY kind-0 the CIRCLE relay sees,
+      // by anyone, from before anything is pumped. That relay carries the
+      // Welcomes and the circle's kind-445, so a kind-0 landing there — Alice's
+      // or Bob's — is exactly the cross-plane join the pool exists to break:
+      // this buffer must be empty at step 1 AND still empty after the
+      // publish/edit/delete cycle.
+      final kind0OnCircleRelay = <TestRelayEvent>[];
       final circleRelayKind0Watch = ctx.relay
           .events(<String, dynamic>{
             'kinds': const <int>[0],
-            'authors': <String>[aliceHex],
           })
-          .listen(aliceKind0OnCircleRelay.add);
+          .listen(kind0OnCircleRelay.add);
 
       // Freshness watch on the PROFILE plane, one buffer per pool member.
       // Publishing is unconditional, so what keeps these empty through step 1
@@ -817,10 +818,10 @@ void main() {
           );
         }
         expect(
-          aliceKind0OnCircleRelay,
+          kind0OnCircleRelay,
           isEmpty,
-          reason: 'The circle relay must observe ZERO kind-0 for Alice — '
-              'ever, but especially before she has published anything.',
+          reason: 'The circle relay must observe ZERO kind-0 — ever, but '
+              'especially before anyone has published one.',
         );
         debugPrint(
           '[e2e_profile] STEP 1 — fresh user verified (no kind-0 yet, on any '
@@ -1162,16 +1163,39 @@ void main() {
         // last, when the app has had every opportunity to get it wrong.
         // -------------------------------------------------------------------
         expect(
-          aliceKind0OnCircleRelay,
+          kind0OnCircleRelay,
           isEmpty,
-          reason: 'The circle relay must NEVER observe a kind-0 from Alice: '
-              'the profile plane is disjoint from every relay carrying her '
+          reason: 'The circle relay must NEVER observe a kind-0, from anyone: '
+              'the profile plane is disjoint from every relay carrying '
               'kind-445 / kind-1059 traffic, and the contamination ledger '
               'subtracts it from the pool.',
         );
         debugPrint(
-          '[e2e_profile] PLANE SEPARATION — circle relay saw 0 kind-0 for '
-          'Alice across the whole cycle',
+          '[e2e_profile] PLANE SEPARATION — circle relay saw 0 kind-0 across '
+          'the whole cycle',
+        );
+
+        // The same separation read from the STORES, the reverse direction
+        // included: each pool member holds the profile plane's kinds only
+        // (kind 0 and a deletion of one — never a key-package retraction or
+        // any circle traffic), and the circle relay holds no kind-0 at all.
+        final harness = <String>{
+          ...ctx.relay.publishedIds,
+          for (final r in profilePool) ...r.publishedIds,
+        };
+        for (var i = 0; i < profilePool.length; i++) {
+          await assertStoreWithinRoles(
+            profilePool[i],
+            check: 'e2e_profile pool relay #$i',
+            roles: const <String>{'profile'},
+            harnessIds: harness,
+          );
+        }
+        await assertStoreLacksKinds(
+          ctx.relay,
+          check: 'e2e_profile circle relay',
+          kinds: const <int>{0},
+          harnessIds: harness,
         );
       } finally {
         await circleRelayKind0Watch.cancel();

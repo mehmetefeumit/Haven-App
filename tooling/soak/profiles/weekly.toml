@@ -19,6 +19,8 @@ tick_ms = 250
 members = 5
 circles = 4
 relays = 3
+account_relays = 2
+profile_relays = 3
 
 [[scenarios]]
 id = "S01"
@@ -124,3 +126,7 @@ arms = ["collided-circles-leave-apart"]
 [[scenarios]]
 id = "S25"
 arms = ["dead-and-silent-relays"]
+
+[[scenarios]]
+id = "S26"
+arms = ["identity-planes-under-faults"]

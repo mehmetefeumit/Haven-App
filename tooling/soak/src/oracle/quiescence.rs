@@ -343,8 +343,7 @@ mod tests {
     use super::*;
     use crate::nemesis::types::Schedule;
     use crate::profiles::WorldShape;
-    use crate::rig::doubles::{RecordingTimeline, StubDrain, TestRelay};
-    use crate::rig::RelayTag;
+    use crate::rig::doubles::{test_planes, RecordingTimeline, StubDrain, TestRelay};
 
     type TestWorld = SimWorld<TestRelay, RecordingTimeline, StubDrain>;
 
@@ -353,15 +352,16 @@ mod tests {
             members: 2,
             circles: 1,
             relays: 1,
+            account_relays: 1,
+            profile_relays: 0,
         }
     }
 
     async fn build_world() -> TestWorld {
-        let relay = TestRelay::start(RelayTag::new(0)).await;
         SimWorld::build(
             &smallest_shape(),
             Schedule::new(Vec::new()),
-            vec![relay],
+            test_planes(&smallest_shape()).await,
             RecordingTimeline::default(),
             StubDrain::default(),
         )

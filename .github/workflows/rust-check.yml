@@ -634,6 +634,21 @@ jobs:
           fi
           echo "test-utils is absent from rust_builder's non-dev haven-core graph"
 
+      # The recording proxy's crate carries the relay-plane judge rust_builder's
+      # tests reach; rooted at rust_builder (no `-p`) so its own edge is in the
+      # tree. Token `haven-local-relay`, the package name `cargo tree` prints: the
+      # dev-dependency's key is `planes`.
+      - name: The wire-proxy crate is absent from the shipped FFI graph
+        working-directory: haven/rust_builder
+        run: |
+          set -euo pipefail
+          tree="$(cargo tree -e no-dev)"
+          if grep -qE '(^|[^a-z-])haven-local-relay v' <<<"${tree}"; then
+            echo '::error::haven-local-relay is on the non-dev graph of rust_builder. That crate builds the recording wire proxy, which writes a full transcript of relay traffic; only tests may reach it.'
+            exit 1
+          fi
+          echo "haven-local-relay is absent from rust_builder's non-dev graph"
+
       # MDK's Nostr adapter has ONE feature, `sdk`: its relay client, which
       # Haven's fanout hands the publish client. A lockfile shows a feature only
       # through the dependency it adds, so the guard job's lockfile check cannot
@@ -646,7 +661,7 @@ jobs:
         run: bash scripts/ci/check_mdk_supply_chain.sh --adapter-features
 
       # The rig derives S01's and S17's liveness bounds from nostr-relay-pool's
-      # own reconnect constants. They are private to that crate, so the rig
+      # own reconnect constants, and S26's from the relay manager's. They are private to that crate, so the rig
       # carries its own copies; this step is what stops the two drifting — it
       # reads the VENDORED source cargo just resolved, not a doc.
       - name: Reconnect constants still say what the bounds assume
@@ -688,6 +703,21 @@ jobs:
             echo "::error::LOCATION_PUBLISH_ATTEMPTS is no longer 1 in haven-core/src/relay/manager.rs; tooling/soak/src/oracle/bounds.rs::location_publish_window assumes a single attempt."
             status=1
           }
+          # And the ones behind `profile_publish_ladder()` and
+          # `key_package_round_trip()` (S26's identity-plane turn).
+          for want in \
+            '^pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs\(5\);' \
+            '^const DEFAULT_TIMEOUT: Duration = Duration::from_secs\(10\);' \
+            '^const MAX_PUBLISH_ATTEMPTS: u32 = 3;' \
+            '^const PUBLISH_RETRY_BACKOFF: Duration = Duration::from_secs\(2\);' \
+            '^const PROFILE_PUBLISH_MAX_ATTEMPTS: u32 = 2;' \
+            '^const PROFILE_PUBLISH_RETRY_BACKOFF: Duration = Duration::from_secs\(1\);' \
+            '^const PROFILE_PUBLISH_ACK_TIMEOUT: Duration = Duration::from_secs\(6\);'; do
+            grep -qE "${want}" "${loc}" || {
+              echo "::error::a relay-manager constant moved in haven-core/src/relay/manager.rs; tooling/soak/src/oracle/bounds.rs::profile_publish_ladder / key_package_round_trip derive from it."
+              status=1
+            }
+          done
           exit "${status}"
 
       # As in haven-core: built before the transcript exists, `id` for the

@@ -7,7 +7,7 @@
 //! `SQLCipher` database — none of them plants a row to "reach" the state it
 //! asserts.
 //!
-//! Seven are READ seams; three are not. `set_stored_message_write_fault_for_test`
+//! Eight are READ seams; three are not. `set_stored_message_write_fault_for_test`
 //! MUTATES a live database so a harness can make a write the engine performs
 //! mid-call fail, `forge_future_header_445_for_test` SEALS a crafted event
 //! under the group key (a member's outbound power, not a reader's), and
@@ -16,7 +16,7 @@
 //! marked, because "a harness can see state the product does not expose" is not
 //! a true description of any of them.
 //!
-//! The ten seams and what each is for:
+//! The eleven seams and what each is for:
 //!
 //! 1. `SessionManager::process_event_typed_for_test` — one ingest of one event
 //!    that keeps production's pre-authentication screen and hands back the
@@ -65,6 +65,12 @@
 //!     processed-transport-id rows for one group: one per peeled wrapper, kept
 //!     for the life of the group and never pruned (T-DEDUPE-GROWTH). The engine
 //!     exposes no count, so a growth scenario has nothing else to read.
+//! 11. `relay::dial_witness` — the relay-plane proof's, not the rig's: while a
+//!     `DialWatch` is armed, the admission policy of every client
+//!     `verified_client` builds records each relay URL the pool dials, and
+//!     admits it exactly as the trait's default does. It is the one record of a
+//!     dial to a relay outside a test's world. Its socket test lives in
+//!     `test_utils_seams_sockets.rs`; its gate and body tests are below.
 //!
 //! # Rule 15 over this file
 //!
@@ -1396,5 +1402,47 @@ fn the_processed_id_count_is_gated_by_its_own_test_utils_attribute() {
     assert!(
         !source[gate..declaration].contains("pub fn "),
         "the gate must be the seam's OWN attribute, not one belonging to an earlier item"
+    );
+}
+
+// ── Seam 11: the dial witness (socket test: test_utils_seams_sockets.rs) ────
+
+/// The policy's dial hook exists only with the feature, and is the trait's
+/// default with a note before it: it admits every dial and refuses none, so
+/// the witness can change what a test observes and never what a client does.
+#[test]
+fn the_dial_witness_is_gated_and_admits_exactly_as_the_default_does() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/relay/verified.rs"),
+    )
+    .expect("read the verified module");
+    let declaration = source
+        .find("fn admit_connection<")
+        .expect("the hook is declared here");
+    let gate = source[..declaration]
+        .rfind("#[cfg(any(test, feature = \"test-utils\"))]")
+        .expect("and it carries a gate");
+    assert!(
+        !source[gate..declaration].contains("fn "),
+        "the gate must be the hook's OWN attribute, not one belonging to an earlier item"
+    );
+    let open = declaration + source[declaration..].find('{').expect("a body");
+    let close = open + source[open..].find("\n    }\n").expect("the body ends");
+    let body: String = source[open + 1..close]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(
+        body,
+        "super::dial_witness::note(relay_url.as_str());Box::pin(asyncmove{Ok(AdmitStatus::Success)})",
+        "the hook does more than note the dial and admit it"
+    );
+    let module = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/relay/mod.rs"),
+    )
+    .expect("read the relay module");
+    assert!(
+        module.contains("#[cfg(any(test, feature = \"test-utils\"))]\npub mod dial_witness;"),
+        "the witness module is gated by its own attribute"
     );
 }

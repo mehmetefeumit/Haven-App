@@ -86,10 +86,10 @@ jobs:
       # (tooling/e2e/ci/start-wire-proxy.sh) in front of strfry. strfry keeps
       # its port; the proxy listens on 7788 and forwards there, so every frame
       # the app and the in-process synthetic peers send is journalled on the
-      # host and read post-drive by the three wire oracles below. Pointing this
+      # host and read post-drive by the wire oracles below. Pointing this
       # back at the relay port is the quietest possible break — traffic still
-      # flows, the journal is empty-but-valid, and all three oracles then
-      # certify nothing. scripts/ci/check_wire_oracle_lane_reachable.sh pins it.
+      # flows, the journal is empty-but-valid, and every oracle then
+      # certifies nothing. scripts/ci/check_wire_oracle_lane_reachable.sh pins it.
       HAVEN_E2E_RELAY: ws://10.0.2.2:7788
       # The location relay pool's one entry, where the UI-created circle is
       # placed: the proxy's SECOND route (7789), forwarding to the SAME relay.
@@ -97,7 +97,10 @@ jobs:
       # account's inbox relay and so never picked, yet hold the same events,
       # because the harness reads that circle's kind-445s through 7788 and C5.1
       # flags groups whose kind-445s reach disjoint upstreams. Through the
-      # proxy, so the oracles see that circle's traffic too.
+      # proxy, so the oracles see that circle's traffic too. Every circle the
+      # scenario creates (the UI one, FE-2's and the M11 ones over the FFI) is
+      # routed here, never to HAVEN_E2E_RELAY, and C8 holds each circle's
+      # kind-445s, `#h` REQs and NEG-OPENs to this listen alone.
       HAVEN_E2E_LOCATION_RELAY: ws://10.0.2.2:7789
       FLUTTER_SUPPRESS_ANALYTICS: "true"
       # The runtime log scanner is wired into THIS lane (the one that runs the
@@ -592,7 +595,7 @@ jobs:
 
       # THE POINT OF ALL OF THE ABOVE: read the transcript.
       #
-      # Three oracles, one journal, one sentinel. They run together in one step
+      # Four oracles, one journal, one sentinel. They run together in one step
       # so a single red run reports every finding instead of hiding the second
       # and third behind the first — the same reason repo-guards.yml runs its
       # guards with `if: always()` between steps.
@@ -722,6 +725,33 @@ jobs:
             --min-distinct-conns 2 \
             ${excl[@]+"${excl[@]}"} || rc=$?
           verdict "C2-C4 structural" "${rc}"
+
+          # C8 — relay-plane placement: every client->relay EVENT, REQ and
+          # NEG-OPEN on a listen whose roles admit it (check-wire-planes.sh, a
+          # wrapper over the haven-wire-planes binary start-wire-proxy.sh built
+          # beside the recorder). OUTSIDE the live_sync gate below on purpose:
+          # it needs no two-circle scenario — the family circle's kind-445s,
+          # the Welcomes, the KeyPackages and the invite lookups run on both
+          # paths — so the poll variant is judged too. Each listen declares the
+          # roles its relay holds: 7789 is the location pool's one entry; 7788
+          # is the account's inbox AND key-package relay, and discovery reads it
+          # as well, because the default-relay override the harness installs is
+          # discovery's fallback — the same overlap production has built in
+          # (its discovery pool contains the default relays). Both overlaps are
+          # DECLARED, never inferred. Values never reach this log: the binary
+          # prints role names, kinds, rule ids and buckets only.
+          rc=0
+          bash tooling/e2e/ci/check-wire-planes.sh \
+            --journal "${WIRE_JOURNAL}" \
+            --sentinel "${WIRE_SENTINEL}" \
+            --plane inbox=127.0.0.1:7788 \
+            --plane keypackage=127.0.0.1:7788 \
+            --plane discovery=127.0.0.1:7788 \
+            --plane location=127.0.0.1:7789 \
+            --declare-overlap inbox:discovery \
+            --declare-overlap keypackage:discovery \
+            ${excl[@]+"${excl[@]}"} || rc=$?
+          verdict "C8 planes" "${rc}"
 
           # C5 — correlation and containment. Each pool is the set of relays a
           # KIND may reach; this lane is hermetic, so every kind's pool is the
@@ -864,7 +894,7 @@ jobs:
             echo "::error::wire oracles FAILED:${failures}" >&2
             exit "${first_rc}"
           fi
-          echo "All three wire oracles read the journal and found it clean."
+          echo "All four wire oracles read the journal and found it clean."
 
       # The RAW journal is a full traffic transcript and must die with the
       # runner (scripts/ci/check_wire_proxy_test_only.sh forbids uploading a

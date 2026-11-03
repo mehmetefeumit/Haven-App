@@ -67,6 +67,7 @@ import 'package:haven/src/utils/log_alias.dart'
     show LogAliasClass, logAliasHandle;
 import 'package:integration_test/integration_test.dart';
 
+import 'e2e/_lib/plane_store_check.dart';
 import 'e2e/_lib/test_relay.dart';
 import 'e2e/_lib/test_user.dart';
 import 'e2e/_lib/throw_time_error_capture.dart';
@@ -206,6 +207,7 @@ void main() {
         // Connect the R2 observer BEFORE wiring the container.
         final r2 = await connectProbeRelay(secondStrfryUrl);
         try {
+          final r2Before = await storeIds(r2);
           // Register the observer BEFORE any state mutation.
           final r2EventFuture = r2.firstWhere(
             filter: <String, dynamic>{
@@ -317,6 +319,13 @@ void main() {
             debugPrint(
               '[RLY-PROV-01] PASS: kind 30443 received on R2 '
               'id=${logAliasHandle(LogAliasClass.event, ev.id)}',
+            );
+            await assertStoreWithinRoles(
+              r2,
+              check: 'RLY-PROV-01 R2',
+              roles: const <String>{'keypackage'},
+              before: r2Before,
+              harnessIds: r2.publishedIds,
             );
           } finally {
             container.dispose();

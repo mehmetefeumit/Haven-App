@@ -473,6 +473,7 @@ async fn commit_gap<T: TimelineSink, L: LogDrain>(
     // one that can commit. Staged by the product's staging call rather than
     // through `relay_update`, because that drives the commit in the same call
     // and the whole point here is the window in which it is not yet resolved.
+    world.note_routing_of(&group, &urls);
     let change = world
         .device(stager)?
         .manager()?

@@ -6,8 +6,8 @@
 //! genuine MLS groups over a genuine relay, and a tick applies genuine faults.
 
 use std::fmt;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use haven_core::circle::MemberKeyPackage;
@@ -27,6 +27,7 @@ use crate::nemesis::types::DropClass;
 use crate::nemesis::types::{DeviceOp, Fault, Op, Schedule, ScheduledOp};
 use crate::profiles::WorldShape;
 use crate::rc::Rc;
+use crate::relay::plane_instant;
 use crate::rig::circle::{build_circle, publish_witnessed, DeviceDriver, PublishVerdict};
 use crate::rig::declare::DeclareSink;
 use crate::rig::plane::{CapturedLine, LogDrain, RelayPlane, TimelineRecord, TimelineSink};
@@ -119,24 +120,51 @@ impl SessionStoreUse {
     }
 }
 
-/// Installs the process-wide opt-ins the rig needs, exactly once.
+/// Installs the process-wide opt-ins the rig needs, exactly once: the
+/// loopback opt-in and a dead discovery plane.
 ///
-/// `allow_ws_loopback_for_test` is install-once by design and returns an error
-/// on a second call, so the verdict of the FIRST call is what every later
-/// caller is told. An opt-in that never installed is rc 2: without it no device
-/// can dial the world's own relay, and every liveness result would be a
-/// fiction.
+/// Both are install-once by design and return an error on a second call, so
+/// the verdict of the FIRST call is what every later caller is told. An
+/// opt-in that never installed is rc 2: without the first no device can dial
+/// the world's own relay, and every liveness result would be a fiction;
+/// without the second a world is not hermetic.
 ///
 /// # Errors
 ///
 /// [`RigError::LoopbackOptInRefused`] if the first install failed.
 pub fn install_process_globals() -> Result<(), RigError> {
     static INSTALLED: OnceLock<bool> = OnceLock::new();
-    if *INSTALLED.get_or_init(|| haven_core::relay::allow_ws_loopback_for_test().is_ok()) {
+    if *INSTALLED.get_or_init(|| {
+        haven_core::relay::allow_ws_loopback_for_test().is_ok() && discovery_held_dead()
+    }) {
         Ok(())
     } else {
         Err(RigError::LoopbackOptInRefused)
     }
+}
+
+/// Points the discovery plane at a loopback port that refuses every dial.
+///
+/// Without it `discovery_relays()` resolves to the production indexers, so a
+/// product path that falls back to discovery from inside a world would dial
+/// public hosts from CI. The port is bound and never listened on, and the
+/// socket is HELD for the life of the process: released, a later relay plane
+/// could bind the same port and discovery traffic would land on it.
+fn discovery_held_dead() -> bool {
+    static DEAD: OnceLock<Option<tokio::net::TcpSocket>> = OnceLock::new();
+    let held = DEAD.get_or_init(|| {
+        let socket = tokio::net::TcpSocket::new_v4().ok()?;
+        socket.set_reuseaddr(false).ok()?;
+        socket
+            .bind((std::net::Ipv4Addr::LOCALHOST, 0).into())
+            .ok()?;
+        Some(socket)
+    });
+    held.as_ref()
+        .and_then(|socket| socket.local_addr().ok())
+        .is_some_and(|addr| {
+            haven_core::relay::set_discovery_relays_for_test(vec![format!("ws://{addr}")]).is_ok()
+        })
 }
 
 /// A change a scenario asks a device's product driver to make: the app's own
@@ -497,12 +525,98 @@ impl fmt::Debug for WorldFingerprint {
     }
 }
 
+/// A world's relay planes, by the role each plays.
+///
+/// Three sets, never one relabelled: an arm's "the relays" is the location
+/// set, and the account and profile planes are where a device's own lists
+/// live, so no device's inbox ever shares a relay with its circles.
+pub struct Planes<R> {
+    /// The circles' routing: what [`SimWorld::relays`] answers.
+    pub location: Vec<R>,
+    /// The devices' own lists: every inbox on the first, every key package on
+    /// the second when there are two, else on the first.
+    pub account: Vec<R>,
+    /// The profile pool.
+    pub profile: Vec<R>,
+}
+
+impl<R: RelayPlane> Planes<R> {
+    /// Gives `tag` an endpoint of its own on every plane and alias endpoints
+    /// on the first location plane, and opens the device behind them.
+    ///
+    /// Before the device dials anything: an endpoint provisioned after the
+    /// engine started would be one nothing dials. Every stored address of the
+    /// location and account planes dials the device's own endpoint on that
+    /// plane; its engine's pool holds the circles' planes and the inbox plane
+    /// and nothing else, so `relay_health().connected` counts
+    /// [`SimWorld::engine_planes`].
+    async fn provision(&mut self, tag: DeviceTag) -> Result<SimDevice, RigError> {
+        for relay in self
+            .location
+            .iter_mut()
+            .chain(&mut self.account)
+            .chain(&mut self.profile)
+        {
+            relay.provision(tag).await?;
+        }
+        let first = self.location.first_mut().ok_or(RigError::ShapeMismatch)?;
+        first.provision_aliases(tag, ALIAS_ENDPOINTS).await?;
+        let aliases = first.alias_urls_for(tag);
+        let routes: Vec<(String, String)> = self
+            .location
+            .iter()
+            .chain(&self.account)
+            .map(|relay| (relay.url().to_owned(), relay.url_for(tag).to_owned()))
+            .collect();
+        let inbox = self.account.first().ok_or(RigError::ShapeMismatch)?;
+        let key_package = self.account.get(1).unwrap_or(inbox);
+        let mut device = SimDevice::open_behind(
+            tag,
+            routes,
+            vec![inbox.url_for(tag).to_owned()],
+            (
+                vec![inbox.url().to_owned()],
+                vec![key_package.url().to_owned()],
+            ),
+        )?;
+        device.hold_aliases(aliases);
+        Ok(device)
+    }
+}
+
+/// One relay of one circle's routing, from the instant the rig staged it to
+/// the instant a change it staged left it. No `Debug`: it holds a routing id
+/// and an address.
+#[derive(Clone)]
+pub struct RoutingSpan {
+    /// The routing id, as `#h` spells it.
+    pub h: String,
+    /// The address the routing names: a plane's canonical URL, or an address
+    /// no plane serves.
+    pub relay: String,
+    /// When it was staged, in the plane record's order.
+    pub added: u64,
+    /// When a staged change left it.
+    pub removed: Option<u64>,
+}
+
 /// A whole simulated world.
 pub struct SimWorld<R: RelayPlane, T: TimelineSink, L: LogDrain> {
     id: WorldId,
     devices: Vec<SimDevice>,
     circles: Vec<SimCircle>,
     relays: Vec<R>,
+    account: Vec<R>,
+    profile: Vec<R>,
+    /// Every routing the rig decided, recorded where it decided it: what O7
+    /// judges a `#h` against.
+    routing: Mutex<Vec<RoutingSpan>>,
+    /// Each circle's routing id by its MLS group, the extra circles an arm
+    /// builds included: a relay change names the group, the routing the id.
+    routing_ids: Mutex<Vec<(GroupId, String)>>,
+    /// Whether an arm drove the profile plane, which is what O7's vacuity
+    /// demands of it.
+    profile_exercised: AtomicBool,
     schedule: Schedule,
     timeline: T,
     logs: L,
@@ -531,45 +645,46 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
     pub async fn build(
         shape: &WorldShape,
         schedule: Schedule,
-        mut relays: Vec<R>,
+        mut planes: Planes<R>,
         timeline: T,
         logs: L,
     ) -> Result<Self, RigError> {
         install_process_globals()?;
-        if relays.len() != shape.relays || shape.members < 2 || shape.circles == 0 {
+        if planes.location.len() != shape.relays
+            || planes.account.len() != shape.account_relays
+            || planes.profile.len() != shape.profile_relays
+            || planes.account.is_empty()
+            || shape.members < 2
+            || shape.circles == 0
+        {
             return Err(RigError::ShapeMismatch);
         }
-
-        let urls: Vec<String> = relays.iter().map(|relay| relay.url().to_string()).collect();
         let mut devices = Vec::with_capacity(shape.members);
         for ordinal in 0..shape.members {
             let tag = DeviceTag::new(u32::try_from(ordinal).map_err(|_| RigError::ShapeMismatch)?);
-            // Before the device dials anything: an endpoint provisioned after
-            // the engine started would be one nothing dials.
-            for relay in &mut relays {
-                relay.provision(tag).await?;
-            }
-            let first = relays.first_mut().ok_or(RigError::ShapeMismatch)?;
-            first.provision_aliases(tag, ALIAS_ENDPOINTS).await?;
-            let aliases = first.alias_urls_for(tag);
-            // The inbox plane dials the device's own endpoints too, so the
-            // engine's pool holds ONE relay per plane: the pool is the group
-            // relays' union with the inbox's, and a second address per plane
-            // would double every `relay_health().connected` a canary reads.
-            let own: Vec<String> = relays
-                .iter()
-                .map(|relay| relay.url_for(tag).to_owned())
-                .collect();
-            let mut device = SimDevice::open_behind(tag, &urls, &own)?;
-            device.hold_aliases(aliases);
-            devices.push(device);
+            devices.push(planes.provision(tag).await?);
         }
+        let Planes {
+            location: relays,
+            account,
+            profile,
+        } = planes;
+        let urls: Vec<String> = relays.iter().map(|relay| relay.url().to_string()).collect();
 
         let outstanding = Arc::new(AtomicUsize::new(0));
         let mut circles = Vec::with_capacity(shape.circles);
+        let mut routing = Vec::new();
+        let mut routing_ids = Vec::new();
         for ordinal in 0..shape.circles {
             let tag = CircleTag::new(u32::try_from(ordinal).map_err(|_| RigError::ShapeMismatch)?);
-            circles.push(build_circle(tag, &devices, &urls).await?);
+            let at = plane_instant();
+            let circle = build_circle(tag, &devices, &urls).await?;
+            routing.extend(spans(circle.group_id_hex(), &urls, at));
+            routing_ids.push((
+                circle.mls_group_id().clone(),
+                circle.group_id_hex().to_owned(),
+            ));
+            circles.push(circle);
         }
 
         for device in &mut devices {
@@ -595,6 +710,11 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
             devices,
             circles,
             relays,
+            account,
+            profile,
+            routing: Mutex::new(routing),
+            routing_ids: Mutex::new(routing_ids),
+            profile_exercised: AtomicBool::new(false),
             schedule,
             timeline,
             logs,
@@ -626,7 +746,7 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         for circle in &self.circles {
             declare_one(sink.as_ref(), circle)?;
         }
-        for relay in &self.relays {
+        for relay in self.all_planes() {
             sink.declare_relay(relay.url())?;
             // Every endpoint the world dials, not only the canonical one: a
             // device's own is an address the rig minted like any other.
@@ -639,6 +759,18 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         }
         self.declarations = Some(sink);
         Ok(())
+    }
+
+    /// Declares a display name an arm has a device publish, through the sink
+    /// the run attached; nothing without one.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::DeclarationRefused`] if the class will not take it.
+    pub fn declare_name(&self, name: &str) -> Result<(), RigError> {
+        self.declarations
+            .as_ref()
+            .map_or(Ok(()), |sink| sink.declare_name(name))
     }
 
     /// Builds one more circle over this world's devices and relays, declares
@@ -666,7 +798,19 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
     /// As [`Self::build_extra_circle`].
     pub async fn build_extra_circle_on(&self, urls: &[String]) -> Result<SimCircle, RigError> {
         let ordinal = self.next_extra_circle.fetch_add(1, Ordering::AcqRel);
+        // Before the create: a running engine follows the circle the moment it
+        // exists, so its first REQ can come before the create returns.
+        let at = plane_instant();
         let circle = build_circle(CircleTag::new(ordinal), &self.devices, urls).await?;
+        self.routing_log()
+            .extend(spans(circle.group_id_hex(), urls, at));
+        self.routing_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((
+                circle.mls_group_id().clone(),
+                circle.group_id_hex().to_owned(),
+            ));
         if let Some(sink) = &self.declarations {
             declare_one(sink.as_ref(), &circle)?;
         }
@@ -794,11 +938,7 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         device: Option<DeviceTag>,
         fault: Fault,
     ) -> Result<(), RigError> {
-        let plane = self
-            .relays
-            .iter_mut()
-            .find(|plane| plane.tag() == relay)
-            .ok_or(RigError::UnknownTarget)?;
+        let plane = self.plane_mut(relay)?;
         match device {
             None => plane.apply(fault).await,
             Some(device) => plane.apply_for(device, fault).await,
@@ -810,8 +950,7 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
     /// bucketed anyway so the timeline carries one magnitude vocabulary).
     fn record_rebind(&self, tick: u64, relay: RelayTag) {
         let Some((attempts, wait)) = self
-            .relays
-            .iter()
+            .all_planes()
             .find(|plane| plane.tag() == relay)
             .and_then(RelayPlane::last_rebind)
         else {
@@ -864,15 +1003,58 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
     /// Publishes `events` from `device` and waits, bounded, for a relay plane
     /// to witness an `OK`.
     ///
+    /// Each event goes to the planes its row admits, as production sends it:
+    /// a key package and the key-package list to the device's key-package
+    /// plane, the inbox list to its inbox plane, a kind 445 to the location
+    /// planes of its `#h` circle's routing. The rig's own traffic is then
+    /// plane-legal by construction, and O7 grades it like the product's.
+    ///
     /// # Errors
     ///
-    /// [`RigError`] if the witness condition could not be read.
+    /// [`RigError::UnknownTarget`] for an event no row sends anywhere, or a
+    /// kind 445 whose circle routes over no location plane; [`RigError`] if
+    /// the witness condition could not be read.
     pub async fn publish_witnessed(
         &self,
         device: DeviceTag,
         events: &[Event],
     ) -> Result<Option<Duration>, RigError> {
-        publish_witnessed(self.device(device)?, &self.relays, events).await
+        publish_witnessed(self.device(device)?, events, |event| self.targets_of(event)).await
+    }
+
+    /// The planes `event`'s row sends it to.
+    fn targets_of(&self, event: &Event) -> Result<Vec<&R>, RigError> {
+        let account = |index: usize| {
+            self.account
+                .get(index)
+                .or_else(|| self.account.first())
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        let targets = match event.kind.as_u16() {
+            30443 | 10002 => account(1),
+            10050 => account(0),
+            445 => {
+                let h = event
+                    .tags
+                    .iter()
+                    .find_map(|tag| match tag.as_slice() {
+                        [name, value, ..] if name == "h" => Some(value.clone()),
+                        _ => None,
+                    })
+                    .ok_or(RigError::UnknownTarget)?;
+                let routed = self.routing_current(&h);
+                self.relays
+                    .iter()
+                    .filter(|plane| routed.iter().any(|relay| relay == plane.url()))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        if targets.is_empty() {
+            return Err(RigError::UnknownTarget);
+        }
+        Ok(targets)
     }
 
     /// Makes `change` through `device`'s product driver, on the device's wall
@@ -906,6 +1088,10 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         let publishing = driver.publishing();
         let outcome = match change {
             Change::Relays { group, relays } => {
+                // At staging, before the driver sends a byte: the routing the
+                // rig asked for is the ground truth from here, whatever the
+                // commit comes to (an unresolved one is still sent there).
+                self.note_routing_of(group, relays);
                 publishing.update_relays(manager, group, relays).await
             }
             Change::Remove { group, members } => {
@@ -1321,6 +1507,144 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         &mut self.relays
     }
 
+    /// The account planes: every device's inbox on the first, its key
+    /// package on the second when there are two.
+    #[must_use]
+    pub fn account_relays(&self) -> &[R] {
+        &self.account
+    }
+
+    /// The profile planes.
+    #[must_use]
+    pub fn profile_relays(&self) -> &[R] {
+        &self.profile
+    }
+
+    /// Every plane of every role, location first, then account, then profile:
+    /// the order their tags were minted in.
+    pub fn all_planes(&self) -> impl Iterator<Item = &R> {
+        self.relays.iter().chain(&self.account).chain(&self.profile)
+    }
+
+    /// Every plane of every role, mutably, in [`Self::all_planes`]'s order.
+    pub fn all_planes_mut(&mut self) -> impl Iterator<Item = &mut R> {
+        self.relays
+            .iter_mut()
+            .chain(&mut self.account)
+            .chain(&mut self.profile)
+    }
+
+    /// The plane `tag` names, whatever its role.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::UnknownTarget`] if the world has no such plane.
+    pub fn plane_mut(&mut self, tag: RelayTag) -> Result<&mut R, RigError> {
+        self.all_planes_mut()
+            .find(|plane| plane.tag() == tag)
+            .ok_or(RigError::UnknownTarget)
+    }
+
+    /// How many planes a device's engine holds once started: the circles'
+    /// location planes and its inbox plane — what `relay_health().connected`
+    /// counts for a world whose routings name nothing else.
+    #[must_use]
+    pub const fn engine_planes(&self) -> usize {
+        self.relays.len() + 1
+    }
+
+    /// The tags of the planes a device's engine holds: the location planes
+    /// and the inbox plane.
+    #[must_use]
+    pub fn engine_plane_tags(&self) -> Vec<RelayTag> {
+        self.relays
+            .iter()
+            .chain(self.account.first())
+            .map(RelayPlane::tag)
+            .collect()
+    }
+
+    /// Records that circle `h` now routes over `relays`, as the rig decided
+    /// it: every relay the change adds joins at this instant, every one it
+    /// drops leaves at it.
+    ///
+    /// Called where the rig decides a routing — a relay change at staging,
+    /// and an arm that commits a routing component itself (S24).
+    pub fn note_routing(&self, h: &str, relays: &[String]) {
+        let at = plane_instant();
+        let mut routing = self.routing_log();
+        for span in routing.iter_mut() {
+            if span.h == h && span.removed.is_none() && !relays.contains(&span.relay) {
+                span.removed = Some(at);
+            }
+        }
+        for relay in relays {
+            if !routing
+                .iter()
+                .any(|span| span.h == h && span.removed.is_none() && span.relay == *relay)
+            {
+                routing.push(RoutingSpan {
+                    h: h.to_owned(),
+                    relay: relay.clone(),
+                    added: at,
+                    removed: None,
+                });
+            }
+        }
+    }
+
+    /// [`Self::note_routing`] for the circle `group` names, adopted or not:
+    /// what an arm that stages a relay change through the product's staging
+    /// call itself calls first, before a byte of it is sent.
+    pub fn note_routing_of(&self, group: &GroupId, relays: &[String]) {
+        if let Some(h) = self.routing_id_of(group) {
+            self.note_routing(&h, relays);
+        }
+    }
+
+    /// Every routing the rig decided, in the order it decided them.
+    #[must_use]
+    pub fn routing_history(&self) -> Vec<RoutingSpan> {
+        self.routing_log().clone()
+    }
+
+    /// The relays circle `h` routes over now, as the rig last decided.
+    #[must_use]
+    pub fn routing_current(&self, h: &str) -> Vec<String> {
+        self.routing_log()
+            .iter()
+            .filter(|span| span.h == h && span.removed.is_none())
+            .map(|span| span.relay.clone())
+            .collect()
+    }
+
+    fn routing_log(&self) -> std::sync::MutexGuard<'_, Vec<RoutingSpan>> {
+        self.routing.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Declares the profile plane driven, so O7 requires it to have carried a
+    /// profile publish and a profile lookup.
+    pub fn exercise_profile(&self) {
+        self.profile_exercised.store(true, Ordering::Release);
+    }
+
+    /// Whether an arm declared the profile plane driven.
+    #[must_use]
+    pub fn profile_exercised(&self) -> bool {
+        self.profile_exercised.load(Ordering::Acquire)
+    }
+
+    /// The routing id the rig built `group` with, whether or not the world
+    /// adopted the circle.
+    fn routing_id_of(&self, group: &GroupId) -> Option<String> {
+        self.routing_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|(built, _)| built == group)
+            .map(|(_, h)| h.clone())
+    }
+
     /// The relay URLs devices dial. Never rendered.
     #[must_use]
     pub fn relay_urls(&self) -> Vec<String> {
@@ -1341,6 +1665,16 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
     pub const fn timeline(&self) -> &T {
         &self.timeline
     }
+}
+
+/// The spans of a routing the rig staged at `at` over `relays`.
+fn spans<'a>(h: &'a str, relays: &'a [String], at: u64) -> impl Iterator<Item = RoutingSpan> + 'a {
+    relays.iter().map(move |relay| RoutingSpan {
+        h: h.to_owned(),
+        relay: relay.clone(),
+        added: at,
+        removed: None,
+    })
 }
 
 /// Declares one circle's two ids and its name.
@@ -1368,7 +1702,7 @@ fn next_world_ordinal() -> u64 {
 mod tests {
     use super::*;
     use crate::nemesis::types::{DeviceOp, ScheduledOp};
-    use crate::rig::doubles::{RecordingTimeline, StubDrain, TestRelay};
+    use crate::rig::doubles::{test_planes, RecordingTimeline, StubDrain, TestRelay};
     use crate::rig::plane::CapturedLine;
     use crate::rig::KillKind;
     use tokio::time::{Instant, MissedTickBehavior};
@@ -1383,15 +1717,16 @@ mod tests {
             members: 2,
             circles: 1,
             relays: 1,
+            account_relays: 1,
+            profile_relays: 0,
         }
     }
 
     async fn build_world(schedule: Schedule) -> TestWorld {
-        let relay = TestRelay::start(RelayTag::new(0)).await;
         SimWorld::build(
             &smallest_shape(),
             schedule,
-            vec![relay],
+            test_planes(&smallest_shape()).await,
             RecordingTimeline::default(),
             StubDrain::default(),
         )
@@ -1824,7 +2159,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_world_reads_only_its_own_captured_lines() {
-        let relay = TestRelay::start(RelayTag::new(0)).await;
         let drain = StubDrain::default();
         // The same drain, kept on this side of the move: the lines are planted
         // AFTER the world exists, so both ids are known and neither assertion
@@ -1833,7 +2167,7 @@ mod tests {
         let world = SimWorld::build(
             &smallest_shape(),
             Schedule::new(Vec::new()),
-            vec![relay],
+            test_planes(&smallest_shape()).await,
             RecordingTimeline::default(),
             drain,
         )
@@ -2033,26 +2367,98 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_world_shape_the_planes_do_not_match_is_refused() {
-        let relay = TestRelay::start(RelayTag::new(0)).await;
-        let outcome = SimWorld::build(
-            &WorldShape {
-                members: 2,
-                circles: 1,
-                relays: 2,
-            },
-            Schedule::new(Vec::new()),
-            vec![relay],
-            RecordingTimeline::default(),
-            StubDrain::default(),
-        )
-        .await;
-        assert!(matches!(outcome, Err(RigError::ShapeMismatch)));
+        let built = |shape: WorldShape| async move {
+            SimWorld::build(
+                &shape,
+                Schedule::new(Vec::new()),
+                test_planes(&smallest_shape()).await,
+                RecordingTimeline::default(),
+                StubDrain::default(),
+            )
+            .await
+        };
+        let mut wider = smallest_shape();
+        wider.relays = 2;
+        assert!(matches!(built(wider).await, Err(RigError::ShapeMismatch)));
+        let mut more_accounts = smallest_shape();
+        more_accounts.account_relays = 2;
+        assert!(matches!(
+            built(more_accounts).await,
+            Err(RigError::ShapeMismatch)
+        ));
+        let mut no_account = smallest_shape();
+        no_account.account_relays = 0;
+        assert!(
+            matches!(built(no_account).await, Err(RigError::ShapeMismatch)),
+            "a world whose inbox would ride a circle's relay is not built"
+        );
     }
 
     #[test]
     fn the_process_opt_in_installs_once_and_reports_the_first_verdict() {
         install_process_globals().expect("the loopback opt-in installs");
         install_process_globals().expect("a second caller is told the first verdict");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_discovery_plane_is_a_loopback_port_that_refuses_every_dial() {
+        install_process_globals().expect("the process globals install");
+        let discovery = haven_core::relay::discovery_relays();
+        let [only] = discovery.as_slice() else {
+            panic!("a soak process has exactly one discovery relay");
+        };
+        let addr = only
+            .strip_prefix("ws://127.0.0.1:")
+            .expect("a loopback ws address, never a public indexer");
+        let refused = tokio::net::TcpStream::connect(format!("127.0.0.1:{addr}")).await;
+        assert!(
+            refused.is_err(),
+            "a dial to the discovery plane is refused, so nothing is ever sent there"
+        );
+        assert!(
+            tokio::net::TcpListener::bind(format!("127.0.0.1:{addr}"))
+                .await
+                .is_err(),
+            "and the port is held, so no relay plane can come to answer on it"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_devices_inbox_and_its_circles_never_share_a_plane() {
+        let mut shape = smallest_shape();
+        shape.account_relays = 2;
+        let world = SimWorld::build(
+            &shape,
+            Schedule::new(Vec::new()),
+            test_planes(&shape).await,
+            RecordingTimeline::default(),
+            StubDrain::default(),
+        )
+        .await
+        .unwrap_or_else(|failure| panic!("world builds: {failure}"));
+        let inbox = world.account_relays()[0].url().to_owned();
+        let key_package = world.account_relays()[1].url().to_owned();
+        for device in world.devices() {
+            assert!(
+                device.inbox_relays().iter().all(|inbox| device
+                    .specs()
+                    .iter()
+                    .all(|spec| !spec.relays.contains(inbox))),
+                "the engine's inbox REQ and its circles' REQs never ride one relay"
+            );
+            assert_eq!(device.stored_inbox(), std::slice::from_ref(&inbox));
+            assert_eq!(
+                device.stored_key_package(),
+                std::slice::from_ref(&key_package),
+                "with two account planes the lists are told apart"
+            );
+            assert!(world
+                .relay_urls()
+                .iter()
+                .all(|url| *url != inbox && *url != key_package));
+        }
+        assert_eq!(world.engine_planes(), world.relays().len() + 1);
+        world.teardown().await.expect("teardown");
     }
 
     #[test]

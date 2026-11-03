@@ -156,6 +156,101 @@ Haven creates). The seed and discovery lists share hosts; the profile and
 location pools share none with any other built-in list
 (`tests/profile_plane_separation.rs`).
 
+### The relay-plane allow matrix
+
+Which frame a relay holding each role may receive from Haven. The table is
+`ROWS` in `tooling/e2e/local-relay/src/planes/policy.rs`, the one policy every
+proof below judges with (`planes::judge::judge`); the crate test
+`the_documented_matrix_is_the_policy` fails when this table and `ROWS` differ,
+and `the_exported_matrix_is_current` pins the export
+(`tooling/e2e/relay_planes.json`, read by the Dart mirror test only). A frame
+no row's shape admits — a stray tag or filter key, a filter spanning two rows,
+a REQ whose filters land on two planes, `COUNT`, `AUTH`, a `CLOSE` or `NEG-*`
+naming a subscription its connection never opened — is unknown; one a row
+admits on a relay its binding does not is a crossing. A relay holding several
+roles admits their union: an account's inbox and key-package lists may share a
+relay; an own list with a location or discovery relay, and an invitee's list
+with any relay, only when the world or lane being judged declares the pair;
+and a profile relay shares with nothing, nor a location relay with discovery.
+Any other sharing refuses the judgement.
+Memberships are intervals, so a frame is judged against what its relay held
+when it was sent; a circle's routing counts from the commit's staging.
+
+| Row | Frame | Kinds | Exactly once / required | May repeat / optional | Limit | Author | Admitted on |
+|---|---|---|---|---|---|---|---|
+| `EV-445C` | EVENT | 445 | `h` | none | - | ephemeral (no known identity), used once | a relay of the `h` circle's routing kept at the instant (the targets frozen at staging, a routing the change leaves included) |
+| `EV-445A` | EVENT | 445 | `h`, `expiration` | none | - | ephemeral (no known identity), used once | a relay of the `h` circle's routing current at the instant, or one it left at or after the event's `created_at`; `0 < expiration - created_at <= 228` |
+| `EV-1059` | EVENT | 1059 | `p` | none | - | ephemeral (no known identity) | a relay an inbox list of the `p` recipient named at or before the instant |
+| `EV-30443` | EVENT | 30443 | `d`, `mls_protocol_version`, `i`, `mls_ciphersuite`, `mls_extensions`, `mls_proposals`, `app_components` | none | - | an account | the author's own key-package list |
+| `EV-10002` | EVENT | 10002 | none | `r` | - | an account | the author's own key-package list; no relay it names holds the location, profile or discovery role without holding one of the author's own lists |
+| `EV-10050` | EVENT | 10050 | none | `relay` | - | an account | the author's own inbox list; no relay it names holds the location, profile or discovery role without holding one of the author's own lists |
+| `EV-0` | EVENT | 0 | none | none | - | an account | a profile relay |
+| `EV-5` | EVENT | 5 | none | `e`, `a`, `k` | - | an account | a relay admitting EVERY kind it retracts (each `k`, each `a` coordinate's kind, each `e` id's kind; at least one `k` or `a`): 0 on a profile relay, 10050 / 10002 on the author's own inbox / key-package list current or former, 30443 on the current key-package list |
+| `REQ-445-H` | REQ | 445 | `kinds`, `#h` | `since`, `until`, `limit` | any | - | a relay where every `#h` circle's routing stands |
+| `REQ-445-IDS` | REQ | 445 | `ids`, `kinds`, `limit` | `#h` | = ids | - | a relay where the routing of every id's circle (the event index) and of every `#h` circle is kept; `limit` = the number of ids |
+| `REQ-1059-P` | REQ | 1059 | `kinds`, `#p` | `since`, `limit` | at most 1000 | - | the inbox list of the one `#p` value, which is the sender when the sender is known |
+| `REQ-30443-A` | REQ | 30443 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list; `limit` 5 (the status probe) also either own list of an account |
+| `REQ-10002-A` | REQ | 10002 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list; `limit` 5 (the status probe) also either own list of an account |
+| `REQ-10050-A` | REQ | 10050 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own inbox list when it is the sender; otherwise a discovery relay or the author's inbox list; `limit` 5 (the status probe) also either own list of an account |
+| `REQ-0-A` | REQ | 0 | `kinds`, `authors` | `limit` | at most 4 | - | one author, a profile relay |
+| `NEG-445-H` | NEG-OPEN | 445 | `kinds`, `#h`, `since`, `until`, `limit` | none | at most 16384 | - | one `#h` circle whose routing stands; opening message `6100000200` |
+
+Three proofs judge with it: **L1a / L1b** on every pull request — L1a,
+`every_relay_plane_receives_only_its_own_traffic_across_a_circle_lifecycle`
+(`haven-core/tests/relay_plane_wire_e2e.rs`): thirteen in-process relays, one
+per role, each behind a recording front (`relay::recording_front`), across a
+circle's lifecycle, then a crossing planted on each plane, each reported
+exactly; L1b, `ffi_account_and_profile_traffic_stays_on_its_planes`
+(`haven/rust_builder/src/api.rs`'s tests): the key-package tick, both
+relay-list heals and the profile's sync, read and retraction, judged with the
+sender known — the soak rig's **O7** (`RelayPlaneContainment`, over worlds
+with account and profile relays) and the E2E lanes' **C8**
+(`haven-wire-planes` over the wire journal). As of 2026-11-03 the judge, its
+own fixture suite (`tooling/e2e/local-relay/tests/wire_planes.rs`), L1a, L1b
+O7 and C8 are in place. C8 runs inside the core-flow lanes' wire-oracle step, on
+the poll and live-sync variants alike: each proxy listen declares the roles
+its relay holds (7788 the account's inbox and key-package relay, which the
+harness's default-relay override also makes discovery's — production's own
+seed ∩ discovery overlap, declared; 7789 the location pool's entry), each
+circle's routing is declared into the journal by the drive, and every
+non-harness client→relay frame below the sentinel is judged. It cannot see
+Blossom (HTTP, not a relay frame), a frame on a lane without the recorder —
+the multi-relay lanes that run without it read each relay's store instead,
+which shows no REQ, no NEG and no expired location (`plane_store_check.dart`)
+— or which of two roles sharing one listen a frame was for. O7 grades every frame
+every device of a soak world sent, after every arm and after the long faulted
+nemesis phase, against the ground truth the rig decided (each circle's routing
+from the instant it staged it, each device's own lists, the profile pool); its
+own controls plant a kind 0 on a location relay, an inbox REQ on a location
+relay, a location on a relay its circle never named and a `CLOSE` its
+connection never opened (`tooling/soak/tests/oracles.rs`), and S26 drives the
+profile and key-package planes under a downed profile relay. It does not grade
+the exact left-routing rule (a member that has not applied a relay change
+still seals for the routing it holds, and only L1a judges with one sender) or
+the discovery plane, which a soak process points at a port that refuses every
+dial. L1a also
+holds that no client dials a relay outside its world: in a build with
+`test-utils` the admission policy every relay client carries (Rule 16's
+`VerifiedEvents`) notes each relay URL before the pool's connection attempt
+(`relay::dial_witness`) and admits it exactly as the trait's default does —
+the same policy, not a second one, and compiled out of every shipped build.
+On its first run L1a found, and the fix closed, the live plane sending a
+circle's `CLOSE` to every relay of its pool when it dropped that circle's REQ
+— the inbox relay and every other circle's relays learned a subscription id
+that joined their planes; it now goes only to the relays that hold the
+subscription.
+Its last phase pins what the product does today with an invitee's relay
+lists that name other planes (the Welcome goes to the first relay of the
+inbox list that acknowledges it, and the key-package lookup to every relay
+of the NIP-65 write set): the finding set it expects becomes empty when a
+rule drops such entries. Residuals: L1a and C8 judge with no
+sender, so a request on another identity's own list (an inbox REQ by `#p` of
+an account other than the device's) passes there — the per-identity bindings
+are proved by L1b and by O7 on a device's own and alias endpoints (O7 judges a
+frame on a plane's canonical endpoint — catch-up sweeps, the rig's inbox reads,
+an invite's key-package lookup — with no sender too), and C8 proves role
+placement on the hermetic lanes, not those bindings.
+
 ### The location relay pool
 
 A circle created without named relays — every create the app's UI makes — gets

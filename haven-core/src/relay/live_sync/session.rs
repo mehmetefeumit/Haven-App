@@ -434,6 +434,21 @@ async fn bounded<T>(dur: Duration, fut: impl Future<Output = T>) -> LiveSyncResu
         .map_err(|_| LiveSyncError::Timeout)
 }
 
+/// CLOSEs `sub_id` on the relays whose own subscription map holds it, and on
+/// no other. The pool's `unsubscribe` sends the CLOSE to every relay it holds,
+/// so one circle's subscription id reached the inbox relay and every other
+/// circle's relays: a handle joining those planes. Every live-plane REQ is
+/// targeted (`subscribe_targeted`), which registers nothing at the pool, so
+/// there is no pool-level entry to remove. A relay's send error is ignored, as
+/// the pool ignores it.
+async fn close_where_held(client: &Client, sub_id: &SubscriptionId) {
+    for url in client.subscription(sub_id).await.into_keys() {
+        if let Ok(relay) = client.relay(url).await {
+            let _ = relay.unsubscribe(sub_id).await;
+        }
+    }
+}
+
 /// Retries an async subscribe `attempt` until at least one relay in the bucket
 /// accepts the REQ, waiting `wait` between tries, up to `max_attempts`.
 ///
@@ -2876,9 +2891,12 @@ impl LiveSyncCore {
                     |live| live.into_keys().collect(),
                 );
         for sub_id in &leftover {
-            if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.client.unsubscribe(sub_id))
-                .await
-                .is_err()
+            if bounded(
+                RELAY_LIFECYCLE_OP_TIMEOUT,
+                close_where_held(&self.client, sub_id),
+            )
+            .await
+            .is_err()
             {
                 log::warn!("[live_sync] pause: a leftover unsubscribe timed out; proceeding");
             }
@@ -4084,9 +4102,12 @@ impl RepairPlane {
         if sub_hexes.len() <= 1 {
             // Singleton / last member: CLOSE the REQ (drops its `#h` from the
             // wire). Bounded so a wedged pool op can't stall the lifecycle lock.
-            if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.client.unsubscribe(&sub_id))
-                .await
-                .is_err()
+            if bounded(
+                RELAY_LIFECYCLE_OP_TIMEOUT,
+                close_where_held(&self.client, &sub_id),
+            )
+            .await
+            .is_err()
             {
                 log::warn!("[live_sync] unsubscribe_circle: unsubscribe timed out; proceeding");
             }

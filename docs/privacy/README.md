@@ -369,6 +369,22 @@ exist:
   it inherits every limitation on this list. Treat the draft PR as unverified by
   CI, not as CI-approved; a human marking it ready for review is what puts it in
   front of the real pipeline.
+* **A refused model request fails the Manifest Author in seconds.**
+  Every scheduled run from 2026-08-18 failed at *Author manifest updates* in
+  about two seconds — one turn, zero cost, `is_error: true` — the shape of an
+  API request refused before any work, most likely the
+  `CLAUDE_CODE_OAUTH_TOKEN` credential (a lapsed plan or usage limit looks the
+  same); the action's log does not say which, and `show_full_output` stays off
+  in a public repository. The next step, *Report why the model run failed*
+  (`scripts/ci/report_manifest_author_failure.sh`), prints the final result's
+  reason alone, as one escaped line with request ids redacted, so dispatch the
+  workflow (`gh workflow run privacy-manifest-author.yml`) and read that line
+  first. If it names the credential, the fix is an owner action: run
+  `claude setup-token` signed in with the subscription account, store the token
+  with `gh secret set CLAUDE_CODE_OAUTH_TOKEN`, then dispatch again. The same
+  secret feeds `claude.yml`, `claude-code-review.yml`, `l10n-ai-review.yml` and
+  `privacy-invariants-ai-review.yml`; the last two run the action
+  `continue-on-error`, so the same refusal leaves their jobs green.
 * **A claim can be laundered out of coverage without moving any number.**
   `enumerate_weakenings` enumerates deleted invariants, status downgrades,
   dropped *disclosures* and assertions that lost their last proof — it does

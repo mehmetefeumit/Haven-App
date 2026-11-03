@@ -47,7 +47,12 @@ Five more, specific to this tier and listed here so nobody has to infer them:
 
 * **The KeyPackage plane is DISCOVERY-free.** A world's members are still
   invited from key packages minted in process and handed to `create_circle` as
-  values: nothing fetches a kind 30443 and no NIP-65 (kind 10002) list is read.
+  values, and no NIP-65 (kind 10002) list is read. One lookup exists: S26's
+  invite lookup of each member's own key package on the member's own
+  key-package relay, which is what that relay holds — the discovery plane a
+  lookup falls back to is a loopback port that refuses every dial, held for
+  the process's life (`rig/world.rs` `install_process_globals`), so no soak
+  world can reach a public indexer.
   What S12's `kp-rotation-slot` adds is the other half — a real 30443 staged
   through the engine's lifecycle record, published into a real slot on a real
   plane, read back from the plane's own store, and the rotation decision taken
@@ -127,9 +132,9 @@ Five more, specific to this tier and listed here so nobody has to infer them:
 
 ## Which safety invariants the rig actually grades
 
-PLAN §2.1 lists nine. The rig grades **S1, S5 and S7**, partially grades **S3**
-and **S6** (S6's advance side only — its hold-back side is still structural), and
-grades **none of S2, S4, S8, S9**. Spelled out, so a reader of the green tick
+PLAN §2.1 lists nine. The rig grades **S1, S2, S5, S7 and S8**, partially grades
+**S3**, **S4** (its routing half, by O7) and **S6** (S6's advance side only — its
+hold-back side is still structural), and grades **S9** not at all. Spelled out, so a reader of the green tick
 knows what it covered:
 
 | # | PLAN §2.1 invariant | Graded? |
@@ -137,7 +142,7 @@ knows what it covered:
 | S1 | Single branch (current-epoch cross-decrypt both ways, round-unique payloads) | **GRADED** — oracle O1, round-unique payloads. Both directions where it matters: every scenario's CLOSING round probes each chain pair BOTH ways, with the device that was restarted, reopened or resumed sending FIRST (a rebuilt epoch or exporter is invisible to the device itself and shows only as a peer failing to decrypt what it produced), and the nemesis phase's teardown round sweeps every ordered pair. Intermediate rounds stay one-directional over a spanning chain, which is the cost trade `Reach::These` exists for |
 | S2 | Post-removal unreadability | **GRADED** — oracle O3 (`RemovalUnreadability`), produced by S21's two O3 arms, graded APART because the delivery paths prove different things. `removal-delivered-commit` delivers the commit and asserts every later 445 is `Stale{SelfEvicted}` carrying no token: the BOOKKEEPING gate (MDK's `!is_active()`), and nothing about key material. `removal-withheld-commit` holds the commit back (`DropClass::Handshake` on the evictee's endpoint for the whole arm) so the evictee's group stays active and the peel is genuinely attempted, and asserts every post-removal probe is `Stale{PeelFailed}` carrying no token, with a stored row that NEVER resolves (read terminally after the closing round). O3 does NOT grade the RFC 9420 §12.4 forward-secrecy property (a Remove's `UpdatePath` blanks the leaf): that is openmls's, tested upstream, and is unreachable from Haven's code — an evictee that never received the commit has no epoch-N+1 exporter secret whether or not the `UpdatePath` was correct, so `PeelFailed` on the withheld path cannot distinguish a broken Remove. §12.4 is the basis O3 relies on, never what the soak measures |
 | S3 | Publish-before-apply (Rule 13) | **PARTIAL** — per COMMIT, not per transition. Every commit the rig makes is staged, sent, confirmed and rolled back by the PRODUCT's durable-fanout driver (`haven_core::relay::fanout::Publishing`, wrapped as `rig::circle::DeviceDriver`; the world's `change`, `resume`, `leave`, `ingest`, `seal_fix` and `publish_location` are its entries), built as the bridge builds its own — the `Claimed` mode a caller's word and the live plane's standing make, under the bridge's `RESUME_BUDGET_MS` budget, every engine claiming the foreground once started (pinned beside the bridge's in `haven-core/tests/security_rule_gates.rs`) — so the soak grades the shipped publish path; the rig resolves no pending state itself (`check_e2e_publish_before_apply.sh` check 2). S18's five arms assert the gap from both sides (stored HERE, unacknowledged THERE): the commit stays pending, the SAME bytes are sent again on the relay's schedule and confirmed on the acknowledgement that reaches the device, the circle converges with its peers paused or online, a location is deferred while the commit is pending and resumes after it, and a location's application fanout ends with its one offer; the rebind counters show no socket went away while the ack was withheld. Three more arms reach the same rule from other sides: S05's `confirm-err-is-not-a-failure` (W9f: a failed confirm of an acknowledged commit is decided by the stored record, never rolled back, and confirmed by the next drive), and S22's `oversized-commit` and `oversized-removal-wedges-the-circle` (a refusal the publisher hears is rolled back by the driver; for a removal the engine re-arms it). What is NOT graded is the universal form — "every observed epoch transition has a stored, acked commit" — because no oracle walks the ledger against the epoch history. That walk needs a per-transition record the Phase-1 ledger does not keep |
-| S4 | Nothing identifying on the wire | **NOT GRADED** — the wire oracles are the e2e lanes' (`check-wire-journal.sh` and friends); the rig still has no wire journal, and Phase 2 adds none |
+| S4 | Nothing identifying on the wire | **PARTIAL — the ROUTING half GRADED by O7** (`RelayPlaneContainment`, `oracle/planes.rs`): which relay each verb, kind and filter reaches, per circle, recipient and account, after every arm and after the nemesis phase, by the relay-plane judge every layer of the proof shares (see "Relay-plane containment (O7)" below). The CONTENT half — an identifying byte inside a frame — is not graded here; the e2e lanes' wire oracles (`check-wire-journal.sh` and friends) own it |
 | S5 | Retention window (5 past epochs) | **GRADED** — O4, over BOTH edges, produced by S04's `offline-past-retention`: one ciphertext sealed exactly `DEFAULT_MAX_PAST_EPOCHS` advances below the reader's tip still decrypts, and one a single epoch older does not. The window is READ from the engine at runtime, never restated, and each edge's distance is MEASURED from the epochs the run really reached — a world that did not reach the intended shape answers "this proved nothing" (one side of the window fed twice) rather than reporting a violation the arm manufactured. What it adds over `haven-core`'s own `rule5_retention_constants_are_pinned` and `rule5_epoch_n_ciphertext_still_decrypts_at_the_window_edge` is those two edges over a real relay and a real live plane, across a pause and a catch-up — and nothing else |
 | S6 | Cursor integrity | **PARTIAL — the ADVANCE side only.** S09's first two arms grade what an adversary can and cannot do to a persisted anchor (its other two grade the NIP-40 `expiration`: a member's commit stamped past it is applied, and the relay pool's own drop is recorded). The first is a standing outsider forging at the circle's public `#h` every round for the whole arm — three recipes per round, expired, doubled `#h` and undecodable — which moves neither `read_sync_cursor` nor `read_backfill_floor`, while a legitimate fix delivered in the SAME round proves the plane was carrying anything at all, and a catch-up sweep that still advances locally is the control that keeps the whole arm from being satisfied by a build where advance had been deleted. The second injects ONE forgery, after the original it copies has been folded: an observed ciphertext re-signed a day ahead, which applies nothing a second time and moves neither anchor. And the catch-up sweep's own advance is required to land inside a bracket taken from the same wall clock the sweep opens its window with, which is the advance's PROVENANCE rather than its arithmetic and which a forged `created_at` a day ahead could not satisfy. **The HOLD-BACK side is still structural only, and the reason is measured, not assumed:** reading it needs an event that is DELIVERED and un-applied while a subscription generation is open, and at this pin the rig cannot produce one — a message sealed at an epoch the receiver has not reached peel-fails (the kind-445 outer layer is keyed by the sender's epoch exporter), and the buffering outcome the engine does produce (the publish-before-apply transition, which S19's `commit-gap` arm grades) leaves no gating row, its delivery landing only once the transition ENDS, on the confirm's own replay, which is not a window a cursor is read against. `haven-core`'s own anchor tests still cover the hold-back. S25 grades the advance's other edge, over a dead and an EOSE-silent relay: the cursor advances once the backlog wait is over, never before the silent relay's wait ends, and the fix only the dead relay held still arrives from the floor that relay owes (Rule 12) |
 | S7 | One session per DB (Rule 14) | **GRADED** — every restart asserts `is_session_live` true before and false after, against a bounded poll, on the `session.sqlite` PATH (a directory computes a key nothing is registered under and answers `Ok(false)` for ever) |
@@ -181,13 +186,13 @@ the next foreground sweep makes.
 
 ## Which scenarios have lane execution, and where
 
-Twenty-three scenarios exist: **S01, S02, S03, S04, S05, S06, S08, S09, S10, S11,
-S12, S13, S14, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25**.
+Twenty-four scenarios exist: **S01, S02, S03, S04, S05, S06, S08, S09, S10, S11,
+S12, S13, S14, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26**.
 
 * `pr` (the profile `ci.yml` calls on every push) runs **S01's single-relay
   outage arm, S06, S11 and S13**.
 * `nightly` runs every other nightly arm — **S02, S03, S04, S05, S08, S09, S10,
-  S12, S14, S16, S17, S18, S19, S20, S21, S22, S23 and S24** beside the PR set (S05
+  S12, S14, S16, S17, S18, S19, S20, S21, S22, S23, S24 and S26** beside the PR set (S05
   without `kill-receive-auto-commit`, S03 without `lost-commit-unnamed`, S17
   without `full-intake`) — and has LANE execution
   in `soak-nightly.yml` alone: its schedule, four slots a night Monday to
@@ -218,7 +223,8 @@ behaviour (S17), the five swallowed-OK Rule-13 arms (S18), duplicate/reorder
 delivery and the commit-gap fold (S19), the catch-up sweep under clamped,
 refused, cold and forged pages and a same-second pile-up (S20), post-removal unreadability and the
 removal lag (S21), the oversized commit, Welcome and removal wedge (S22), the
-chained-commit backlog (S23) or two circles sharing one routing id (S24)
+chained-commit backlog (S23), two circles sharing one routing id (S24) or the
+identity planes under a downed profile relay (S26)
 beyond what a unit test proves — those are the
 nightly's, and only a night's verdict speaks for them. No arm is expected red
 since R4's NIP-77 pass fixed the burial past the replay cap on relays that
@@ -703,13 +709,13 @@ and `relay_health()` reports every expected REQ live. It is swept, and it runs
 in the NIGHTLY as the burial arm's control — the same world and every step but
 the cap, so a night that holds it says the live plane serves a commit under
 forgeries at all, which is the premise the burial arm rests on. The priced
-nightly plus its margin is 5 082.25 s of 5 100 (`tests/budget.rs` is the gate;
-the budget was raised from 4 800 when S16 `processed-ids-growth` joined, and
-from 4 860 when R4 returned the burial to the nightly beside the recorded arm
-and S20's two pile-ups, with the deadline, the step cap and the job cap that
-move with it: 95 m, 99, 140; W9p's re-pricing onto the driver's own waits
-lowered the run and left the budget, which moves only when the run outgrows
-it).
+nightly plus its margin is 6 191 s of 6 240 (`tests/budget.rs` is the gate;
+the budget was raised from 4 800 when S16 `processed-ids-growth` joined, from
+4 860 when R4 returned the burial to the nightly beside the recorded arm and
+S20's two pile-ups, and from 5 100 when S26 joined, with the deadline, the step
+cap and the job cap that move with it: 114 m, 118, 156; W9p's re-pricing onto
+the driver's own waits lowered the run and left the budget, which moves only
+when the run outgrows it).
 Measured 2026-10-26 in `cargo test`, ten runs each, all green: the burial
 86-87 s and the recorded relay-without-NIP-77 arm 80-81 s, each against a
 96.75 s bound; S20's two pile-up arms 24-27 s each, most of it the NIP-77
@@ -871,6 +877,91 @@ circle's coverage only if it was connected when it took the REQ, releases one
 that never ends its replay after `EOSE_WAIT`, and records what each relay left
 out owes (`relay_floors`); S25 grades exactly that over real relays. The map
 stays because a hermetic world dials nothing off the machine.
+
+To O7 each such address is a LOCATION relay of its own, judged by the address
+a circle's commit named, never by the plane whose relay its listener fronts:
+a frame on a device's alias endpoint is a frame on the relay that address
+stands for (`AliasBook::stands_for`), so a `#h` for one circle on an address
+only another circle's routing named is a crossing like any other.
+
+### Relay-plane containment (O7)
+
+`RelayPlaneContainment` (`INV-O7`, `oracle/planes.rs`) grades every frame a
+device sent against the relay-plane allow matrix — the one in
+`tooling/e2e/local-relay/src/planes/policy.rs`, mirrored in
+`haven-core/SECURITY.md` and judged by the same `judge()` haven-core's L1a,
+`rust_builder`'s L1b and the E2E lanes' C8 call — after every arm
+(`Scenario::run`, so no arm grades it and none is exempt) and after the
+nemesis phase (`grade_settled`).
+
+* **Roles in the world.** A world's relays are three sets, never one
+  relabelled (`WorldShape`): the LOCATION planes every circle routes over
+  (`relays`, what an arm calls "the relays"), the ACCOUNT planes (every
+  device's inbox on the first, its key package on the second when there are
+  two — `pr` has one, so its single account plane carries both lists and the
+  `#p`/`#h` split is graded on every PR; `nightly` and `weekly` have two, so
+  the two lists are told apart) and the PROFILE planes (none in `pr`, three in
+  `nightly`/`weekly`, the product's `PROFILE_POOL_MIN`). A device's engine
+  holds the location planes and its inbox plane (`SimWorld::engine_planes`);
+  S01's all-relay and rolling outages roll over exactly those, the device fully
+  offline.
+* **The ground truth is the rig's.** Each circle's routing is recorded where
+  the rig decides it — at build, at the staging of every relay change (before
+  a byte of the commit leaves, whatever the commit then comes to), and at
+  S24's routing commit — never read back from the product. A relay a change
+  leaves stays admissible for what its circle may still send there: commits
+  frozen to it, `#h` REQs within the prior routing's 24-hour standing
+  (`PRIOR_ROUTING_STANDS_SECS`, longer than any soak world — the
+  `routing_retained_epochs` half of the standing is not graded), and a location
+  from a member that has not applied the change yet, whose seal instant the
+  rig knows for no member but the one that staged it. The exact left-routing
+  rule (a location sealed after a change goes only to the new routing) is
+  graded by L1a, with one sender; the soak grades that a location never
+  reaches a relay its circle's routing never named, and that no circle's
+  traffic reaches an account or profile plane.
+* **Senders.** A frame on a device's own or alias endpoint is judged with that
+  device's pubkey as the sender, so the per-identity bindings hold (a `#p`
+  REQ names the sender, a key package is the sender's own); a frame on a
+  plane's canonical endpoint (catch-up sweeps, the rig's inbox reads, an
+  invite's key-package lookup) is judged with the union rules.
+* **Rig traffic needs no exemption.** The rig publishes by ROW
+  (`SimWorld::publish_witnessed`): a key package and the key-package list to
+  the device's key-package plane, the inbox list to its inbox plane, a kind
+  445 to the location planes of its circle's routing; anything else is
+  refused (`RigError::UnknownTarget`). Forgeries (`Fault::Inject`) and seeds
+  (`SimRelay::store`) never cross the client→relay path, and both are
+  indexed by the circle they carry so a by-id fetch of one is judged.
+* **The record.** Every client→relay data frame — text, binary, unparsable,
+  `COUNT`, `AUTH`, a REQ a `CLOSED` fault refused — is recorded at the proxy's
+  one choke point, before anything parses it, under its endpoint and
+  connection (`relay/ledger.rs`). It keeps the projection the judge reads
+  (an event without its content and signature, a filter without its window,
+  the subscription id kept for the `CLOSE` rule), so a REQ re-issued on its
+  connection is one entry — but every reconnect is a new connection and every
+  fetch a new subscription id, so the record grows with a world's faults and
+  fetches. `PLANE_SHAPES_CAP` 4096 and `PLANE_IDS_CAP` 65 536 per plane bound
+  it; a record that hits a cap answers `plane-record-full`, rc 2 — never a
+  silent drop. The marks measured so far are single arms (at most 66 shapes
+  and 1 010 ids a plane); the long nemesis worlds are measured by the nightly
+  run, and a cap moves only from a measured mark.
+* **Findings.** `plane-crossed-event`, `plane-crossed-request` and
+  `plane-unknown-frame` (rc 1) name the plane's and the device's handles, the
+  matrix row and the judge's class literal, nothing else; a `CLOSE` naming a
+  subscription its connection never opened is an unknown frame, never
+  special-cased. `plane-unobserved` (rc 4) is the vacuity, per ROLE: the
+  location planes must have carried a `#h` REQ (`REQ-445-H`) and the account
+  planes the inbox REQ (`REQ-1059-P`), and a profile plane an arm declared
+  driven (S26) a profile publish (`EV-0`) and a profile lookup (`REQ-0-A`).
+* **Advisory.** `coverage.log`'s `plane_overlaps` buckets how many relays of
+  the fullest graded world held two planes at once (in `pr`, the one account
+  plane carrying both lists). An overlap is admitted by the policy, never a
+  crossing; the count is what a night can say about the correlation
+  containment cannot grade.
+* **Discovery is not graded by the soak**: the discovery override is
+  process-global and install-once, and `cargo test` runs worlds concurrently.
+  A soak process points it at a loopback port bound and never listened on,
+  held for the process's life, so a lookup that fell back to discovery is
+  refused before it is a frame. L1a grades the discovery plane on every PR.
 
 ### The MDK v0.10.4 bump: what moved in the rig
 
@@ -1188,7 +1279,7 @@ wrong is still the rig's rc taxonomy, never the deadline.
 sum of its step caps (10 scanner + 25 rig build + 25 drive = 60), so the
 drive's own 23-minute deadline is what reaps a hung run rather than the job's
 anonymous timeout — which is the outcome the ordering rules exist to prevent.
-The other two jobs are the same shape (140 against 134, 355 against 340). What
+The other two jobs are the same shape (156 against 153, 355 against 340). What
 is still missing is C6's other term: job cap ≥ Σ step caps **+ declared
 uncapped minutes**, and that declaration has to be MEASURED. C6 therefore
 deliberately does not cover the soak jobs yet (see "Two decisions inside those
@@ -1565,7 +1656,10 @@ stays green. The slots a night is expected to hold come from
 
 Written beside `verdict.log` at the end of every run (`tooling/soak/src/coverage.rs`),
 one JSON object on one line and nothing else:
-`{"triples":[{"scenario","nemesis","invariant","first_tick"}],"profile","seed"}`.
+`{"triples":[{"scenario","nemesis","invariant","first_tick"}],"plane_overlaps","profile","seed"}`.
+`plane_overlaps` is O7's advisory count — how many relays of the fullest graded
+world held two planes at once — as a bucket (`0`, `1`, `2-4`, `5+`), never a
+count and never a verdict.
 A triple is an invariant GRADED under a fault the world had really taken:
 `scenario` is a registry id, or one of the background phase's two literals —
 `nemesis` for a probe round the schedule asked for, `settled` for the teardown

@@ -243,6 +243,12 @@ async fn rotate_onto<T: TimelineSink, L: LogDrain>(
     let routing =
         NostrRoutingV1::new(onto, relays).map_err(|_| RigError::Core(Step::StageCommit))?;
     let data = encode_nostr_routing_v1(&routing).map_err(|_| RigError::Core(Step::StageCommit))?;
+    // The rig's decision, at staging: `onto` now routes over its own relays
+    // and over the ones the rig built `circle` on — never the product's read.
+    let onto_hex = hex::encode(onto);
+    let mut joined = world.routing_current(&onto_hex);
+    joined.extend(world.routing_current(circle.group_id_hex()));
+    world.note_routing(&onto_hex, &joined);
     let staged = session
         .send_staging(
             SendIntent::UpdateAppComponents {

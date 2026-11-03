@@ -46,6 +46,7 @@ import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/circle_creation.dart';
 import 'e2e/_lib/driven_location.dart';
+import 'e2e/_lib/plane_store_check.dart';
 import 'e2e/_lib/pump_helpers.dart' show pumpUntilCondition;
 import 'e2e/_lib/synthetic_user.dart';
 import 'e2e/_lib/test_relay.dart';
@@ -55,6 +56,10 @@ import 'e2e/_lib/throw_time_error_capture.dart';
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// The harness's own publishes on either relay: not the product's traffic.
+Set<String> _harnessIds(TestRelay a, TestRelay b) =>
+    <String>{...a.publishedIds, ...b.publishedIds};
 
 /// Convenience hex encoder — mirrors the one in test_user.dart.
 String _hex(List<int> bytes) =>
@@ -221,6 +226,8 @@ void main() {
         );
         return;
       }
+      final r1Before = await storeIds(r1);
+      final r2Before = await storeIds(r2);
 
       final dataDir = await Directory.systemTemp.createTemp(
         'haven_relay_kp1_',
@@ -457,6 +464,20 @@ void main() {
             '30443 on R2 id=${logAliasHandle(LogAliasClass.event, kp30443OnR2.id)}, '
             '10002 on R2 id=${logAliasHandle(LogAliasClass.event, kpListOnR2.id)}',
           );
+          await assertStoreWithinRoles(
+            r2,
+            check: 'FFI-KP-1 R2',
+            roles: const <String>{'keypackage'},
+            before: r2Before,
+            harnessIds: _harnessIds(r1, r2),
+          );
+          await assertStoreLacksKinds(
+            r1,
+            check: 'FFI-KP-1 R1',
+            kinds: const <int>{0},
+            before: r1Before,
+            harnessIds: _harnessIds(r1, r2),
+          );
         } finally {
           // Best-effort wipe of secret bytes in Dart's managed heap.
           for (var i = 0; i < secretBytes.length; i++) {
@@ -488,6 +509,8 @@ void main() {
         );
         return;
       }
+      final r1Before = await storeIds(r1);
+      final r2Before = await storeIds(r2);
 
       final dataDir = await Directory.systemTemp.createTemp(
         'haven_relay_inbox1_',
@@ -590,6 +613,20 @@ void main() {
             '[FFI-INBOX-1] PASS: 10050 on R2 id='
             '${logAliasHandle(LogAliasClass.event, inbox10050OnR2.id)}',
           );
+          await assertStoreWithinRoles(
+            r2,
+            check: 'FFI-INBOX-1 R2',
+            roles: const <String>{'inbox'},
+            before: r2Before,
+            harnessIds: _harnessIds(r1, r2),
+          );
+          await assertStoreLacksKinds(
+            r1,
+            check: 'FFI-INBOX-1 R1',
+            kinds: const <int>{0},
+            before: r1Before,
+            harnessIds: _harnessIds(r1, r2),
+          );
         } finally {
           for (var i = 0; i < secretBytes.length; i++) {
             secretBytes[i] = 0;
@@ -622,6 +659,8 @@ void main() {
         );
         return;
       }
+      final r1Before = await storeIds(r1);
+      final r2Before = await storeIds(r2);
 
       final aliceDir = await Directory.systemTemp.createTemp(
         'haven_relay_445pos_alice_',
@@ -838,6 +877,20 @@ void main() {
                 'nostrGroupIdHex='
                 '${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)}',
               );
+              await assertStoreWithinRoles(
+                r2,
+                check: 'FFI-445-POS R2',
+                roles: const <String>{'location'},
+                before: r2Before,
+                harnessIds: _harnessIds(r1, r2),
+              );
+              await assertStoreLacksKinds(
+                r1,
+                check: 'FFI-445-POS R1',
+                kinds: const <int>{0},
+                before: r1Before,
+                harnessIds: _harnessIds(r1, r2),
+              );
             } finally {
               // Nothing peer-specific to scrub at this level any more —
               // Bob's KeyPackage came from `maintainKeyPackage` during
@@ -877,6 +930,8 @@ void main() {
         );
         return;
       }
+      final r1Before = await storeIds(r1);
+      final r2Before = await storeIds(r2);
 
       final aliceDir = await Directory.systemTemp.createTemp(
         'haven_relay_445neg_alice_',
@@ -1015,6 +1070,20 @@ void main() {
                 '(nostrGroupIdHex='
                 '${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)})',
               );
+              await assertStoreWithinRoles(
+                r2,
+                check: 'FFI-445-NEG R2',
+                roles: const <String>{},
+                before: r2Before,
+                harnessIds: _harnessIds(r1, r2),
+              );
+              await assertStoreLacksKinds(
+                r1,
+                check: 'FFI-445-NEG R1',
+                kinds: const <int>{0},
+                before: r1Before,
+                harnessIds: _harnessIds(r1, r2),
+              );
             } finally {
               // Nothing peer-specific to scrub at this level any more —
               // Bob's KeyPackage came from `maintainKeyPackage` during
@@ -1069,6 +1138,8 @@ void main() {
         );
         return;
       }
+      final r1Before = await storeIds(r1);
+      final r2Before = await storeIds(r2);
 
       final aliceDir = await Directory.systemTemp.createTemp(
         'haven_relay_445snap_alice_',
@@ -1209,6 +1280,20 @@ void main() {
                 '(nostrGroupIdHex='
                 '${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)})',
               );
+              await assertStoreWithinRoles(
+                r2,
+                check: 'FFI-445-SNAPSHOT R2',
+                roles: const <String>{'inbox', 'keypackage'},
+                before: r2Before,
+                harnessIds: _harnessIds(r1, r2),
+              );
+              await assertStoreLacksKinds(
+                r1,
+                check: 'FFI-445-SNAPSHOT R1',
+                kinds: const <int>{0},
+                before: r1Before,
+                harnessIds: _harnessIds(r1, r2),
+              );
             } finally {
               // Nothing peer-specific to scrub at this level any more —
               // Bob's KeyPackage came from `maintainKeyPackage` during
@@ -1248,6 +1333,7 @@ void main() {
       // No skip hatch: without a keyring this proof cannot run, which is a
       // red, never a pass.
       await initKeyringStore();
+      final r1Before = await storeIds(r1);
 
       final aliceDir = await Directory.systemTemp.createTemp(
         'haven_relay_od2_alice_',
@@ -1379,6 +1465,22 @@ void main() {
               debugPrint(
                 '[FFI-OD2] PASS: commit on R2 after its restart id='
                 '${logAliasHandle(LogAliasClass.event, commitOnR1.id)}',
+              );
+              // R2's store was wiped by its restart, so all it holds is what
+              // was sent after: the circle's commit, and nothing of any other
+              // plane.
+              await assertStoreWithinRoles(
+                probeB,
+                check: 'FFI-OD2 R2',
+                roles: const <String>{'location'},
+                harnessIds: _harnessIds(r1, probeB),
+              );
+              await assertStoreLacksKinds(
+                r1,
+                check: 'FFI-OD2 R1',
+                kinds: const <int>{0},
+                before: r1Before,
+                harnessIds: _harnessIds(r1, probeB),
               );
             } finally {
               await probeB.dispose();

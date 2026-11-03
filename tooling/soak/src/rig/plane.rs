@@ -124,6 +124,13 @@ pub trait RelayPlane: Send + Sync {
     /// emphatically NOT an ack. A rig that confirmed on storage rather than on
     /// acknowledgement would merge an unpublished commit.
     fn witnessed_ok(&self, event_id: &EventId) -> bool;
+
+    /// The ledger this plane records its client frames in, for O7; `None` for
+    /// a plane that records none (a test double), which O7 then answers as
+    /// having observed nothing.
+    fn plane_ledger(&self) -> Option<&crate::relay::Ledger> {
+        None
+    }
 }
 
 /// Where the rig's own diagnostic records go.

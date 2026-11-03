@@ -274,6 +274,17 @@ jobs:
               * If nothing needs changing, change nothing and say so in the
                 summary. A week with no proposal is a normal and good outcome.
 
+      # The action logs `is_error: true` and nothing about why, and
+      # show_full_output must stay off in a public repository. This prints the
+      # final result's reason alone, one escaped line, so a refused request
+      # names itself instead of failing silently for weeks (it did, from
+      # 2026-08-18). Report only: the job has already failed.
+      - name: Report why the model run failed
+        if: failure() && steps.author.outputs.execution_file != ''
+        env:
+          EXECUTION_FILE: ${{ steps.author.outputs.execution_file }}
+        run: bash scripts/ci/report_manifest_author_failure.sh "${EXECUTION_FILE}"
+
       # Read the summary out, then remove the scratch directory, so the bound
       # below sees the tree the pull request would actually contain.
       #

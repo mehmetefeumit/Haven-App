@@ -1,6 +1,6 @@
 //! Seam 9 of `test_utils_seams.rs` — the live engine's address map
-//! (`LiveSyncCore::new_local_with_relay_map_for_test`) — proved over a real
-//! loopback relay.
+//! (`LiveSyncCore::new_local_with_relay_map_for_test`) — and seam 11, the dial
+//! witness (`relay::dial_witness`), each proved over a real loopback relay.
 //!
 //! A binary of its own because these tests open sockets: `test_utils_seams.rs`
 //! holds a process-wide log capture that pins the exact set of third-party
@@ -18,9 +18,11 @@ use std::time::Duration;
 
 use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::nostr::mls::types::GroupId;
+use haven_core::relay::dial_witness::{AlreadyArmed, DialWatch};
 use haven_core::relay::live_sync::{CircleSpec, Claim, LiveSyncCore};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::{Filter, Keys, Kind};
+use haven_core::relay::{normalize_relay_url, RelayManager};
+use nostr::{EventBuilder, Filter, Keys, Kind};
 use tempfile::TempDir;
 
 /// The one address the circle stores; the engine's pool never holds it.
@@ -226,4 +228,65 @@ async fn the_claimed_foregrounds_eviction_goes_to_the_address_the_map_returns() 
     );
     let _ = core.stop().await;
     observer.shutdown().await;
+}
+
+/// Seam 11: a relay client's dial is recorded while a watch is armed, a second
+/// watch is refused while one lives, and the watch keeps nothing once dropped:
+/// the next one starts empty though a dial was made in between. The sibling
+/// test of this binary dials relays of its own, so dials are read by URL.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_dial_witness_records_each_dial_while_armed_and_nothing_after() {
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+    let watched_relay = nostr_relay_builder::MockRelay::run()
+        .await
+        .expect("a mock relay starts");
+    let unwatched_relay = nostr_relay_builder::MockRelay::run()
+        .await
+        .expect("a mock relay starts");
+    let watched = normalize_relay_url(&watched_relay.url().await.to_string()).expect("a relay url");
+    let unwatched =
+        normalize_relay_url(&unwatched_relay.url().await.to_string()).expect("a relay url");
+    let dials_of = |dials: &[String], url: &str| {
+        dials
+            .iter()
+            .filter(|dial| normalize_relay_url(dial).as_deref() == Some(url))
+            .count()
+    };
+    let note = EventBuilder::text_note("dialled")
+        .sign_with_keys(&Keys::generate())
+        .expect("a locally built event signs");
+
+    let Ok(watch) = DialWatch::arm() else {
+        panic!("no watch is armed yet");
+    };
+    assert!(
+        matches!(DialWatch::arm(), Err(AlreadyArmed)),
+        "a second watch was armed beside the first",
+    );
+    let first = RelayManager::new();
+    first
+        .publish_event(&note, std::slice::from_ref(&watched))
+        .await
+        .expect("the relay takes the event");
+    first.shutdown().await;
+    assert!(
+        dials_of(&watch.dials(), &watched) >= 1,
+        "the dial made while the watch was armed was not recorded",
+    );
+    drop(watch);
+
+    let second = RelayManager::new();
+    second
+        .publish_event(&note, std::slice::from_ref(&unwatched))
+        .await
+        .expect("the relay takes the event");
+    second.shutdown().await;
+    let Ok(next) = DialWatch::arm() else {
+        panic!("the dropped watch is still armed");
+    };
+    let kept = next.dials();
+    assert!(
+        dials_of(&kept, &watched) == 0 && dials_of(&kept, &unwatched) == 0,
+        "a dial from before this watch was armed is in its record",
+    );
 }

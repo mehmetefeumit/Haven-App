@@ -130,18 +130,18 @@
 #
 #       The same peer publishes the same sentinel fix, and this phase drives
 #       NOTHING afterwards: the timer is the subject, so calling anything would
-#       replace it. The oracle is the sweep's own side effect — Rust's
-#       `persist_locations` upserts a last-known-location row per decrypted
-#       location message — read back through
-#       `snapshotLastKnownForCircle`, coordinates compared, against a BASELINE
-#       taken before the peer published. Nothing else on this leg can write that
-#       row: the publish tick's burst open fails with no engine (the drive
-#       asserts that read THROWS while still foregrounded), the foreground
-#       fetch timer was cancelled at the pause, and no provider recomputes with
-#       frames off.
+#       replace it. Two oracles: the timer's own count of completed sweeps
+#       (`MapShell.backgroundReceiveTimerSweeps`) must advance, and the peer's
+#       coordinates must land in the persisted last-known store (Rust's
+#       `persist_locations`, read back through `snapshotLastKnownForCircle`)
+#       against a BASELINE taken before the peer published. That row has a
+#       second writer — a publish tick's burst receives through the same
+#       catch-up before it seals (decision 244) — and P2d does not tell the two
+#       apart; the foreground fetch timer was cancelled at the pause, and no
+#       provider recomputes with frames off.
 #
-#       What P2d does NOT prove: anything about the burst plane, which this
-#       build does not have; and not the C3 chokepoint that must refuse a wake
+#       What P2d does NOT prove: anything about the live-sync burst plane,
+#       which this build compiles out; and not the C3 chokepoint that must refuse a wake
 #       after consent is withdrawn — host tests own that.
 #   P3  Flipping background sharing OFF while STILL backgrounded deactivates
 #       the per-circle scheduler in-process and stops publishing on the wire
@@ -1278,7 +1278,7 @@ run_self_test() {
   # check_ios_background_publish.sh's SELF_TEST_FIXTURES enforces). A count in
   # the summary line alone reports whatever ran: a fixture deleted with the
   # code it covered would print a smaller number and still say "all passed".
-  local -r SELF_TEST_FIXTURES=113
+  local -r SELF_TEST_FIXTURES=114
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -2246,6 +2246,26 @@ ${DISARMED_MARKER}")"
   _check "H11 the reclaimed branch holds P3's window open instead of ending" \
     0 "${rc}"
 
+  # --- (H15) STRUCTURAL: a drive that exited before DISABLED is not read as
+  #     one that died inside P3's window. Without the gate an earlier red whose
+  #     app was gone printed "exited INSIDE P3's settle window" and then "P3 has
+  #     NO verdict" over a phase that never started (CI run 41576538923).
+  rc=0
+  local gate_line else_line reclaim_line
+  gate_line="$(grep -nxF '        if [[ "${DISABLE_RC}" != 0 ]]; then' \
+                 <<<"${disarm_exit}" | cut -d: -f1 | head -n 1 || true)"
+  else_line="$(grep -nx '        else' <<<"${disarm_exit}" \
+                 | cut -d: -f1 | head -n 1 || true)"
+  reclaim_line="$(grep -nF 'RECLAIMED_INSIDE_WINDOW=1' <<<"${disarm_exit}" \
+                    | cut -d: -f1 | head -n 1 || true)"
+  [[ -n "${gate_line}" && -n "${else_line}" && -n "${reclaim_line}" ]] \
+    || rc=1
+  if (( rc == 0 )); then
+    (( gate_line < else_line && else_line < reclaim_line )) || rc=1
+  fi
+  _check "H15 an exit before DISABLED never takes the reclaimed branch" \
+    0 "${rc}"
+
   # --- (H12) STRUCTURAL: the wire oracle's window is derived from the SAME
   #     anchor and the SAME two constants the drive uses, and the verdict is
   #     taken from the function V1-V8 pin. A `--since` computed from `now`
@@ -2454,7 +2474,8 @@ ${DISARMED_MARKER}")"
        "grant, the uninstall" \
        "skip, the tier threaded to the delegate, the single validated tier" \
        "input, the per-leg DISABLE deadline, the anchored DISARM budget, the" \
-       "attribution of a drive that dies inside the settle window, the" \
+       "attribution of a drive that dies inside the settle window (and" \
+       "never of one that exited before the disable), the" \
        "window the wire verdict measures, the probe's own preflight" \
        "self-test, the single source of that excuse, the own non-zero exit" \
        "every verdict but 'holds' has, and the" \
@@ -2922,49 +2943,58 @@ case "${READY_RC}" in
         bgp_foreground_app
         ;;
       *)
-        # 2 — the drive exited on its own, INSIDE P3's settle window. This is
-        # the one stretch of the lane where the app holds no execution claim
-        # (that is the guarantee being proven), so it is also the one where
-        # iOS can end the process under a drive that has printed every proof
-        # but its last two. In CI runs 35397118356 and 35622556197 it did, and
-        # the second one's sim-lifecycle.log names the mechanism exactly: the
-        # disable released every CoreLocation claim, runningboardd invalidated
-        # the assertion locationd held on the app one second later, the shared
-        # FinishTask grace that replaced it expired ~30 s on, and RunningBoard
-        # terminated the process for not invalidating it
-        # (OS_REASON_RUNNINGBOARD 0x2182bad2 — no jetsam, no crash report, no
-        # watchdog). That is iOS doing exactly what a healthy app with no
-        # background claim invites, so it cannot be a red on its own.
-        DRIVE_EXIT_APP_STATE="$(bgp_calibrated_app_state \
-          "${APP_PROBE_AT_READY}" "$(bgp_app_process_state "${SIM_UDID}")")"
-        echo "bg-publish — the drive exited INSIDE P3's settle window," \
-             "before ${DISARMED_MARKER}, with the app process" \
-             "'${DRIVE_EXIT_APP_STATE}'."
-        if [[ "${DRIVE_EXIT_APP_STATE}" == 'gone' ]]; then
-          # The OS reclaimed the app. Its in-process half of P3 is already
-          # proven — the DISABLED marker is appended only AFTER the provider
-          # and the publish scheduler have been asserted — and the half it
-          # could not finish is the one the HOST can take over, because the
-          # relay outlives the app. So this is not the end of the phase: wait
-          # the rest of the window out (capped by the budget the wake-up it
-          # replaces would have spent, so the lane costs no extra wall clock)
-          # and let the wire answer below.
-          RECLAIMED_INSIDE_WINDOW=1
-          echo "      The OS reclaimed the suspended app, which is its right" \
-               "once the disable removed the app's background claim. Holding" \
-               "P3's window open from the host and asking the relay."
-          SETTLE_SLEEP_SECS="$(bgp_secs_until \
-            "$(( ${DISABLE_AT:-0} + SETTLE_WINDOW_SECS ))" \
-            "${DISARM_BUDGET_SECS}")"
-          if (( SETTLE_SLEEP_SECS > 0 )); then sleep "${SETTLE_SLEEP_SECS}"; fi
+        if [[ "${DISABLE_RC}" != 0 ]]; then
+          # The drive never got as far as P3, so there is no window it could
+          # have exited inside and no reclaim to hand to the host (the same
+          # premise bgp_p3_host_verdict refuses first).
+          echo "bg-publish — the drive exited without ${DISABLED_MARKER}" \
+               "having been observed: P2 or earlier failed, and P3 never" \
+               "started. Its rc is collected below."
         else
-          echo "      'running' means the drive died with its app still" >&2
-          echo "      there, which is the drive's own failure and its" >&2
-          echo "      transcript's to explain; 'unknown' means the liveness" >&2
-          echo "      read was never calibrated, so neither reading is" >&2
-          echo "      evidence. The device log's lifecycle daemons are the" >&2
-          echo "      record either way (sim-lifecycle.log in this job's" >&2
-          echo "      artifact). The drive's rc is collected below." >&2
+          # The drive exited on its own, INSIDE P3's settle window. This is
+          # the one stretch of the lane where the app holds no execution claim
+          # (that is the guarantee being proven), so it is also the one where
+          # iOS can end the process under a drive that has printed every proof
+          # but its last two. In CI runs 35397118356 and 35622556197 it did, and
+          # the second one's sim-lifecycle.log names the mechanism exactly: the
+          # disable released every CoreLocation claim, runningboardd invalidated
+          # the assertion locationd held on the app one second later, the shared
+          # FinishTask grace that replaced it expired ~30 s on, and RunningBoard
+          # terminated the process for not invalidating it
+          # (OS_REASON_RUNNINGBOARD 0x2182bad2 — no jetsam, no crash report, no
+          # watchdog). That is iOS doing exactly what a healthy app with no
+          # background claim invites, so it cannot be a red on its own.
+          DRIVE_EXIT_APP_STATE="$(bgp_calibrated_app_state \
+            "${APP_PROBE_AT_READY}" "$(bgp_app_process_state "${SIM_UDID}")")"
+          echo "bg-publish — the drive exited INSIDE P3's settle window," \
+               "before ${DISARMED_MARKER}, with the app process" \
+               "'${DRIVE_EXIT_APP_STATE}'."
+          if [[ "${DRIVE_EXIT_APP_STATE}" == 'gone' ]]; then
+            # The OS reclaimed the app. Its in-process half of P3 is already
+            # proven — the DISABLED marker is appended only AFTER the provider
+            # and the publish scheduler have been asserted — and the half it
+            # could not finish is the one the HOST can take over, because the
+            # relay outlives the app. So this is not the end of the phase: wait
+            # the rest of the window out (capped by the budget the wake-up it
+            # replaces would have spent, so the lane costs no extra wall clock)
+            # and let the wire answer below.
+            RECLAIMED_INSIDE_WINDOW=1
+            echo "      The OS reclaimed the suspended app, which is its right" \
+                 "once the disable removed the app's background claim. Holding" \
+                 "P3's window open from the host and asking the relay."
+            SETTLE_SLEEP_SECS="$(bgp_secs_until \
+              "$(( ${DISABLE_AT:-0} + SETTLE_WINDOW_SECS ))" \
+              "${DISARM_BUDGET_SECS}")"
+            if (( SETTLE_SLEEP_SECS > 0 )); then sleep "${SETTLE_SLEEP_SECS}"; fi
+          else
+            echo "      'running' means the drive died with its app still" >&2
+            echo "      there, which is the drive's own failure and its" >&2
+            echo "      transcript's to explain; 'unknown' means the liveness" >&2
+            echo "      read was never calibrated, so neither reading is" >&2
+            echo "      evidence. The device log's lifecycle daemons are the" >&2
+            echo "      record either way (sim-lifecycle.log in this job's" >&2
+            echo "      artifact). The drive's rc is collected below." >&2
+          fi
         fi
         ;;
     esac
@@ -3257,12 +3287,13 @@ if [[ "${LIVE_SYNC}" == 'true' ]]; then
   echo "     exists for it in this lane — the Rust in-process tests own it),"
 else
   echo "     session. The receive half, on the POLL path this leg exists for"
-  echo "     (OD4-d): the 90 s background receive timer ran a catch-up sweep"
-  echo "     from the backgrounded process and landed a peer's location in the"
-  echo "     persisted last-known store."
-  echo "     NOT proven here: anything about the burst plane, which this build"
-  echo "     does not have; and not the C3 chokepoint that refuses a wake after"
-  echo "     consent is withdrawn — host tests own that,"
+  echo "     (OD4-d): the 90 s background receive timer completed at least one"
+  echo "     catch-up sweep from the backgrounded process, and a peer's location"
+  echo "     landed in the persisted last-known store (that sweep's or a burst's"
+  echo "     receive-before-seal, not told apart)."
+  echo "     NOT proven here: anything about the live-sync burst plane, which"
+  echo "     this build compiles out; and not the C3 chokepoint that refuses a"
+  echo "     wake after consent is withdrawn — host tests own that,"
 fi
 echo "     and, not provable on a simulator at all, that the shape survives"
 echo "     hours of stationary wall clock on a device (M7 §6 item 0a,"

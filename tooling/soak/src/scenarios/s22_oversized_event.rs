@@ -598,6 +598,7 @@ async fn stage<T: TimelineSink, L: LogDrain>(
     group: &GroupId,
     relays: &[String],
 ) -> Result<Recorded, RigError> {
+    world.note_routing_of(group, relays);
     let staged = world
         .device(device)?
         .manager()?
@@ -681,22 +682,23 @@ fn extended_relay_list<T: TimelineSink, L: LogDrain>(
     relays
 }
 
-/// Arms every plane with the same cap.
+/// Arms every plane with the same cap: the circles' and the account ones a
+/// Welcome rides.
 async fn cap_every_plane<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     max_bytes: ByteCap,
 ) -> Result<(), RigError> {
-    for plane in world.relays_mut() {
+    for plane in world.all_planes_mut() {
         plane.apply(Fault::RefuseOversize { max_bytes }).await?;
     }
     Ok(())
 }
 
-/// Undoes every cap.
+/// Undoes every cap, on every plane.
 async fn heal<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
 ) -> Result<(), RigError> {
-    for plane in world.relays_mut() {
+    for plane in world.all_planes_mut() {
         plane.apply(Fault::Heal).await?;
     }
     Ok(())
@@ -708,7 +710,7 @@ async fn refused_machine_readably<T: TimelineSink, L: LogDrain>(
     id: &EventId,
 ) -> Result<bool, RigError> {
     let mut refused = false;
-    for plane in world.relays() {
+    for plane in world.all_planes() {
         if plane.stored(id).await? || plane.witnessed_ok(id) {
             return Ok(false);
         }
@@ -756,8 +758,7 @@ async fn stored_everywhere<T: TimelineSink, L: LogDrain>(
 /// Every event id the planes have seen a client publish.
 fn published_ids<T: TimelineSink, L: LogDrain>(world: &ScenarioWorld<T, L>) -> Vec<EventId> {
     world
-        .relays()
-        .iter()
+        .all_planes()
         .flat_map(|plane| plane.ledger().published_ids())
         .collect()
 }
@@ -773,7 +774,7 @@ async fn every_new_publish_was_refused<T: TimelineSink, L: LogDrain>(
     before: &[EventId],
 ) -> Result<bool, RigError> {
     let mut seen_one = false;
-    for plane in world.relays() {
+    for plane in world.all_planes() {
         for id in plane.ledger().published_ids() {
             if before.contains(&id) {
                 continue;
@@ -804,7 +805,8 @@ async fn smallest_welcome<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
 ) -> Result<usize, RigError> {
     let mut smallest: Option<usize> = None;
-    for plane in world.relays() {
+    // On the inbox plane, which is where a Welcome goes.
+    for plane in world.all_planes() {
         for event in plane
             .stored_page(Filter::new().kind(Kind::GiftWrap))
             .await?

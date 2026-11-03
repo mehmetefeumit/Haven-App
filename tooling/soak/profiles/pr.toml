@@ -1,6 +1,8 @@
 # The per-PR soak profile.
 #
-# Four scenarios, one relay. The set is pinned here rather than left to a run:
+# Four scenarios over one location relay, and one account relay that carries
+# every device's inbox and key package apart from it (O7 grades the split on
+# every PR); no profile relay. The set is pinned here rather than left to a run:
 # S01's single-relay outage alone carries the pool's own 123-second reconnect
 # ladder, and any S17 arm starts at the 684-second delivery-silence window.
 #
@@ -29,6 +31,8 @@ tick_ms = 250
 members = 3
 circles = 2
 relays = 1
+account_relays = 1
+profile_relays = 0
 
 [[scenarios]]
 id = "S01"

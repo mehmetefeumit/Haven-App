@@ -69,7 +69,8 @@ impl Observed {
     /// Reads the three measurable terms out of `world` and takes the one only
     /// the arm can know.
     ///
-    /// `faults_applied` is summed from the PLANES, never taken from the caller:
+    /// `faults_applied` is summed from the PLANES of every role, never taken
+    /// from the caller:
     /// an arm declares how many faults it means to apply in its own
     /// [`ExpectationFloor`], and counting the same number twice would grade the
     /// arm against itself. The plane records what it really took, so an arm
@@ -87,7 +88,7 @@ impl Observed {
         world: &SimWorld<R, T, L>,
         canaries_caught: usize,
     ) -> Result<Self, RigError> {
-        let faults_applied = world.relays().iter().map(RelayPlane::faults_applied).sum();
+        let faults_applied = world.all_planes().map(RelayPlane::faults_applied).sum();
         let fingerprint = world.fingerprint().await?;
         let epochs_crossed = fingerprint
             .devices
@@ -186,7 +187,7 @@ fn render(
 mod tests {
     use super::*;
     use crate::rc::Rc;
-    use crate::rig::doubles::{RecordingTimeline, StubDrain, TestRelay};
+    use crate::rig::doubles::{test_planes, RecordingTimeline, StubDrain, TestRelay};
     use crate::rig::RelayTag;
 
     const fn floor(
@@ -214,15 +215,17 @@ mod tests {
 
     /// The smallest world a measurement can be taken over.
     async fn world() -> SimWorld<TestRelay, RecordingTimeline, StubDrain> {
-        let relay = TestRelay::start(RelayTag::new(0)).await;
+        let shape = crate::profiles::WorldShape {
+            members: 2,
+            circles: 1,
+            relays: 1,
+            account_relays: 1,
+            profile_relays: 0,
+        };
         SimWorld::build(
-            &crate::profiles::WorldShape {
-                members: 2,
-                circles: 1,
-                relays: 1,
-            },
+            &shape,
             crate::nemesis::types::Schedule::new(Vec::new()),
-            vec![relay],
+            test_planes(&shape).await,
             RecordingTimeline::default(),
             StubDrain::default(),
         )
@@ -264,6 +267,29 @@ mod tests {
                 == 1,
             "the plane took one fault and one heal, and counts one: a floor that \
              counted the heal too would be met by a world nothing stayed broken in"
+        );
+
+        // An account plane's fault is a fault the world took: the inbox and
+        // key-package planes are faulted by the arms that aim at a Welcome.
+        let account = world.account_relays()[0].tag();
+        assert_eq!(
+            account,
+            RelayTag::new(1),
+            "the account planes follow the location ones"
+        );
+        world
+            .plane_mut(account)
+            .expect("the account plane is the world's")
+            .apply(crate::nemesis::types::Fault::SwallowOk)
+            .await
+            .expect("the fault applies");
+        assert!(
+            Observed::measure(&world, 0)
+                .await
+                .expect("the measurement reads")
+                .faults_applied
+                == 2,
+            "every role's planes are counted, not the location ones alone"
         );
         world.teardown().await.expect("teardown");
     }

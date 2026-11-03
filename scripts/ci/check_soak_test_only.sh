@@ -7,13 +7,13 @@
 # ## What the rig is, and why it needs a boundary
 #
 # `tooling/soak` builds `haven-soak`, which links haven-core with the
-# `test-utils` feature ON. That feature is the door to ten test-only seams.
-# Seven only READ state the product deliberately does not expose (a typed ingest
+# `test-utils` feature ON. That feature is the door to eleven test-only seams.
+# Eight only READ state the product deliberately does not expose (a typed ingest
 # that returns the engine's own error, a stored-message probe, the live-sync
 # processor, the circle rotation stamps, direct read/delete of the OpenMLS group
 # state inside the SQLCipher store, a count of the uncapped convergence buffer,
-# and a count of the unpruned processed-transport-id rows) plus the
-# unencrypted-store constructors.
+# a count of the unpruned processed-transport-id rows, and a record of every
+# relay a client dials) plus the unencrypted-store constructors.
 #
 # Three do MORE than read, and are worse. `set_stored_message_write_fault_for_test`
 # is a MUTATION seam: it installs an abort trigger on the engine's stored-message
@@ -68,10 +68,11 @@
 #
 #      A dependency table is not the only door. A `[features]` ALIAS is the
 #      other one, and it is wider: `default = ["test-utils"]` in
-#      haven-core/Cargo.toml turns those ten test-only seams on for every consumer
-#      that does not opt out — every DEBUG build of the app included, since the
-#      `compile_error!` fires only with `debug_assertions` off. Checks 2, 3 and
-#      4 as first written all stay green through that one-word diff. So: no
+#      haven-core/Cargo.toml turns those eleven test-only seams on for every
+#      consumer that does not opt out — every DEBUG build of the app included,
+#      since the `compile_error!` fires only with `debug_assertions` off.
+#      Checks 2, 3 and 4 as first written all stay green through that one-word
+#      diff. So: no
 #      manifest may list haven-core's feature (`"test-utils"` or
 #      `"haven-core/test-utils"`) inside ANY `[features]` alias's array,
 #      `default` first among them, and haven-core must still DECLARE its
@@ -228,7 +229,7 @@ check_no_production_reach() {
       hits="$(grep -rlF -- "${token}" "${root}/${tree}" 2>/dev/null)"
       if [[ -n "${hits}" ]]; then
         printf '%s\n' "${hits}" >&2
-        fail "'${token}' appears under ${tree}. The soak rig links haven-core with test-utils on — ten test-only seams (a mutation seam, an outbound sealing seam and an address-map seam among them) and the unencrypted-store constructors — and must be unreachable from the shipped app."
+        fail "'${token}' appears under ${tree}. The soak rig links haven-core with test-utils on — eleven test-only seams (a mutation seam, an outbound sealing seam and an address-map seam among them) and the unencrypted-store constructors — and must be unreachable from the shipped app."
         rc=1
       fi
     done
@@ -359,7 +360,7 @@ check_test_utils_is_dev_only() {
     hits="$(feature_alias_hits "${m}")"
     if [[ -n "${hits}" ]]; then
       printf '%s\n' "${hits}" >&2
-      fail "${m#"${root}/"} pulls haven-core's test-utils into a [features] alias (line:alias above). An alias is not a dev edge: \`default = [\"test-utils\"]\` opens all ten test-only seams for every consumer that does not opt out, and haven-core's compile_error! only fires with debug_assertions OFF — so every DEBUG build of the app would carry them while checks 2-4 stayed green."
+      fail "${m#"${root}/"} pulls haven-core's test-utils into a [features] alias (line:alias above). An alias is not a dev edge: \`default = [\"test-utils\"]\` opens all eleven test-only seams for every consumer that does not opt out, and haven-core's compile_error! only fires with debug_assertions OFF — so every DEBUG build of the app would carry them while checks 2-4 stayed green."
       rc=1
     fi
   done < <(other_manifests "${root}")
@@ -840,7 +841,7 @@ main() {
 
   if (( FAILED )); then
     echo >&2
-    echo "The Tier-1 soak rig links haven-core with test-utils on: ten test-only" >&2
+    echo "The Tier-1 soak rig links haven-core with test-utils on: eleven test-only" >&2
     echo "seams (a mutation seam, an outbound sealing seam and an address-map" >&2
     echo "seam among them) and the unencrypted-store constructors. It must stay" >&2
     echo "out of the" >&2

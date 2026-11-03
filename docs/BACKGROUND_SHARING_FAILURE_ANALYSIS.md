@@ -1982,8 +1982,9 @@ would hide the very confusion this block exists to prevent:
   `hundredMeters` (the tier was really requested of CoreLocation, not written to a Dart field);
   P2c observes a peer's kind-445 decrypted into the member-location cache during a burst and the
   engine's pool subscription **count** at zero between bursts, with a non-zero foreground control
-  arm; on the poll leg P2d observes the 90 s background receive timer's sweep landing a peer's
-  kind-445 in the persisted last-known store instead; the tier→policy inversion is observed per
+  arm; on the poll leg P2d instead observes the 90 s background receive timer completing a sweep
+  and a peer's kind-445 landing in the persisted last-known store (that sweep's or a burst's
+  receive-before-seal, not told apart); the tier→policy inversion is observed per
   matrix job.
 - **Host (not a device).** `the_publish_socket_sleeps_after_a_burst_and_wakes_for_the_next`
   (`haven-core/src/relay/manager.rs`, against `nostr-relay-builder`'s `LocalRelay`) waits on a real

@@ -332,6 +332,7 @@ async fn stage_and_drive_unacknowledged<T: TimelineSink, L: LogDrain>(
     circle: &SimCircle,
     relays: Vec<String>,
 ) -> Result<(Event, FanoutId, bool), RigError> {
+    world.note_routing_of(circle.mls_group_id(), &relays);
     let device = world.device(tag)?;
     let session = device.session()?;
     let staged = session

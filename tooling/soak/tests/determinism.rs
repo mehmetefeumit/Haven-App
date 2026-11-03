@@ -26,10 +26,8 @@
 
 use haven_soak::nemesis::generator::Generator;
 use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
-use haven_soak::relay::SimRelay;
-use haven_soak::rig::{
-    install_process_globals, CapturedLine, LogDrain, RelayTag, SimWorld, TimelineSink,
-};
+use haven_soak::relay::{planes_for, SimRelay};
+use haven_soak::rig::{install_process_globals, CapturedLine, LogDrain, SimWorld, TimelineSink};
 use haven_soak::timeline::Timeline;
 use nostr::EventId;
 
@@ -46,12 +44,15 @@ impl LogDrain for NoLogs {
     }
 }
 
-/// The smallest world that proves anything: two devices, one circle, one relay.
+/// The smallest world that proves anything: two devices, one circle, one
+/// location relay and the account relay the inboxes ride.
 const fn smallest() -> WorldShape {
     WorldShape {
         members: 2,
         circles: 1,
         relays: 1,
+        account_relays: 1,
+        profile_relays: 0,
     }
 }
 
@@ -67,7 +68,7 @@ fn handle_table<T: TimelineSink, L: LogDrain>(world: &SimWorld<SimRelay, T, L>) 
         .map(|device| device.tag.to_string())
         .collect();
     out.extend(world.circles().iter().map(|circle| circle.tag.to_string()));
-    out.extend(world.relays().iter().map(|relay| {
+    out.extend(world.all_planes().map(|relay| {
         use haven_soak::rig::RelayPlane as _;
         relay.tag().to_string()
     }));
@@ -153,13 +154,10 @@ async fn two_worlds_of_one_shape_hand_out_the_same_handles() {
 
     let mut tables = Vec::new();
     for _ in 0..2 {
-        let relay = SimRelay::start(RelayTag::new(0))
-            .await
-            .expect("a relay plane");
         let world = SimWorld::build(
             &shape,
             schedule.clone(),
-            vec![relay],
+            planes_for(&shape).await.expect("the relay planes"),
             Timeline::in_memory(),
             NoLogs,
         )
@@ -175,8 +173,16 @@ async fn two_worlds_of_one_shape_hand_out_the_same_handles() {
          be read against another run's timeline"
     );
     assert!(
-        tables[0] == vec!["simdev#0", "simdev#1", "simcircle#0", "simrelay#0"],
-        "the handle table is the world's shape in the rig's own vocabulary"
+        tables[0]
+            == vec![
+                "simdev#0",
+                "simdev#1",
+                "simcircle#0",
+                "simrelay#0",
+                "simrelay#1"
+            ],
+        "the handle table is the world's shape in the rig's own vocabulary, the account \
+         plane's tag after the location plane's"
     );
 }
 
@@ -184,13 +190,10 @@ async fn two_worlds_of_one_shape_hand_out_the_same_handles() {
 async fn event_handles_are_bijective_and_never_reused() {
     install_process_globals().expect("the ws:// loopback opt-in");
     let shape = smallest();
-    let relay = SimRelay::start(RelayTag::new(0))
-        .await
-        .expect("a relay plane");
     let world = SimWorld::build(
         &shape,
         Generator::new(pr(), 13).schedule(&shape),
-        vec![relay],
+        planes_for(&shape).await.expect("the relay planes"),
         Timeline::in_memory(),
         NoLogs,
     )

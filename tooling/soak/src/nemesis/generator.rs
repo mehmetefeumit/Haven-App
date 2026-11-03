@@ -502,11 +502,15 @@ mod tests {
             members: 2,
             circles: 1,
             relays: 1,
+            account_relays: 1,
+            profile_relays: 0,
         });
         let big = Generator::new(pr(), 42).schedule(&WorldShape {
             members: 5,
             circles: 4,
             relays: 3,
+            account_relays: 1,
+            profile_relays: 0,
         });
         assert!(
             big.ops().len() > small.ops().len(),
@@ -524,6 +528,8 @@ mod tests {
                 members: 4,
                 circles: 2,
                 relays: 3,
+                account_relays: 1,
+                profile_relays: 0,
             });
             for scheduled in schedule.ops() {
                 if let Op::Fault { fault, .. } = scheduled.op {

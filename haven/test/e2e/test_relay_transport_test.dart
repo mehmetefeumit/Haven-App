@@ -498,6 +498,36 @@ void main() {
       await refusal;
     });
 
+    test('a circle routing is refused on the compiled default, and no frame '
+        'is written', () async {
+      // A routing token never equals the compiled default, so the sentinel's
+      // own token gate would let it through: the routing call must ask the
+      // BUILD, before it validates or writes anything.
+      await connect();
+
+      await expectLater(
+        relay.declareCircleRouting(
+          nostrGroupId: List<int>.filled(32, 0xab),
+          relays: const <String>['ws://127.0.0.1:7789'],
+        ),
+        throwsA(isA<StateError>()),
+      );
+
+      await relay.emitWireJournalSentinel(
+        token: 'after-the-refusal',
+        timeout: _fastPing * 5,
+      );
+
+      expect(
+        recorder.frames,
+        <Object?>[
+          <Object?>['HAVEN_WIRE_SENTINEL', 'after-the-refusal'],
+        ],
+        reason: "a circle's `h` and routing in one frame have no business on "
+            'a relay that is not the recorder',
+      );
+    });
+
     test('a declared token writes exactly the sentinel frame', () async {
       await connect();
 

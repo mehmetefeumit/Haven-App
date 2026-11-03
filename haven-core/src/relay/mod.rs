@@ -28,6 +28,8 @@
 pub mod catchup;
 pub mod clock_skew;
 pub mod cursor;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod dial_witness;
 pub mod discovery;
 mod error;
 pub mod fanout;
@@ -36,6 +38,8 @@ pub mod maintenance;
 mod manager;
 pub mod negentropy;
 pub mod publishers;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod recording_front;
 pub mod retick;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod scripted_relay;

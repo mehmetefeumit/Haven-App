@@ -2289,6 +2289,28 @@ self_test() {
   expect_msg "filter key \"#g\"" "...and the geohash filter" \
     --journal "${badfilter}" "${base[@]}" || fail=1
 
+  # The catch-up pager's page (catchup.rs: group_filter + limit + until) is the
+  # one REQ Haven builds with a ceiling; it runs against a relay without NIP-77.
+  local pagerreq="${tmp}/pagerreq.ndjson"
+  fx_begin "${pagerreq}"
+  jline c2r c1 '["REQ","sub-page",{"kinds":[445],"#h":["cafebabe"],"since":1783294144,"until":1785886144,"limit":500}]'
+  jq -c '.wire_seq = .wire_seq + 1' "${healthy}" >> "${pagerreq}"
+  expect_rc 0 "the catch-up pager's REQ with \`until\` passes C4-REQ" \
+    --journal "${pagerreq}" "${base[@]}" || fail=1
+  expect_no_msg "filter key \"until\"" "...and no filter-key finding names \`until\`" \
+    --journal "${pagerreq}" "${base[@]}" || fail=1
+
+  # The orphaned key-package slot retraction (key_package.rs
+  # build_kp_slot_retraction) names the deleted kind in `k` (NIP-09).
+  local kpretract="${tmp}/kpretract.ndjson"
+  fx_begin "${kpretract}"
+  jline c2r c1 "[\"EVENT\",$(ev 5 "e5k" "${PK_A}" "[[\"a\",\"30443:${PK_A}:slot\"],[\"k\",\"30443\"]]")]"
+  jq -c '.wire_seq = .wire_seq + 1' "${healthy}" >> "${kpretract}"
+  expect_rc 0 "a key-package slot retraction's \`k\` tag passes C4" \
+    --journal "${kpretract}" "${base[@]}" || fail=1
+  expect_no_msg "kind 5 carried tag \"k\"" "...and no tag finding names \`k\`" \
+    --journal "${kpretract}" "${base[@]}" || fail=1
+
   # The two REQ-shape rules get one fixture each: a REQ carrying a valid filter
   # BESIDE an unreadable element fires only the non-object rule, and a REQ with
   # no filter at all fires only the zero-filter rule. A single fixture with a
@@ -2810,7 +2832,7 @@ self_test() {
   # it exactly, and deleting any case still trips it. If a case is genuinely
   # retired, lower this number in the same commit and say why.
   # -------------------------------------------------------------------------
-  readonly MIN_CASES=150
+  readonly MIN_CASES=156
   if (( CASES_RUN + CASES_SKIPPED < MIN_CASES )); then
     echo "SELF-TEST FAIL: only $(( CASES_RUN + CASES_SKIPPED )) fixture(s) accounted for" >&2
     echo "  (${CASES_RUN} run + ${CASES_SKIPPED} skipped); at least ${MIN_CASES} expected." >&2

@@ -109,7 +109,8 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
         .first()
         .map(|device| device.tag)
         .ok_or(RigError::ShapeMismatch)?;
-    let planes = world.relays().len();
+    // What each engine holds: the circles' planes and its inbox plane.
+    let planes = world.engine_planes();
     let plane = world
         .relays()
         .first()
@@ -223,11 +224,12 @@ async fn break_and_heal<T: TimelineSink, L: LogDrain>(
     }
     // 4. After the reconnect every device's pool still holds every REQ its
     //    session expects — and the adopted circles are among them, each a REQ
-    //    of its own on every plane. Registration replays on reconnect, so the
-    //    bound is the pool's own ladder.
+    //    of its own on every location plane. Registration replays on
+    //    reconnect, so the bound is the pool's own ladder.
+    let circle_planes = world.relays().len();
     if await_condition(
         bounds::pool_reconnect() + bounds::subscribe_ladder(),
-        || async { every_bucket_live(world, built * planes).await },
+        || async { every_bucket_live(world, built * circle_planes).await },
     )
     .await?
     {

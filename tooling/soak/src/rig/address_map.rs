@@ -73,6 +73,15 @@ impl AliasBook {
         index.and_then(|index| self.endpoints.get(index).cloned())
     }
 
+    /// The address endpoint `slot` stands for, once one was named there.
+    pub fn stands_for(&self, slot: usize) -> Option<String> {
+        self.assigned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(slot)
+            .cloned()
+    }
+
     /// Whether an address was named once every endpoint stood for another: the
     /// world named more unserved addresses than it was built for.
     pub fn overflowed(&self) -> bool {
@@ -164,6 +173,11 @@ mod tests {
             "an address keeps its endpoint in whichever normal form it is named"
         );
         assert!(!book.overflowed());
+        assert!(
+            book.stands_for(1).as_deref() == Some("wss://two.example.com")
+                && book.stands_for(2).is_none(),
+            "each slot answers the address it stands for, and a slot nothing named none"
+        );
     }
 
     #[test]

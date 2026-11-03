@@ -242,14 +242,14 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
     use haven_soak::oracle::undecryptable::{self, Cause, Probe, StoredRow};
     use haven_soak::oracle::vacuity::{ExpectationFloor, FloorTerm, Observed};
     use haven_soak::oracle::{
-        Finding, Invariant, ProbeToken, Reach, RemovalPath, RemovalProbe, RemovalRow, RemovalStage,
-        RetentionEdge, Round, Verdict,
+        Finding, Invariant, PlaneRole, ProbeToken, Reach, RemovalPath, RemovalProbe, RemovalRow,
+        RemovalStage, RetentionEdge, Round, Verdict,
     };
     use haven_soak::profiles::{
         ProfileError, ProfileName, ProfileSpec, ScenarioSelection, WorldShape,
     };
     use haven_soak::rc::{Rc, Verdicts};
-    use haven_soak::relay::{Forgery, NativeClosed, NegFrame};
+    use haven_soak::relay::{EndpointId, Forgery, NativeClosed, NegFrame, PlaneHighWater};
     use haven_soak::rig::{
         CapturedLine, CircleTag, DeviceTag, EventTag, KillKind, PublishVerdict, RelayTag,
         ReopenReport, RigError, SessionStoreUse, SimKind, Step, TimelineRecord, Wait, WorldId,
@@ -435,6 +435,31 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
     ] {
         add(&mut out, "relay/ledger.rs::NegFrame", format!("{frame:?}"));
     }
+    for endpoint in [
+        EndpointId::Canonical,
+        EndpointId::Own(device),
+        EndpointId::Alias(device, 3),
+    ] {
+        add(
+            &mut out,
+            "relay/ledger.rs::EndpointId",
+            format!("{endpoint:?}"),
+        );
+    }
+    add(
+        &mut out,
+        "relay/ledger.rs::PlaneHighWater",
+        format!(
+            "{:?}",
+            PlaneHighWater {
+                shapes: NEEDLE_COUNT,
+                ids: NEEDLE_COUNT,
+            }
+        ),
+    );
+    for role in [PlaneRole::Location, PlaneRole::Account, PlaneRole::Profile] {
+        add(&mut out, "oracle/planes.rs::PlaneRole", format!("{role:?}"));
+    }
     for op in [
         DeviceOp::Restart(KillKind::Soft),
         DeviceOp::Restart(KillKind::Hard),
@@ -493,6 +518,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         BoundDefect::BurstBacklogWait,
         BoundDefect::ResubscribeLookback,
         BoundDefect::WallSecondTurnover,
+        BoundDefect::ProfileRoundTrip,
     ] {
         add(
             &mut out,
@@ -524,6 +550,26 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
             from: device,
             to: DeviceTag::new(1),
             circle,
+        },
+        Finding::PlaneCrossedEvent {
+            relay,
+            device: Some(device),
+            row: "EV-0",
+            rule: "plane-crossed-event",
+        },
+        Finding::PlaneCrossedRequest {
+            relay,
+            device: None,
+            row: "REQ-1059-P",
+        },
+        Finding::PlaneUnknownFrame {
+            relay,
+            device: Some(device),
+            rule: "plane-unknown-frame",
+        },
+        Finding::PlaneRecordFull { relay },
+        Finding::PlaneUnobserved {
+            role: PlaneRole::Location,
         },
     ] {
         add(
@@ -874,6 +920,8 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
                 members: 2,
                 circles: 1,
                 relays: 1,
+                account_relays: 1,
+                profile_relays: 0,
             }
         ),
     );
@@ -1129,6 +1177,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         WithheldAcks::PerInvitedMember,
         WithheldAcks::Locations(1),
         WithheldAcks::FanoutDrives(1),
+        WithheldAcks::IdentityTurns,
     ] {
         add(
             &mut out,
@@ -1223,10 +1272,8 @@ async fn world_samples() -> (BTreeMap<String, Vec<String>>, Vec<String>) {
     use haven_soak::logsink::SoakLogs;
     use haven_soak::nemesis::types::Schedule;
     use haven_soak::profiles::WorldShape;
-    use haven_soak::relay::SimRelay;
-    use haven_soak::rig::{
-        install_process_globals, RelayPlane, RelayTag, SessionStoreUse, SimWorld,
-    };
+    use haven_soak::relay::planes_for;
+    use haven_soak::rig::{install_process_globals, RelayPlane, SessionStoreUse, SimWorld};
     use haven_soak::timeline::Timeline;
 
     install_process_globals().expect("the ws:// loopback opt-in installs");
@@ -1235,17 +1282,17 @@ async fn world_samples() -> (BTreeMap<String, Vec<String>>, Vec<String>) {
     let logs = SoakLogs::acquire(haven_soak::oracle::bounds::settle())
         .await
         .expect("the capture lease");
-    let relay = SimRelay::start(RelayTag::new(0))
-        .await
-        .expect("a relay plane starts");
+    let shape = WorldShape {
+        members: 2,
+        circles: 1,
+        relays: 1,
+        account_relays: 1,
+        profile_relays: 0,
+    };
     let mut world: RunWorld = SimWorld::build(
-        &WorldShape {
-            members: 2,
-            circles: 1,
-            relays: 1,
-        },
+        &shape,
         Schedule::new(Vec::new()),
-        vec![relay],
+        planes_for(&shape).await.expect("the relay planes start"),
         Timeline::in_memory(),
         logs.clone(),
     )

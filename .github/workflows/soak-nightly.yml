@@ -13,7 +13,7 @@
 #
 # `23 0 * * 1-6`: off the hour, because scheduled runs queue hardest at `:00`,
 # and 00:xx is the only hour no other scheduled workflow uses. 00:23 plus the
-# nightly job cap (140 min) is 02:43, clear of e2e-nightly.yml at 03:00 — that
+# nightly job cap (156 min) is 02:59, clear of e2e-nightly.yml at 03:00 — that
 # is DESIGN INTENT, not a bound: GitHub delays scheduled runs under load, and a
 # collision queues (`cancel-in-progress: false`) rather than kills. No Sunday,
 # so the Phase-4 weekly never overlaps. check_soak_lane_reachable.sh L8 reads

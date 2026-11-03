@@ -106,6 +106,7 @@ import 'e2e/_lib/circle_creation.dart'
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
 import 'e2e/_lib/fake_location_service.dart'
     show bobFakeLatitude, bobFakeLongitude;
+import 'e2e/_lib/plane_store_check.dart' show assertStoreWithinRoles;
 import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
 import 'e2e/_lib/synthetic_user.dart' show SyntheticUser;
 import 'e2e/_lib/test_relay.dart'
@@ -943,6 +944,19 @@ void main() {
           'dSame=true materialChanged=true '
           // harness-log-ok: dCreatedAt= parsed by kpr_marker_number.
           'dCreatedAt=${replaced.createdAt - rotated.createdAt}',
+        );
+
+        // The second relay was added as a NIP-65 relay and nothing else, so
+        // all it may hold is the key-package plane's: the heal, the
+        // replacement and their relay list.
+        await assertStoreWithinRoles(
+          healRelay,
+          check: 'kpr R2',
+          roles: const <String>{'keypackage'},
+          harnessIds: <String>{
+            ...relay.publishedIds,
+            ...healRelay.publishedIds,
+          },
         );
 
         // harness-log-ok: runner-grepped marker constant

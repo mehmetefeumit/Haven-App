@@ -68,11 +68,13 @@ pub const ARMS: [Arm; 3] = [
         resubscribes: false,
         absence: Absence::None,
         withheld_acks: WithheldAcks::None,
+        // Both observations on every plane an engine holds, and a rolling
+        // world holds at least three: two circle planes and the inbox one.
         floor: ExpectationFloor {
-            faults_applied: 2,
+            faults_applied: 3,
             epochs_crossed: 0,
             deliveries_observed: 2,
-            canaries_caught: 4,
+            canaries_caught: 6,
         },
     },
 ];
@@ -103,20 +105,24 @@ impl Outage {
 ///
 /// # Errors
 ///
-/// [`RigError::ShapeMismatch`] if the arm needs more relay planes than the
-/// world has — an all-relay or rolling outage over one plane is a single-relay
-/// outage wearing another arm's label, and would report coverage this run does
-/// not have. Otherwise [`RigError`] naming the read that failed.
+/// [`RigError::ShapeMismatch`] if the arm needs more location planes than the
+/// world has — an all-relay or rolling outage over one circle plane is the
+/// single-relay outage plus the inbox, wearing another arm's label, and would
+/// report coverage this run does not have. Otherwise [`RigError`] naming the
+/// read that failed.
 pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     arm: &Arm,
     tick: Duration,
 ) -> Result<ArmOutcome, RigError> {
     let outage = Outage::of(arm).ok_or(RigError::UnknownTarget)?;
-    let planes = world.relays().len();
-    if outage != Outage::Single && planes < 2 {
+    if outage != Outage::Single && world.relays().len() < 2 {
         return Err(RigError::ShapeMismatch);
     }
+    // What a device's engine holds: the circles' planes and its inbox plane.
+    // "All" is every one of them — the device fully offline — and a rolling
+    // outage rolls over the same set.
+    let planes = world.engine_planes();
 
     // The control round: the same probe over the same pairs BEFORE anything is
     // broken, so a world that never delivered cannot read as a world an outage
@@ -133,7 +139,7 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
     );
     let mut graded = grade_round(world, &control, &[Invariant::LocationRoundTrip]).await?;
 
-    let tags: Vec<RelayTag> = world.relays().iter().map(RelayPlane::tag).collect();
+    let tags = world.engine_plane_tags();
     // How many faults this applies is not counted here: the PLANES record what
     // they took, and the floor is graded against that.
     let mut canaries = 0_usize;
@@ -237,13 +243,7 @@ async fn apply<T: TimelineSink, L: LogDrain>(
     tag: RelayTag,
     fault: Fault,
 ) -> Result<(), RigError> {
-    world
-        .relays_mut()
-        .iter_mut()
-        .find(|plane| plane.tag() == tag)
-        .ok_or(RigError::UnknownTarget)?
-        .apply(fault)
-        .await
+    world.plane_mut(tag)?.apply(fault).await
 }
 
 #[cfg(test)]

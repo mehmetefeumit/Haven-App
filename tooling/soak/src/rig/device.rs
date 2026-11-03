@@ -24,6 +24,7 @@ use haven_core::nostr::mls::storage::{is_session_live, StorageConfig};
 use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::fanout::RelayMappedFanout;
 use haven_core::relay::live_sync::{CircleSpec, Claim, LiveSyncCore, LiveSyncEvent};
+use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::{FanoutTransport, RelayManager};
 use nostr::Keys;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -151,16 +152,19 @@ pub struct SimDevice {
     pub policy_offset_secs: i64,
     bus_rx: Option<Receiver<LiveSyncEvent>>,
     specs: Vec<CircleSpec>,
-    /// The gift-wrap plane: the device's OWN endpoint on every relay, like its
-    /// engine's group REQs, so the engine's pool holds one relay per plane and
-    /// a welcome crosses the same partition its engine does. What a member's
-    /// key package STORES as its inbox relays stays canonical
-    /// (`rig/circle.rs`).
+    /// The gift-wrap plane its engine subscribes on: its OWN endpoint on the
+    /// world's inbox plane, so a welcome crosses the same partition its engine
+    /// does. What a member's key package STORES as its inbox relays stays
+    /// canonical ([`Self::stored_inbox`]).
     inbox_relays: Vec<String>,
-    /// Each plane's STORED address, index for index with `inbox_relays`: what
-    /// the live plane's sends swap for the device's own endpoint
+    /// Each plane's STORED address and the device's own endpoint on it: what
+    /// the live plane's sends swap a stored address for
     /// (`rig/address_map.rs`).
-    stored_relays: Vec<String>,
+    routes: Vec<(String, String)>,
+    /// The canonical addresses of its inbox and key-package lists, as an
+    /// inviter learns them.
+    stored_inbox: Vec<String>,
+    stored_key_package: Vec<String>,
     /// The endpoints standing for addresses no plane serves, shared by every
     /// address map built for this device.
     aliases: Arc<AliasBook>,
@@ -179,20 +183,32 @@ impl SimDevice {
     /// [`RigError::Core`] with [`Step::OpenStore`] if the store cannot be
     /// opened — which includes another live session already holding it
     /// (Rule 14).
-    pub fn open(tag: DeviceTag, inbox_relays: &[String]) -> Result<Self, RigError> {
-        Self::open_behind(tag, inbox_relays, inbox_relays)
+    /// Every relay in `relays` is its inbox, its key-package list and a plane
+    /// it dials as named.
+    pub fn open(tag: DeviceTag, relays: &[String]) -> Result<Self, RigError> {
+        Self::open_behind(
+            tag,
+            relays
+                .iter()
+                .map(|url| (url.clone(), url.clone()))
+                .collect(),
+            relays.to_vec(),
+            (relays.to_vec(), relays.to_vec()),
+        )
     }
 
-    /// Opens a device whose endpoints (`own`) front planes storage knows by
-    /// `stored`, one of each per plane in the same order.
+    /// Opens a device that dials each stored address of `routes` at its own
+    /// endpoint, subscribes for its invitations on `inbox_own`, and lists the
+    /// canonical `(inbox, key package)` addresses an inviter learns.
     ///
     /// # Errors
     ///
     /// As [`Self::open`].
     pub(crate) fn open_behind(
         tag: DeviceTag,
-        stored: &[String],
-        own: &[String],
+        routes: Vec<(String, String)>,
+        inbox_own: Vec<String>,
+        (stored_inbox, stored_key_package): (Vec<String>, Vec<String>),
     ) -> Result<Self, RigError> {
         let dir = tempfile::TempDir::new().map_err(|_| RigError::Core(Step::OpenStore))?;
         let keys = Keys::generate();
@@ -209,8 +225,10 @@ impl SimDevice {
             policy_offset_secs: 0,
             bus_rx: None,
             specs: Vec::new(),
-            inbox_relays: own.to_vec(),
-            stored_relays: stored.to_vec(),
+            inbox_relays: inbox_own,
+            routes,
+            stored_inbox,
+            stored_key_package,
             aliases: AliasBook::new(Vec::new()),
             ledger: DeviceLedger::default(),
             applied_ops: Vec::new(),
@@ -314,10 +332,49 @@ impl SimDevice {
         &self.specs
     }
 
-    /// The relays this device takes invitations on.
+    /// The relays this device takes invitations on: its own endpoints.
     #[must_use]
     pub fn inbox_relays(&self) -> &[String] {
         &self.inbox_relays
+    }
+
+    /// Its inbox list as an inviter stores it: canonical addresses.
+    #[must_use]
+    pub fn stored_inbox(&self) -> &[String] {
+        &self.stored_inbox
+    }
+
+    /// Its key-package list as canonical addresses.
+    #[must_use]
+    pub fn stored_key_package(&self) -> &[String] {
+        &self.stored_key_package
+    }
+
+    /// Mints a fresh key package into a new slot, its event naming the
+    /// device's key-package list — the shape an invitee hands an inviter.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::Core`] with [`Step::MintKeyPackage`] if the session cannot
+    /// mint one.
+    pub async fn mint_key_package(&self) -> Result<nostr::Event, RigError> {
+        build_kp_maintenance_events(
+            self.session()?,
+            &self.keys,
+            &self.stored_key_package,
+            None,
+            None,
+        )
+        .await
+        .map(|built| built.event)
+        .map_err(|_| RigError::Core(Step::MintKeyPackage))
+    }
+
+    /// The address an alias endpoint `slot` stands for, once the device has
+    /// named one there.
+    #[must_use]
+    pub fn alias_address(&self, slot: u16) -> Option<String> {
+        self.aliases.stands_for(usize::from(slot))
     }
 
     /// This device's policy instant for `wall`.
@@ -367,13 +424,7 @@ impl SimDevice {
     /// Each stored (canonical) relay address mapped to this device's own
     /// endpoint on that plane ([`endpoint_map`]).
     pub fn endpoint_route(&self) -> impl Fn(&str) -> String + Send + Sync + 'static {
-        let routes: Vec<(String, String)> = self
-            .stored_relays
-            .iter()
-            .cloned()
-            .zip(self.inbox_relays.iter().cloned())
-            .collect();
-        endpoint_map(routes, Arc::clone(&self.aliases))
+        endpoint_map(self.routes.clone(), Arc::clone(&self.aliases))
     }
 
     /// Hands this device the endpoints that stand for addresses no plane
@@ -396,12 +447,6 @@ impl SimDevice {
     /// [`RigError::Core`] with [`Step::StartEngine`] if a subscription fails.
     pub async fn start_engine(&mut self, specs: Vec<CircleSpec>) -> Result<(), RigError> {
         let manager = Arc::clone(self.manager()?);
-        let routes: Vec<(String, String)> = self
-            .stored_relays
-            .iter()
-            .cloned()
-            .zip(self.inbox_relays.iter().cloned())
-            .collect();
         // The engine's own publish pool for its fanout drives, as the
         // product gives it one: never the pool the rig's ladder publishes
         // through, which the engine would close at every pause.
@@ -409,7 +454,7 @@ impl SimDevice {
             manager,
             self.keys.public_key(),
             Arc::new(RelayManager::new()),
-            endpoint_map(routes, Arc::clone(&self.aliases)),
+            endpoint_map(self.routes.clone(), Arc::clone(&self.aliases)),
         );
         // Subscribed BEFORE start: a broadcast receiver only sees what is sent
         // after it subscribes, and the first deliveries can land inside start.

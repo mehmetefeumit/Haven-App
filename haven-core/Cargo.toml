@@ -266,6 +266,10 @@ openmls_basic_credential = { git = "https://github.com/erskingardner/openmls.git
 # the graph at 0.26 via `nostr-relay-pool`'s async-wsocket: zero new crates.
 # `handshake` is the server-side accept, declared rather than inherited.
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+# The relay-plane judge (`planes::judge`, the one policy every layer of the
+# relay-plane proof judges with). Dev-only, and only ever dev-only: the crate
+# also builds the recording wire proxy (`check_wire_proxy_test_only.sh` check 2).
+haven-local-relay = { path = "../tooling/e2e/local-relay" }
 # Enable test-utils feature for integration tests
 haven-core = { path = ".", features = ["test-utils"] }
 

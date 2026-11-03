@@ -34,6 +34,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:integration_test/integration_test.dart';
 
+import 'e2e/_lib/plane_store_check.dart';
 import 'e2e/_lib/test_relay.dart';
 import 'e2e/_lib/test_user.dart';
 import 'e2e/_lib/throw_time_error_capture.dart';
@@ -86,6 +87,7 @@ void main() {
   Future<void> runLeakProof({
     required RelayTypeFfi category,
     required int listKind,
+    required String role,
     required String scenario,
   }) async {
     try {
@@ -97,6 +99,9 @@ void main() {
       );
       return;
     }
+    // Both tests share one R2 store, so each judges only what it added.
+    final r1Before = await storeIds(r1);
+    final r2Before = await storeIds(r2);
 
     final dataDir = await Directory.systemTemp.createTemp('haven_2plane_');
     try {
@@ -205,6 +210,20 @@ void main() {
       );
 
       debugPrint('[$scenario] PASS: kind $listKind on R2 only; R1 leak-free.');
+      await assertStoreWithinRoles(
+        r2,
+        check: '$scenario R2',
+        roles: <String>{role},
+        before: r2Before,
+        harnessIds: <String>{...r1.publishedIds, ...r2.publishedIds},
+      );
+      await assertStoreLacksKinds(
+        r1,
+        check: '$scenario R1',
+        kinds: const <int>{0},
+        before: r1Before,
+        harnessIds: <String>{...r1.publishedIds, ...r2.publishedIds},
+      );
     } finally {
       await dataDir.delete(recursive: true);
     }
@@ -217,6 +236,7 @@ void main() {
       await runLeakProof(
         category: RelayTypeFfi.inbox,
         listKind: 10050,
+        role: 'inbox',
         scenario: 'TP-INBOX',
       );
     },
@@ -232,6 +252,7 @@ void main() {
       await runLeakProof(
         category: RelayTypeFfi.nip65,
         listKind: 10002,
+        role: 'keypackage',
         scenario: 'TP-KP',
       );
     },

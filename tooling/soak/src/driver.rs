@@ -44,10 +44,9 @@ use crate::nemesis::types::{Op, Schedule, ScheduledOp};
 use crate::oracle::{bounds, vacuity, Invariant, Reach, Recovery, Round, Verdict};
 use crate::profiles::{ProfileName, ProfileSpec, WorldShape};
 use crate::rc::{Rc, Verdicts};
-use crate::relay::SimRelay;
+use crate::relay::planes_for;
 use crate::rig::{
-    sim_magnitude, CapturedLine, DeclareSink, DeviceTag, RelayTag, RigError, SessionStoreUse,
-    SimWorld,
+    sim_magnitude, CapturedLine, DeclareSink, DeviceTag, RigError, SessionStoreUse, SimWorld,
 };
 use crate::scenarios::{Scenario, ScenarioReport, ScenarioWorld};
 use crate::timeline::{self, Snapshot, Timeline};
@@ -366,6 +365,12 @@ impl DeclareSink for NeedleSink {
             .declare_relay_url(url)
             .map_err(|_| RigError::DeclarationRefused)
     }
+
+    fn declare_name(&self, name: &str) -> Result<(), RigError> {
+        self.locked()
+            .declare_petname(name)
+            .map_err(|_| RigError::DeclarationRefused)
+    }
 }
 
 /// The run id the manifest carries. Deterministic in the two things that
@@ -562,13 +567,9 @@ impl Run {
         schedule: Schedule,
         timeline: &Timeline,
     ) -> Result<(RunWorld, Manifest), Refusal> {
-        let mut relays = Vec::with_capacity(shape.relays);
-        for ordinal in 0..shape.relays {
-            let tag = RelayTag::new(u32::try_from(ordinal).map_err(|_| RigError::ShapeMismatch)?);
-            relays.push(SimRelay::start(tag).await?);
-        }
+        let planes = planes_for(shape).await?;
         let mut world =
-            SimWorld::build(shape, schedule, relays, timeline.clone(), self.logs.clone()).await?;
+            SimWorld::build(shape, schedule, planes, timeline.clone(), self.logs.clone()).await?;
         self.logs.attribute_to(world.id());
         // Attached, not merely called: a circle an ARM builds later declares
         // itself through the same seam.
@@ -637,7 +638,8 @@ impl Run {
 
     /// Grades the world the schedule left behind.
     ///
-    /// O1, O2 and O6 only: O5's subject is a set of classifications, and the
+    /// O1, O2, O6 and O7 only — O7 over everything the long, faulted world
+    /// sent: O5's subject is a set of classifications, and the
     /// background schedule collects none — an empty set would grade as
     /// "nothing went unaccounted for" because nothing was looked at, which is
     /// exactly the vacuous pass the oracle refuses.
@@ -669,10 +671,13 @@ impl Run {
             Invariant::LocationRoundTrip,
             Invariant::SendPathLiveness,
             Invariant::Quiescence,
+            Invariant::RelayPlaneContainment,
         ] {
             let verdict = invariant.check(world, &round).await?;
             self.report_oracle(world, SETTLED_ROUND, invariant, verdict)?;
         }
+        self.coverage
+            .note_plane_overlaps(crate::oracle::planes::overlapping_relays(world));
 
         // The schedule's own floor, DECLARED by the schedule and OBSERVED from
         // the world: the floor counts what the generator put in the op list,
@@ -820,6 +825,8 @@ impl Run {
         };
         println!("{rendered} bound={within}");
         let faults = applied_faults(world);
+        self.coverage
+            .note_plane_overlaps(crate::oracle::planes::overlapping_relays(world));
         for (invariant, verdict) in &report.graded {
             self.verdicts.fold_invariant(verdict.rc());
             self.coverage.note(
@@ -1003,10 +1010,7 @@ impl Run {
 /// under a fault the world really took.
 fn applied_faults(world: &RunWorld) -> Vec<&'static str> {
     let mut labels = Vec::new();
-    let planes = world
-        .relays()
-        .iter()
-        .flat_map(|plane| plane.ledger().faults());
+    let planes = world.all_planes().flat_map(|plane| plane.ledger().faults());
     let devices = world
         .devices()
         .iter()
@@ -1078,8 +1082,7 @@ fn rendered_devices(world: &RunWorld) -> Vec<String> {
 /// Every relay plane, the same way.
 fn rendered_relays(world: &RunWorld) -> Vec<String> {
     world
-        .relays()
-        .iter()
+        .all_planes()
         .map(|relay| format!("{relay:?}"))
         .collect()
 }
@@ -1210,6 +1213,8 @@ mod tests {
             members: 2,
             circles: 1,
             relays: 1,
+            account_relays: 1,
+            profile_relays: 0,
         };
         spec.scenarios = vec![
             ScenarioSelection {

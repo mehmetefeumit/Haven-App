@@ -3,7 +3,7 @@
 # Superset of `pr` — every PR arm runs here too, so a nightly red is never
 # something the PR lane silently stopped covering. The scenarios that appear
 # only here (S02, S03, S04, S05, S08, S09, S10, S12, S14, S16, S17, S18, S19,
-# S20, S21, S22, S23, S24) have lane execution only in `soak-nightly.yml` — its
+# S20, S21, S22, S23, S24, S26) have lane execution only in `soak-nightly.yml` — its
 # schedule (four slots, Monday to Saturday) or a dispatch of it — never on a
 # pull request.
 #
@@ -42,7 +42,13 @@
 # pile-up arms, each pile-up paying the NIP-77 spacing it waits out: the priced
 # run became 4 782.25 s, which with the margin is 5 082.25 s, past the 4 860 s
 # budget, so the budget rose to the next whole minute, 5 100 s (85 min), and the
-# deadline and the lane's caps with it (PLAN_PHASE2 §7.5). The budget is not
+# deadline and the lane's caps with it (PLAN_PHASE2 §7.5). S26 joined with
+# its identity-plane turns at the product's own profile and key-package
+# ceilings — every device's own read and publish, a retry ladder per peer
+# read, a key-package round trip per member (1 108.75 s): the priced run
+# became 5 891 s, 6 191 s with the margin, so the budget rose to the next
+# whole minute, 6 240 s (104 min), and the deadline (114 min) and the lane's
+# caps with it. The budget is not
 # lowered with the price: the rule (PLAN §2) moves it only when the priced run
 # outgrows it.
 #
@@ -51,8 +57,8 @@
 # it to `soak-core.yml`'s own literal in both directions, and that literal's
 # step cap and job cap move with it (`check_e2e_step_timeout_ordering.sh`).
 name = "nightly"
-run_budget_secs = 5100
-deadline_secs = 5700
+run_budget_secs = 6240
+deadline_secs = 6840
 margin_secs = 300
 duration_secs = 900
 tick_ms = 250
@@ -61,6 +67,8 @@ tick_ms = 250
 members = 4
 circles = 3
 relays = 2
+account_relays = 2
+profile_relays = 3
 
 [[scenarios]]
 id = "S01"
@@ -165,3 +173,7 @@ arms = ["removal-withheld-commit", "removal-delivered-commit", "removal-lag"]
 [[scenarios]]
 id = "S24"
 arms = ["collided-circles-leave-apart"]
+
+[[scenarios]]
+id = "S26"
+arms = ["identity-planes-under-faults"]

@@ -55,6 +55,13 @@ impl Frame {
         self.opcode == OPCODE_TEXT
     }
 
+    /// Whether this is a data frame — text, binary or a continuation — rather
+    /// than a ping, pong or close (RFC 6455 §5.5: control opcodes have the
+    /// high bit set).
+    pub const fn is_data(&self) -> bool {
+        self.opcode & 0x8 == 0
+    }
+
     /// The payload, unmasked if it arrived masked.
     pub fn payload(&self) -> Cow<'_, [u8]> {
         let raw = &self.bytes[self.payload_at..];

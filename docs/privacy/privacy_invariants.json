@@ -2376,7 +2376,8 @@
       ],
       "guards": [
         "scripts/ci/check_no_exporter_label_override.sh",
-        "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml"
+        "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml",
+        "tooling/e2e/ci/check-wire-correlation.sh#workflow=e2e-android.yml"
       ]
     },
     {
@@ -2670,7 +2671,8 @@
         }
       ],
       "guards": [
-        "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml"
+        "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml",
+        "tooling/e2e/ci/check-wire-correlation.sh#workflow=e2e-android.yml"
       ]
     },
     {
@@ -2868,7 +2870,8 @@
         }
       ],
       "guards": [
-        "scripts/ci/check_publish_rotation_fairness.sh"
+        "scripts/ci/check_publish_rotation_fairness.sh",
+        "tooling/e2e/ci/check-wire-correlation.sh#workflow=e2e-android.yml"
       ],
       "residual": "The no-gap property this constant is sized for is a bound on the SCHEDULED gap, and it is bounded by the ROSTER at eleven circles — which is why the roster itself is bounded at TEN. kMaxCirclesPerAccount (owner decision, 2026-09-09) refuses circle creation and invitation accept once the account holds ten accepted circles, enforced in NostrCircleService because its two roster-growing calls are the only Dart callers of the only two core operations that CREATE a circles row: create_circle_with_config, which upserts through CircleStorage::save_circle, and record_processed_invitation, which runs its own INSERT INTO circles. 'CREATE' and not 'write' is the property, and the difference is load-bearing rather than pedantic: save_circle is an UPSERT with three further non-test callers (resync_circle_relays_from_mdk, add_members, remove_members), and record_processed_invitation is not among them; each of those three reads the row back with storage.get_circle first and returns early when there is none, so none of them can mint one. The gate is also enforced against CONCURRENCY, not only against call sites: _refuseIfRosterFull RESERVES the admitted slot (_reservedRosterSlots, released in the caller's finally), because the row only exists once the core write returns, so without the reservation simultaneous accepts would each read the same pre-growth roster and enough of them would carry it past kMaxCirclesPerBurst — the deferral the bound exists to eliminate. The call-site half is pinned by 'only the gated service grows the account roster' (haven/test/lints/circle_roster_bound_sites_test.dart), an AST inventory over all of lib minus lib/src/rust/ — main.dart included, with its own anti-vacuity assertion — which fails on a third call site rather than letting one land silently; the concurrency half by 'admit exactly one when only one slot is left' and its two slot-release siblings. A burst is therefore never handed more than ten circles and the deferral ladder below is UNREACHABLE in production. THE LADDER IS KEPT ON RECORD BECAUSE THE DEFERRAL CODE IS, and lifting the bound re-opens it verbatim: a burst publishes at most kMaxCirclesPerBurst (11) circles and defers the rest to the next tick, _takeBurstSlice is strict round-robin, so a DEFERRED circle's worst SERVICE PERIOD would be ceil(N / 11) bursts rather than two at every roster — N = 12..22 -> TWO sampled intervals (144 s best, 240 s mean, 336 s worst, and 366 s once the burst-position differential is added, because a circle may lead one burst and trail the one two ticks later, a whole kPublishStaggerMaxSpread apart); N = 23..33 -> three (216 / 360 / 504 s); N >= 34 -> four or more, where even the BEST case (288 s) exceeds the 228 s retention on EVERY publish rather than on some. Both halves stay PINNED rather than left as prose, so that a lifted bound cannot re-open them unmeasured: the round-robin period by 'a deferred circle waits ceil(N / kMaxCirclesPerBurst) bursts' (which drives real ticks through _takeBurstSlice, so it fails when the slice size or the rotate moves) and the seconds by 'and past the cap, the deferral ladder in SECONDS' (which reads them off the cadence constants, so it fails when the cadence moves). The two scope limits that used to matter go with it: a tick folding into a running iOS burst (BackgroundBurstCoordinator._joinable), and the 21-circle point where a one-shot's own spread outlasts kLocationPublishOverlapGuard, are both reachable only at N >= 12. WHAT THE BOUND DOES NOT CLOSE, and what this entry therefore does not promise. FIRST, the PROPAGATION MARGIN. Against the ACTUAL predecessor — per-circle schedulers, where the gap was each circle's own sampled interval, <= 168 s at every N, with no spread and no deferral — the full 60 s (2 x kTtlNetworkBufferSeconds) was margin; since PUB-COALESCE the burst spread spends one of the two, so this invariant runs on 30 s of propagation and clock-skew margin at every roster from TWO circles up. That halving is not a past-eleven effect and the roster bound does not touch it; it is recorded in the ratchet_override block for PUB-COALESCE, the change that caused it, so it sits in a reviewed diff and not only here. SECOND, the period is a period of TURNS, and a turn is a SELECTION rather than a publish: the rotation advances when the tick FIRES, ahead of the chain, the window and the sink, so a slice that loses its window (no identity, disclosure not accepted, a fix that timed out, a pause under it, an iOS coordinator that drops a queued burst) publishes nothing and waits a whole interval over again — up to 336 s against this 228 s retention, at every roster including a bounded one. The health model is told; the queue is not. THIRD, THREE REALIZED-gap terms sit outside this SCHEDULED bound, and two of them cross the retention at rosters the bound admits. The Android foreground service publishes on a platform delivery that arrives a TTFF late: on API 23-30 a cold acquisition reaches 248 s, i.e. 20 s past this 228 s, pinned by equality per API regime in haven/test/services/background_fix_request_test.dart. The iOS burst HEAD (connect, backlog wait and one-shot fix, up to 40 s) varies between bursts and so enters the realized gap as a differential on top of the spread: 168 + 40 + spread reaches 235 s at four circles and 238 s from five up, so iOS is inside 228 s only up to three circles. The THIRD is the only one that scales with N and coalescing introduced it: the pass is SERIAL and the stagger buys separation on top of each publish rather than inside it, so the foreground _pacedPublish — which measures the gap from the previous publish's START — spans sum(max(gap_i, dur_i)), while the background pass awaits the gap AFTER the previous publish returns and is strictly additive, sum(dur_i + gap_i+1); at one publish priced at kBurstPublishBudget (10 s) the realized span reaches about 100 s (foreground shape) or 130 s (background) against a SCHEDULED 30 s spread, and it lands twice — once in a realized gap and once in the duration-shaped circle-count estimator PUB-COALESCE records. So this entry is a promise about the SCHEDULE at every reachable roster, and must not be read as 'a peer's marker never expires': on iOS with background sharing on it CAN expire before the replacement lands, from FOUR circles up, which is an ordinary roster and not a corner. All three are stated on haven/lib/src/constants/location.dart, and their PROOF status differs, which is the reason to state it: only the Android 248 s is pinned, by equality per API regime (haven/test/services/background_fix_request_test.dart, 'a cold TTFF outruns the lead, and on API ≤ 30 it outruns the retention as well — the residual, exactly'). The iOS 235/238 s crossing and the 100/130 s serial span are arithmetic over kBurstConnectBudget, kBurstBacklogBudget, kBurstWindowBudget, kBurstPublishBudget and the stagger that NO test asserts — burstBound pins the composition of those budgets, never the seconds they add up to — so those two are DISCLOSED and not enforced, and moving a budget moves them silently. THE ROTATION FACTS THAT MAKE THE PERIOD ABSOLUTE ARE UNCHANGED and still worth stating, because they are what keeps a lost turn from compounding: _rotation outlives stopScheduling()/startScheduling() and outlives an emission reporting nothing eligible (circlesProvider degrades ANY roster-read failure to an empty list, so an empty emission is at least as often a transient FFI/keyring error as a real departure), so neither a backgrounding nor a failed roster read re-phases whose turn it is — pinned by 'a deferred circle is not deferred again by every resume', 'a transient empty roster emission does not re-phase whose turn it is' and 'a roster change keeps survivors' places in the queue', and structurally by scripts/ci/check_publish_rotation_fairness.sh, which pins _rotation.clear() to exactly ONE site inside build() and the survivor merge to below the _circles.isEmpty guard. What DOES rewind the queue is build() — a fresh container, or the invalidate in IdentityNotifier.deleteIdentity — and a process restart, which does not persist it; and because the roster keeps filterPublishEligibleCircles order (getVisibleCircles() orders by updated_at DESC) a rewind returns to the SAME head and re-serves the same first slice, a deterministic re-service and not a re-phase. At a bounded roster the first slice IS the roster, so a rewind serves all of it."
     },
@@ -3136,6 +3139,10 @@
         {
           "file": "haven/test/providers/invitation_provider_test.dart",
           "name": "looks back 96 h: a wrap re-sent a day after its hand-over and backdated two days is still asked for"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "ffi_account_and_profile_traffic_stays_on_its_planes"
         }
       ],
       "guards": []
@@ -3579,11 +3586,135 @@
         {
           "file": "haven-core/tests/negentropy_e2e.rs",
           "name": "negentropy_logs_no_identifier"
+        },
+        {
+          "file": "haven-core/tests/relay_plane_wire_e2e.rs",
+          "name": "every_relay_plane_receives_only_its_own_traffic_across_a_circle_lifecycle"
         }
       ],
       "guards": [
         "scripts/ci/check_publish_client_no_subscription.sh",
         "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-ios.yml"
+      ]
+    },
+    {
+      "id": "INV-R-RELAY-PLANE-CONTAINMENT",
+      "title": "Every frame Haven sends a relay reaches only a relay whose plane admits it",
+      "statement": "Every client-to-relay frame Haven sends reaches only a relay whose plane admits that verb, kind and exact tag or filter-key set for that binding, as the allow matrix ROWS (tooling/e2e/local-relay/src/planes/policy.rs, rendered verbatim in haven-core/SECURITY.md \"The relay-plane allow matrix\") states it: a circle's kind 445 on that circle's routing (a commit on the targets frozen when it was staged, the routing a relay change leaves included), its #h REQs and NIP-77 sessions where that routing stands and its by-id fetches where it is kept; a Welcome on its invitee's inbox list; the account's own key package and relay lists on its own lists, each list naming no relay of another plane; kind 0 and its lookups on the profile plane alone; another account's relay lists and key packages asked of the discovery plane or of that account's own lists; and a CLOSE, NEG-MSG or NEG-CLOSE only for a subscription its own connection opened. One judge (judge) applies it to every frame in-process relays recorded across a circle's lifecycle — three real engines over thirteen relays, one per role, through the live plane, both catch-up planes, invites, a relay change, a leave and the profile plane — and to the FFI's key-package, relay-list and profile orchestration with the sender known; in the lifecycle run every relay any client dials is a relay of the test's world, and in both runs a crossing planted on a plane is reported exactly. The soak rig's O7 applies the same judge to every frame every device of a soak world sent — with the sender known on a device's own and alias endpoints — after every arm and the nemesis phase, its profile and key-package planes driven under a downed profile relay (S26), and its own planted crossings each reported.",
+      "status": "enforced",
+      "residual": "Two things this does not hold. (a) An invitee's own relay lists steer an invite onto other planes: the lifecycle run's last phase pins, as current behaviour, the key-package lookup asked of a profile relay that the invitee's NIP-65 write set names and the Welcome sent to a location relay that the invitee's inbox list names first (PLAN_v2 section 4 finding 1, owner decision OQ-1: no product change in this work); that expected set becomes empty when a rule drops such entries. (b) The lifecycle run judges with no sender, so a request bound to another identity's own list there (an inbox REQ by #p of an account other than the sending device's) passes; the per-identity bindings are proved only by the FFI run, with the sender known. The dial check is the lifecycle run's alone: the FFI run arms no dial witness, its binary's tests sharing one process concurrently. O7 judges a frame on a plane's canonical endpoint (catch-up sweeps, the rig's inbox reads, an invite's key-package lookup) with no sender, so there too a request bound to another identity's own list passes. O7 holds a location on a relay a change left admissible (a member that has not applied the change still seals for the routing it holds, and the rig knows that instant for the stager alone), and grades no discovery traffic: a soak process points discovery at a port that refuses every dial.",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "tooling/e2e/local-relay/src/planes/policy.rs",
+          "symbol": "ROWS"
+        },
+        {
+          "file": "tooling/e2e/local-relay/src/planes/judge.rs",
+          "symbol": "judge"
+        },
+        {
+          "file": "haven-core/src/relay/verified.rs",
+          "symbol": "verified_client"
+        },
+        {
+          "file": "haven-core/src/circle/location_pool.rs",
+          "symbol": "pick_circle_relays"
+        },
+        {
+          "file": "haven-core/src/circle/storage_contamination.rs",
+          "symbol": "usable_profile_relays"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/relay_plane_wire_e2e.rs",
+          "name": "every_relay_plane_receives_only_its_own_traffic_across_a_circle_lifecycle"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "ffi_account_and_profile_traffic_stays_on_its_planes"
+        },
+        {
+          "file": "tooling/e2e/local-relay/tests/wire_planes.rs",
+          "name": "every_row_admits_its_own_shape_on_its_own_list_and_nothing_else"
+        },
+        {
+          "file": "tooling/e2e/local-relay/tests/wire_planes.rs",
+          "name": "the_documented_matrix_is_the_policy"
+        },
+        {
+          "file": "tooling/soak/tests/oracles.rs",
+          "name": "o7_reds_on_a_kind_0_published_to_a_location_plane"
+        },
+        {
+          "file": "tooling/soak/tests/oracles.rs",
+          "name": "o7_reds_on_an_inbox_request_sent_to_a_location_plane"
+        },
+        {
+          "file": "tooling/soak/tests/oracles.rs",
+          "name": "o7_reds_on_a_location_sent_to_the_other_circles_plane"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-R-RELAY-PLANES-WIRE-CONTAINMENT",
+      "title": "On the hermetic core-flow lanes, every frame Haven puts on the wire lands on a relay whose role admits it",
+      "statement": "On the recorded core-flow lanes (Android and iOS, poll and live-sync), every client-to-relay EVENT, REQ filter and NEG-OPEN filter outside the harness, at or below the sentinel, reaches only a proxy listen whose declared role (inbox, key-package, discovery, location; no profile listen exists there) admits its verb, kind and shape: a kind-445 and every #h REQ and NEG-OPEN only on a relay of its circle's declared routing, a kind-1059 only on an inbox relay some kind-10050 of its recipient names, a kind-30443 or kind-10002 only on a relay its author's kind-10002 names, a kind-10050 only on its own inbox relays, a key-package or relay-list lookup only on discovery or on the target's own lists, nothing at all on discovery, and no kind 0 or kind-0 REQ anywhere, since that lane's profile plane fails closed. Every declared role is witnessed, every circle with traffic is declared, and every frame's listen is declared, so a run that judged nothing is a failure rather than a pass. False if any such frame reaches a listen outside its role.",
+      "status": "enforced",
+      "residual": "ROLE PLACEMENT, not the per-identity bindings: the oracle judges every frame with no sender, so a request on another identity's own list passes it; those bindings are held by INV-R-RELAY-PLANE-CONTAINMENT's L1b test and the soak oracle O7. The lanes give one listen three roles — the account's inbox and key-package relay, which discovery also reads through the default-relay fallback, the same seed-and-discovery overlap production has — so a frame for one of those roles on the relay of another of them is not told apart here; the Rust layers, where each role has its own relay, tell them apart. A circle's routing is the one the drive declares from Rust's view of the circle (CircleFfi.relays), so a routing Rust itself recorded wrong is not caught here. Blossom (HTTP) is outside every relay oracle. The unproxied multi-relay lanes (relay customization, the profile plane, key-package rotation) carry no recorder: their relays are judged from the STORE, which shows no REQ, no NEG session, no expired location and no binding beyond the kind.",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "tooling/e2e/local-relay/src/planes/cli.rs",
+          "symbol": "ROUTING_DECLARATION_PREFIX"
+        },
+        {
+          "file": "haven/integration_test/e2e/_lib/test_relay.dart",
+          "symbol": "declareCircleRouting"
+        },
+        {
+          "file": "haven/integration_test/e2e/_lib/plane_store_check.dart",
+          "symbol": "assertStoreWithinRoles"
+        }
+      ],
+      "tests": [
+        {
+          "file": "tooling/e2e/local-relay/tests/wire_planes.rs",
+          "name": "the_c8_fixture_suite"
+        },
+        {
+          "file": "tooling/e2e/local-relay/src/frame.rs",
+          "name": "a_routing_declaration_is_a_sentinel_that_keeps_its_payload"
+        },
+        {
+          "file": "tooling/e2e/local-relay/tests/wire_proxy_e2e.rs",
+          "name": "self_test_passes"
+        },
+        {
+          "file": "haven/test/e2e/test_relay_routing_decl_test.dart",
+          "name": "the payload is exactly {h, relays}, h as 64 lowercase hex"
+        },
+        {
+          "file": "haven/test/e2e/plane_store_check_test.dart",
+          "name": "a key-package retraction on a profile relay is a crossing"
+        },
+        {
+          "file": "haven/test/lints/relay_planes_mirror_test.dart",
+          "name": "every role admits exactly the event kinds the judge exports"
+        }
+      ],
+      "guards": [
+        "tooling/e2e/ci/check-wire-planes.sh#workflow=e2e-android.yml",
+        "tooling/e2e/ci/check-wire-planes.sh#workflow=e2e-ios.yml",
+        "scripts/ci/check_wire_oracle_lane_reachable.sh"
       ]
     },
     {
@@ -4050,6 +4181,10 @@
         {
           "file": "haven/rust_builder/src/api.rs",
           "name": "the_plain_publish_refuses_a_gift_wrap"
+        },
+        {
+          "file": "haven-core/tests/relay_plane_wire_e2e.rs",
+          "name": "every_relay_plane_receives_only_its_own_traffic_across_a_circle_lifecycle"
         }
       ],
       "guards": []

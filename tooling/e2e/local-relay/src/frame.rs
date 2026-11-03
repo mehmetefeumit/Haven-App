@@ -1027,4 +1027,23 @@ mod tests {
         );
         assert_eq!(obs.verb(), Some(SENTINEL_VERB));
     }
+
+    // A circle's routing rides the same verb with a third element (C8, the
+    // relay-plane oracle): it must stay a sentinel, so it is intercepted and
+    // acked, and the frame must keep the payload, since the journal is the only
+    // place the oracle reads it from.
+    #[test]
+    fn a_routing_declaration_is_a_sentinel_that_keeps_its_payload() {
+        let text = r#"["HAVEN_WIRE_SENTINEL","HAVEN_WIRE_ROUTING:2",{"h":"ab","relays":["ws://127.0.0.1:7789"]}]"#;
+        let obs = classify_text(text);
+        assert_eq!(obs.sentinel.as_deref(), Some("HAVEN_WIRE_ROUTING:2"));
+        assert_eq!(obs.control().map(|c| c.verb()), Some(ControlVerb::Sentinel));
+        let frame = obs.frame.expect("a routing declaration is a frame");
+        assert_eq!(frame.as_array().map(Vec::len), Some(3));
+        assert_eq!(frame[2]["relays"][0], "ws://127.0.0.1:7789");
+        assert_eq!(
+            sentinel_ack("HAVEN_WIRE_ROUTING:2", 9, "c1"),
+            r#"["HAVEN_WIRE_SENTINEL_ACK","HAVEN_WIRE_ROUTING:2",9,"c1"]"#
+        );
+    }
 }

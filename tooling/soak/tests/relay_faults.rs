@@ -20,13 +20,13 @@ use haven_soak::nemesis::types::{ByteCap, ClosedPrefix, DropClass, Fault, RigCou
 use haven_soak::oracle::{bounds, Recovery};
 use haven_soak::profiles::WorldShape;
 use haven_soak::relay::{
-    mint, Forgery, Ledger, NativeClosed, NegFrame, SimRelay, NEG_REFUSAL, OVERSIZE_PREFIX,
-    RELAY_DEFAULT_REPLAY_CAP,
+    mint, planes_for, EndpointId, Forgery, Ledger, NativeClosed, NegFrame, SimRelay, NEG_REFUSAL,
+    OVERSIZE_PREFIX, RELAY_DEFAULT_REPLAY_CAP,
 };
 use haven_soak::rig::circle::{build_circle, publish_witnessed};
 use haven_soak::rig::{
     install_process_globals, poll_until, CapturedLine, CircleTag, DeviceTag, EventTag, LogDrain,
-    RelayPlane, RelayTag, RigError, SimDevice, SimWorld,
+    Planes, RelayPlane, RelayTag, RigError, SimDevice, SimWorld,
 };
 use haven_soak::timeline::Timeline;
 use nostr::{
@@ -65,6 +65,19 @@ async fn plane() -> SimRelay {
     SimRelay::start(RelayTag::new(0))
         .await
         .expect("a plane starts")
+}
+
+/// One location plane and the account plane a world's inboxes ride.
+async fn planes(location: usize) -> Planes<SimRelay> {
+    planes_for(&WorldShape {
+        members: 2,
+        circles: 1,
+        relays: location,
+        account_relays: 1,
+        profile_relays: 0,
+    })
+    .await
+    .expect("the planes start")
 }
 
 async fn connected_client(plane: &SimRelay) -> Client {
@@ -526,11 +539,9 @@ async fn a_location_takes_the_products_location_ladder_and_a_commit_takes_the_co
 
     let location = an_application_445();
     assert!(
-        publish_witnessed(
-            &device,
-            std::slice::from_ref(&plane),
-            std::slice::from_ref(&location)
-        )
+        publish_witnessed(&device, std::slice::from_ref(&location), |_| Ok(vec![
+            &plane
+        ]),)
         .await
         .expect("the witness reads")
         .is_none(),
@@ -544,14 +555,10 @@ async fn a_location_takes_the_products_location_ladder_and_a_commit_takes_the_co
 
     let commit = a_commit_445();
     assert!(
-        publish_witnessed(
-            &device,
-            std::slice::from_ref(&plane),
-            std::slice::from_ref(&commit)
-        )
-        .await
-        .expect("the witness reads")
-        .is_none(),
+        publish_witnessed(&device, std::slice::from_ref(&commit), |_| Ok(vec![&plane]),)
+            .await
+            .expect("the witness reads")
+            .is_none(),
         "the plane acknowledged the commit publish, so its ladder did not run out either"
     );
     assert!(
@@ -630,6 +637,196 @@ async fn create_under_swallowed_ok_is_reported_unacked() {
             .expect("the invitee's circles read")
             .is_empty(),
         "the invitee joined a circle whose create was rolled back"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The plane record — every client frame, before anything parses it (O7)
+// ---------------------------------------------------------------------------
+
+/// A raw WebSocket connection: what no SDK sends — a `COUNT`, a frame that is
+/// not JSON, a binary frame — written as a client writes it.
+struct RawClient(TcpStream);
+
+impl RawClient {
+    async fn dial(url: &str) -> Self {
+        use tokio::io::AsyncWriteExt;
+        let addr = url.trim_start_matches("ws://");
+        let mut stream = TcpStream::connect(addr)
+            .await
+            .expect("the endpoint accepts");
+        let head = format!(
+            "GET / HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        stream
+            .write_all(head.as_bytes())
+            .await
+            .expect("the upgrade goes out");
+        let mut seen = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !seen.ends_with(b"\r\n\r\n") {
+            stream
+                .read_exact(&mut byte)
+                .await
+                .expect("the upgrade answers");
+            seen.push(byte[0]);
+        }
+        Self(stream)
+    }
+
+    /// One masked frame of `opcode` (a zero mask: the bytes are the payload).
+    async fn send(&mut self, opcode: u8, payload: &[u8]) {
+        use tokio::io::AsyncWriteExt;
+        let mut frame = vec![0x80 | opcode];
+        let len = u16::try_from(payload.len()).expect("a raw test frame fits a 16-bit length");
+        if len < 0x7e {
+            frame.push(0x80 | u8::try_from(len).expect("a short length fits a byte"));
+        } else {
+            frame.push(0x80 | 0x7e);
+            frame.extend(len.to_be_bytes());
+        }
+        frame.extend([0_u8; 4]);
+        frame.extend(payload);
+        self.0.write_all(&frame).await.expect("the frame goes out");
+    }
+
+    async fn text(&mut self, text: &str) {
+        self.send(0x1, text.as_bytes()).await;
+    }
+}
+
+/// The record's frames that came on `endpoint`, as text.
+fn recorded_on(plane: &SimRelay, endpoint: EndpointId) -> Vec<String> {
+    plane
+        .ledger()
+        .plane_record()
+        .frames
+        .into_iter()
+        .filter(|frame| frame.endpoint == endpoint)
+        .map(|frame| frame.text)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_ledger_records_every_client_frame_with_its_endpoint() {
+    let device = DeviceTag::new(0);
+    let mut plane = provisioned_plane(&[device]).await;
+    plane
+        .provision_aliases(device, 2)
+        .await
+        .expect("the alias endpoints bind");
+
+    let event = EventBuilder::new(Kind::Custom(445), "ciphertext")
+        .tags([Tag::parse(["h", &"ab".repeat(32)]).expect("an h tag")])
+        .sign_with_keys(&Keys::generate())
+        .expect("a 445 signs");
+    let mut raw = RawClient::dial(plane.url()).await;
+    raw.text(&ClientMessage::event(event.clone()).as_json())
+        .await;
+    for since in [10, 20] {
+        raw.text(&format!(
+            r##"["REQ","s1",{{"kinds":[445],"#h":["aa"],"since":{since}}}]"##
+        ))
+        .await;
+    }
+    raw.text(r##"["NEG-OPEN","n1",{"kinds":[445],"#h":["aa"],"since":1,"until":2,"limit":9},"6100000200"]"##)
+        .await;
+    raw.text(r#"["CLOSE","s1"]"#).await;
+    raw.text(r#"["COUNT","c1",{"kinds":[1]}]"#).await;
+    raw.text("this is not a frame").await;
+    raw.send(0x9, b"ping").await;
+    raw.send(0x2, &[0xde, 0xad]).await;
+    let mut own = RawClient::dial(plane.url_for(device)).await;
+    own.text(r##"["REQ","s2",{"kinds":[1059],"#p":["bb"]}]"##)
+        .await;
+    let alias = plane.alias_urls_for(device)[1].clone();
+    let mut aliased = RawClient::dial(&alias).await;
+    aliased
+        .text(r##"["REQ","s3",{"kinds":[445],"#h":["cc"]}]"##)
+        .await;
+
+    let ledger = plane.ledger().clone();
+    assert!(
+        reaching(WIRE_BOUND, 9, || ledger.plane_record().frames.len()).await == 9,
+        "seven distinct frames on the canonical endpoint (the re-issue folded, the \
+         ping not a frame) and one on each device endpoint"
+    );
+    let canonical = recorded_on(&plane, EndpointId::Canonical);
+    assert!(
+        canonical.len() == 7
+            && canonical[0].starts_with(r#"["EVENT",{"#)
+            && !canonical[0].contains("ciphertext")
+            && canonical[0].contains(&event.id.to_hex())
+            && canonical[1] == r##"["REQ","s1",{"#h":["aa"],"kinds":[445],"since":0}]"##
+            && canonical[2].starts_with(r#"["NEG-OPEN","n1",{"#)
+            && canonical[2].contains(r#""until":0"#)
+            && canonical[3] == r#"["CLOSE","s1"]"#
+            && canonical[4] == r#"["COUNT","c1",{"kinds":[1]}]"#
+            && canonical[5] == "this is not a frame"
+            && canonical[6].is_empty(),
+        "every data frame in arrival order, the event without its content, the filters \
+         without their window, the unparsable and the binary kept as frames"
+    );
+    assert!(
+        recorded_on(&plane, EndpointId::Own(device)).len() == 1
+            && recorded_on(&plane, EndpointId::Alias(device, 1)).len() == 1
+            && recorded_on(&plane, EndpointId::Alias(device, 0)).is_empty(),
+        "each frame under the endpoint it crossed, an alias by its slot"
+    );
+    let events = ledger.plane_record().events;
+    assert!(
+        events == vec![(event.id.to_hex(), 445, Some("ab".repeat(32)))],
+        "an event sent is indexed by its kind and its #h"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_req_is_recorded_as_sent() {
+    let mut plane = plane().await;
+    plane
+        .apply(Fault::Closed(ClosedPrefix::Blocked))
+        .await
+        .expect("the fault applies");
+    let client = connected_client(&plane).await;
+    client
+        .subscribe_with_id(
+            SubscriptionId::new("refused"),
+            Filter::new().kind(Kind::Metadata),
+            None,
+        )
+        .await
+        .expect("the REQ goes out");
+    let ledger = plane.ledger().clone();
+    assert!(
+        reaching(WIRE_BOUND, 1, || ledger.closed_messages().len()).await == 1,
+        "premise: the plane refused it"
+    );
+    assert!(
+        recorded_on(&plane, EndpointId::Canonical)
+            .iter()
+            .any(|frame| frame.starts_with(r#"["REQ","refused""#)),
+        "what the client SENT is the subject, whatever the plane answered"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seeded_event_is_indexed_by_the_circle_it_carries() {
+    let plane = plane().await;
+    let h = "cd".repeat(32);
+    let seeded = EventBuilder::new(Kind::Custom(445), "seeded")
+        .tags([Tag::parse(["h", &h]).expect("an h tag")])
+        .sign_with_keys(&Keys::generate())
+        .expect("a 445 signs");
+    plane
+        .store(std::slice::from_ref(&seeded))
+        .await
+        .expect("the seed lands");
+    let events = plane.ledger().plane_record().events;
+    assert!(
+        events == vec![(seeded.id.to_hex(), 445, Some(h))],
+        "an event that reached the store and no client frame is still one a \
+         by-id fetch may name"
     );
 }
 
@@ -1377,6 +1574,15 @@ async fn an_injected_expired_forgery_goes_out_on_the_wire_and_no_store_holds_it(
         !plane.witnessed_ok(&forged),
         "nobody published it, so nothing acknowledged it"
     );
+    assert!(
+        plane.ledger().plane_record().events.contains(&(
+            forged.to_hex(),
+            445,
+            Some(hex::encode(A_CIRCLES_ROUTING_ID))
+        )),
+        "a forged event reaches no store and no client frame, and a by-id refetch of \
+         it is still judged by the circle it carries"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1945,11 +2151,13 @@ async fn in_a_world_a_plane_wide_injection_reaches_every_devices_own_endpoint() 
         members: 3,
         circles: 1,
         relays: 1,
+        account_relays: 1,
+        profile_relays: 0,
     };
     let mut world: SimWorld<SimRelay, Timeline, NoDrain> = SimWorld::build(
         &shape,
         Schedule::new(Vec::new()),
-        vec![plane().await],
+        planes(1).await,
         Timeline::in_memory(),
         NoDrain,
     )
@@ -2718,14 +2926,10 @@ async fn a_co_member_future_header_is_replayed_live_and_the_engine_buffers_it_in
         .await
         .expect("alice seals a future-header 445");
     assert!(
-        publish_witnessed(
-            alice,
-            std::slice::from_ref(&plane),
-            std::slice::from_ref(&forged)
-        )
-        .await
-        .expect("publish the seal")
-        .is_some(),
+        publish_witnessed(alice, std::slice::from_ref(&forged), |_| Ok(vec![&plane]),)
+            .await
+            .expect("publish the seal")
+            .is_some(),
         "the seal must be acked so the plane can serve it to the injection"
     );
     let client = connected_client(&plane).await;
@@ -2923,9 +3127,11 @@ async fn engine_world(members: usize) -> EngineWorld {
             members,
             circles: 1,
             relays: 1,
+            account_relays: 1,
+            profile_relays: 0,
         },
         Schedule::new(Vec::new()),
-        vec![plane().await],
+        planes(1).await,
         Timeline::in_memory(),
         NoDrain,
     )
@@ -2939,9 +3145,11 @@ async fn engine_world(members: usize) -> EngineWorld {
 async fn a_published_leave(world: &EngineWorld) -> EventId {
     let proposal = a_leave_proposal(world).await;
     let leaver = world.device(LEAVER).expect("dev#1");
-    let acked = publish_witnessed(leaver, world.relays(), std::slice::from_ref(&proposal))
-        .await
-        .expect("the proposal publishes");
+    let acked = publish_witnessed(leaver, std::slice::from_ref(&proposal), |_| {
+        Ok(world.relays().iter().collect())
+    })
+    .await
+    .expect("the proposal publishes");
     assert!(
         acked.is_some(),
         "the proposal is on the relay, acknowledged"

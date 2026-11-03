@@ -487,7 +487,7 @@ main() {
 
 # Pinned by equality against the fixtures that actually ran: a fixture that
 # stops running is the one way a deleted fixture reports success.
-readonly SELF_TEST_FIXTURES=98
+readonly SELF_TEST_FIXTURES=99
 
 self_test() {
   local tmp n=0 fails=0
@@ -990,6 +990,11 @@ PLANTS
   _slot s2 "$(_mut '.invariant = "INV-O6" | .finding_class = "not-quiescent"')"
   _run --file -- s1 s2
   _ok "$([[ "${rc}" == 0 && "$(_creates)" == 2 ]] && echo 0 || echo 1)" '(F7) two invariants are two issues'
+  _reset
+  _slot s1 "$(_mut '.invariant = "INV-O7" | .finding_class = "plane-crossed-request" | .handles = ["simrelay#2","simdev#1"]')"
+  _run --file -- s1
+  _ok "$([[ "${rc}" == 0 && "$(_creates)" == 1 ]] && grep -qF 'issue create --title soak(nightly): INV-O7 ' "${calls}" && grep -qxF 'finding_class: plane-crossed-request' "${out}/INV-O7.body.log" && echo 0 || echo 1)" \
+    '(F7b) an O7 crossing is a key of its own, its class and handles in the body'
   _reset
   for d in s1 s2 s3 s4; do _slot "${d}" "${clean}"; done
   _run --file -- s1 s2 s3 s4

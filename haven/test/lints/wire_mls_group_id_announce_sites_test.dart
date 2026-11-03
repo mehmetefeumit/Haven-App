@@ -16,6 +16,11 @@
 // announce and C5.8 still reports clean over a set missing the ids that
 // actually ride those circles' `h` tags.
 //
+// The same helper declares each circle's routing to the relay-plane oracle
+// (C8), so this pin covers that declaration too: C8 reports an undeclared
+// circle as a META-FLOOR, and a removed site would surface there only at
+// runtime, on the lanes.
+//
 // This pins the count by EQUALITY, so adding a circle-creating scenario
 // without announcing its id is as loud as deleting one. Update the number in
 // the same commit that changes the sites, and say why.

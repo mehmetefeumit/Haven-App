@@ -9,11 +9,12 @@
 # shipped app. This is the POSITIVE half, and it answers a different question —
 # is the instrument reached by anything at all?
 #
-# Three oracles read the journal the proxy writes
+# Four oracles read the journal the proxy writes
 # (`tooling/e2e/ci/check-wire-journal.sh`, `check-wire-correlation.sh`,
-# `check-wire-canaries.dart`). All three are green on every PR, and every one of
-# those green results comes from a `--self-test` over hermetic fixtures. None of
-# them has ever read a journal produced by a real run.
+# `check-wire-canaries.dart`, `check-wire-planes.sh`). When this guard was
+# written, all of them were green on every PR, and every one of those green
+# results came from a `--self-test` over hermetic fixtures. None of them had
+# ever read a journal produced by a real run.
 #
 # That is the exact shape `docs/CI_HARDENING_BACKLOG.md` catalogues under
 # "Cross-cutting note: the recurring failure mode" — code that is written,
@@ -144,14 +145,16 @@ readonly SELF_NAME
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly REPO_ROOT
 
-# The recorder's lifecycle scripts and the three oracles that read its journal.
+# The recorder's lifecycle scripts and the four oracles that read its journal.
 # `[.]` rather than `\.`: these strings are handed to awk via -v, where a
 # backslash escape is consumed by the string literal before the regex ever sees
 # it (awk warns and treats `\.` as a bare `.`). A bracket expression means the
 # same thing to awk and to `grep -E`, with no escaping layer in between.
 readonly PROXY_START_RE='start-wire-proxy[.]sh'
 readonly PROXY_STOP_RE='stop-wire-proxy[.]sh'
-readonly ORACLE_RE='check-wire-journal[.]sh|check-wire-correlation[.]sh|check-wire-canaries[.]dart'
+readonly ORACLE_RE='check-wire-journal[.]sh|check-wire-correlation[.]sh|check-wire-canaries[.]dart|check-wire-planes[.]sh'
+# The relay-plane oracle (C8), which link 6 holds to the lane's routing table.
+readonly PLANES_RE='check-wire-planes[.]sh'
 
 # Every way a lane brings up a hermetic relay. This is what defines the
 # POPULATION of lanes that could put a recorder in front of one — derived from
@@ -204,8 +207,16 @@ readonly KNOWN_UNWIRED_LANES=(
   'e2e-location-provider-toggle.yml:e2e_location_provider_toggle'
   'e2e-clock-skew.yml:e2e_clock_skew'
   'e2e-network-reconnect.yml:e2e_network_reconnect'
-  'e2e-kp-rotation.yml:e2e_kp_rotation'
   'e2e-background-catchup.yml:e2e_background_catchup'
+
+  # Multi-relay lanes without the recorder. Proxying them would pull in the
+  # `proxy` logscan profile, whose declaration floors belong to e2e_combined,
+  # for a smaller gain than C8 has on the core lanes. Their relay planes are
+  # read from each relay's STORE instead (integration_test/e2e/_lib/
+  # plane_store_check.dart): relay customization's R2 per test with that
+  # test's roles and R1 for no kind 0, key-package rotation's R2 for the
+  # key-package plane only.
+  'e2e-kp-rotation.yml:e2e_kp_rotation'
   'e2e-relay-customization.yml:e2e_relay_customization'
 
   # The kind-0 + Blossom plane. C7's egress guard already runs here; the wire
@@ -213,7 +224,10 @@ readonly KNOWN_UNWIRED_LANES=(
   # once parked them — whether kinds 10002 / 10050 could be marked required —
   # is settled: both are `required: true` in tooling/e2e/wire_allowlist.json on
   # real journals from the full flow. What remains is a standing exemption, not
-  # a wait on something else.
+  # a wait on something else. Its planes are read from the relay STORES
+  # (plane_store_check.dart): every profile-pool relay holds the profile
+  # plane's kinds only, and the circle relay no kind 0 from anyone. Kind-0 REQ
+  # containment needs a recorder and is proved by the Rust layers.
   'e2e-profile.yml:e2e_profile_android'
   'e2e-profile.yml:e2e_profile_ios'
 
@@ -389,22 +403,10 @@ chain_text() { # chain_text <job-text>
   done < <(grep -oE -- "${HARNESS_REF_RE}" <<<"${txt}" | sort -u)
 }
 
-# ---------------------------------------------------------------------------
-# Link 1 — the app is pointed at the proxy, not past it.
-#
-# Every literal `ws://host:PORT` a proxy-starting job declares must name a port
-# the proxy LISTENS on. Checking every literal URL rather than only
-# `HAVEN_E2E_RELAY` is deliberate: multi-relay lanes (e2e-profile, kp-rotation,
-# relay-customization) carry several, and a lane that re-points one and forgets
-# the rest records a partial transcript, which is worse than none — it looks
-# complete.
-# ---------------------------------------------------------------------------
-check_relay_points_at_proxy() { # <records> <file> <job>
-  local records="$1" file="$2" job="$3"
-  local jr; jr="$(job_records "${records}" "${file}" "${job}")"
-
-  # The listen set, read from the lane's own start invocation(s).
-  local listen="" line args first port
+# The proxy's listen ports, one per line, read from the job's own start
+# invocation(s): a `HAVEN_WIRE_PROXY_ROUTES` table wins over argv.
+proxy_listen_ports() { # proxy_listen_ports <job-records>
+  local jr="$1" listen="" line args first port
   while IFS= read -r line; do
     [[ -z "${line}" ]] && continue
     # `HAVEN_WIRE_PROXY_ROUTES='7788=ws://…,7789=ws://…'` wins over argv.
@@ -431,7 +433,25 @@ check_relay_points_at_proxy() { # <records> <file> <job>
     fi
   done < <(text_of <<<"${jr}" | grep -E -- "${PROXY_START_RE}|HAVEN_WIRE_PROXY_ROUTES" | drop_self_tests)
 
-  listen="$(grep -v '^$' <<<"${listen}" | sort -u)"
+  grep -v '^$' <<<"${listen}" | sort -u
+}
+
+# ---------------------------------------------------------------------------
+# Link 1 — the app is pointed at the proxy, not past it.
+#
+# Every literal `ws://host:PORT` a proxy-starting job declares must name a port
+# the proxy LISTENS on. Checking every literal URL rather than only
+# `HAVEN_E2E_RELAY` is deliberate: multi-relay lanes (e2e-profile, kp-rotation,
+# relay-customization) carry several, and a lane that re-points one and forgets
+# the rest records a partial transcript, which is worse than none — it looks
+# complete.
+# ---------------------------------------------------------------------------
+check_relay_points_at_proxy() { # <records> <file> <job>
+  local records="$1" file="$2" job="$3"
+  local jr; jr="$(job_records "${records}" "${file}" "${job}")"
+
+  local listen port
+  listen="$(proxy_listen_ports "${jr}")"
   if [[ -z "${listen}" ]]; then
     broken "${file}:${job}: the job starts the recorder but no listen port could be derived from it. Either start-wire-proxy.sh's argv convention changed or this guard's parser has rotted into one that would accept any relay URL."
     return
@@ -591,6 +611,59 @@ check_logscan_is_on() { # <records> <file> <job>
 }
 
 # ---------------------------------------------------------------------------
+# Link 6 — the plane table is the routing table.
+#
+# The relay-plane oracle (C8, check-wire-planes.sh) judges each frame by the
+# roles its `--plane` arguments give the listen it arrived on, so:
+#
+#   (a) a job whose recorder serves MORE THAN ONE listen runs C8 — a lane that
+#       pays for distinct relay authorities and asserts nothing about what
+#       reached each is the instance-11 shape this guard exists for;
+#   (b) each C8 invocation names exactly the route listen ports — a route with
+#       no role is traffic C8 cannot place (its META-FLOOR, read as a scenario
+#       fault), a role on a port no route serves is a dead declaration;
+#   (c) C8 sits ABOVE the first `inputs.live_sync` line of its step — the C5
+#       gate. Below it, it inherits C5's poll-path skip and the poll variant
+#       is never judged.
+# ---------------------------------------------------------------------------
+check_planes_cover_routes() { # <records> <file> <job>
+  local records="$1" file="$2" job="$3"
+  local jr; jr="$(job_records "${records}" "${file}" "${job}")"
+  local listen; listen="$(proxy_listen_ports "${jr}")"
+  [[ -n "${listen}" ]] || return   # link 1 already reported this
+
+  local cmds
+  cmds="$(text_of <<<"${jr}" | join_continuations | grep -E -- "${PLANES_RE}" | drop_self_tests)"
+  if [[ -z "${cmds}" ]]; then
+    if (( $(grep -c . <<<"${listen}") > 1 )); then
+      violation "${file}:${job}: the recorder serves several listens ($(tr '\n' ' ' <<<"${listen}" | sed 's/ *$//')) and the job runs no check-wire-planes.sh. Distinct listens exist to keep relay planes apart; without C8 nothing checks that each received only its own traffic."
+    fi
+    return
+  fi
+
+  local cmd ports
+  while IFS= read -r cmd; do
+    [[ -z "${cmd}" ]] && continue
+    ports="$(grep -oE -- '--plane[= ]+[a-z]+=[^[:space:]]+' <<<"${cmd}" \
+               | sed -E 's/.*:([0-9]+)$/\1/' | sort -u)"
+    if [[ "${ports}" != "${listen}" ]]; then
+      violation "${file}:${job}: a check-wire-planes.sh invocation declares --plane ports ($(tr '\n' ' ' <<<"${ports}" | sed 's/ *$//')) that are not the recorder's listen ports ($(tr '\n' ' ' <<<"${listen}" | sed 's/ *$//')). Every route needs a role and every role a route: an undeclared listen is traffic C8 cannot place, and a role on a port nothing serves declares a plane that was never judged."
+    fi
+  done <<<"${cmds}"
+
+  local rec step at gate
+  while IFS= read -r rec; do
+    [[ -z "${rec}" ]] && continue
+    step="$(cut -f3 <<<"${rec}")"; at="$(cut -f4 <<<"${rec}")"
+    gate="$(step_records "${records}" "${file}" "${job}" "${step}" \
+              | awk -F'\t' '$5 ~ /inputs[.]live_sync/ {print $4}' | sort -n | head -1)"
+    if [[ -n "${gate}" ]] && (( gate < at )); then
+      violation "${file}:${job}: check-wire-planes.sh (line ${at}) sits below the step's first inputs.live_sync line (line ${gate}). That line is C5's poll-path gate; C8 below it is skipped with C5 and the poll variant is never judged."
+    fi
+  done < <(awk -F'\t' -v re="${PLANES_RE}" '$5 ~ re' <<<"${jr}" | drop_self_tests)
+}
+
+# ---------------------------------------------------------------------------
 # Link 4 — one sentinel string, both halves.
 # ---------------------------------------------------------------------------
 check_sentinel_is_shared() { # <records> <file> <job>
@@ -741,16 +814,24 @@ check_dir() { # check_dir <workflow-dir> <exempt-list-newline-separated> [harnes
   # means the bringup script's own text keeps the lane in the population, so
   # the loss of wiring surfaces as an undeclared lane instead of as nothing.
   local candidates wired unwired
+  # A `--self-test` step is dropped on the WORKFLOW line, before the hop:
+  # every harness script has a self-test mode and spells the flag in its
+  # body, so the same filter over the hopped text would drop every lane.
   local pop_records="" rec jt
   while IFS= read -r rec; do
     [[ -n "${rec}" ]] || continue
     jt="$(chain_text "$(awk -F'\t' '{print $5}' <<<"${rec}")")"
-    pop_records+="$(awk -F'\t' -v OFS='\t' -v t="${jt//$'\n'/ }" '{$5=t; print}' <<<"${rec}")"$'\n'
-  done <<<"${records}"
+    # The chain text is spliced in by the shell, never handed to awk as an
+    # argument: a real bringup script's uncommented text runs past
+    # MAX_ARG_STRLEN, awk then fails to exec, and the record — the lane with
+    # it — left the population in silence (fixture E5d).
+    jt="${jt//$'\n'/ }"; jt="${jt//$'\t'/ }"
+    pop_records+="$(awk -F'\t' -v OFS='\t' '{print $1, $2, $3, $4}' <<<"${rec}")"$'\t'"${jt}"$'\n'
+  done < <(drop_self_tests <<<"${records}")
   pop_records="$(grep -v '^$' <<<"${pop_records}")"
 
   candidates="$(awk -F'\t' -v re="${RELAY_START_RE}|${PROXY_START_RE}" '$5 ~ re' <<<"${pop_records}" \
-                 | drop_self_tests | awk -F'\t' '{print $1":"$2}' | sort -u)"
+                 | awk -F'\t' '{print $1":"$2}' | sort -u)"
   wired="$(awk -F'\t' -v re="${PROXY_START_RE}" '$5 ~ re' <<<"${records}" \
             | drop_self_tests | awk -F'\t' '{print $1":"$2}' | sort -u)"
 
@@ -782,7 +863,7 @@ check_dir() { # check_dir <workflow-dir> <exempt-list-newline-separated> [harnes
     violation "these entries in KNOWN_UNWIRED_LANES are stale — the job either wires the recorder now, or no longer exists: $(tr '\n' ' ' <<<"${stale}" | sed 's/ *$//'). A stale exemption is an exemption nobody can re-derive; delete the line."
   fi
 
-  # The five links, per wired job.
+  # The six links, per wired job.
   local entry file job
   while IFS= read -r entry; do
     [[ -z "${entry}" ]] && continue
@@ -792,6 +873,7 @@ check_dir() { # check_dir <workflow-dir> <exempt-list-newline-separated> [harnes
     check_oracle_runs          "${records}" "${file}" "${job}"
     check_sentinel_is_shared   "${records}" "${file}" "${job}"
     check_logscan_is_on        "${records}" "${file}" "${job}"
+    check_planes_cover_routes  "${records}" "${file}" "${job}"
   done <<<"${wired}"
 
   if (( VIOLATIONS == 0 && BROKEN == 0 )); then
@@ -851,6 +933,24 @@ jobs:
 YAML
 }
 
+# Appends a C8 invocation to the oracle step of a write_wired_lane workflow,
+# one `--plane` per port given, placed before <before> (default: the next step).
+add_planes_call() { # add_planes_call <workflow> <before-line-regex|''> <port>...
+  local wf="$1" before="${2:-^      - name: Stop wire proxy}" block port
+  shift 2
+  block='          bash tooling/e2e/ci/check-wire-planes.sh \\\n'
+  block+='            --journal /tmp/haven-wire-journal.ndjson \\\n'
+  block+='            --sentinel "${HAVEN_WIRE_SENTINEL}"'
+  for port in "$@"; do
+    block+=' \\\n            --plane inbox=127.0.0.1:'"${port}"
+  done
+  # awk -v turns each `\\` into `\` and each `\n` into a newline.
+  awk -v re="${before}" -v blk="${block}" '
+    !done && $0 ~ re { print blk; done = 1 }
+    { print }
+  ' "${wf}" > "${wf}.new" && mv "${wf}.new" "${wf}"
+}
+
 # A lane that starts a relay and nothing else — the exemption population.
 write_plain_lane() { # write_plain_lane <dir> <basename> <job-id>
   local dir="$1" base="$2" job="$3"
@@ -878,7 +978,7 @@ self_test() {
   # carried in prose instead (docs/CI_HARDENING_BACKLOG.md, Workstream C) — the
   # one arrangement in which deleting a fixture reports "self-test: OK" while
   # checking one thing fewer. Same pin as check_e2e_step_timeout_ordering.sh.
-  local -r SELF_TEST_CASES=45
+  local -r SELF_TEST_CASES=53
   local tmp failures=0 cases=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -949,6 +1049,7 @@ self_test() {
   write_plain_lane "${b2}" 'e2e-integration.yml' 'e2e_integration'
   sed -i "s|run: bash tooling/e2e/ci/start-wire-proxy.sh|run: HAVEN_WIRE_PROXY_ROUTES='7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7778' bash tooling/e2e/ci/start-wire-proxy.sh|" \
     "${b2}/e2e-android.yml"
+  add_planes_call "${b2}/e2e-android.yml" '' 7788 7789
   _expect "link 1: a routing table declares its listen ports and passes" \
     "${b2}" "${EX_PLAIN}" 0
 
@@ -1166,6 +1267,22 @@ bash tooling/e2e/ci/start-strfry.sh
 SH
   _expect "a lane that hides BOTH starts in a harness stays in the population" \
     "${e5c}" "${EX_PLAIN}" 1 "neither wire the recorder" "${hbringup}"
+
+  # ...and the hop must survive a LARGE harness. The chain text of one job line
+  #    is the uncommented text of every script it names; a real bringup script
+  #    runs past 128 KiB, and a value that long cannot be passed to awk as an
+  #    argument (MAX_ARG_STRLEN). Done that way, the record for that line was
+  #    dropped with the guard still printing OK — the lane left the population
+  #    exactly as E5c describes, from the size of the script alone.
+  local e5d="${tmp}/e5d"; cp -r "${e5c}" "${e5d}"
+  local hbig="${tmp}/harness-big"
+  mkdir -p "${hbig}/tooling/e2e/ci"
+  { printf '#!/usr/bin/env bash\n'
+    awk 'BEGIN { for (i = 0; i < 4096; i++) printf ": padding line %05d %s\n", i, "................................" }'
+    printf 'bash tooling/e2e/ci/start-strfry.sh\n'
+  } > "${hbig}/tooling/e2e/ci/run-bringup.sh"
+  _expect "a lane whose bringup script exceeds one argument's length stays in the population" \
+    "${e5d}" "${EX_PLAIN}" 1 "neither wire the recorder" "${hbig}"
 
   # --- E6. Link 4, one call deeper. The Android/iOS lanes build inside their
   #         harness, so the workflow sets the env and the SCRIPT spells the
@@ -1451,6 +1568,64 @@ YAML
     "${j}" $'e2e-profile.yml:e2e_profile_android\ne2e-profile.yml:e2e_profile_ios' 0
   _expect "declaring only one job of a two-job lane fails, naming the other" \
     "${j}" 'e2e-profile.yml:e2e_profile_android' 1 "e2e-profile.yml:e2e_profile_ios"
+
+  # --- K. Link 6: the plane table is the routing table. b2 above is the
+  #        two-route lane whose C8 names both listens, and passes.
+  local routes="s|run: bash tooling/e2e/ci/start-wire-proxy.sh|run: HAVEN_WIRE_PROXY_ROUTES='7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7777' bash tooling/e2e/ci/start-wire-proxy.sh|"
+  local gate='          if [[ "${{ inputs.live_sync }}" != "true" ]]; then echo "C5: SKIPPED"; fi'
+
+  local k1="${tmp}/k1"; write_wired_lane "${k1}"
+  write_plain_lane "${k1}" 'e2e-integration.yml' 'e2e_integration'
+  sed -i '/check-wire-journal.sh/,/--sentinel/d' "${k1}/e2e-android.yml"
+  add_planes_call "${k1}/e2e-android.yml" '' 7788
+  _expect "link 3: C8 alone is an oracle that reads the journal" \
+    "${k1}" "${EX_PLAIN}" 0
+
+  local k2="${tmp}/k2"; write_wired_lane "${k2}"
+  write_plain_lane "${k2}" 'e2e-integration.yml' 'e2e_integration'
+  sed -i "${routes}" "${k2}/e2e-android.yml"
+  _expect "link 6: a two-listen lane that runs no C8 fails" \
+    "${k2}" "${EX_PLAIN}" 1 "runs no check-wire-planes.sh"
+
+  local k3="${tmp}/k3"; write_wired_lane "${k3}"
+  write_plain_lane "${k3}" 'e2e-integration.yml' 'e2e_integration'
+  sed -i "${routes}" "${k3}/e2e-android.yml"
+  add_planes_call "${k3}/e2e-android.yml" '' 7788
+  _expect "link 6: a route listen with no --plane fails" \
+    "${k3}" "${EX_PLAIN}" 1 "not the recorder's listen ports"
+
+  local k4="${tmp}/k4"; write_wired_lane "${k4}"
+  write_plain_lane "${k4}" 'e2e-integration.yml' 'e2e_integration'
+  sed -i "${routes}" "${k4}/e2e-android.yml"
+  add_planes_call "${k4}/e2e-android.yml" '' 7788 7789 7790
+  _expect "link 6: a --plane port no route serves fails" \
+    "${k4}" "${EX_PLAIN}" 1 "not the recorder's listen ports"
+
+  local k5="${tmp}/k5"; write_wired_lane "${k5}"
+  write_plain_lane "${k5}" 'e2e-integration.yml' 'e2e_integration'
+  sed -i "${routes}" "${k5}/e2e-android.yml"
+  add_planes_call "${k5}/e2e-android.yml" '' 7788 7789
+  awk -v g="${gate}" '/check-wire-planes.sh/ && !d { print g; d = 1 } { print }' \
+    "${k5}/e2e-android.yml" > "${k5}/x" && mv "${k5}/x" "${k5}/e2e-android.yml"
+  _expect "link 6: C8 below its step's live_sync gate fails" \
+    "${k5}" "${EX_PLAIN}" 1 "sits below the step's first inputs.live_sync line"
+
+  local k6="${tmp}/k6"; write_wired_lane "${k6}"
+  write_plain_lane "${k6}" 'e2e-integration.yml' 'e2e_integration'
+  sed -i "${routes}" "${k6}/e2e-android.yml"
+  add_planes_call "${k6}/e2e-android.yml" '' 7788 7789
+  awk -v g="${gate}" '/^      - name: Stop wire proxy/ && !d { print g; d = 1 } { print }' \
+    "${k6}/e2e-android.yml" > "${k6}/x" && mv "${k6}/x" "${k6}/e2e-android.yml"
+  _expect "link 6: C8 above its step's live_sync gate passes" \
+    "${k6}" "${EX_PLAIN}" 0
+
+  local k7="${tmp}/k7"; write_wired_lane "${k7}"
+  write_plain_lane "${k7}" 'e2e-integration.yml' 'e2e_integration'
+  sed -i "${routes}" "${k7}/e2e-android.yml"
+  add_planes_call "${k7}/e2e-android.yml" '' 7788 7789
+  sed -i '/--sentinel "${HAVEN_WIRE_SENTINEL}" \\$/d' "${k7}/e2e-android.yml"
+  _expect "link 4: C8 with no --sentinel fails" \
+    "${k7}" "${EX_PLAIN}" 1 "(check-wire-planes.sh)"
 
   if (( cases != SELF_TEST_CASES )); then
     echo "self-test: ran ${cases} fixture(s), expected exactly ${SELF_TEST_CASES}" >&2

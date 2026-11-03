@@ -479,7 +479,7 @@ async fn agreed_epoch<T: TimelineSink, L: LogDrain>(
 fn rebinds<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
 ) -> Vec<Option<(u32, Duration)>> {
-    world.relays().iter().map(RelayPlane::last_rebind).collect()
+    world.all_planes().map(RelayPlane::last_rebind).collect()
 }
 
 /// A location whose acknowledgement never arrives is not a published location,
@@ -641,13 +641,14 @@ async fn stored_but_unacked<T: TimelineSink, L: LogDrain>(
     Ok(stored)
 }
 
-/// Turns the swallowed acknowledgement on or off across every plane.
+/// Turns the swallowed acknowledgement on or off across every plane, the
+/// inbox plane a founding Welcome goes to among them.
 async fn swallow<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     on: bool,
 ) -> Result<(), RigError> {
     let fault = if on { Fault::SwallowOk } else { Fault::Heal };
-    for plane in world.relays_mut() {
+    for plane in world.all_planes_mut() {
         plane.apply(fault).await?;
     }
     Ok(())

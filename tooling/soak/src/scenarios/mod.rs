@@ -54,12 +54,13 @@ pub mod s22_oversized_event;
 pub mod s23_chained_backlog;
 pub mod s24_routing_collision;
 pub mod s25_silent_relays;
+pub mod s26_identity_planes;
 
 use std::fmt;
 use std::time::Duration;
 
 use haven_core::circle::MemberKeyPackage;
-use haven_core::relay::maintenance::build_kp_maintenance_events;
+
 use nostr::Event;
 
 use crate::oracle::bounds;
@@ -87,7 +88,7 @@ use crate::rig::{
 pub type ScenarioWorld<T, L> = SimWorld<SimRelay, T, L>;
 
 /// The smallest world any scenario can be run in: two devices, one circle, one
-/// relay.
+/// location relay and one account relay.
 ///
 /// A circle of one cannot be built, and a peer is what every liveness oracle
 /// needs — so this is the floor rather than a choice.
@@ -95,6 +96,8 @@ pub const MINIMAL_SHAPE: WorldShape = WorldShape {
     members: 2,
     circles: 1,
     relays: 1,
+    account_relays: 1,
+    profile_relays: 0,
 };
 
 /// How often a scenario re-reads a condition it is waiting for.
@@ -203,6 +206,11 @@ pub enum WithheldAcks {
     /// record is sent again when that relay is next due, and the arm waits
     /// that out before the re-send can be acknowledged.
     FanoutResends(u32),
+    /// S26's identity-plane turns, every member's profile published into a pool
+    /// with one relay down: priced at the product's own profile read, publish
+    /// and per-peer retry-ladder ceilings and a key package's publish and
+    /// lookup per member ([`bounds::identity_planes`]).
+    IdentityTurns,
 }
 
 impl WithheldAcks {
@@ -220,6 +228,7 @@ impl WithheldAcks {
             Self::PerInvitedMember => u32::try_from(shape.members)
                 .unwrap_or(u32::MAX)
                 .saturating_sub(1),
+            Self::IdentityTurns => u32::try_from(shape.members).unwrap_or(u32::MAX),
         }
     }
 
@@ -240,6 +249,7 @@ impl WithheldAcks {
         let ladder = match self {
             Self::FanoutDrives(_) => return bounds::fanout_call_ceiling() * count,
             Self::FanoutResends(_) => return bounds::fanout_resend_after_silence() * count,
+            Self::IdentityTurns => return bounds::identity_planes(count),
             Self::Locations(_) => bounds::location_publish_window(),
             Self::None | Self::Fixed(_) | Self::PerInvitedMember => {
                 bounds::withheld_publish_ladder()
@@ -377,11 +387,15 @@ pub enum Scenario {
     /// **S25** — a circle's relay never answers and another never ends its
     /// replay: the circle advances without them and loses nothing they held.
     SilentRelays,
+    /// **S26** — every device's profile published past a downed profile relay
+    /// and read back by every peer, every key package looked up where it was
+    /// published: the identity planes, graded by O7.
+    IdentityPlanes,
 }
 
 impl Scenario {
     /// Every scenario this crate runs.
-    pub const REGISTRY: [Self; 23] = [
+    pub const REGISTRY: [Self; 24] = [
         Self::RelayOutage,
         Self::ReceiverPartition,
         Self::LostCommit,
@@ -405,6 +419,7 @@ impl Scenario {
         Self::ChainedBacklog,
         Self::RoutingCollision,
         Self::SilentRelays,
+        Self::IdentityPlanes,
     ];
 
     /// The id the profiles, the timeline and `--list-scenarios` spell.
@@ -434,6 +449,7 @@ impl Scenario {
             Self::CatchupSweep => "S20",
             Self::RoutingCollision => "S24",
             Self::SilentRelays => "S25",
+            Self::IdentityPlanes => "S26",
         }
     }
 
@@ -464,6 +480,7 @@ impl Scenario {
             Self::CatchupSweep => "CATCH-UP SWEEP UNDER PAGE FAULTS",
             Self::RoutingCollision => "ROUTING COLLISION ON DISTINCT RELAYS",
             Self::SilentRelays => "DEAD AND EOSE-SILENT RELAYS",
+            Self::IdentityPlanes => "IDENTITY PLANES UNDER FAULTS",
         }
     }
 
@@ -494,6 +511,7 @@ impl Scenario {
             Self::CatchupSweep => &s20_catchup_sweep::ARMS,
             Self::RoutingCollision => &s24_routing_collision::ARMS,
             Self::SilentRelays => &s25_silent_relays::ARMS,
+            Self::IdentityPlanes => &s26_identity_planes::ARMS,
         }
     }
 
@@ -541,7 +559,7 @@ impl Scenario {
         let started = tokio::time::Instant::now();
         // Each arm's future boxed: their sum on one frame is past what a
         // worker's stack should hold.
-        let outcome = match self {
+        let mut outcome = match self {
             Self::RelayOutage => Box::pin(s01_relay_outage::run(world, arm, tick)).await?,
             Self::ReceiverPartition => {
                 Box::pin(s02_receiver_partition::run(world, arm, tick)).await?
@@ -577,7 +595,14 @@ impl Scenario {
                 Box::pin(s24_routing_collision::run(world, arm, tick)).await?
             }
             Self::SilentRelays => Box::pin(s25_silent_relays::run(world, arm, tick)).await?,
+            Self::IdentityPlanes => Box::pin(s26_identity_planes::run(world, arm, tick)).await?,
         };
+        // Every arm, once, over everything its world sent: O7's subject is
+        // the whole wire, so no arm grades it and none is exempt from it.
+        outcome.graded.push((
+            Invariant::RelayPlaneContainment,
+            crate::oracle::planes::plane_containment(world)?,
+        ));
         Ok(self.report(world, arm, outcome, started))
     }
 
@@ -717,6 +742,8 @@ pub(crate) fn shape_of<T: TimelineSink, L: LogDrain>(world: &ScenarioWorld<T, L>
         members: world.devices().len(),
         circles: world.circles().len(),
         relays: world.relays().len(),
+        account_relays: world.account_relays().len(),
+        profile_relays: world.profile_relays().len(),
     }
 }
 
@@ -969,17 +996,12 @@ pub async fn add_member<T: TimelineSink, L: LogDrain>(
     circle: &SimCircle,
     joiner: DeviceTag,
 ) -> Result<(Event, PublishVerdict), RigError> {
-    let urls = world.relay_urls();
     let joining = world.device(joiner)?;
-    let key_package =
-        build_kp_maintenance_events(joining.session()?, &joining.keys, &urls, None, None)
-            .await
-            .map_err(|_| RigError::Core(Step::MintKeyPackage))?;
     let members = [MemberKeyPackage {
-        key_package_event: key_package.event,
+        key_package_event: joining.mint_key_package().await?,
         // Explicit, always: an invitee with no inbox relay has no Welcome
         // route, so the invite would be refused.
-        inbox_relays: urls.clone(),
+        inbox_relays: joining.stored_inbox().to_vec(),
         nip65_relays: Vec::new(),
         nip65_write_relays: Vec::new(),
     }];
@@ -1202,10 +1224,9 @@ mod tests {
     use crate::oracle::Recovery;
     use crate::profiles::WorldShape;
     use crate::profiles::{ProfileName, ProfileSpec};
-    use crate::relay::SimRelay;
     use crate::rig::circle::build_circle;
     use crate::rig::doubles::{RecordingTimeline, StubDrain};
-    use crate::rig::{CircleTag, DeviceTag, RelayPlane, RelayTag, SimWorld};
+    use crate::rig::{CircleTag, DeviceTag, RelayPlane, SimWorld};
     use haven_core::nostr::mls::types::ConvergedRoster;
     use std::time::Duration;
 
@@ -1214,17 +1235,19 @@ mod tests {
     type MembershipWorld = super::ScenarioWorld<RecordingTimeline, StubDrain>;
 
     async fn membership_world() -> MembershipWorld {
-        let relay = SimRelay::start(RelayTag::new(0))
-            .await
-            .expect("the relay plane starts");
+        let shape = WorldShape {
+            members: 3,
+            circles: 1,
+            relays: 1,
+            account_relays: 1,
+            profile_relays: 0,
+        };
         SimWorld::build(
-            &WorldShape {
-                members: 3,
-                circles: 1,
-                relays: 1,
-            },
+            &shape,
             Schedule::new(Vec::new()),
-            vec![relay],
+            crate::relay::planes_for(&shape)
+                .await
+                .expect("the relay planes start"),
             RecordingTimeline::default(),
             StubDrain::default(),
         )
@@ -1567,6 +1590,8 @@ mod tests {
             members: 3,
             circles: 2,
             relays: 1,
+            account_relays: 1,
+            profile_relays: 0,
         };
         assert!(
             create
@@ -1605,6 +1630,12 @@ mod tests {
         );
         // A drive of the durable-fanout driver is neither: it waits out one
         // call of MDK's relay client and polls for nothing afterwards.
+        let mut turns = quiet;
+        turns.withheld_acks = WithheldAcks::IdentityTurns;
+        assert!(
+            turns.deadline(tick, &wide) == quiet.deadline(tick, &wide) + bounds::identity_planes(3),
+            "an identity-plane arm pays the turns of every member of its world"
+        );
         let mut driven = quiet;
         driven.withheld_acks = WithheldAcks::FanoutDrives(1);
         assert!(
@@ -1733,14 +1764,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_outage_nobody_was_online_to_observe_is_not_observed() {
         use crate::nemesis::types::Schedule;
-        use crate::rig::doubles::{RecordingTimeline, StubDrain, TestRelay};
-        use crate::rig::RelayTag;
+        use crate::rig::doubles::{test_planes, RecordingTimeline, StubDrain};
 
-        let relay = TestRelay::start(RelayTag::new(0)).await;
         let mut world = SimWorld::build(
             &MINIMAL_SHAPE,
             Schedule::new(Vec::new()),
-            vec![relay],
+            test_planes(&MINIMAL_SHAPE).await,
             RecordingTimeline::default(),
             StubDrain::default(),
         )

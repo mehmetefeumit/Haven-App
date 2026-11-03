@@ -80,8 +80,15 @@ pub struct WorldShape {
     /// Circles, all created by the admin device, all in the same stores — a
     /// sibling circle is what proves a per-circle fault stayed per-circle.
     pub circles: usize,
-    /// Relay planes the world runs over.
+    /// Location planes: the relays every circle the world builds routes over.
     pub relays: usize,
+    /// Account planes: the devices' inbox and key-package lists. The first
+    /// carries every inbox and, alone, every key package too; a second
+    /// carries the key packages, so the two lists are told apart.
+    pub account_relays: usize,
+    /// Profile planes: none, or at least `PROFILE_POOL_MIN`, below which the
+    /// product's profile plane refuses to run at all.
+    pub profile_relays: usize,
 }
 
 /// One scenario the profile runs, and which of its arms.
@@ -172,6 +179,16 @@ impl ProfileSpec {
         }
         if self.world.relays == 0 {
             return invalid("world.relays");
+        }
+        // A device's inbox never rides a circle's relay (`rig/world.rs`), so
+        // a world needs a plane of its own for it.
+        if self.world.account_relays == 0 {
+            return invalid("world.account_relays");
+        }
+        if self.world.profile_relays != 0
+            && self.world.profile_relays < haven_core::profile::PROFILE_POOL_MIN
+        {
+            return invalid("world.profile_relays");
         }
         if self.tick_ms == 0 {
             return invalid("tick_ms");
@@ -274,6 +291,26 @@ mod tests {
     }
 
     #[test]
+    fn every_world_has_an_account_plane_and_the_longer_ones_split_the_lists() {
+        let world = |name| ProfileSpec::embedded(name).expect("embedded").world;
+        assert_eq!(
+            (
+                world(ProfileName::Pr).account_relays,
+                world(ProfileName::Pr).profile_relays
+            ),
+            (1, 0),
+            "the PR world grades the #p/#h split on one account plane"
+        );
+        for name in [ProfileName::Nightly, ProfileName::Weekly] {
+            assert_eq!(
+                (world(name).account_relays, world(name).profile_relays),
+                (2, haven_core::profile::PROFILE_POOL_MIN),
+                "inbox apart from key package, and a profile pool the product will use"
+            );
+        }
+    }
+
+    #[test]
     fn a_profile_name_round_trips_through_its_command_line_spelling() {
         for name in ProfileName::ALL {
             assert_eq!(ProfileName::parse(name.as_str()), Some(name));
@@ -303,6 +340,31 @@ mod tests {
                 field: "world.members"
             })
         );
+
+        let mut spec = pr();
+        spec.world.account_relays = 0;
+        assert_eq!(
+            spec.validate(),
+            Err(ProfileError::Invalid {
+                field: "world.account_relays"
+            }),
+            "an inbox needs a plane no circle routes over"
+        );
+
+        for profile_relays in 1..haven_core::profile::PROFILE_POOL_MIN {
+            let mut spec = pr();
+            spec.world.profile_relays = profile_relays;
+            assert_eq!(
+                spec.validate(),
+                Err(ProfileError::Invalid {
+                    field: "world.profile_relays"
+                }),
+                "a pool below the product's minimum is one it refuses to use"
+            );
+        }
+        let mut spec = pr();
+        spec.world.profile_relays = haven_core::profile::PROFILE_POOL_MIN;
+        assert_eq!(spec.validate(), Ok(()));
 
         let mut spec = pr();
         spec.deadline_secs = spec.run_budget_secs;

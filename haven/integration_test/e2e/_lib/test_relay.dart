@@ -137,6 +137,16 @@ const String _sentinelAckVerb = 'HAVEN_WIRE_SENTINEL_ACK';
 /// read — it exists to be recognisably NOT the anchor.
 const String _harnessSocketDeclaration = 'HAVEN_WIRE_CONN';
 
+/// Token prefix of a circle's routing declaration
+/// ([TestRelay.declareCircleRouting]). Must match
+/// `ROUTING_DECLARATION_PREFIX` in
+/// `tooling/e2e/local-relay/src/planes/cli.rs`.
+const String _routingTokenPrefix = 'HAVEN_WIRE_ROUTING:';
+
+/// Routing declarations this process has made: numbers each token, so the
+/// ack (which echoes the token) answers exactly one pending declaration.
+int _routingDeclarations = 0;
+
 /// Frame verb the recording proxy intercepts as a real-MLS-group-id
 /// announcement ([TestRelay.announceMlsGroupId]). Must match
 /// `MLS_GROUP_ID_VERB` in `tooling/e2e/local-relay/src/frame.rs`.
@@ -262,6 +272,80 @@ String encodeWireMlsGroupId(List<int> mlsGroupId) {
   }
   return hex;
 }
+
+/// Byte length of a `nostr_group_id`, the value a circle's kind-445 `h` tag
+/// carries.
+const int kWireNostrGroupIdBytes = 32;
+
+/// A relay URL the relay-plane oracle can map to a proxy listen: `ws(s)://`,
+/// a host, and an EXPLICIT port (the oracle maps a routing relay to a listen by
+/// port, `haven-wire-planes`' `explicit_port`).
+final RegExp _routingRelayUrl =
+    RegExp(r'^wss?://[^/?#:\s]+:(\d{1,5})(?:[/?#]|$)');
+
+/// The payload of a circle's routing declaration
+/// ([TestRelay.declareCircleRouting]): `{"h": <64 lowercase hex>, "relays":
+/// [...]}`, exactly the two keys `haven-wire-planes` accepts.
+///
+/// [nostrGroupId] is `CircleFfi.nostrGroupId`, the value on the wire in every
+/// `h`; [relays] is `CircleFfi.relays`, Rust's view of the routing, never a
+/// harness literal, so the oracle holds the wire to what the circle says.
+/// Validated HERE because a malformed declaration makes the oracle UNUSABLE
+/// (rc 3) for the whole run, and one naming a relay without a port cannot be
+/// mapped to a listen at all.
+///
+/// Throws [ArgumentError] when [nostrGroupId] is not [kWireNostrGroupIdBytes]
+/// bytes, [relays] is empty, or a relay is not a `ws(s)://` URL with an
+/// explicit port. Messages name lengths and positions only, never a value
+/// (Security Rule 15).
+Map<String, Object> encodeWireRoutingDecl({
+  required List<int> nostrGroupId,
+  required List<String> relays,
+}) {
+  if (nostrGroupId.length != kWireNostrGroupIdBytes) {
+    throw ArgumentError(
+      // harness-log-ok: byte length, not the id
+      'nostr_group_id is ${nostrGroupId.length} byte(s); a routing '
+      // harness-log-ok: fixed protocol-constant length, not the id
+      'declaration names exactly $kWireNostrGroupIdBytes, the `h` a circle '
+      'carries on the wire.',
+    );
+  }
+  for (var i = 0; i < nostrGroupId.length; i++) {
+    final b = nostrGroupId[i];
+    if (b < 0 || b > 255) {
+      throw ArgumentError(
+        'nostr_group_id byte $i is outside 0..255, so it did not come from '
+        'CircleFfi.nostrGroupId.',
+      );
+    }
+  }
+  if (relays.isEmpty) {
+    throw ArgumentError(
+      'a routing declaration names no relay; the relay-plane oracle refuses '
+      'it as malformed and the whole run proves nothing.',
+    );
+  }
+  for (var i = 0; i < relays.length; i++) {
+    final match = _routingRelayUrl.firstMatch(relays[i]);
+    final port = match == null ? null : int.parse(match.group(1)!);
+    if (port == null || port < 1 || port > 65535) {
+      throw ArgumentError(
+        'routing relay $i is not a ws(s):// URL with an explicit port; the '
+        'relay-plane oracle maps a routing relay to a proxy listen by port.',
+      );
+    }
+  }
+  return <String, Object>{
+    'h': nostrGroupId.map((b) => b.toRadixString(16).padLeft(2, '0')).join(),
+    'relays': List<String>.of(relays),
+  };
+}
+
+/// The limit [TestRelay.dumpStore] asks for: strfry's `maxFilterLimit`
+/// (`tooling/e2e/strfry.conf`, `strfry-negentropy.conf`), pinned there by
+/// `test/lints/relay_planes_mirror_test.dart`.
+const int kDumpStoreLimit = 500;
 
 /// The recording proxy's answer to a sentinel marker.
 ///
@@ -446,6 +530,12 @@ class TestRelay {
   final List<Completer<void>> _pendingNeedleDecls = <Completer<void>>[];
   final List<Completer<void>> _pendingCanaryManifests = <Completer<void>>[];
   final Random _rng = Random.secure();
+  final Set<String> _publishedIds = <String>{};
+
+  /// The id of every event the harness published through this relay
+  /// ([publish], [publishAndAwaitOk]): the harness's own writes, which a
+  /// store check ([TestRelay.dumpStore]) must not attribute to the app.
+  Set<String> get publishedIds => Set<String>.unmodifiable(_publishedIds);
 
   /// The ping interval the LIVE socket carries.
   ///
@@ -624,6 +714,10 @@ class TestRelay {
       final subId = frame[1] as String?;
       if (subId == null) return;
       _subs[subId]?.onEose();
+    } else if (tag == 'CLOSED' && frame.length >= 2) {
+      final subId = frame[1];
+      if (subId is! String) return;
+      _subs[subId]?.onClosed?.call();
     } else if (tag == 'OK' && frame.length >= 4) {
       final eventId = frame[1];
       final accepted = frame[2];
@@ -946,8 +1040,9 @@ class TestRelay {
 
   Future<WireJournalSentinel> _emitWireJournalSentinelOnce(
     String token,
-    Duration timeout,
-  ) async {
+    Duration timeout, {
+    Map<String, Object>? payload,
+  }) async {
     // FIRST STATEMENT, before the closed check and before the writability
     // poll — same placement as [_announceMlsGroupIdOnce]'s gate, for the same
     // reason: the ack timeout below fires only AFTER the frame is already on
@@ -978,7 +1073,9 @@ class TestRelay {
     }
     final completer = Completer<WireJournalSentinel>();
     _pendingSentinels.add(_PendingSentinel(token, completer));
-    _channel.sink.add(jsonEncode(<dynamic>[_sentinelVerb, token]));
+    _channel.sink.add(
+      jsonEncode(<dynamic>[_sentinelVerb, token, ?payload]),
+    );
     final budget = _answerBudget(timeout);
     try {
       return await completer.future.timeout(budget);
@@ -991,6 +1088,54 @@ class TestRelay {
     } finally {
       _pendingSentinels.removeWhere((p) => p.token == token);
     }
+  }
+
+  /// Declares one circle's routing to the relay-plane oracle (C8,
+  /// `tooling/e2e/ci/check-wire-planes.sh`).
+  ///
+  /// The oracle holds every kind-445 EVENT, `#h` REQ and NEG-OPEN to the
+  /// relays its circle is routed to, and the journal alone cannot say which
+  /// those are: inferring them from the first 445 would bless whatever that
+  /// first send got wrong. So the drive declares them, on the sentinel verb
+  /// with the payload as a third element —
+  /// `["HAVEN_WIRE_SENTINEL","HAVEN_WIRE_ROUTING:<n>",{"h":…,"relays":[…]}]`.
+  /// The proxy journals it verbatim, acks it and never forwards it, and the
+  /// socket is a harness one already. The `h` and the relays are on the wire
+  /// in every `#h` and every connection, so journalling them discloses
+  /// nothing new; nothing prints the payload.
+  ///
+  /// [nostrGroupId] and [relays] are validated by [encodeWireRoutingDecl].
+  /// An undeclared circle is a META-FLOOR for the whole run, so a lost ack
+  /// fails here, like [announceMlsGroupId]'s, rather than narrowing the check.
+  ///
+  /// Throws [StateError] if this build declares no recording proxy — gated on
+  /// [wireRecorderDeclared] itself, because a routing token never equals the
+  /// compiled default and [wireRecorderDeclaredFor] would pass it — if the
+  /// frame could not be written, or if no ack arrives within [timeout]; and
+  /// [ArgumentError] if the routing fails [encodeWireRoutingDecl].
+  Future<void> declareCircleRouting({
+    required List<int> nostrGroupId,
+    required List<String> relays,
+    Duration timeout = const Duration(seconds: 15),
+  }) async {
+    // FIRST STATEMENT, for the reason [_announceMlsGroupIdOnce] gives: the
+    // ack timeout fires only after the frame is on the relay.
+    if (!wireRecorderDeclared) {
+      throw StateError(
+        'refusing to declare a circle routing: this build declares no '
+        'recording proxy (HAVEN_WIRE_SENTINEL is the compiled default), so '
+        'the frame would go to the relay itself. Callers must gate on '
+        'wireRecorderDeclared.',
+      );
+    }
+    final payload = encodeWireRoutingDecl(
+      nostrGroupId: nostrGroupId,
+      relays: relays,
+    );
+    final token = '$_routingTokenPrefix${++_routingDeclarations}';
+    await _reissuingAcrossReconnect(
+      () => _emitWireJournalSentinelOnce(token, timeout, payload: payload),
+    );
   }
 
   /// Marks THIS socket, in the journal, as one the harness owns.
@@ -1334,6 +1479,8 @@ class TestRelay {
     if (decoded is! Map<String, dynamic>) {
       throw ArgumentError('eventJson must decode to a JSON object');
     }
+    final id = decoded['id'];
+    if (id is String) _publishedIds.add(id);
     _channel.sink.add(jsonEncode(<dynamic>['EVENT', decoded]));
   }
 
@@ -1386,6 +1533,7 @@ class TestRelay {
     if (eventId is! String) {
       throw ArgumentError('eventJson must include an "id" string');
     }
+    _publishedIds.add(eventId);
     final completer = Completer<(bool, String)>();
     final pending = _PendingOk(eventId: eventId, completer: completer);
     _pendingOks.add(pending);
@@ -1610,6 +1758,86 @@ class TestRelay {
     return completer.future;
   }
 
+  /// Every event the relay stores, read in ONE `{"limit": kDumpStoreLimit}`
+  /// REQ and resolved on its `EOSE`, de-duplicated by id.
+  ///
+  /// For the UNPROXIED multi-relay lanes, whose stores are the only record of
+  /// what reached each relay (`plane_store_check.dart`). Refused when a
+  /// recorder is declared: through the proxy, a filter with no `kinds` is a
+  /// REQ no plane admits, and the journal already answers the question.
+  ///
+  /// What it cannot see: REQs and NEG sessions (no filter is stored),
+  /// application kind-445s past their NIP-40 expiry (both hermetic relays stop
+  /// serving them), and deleted events. It proves "this relay holds nothing
+  /// outside its role", nothing more.
+  ///
+  /// Throws [StateError] when an answer of exactly [kDumpStoreLimit] events may
+  /// hide a truncation (both hermetic relays serve at most the limit asked:
+  /// strfry's `maxFilterLimit`, and `haven-local-relay`, pinned by
+  /// `tooling/e2e/local-relay/tests/local_relay_store_dump.rs`), when the relay
+  /// answers `CLOSED`, or when no `EOSE` arrives within [timeout].
+  Future<List<TestRelayEvent>> dumpStore({
+    Duration timeout = const Duration(seconds: 15),
+  }) {
+    if (wireRecorderDeclared) {
+      throw StateError(
+        'refusing to dump a relay store through the recording proxy: a REQ '
+        'with no kinds is a frame no relay plane admits.',
+      );
+    }
+    if (_closed) {
+      throw StateError('TestRelay is closed');
+    }
+    final completer = Completer<List<TestRelayEvent>>();
+    final collected = <String, TestRelayEvent>{};
+    final subId = _randomSubId();
+    Timer? timer;
+
+    void cleanup() {
+      timer?.cancel();
+      _sendClose(subId);
+      _subs.remove(subId);
+    }
+
+    void settle(Object? error) {
+      if (completer.isCompleted) return;
+      cleanup();
+      if (error != null) {
+        completer.completeError(error);
+      } else {
+        completer.complete(List<TestRelayEvent>.unmodifiable(collected.values));
+      }
+    }
+
+    _subs[subId] = _Subscription(
+      filter: const <String, dynamic>{'limit': kDumpStoreLimit},
+      onEvent: (event) => collected[event.id] = event,
+      onEose: () => settle(
+        collected.length >= kDumpStoreLimit
+            ? StateError(
+                'the store dump returned its whole limit, so the store may '
+                'hold more than it served; the check is unproven.',
+              )
+            : null,
+      ),
+      onClosed: () => settle(
+        StateError('the relay refused the store dump (CLOSED).'),
+      ),
+      onError: settle,
+    );
+    timer = Timer(
+      timeout,
+      () => settle(
+        StateError(
+          'no EOSE for the store dump within ${timeout.inSeconds}s; the '
+          'store was not read to its end.',
+        ),
+      ),
+    );
+    _sendReq(subId, const <String, dynamic>{'limit': kDumpStoreLimit});
+    return completer.future;
+  }
+
   /// Closes all subscriptions and the underlying socket. Idempotent.
   Future<void> dispose() async {
     if (_closed) return;
@@ -1631,6 +1859,7 @@ class _Subscription {
     required this.onEvent,
     required this.onEose,
     required this.onError,
+    this.onClosed,
   });
 
   /// The filter this subscription was originally issued with. Held so
@@ -1640,6 +1869,10 @@ class _Subscription {
   final void Function(TestRelayEvent) onEvent;
   final void Function() onEose;
   final void Function(Object) onError;
+
+  /// The relay's `CLOSED` for this subscription; ignored when null, which is
+  /// every subscription but [TestRelay.dumpStore]'s.
+  final void Function()? onClosed;
 
   void completeWithError(Object error) => onError(error);
 }

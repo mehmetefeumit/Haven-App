@@ -21,8 +21,27 @@ use nostr_relay_builder::MockRelay;
 use nostr_sdk::{Client, RelayPoolNotification};
 
 use crate::nemesis::types::Fault;
+use crate::profiles::WorldShape;
 use crate::rig::plane::{CapturedLine, LogDrain, RelayPlane, TimelineRecord, TimelineSink};
+use crate::rig::world::Planes;
 use crate::rig::{RelayTag, RigError};
+
+/// A double for every plane a world of `shape` runs over, tagged as
+/// `relay::planes_for` tags the real ones.
+pub async fn test_planes(shape: &WorldShape) -> Planes<TestRelay> {
+    let mut location = Vec::new();
+    for ordinal in 0..shape.relays + shape.account_relays + shape.profile_relays {
+        let tag = RelayTag::new(u32::try_from(ordinal).unwrap_or(u32::MAX));
+        location.push(TestRelay::start(tag).await);
+    }
+    let profile = location.split_off(shape.relays + shape.account_relays);
+    let account = location.split_off(shape.relays);
+    Planes {
+        location,
+        account,
+        profile,
+    }
+}
 
 /// A real in-process relay, plus a witness of what it broadcast.
 pub struct TestRelay {

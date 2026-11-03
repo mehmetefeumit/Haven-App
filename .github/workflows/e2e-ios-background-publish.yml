@@ -143,11 +143,11 @@
 #       OS-backgrounded, the POLL path's background CATCH-UP runs: a peer
 #       publishes the same sentinel fix, and
 #       `MapShell._startIosBackgroundReceiveTimer`'s `Timer.periodic(90 s)` must
-#       reach `CatchupService.runCatchup(isBackgroundWake: true)` from the
-#       backgrounded process and land that peer's location in the PERSISTED
-#       last-known store — read back through `snapshotLastKnownForCircle`,
-#       coordinates compared, against a baseline taken before the peer
-#       published.
+#       complete a `CatchupService.runCatchup(isBackgroundWake: true)` sweep in
+#       the backgrounded process, and that peer's location must land in the
+#       PERSISTED last-known store — read back through
+#       `snapshotLastKnownForCircle`, coordinates compared, against a baseline
+#       taken before the peer published.
 #
 #       This phase drives NOTHING: the timer is the subject, so calling a tick
 #       would replace the mechanism under test. The row alone does not
@@ -155,30 +155,32 @@
 #       receives through the same catch-up before it seals and writes the same
 #       row. So the TIMER is attributed by its own count of finished sweeps,
 #       `MapShell.backgroundReceiveTimerSweeps`, asserted to advance inside the
-#       window beside the row (`check_ios_background_publish.sh` pins both);
-#       the foreground fetch timer was cancelled at the pause, and no provider
-#       recomputes with frames off, so the burst and the timer are the only
-#       writers. Its window spans TWO timer
-#       ticks, not one: a sweep whose window opened in the same whole second
+#       window beside the row (`check_ios_background_publish.sh` pins both),
+#       and which of the two wrote the row is not told apart; the foreground
+#       fetch timer was cancelled at the pause, and no provider recomputes with
+#       frames off, so the burst and the timer are the only writers. Its window
+#       spans TWO timer ticks, not one: a sweep whose window opened in the same whole second
 #       the peer's event was stored can miss it and still advance the group
 #       cursor to that second, and it is the NEXT sweep's 60 s re-read below the
 #       cursor that recovers it.
 #
-#       A FOURTH premise holds that row attributable, and unlike the three
-#       above it is not a fact about Dart, so it is stated rather than assumed:
-#       the native catch-up channel handler (registered from main.dart
+#       A FOURTH premise keeps that list of writers exact, and unlike the
+#       three above it is not a fact about Dart, so it is stated rather than
+#       assumed: the native catch-up channel handler (registered from main.dart
 #       regardless of the flag) reaches the SAME persist through the SAME
-#       runCatchup. HavenSLCHandler arms nothing without .authorizedAlways, so
-#       this leg's `tier: when-in-use` is what excludes it — which is the
-#       binding reason there is no (always, poll) leg, stronger than the cost
-#       argument below, and the reason this leg's tier may not be flipped.
+#       runCatchup, without advancing the timer's sweep count. HavenSLCHandler
+#       arms nothing without .authorizedAlways, so this leg's
+#       `tier: when-in-use` keeps the row's writers to the timer and the
+#       burst. An (always, poll) leg would prove the same two things with a
+#       third, unnamed writer; it is left out for the cost given above, and
+#       this leg's tier stays put so the list of writers stays true.
 #       HavenBGTaskHandler is not tier-gated at all; only the Simulator
 #       excludes it (BGTaskScheduler.submit throws notPermitted there and the
 #       handler swallows it), the same simulator ceiling this header states for
-#       jetsam and SLC relaunch. On a device P2d would need a different oracle.
+#       jetsam and SLC relaunch. On a device it would be a third writer too.
 #
-#       What P2d does NOT prove: anything about the burst plane, which this
-#       build does not have; and not the C3 chokepoint that must refuse a wake
+#       What P2d does NOT prove: anything about the live-sync burst plane,
+#       which this build compiles out; and not the C3 chokepoint that must refuse a wake
 #       once consent is withdrawn — the C4 watcher cancels this timer on that
 #       edge before the chokepoint is reached, and host tests
 #       (haven/test/pages/map_shell_ios_receive_timer_test.dart) own both.
@@ -220,7 +222,7 @@
 #
 # The owner's decision on OD4-d (docs/POWER_EFFICIENCY_PLAN.md §4) was to buy
 # that coverage back, and the `when-in-use-poll` leg above IS it: P2d asserts
-# the timer, its sweep and the decrypt in one row of the persisted store.
+# the timer's completed sweep and the decrypted row in the persisted store.
 # OD4-d is therefore CLOSED here, at one extra ~62-minute macOS job.
 # CLAUDE.md's "CI Pipeline" description of this lane was the last carrier of the
 # open-gap framing; it was corrected on 2026-09-09 and now names the three legs.
@@ -319,11 +321,11 @@ jobs:
           # with no runtime coverage at all between P4-7 and this leg. See the
           # header's OD4-d section.
           #
-          # `when-in-use` here is a CORRECTNESS constraint, not a sampling
-          # choice: P2d's oracle is the persisted last-known store, and under
-          # `always` the SLC wake reaches the same store through the same
-          # runCatchup, so the row would no longer be attributable to the timer
-          # (P2d, above). Do not flip it, and do not add an (always, poll) leg.
+          # `when-in-use` here is not a sampling choice: P2d's oracle is the
+          # persisted last-known store, and under `always` the SLC wake reaches
+          # the same store through the same runCatchup — a third writer of the
+          # row that P2d's list (the timer and a burst, above) does not name.
+          # Do not flip it, and do not add an (always, poll) leg.
           - leg: when-in-use-poll
             tier: when-in-use
             live_sync: "false"

@@ -715,6 +715,7 @@ void main() {
           relay: ctx.relay,
           mlsGroupId: mlsGroupId,
           nostrGroupId: bobCircle.circle.nostrGroupId,
+          routing: bobCircle.circle.relays,
           label: 'core flow: family circle',
         );
 
@@ -1494,7 +1495,7 @@ void main() {
           members: <MemberKeyPackageFfi>[daveKp],
           name: 'FE-2 Circle',
           circleType: 'location_sharing',
-          relays: <String>[fe2Relay.url],
+          relays: const <String>[locationRelayUrl],
           scenario: 'FE-2',
         );
       } finally {
@@ -1512,6 +1513,7 @@ void main() {
         relay: fe2Relay,
         mlsGroupId: creationResult.circle.mlsGroupId,
         nostrGroupId: creationResult.circle.nostrGroupId,
+        routing: creationResult.circle.relays,
         label: 'FE-2 circle',
       );
 
@@ -2158,7 +2160,7 @@ void main() {
               members: <MemberKeyPackageFfi>[aliceKp],
               name: 'M11 f Circle',
               circleType: 'location_sharing',
-              relays: <String>[m11Relay.url],
+              relays: const <String>[locationRelayUrl],
               scenario: 'M11:f',
             );
           } finally {
@@ -2173,6 +2175,7 @@ void main() {
             relay: m11Relay,
             mlsGroupId: creation.circle.mlsGroupId,
             nostrGroupId: creation.circle.nostrGroupId,
+            routing: creation.circle.relays,
             label: 'M11:f circle (Bob-created)',
           );
 
@@ -2669,7 +2672,7 @@ void main() {
               members: <MemberKeyPackageFfi>[aliceKp],
               name: 'M11 g Circle',
               circleType: 'location_sharing',
-              relays: <String>[m11Relay.url],
+              relays: const <String>[locationRelayUrl],
               scenario: 'M11:g',
             );
           } finally {
@@ -2683,6 +2686,7 @@ void main() {
             relay: m11Relay,
             mlsGroupId: creation.circle.mlsGroupId,
             nostrGroupId: creation.circle.nostrGroupId,
+            routing: creation.circle.relays,
             label: 'M11:g circle (Bob-created)',
           );
 
@@ -5226,6 +5230,7 @@ Future<void> _announceMlsGroupId({
   required TestRelay relay,
   required List<int> mlsGroupId,
   required List<int> nostrGroupId,
+  required List<String> routing,
   required String label,
 }) async {
   // Lanes that declare NO recording proxy must not transmit this value at all.
@@ -5263,6 +5268,14 @@ Future<void> _announceMlsGroupId({
   await _needles.declare(
     'nostr_group_id',
     _hexLower(Uint8List.fromList(nostrGroupId)),
+  );
+  // The circle's routing, for the relay-plane oracle (C8): it holds every 445,
+  // `#h` REQ and NEG-OPEN of this circle to these relays, and reports an
+  // undeclared circle as a META-FLOOR. Every circle-creation path funnels
+  // through here, so the announce-site lint pins this declaration too.
+  await relay.declareCircleRouting(
+    nostrGroupId: nostrGroupId,
+    relays: routing,
   );
 }
 
@@ -6261,10 +6274,11 @@ Future<CircleFfi> _m11AliceCreatesCircle({
       members: members,
       name: name,
       circleType: 'location_sharing',
-      relays: <String>[relay.url],
-      // Synthetic peers advertise no inbox/NIP-65 relays, so pass Alice's own
-      // inbox (the hermetic relay) as the Welcome-delivery fallback — exactly
-      // what the production admin flow does (see the FE-2 note).
+      // The location relay, never the account's inbox relay: a circle's
+      // kind-445s belong on the location plane (C8 holds them there). The
+      // Welcomes go to each invitee's own inbox list, which every synthetic
+      // peer publishes at bootstrap.
+      relays: const <String>[locationRelayUrl],
       scenario: 'M11',
     );
   } finally {
@@ -6286,6 +6300,7 @@ Future<CircleFfi> _m11AliceCreatesCircle({
     relay: relay,
     mlsGroupId: result.circle.mlsGroupId,
     nostrGroupId: result.circle.nostrGroupId,
+    routing: result.circle.relays,
     label: 'M11 circle $circleHandle',
   );
 

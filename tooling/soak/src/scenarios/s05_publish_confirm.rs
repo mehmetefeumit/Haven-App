@@ -505,10 +505,14 @@ async fn negative_gates<T: TimelineSink, L: LogDrain>(
     let (shared_tag, shared_routing) = (shared.tag, *shared.nostr_group_id());
     let bound = bounds::round_trip(Recovery::Undisturbed);
 
-    // The committer's endpoint goes dark before the eviction is staged: its
-    // drive reaches no relay, so the commit waits under its record.
-    for plane in world.relays_mut() {
-        plane.apply_for(committer, Fault::Down).await?;
+    // The committer's endpoints go dark before the eviction is staged: its
+    // drive reaches no relay, so the commit waits under its record, and its
+    // engine — circles and inbox alike — is connected to nothing.
+    for tag in world.engine_plane_tags() {
+        world
+            .plane_mut(tag)?
+            .apply_for(committer, Fault::Down)
+            .await?;
     }
     let eviction = surface_eviction(world, committer, leaver, (admin, 105), &circle).await?;
     let group = circle.mls_group_id().clone();
@@ -553,8 +557,11 @@ async fn negative_gates<T: TimelineSink, L: LogDrain>(
     if paused && sweep(world, committer, &mut bus).await?.silent {
         canaries += 1;
     }
-    for plane in world.relays_mut() {
-        plane.apply_for(committer, Fault::Heal).await?;
+    for tag in world.engine_plane_tags() {
+        world
+            .plane_mut(tag)?
+            .apply_for(committer, Fault::Heal)
+            .await?;
     }
 
     // 4. A future-epoch backlog (Rule 12): the admin commits on a world circle
@@ -1270,6 +1277,7 @@ async fn confirm_err<T: TimelineSink, L: LogDrain>(
 
     let mut relays = world.relay_urls();
     relays.push("wss://s05-confirm-err.example.com".to_string());
+    world.note_routing_of(victim.mls_group_id(), &relays);
     let staged = world
         .device(admin)?
         .manager()?

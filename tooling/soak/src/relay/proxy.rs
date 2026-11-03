@@ -33,7 +33,7 @@ use tokio::task::JoinHandle;
 
 use crate::nemesis::types::{ClosedPrefix, DropClass, RigCount};
 use crate::relay::forge::{take_frame, take_http_head, text_frame, Frame};
-use crate::relay::ledger::{Ledger, NegFrame};
+use crate::relay::ledger::{next_connection, EndpointId, Ledger, NegFrame};
 use crate::relay::policies::{closed_message, oversize_message};
 use crate::rig::{DeviceTag, RigError, Step};
 
@@ -193,11 +193,11 @@ pub struct Proxy {
     url: String,
     addr: SocketAddr,
     target: String,
-    /// Whose endpoint this is. `None` is the plane's canonical one — circles,
-    /// key packages and catch-up dial it — and the ledger records every
-    /// delivery under this key, which is the device dimension a partition arm
-    /// reads back.
-    device: Option<DeviceTag>,
+    /// Whose endpoint this is. The canonical one is what circles, key packages
+    /// and catch-up dial; the ledger records every delivery under its device,
+    /// which is the dimension a partition arm reads back, and every client
+    /// frame under the endpoint itself (O7).
+    endpoint: EndpointId,
     state: Arc<RwLock<FaultState>>,
     ledger: Ledger,
     /// Bumped to cancel every live connection. Held behind an `Arc` so the
@@ -233,11 +233,7 @@ impl Proxy {
     ///
     /// [`RigError::Core`] with [`Step::ApplyFault`] if the endpoint cannot be
     /// bound — a plane with no address is not a plane.
-    pub fn start(
-        relay_url: &str,
-        ledger: Ledger,
-        device: Option<DeviceTag>,
-    ) -> Result<Self, RigError> {
+    pub fn start(relay_url: &str, ledger: Ledger, endpoint: EndpointId) -> Result<Self, RigError> {
         let listener = reserve((Ipv4Addr::LOCALHOST, 0).into())
             .and_then(|socket| socket.listen(BACKLOG))
             .map_err(|_| RigError::Core(Step::ApplyFault))?;
@@ -253,7 +249,7 @@ impl Proxy {
                 .trim_start_matches("ws://")
                 .trim_end_matches('/')
                 .to_string(),
-            device,
+            endpoint,
             state: Arc::new(RwLock::new(FaultState::default())),
             ledger,
             generation: Arc::new(generation),
@@ -389,7 +385,7 @@ impl Proxy {
 
     fn serve_on(&mut self, listener: TcpListener) {
         let target = self.target.clone();
-        let device = self.device;
+        let endpoint = self.endpoint;
         let state = Arc::clone(&self.state);
         let ledger = self.ledger.clone();
         let generation = Arc::clone(&self.generation);
@@ -412,7 +408,7 @@ impl Proxy {
                 tokio::spawn(serve(
                     client,
                     target.clone(),
-                    device,
+                    endpoint,
                     Arc::clone(&state),
                     ledger.clone(),
                     generation.subscribe(),
@@ -461,7 +457,7 @@ impl Drop for Proxy {
 async fn serve(
     client: TcpStream,
     target: String,
-    device: Option<DeviceTag>,
+    endpoint: EndpointId,
     state: Arc<RwLock<FaultState>>,
     ledger: Ledger,
     mut cancel: watch::Receiver<u64>,
@@ -484,14 +480,14 @@ async fn serve(
     let mut upstream = tokio::spawn(pump_to_relay(
         from_client,
         to_relay,
-        device,
+        (endpoint, next_connection()),
         Arc::clone(&state),
         ledger.clone(),
         forged_tx,
         Arc::clone(&subscriptions),
     ));
     let connection = Connection {
-        device,
+        device: endpoint.device(),
         state,
         ledger,
         subscriptions,
@@ -514,7 +510,7 @@ async fn serve(
 async fn pump_to_relay(
     mut from_client: OwnedReadHalf,
     mut to_relay: OwnedWriteHalf,
-    device: Option<DeviceTag>,
+    (endpoint, conn): (EndpointId, u64),
     state: Arc<RwLock<FaultState>>,
     ledger: Ledger,
     forged: mpsc::Sender<String>,
@@ -528,7 +524,8 @@ async fn pump_to_relay(
     loop {
         while let Some(frame) = take_frame(&mut buf) {
             let upstream = Upstream {
-                device,
+                endpoint,
+                conn,
                 state: &state,
                 ledger: &ledger,
                 forged: &forged,
@@ -626,7 +623,8 @@ async fn read_more(from: &mut OwnedReadHalf, buf: &mut Vec<u8>) -> Option<usize>
 /// frames are recorded, where a forged answer goes, and what it has open.
 #[derive(Clone, Copy)]
 struct Upstream<'a> {
-    device: Option<DeviceTag>,
+    endpoint: EndpointId,
+    conn: u64,
     state: &'a RwLock<FaultState>,
     ledger: &'a Ledger,
     forged: &'a mpsc::Sender<String>,
@@ -666,12 +664,15 @@ async fn forward_from_client(
     reqs: &mut ReqCount,
 ) -> bool {
     let Upstream {
-        device,
+        endpoint,
+        conn,
         state,
         ledger,
         forged,
         subscriptions,
     } = upstream;
+    let device = endpoint.device();
+    record(frame, ledger, endpoint, conn);
     if frame.is_text() {
         if let Ok(message) = ClientMessage::from_json(frame.payload().as_ref()) {
             let faults = *state.read().unwrap_or_else(PoisonError::into_inner);
@@ -771,6 +772,20 @@ async fn forward_from_client(
         }
     }
     to_relay.write_all(frame.bytes()).await.is_ok()
+}
+
+/// Records `frame` in the plane record if it is a data frame — here, before
+/// anything parses it, answers it or refuses it: what the client SENT is O7's
+/// subject, whatever the plane did with it.
+fn record(frame: &Frame, ledger: &Ledger, endpoint: EndpointId, conn: u64) {
+    if frame.is_data() {
+        let payload = frame.payload();
+        let text = frame
+            .is_text()
+            .then(|| std::str::from_utf8(&payload).ok())
+            .flatten();
+        ledger.note_plane_frame(endpoint, conn, text);
+    }
 }
 
 /// What one connection's client-facing pump owns: the same four things

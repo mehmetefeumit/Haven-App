@@ -42,6 +42,17 @@ impl AdmitPolicy for VerifiedEvents {
         };
         Box::pin(async move { Ok(status) })
     }
+
+    /// The trait's own default, after telling a watching test which relay is
+    /// being dialled (`dial_witness`): admission is unchanged.
+    #[cfg(any(test, feature = "test-utils"))]
+    fn admit_connection<'a>(
+        &'a self,
+        relay_url: &'a RelayUrl,
+    ) -> BoxedFuture<'a, Result<AdmitStatus, PolicyError>> {
+        super::dial_witness::note(relay_url.as_str());
+        Box::pin(async move { Ok(AdmitStatus::Success) })
+    }
 }
 
 /// Builds a relay client that hands on only verified events.

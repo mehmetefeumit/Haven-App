@@ -57,6 +57,7 @@ import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/circle_creation.dart' show createCircleDelivered;
 import 'e2e/_lib/driven_location.dart';
+import 'e2e/_lib/plane_store_check.dart';
 import 'e2e/_lib/synthetic_user.dart';
 import 'e2e/_lib/test_relay.dart';
 import 'e2e/_lib/test_user.dart';
@@ -153,6 +154,8 @@ void main() {
         );
         return;
       }
+      final r1Before = await storeIds(r1);
+      final r2Before = await storeIds(r2);
 
       // Per-test temp dirs so MLS state is isolated between scenarios.
       final aliceDir = await Directory.systemTemp.createTemp(
@@ -499,6 +502,20 @@ void main() {
                 'Alice and Bob converged to the same relay set (never '
                 'logged); post-update 445 reached R2 and Bob decrypted it.',
               );
+              await assertStoreWithinRoles(
+                r2,
+                check: 'CONV-1 R2',
+                roles: const <String>{'location'},
+                before: r2Before,
+                harnessIds: <String>{...r1.publishedIds, ...r2.publishedIds},
+              );
+              await assertStoreLacksKinds(
+                r1,
+                check: 'CONV-1 R1',
+                kinds: const <int>{0},
+                before: r1Before,
+                harnessIds: <String>{...r1.publishedIds, ...r2.publishedIds},
+              );
             } finally {
               // Nothing peer-specific to scrub at this level any more —
               // Bob's/Carol's/Dave's KeyPackage came from
@@ -540,6 +557,8 @@ void main() {
         );
         return;
       }
+      final r1Before = await storeIds(r1);
+      final r2Before = await storeIds(r2);
 
       final aliceDir = await Directory.systemTemp.createTemp(
         'haven_conv2_alice_',
@@ -717,6 +736,20 @@ void main() {
                 '(nostrGroupIdHex='
                 '${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)})',
               );
+              await assertStoreWithinRoles(
+                r2,
+                check: 'CONV-2 R2',
+                roles: const <String>{'location'},
+                before: r2Before,
+                harnessIds: <String>{...r1.publishedIds, ...r2.publishedIds},
+              );
+              await assertStoreLacksKinds(
+                r1,
+                check: 'CONV-2 R1',
+                kinds: const <int>{0},
+                before: r1Before,
+                harnessIds: <String>{...r1.publishedIds, ...r2.publishedIds},
+              );
             } finally {
               // Nothing peer-specific to scrub at this level any more —
               // Bob's/Carol's/Dave's KeyPackage came from
@@ -765,6 +798,8 @@ void main() {
         );
         return;
       }
+      final r1Before = await storeIds(r1);
+      final r2Before = await storeIds(r2);
 
       final aliceDir = await Directory.systemTemp.createTemp(
         'haven_conv3_alice_',
@@ -1094,6 +1129,20 @@ void main() {
                 'Alice and Bob converged to the same relay set (never '
                 'logged); post-removal 445 reached R2 only; Bob decrypted '
                 'it from R2.',
+              );
+              await assertStoreWithinRoles(
+                r2,
+                check: 'CONV-3 R2',
+                roles: const <String>{'location'},
+                before: r2Before,
+                harnessIds: <String>{...r1.publishedIds, ...r2.publishedIds},
+              );
+              await assertStoreLacksKinds(
+                r1,
+                check: 'CONV-3 R1',
+                kinds: const <int>{0},
+                before: r1Before,
+                harnessIds: <String>{...r1.publishedIds, ...r2.publishedIds},
               );
             } finally {
               // Nothing peer-specific to scrub at this level any more —

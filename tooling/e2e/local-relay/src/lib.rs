@@ -43,12 +43,22 @@
 //! Security Rule 4 says must never reach a relay. It is written so a host-side
 //! oracle can assert their ABSENCE from the journal, and it must never become
 //! an artifact — the same guard enforces that.
+//!
+//! # The judge of the journal
+//!
+//! [`planes`] is the relay-plane judge: the allow matrix of which frame each
+//! relay role may receive, and the one function every relay-plane proof is
+//! built to judge with — haven-core's and `rust_builder`'s tests, the soak rig
+//! and this crate's journal consumer `haven-wire-planes` (oracle C8). It lives
+//! beside the journal's writer and reads frames with `serde_json` alone, so it
+//! never depends on haven-core, whose tests depend on it.
 
 pub mod config;
 pub mod frame;
 pub mod journal;
 pub mod loopback;
 pub mod needles;
+pub mod planes;
 pub mod proxy;
 pub mod selftest;
 pub mod summarize;

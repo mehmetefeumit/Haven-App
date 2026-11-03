@@ -16,7 +16,7 @@ description = "Hermetic in-memory Nostr relay for Haven's iOS E2E lane (no Docke
 license = "MIT"
 
 # The recording proxy's logic lives in a library so it can be unit-tested and
-# driven from an integration test; the two binaries are thin shells over it.
+# driven from an integration test; the binaries are thin shells over it.
 [lib]
 name = "haven_local_relay"
 path = "src/lib.rs"
@@ -32,6 +32,12 @@ path = "src/main.rs"
 [[bin]]
 name = "haven-wire-proxy"
 path = "src/bin/wire_proxy.rs"
+
+# Oracle C8 over the proxy's journal: the relay-plane judge (src/planes). It
+# reads a journal and prints roles, rule ids and buckets only, never a value.
+[[bin]]
+name = "haven-wire-planes"
+path = "src/bin/wire_planes.rs"
 
 [dependencies]
 # Pinned to the 0.44 line to match the app's nostr 0.44.x wire format.

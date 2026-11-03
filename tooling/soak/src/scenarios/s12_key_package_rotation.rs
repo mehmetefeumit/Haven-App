@@ -7,7 +7,8 @@
 //! `Add` fails validation with nothing on the publishing device to say so. The
 //! policy that prevents it rotates once a fixed fraction of the package's OWN
 //! lifetime has elapsed, and this scenario grades that policy where it is
-//! actually exercised: against a slot a relay really serves.
+//! actually exercised: against a slot a relay really serves — the world's
+//! key-package plane, where production publishes it, never a circle's.
 //!
 //! # Every instant comes off the package, never off a calendar
 //!
@@ -139,6 +140,7 @@ use tokio::time::Instant;
 use crate::clock::{ClockError, WallNow};
 use crate::oracle::vacuity::{ExpectationFloor, Observed};
 use crate::oracle::{Invariant, Reach, Recovery};
+use crate::relay::SimRelay;
 use crate::rig::{DeviceTag, LogDrain, RelayPlane, RigError, Step, TimelineSink};
 use crate::scenarios::{
     closing_pairs, grade_round, round, Absence, Arm, ArmOutcome, Scenario, ScenarioReport,
@@ -328,7 +330,7 @@ async fn rotation_slot<T: TimelineSink, L: LogDrain>(
             fresh_instant(&consumed.package)?,
         ) == (KpMaintenanceDecision::Replace {
             existing_d: slot.clone(),
-            targets: world.relay_urls(),
+            targets: key_package_urls(world),
         })
     {
         canaries += 1;
@@ -442,7 +444,7 @@ async fn rotation_slot<T: TimelineSink, L: LogDrain>(
             fresh_instant(&lost.package)?,
         ) == (KpMaintenanceDecision::Replace {
             existing_d: slot.clone(),
-            targets: world.relay_urls(),
+            targets: key_package_urls(world),
         });
     let restored = publish_slot(world, owner, Some(&slot), created_at_of(&replacement)).await?;
     if owed
@@ -668,12 +670,11 @@ async fn publish_slot<T: TimelineSink, L: LogDrain>(
     existing_d: Option<&str>,
     prev_created_at: Option<i64>,
 ) -> Result<KpMaintenanceEvents, RigError> {
-    let urls = world.relay_urls();
     let device = world.device(owner)?;
     let built = build_kp_maintenance_events(
         device.session()?,
         &device.keys,
-        &urls,
+        device.stored_key_package(),
         existing_d,
         prev_created_at,
     )
@@ -758,7 +759,28 @@ fn rotates_into(decision: &KpMaintenanceDecision) -> Option<String> {
     }
 }
 
-/// Whether every plane serves `slot` with exactly `content`.
+/// The planes a key package is published to: the key-package plane — the
+/// world's second account plane, or its only one — as production publishes
+/// it to the account's own key-package list.
+fn key_package_planes<T: TimelineSink, L: LogDrain>(world: &ScenarioWorld<T, L>) -> Vec<&SimRelay> {
+    let account = world.account_relays();
+    account
+        .get(1)
+        .or_else(|| account.first())
+        .into_iter()
+        .collect()
+}
+
+/// The canonical addresses of [`key_package_planes`], as a maintenance
+/// decision names its targets.
+fn key_package_urls<T: TimelineSink, L: LogDrain>(world: &ScenarioWorld<T, L>) -> Vec<String> {
+    key_package_planes(world)
+        .iter()
+        .map(|plane| plane.url().to_owned())
+        .collect()
+}
+
+/// Whether every key-package plane serves `slot` with exactly `content`.
 async fn served_everywhere<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     owner: DeviceTag,
@@ -766,7 +788,10 @@ async fn served_everywhere<T: TimelineSink, L: LogDrain>(
     content: &str,
 ) -> Result<bool, RigError> {
     let served = slot_contents(world, owner, slot).await?;
-    Ok(served.len() == world.relays().len() && served.iter().all(|page| page == content))
+    Ok(
+        served.len() == key_package_planes(world).len()
+            && served.iter().all(|page| page == content),
+    )
 }
 
 /// What each plane's store serves for `owner`'s `slot`, in plane order.
@@ -781,8 +806,8 @@ async fn slot_contents<T: TimelineSink, L: LogDrain>(
     slot: &str,
 ) -> Result<Vec<String>, RigError> {
     let author = world.device(owner)?.keys.public_key();
-    let mut served = Vec::with_capacity(world.relays().len());
-    for plane in world.relays() {
+    let mut served = Vec::new();
+    for plane in key_package_planes(world) {
         let page = plane
             .stored_page(
                 Filter::new()
@@ -811,8 +836,8 @@ async fn snapshot_from_planes<T: TimelineSink, L: LogDrain>(
     slot: &str,
 ) -> Result<RelayKpSnapshot, RigError> {
     let author = world.device(owner)?.keys.public_key();
-    let mut responders = Vec::with_capacity(world.relays().len());
-    for plane in world.relays() {
+    let mut responders = Vec::new();
+    for plane in key_package_planes(world) {
         let page = plane
             .stored_page(
                 Filter::new()

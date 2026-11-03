@@ -28,12 +28,20 @@
 //! at the schedule's last tick every night, so under the probe literal the
 //! knee would read the schedule's length back as a constant.
 //!
+//! # The advisory overlap count
+//!
+//! `plane_overlaps` is how many relays of the fullest graded world held more
+//! than one plane at once, bucketed — advisory, never a verdict: O7 grades
+//! containment per role, and an overlap (an account's inbox and key-package
+//! lists on one relay, say) is admitted by the policy rather than crossed. It
+//! is what the night can say about the correlation O7 cannot grade.
+//!
 //! # Rule 15
 //!
-//! Every value is a `&'static str` of this crate, a delta or a repository fact
-//! (the profile and the seed). Nothing counts a circle, a member, a relay or
-//! an event — the list's length counts triples of the rig's own vocabulary —
-//! and nothing is an instant.
+//! Every value is a `&'static str` of this crate, a delta, a bucket or a
+//! repository fact (the profile and the seed). Nothing counts a circle, a
+//! member, a relay or an event exactly — the list's length counts triples of
+//! the rig's own vocabulary — and nothing is an instant.
 //!
 //! [`Fault::label`]: crate::nemesis::types::Fault::label
 //! [`DeviceOp::label`]: crate::nemesis::types::DeviceOp::label
@@ -50,7 +58,7 @@ use crate::verdict::namespaced;
 pub const COVERAGE_FILE: &str = "coverage.log";
 
 /// Every top-level key `coverage.log` carries, pinned by equality.
-pub const COVERAGE_KEYS: [&str; 3] = ["triples", "profile", "seed"];
+pub const COVERAGE_KEYS: [&str; 4] = ["triples", "plane_overlaps", "profile", "seed"];
 
 /// Every key one triple carries, pinned by equality.
 pub const TRIPLE_KEYS: [&str; 4] = ["scenario", "nemesis", "invariant", "first_tick"];
@@ -79,6 +87,10 @@ pub struct Triple {
 pub struct Coverage {
     /// The triples, first-reached first.
     triples: Vec<Triple>,
+    /// The most relays any graded world held on more than one plane,
+    /// bucketed.
+    #[serde(serialize_with = "bucketed")]
+    plane_overlaps: usize,
     /// The profile, as the TOMLs spell it.
     profile: &'static str,
     /// The seed, `0x` and sixteen hex — the banner's own spelling.
@@ -91,6 +103,7 @@ impl Coverage {
     pub fn new(profile: ProfileName, seed: u64) -> Self {
         Self {
             triples: Vec::new(),
+            plane_overlaps: 0,
             profile: profile.as_str(),
             seed: format!("0x{seed:016x}"),
         }
@@ -121,6 +134,12 @@ impl Coverage {
         }
     }
 
+    /// Records that a graded world held `relays` relays on more than one
+    /// plane; the record keeps the most.
+    pub fn note_plane_overlaps(&mut self, relays: usize) {
+        self.plane_overlaps = self.plane_overlaps.max(relays);
+    }
+
     /// The triples so far, first-reached first.
     #[must_use]
     pub fn triples(&self) -> &[Triple] {
@@ -142,9 +161,32 @@ impl Coverage {
     }
 }
 
+/// A count, as the crate's one bucket vocabulary renders it.
+// By reference because serde's `serialize_with` hands one.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn bucketed<S: serde::Serializer>(count: &usize, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(crate::rig::sim_magnitude(*count))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_overlap_count_keeps_the_most_and_renders_a_bucket() {
+        let mut coverage = Coverage::new(ProfileName::Nightly, 0);
+        assert_eq!(
+            serde_json::to_value(&coverage).expect("serialises")["plane_overlaps"],
+            serde_json::json!("0")
+        );
+        coverage.note_plane_overlaps(3);
+        coverage.note_plane_overlaps(1);
+        assert_eq!(
+            serde_json::to_value(&coverage).expect("serialises")["plane_overlaps"],
+            serde_json::json!("2-4"),
+            "the fullest world's count, never the last one's, and never exact"
+        );
+    }
 
     #[test]
     fn a_triple_keeps_its_first_tick_and_is_recorded_once_per_fault() {

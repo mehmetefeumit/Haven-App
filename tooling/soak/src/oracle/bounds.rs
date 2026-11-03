@@ -30,6 +30,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use haven_core::nostr::mls::types::UNRESOLVABLE_INPUT_MAX_AGE_SECS;
+use haven_core::profile::{
+    PROFILE_BATCH_DEADLINE, PROFILE_MAX_RELAY_RANK, PROFILE_OWN_FETCH_BUDGET,
+};
 use haven_core::relay::live_sync::config::{
     delivery_silence_window_secs, BACKOFF_JITTER_FRACTION_BP, BACKOFF_MAX_SECS,
     BURST_BACKLOG_WAIT_SECS, COMMIT_SETTLE_WINDOW_SECS, SUBSCRIBE_CONNECT_WAIT_SECS,
@@ -153,6 +156,58 @@ pub const fn fanout_resend_after_silence() -> Duration {
 #[must_use]
 pub const fn location_publish_window() -> Duration {
     Duration::from_secs(5)
+}
+
+/// What ONE profile publish costs when one relay of the pool is down and the
+/// rest acknowledge, at the most: its whole ladder.
+///
+/// `PROFILE_PUBLISH_MAX_ATTEMPTS × (CONNECTION_TIMEOUT +
+/// PROFILE_PUBLISH_ACK_TIMEOUT) + (PROFILE_PUBLISH_MAX_ATTEMPTS − 1) ×
+/// PROFILE_PUBLISH_RETRY_BACKOFF` = 2 × (5 + 6) + 1 = **23 s**
+/// (`haven-core/src/relay/manager.rs:171`, `:121`, `:193`, `:177`). A literal
+/// with its citation for [`pool_reconnect`]'s reason: the relay manager's
+/// module is private, so no expression here can name them; the `soak-tooling`
+/// grep step is the control.
+#[must_use]
+pub const fn profile_publish_ladder() -> Duration {
+    Duration::from_secs(23)
+}
+
+/// What ONE key-package publish and ONE lookup of it cost at the most.
+///
+/// The publish ladder (`PUBLISH_LADDER_MS` = 3 × (5 + 10) + 2 × 2 = 49 s) and
+/// the lookup's connect and default wait (`CONNECTION_TIMEOUT +
+/// DEFAULT_TIMEOUT` = 15 s), `haven-core/src/relay/manager.rs:149`, `:121`,
+/// `:50`; literals and grep-guarded for [`profile_publish_ladder`]'s reason.
+#[must_use]
+pub const fn key_package_round_trip() -> Duration {
+    Duration::from_secs(49 + 15)
+}
+
+/// What S26's identity-plane turns cost at the most in a world of `members`
+/// devices.
+///
+/// Each device reads its own profile (`PROFILE_OWN_FETCH_BUDGET`) and
+/// publishes it ([`profile_publish_ladder`]), then reads each of its
+/// `members − 1` peers' profiles walking the whole retry ladder — one batch of
+/// `PROFILE_BATCH_DEADLINE` per rung, `PROFILE_MAX_RELAY_RANK + 1` rungs; each
+/// of the `members − 1` members then publishes a key package and the admin
+/// looks it up ([`key_package_round_trip`]), the publish's witness poll
+/// (`WITNESS_BOUND`) on top. With the product's values: `m × (12 + 23) + m ×
+/// (m − 1) × 3 × 20 + (m − 1) × (64 + 10)` seconds — 1 082 s for four devices,
+/// 1 671 s for five.
+#[must_use]
+pub fn identity_planes(members: u32) -> Duration {
+    let peers = members.saturating_sub(1);
+    (PROFILE_OWN_FETCH_BUDGET + profile_publish_ladder()) * members
+        + PROFILE_BATCH_DEADLINE * profile_rungs() * members * peers
+        + (key_package_round_trip() + crate::rig::circle::WITNESS_BOUND) * peers
+}
+
+/// The rungs of the profile retry ladder: the assigned relay and every rank
+/// behind it.
+fn profile_rungs() -> u32 {
+    u32::try_from(PROFILE_MAX_RELAY_RANK + 1).unwrap_or(u32::MAX)
 }
 
 /// The longest a throttled REQ may wait before Haven re-issues it.
@@ -427,18 +482,22 @@ pub enum BoundDefect {
     /// The wall-second turnover bound no longer exceeds one wall second, so a
     /// wait on it could run out before the second it watches ends.
     WallSecondTurnover,
+    /// The identity-plane turns no longer pay the product's own profile read,
+    /// a retry ladder per peer read and a key-package round trip per member.
+    ProfileRoundTrip,
 }
 
 /// Re-derives every bound from its source constant — the `--self-test` case.
 ///
-/// Three bounds have no re-derivation here — [`pool_reconnect`],
-/// [`withheld_publish_ladder`] and [`location_publish_window`] — because their
+/// Five bounds have no re-derivation here — [`pool_reconnect`],
+/// [`withheld_publish_ladder`], [`location_publish_window`],
+/// [`profile_publish_ladder`] and [`key_package_round_trip`] — because their
 /// source constants are private to their own modules (`pub(super)` in the
 /// pinned pool crate, plain `const` in `haven-core`'s relay manager), so a case
 /// would compare this file to itself. The `soak-tooling` grep step against
 /// those sources is their control, as their docs say; what IS checked here is
-/// the relation between the two publish ladders, which does not need either
-/// constant to be nameable.
+/// the relation between the publish ladders, which does not need any of those
+/// constants to be nameable.
 ///
 /// The cases below are also what keeps [`WaitScale`] honest: the scale is
 /// applied at [`round_trip`] alone, so a scale that had leaked into a leaf
@@ -492,6 +551,18 @@ pub fn self_check() -> Result<(), BoundDefect> {
     if wall_second_turnover() <= Duration::from_secs(ONE_WALL_SECOND) {
         return Err(BoundDefect::WallSecondTurnover);
     }
+    // The public terms, named here once more over the smallest world that has
+    // a peer; the two private ladders only by their relation to each other (a
+    // profile publish is two attempts, a key package's three).
+    if identity_planes(2)
+        != (PROFILE_OWN_FETCH_BUDGET + profile_publish_ladder()) * 2
+            + PROFILE_BATCH_DEADLINE * profile_rungs() * 2
+            + key_package_round_trip()
+            + crate::rig::circle::WITNESS_BOUND
+        || profile_publish_ladder() >= key_package_round_trip()
+    {
+        return Err(BoundDefect::ProfileRoundTrip);
+    }
     if round_trip(Recovery::Undisturbed) >= round_trip(Recovery::Reconnect)
         || round_trip(Recovery::Undisturbed) >= round_trip(Recovery::Throttled)
         || quiescence(Recovery::Undisturbed, Duration::from_millis(1))
@@ -509,6 +580,11 @@ mod tests {
     #[test]
     fn every_bound_re_derives_from_the_constant_its_doc_quotes() {
         self_check().expect("a bound drifted from its source constant");
+        assert_eq!(
+            (identity_planes(4), identity_planes(5)),
+            (Duration::from_secs(1_082), Duration::from_secs(1_671)),
+            "the identity-plane figures the doc quotes for the nightly and weekly worlds"
+        );
     }
 
     #[test]

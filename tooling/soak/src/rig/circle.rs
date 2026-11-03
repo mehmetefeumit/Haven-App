@@ -27,7 +27,6 @@ use haven_core::relay::fanout::{
     RelayMappedFanout, Taken, RESUME_BUDGET_MS,
 };
 use haven_core::relay::live_sync::CircleSpec;
-use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::{FanoutTransport, PublishResult, RelayManager, RelayResult};
 use nostr::Event;
 
@@ -211,8 +210,9 @@ impl fmt::Debug for SimCircle {
     }
 }
 
-/// Publishes `events` from `device`'s own endpoint on every plane and waits,
-/// bounded, for a relay plane to witness an `OK` for at least one of them.
+/// Publishes each of `events` from `device`'s own endpoint on the planes
+/// `targets` names for it, and waits, bounded, for one of those planes to
+/// witness an `OK` for at least one of them.
 ///
 /// A publish that errors is NOT an error here: an unreachable relay is the
 /// commonest thing a schedule asks for, and the caller's question is only ever
@@ -220,17 +220,20 @@ impl fmt::Debug for SimCircle {
 ///
 /// # Errors
 ///
-/// [`RigError`] only if the witness condition itself could not be read.
-pub async fn publish_witnessed<R: RelayPlane>(
+/// What `targets` answers for an event, or [`RigError`] if the witness
+/// condition itself could not be read.
+pub async fn publish_witnessed<'r, R: RelayPlane + 'r>(
     device: &SimDevice,
-    relays: &[R],
     events: &[Event],
+    targets: impl Fn(&Event) -> Result<Vec<&'r R>, RigError>,
 ) -> Result<Option<Duration>, RigError> {
-    let urls: Vec<String> = relays
-        .iter()
-        .map(|relay| relay.url_for(device.tag).to_owned())
-        .collect();
+    let mut witnesses: Vec<&R> = Vec::new();
     for event in events {
+        let planes = targets(event)?;
+        let urls: Vec<String> = planes
+            .iter()
+            .map(|relay| relay.url_for(device.tag).to_owned())
+            .collect();
         // The publish plane is haven-core's own, and so is the CHOICE of
         // ladder: a location takes `publish_location_event`'s single bounded
         // attempt and a commit or a welcome takes `publish_event`'s retrying
@@ -244,11 +247,12 @@ pub async fn publish_witnessed<R: RelayPlane>(
         } else {
             device.relays.publish_event(event, &urls).await
         };
+        witnesses.extend(planes);
     }
     poll_until(WITNESS_BOUND, WITNESS_POLL, || async {
         Ok(events
             .iter()
-            .any(|event| relays.iter().any(|relay| relay.witnessed_ok(&event.id))))
+            .any(|event| witnesses.iter().any(|relay| relay.witnessed_ok(&event.id))))
     })
     .await
 }
@@ -449,9 +453,10 @@ impl<'a> DeviceDriver<'a> {
 /// nothing to confirm or roll back and nothing for the world's staged-commit
 /// counter to hold.
 ///
-/// `urls` are the planes' CANONICAL endpoints, and everything here that
-/// reaches storage keeps them: `CircleConfig::with_relays`, a member's stored
-/// `inbox_relays` and `create_circle`'s relay argument. haven-core's
+/// `urls` are the location planes' CANONICAL endpoints, and everything here
+/// that reaches storage keeps canonical addresses: `CircleConfig::with_relays`
+/// and `create_circle`'s relay argument name `urls`, a member's stored
+/// `inbox_relays` its account inbox plane's ([`SimDevice::stored_inbox`]). haven-core's
 /// `resync_circle_relays_from_mdk` rewrites the stored relay row from the
 /// engine's routing component after any group update, and
 /// `run_catchup_all_circles` reads its list out of storage — so a catch-up
@@ -459,7 +464,7 @@ impl<'a> DeviceDriver<'a> {
 /// stays relay-global, and a scenario that partitions a device's ENGINE
 /// endpoint must not run a sweep during the partition or the withheld commit
 /// arrives by the other path. Only the engine — its group REQs
-/// ([`SimCircle::spec_for`]), its inbox REQ (`SimDevice::open`) and its own
+/// ([`SimCircle::spec_for`]), its inbox REQ (`SimDevice::inbox_relays`) and its own
 /// fanout drives, mapped from the stored address (`rig/address_map.rs`) — and
 /// the publish plane ([`publish_witnessed`]) dial a device's own endpoint.
 ///
@@ -477,14 +482,11 @@ pub async fn build_circle(
 
     let mut members = Vec::with_capacity(invited.len());
     for device in invited {
-        let kp = build_kp_maintenance_events(device.session()?, &device.keys, urls, None, None)
-            .await
-            .map_err(|_| RigError::Core(Step::MintKeyPackage))?;
         members.push(MemberKeyPackage {
-            key_package_event: kp.event,
+            key_package_event: device.mint_key_package().await?,
             // Explicit, always: an invitee with no inbox relay has no Welcome
             // route, so the create would be refused.
-            inbox_relays: urls.to_vec(),
+            inbox_relays: device.stored_inbox().to_vec(),
             nip65_relays: Vec::new(),
             nip65_write_relays: Vec::new(),
         });
@@ -505,7 +507,7 @@ pub async fn build_circle(
     let mut held_before = Vec::with_capacity(invited.len());
     for device in invited {
         held_before.push(if admin.engine().is_ok() {
-            Some(inbox_wraps(device, urls).await)
+            Some(inbox_wraps(device).await)
         } else {
             None
         });
@@ -535,7 +537,7 @@ pub async fn build_circle(
         let Some(before) = before.as_deref() else {
             continue;
         };
-        if !sent && take_welcome_from_inbox(device, urls, &mls_group_id, before).await? {
+        if !sent && take_welcome_from_inbox(device, &mls_group_id, before).await? {
             joined.push(device.tag);
         }
     }
@@ -593,26 +595,25 @@ pub async fn build_circle(
     })
 }
 
-/// The gift wraps `urls` hold for `device`, by id.
-async fn inbox_wraps(device: &SimDevice, urls: &[String]) -> Vec<nostr::EventId> {
+/// The gift wraps `device`'s inbox holds for it, by id.
+async fn inbox_wraps(device: &SimDevice) -> Vec<nostr::EventId> {
     let filter = nostr::Filter::new()
         .kind(nostr::Kind::GiftWrap)
         .pubkey(device.keys.public_key());
     device
         .relays
-        .fetch_events(filter, urls, Some(INBOX_POLL))
+        .fetch_events(filter, device.stored_inbox(), Some(INBOX_POLL))
         .await
         .map(|wraps| wraps.into_iter().map(|wrap| wrap.id).collect())
         .unwrap_or_default()
 }
 
-/// Fetches `device`'s gift wraps from `urls` until one that was not among
-/// `before` arrives, and accepts it: whether that joined it to `group`
+/// Fetches `device`'s gift wraps from its inbox until one that was not
+/// among `before` arrives, and accepts it: whether that joined it to `group`
 /// within [`WITNESS_BOUND`]. One that founds another circle means the rig
 /// lost track of its own creates.
 async fn take_welcome_from_inbox(
     device: &SimDevice,
-    urls: &[String],
     group: &GroupId,
     before: &[nostr::EventId],
 ) -> Result<bool, RigError> {
@@ -623,7 +624,7 @@ async fn take_welcome_from_inbox(
     let found = poll_until(WITNESS_BOUND, INBOX_POLL, || async {
         let wraps = device
             .relays
-            .fetch_events(filter.clone(), urls, Some(INBOX_POLL))
+            .fetch_events(filter.clone(), device.stored_inbox(), Some(INBOX_POLL))
             .await
             .unwrap_or_default();
         let Some(wrap) = wraps.into_iter().find(|wrap| !before.contains(&wrap.id)) else {

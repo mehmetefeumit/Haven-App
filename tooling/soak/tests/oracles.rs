@@ -44,9 +44,9 @@ use haven_soak::oracle::{
 };
 use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
 use haven_soak::rc::Rc;
-use haven_soak::relay::SimRelay;
+use haven_soak::relay::{planes_for, SimRelay};
 use haven_soak::rig::{
-    CapturedLine, Change, DeviceTag, LogDrain, PublishVerdict, RelayPlane, RelayTag, SimWorld,
+    CapturedLine, Change, DeviceTag, LogDrain, PublishVerdict, RelayPlane, SimWorld,
 };
 use haven_soak::scenarios::s02_receiver_partition::unwitnessed_control;
 use haven_soak::scenarios::s05_publish_confirm::acked_kill_control;
@@ -59,6 +59,7 @@ use haven_soak::scenarios::s20_catchup_sweep::empty_store_control;
 use haven_soak::scenarios::s23_chained_backlog::one_commit_control;
 use haven_soak::scenarios::s24_routing_collision::uncollided_control;
 use haven_soak::scenarios::s25_silent_relays::answering_control;
+use haven_soak::scenarios::s26_identity_planes::no_pool_control;
 use haven_soak::scenarios::Scenario;
 use haven_soak::timeline::Timeline;
 
@@ -94,6 +95,8 @@ const fn smallest_shape() -> WorldShape {
         members: 2,
         circles: 1,
         relays: 1,
+        account_relays: 1,
+        profile_relays: 0,
     }
 }
 
@@ -103,20 +106,10 @@ async fn build_world() -> World {
 
 /// A world of exactly `shape`, on as many relay planes as the shape declares.
 async fn build_shaped_world(shape: &WorldShape) -> World {
-    let mut relays = Vec::with_capacity(shape.relays);
-    for ordinal in 0..shape.relays {
-        relays.push(
-            SimRelay::start(RelayTag::new(
-                u32::try_from(ordinal).expect("a world has few relays"),
-            ))
-            .await
-            .expect("the relay plane starts"),
-        );
-    }
     SimWorld::build(
         shape,
         Schedule::new(Vec::new()),
-        relays,
+        planes_for(shape).await.expect("the relay planes start"),
         Timeline::in_memory(),
         EmptyDrain,
     )
@@ -815,6 +808,356 @@ async fn quiescent_now(world: &World) -> Quiescence {
         .expect("the predicate reads")
 }
 
+// ── O7 ──────────────────────────────────────────────────────────────────────
+
+async fn o7(world: &mut World, ordinal: u32) -> Verdict {
+    Invariant::RelayPlaneContainment
+        .check(world, &round(ordinal))
+        .await
+        .expect("the oracle reads")
+}
+
+/// Asserts O7 holds on `world` before a plant, so the red after it is the
+/// plant's.
+async fn o7_clean(world: &mut World) {
+    assert!(
+        o7(world, 1).await == Verdict::Holds,
+        "a world nobody broke is contained, or no plant below proves anything"
+    );
+}
+
+/// Every identifier `world` minted that a finding could carry: each endpoint's
+/// address, each device's pubkey, each circle's routing id.
+fn o7_needles(world: &World) -> Vec<String> {
+    let mut needles = Vec::new();
+    for plane in world.all_planes() {
+        needles.push(plane.url().to_owned());
+        for device in world.devices() {
+            needles.push(plane.url_for(device.tag).to_owned());
+        }
+    }
+    for device in world.devices() {
+        needles.push(device.pubkey_hex());
+    }
+    for circle in world.circles() {
+        needles.push(circle.group_id_hex().to_owned());
+    }
+    needles.push("127.0.0.1".to_owned());
+    needles
+}
+
+/// The finding renders the rig's handles and literals and none of `needles`.
+fn assert_renders_no_value(verdict: Verdict, needles: &[String]) {
+    let Verdict::Failed(finding) = verdict else {
+        panic!("the plant was not reported");
+    };
+    let rendered = format!(
+        "{} {finding:?} {}",
+        finding.class(),
+        finding.handles().join(" ")
+    );
+    for needle in needles {
+        assert!(
+            !rendered.contains(needle.as_str()),
+            "an O7 finding carries a value the world minted"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn o7_reds_on_a_kind_0_published_to_a_location_plane() {
+    let mut world = build_world().await;
+    o7_clean(&mut world).await;
+    let (alice, _) = pair(&world);
+    let device = world.device(alice).expect("alice");
+    let profile = haven_core::profile::build_blank_metadata_event(&device.keys, None)
+        .expect("a kind 0 signs");
+    let location = world.relays()[0].url_for(alice).to_owned();
+    let _ = device.relays.publish_event(&profile, &[location]).await;
+
+    let verdict = o7(&mut world, 2).await;
+    assert!(
+        verdict
+            == Verdict::Failed(Finding::PlaneCrossedEvent {
+                relay: world.relays()[0].tag(),
+                device: Some(alice),
+                row: "EV-0",
+                rule: "plane-crossed-event",
+            }),
+        "a profile on a circle's relay joins the profile plane to the location one"
+    );
+    assert!(
+        verdict.rc() == Rc::ViolationOrLeak,
+        "a crossing is a finding about the subject"
+    );
+    assert_renders_no_value(verdict, &o7_needles(&world));
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn o7_reds_on_an_inbox_request_sent_to_a_location_plane() {
+    let mut world = build_world().await;
+    o7_clean(&mut world).await;
+    let (alice, _) = pair(&world);
+    let device = world.device(alice).expect("alice");
+    let own_inbox = nostr::Filter::new()
+        .kind(nostr::Kind::GiftWrap)
+        .pubkey(device.keys.public_key());
+    let location = world.relays()[0].url_for(alice).to_owned();
+    let _ = device
+        .relays
+        .fetch_events(own_inbox, &[location], Some(Duration::from_secs(5)))
+        .await;
+
+    let verdict = o7(&mut world, 2).await;
+    assert!(
+        verdict
+            == Verdict::Failed(Finding::PlaneCrossedRequest {
+                relay: world.relays()[0].tag(),
+                device: Some(alice),
+                row: "REQ-1059-P",
+            }),
+        "a device's #p on a circle's relay links its identity to the circle"
+    );
+    assert!(
+        verdict.rc() == Rc::ViolationOrLeak,
+        "a crossing is a finding about the subject"
+    );
+    assert_renders_no_value(verdict, &o7_needles(&world));
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn o7_reds_on_a_location_sent_to_the_other_circles_plane() {
+    let mut shape = smallest_shape();
+    shape.relays = 2;
+    let mut world = build_shaped_world(&shape).await;
+    let (alice, _) = pair(&world);
+    let apart = world
+        .build_extra_circle_on(&world.relay_urls()[1..])
+        .await
+        .expect("a circle on the second plane alone builds");
+    o7_clean(&mut world).await;
+    let device = world.device(alice).expect("alice");
+    let (event, _, _) = device
+        .manager()
+        .expect("a manager")
+        .seal_location_for_test(
+            apart.mls_group_id(),
+            &haven_core::location::LocationMessage::new(12.5, 25.0),
+        )
+        .await
+        .expect("a location seals");
+    let other = world.relays()[0].url_for(alice).to_owned();
+    let _ = device.relays.publish_location_event(&event, &[other]).await;
+
+    let verdict = o7(&mut world, 2).await;
+    assert!(
+        verdict
+            == Verdict::Failed(Finding::PlaneCrossedEvent {
+                relay: world.relays()[0].tag(),
+                device: Some(alice),
+                row: "EV-445A",
+                rule: "plane-crossed-event",
+            }),
+        "a location on a relay its circle's routing never named is a crossing"
+    );
+    let mut needles = o7_needles(&world);
+    needles.push(apart.group_id_hex().to_owned());
+    assert_renders_no_value(verdict, &needles);
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn o7_reds_on_a_location_sent_to_an_address_only_the_other_circles_change_named() {
+    // Both circles ride location#0, and circle B's change names one address no
+    // plane serves, which every device dials at an alias endpoint fronting that
+    // same relay. A's location sent there reached a relay A's routing never
+    // named: an alias frame is judged by the address its slot stands for, never
+    // by the plane behind its listener, where A's routing would admit it.
+    let mut shape = smallest_shape();
+    shape.circles = 2;
+    let mut world = build_shaped_world(&shape).await;
+    let (alice, _) = pair(&world);
+    let (a_group, b_group) = (
+        world.circles()[0].mls_group_id().clone(),
+        world.circles()[1].mls_group_id().clone(),
+    );
+    let only_b = "wss://o7-only-b.example.com";
+    let mut relays = world.relay_urls();
+    relays.push(only_b.to_owned());
+    let changed = world
+        .change(
+            alice,
+            Change::Relays {
+                group: &b_group,
+                relays: &relays,
+            },
+        )
+        .await
+        .expect("the driver makes the change");
+    assert!(
+        changed.verdict == PublishVerdict::Confirmed,
+        "premise: circle B routes over the address"
+    );
+    o7_clean(&mut world).await;
+    let device = world.device(alice).expect("alice");
+    let (event, _, _) = device
+        .manager()
+        .expect("a manager")
+        .seal_location_for_test(
+            &a_group,
+            &haven_core::location::LocationMessage::new(6.25, 12.5),
+        )
+        .await
+        .expect("a location seals");
+    let alias = (device.endpoint_route())(only_b);
+    let _ = device.relays.publish_location_event(&event, &[alias]).await;
+
+    let verdict = o7(&mut world, 2).await;
+    assert!(
+        verdict
+            == Verdict::Failed(Finding::PlaneCrossedEvent {
+                relay: world.relays()[0].tag(),
+                device: Some(alice),
+                row: "EV-445A",
+                rule: "plane-crossed-event",
+            }),
+        "circle A's location on the address only circle B's change named is a crossing"
+    );
+    assert!(
+        verdict.rc() == Rc::ViolationOrLeak,
+        "a crossing is a finding about the subject"
+    );
+    let mut needles = o7_needles(&world);
+    needles.push(only_b.to_owned());
+    assert_renders_no_value(verdict, &needles);
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn o7_reds_on_a_close_its_connection_never_opened() {
+    let mut world = build_world().await;
+    o7_clean(&mut world).await;
+    let (alice, _) = pair(&world);
+    // The pool's own connection is the subject's; a CLOSE needs no
+    // subscription of its own, so it is sent raw on a connection to alice's
+    // endpoint, where it is judged as alice's.
+    let url = world.relays()[0].url_for(alice).to_owned();
+    let client = nostr_sdk::Client::builder().build();
+    client.automatic_authentication(false);
+    client
+        .add_relay(&url)
+        .await
+        .expect("the endpoint is a relay");
+    client.connect().await;
+    client
+        .send_msg_to(
+            [url.as_str()],
+            nostr::ClientMessage::close(nostr::SubscriptionId::new("never-opened")),
+        )
+        .await
+        .expect("the CLOSE is sent");
+    let recorded = wait_for(Duration::from_secs(5), || {
+        world.relays()[0]
+            .ledger()
+            .plane_record()
+            .frames
+            .iter()
+            .any(|frame| frame.text.contains("never-opened"))
+    })
+    .await;
+    assert!(recorded, "premise: the CLOSE reached the endpoint");
+    client.shutdown().await;
+
+    let verdict = o7(&mut world, 2).await;
+    assert!(
+        verdict
+            == Verdict::Failed(Finding::PlaneUnknownFrame {
+                relay: world.relays()[0].tag(),
+                device: Some(alice),
+                rule: "plane-unknown-frame",
+            }),
+        "a CLOSE naming a subscription its connection never opened carries an id \
+         from another plane's socket, and is never special-cased"
+    );
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn o7_answers_proves_too_little_when_a_declared_profile_plane_saw_nothing() {
+    let mut shape = smallest_shape();
+    shape.profile_relays = haven_core::profile::PROFILE_POOL_MIN;
+    let mut world = build_shaped_world(&shape).await;
+    assert!(
+        o7(&mut world, 1).await == Verdict::Holds,
+        "an undeclared profile plane owes nothing"
+    );
+    world.exercise_profile();
+    let verdict = o7(&mut world, 2).await;
+    assert!(
+        verdict
+            == Verdict::Failed(Finding::PlaneUnobserved {
+                role: haven_soak::oracle::PlaneRole::Profile,
+            }),
+        "a profile plane declared driven that carried nothing graded nothing"
+    );
+    assert!(
+        verdict.rc() == Rc::ProvesTooLittle,
+        "which is ungraded, never clean and never a violation"
+    );
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn o7_answers_rig_broken_when_the_plane_record_is_full() {
+    let mut world = build_world().await;
+    o7_clean(&mut world).await;
+    let (alice, _) = pair(&world);
+    world.relays()[0].ledger().set_plane_caps(0, 0);
+    // One more distinct, plane-legal shape: the circle's own `#h`, asked again.
+    let device = world.device(alice).expect("alice");
+    let h = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let again = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(445))
+        .custom_tag(h, world.circles()[0].group_id_hex());
+    let location = world.relays()[0].url_for(alice).to_owned();
+    let _ = device
+        .relays
+        .fetch_events(again, &[location], Some(Duration::from_secs(5)))
+        .await;
+
+    let verdict = o7(&mut world, 2).await;
+    assert!(
+        verdict
+            == Verdict::Failed(Finding::PlaneRecordFull {
+                relay: world.relays()[0].tag(),
+            }),
+        "a record that could not keep a frame cannot say what that frame was"
+    );
+    assert!(
+        verdict.rc() == Rc::RigBroken,
+        "the rig could not hold the evidence: never a silent pass"
+    );
+    world.teardown().await.expect("teardown");
+}
+
+/// Waits, bounded, for `condition`.
+async fn wait_for(bound: Duration, condition: impl Fn() -> bool) -> bool {
+    let started = Instant::now();
+    let mut ticker = tokio::time::interval(POLL);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        if condition() {
+            return true;
+        }
+        if started.elapsed() >= bound {
+            return false;
+        }
+        ticker.tick().await;
+    }
+}
+
 // ── Expectation floors ──────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1006,7 +1349,7 @@ const EXPECTED_RED: [(Scenario, &str); 0] = [];
 
 /// Every (scenario, arm) the sweep below runs, written out so that an arm added
 /// to a scenario without a test here fails rather than widening a loop.
-const SWEPT: [(Scenario, &str); 64] = [
+const SWEPT: [(Scenario, &str); 65] = [
     (Scenario::RelayOutage, "single-relay-outage"),
     (Scenario::RelayOutage, "all-relay-outage"),
     (Scenario::RelayOutage, "rolling-outage"),
@@ -1089,17 +1432,18 @@ const SWEPT: [(Scenario, &str); 64] = [
     (Scenario::ChainedBacklog, "chained-commit-backlog"),
     (Scenario::RoutingCollision, "collided-circles-leave-apart"),
     (Scenario::SilentRelays, "dead-and-silent-relays"),
+    (Scenario::IdentityPlanes, "identity-planes-under-faults"),
 ];
 
 /// The world one arm is run in: the PR profile's own shape, widened only where
-/// an arm cannot run in it at all.
+/// an arm cannot run in it at all, or cannot fail in it.
 ///
 /// The PR shape rather than each arm's own profile, because it is the shape the
-/// lane actually executes and the cheapest one every arm but four can use. Three
-/// exceptions need a second relay plane by definition: an all-relay or rolling
-/// outage over one plane is a single-relay outage wearing another arm's label,
-/// and "a second relay changes nothing about a size refusal" cannot be said in a
-/// world with one. The fourth needs a fourth device: a removal that left the
+/// lane actually executes and the cheapest one most arms can use. Some need a
+/// second relay plane by definition: an all-relay or rolling outage over one
+/// plane is a single-relay outage wearing another arm's label, and "a second
+/// relay changes nothing about a size refusal" cannot be said in a world with
+/// one. One needs a fourth device: a removal that left the
 /// circle with only the admin and the returning member would be testing an empty
 /// roster, which is also why that arm answers `ShapeMismatch` in the PR shape and
 /// is not in `pr.toml`.
@@ -1115,9 +1459,20 @@ fn shape_for(label: &str) -> WorldShape {
     ) {
         shape.relays = shape.relays.max(2);
     }
+    // The nightly's two location relays: a plane left forwarding the page
+    // races the reversed one, which a world of one plane cannot show.
+    if label == "reordered-pages" {
+        shape.relays = shape.relays.max(2);
+    }
     // A dead relay, a silent one, and one that answers.
     if label == "dead-and-silent-relays" {
         shape.relays = shape.relays.max(3);
+    }
+    // The nightly's identity planes: an inbox apart from the key packages,
+    // and a profile pool the product will use.
+    if label == "identity-planes-under-faults" {
+        shape.account_relays = 2;
+        shape.profile_relays = haven_core::profile::PROFILE_POOL_MIN;
     }
     if matches!(
         label,
@@ -1155,6 +1510,12 @@ fn arm_of(scenario: Scenario, label: &str) -> &'static haven_soak::scenarios::Ar
 /// measuring the runner's load. Every span that matters is already enforced
 /// INSIDE the oracles' own bounded waits, which fail on their own.
 async fn happy_path(scenario: Scenario, label: &str) {
+    happy_path_after(scenario, label, |_| {}).await;
+}
+
+/// [`happy_path`], with `premise` asserted on the world the arm ran in before
+/// any verdict is read: a premise the arm's own report cannot carry.
+async fn happy_path_after(scenario: Scenario, label: &str, premise: impl FnOnce(&World)) {
     let arm = arm_of(scenario, label);
     let mut world = build_shaped_world(&shape_for(label)).await;
 
@@ -1162,6 +1523,14 @@ async fn happy_path(scenario: Scenario, label: &str) {
         .run(&mut world, arm, pr_tick())
         .await
         .expect("the scenario runs");
+    premise(&world);
+    assert!(
+        report
+            .graded
+            .iter()
+            .any(|(invariant, _)| *invariant == Invariant::RelayPlaneContainment),
+        "every arm's run grades O7 over its whole wire"
+    );
 
     let graded: Vec<String> = report
         .graded
@@ -1416,7 +1785,15 @@ async fn s19_duplicate_replay_holds() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s19_reordered_pages_holds() {
-    happy_path(Scenario::DuplicateReorder, "reordered-pages").await;
+    // The floor sums faults over every plane, so one plane reversed meets it.
+    happy_path_after(Scenario::DuplicateReorder, "reordered-pages", |world| {
+        let planes = world.relays();
+        assert!(
+            planes.len() >= 2 && planes.iter().all(|plane| plane.faults_applied() >= 1),
+            "every location relay serves the page, so every one must reverse it"
+        );
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1551,6 +1928,26 @@ async fn s24_two_circles_that_never_collided_prove_nothing_about_a_collision() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s25_dead_and_silent_relays_holds() {
     happy_path(Scenario::SilentRelays, "dead-and-silent-relays").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s26_identity_planes_under_faults_holds() {
+    happy_path(Scenario::IdentityPlanes, "identity-planes-under-faults").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s26_identity_planes_with_no_pool_prove_nothing() {
+    // The mis-configuration: no Profile row, so the pool underflows and the
+    // product publishes and reads nothing — fail-closed, the curated pool
+    // still excluded, so nothing leaves the machine.
+    let mut world = build_shaped_world(&shape_for("identity-planes-under-faults")).await;
+
+    let report = no_pool_control(&mut world, pr_tick())
+        .await
+        .expect("the scenario runs");
+    floor_is_unusable(&report);
+
+    world.teardown().await.expect("teardown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1743,12 +2140,17 @@ async fn wait_until_disconnected(world: &World, bound: Duration) -> bool {
     }
 }
 
-/// Takes one plane down and waits for the devices to notice.
-async fn down_and_noticed(world: &mut World, plane: usize) {
-    world.relays_mut()[plane]
-        .apply(Fault::Down)
-        .await
-        .expect("the plane takes the fault");
+/// Takes every plane a device's engine holds down — the circles' and its
+/// inbox — and waits for the devices to notice: the world fully offline.
+async fn down_and_noticed(world: &mut World) {
+    for tag in world.engine_plane_tags() {
+        world
+            .plane_mut(tag)
+            .expect("an engine plane is the world's")
+            .apply(Fault::Down)
+            .await
+            .expect("the plane takes the fault");
+    }
     assert!(
         wait_until_disconnected(world, bounds::round_trip(Recovery::Undisturbed)).await,
         "the control's premise: the endpoint really is gone before the arm runs"
@@ -1799,7 +2201,7 @@ async fn s03_a_commit_no_relay_ever_stored_cannot_be_lost() {
     // device cannot be stranded behind one — the arm refuses at the first
     // unacknowledged commit rather than reporting a strand it never staged.
     let mut world = build_shaped_world(&shape_for("lost-commit-strands")).await;
-    down_and_noticed(&mut world, 0).await;
+    down_and_noticed(&mut world).await;
 
     let report = run_arm(Scenario::LostCommit, "lost-commit-strands", &mut world).await;
     match report {
@@ -1842,7 +2244,7 @@ async fn s04_a_world_whose_epochs_cannot_move_strands_nobody() {
     // where nobody commits, and the arm says so rather than reporting a
     // catch-up it never had to make.
     let mut world = build_shaped_world(&shape_for("offline-across-commits")).await;
-    down_and_noticed(&mut world, 0).await;
+    down_and_noticed(&mut world).await;
 
     let report = run_arm(
         Scenario::OfflineMember,
@@ -1870,7 +2272,7 @@ async fn s05_a_commit_nobody_acked_has_no_confirm_that_could_fail() {
     // even be created. A confirm that fails after the engine already delivered
     // is the arm's whole subject, and there is no confirm at all.
     let mut world = build_shaped_world(&shape_for("confirm-err-is-not-a-failure")).await;
-    for plane in world.relays_mut() {
+    for plane in world.all_planes_mut() {
         plane
             .apply(Fault::SwallowOk)
             .await
@@ -1931,7 +2333,7 @@ async fn s14_two_commits_nobody_acked_are_not_a_race() {
     // siblings at one epoch; two rolled-back commits are neither, and the arm
     // refuses rather than classifying a branch loss nothing branched.
     let mut world = build_shaped_world(&shape_for("race-no-restart")).await;
-    down_and_noticed(&mut world, 0).await;
+    down_and_noticed(&mut world).await;
 
     let refused = run_arm(Scenario::RestartRace, "race-no-restart", &mut world)
         .await
@@ -1974,7 +2376,7 @@ async fn s09_a_forgery_no_client_can_receive_poisons_nothing() {
     // anchor did not move" below it would be a statement about an event that
     // was never delivered.
     let mut world = build_shaped_world(&shape_for("standing-adversary")).await;
-    down_and_noticed(&mut world, 0).await;
+    down_and_noticed(&mut world).await;
 
     let report = run_arm(Scenario::CursorPoisoning, "standing-adversary", &mut world).await;
     match report {
@@ -1996,7 +2398,7 @@ async fn s12_a_slot_no_relay_serves_has_no_rotation_to_decide() {
     // publish a rotation — so `Rotate` can never be the decision and the arm
     // grades a policy it never reached.
     let mut world = build_shaped_world(&shape_for("kp-rotation-slot")).await;
-    down_and_noticed(&mut world, 0).await;
+    down_and_noticed(&mut world).await;
 
     let report = run_arm(Scenario::KeyPackageRotation, "kp-rotation-slot", &mut world).await;
     match report {
@@ -2038,7 +2440,7 @@ async fn s22_an_event_that_reached_no_relay_was_refused_by_none() {
     // outage is not a size cap, and the arm says so rather than reporting a
     // refusal nothing produced.
     let mut world = build_shaped_world(&shape_for("oversized-commit")).await;
-    down_and_noticed(&mut world, 0).await;
+    down_and_noticed(&mut world).await;
 
     let report = run_arm(Scenario::OversizedEvent, "oversized-commit", &mut world).await;
     match report {
@@ -2081,7 +2483,7 @@ async fn s13_a_victim_circle_that_was_never_created_cannot_be_quarantined() {
     // The arm cannot reach its own grading point, and says so as rc 3 rather
     // than reporting a quarantine it never induced.
     let mut world = build_shaped_world(&shape_for("hydration-quarantine")).await;
-    for plane in world.relays_mut() {
+    for plane in world.all_planes_mut() {
         plane
             .apply(Fault::SwallowOk)
             .await
@@ -2109,7 +2511,7 @@ async fn s17_a_notice_no_client_can_receive_proves_nothing() {
     // NOTICE, so the text reaches no client-facing stream. The arm's one canary
     // is that the text was READ BACK off the wire, and there is no wire.
     let mut world = build_shaped_world(&shape_for("notice")).await;
-    down_and_noticed(&mut world, 0).await;
+    down_and_noticed(&mut world).await;
 
     let report = run_arm(Scenario::ClosedPrefixes, "notice", &mut world).await;
     match report {
@@ -2132,7 +2534,7 @@ async fn s18_a_relay_that_never_received_the_event_proves_no_swallowed_ack() {
     // ordinary reason — an outage — and the gap this arm grades, stored HERE and
     // unacknowledged THERE, does not exist.
     let mut world = build_shaped_world(&shape_for("swallowed-ok-location-send")).await;
-    down_and_noticed(&mut world, 0).await;
+    down_and_noticed(&mut world).await;
 
     let report = run_arm(
         Scenario::SwallowedOk,
@@ -2153,7 +2555,7 @@ async fn s19_a_probe_that_never_crossed_cannot_be_duplicated() {
     // nothing stored to replay, and the arm refuses rather than reporting a
     // dedup nothing exercised.
     let mut world = build_shaped_world(&shape_for("duplicate-replay")).await;
-    down_and_noticed(&mut world, 0).await;
+    down_and_noticed(&mut world).await;
 
     let refused = run_arm(Scenario::DuplicateReorder, "duplicate-replay", &mut world)
         .await
@@ -2177,6 +2579,8 @@ async fn s10_a_world_already_at_the_whole_roster_measures_nothing_about_scale() 
         members: pr_spec().world.members,
         circles: 10,
         relays: 1,
+        account_relays: 1,
+        profile_relays: 0,
     })
     .await;
 
@@ -2216,7 +2620,7 @@ async fn s16_a_seal_no_plane_ever_carried_floods_no_buffer() {
     // counter it would read after, and the arm refuses at that first seal
     // rather than reporting a store that grew.
     let mut world = build_shaped_world(&shape_for("member-future-header-flood")).await;
-    down_and_noticed(&mut world, 0).await;
+    down_and_noticed(&mut world).await;
 
     let report = run_arm(
         Scenario::StorageGrowth,
@@ -2242,7 +2646,7 @@ async fn s16_fixes_no_plane_ever_carried_grow_no_processed_ids() {
     // peeled, and the arm refuses at its first fix rather than reporting a
     // table that grew.
     let mut world = build_shaped_world(&shape_for("processed-ids-growth")).await;
-    down_and_noticed(&mut world, 0).await;
+    down_and_noticed(&mut world).await;
 
     let report = run_arm(Scenario::StorageGrowth, "processed-ids-growth", &mut world).await;
     match report {
@@ -2356,7 +2760,7 @@ fn every_registered_scenario_has_a_mis_configuration_control() {
     // The controls above, by the scenario each one controls. Written out
     // so that a scenario added to the registry without a control fails here
     // rather than inheriting somebody else's.
-    const CONTROLLED: [Scenario; 23] = [
+    const CONTROLLED: [Scenario; 24] = [
         Scenario::RelayOutage,
         Scenario::ReceiverPartition,
         Scenario::LostCommit,
@@ -2380,6 +2784,7 @@ fn every_registered_scenario_has_a_mis_configuration_control() {
         Scenario::CatchupSweep,
         Scenario::RoutingCollision,
         Scenario::SilentRelays,
+        Scenario::IdentityPlanes,
     ];
     assert!(
         CONTROLLED.len() == Scenario::REGISTRY.len(),

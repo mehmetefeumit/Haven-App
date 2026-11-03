@@ -137,7 +137,10 @@ jobs:
       # account's inbox relay and so never picked, yet hold the same events,
       # because the harness reads that circle's kind-445s through 7788 and C5.1
       # flags groups whose kind-445s reach disjoint upstreams. Through the
-      # proxy, so the oracles see that circle's traffic too.
+      # proxy, so the oracles see that circle's traffic too. Every circle the
+      # scenario creates (the UI one, FE-2's and the M11 ones over the FFI) is
+      # routed here, never to HAVEN_E2E_RELAY, and C8 holds each circle's
+      # kind-445s, `#h` REQs and NEG-OPENs to this listen alone.
       # run-ios-sim-scenario.sh compiles it in as a --dart-define.
       HAVEN_E2E_LOCATION_RELAY: ws://localhost:7789
       FLUTTER_SUPPRESS_ANALYTICS: "true"
@@ -571,7 +574,7 @@ jobs:
       # which is the point: 3 (UNUSABLE — the recorder broke) and 4 (META-FLOOR
       # — the scenario proved too little) are NOT passes. A run whose instrument
       # was broken proves nothing about privacy and must not be reported as
-      # though it did. Both oracles run in ONE step so a single red run reports
+      # though it did. The oracles run in ONE step so a single red run reports
       # every finding, and the step exits on the WORST verdict rather than the
       # first: a C2-C4 META-FLOOR must never mask a C5 VIOLATION.
       #
@@ -642,6 +645,33 @@ jobs:
             --min-distinct-conns 2 \
             ${excl[@]+"${excl[@]}"} || rc=$?
           verdict "C2-C4 structural" "${rc}"
+
+          # C8 — relay-plane placement: every client->relay EVENT, REQ and
+          # NEG-OPEN on a listen whose roles admit it (check-wire-planes.sh, a
+          # wrapper over the haven-wire-planes binary start-wire-proxy.sh built
+          # beside the recorder). OUTSIDE the live_sync gate below on purpose:
+          # it needs no two-circle scenario — the family circle's kind-445s,
+          # the Welcomes, the KeyPackages and the invite lookups run on both
+          # paths — so the poll variant is judged too. Each listen declares the
+          # roles its relay holds: 7789 is the location pool's one entry; 7788
+          # is the account's inbox AND key-package relay, and discovery reads it
+          # as well, because the default-relay override the harness installs is
+          # discovery's fallback — the same overlap production has built in
+          # (its discovery pool contains the default relays). Both overlaps are
+          # DECLARED, never inferred. Values never reach this log: the binary
+          # prints role names, kinds, rule ids and buckets only.
+          rc=0
+          bash tooling/e2e/ci/check-wire-planes.sh \
+            --journal /tmp/haven-wire-journal.ndjson \
+            --sentinel "${HAVEN_WIRE_SENTINEL}" \
+            --plane inbox=127.0.0.1:7788 \
+            --plane keypackage=127.0.0.1:7788 \
+            --plane discovery=127.0.0.1:7788 \
+            --plane location=127.0.0.1:7789 \
+            --declare-overlap inbox:discovery \
+            --declare-overlap keypackage:discovery \
+            ${excl[@]+"${excl[@]}"} || rc=$?
+          verdict "C8 planes" "${rc}"
 
           # C5 — correlation and containment. Each pool is the set of relays a
           # KIND may reach; this lane is hermetic, so every kind's pool is the

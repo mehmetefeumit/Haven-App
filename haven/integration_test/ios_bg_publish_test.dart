@@ -48,9 +48,10 @@
 ///     NIP-77 session of a burst runs — no connected relay.
 ///   * poll build -> **P2d**, the timer:
 ///     `MapShell._startIosBackgroundReceiveTimer`'s `Timer.periodic(90 s)`
-///     reaches `CatchupService.runCatchup(isBackgroundWake: true)` from the
-///     backgrounded process, and that sweep lands the peer's location in the
-///     PERSISTED last-known store.
+///     completes a `CatchupService.runCatchup(isBackgroundWake: true)` sweep
+///     in the backgrounded process, and the peer's location lands in the
+///     PERSISTED last-known store — written by that sweep or by a burst's
+///     receive-before-seal, which the drive does not tell apart.
 ///
 /// The branch is a compile-time one (`liveSyncEnabled` is a
 /// `bool.fromEnvironment` const), so exactly one of the two runs and neither is
@@ -357,6 +358,7 @@ import 'e2e/_lib/circle_creation.dart'
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
 import 'e2e/_lib/pump_helpers.dart' show pumpUntilCondition, pumpUntilFound;
 import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
+import 'e2e/_lib/stored_fix_poll.dart';
 import 'e2e/_lib/synthetic_user.dart' show SyntheticUser;
 import 'e2e/_lib/test_relay.dart' show TestRelayEvent, defaultStrfryUrl;
 import 'e2e/_lib/test_user.dart' show TestUser, aliceSeed, bytesToHex;
@@ -453,16 +455,19 @@ const String kBackgroundPublishMarker = '[bg-publish] BACKGROUND_PUBLISH_OK';
 /// still receive, and does it hold anything between the bursts that do".
 ///
 /// Printed by the live-sync legs only, and REFUSED by the poll leg's completion
-/// gate: the burst plane it stands for does not exist in a build compiled
-/// without the engine, so its presence there would mean the leg was measuring
-/// the other plane. [kBackgroundCatchupMarker] is that leg's own proof.
+/// gate: the live-sync burst plane it stands for does not exist in a build
+/// compiled without the engine, so its presence there would mean the leg was
+/// measuring the other plane. [kBackgroundCatchupMarker] is that leg's own
+/// proof.
 const String kBackgroundReceiveMarker = '[bg-publish] BACKGROUND_RECEIVE_OK';
 
 /// Verbatim marker printed only after P2d's last assertion: the POLL path's
-/// 90 s background receive timer ran a catch-up sweep from the OS-backgrounded
-/// process, and that sweep landed a peer's kind-445 — published while the
-/// process was backgrounded — in the persisted last-known-location store, with
-/// the coordinates it was published with.
+/// 90 s background receive timer completed a catch-up sweep in the
+/// OS-backgrounded process after P2d's pre-publish read, and the peer's
+/// kind-445 — published while the process was backgrounded — landed in the
+/// persisted last-known-location store with the coordinates it was published
+/// with, written by that sweep or by a burst's receive-before-seal (not told
+/// apart).
 ///
 /// The receive half of the background promise on the ROLLBACK configuration.
 /// Printed by the `HAVEN_LIVE_SYNC=false` leg only and refused on the others,
@@ -1159,29 +1164,8 @@ Future<({MemberLocation? fix, int polls, Duration wall})> _pollForPeerFix(
   );
 }
 
-/// What one of P2d's bounded reads of the persisted last-known store saw.
-class _StoredFixObservation {
-  const _StoredFixObservation({
-    required this.fix,
-    required this.polls,
-    required this.wall,
-  });
-
-  /// The peer's persisted row, or `null` if none ever appeared.
-  final DecryptedLocation? fix;
-
-  /// How many reads the poll made — printed so a run that never got to ASK is
-  /// distinguishable from one that asked and was answered nothing.
-  final int polls;
-
-  /// Wall clock the poll consumed. Compared against its own budget before its
-  /// verdict is trusted: a frozen isolate observes nothing for reasons that
-  /// have nothing to do with the catch-up sweep.
-  final Duration wall;
-}
-
-/// Polls the PERSISTED last-known-location store for [senderPubkeyHex]'s row in
-/// the circle named by [nostrGroupId], until it lands or [budget] expires.
+/// P2d's read of the PERSISTED last-known-location store for the circle named
+/// by [nostrGroupId], for `pollForStoredPeerFix`.
 ///
 /// The store and NOT `LocationSharingService.cachedLocations`, because on the
 /// poll path the writer is a different one. There is no live-event router: the
@@ -1191,48 +1175,11 @@ class _StoredFixObservation {
 /// `cachedLocations` re-reads the store only for a circle it has not hydrated,
 /// and this circle was hydrated in the foreground. Reading the cache here would
 /// therefore report an absence for a sweep that worked perfectly.
-///
-/// Each read is bounded by the poll's own remaining budget, for the reason
-/// [_pollPoolSubscriptions]'s are: a read that hangs inside SQLCipher or the
-/// FFI must be subject to the deadline rather than outliving it.
-Future<_StoredFixObservation> _pollForStoredPeerFix(
+Future<List<DecryptedLocation>> Function() _lastKnownStore(
   CircleService circleService,
   List<int> nostrGroupId,
-  String senderPubkeyHex,
-  Duration budget,
-) async {
-  final startedAt = DateTime.now();
-  final deadline = startedAt.add(budget);
-  final wanted = senderPubkeyHex.toLowerCase();
-  var polls = 0;
-  DecryptedLocation? fix;
-  while (true) {
-    final remaining = deadline.difference(DateTime.now());
-    if (remaining <= Duration.zero) break;
-    try {
-      final rows = await circleService
-          .snapshotLastKnownForCircle(nostrGroupId: nostrGroupId)
-          .timeout(remaining);
-      polls += 1;
-      for (final row in rows) {
-        if (row.senderPubkey.toLowerCase() == wanted) {
-          fix = row;
-          break;
-        }
-      }
-      if (fix != null) break;
-    } on Object catch (e) {
-      // Rule 8: the type only — the read reaches SQLCipher and the FFI.
-      debugPrint('[bg-publish] last-known read failed: ${e.runtimeType}');
-    }
-    await Future<void>.delayed(_statusPollInterval);
-  }
-  return _StoredFixObservation(
-    fix: fix,
-    polls: polls,
-    wall: DateTime.now().difference(startedAt),
-  );
-}
+) =>
+    () => circleService.snapshotLastKnownForCircle(nostrGroupId: nostrGroupId);
 
 /// Records every lifecycle state the binding dispatches.
 ///
@@ -1500,8 +1447,8 @@ void main() {
       //     IDENTITY: `poolSubscriptionCount` throws when there is no session
       //     (it deliberately never answers 0 for one), and no session is
       //     exactly why P2c cannot exist on this leg — and it is the premise
-      //     P2d's attribution rests on, which is why the matcher below pins
-      //     WHICH throw.
+      //     P2d's list of the row's writers rests on, which is why the
+      //     matcher below pins WHICH throw.
       //
       // What it does NOT catch, said here because an earlier version of this
       // comment claimed it did: a leg whose wrapper env said `false` while the
@@ -1582,7 +1529,7 @@ void main() {
           // cleared Rust SESSION, a poisoned lock, a panic, an uninitialised
           // bridge). A bare `isNotNull` accepted the second one, and with it a
           // build in which a session existed — the state this branch exists to
-          // refute, and the premise P2d's "nothing else could have written
+          // refute, and the premise P2d's "only the timer and a burst write
           // that row" rests on.
           isA<SubscriptionServiceException>().having(
             (SubscriptionServiceException e) => e.message,
@@ -1614,7 +1561,7 @@ void main() {
               'what this read catches. Never relax this to accept a live '
               'session, or to accept any throw: it is the observable '
               'statement of WHY P2c cannot run on this leg, and the premise '
-              "P2d's attribution argument below rests on.",
+              "P2d's list of that row's writers below rests on.",
         );
       }
 
@@ -2635,26 +2582,28 @@ void main() {
           // the TIMER is attributed by its own count of finished sweeps
           // (`MapShell.backgroundReceiveTimerSweeps`, which only its tick's
           // `_runBackgroundCatchUp` advances), and the row says that a sweep
-          // decrypted the peer's fix. The foreground 30 s fetch timer was
+          // decrypted the peer's fix — the timer's or a burst's, not told
+          // apart. The foreground 30 s fetch timer was
           // cancelled at the pause, and no provider recomputes while frames
           // are off, so those two are the only writers.
           //
           // A FOURTH premise, and the fragile one, because it is not a fact
           // about Dart: `registerIosBackgroundCatchupHandler` (main.dart,
           // flag-independent) reaches the SAME `persist_locations` from the
-          // same `runCatchup`, driven by two native wakes. `HavenSLCHandler`
-          // arms nothing without `.authorizedAlways`, so this leg's
-          // `when-in-use` grant excludes it — an (always, poll) leg would NOT
-          // be attributable and must not be added on cost grounds alone.
+          // same `runCatchup`, driven by two native wakes, and advances no
+          // sweep count. `HavenSLCHandler` arms nothing without
+          // `.authorizedAlways`, so this leg's `when-in-use` grant keeps the
+          // row's writers to the two above; an (always, poll) leg would prove
+          // the same two things with a third, unnamed writer.
           // `HavenBGTaskHandler` is not tier-gated at all; only the Simulator
           // excludes it (`BGTaskScheduler.submit` throws `notPermitted` there,
           // swallowed), which is the same simulator ceiling the lane header
-          // states for jetsam and SLC relaunch. On a device this phase would
-          // need a different oracle.
+          // states for jetsam and SLC relaunch; on a device it would be a
+          // third writer too.
           //
-          // What P2d does NOT prove: anything at all about the burst plane,
-          // which this build does not have; and not the C3 chokepoint that
-          // must refuse a wake once consent is withdrawn — the C4 watcher
+          // What P2d does NOT prove: anything at all about the live-sync burst
+          // plane, which this build compiles out; and not the C3 chokepoint
+          // that must refuse a wake once consent is withdrawn — the C4 watcher
           // cancels this timer on that edge before the chokepoint is reached,
           // and host tests own both halves
           // (`test/pages/map_shell_ios_receive_timer_test.dart`).
@@ -2664,11 +2613,12 @@ void main() {
           // this can only fail on a store that was not empty — and without it
           // a row written at any earlier point would let the poll below pass
           // on something the backgrounded sweep never did.
-          final storeBaseline = await _pollForStoredPeerFix(
-            circleService,
-            creation.circle.nostrGroupId,
-            bob.pubkeyHex,
-            _storeBaselineWindow,
+          final lastKnownStore =
+              _lastKnownStore(circleService, creation.circle.nostrGroupId);
+          final storeBaseline = await pollForStoredPeerFix(
+            read: lastKnownStore,
+            senderPubkeyHex: bob.pubkeyHex,
+            budget: _storeBaselineWindow,
           );
           expect(
             storeBaseline.fix,
@@ -2678,9 +2628,9 @@ void main() {
                 'peer, before he has published anything '
                 '(${storeBaseline.polls} read(s) over '
                 '${_storeBaselineWindow.inSeconds}s). P2d reads '
-                "the appearance of that row as the sweep's work, so a row "
-                'that predates the publish below would let this phase pass '
-                'with the receive timer never having fired.',
+                'the appearance of that row as a backgrounded receive, so a '
+                'row that predates the publish below would let this phase '
+                'pass with nothing received while backgrounded.',
           );
 
           final swept = MapShell.backgroundReceiveTimerSweeps;
@@ -2700,11 +2650,13 @@ void main() {
           // subject is the timer. Driving anything would replace the
           // mechanism under test with this drive's own call.
           var sweeping = true;
-          final catchupFuture = _pollForStoredPeerFix(
-            circleService,
-            creation.circle.nostrGroupId,
-            bob.pubkeyHex,
-            _pollPathCatchupWindow,
+          // Until the timer's count moves too, not on the row alone: a burst
+          // can write the row first, and the count sampled then is stale.
+          final catchupFuture = pollForStoredPeerFix(
+            read: lastKnownStore,
+            senderPubkeyHex: bob.pubkeyHex,
+            budget: _pollPathCatchupWindow,
+            settled: () => MapShell.backgroundReceiveTimerSweeps > swept,
           ).whenComplete(() => sweeping = false);
           final catchupHeartbeat = _heartbeatWhile(
             () => sweeping,
@@ -2758,13 +2710,16 @@ void main() {
           );
           expect(catchup.fix!.longitude, closeTo(_peerLongitude, 1e-6));
           expect(MapShell.backgroundReceiveTimerSweeps, greaterThan(swept),
-              reason: "the peer's fix reached the store, but the poll path's "
-                  'background receive timer finished no sweep in the window: '
-                  "a burst's receive-first catch-up wrote it, and the timer "
-                  'this phase exists for is dead');
+              reason: "the peer's row arrived, but across the whole "
+                  '${_pollPathCatchupWindow.inSeconds}s window the poll '
+                  "path's background receive timer completed no sweep — it "
+                  'is dead, or every sweep failed `catchupCompleted` (a relay '
+                  "error or its deadline); the row came from a burst's "
+                  'receive-before-seal');
           debugPrint(
-            "[bg-publish] poll-path catch-up: the peer's location reached the "
-            'persisted store on read #${magnitudeBucket(catchup.polls)}, '
+            "[bg-publish] poll-path catch-up: the peer's location was in the "
+            'persisted store and the receive timer had swept by read '
+            '#${magnitudeBucket(catchup.polls)}, '
             '${catchup.wall.inSeconds}s after his publish.',
           );
           debugPrint(kBackgroundCatchupMarker);

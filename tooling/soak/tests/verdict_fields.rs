@@ -16,10 +16,10 @@ use std::collections::BTreeSet;
 use haven_soak::banner::Provenance;
 use haven_soak::oracle::quiescence::PendingReason;
 use haven_soak::oracle::undecryptable;
-use haven_soak::oracle::{Finding, FloorTerm, Invariant};
+use haven_soak::oracle::{Finding, FloorTerm, Invariant, PlaneRole};
 use haven_soak::profiles::ProfileName;
 use haven_soak::rc::Rc;
-use haven_soak::rig::{CircleTag, DeviceTag};
+use haven_soak::rig::{CircleTag, DeviceTag, RelayTag};
 use haven_soak::scenarios::registry;
 use haven_soak::verdict::{is_handle, is_invariant_id, RunVerdict, Violation, VERDICT_KEYS};
 
@@ -165,11 +165,33 @@ fn every_finding() -> Vec<Finding> {
         Finding::NotQuiescent(PendingReason::StagedCommit),
         Finding::BacklogUnsettled { device },
         Finding::FloorUnmet(FloorTerm::FaultsApplied),
+        Finding::PlaneCrossedEvent {
+            relay: RelayTag::new(1),
+            device: Some(device),
+            row: "EV-0",
+            rule: "plane-crossed-event",
+        },
+        Finding::PlaneCrossedRequest {
+            relay: RelayTag::new(0),
+            device: None,
+            row: "REQ-1059-P",
+        },
+        Finding::PlaneUnknownFrame {
+            relay: RelayTag::new(0),
+            device: Some(other),
+            rule: "plane-unknown-frame",
+        },
+        Finding::PlaneRecordFull {
+            relay: RelayTag::new(2),
+        },
+        Finding::PlaneUnobserved {
+            role: PlaneRole::Profile,
+        },
     ]
 }
 
 /// The number of `Finding` variants, pinned.
-const FINDING_VARIANTS: usize = 33;
+const FINDING_VARIANTS: usize = 38;
 
 /// A distinct ordinal per `Finding` variant.
 ///
@@ -213,6 +235,11 @@ const fn variant_index(finding: &Finding) -> usize {
         Finding::ResubscribeUnbounded { .. } => 31,
         Finding::UnaskedHandshake { .. } => 12,
         Finding::CursorHeld { .. } => 32,
+        Finding::PlaneCrossedEvent { .. } => 33,
+        Finding::PlaneCrossedRequest { .. } => 34,
+        Finding::PlaneUnknownFrame { .. } => 35,
+        Finding::PlaneRecordFull { .. } => 36,
+        Finding::PlaneUnobserved { .. } => 37,
     }
 }
 

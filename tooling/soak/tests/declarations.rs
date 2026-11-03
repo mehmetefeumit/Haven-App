@@ -17,8 +17,8 @@ use haven_logscan::manifest::Manifest;
 use haven_soak::logsink::Needles;
 use haven_soak::nemesis::types::Schedule;
 use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
-use haven_soak::relay::SimRelay;
-use haven_soak::rig::{CapturedLine, DeclareSink, LogDrain, RelayTag, RigError, SimWorld};
+use haven_soak::relay::planes_for;
+use haven_soak::rig::{CapturedLine, DeclareSink, LogDrain, RigError, SimWorld};
 use haven_soak::scenarios::{Scenario, ScenarioWorld};
 use haven_soak::timeline::Timeline;
 
@@ -86,6 +86,12 @@ impl DeclareSink for Sink {
             .declare_relay_url(url)
             .map_err(|_| RigError::DeclarationRefused)
     }
+
+    fn declare_name(&self, name: &str) -> Result<(), RigError> {
+        self.locked()
+            .declare_petname(name)
+            .map_err(|_| RigError::DeclarationRefused)
+    }
 }
 
 /// How many values of `class` a sealed manifest carries.
@@ -104,19 +110,18 @@ const fn shape() -> WorldShape {
         members: 2,
         circles: 2,
         relays: 1,
+        account_relays: 1,
+        profile_relays: 0,
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_circle_an_arm_builds_mid_run_is_declared_like_every_other() {
     let sink = Arc::new(Sink::new());
-    let relay = SimRelay::start(RelayTag::new(0))
-        .await
-        .expect("the relay plane starts");
     let mut world: ScenarioWorld<Timeline, EmptyDrain> = SimWorld::build(
         &shape(),
         Schedule::new(Vec::new()),
-        vec![relay],
+        planes_for(&shape()).await.expect("the relay planes start"),
         Timeline::in_memory(),
         EmptyDrain,
     )
@@ -144,8 +149,9 @@ async fn a_circle_an_arm_builds_mid_run_is_declared_like_every_other() {
         "every device's identity, both halves"
     );
     assert!(
-        declared(&built, "relay_url") == 3,
-        "and every endpoint the world dials: the plane's canonical one and one per device"
+        declared(&built, "relay_url") == 6,
+        "and every endpoint the world dials: each plane's canonical one — the location \
+         plane's and the account plane's — and one per device on each"
     );
 
     // S13 builds one more circle inside its own body and breaks it. Before the
@@ -201,7 +207,7 @@ async fn a_circle_an_arm_builds_mid_run_is_declared_like_every_other() {
     assert!(
         declared(&adopted, "pubkey") == 2
             && declared(&adopted, "nsec") == 2
-            && declared(&adopted, "relay_url") == 3,
+            && declared(&adopted, "relay_url") == 6,
         "no device or relay class is declared twice by an adoption"
     );
 
@@ -215,13 +221,10 @@ async fn the_whole_roster_an_arm_grows_to_is_declared_once_per_circle() {
     // built, never again when adopted — and the arm mints no device and no
     // relay, so those classes stay where the world left them.
     let sink = Arc::new(Sink::new());
-    let relay = SimRelay::start(RelayTag::new(0))
-        .await
-        .expect("the relay plane starts");
     let mut world: ScenarioWorld<Timeline, EmptyDrain> = SimWorld::build(
         &shape(),
         Schedule::new(Vec::new()),
-        vec![relay],
+        planes_for(&shape()).await.expect("the relay planes start"),
         Timeline::in_memory(),
         EmptyDrain,
     )
@@ -256,9 +259,51 @@ async fn the_whole_roster_an_arm_grows_to_is_declared_once_per_circle() {
     assert!(
         declared(&after, "pubkey") == 2
             && declared(&after, "nsec") == 2
-            && declared(&after, "relay_url") == 3,
+            && declared(&after, "relay_url") == 6,
         "the arm minted no device and no relay, so nothing of those classes is declared twice"
     );
 
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_display_name_an_arm_publishes_is_declared_before_it_is_published() {
+    // S26 has every device publish a profile under a name the rig minted: a
+    // name is just a word, so only its declaration lets the scan find it.
+    let mut shape = shape();
+    shape.account_relays = 2;
+    shape.profile_relays = haven_core::profile::PROFILE_POOL_MIN;
+    let sink = Arc::new(Sink::new());
+    let mut world: ScenarioWorld<Timeline, EmptyDrain> = SimWorld::build(
+        &shape,
+        Schedule::new(Vec::new()),
+        planes_for(&shape).await.expect("the relay planes start"),
+        Timeline::in_memory(),
+        EmptyDrain,
+    )
+    .await
+    .expect("the world builds");
+    world
+        .declare_to(Arc::clone(&sink) as Arc<dyn DeclareSink>)
+        .expect("the world declares what it minted");
+    assert!(
+        declared(&sink.seal(), "petname") == 0,
+        "the world names no profile"
+    );
+
+    let scenario = Scenario::IdentityPlanes;
+    let spec = ProfileSpec::embedded(ProfileName::Pr).expect("the pr profile parses");
+    let arm = scenario
+        .arm("identity-planes-under-faults")
+        .expect("the scenario offers its arm");
+    scenario
+        .run(&mut world, arm, Duration::from_millis(spec.tick_ms))
+        .await
+        .expect("the arm runs");
+
+    assert!(
+        declared(&sink.seal(), "petname") == shape.members,
+        "one display name per device, each declared through the world's seam"
+    );
     world.teardown().await.expect("teardown");
 }

@@ -19,7 +19,7 @@ use haven_soak::scenarios::registry;
 use haven_soak::verdict::is_invariant_id;
 
 /// The top-level field set, pinned.
-const COVERAGE_FIELDS: usize = 3;
+const COVERAGE_FIELDS: usize = 4;
 
 /// One triple's field set, pinned.
 const TRIPLE_FIELDS: usize = 4;
@@ -141,6 +141,7 @@ fn scenario_ids() -> BTreeSet<&'static str> {
 fn everything() -> serde_json::Value {
     let labels: Vec<&'static str> = fault_labels().into_iter().collect();
     let mut coverage = Coverage::new(ProfileName::Nightly, 0x2a);
+    coverage.note_plane_overlaps(7919);
     for (tick, scenario) in (0_u64..).zip(scenario_ids()) {
         for invariant in Invariant::REGISTRY {
             coverage.note(scenario, &labels, invariant, tick);
@@ -234,6 +235,10 @@ fn every_value_is_a_literal_of_its_own_vocabulary() {
     assert!(
         written["seed"] == serde_json::json!("0x000000000000002a"),
         "the seed is the banner's spelling, sixteen hex and no more"
+    );
+    assert!(
+        ["0", "1", "2-4", "5+"].contains(&written["plane_overlaps"].as_str().unwrap_or("")),
+        "the advisory overlap count is a bucket of the crate's one vocabulary, never a count"
     );
     let scenarios = scenario_ids();
     let faults = fault_labels();
@@ -336,7 +341,14 @@ fn no_coverage_field_carries_a_shape_a_structural_rule_matches() {
             "coverage.log carries a dotted quad"
         );
     }
-    for needle in ["Saturday Ride", "npub1", "simdev#", "127.0.0.1", "wss://"] {
+    for needle in [
+        "Saturday Ride",
+        "npub1",
+        "simdev#",
+        "127.0.0.1",
+        "wss://",
+        "7919",
+    ] {
         assert!(
             !rendered.contains(needle),
             "coverage.log names no circle, key, device or endpoint"

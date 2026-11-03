@@ -31,11 +31,13 @@ Two phases, and a world of its own for each of them.
 
 1. **The nemesis schedule.** Every tick is walked, every fault fires and heals
    where the schedule says, each scheduled probe is graded (O1), and the world
-   the schedule left behind is graded against O1, O2 and O6 plus the schedule's
-   own expectation floor. Not O5: it grades a set of classifications, and a
-   background schedule collects none — an empty set would report that nothing
-   went unaccounted for because nothing was looked at.
-2. **The declared scenario arms**, in the profile's own order.
+   the schedule left behind is graded against O1, O2, O6 and O7 (relay-plane
+   containment over everything it sent) plus the schedule's own expectation
+   floor. Not O5: it grades a set of classifications, and a background
+   schedule collects none — an empty set would report that nothing went
+   unaccounted for because nothing was looked at.
+2. **The declared scenario arms**, in the profile's own order, each graded
+   against O7 as well once its body has run.
 
 One world per arm, not one for the run: an arm's expectation floor counts what
 its OWN world did (S11's floor includes "nothing was delivered while the circle

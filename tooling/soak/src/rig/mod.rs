@@ -48,8 +48,8 @@ pub use plane::{
 pub use restart::{kill_and_reopen, KillKind, ReopenReport};
 pub use world::{
     install_process_globals, no_pending_fanout, Change, Changed, CircleFingerprint,
-    DeviceFingerprint, PendingGuard, RosterDigest, SessionStoreUse, SimWorld, TickReport,
-    WorldFingerprint, SESSION_STORE_CEILING_BYTES,
+    DeviceFingerprint, PendingGuard, Planes, RosterDigest, RoutingSpan, SessionStoreUse, SimWorld,
+    TickReport, WorldFingerprint, SESSION_STORE_CEILING_BYTES,
 };
 
 /// The kinds of thing the rig names.
@@ -258,8 +258,9 @@ pub enum Wait {
 /// Everything that can go wrong in the rig, as a classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RigError {
-    /// `allow_ws_loopback_for_test` refused, so no device can dial the world's
-    /// own relay. The rig is broken, not the subject.
+    /// A process-wide opt-in refused: `allow_ws_loopback_for_test`, so no
+    /// device can dial the world's own relay, or the dead discovery plane, so
+    /// no world is hermetic. The rig is broken, not the subject.
     LoopbackOptInRefused,
     /// A restart control started from a device whose session was not live —
     /// the control would have proven nothing.

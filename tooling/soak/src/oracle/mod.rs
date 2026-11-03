@@ -7,11 +7,14 @@
 //!
 //! # The registry is exhaustive, and deliberately short
 //!
-//! [`Invariant::REGISTRY`] is every oracle this crate grades: O1, O2, O3, O4, O5
-//! and O6. PLAN §2.1's safety invariants S4 (wire privacy) and S9 (kind-445
-//! nonce uniqueness) are still absent by construction: both want relay-ledger
-//! evidence the ledger does not keep, and an entry that could never run would
-//! report coverage this crate does not have.
+//! [`Invariant::REGISTRY`] is every oracle this crate grades: O1 to O7. PLAN
+//! §2.1's safety invariant S4 (nothing identifying on the wire) is graded on
+//! its ROUTING half by O7 — which relay each verb, kind and filter reaches, per
+//! circle, recipient and account — and its CONTENT half stays the E2E lanes'
+//! wire oracles'. S9 (kind-445 nonce uniqueness) is still absent by
+//! construction: it wants relay-ledger evidence the ledger does not keep, and
+//! an entry that could never run would report coverage this crate does not
+//! have.
 //!
 //! **O3 (removal unreadability) is here**, and S21's `removal-unreadability` is
 //! what produces the state it grades: a removed member fed post-removal probes
@@ -53,6 +56,7 @@
 //! S06 grades O5 and the gating count for exactly that reason.
 
 pub mod bounds;
+pub mod planes;
 pub mod quiescence;
 pub mod undecryptable;
 pub mod vacuity;
@@ -69,11 +73,12 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::rc::Rc;
 use crate::rig::{
-    CircleTag, DeviceTag, LogDrain, RelayPlane, RigError, SimCircle, SimDevice, SimWorld, Step,
-    TimelineSink,
+    CircleTag, DeviceTag, LogDrain, RelayPlane, RelayTag, RigError, SimCircle, SimDevice, SimWorld,
+    Step, TimelineSink,
 };
 
 pub use bounds::Recovery;
+pub use planes::PlaneRole;
 pub use quiescence::PendingReason;
 pub use vacuity::FloorTerm;
 
@@ -148,18 +153,27 @@ pub enum Invariant {
     Undecryptable,
     /// **O6** — the world stops moving, and does so within the derived bound.
     Quiescence,
+    /// **O7** — every frame a device sent reached only a relay whose plane
+    /// admits it: a circle's `#h` its routing, a gift wrap its recipient's
+    /// inbox, a device's `#p` its own inbox, its lists their own planes, a
+    /// kind 0 the profile plane — the matrix in
+    /// `haven_local_relay::planes::policy::ROWS`, judged over the world's
+    /// whole plane record ([`planes`]). Graded after every arm and after the
+    /// nemesis phase, with no exemption.
+    RelayPlaneContainment,
 }
 
 impl Invariant {
-    /// Every oracle this crate grades. See the module docs for the two invariants
-    /// (S4, S9) still absent by construction.
-    pub const REGISTRY: [Self; 6] = [
+    /// Every oracle this crate grades. See the module docs for what of S4 is
+    /// graded and why S9 is absent by construction.
+    pub const REGISTRY: [Self; 7] = [
         Self::LocationRoundTrip,
         Self::SendPathLiveness,
         Self::RemovalUnreadability,
         Self::RetentionWindow,
         Self::Undecryptable,
         Self::Quiescence,
+        Self::RelayPlaneContainment,
     ];
 
     /// The oracle's id, as the plan and the timeline spell it.
@@ -172,6 +186,7 @@ impl Invariant {
             Self::RetentionWindow => "O4",
             Self::Undecryptable => "O5",
             Self::Quiescence => "O6",
+            Self::RelayPlaneContainment => "O7",
         }
     }
 
@@ -185,6 +200,7 @@ impl Invariant {
             Self::RetentionWindow => "RETENTION WINDOW",
             Self::Undecryptable => "UNDECRYPTABLE ACCOUNTED",
             Self::Quiescence => "QUIESCENCE",
+            Self::RelayPlaneContainment => "RELAY-PLANE CONTAINMENT",
         }
     }
 
@@ -210,6 +226,7 @@ impl Invariant {
             Self::RetentionWindow => Ok(retention_window_holds(round)),
             Self::Undecryptable => Ok(undecryptable_accounted(round)),
             Self::Quiescence => quiescence_holds(world, round).await,
+            Self::RelayPlaneContainment => planes::plane_containment(world),
         }
     }
 }
@@ -458,6 +475,53 @@ pub enum Finding {
     },
     /// An arm did less than it declared, so its verdicts prove nothing.
     FloorUnmet(FloorTerm),
+    /// A device sent an event to a relay whose plane does not admit it
+    /// (O7): a crossing, a wrong author, or a relay list naming another
+    /// plane — `rule` says which.
+    PlaneCrossedEvent {
+        /// The plane that received it.
+        relay: RelayTag,
+        /// Whose endpoint it came on; `None` for the canonical one.
+        device: Option<DeviceTag>,
+        /// The matrix row its shape matched.
+        row: &'static str,
+        /// The judge's class.
+        rule: &'static str,
+    },
+    /// A device sent a REQ or NEG-OPEN to a relay whose plane does not admit
+    /// it (O7).
+    PlaneCrossedRequest {
+        /// The plane that received it.
+        relay: RelayTag,
+        /// Whose endpoint it came on; `None` for the canonical one.
+        device: Option<DeviceTag>,
+        /// The matrix row its shape matched.
+        row: &'static str,
+    },
+    /// A device sent a frame no row of the matrix admits for the world's
+    /// ground truth (O7): an unknown verb or shape, `COUNT`, `AUTH`, a `CLOSE`
+    /// naming a subscription its connection never opened, an id or a circle
+    /// nothing records.
+    PlaneUnknownFrame {
+        /// The plane that received it.
+        relay: RelayTag,
+        /// Whose endpoint it came on; `None` for the canonical one.
+        device: Option<DeviceTag>,
+        /// The judge's class.
+        rule: &'static str,
+    },
+    /// A plane's record hit its cap, so O7 cannot say what it did not keep:
+    /// the rig could not hold the evidence.
+    PlaneRecordFull {
+        /// The plane.
+        relay: RelayTag,
+    },
+    /// A plane role carried none of the traffic the world must have sent it
+    /// (O7's vacuity): a containment graded over nothing.
+    PlaneUnobserved {
+        /// The role.
+        role: PlaneRole,
+    },
 }
 
 impl Finding {
@@ -504,6 +568,11 @@ impl Finding {
             Self::NotQuiescent(_) => "not-quiescent",
             Self::BacklogUnsettled { .. } => "backlog-unsettled",
             Self::FloorUnmet(_) => "floor-unmet",
+            Self::PlaneCrossedEvent { .. } => "plane-crossed-event",
+            Self::PlaneCrossedRequest { .. } => "plane-crossed-request",
+            Self::PlaneUnknownFrame { .. } => "plane-unknown-frame",
+            Self::PlaneRecordFull { .. } => "plane-record-full",
+            Self::PlaneUnobserved { .. } => "plane-unobserved",
         }
     }
 
@@ -524,8 +593,15 @@ impl Finding {
             | Self::RetentionEdgesIncomplete
             | Self::RemovalProbesIncomplete
             | Self::NotQuiescent(_)
-            | Self::FloorUnmet(_) => Vec::new(),
+            | Self::FloorUnmet(_)
+            | Self::PlaneUnobserved { .. } => Vec::new(),
             Self::DeliveryEvidenceLost { to } => vec![to.to_string()],
+            Self::PlaneRecordFull { relay } => vec![relay.to_string()],
+            Self::PlaneCrossedEvent { relay, device, .. }
+            | Self::PlaneCrossedRequest { relay, device, .. }
+            | Self::PlaneUnknownFrame { relay, device, .. } => std::iter::once(relay.to_string())
+                .chain(device.map(|device| device.to_string()))
+                .collect(),
             Self::CommitPending { device }
             | Self::BacklogUnsettled { device }
             | Self::ResubscribeUnbounded { device } => vec![device.to_string()],
@@ -589,8 +665,14 @@ impl Finding {
             | Self::RemovalReadable { .. }
             | Self::UnaccountedOutcome
             | Self::NotQuiescent(_)
-            | Self::BacklogUnsettled { .. } => Rc::ViolationOrLeak,
-            Self::DeliveryEvidenceLost { .. } | Self::UnnamedRow => Rc::RigBroken,
+            | Self::BacklogUnsettled { .. }
+            | Self::PlaneCrossedEvent { .. }
+            | Self::PlaneCrossedRequest { .. }
+            | Self::PlaneUnknownFrame { .. } => Rc::ViolationOrLeak,
+            Self::DeliveryEvidenceLost { .. } | Self::UnnamedRow | Self::PlaneRecordFull { .. } => {
+                Rc::RigBroken
+            }
+            Self::PlaneUnobserved { .. } => Rc::ProvesTooLittle,
             Self::RowEnvelopeExceeded { .. }
             | Self::NothingProbed
             | Self::NothingClassified
@@ -604,6 +686,8 @@ impl Finding {
 }
 
 impl fmt::Display for Finding {
+    // One arm per finding: the match IS the table.
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ProbeNotPublished { device, circle } => {
@@ -701,8 +785,45 @@ impl fmt::Display for Finding {
                 write!(f, "a burst's stored replay never settled ({device})")
             }
             Self::FloorUnmet(term) => write!(f, "an expectation floor was unmet ({term:?})"),
+            Self::PlaneCrossedEvent {
+                relay,
+                device,
+                row,
+                rule,
+            } => write!(
+                f,
+                "an event reached a plane that does not admit it ({relay}{}, {row}, {rule})",
+                endpoint_of(*device)
+            ),
+            Self::PlaneCrossedRequest { relay, device, row } => write!(
+                f,
+                "a request reached a plane that does not admit it ({relay}{}, {row})",
+                endpoint_of(*device)
+            ),
+            Self::PlaneUnknownFrame {
+                relay,
+                device,
+                rule,
+            } => write!(
+                f,
+                "a plane received a frame no row admits ({relay}{}, {rule})",
+                endpoint_of(*device)
+            ),
+            Self::PlaneRecordFull { relay } => {
+                write!(f, "a plane's record ran past its cap ({relay})")
+            }
+            Self::PlaneUnobserved { role } => write!(
+                f,
+                "the {} plane carried none of the traffic it must have",
+                role.label()
+            ),
         }
     }
+}
+
+/// `, simdev#n` for a device's endpoint, nothing for the canonical one.
+fn endpoint_of(device: Option<DeviceTag>) -> String {
+    device.map_or_else(String::new, |device| format!(", {device}"))
 }
 
 /// Which ordered pairs [`Invariant::LocationRoundTrip`] probes this round.
@@ -1488,9 +1609,9 @@ mod tests {
     }
 
     #[test]
-    fn the_registry_is_the_six_oracles_this_crate_grades_and_no_placeholders() {
+    fn the_registry_is_the_seven_oracles_this_crate_grades_and_no_placeholders() {
         let ids: Vec<&str> = Invariant::REGISTRY.iter().map(|i| i.id()).collect();
-        assert_eq!(ids, ["O1", "O2", "O3", "O4", "O5", "O6"]);
+        assert_eq!(ids, ["O1", "O2", "O3", "O4", "O5", "O6", "O7"]);
     }
 
     fn an_edge(distance: u64, outcome: undecryptable::Verdict) -> RetentionEdge {
@@ -1962,12 +2083,18 @@ mod tests {
             | Finding::RemovalProbeShortCircuited { .. }
             | Finding::RemovalProbeInconclusive { .. }
             | Finding::RemovalProbesIncomplete
-            | Finding::FloorUnmet(_) => {}
+            | Finding::FloorUnmet(_)
+            | Finding::PlaneCrossedEvent { .. }
+            | Finding::PlaneCrossedRequest { .. }
+            | Finding::PlaneUnknownFrame { .. }
+            | Finding::PlaneRecordFull { .. }
+            | Finding::PlaneUnobserved { .. } => {}
         }
     }
 
     /// One value of every `Finding` variant, checked exhaustive by
     /// [`assert_listed`].
+    #[allow(clippy::too_many_lines)]
     fn every_finding() -> Vec<Finding> {
         let (device, circle) = (DeviceTag::new(1), CircleTag::new(0));
         let findings = vec![
@@ -2059,6 +2186,28 @@ mod tests {
             },
             Finding::RemovalProbesIncomplete,
             Finding::FloorUnmet(FloorTerm::FaultsApplied),
+            Finding::PlaneCrossedEvent {
+                relay: RelayTag::new(2),
+                device: Some(device),
+                row: "EV-0",
+                rule: "plane-crossed-event",
+            },
+            Finding::PlaneCrossedRequest {
+                relay: RelayTag::new(0),
+                device: None,
+                row: "REQ-1059-P",
+            },
+            Finding::PlaneUnknownFrame {
+                relay: RelayTag::new(0),
+                device: Some(device),
+                rule: "plane-unknown-frame",
+            },
+            Finding::PlaneRecordFull {
+                relay: RelayTag::new(1),
+            },
+            Finding::PlaneUnobserved {
+                role: PlaneRole::Account,
+            },
         ];
         for finding in &findings {
             assert_listed(finding);

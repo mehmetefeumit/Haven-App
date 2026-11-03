@@ -21625,6 +21625,291 @@ mod maintenance_real_ffi_tests {
             "nothing was published",
         );
     }
+
+    // ------------------------------------------------------------------------
+    // Relay planes: everything the FFI's account and profile orchestration
+    // sends, judged on the wire by the relay-plane judge (the crate is keyed
+    // `planes` in this manifest; see its comment there).
+    // ------------------------------------------------------------------------
+
+    /// An in-process relay behind a recording front: the product is told the
+    /// front's address and nothing else.
+    struct FrontedRelay {
+        _server: nostr_relay_builder::LocalRelay,
+        db: nostr_relay_builder::prelude::MemoryDatabase,
+        front: haven_core::relay::recording_front::RecordingFront,
+    }
+
+    impl FrontedRelay {
+        async fn run() -> Self {
+            let db = nostr_relay_builder::prelude::MemoryDatabase::with_opts(
+                nostr_relay_builder::prelude::MemoryDatabaseOptions {
+                    events: true,
+                    max_events: None,
+                },
+            );
+            // A port picked when the relay is built can be taken before it
+            // binds; a fresh one is picked then.
+            let mut tries = 0;
+            let server = loop {
+                let server = nostr_relay_builder::LocalRelay::new(
+                    nostr_relay_builder::RelayBuilder::default().database(db.clone()),
+                );
+                let started = server.run().await;
+                if let Err(nostr_relay_builder::Error::IO(error)) = &started {
+                    if error.kind() == std::io::ErrorKind::AddrInUse && tries < 8 {
+                        tries += 1;
+                        continue;
+                    }
+                }
+                assert!(started.is_ok(), "an in-process relay did not start");
+                break server;
+            };
+            let front = haven_core::relay::recording_front::RecordingFront::start(
+                &server.url().await.to_string(),
+            );
+            Self {
+                _server: server,
+                db,
+                front,
+            }
+        }
+    }
+
+    /// Every account and profile frame the FFI orchestration sends lands on a
+    /// relay whose plane admits it, judged with the sender known: the
+    /// key-package tick (its probe, the re-pointed package and the retraction
+    /// of a pre-width-fix slot), both relay-list heals, and the profile's sync,
+    /// read and retraction. The curated profile pool is excluded the way a
+    /// user's own removal leaves it — recorded when added as an inbox, then
+    /// removed — so no row names a real host. Then a kind 0 sent to the
+    /// key-package relay is the one finding.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ffi_account_and_profile_traffic_stays_on_its_planes() {
+        use nostr_relay_builder::prelude::NostrDatabase as _;
+        use planes::planes::frame::Frame;
+        use planes::planes::judge::{judge, Class, Judgement, Observed};
+        use planes::planes::policy::{Row, Verb};
+        use planes::planes::table::{List, PlaneTable, RelayIx, RelayMatch};
+
+        const OWN_INBOX: usize = 0;
+        const OWN_KP: usize = 1;
+        const PROFILE: [usize; 3] = [2, 3, 4];
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let mut relays = Vec::new();
+        for _ in 0..5 {
+            relays.push(FrontedRelay::run().await);
+        }
+        let urls: Vec<String> = relays.iter().map(|r| r.front.url().to_owned()).collect();
+
+        let keys = Keys::generate();
+        let own = keys.public_key().to_hex();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("relay_planes");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(urls[OWN_INBOX].clone(), RelayTypeFfi::Inbox)
+            .await
+            .expect("the inbox row");
+        circle
+            .add_user_relay(urls[OWN_KP].clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("the key-package row");
+        for url in haven_core::profile::profile_relay_pool_default() {
+            circle
+                .add_user_relay(url.clone(), RelayTypeFfi::Inbox)
+                .await
+                .expect("a curated relay recorded as an inbox");
+            assert!(
+                circle
+                    .remove_user_relay(url, RelayTypeFfi::Inbox)
+                    .await
+                    .expect("and removed again"),
+                "premise: the curated relay's row is gone",
+            );
+        }
+        for at in PROFILE {
+            circle
+                .add_user_relay(urls[at].clone(), RelayTypeFfi::Profile)
+                .await
+                .expect("a profile row");
+        }
+        assert_profile_pool_is_local(&circle, PROFILE.len());
+
+        // A pre-width-fix install, as TC-8 seeds it: a real package in the
+        // malformed slot, on the key-package relay, and tracked. Written into
+        // the store, so every frame recorded is the orchestration's own.
+        let legacy = haven_core::relay::maintenance::build_kp_maintenance_events(
+            circle.inner.session(),
+            &keys,
+            &urls[OWN_KP..=OWN_KP],
+            Some(&legacy_slot_id()),
+            None,
+        )
+        .await
+        .expect("a package in the legacy slot");
+        assert!(
+            relays[OWN_KP]
+                .db
+                .save_event(&legacy.event)
+                .await
+                .expect("seed")
+                .is_success(),
+            "premise: the relay holds the legacy package",
+        );
+        track_published(&circle, &legacy).await;
+
+        let ticked = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert!(
+            ticked.relays_healed == 1 && ticked.retired_malformed_slot,
+            "premise: the tick re-pointed the package and retracted the legacy slot",
+        );
+        for category in [RelayTypeFfi::Inbox, RelayTypeFfi::Nip65] {
+            circle
+                .set_publish_relay_list(category, true)
+                .await
+                .expect("the publish toggle");
+        }
+        let healed = relay_mgr
+            .maintain_relay_list(&circle, secret.clone())
+            .await
+            .expect("the relay-list tick");
+        assert!(
+            matches!(healed.inbox.action, super::RelayListActionFfi::Republished)
+                && matches!(
+                    healed.key_package.action,
+                    super::RelayListActionFfi::Republished
+                ),
+            "premise: both relay lists were published",
+        );
+        circle
+            .save_my_profile_local(Some("Quiet Wanderer".to_owned()), None)
+            .await
+            .expect("the local save");
+        let synced = circle
+            .sync_my_profile(secret.clone())
+            .await
+            .expect("the sync");
+        assert!(
+            matches!(synced.outcome, ProfileSyncOutcomeFfi::Published),
+            "premise: the profile was published",
+        );
+        circle
+            .fetch_my_profile(own.clone(), true)
+            .await
+            .expect("the own-profile read");
+        circle
+            .delete_my_public_profile(secret.clone())
+            .await
+            .expect("the retraction");
+
+        let mut table = PlaneTable::new(RelayMatch::Authority);
+        for url in &urls {
+            // The judge's table, not a relay client: spelled as a path, since
+            // check 6 of check_engine_client_options.sh reads every
+            // `.add_relay(` here as a client registration.
+            PlaneTable::add_relay(&mut table, url).expect("a front's address is a relay url");
+        }
+        let ix = |at: usize| RelayIx(u32::try_from(at).expect("a relay position"));
+        table.add_account(&own);
+        table.add(List::OwnInbox(&own), ix(OWN_INBOX), 0);
+        table.add(List::OwnKeyPackage(&own), ix(OWN_KP), 0);
+        for at in PROFILE {
+            table.add(List::Profile, ix(at), 0);
+        }
+        let judged = |table: &mut PlaneTable| -> Judgement {
+            let mut seen = Vec::new();
+            for (at, relay) in relays.iter().enumerate() {
+                for frame in relay.front.frames() {
+                    let conn = (u64::try_from(at).expect("a position") << 32)
+                        | u64::try_from(frame.conn).expect("a connection");
+                    seen.push((ix(at), conn, Frame::parse(&frame.text), frame.text));
+                }
+            }
+            for event in seen
+                .iter()
+                .filter_map(|(_, _, _, text)| serde_json::from_str::<serde_json::Value>(text).ok())
+                .filter(|value| value.get(0).and_then(serde_json::Value::as_str) == Some("EVENT"))
+                .filter_map(|value| serde_json::from_value::<nostr::Event>(value[1].clone()).ok())
+                .chain(std::iter::once(legacy.event.clone()))
+            {
+                table.index_event(&event.id.to_hex(), event.kind.as_u16(), None);
+            }
+            judge(
+                table,
+                seen.iter().map(|(relay, conn, frame, _)| Observed {
+                    relay: *relay,
+                    conn: *conn,
+                    sender: Some(&own),
+                    at: 0,
+                    frame,
+                }),
+            )
+            .unwrap_or_else(|unusable| panic!("the table is unusable: {unusable:?}"))
+        };
+
+        let clean = judged(&mut table);
+        assert!(
+            clean.findings.is_empty(),
+            "the orchestration crossed a plane: {:?}",
+            clean.findings,
+        );
+        let hit = |row: Row, at: Option<usize>| {
+            clean.hits.iter().any(|((relay, r, _), n)| {
+                *r == row && *n > 0 && at.is_none_or(|at| *relay == ix(at))
+            })
+        };
+        for row in [
+            Row::Req30443A,
+            Row::Ev30443,
+            Row::Req10050A,
+            Row::Ev10050,
+            Row::Req10002A,
+            Row::Ev10002,
+            Row::Ev0,
+            Row::Req0A,
+        ] {
+            assert!(hit(row, None), "row {} was never admitted", row.id());
+        }
+        assert!(
+            hit(Row::Ev5, Some(OWN_KP)) && PROFILE.iter().any(|at| hit(Row::Ev5, Some(*at))),
+            "the slot retraction and the profile retraction were not both admitted",
+        );
+        for (at, relay) in relays.iter().enumerate() {
+            assert!(
+                !relay.front.frames().is_empty(),
+                "relay {at} received no frame: a dead plane passes any judgement",
+            );
+        }
+
+        let kind0 = haven_core::profile::build_metadata_event(
+            &keys,
+            &ProfileMetadata::from_metadata(nostr::Metadata::new().display_name("Quiet Wanderer")),
+            None,
+        )
+        .expect("a kind 0");
+        relay_mgr
+            .inner
+            .publish_event(&kind0, &urls[OWN_KP..=OWN_KP])
+            .await
+            .expect("the relay takes it");
+        let planted = judged(&mut table);
+        assert!(
+            planted
+                .findings
+                .iter()
+                .map(|f| (f.relay, f.verb, f.row, f.class))
+                .eq([(ix(OWN_KP), Verb::Event, Some(Row::Ev0), Class::CrossedEvent)]),
+            "a kind 0 on the key-package relay was not the one finding: {:?}",
+            planted.findings,
+        );
+    }
 }
 
 // ============================================================================

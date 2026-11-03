@@ -44,6 +44,12 @@ nostr-relay-builder = "=0.44.1"
 # for the same reason as `nostr-relay-builder` above.
 nostr-sdk = { version = "=0.44.1", default-features = false, features = ["nip44", "nip59"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# The relay-plane judge, for the plane test in `api.rs`'s tests. Keyed `planes`
+# because check 1 of `scripts/ci/check_wire_proxy_test_only.sh` bans the crate's
+# own name anywhere under `src/`, and a text guard cannot see that the one use
+# sits in `#[cfg(test)]`. Dev-only, and only ever dev-only (check 2): the crate
+# also builds the recording wire proxy.
+planes = { package = "haven-local-relay", path = "../../tooling/e2e/local-relay" }
 
 # MDK's SQLCipher 4.17 source (tracked exception T-LIBSQLITE-PATCH). Only a
 # root's `[patch]` applies, and none is inherited through the haven-core path

@@ -81,7 +81,8 @@ fn scheduled_probes(spec: &ProfileSpec) -> u32 {
 ///
 /// The driver walks the schedule before it runs a single arm, and that walk is
 /// graded: one `LocationRoundTrip` round per scheduled probe, and a final
-/// O1/O2/O6 round over the settled world. Every one of those rounds is graded
+/// O1/O2/O6/O7 round over the settled world (O7 waits for nothing, so it adds
+/// no term). Every one of those rounds is graded
 /// at `Recovery::Reconnect`, because a slot may have healed a dropped endpoint
 /// and the pool's own ladder is then in the path.
 ///

@@ -741,6 +741,15 @@
 #     precondition that never fires is how a privacy check comes to certify a
 #     sample it never had.
 #
+#   Wire relay-plane oracle           tooling/e2e/ci/check-wire-planes.sh
+#     C8: every client->relay EVENT, REQ filter and NEG-OPEN landed on a proxy
+#     listen whose declared role admits it — what C5 cannot ask, since it keys
+#     on the upstream every route shares, reads no binding and is skipped on
+#     the poll path. The judge is the `haven-wire-planes` binary, whose fixtures
+#     run as `cargo test` in rust-check.yml's e2e-tooling job; the self-test
+#     here covers the bash wrapper the lanes call: an absent binary is rc 3,
+#     every exit code and argument passes through, and it prints no value.
+#
 #   Wire content-canary oracle        tooling/e2e/ci/check-wire-canaries.dart
 #     The third wire oracle, and the only one that asserts over CONTENT rather
 #     than structure: it plants values the run knows — a circle name, a
@@ -844,6 +853,12 @@
 #     opens no PR. Same shape as above — fixtures are the only proof, and the
 #     one that matters is an untracked scratch file, which `git diff` cannot
 #     see.
+#
+#   Manifest-author failure reporter  scripts/ci/report_manifest_author_failure.sh
+#     When the weekly Manifest Author's model run fails, prints the final
+#     result's reason and nothing else from the transcript, as one escaped
+#     line: no `::`/`##[` command, no second line, request ids redacted. Its
+#     subject is another workflow's failure, so the fixtures are the proof.
 #
 #   Runner-loss re-run gate           scripts/ci/rerun_runner_losses.sh
 #     rerun-runner-losses.yml re-runs a failed job when its log carries the
@@ -2221,6 +2236,17 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/check-wire-correlation.sh --self-test
 
+      # The relay-plane oracle's lane wrapper (Workstream C, C8). The judge's
+      # own fixtures are Rust and run in rust-check.yml's e2e-tooling job, which
+      # this grep job cannot host; what runs here is the part the lanes shell
+      # out to, and the part that would fail silently: an absent binary must be
+      # rc 3 rather than a pass, the binary's exit code must reach the lane's
+      # verdict() untouched, and the wrapper must add no line a value could
+      # ride on.
+      - name: E2E harness self-test (wire-journal relay-plane oracle)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/check-wire-planes.sh --self-test
+
       # The CONTENT layer (Workstream C, C6), and the third of the three wire
       # oracles — the only one whose self-test was wired to nothing. Its two
       # siblings above assert over structure and can therefore only reject a
@@ -2494,6 +2520,12 @@ jobs:
       - name: Manifest-author diff bound self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_manifest_author_diff.sh --self-test
+
+      # Its subject is the author job's failure log, so only the fixtures can
+      # prove it prints the reason alone, escaped, and nothing else.
+      - name: Manifest-author failure reporter self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/report_manifest_author_failure.sh --self-test
 
       # The manifest is a join table between what the app PROMISES the user and
       # what makes that promise true, and nothing about a JSON file resists rot:

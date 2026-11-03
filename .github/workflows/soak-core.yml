@@ -29,7 +29,7 @@
 #                priced run fits. It is a ceiling of worst-case product
 #                constants, not an expectation: a healthy pr run measures about
 #                twenty seconds.
-#   deadline     run-with-deadline.sh 23m / 95m / 300m — above the run budget
+#   deadline     run-with-deadline.sh 23m / 114m / 300m — above the run budget
 #                so a hung run is killed with time left to finalise, and
 #                ATTRIBUTABLE where a bare 124 would not be.
 #   step cap     above the deadline + the 1 min SIGTERM→SIGKILL grace.
@@ -205,19 +205,19 @@ jobs:
   # nightly — pr plus the all-relay and rolling S01 arms, S02, S03's nightly
   # arm, S04, S05's four swept arms, S08's three arms (`buried-past-the-cap`
   # among them since its C8 fix), S09, S10, S12, S14, S16, S17's two ClosedKind
-  # arms, S18, S19, S20, S21, S22, S23 and S24. No arm is expected red.
+  # arms, S18, S19, S20, S21, S22, S23, S24 and S26. No arm is expected red.
   # Dispatched by soak-nightly.yml, once per matrix slot.
   # ---------------------------------------------------------------------------
   e2e_soak_core_nightly:
     name: e2e_soak_core_nightly
     if: ${{ inputs.profile == 'nightly' }}
     runs-on: ubuntu-latest
-    # Deadline 95m (the profile's `deadline_secs`, L6-tied), drive step cap 99
-    # (budget 95 + 1 kill grace + 0 boot = 96, and C2 fails on budget >= cap);
-    # job cap 140 is above the step-cap sum (10 + 25 + 99 = 134) so the drive
+    # Deadline 114m (the profile's `deadline_secs`, L6-tied), drive step cap 118
+    # (budget 114 + 1 kill grace + 0 boot = 115, and C2 fails on budget >= cap);
+    # job cap 156 is above the step-cap sum (10 + 25 + 118 = 153) so the drive
     # reaps before the job. The four move together: a raise of the profile's
     # budget is a raise of all of them.
-    timeout-minutes: 140
+    timeout-minutes: 156
     env:
       HAVEN_LOGSCAN: "true"
       HAVEN_LOGSCAN_PROFILE: host
@@ -254,8 +254,8 @@ jobs:
 
       - name: Run the soak (nightly profile)
         id: soak
-        timeout-minutes: 99
-        run: bash tooling/e2e/ci/run-with-deadline.sh 95m "soak-core nightly" -- bash tooling/e2e/ci/run-soak-core.sh nightly
+        timeout-minutes: 118
+        run: bash tooling/e2e/ci/run-with-deadline.sh 114m "soak-core nightly" -- bash tooling/e2e/ci/run-soak-core.sh nightly
 
       # The pr job's comment says why this step exists and why it is gated on
       # the checkout rather than on the drive.

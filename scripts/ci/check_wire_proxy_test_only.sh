@@ -29,7 +29,18 @@
 #   2. NOT IN A BUILD PATH. No shipped manifest may depend on either tooling
 #      crate — the recorder (tooling/e2e/local-relay) or the runtime log
 #      scanner (tooling/logscan) — so neither can enter an APK, an IPA or the
-#      release wrapper, and both declare `publish = false`.
+#      release wrapper, and both declare `publish = false`. One edge is
+#      allowed: the recorder's crate also carries the relay-plane judge, which
+#      haven-core's and rust_builder's TESTS call, so either Cargo manifest may
+#      name it — by package name or by path — in a `dev-dependencies` table of
+#      any target scope, and nowhere else: not `[dependencies]`, not
+#      `[build-dependencies]`, not a dotted `[dependencies.<key>]` table (a
+#      key named `dev-dependencies` included), not `[features]`; and no TOML
+#      escape in any dependency table, which could spell either name past the
+#      match. A dev-dependency never reaches `cargo build --lib` or
+#      cargokit, and rust-check.yml's soak-tooling job proves the shipped
+#      graph independently of this text (a rust_builder-rooted `cargo tree -e
+#      no-dev`).
 #
 #   3. THE RAW EVIDENCE IS NEVER AN ARTIFACT. No workflow may name a `.ndjson`
 #      path, or any `/tmp/haven-wire-*` path other than a `.log`, in an
@@ -137,7 +148,7 @@ readonly SUMMARIZE_SH='tooling/e2e/ci/summarize-wire-journal.sh'
 readonly E2E_CI_DIR='tooling/e2e/ci'
 # Check 6's one scanned file outside both directories: it writes issue bodies.
 readonly FILE_SOAK_ISSUE='scripts/ci/file_soak_issue.sh'
-readonly SELF_TEST_FIXTURES=80
+readonly SELF_TEST_FIXTURES=94
 
 # Trees that ship. `haven/integration_test` is deliberately absent: that is the
 # harness, and it is where the sentinel emitter belongs.
@@ -158,7 +169,10 @@ readonly PRODUCTION_TREES=(
 # HAVEN_NEEDLE_DECL and HAVEN_WIRE_CANARY_MANIFEST carry exactly the same
 # reason: a shipped app able to emit either would be handing whatever it
 # declares — pubkeys, group ids, names, coordinates, secret-class material — to
-# whatever it is connected to. HAVEN_NEEDLE_DIR is here as a name that must
+# whatever it is connected to. HAVEN_WIRE_ROUTING (a circle's routing, declared
+# to the relay-plane oracle as a sentinel token) is the same: a shipped app able
+# to emit it would hand a relay its circles' `h` values tied to their routing in
+# one frame. HAVEN_NEEDLE_DIR is here as a name that must
 # exist NOWHERE: the needle directory is a constant so the path bans below can
 # name it, and an override would make the subject of those bans relocatable.
 readonly FORBIDDEN_TOKENS=(
@@ -167,6 +181,7 @@ readonly FORBIDDEN_TOKENS=(
   'HAVEN_WIRE_PROXY'
   'HAVEN_WIRE_JOURNAL'
   'HAVEN_WIRE_SENTINEL'
+  'HAVEN_WIRE_ROUTING'
   'HAVEN_WIRE_MLS_GROUP_ID'
   'HAVEN_NEEDLE_DECL'
   'HAVEN_WIRE_CANARY_MANIFEST'
@@ -210,14 +225,47 @@ check_no_production_reach() {
   return "${rc}"
 }
 
+# Prints `<line>:<table>` for every line of a Cargo manifest that names the
+# recorder's crate — package name or path — outside a dev-dependencies table.
+# Comments are stripped first, so the manifest can say WHY it names the crate.
+# A dotted table header (`[dependencies.<key>]`, the target-scoped and
+# build-dependencies forms) is judged by its own name, so naming the crate in
+# such a header, or under one, is a hit unless the table is a dev table.
+recorder_non_dev_hits() { # recorder_non_dev_hits <Cargo.toml>
+  awk '
+    function names(text) { return text ~ /haven[-_]local[-_]relay|tooling\/e2e\/local-relay/ }
+    {
+      line = $0
+      sub(/[[:space:]]*#.*$/, "", line)
+      if (line ~ /^[[:space:]]*$/) next
+      if (line ~ /^[[:space:]]*\[/) {
+        table = line
+        gsub(/^[[:space:]]*\[+|\]+[[:space:]]*$/, "", table)
+        # The kind is the LAST dependency-kind segment: `[dependencies.dev-dependencies]` is a dependency keyed `dev-dependencies`.
+        isdev = (table ~ /^(target\..+\.)?dev-dependencies(\.[^.]+)?$/ && table !~ /(^|\.)(dev-|build-)?dependencies\..*dev-dependencies/)
+      }
+      # A TOML escape (`\u002d`) spells the crate so no pattern sees it: refused in any dependency table.
+      if (table ~ /dependencies/ && index(line, "\\")) print NR ":" table
+      if (!isdev && names(line)) print NR ":" table
+    }
+  ' "$1"
+}
+
 # 2. No shipped manifest pulls the crate in.
 check_not_in_build_path() {
-  local root="$1" rc=0 manifest crate
+  local root="$1" rc=0 manifest crate hits
   for crate in "${TOOLING_CRATES[@]}"; do
     for manifest in "${BUILD_MANIFESTS[@]}"; do
       local f="${root}/${manifest}"
       [[ -f "${f}" ]] || continue
-      if grep -qF -- "${crate}" "${f}"; then
+      if [[ "${crate}" == "${CRATE_DIR}" && "${manifest}" == *Cargo.toml ]]; then
+        hits="$(recorder_non_dev_hits "${f}")"
+        if [[ -n "${hits}" ]]; then
+          printf '%s:%s\n' "${manifest}" "${hits}" >&2
+          fail "${manifest} names ${crate} outside a dev-dependencies table. Only the tests of a shipped crate may reach the recorder's crate."
+          rc=1
+        fi
+      elif grep -qF -- "${crate}" "${f}"; then
         fail "${manifest} references ${crate}. A harness-only crate must never be part of a build that ships."
         rc=1
       fi
@@ -565,7 +613,7 @@ self_test() {
     printf 'pub fn y() {}\n' > "${r}/haven/rust_builder/src/api.rs"
     # The harness legitimately names EVERY control verb; it must never be
     # flagged for any of them.
-    printf "const t = String.fromEnvironment('HAVEN_WIRE_SENTINEL');\nconst m = 'HAVEN_WIRE_MLS_GROUP_ID';\nconst n = 'HAVEN_NEEDLE_DECL';\nconst c = 'HAVEN_WIRE_CANARY_MANIFEST';\n" \
+    printf "const t = String.fromEnvironment('HAVEN_WIRE_SENTINEL');\nconst m = 'HAVEN_WIRE_MLS_GROUP_ID';\nconst n = 'HAVEN_NEEDLE_DECL';\nconst c = 'HAVEN_WIRE_CANARY_MANIFEST';\nconst r = 'HAVEN_WIRE_ROUTING:';\n" \
       > "${r}/haven/integration_test/e2e/_lib/test_relay.dart"
 
     # The needle directory as a CONSTANT, which is what keeps it bannable.
@@ -713,12 +761,75 @@ YAML
     > "${dirleak}/haven/rust_builder/src/api.rs"
   _case "a needle-dir override in rust_builder fails" 1 check_no_production_reach "${dirleak}"
 
+  local routingleak="${tmp}/routingleak"; _mk "${routingleak}"
+  printf 'pub const R: &str = "HAVEN_WIRE_ROUTING:";\n' \
+    > "${routingleak}/haven-core/src/lib.rs"
+  _case "the routing-declaration token in haven-core fails" 1 check_no_production_reach "${routingleak}"
+
   echo "self-test: check 2 — not in a build path"
   _case "healthy manifests pass" 0 check_not_in_build_path "${ok}"
   local depended="${tmp}/depended"; _mk "${depended}"
   printf '[dependencies]\nhaven-local-relay = { path = "../tooling/e2e/local-relay" }\n' \
     >> "${depended}/haven-core/Cargo.toml"
   _case "haven-core path-depending on the crate fails" 1 check_not_in_build_path "${depended}"
+
+  # The one edge allowed: a dev-dependency, in each spelling a manifest can
+  # give it, beside a comment saying why.
+  local devdep="${tmp}/devdep"; _mk "${devdep}"
+  printf '[dev-dependencies]\nhaven-local-relay = { path = "../tooling/e2e/local-relay" }\n' \
+    >> "${devdep}/haven-core/Cargo.toml"
+  _case "a dev-dependency on the crate passes" 0 check_not_in_build_path "${devdep}"
+  local keyed="${tmp}/keyed"; _mk "${keyed}"
+  cat >> "${keyed}/haven/rust_builder/Cargo.toml" <<'TOML'
+[dependencies]
+nostr = "0.44"
+# Keyed `planes`: check 1 bans the crate's literal name in rust_builder/src.
+[dev-dependencies]
+planes = { package = "haven-local-relay", path = "../../tooling/e2e/local-relay" }
+TOML
+  _case "rust_builder's keyed dev-dependency with its comment passes" 0 check_not_in_build_path "${keyed}"
+  local scoped_dev="${tmp}/scopeddev"; _mk "${scoped_dev}"
+  printf "[target.'cfg(unix)'.dev-dependencies]\nhaven-local-relay = { path = \"../tooling/e2e/local-relay\" }\n" \
+    >> "${scoped_dev}/haven-core/Cargo.toml"
+  _case "a target-scoped dev-dependency passes" 0 check_not_in_build_path "${scoped_dev}"
+  local dotted_dev="${tmp}/dotteddev"; _mk "${dotted_dev}"
+  printf '[dev-dependencies.haven-local-relay]\npath = "../tooling/e2e/local-relay"\n' \
+    >> "${dotted_dev}/haven-core/Cargo.toml"
+  _case "a dotted dev-dependency table passes" 0 check_not_in_build_path "${dotted_dev}"
+
+  # ...and every other table, the four forms a flat grep used to catch.
+  local dotted="${tmp}/dotted"; _mk "${dotted}"
+  printf '[dev-dependencies]\nserde = "1"\n[dependencies.recorder]\npath = "../tooling/e2e/local-relay"\n' \
+    >> "${dotted}/haven-core/Cargo.toml"
+  _case "a dotted [dependencies.<key>] table naming the path fails" 1 check_not_in_build_path "${dotted}"
+  local scoped="${tmp}/scoped"; _mk "${scoped}"
+  printf "[target.'cfg(target_os = \"android\")'.dependencies]\nhaven-local-relay = { path = \"../tooling/e2e/local-relay\" }\n" \
+    >> "${scoped}/haven/rust_builder/Cargo.toml"
+  _case "a target-scoped [dependencies] fails" 1 check_not_in_build_path "${scoped}"
+  local build_dep="${tmp}/builddep"; _mk "${build_dep}"
+  printf '[build-dependencies]\nhaven-local-relay = { path = "../tooling/e2e/local-relay" }\n' \
+    >> "${build_dep}/haven-core/Cargo.toml"
+  _case "a build-dependency fails" 1 check_not_in_build_path "${build_dep}"
+  local alias="${tmp}/alias"; _mk "${alias}"
+  printf '[dev-dependencies]\nhaven-local-relay = { path = "../tooling/e2e/local-relay" }\n[features]\nrecorder = ["haven-local-relay/default"]\n' \
+    >> "${alias}/haven-core/Cargo.toml"
+  _case "a [features] alias naming the crate fails" 1 check_not_in_build_path "${alias}"
+  # A dependency KEYED `dev-dependencies` is no dev table, in any of its forms.
+  local keyed_dev header n=0
+  for header in "dependencies.dev-dependencies" "build-dependencies.dev-dependencies" \
+                "target.'cfg(unix)'.dependencies.dev-dependencies" \
+                "target.'cfg(unix)'.build-dependencies.dev-dependencies"; do
+    n=$(( n + 1 )); keyed_dev="${tmp}/keyeddev${n}"; _mk "${keyed_dev}"
+    printf '[%s]\npackage = "haven-local-relay"\npath = "../tooling/e2e/local-relay"\n' "${header}" \
+      >> "${keyed_dev}/haven-core/Cargo.toml"
+    _case "a dependency keyed dev-dependencies ([${header}]) fails" 1 check_not_in_build_path "${keyed_dev}"
+  done
+  local escaped="${tmp}/escaped"; _mk "${escaped}"
+  cat >> "${escaped}/haven-core/Cargo.toml" <<'TOML'
+[dependencies]
+recorder = { package = "haven\u002dlocal-relay", path = "../tooling/e2e/loc\u0061l-relay" }
+TOML
+  _case "a dependency spelled through a TOML escape fails" 1 check_not_in_build_path "${escaped}"
   local publishable="${tmp}/publishable"; _mk "${publishable}"
   printf '[package]\nname = "haven-local-relay"\n' \
     > "${publishable}/${CRATE_DIR}/Cargo.toml"

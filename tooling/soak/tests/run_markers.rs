@@ -34,6 +34,8 @@ const fn shape() -> WorldShape {
         members: 2,
         circles: 1,
         relays: 1,
+        account_relays: 1,
+        profile_relays: 0,
     }
 }
 
@@ -148,7 +150,7 @@ async fn a_violated_invariant_leaves_its_marker_and_its_snapshot() {
 
     // Coverage is read from what the PLANE took: the swallowed ack fired at
     // tick 1 and O1 graded it at the tick-2 probe. The teardown round grades
-    // O1, O2 and O6 at the schedule's last tick (the heal, tick 3) under its
+    // O1, O2, O6 and O7 at the schedule's last tick (the heal, tick 3) under its
     // OWN literal: filed under the probe literal, it would make every night's
     // knee the schedule's length. The heal is not a fault, so no triple names
     // it. The whole array, so a stray or a missing triple fails as surely as a
@@ -161,9 +163,15 @@ async fn a_violated_invariant_leaves_its_marker_and_its_snapshot() {
                 {"scenario": "settled", "nemesis": swallowed, "invariant": "INV-O1", "first_tick": 3},
                 {"scenario": "settled", "nemesis": swallowed, "invariant": "INV-O2", "first_tick": 3},
                 {"scenario": "settled", "nemesis": swallowed, "invariant": "INV-O6", "first_tick": 3},
+                {"scenario": "settled", "nemesis": swallowed, "invariant": "INV-O7", "first_tick": 3},
             ]),
-        "one probe triple at the probe that followed the fault, and the teardown round's three \
+        "one probe triple at the probe that followed the fault, and the teardown round's four \
          under their own literal"
+    );
+    assert!(
+        read_coverage(dir)["plane_overlaps"] == serde_json::json!("1"),
+        "one account plane carries every inbox and every key package: one relay on two \
+         planes, counted and bucketed, never graded"
     );
 }
 

@@ -1163,6 +1163,10 @@ readonly -a REQUIRED_PROFILE_TESTS=(
   location_probe_fails_a_relay_that_acks_445_and_serves_nothing
   location_probe_fails_a_relay_that_demands_nip42_auth_on_read
   location_probe_reports_nip77_support_of_each_kind
+  # tests/relay_plane_wire_e2e.rs — every frame of a circle's lifecycle, the
+  # profile plane's included, judged on the wire by the relay-plane judge, and
+  # a crossing planted on each plane reported exactly
+  every_relay_plane_receives_only_its_own_traffic_across_a_circle_lifecycle
 )
 
 log "Verifying the named plane-separation tests still exist ..."

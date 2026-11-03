@@ -22,7 +22,10 @@ mod policies;
 mod proxy;
 
 pub use forge::{mint, mint_dated, past_expiration, Forgery};
-pub use ledger::{Ledger, NegFrame};
+pub use ledger::{
+    plane_instant, EndpointId, Ledger, NegFrame, PlaneFrame, PlaneHighWater, PlaneRecord,
+    PLANE_IDS_CAP, PLANE_SHAPES_CAP,
+};
 pub use policies::{oversize_message, NativeClosed, OVERSIZE_PREFIX};
 pub use proxy::NEG_REFUSAL;
 
@@ -37,8 +40,10 @@ use nostr_database::{DatabaseEventStatus, MemoryDatabase, MemoryDatabaseOptions,
 use nostr_relay_builder::{LocalRelay, RelayBuilder};
 
 use crate::nemesis::types::{Fault, RigCount};
+use crate::profiles::WorldShape;
 use crate::relay::proxy::{arm_refuse_page, FaultState, Proxy};
 use crate::rig::plane::RelayPlane;
+use crate::rig::world::Planes;
 use crate::rig::{sim_magnitude, DeviceTag, RelayTag, RigError, Step};
 
 /// The most events a plane's relay serves for a REQ whose filter sets no
@@ -76,6 +81,29 @@ pub struct SimRelay {
     // Kept alive deliberately: a `LocalRelay` shuts itself down when its last
     // handle is dropped, which would take the plane's store with it.
     _relay: LocalRelay,
+}
+
+/// Starts every plane a world of `shape` runs over, healthy, each role's
+/// tags minted after the last role's: location from `simrelay#0`, so an arm's
+/// handles keep their meaning, then account, then profile.
+///
+/// # Errors
+///
+/// As [`SimRelay::start`].
+pub async fn planes_for(shape: &WorldShape) -> Result<Planes<SimRelay>, RigError> {
+    let total = shape.relays + shape.account_relays + shape.profile_relays;
+    let mut location = Vec::with_capacity(total);
+    for ordinal in 0..total {
+        let tag = RelayTag::new(u32::try_from(ordinal).map_err(|_| RigError::ShapeMismatch)?);
+        location.push(SimRelay::start(tag).await?);
+    }
+    let profile = location.split_off(shape.relays + shape.account_relays);
+    let account = location.split_off(shape.relays);
+    Ok(Planes {
+        location,
+        account,
+        profile,
+    })
 }
 
 impl SimRelay {
@@ -146,7 +174,7 @@ impl SimRelay {
             .map_err(|_| RigError::Core(Step::ApplyFault))?;
         let ledger = Ledger::new();
         let relay_url = relay.url().await.to_string();
-        let canonical = Proxy::start(&relay_url, ledger.clone(), None)?;
+        let canonical = Proxy::start(&relay_url, ledger.clone(), EndpointId::Canonical)?;
         Ok(Self {
             tag,
             ledger,
@@ -231,6 +259,7 @@ impl SimRelay {
                 .await
                 .map_err(|_| RigError::Core(Step::ApplyFault))?;
             saved += usize::from(status.is_success());
+            self.ledger.note_seeded(event);
         }
         Ok(saved)
     }
@@ -269,7 +298,12 @@ impl RelayPlane for SimRelay {
         let provisioned = if self.per_device.contains_key(&device) {
             Ok(())
         } else {
-            Proxy::start(&self.relay_url, self.ledger.clone(), Some(device)).map(|proxy| {
+            Proxy::start(
+                &self.relay_url,
+                self.ledger.clone(),
+                EndpointId::Own(device),
+            )
+            .map(|proxy| {
                 self.per_device.insert(device, proxy);
             })
         };
@@ -287,7 +321,14 @@ impl RelayPlane for SimRelay {
             Ok(())
         } else {
             (0..count)
-                .map(|_| Proxy::start(&self.relay_url, self.ledger.clone(), Some(device)))
+                .map(|slot| {
+                    let slot = u16::try_from(slot).map_err(|_| RigError::ShapeMismatch)?;
+                    Proxy::start(
+                        &self.relay_url,
+                        self.ledger.clone(),
+                        EndpointId::Alias(device, slot),
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()
                 .map(|endpoints| {
                     self.aliases.insert(device, endpoints);
@@ -333,6 +374,10 @@ impl RelayPlane for SimRelay {
 
     fn witnessed_ok(&self, event_id: &EventId) -> bool {
         self.ledger.witnessed_ok(event_id)
+    }
+
+    fn plane_ledger(&self) -> Option<&Ledger> {
+        Some(&self.ledger)
     }
 }
 
@@ -454,7 +499,7 @@ async fn apply_inner(
             if matching.is_empty() {
                 return Err(RigError::Core(Step::ApplyFault));
             }
-            ledger.note_injected(forged.id);
+            ledger.note_injected(&forged);
             reached_any(
                 endpoints
                     .iter()

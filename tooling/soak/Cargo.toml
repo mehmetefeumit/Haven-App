@@ -35,6 +35,9 @@ haven-core = { path = "../../haven-core", features = ["test-utils"] }
 # The scanner runs IN-PROCESS over each scenario's captured lines, through the
 # same expander the lanes use — two expanders would mean two coverage claims.
 haven-logscan = { path = "../logscan" }
+# The relay-plane judge O7 grades with: the one policy every layer of the
+# relay-plane proof judges by.
+haven-local-relay = { path = "../e2e/local-relay" }
 # Every direct nostr-stack dependency is exact-pinned to the version
 # haven-core/Cargo.lock resolves. A different 0.44.x would split the `nostr`
 # type graph from MDK's pinned rev, and this is the one crate where haven-core's

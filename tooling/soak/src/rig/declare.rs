@@ -43,4 +43,12 @@ pub trait DeclareSink: Send + Sync {
     ///
     /// [`RigError::DeclarationRefused`] if the class will not take the value.
     fn declare_relay(&self, url: &str) -> Result<(), RigError>;
+
+    /// Declares one display name a device publishes as its profile: a name,
+    /// searched for as a petname is.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::DeclarationRefused`] if the class will not take the value.
+    fn declare_name(&self, name: &str) -> Result<(), RigError>;
 }

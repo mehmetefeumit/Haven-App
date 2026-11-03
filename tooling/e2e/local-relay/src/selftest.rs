@@ -31,7 +31,7 @@ use crate::proxy::{ControlSinks, MlsGroupIdSink, Proxy, ProxyConfig, Route};
 
 /// Number of cases [`run`] must execute. A case that stops running is a case
 /// that stops proving anything, and silence is how that goes unnoticed.
-const DECLARED_CASES: usize = 9;
+const DECLARED_CASES: usize = 10;
 
 /// Everything the self-test can conclude.
 type Case = Result<(), String>;
@@ -55,6 +55,7 @@ pub async fn run() -> Result<(), String> {
         ("G mls-group-id channel", case_mls_group_id().await),
         ("H needle + canary channel", case_needles().await),
         ("I unknown control verb", case_unknown_control_verb().await),
+        ("J routing declaration", case_routing_declaration().await),
     ] {
         executed += 1;
         match result {
@@ -596,6 +597,74 @@ async fn case_sentinel() -> Case {
     }
     if !below.iter().any(|l| l["frame"][1] == "before") {
         return Err("pre-sentinel traffic fell OUTSIDE the snapshot".to_owned());
+    }
+
+    close(client).await;
+    echo.abort();
+    Ok(())
+}
+
+/// J: a routing declaration — the sentinel verb with the circle's routing as a
+/// third element — is journalled VERBATIM, acked with its own token, and never
+/// forwarded. The relay-plane oracle (C8) reads a circle's routing from that
+/// journal line alone, so a payload dropped or rewritten on the way in would
+/// leave the circle undeclared, and one forwarded would put a harness frame in
+/// front of the relay. Same echo upstream and ordered barrier as case C.
+async fn case_routing_declaration() -> Case {
+    const TOKEN: &str = "HAVEN_WIRE_ROUTING:1";
+    let declaration = format!(
+        r#"["{SENTINEL_VERB}","{TOKEN}",{{"h":"{}","relays":["ws://127.0.0.1:7789"]}}]"#,
+        "c".repeat(64)
+    );
+
+    let dir = TempDir::new("routing")?;
+    let journal_path = dir.0.join("journal.ndjson");
+    let (upstream, echo) = start_echo_upstream().await?;
+    let journal = Arc::new(WireJournal::open(&journal_path));
+    let proxy = Proxy::start(
+        &ProxyConfig {
+            routes: vec![Route {
+                listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                upstream,
+            }],
+        },
+        journal,
+        Arc::new(MlsGroupIdSink::disabled()),
+    )
+    .await
+    .map_err(|e| format!("proxy start: {:?}", e.kind()))?;
+    let mut client = connect(proxy.local_addr()).await?;
+
+    send(&mut client, &declaration).await?;
+    let ack = recv_until(&mut client, "routing declaration ack", |v| {
+        verb_is(v, SENTINEL_ACK_VERB)
+    })
+    .await?;
+    send(&mut client, r#"["REQ","after",{"kinds":[1]}]"#).await?;
+    let seen = recv_collecting(&mut client, "the echo of the post-declaration REQ", |v| {
+        verb_is(v, "ECHO") && v[1].as_str().is_some_and(|t| t.contains("after"))
+    })
+    .await?;
+    if seen
+        .iter()
+        .any(|m| m.contains("ECHO") && m.contains(SENTINEL_VERB))
+    {
+        return Err("the routing declaration was FORWARDED upstream".to_owned());
+    }
+    if ack[1] != TOKEN {
+        return Err("the ack did not echo the routing token".to_owned());
+    }
+
+    let lines = read_journal(&journal_path, 4).await?;
+    let sent: Value = serde_json::from_str(&declaration)
+        .map_err(|_| "the declaration fixture is not JSON".to_owned())?;
+    let line = find_verb(&lines, "c2r", SENTINEL_VERB)
+        .ok_or_else(|| "the routing declaration is not in the journal".to_owned())?;
+    if line["frame"] != sent {
+        return Err("the routing declaration was not journalled verbatim".to_owned());
+    }
+    if line["wire_seq"].as_u64() != ack[2].as_u64() {
+        return Err("the acked wire_seq is not the declaration line's".to_owned());
     }
 
     close(client).await;

@@ -30,10 +30,8 @@ use haven_soak::oracle::{
 };
 use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
 use haven_soak::rc::Rc;
-use haven_soak::relay::SimRelay;
-use haven_soak::rig::{
-    Change, DeviceTag, PublishVerdict, RelayPlane, RelayTag, RigError, SimWorld,
-};
+use haven_soak::relay::planes_for;
+use haven_soak::rig::{Change, DeviceTag, PublishVerdict, RelayPlane, RigError, SimWorld};
 use haven_soak::scenarios::registry;
 use haven_soak::timeline::{self, Timeline};
 
@@ -476,11 +474,14 @@ async fn drive_planned(cli: &Cli) -> Rc {
 // ---------------------------------------------------------------------------
 
 /// The world every self-test case runs over: two devices, one circle, one
-/// relay — the smallest world in which one peer can receive what another sent.
+/// location relay and the account relay their inboxes ride — the smallest
+/// world in which one peer can receive what another sent.
 const SELF_TEST_SHAPE: WorldShape = WorldShape {
     members: 2,
     circles: 1,
     relays: 1,
+    account_relays: 1,
+    profile_relays: 0,
 };
 
 /// The tick these cases derive their bounds at. A harness cadence, not a
@@ -519,6 +520,7 @@ async fn self_test_inner() -> Result<Rc, Refusal> {
     worst = fold_case("o6-staged-commit", case_o6(&logs).await?, worst);
     worst = fold_case("o5-unnamed-row", case_o5(&logs).await?, worst);
     worst = fold_case("floor-no-fault", case_floor(&logs).await?, worst);
+    worst = fold_case("o7-kind0-on-a-location-relay", case_o7(&logs).await?, worst);
     worst = fold_case("clean-world", case_clean(&logs).await?, worst);
 
     let verdict = worst.name();
@@ -546,11 +548,10 @@ fn fold_case(case: &str, as_declared: bool, worst: Rc) -> Rc {
 
 /// A world for one case.
 async fn self_test_world(logs: &SoakLogs) -> Result<RunWorld, Refusal> {
-    let relay = SimRelay::start(RelayTag::new(0)).await?;
     let world = SimWorld::build(
         &SELF_TEST_SHAPE,
         Schedule::new(Vec::new()),
-        vec![relay],
+        planes_for(&SELF_TEST_SHAPE).await?,
         Timeline::in_memory(),
         logs.clone(),
     )
@@ -723,6 +724,31 @@ async fn case_floor(logs: &SoakLogs) -> Result<bool, Refusal> {
     };
     let verdict = vacuity::grade(&floor, &observed);
     let as_declared = delivered == Verdict::Holds && verdict.rc() == Rc::Unusable;
+    teardown_then(world, as_declared).await
+}
+
+/// O7: a device's own kind 0, sent from its own endpoint to the circle's
+/// relay, which the matrix admits on a profile relay alone. The same world
+/// graded first holds, so the red is the plant's.
+async fn case_o7(logs: &SoakLogs) -> Result<bool, Refusal> {
+    let mut world = self_test_world(logs).await?;
+    let pairs = chain_pairs(&world);
+    let clean = Invariant::RelayPlaneContainment
+        .check(&mut world, &self_test_round(1, &pairs, &[]))
+        .await?;
+    let device = &world.devices()[0];
+    let profile = haven_core::profile::build_blank_metadata_event(&device.keys, None)
+        .map_err(|_| RigError::Core(haven_soak::rig::Step::Publish))?;
+    let location = world.relays()[0].url_for(device.tag).to_owned();
+    let _ = device.relays.publish_event(&profile, &[location]).await;
+    let planted = Invariant::RelayPlaneContainment
+        .check(&mut world, &self_test_round(2, &pairs, &[]))
+        .await?;
+    let as_declared = clean == Verdict::Holds
+        && matches!(
+            planted,
+            Verdict::Failed(haven_soak::oracle::Finding::PlaneCrossedEvent { row: "EV-0", .. })
+        );
     teardown_then(world, as_declared).await
 }
 
