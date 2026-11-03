@@ -512,9 +512,10 @@ cd "${HAVEN_DIR}"
 
 # --- Build ONCE. -------------------------------------------------------------
 # The .app must exist BEFORE the grant, because `simctl privacy grant` resolves
-# the bundle id against the simulator's installed apps. The delegated
-# `flutter test` below rebuilds incrementally from the same derived data, so
-# this costs one cold Xcode+Rust build for the lane rather than two.
+# the bundle id against the simulator's installed apps. The job's pre-build
+# step (prebuild-ios-app.sh) already made the cold Xcode+Rust build, so this one
+# is incremental, and so is the delegated `flutter test` below, from the same
+# derived data.
 #
 # The expected coordinates are baked in here AND forwarded to the delegated
 # build (below) from the same variables, so the seed and the assertion can never

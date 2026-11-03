@@ -606,9 +606,9 @@ cd "${HAVEN_DIR}"
 
 # --- Build ONCE. --------------------------------------------------------------
 # The .app is needed BEFORE the first run so the privacy grant has an installed
-# bundle to attach to. Each `flutter test` below rebuilds incrementally from the
-# same derived data, so this costs one cold Xcode+Rust build for the lane rather
-# than one per tier.
+# bundle to attach to. The job's pre-build step (prebuild-ios-app.sh) already
+# made the cold Xcode+Rust build, so this one is incremental, and so is each
+# `flutter test` below, from the same derived data.
 #
 # The build is deliberately NOT bounded here: a hung or failed build is
 # deterministic, and the caller's retry timeout is the backstop (same stance as

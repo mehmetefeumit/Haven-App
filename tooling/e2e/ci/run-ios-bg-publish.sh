@@ -488,8 +488,8 @@ readonly BG_LOG="/tmp/bg-publish-ios.log"
 readonly BGP_DRIVE_FLOOR=4
 
 # Handshake bounds. READY must appear after the delegated `flutter test`'s
-# incremental build (~2-4 min; the cold build happens in THIS script, before
-# the drive) plus install/launch/attach plus the in-test setup and P1 —
+# incremental build (~2-4 min; the cold build happens in the job's pre-build
+# step, prebuild-ios-app.sh) plus install/launch/attach plus the in-test setup and P1 —
 # ~10 min worst case measured against B7's phases, so 20 min is ~2x. The
 # ALWAYS job adds at most its 60 s confirmed-Always poll to P1, which the 2x
 # absorbs; a poll that actually burns 60 s has failed its assertion anyway.
@@ -2634,9 +2634,10 @@ cd "${HAVEN_DIR}"
 
 # --- Build ONCE. -------------------------------------------------------------
 # The .app must exist BEFORE the grant, because `simctl privacy grant`
-# resolves the bundle id against the simulator's installed apps. The
-# delegated `flutter test` below rebuilds incrementally from the same derived
-# data, so this costs one cold Xcode+Rust build for the lane rather than two.
+# resolves the bundle id against the simulator's installed apps. The job's
+# pre-build step (prebuild-ios-app.sh) already made the cold Xcode+Rust build,
+# so this one is incremental, and so is the delegated `flutter test` below,
+# from the same derived data.
 #
 # The build is deliberately NOT bounded here: a hung or failed build is
 # deterministic, and the caller's retry timeout is the backstop (the same

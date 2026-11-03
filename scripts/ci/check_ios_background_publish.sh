@@ -1547,8 +1547,9 @@ check_bg_publish_timeout_ladder() { # <ios_bg_publish_test.dart> <workflow yml>
   local drive="$1" workflow="$2"
   _lf=0
   # Fixed per-attempt cost the drive's Timeout does NOT cover, in minutes, as
-  # derived in the workflow's own timeout arithmetic: the cold Xcode + pods +
-  # aarch64-Rust build the wrapper performs before the drive (~15), `flutter
+  # derived in the workflow's own timeout arithmetic: the wrapper's Xcode + pods
+  # + aarch64-Rust build before the drive, priced cold (~15) though the job's
+  # pre-build step makes it incremental, `flutter
   # test`'s incremental rebuild (~3), install/grant/seed + launch/attach (~2)
   # and teardown (~2). Raising a drive Timeout by N minutes therefore costs
   # N minutes of that leg's retry deadline, and this is the sum that must

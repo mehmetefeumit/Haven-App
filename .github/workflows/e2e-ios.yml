@@ -94,6 +94,7 @@ jobs:
     # most the work no step cap bounds has taken:
     #                                                          poll / flag-on
     #   Build the runtime log scanner                            10
+    #   Pre-build the iOS app                                    35
     #   Build and start host-native relay                        15
     #   Build and start recording wire proxy                     20
     #   Boot iOS simulator                                       15
@@ -111,7 +112,7 @@ jobs:
     #     run 29548776682, whose Setup Flutter failed and which
     #     then sat 125 s past "Complete job" (unique in 5,131
     #     jobs); poll's worst is 4.733 (29367847488)              6
-    #                                          = 176 / 206 -> 180 / 210
+    #                                          = 211 / 241 -> 215 / 245
     # Measured to completion, not to the last step: which one GitHub's job
     # timer counts is not certain, and the stricter reading can only remove a
     # false result. It was 4.7 to the last step; that figure would leave a
@@ -120,7 +121,7 @@ jobs:
     # flag-on sum above this cap, and the poll cap sat at 130 against its own
     # 160.
     # job-uncapped-minutes: 5.4 (210 runs, worst 29548776682)
-    timeout-minutes: ${{ inputs.live_sync && 210 || 180 }}
+    timeout-minutes: ${{ inputs.live_sync && 245 || 215 }}
     env:
       # 7788 is the RECORDING PROXY, not the relay. The relay stays on 7777 and
       # the proxy forwards to it, so this one line is what puts every byte the
@@ -194,6 +195,17 @@ jobs:
       - name: Get Flutter dependencies
         working-directory: haven
         run: flutter pub get
+
+      # The cold app build, before anything is resident and outside the drive's
+      # retry attempt (tooling/e2e/ci/prebuild-ios-app.sh says why). 35 min
+      # clears the worst cold build measured inside an attempt with the
+      # simulator resident, 1649 s (this lane's flag-on job, CI run
+      # 41492770461). The background-mirror scenario reuses it as well.
+      - name: Pre-build the iOS app
+        timeout-minutes: 35
+        env:
+          HAVEN_LIVE_SYNC: ${{ inputs.live_sync }}
+        run: bash tooling/e2e/ci/prebuild-ios-app.sh integration_test/e2e/e2e_combined.dart
 
       # Build + start the relay BEFORE booting the simulator so the two
       # multi-GB build peaks (relay/cargo, then the Flutter+Rust app build)
@@ -300,15 +312,14 @@ jobs:
       # timeouts below are unchanged and remain the backstop — they still have
       # to cover the HEALTHY worst case, which the watchdog does not shorten.
       #
-      # The per-attempt timeout covers a COLD iOS build (Xcode + pod install +
-      # aarch64 Rust, ~15 min) PLUS the inner test. On the POLL path the inner
-      # test self-bounds at ~12 min, so 30 min/attempt is ample. FLAG-ON
+      # The per-attempt timeout was sized for a COLD iOS build (then ~15 min)
+      # PLUS the inner test, and is left at that size: the cold build now runs
+      # in the pre-build step above, so an attempt pays only its incremental
+      # rebuild, and the old cold-build share is headroom. On the POLL path the
+      # inner test self-bounds at ~12 min, so 30 min/attempt is ample. FLAG-ON
       # (live_sync=true) runs the 10 live-sync scenarios instead — a ~25 min
       # inner suite (measured run 29262791698 attempt 2: full 12-test suite in
-      # ~25.3 min). Cold build measured ~14 min (Xcode ~9.7 min + pods + aarch64
-      # Rust), so a cold attempt is ~39 min — 30 min DID time out attempt 1 on
-      # the cold build alone. The flag-on per-attempt is therefore widened to
-      # 45 min (~39 min measured + slack; 40 would leave only ~1 min). The step
+      # ~25.3 min), hence 45 min/attempt. The step
       # `timeout-minutes` MUST exceed max_attempts × timeout_minutes (flag-on:
       # 2 × 45 = 90) + slack, otherwise the outer step timeout fires mid-second
       # attempt and the retry buys nothing → flag-on step is 95 (poll keeps 65

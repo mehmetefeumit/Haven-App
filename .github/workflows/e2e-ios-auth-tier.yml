@@ -42,16 +42,17 @@ jobs:
     # The job cap must clear the SUM of the step caps: below it, a run whose
     # every step is still inside its own cap can die here, and a job-cap death
     # skips every `if: always()` diagnostic (e2e-android.yml states the rule).
-    # So: Build the runtime log scanner 10 + Boot iOS simulator 15 + the drive
-    # step 95 (2 x 45m retry + slack, derived there) + the most the work no
-    # step cap bounds has taken (the host-native relay build included; since
+    # So: Build the runtime log scanner 10 + Pre-build the iOS app 35 + Boot
+    # iOS simulator 15 + the drive step 95 (2 x 45m retry + slack, derived
+    # there) + the most the work no step cap bounds has taken (the
+    # host-native relay build included; since
     # 2026-09-12 the diagnostics step also runs two `log show` passes over the
     # archive and the secret scan, and since 0c the seal + identifier scan in
     # the runner and at the scan step, unmeasured yet: re-measure), 6.35 min
     # over 33 runs of this job (ci.yml, 2026-08-04..09-10; 1.7 of it Setup
-    # Flutter, run 33182048610) = 126.35 -> 130. At 125 that sum did not fit.
+    # Flutter, run 33182048610) = 161.35 -> 165.
     # job-uncapped-minutes: 6.35 (33 runs, worst 33182048610)
-    timeout-minutes: 130
+    timeout-minutes: 165
     env:
       HAVEN_E2E_RELAY: ws://localhost:7777
       FLUTTER_SUPPRESS_ANALYTICS: "true"
@@ -107,6 +108,14 @@ jobs:
         working-directory: haven
         run: flutter pub get
 
+      # The cold app build, before anything is resident and outside the drive's
+      # retry attempt (tooling/e2e/ci/prebuild-ios-app.sh says why). 35 min
+      # clears the worst cold build measured inside an attempt with the
+      # simulator resident, 1649 s (CI run 41492770461).
+      - name: Pre-build the iOS app
+        timeout-minutes: 35
+        run: bash tooling/e2e/ci/prebuild-ios-app.sh integration_test/b7_ios_auth_tier_test.dart
+
       # Build + start the relay BEFORE booting the simulator, so the two
       # multi-GB build peaks never coincide with a resident simulator (the same
       # build-before-boot discipline e2e-ios.yml and e2e-android.yml use).
@@ -130,9 +139,10 @@ jobs:
       # pre-first-test launch/attach stall). A genuine assertion failure — or a
       # failed discrimination gate — stops on attempt 1 with its own exit code.
       #
-      # 45 min/attempt covers a COLD run: one full Xcode+pods+aarch64-Rust build
-      # (~15 min, done ONCE by the harness) plus two incremental builds and two
-      # ~8 min drives. The step cap (95) must exceed max_attempts x
+      # 45 min/attempt was sized for a COLD run: one full Xcode+pods+aarch64-Rust
+      # build (then ~15 min, done ONCE by the harness) plus two incremental
+      # builds and two ~8 min drives. The pre-build step above now makes the
+      # harness's build incremental too; the cold-build share is headroom. The step cap (95) must exceed max_attempts x
       # timeout_minutes (2 x 45 = 90) plus slack, or the step reaper fires
       # mid-second-attempt and the retry buys nothing.
       #

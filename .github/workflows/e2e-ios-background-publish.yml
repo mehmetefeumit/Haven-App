@@ -337,6 +337,7 @@ jobs:
     #     cache restore, `flutter pub get`, and a cold `cargo build` of
     #     the host-native relay                                      <= 15m
     #   scanner build step cap                                          10m
+    #   pre-build step cap                                              35m
     #   boot step cap                                                   15m
     #   drive step cap                                       135m / poll 129m
     #   diagnostics + artifact upload, UNCAPPED: a `log collect` of a
@@ -351,7 +352,7 @@ jobs:
     #     killed a diagnostic would turn a green run red, which is the
     #     failure this whole ladder exists to avoid; and a job-cap death
     #     skips the upload, so nothing unscanned can be published  <= 10m
-    #                                                       = 185m / poll 179m
+    #                                                       = 220m / poll 214m
     # This was 155 while the same header sized setup at 10-15m, so by its own
     # numbers the worst case was 160-165m and the cap could fire first. The
     # drive step's own cap is still the bound that should fire on a wedged run;
@@ -362,7 +363,7 @@ jobs:
     # own inner bounds can never reach, which is the inoperative-bound shape C3
     # exists to name.
     # job-uncapped-minutes: 6.7 (19 runs, worst 34488512808)
-    timeout-minutes: ${{ matrix.live_sync == 'true' && 185 || 179 }}
+    timeout-minutes: ${{ matrix.live_sync == 'true' && 220 || 214 }}
     env:
       HAVEN_E2E_RELAY: ws://localhost:7777
       FLUTTER_SUPPRESS_ANALYTICS: "true"
@@ -439,6 +440,16 @@ jobs:
         working-directory: haven
         run: flutter pub get
 
+      # The cold app build, before anything is resident and outside the drive's
+      # retry attempt (tooling/e2e/ci/prebuild-ios-app.sh says why). 35 min
+      # clears the worst cold build measured inside an attempt with the
+      # simulator resident, 1649 s (CI run 41492770461). A plain step cap, not
+      # a retry: check_ios_background_publish.sh check 15 reads this file's
+      # first `timeout_minutes:` as the drive's.
+      - name: Pre-build the iOS app
+        timeout-minutes: 35
+        run: bash tooling/e2e/ci/prebuild-ios-app.sh integration_test/ios_bg_publish_test.dart
+
       # Build + start the relay BEFORE booting the simulator, so the two
       # multi-GB build peaks never coincide with a resident simulator (the
       # same build-before-boot discipline every other iOS lane uses).
@@ -471,7 +482,8 @@ jobs:
       # the same sources; the two must move together.
       #
       # Shared by every leg:
-      #   cold Xcode+pods+aarch64-Rust build   ~15m  (once, by the wrapper)
+      #   the wrapper's Xcode+pods+Rust build  ~15m  (priced cold: incremental
+      #     since the pre-build step, but the overhead check 15 pins stays)
       #   incremental rebuild in `flutter test` ~3m
       #   install/grant/seed + launch/attach    ~2m
       #   teardown                              ~2m               = 22m

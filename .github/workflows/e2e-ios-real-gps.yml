@@ -52,8 +52,8 @@ jobs:
     name: e2e_ios_real_gps
     runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
     # Envelope sized for a COLD first run: setup (~10-15m) + the scanner
-    # build's 10m ceiling + the boot step's 15m ceiling + the drive step's 75m
-    # ceiling (+ uncapped diagnostics, which since 2026-09-12 also run two
+    # build's 10m ceiling + the pre-build step's 35m ceiling + the boot step's
+    # 15m ceiling + the drive step's 75m ceiling (+ uncapped diagnostics, which since 2026-09-12 also run two
     # `log show` passes over the archive and the secret scan, and since 0c the
     # seal + identifier scan in the runner and at the scan step, unmeasured
     # yet: re-measure). The drive step is the real bound; this is the outer
@@ -61,7 +61,7 @@ jobs:
     # every `if: always()` diagnostic — the worst red there is
     # (scripts/ci/check_e2e_step_timeout_ordering.sh).
     # job-uncapped-minutes: 5.5 (33 runs, worst 32553078705)
-    timeout-minutes: 115
+    timeout-minutes: 150
     env:
       HAVEN_E2E_RELAY: ws://localhost:7777
       FLUTTER_SUPPRESS_ANALYTICS: "true"
@@ -142,6 +142,14 @@ jobs:
         working-directory: haven
         run: flutter pub get
 
+      # The cold app build, before anything is resident and outside the drive's
+      # retry attempt (tooling/e2e/ci/prebuild-ios-app.sh says why). 35 min
+      # clears the worst cold build measured inside an attempt with the
+      # simulator resident, 1649 s (CI run 41492770461).
+      - name: Pre-build the iOS app
+        timeout-minutes: 35
+        run: bash tooling/e2e/ci/prebuild-ios-app.sh integration_test/b4_ios_real_gps_test.dart
+
       # Build + start the relay BEFORE booting the simulator, so the two
       # multi-GB build peaks never coincide with a resident simulator.
       - name: Build and start host-native relay
@@ -165,9 +173,11 @@ jobs:
       # drive that exited 0 without printing its proof marker all stop on
       # attempt 1 with their own exit code.
       #
-      # 35 min/attempt covers a COLD run: one full Xcode+pods+aarch64-Rust build
-      # (~15 min, done ONCE by the harness), one incremental rebuild inside the
-      # delegated `flutter test`, and a single ~5 min drive. The step cap (75)
+      # 35 min/attempt was sized for a COLD run: one full Xcode+pods+aarch64-Rust
+      # build (then ~15 min, done ONCE by the harness), one incremental rebuild
+      # inside the delegated `flutter test`, and a single ~5 min drive. The
+      # pre-build step above now makes the harness's build incremental too; the
+      # cold-build share is headroom. The step cap (75)
       # must exceed max_attempts x timeout_minutes (2 x 35 = 70) plus slack, or
       # the step reaper fires mid-second-attempt and the retry buys nothing.
       #

@@ -240,9 +240,10 @@ spawn_ios_test() {
 # the deadline so a suite that started in the final poll window is never killed
 # as a stall.
 #
-# It deliberately does NOT bound the BUILD. A build legitimately takes 7-11 min
-# (measured) and a cold cache can take longer, and a hung or failed build is
-# deterministic — retrying it hides it for another ten minutes. So a build that
+# It deliberately does NOT bound the BUILD. The cold build is made before the
+# boot, under its own step cap, by prebuild-ios-app.sh (it took up to 27 min
+# inside an attempt, CI run 41492770461); the one here is incremental, and a
+# hung or failed build is deterministic — retrying it hides it. So a build that
 # never completes runs into the caller's attempt timeout with the verdict still
 # `unproven`, which the gate refuses to retry.
 run_ios_test_with_watchdog() {
@@ -1388,7 +1389,7 @@ readonly LOG_FILE="/tmp/flutter-ios-test.log"
 readonly REPO_ROOT="${SCRIPT_DIR}/../../.."
 readonly HAVEN_DIR="${REPO_ROOT}/haven"
 # Under HAVEN_LOGSCAN=true a profile the job DID state must be one the seal
-# knows; refused HERE, before a 15-minute build: a lane whose recorder is in
+# knows; refused HERE, before the build: a lane whose recorder is in
 # front of the relay but which is sealed as `host` searches for fewer needles
 # than the run declared, and `rules` scans for none. Unset is not refused —
 # scan_log_or_contain infers it from the recorder's own exports.
@@ -1416,7 +1417,7 @@ cd "${HAVEN_DIR}"
 # exit, and it has no input that could be told otherwise — so the refusal has to
 # live here, in the command it re-runs, keyed on the verdict the previous
 # attempt left behind. Placed FIRST so a refused attempt costs seconds rather
-# than another 10-minute Xcode build.
+# than another Xcode build.
 #
 # Fails closed: only an attempt that reached classification AND proved the one
 # admitted signature leaves `retryable`. Everything else — a genuine failure, a

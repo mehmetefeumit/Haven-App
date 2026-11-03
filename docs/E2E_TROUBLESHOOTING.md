@@ -1419,6 +1419,16 @@ the simulator or the runner is the suspect, not the commit. Any line of the form
 `HH:MM +N: <something other than loading>` after the build = a test ran, and
 whatever follows is the product's failure to explain.
 
+**Not this mode: the build ate the attempt.** Same timeout warning, same refusal,
+but `Xcode build done.` carries a cold build's duration (CI run 41492770461:
+1492 s, then the timeout 52 s later, before the watchdog's 300 s could pass), and
+the scan step then fails `META-FLOOR (rc 4)` because nothing was sealed. Every
+iOS job makes the cold build in its `Pre-build the iOS app` step
+(`tooling/e2e/ci/prebuild-ios-app.sh`), so the attempt's build should be
+incremental (~2-4 min). A cold-sized number there means that step stopped
+building what the attempt builds: check that its target and flags still match
+the attempt's build, and don't raise the attempt timeout.
+
 ## Failure mode 19 — B1 step 7: "not one publish in the window was delivery-driven"
 
 **Symptom.** Lane `E2E FGS Publish (Android)`, oracle step (7):
