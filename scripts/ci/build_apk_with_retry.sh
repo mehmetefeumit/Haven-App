@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
 # `flutter build apk` with a CLASSIFIED, BUDGETED retry. The ONE build site
-# every Gradle-backed lane goes through.
+# every Gradle-backed lane goes through. On CI it first installs and verifies
+# the Android NDK the build needs, under the same budget (see "The Android NDK"
+# below).
 #
 # ## The failure this exists for
 #
@@ -140,6 +142,15 @@
 #
 #   = B + 180 s  =  B + 3.0 min
 #
+# The NDK's attempts are charged to the same budget by the same rules, so this
+# is the bound with them included; the install that succeeds is part of B. On
+# CI since the ubuntu-26.04 image that install has MEASURED at most ~1 min,
+# which leaves every line of the table below inside its cap (e2e-flakiness-
+# stress is the tightest: 16.9 + 1 + 3 = 20.9 < 22). What ENFORCES it is only
+# NDK_ATTEMPT_SECS (5 min): a download five times slower than any measured
+# would still land, and would put that lane over its cap — the exposure Flutter's
+# own uncapped call already had, not one this script adds.
+#
 # On the path that ends RED the final attempt is a failure rather than a build,
 # so the same bound holds with that failure standing in for the last build. A
 # single Gradle invocation is bounded by the step's own `timeout-minutes` and by
@@ -177,7 +188,9 @@
 # Exit codes:
 #   0  the APK built (on some attempt)
 #   *  the build's own exit code, unchanged — a retry never rewrites it
-#   2  wrong arguments, or the self-test failed
+#   2  wrong arguments, the self-test failed, or (CI) the NDK cannot be
+#      provisioned for a reason that is this script's, not the network's
+#   3  (CI) the NDK did not install and verify within the attempts and budget
 
 set -euo pipefail
 
@@ -416,9 +429,160 @@ build_with_retry() {
 }
 
 # ---------------------------------------------------------------------------
+# The Android NDK, installed and verified before the first build (CI only).
+#
+# Flutter's Gradle plugin (3.47.9, FlutterPluginUtils.forceNdkDownload) runs
+# `sdkmanager --install ndk;<flutter.ndkVersion>` itself when the SDK does not
+# hold that version: once, judged by its exit code and a `source.properties`
+# marker, never retried. The ubuntu-26.04 runner image ships NDK 30 alone, so
+# since `ubuntu-latest` moved to it every Android build downloads the ~700 MB
+# NDK 28 that way, and in CI run 41546262596 one download arrived truncated
+# ("Error reading Zip content from a SeekableByteChannel"): the build died
+# before compiling anything, no test ran, and the classifier above rightly
+# found no dependency-resolution signature to retry.
+#
+# So the install happens here, ahead of Gradle, under this script's rules. An
+# attempt is graded by what landed on disk — that version's `source.properties`
+# naming exactly that revision, sdkmanager's `package.xml` (the marker cargokit
+# reads), and its clang running — never by sdkmanager's
+# exit code. A package that fails the grading is removed together with
+# sdkmanager's download cache before the next attempt (a kept archive would make
+# the retry an unzip of the same truncated bytes). Every failed attempt and
+# every pause is charged to the SAME budget as the Gradle retries, with the same
+# projection, so the worst case in the header holds for the step as a whole;
+# the install that succeeds is part of B, as it already was inside Gradle
+# (measured 15-60 s across the 15 jobs of run 41546262596 that made it). Once
+# the NDK verifies, Flutter finds it installed and makes no call of its own.
+#
+# CI only: a developer's SDK is theirs, and there Flutter installs what it needs
+# exactly as before.
+# ---------------------------------------------------------------------------
+
+# 5x the slowest healthy install measured (60 s): an attempt is cut only when it
+# is plainly stalled, never because a mirror is slow, since an attempt that long
+# also starts no second one (the projection). The self-test replaces the
+# function, not the constant, for the same reason build_now is a function.
+readonly NDK_ATTEMPT_SECS=300
+readonly NDK_PROBE_SECS=20
+readonly RC_NDK_FAILED=3
+ndk_attempt_secs() { printf '%s' "${NDK_ATTEMPT_SECS}"; }
+
+# ndk_required_version <flutter-root> <app build.gradle.kts> — the version
+# Flutter's plugin will ask for, read where it is defined. A source that moved
+# is refused rather than guessed at: provisioning the wrong version is a silent
+# no-op that hands the download back to Flutter's single unretried call.
+ndk_required_version() {
+  local ext="$1/packages/flutter_tools/gradle/src/main/kotlin/FlutterExtension.kt" app="$2" pins found
+  pins="$(grep -cE '^[[:space:]]*ndkVersion[[:space:]]*=[[:space:]]*flutter\.ndkVersion[[:space:]]*$' "${app}" 2>/dev/null || true)"
+  if [[ "${pins}" != "1" ]]; then
+    err "${app} does not set 'ndkVersion = flutter.ndkVersion' exactly once, so the"
+    err "NDK it builds with is not the one this script reads; teach ndk_required_version its source."
+    return 1
+  fi
+  found="$(sed -nE 's/^[[:space:]]*val ndkVersion: String = "([0-9]+\.[0-9]+\.[0-9]+)"[[:space:]]*$/\1/p' "${ext}" 2>/dev/null || true)"
+  if [[ ! "${found}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    err "cannot read flutter.ndkVersion from ${ext}: exactly one"
+    err "'val ndkVersion: String = \"<x.y.z>\"' line was expected, so Flutter has moved it."
+    return 1
+  fi
+  printf '%s' "${found}"
+}
+
+# ndk_verified <dir> <version> — the grading. Says on stderr why it failed.
+ndk_verified() {
+  local dir="$1" ver="$2" host
+  if [[ ! -f "${dir}/source.properties" ]]; then
+    err "  NDK ${ver}: no source.properties."
+    return 1
+  fi
+  if ! grep -qxE "Pkg\.Revision[[:space:]]*=[[:space:]]*${ver//./\\.}[[:space:]]*" "${dir}/source.properties"; then
+    err "  NDK ${ver}: source.properties names another revision."
+    return 1
+  fi
+  if [[ ! -f "${dir}/package.xml" ]]; then
+    err "  NDK ${ver}: no package.xml, which sdkmanager writes last."
+    return 1
+  fi
+  case "$(uname -s)" in
+    Linux) host=linux-x86_64 ;;
+    Darwin) host=darwin-x86_64 ;;
+    *) err "  NDK ${ver}: no NDK host toolchain for $(uname -s)."; return 1 ;;
+  esac
+  if ! timeout "${NDK_PROBE_SECS}" "${dir}/toolchains/llvm/prebuilt/${host}/bin/clang" --version >/dev/null 2>&1; then
+    err "  NDK ${ver}: its clang is missing or does not run."
+    return 1
+  fi
+  return 0
+}
+
+# provision_ndk <flutter-root> <sdk-root> <app build.gradle.kts>
+provision_ndk() {
+  local flutter_root="$1" sdk="$2" app="$3" ver dir sdkmanager attempt=1 rc started elapsed spent backoff out
+  if [[ -z "${flutter_root}" ]]; then
+    printf '::error::FLUTTER_ROOT is not set, so the NDK version Flutter builds with cannot be read — this script is broken, not the lane.\n' >&2
+    return "${RC_BROKEN}"
+  fi
+  ver="$(ndk_required_version "${flutter_root}" "${app}")" || return "${RC_BROKEN}"
+  if [[ -z "${sdk}" || ! -d "${sdk}" ]]; then
+    printf '::error::neither ANDROID_HOME nor ANDROID_SDK_ROOT names an SDK directory, so NDK %s cannot be provisioned — this script is broken, not the lane.\n' "${ver}" >&2
+    return "${RC_BROKEN}"
+  fi
+  dir="${sdk}/ndk/${ver}"
+  if ndk_verified "${dir}" "${ver}" 2>/dev/null; then
+    log "NDK ${ver} is installed and verified."
+    return 0
+  fi
+  sdkmanager="${sdk}/cmdline-tools/latest/bin/sdkmanager"
+  if [[ ! -x "${sdkmanager}" ]]; then
+    sdkmanager="$(command -v sdkmanager || true)"
+  fi
+  if [[ -z "${sdkmanager}" || ! -x "${sdkmanager}" ]]; then
+    printf '::error::no executable sdkmanager under the SDK root or on PATH, so NDK %s cannot be provisioned — this script is broken, not the lane.\n' "${ver}" >&2
+    return "${RC_BROKEN}"
+  fi
+  # A copy that fails the grading is not an install sdkmanager will redo.
+  rm -rf "${dir}" "${sdk}/.downloadIntermediates" "${sdk}/.temp"
+
+  while :; do
+    out="$(mktemp)"
+    started="$(build_now)"
+    rc=0
+    timeout -k 10 "$(ndk_attempt_secs)" "${sdkmanager}" "--sdk_root=${sdk}" --install "ndk;${ver}" \
+      > "${out}" 2>&1 <<<"$(printf 'y\n%.0s' {1..16})" || rc=$?
+    elapsed=$(( $(build_now) - started ))
+    if ndk_verified "${dir}" "${ver}"; then
+      rm -f "${out}"
+      log "NDK ${ver} installed and verified on attempt ${attempt}/${MAX_ATTEMPTS} (sdkmanager rc ${rc})."
+      return 0
+    fi
+    err "NDK ${ver} did not verify on attempt ${attempt}/${MAX_ATTEMPTS} (sdkmanager rc ${rc}); its last lines:"
+    tr '\r' '\n' < "${out}" | awk 'NF' | tail -n 6 | sed 's/^/    | /' >&2
+    rm -f "${out}"
+    rm -rf "${dir}" "${sdk}/.downloadIntermediates" "${sdk}/.temp"
+    budget_charge "${elapsed}"
+    if (( attempt >= MAX_ATTEMPTS )); then
+      break
+    fi
+    backoff="${BACKOFF_SECS[attempt - 1]}"
+    spent="$(budget_spent)"
+    if (( spent + backoff + elapsed > RETRY_BUDGET_SECS )); then
+      err "retry budget spent (${spent}s of ${RETRY_BUDGET_SECS}s used by this job; the next"
+      err "attempt is projected at ${elapsed}s plus a ${backoff}s pause) — not starting another."
+      break
+    fi
+    log "waiting ${backoff}s before NDK attempt $(( attempt + 1 ))/${MAX_ATTEMPTS}."
+    budget_charge "${backoff}"
+    build_sleep "${backoff}"
+    attempt=$(( attempt + 1 ))
+  done
+  printf '::error::the Android NDK %s that Flutter builds with could not be installed and verified after %s attempt(s). This is INFRASTRUCTURE, not a product failure: no APK was built and no test ran in this job.\n' "${ver}" "${attempt}" >&2
+  return "${RC_NDK_FAILED}"
+}
+
+# ---------------------------------------------------------------------------
 # Self-test: hermetic. A fake `flutter` on PATH, no network, no real waiting.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=16
+readonly SELF_TEST_FIXTURES=26
 
 # The verbatim Gradle output of CI run 35622556197 job 106414462454. Fixtures
 # assert against what the runner actually printed, not a paraphrase of it: a
@@ -510,6 +674,96 @@ write_fake_flutter() {
 fake_invocations() { # <bindir>
   local f="$1/n"
   if [[ -r "${f}" ]]; then cat "${f}"; else printf '0'; fi
+}
+
+# The NDK fixtures' version. Any x.y.z serves, since the fixtures also write
+# Flutter's definition of it — except where the REAL app build file is read.
+readonly FAKE_NDK_VERSION="28.2.13676358"
+
+fake_ndk_host() { case "$(uname -s)" in Darwin) printf 'darwin-x86_64' ;; *) printf 'linux-x86_64' ;; esac; }
+
+# write_fake_ndk <dir> <revision> — the two things ndk_verified grades.
+write_fake_ndk() {
+  local dir="$1" rev="$2" clang
+  clang="${dir}/toolchains/llvm/prebuilt/$(fake_ndk_host)/bin/clang"
+  mkdir -p "$(dirname "${clang}")"
+  printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "${rev}" > "${dir}/source.properties"
+  printf '<package/>\n' > "${dir}/package.xml"
+  printf '#!/bin/sh\necho "Android clang version 19 (fake)"\n' > "${clang}"
+  chmod +x "${clang}"
+}
+
+# write_fake_flutter_root <root> <version>... — one `val ndkVersion` line per
+# version given, where Flutter 3.47.9 defines it.
+write_fake_flutter_root() {
+  local root="$1" f v
+  shift
+  f="${root}/packages/flutter_tools/gradle/src/main/kotlin/FlutterExtension.kt"
+  mkdir -p "$(dirname "${f}")"
+  {
+    printf 'open class FlutterExtension {\n'
+    for v in "$@"; do printf '    val ndkVersion: String = "%s"\n' "${v}"; done
+    printf '}\n'
+  } > "${f}"
+}
+
+# write_fake_sdkmanager <sdk-root> <mode>. Like the fake flutter it carries its
+# own control: any argv but the one provision_ndk issues is refused, so a call
+# that drifts reds the fixtures instead of passing against a yes-machine.
+write_fake_sdkmanager() {
+  local sdk="$1" mode="$2" bin="$1/cmdline-tools/latest/bin" host
+  host="$(fake_ndk_host)"
+  mkdir -p "${bin}"
+  cat > "${bin}/sdkmanager" <<EOF
+#!/usr/bin/env bash
+set -u
+sdk='${sdk}'; ver='${FAKE_NDK_VERSION}'; mode='${mode}'
+if [[ \$# -ne 3 || "\$1" != "--sdk_root=\${sdk}" || "\$2" != "--install" || "\$3" != "ndk;\${ver}" ]]; then
+  echo "fake-sdkmanager: refusing argv: \$*" >&2
+  exit 64
+fi
+echo x >> "\${sdk}/invocations"
+n="\$(wc -l < "\${sdk}/invocations" | tr -d ' ')"
+dir="\${sdk}/ndk/\${ver}"
+put() { # <with a working clang: yes|no>
+  mkdir -p "\${dir}/toolchains/llvm/prebuilt/${host}/bin"
+  printf 'Pkg.Desc = Android NDK\nPkg.Revision = %s\n' "\${ver}" > "\${dir}/source.properties"
+  printf '<package/>\n' > "\${dir}/package.xml"
+  if [[ "\$1" == yes ]]; then
+    printf '#!/bin/sh\necho "Android clang version 19 (fake)"\n' > "\${dir}/toolchains/llvm/prebuilt/${host}/bin/clang"
+    chmod +x "\${dir}/toolchains/llvm/prebuilt/${host}/bin/clang"
+  fi
+}
+case "\${mode}" in
+  # Like the real one, it takes a package directory that exists for installed.
+  ok) [[ -d "\${dir}" ]] || put yes ;;
+  # sdkmanager's own wording when a download fails, and an exit code of 0.
+  nothing) echo "Warning: Failed to download package!" ;;
+  # Run 41546262596's shape: the manifest lands, the toolchain does not, and the
+  # archive stays in the download cache. A retry over that cache unzips the same
+  # bytes, so it fails the same way; only a cleared cache lets it install.
+  truncated)
+    if (( n == 1 )) || [[ -e "\${sdk}/.downloadIntermediates/ndk.zip" ]]; then
+      mkdir -p "\${sdk}/.downloadIntermediates"
+      echo partial > "\${sdk}/.downloadIntermediates/ndk.zip"
+      put no
+      echo "Warning: An error occurred while preparing SDK package NDK (Side by side) \${ver}: Error reading Zip content from a SeekableByteChannel."
+      exit 1
+    fi
+    put yes ;;
+  hang)
+    echo started >> "\${sdk}/hang"
+    sleep 300
+    echo finished >> "\${sdk}/hang" ;;
+  *) echo "fake-sdkmanager: unknown mode \${mode}" >&2; exit 65 ;;
+esac
+exit 0
+EOF
+  chmod +x "${bin}/sdkmanager"
+}
+
+sdk_invocations() { # <sdk-root>
+  if [[ -r "$1/invocations" ]]; then wc -l < "$1/invocations" | tr -d ' '; else printf '0'; fi
 }
 
 run_self_test() {
@@ -708,7 +962,7 @@ java.io.IOException: No space left on device"
   ran=$(( ran + 1 ))
   bin="${tmp}/j"; write_fake_flutter "${bin}" ok
   rc=0
-  out="$(PATH="${bin}:${PATH}" HAVEN_BUILD_RETRY_STATE="${tmp}/j.budget" \
+  out="$(PATH="${bin}:${PATH}" GITHUB_ACTIONS= HAVEN_BUILD_RETRY_STATE="${tmp}/j.budget" \
          bash "${BASH_SOURCE[0]}" android-x64 --target=integration_test/x.dart \
          --dart-define=HAVEN_LIVE_SYNC=false 2>&1)" || rc=$?
   if (( rc != 0 )) || [[ "$(cat "${bin}/argv.log")" != "build apk --debug --target-platform android-x64 --target=integration_test/x.dart --dart-define=HAVEN_LIVE_SYNC=false" ]]; then
@@ -799,6 +1053,192 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
     _fail n "a spent budget left by another run must not be read, and this run must charge its own file; got rc=${rc}, $(fake_invocations "${bin}") invocation(s), this run's file $( [[ -r "${tmp}/n-temp/haven-build-retry-budget-111" ]] && echo present || echo ABSENT )"
   fi
 
+  # ---- The Android NDK (provision_ndk). One fake Flutter root and one app
+  #      build file serve every in-process fixture below; each fixture has its
+  #      own SDK root, budget file and pause log.
+  local sdk fr="${tmp}/flutter-root" app="${tmp}/app.gradle.kts" ndk_dir
+  write_fake_flutter_root "${fr}" "${FAKE_NDK_VERSION}"
+  printf 'android {\n    ndkVersion = flutter.ndkVersion\n}\n' > "${app}"
+  _ndk_dir() { printf '%s/ndk/%s' "$1" "${FAKE_NDK_VERSION}"; }
+
+  # (p1) An SDK without the NDK gets it in one sdkmanager call, verified, with
+  #      no pause and nothing charged to the budget.
+  ran=$(( ran + 1 ))
+  sdk="${tmp}/p1"; write_fake_sdkmanager "${sdk}" ok
+  rm -f "${tmp}/sleeps"
+  rc=0
+  out="$(export HAVEN_BUILD_RETRY_STATE="${tmp}/p1.budget"; \
+         provision_ndk "${fr}" "${sdk}" "${app}" 2>&1)" || rc=$?
+  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "1" ]] || (( $(_sleeps) != 0 )) \
+     || ! ndk_verified "$(_ndk_dir "${sdk}")" "${FAKE_NDK_VERSION}" 2>/dev/null \
+     || [[ -s "${tmp}/p1.budget" && "$(cat "${tmp}/p1.budget")" != "0" ]]; then
+    _fail p1 "a missing NDK must be installed and verified in one call with nothing charged; got rc=${rc}, $(sdk_invocations "${sdk}") call(s), $(_sleeps) pause(s): ${out}"
+  fi
+
+  # (p2) An NDK already installed and verifying costs no sdkmanager call at all.
+  ran=$(( ran + 1 ))
+  sdk="${tmp}/p2"; write_fake_sdkmanager "${sdk}" ok
+  write_fake_ndk "$(_ndk_dir "${sdk}")" "${FAKE_NDK_VERSION}"
+  rc=0
+  out="$(export HAVEN_BUILD_RETRY_STATE="${tmp}/p2.budget"; \
+         provision_ndk "${fr}" "${sdk}" "${app}" 2>&1)" || rc=$?
+  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "0" ]]; then
+    _fail p2 "a verified NDK must be left alone; got rc=${rc}, $(sdk_invocations "${sdk}") call(s)"
+  fi
+
+  # (p2b) …but only a COMPLETE one: a copy whose manifest and clang are there
+  #       without sdkmanager's package.xml — what a kill between its last two
+  #       writes leaves, and what cargokit would then reinstall unretried — is
+  #       reinstalled here instead.
+  ran=$(( ran + 1 ))
+  sdk="${tmp}/p2b"; write_fake_sdkmanager "${sdk}" ok
+  write_fake_ndk "$(_ndk_dir "${sdk}")" "${FAKE_NDK_VERSION}"
+  rm -f "$(_ndk_dir "${sdk}")/package.xml"
+  rc=0
+  out="$(export HAVEN_BUILD_RETRY_STATE="${tmp}/p2b.budget"; \
+         provision_ndk "${fr}" "${sdk}" "${app}" 2>&1)" || rc=$?
+  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "1" ]] \
+     || [[ ! -f "$(_ndk_dir "${sdk}")/package.xml" ]]; then
+    _fail p2b "an NDK without package.xml must be reinstalled; got rc=${rc}, $(sdk_invocations "${sdk}") call(s)"
+  fi
+
+  # (p3) Run 41546262596's failure: a truncated archive leaves the manifest
+  #      without the toolchain. It is caught by the grading despite the
+  #      manifest, retried after exactly one ladder pause, and the retry
+  #      installs only because the download cache was cleared (the fake fails
+  #      again over a kept archive). Both the attempt and the pause are charged.
+  ran=$(( ran + 1 ))
+  sdk="${tmp}/p3"; write_fake_sdkmanager "${sdk}" truncated
+  rm -f "${tmp}/sleeps"
+  rc=0
+  out="$(export HAVEN_BUILD_RETRY_STATE="${tmp}/p3.budget"; \
+         provision_ndk "${fr}" "${sdk}" "${app}" 2>&1)" || rc=$?
+  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "2" ]] || (( $(_sleeps) != 1 )) \
+     || [[ "$(head -1 "${tmp}/sleeps" 2>/dev/null)" != "${BACKOFF_SECS[0]}" ]] \
+     || (( $(cat "${tmp}/p3.budget" 2>/dev/null || echo 0) < BACKOFF_SECS[0] )) \
+     || [[ -e "${sdk}/.downloadIntermediates" ]] \
+     || [[ "${out}" != *"clang is missing or does not run"* ]] \
+     || [[ "${out}" != *"Error reading Zip content"* ]]; then
+    _fail p3 "a truncated NDK must be graded as failed, its cache cleared and the retry charged; got rc=${rc}, $(sdk_invocations "${sdk}") call(s), $(_sleeps) pause(s), budget '$(cat "${tmp}/p3.budget" 2>/dev/null)': ${out}"
+  fi
+
+  # (p4) A copy that names another revision is not the NDK asked for: it is
+  #      replaced, not accepted.
+  ran=$(( ran + 1 ))
+  sdk="${tmp}/p4"; write_fake_sdkmanager "${sdk}" ok
+  write_fake_ndk "$(_ndk_dir "${sdk}")" "27.0.12077973"
+  rc=0
+  out="$(export HAVEN_BUILD_RETRY_STATE="${tmp}/p4.budget"; \
+         provision_ndk "${fr}" "${sdk}" "${app}" 2>&1)" || rc=$?
+  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "1" ]] \
+     || ! ndk_verified "$(_ndk_dir "${sdk}")" "${FAKE_NDK_VERSION}" 2>/dev/null; then
+    _fail p4 "an NDK directory naming another revision must be reinstalled; got rc=${rc}, $(sdk_invocations "${sdk}") call(s)"
+  fi
+
+  # (p5) An sdkmanager that exits 0 having installed nothing fails CLOSED, at
+  #      exactly MAX_ATTEMPTS calls, with one annotation that names the version,
+  #      says INFRASTRUCTURE and that no test ran.
+  ran=$(( ran + 1 ))
+  sdk="${tmp}/p5"; write_fake_sdkmanager "${sdk}" nothing
+  rm -f "${tmp}/sleeps"
+  rc=0
+  out="$(export HAVEN_BUILD_RETRY_STATE="${tmp}/p5.budget"; \
+         provision_ndk "${fr}" "${sdk}" "${app}" 2>&1)" || rc=$?
+  if (( rc != RC_NDK_FAILED )) || [[ "$(sdk_invocations "${sdk}")" != "${MAX_ATTEMPTS}" ]] \
+     || [[ "$(grep -c '::error::' <<<"${out}")" != "1" ]] \
+     || [[ "${out}" != *"NDK ${FAKE_NDK_VERSION}"*"INFRASTRUCTURE"*"no test ran in this job"* ]]; then
+    _fail p5 "an NDK that never lands must fail with rc ${RC_NDK_FAILED} after ${MAX_ATTEMPTS} calls and one infrastructure annotation; got rc=${rc}, $(sdk_invocations "${sdk}") call(s): ${out}"
+  fi
+
+  # (p6) A HUNG sdkmanager is killed at the attempt bound, and an attempt that
+  #      took that long is not repeated: 150 s charged plus a 20 s pause plus a
+  #      projected 150 s is past the budget (as is anything up to the real
+  #      300 s bound). The bound is shortened by replacing
+  #      ndk_attempt_secs inside this fixture's subshell only; the clock says
+  #      the attempt took 150 s.
+  ran=$(( ran + 1 ))
+  sdk="${tmp}/p6"; write_fake_sdkmanager "${sdk}" hang
+  rm -f "${tmp}/sleeps"
+  rc=0
+  out="$(ndk_attempt_secs() { printf '1'; }
+         CLOCK_FILE="${tmp}/p6.clock"; printf '1000\n1150\n' > "${CLOCK_FILE}"
+         export HAVEN_BUILD_RETRY_STATE="${tmp}/p6.budget"
+         provision_ndk "${fr}" "${sdk}" "${app}" 2>&1)" || rc=$?
+  if (( rc != RC_NDK_FAILED )) || [[ "$(sdk_invocations "${sdk}")" != "1" ]] || (( $(_sleeps) != 0 )) \
+     || ! grep -q started "${sdk}/hang" || grep -q finished "${sdk}/hang" \
+     || [[ "${out}" != *"projected at 150s"* ]]; then
+    _fail p6 "a hung sdkmanager must be killed at the attempt bound and a 150 s attempt not repeated; got rc=${rc}, $(sdk_invocations "${sdk}") call(s), $(_sleeps) pause(s), hang log '$(tr '\n' ' ' < "${sdk}/hang" 2>/dev/null)': ${out}"
+  fi
+
+  # (p7) Inputs this script owns fail as BROKEN (rc ${RC_BROKEN}) before any
+  #      sdkmanager call: Flutter's definition missing or ambiguous, an app that
+  #      no longer takes flutter.ndkVersion, no Flutter root, no sdkmanager.
+  ran=$(( ran + 1 ))
+  local case_name case_fr case_app case_sdk tool
+  # A PATH holding only what provision_ndk runs before its sdkmanager lookup,
+  # so no sdkmanager the host happens to have can answer for the absent one.
+  mkdir -p "${tmp}/p7-path"
+  for tool in grep sed; do ln -sf "$(command -v "${tool}")" "${tmp}/p7-path/${tool}"; done
+  for case_name in no-definition two-definitions app-pins-its-own no-flutter-root no-sdkmanager; do
+    case_fr="${tmp}/p7-${case_name}-fr"; case_app="${app}"; case_sdk="${tmp}/p7-${case_name}"
+    mkdir -p "${case_sdk}"
+    case "${case_name}" in
+      no-definition) mkdir -p "${case_fr}" ;;
+      two-definitions) write_fake_flutter_root "${case_fr}" "${FAKE_NDK_VERSION}" "27.0.12077973" ;;
+      app-pins-its-own)
+        write_fake_flutter_root "${case_fr}" "${FAKE_NDK_VERSION}"
+        case_app="${tmp}/p7-app.gradle.kts"
+        printf 'android {\n    ndkVersion = "%s"\n}\n' "${FAKE_NDK_VERSION}" > "${case_app}" ;;
+      no-flutter-root) case_fr="" ;;
+      no-sdkmanager) write_fake_flutter_root "${case_fr}" "${FAKE_NDK_VERSION}" ;;
+    esac
+    [[ "${case_name}" == "no-sdkmanager" ]] || write_fake_sdkmanager "${case_sdk}" ok
+    rc=0
+    out="$(export PATH="${tmp}/p7-path" HAVEN_BUILD_RETRY_STATE="${tmp}/p7.budget"; \
+           provision_ndk "${case_fr}" "${case_sdk}" "${case_app}" 2>&1)" || rc=$?
+    if (( rc != RC_BROKEN )) || [[ "$(sdk_invocations "${case_sdk}")" != "0" ]]; then
+      _fail p7 "${case_name}: must fail as broken (rc ${RC_BROKEN}) with no sdkmanager call; got rc=${rc}, $(sdk_invocations "${case_sdk}") call(s): ${out}"
+    fi
+  done
+
+  # (p8) End to end on CI, as a SUBPROCESS against the REAL app build file:
+  #      the script provisions before it builds, and an NDK that cannot be
+  #      provisioned stops it with rc ${RC_NDK_FAILED} before Gradle is ever
+  #      run. Reading the real file is also the live check that the app still
+  #      takes flutter.ndkVersion, the one source ndk_required_version reads.
+  ran=$(( ran + 1 ))
+  sdk="${tmp}/p8-ok"; write_fake_sdkmanager "${sdk}" ok
+  bin="${tmp}/p8-ok-bin"; write_fake_flutter "${bin}" ok
+  rc=0
+  out="$(PATH="${bin}:${PATH}" GITHUB_ACTIONS=true FLUTTER_ROOT="${fr}" ANDROID_HOME="${sdk}" \
+         HAVEN_BUILD_RETRY_STATE="${tmp}/p8-ok.budget" \
+         bash "${BASH_SOURCE[0]}" android-x64 --dart-define=HAVEN_LIVE_SYNC=false 2>&1)" || rc=$?
+  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "1" ]] || [[ "$(fake_invocations "${bin}")" != "1" ]]; then
+    _fail p8 "on CI the script must provision the NDK and then build; got rc=${rc}, $(sdk_invocations "${sdk}") sdkmanager call(s), $(fake_invocations "${bin}") build(s): ${out}"
+  fi
+  sdk="${tmp}/p8-bad"; write_fake_sdkmanager "${sdk}" nothing
+  bin="${tmp}/p8-bad-bin"; write_fake_flutter "${bin}" ok
+  rc=0
+  out="$(PATH="${bin}:${PATH}" GITHUB_ACTIONS=true FLUTTER_ROOT="${fr}" ANDROID_HOME="${sdk}" \
+         HAVEN_BUILD_MAX_ATTEMPTS=1 HAVEN_BUILD_RETRY_STATE="${tmp}/p8-bad.budget" \
+         bash "${BASH_SOURCE[0]}" android-x64 --dart-define=HAVEN_LIVE_SYNC=false 2>&1)" || rc=$?
+  if (( rc != RC_NDK_FAILED )) || [[ "$(fake_invocations "${bin}")" != "0" ]]; then
+    _fail p8 "on CI an NDK that cannot be provisioned must stop the script with rc ${RC_NDK_FAILED} before any build; got rc=${rc}, $(fake_invocations "${bin}") build(s): ${out}"
+  fi
+
+  # (p9) Off CI the script leaves the SDK alone — a developer's SDK is theirs —
+  #      and builds, even with the NDK absent and an sdkmanager to hand.
+  ran=$(( ran + 1 ))
+  sdk="${tmp}/p9"; write_fake_sdkmanager "${sdk}" ok
+  bin="${tmp}/p9-bin"; write_fake_flutter "${bin}" ok
+  rc=0
+  out="$(PATH="${bin}:${PATH}" GITHUB_ACTIONS= FLUTTER_ROOT="${fr}" ANDROID_HOME="${sdk}" \
+         HAVEN_BUILD_RETRY_STATE="${tmp}/p9.budget" \
+         bash "${BASH_SOURCE[0]}" android-x64 --dart-define=HAVEN_LIVE_SYNC=false 2>&1)" || rc=$?
+  if (( rc != 0 )) || [[ "$(sdk_invocations "${sdk}")" != "0" ]] || [[ "$(fake_invocations "${bin}")" != "1" ]]; then
+    _fail p9 "off CI the script must build without touching the SDK; got rc=${rc}, $(sdk_invocations "${sdk}") sdkmanager call(s), $(fake_invocations "${bin}") build(s)"
+  fi
+
   # (h) Structural: one backoff per pause, and the header's worst case is the
   #     one the constants actually add up to. Both are claims the prose above
   #     makes, and neither is visible in any single fixture.
@@ -819,7 +1259,7 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a transient 429 is ridden out on the second attempt after exactly one ladder pause, and the fake proves it refuses both a non-build argv and a build missing the flags this script adds; a compile error and a disk exhaustion each fail once with their own exit code, their original output and the right verdict; a persistent 429 stops at exactly ${MAX_ATTEMPTS} attempts with one ::error:: saying INFRASTRUCTURE and that no test ran, the Gradle error still shown; a budget spent by an earlier build in the step starts no further attempt, and a retried build charges the shared budget while a clean one charges nothing; an attempt long enough that repeating it would not fit the budget is never started, while a short one under the same injected clock still is; every retriable signature is load-bearing on its own, this repo's real wrapped 403 is retried while a bare status line decides nothing, and a capacity signature beats a resolution one; the annotation names a rate limit only where a 429 says so, names the missing-coordinate shape as the ambiguity it is without reprinting the coordinate, and otherwise admits the cause is not knowable; a spent budget left by another run is not read; the script itself issues the build argv the lanes depend on; one backoff per pause, and the ladder fits the budget)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a transient 429 is ridden out on the second attempt after exactly one ladder pause, and the fake proves it refuses both a non-build argv and a build missing the flags this script adds; a compile error and a disk exhaustion each fail once with their own exit code, their original output and the right verdict; a persistent 429 stops at exactly ${MAX_ATTEMPTS} attempts with one ::error:: saying INFRASTRUCTURE and that no test ran, the Gradle error still shown; a budget spent by an earlier build in the step starts no further attempt, and a retried build charges the shared budget while a clean one charges nothing; an attempt long enough that repeating it would not fit the budget is never started, while a short one under the same injected clock still is; every retriable signature is load-bearing on its own, this repo's real wrapped 403 is retried while a bare status line decides nothing, and a capacity signature beats a resolution one; the annotation names a rate limit only where a 429 says so, names the missing-coordinate shape as the ambiguity it is without reprinting the coordinate, and otherwise admits the cause is not knowable; a spent budget left by another run is not read; the script itself issues the build argv the lanes depend on; on CI the NDK Flutter asks for is installed in one call when missing, left alone when present and complete and reinstalled when its package.xml is missing, a truncated install is graded failed despite its manifest, its download cache cleared and the charged retry installs it, another revision is replaced, a yes-machine sdkmanager fails closed at ${MAX_ATTEMPTS} calls with one INFRASTRUCTURE annotation, a hung one is killed at the attempt bound and not repeated past the budget, and every input this script owns fails as broken before any call; end to end the script provisions before it builds against the real app build file, stops before Gradle when the NDK cannot be had, and off CI never touches the SDK; one backoff per pause, and the ladder fits the budget)."
   return 0
 }
 
@@ -836,6 +1276,15 @@ fi
 
 readonly TARGET_PLATFORM="$1"
 shift
+
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  ndk_rc=0
+  provision_ndk "${FLUTTER_ROOT:-}" "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}" \
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/haven/android/app/build.gradle.kts" || ndk_rc=$?
+  if (( ndk_rc != 0 )); then
+    exit "${ndk_rc}"
+  fi
+fi
 
 build_rc=0
 build_with_retry flutter build apk --debug --target-platform "${TARGET_PLATFORM}" "$@" || build_rc=$?

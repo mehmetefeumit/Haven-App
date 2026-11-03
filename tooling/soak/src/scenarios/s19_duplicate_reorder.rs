@@ -142,13 +142,16 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
     // floor is graded against that.
     let canaries = match arm.label {
         "duplicate-replay" => duplicate(world, sender, receiver, plane).await?,
-        "reordered-pages" => reordered(world, sender, receiver, plane).await?,
+        "reordered-pages" => reordered(world, sender, receiver).await?,
         "cross-sub-eose" => cross_eose(world, sender, receiver, plane).await?,
         "commit-gap" => commit_gap(world, sender, receiver, &mut classified).await?,
         _ => return Err(RigError::UnknownTarget),
     };
 
-    apply(world, plane, Fault::Heal).await?;
+    // Every plane: the reordering arm faults them all.
+    for relay in world.relays_mut() {
+        relay.apply(Fault::Heal).await?;
+    }
     // The device whose delivery was broken SENDS first, and the chain is probed
     // both ways: a duplicate, a reorder or a buffered commit gap that left the
     // two devices on different branches shows up as a peer that cannot decrypt
@@ -261,11 +264,20 @@ async fn duplicate<T: TimelineSink, L: LogDrain>(
 /// subscription's own `EOSE`, which is what makes "the page" a well-defined
 /// thing here: a device runs several subscriptions over one socket, and a hold
 /// shared across them would be released by whichever ended first.
+///
+/// # Every plane reverses, because every plane serves the page
+///
+/// The circle routes through every plane, the device takes in every copy from
+/// each, and the arm reads each id's first arrival. With one plane reversed,
+/// another plane's page — forwarded as it is served, while the reversed one
+/// waits for its `EOSE` — raced it, and the arm graded which socket answered
+/// first (red in about half the two-relay nightly slots, every night from
+/// 2026-09-29). When every plane serves one page backwards, each id's first
+/// copy can arrive in one order only.
 async fn reordered<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     sender: DeviceTag,
     receiver: DeviceTag,
-    plane: RelayTag,
 ) -> Result<usize, RigError> {
     let circle_tag = world.circles().first().ok_or(RigError::ShapeMismatch)?.tag;
     // Paused first, so both locations are STORED rather than live-delivered:
@@ -279,14 +291,16 @@ async fn reordered<T: TimelineSink, L: LogDrain>(
         publish_probe(world, sender, circle_tag, second).await?.id,
     ];
 
-    apply(world, plane, Fault::ReversePages).await?;
-    // The order the relay ITSELF would serve the two in, which is not the order
-    // they were published: the whole arm runs inside one second, so both events
-    // carry the same `created_at` and the store's tie-break decides — and that
-    // is the event id, minted from a per-message ephemeral key and so different
-    // every run. Reading it here is what makes "backwards" a property of the
-    // fault rather than of a coin toss.
-    let served = served_order(world, plane, &published).await?;
+    for relay in world.relays_mut() {
+        relay.apply(Fault::ReversePages).await?;
+    }
+    // The order the relays THEMSELVES would serve the two in, which is not the
+    // order they were published: the whole arm runs inside one second, so both
+    // events carry the same `created_at` and the store's tie-break decides —
+    // and that is the event id, minted from a per-message ephemeral key and so
+    // different every run. Reading it here is what makes "backwards" a
+    // property of the fault rather than of a coin toss.
+    let served = served_order(world, &published).await?;
     let sender_hex = world.device(sender)?.pubkey_hex();
     let group_routing = *world.circle(circle_tag)?.nostr_group_id();
     let mut bus = world.device(receiver)?.engine()?.bus().subscribe();
@@ -315,13 +329,14 @@ async fn reordered<T: TimelineSink, L: LogDrain>(
     }
 
     let mut canaries = 0_usize;
-    // 1. The page really arrived backwards — the reverse of the order this
-    //    plane's own store would have served. Without this the arm would be a
+    // 1. The page really arrived backwards — the reverse of the order the
+    //    planes' own stores would have served. Without this the arm would be a
     //    plain catch-up test wearing a reordering label.
-    let mut backwards = served.clone();
-    backwards.reverse();
-    if served.len() == published.len() && arrived == backwards {
-        canaries += 1;
+    if let Some(mut backwards) = served {
+        backwards.reverse();
+        if arrived == backwards {
+            canaries += 1;
+        }
     }
     // 2. …and both locations were applied all the same.
     if order.len() == published.len() {
@@ -330,28 +345,31 @@ async fn reordered<T: TimelineSink, L: LogDrain>(
     Ok(canaries)
 }
 
-/// Where `published` sit in the order `plane`'s store would serve them, as
-/// indices into `published` itself.
+/// Where `published` sit in the order every plane's store would serve them,
+/// as indices into `published` itself — `None` unless every plane holds all
+/// of them in one order, the premise of a single arrival order.
 ///
-/// Read from the store rather than assumed: a page is served newest first and
+/// Read from the stores rather than assumed: a page is served newest first and
 /// ties are broken by event id, so the order events were published in is not
 /// the order they come back in.
 async fn served_order<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
-    plane: RelayTag,
     published: &[EventId],
-) -> Result<Vec<usize>, RigError> {
-    let page = world
-        .relays()
-        .iter()
-        .find(|candidate| candidate.tag() == plane)
-        .ok_or(RigError::UnknownTarget)?
-        .stored_page(nostr::Filter::new().ids(published.iter().copied()))
-        .await?;
-    Ok(page
-        .iter()
-        .filter_map(|event| published.iter().position(|id| *id == event.id))
-        .collect())
+) -> Result<Option<Vec<usize>>, RigError> {
+    let mut agreed: Option<Vec<usize>> = None;
+    for relay in world.relays() {
+        let order: Vec<usize> = relay
+            .stored_page(nostr::Filter::new().ids(published.iter().copied()))
+            .await?
+            .iter()
+            .filter_map(|event| published.iter().position(|id| *id == event.id))
+            .collect();
+        if order.len() != published.len() || agreed.as_ref().is_some_and(|seen| *seen != order) {
+            return Ok(None);
+        }
+        agreed = Some(order);
+    }
+    Ok(agreed)
 }
 
 /// An `EOSE` addressed to a subscription nobody opened changes nothing.

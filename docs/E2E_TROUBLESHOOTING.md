@@ -1259,6 +1259,31 @@ that differ from what that job's action steps declare. It also fails any
 emulator step whose `emulator-options` lacks `-no-window` (or is absent): the
 step verifies the headless emulator binary, so that is the one a lane must boot.
 
+## Failure mode 15b — "the Android NDK … could not be installed and verified" (infrastructure; no test ran)
+
+**Symptom.** Any Android build step — an E2E lane's APK build or `build-check.yml`
+— reds before Gradle starts, with one annotation naming the NDK version, saying
+INFRASTRUCTURE and that no test ran. Each rejected attempt above it says why
+(`no source.properties`, `names another revision`, or `its clang is missing or
+does not run`, `no package.xml`) followed by sdkmanager's last lines.
+
+**What it means.** The `ubuntu-26.04` runner image ships NDK 30 alone, and the
+build needs the version Flutter's Gradle plugin asks for (`flutter.ndkVersion`,
+28.2.13676358 on Flutter 3.47.9), so on CI `scripts/ci/build_apk_with_retry.sh`
+installs that version first and grades every attempt on disk. Before it did,
+Flutter's plugin made that install itself with one unretried `sdkmanager` call,
+and in CI run 41546262596 (`e2e-relay-customization`) a truncated download ended
+the build as `Error reading Zip content from a SeekableByteChannel` with nothing
+compiled. A red here is therefore a download that did not land after the
+retries the build budget allowed (they share its 180 s with the Gradle retries).
+Re-running is reasonable once; the same red in every Android job at once is an
+SDK-mirror outage.
+
+| rc | It means |
+|---|---|
+| 2 | the script is broken, not the lane: no `FLUTTER_ROOT`, no SDK root, no `sdkmanager`, Flutter's `val ndkVersion` line moved, or `haven/android/app/build.gradle.kts` stopped taking `ndkVersion = flutter.ndkVersion` — teach `ndk_required_version` the new source |
+| 3 | with that annotation: the NDK did not install and verify — infrastructure (without it, rc 3 is the build's own) |
+
 ## Failure mode 16 — `E2E Flakiness Stress` fails the same scenario every iteration
 
 `e2e-flakiness-stress.yml` is the one lane that drives `e2e_combined.dart` with
