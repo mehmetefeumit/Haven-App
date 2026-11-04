@@ -12,7 +12,7 @@ import 'package:haven/src/widgets/common/haven_logo.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// First onboarding screen: the hero (logo + tagline) merged with the three
-/// "what makes Haven different" value props on a single page.
+/// value props on a single page.
 ///
 /// Tapping "Get Started" flips the `intro_seen` flag via
 /// [OnboardingController.markIntroSeen]; the onboarding shell then advances to
@@ -67,18 +67,12 @@ class _IntroScreenState extends ConsumerState<IntroScreen> {
             style: theme.textTheme.titleLarge,
           ),
           const SizedBox(height: HavenSpacing.xs),
-          Text.rich(
-            TextSpan(children: _welcomeHeadlineSpans(l10n)),
+          Text(
+            l10n.onboardingWelcomeHeadline,
             textAlign: TextAlign.center,
             style: theme.textTheme.bodyMedium?.copyWith(
               color: colorScheme.onSurfaceVariant,
             ),
-          ),
-          const SizedBox(height: HavenSpacing.lg),
-          Text(
-            l10n.onboardingValuePropsTitle,
-            textAlign: TextAlign.center,
-            style: theme.textTheme.titleMedium,
           ),
           const SizedBox(height: HavenSpacing.md),
           _ValuePropCard(
@@ -117,24 +111,6 @@ class _IntroScreenState extends ConsumerState<IntroScreen> {
       ),
     );
   }
-}
-
-/// Splits the welcome headline into spans so its emphasised word
-/// (`onboardingWelcomeHeadlineEmphasis`) renders in bold while the rest
-/// inherits the surrounding style.
-///
-/// Falls back to the whole sentence as a single span if the emphasis word is
-/// somehow absent, so the copy is never dropped.
-List<TextSpan> _welcomeHeadlineSpans(AppLocalizations l10n) {
-  final full = l10n.onboardingWelcomeHeadline;
-  final word = l10n.onboardingWelcomeHeadlineEmphasis;
-  final start = full.indexOf(word);
-  if (start < 0) return [TextSpan(text: full)];
-  return [
-    TextSpan(text: full.substring(0, start)),
-    TextSpan(text: word, style: const TextStyle(fontWeight: FontWeight.bold)),
-    TextSpan(text: full.substring(start + word.length)),
-  ];
 }
 
 /// A compact value-prop card: leading icon tile, title, and body.

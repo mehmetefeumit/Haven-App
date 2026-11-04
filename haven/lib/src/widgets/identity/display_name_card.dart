@@ -280,11 +280,6 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          l10n.displayNameCardTitle,
-          style: Theme.of(context).textTheme.titleSmall,
-        ),
-        const SizedBox(height: HavenSpacing.md),
         Row(
           children: [
             Expanded(

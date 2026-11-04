@@ -102,23 +102,15 @@
   "@onboardingAppName": {
     "description": "The app name 'Haven' as it appears in the onboarding welcome hero. A brand name, intentionally English (not translated)."
   },
-  "onboardingWelcomeHeadline": "Share your location privately, only with those you want.",
+  "onboardingWelcomeHeadline": "Private and censorship-resistant location sharing.",
   "@onboardingWelcomeHeadline": {
-    "description": "Welcome hero subtitle beneath the app name. The word in onboardingWelcomeHeadlineEmphasis is rendered in bold and must remain an exact substring of this sentence."
-  },
-  "onboardingWelcomeHeadlineEmphasis": "only",
-  "@onboardingWelcomeHeadlineEmphasis": {
-    "description": "The single word emphasised (bold) within onboardingWelcomeHeadline. Must be an exact substring of that headline."
+    "description": "Welcome hero subtitle beneath the app name. 'Censorship-resistant' means no single party can block or switch off the sharing (the value prop below it explains this in plain words); translate it with the term a non-technical reader of the language recognises, not a literal calque. Identical in English to aboutHeroTagline, so keep the two identical in every locale too."
   },
   "onboardingWelcomeCta": "Get Started",
   "@onboardingWelcomeCta": {
     "description": "Primary call-to-action button on the onboarding welcome screen."
   },
 
-  "onboardingValuePropsTitle": "What makes Haven different",
-  "@onboardingValuePropsTitle": {
-    "description": "Title of the onboarding value-props screen."
-  },
   "onboardingValueProp1Title": "Only your circles can see you",
   "@onboardingValueProp1Title": {
     "description": "Headline of the first onboarding value-prop card."
@@ -131,30 +123,22 @@
   "@onboardingValueProp3Title": {
     "description": "Headline of the third onboarding value-prop card."
   },
-  "onboardingValueProp1Summary": "Encrypted on your device, so only the circles you choose can read it.",
+  "onboardingValueProp1Summary": "Encrypted on your device, so only the circles you choose can read it. Not even the relays that carry it can.",
   "@onboardingValueProp1Summary": {
-    "description": "Short one-line summary of the first value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling."
+    "description": "Two-sentence explanation of the first value prop, shown under its title on the onboarding intro screen, written for a reader with no technical background. Keep it short so the intro screen fits without scrolling. The second sentence claims only that relays cannot read the location updates; never widen it to 'cannot see where you are' or 'see nothing': every relay sees the device's network address, which itself reveals a rough location."
   },
-  "onboardingValueProp2Summary": "No central server. It runs on independent relays.",
+  "onboardingValueProp2Summary": "No central server. It runs on independent relays. Many people run them, so no single company can switch it off.",
   "@onboardingValueProp2Summary": {
-    "description": "Short one-line summary of the second value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling. An earlier version said the app 'runs on a relay network you choose', which is false: Haven picks a new circle's relays itself, and it also contacts profile and discovery relays the user never chose. Do not reintroduce a claim that the user chooses the relays; 'independent' (run by other people, not by Haven) is the claim that holds."
+    "description": "Three short sentences explaining the second value prop, shown under its title on the onboarding intro screen, written for a reader with no technical background. Keep it short so the intro screen fits without scrolling. An earlier version said the app 'runs on a relay network you choose', which is false: Haven picks a new circle's relays itself, and it also contacts profile and discovery relays the user never chose. Do not reintroduce a claim that the user chooses the relays; 'independent' (run by other people, not by Haven) is the claim that holds."
   },
-  "onboardingValueProp3Summary": "No email, phone, or sign-up. Your secret key never leaves your phone.",
+  "onboardingValueProp3Summary": "No email, phone, or sign-up. Your secret key never leaves your phone. Keep the anonymous name Haven picks, or choose your own.",
   "@onboardingValueProp3Summary": {
-    "description": "Short one-line summary of the third value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling. An earlier version claimed 'nothing links it to you', which over-claimed (the user's network address is visible to every relay, and the same key carries a renameable public profile). Keep the claim narrowed to key custody."
+    "description": "Three short sentences explaining the third value prop, shown under its title on the onboarding intro screen, written for a reader with no technical background. Keep it short so the intro screen fits without scrolling. An earlier version claimed 'nothing links it to you', which over-claimed (the user's network address is visible to every relay, and the same key carries a renameable public profile). Keep the claim narrowed to key custody and to the name being the user's choice; the third sentence refers to the random anonymous name onboarding pre-fills, and must not promise anonymity."
   },
 
   "onboardingCreateIdentityTitle": "Create your identity",
   "@onboardingCreateIdentityTitle": {
     "description": "Title of the onboarding create-identity screen."
-  },
-  "onboardingCreateIdentityBody": "Haven creates your keys on this phone. The secret one never leaves it.",
-  "@onboardingCreateIdentityBody": {
-    "description": "Body explaining what happens when an identity is created on the onboarding create-identity screen."
-  },
-  "onboardingCreateIdentityWarning": "If you lose this phone or delete the app, your identity is gone. Haven has no way to recover it for you.",
-  "@onboardingCreateIdentityWarning": {
-    "description": "Critical warning the user must understand on the onboarding create-identity screen: identity loss is unrecoverable."
   },
   "onboardingCreateIdentityCta": "Create My Identity",
   "@onboardingCreateIdentityCta": {
@@ -1795,7 +1779,7 @@
 
   "displayNameCardTitle": "Display Name",
   "@displayNameCardTitle": {
-    "description": "Section title of the display-name card on the Identity page. Reused as the display-name TextField's InputDecoration.labelText so the field's purpose is still announced by screen readers once text has been entered and the hint is no longer visible."
+    "description": "Label of the display-name text field, on the Identity page and on the onboarding create-identity screen. A persistent label, so the field's purpose is still announced by screen readers once text has been entered and the hint is no longer visible."
   },
   "displayNameCardLoadError": "Could not load your display name. Try again later.",
   "@displayNameCardLoadError": {

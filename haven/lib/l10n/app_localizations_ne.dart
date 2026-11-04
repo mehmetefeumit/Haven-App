@@ -96,16 +96,10 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get onboardingWelcomeHeadline =>
-      'तपाईंले चाहेका मानिसहरूसँग मात्र, गोप्य रूपमा आफ्नो स्थान साझा गर्नुहोस्।';
-
-  @override
-  String get onboardingWelcomeHeadlineEmphasis => 'मात्र';
+      'गोप्य र सेन्सरशिप-प्रतिरोधी स्थान साझेदारी।';
 
   @override
   String get onboardingWelcomeCta => 'सुरु गर्नुहोस्';
-
-  @override
-  String get onboardingValuePropsTitle => 'Haven लाई के कुराले फरक बनाउँछ';
 
   @override
   String get onboardingValueProp1Title =>
@@ -119,26 +113,18 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Summary =>
-      'तपाईंको यन्त्रमै इन्क्रिप्ट हुन्छ, त्यसैले तपाईंले छानेका सर्कलहरूले मात्र पढ्न सक्छन्।';
+      'तपाईंको यन्त्रमै इन्क्रिप्ट हुन्छ, त्यसैले तपाईंले छानेका सर्कलहरूले मात्र पढ्न सक्छन्। यसलाई बोक्ने रिलेहरूले पनि पढ्न सक्दैनन्।';
 
   @override
   String get onboardingValueProp2Summary =>
-      'कुनै केन्द्रीय सर्भर छैन। यो स्वतन्त्र रिलेहरूमा चल्छ।';
+      'कुनै केन्द्रीय सर्भर छैन। यो स्वतन्त्र रिलेहरूमा चल्छ। धेरै मानिसले ती चलाउँछन्, त्यसैले कुनै एउटा कम्पनीले यसलाई बन्द गर्न सक्दैन।';
 
   @override
   String get onboardingValueProp3Summary =>
-      'इमेल, फोन वा साइन-अप छैन। तपाईंको गोप्य कुञ्जी कहिल्यै फोनबाट बाहिर जाँदैन।';
+      'इमेल, फोन वा साइन-अप छैन। तपाईंको गोप्य कुञ्जी कहिल्यै फोनबाट बाहिर जाँदैन। Haven ले छानेको अज्ञात नाम राख्नुहोस्, वा आफ्नै नाम छान्नुहोस्।';
 
   @override
   String get onboardingCreateIdentityTitle => 'आफ्नो परिचय बनाउनुहोस्';
-
-  @override
-  String get onboardingCreateIdentityBody =>
-      'Haven ले तपाईंका कुञ्जी यही फोनमा बनाउँछ। गोप्य कुञ्जीले यो फोन कहिल्यै छोड्दैन।';
-
-  @override
-  String get onboardingCreateIdentityWarning =>
-      'यदि तपाईंले यो फोन हराउनुभयो वा एप मेटाउनुभयो भने, तपाईंको परिचय हराउँछ। Haven सँग यसलाई तपाईंका लागि पुनर्प्राप्त गर्ने कुनै उपाय छैन।';
 
   @override
   String get onboardingCreateIdentityCta => 'मेरो परिचय बनाउनुहोस्';

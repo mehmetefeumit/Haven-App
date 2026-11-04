@@ -94,16 +94,10 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get onboardingWelcomeHeadline =>
-      'Share your location privately, only with those you want.';
-
-  @override
-  String get onboardingWelcomeHeadlineEmphasis => 'only';
+      'Private and censorship-resistant location sharing.';
 
   @override
   String get onboardingWelcomeCta => 'Get Started';
-
-  @override
-  String get onboardingValuePropsTitle => 'What makes Haven different';
 
   @override
   String get onboardingValueProp1Title => 'Only your circles can see you';
@@ -116,26 +110,18 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Summary =>
-      'Encrypted on your device, so only the circles you choose can read it.';
+      'Encrypted on your device, so only the circles you choose can read it. Not even the relays that carry it can.';
 
   @override
   String get onboardingValueProp2Summary =>
-      'No central server. It runs on independent relays.';
+      'No central server. It runs on independent relays. Many people run them, so no single company can switch it off.';
 
   @override
   String get onboardingValueProp3Summary =>
-      'No email, phone, or sign-up. Your secret key never leaves your phone.';
+      'No email, phone, or sign-up. Your secret key never leaves your phone. Keep the anonymous name Haven picks, or choose your own.';
 
   @override
   String get onboardingCreateIdentityTitle => 'Create your identity';
-
-  @override
-  String get onboardingCreateIdentityBody =>
-      'Haven creates your keys on this phone. The secret one never leaves it.';
-
-  @override
-  String get onboardingCreateIdentityWarning =>
-      'If you lose this phone or delete the app, your identity is gone. Haven has no way to recover it for you.';
 
   @override
   String get onboardingCreateIdentityCta => 'Create My Identity';

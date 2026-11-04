@@ -34,7 +34,10 @@ void main() {
 
     expect(find.byType(HavenLogo), findsOneWidget);
     expect(find.text('Haven'), findsOneWidget);
-    expect(find.text('What makes Haven different'), findsOneWidget);
+    expect(
+      find.text('Private and censorship-resistant location sharing.'),
+      findsOneWidget,
+    );
     expect(find.text('Only your circles can see you'), findsOneWidget);
     expect(find.text('No one can shut it down'), findsOneWidget);
     expect(find.text('No account needed'), findsOneWidget);

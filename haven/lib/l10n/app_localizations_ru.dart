@@ -96,16 +96,10 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get onboardingWelcomeHeadline =>
-      'Делитесь своим местоположением приватно, только с теми, с кем хотите.';
-
-  @override
-  String get onboardingWelcomeHeadlineEmphasis => 'только';
+      'Приватный и устойчивый к цензуре обмен местоположением.';
 
   @override
   String get onboardingWelcomeCta => 'Начать';
-
-  @override
-  String get onboardingValuePropsTitle => 'Чем отличается Haven';
 
   @override
   String get onboardingValueProp1Title => 'Вас видят только ваши круги';
@@ -118,26 +112,18 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Summary =>
-      'Шифруется на устройстве — прочитают только выбранные вами круги.';
+      'Шифруется на устройстве — прочитают только выбранные вами круги. Даже реле, через которые оно проходит, прочитать его не могут.';
 
   @override
   String get onboardingValueProp2Summary =>
-      'Без центрального сервера. Работает через независимые реле.';
+      'Без центрального сервера. Работает через независимые реле. Их держат многие люди, поэтому ни одна компания не может всё отключить.';
 
   @override
   String get onboardingValueProp3Summary =>
-      'Ни почты, ни телефона, ни регистрации. Секретный ключ никогда не покидает ваш телефон.';
+      'Ни почты, ни телефона, ни регистрации. Секретный ключ никогда не покидает ваш телефон. Оставьте анонимное имя от Haven или выберите своё.';
 
   @override
   String get onboardingCreateIdentityTitle => 'Создайте свою личность';
-
-  @override
-  String get onboardingCreateIdentityBody =>
-      'Haven создаёт ваши ключи прямо на этом телефоне. Секретный ключ никогда его не покидает.';
-
-  @override
-  String get onboardingCreateIdentityWarning =>
-      'Если вы потеряете этот телефон или удалите приложение, ваша личность исчезнет. Haven не сможет её восстановить.';
 
   @override
   String get onboardingCreateIdentityCta => 'Создать личность';

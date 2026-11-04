@@ -126,6 +126,17 @@ void main() {
       },
     );
 
+    testWidgets('"Display Name" is shown once, as the field label', (
+      tester,
+    ) async {
+      final service = _FakeIdentityService(initialDisplayName: 'Alice');
+
+      await tester.pumpWidget(buildHarness(service: service));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Display Name'), findsOneWidget);
+    });
+
     testWidgets('opts the display-name field out of IME personalized learning', (
       tester,
     ) async {

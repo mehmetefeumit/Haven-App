@@ -246,29 +246,17 @@ abstract class AppLocalizations {
   /// **'Haven'**
   String get onboardingAppName;
 
-  /// Welcome hero subtitle beneath the app name. The word in onboardingWelcomeHeadlineEmphasis is rendered in bold and must remain an exact substring of this sentence.
+  /// Welcome hero subtitle beneath the app name. 'Censorship-resistant' means no single party can block or switch off the sharing (the value prop below it explains this in plain words); translate it with the term a non-technical reader of the language recognises, not a literal calque. Identical in English to aboutHeroTagline, so keep the two identical in every locale too.
   ///
   /// In en, this message translates to:
-  /// **'Share your location privately, only with those you want.'**
+  /// **'Private and censorship-resistant location sharing.'**
   String get onboardingWelcomeHeadline;
-
-  /// The single word emphasised (bold) within onboardingWelcomeHeadline. Must be an exact substring of that headline.
-  ///
-  /// In en, this message translates to:
-  /// **'only'**
-  String get onboardingWelcomeHeadlineEmphasis;
 
   /// Primary call-to-action button on the onboarding welcome screen.
   ///
   /// In en, this message translates to:
   /// **'Get Started'**
   String get onboardingWelcomeCta;
-
-  /// Title of the onboarding value-props screen.
-  ///
-  /// In en, this message translates to:
-  /// **'What makes Haven different'**
-  String get onboardingValuePropsTitle;
 
   /// Headline of the first onboarding value-prop card.
   ///
@@ -288,22 +276,22 @@ abstract class AppLocalizations {
   /// **'No account needed'**
   String get onboardingValueProp3Title;
 
-  /// Short one-line summary of the first value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling.
+  /// Two-sentence explanation of the first value prop, shown under its title on the onboarding intro screen, written for a reader with no technical background. Keep it short so the intro screen fits without scrolling. The second sentence claims only that relays cannot read the location updates; never widen it to 'cannot see where you are' or 'see nothing': every relay sees the device's network address, which itself reveals a rough location.
   ///
   /// In en, this message translates to:
-  /// **'Encrypted on your device, so only the circles you choose can read it.'**
+  /// **'Encrypted on your device, so only the circles you choose can read it. Not even the relays that carry it can.'**
   String get onboardingValueProp1Summary;
 
-  /// Short one-line summary of the second value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling. An earlier version said the app 'runs on a relay network you choose', which is false: Haven picks a new circle's relays itself, and it also contacts profile and discovery relays the user never chose. Do not reintroduce a claim that the user chooses the relays; 'independent' (run by other people, not by Haven) is the claim that holds.
+  /// Three short sentences explaining the second value prop, shown under its title on the onboarding intro screen, written for a reader with no technical background. Keep it short so the intro screen fits without scrolling. An earlier version said the app 'runs on a relay network you choose', which is false: Haven picks a new circle's relays itself, and it also contacts profile and discovery relays the user never chose. Do not reintroduce a claim that the user chooses the relays; 'independent' (run by other people, not by Haven) is the claim that holds.
   ///
   /// In en, this message translates to:
-  /// **'No central server. It runs on independent relays.'**
+  /// **'No central server. It runs on independent relays. Many people run them, so no single company can switch it off.'**
   String get onboardingValueProp2Summary;
 
-  /// Short one-line summary of the third value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling. An earlier version claimed 'nothing links it to you', which over-claimed (the user's network address is visible to every relay, and the same key carries a renameable public profile). Keep the claim narrowed to key custody.
+  /// Three short sentences explaining the third value prop, shown under its title on the onboarding intro screen, written for a reader with no technical background. Keep it short so the intro screen fits without scrolling. An earlier version claimed 'nothing links it to you', which over-claimed (the user's network address is visible to every relay, and the same key carries a renameable public profile). Keep the claim narrowed to key custody and to the name being the user's choice; the third sentence refers to the random anonymous name onboarding pre-fills, and must not promise anonymity.
   ///
   /// In en, this message translates to:
-  /// **'No email, phone, or sign-up. Your secret key never leaves your phone.'**
+  /// **'No email, phone, or sign-up. Your secret key never leaves your phone. Keep the anonymous name Haven picks, or choose your own.'**
   String get onboardingValueProp3Summary;
 
   /// Title of the onboarding create-identity screen.
@@ -311,18 +299,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Create your identity'**
   String get onboardingCreateIdentityTitle;
-
-  /// Body explaining what happens when an identity is created on the onboarding create-identity screen.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven creates your keys on this phone. The secret one never leaves it.'**
-  String get onboardingCreateIdentityBody;
-
-  /// Critical warning the user must understand on the onboarding create-identity screen: identity loss is unrecoverable.
-  ///
-  /// In en, this message translates to:
-  /// **'If you lose this phone or delete the app, your identity is gone. Haven has no way to recover it for you.'**
-  String get onboardingCreateIdentityWarning;
 
   /// Primary call-to-action on the onboarding create-identity screen.
   ///
@@ -2370,7 +2346,7 @@ abstract class AppLocalizations {
   /// **'Your public key works like a username that is safe to share. People scan this code, or paste your public key, to invite you to a circle. Sharing it cannot reveal where you are. Your display name and photo are already public, so this adds nothing.'**
   String get qrCodeExplainerUsername;
 
-  /// Section title of the display-name card on the Identity page. Reused as the display-name TextField's InputDecoration.labelText so the field's purpose is still announced by screen readers once text has been entered and the hint is no longer visible.
+  /// Label of the display-name text field, on the Identity page and on the onboarding create-identity screen. A persistent label, so the field's purpose is still announced by screen readers once text has been entered and the hint is no longer visible.
   ///
   /// In en, this message translates to:
   /// **'Display Name'**

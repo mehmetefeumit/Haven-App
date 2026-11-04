@@ -96,16 +96,10 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get onboardingWelcomeHeadline =>
-      'Partagez votre position en privé, uniquement avec les personnes de votre choix.';
-
-  @override
-  String get onboardingWelcomeHeadlineEmphasis => 'uniquement';
+      'Partage de position privé et résistant à la censure.';
 
   @override
   String get onboardingWelcomeCta => 'Commencer';
-
-  @override
-  String get onboardingValuePropsTitle => 'Ce qui distingue Haven';
 
   @override
   String get onboardingValueProp1Title => 'Seuls vos cercles peuvent vous voir';
@@ -118,26 +112,18 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Summary =>
-      'Chiffrée sur votre appareil : seuls les cercles que vous choisissez peuvent la lire.';
+      'Chiffrée sur votre appareil : seuls les cercles que vous choisissez peuvent la lire. Même les relais qui la transmettent en sont incapables.';
 
   @override
   String get onboardingValueProp2Summary =>
-      'Pas de serveur central. Haven s\'appuie sur des relais indépendants.';
+      'Pas de serveur central. Haven s\'appuie sur des relais indépendants, gérés par de nombreuses personnes : aucune entreprise ne peut tout éteindre.';
 
   @override
   String get onboardingValueProp3Summary =>
-      'Ni e-mail, ni téléphone, ni inscription. Votre clé secrète ne quitte jamais votre téléphone.';
+      'Ni e-mail, ni téléphone, ni inscription. Votre clé secrète ne quitte jamais votre téléphone. Gardez le nom anonyme choisi par Haven, ou choisissez le vôtre.';
 
   @override
   String get onboardingCreateIdentityTitle => 'Créez votre identité';
-
-  @override
-  String get onboardingCreateIdentityBody =>
-      'Haven crée vos clés sur ce téléphone. La clé secrète n\'en sort jamais.';
-
-  @override
-  String get onboardingCreateIdentityWarning =>
-      'Si vous perdez ce téléphone ou supprimez l\'application, votre identité est perdue. Haven n\'a aucun moyen de la récupérer pour vous.';
 
   @override
   String get onboardingCreateIdentityCta => 'Créer mon identité';

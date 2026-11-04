@@ -77,9 +77,7 @@ void main() {
   String prefilledName(WidgetTester tester) =>
       tester.widget<TextField>(find.byType(TextField)).controller!.text;
 
-  testWidgets('renders title, body, warning, disclosure, field, and CTA', (
-    tester,
-  ) async {
+  testWidgets('renders title, disclosure, field, and CTA', (tester) async {
     await pumpLocalized(
       tester,
       const CreateIdentityScreen(),
@@ -87,26 +85,34 @@ void main() {
     );
 
     expect(find.text('Create your identity'), findsOneWidget);
-    expect(
-      find.text(
-        'Haven creates your keys on this phone. The secret one never leaves '
-        'it.',
-      ),
-      findsOneWidget,
-    );
-    expect(
-      find.text(
-        'If you lose this phone or delete the app, your identity is gone. '
-        'Haven has no way to recover it for you.',
-      ),
-      findsOneWidget,
-    );
     // The public-profile disclosure must be present since publishing is
     // now mandatory and unskippable.
     expect(find.byType(PublicProfileNotice), findsOneWidget);
     expect(find.byType(TextField), findsOneWidget);
     expect(find.byKey(WidgetKeys.createIdentityCta), findsOneWidget);
     expect(find.text('Create My Identity'), findsOneWidget);
+  });
+
+  testWidgets('photo and name field match the Identity page', (tester) async {
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: _RecordingIdentityService()),
+    );
+
+    // IdentityPhotoHeader's avatar is HavenAvatarSize.xlarge (96dp) and
+    // DisplayNameCard is a Card around a dense outlined field labelled once.
+    expect(tester.getSize(find.byType(HavenAvatar)), const Size(96, 96));
+    expect(
+      find.ancestor(of: find.byType(TextField), matching: find.byType(Card)),
+      findsOneWidget,
+    );
+    final decoration = tester
+        .widget<TextField>(find.byType(TextField))
+        .decoration!;
+    expect(decoration.isDense, isTrue);
+    expect(decoration.border, isA<OutlineInputBorder>());
+    expect(find.text('Display Name'), findsOneWidget);
   });
 
   testWidgets('the display-name field is pre-filled with an anonymous name', (

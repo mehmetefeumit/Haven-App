@@ -94,16 +94,10 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get onboardingWelcomeHeadline =>
-      'اپنا مقام نجی طور پر صرف انہی لوگوں کے ساتھ شیئر کریں جنہیں آپ چاہتے ہیں۔';
-
-  @override
-  String get onboardingWelcomeHeadlineEmphasis => 'صرف';
+      'نجی اور سنسرشپ سے محفوظ مقام شیئرنگ۔';
 
   @override
   String get onboardingWelcomeCta => 'شروع کریں';
-
-  @override
-  String get onboardingValuePropsTitle => 'Haven کو مختلف کیا بناتا ہے';
 
   @override
   String get onboardingValueProp1Title =>
@@ -117,26 +111,18 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Summary =>
-      'آپ کے آلے پر خفیہ کردہ، تاکہ صرف آپ کے منتخب کردہ حلقے ہی اسے پڑھ سکیں۔';
+      'آپ کے آلے پر خفیہ کردہ، تاکہ صرف آپ کے منتخب کردہ حلقے ہی اسے پڑھ سکیں۔ اسے آگے پہنچانے والے ریلے بھی اسے نہیں پڑھ سکتے۔';
 
   @override
   String get onboardingValueProp2Summary =>
-      'کوئی مرکزی سرور نہیں۔ یہ آزاد ریلے پر چلتا ہے۔';
+      'کوئی مرکزی سرور نہیں۔ یہ آزاد ریلے پر چلتا ہے۔ بہت سے لوگ انہیں چلاتے ہیں، اس لیے کوئی ایک کمپنی اسے بند نہیں کر سکتی۔';
 
   @override
   String get onboardingValueProp3Summary =>
-      'نہ ای میل، نہ فون، نہ سائن اپ۔ آپ کی خفیہ کلید کبھی آپ کے فون سے باہر نہیں جاتی۔';
+      'نہ ای میل، نہ فون، نہ سائن اپ۔ آپ کی خفیہ کلید کبھی آپ کے فون سے باہر نہیں جاتی۔ Haven کا چنا ہوا گمنام نام رکھیں، یا اپنا خود چنیں۔';
 
   @override
   String get onboardingCreateIdentityTitle => 'اپنی شناخت بنائیں';
-
-  @override
-  String get onboardingCreateIdentityBody =>
-      'Haven آپ کی کلیدیں اسی فون پر بناتا ہے۔ خفیہ کلید کبھی اس سے باہر نہیں جاتی۔';
-
-  @override
-  String get onboardingCreateIdentityWarning =>
-      'اگر آپ یہ فون کھو دیں یا ایپ حذف کر دیں تو آپ کی شناخت ختم ہو جائے گی۔ Haven کے پاس اسے آپ کے لیے بحال کرنے کا کوئی طریقہ نہیں۔';
 
   @override
   String get onboardingCreateIdentityCta => 'میری شناخت بنائیں';

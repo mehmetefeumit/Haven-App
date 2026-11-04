@@ -94,16 +94,10 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get onboardingWelcomeHeadline =>
-      'Konumunuzu yalnızca istediğiniz kişilerle, gizlice paylaşın.';
-
-  @override
-  String get onboardingWelcomeHeadlineEmphasis => 'yalnızca';
+      'Gizli ve sansüre dirençli konum paylaşımı.';
 
   @override
   String get onboardingWelcomeCta => 'Başla';
-
-  @override
-  String get onboardingValuePropsTitle => 'Haven\'ı farklı kılan ne?';
 
   @override
   String get onboardingValueProp1Title =>
@@ -117,26 +111,18 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Summary =>
-      'Cihazınızda şifrelenir; yalnızca seçtiğiniz çevreler görebilir.';
+      'Cihazınızda şifrelenir; yalnızca seçtiğiniz çevreler okuyabilir. Onu taşıyan aktarıcılar bile okuyamaz.';
 
   @override
   String get onboardingValueProp2Summary =>
-      'Merkezi sunucu yok. Bağımsız aktarıcılar üzerinde çalışır.';
+      'Merkezi sunucu yok. Bağımsız aktarıcılar üzerinde çalışır. Onları pek çok kişi işletir, bu yüzden hiçbir şirket kapatamaz.';
 
   @override
   String get onboardingValueProp3Summary =>
-      'E-posta, telefon veya kayıt yok. Gizli anahtarınız telefonunuzdan hiç çıkmaz.';
+      'E-posta, telefon veya kayıt yok. Gizli anahtarınız telefonunuzdan hiç çıkmaz. Haven\'in seçtiği anonim adı koruyun ya da kendi adınızı seçin.';
 
   @override
   String get onboardingCreateIdentityTitle => 'Kimliğinizi oluşturun';
-
-  @override
-  String get onboardingCreateIdentityBody =>
-      'Haven anahtarlarınızı bu telefonda oluşturur. Gizli olan telefondan hiçbir zaman çıkmaz.';
-
-  @override
-  String get onboardingCreateIdentityWarning =>
-      'Bu telefonu kaybeder ya da uygulamayı silerseniz kimliğiniz tamamen kaybolur. Haven\'ın bunu sizin için kurtarmasının hiçbir yolu yoktur.';
 
   @override
   String get onboardingCreateIdentityCta => 'Kimliğimi Oluştur';

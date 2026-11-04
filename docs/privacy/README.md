@@ -335,7 +335,7 @@ exist:
 * **Rule 12's ARB sweep is opt-in by naming convention, and that is the widest
   hole in the completeness half.** The sweep greps `^privacy`, which is 86 of the
   ARB's 535 keys, while 47 of the 133 keys the manifest classifies do not start
-  with `privacy` — `onboardingValueProp*`, `onboardingCreateIdentityWarning`,
+  with `privacy` — `onboardingValueProp*`,
   `mapLocationSharingStopped*`, `locationSettingsIos*`, `clockSkewBody*`,
   `qrCodeExplainer*`, `identityAdvancedDeleteBody` and the rest. Those 47 are
   classified because somebody chose to classify them; nothing forces the next

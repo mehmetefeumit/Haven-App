@@ -94,16 +94,10 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get onboardingWelcomeHeadline =>
-      'अपना स्थान निजी तौर पर साझा करें, केवल उन्हीं के साथ जिन्हें आप चाहते हैं।';
-
-  @override
-  String get onboardingWelcomeHeadlineEmphasis => 'केवल';
+      'निजी और सेंसरशिप-प्रतिरोधी स्थान साझाकरण।';
 
   @override
   String get onboardingWelcomeCta => 'शुरू करें';
-
-  @override
-  String get onboardingValuePropsTitle => 'Haven को क्या अलग बनाता है';
 
   @override
   String get onboardingValueProp1Title => 'केवल आपके सर्कल आपको देख सकते हैं';
@@ -116,26 +110,18 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Summary =>
-      'आपके डिवाइस पर एन्क्रिप्टेड, ताकि इसे केवल आपके चुने हुए सर्कल ही पढ़ सकें।';
+      'आपके डिवाइस पर एन्क्रिप्टेड, ताकि इसे केवल आपके चुने हुए सर्कल ही पढ़ सकें। इसे ले जाने वाले रिले भी नहीं पढ़ सकते।';
 
   @override
   String get onboardingValueProp2Summary =>
-      'कोई केंद्रीय सर्वर नहीं। यह स्वतंत्र रिले पर चलता है।';
+      'कोई केंद्रीय सर्वर नहीं। यह स्वतंत्र रिले पर चलता है। इन्हें कई लोग चलाते हैं, इसलिए कोई एक कंपनी इसे बंद नहीं कर सकती।';
 
   @override
   String get onboardingValueProp3Summary =>
-      'न ईमेल, न फ़ोन, न साइन-अप। आपकी गुप्त कुंजी कभी आपके फ़ोन से बाहर नहीं जाती।';
+      'न ईमेल, न फ़ोन, न साइन-अप। आपकी गुप्त कुंजी कभी आपके फ़ोन से बाहर नहीं जाती। Haven का चुना बेनामी नाम रखें, या अपना चुनें।';
 
   @override
   String get onboardingCreateIdentityTitle => 'अपनी पहचान बनाएँ';
-
-  @override
-  String get onboardingCreateIdentityBody =>
-      'Haven आपकी कुंजियाँ इसी फ़ोन पर बनाता है। गुप्त कुंजी इसे कभी नहीं छोड़ती।';
-
-  @override
-  String get onboardingCreateIdentityWarning =>
-      'अगर यह फ़ोन खो गया या आपने ऐप हटा दिया, तो आपकी पहचान चली जाएगी। Haven के पास इसे वापस पाने का कोई तरीका नहीं है।';
 
   @override
   String get onboardingCreateIdentityCta => 'मेरी पहचान बनाएँ';

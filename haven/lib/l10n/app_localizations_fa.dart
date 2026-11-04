@@ -94,16 +94,10 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get onboardingWelcomeHeadline =>
-      'موقعیت مکانی‌ات را به‌صورت خصوصی، فقط با کسانی که می‌خواهی به اشتراک بگذار.';
-
-  @override
-  String get onboardingWelcomeHeadlineEmphasis => 'فقط';
+      'اشتراک موقعیت مکانی خصوصی و مقاوم در برابر سانسور.';
 
   @override
   String get onboardingWelcomeCta => 'شروع کن';
-
-  @override
-  String get onboardingValuePropsTitle => 'چه چیزی Haven را متفاوت می‌کند';
 
   @override
   String get onboardingValueProp1Title =>
@@ -117,26 +111,18 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Summary =>
-      'روی دستگاهت رمزگذاری می‌شود؛ فقط حلقه‌هایی که انتخاب می‌کنی می‌توانند آن را ببینند.';
+      'روی دستگاهت رمزگذاری می‌شود؛ فقط حلقه‌هایی که انتخاب می‌کنی می‌توانند آن را ببینند. حتی رله‌هایی که آن را منتقل می‌کنند هم نمی‌توانند بخوانندش.';
 
   @override
   String get onboardingValueProp2Summary =>
-      'بدون سرور مرکزی. روی رله‌های مستقل اجرا می‌شود.';
+      'بدون سرور مرکزی. روی رله‌های مستقل اجرا می‌شود. افراد زیادی آن‌ها را راه‌اندازی می‌کنند، پس هیچ شرکتی نمی‌تواند آن را خاموش کند.';
 
   @override
   String get onboardingValueProp3Summary =>
-      'بدون ایمیل، تلفن یا ثبت‌نام. کلید خصوصی‌ات هرگز از گوشی‌ات بیرون نمی‌رود.';
+      'بدون ایمیل، تلفن یا ثبت‌نام. کلید خصوصی‌ات هرگز از گوشی‌ات بیرون نمی‌رود. نام ناشناسی را که Haven انتخاب می‌کند نگه دار، یا نام خودت را بگذار.';
 
   @override
   String get onboardingCreateIdentityTitle => 'هویتت را بساز';
-
-  @override
-  String get onboardingCreateIdentityBody =>
-      'Haven کلیدهایت را روی همین گوشی می‌سازد. کلید خصوصی هرگز از آن بیرون نمی‌رود.';
-
-  @override
-  String get onboardingCreateIdentityWarning =>
-      'اگر این گوشی را گم کنی یا برنامه را پاک کنی، هویتت از بین می‌رود. Haven هیچ راهی برای بازیابی آن برایت ندارد.';
 
   @override
   String get onboardingCreateIdentityCta => 'هویتم را بساز';

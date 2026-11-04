@@ -92,17 +92,10 @@ class AppLocalizationsJa extends AppLocalizations {
   String get onboardingAppName => 'Haven';
 
   @override
-  String get onboardingWelcomeHeadline =>
-      'あなたの位置情報を、共有したい相手だけに、プライベートに共有しましょう。';
-
-  @override
-  String get onboardingWelcomeHeadlineEmphasis => 'だけ';
+  String get onboardingWelcomeHeadline => 'プライベートで、検閲に強い位置情報共有。';
 
   @override
   String get onboardingWelcomeCta => 'はじめる';
-
-  @override
-  String get onboardingValuePropsTitle => 'Haven が選ばれる理由';
 
   @override
   String get onboardingValueProp1Title => 'あなたを見られるのはサークルのメンバーだけ';
@@ -114,25 +107,19 @@ class AppLocalizationsJa extends AppLocalizations {
   String get onboardingValueProp3Title => 'アカウントは不要';
 
   @override
-  String get onboardingValueProp1Summary => '端末上で暗号化。あなたが選んだサークルだけが読めます。';
+  String get onboardingValueProp1Summary =>
+      '端末上で暗号化。あなたが選んだサークルだけが読めます。データを運ぶリレーにも読めません。';
 
   @override
-  String get onboardingValueProp2Summary => '中央サーバーなし。独立したリレーで動作します。';
+  String get onboardingValueProp2Summary =>
+      '中央サーバーなし。独立したリレーで動作します。多くの人が運営しているので、一つの会社が止めることはできません。';
 
   @override
   String get onboardingValueProp3Summary =>
-      'メール、電話番号、登録は不要。秘密鍵が端末から出ることはありません。';
+      'メール、電話番号、登録は不要。秘密鍵が端末から出ることはありません。Haven が選ぶ匿名の名前をそのまま使っても、好きな名前に変えても構いません。';
 
   @override
   String get onboardingCreateIdentityTitle => '識別情報を作成';
-
-  @override
-  String get onboardingCreateIdentityBody =>
-      'Haven はこの端末の中であなたの鍵を作成します。秘密鍵がこの端末を離れることはありません。';
-
-  @override
-  String get onboardingCreateIdentityWarning =>
-      'この端末を紛失したりアプリを削除したりすると、識別情報は失われます。Haven がそれを復元する方法はありません。';
 
   @override
   String get onboardingCreateIdentityCta => '識別情報を作成';

@@ -297,7 +297,6 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
 
     return OnboardingScaffold(
       stepNumber: kOnboardingStepCreateIdentity,
@@ -310,19 +309,9 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
             style: theme.textTheme.headlineSmall,
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: HavenSpacing.md),
-          Text(
-            l10n.onboardingCreateIdentityBody,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: colorScheme.onSurfaceVariant,
-            ),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: HavenSpacing.md),
-          _WarningCard(message: l10n.onboardingCreateIdentityWarning),
-          const SizedBox(height: HavenSpacing.md),
+          const SizedBox(height: HavenSpacing.base),
           const PublicProfileNotice(),
-          const SizedBox(height: HavenSpacing.sm),
+          const SizedBox(height: HavenSpacing.base),
           Center(
             child: _AvatarPicker(
               photoBytes: _pickedPhoto,
@@ -334,30 +323,36 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
             ),
           ),
           const SizedBox(height: HavenSpacing.sm),
-          TextField(
-            controller: _controller,
-            focusNode: _focusNode,
-            textCapitalization: TextCapitalization.words,
-            textInputAction: TextInputAction.done,
-            // Publishing this name is the user's choice; the keyboard's
-            // learned-word dictionary is a different recipient — outside
-            // Haven's storage and its logout wipe.
-            enableIMEPersonalizedLearning: false,
-            autofillHints: kNoAutofill,
-            onChanged: (_) => _userEdited = true,
-            // The consequential action requires an explicit CTA tap — the
-            // keyboard "done" key only dismisses the keyboard.
-            onSubmitted: (_) => FocusScope.of(context).unfocus(),
-            inputFormatters: [
-              LengthLimitingTextInputFormatter(64),
-              FilteringTextInputFormatter.singleLineFormatter,
-            ],
-            decoration: InputDecoration(
-              // Reuse the Identity page's "Display Name" label so onboarding
-              // adds no new localized copy (it exists in every locale already).
-              labelText: l10n.displayNameCardTitle,
-              hintText: l10n.onboardingDisplayNameHint,
-              border: const OutlineInputBorder(),
+          // Same card, padding and dense outlined field as the Identity
+          // page's DisplayNameCard, so the two read as one control.
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(HavenSpacing.base),
+              child: TextField(
+                controller: _controller,
+                focusNode: _focusNode,
+                textCapitalization: TextCapitalization.words,
+                textInputAction: TextInputAction.done,
+                // Publishing this name is the user's choice; the keyboard's
+                // learned-word dictionary is a different recipient — outside
+                // Haven's storage and its logout wipe.
+                enableIMEPersonalizedLearning: false,
+                autofillHints: kNoAutofill,
+                onChanged: (_) => _userEdited = true,
+                // The consequential action requires an explicit CTA tap — the
+                // keyboard "done" key only dismisses the keyboard.
+                onSubmitted: (_) => FocusScope.of(context).unfocus(),
+                inputFormatters: [
+                  LengthLimitingTextInputFormatter(64),
+                  FilteringTextInputFormatter.singleLineFormatter,
+                ],
+                decoration: InputDecoration(
+                  labelText: l10n.displayNameCardTitle,
+                  hintText: l10n.onboardingDisplayNameHint,
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
             ),
           ),
         ],
@@ -422,7 +417,7 @@ Future<void> _saveOnboardingProfileLocally(
 /// picked photo when set (with a "Remove" action), otherwise the name's
 /// initials behind a camera badge inviting the user to add one.
 ///
-/// The whole 60dp circle is the tap target (well above the 48dp WCAG minimum);
+/// The whole 96dp circle is the tap target (well above the 48dp WCAG minimum);
 /// the camera badge is decorative ([IgnorePointer]) so it never steals the tap.
 /// The caption/Remove row sits in a fixed-height slot so it neither shifts the
 /// field below when a photo is chosen nor breaks the page's no-scroll budget.
@@ -471,8 +466,8 @@ class _AvatarPicker extends StatelessWidget {
           excludeSemantics: true,
           onTap: onTap,
           child: SizedBox(
-            width: 60,
-            height: 60,
+            width: 96,
+            height: 96,
             child: Stack(
               children: [
                 InkWell(
@@ -483,7 +478,7 @@ class _AvatarPicker extends StatelessWidget {
                     builder: (context, _) => HavenAvatar(
                       imageBytes: bytes,
                       initials: avatarInitials(nameController.text),
-                      diameter: 60,
+                      size: HavenAvatarSize.xlarge,
                     ),
                   ),
                 ),
@@ -492,8 +487,8 @@ class _AvatarPicker extends StatelessWidget {
                   bottom: 0,
                   child: IgnorePointer(
                     child: Container(
-                      width: 24,
-                      height: 24,
+                      width: 28,
+                      height: 28,
                       alignment: Alignment.center,
                       decoration: BoxDecoration(
                         color: colorScheme.primary,
@@ -505,7 +500,7 @@ class _AvatarPicker extends StatelessWidget {
                       ),
                       child: Icon(
                         LucideIcons.camera,
-                        size: 13,
+                        size: 16,
                         color: colorScheme.onPrimary,
                       ),
                     ),
@@ -544,38 +539,6 @@ class _AvatarPicker extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-class _WarningCard extends StatelessWidget {
-  const _WarningCard({required this.message});
-
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.all(HavenSpacing.sm),
-      decoration: BoxDecoration(
-        color: HavenSecurityColors.warning.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(HavenSpacing.sm),
-        border: Border.all(
-          color: HavenSecurityColors.warning.withValues(alpha: 0.3),
-        ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Icon(
-            LucideIcons.triangleAlert,
-            color: HavenSecurityColors.warning,
-          ),
-          const SizedBox(width: HavenSpacing.sm),
-          Expanded(child: Text(message, style: theme.textTheme.bodyMedium)),
-        ],
-      ),
     );
   }
 }

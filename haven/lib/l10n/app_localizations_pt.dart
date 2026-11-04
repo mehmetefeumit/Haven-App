@@ -96,16 +96,10 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get onboardingWelcomeHeadline =>
-      'Compartilhe sua localização com privacidade, só com quem você quiser.';
-
-  @override
-  String get onboardingWelcomeHeadlineEmphasis => 'só';
+      'Compartilhamento de localização privado e resistente à censura.';
 
   @override
   String get onboardingWelcomeCta => 'Começar';
-
-  @override
-  String get onboardingValuePropsTitle => 'O que torna o Haven diferente';
 
   @override
   String get onboardingValueProp1Title => 'Só os seus círculos podem ver você';
@@ -118,26 +112,18 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Summary =>
-      'Criptografada no seu dispositivo, então só os círculos que você escolher podem lê-la.';
+      'Criptografada no seu dispositivo, então só os círculos que você escolher podem lê-la. Nem os relays que a transportam conseguem.';
 
   @override
   String get onboardingValueProp2Summary =>
-      'Sem servidor central. Funciona em relays independentes.';
+      'Sem servidor central. Funciona em relays independentes. Muita gente os mantém, então nenhuma empresa sozinha pode desligá-lo.';
 
   @override
   String get onboardingValueProp3Summary =>
-      'Sem e-mail, telefone ou cadastro. Sua chave secreta nunca sai do seu celular.';
+      'Sem e-mail, telefone ou cadastro. Sua chave secreta nunca sai do seu celular. Fique com o nome anônimo que o Haven escolher ou crie o seu.';
 
   @override
   String get onboardingCreateIdentityTitle => 'Crie sua identidade';
-
-  @override
-  String get onboardingCreateIdentityBody =>
-      'O Haven cria suas chaves neste telefone. A secreta nunca sai dele.';
-
-  @override
-  String get onboardingCreateIdentityWarning =>
-      'Se você perder este celular ou apagar o app, sua identidade desaparece. O Haven não tem como recuperá-la para você.';
 
   @override
   String get onboardingCreateIdentityCta => 'Criar minha identidade';

@@ -5111,7 +5111,6 @@
       "statement": "The 32-byte identity secret is persisted only in flutter_secure_storage (Keychain / Keystore), is read back per use rather than held, and no code path serializes it into a Nostr event, an HTTP body or a log line; this becomes false the moment a secret-bytes value is bound to a long-lived field or interpolated into any outbound payload.",
       "status": "enforced",
       "assertion_arb_keys": [
-        "onboardingCreateIdentityBody",
         "onboardingValueProp3Summary"
       ],
       "disclosure_arb_keys": [
@@ -5561,23 +5560,16 @@
       "title": "Losing the phone loses the identity",
       "statement": "There is no escrow, no server-side backup and no recovery flow: the secret exists only in the device keystore, so the only recovery path is a user-made nsec backup. This becomes false the moment any code path uploads or shares the secret for recovery.",
       "status": "ratcheted",
-      "residual": "Nothing fails if a key-escrow or cloud-backup path is added: the guarantee rests on INV-K-SECRET-KEY-NEVER-LEAVES-DEVICE's log/commit guards, which detect logging and committed secrets but not a deliberate upload. No test asserts the absence of a recovery endpoint.",
+      "residual": "Nothing fails if a key-escrow or cloud-backup path is added: the guarantee rests on INV-K-SECRET-KEY-NEVER-LEAVES-DEVICE's log/commit guards, which detect logging and committed secrets but not a deliberate upload. No test asserts the absence of a recovery endpoint. Nor is the fact disclosed: onboarding's warning (onboardingCreateIdentityWarning, 'If you lose this phone or delete the app, your identity is gone') was removed at the owner's direction on 2026-11-04, and the only remaining mention is the backup sentence in the delete-identity confirmation (identityAdvancedDeleteBody), which a user meets only when deleting.",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "onboardingCreateIdentityWarning"
-      ],
+      "disclosure_arb_keys": [],
       "symbols": [
         {
           "file": "haven/lib/src/services/identity_service.dart",
           "symbol": "deleteIdentity"
         }
       ],
-      "tests": [
-        {
-          "file": "haven/test/pages/onboarding/create_identity_screen_test.dart",
-          "name": "renders title, body, warning, disclosure, field, and CTA"
-        }
-      ],
+      "tests": [],
       "guards": []
     },
     {
@@ -6992,8 +6984,7 @@
       "residual": "No guard forbids adding an email/phone parameter to createIdentity or a PII field to Identity; the cited tests pin the model's current shape and the secret's absence from it, not the absence of a future field. The 'no sign-up' half rests on review.",
       "assertion_arb_keys": [
         "onboardingValueProp3Title",
-        "onboardingValueProp3Summary",
-        "onboardingWelcomeHeadline"
+        "onboardingValueProp3Summary"
       ],
       "disclosure_arb_keys": [],
       "symbols": [
@@ -7014,6 +7005,14 @@
         {
           "file": "haven/test/pages/onboarding/intro_screen_test.dart",
           "name": "renders the hero, all three value props, and the CTA"
+        },
+        {
+          "file": "haven/test/pages/onboarding/create_identity_screen_test.dart",
+          "name": "the display-name field is pre-filled with an anonymous name"
+        },
+        {
+          "file": "haven/test/pages/onboarding/create_identity_screen_test.dart",
+          "name": "an edited name is what gets saved and published"
         }
       ],
       "guards": []
@@ -7026,7 +7025,8 @@
       "assertion_arb_keys": [
         "onboardingValueProp1Title",
         "onboardingValueProp1Summary",
-        "fgsChannelDescription"
+        "fgsChannelDescription",
+        "onboardingWelcomeHeadline"
       ],
       "disclosure_arb_keys": [],
       "event_kinds": [
@@ -7055,12 +7055,13 @@
       "title": "Haven runs no server of its own for circle traffic",
       "statement": "Identity-plane publishes (the kind-10050 and kind-10002 lists, KeyPackages) target exactly the user's own stored relay lists; a circle's kind-445 goes to that circle's relays, which for a circle Haven creates without named relays are three third-party relays drawn from the curated location pool (PRODUCTION_LOCATION_RELAYS, INV-R-CIRCLE-RELAYS-FROM-LOCATION-POOL) and for any other circle the relays its creator chose; and the live-sync engine connects only to configured relays — each circle's relays and the inbox list — never a gossip-discovered one. There is no Haven-operated endpoint in the location path. This becomes false if any publisher, engine client or curated relay list acquires a first-party destination.",
       "status": "ratcheted",
-      "residual": "Nothing proves that no curated list holds a Haven-operated relay: the location and profile pools' operators are recorded when the pools are vetted, not tested. And the user chooses none of: the eight profile relays and six discovery relays (contacted unconditionally, not removable, INV-P-P3), the three location-pool relays Haven picks for each circle it creates (no setting edits them), the Blossom host (hardcoded to blossom.primal.net) and the tile provider (hardcoded to Stadia). The copy claims no such choice: onboardingValueProp2Summary was reworded on 2026-10-31 from 'It runs on a relay network you choose.' — false once Haven picks a circle's relays — to 'No central server. It runs on independent relays.', and relaySettingsBackendCaption names no choice either. Nothing fails if a curated list grows.",
+      "residual": "Nothing proves that no curated list holds a Haven-operated relay: the location and profile pools' operators are recorded when the pools are vetted, not tested. And the user chooses none of: the eight profile relays and six discovery relays (contacted unconditionally, not removable, INV-P-P3), the three location-pool relays Haven picks for each circle it creates (no setting edits them), the Blossom host (hardcoded to blossom.primal.net) and the tile provider (hardcoded to Stadia). The copy claims no such choice: onboardingValueProp2Summary was reworded on 2026-10-31 from 'It runs on a relay network you choose.' — false once Haven picks a circle's relays — to 'No central server. It runs on independent relays.' (extended on 2026-11-04 with 'Many people run them, so no single company can switch it off.', which names no choice either), and relaySettingsBackendCaption names no choice either. Nothing fails if a curated list grows.",
       "assertion_arb_keys": [
         "onboardingValueProp2Title",
         "onboardingValueProp2Summary",
         "relaySettingsBackendCaption",
-        "aboutHeroTagline"
+        "aboutHeroTagline",
+        "onboardingWelcomeHeadline"
       ],
       "disclosure_arb_keys": [],
       "tests": [

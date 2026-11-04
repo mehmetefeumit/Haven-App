@@ -95,16 +95,10 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get onboardingWelcomeHeadline =>
-      'Teile deinen Standort privat, nur mit Menschen, denen du vertraust.';
-
-  @override
-  String get onboardingWelcomeHeadlineEmphasis => 'nur';
+      'Privates und zensurresistentes Teilen des Standorts.';
 
   @override
   String get onboardingWelcomeCta => 'Loslegen';
-
-  @override
-  String get onboardingValuePropsTitle => 'Was Haven besonders macht';
 
   @override
   String get onboardingValueProp1Title => 'Nur deine Kreise können dich sehen';
@@ -117,26 +111,18 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Summary =>
-      'Auf deinem Gerät verschlüsselt – lesbar nur für die Kreise, die du auswählst.';
+      'Auf deinem Gerät verschlüsselt, damit nur die Kreise, die du auswählst, ihn lesen können. Auch die Relays, die ihn weiterleiten, können das nicht.';
 
   @override
   String get onboardingValueProp2Summary =>
-      'Kein zentraler Server. Es läuft über unabhängige Relays.';
+      'Kein zentraler Server. Es läuft über unabhängige Relays. Viele Menschen betreiben sie, deshalb kann kein einzelnes Unternehmen es abschalten.';
 
   @override
   String get onboardingValueProp3Summary =>
-      'Ohne E-Mail, Telefon oder Anmeldung. Dein geheimer Schlüssel verlässt dein Telefon nie.';
+      'Ohne E-Mail, Telefon oder Anmeldung. Dein geheimer Schlüssel verlässt dein Telefon nie. Behalte den anonymen Namen, den Haven auswählt, oder wähle einen eigenen.';
 
   @override
   String get onboardingCreateIdentityTitle => 'Erstelle deine Identität';
-
-  @override
-  String get onboardingCreateIdentityBody =>
-      'Haven erstellt deine Schlüssel auf diesem Handy. Der geheime verlässt es nie.';
-
-  @override
-  String get onboardingCreateIdentityWarning =>
-      'Wenn du dieses Telefon verlierst oder die App löschst, ist deine Identität verloren. Haven kann sie für dich nicht wiederherstellen.';
 
   @override
   String get onboardingCreateIdentityCta => 'Meine Identität erstellen';

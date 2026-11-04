@@ -97,17 +97,10 @@ class AppLocalizationsAr extends AppLocalizations {
   String get onboardingAppName => 'Haven';
 
   @override
-  String get onboardingWelcomeHeadline =>
-      'شارِك موقعك بخصوصية، فقط مع من تريد.';
-
-  @override
-  String get onboardingWelcomeHeadlineEmphasis => 'فقط';
+  String get onboardingWelcomeHeadline => 'مشاركة موقع خاصة ومقاوِمة للرقابة.';
 
   @override
   String get onboardingWelcomeCta => 'ابدأ الآن';
-
-  @override
-  String get onboardingValuePropsTitle => 'ما الذي يميّز Haven';
 
   @override
   String get onboardingValueProp1Title => 'دوائرك وحدها تستطيع رؤيتك';
@@ -120,26 +113,18 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Summary =>
-      'مُشفَّر على جهازك، فلا يستطيع قراءته سوى الدوائر التي تختارها.';
+      'مُشفَّر على جهازك، فلا يستطيع قراءته سوى الدوائر التي تختارها. وحتى المُرحِّلات التي تنقله لا تستطيع قراءته.';
 
   @override
   String get onboardingValueProp2Summary =>
-      'بلا خادم مركزي. يعمل على مُرحِّلات مستقلة.';
+      'بلا خادم مركزي. يعمل على مُرحِّلات مستقلة. يشغّلها أناس كثيرون، فلا تستطيع شركة واحدة إيقافه.';
 
   @override
   String get onboardingValueProp3Summary =>
-      'بلا بريد أو هاتف أو تسجيل. مفتاحك السري لا يغادر هاتفك أبدًا.';
+      'بلا بريد أو هاتف أو تسجيل. مفتاحك السري لا يغادر هاتفك أبدًا. احتفظ بالاسم المجهول الذي يختاره Haven، أو اختر اسمك.';
 
   @override
   String get onboardingCreateIdentityTitle => 'أنشئ هويتك';
-
-  @override
-  String get onboardingCreateIdentityBody =>
-      'يُنشئ Haven مفاتيحك على هذا الهاتف. ولا يغادره المفتاح السري أبدًا.';
-
-  @override
-  String get onboardingCreateIdentityWarning =>
-      'إن فقدت هذا الهاتف أو حذفت التطبيق، فستضيع هويتك. وليس لدى Haven أي وسيلة لاستعادتها لك.';
 
   @override
   String get onboardingCreateIdentityCta => 'أنشئ هويتي';
