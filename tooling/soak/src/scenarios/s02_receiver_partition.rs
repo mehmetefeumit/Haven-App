@@ -75,7 +75,7 @@ use haven_core::relay::live_sync::group_cursor_stream;
 use nostr::{Event, EventId};
 
 use crate::nemesis::types::{DropClass, Fault};
-use crate::oracle::vacuity::{ExpectationFloor, Observed};
+use crate::oracle::vacuity::{Canaries, ExpectationFloor, Observed};
 use crate::oracle::{bounds, Invariant, ProbeToken, Reach, Recovery};
 use crate::rig::{
     CircleTag, DeviceTag, LogDrain, PublishVerdict, RelayPlane, RigError, Step, TimelineSink,
@@ -262,12 +262,12 @@ async fn partitioned<T: TimelineSink, L: LogDrain>(
     witness: DeviceTag,
     victim: DeviceTag,
     circle_tag: CircleTag,
-) -> Result<usize, RigError> {
+) -> Result<Canaries, RigError> {
     let group = world.circle(circle_tag)?.mls_group_id().clone();
     let stream = group_cursor_stream(world.circle(circle_tag)?.group_id_hex());
     let bound = bounds::round_trip(Recovery::Undisturbed);
     let mut cursors = vec![cursor_of(world, victim, &stream)?];
-    let mut canaries = 0_usize;
+    let mut canaries = Canaries::new();
 
     // Phase 1: the application class is withheld from the victim on every
     // plane.
@@ -299,23 +299,21 @@ async fn partitioned<T: TimelineSink, L: LogDrain>(
     //    an absence read before a later frame crossed the same connection is
     //    "not yet", not "withheld". The victim's bus stays at its phase-1 count
     //    because the one fix that DID cross is sealed above its epoch.
-    if witness_took_a
-        && marker
-        && withheld_from(world, victim, &probe_a.id)
-        && deliveries_for(world.device(victim)?, circle_tag) == victim_before
-    {
-        canaries += 1;
-    }
+    canaries.check(
+        witness_took_a
+            && marker
+            && withheld_from(world, victim, &probe_a.id)
+            && deliveries_for(world.device(victim)?, circle_tag) == victim_before,
+    );
     // 2. The victim is strictly behind, the commit never crossed its endpoint
     //    (final, per the marker), and the witness kept receiving after it.
-    if ahead
-        && witness_took_b
-        && marker
-        && withheld_from(world, victim, &commit.id)
-        && epoch_of(world, victim, &group).await? < epoch_of(world, witness, &group).await?
-    {
-        canaries += 1;
-    }
+    canaries.check(
+        ahead
+            && witness_took_b
+            && marker
+            && withheld_from(world, victim, &commit.id)
+            && epoch_of(world, victim, &group).await? < epoch_of(world, witness, &group).await?,
+    );
     cursors.push(cursor_of(world, victim, &stream)?);
 
     // Heal, then pause and resume: the replay from the persisted cursor is the
@@ -332,15 +330,11 @@ async fn partitioned<T: TimelineSink, L: LogDrain>(
             && reached == epoch_of(world, publisher, &group).await?)
     })
     .await?;
-    if caught_up && has_current_secret(world, victim, &group).await? {
-        canaries += 1;
-    }
+    canaries.check(caught_up && has_current_secret(world, victim, &group).await?);
     cursors.push(cursor_of(world, victim, &stream)?);
     // 4. The persisted cursor never went backwards across the whole arm: not
     //    during the partition, and not on the resume that advanced it.
-    if monotone(&cursors) {
-        canaries += 1;
-    }
+    canaries.check(monotone(&cursors));
     Ok(canaries)
 }
 
@@ -352,10 +346,10 @@ async fn commit_class_only<T: TimelineSink, L: LogDrain>(
     witness: DeviceTag,
     victim: DeviceTag,
     circle_tag: CircleTag,
-) -> Result<usize, RigError> {
+) -> Result<Canaries, RigError> {
     let group = world.circle(circle_tag)?.mls_group_id().clone();
     let bound = bounds::round_trip(Recovery::Undisturbed);
-    let mut canaries = 0_usize;
+    let mut canaries = Canaries::new();
 
     aim(world, victim, Fault::DropClass(DropClass::Application)).await?;
     world.drain_buses();
@@ -377,25 +371,20 @@ async fn commit_class_only<T: TimelineSink, L: LogDrain>(
     // 1. The partition is real. Read AFTER the commit crossed the victim's
     //    endpoints: one connection's frames are written in order, so the fix's
     //    absence there is final rather than in flight.
-    if witness_took_a
-        && crossed
-        && withheld_from(world, victim, &probe_a.id)
-        && deliveries_for(world.device(victim)?, circle_tag) == victim_before
-    {
-        canaries += 1;
-    }
+    canaries.check(
+        witness_took_a
+            && crossed
+            && withheld_from(world, victim, &probe_a.id)
+            && deliveries_for(world.device(victim)?, circle_tag) == victim_before,
+    );
     // 2. The handshake arrived live and APPLIED: no resume, one epoch, and the
     //    epoch's own secret.
-    if live && crossed && has_current_secret(world, victim, &group).await? {
-        canaries += 1;
-    }
+    canaries.check(live && crossed && has_current_secret(world, victim, &group).await?);
     // 3. …and the witness kept receiving after the commit, while the
     //    partition still stood.
     let witness_before = deliveries_for(world.device(witness)?, circle_tag);
     let _probe_b = publish_fix(world, publisher, circle_tag, 2).await?;
-    if await_delivery(world, witness, circle_tag, witness_before, bound).await? {
-        canaries += 1;
-    }
+    canaries.check(await_delivery(world, witness, circle_tag, witness_before, bound).await?);
 
     aim(world, victim, Fault::Heal).await?;
     Ok(canaries)

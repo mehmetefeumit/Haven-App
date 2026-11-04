@@ -864,6 +864,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
                 epochs_crossed: 2,
                 deliveries_observed: NEEDLE_COUNT_U64,
                 canaries_caught: NEEDLE_COUNT,
+                canaries_missed: 0b101,
             }
         ),
     );
@@ -1208,6 +1209,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
                             epochs_crossed: 2,
                             deliveries_observed: NEEDLE_COUNT_U64,
                             canaries_caught: NEEDLE_COUNT,
+                            canaries_missed: 0b101,
                         },
                         elapsed: Duration::from_secs(12),
                         deadline: Duration::from_secs(90),

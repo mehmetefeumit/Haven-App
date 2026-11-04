@@ -1352,7 +1352,12 @@ A clean run carries the first seven and **no violation field at all**, so "is
 there a finding here?" is answerable without a rule. `invariant` is absent from a
 violation too when what broke was the arm's own expectation floor rather than one
 of the registry's promises, because a borrowed id would make a reader group a
-floor with an oracle.
+floor with an oracle. An arm that checks its canaries through
+`vacuity::Canaries` (S02 today; the others still count) ends its report line
+with the ordinals it missed — `missed=1,3` — because a `CanariesCaught` floor
+unmet by one of several instantaneous checks is otherwise unreadable: CI run
+41671663759 lost one of S02's four in a 2 s arm, and the count alone could not
+say which.
 
 **Why an allowlist and not a re-scan.** A scanner finds what it was told to look
 for. Re-scanning a composed issue body catches a structural shape — a long hex

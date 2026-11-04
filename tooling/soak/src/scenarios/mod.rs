@@ -724,7 +724,17 @@ impl fmt::Display for ScenarioReport {
             self.rc().name(),
             self.elapsed.as_secs(),
             self.deadline.as_secs()
-        )
+        )?;
+        // Named only when something is missing: the ordinals are what tell a
+        // red run's reader WHICH instantaneous check the arm lost.
+        if self.observed.canaries_missed != 0 {
+            write!(
+                f,
+                " missed={}",
+                crate::oracle::vacuity::render_missed(self.observed.canaries_missed)
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -1819,5 +1829,30 @@ mod tests {
     #[test]
     fn an_arm_that_stages_no_row_tolerates_no_gating_row() {
         const { assert!(NO_GATING_ROWS == 0) }
+    }
+
+    #[test]
+    fn a_report_names_the_canaries_the_arm_missed_and_only_those() {
+        use crate::oracle::vacuity::Observed;
+        use crate::oracle::{Invariant, Verdict};
+        let report = |canaries_missed: u32| super::ScenarioReport {
+            scenario: Scenario::ReceiverPartition,
+            arm: "partitioned-receiver",
+            graded: vec![(Invariant::LocationRoundTrip, Verdict::Holds)],
+            floor: Verdict::Holds,
+            observed: Observed {
+                faults_applied: 2,
+                epochs_crossed: 1,
+                deliveries_observed: 2,
+                canaries_caught: 2,
+                canaries_missed,
+            },
+            elapsed: Duration::from_secs(2),
+            deadline: Duration::from_secs(48),
+        };
+        let red = report(0b1010).to_string();
+        assert!(red.ends_with(" missed=2,4"), "{red}");
+        let clean = report(0).to_string();
+        assert!(!clean.contains("missed"), "{clean}");
     }
 }

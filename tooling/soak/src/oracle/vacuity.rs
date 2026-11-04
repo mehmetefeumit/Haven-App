@@ -63,6 +63,84 @@ pub struct Observed {
     pub deliveries_observed: u64,
     /// Deliberately induced conditions the arm observed.
     pub canaries_caught: usize,
+    /// The ordinals of the conditions it checked and did NOT observe, as a
+    /// bit set (bit `n - 1` for ordinal `n`); empty when the arm counts
+    /// without naming. The one thing a count cannot say about an unmet floor.
+    pub canaries_missed: u32,
+}
+
+/// An arm's canaries, each checked in turn: how many were caught, and which
+/// were not.
+///
+/// A count alone grades the floor; the ordinals are for the reader of a red
+/// run, who otherwise knows only that one of several instantaneous checks
+/// missed. Ordinals are the arm's own vocabulary, never a value of the world.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Canaries {
+    caught: usize,
+    missed: u32,
+    checked: u32,
+}
+
+impl Canaries {
+    /// No canary checked yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            caught: 0,
+            missed: 0,
+            checked: 0,
+        }
+    }
+
+    /// Records the next canary, in checking order, as caught or missed.
+    ///
+    /// Only the first 32 can be named; a later miss still counts.
+    pub const fn check(&mut self, caught: bool) {
+        self.checked = self.checked.saturating_add(1);
+        if caught {
+            self.caught += 1;
+        } else if self.checked <= u32::BITS {
+            self.missed |= 1 << (self.checked - 1);
+        }
+    }
+
+    /// How many were caught.
+    #[must_use]
+    pub const fn caught(&self) -> usize {
+        self.caught
+    }
+}
+
+impl Default for Canaries {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A count alone: the ordinals are unknown.
+impl From<usize> for Canaries {
+    fn from(caught: usize) -> Self {
+        Self {
+            caught,
+            missed: 0,
+            checked: 0,
+        }
+    }
+}
+
+/// The ordinals a missed-canary bit set names, ascending.
+fn missed_ordinals(missed: u32) -> impl Iterator<Item = u32> {
+    (1..=u32::BITS).filter(move |ordinal| missed & (1 << (ordinal - 1)) != 0)
+}
+
+/// Renders a missed-canary bit set as `1,3`.
+#[must_use]
+pub fn render_missed(missed: u32) -> String {
+    missed_ordinals(missed)
+        .map(|ordinal| ordinal.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 impl Observed {
@@ -86,8 +164,9 @@ impl Observed {
     /// [`RigError`] naming the read that failed.
     pub async fn measure<R: RelayPlane, T: TimelineSink, L: LogDrain>(
         world: &SimWorld<R, T, L>,
-        canaries_caught: usize,
+        canaries: impl Into<Canaries>,
     ) -> Result<Self, RigError> {
+        let canaries = canaries.into();
         let faults_applied = world.all_planes().map(RelayPlane::faults_applied).sum();
         let fingerprint = world.fingerprint().await?;
         let epochs_crossed = fingerprint
@@ -106,7 +185,8 @@ impl Observed {
             faults_applied,
             epochs_crossed,
             deliveries_observed,
-            canaries_caught,
+            canaries_caught: canaries.caught,
+            canaries_missed: canaries.missed,
         })
     }
 }
@@ -145,11 +225,13 @@ impl fmt::Debug for ExpectationFloor {
             self.epochs_crossed,
             self.deliveries_observed,
             self.canaries_caught,
+            None,
         )
     }
 }
 
-// Bucketed for the same reason as [`ExpectationFloor`].
+// Bucketed for the same reason as [`ExpectationFloor`]; the missed ordinals
+// are the arm's own vocabulary, so they are exact.
 impl fmt::Debug for Observed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         render(
@@ -159,6 +241,7 @@ impl fmt::Debug for Observed {
             self.epochs_crossed,
             self.deliveries_observed,
             self.canaries_caught,
+            Some(self.canaries_missed),
         )
     }
 }
@@ -171,16 +254,20 @@ fn render(
     epochs_crossed: u64,
     deliveries_observed: u64,
     canaries_caught: usize,
+    canaries_missed: Option<u32>,
 ) -> fmt::Result {
-    f.debug_struct(name)
-        .field("faults_applied", &sim_magnitude(faults_applied))
+    let mut out = f.debug_struct(name);
+    out.field("faults_applied", &sim_magnitude(faults_applied))
         .field("epochs_crossed", &epochs_crossed)
         .field(
             "deliveries_observed",
             &sim_magnitude(usize::try_from(deliveries_observed).unwrap_or(usize::MAX)),
         )
-        .field("canaries_caught", &sim_magnitude(canaries_caught))
-        .finish()
+        .field("canaries_caught", &sim_magnitude(canaries_caught));
+    if let Some(missed) = canaries_missed {
+        out.field("canaries_missed", &render_missed(missed));
+    }
+    out.finish()
 }
 
 #[cfg(test)]
@@ -210,7 +297,50 @@ mod tests {
             epochs_crossed: epochs,
             deliveries_observed: deliveries,
             canaries_caught: canaries,
+            canaries_missed: 0,
         }
+    }
+
+    #[test]
+    fn canaries_count_the_caught_and_name_the_missed_in_checking_order() {
+        let mut canaries = Canaries::new();
+        canaries.check(true);
+        canaries.check(false);
+        canaries.check(true);
+        canaries.check(false);
+        assert_eq!(canaries.caught(), 2);
+        assert_eq!(render_missed(canaries.missed), "2,4");
+        assert_eq!(
+            render_missed(Canaries::from(3).missed),
+            "",
+            "a count alone names nothing"
+        );
+        assert_eq!(Canaries::from(3).caught(), 3);
+        assert_eq!(render_missed(0), "");
+    }
+
+    #[test]
+    fn a_miss_past_the_thirty_second_canary_still_counts_against_the_floor() {
+        let mut canaries = Canaries::new();
+        for _ in 0..u32::BITS {
+            canaries.check(true);
+        }
+        canaries.check(false);
+        canaries.check(true);
+        assert_eq!(canaries.caught(), 33);
+        assert_eq!(render_missed(canaries.missed), "");
+    }
+
+    #[test]
+    fn observed_debug_redacts_magnitudes_and_names_the_missed_ordinals() {
+        let mut shown = observed(7, 2, 9, 1);
+        shown.canaries_missed = 0b101;
+        let rendered = format!("{shown:?}");
+        assert!(rendered.contains("canaries_missed: \"1,3\""), "{rendered}");
+        assert!(
+            !rendered.contains('7') && !rendered.contains('9'),
+            "{rendered}"
+        );
     }
 
     /// The smallest world a measurement can be taken over.
