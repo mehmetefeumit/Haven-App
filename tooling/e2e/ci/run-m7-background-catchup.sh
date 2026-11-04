@@ -335,6 +335,15 @@ run_self_test() {
     echo "SELF-TEST FAIL (wiring): a soft \`if [[ -x …\` scanner gate is in the real run" >&2
     fail=1
   fi
+  # No `adb wait-for-device` in the real run: it blocks until a device
+  # appears, and after the Phase-B guest reboot none may (the emulator itself
+  # exited on the reboot in CI run 41858798643), so one held the lane open to
+  # its 30 m deadline instead of failing in BOOT_TIMEOUT with the reason. Every
+  # wait for the device is a wall-clock poll whose reads fail at once.
+  if grep -qF 'wait-for-device' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (wiring): \`adb wait-for-device\` is in the real run; wait for the device with a bounded poll" >&2
+    fail=1
+  fi
   # The lane's floors reach the manifest only if the pre-seal runs before any
   # gate does: the host profile reuses whatever manifest is at the out path, so
   # a pre-seal moved below the EXIT trap would leave the policy defaults sealed
@@ -386,7 +395,7 @@ run_self_test() {
     echo "run-m7-background-catchup.sh: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-m7-background-catchup.sh: self-test passed (the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; echo_log_tail withholds a tail the gate refuses; the gate library is sourced, the EXIT trap gates LOG_DIR with the report outside the upload, every echo of a captured log goes through the gate first, no soft scanner gate, the manifest is sealed once with the lane's drive and relay floors before the trap is armed, and that drive floor stays within the lines flutter drive prints on the host)."
+  echo "run-m7-background-catchup.sh: self-test passed (the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; echo_log_tail withholds a tail the gate refuses; the gate library is sourced, the EXIT trap gates LOG_DIR with the report outside the upload, every echo of a captured log goes through the gate first, no soft scanner gate, no adb wait-for-device, the manifest is sealed once with the lane's drive and relay floors before the trap is armed, and that drive floor stays within the lines flutter drive prints on the host)."
   return 0
 }
 
@@ -548,7 +557,7 @@ parse_counter() {
 # deliberately reboots the guest in Phase B. Under that pressure the GH runner's
 # software-GPU emulator can drop its adb transport to 'offline': the guest is
 # often still alive, only the socket handshake was lost. `adb reconnect offline`
-# re-establishes it; wait-for-device + a sys.boot_completed poll then confirm the
+# re-establishes it; a bounded state + sys.boot_completed poll then confirms the
 # shell is actually serving again.
 #
 # Every job-discovery poll calls ensure_device_online FIRST, so a transient
@@ -561,6 +570,14 @@ device_state() {
   adb -s "${DEVICE}" get-state 2>/dev/null | tr -d '\r' || true
 }
 
+# Whether the emulator PROCESS is still here: a guest that never comes back
+# from the Phase-B reboot reads very differently when the emulator exited on
+# the reboot (CI run 41858798643: adb's console port refused afterwards) than
+# when the guest is wedged inside a live emulator.
+emulator_process_state() {
+  if pgrep -f 'qemu-system' >/dev/null 2>&1; then echo running; else echo gone; fi
+}
+
 # Returns 0 once the device is 'device' state AND booted; 1 if it stays
 # unreachable for DEVICE_ONLINE_TIMEOUT. Fast-returns when already online, so it
 # is cheap to call at the top of every poll iteration.
@@ -570,7 +587,6 @@ ensure_device_online() {
   local deadline=$(( SECONDS + DEVICE_ONLINE_TIMEOUT ))
   while (( SECONDS < deadline )); do
     adb reconnect offline >/dev/null 2>&1 || true
-    adb -s "${DEVICE}" wait-for-device >/dev/null 2>&1 || true
     if [[ "$(device_state)" == "device" ]] &&
        [[ "$(adb -s "${DEVICE}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; then
       echo "[device] ${DEVICE} recovered to online." >&2
@@ -1053,7 +1069,8 @@ phase_b() {
   echo "[phase-b] rebooting the guest..."
   adb -s "${DEVICE}" reboot
   if ! wait_for_boot "${BOOT_TIMEOUT}"; then
-    fail "guest did not reach sys.boot_completed=1 within ${BOOT_TIMEOUT}s after reboot."
+    fail "guest did not reach sys.boot_completed=1 within ${BOOT_TIMEOUT}s after reboot" \
+         "(adb state='$(device_state)', emulator process $(emulator_process_state))."
   fi
   adb -s "${DEVICE}" shell wm dismiss-keyguard >/dev/null 2>&1 || true
   echo "[phase-b] boot complete."
@@ -1097,13 +1114,23 @@ assert_reboot_receiver_resolvable() {
   fail "RebootReceiver not resolvable for BOOT_COMPLETED — manifest flip #2 (enabled=true) or the plugin intent-filter regressed."
 }
 
+# The bounded poll is the whole wait: a device that never returns answers
+# every read with an error at once, so the poll fails at its deadline with the
+# reason. An `adb wait-for-device` ahead of it blocked for good when the
+# emulator itself exited on the reboot (CI run 41858798643), and the lane could
+# only die at its 30 m deadline. A boot is complete only once a read has seen
+# the property NOT at 1 — `adb reboot` returns before adbd goes down, so the
+# first read can still answer 1 for the boot being left.
 wait_for_boot() {
   local timeout_s="$1"
-  adb -s "${DEVICE}" wait-for-device
-  local deadline=$(( SECONDS + timeout_s )) bc
+  local deadline=$(( SECONDS + timeout_s )) bc seen_down=0
   while (( SECONDS < deadline )); do
     bc="$(adb -s "${DEVICE}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
-    [[ "${bc}" == "1" ]] && return 0
+    if [[ "${bc}" != "1" ]]; then
+      seen_down=1
+    elif (( seen_down )); then
+      return 0
+    fi
     sleep 2
   done
   return 1

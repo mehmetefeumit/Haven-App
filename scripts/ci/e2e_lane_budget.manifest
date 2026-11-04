@@ -242,7 +242,6 @@ strfry */reset_strfry#1/bash:start-strfry.sh#1 charge @
 logscan */lib:logscan_gate*#* charge @
 install */lib:install_*#1 charge @
 drive */drive_target#1/timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
-device */wait-for-device#* allowance
 # Recovery runs inside wall-clock loops (register, force-run): its time falls
 # inside their window, and only their last iteration can run into one more.
 recover */ensure_device_online#1/sleep:3#1 charge DEVICE_ONLINE_TIMEOUT + 3 once the enclosing loops are wall-clock windows, so only their last pass adds a recovery
