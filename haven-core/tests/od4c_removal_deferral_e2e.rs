@@ -644,13 +644,22 @@ async fn the_claim_that_puts_a_session_in_the_foreground_sends_what_the_poll_lef
     // The claim itself sends nothing: it holds the lock a pause and a stop
     // take first. The session's drive does, on its own task.
     core.claim_foreground(Claim::Foreground).await;
+    let landed = comes_true(|| async {
+        !holds_a_staged_commit(&fx.alice, &fx.mls_group_id).await
+            && !roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex)
+    })
+    .await;
+    // The entry's NIP-77 pass may be fetching the eviction's own echo, which
+    // holds the circle's sends until it is taken in (Security Rule 10).
     assert!(
-        comes_true(|| async {
-            !holds_a_staged_commit(&fx.alice, &fx.mls_group_id).await
-                && !roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex)
-        })
-        .await
-            && accepts_a_send(&fx.alice, &fx.mls_group_id).await,
+        core.processor()
+            .for_test()
+            .entry_pass_ended(Duration::from_secs(20))
+            .await,
+        "premise: the foreground entry's pass ended"
+    );
+    assert!(
+        landed && accepts_a_send(&fx.alice, &fx.mls_group_id).await,
         "the claim that put the session in the foreground did not have the recorded \
          eviction sent and applied"
     );
