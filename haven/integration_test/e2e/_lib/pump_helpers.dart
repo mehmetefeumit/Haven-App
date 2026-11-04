@@ -38,6 +38,16 @@ library;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+/// How long a widget may take to appear after the action that produces it.
+///
+/// The one bound every "wait for it to appear" helper in the harness shares,
+/// so a wait that is really for the app's own start-up work — a store open,
+/// an engine handshake, a provider's first load — gets the same headroom
+/// everywhere, instead of a shorter literal in one helper losing a race the
+/// others win. A loaded CI emulator opens one SQLCipher store in ten seconds
+/// (run 41780565888), so a bound under that is a flake, not a budget.
+const Duration kUiAppearsTimeout = Duration(seconds: 30);
+
 /// Pumps frames at [pumpInterval] until [finder] matches at least one
 /// element, or [timeout] elapses.
 ///
@@ -56,7 +66,7 @@ import 'package:flutter_test/flutter_test.dart';
 Future<void> pumpUntilFound(
   WidgetTester tester,
   Finder finder, {
-  Duration timeout = const Duration(seconds: 30),
+  Duration timeout = kUiAppearsTimeout,
   Duration pumpInterval = const Duration(milliseconds: 100),
   String? description,
   bool Function()? shouldAbort,
@@ -102,7 +112,7 @@ Future<void> pumpUntilFound(
 Future<void> pumpUntilGone(
   WidgetTester tester,
   Finder finder, {
-  Duration timeout = const Duration(seconds: 30),
+  Duration timeout = kUiAppearsTimeout,
   Duration pumpInterval = const Duration(milliseconds: 100),
   String? description,
   bool Function()? shouldAbort,
@@ -162,7 +172,7 @@ Future<void> pumpUntilGone(
 Future<void> tapWhenHittable(
   WidgetTester tester,
   Finder finder, {
-  Duration timeout = const Duration(seconds: 30),
+  Duration timeout = kUiAppearsTimeout,
   Duration pumpInterval = const Duration(milliseconds: 100),
   String? description,
 }) async {
@@ -234,7 +244,7 @@ Future<void> pumpUntilCondition(
   WidgetTester tester,
   bool Function() condition, {
   required String description,
-  Duration timeout = const Duration(seconds: 30),
+  Duration timeout = kUiAppearsTimeout,
   Duration pumpInterval = const Duration(milliseconds: 100),
   bool Function()? shouldAbort,
 }) async {
@@ -297,7 +307,7 @@ Future<void> pumpUntilCondition(
 Future<void> waitUntilAsync(
   Future<bool> Function() condition, {
   required String description,
-  Duration timeout = const Duration(seconds: 30),
+  Duration timeout = kUiAppearsTimeout,
   Duration pollInterval = const Duration(seconds: 2),
 }) async {
   final deadline = DateTime.now().add(timeout);

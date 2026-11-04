@@ -44,6 +44,8 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 
+import 'pump_helpers.dart';
+
 /// Drives the [CirclesBottomSheet] to its maximum snap point and
 /// optionally waits for [targetFinder] to land fully on-screen.
 ///
@@ -154,9 +156,12 @@ Future<void> expandCirclesSheetToMax(
   // legitimate async-settle race, not a synthetic-gesture or layout issue, so
   // wait for the observable widget the way `pumpUntilFound` does (bounded,
   // single-frame pumps — never `pumpAndSettle`, which MapShell's periodic
-  // timers would hang) rather than trusting a fixed frame budget. A genuine
-  // absence still fails below with the same StateError after the deadline.
-  final targetDeadline = DateTime.now().add(const Duration(seconds: 10));
+  // timers would hang) rather than trusting a fixed frame budget. The bound
+  // is the harness's shared one: what gates the CTA is the app's own circle
+  // store open, which a loaded emulator has taken ten seconds over, and a
+  // shorter literal here lost that race. A genuine absence still fails below
+  // with the same StateError after the deadline.
+  final targetDeadline = DateTime.now().add(kUiAppearsTimeout);
   while (targetFinder.evaluate().isEmpty &&
       DateTime.now().isBefore(targetDeadline)) {
     await tester.pump(const Duration(milliseconds: 100));
