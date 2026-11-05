@@ -253,7 +253,15 @@ register-negative main#1/run_negative_phase#?/sleep:3#1 charge JOB_REGISTER_TIME
 force-run */force_run_until_marker#1/sleep:1#1 charge MARKER_TIMEOUT + FORCE_RUN_ROUND_POLL
 force-run-tail */force_run_until_marker#1/wait_for_marker#1/sleep:2#1 within force-run it waits only what is left of force-run's own deadline
 setup-marker main#1/phase_a#1/wait_for_marker#1/sleep:2#1 charge MARKER_TIMEOUT + 2
-boot main#1/phase_b#1/wait_for_boot#1/sleep:2#1 charge BOOT_TIMEOUT + 2
+# Phase B's restart: the AVD-name read, the power-off, then the wait for the powered-off
+# guest's emulator to exit (a wall-clock loop, one tick past its bound).
+restart-avd main#1/phase_b#1/restart_guest#1/timeout:ADB_READ_SECS#1 charge ADB_READ_SECS
+restart-poweroff main#1/phase_b#1/restart_guest#1/timeout:ADB_READ_SECS#2 charge ADB_READ_SECS
+restart-off main#1/phase_b#1/restart_guest#1/sleep:2#1 charge SHUTDOWN_TIMEOUT + 2
+# Each boot read is bounded and falls inside the boot loop's window; the last
+# one can start just before the deadline and run its whole bound.
+boot-read main#1/phase_b#1/wait_for_boot#1/timeout:ADB_READ_SECS#1 within boot each read runs inside the boot loop's own window, which charges the last one
+boot main#1/phase_b#1/wait_for_boot#1/sleep:2#1 charge BOOT_TIMEOUT + ADB_READ_SECS + 2
 rearm-marker main#1/phase_b#1/wait_for_marker#1/sleep:2#1 charge JOB_REARM_TIMEOUT + 2
 negative-settle main#1/run_negative_phase#?/sleep:5#1 charge 5
 

@@ -165,8 +165,9 @@ proof below judges with (`planes::judge::judge`); the crate test
 and `the_exported_matrix_is_current` pins the export
 (`tooling/e2e/relay_planes.json`, read by the Dart mirror test only). A frame
 no row's shape admits — a stray tag or filter key, a filter spanning two rows,
-a REQ whose filters land on two planes, `COUNT`, `AUTH`, a `CLOSE` or `NEG-*`
-naming a subscription its connection never opened — is unknown; one a row
+a REQ whose filters land on two planes, `COUNT`, `AUTH`, a `CLOSE` naming a
+subscription its relay was never sent, a `NEG-*` naming a session its
+connection never opened — is unknown; one a row
 admits on a relay its binding does not is a crossing. A relay holding several
 roles admits their union: an account's inbox and key-package lists may share a
 relay; an own list with a location or discovery relay, and an invitee's list
@@ -222,8 +223,8 @@ every device of a soak world sent, after every arm and after the long faulted
 nemesis phase, against the ground truth the rig decided (each circle's routing
 from the instant it staged it, each device's own lists, the profile pool); its
 own controls plant a kind 0 on a location relay, an inbox REQ on a location
-relay, a location on a relay its circle never named and a `CLOSE` its
-connection never opened (`tooling/soak/tests/oracles.rs`), and S26 drives the
+relay, a location on a relay its circle never named and a `CLOSE` naming a
+subscription its relay was never sent (`tooling/soak/tests/oracles.rs`), and S26 drives the
 profile and key-package planes under a downed profile relay. It does not grade
 the exact left-routing rule (a member that has not applied a relay change
 still seals for the routing it holds, and only L1a judges with one sender) or

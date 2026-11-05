@@ -23,8 +23,10 @@ use super::table::{PlaneTable, RelayIx, Unusable};
 pub struct Observed<'a> {
     /// The relay that received it.
     pub relay: RelayIx,
-    /// The connection it came on, an opaque caller-chosen number: `CLOSE`,
-    /// `NEG-MSG` and `NEG-CLOSE` must name a subscription opened on it.
+    /// The connection it came on, an opaque caller-chosen number: `NEG-MSG`
+    /// and `NEG-CLOSE` must name a session opened on it. A `CLOSE` must name a
+    /// subscription opened on its relay: the SDK sends one pending at a
+    /// reconnect on the new socket, which tells that relay nothing new.
     pub conn: u64,
     /// The identity that sent it, when the caller knows.
     pub sender: Option<&'a str>,
@@ -43,8 +45,9 @@ pub enum Class {
     CrossedRequest,
     /// A frame no row admits: unknown verb, `COUNT`, `AUTH`, an unparsable
     /// frame, a stray tag or key, a filter spanning two rows, a REQ whose
-    /// filters land on different planes, a `CLOSE` / `NEG-*` naming a
-    /// subscription this connection never opened.
+    /// filters land on different planes, a `CLOSE` naming a subscription its
+    /// relay was never sent, a `NEG-*` naming a session its connection never
+    /// opened.
     UnknownFrame,
     /// An ephemeral row authored by a known identity or a reused key, or an
     /// identity row authored by someone other than the known sender.
@@ -110,15 +113,10 @@ type Reject = (Option<Row>, Class);
 
 type Verdict = Result<Plane, Reject>;
 
-#[derive(Default)]
-struct Subs {
-    req: HashSet<String>,
-    neg: HashSet<String>,
-}
-
 struct Judge<'t> {
     table: &'t PlaneTable,
-    subs: HashMap<u64, Subs>,
+    reqs: HashMap<RelayIx, HashSet<String>>,
+    negs: HashMap<u64, HashSet<String>>,
     ephemeral: HashMap<String, String>,
 }
 
@@ -135,7 +133,8 @@ pub fn judge<'a>(
     table.validate()?;
     let mut judge = Judge {
         table,
-        subs: HashMap::new(),
+        reqs: HashMap::new(),
+        negs: HashMap::new(),
         ephemeral: HashMap::new(),
     };
     let mut out = Judgement::default();
@@ -220,6 +219,14 @@ fn one(values: Option<&Vec<String>>) -> Option<&str> {
     }
 }
 
+fn opened(open: Option<&HashSet<String>>, sub: &str) -> Result<Vec<(Row, Plane)>, Reject> {
+    if open.is_some_and(|open| open.contains(sub)) {
+        Ok(Vec::new())
+    } else {
+        Err(UNKNOWN)
+    }
+}
+
 impl Judge<'_> {
     fn frame(&mut self, obs: &Observed<'_>) -> Result<Vec<(Row, Plane)>, Reject> {
         match obs.frame {
@@ -229,11 +236,7 @@ impl Judge<'_> {
                 Ok(vec![(row, plane)])
             }
             Frame::Req { sub, filters } => {
-                self.subs
-                    .entry(obs.conn)
-                    .or_default()
-                    .req
-                    .insert(sub.clone());
+                self.reqs.entry(obs.relay).or_default().insert(sub.clone());
                 let mut admitted = Vec::with_capacity(filters.len());
                 for filter in filters {
                     let row = filter_row(filter, Verb::Req).ok_or(UNKNOWN)?;
@@ -250,30 +253,14 @@ impl Judge<'_> {
                 filter,
                 initial,
             } => {
-                self.subs
-                    .entry(obs.conn)
-                    .or_default()
-                    .neg
-                    .insert(sub.clone());
+                self.negs.entry(obs.conn).or_default().insert(sub.clone());
                 let row = filter_row(filter, Verb::NegOpen).ok_or(UNKNOWN)?;
                 require(initial == NEG_INITIAL_MESSAGE, row, Class::UnknownFrame)?;
                 Ok(vec![(row, self.filter(row, filter, obs)?)])
             }
-            Frame::Close(sub) => self.opened(obs.conn, sub, false),
-            Frame::NegMsg(sub) | Frame::NegClose(sub) => self.opened(obs.conn, sub, true),
+            Frame::Close(sub) => opened(self.reqs.get(&obs.relay), sub),
+            Frame::NegMsg(sub) | Frame::NegClose(sub) => opened(self.negs.get(&obs.conn), sub),
             Frame::Other(_) => Err(UNKNOWN),
-        }
-    }
-
-    fn opened(&self, conn: u64, sub: &str, neg: bool) -> Result<Vec<(Row, Plane)>, Reject> {
-        let open = self
-            .subs
-            .get(&conn)
-            .is_some_and(|subs| if neg { &subs.neg } else { &subs.req }.contains(sub));
-        if open {
-            Ok(Vec::new())
-        } else {
-            Err(UNKNOWN)
         }
     }
 

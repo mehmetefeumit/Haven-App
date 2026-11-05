@@ -958,7 +958,7 @@ fn the_filters_of_one_req_must_land_on_one_plane() {
 }
 
 #[test]
-fn close_and_neg_continuations_must_name_a_subscription_of_their_connection() {
+fn a_close_must_name_a_subscription_of_its_relay_and_a_neg_continuation_one_of_its_connection() {
     let w = world();
     let frames = [
         (
@@ -997,8 +997,8 @@ fn close_and_neg_continuations_must_name_a_subscription_of_their_connection() {
         .collect();
     assert_eq!(
         refused,
-        [5, 6, 7, 8].map(|i| (i, Class::UnknownFrame)),
-        "a continuation on another connection, or of the other kind of subscription"
+        [6, 7, 8].map(|i| (i, Class::UnknownFrame)),
+        "a NEG continuation on another connection, or a continuation of the other kind of subscription"
     );
 }
 
@@ -1833,6 +1833,24 @@ fn cases() -> Vec<Case> {
             RC_CLEAN,
             &["C8.1-C8.8 hold"],
         ),
+        case(
+            // CI run 41944390485: the socket a fetch's REQ went out on was
+            // replaced before its CLOSE, which the SDK then sent first on the
+            // new socket to the same relay.
+            "P5 a CLOSE the SDK sends on the socket that replaced its REQ's",
+            &healthy(|j| {
+                j.c2r(
+                    APP_LOC,
+                    7789,
+                    json!(["REQ", "sub-r", {"kinds": [445], "#h": [hx()], "since": 1}]),
+                );
+                j.open("app-loc-again", 7789);
+                j.c2r("app-loc-again", 7789, json!(["CLOSE", "sub-r"]));
+            }),
+            &[],
+            RC_CLEAN,
+            &["C8.1-C8.8 hold"],
+        ),
     ];
     // C8.1 — EVENT placement.
     let c81: [Plant; 15] = [
@@ -2050,7 +2068,7 @@ fn cases() -> Vec<Case> {
             json!(["COUNT", "sub-x", {"kinds": [445]}]),
         ),
         (
-            "C8.2 a CLOSE naming another connection's subscription",
+            "C8.2 a CLOSE naming a subscription another relay was sent",
             7790,
             APP_DISC,
             json!(["CLOSE", "sub-h"]),
@@ -2513,7 +2531,7 @@ fn lane_args(journal: &Path, extra: &[String]) -> Vec<String> {
 }
 
 /// The number of C8 fixtures. Moving it is the only way to add or remove one.
-const CLI_CASES: usize = 79;
+const CLI_CASES: usize = 80;
 
 #[test]
 fn the_c8_fixture_suite() {

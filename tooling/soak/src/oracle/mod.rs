@@ -500,7 +500,7 @@ pub enum Finding {
     },
     /// A device sent a frame no row of the matrix admits for the world's
     /// ground truth (O7): an unknown verb or shape, `COUNT`, `AUTH`, a `CLOSE`
-    /// naming a subscription its connection never opened, an id or a circle
+    /// naming a subscription its relay was never sent, an id or a circle
     /// nothing records.
     PlaneUnknownFrame {
         /// The plane that received it.

@@ -1036,7 +1036,7 @@ async fn o7_reds_on_a_location_sent_to_an_address_only_the_other_circles_change_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn o7_reds_on_a_close_its_connection_never_opened() {
+async fn o7_reds_on_a_close_naming_a_subscription_its_relay_was_never_sent() {
     let mut world = build_world().await;
     o7_clean(&mut world).await;
     let (alice, _) = pair(&world);
@@ -1078,7 +1078,7 @@ async fn o7_reds_on_a_close_its_connection_never_opened() {
                 device: Some(alice),
                 rule: "plane-unknown-frame",
             }),
-        "a CLOSE naming a subscription its connection never opened carries an id \
+        "a CLOSE naming a subscription its relay was never sent carries an id \
          from another plane's socket, and is never special-cased"
     );
     world.teardown().await.expect("teardown");

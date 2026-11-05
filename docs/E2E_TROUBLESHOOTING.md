@@ -142,20 +142,23 @@ drop from a hard wedge.
 emulator infrastructure, not the product. Re-run the lane; if chronic, raise AVD
 RAM or reduce concurrent memory pressure.
 
-**The emulator itself can exit on the Phase-B reboot** (run 41858798643: the
-guest logged `Reboot start`, no device ever returned, and `adb emu kill`
-afterwards found the console port refusing). That reads as
-`M7-LANE-FAIL: guest did not reach sys.boot_completed=1 within 300s after reboot
-(adb state='', emulator process gone)` — `emulator process gone` is the
-discriminator from a wedged guest inside a live emulator. It is infrastructure;
-re-run. Before this message existed the lane could only die at its 30 m
-deadline, because `wait_for_boot` opened with an unbounded `adb wait-for-device`
-ahead of its bounded poll. The script now has no `wait-for-device` at all —
-every wait for the device is a wall-clock poll whose reads fail at once when
-no device answers — and the self-test holds that. The boot poll also accepts
-`sys.boot_completed=1` only after a read that was not 1, because `adb reboot`
-returns before adbd goes down and the first read can still describe the boot
-being left.
+**The emulator itself exited on the old Phase-B `adb reboot`** (runs
+41858798643 and 41944390485, 2 of 14 runs: the guest logged `Reboot start`, no
+device ever returned, and the emulator process was gone, with no crash output).
+An in-place guest reset is what the emulator died on, so Phase B no longer does
+one: `restart_guest` powers the guest off (`adb shell reboot -p`), waits up to
+`SHUTDOWN_TIMEOUT` for the emulator to exit as a powered-off emulator does, and
+launches the same AVD again with the workflow step's own `emulator-options`
+(passed verbatim as `M7_EMULATOR_OPTIONS`; the self-test fails when the two
+differ). That is a real shutdown and boot from persisted state, with
+BOOT_COMPLETED sent to the app, which is what Phase B proves. Its failures name
+themselves: `the emulator was still running … after the guest was powered off`,
+or `guest did not reach sys.boot_completed=1 within 300s after its restart
+(adb state='…', emulator process running|gone)`. Every boot read is bounded by
+`ADB_READ_SECS`: in run 41944390485 an unbounded read against the dying
+emulator made the 300 s boot wait report after 600 s. The script has no
+`adb wait-for-device` (it blocked for good when no device came back), and a
+boot counts only after a read that was not 1.
 
 ## Failure mode 3 — hang / timeout (exit 124) on the flag-on live path
 

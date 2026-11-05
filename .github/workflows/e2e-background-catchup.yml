@@ -9,7 +9,7 @@
 #            (bootstrap ok + sweep complete: + circles>=1). Decryption counters
 #            are captured as evidence (see the script header for why the cold
 #            worker cannot reach the plaintext CI relay).
-#   Phase B  the job survives `adb reboot` (WorkManager RescheduleReceiver +
+#   Phase B  the job survives a restart (WorkManager RescheduleReceiver +
 #            Room DB) and the RebootReceiver is runtime-resolvable for
 #            BOOT_COMPLETED, then a post-boot cold wake completes.
 #   Phase C1 the pending-wipe gate declines the wake with ZERO relay
@@ -31,8 +31,8 @@
 # must never coincide with a resident emulator; see docs/E2E_TROUBLESHOOTING.md).
 # The three target APKs are built in a dedicated step BEFORE the emulator boots;
 # the on-emulator step then only installs + grants + drives + force-runs, via the
-# checked-in run-m7-background-catchup.sh orchestrator. The reboot is a GUEST
-# reboot the action's emulator survives (the script waits for boot_completed).
+# checked-in run-m7-background-catchup.sh orchestrator. Phase B's restart powers
+# the guest off and boots the same AVD again (the script waits for boot_completed).
 
 name: E2E Background Catch-up
 
@@ -272,8 +272,8 @@ jobs:
       # Run the four background catch-up phases. All real logic is in the
       # checked-in orchestrator (single bash invocation — the action runs each
       # line of a multi-line script: in its own sh -c, which would drop shell
-      # state). The reboot in Phase B is a GUEST reboot the action's emulator
-      # survives; the script waits for sys.boot_completed. STRFRY_IMAGE is
+      # state). Phase B powers the guest off and boots the same AVD again with
+      # M7_EMULATOR_OPTIONS; the script waits for sys.boot_completed. STRFRY_IMAGE is
       # forwarded so the per-phase relay resets pull the same pinned image.
       # BOUNDS. Three of them, innermost first:
       #   10m  per-drive `flutter drive` (run-m7-background-catchup.sh's
@@ -311,6 +311,10 @@ jobs:
           # the script itself, so the value the orchestrator reads is pinned
           # where it is used rather than inherited from two scopes away.
           M7_REQUIRE_DECRYPT: ${{ env.M7_REQUIRE_DECRYPT }}
+          # emulator-options below, verbatim: Phase B powers the guest off and
+          # boots the same AVD again with them (restart_guest), and the lane's
+          # --self-test fails when the two differ.
+          M7_EMULATOR_OPTIONS: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -memory 6144
         with:
           api-level: 34
           arch: x86_64
@@ -325,9 +329,7 @@ jobs:
           # OOM the app). 6 GB gives headroom; the runner has 16 GB and the APK
           # build (long done by this step) is the only other large consumer. Only
           # THIS lane needs it — the lighter e2e lanes run fine at the default.
-          emulator-options: >-
-            -no-snapshot-save -no-window -gpu swiftshader_indirect
-            -noaudio -no-boot-anim -camera-back none -memory 6144
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -memory 6144
           disable-animations: true
           # Bound the boot (which happens BEFORE `script:` runs, and is
           # therefore outside the deadline below).

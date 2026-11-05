@@ -166,6 +166,12 @@ readonly DRIVE_TIMEOUT="${HAVEN_DRIVE_TIMEOUT:-10m}"
 # How long SIGKILL follows a drive's SIGTERM at DRIVE_TIMEOUT.
 readonly DRIVE_KILL_AFTER_SECS=30
 readonly BOOT_TIMEOUT="${M7_BOOT_TIMEOUT:-300}"
+# One adb read in a boot wait. A read against an emulator that is going away
+# can block past the wait's own deadline (CI run 41944390485: a 300 s wait
+# reported after 600 s).
+readonly ADB_READ_SECS="${M7_ADB_READ_SECS:-10}"
+# A powered-off guest's emulator exits; this bounds how long that may take.
+readonly SHUTDOWN_TIMEOUT="${M7_SHUTDOWN_TIMEOUT:-120}"
 readonly JOB_REARM_TIMEOUT="${M7_JOB_REARM_TIMEOUT:-60}"
 # Fresh-registration → JobScheduler visibility is async (like the reboot re-arm),
 # so Phase A and the C/D force-run phases BOUNDED-poll for the job, not one-shot.
@@ -251,6 +257,11 @@ readonly STOP_STRFRY="${SCRIPT_DIR}/stop-strfry.sh"
 # world-readable, so an echo before the gate is a leak the guard could only
 # report after the fact.
 run_self_test() {
+  # The restart fixtures need short shutdown and read bounds, and both are
+  # `readonly`.
+  if [[ "${M7_SELF_TEST_REEXEC:-}" != 1 ]]; then
+    M7_SELF_TEST_REEXEC=1 M7_SHUTDOWN_TIMEOUT=2 M7_ADB_READ_SECS=1 exec bash "${BASH_SOURCE[0]}" --self-test
+  fi
   local tmp fail=0 dir fake want rc real_run body gate_line echo_line
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -391,11 +402,136 @@ run_self_test() {
     echo "SELF-TEST FAIL (drive floor): drive=${drive_floor:-none} is not within the ${printed} line(s) \`flutter drive\` prints on the host. A drive floor is calibrated to those lines alone; a higher one was measured from a transcript that also carried forwarded logcat furniture, which is not a property of the run (CI run 35464818348). 'A test ran' is the scanner's proof_of_run, not this number." >&2
     fail=1
   fi
+  # THE GUEST RESTART, driven through the real helpers against a stub world:
+  # `adb` answers the AVD name, takes the power-off and answers boot reads;
+  # `emulator` records how it was launched and boots; and `pgrep` reports
+  # whether an emulator is running.
+  local world="${tmp}/world" args want_args
+  mkdir -p "${world}/bin" "${world}/sdk/emulator"
+  cat > "${world}/bin/adb" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"emu avd name"*) printf 'test\r\nOK\r\n' ;;
+  *"shell reboot -p"*) [[ -e "${M7_WORLD}/stubborn" ]] || : > "${M7_WORLD}/powering-off" ;;
+  *"getprop sys.boot_completed"*)
+    if [[ ! -e "${M7_WORLD}/read" ]]; then : > "${M7_WORLD}/read"; exit 1
+    elif [[ -e "${M7_WORLD}/booted" ]]; then echo 1
+    else exit 1; fi ;;
+  *) exit 1 ;;
+esac
+STUB
+  cat > "${world}/sdk/emulator/emulator" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "${M7_WORLD}/launched"
+echo EMULATOR-OUTPUT-CANARY
+echo EMULATOR-OUTPUT-CANARY >&2
+: > "${M7_WORLD}/qemu"
+: > "${M7_WORLD}/booted"
+STUB
+  # A powered-off emulator is still running at the first look and gone from
+  # the second, so a restart that does not wait for it to exit is caught.
+  cat > "${world}/bin/pgrep" <<'STUB'
+#!/usr/bin/env bash
+if [[ -e "${M7_WORLD}/powering-off" ]]; then
+  if [[ -e "${M7_WORLD}/looked" ]]; then
+    rm -f "${M7_WORLD}/qemu" "${M7_WORLD}/booted" "${M7_WORLD}/powering-off" "${M7_WORLD}/looked"
+  else
+    : > "${M7_WORLD}/looked"
+  fi
+fi
+[[ -e "${M7_WORLD}/qemu" ]]
+STUB
+  chmod +x "${world}/bin/adb" "${world}/sdk/emulator/emulator" "${world}/bin/pgrep"
+  local f
+  for f in fail emulator_process_state device_state restart_guest wait_for_boot; do
+    eval "$(sed -n "/^${f}() {/,/^}/p" "${BASH_SOURCE[0]}")"
+  done
+  args="-no-snapshot-save -no-window -memory 6144"
+  : > "${world}/qemu"
+  : > "${world}/booted"
+  rc=0
+  ( PATH="${world}/bin:${PATH}" M7_WORLD="${world}" ANDROID_HOME="${world}/sdk" \
+      M7_EMULATOR_OPTIONS="${args}" restart_guest && \
+    PATH="${world}/bin:${PATH}" M7_WORLD="${world}" wait_for_boot 10 ) > "${world}/out" 2>&1 || rc=$?
+  want_args="-port 5554 -avd test ${args} -no-snapshot-load"
+  if grep -qF EMULATOR-OUTPUT-CANARY "${world}/out"; then
+    echo "SELF-TEST FAIL (restart): the relaunched emulator's output reached the lane's own output; it carries the guest's boot parameters and belongs nowhere a log is kept" >&2
+    fail=1
+  fi
+  if (( rc != 0 )) || [[ "$(cat "${world}/launched" 2>/dev/null)" != "${want_args}" ]]; then
+    echo "SELF-TEST FAIL (restart): powering the guest off and booting it again did not relaunch '${want_args}' and complete a boot (rc ${rc}, launched '$(cat "${world}/launched" 2>/dev/null)')" >&2
+    fail=1
+  fi
+  # An emulator that outlives the power-off is reported, with the reason.
+  rm -f "${world}/launched" "${world}/read"
+  : > "${world}/qemu"
+  : > "${world}/stubborn"
+  rc=0
+  ( PATH="${world}/bin:${PATH}" M7_WORLD="${world}" ANDROID_HOME="${world}/sdk" \
+      M7_EMULATOR_OPTIONS="${args}" restart_guest ) 2> "${world}/err" || rc=$?
+  if (( rc == 0 )) || [[ -e "${world}/launched" ]] || ! grep -qF 'still running' "${world}/err"; then
+    echo "SELF-TEST FAIL (restart): an emulator still running after the power-off must fail the lane with that reason, before a second one is launched (rc ${rc})" >&2
+    fail=1
+  fi
+  # A boot read that hangs is cut at its own bound, so the wait still reports
+  # at its deadline (CI run 41944390485: a 300 s wait reported after 600 s).
+  cat > "${world}/bin/adb" <<'STUB'
+#!/usr/bin/env bash
+exec sleep 30
+STUB
+  local started=${SECONDS}
+  rc=0
+  ( PATH="${world}/bin:${PATH}" wait_for_boot 2 ) 2>/dev/null || rc=$?
+  if (( rc == 0 )) || (( SECONDS - started >= 15 )); then
+    echo "SELF-TEST FAIL (restart): a boot read that hangs held the wait $(( SECONDS - started ))s past a 2 s deadline (rc ${rc}); each read must be bounded" >&2
+    fail=1
+  fi
+  # …and so is each adb call of the restart: an AVD-name read that hangs, and
+  # a power-off whose shell the guest never closes.
+  local hang
+  for hang in "emu avd name" "shell reboot -p"; do
+    cat > "${world}/bin/adb" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"${hang}"*) [[ "${hang}" == "shell reboot -p" ]] && : > "\${M7_WORLD}/powering-off"; exec sleep 30 ;;
+  *"emu avd name"*) printf 'test\r\nOK\r\n' ;;
+  *) exit 1 ;;
+esac
+STUB
+    rm -f "${world}/stubborn" "${world}/launched" "${world}/looked" "${world}/powering-off"
+    : > "${world}/qemu"
+    started=${SECONDS}
+    ( PATH="${world}/bin:${PATH}" M7_WORLD="${world}" ANDROID_HOME="${world}/sdk" \
+        M7_EMULATOR_OPTIONS="${args}" restart_guest ) >/dev/null 2>&1 || true
+    if (( SECONDS - started >= 15 )); then
+      echo "SELF-TEST FAIL (restart): an adb call that hangs ('${hang}') held the restart $(( SECONDS - started ))s; every adb call of the restart must be bounded" >&2
+      fail=1
+    fi
+  done
+  # Phase B restarts through restart_guest, and nothing in the real run resets
+  # the guest in place, which the emulator itself has died on.
+  body="$(sed -n '/^phase_b() {/,/^}/p' <<<"${real_run}")"
+  if ! grep -qE '^[[:space:]]+restart_guest$' <<<"${body}" \
+     || grep -qE 'adb[^#]* reboot([[:space:]]*$|[[:space:]]+[^-])|shell reboot[[:space:]]*$' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (wiring): Phase B must restart the guest through restart_guest, and no \`adb reboot\` may reset it in place" >&2
+    fail=1
+  fi
+  # The options the restart launches with are the ones the workflow's step
+  # launched the emulator with.
+  local wf step step_opts env_opts
+  wf="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/.github/workflows/e2e-background-catchup.yml"
+  step="$(sed -n '/^      - name: Run background catch-up phases on the emulator$/,/^      - name: /p' "${wf}")"
+  step_opts="$(sed -n -E 's/^ +emulator-options: (.*)$/\1/p' <<<"${step}")"
+  env_opts="$(sed -n -E 's/^ +M7_EMULATOR_OPTIONS: (.*)$/\1/p' <<<"${step}")"
+  if [[ -z "${step_opts}" || "${step_opts}" != "${env_opts}" ]]; then
+    echo "SELF-TEST FAIL (restart): the workflow's M7_EMULATOR_OPTIONS ('${env_opts}') is not its emulator-options ('${step_opts}'), so Phase B would boot a different emulator than the one the lane started" >&2
+    fail=1
+  fi
   if (( fail )); then
     echo "run-m7-background-catchup.sh: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-m7-background-catchup.sh: self-test passed (the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; echo_log_tail withholds a tail the gate refuses; the gate library is sourced, the EXIT trap gates LOG_DIR with the report outside the upload, every echo of a captured log goes through the gate first, no soft scanner gate, no adb wait-for-device, the manifest is sealed once with the lane's drive and relay floors before the trap is armed, and that drive floor stays within the lines flutter drive prints on the host)."
+  echo "run-m7-background-catchup.sh: self-test passed (Phase B powers the guest off, waits for the emulator to exit, boots the same AVD with the workflow's own emulator options and completes a boot, and fails with the reason when the emulator outlives the power-off; the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; echo_log_tail withholds a tail the gate refuses; the gate library is sourced, the EXIT trap gates LOG_DIR with the report outside the upload, every echo of a captured log goes through the gate first, no soft scanner gate, no adb wait-for-device, the manifest is sealed once with the lane's drive and relay floors before the trap is armed, and that drive floor stays within the lines flutter drive prints on the host)."
   return 0
 }
 
@@ -1066,10 +1202,10 @@ phase_b() {
   echo "============================================================"
   echo "Phase B — reboot re-arm (consent still ON)"
   echo "============================================================"
-  echo "[phase-b] rebooting the guest..."
-  adb -s "${DEVICE}" reboot
+  echo "[phase-b] restarting the guest: a clean power-off, then the same AVD booted again..."
+  restart_guest
   if ! wait_for_boot "${BOOT_TIMEOUT}"; then
-    fail "guest did not reach sys.boot_completed=1 within ${BOOT_TIMEOUT}s after reboot" \
+    fail "guest did not reach sys.boot_completed=1 within ${BOOT_TIMEOUT}s after its restart" \
          "(adb state='$(device_state)', emulator process $(emulator_process_state))."
   fi
   adb -s "${DEVICE}" shell wm dismiss-keyguard >/dev/null 2>&1 || true
@@ -1114,18 +1250,48 @@ assert_reboot_receiver_resolvable() {
   fail "RebootReceiver not resolvable for BOOT_COMPLETED — manifest flip #2 (enabled=true) or the plugin intent-filter regressed."
 }
 
-# The bounded poll is the whole wait: a device that never returns answers
-# every read with an error at once, so the poll fails at its deadline with the
-# reason. An `adb wait-for-device` ahead of it blocked for good when the
-# emulator itself exited on the reboot (CI run 41858798643), and the lane could
-# only die at its 30 m deadline. A boot is complete only once a read has seen
-# the property NOT at 1 — `adb reboot` returns before adbd goes down, so the
-# first read can still answer 1 for the boot being left.
+# Restarts the guest the way a phone is restarted: powered off, then booted
+# again from what it persisted, with BOOT_COMPLETED sent to the app. Not
+# `adb reboot`: the emulator process itself exited on that in-place reset in
+# 2 of 14 runs (CI runs 41858798643 and 41944390485), leaving nothing to boot.
+# A powered-off guest's emulator exits by design, and the same AVD is launched
+# again with the options the workflow launched it with.
+restart_guest() {
+  local emulator="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}/emulator/emulator" avd
+  local port="${DEVICE#emulator-}"
+  [[ -x "${emulator}" ]] || fail "phase b: no emulator launcher under the SDK root to boot the guest again."
+  [[ -n "${M7_EMULATOR_OPTIONS:-}" ]] \
+    || fail "phase b: M7_EMULATOR_OPTIONS is unset; the workflow passes the options it launched the emulator with."
+  avd="$(timeout "${ADB_READ_SECS}" adb -s "${DEVICE}" emu avd name 2>/dev/null | head -n 1 | tr -d '\r' || true)"
+  [[ -n "${avd}" && "${avd}" != KO* ]] || fail "phase b: the emulator did not name its AVD."
+  # `reboot` never exits on the guest, so the shell ends only when the guest
+  # drops it: bounded like every other read here.
+  timeout "${ADB_READ_SECS}" adb -s "${DEVICE}" shell reboot -p >/dev/null 2>&1 || true
+  local deadline=$(( SECONDS + SHUTDOWN_TIMEOUT ))
+  while (( SECONDS < deadline )); do
+    [[ "$(emulator_process_state)" == gone ]] && break
+    sleep 2
+  done
+  [[ "$(emulator_process_state)" == gone ]] \
+    || fail "phase b: the emulator was still running ${SHUTDOWN_TIMEOUT}s after the guest was powered off."
+  # Its output carries the guest's adb key, so it goes nowhere the upload reads.
+  # shellcheck disable=SC2086 # the workflow's emulator-options, split as the action splits them
+  # -no-snapshot-load: a snapshot in the AVD would restore a disk from before
+  # the app was installed, and Phase B would then blame the product.
+  setsid "${emulator}" -port "${port}" -avd "${avd}" ${M7_EMULATOR_OPTIONS} -no-snapshot-load \
+    > /dev/null 2>&1 < /dev/null &
+}
+
+# The bounded poll is the whole wait, and each read is bounded too, so the
+# poll reports at its deadline with the reason. An `adb wait-for-device` ahead
+# of it blocked for good when the emulator itself exited on a reboot (CI run
+# 41858798643). A boot is complete only once a read has seen the property NOT
+# at 1, so a read answered by the guest being left can never count.
 wait_for_boot() {
   local timeout_s="$1"
   local deadline=$(( SECONDS + timeout_s )) bc seen_down=0
   while (( SECONDS < deadline )); do
-    bc="$(adb -s "${DEVICE}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
+    bc="$(timeout "${ADB_READ_SECS}" adb -s "${DEVICE}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
     if [[ "${bc}" != "1" ]]; then
       seen_down=1
     elif (( seen_down )); then

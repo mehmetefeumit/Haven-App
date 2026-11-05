@@ -947,7 +947,7 @@ nemesis phase (`grade_settled`).
 * **Findings.** `plane-crossed-event`, `plane-crossed-request` and
   `plane-unknown-frame` (rc 1) name the plane's and the device's handles, the
   matrix row and the judge's class literal, nothing else; a `CLOSE` naming a
-  subscription its connection never opened is an unknown frame, never
+  subscription its relay was never sent is an unknown frame, never
   special-cased. `plane-unobserved` (rc 4) is the vacuity, per ROLE: the
   location planes must have carried a `#h` REQ (`REQ-445-H`) and the account
   planes the inbox REQ (`REQ-1059-P`), and a profile plane an arm declared

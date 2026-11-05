@@ -578,8 +578,10 @@ kill; does NOT enter stopped state; jobs survive).
   relayErrors=0` (full relay→MLS-decrypt pipeline inside the worker isolate). *Counter expectations
   pinned on the §5 runbook run FIRST; documented fallback if first-sweep cursor-seeding excludes the
   pre-published location — decided with local evidence, never by weakening CI after the fact.*
-- **Phase B — reboot re-arm (consent still ON):** `adb reboot` → `wait-for-device` → poll
-  `getprop sys.boot_completed`=1 (300 s bound) → `wm dismiss-keyguard` best-effort → restart host
+- **Phase B — reboot re-arm (consent still ON):** the guest powered off (`adb shell reboot -p`) and
+  the same AVD booted again with the step's own emulator options (`restart_guest`; the emulator
+  died on an in-place `adb reboot` in 2 of 14 runs) → bounded poll of
+  `getprop sys.boot_completed`=1 (300 s bound, each read bounded) → `wm dismiss-keyguard` best-effort → restart host
   logcat capture → **bounded poll** for the SystemJobService job listed again (A6: WorkManager reboot
   survival is via its own `RescheduleReceiver` + Room DB, `setPersisted(false)`, NOT persisted
   JobScheduler jobs — the job may appear seconds-to-tens-of-seconds after boot) → assert RebootReceiver
