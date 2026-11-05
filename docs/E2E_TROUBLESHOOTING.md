@@ -1452,6 +1452,23 @@ failure reported anywhere):
 Both end as verdict `launch-stall` → the one sanctioned retry. A run that reached
 test code cannot reach either: it carries a test-start line, which vetoes.
 
+**The log gate's refusal of a stalled attempt is the stall, not a finding.**
+The transcript is gated before the retry is classified, and a stalled attempt
+ran no Dart code, so its gate refuses it on every stall: `META-FLOOR (rc 4)` on
+a host-profile lane (the `drive` class's proof of run finds no test-start line),
+`UNUSABLE (rc 3)` on the proxy-profile core flow (`no needle declaration
+sidecar`: nothing reached the proxy, so nothing was sealed). Until CI run
+41924298176 both were recorded `genuine`, and attempt 2 refused with *"verdict
+is 'genuine' (log-privacy gate failed the test log (rc=4))"*: `e2e_profile_ios`
+and one bg-publish leg went red on two watchdog-caught stalls (app launched,
+`The Dart VM service is listening` in `sim-unified.log`, no Dart code ran).
+`ios_record_gate_failure_verdict` now classifies a refused transcript: rc 3 or 4
+on an attempt the classifier proves is the stall is the sanctioned retry, and a
+leak (rc 1), a broken guard (2), or either refusal on a suite that ran stays
+`genuine`. The gate ranks 1 > 2 > 3 > 4, so rc 3 and 4 carry neither of the
+first two, and attempt 2's gate scans attempt 1's preserved transcript against a
+sealed manifest.
+
 **So: is a red here infrastructure or a bug?** Read `flutter-ios-test.log`. No
 test-start line after `Xcode build done.` = the app never attached, i.e.
 infrastructure — the lane retries once, and if the retry also fails to attach,

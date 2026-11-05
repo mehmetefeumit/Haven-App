@@ -990,6 +990,16 @@ run_self_test() {
          "classify='${verdict_line}')" >&2
     fail=1
   fi
+  # A transcript the gate refused is classified by the library, which keeps a
+  # stall's meta floor retryable; a verdict written here directly made the
+  # lane's one retry unreachable (CI run 41924298176).
+  if ! grep -qF 'ios_record_gate_failure_verdict "${VERDICT_FILE}" "${LOG_FILE}" "${TEST_RC}" "${scan_rc}"' <<<"${real_run}" \
+     || grep -qE 'ios_retry_record "\$\{VERDICT_FILE\}"' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (S2): the real run records a refused transcript's" \
+         "verdict itself instead of through ios_record_gate_failure_verdict," \
+         "so a stall's meta floor reads as genuine and is never retried" >&2
+    fail=1
+  fi
   if grep -qE '^(cat|head|tail) .*LOG_FILE' <<<"${real_run}"; then
     echo "SELF-TEST FAIL (S2): the transcript is echoed at top level — a leak" \
          "would reach the job log outside the gate" >&2
@@ -1586,7 +1596,12 @@ set -e
 scan_rc=0
 scan_log_or_contain "${LOG_FILE}" || scan_rc=$?
 if (( scan_rc != 0 )); then
-  ios_retry_record "${VERDICT_FILE}" genuine 1 "log-privacy gate failed the test log (rc=${scan_rc})"
+  if ios_record_gate_failure_verdict "${VERDICT_FILE}" "${LOG_FILE}" "${TEST_RC}" "${scan_rc}"; then
+    echo "WARN: iOS e2e scenario '${SCENARIO_FILE}' hit a simulator" \
+         "LAUNCH/ATTACH STALL (rc=${TEST_RC}): no test started, so the gate's" \
+         "refusal is that stall's own empty transcript, not a finding. A retry" \
+         "may follow, and its gate scans this transcript too." >&2
+  fi
   echo "ERROR: log-privacy gate failed for the iOS test log (rc=${scan_rc}:" \
        "1 = leak, now removed; 2 = guard broken; 3 = unusable; 4 = meta floor)" >&2
   exit 1

@@ -466,6 +466,27 @@ ios_record_failure_verdict() {
   return 1
 }
 
+# ios_record_gate_failure_verdict <verdict-file> <log> <rc> <scan-rc> — the
+# verdict of an attempt whose transcript the log-privacy gate refused. Returns 0
+# when that attempt is still the admitted stall, 1 otherwise.
+#
+# A stalled attempt ran no Dart code, so its gate refuses it on every stall: rc
+# 4 on a host lane (the drive class's proof of run finds no test-start line), rc
+# 3 on a proxy lane (no needle declaration ever reached the proxy, so nothing
+# was sealed). Both stay the admitted stall. A leak or a broken guard never
+# does, and the gate ranks them above both (1 > 2 > 3 > 4). The transcript is
+# kept for the next attempt's gate, which scans it against a sealed manifest.
+# Recording these `genuine` made the one retry this lane admits unreachable
+# (CI run 41924298176, two lanes).
+ios_record_gate_failure_verdict() {
+  local file="$1" log="$2" rc="$3" scan_rc="$4"
+  if (( scan_rc == 3 || scan_rc == 4 )) && ios_record_failure_verdict "${file}" "${log}" "${rc}"; then
+    return 0
+  fi
+  ios_retry_record "${file}" genuine 1 "log-privacy gate failed the test log (rc=${scan_rc})"
+  return 1
+}
+
 # Field 1 = verdict word, 2 = rc, 3 = reason. An absent file reports `absent`
 # (this is attempt 1); an unreadable or malformed one reports `unknown`, which
 # the gate refuses — a verdict we cannot read is not a verdict to act on.
@@ -1085,6 +1106,39 @@ ios_flake_lib_self_test() {
     fail=1
   fi
 
+  # (R3) A STALL THE LOG GATE REFUSED, CI run 41924298176. A stalled attempt
+  #      ran no Dart code, so its gate refuses it on every stall: rc 4 on a
+  #      host lane (no test-start line), rc 3 on a proxy lane (nothing
+  #      declared, nothing sealed). Both must stay the retryable stall, or the
+  #      retry is unreachable again.
+  local scan_case scan_log scan_rc
+  for scan_rc in 3 4; do
+    ios_retry_clear "${vf}"
+    rec_rc=0
+    ios_record_gate_failure_verdict "${vf}" "${tmp}/stall.log" 1 "${scan_rc}" || rec_rc=$?
+    if (( rec_rc != 0 )) || [[ "$(ios_retry_verdict_field "${vf}" 1)" != "retryable" ]]; then
+      echo "SELF-TEST FAIL (R3): a stall the gate refused with rc ${scan_rc} was" \
+           "not recorded as 'retryable' (CI run 41924298176)" >&2
+      fail=1
+    fi
+  done
+
+  # (R4) …and nothing else the gate refuses ever is: a leak and a broken guard
+  #      on that very stall, and either refusal on a suite that ran and failed.
+  #      A leak re-rolled is a leak published twice.
+  for scan_case in stall.log:1 stall.log:2 testfail.log:3 testfail.log:4; do
+    scan_log="${scan_case%%:*}"
+    scan_rc="${scan_case##*:}"
+    ios_retry_clear "${vf}"
+    rec_rc=0
+    ios_record_gate_failure_verdict "${vf}" "${tmp}/${scan_log}" 1 "${scan_rc}" || rec_rc=$?
+    if (( rec_rc == 0 )) || [[ "$(ios_retry_verdict_field "${vf}" 1)" != "genuine" ]]; then
+      echo "SELF-TEST FAIL (R4): gate rc ${scan_rc} on ${scan_log} was not" \
+           "recorded as 'genuine'" >&2
+      fail=1
+    fi
+  done
+
   # (G7) Per-SCENARIO isolation: e2e-ios.yml runs two scenarios in one job, and
   #      the first one's leftover verdict must not gate the second.
   local vf2
@@ -1104,7 +1158,7 @@ ios_flake_lib_self_test() {
     echo "ios-flake-lib.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "ios-flake-lib.sh --self-test: all 25 predicate + 8 gate + 2 recording fixtures passed" \
+  echo "ios-flake-lib.sh --self-test: all 25 predicate + 8 gate + 8 recording fixtures passed" \
        "(the one admitted stall retries in both its spellings — our watchdog's" \
        "and flutter_tools' own failed attach — including when the transcript" \
        "opens with the reporter's pre-build suite load; genuine failures," \
