@@ -209,10 +209,12 @@ jobs:
           bash ../scripts/build_release.sh apk
 
       # Security Rule 15: no APK ships with SQLCipher's native logger compiled in.
+      # unzip -d creates only the last directory of its target, hence the mkdir.
       - name: Probe each APK for SQLCipher's logger
         run: |
           for apk in build/app/outputs/flutter-apk/app-*-release.apk; do
             out="${RUNNER_TEMP}/apk-lib/$(basename "${apk}" .apk)"
+            mkdir -p "${out}"
             unzip -q -o "${apk}" 'lib/*/librust_lib_haven.so' -d "${out}"
             bash ../scripts/ci/check_sqlcipher_logger_omitted.sh "${out}/lib"
           done
@@ -325,9 +327,10 @@ jobs:
 
       # Install the Match-provisioned Apple Distribution cert + "match AppStore
       # com.oblivioustech.haven" profile READ-ONLY into a temporary CI keychain, and switch
-      # the Runner target to manual signing so the archive can use them. Uses the
-      # App Store Connect API key (no Apple ID / 2FA). Certificates are minted by
-      # the separate "iOS Certificates" workflow, never here.
+      # the Runner target to manual signing so the archive can use them. Read-only:
+      # it needs only the Match repo token and MATCH_PASSWORD, never the App Store
+      # Connect API key. Certificates are minted by the separate "iOS Certificates"
+      # workflow, never here.
       - name: Install iOS signing assets (Fastlane Match)
         working-directory: haven/ios
         env:
