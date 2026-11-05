@@ -151,9 +151,14 @@ A release is cut by pushing a version **tag** — the only manual git action. CI
 never tags or commits. Pushing `vX.Y.Z` (or `vX.Y.Z-beta.N` for a pre-release) to
 `origin` triggers `.github/workflows/release-build.yml`, which:
 
-1. Runs the gate (rust-check, cross-check, coverage, and the full repo-guards
-   set — committed secrets, tile-provider policy, and the other static
-   invariants) on the tagged commit.
+1. Runs the gate: CI's push to `main` must have passed rust-check,
+   cross-check, coverage and the full repo-guards set (committed secrets,
+   tile-provider policy and the other static invariants) on the tagged commit.
+   The gate reads that verdict rather than running the checks again, so tag
+   the commit a push to `main` ended on (CI runs only each push's tip). If its
+   checks are still running the gate waits for them, but a later push to
+   `main` cancels them (`ci.yml` cancels in-progress runs per branch), and the
+   gate then fails until `gh run rerun <run id> --failed` passes them.
 2. **Refuses to proceed if the release keystore isn't configured** — a tag must be
    release-signed, never debug-signed.
 3. Builds the **per-ABI release APKs** (`app-arm64-v8a-release.apk`,

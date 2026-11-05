@@ -424,6 +424,13 @@
 #     stale ignore, an id seen only as an alias, and a filtered or unreadable
 #     report each fail rather than pass.
 #
+#   Release gate names CI's jobs      scripts/ci/check_ci_verdict.sh
+#     release-build.yml ships a tag only once ci.yml's push run has passed
+#     every job of rust-check, cross-check, coverage and repo-guards on that
+#     commit. The jobs it requires are pinned; this holds the list equal to
+#     the jobs those workflows and ci.yml's callers define, so a job added or
+#     renamed cannot silently leave the release gate.
+#
 #   Session-busy marker is log-only   scripts/ci/check_session_busy_marker_not_routed.sh
 #     The Rule-14 "an MLS session is already open" marker must never drive a
 #     decision — Haven's FFI errors interpolate remote-authored text, so a
@@ -1410,6 +1417,18 @@ jobs:
       - name: Audit-ignore liveness guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_audit_ignores_live.sh --self-test
+
+      - name: Release gate names CI's jobs
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_ci_verdict.sh
+
+      # Stubs the Actions API: a failed, cancelled, skipped-only, missing or
+      # unfinished gate job, an unlisted failed one and a missing run each fail
+      # the gate; a waited-for job and a red E2E lane do not; and an added job
+      # or renamed caller fails the list check.
+      - name: Release gate self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_ci_verdict.sh --self-test
 
       # The Rule-14 busy marker is a LOG token. Routing on it would be
       # remotely influenceable: a circle admin controls the group's routing
@@ -2549,8 +2568,8 @@ jobs:
       # `pull_request.base.sha`; on a push it is `event.before`, the PREVIOUS
       # TIP OF THE SAME BRANCH — a push to main therefore ratchets against what
       # main was a moment earlier, not against a diverged branch. Anchoring on
-      # the tip was wrong twice: a tag build (release-build.yml calls this job
-      # too) would fetch a main that had moved on and report every newer
+      # the tip was wrong twice: a tag build (release-build.yml then called
+      # this job too) would fetch a main that had moved on and report every newer
       # invariant as `.deleted`, failing the release gate on a phantom
       # weakening; and on a push to main the tip IS the pushed commit, so the
       # baseline equalled HEAD and the ratchet — the thing this workstream is

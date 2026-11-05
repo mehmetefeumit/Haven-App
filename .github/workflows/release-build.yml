@@ -60,35 +60,39 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Release gate: the tagged commit MUST pass the deterministic checks before
-  # any signed artifact is produced or uploaded. These are the same reusable
-  # workflows PR CI (ci.yml) runs; invoking them here re-verifies them on the
-  # exact tagged tree — without this gate a tag pushed onto a red/unverified
-  # commit shipped straight to TestFlight. The `guards` job runs the FULL
-  # consolidated guard set (committed secrets, tile-provider policy, profile
-  # privacy boundaries, INTERNET permission, background-wake invariants,
-  # locale privacy, harness self-tests) — all deterministic greps, consistent
-  # with this gate's philosophy. The emulator E2E lanes are deliberately NOT
-  # part of this gate: their AVD nondeterminism must never block a release of
-  # an already-green commit, so they stay the PR/nightly functional signal.
-  # None of these reusables consume secrets, so no `secrets:` pass-through is
-  # needed.
+  # Release gate: the tagged commit MUST have passed the deterministic checks
+  # before any signed artifact is produced or uploaded — without this gate a
+  # tag pushed onto a red/unverified commit shipped straight to TestFlight. The
+  # checks are ci.yml's rust-check, cross-check, coverage and repo-guards jobs,
+  # and this job reads the verdict ci.yml's push to main recorded for this exact
+  # commit (scripts/ci/check_ci_verdict.sh) rather than running them again: a
+  # tag's cache scope holds nothing, so the redo was a cold rebuild of what main
+  # had just proved, and it ran past its 60-minute bound on v0.1.13. Main's run
+  # is also the stronger proof, because its repo-guards ratchets the privacy
+  # manifest against the previous tip, which a tag run cannot. A tag must
+  # therefore point at the tip of a push to main. If that commit's gate jobs
+  # are still running this job waits for them; a later push to main cancels
+  # them, and the gate then fails until they are re-run. The emulator E2E lanes are
+  # deliberately NOT part of this gate: their AVD nondeterminism must never
+  # block a release of an already-green commit, so they stay the PR/nightly
+  # functional signal.
   # ---------------------------------------------------------------------------
-  rust-check:
-    name: Rust Checks
-    uses: ./.github/workflows/rust-check.yml
+  gate:
+    name: CI passed on this commit
+    runs-on: ubuntu-latest
+    # The script's own deadline is 90 minutes.
+    timeout-minutes: 100
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
 
-  cross-check:
-    name: Cross-Platform Compile
-    uses: ./.github/workflows/cross-check.yml
-
-  coverage:
-    name: Coverage
-    uses: ./.github/workflows/coverage.yml
-
-  guards:
-    name: Repo Guards
-    uses: ./.github/workflows/repo-guards.yml
+      - name: Require ci.yml's gate jobs to have passed on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/check_ci_verdict.sh --sha "${GITHUB_SHA}"
 
   android:
     name: Android release (per-ABI APKs)
@@ -112,7 +116,7 @@ jobs:
     # scripts/ci/build_apk_with_retry.sh, so a transient here is a human
     # re-run of the tag, not an in-job recovery. Revisit only once both
     # checksums are pinned and verified.
-    needs: [rust-check, cross-check, coverage, guards]
+    needs: [gate]
     runs-on: ubuntu-latest
     # contents: write lets the built-in GITHUB_TOKEN create the GitHub Release and
     # attach the signed APKs. The GitHub Release is the canonical Android channel:
@@ -155,6 +159,9 @@ jobs:
         with:
           workspaces: haven-core
           key: release-android
+          # A tag-scoped cache can never be restored (a later tag cannot read
+          # it, nor can main), and it evicts main's from the full 10 GB store.
+          save-if: ${{ github.ref_type != 'tag' }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -275,7 +282,7 @@ jobs:
     # HAVEN_LIVE_SYNC-INTENT: production-default — see the header. The shipped
     # IPA's receive path is live_sync_provider.dart's defaultValue, not a
     # value this workflow chooses.
-    needs: [rust-check, cross-check, coverage, guards]
+    needs: [gate]
     # Pin macos-15 (GA) rather than macos-latest: macos-latest is mid-migration
     # to macos-26 (started 2026-06-15), so the SDK it provides is ambiguous.
     # macos-15 ships Xcode 26.x (up to 26.3, the newest that runs on macOS 15).
@@ -308,6 +315,9 @@ jobs:
         with:
           workspaces: haven-core
           key: release-ios
+          # A tag-scoped cache can never be restored (a later tag cannot read
+          # it, nor can main), and it evicts main's from the full 10 GB store.
+          save-if: ${{ github.ref_type != 'tag' }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2

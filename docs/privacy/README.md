@@ -345,14 +345,15 @@ exist:
   model, so the unswept third is not the harmless third. Rule 12's coverage is
   bidirectional and genuinely strong **within** `^privacy`; outside it, adding a
   claim to the manifest is a human act.
-* **The release gate never ratchets.** `release-build.yml` calls this same
-  `repo-guards` job, but it runs on tags and `workflow_dispatch`, neither of
-  which carries a `pull_request.base.sha` or a non-zero `event.before` — so the
-  step takes the `--no-ratchet` branch. Rules 1-14 still run. What a release
-  build cannot detect is a *weakening*: a status downgraded, an invariant
-  deleted or a disclosure key dropped between the last PR and the tag passes the
-  release gate in silence. The ratchet is a pull-request mechanism, and only a
-  pull-request mechanism.
+* **The release gate takes main's ratchet.** `release-build.yml` runs no guard
+  itself: it requires the `repo-guards` job of ci.yml's push run for the tagged
+  commit to have passed (`scripts/ci/check_ci_verdict.sh`), and on a push the
+  step ratchets against `event.before`, the previous tip of main. A tag or a
+  `workflow_dispatch` run carries neither that nor a `pull_request.base.sha`,
+  so a guard run there could only take the `--no-ratchet` branch. The ratchet
+  compares one push with the tip before it: a weakening that landed in an
+  earlier push whose run went red is the baseline every later push is compared
+  with.
 * **The pre-commit hook does not run this gate.** `scripts/ci/run_source_guards.sh`
   derives its list from `repo-guards.yml` by matching argument-less
   `bash scripts/ci/check_*.sh` steps, and this gate's invocation always carries a
