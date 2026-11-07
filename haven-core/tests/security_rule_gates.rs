@@ -756,12 +756,14 @@ fn rule13_a_burst_never_pauses_with_a_pending_publish_outstanding() {
         std::fs::read_to_string(repo_root().join("haven-core/src/relay/live_sync/session.rs"))
             .expect("read session.rs");
 
-    let pause = fn_body(&session, "pub async fn pause_subscriptions")
-        .expect("session.rs must define pause_subscriptions");
+    let pause = pause_body(&session);
 
     let resume =
         fn_body(&session, "async fn resume_burst").expect("session.rs must define resume_burst");
-    for (name, body) in [("pause_subscriptions", &pause), ("resume_burst", &resume)] {
+    for (name, body) in [
+        ("pause_subscriptions", pause.as_str()),
+        ("resume_burst", resume),
+    ] {
         let gauge = body
             .find("wait_publishes_drained")
             .unwrap_or_else(|| panic!("{name} must await the in-flight publish gauge"));
@@ -873,12 +875,15 @@ fn rule14_pause_and_burst_open_no_second_session() {
         std::fs::read_to_string(repo_root().join("haven-core/src/relay/live_sync/session.rs"))
             .expect("read session.rs");
 
-    for (name, body) in [
-        ("pause_subscriptions", "pub async fn pause_subscriptions"),
-        ("resume_burst", "async fn resume_burst"),
+    for (name, text) in [
+        ("pause_subscriptions", pause_body(&session)),
+        (
+            "resume_burst",
+            fn_body(&session, "async fn resume_burst")
+                .expect("session.rs must define resume_burst")
+                .to_owned(),
+        ),
     ] {
-        let text =
-            fn_body(&session, body).unwrap_or_else(|| panic!("session.rs must define {name}"));
         for forbidden in ["new_local", "AccountDeviceSession", "SessionManager::"] {
             assert!(
                 !text.contains(forbidden),
@@ -2558,10 +2563,7 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
          cold-launched the process, and leaves a session only started — whose one \
          drive only finishes — and never behind a stop that has just ended it",
     );
-    let pause = squash(
-        fn_body(&core, "pub async fn pause_subscriptions(")
-            .expect("session.rs defines pause_subscriptions"),
-    );
+    let pause = squash(&pause_body(&core));
     assert!(
         pause.find("self.processor.leave_foreground();")
             < pause.find("self.processor.wait_publishes_drained().await;")
@@ -4092,6 +4094,19 @@ fn every_wake_a_drive_runs_in_is_cut_at_the_burst_end() {
         ) && processor.matches("deadline_ms:").count() == 1,
         "the live plane's drive is not cut at its burst end",
     );
+}
+
+/// The pause's whole body in the order it runs: `pause_subscriptions`, with
+/// the body of the `pause_locked` it delegates to spliced in where it calls it.
+fn pause_body(session: &str) -> String {
+    let wrapper = fn_body(session, "pub async fn pause_subscriptions(")
+        .expect("session.rs must define pause_subscriptions");
+    let Some(call) = wrapper.find("self.pause_locked(") else {
+        return wrapper.to_owned();
+    };
+    let locked = fn_body(session, "async fn pause_locked(")
+        .expect("pause_subscriptions delegates to a pause_locked session.rs must define");
+    format!("{}{locked}{}", &wrapper[..call], &wrapper[call..])
 }
 
 /// The body of `fn <name>` in `src`, brace-balanced, or `None`.

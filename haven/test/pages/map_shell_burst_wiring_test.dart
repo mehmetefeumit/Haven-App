@@ -96,6 +96,17 @@ String _rustFnBody(String source, String signature) {
   fail('unbalanced braces in $signature');
 }
 
+/// The pause's whole body in the order it runs: `pause_subscriptions`, with
+/// the body of the `pause_locked` it delegates to spliced in where it calls it.
+String _rustPauseBody(String session) {
+  final wrapper = _rustFnBody(session, 'pub async fn pause_subscriptions(');
+  final call = wrapper.indexOf('self.pause_locked(');
+  if (call < 0) return wrapper;
+  return wrapper.substring(0, call) +
+      _rustFnBody(session, 'async fn pause_locked(') +
+      wrapper.substring(call);
+}
+
 /// Records the two teardown links the opt-out must always reach.
 class _RecordingEngine implements SubscriptionService {
   @override
@@ -821,9 +832,8 @@ void main() {
       // worker's ack of it — four steps it always takes — plus ONE MORE per
       // leftover REQ, inside the sweep loop. That fifth site is why the count
       // here is 5 and the multiplier in the constant is 4.
-      final body = _rustFnBody(
+      final body = _rustPauseBody(
         _rustSource('src/relay/live_sync/session.rs'),
-        'pub async fn pause_subscriptions',
       );
       expect(
         'RELAY_LIFECYCLE_OP_TIMEOUT'.allMatches(body).length,
