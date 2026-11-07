@@ -70,7 +70,9 @@
 #   5. `session.rs` contains no `.ping(false)` and no `.sleep_when_idle(` CALL:
 #      the engine keeps the ping its standing REQ depends on, and its socket
 #      may never sleep.
-#   8. `session.rs`'s `fn pause_subscriptions` BODY (the burst's close path):
+#   8. `session.rs`'s `fn pause_subscriptions` BODY (the burst's close path),
+#      together with, when it calls `self.pause_locked(`, `fn pause_locked`'s
+#      body — the pause under a lifecycle acquisition its caller holds:
 #      contains `note_delivery_gap` or the `RawSignal::Pause` marker that
 #      reaches it; contains NO `forget_` token; CALLS `terminate_all_relays()`
 #      and contains NO `client.shutdown()`. The radio-off step is pinned
@@ -410,9 +412,16 @@ check_engine_pool_options() { # <session.rs>
 
   # (8) The background burst's close path.
   local pause
+  local locked=''
   pause="$(fn_body_flat 'pause_subscriptions' "${session}")"
+  # The rules read the wrapper AND the body it delegates to: a shutdown or a
+  # forget added beside the delegation is the same defect as one inside it.
+  if [[ "${pause}" == *"self.pause_locked("* ]]; then
+    locked="$(fn_body_flat 'pause_locked' "${session}")"
+    [[ -n "${locked}" ]] && pause+=" ${locked}" || pause=''
+  fi
   if [[ -z "${pause}" ]]; then
-    lfail "(8) $(basename "${session}") defines no pause_subscriptions() — the background burst has no close path, so the engine holds its standing REQ and its socket between publish ticks and P4's whole saving is gone."
+    lfail "(8) $(basename "${session}") defines no pause_subscriptions(), or no pause_locked() for it to call — the background burst has no close path, so the engine holds its standing REQ and its socket between publish ticks and P4's whole saving is gone."
   else
     if [[ "${pause}" != *"note_delivery_gap"* && "${pause}" != *"RawSignal::Pause"* ]]; then
       lfail "(8) pause_subscriptions() neither calls note_delivery_gap nor sends the RawSignal::Pause marker that reaches it. Without one of them the pause closes every REQ while leaving each open generation still owed an advance, so the next burst's EOSE advances the cursor over a window this one interrupted."
@@ -1162,7 +1171,7 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=100
+  local -r SELF_TEST_FIXTURES=103
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1344,7 +1353,11 @@ impl LiveSyncCore {
 
     /// The background burst's close path.
     pub async fn pause_subscriptions(&self) -> LiveSyncResult<()> {
-        let _lifecycle = self.lifecycle.lock().await;
+        let lifecycle = self.lifecycle.lock().await;
+        self.pause_locked(&lifecycle).await
+    }
+
+    async fn pause_locked(&self, _lifecycle: &TokioMutexGuard<'_, ()>) -> LiveSyncResult<()> {
         self.paused.store(true, Ordering::Release);
         let _ = bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.client.unsubscribe_all()).await;
         let mut drained = false;
@@ -1574,6 +1587,11 @@ RS
 
   _noop() { :; }
   _sed() { sed -i "$1" "$2"; }
+  # The fixture's pause folded back into one function: the wrapper's two lines
+  # and the variant's signature go.
+  _pause_inline() {
+    sed -i -e '/^        let lifecycle = self.lifecycle.lock().await;$/,/^    async fn pause_locked(/c\        let _lifecycle = self.lifecycle.lock().await;' "$1"
+  }
   _append() { printf '%s\n' "$2" >>"$1"; }
 
   # 1. The shapes in the tree today pass, all four checks at once — including
@@ -1675,6 +1693,21 @@ RS
   #     regression itself, and the one with no runtime symptom but battery.
   _fixture 'a standing REQ in the burst path fails' 1 '(8) resume_burst() opens a standing REQ' \
     _sed 's|self.client.wait_for_connection(SUBSCRIBE_CONNECT_WAIT).await;|self.client.subscribe_with_id_to(relays, sub_id, filter, None).await?;|' "${session}"
+
+  # 21a. The pause's body inline in pause_subscriptions, with no lock-holding
+  #      variant, is the same close path and passes.
+  _fixture 'a pause body inline in pause_subscriptions passes' 0 '' \
+    _pause_inline "${session}"
+
+  # 21b. A pause_subscriptions that delegates to a pause_locked() the file does
+  #      not define: every rule would read an EMPTY body and certify nothing.
+  _fixture 'a pause delegating to a missing pause_locked fails' 1 \
+    'or no pause_locked() for it to call' \
+    _sed 's@    async fn pause_locked(@    async fn pause_now(@' "${session}"
+
+  # 21c. A shutdown beside the delegation, in the wrapper itself.
+  _fixture 'a client.shutdown() in the pause wrapper fails' 1 '(8) pause_subscriptions() calls client.shutdown()' \
+    _sed 's@^        self.pause_locked(&lifecycle).await$@        self.client.shutdown().await;\n        self.pause_locked(\&lifecycle).await@' "${session}"
 
   # 38-44. The radio-off step, now reached through `terminate_all_relays()`.
   #        Fixture 38 is the call itself; 39-44 are what the helper must still

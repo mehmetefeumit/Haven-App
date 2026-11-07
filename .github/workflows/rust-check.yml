@@ -175,6 +175,9 @@ jobs:
     name: haven-core suite (stable)
     if: ${{ inputs.group == 'all' || inputs.group == 'suite' }}
     runs-on: ubuntu-latest
+    # A hung test otherwise holds the runner to GitHub's six-hour limit (CI run
+    # 42134143952). Twice the worst of ten green runs (26-40 minutes).
+    timeout-minutes: 80
     defaults:
       run:
         working-directory: haven-core
@@ -540,8 +543,8 @@ jobs:
   # built from source, and `[profile.soak]` is a new target subdirectory on top
   # of it. A cache miss here is minutes, and because the soak lane waits on
   # this job (ci.yml's `rust-tooling`), a cold build here delays it — hence the
-  # explicit `timeout-minutes` (this workflow's other jobs have none) and the
-  # single `shared-key` shared with soak-core.yml, so the lane reads the cache
+  # explicit `timeout-minutes` and the single `shared-key` shared with
+  # soak-core.yml, so the lane reads the cache
   # this job wrote rather than building the crate a second time. `key:` would
   # not do: it APPENDS to the automatic job-scoped key, which would give every
   # job its own cold build.

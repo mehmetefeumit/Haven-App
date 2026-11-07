@@ -45,6 +45,10 @@ jobs:
   rust-coverage:
     name: Rust Coverage
     runs-on: ubuntu-latest
+    # A hung test otherwise holds the runner to GitHub's six-hour limit (CI run
+    # 42134143952). Twice the worst of ten green runs since the SQLCipher
+    # test-store fix (31-45 minutes).
+    timeout-minutes: 92
     defaults:
       run:
         working-directory: haven-core

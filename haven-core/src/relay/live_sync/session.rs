@@ -2856,7 +2856,13 @@ impl LiveSyncCore {
     ///
     /// Returns [`LiveSyncError::NoSession`] if the session was already stopped.
     pub async fn pause_subscriptions(&self) -> LiveSyncResult<()> {
-        let _lifecycle = self.lifecycle.lock().await;
+        let lifecycle = self.lifecycle.lock().await;
+        self.pause_locked(&lifecycle).await
+    }
+
+    /// [`Self::pause_subscriptions`] under a lifecycle acquisition the caller
+    /// holds.
+    async fn pause_locked(&self, _lifecycle: &TokioMutexGuard<'_, ()>) -> LiveSyncResult<()> {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(LiveSyncError::NoSession);
         }
@@ -9277,6 +9283,12 @@ mod tests {
     /// passed, and it parks inside the probe on the `active` read this test
     /// holds shut. The pause — which never touches `active` — then runs to
     /// completion, and only afterwards is the probe released.
+    ///
+    /// The test takes the lifecycle lock BEFORE `active`, as every production
+    /// path does, and the pause runs under that acquisition. Taken the other
+    /// way round it deadlocks whenever the repair task, woken by the start's
+    /// own connect, holds the lifecycle lock while it waits to read `active`
+    /// (CI run 42134143952: six hours, under coverage).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_health_tick_inside_the_probe_when_a_pause_lands_reopens_nothing() {
         let _ = crate::relay::allow_ws_loopback_for_test();
@@ -9307,6 +9319,7 @@ mod tests {
 
         // `probe_subscriptions` reads the active session first, so this is where
         // the tick parks.
+        let lifecycle = core.lifecycle.lock().await;
         let active = core.active.write().await;
         let mut tick = std::pin::pin!(core.maintain_subscription_health(Claim::Foreground));
         assert!(
@@ -9316,8 +9329,9 @@ mod tests {
              below would be measuring the gate this test is not about"
         );
 
-        core.pause_subscriptions().await.expect("pause");
+        core.pause_locked(&lifecycle).await.expect("pause");
         drop(active);
+        drop(lifecycle);
 
         let outcome = tick.await.expect("the tick must not error");
         assert_eq!(
