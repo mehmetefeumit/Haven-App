@@ -366,18 +366,32 @@ with a fixed 20/45/75 s ladder (`HAVEN_BUILD_MAX_ATTEMPTS`,
 `HAVEN_BUILD_RETRY_BUDGET_SECS`), inside a 180 s wall-clock budget shared by the
 WHOLE step — so a seven-APK step cannot spend it seven times over — and it
 refuses to start an attempt whose projected cost will not fit. It CLASSIFIES:
-only a dependency-resolution signature is retried, a disk/OOM signature is
-never retried (that would turn a capacity problem into a green build), and
-anything unclassified fails immediately with the build's own exit code.
+only a dependency-resolution signature, or the Gradle wrapper failing to
+download the Gradle distribution with a 408, 429 or 5xx, is retried; a
+disk/OOM signature is never retried (that would turn a capacity problem into a
+green build), and anything unclassified fails immediately with the build's own
+exit code. The wrapper case is separate because the wrapper runs before Gradle
+and prints Java's wording (`Server returned HTTP response code: 504 for URL:
+…/gradle-8.14-all.zip`, CI run 42392657873), which neither Gradle's own retry
+nor the resolution signatures can see. It appears only when the dependency
+cache, which carries `~/.gradle/wrapper`, was not restored, and on every build
+of `e2e-flakiness-stress.yml`, which is exempt from that cache. A 404 there
+means a misnamed distribution and is not retried, and nor is a checksum
+mismatch, since the archive is pinned by `distributionSha256Sum`. The retry is
+safe because of the wrapper Flutter supplies (Gradle 2.10's jar): it deletes a
+partial download before each attempt and marks a distribution usable only once
+it is complete. A Flutter release that ships a different wrapper jar needs
+that re-checked.
 
 Note what it cannot decide. `Could not resolve all files for configuration ...`
 is what Gradle prints both for a transient and for a dependency version this
 commit got wrong, so the retry class covers both. The verdict annotation is
-where that is told honestly, and it has **three wordings** — read which one you
+where that is told honestly, and it has **four wordings** — read which one you
 got before re-running:
 
 | The output carried | The annotation says | What to do |
 |---|---|---|
+| the wrapper's `Server returned HTTP response code: 408/429/5xx` for the distribution archive | the Gradle wrapper could not download the Gradle distribution; INFRASTRUCTURE, not a product failure | re-run; a recurrence on a lane that restores the dependency cache (which carries `~/.gradle/wrapper`) means it is not being restored |
 | `status code 429` | a repository rate-limited this runner; INFRASTRUCTURE, not a product failure | re-run on a different runner; a recurrence means the cache is not being restored |
 | `Could not find …` + `Searched in the following locations` | Gradle could not find a coordinate in any repository, and that is also what a wrong version prints | read the Gradle error FIRST — if this commit changed a dependency, no re-run will fix it |
 | neither | no HTTP status was reported, so the cause is not knowable from here | usually infrastructure, but check the diff for a dependency change |

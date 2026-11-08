@@ -239,6 +239,27 @@ readonly RC_BROKEN=2
 #              and "Could not parse POM ...", which are matched below — and
 #              because it IS, `infra_error` names that shape rather than
 #              asserting a cause it cannot see.
+#   MEASURED   run 42392657873 job 128468678459 (e2e_kp_rotation, 2026-11-07),
+#              with the dependency cache missed: the Gradle WRAPPER, fetching
+#              the distribution before Gradle runs, printed
+#              "java.io.IOException: Server returned HTTP response code: 504 for
+#              URL: https://github.com/gradle/gradle-distributions/releases/
+#              download/v8.14.0/gradle-8.14-all.zip" — Java's wording, not
+#              Gradle's, so the `status code` alternative never saw it, and no
+#              in-Gradle retry can, since Gradle is not running yet. Matched by
+#              WRAPPER_DOWNLOAD_RE, anchored on that wording AND the
+#              distribution archive's name, and only for the codes Gradle
+#              itself treats as transient (408, 429, 5xx): a 404 is a
+#              distribution this commit named wrongly. The wrapper is the jar
+#              Flutter supplies (its cache's gradle_wrapper; the stack matches
+#              Gradle 2.10's), which deletes a partial `.part` before each
+#              download and writes its `.ok` marker last, so a retry downloads
+#              afresh. It fetches the same bytes, because
+#              gradle-wrapper.properties pins them by `distributionSha256Sum`,
+#              and a checksum mismatch prints no status and is never retried.
+#              UNMEASURED: github.com redirects to a signed asset URL whose
+#              archive name is a query value (`filename%3Dgradle-…`), so a 5xx
+#              at that hop is matched by its `%3D` form.
 #   UNMEASURED "Read timed out", "Connection reset", "Connection timed out",
 #              "Could not HEAD", "Could not download", and the 408/5xx codes:
 #              never seen in this repo's logs. They are Gradle's own transient
@@ -256,7 +277,8 @@ readonly RC_BROKEN=2
 # to say the line came from dependency resolution at all. Fixture (i) pins both
 # halves, because for a while this header claimed the opposite of what the code
 # does.
-readonly RETRIABLE_RE='Could not (GET|HEAD|resolve|download|get resource)|Could not parse POM|Error resolving plugin|downloading artifacts from the network|Read timed out|Connection (reset|timed out)|status code (408|429|5[0-9][0-9])|Could not resolve all (artifacts|dependencies|files)'
+readonly WRAPPER_DOWNLOAD_RE='Server returned HTTP response code: (408|429|5[0-9][0-9]) for URL: [^[:space:]]*(/|%3D)gradle-[0-9][0-9.]*-(all|bin)\.zip'
+readonly RETRIABLE_RE="Could not (GET|HEAD|resolve|download|get resource)|Could not parse POM|Error resolving plugin|downloading artifacts from the network|Read timed out|Connection (reset|timed out)|status code (408|429|5[0-9][0-9])|Could not resolve all (artifacts|dependencies|files)|${WRAPPER_DOWNLOAD_RE}"
 
 # Signatures that must NEVER be retried: intermittent but REAL. Retrying these
 # converts a capacity problem into a passing build that hides it. Checked FIRST,
@@ -332,12 +354,15 @@ classify() {
 # retriable class deliberately includes a wrapper — "Could not resolve all files
 # for configuration ..." — that a wrong or missing dependency version prints
 # too. An annotation that asserts HTTP 429 over a mistyped coordinate sends the
-# reader to re-run instead of to the diff. So: three wordings, each as specific
+# reader to re-run instead of to the diff. So: four wordings, each as specific
 # as its evidence allows, and never the coordinate itself — Gradle's own output
 # is above, unaltered, and already has it (Rule 15: an annotation is a log sink).
 infra_error() { # $1 attempts, $2 rc, $3 the captured build output
-  local why
-  if grep -q 'status code 429' <<<"$3"; then
+  local why code
+  if grep -qE "${WRAPPER_DOWNLOAD_RE}" <<<"$3"; then
+    code="$(grep -oE 'Server returned HTTP response code: [0-9]{3}' <<<"$3" | tail -n 1 | grep -oE '[0-9]{3}$')"
+    why="the Gradle wrapper could not download the Gradle distribution (HTTP ${code} from its host) before Gradle ran. That is INFRASTRUCTURE, not a product failure: the archive is pinned by distributionSha256Sum, so a re-run fetches the same bytes. A recurrence on a lane that restores the dependency cache, which carries ~/.gradle/wrapper, means it is not being restored"
+  elif grep -q 'status code 429' <<<"$3"; then
     why="a repository rate-limited this runner (HTTP 429). That is INFRASTRUCTURE, not a product failure — the limit follows the shared runner egress IP, not this commit. A re-run on a different runner is the remedy; a recurrence means the Gradle dependency cache is not being restored"
   elif grep -q 'Could not find ' <<<"$3" && grep -q 'Searched in the following locations' <<<"$3"; then
     why="Gradle reports a coordinate it could not find in any repository it searched. This repo has seen that shape as a transient, but it is ALSO exactly what a wrong or missing dependency version prints, and no status code says which. Read the Gradle error above FIRST: if this commit changed a dependency, no re-run will fix it"
@@ -582,7 +607,7 @@ provision_ndk() {
 # ---------------------------------------------------------------------------
 # Self-test: hermetic. A fake `flutter` on PATH, no network, no real waiting.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=26
+readonly SELF_TEST_FIXTURES=27
 
 # The verbatim Gradle output of CI run 35622556197 job 106414462454. Fixtures
 # assert against what the runner actually printed, not a paraphrase of it: a
@@ -603,6 +628,24 @@ BUILD FAILED in 43s"
 # why the classifier retries it without any 403 alternative of its own.
 readonly MEASURED_403_TEXT="Could not resolve org.jetbrains.kotlin:kotlin-stdlib:2.0.21.
    > Could not GET 'https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.0.21/kotlin-stdlib-2.0.21.pom'. Received status code 403 from server: Forbidden"
+
+# The wrapper's own failure, verbatim from CI run 42392657873 job 128468678459
+# (log lines 1133-1146): printed by the Gradle WRAPPER before Gradle ran, in
+# Java's wording.
+readonly MEASURED_WRAPPER_504_TEXT="Exception in thread \"main\" java.io.IOException: Server returned HTTP response code: 504 for URL: https://github.com/gradle/gradle-distributions/releases/download/v8.14.0/gradle-8.14-all.zip
+	at java.base/sun.net.www.protocol.http.HttpURLConnection.getInputStream0(HttpURLConnection.java:2034)
+	at java.base/sun.net.www.protocol.http.HttpURLConnection.getInputStream(HttpURLConnection.java:1632)
+	at java.base/sun.net.www.protocol.https.HttpsURLConnectionImpl.getInputStream(HttpsURLConnectionImpl.java:223)
+	at org.gradle.wrapper.Download.downloadInternal(Download.java:58)
+	at org.gradle.wrapper.Download.download(Download.java:44)
+	at org.gradle.wrapper.Install\$1.call(Install.java:61)
+	at org.gradle.wrapper.Install\$1.call(Install.java:48)
+	at org.gradle.wrapper.ExclusiveFileAccessManager.access(ExclusiveFileAccessManager.java:65)
+	at org.gradle.wrapper.Install.createDist(Install.java:48)
+	at org.gradle.wrapper.WrapperExecutor.execute(WrapperExecutor.java:128)
+	at org.gradle.wrapper.GradleWrapperMain.main(GradleWrapperMain.java:61)
+Running Gradle task 'assembleDebug'...                             11.6s
+Gradle task assembleDebug failed with exit code 1"
 
 # A dependency that does not exist. The `Could not find ... / Searched in the
 # following locations:` half is MEASURED (run 35418051379 job 105830389349); the
@@ -655,6 +698,12 @@ write_fake_flutter() {
       always429)
         printf 'cat <<%s\n%s\n%s\nexit 1\n' \
           "'GRADLE_EOF'" "${MEASURED_429_TEXT}" "GRADLE_EOF"
+        ;;
+      # Fails once with the MEASURED wrapper 504, then succeeds.
+      flakywrapper504)
+        printf 'if (( n == 1 )); then cat <<%s\n%s\n%s\nexit 1\nfi\n' \
+          "'GRADLE_EOF'" "${MEASURED_WRAPPER_504_TEXT}" "GRADLE_EOF"
+        printf 'echo "Built build/app/outputs/flutter-apk/app-debug.apk"\nexit 0\n'
         ;;
       compile)
         printf 'echo "lib/src/main.dart:12:3: Error: Expected %s;%s after this."\nexit 1\n' "'" "'"
@@ -831,6 +880,19 @@ run_self_test() {
     _fail a3 "the fake flutter accepted a build apk with no --debug/--target-platform (rc=${rc}); (a) would then pass even if this script stopped adding them"
   fi
 
+  # (a4) The wrapper's distribution download failing with a 5xx is ridden out
+  #      the same way, through the whole retry engine, not only the classifier.
+  ran=$(( ran + 1 ))
+  bin="${tmp}/a4"; write_fake_flutter "${bin}" flakywrapper504
+  rm -f "${tmp}/sleeps"
+  rc=0
+  out="$(export PATH="${bin}:${PATH}" HAVEN_BUILD_RETRY_STATE="${tmp}/a4.budget"; \
+         build_with_retry flutter build apk --debug --target-platform android-x64 2>&1)" || rc=$?
+  slept="$(_sleeps)"
+  if (( rc != 0 )) || [[ "$(fake_invocations "${bin}")" != "2" ]] || (( slept != 1 )); then
+    _fail a4 "a wrapper 504 that clears on the second attempt must return 0 after exactly 2 invocations and 1 pause; got rc=${rc}, $(fake_invocations "${bin}") invocation(s), ${slept} pause(s)"
+  fi
+
   # (b) A COMPILE error is never retried: one invocation, no pause, the
   #     command's own rc, and its original output still shown.
   ran=$(( ran + 1 ))
@@ -948,6 +1010,21 @@ run_self_test() {
     "> Could not parse POM https://plugins.gradle.org/m2/x/y/1.0/y-1.0.pom"
   _classifies "socket read timeout" retry \
     "Caused by: java.net.SocketTimeoutException: Read timed out"
+  _classifies "the MEASURED wrapper 504 fetching the distribution" retry \
+    "${MEASURED_WRAPPER_504_TEXT}"
+  # The wrapper alternative is anchored on the distribution archive: Java's
+  # wording for some other URL decides nothing, and a 404 is a distribution
+  # this commit named wrongly.
+  _classifies "Java's 504 wording for a URL that is not the distribution" fail \
+    "java.io.IOException: Server returned HTTP response code: 504 for URL: https://example.invalid/app.json"
+  _classifies "a wrapper 503 at the redirect's signed asset URL" retry \
+    "java.io.IOException: Server returned HTTP response code: 503 for URL: https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sp=r&response-content-disposition=attachment%3B%20filename%3Dgradle-8.14-all.zip&response-content-type=application%2Foctet-stream"
+  _classifies "Java's 504 wording for some other archive" fail \
+    "java.io.IOException: Server returned HTTP response code: 504 for URL: https://example.invalid/releases/app-release.zip"
+  _classifies "a wrapper 404 is a misnamed distribution, never retried" fail \
+    "java.io.IOException: Server returned HTTP response code: 404 for URL: https://services.gradle.org/distributions/gradle-8.99-all.zip"
+  _classifies "a distribution failing its pinned checksum is never retried" fail \
+    "Exception in thread \"main\" java.lang.RuntimeException: Verification of Gradle distribution failed!"
   _classifies "kotlin compile error" fail \
     "e: file:///x/Main.kt:8:1 Unresolved reference: foo"
   _classifies "capacity WINS over a resolution error in the same output" fatal \
@@ -1006,7 +1083,7 @@ java.io.IOException: No space left on device"
     _fail k2 "a 30s failure is well inside the budget and must still be retried; got rc=${rc}, $(fake_invocations "${bin}") invocation(s), ${slept} pause(s)"
   fi
 
-  # (m) The annotation says only what the output entitles it to say. Three
+  # (m) The annotation says only what the output entitles it to say. Four
   #     wordings, one per evidence class, and none of them reprints the
   #     coordinate: Gradle's own output is above, unaltered, and an annotation
   #     is a log sink (Rule 15).
@@ -1029,6 +1106,8 @@ java.io.IOException: No space left on device"
     "${MISSING_COORDINATE_TEXT}" "if this commit changed a dependency" "429"
   _annotation "a missing coordinate is not reprinted by us" \
     "${MISSING_COORDINATE_TEXT}" "a coordinate it could not find" "kotlin-stdlib:9.9.9"
+  _annotation "a wrapper 504 names the distribution download and its status" \
+    "${MEASURED_WRAPPER_504_TEXT}" "Gradle distribution (HTTP 504" "429"
   _annotation "a timeout with no status admits it cannot know" \
     "> Could not resolve all files for configuration ':app:debugRuntimeClasspath'.
 Caused by: java.net.SocketTimeoutException: Read timed out" \
@@ -1259,7 +1338,7 @@ Caused by: java.net.SocketTimeoutException: Read timed out" \
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a transient 429 is ridden out on the second attempt after exactly one ladder pause, and the fake proves it refuses both a non-build argv and a build missing the flags this script adds; a compile error and a disk exhaustion each fail once with their own exit code, their original output and the right verdict; a persistent 429 stops at exactly ${MAX_ATTEMPTS} attempts with one ::error:: saying INFRASTRUCTURE and that no test ran, the Gradle error still shown; a budget spent by an earlier build in the step starts no further attempt, and a retried build charges the shared budget while a clean one charges nothing; an attempt long enough that repeating it would not fit the budget is never started, while a short one under the same injected clock still is; every retriable signature is load-bearing on its own, this repo's real wrapped 403 is retried while a bare status line decides nothing, and a capacity signature beats a resolution one; the annotation names a rate limit only where a 429 says so, names the missing-coordinate shape as the ambiguity it is without reprinting the coordinate, and otherwise admits the cause is not knowable; a spent budget left by another run is not read; the script itself issues the build argv the lanes depend on; on CI the NDK Flutter asks for is installed in one call when missing, left alone when present and complete and reinstalled when its package.xml is missing, a truncated install is graded failed despite its manifest, its download cache cleared and the charged retry installs it, another revision is replaced, a yes-machine sdkmanager fails closed at ${MAX_ATTEMPTS} calls with one INFRASTRUCTURE annotation, a hung one is killed at the attempt bound and not repeated past the budget, and every input this script owns fails as broken before any call; end to end the script provisions before it builds against the real app build file, stops before Gradle when the NDK cannot be had, and off CI never touches the SDK; one backoff per pause, and the ladder fits the budget)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a transient 429 is ridden out on the second attempt after exactly one ladder pause, and so is the wrapper's 504 fetching the Gradle distribution, and the fake proves it refuses both a non-build argv and a build missing the flags this script adds; a compile error and a disk exhaustion each fail once with their own exit code, their original output and the right verdict; a persistent 429 stops at exactly ${MAX_ATTEMPTS} attempts with one ::error:: saying INFRASTRUCTURE and that no test ran, the Gradle error still shown; a budget spent by an earlier build in the step starts no further attempt, and a retried build charges the shared budget while a clean one charges nothing; an attempt long enough that repeating it would not fit the budget is never started, while a short one under the same injected clock still is; every retriable signature is load-bearing on its own, this repo's real wrapped 403 is retried while a bare status line decides nothing, the wrapper's distribution download is retried on a 5xx but not on a 404, a checksum mismatch or another URL, and a capacity signature beats a resolution one; the annotation names a rate limit only where a 429 says so, names a failed distribution download with its status, names the missing-coordinate shape as the ambiguity it is without reprinting the coordinate, and otherwise admits the cause is not knowable; a spent budget left by another run is not read; the script itself issues the build argv the lanes depend on; on CI the NDK Flutter asks for is installed in one call when missing, left alone when present and complete and reinstalled when its package.xml is missing, a truncated install is graded failed despite its manifest, its download cache cleared and the charged retry installs it, another revision is replaced, a yes-machine sdkmanager fails closed at ${MAX_ATTEMPTS} calls with one INFRASTRUCTURE annotation, a hung one is killed at the attempt bound and not repeated past the budget, and every input this script owns fails as broken before any call; end to end the script provisions before it builds against the real app build file, stops before Gradle when the NDK cannot be had, and off CI never touches the SDK; one backoff per pause, and the ladder fits the budget)."
   return 0
 }
 
