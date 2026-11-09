@@ -1457,17 +1457,23 @@ watchdog fires at build-done + `FIRST_TEST_WATCHDOG_SECS` (300 s), kills the
 hung process, leaves its marker, `.stall` flag and `.prekill` snapshot, and the
 attempt is classified instead of timing out anonymously.
 
-**The retry classifier admits two spellings of this one signature**, and both
-still have to satisfy every other clause (the build finished, no test started, no
+**The retry classifier admits three spellings of this one signature**, and each
+still has to satisfy every other clause (the build finished, no test started, no
 failure reported anywhere):
 
 | Evidence | When you see it |
 |---|---|
 | our watchdog's `.stall` flag / `IOS-WATCHDOG: no on-device test started` marker | flutter_tools hangs after the failed attach (the measured case) |
 | flutter_tools' own `Error waiting for a debug connection` after the build | flutter_tools gives up and exits on its own |
+| `flutter test`'s `Failed to load "<suite>": Connecting to the VM Service timed out.` after the build | the app launched and published its VM service, but flutter_tools' hard-coded 5 s connect timed out (run 42456694728, job 128661186537: the launch came right after a reinstall the simulator had been refusing launches for, `LaunchServicesDataMismatch`; the app came up with no crash and its VM service listening; no test started) |
 
-Both end as verdict `launch-stall` → the one sanctioned retry. A run that reached
-test code cannot reach either: it carries a test-start line, which vetoes.
+All three end as verdict `launch-stall` → the one sanctioned retry. A run that
+reached test code cannot reach any of them: it carries a test-start line, which
+vetoes. The third form is reported as a failed suite LOAD, so the reporter
+counts it as one failed test (`+0 -1: loading … [E]`, then `+0 -1: Some tests
+failed.`). For that form only, the classifier sets those two lines aside before
+asking whether a test started or anything else failed. A second failure, a
+passed test, a skip or a load that failed for any other reason still vetoes.
 
 **The log gate's refusal of a stalled attempt is the stall, not a finding.**
 The transcript is gated before the retry is classified, and a stalled attempt

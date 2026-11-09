@@ -55,6 +55,24 @@
 # a second signature — every other clause still has to hold, and "no test ran"
 # here is the tool's own account rather than our inference.
 #
+# CI run 42456694728 (job 128661186537, 2026-11-08) measured a THIRD spelling,
+# from `flutter test`'s integration-test device rather than the simulator
+# launcher:
+#
+#     Xcode build done.                                           120.3s
+#     00:00 +0 -1: loading <suite> [E]
+#       Failed to load "<suite>": Connecting to the VM Service timed out.
+#     00:00 +0 -1: Some tests failed.
+#
+# lib/src/test/integration_test_device.dart (Flutter 3.47.9) prints it when the
+# app launched and published its VM-service URI, but connecting to it took
+# longer than the hard-coded 5 s. The simulator's own log for that run shows the
+# app up and no crash, right after a reinstall the launcher had been retrying
+# (`LaunchServicesDataMismatch`). Only the VM service's own code had run; no
+# test had started, so this is the same observation once more. The reporter counts the failed LOAD as a failed test,
+# which is why clauses (d) and (e) set aside exactly those two lines for this
+# form and nothing else (`ios_log_judged_copy`).
+#
 # That is the ONE signature admitted here. Nothing else observed in that window
 # is retryable, and no signature is admitted that has not been seen — an invented
 # pattern is indistinguishable from a blanket retry with extra steps.
@@ -215,8 +233,10 @@ ios_clear_stall_evidence() {
 # failed.` summaries. `No tests ran.` is NOT among them: it is written bare,
 # with no `HH:MM +N:` prefix, which is why nothing below has to name it.
 # Excluding `loading` therefore leaves only subjects that imply a test ran, and
-# the three summaries need no rule of their own — none is reachable without a
-# live test, so none can precede a start line.
+# the summaries need no rule of their own here. `Some tests failed.` IS
+# reachable with no test, after a failed suite load (CI run 42456694728); it
+# still reads as a start, so such a load failure stays vetoed, except for the
+# one admitted form, whose two reporter lines `ios_log_judged_copy` sets aside.
 #
 # This mirrors tooling/logscan/policy.toml's `proof_of_run_excludes`, which
 # subtracts the same suite-load shape from the same question for the same
@@ -254,6 +274,18 @@ readonly IOS_SUITE_LOAD_RE='^[0-9]{2}:[0-9]{2} \+[0-9]+( -[0-9]+)?( ~[0-9]+)?: l
 # arbitrary exception rendering, and pattern-matching an exception's text is how
 # a predicate starts depending on prose nobody controls.
 readonly IOS_ATTACH_FAILURE_MARKER='Error waiting for a debug connection'
+
+# flutter_tools' `flutter test` account of the same failed attach, measured
+# verbatim in CI run 42456694728: the suite's LOAD failed because connecting to
+# the launched app's VM service timed out. Matched as the whole line, cause
+# included, so a suite that failed to load for any other reason (a compile
+# error, a missing file) is not this signature.
+readonly IOS_VM_CONNECT_TIMEOUT_RE='^[[:space:]]*Failed to load ".*": Connecting to the VM Service timed out\.$'
+
+# The two reporter lines that form, and only that form, necessarily prints: the
+# failed load counted as one failure, and the summary. Anchored to `+0 -1`, so
+# no line that counts a passed, skipped or second failed test is ever set aside.
+readonly IOS_VM_CONNECT_REPORTER_RE='^[0-9]{2}:[0-9]{2} \+0 -1: (loading .* \[E\]|Some tests failed\.)$'
 
 # Same rationale as drive-log-lib.sh's `_drive_log_decolour`: reporter output can
 # carry SGR escapes that split a pattern in half, and depending on a colour
@@ -322,6 +354,36 @@ ios_log_reports_attach_failure() {
   LC_ALL=C grep -aqF -- "${IOS_ATTACH_FAILURE_MARKER}" < <(_ios_log_after_build_done "${log}")
 }
 
+# ios_log_reports_vm_connect_timeout <log> — 0 (true) when, after the build,
+# `flutter test` said the suite failed to load because it could not connect to
+# the launched app's VM service. The third admitted form of clause (b).
+ios_log_reports_vm_connect_timeout() {
+  local log="${1:-}"
+  [[ -f "${log}" ]] || return 1
+  LC_ALL=C grep -aqE -- "${IOS_VM_CONNECT_TIMEOUT_RE}" < <(_ios_log_after_build_done "${log}")
+}
+
+# ios_log_judged_copy <log> <out> — the copy of <log> clauses (d) and (e)
+# judge. For the VM-service form it omits the two reporter lines that form
+# necessarily prints (the failed load counted as a failure, and the summary), so
+# the vetoes ask whether anything ELSE started a test or reported a failure; any
+# other log is copied unchanged. Always a real file, never a process
+# substitution: the failure predicate's `-f` test reads a pipe as "no log" and
+# would answer "no failure".
+ios_log_judged_copy() {
+  local log="${1}" out="${2}" rc=0
+  if [[ ! -f "${log}" ]]; then
+    rm -f "${out}"
+  elif ios_log_reports_vm_connect_timeout "${log}"; then
+    # grep answers 1 when it keeps no line; a write error or a signal is
+    # anything above that, and a copy cut short would read as "no failure".
+    _ios_log_decolour "${log}" | LC_ALL=C grep -avE -- "${IOS_VM_CONNECT_REPORTER_RE}" > "${out}" || rc=$?
+    (( rc <= 1 )) || return 1
+  else
+    cp "${log}" "${out}" || return 1
+  fi
+}
+
 # ios_log_is_launch_stall <log> — 0 (true, RETRYABLE) iff the log is the one
 # admitted infrastructure signature: the Xcode build completed, no test started
 # after it, somebody observed that (our watchdog, or flutter_tools reporting a
@@ -335,21 +397,22 @@ ios_log_reports_attach_failure() {
 #       (A4) established that missing input must never read as the benign case.
 #       Here the benign-for-retry case is "infrastructure flake", so no evidence
 #       means no retry — the run stays red and a human reads the artifact.
-#   (b) Somebody must have OBSERVED that no test started, in one of three forms:
+#   (b) Somebody must have OBSERVED that no test started, in one of four forms:
 #       the watchdog's out-of-band flag file, the watchdog's marker in the
-#       evidence log, or flutter_tools' own `Error waiting for a debug
-#       connection` after the build. The first two are positive evidence
-#       produced by our own watchdog at a moment it could still see that no test
-#       had started; the flag is checked FIRST because it is the one a dying
-#       child cannot corrupt (see above). The third is the SAME observation
-#       spelled by the tool instead of by us: it prints that line only after it
-#       has launched the app and given up waiting for a VM service, i.e. no Dart
-#       code ran, by its own account. Without one of the three, "built then
-#       silence" is indistinguishable from "killed by the outer timeout
-#       mid-suite".
+#       evidence log, flutter_tools' own `Error waiting for a debug
+#       connection` after the build, or `flutter test`'s `Failed to load
+#       "<suite>": Connecting to the VM Service timed out.` after it. The first
+#       two are positive evidence produced by our own watchdog at a moment it
+#       could still see that no test had started; the flag is checked FIRST
+#       because it is the one a dying child cannot corrupt (see above). The
+#       last two are the SAME observation spelled by the tool instead of by us:
+#       it prints them only after it has launched the app and failed to reach
+#       its VM service, i.e. no test started, by its own account. Without one
+#       of the four, "built then silence" is indistinguishable from "killed by
+#       the outer timeout mid-suite".
 #
-#       The third form widens nothing: it substitutes for the WITNESS, never for
-#       a clause. (c) still requires the build to have finished — and the
+#       The tool's forms widen nothing: they substitute for the WITNESS, never
+#       for a clause. (c) still requires the build to have finished — and the
 #       attach-failure search is scoped to the post-build suffix, so a build
 #       failure cannot supply it at all — (d) still requires that no test
 #       started, and (e) still lets any self-reported failure veto. A run that
@@ -373,7 +436,13 @@ ios_log_reports_attach_failure() {
 #       self-reported FAILURE must veto whenever it appears, including on the
 #       way out.
 #   (e) drive-log-lib.sh's app-side failure predicate must be silent — on the
-#       snapshot AND on the live log. A second,
+#       snapshot AND on the live log.
+#
+#       For the VM-service form only, (d) and (e) both judge the log less the
+#       two reporter lines that form itself prints (`+0 -1: loading … [E]` and
+#       `+0 -1: Some tests failed.`): the reporter counts the failed load as a
+#       failure and its summary is a progress line. Any other failure, a skip,
+#       a passed test, a second failure or a started test still vetoes. A second,
 #       independently-maintained opinion on the same question, and the one that
 #       also catches `All tests skipped.` — so a vacuous suite cannot be retried
 #       into a green either.
@@ -390,7 +459,8 @@ ios_log_is_launch_stall() {
   [[ -s "${evidence}" ]] || return 1
   if [[ ! -f "${flag}" ]] \
      && ! LC_ALL=C grep -aqF -- "${IOS_STALL_MARKER}" < <(_ios_log_decolour "${evidence}") \
-     && ! ios_log_reports_attach_failure "${evidence}"; then
+     && ! ios_log_reports_attach_failure "${evidence}" \
+     && ! ios_log_reports_vm_connect_timeout "${evidence}"; then
     return 1
   fi
   # The build-done evidence is taken from lines that are NOT the watchdog's own.
@@ -399,14 +469,30 @@ ios_log_is_launch_stall() {
   # about itself and a build failure would become retryable. Fixture 8 pins this.
   LC_ALL=C grep -aqF -- "${IOS_BUILD_DONE_MARKER}" \
     < <(_ios_log_decolour "${evidence}" | LC_ALL=C grep -avF -- "${IOS_STALL_MARKER}") || return 1
-  if ios_log_test_started "${evidence}"; then return 1; fi
+  # Clauses (d) and (e) judge each log as `ios_log_judged_copy` leaves it: the
+  # log itself, except that the VM-service form's own two reporter lines are
+  # set aside.
+  # A copy that could not be made is not retryable: the vetoes would read the
+  # missing or truncated file as "no start, no failure".
+  local judged_evidence judged_log verdict=0
+  judged_evidence="$(mktemp)" || return 1
+  judged_log="$(mktemp)" || { rm -f "${judged_evidence}"; return 1; }
+  if ! ios_log_judged_copy "${evidence}" "${judged_evidence}" \
+     || ! ios_log_judged_copy "${log}" "${judged_log}"; then
+    rm -f "${judged_evidence}" "${judged_log}"
+    return 1
+  fi
   # Clause (e) is checked against the snapshot AND the full log. A suite that
   # reported a real failure vetoes the retry no matter when it said so, and the
   # post-SIGTERM teardown line does not match this predicate, so the extra read
   # costs nothing and closes the "it failed as it died" case.
-  if drive_log_reports_test_failure "${evidence}"; then return 1; fi
-  if drive_log_reports_test_failure "${log}"; then return 1; fi
-  return 0
+  if ios_log_test_started "${judged_evidence}" \
+     || drive_log_reports_test_failure "${judged_evidence}" \
+     || drive_log_reports_test_failure "${judged_log}"; then
+    verdict=1
+  fi
+  rm -f "${judged_evidence}" "${judged_log}"
+  return "${verdict}"
 }
 
 # ---------------------------------------------------------------------------
@@ -983,6 +1069,89 @@ ios_flake_lib_self_test() {
     fail=1
   fi
 
+  # (21) CI RUN 42456694728, VERBATIM. `flutter test` launched the app, then
+  #      timed out connecting to its VM service and failed the suite's LOAD.
+  #      No watchdog fired: flutter_tools gave up after 5 s. MUST be retryable.
+  printf '%s\n' \
+    '00:00 +0: loading /Users/runner/work/Haven-App/Haven-App/haven/integration_test/ios_bg_publish_test.dart' \
+    'Running Xcode build...                                          ' \
+    'Xcode build done.                                           120.3s' \
+    '00:00 +0 -1: loading /Users/runner/work/Haven-App/Haven-App/haven/integration_test/ios_bg_publish_test.dart [E]' \
+    '  Failed to load "/Users/runner/work/Haven-App/Haven-App/haven/integration_test/ios_bg_publish_test.dart": Connecting to the VM Service timed out.' \
+    '  package:flutter_tools/src/test/integration_test_device.dart 105:28  IntegrationTestTestDevice.start.<fn>' \
+    '  ' \
+    '00:00 +0 -1: Some tests failed.' \
+    '' \
+    'Failing tests:' \
+    '  /Users/runner/work/Haven-App/Haven-App/haven/integration_test/ios_bg_publish_test.dart: loading /Users/runner/work/Haven-App/Haven-App/haven/integration_test/ios_bg_publish_test.dart' \
+    > "${tmp}/vm-connect.log"
+  if ! ios_log_is_launch_stall "${tmp}/vm-connect.log"; then
+    echo "SELF-TEST FAIL (21): flutter test's own report that it could not" \
+         "connect to the launched app's VM service, before any test, was" \
+         "classified as GENUINE (CI run 42456694728)" >&2
+    fail=1
+  fi
+
+  # (22) …but NOT once a test has started: the same lines after a test's own
+  #      progress line. Clause (d) vetoes. MUST NOT be retryable.
+  sed 's|^Xcode build done.*|&\n00:00 +0: (setUpAll)|' "${tmp}/vm-connect.log" > "${tmp}/vm-connect-started.log"
+  if ios_log_is_launch_stall "${tmp}/vm-connect-started.log"; then
+    echo "SELF-TEST FAIL (22): a suite that had started was retried because" \
+         "flutter test also reported a VM-service timeout" >&2
+    fail=1
+  fi
+
+  # (23) …nor when anything else reports a failure: a second failure counted,
+  #      a passed test, or a skip. Only the form's own two lines are set aside.
+  #      MUST NOT be retryable.
+  local vm_case
+  for vm_case in 's|^00:00 +0 -1: Some tests failed.$|00:00 +0 -1: (setUpAll) [E]\n00:00 +0 -1: Some tests failed.|' \
+                 's|^00:00 +0 -1: Some tests failed.$|00:00 +0 -2: Some tests failed.|' \
+                 's|^00:00 +0 -1: Some tests failed.$|00:00 +1 -1: Some tests failed.|' \
+                 's|^Failing tests:$|00:00 +0 -1: All tests skipped.\nFailing tests:|'; do
+    sed "${vm_case}" "${tmp}/vm-connect.log" > "${tmp}/vm-connect-more.log"
+    if cmp -s "${tmp}/vm-connect.log" "${tmp}/vm-connect-more.log"; then
+      echo "SELF-TEST FAIL (23): fixture edit '${vm_case}' changed nothing" >&2
+      fail=1
+    elif ios_log_is_launch_stall "${tmp}/vm-connect-more.log"; then
+      echo "SELF-TEST FAIL (23): a VM-service timeout excused another reported" \
+           "failure ('${vm_case}')" >&2
+      fail=1
+    fi
+  done
+
+  # (24) …nor a suite that failed to load for any OTHER reason: the witness is
+  #      the VM-service timeout, cause included. MUST NOT be retryable.
+  sed 's|: Connecting to the VM Service timed out\.$|: Compilation failed for testPath=x|' \
+    "${tmp}/vm-connect.log" > "${tmp}/load-failed-other.log"
+  if ios_log_is_launch_stall "${tmp}/load-failed-other.log"; then
+    echo "SELF-TEST FAIL (24): a suite that failed to load for another reason" \
+         "was classified as retryable" >&2
+    fail=1
+  fi
+
+  # (25) …nor one reported BEFORE the build finished: it is about no launch of
+  #      this build. MUST NOT be retryable.
+  printf '%s\n' \
+    '  Failed to load "x.dart": Connecting to the VM Service timed out.' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           120.3s' \
+    > "${tmp}/vm-connect-before-build.log"
+  if ios_log_is_launch_stall "${tmp}/vm-connect-before-build.log"; then
+    echo "SELF-TEST FAIL (25): post-build silence was classified as retryable on" \
+         "the strength of a VM-service timeout reported BEFORE the build" >&2
+    fail=1
+  fi
+
+  # (26) FAILS CLOSED. When the judged copy cannot be made, the vetoes would
+  #      read a missing file as "no start, no failure", so even the admitted
+  #      form is refused. MUST NOT be retryable.
+  if ( export TMPDIR="${tmp}/no-such-dir"; ios_log_is_launch_stall "${tmp}/vm-connect.log" ) 2>/dev/null; then
+    echo "SELF-TEST FAIL (26): the stall was classified as retryable although its" \
+         "judged copy could not be written — the vetoes read nothing" >&2
+    fail=1
+  fi
+
   # --- Gate fixtures — THE WIRING, not the predicate ----------------------
   #
   # The predicate can be perfect and the lane still retry everything, because
@@ -1123,6 +1292,17 @@ ios_flake_lib_self_test() {
     fi
   done
 
+  # (R3b) The same for the VM-service form, as CI run 42456694728 ran it: the
+  #       host lane's gate refused the transcript with rc 4.
+  ios_retry_clear "${vf}"
+  rec_rc=0
+  ios_record_gate_failure_verdict "${vf}" "${tmp}/vm-connect.log" 1 4 || rec_rc=$?
+  if (( rec_rc != 0 )) || [[ "$(ios_retry_verdict_field "${vf}" 1)" != "retryable" ]]; then
+    echo "SELF-TEST FAIL (R3b): the VM-service form the gate refused with rc 4" \
+         "was not recorded as 'retryable' (CI run 42456694728)" >&2
+    fail=1
+  fi
+
   # (R4) …and nothing else the gate refuses ever is: a leak and a broken guard
   #      on that very stall, and either refusal on a suite that ran and failed.
   #      A leak re-rolled is a leak published twice.
@@ -1158,9 +1338,10 @@ ios_flake_lib_self_test() {
     echo "ios-flake-lib.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "ios-flake-lib.sh --self-test: all 25 predicate + 8 gate + 8 recording fixtures passed" \
-       "(the one admitted stall retries in both its spellings — our watchdog's" \
-       "and flutter_tools' own failed attach — including when the transcript" \
+  echo "ios-flake-lib.sh --self-test: all 31 predicate + 8 gate + 9 recording fixtures passed" \
+       "(the one admitted stall retries in each of its spellings — our watchdog's," \
+       "flutter_tools' own failed attach and flutter test's VM-service timeout," \
+       "the last only while nothing else reports a failure and failing closed when it cannot be judged — including when the transcript" \
        "opens with the reporter's pre-build suite load; genuine failures," \
        "vacuous suites, build failures, a started suite, empty/absent logs and" \
        "unattributed silence do not)."
