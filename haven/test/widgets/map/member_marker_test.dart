@@ -412,19 +412,25 @@ void main() {
     testWidgets('the painted tip lands on the coordinate, at any angle', (
       tester,
     ) async {
-      for (final angle in [0.0, math.pi / 2, -math.pi / 2, math.pi]) {
+      // Tail direction paired with the painted reach from the head centre
+      // (footprint centre 60) along it.
+      final cases = <(double, double Function(Rect))>[
+        (0, (b) => b.right - 60),
+        (math.pi / 2, (b) => b.bottom - 60),
+        (-math.pi / 2, (b) => 60 - b.top),
+        (math.pi, (b) => 60 - b.left),
+      ];
+      for (final (angle, reachOf) in cases) {
         await tester.pumpWidget(_wrap(_marker(nubLength: 10, angle: angle)));
         await tester.pump(const Duration(milliseconds: 200));
         final rec = _paintMarker(tester);
         final b = _tightBounds(rec.shadow.path!);
         final ringWidth = rec.strokes.last.width!;
-        final extent = switch (angle) {
-          0.0 => b.right - 60,
-          math.pi / 2 => b.bottom - 60,
-          math.pi => 60 - b.left,
-          _ => 60 - b.top,
-        };
-        expect(extent + ringWidth / 2, closeTo(36, 1e-4), reason: '$angle');
+        expect(
+          reachOf(b) + ringWidth / 2,
+          closeTo(36, 1e-4),
+          reason: '$angle',
+        );
       }
     });
 
