@@ -5,8 +5,11 @@
 //! logs. Randomness is always an injected generator: `OsRng` in production, a
 //! seeded or scripted one in tests.
 
+pub mod engine;
+pub mod frame;
 pub mod noise;
 pub mod packet;
+pub mod store;
 
 #[cfg(test)]
 pub(crate) mod test_rng {
