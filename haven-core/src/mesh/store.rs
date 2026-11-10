@@ -4,17 +4,24 @@
 //!
 //! A packet lives at most [`Limits::life_ms`] (`L`) from its origin. Phones
 //! tell each other how much is left in [`LIFETIME_UNITS`] steps of `L / 256`,
-//! rounded down, and never a clock reading. For every packet accepted or
-//! emitted the store keeps a record for `2 L` from first receipt:
+//! rounded down and less one, and never a clock reading. For every packet
+//! accepted or emitted the store keeps a record for `2 L` from first receipt:
 //!
 //! ```text
-//! first receipt      expires           first + L          first + 2 L
+//! first receipt      expires − 2 units    first + L          first + 2 L
 //!   │ announced, sent  │ bytes kept, silent │ record only        │ forgotten
 //! ```
 //!
 //! `expires` is what a peer announced, or the origin's draw; a later, larger
 //! announcement raises it, never past `first + L`. While the record lasts the
 //! same bytes are never taken again, so a relayed packet cannot bounce back.
+//!
+//! **Why one unit less.** A receiver sets `expires` to the announcement's
+//! arrival plus the units announced, so the time the announcement spent on
+//! the way would be added to the lifetime at every hop. Announcing one unit
+//! less than is left takes a unit off instead: a hop that takes `d` ends the
+//! lifetime `d − unit` later at most, so no hop of up to one unit, and no
+//! cycle of such hops, can stretch it.
 //!
 //! Own and carried packets are the same rows under the same rules. Links are
 //! named by slot, a small number the engine assigns; the store never sees a
@@ -111,9 +118,11 @@ const fn source_bit(origin: Origin) -> u32 {
     }
 }
 
-/// Lifetime units left at `now_ms`, rounded down.
+/// The lifetime units to announce at `now_ms`: those left, rounded down, less
+/// one. Zero for a packet no longer announced or sent.
 fn units(expires_ms: u64, now_ms: u64, unit_ms: u64) -> u8 {
-    u8::try_from(expires_ms.saturating_sub(now_ms) / unit_ms).unwrap_or(u8::MAX)
+    let left = expires_ms.saturating_sub(now_ms) / unit_ms;
+    u8::try_from(left.saturating_sub(1)).unwrap_or(u8::MAX)
 }
 
 /// The mesh store of one phone. Memory only.
@@ -213,8 +222,8 @@ impl Store {
     ///
     /// `false`, changing nothing, when the packet has a record or the record
     /// table is full. A carried packet is also queued for session code. When
-    /// the store is full a row is evicted first: one whose lifetime has
-    /// ended, else one from a closed link, else one of the class that holds
+    /// the store is full a row is evicted first: one no longer announced,
+    /// else one from a closed link, else one of the class that holds
     /// the most rows — this packet counted in its own — picked with `rng`.
     pub fn accept<R: RngCore>(
         &mut self,
@@ -280,7 +289,7 @@ impl Store {
         } else {
             self.largest_class(incoming)
         };
-        // `None` is the class of rows whose lifetime has ended.
+        // `None` is the class of rows no longer announced.
         let of_class =
             |record: &Record| class.map_or_else(|| ended(record), |c| record.origin == c);
         let count = rows().filter(|(_, record)| of_class(record)).count();
@@ -334,15 +343,16 @@ impl Store {
     ///
     /// A later end raises the packet's, never past `first + L`; a raise of a
     /// whole unit makes it due for announcing again, to every link but its
-    /// source and this one. A link that announced about as much as the store
-    /// holds needs no announcement back.
+    /// source and this one. A link that holds the packet for at least as long
+    /// as an announcement back would give it needs none: it announced a unit
+    /// less than it holds, and would be told a unit less than the store does.
     pub fn heard(&mut self, id: &PacketId, slot: u8, expires_ms: u64) -> bool {
         let (now, unit, life) = (self.now_ms, self.unit_ms, self.limits.life_ms);
         let Some(record) = self.records.get_mut(id) else {
             return false;
         };
         let theirs = expires_ms.min(record.first_ms.saturating_add(life));
-        if theirs.saturating_add(unit) > record.expires_ms {
+        if theirs.saturating_add(2 * unit) >= record.expires_ms {
             record.told |= bit(slot);
         }
         if theirs > record.expires_ms {
@@ -357,8 +367,9 @@ impl Store {
     }
 
     /// The next packet in id order after `after` to announce to `slot`, with
-    /// its units left, marked as announced there: held, unexpired, due since
-    /// no later than `since_ms`, and not yet told to that link.
+    /// the units to announce, marked as announced there: held, with a unit to
+    /// announce, due since no later than `since_ms`, and not yet told to that
+    /// link.
     pub fn next_announcement(
         &mut self,
         slot: u8,
@@ -384,7 +395,8 @@ impl Store {
     }
 
     /// Whether the link in `slot` may be sent `id` now, marking it given: it
-    /// was announced there, was not given there before, and is held unexpired.
+    /// was announced there, was not given there before, and is held with a
+    /// unit to announce.
     pub fn claim(&mut self, id: &PacketId, slot: u8) -> bool {
         let (now, unit, mark) = (self.now_ms, self.unit_ms, bit(slot));
         self.records.get_mut(id).is_some_and(|record| {
@@ -397,7 +409,8 @@ impl Store {
         })
     }
 
-    /// The packet, while it is held and unexpired: what may still be sent.
+    /// The packet, while it is held with a unit to announce: what may still
+    /// be sent.
     #[must_use]
     pub fn packet(&self, id: &PacketId) -> Option<Packet> {
         let record = self.records.get(id)?;
@@ -529,7 +542,7 @@ impl Store {
     }
 
     /// The lifetime units `id` would be announced with now; zero for a packet
-    /// that is not held or whose lifetime has ended.
+    /// that is not held or has fewer than two units left.
     #[must_use]
     pub fn remaining(&self, id: &PacketId) -> u8 {
         self.records
@@ -623,19 +636,45 @@ mod tests {
     }
 
     #[test]
-    fn units_left_are_rounded_down() {
+    fn the_units_announced_are_those_left_rounded_down_less_one() {
         let mut store = roomy();
         let expires = 10 * UNIT + UNIT - 1;
         assert!(store.accept(packet(1), Origin::Link(0), expires, &mut rng()));
-        assert_eq!(store.remaining(&id(1)), 10);
-        store.advance(UNIT - 1);
-        assert_eq!(store.remaining(&id(1)), 10);
-        store.advance(UNIT);
         assert_eq!(store.remaining(&id(1)), 9);
-        store.advance(10 * UNIT - 1);
+        store.advance(UNIT - 1);
+        assert_eq!(store.remaining(&id(1)), 9);
+        store.advance(UNIT);
+        assert_eq!(store.remaining(&id(1)), 8);
+        store.advance(9 * UNIT - 1);
         assert_eq!(store.remaining(&id(1)), 1);
-        store.advance(10 * UNIT);
+        // Under two whole units left: no longer announced.
+        store.advance(9 * UNIT);
         assert_eq!(store.remaining(&id(1)), 0);
+        store.advance(11 * UNIT);
+        assert_eq!(store.remaining(&id(1)), 0);
+    }
+
+    /// The whole of the lifetime rule: a receiver that adds the units it is
+    /// told to the arrival time ends the lifetime a unit early, less the time
+    /// the announcement took, so transit of up to one unit never stretches it.
+    #[test]
+    fn a_receiver_ends_the_lifetime_a_unit_early_less_the_transit() {
+        for (left, transit) in [
+            (100 * UNIT, 0),
+            (100 * UNIT + 17, UNIT),
+            (7 * UNIT - 1, 300),
+        ] {
+            let mut sender = roomy();
+            sender.advance(5000);
+            assert!(sender.accept(packet(1), Origin::Local, 5000 + left, &mut rng()));
+            let told = sender.remaining(&id(1));
+            let mut receiver = roomy();
+            receiver.advance(5000 + transit);
+            let ends = receiver.announced_expiry(told);
+            assert!(ends <= 5000 + left + transit - UNIT);
+            assert!(ends + 2 * UNIT > 5000 + left + transit);
+            assert!(transit > UNIT || ends <= 5000 + left);
+        }
     }
 
     #[test]
@@ -673,10 +712,10 @@ mod tests {
     #[test]
     fn a_packet_at_zero_units_is_silent_but_kept_until_first_plus_the_lifetime() {
         let mut store = roomy();
-        assert!(store.accept(packet(1), Origin::Link(0), UNIT - 1, &mut rng()));
+        assert!(store.accept(packet(1), Origin::Link(0), 2 * UNIT - 1, &mut rng()));
         assert!(announced(&mut store, 1).is_empty());
 
-        assert!(take(&mut store, 2, Origin::Link(0), 2));
+        assert!(take(&mut store, 2, Origin::Link(0), 3));
         assert!(announced(&mut store, 1) == vec![(id(2), 2)]);
         store.advance(UNIT + 1);
         assert!(store.packet(&id(2)).is_none());
@@ -696,12 +735,12 @@ mod tests {
             assert!(take(&mut store, n, Origin::Link(0), 200));
         }
         assert!(take(&mut store, 6, Origin::Local, 200));
-        let mut expected: Vec<_> = (1..=6).map(|n| (id(n), 200)).collect();
+        let mut expected: Vec<_> = (1..=6).map(|n| (id(n), 199)).collect();
         expected.sort();
 
         assert!(announced(&mut store, 1) == expected);
         assert!(announced(&mut store, 1).is_empty());
-        assert!(announced(&mut store, 0) == vec![(id(6), 200)]);
+        assert!(announced(&mut store, 0) == vec![(id(6), 199)]);
         assert!(announced(&mut store, 2) == expected);
     }
 
@@ -719,7 +758,7 @@ mod tests {
     #[test]
     fn a_raise_announces_a_packet_again_to_all_but_its_source_and_the_raiser() {
         let mut store = roomy();
-        assert!(take(&mut store, 1, Origin::Link(0), 1));
+        assert!(take(&mut store, 1, Origin::Link(0), 2));
         assert!(announced(&mut store, 1) == vec![(id(1), 1)]);
         store.advance(UNIT);
         assert_eq!(store.remaining(&id(1)), 0);
@@ -727,8 +766,8 @@ mod tests {
 
         let honest = store.announced_expiry(180);
         assert!(store.heard(&id(1), 2, honest));
-        assert!(announced(&mut store, 1) == vec![(id(1), 180)]);
-        assert!(announced(&mut store, 3) == vec![(id(1), 180)]);
+        assert!(announced(&mut store, 1) == vec![(id(1), 179)]);
+        assert!(announced(&mut store, 3) == vec![(id(1), 179)]);
         assert!(announced(&mut store, 0).is_empty());
         assert!(announced(&mut store, 2).is_empty());
     }
@@ -743,17 +782,20 @@ mod tests {
         assert!(announced(&mut store, 1).is_empty());
         // The sub-unit raises add up: a whole unit past the last announcement.
         assert!(store.heard(&id(1), 2, 101 * UNIT));
-        assert!(announced(&mut store, 1) == vec![(id(1), 101)]);
+        assert!(announced(&mut store, 1) == vec![(id(1), 100)]);
     }
 
+    /// A link whose announcement comes to two units short of the store's
+    /// lifetime holds the packet for at least as long as it would be told:
+    /// both announce a unit less than they hold.
     #[test]
-    fn a_link_that_announced_as_much_is_not_told_and_one_a_unit_behind_is() {
+    fn a_link_that_holds_as_much_as_it_would_be_told_is_not_told_and_one_behind_is() {
         let mut store = roomy();
         assert!(take(&mut store, 1, Origin::Link(0), 100));
-        assert!(store.heard(&id(1), 1, 99 * UNIT + 1));
+        assert!(store.heard(&id(1), 1, 98 * UNIT));
         assert!(announced(&mut store, 1).is_empty());
-        assert!(store.heard(&id(1), 2, 99 * UNIT));
-        assert!(announced(&mut store, 2) == vec![(id(1), 100)]);
+        assert!(store.heard(&id(1), 2, 98 * UNIT - 1));
+        assert!(announced(&mut store, 2) == vec![(id(1), 99)]);
     }
 
     #[test]
@@ -818,7 +860,7 @@ mod tests {
     fn a_full_store_evicts_a_row_whose_lifetime_ended_first() {
         let mut store = store(3, 64, 64);
         assert!(take(&mut store, 1, Origin::Link(0), 255));
-        assert!(take(&mut store, 2, Origin::Link(1), 1));
+        assert!(take(&mut store, 2, Origin::Link(1), 2));
         assert!(take(&mut store, 3, Origin::Departed, 255));
         store.advance(UNIT);
         assert!(take(&mut store, 4, Origin::Link(0), 255));
@@ -1176,14 +1218,16 @@ mod tests {
             }
         }
 
-        /// T-LIFE-4 and T-LIFE-5 on a line of honest phones with no transit
-        /// delay: no phone's lifetime for a packet ends after the one it
-        /// heard it from, a hop loses under one unit, and so nobody announces
-        /// the packet past its origin time + `L`.
+        /// T-LIFE-4 and T-LIFE-5 on a line of honest phones whose
+        /// announcements take up to three units to arrive: each hop ends the
+        /// lifetime between one and two units early, less its transit. So a
+        /// hop of up to one unit never ends it later than the phone it heard
+        /// it from, and while every hop is that fast nobody announces the
+        /// packet past its origin's own figure, which is under `L`.
         #[test]
-        fn prop_an_honest_line_never_stretches_a_lifetime(
+        fn prop_a_hop_shortens_a_lifetime_by_one_to_two_units_less_its_transit(
             seed in any::<u64>(),
-            waits in proptest::collection::vec(0u64..40_000, 1..40),
+            hops in proptest::collection::vec((0u64..40_000, 0u64..=3 * UNIT), 1..40),
         ) {
             let mut rng = StdRng::seed_from_u64(seed);
             let mut now = 1000;
@@ -1192,22 +1236,30 @@ mod tests {
             let origin_expires = holder.origin_expiry(&mut rng);
             prop_assert!(holder.accept(packet(1), Origin::Local, origin_expires, &mut rng));
             prop_assert!(origin_expires < now + LIFE);
-            let mut hops = 0;
-            for wait in waits {
+            // What the transits so far could have added, and the units lost.
+            let (mut transits, mut fast, mut count) = (0, true, 0);
+            for (wait, transit) in hops {
                 now += wait;
                 holder.advance(now);
+                let before = holder.expires_ms(&id(1)).expect("recorded");
                 let Some((_, remaining)) = holder.next_announcement(1, None, now) else {
-                    prop_assert!(holder.remaining(&id(1)) == 0);
+                    prop_assert!(now + 2 * UNIT > before);
                     break;
                 };
-                let before = holder.expires_ms(&id(1)).expect("recorded");
+                // T-LIFE-4: never more than is truly left.
+                prop_assert!(now + u64::from(remaining) * UNIT + UNIT <= before);
+                now += transit;
                 let mut next = roomy();
                 next.advance(now);
                 let expires = next.announced_expiry(remaining);
                 prop_assert!(next.accept(packet(1), Origin::Link(0), expires, &mut rng));
-                hops += 1;
-                prop_assert!(expires <= before && before - expires < UNIT);
-                prop_assert!(origin_expires - expires < hops * UNIT);
+                prop_assert!(expires + UNIT <= before + transit);
+                prop_assert!(expires + 2 * UNIT > before + transit);
+                (transits, fast, count) = (transits + transit, fast && transit <= UNIT, count + 1);
+                // T-LIFE-5: `count` hops lose under `2 × count` units.
+                prop_assert!(expires + count * UNIT <= origin_expires + transits);
+                prop_assert!(expires + 2 * count * UNIT > origin_expires + transits);
+                prop_assert!(!fast || expires <= origin_expires);
                 holder = next;
             }
         }

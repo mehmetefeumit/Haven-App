@@ -1,18 +1,25 @@
 //! The mesh engine: one phone's links, inventory flood, emission schedule and
 //! link budget as an owned state machine (plan §3, §5.1, §6, §15).
 //!
-//! The engine holds no key, does no I/O and reads no clock. Every input names
+//! The engine holds no key, does no I/O and reads no clock. Every call names
 //! the time on a clock that keeps counting during sleep; time never runs
-//! backwards, and every input first runs the timers that fell due. What the
-//! radio layer must do comes out of [`MeshEngine::poll_output`]; when to call
-//! [`MeshEngine::advance`] next comes out of [`MeshEngine::next_wake_ms`].
+//! backwards, and every call, [`MeshEngine::poll_output`] included, first
+//! runs the timers that fell due. What the radio layer must do comes out of
+//! [`MeshEngine::poll_output`]; when to call [`MeshEngine::advance`] next
+//! comes out of [`MeshEngine::next_wake_ms`].
 //!
 //! A link carries the two raw Noise handshake messages, then sealed frames of
 //! exactly its frame size (`frame`). Each side opens with `HELLO`, announces
 //! what it holds as `HAVE`, asks with `WANT` for what it lacks and may take,
 //! and is sent each wanted packet as `PKT` chunks. A packet that was not asked
 //! for on that link, a frame that does not open or does not parse, and a first
-//! frame that is not `HELLO` close the link.
+//! frame that is not `HELLO` close the link; so does a peer whose `HELLO` has
+//! not come within [`Config::connect_timeout_ms`] of the link coming up.
+//!
+//! **Frames are built when polled.** A link frame is sealed by the call that
+//! hands it out, so the lifetime it announces is the one at that instant and
+//! a transfer starts only on a packet that may still be sent. Nothing waits
+//! in a queue but handshake messages, `BYE`s, closes and one connect.
 //!
 //! **Duplicate links.** Two phones may connect in both directions. Of the
 //! links on which one `HELLO` value has been seen, the one that saw it first
@@ -21,7 +28,12 @@
 //! unless the two links' `HELLO`s cross, in which case each may close a
 //! different one and the jittered back-off lets one re-form. The rule keeps
 //! the older link because a `HELLO` value is not a secret: a rule the newer
-//! link could win would let any neighbour of a peer close the link to it.
+//! link could win would let any neighbour of a peer close the link to it,
+//! and the second link of a crossed pair looks, from either end, exactly
+//! like such a neighbour's. The peer whose link was closed is taken as
+//! reached through the one kept only until that link's value changes or
+//! [`Config::rotate_ms`] has passed, then dialled again: a link that showed
+//! a neighbour's value first does not keep the neighbour away for good.
 //!
 //! **Reserved slots.** One outgoing slot is filled at random among the
 //! sighted candidates and closed again after [`Config::rotate_ms`]. Whoever
@@ -32,12 +44,21 @@
 //! **Credit.** Packets arrive only when asked for, and a link is asked for
 //! no more than its allowance, which starts near zero and grows with its age;
 //! the one way to exceed it is an unsolicited packet, which closes the link.
+//! A request not answered within [`Config::want_timeout_ms`] is given up and
+//! may be made of another link; its packet is still taken for as long again,
+//! and after that it was asked for by nobody.
+//!
+//! **Rate limit.** Requests over all links are limited together, and the
+//! limit is shared out by turns, one request per link per turn: a link that
+//! announces without pause is asked for no more than any other link that has
+//! something to ask for.
 //!
 //! Nothing here logs, and no type that holds a packet, an id or a peer is
 //! `Debug` (Security Rule 15).
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, VecDeque};
+use std::ops::Bound;
 
 use rand::{CryptoRng, Rng, RngCore};
 
@@ -94,6 +115,12 @@ pub enum Output {
     },
 }
 
+impl Output {
+    fn is_frame_of(&self, id: LinkId) -> bool {
+        matches!(self, Self::Frame { link, .. } if *link == id)
+    }
+}
+
 /// Counts for the statistics sheet and for tests. Shown, never logged.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -117,7 +144,8 @@ pub struct Stats {
     /// Packets handed in full to the radio layer.
     pub sent: u64,
     /// Packets received in full that already had a record: zero unless a
-    /// request was given up on and answered late.
+    /// request was given up on, made of another link and answered by both.
+    /// Such a packet is dropped and changes nothing else.
     pub duplicates: u64,
 }
 
@@ -142,17 +170,13 @@ pub struct Config {
     pub tick_ms: u64,
     /// §6.3: the most packets asked of one link and not yet received.
     pub want_window: usize,
-    /// §6.3: how long a request waits before it is made again or given up.
+    /// §6.3: how long a request waits for its packet before another link
+    /// that announced it may be asked. The packet is still taken for as long
+    /// again; after that it was asked for by nobody.
     pub want_timeout_ms: u64,
-    /// §6.3: how many times a packet is asked of one link before another
-    /// link that announced it is asked.
-    pub want_asks: u8,
     /// §6.3: the most announcements remembered per link for packets not yet
     /// held; further ones are ignored.
     pub offers_per_link: usize,
-    /// §6.3: the most frames queued per link for the radio layer; the engine
-    /// produces more as they are polled.
-    pub link_queue_frames: usize,
     /// §6.5: the packets a link may be asked for the moment it opens.
     pub credit_initial: u64,
     /// §6.5: how fast a link's allowance grows with its age.
@@ -177,11 +201,13 @@ pub struct Config {
     /// signal-chosen link.
     pub rssi_hysteresis: u8,
     /// §6.1: how long the random outgoing link, and a full set of incoming
-    /// links, lasts before one is closed.
+    /// links, lasts before one is closed; and how long a peer whose link was
+    /// closed as a duplicate is taken as reached through the one kept.
     pub rotate_ms: u64,
     /// §6.1: how long a sighting makes a peer a candidate.
     pub sighting_ttl_ms: u64,
-    /// §6.1: how long a connect attempt may take.
+    /// §6.1: how long a connect attempt may take, and how long a link may
+    /// take from coming up to its peer's `HELLO`.
     pub connect_timeout_ms: u64,
     /// §6.1: how long a peer is left alone after a failed connect or a
     /// closed link.
@@ -189,7 +215,8 @@ pub struct Config {
     /// §6.1: up to this much is added to each back-off, drawn per use, so two
     /// phones that closed each other's link do not retry in step.
     pub backoff_jitter_ms: u64,
-    /// §6.1: the most peers remembered from sightings.
+    /// §6.1: the most peers remembered from sightings; one more takes the
+    /// place of one picked at random.
     pub max_peers: usize,
 }
 
@@ -205,9 +232,7 @@ impl Default for Config {
             tick_ms: 5000,
             want_window: 32,
             want_timeout_ms: 30_000,
-            want_asks: 2,
             offers_per_link: 2048,
-            link_queue_frames: 16,
             credit_initial: 16,
             credit_per_min: 120,
             accept_per_min: 240,
@@ -230,34 +255,31 @@ impl Default for Config {
 }
 
 impl Config {
-    /// The size of the record table (§6.4): every packet that can be
-    /// requested or emitted within the `2 L` a record lasts, and every packet
-    /// requested before that and still awaited, so traffic inside the rate
-    /// limit cannot fill it.
+    /// The size of the record table (§6.4): every packet that can have a
+    /// record at one time, so traffic inside the rate limit cannot fill it.
     ///
-    /// The awaited ones count because a link may hold back what it was asked
-    /// for and hand it all over later: each link has at most
-    /// [`Self::offers_per_link`] such packets outstanding.
+    /// A record lasts `2 L`, and a packet is taken only within two request
+    /// timeouts of the request the rate limit counted. So the packets with a
+    /// record are at most the requests the limit allows in `2 L` and that
+    /// wait together, and this phone's own emissions in `2 L`.
     #[must_use]
     pub fn record_capacity(&self) -> usize {
         let reaccept_ms = self.life_ms.saturating_mul(2);
+        let asked_ms = reaccept_ms.saturating_add(self.want_timeout_ms.saturating_mul(2));
         let requested = self
             .accept_per_min
-            .saturating_mul(reaccept_ms.div_ceil(MINUTE_MS))
+            .saturating_mul(asked_ms.div_ceil(MINUTE_MS))
             .saturating_add(self.accept_burst);
         let shortest_slot = self.emit_period_ms.saturating_sub(self.emit_jitter_ms);
         let emitted = reaccept_ms / shortest_slot.max(1) + 1;
-        let links = self.max_outgoing.saturating_add(self.max_incoming);
-        let awaited = self.offers_per_link.saturating_mul(links);
-        usize::try_from(requested.saturating_add(emitted))
-            .unwrap_or(usize::MAX)
-            .saturating_add(awaited)
+        usize::try_from(requested.saturating_add(emitted)).unwrap_or(usize::MAX)
     }
 
     /// Periods of at least a millisecond and no more links than a record
     /// tracks: a zero period would wake the caller forever.
     fn bounded(mut self) -> Self {
         self.tick_ms = self.tick_ms.max(1);
+        self.hello_period_ms = self.hello_period_ms.max(1);
         self.emit_period_ms = self.emit_period_ms.max(1);
         self.emit_jitter_ms = self.emit_jitter_ms.min(self.emit_period_ms - 1);
         self.max_outgoing = self.max_outgoing.min(usize::from(MAX_LINKS));
@@ -283,14 +305,19 @@ impl Bucket {
         }
     }
 
-    fn take(&mut self, per_min: u64, burst: u64, now_ms: u64) -> bool {
+    /// Whether a token is there to take at `now_ms`.
+    fn has(&mut self, per_min: u64, burst: u64, now_ms: u64) -> bool {
         let gained = now_ms.saturating_sub(self.at_ms).saturating_mul(per_min);
         self.level = self
             .level
             .saturating_add(gained)
             .min(burst.saturating_mul(MINUTE_MS));
         self.at_ms = now_ms;
-        let granted = self.level >= MINUTE_MS;
+        self.level >= MINUTE_MS
+    }
+
+    fn take(&mut self, per_min: u64, burst: u64, now_ms: u64) -> bool {
+        let granted = self.has(per_min, burst, now_ms);
         if granted {
             self.level -= MINUTE_MS;
         }
@@ -321,17 +348,32 @@ enum Phase {
 enum Ask {
     /// Announced, not asked for.
     Offered,
-    /// Asked for `asks` times, last at `since_ms`.
-    Asked { since_ms: u64, asks: u8 },
-    /// Asked for and given up on: still taken if it arrives, but another
-    /// link may be asked.
-    Abandoned,
+    /// Asked for at `since_ms`: no other link is asked meanwhile.
+    Asked { since_ms: u64 },
+    /// Asked for at `since_ms` and not delivered within the request timeout:
+    /// another link may be asked.
+    Abandoned { since_ms: u64 },
 }
 
 struct Offer {
     /// When the packet's lifetime ends, by the link's announcements.
     expires_ms: u64,
     state: Ask,
+}
+
+impl Offer {
+    /// Whether the packet may still arrive: it was asked for less than two
+    /// request timeouts ago. The bound is on the time since the request, not
+    /// on the packet's lifetime, which the peer can announce again and again:
+    /// it is what lets the record table be sized (`Config::record_capacity`).
+    const fn awaited(&self, now_ms: u64, timeout_ms: u64) -> bool {
+        match self.state {
+            Ask::Offered => false,
+            Ask::Asked { since_ms } | Ask::Abandoned { since_ms } => {
+                now_ms.saturating_sub(since_ms) < timeout_ms.saturating_mul(2)
+            }
+        }
+    }
 }
 
 /// A packet being sent as chunks.
@@ -344,9 +386,10 @@ struct Sending {
 struct Link {
     id: LinkId,
     peer: Option<PeerRef>,
-    /// A peer whose own link was closed as a duplicate of this one: reached
-    /// through this link for as long as it lasts.
-    alias: Option<PeerRef>,
+    /// A peer whose own link was closed as a duplicate of this one, and
+    /// when: reached through this link until its `HELLO` value changes or
+    /// [`Config::rotate_ms`] has passed.
+    alias: Option<(PeerRef, u64)>,
     kind: Kind,
     up_ms: u64,
     size: FrameSize,
@@ -363,8 +406,7 @@ struct Link {
     offers: BTreeMap<PacketId, Offer>,
     /// Offers in [`Ask::Asked`].
     asked: usize,
-    /// Offers in [`Ask::Asked`] or [`Ask::Abandoned`]: packets that may
-    /// arrive.
+    /// Offers in [`Ask::Asked`] or [`Ask::Abandoned`].
     expected: usize,
     /// Packets ever asked of this link: what its credit is spent on.
     charged: u64,
@@ -375,10 +417,6 @@ struct Link {
     sending: Option<Sending>,
     /// The chunks of the packet the peer is sending, so far.
     assembly: Vec<u8>,
-    /// Frames in the output queue.
-    queued: usize,
-    /// The output queue was full when the link last had a turn.
-    blocked: bool,
 }
 
 struct Peer {
@@ -400,25 +438,6 @@ struct Waiting {
     served: u64,
 }
 
-struct Queued {
-    output: Output,
-    /// The packet this frame is the last chunk of.
-    completes: Option<PacketId>,
-}
-
-impl Queued {
-    const fn plain(output: Output) -> Self {
-        Self {
-            output,
-            completes: None,
-        }
-    }
-
-    fn is_frame_of(&self, id: LinkId) -> bool {
-        matches!(&self.output, Output::Frame { link, .. } if *link == id)
-    }
-}
-
 /// How a link ends.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum End {
@@ -427,8 +446,7 @@ enum End {
     /// The peer broke the protocol, or the phone has no room: disconnect,
     /// and send nothing more.
     Drop,
-    /// This phone's own choice: send what is queued, then `BYE`, then
-    /// disconnect.
+    /// This phone's own choice: send `BYE`, then disconnect.
     Bye,
 }
 
@@ -440,17 +458,24 @@ pub struct MeshEngine<R> {
     stopped: bool,
     store: Store,
     links: Vec<Option<Link>>,
-    output: VecDeque<Queued>,
+    /// Handshake messages, `BYE`s, closes and connects, in order. Every other
+    /// frame is built when it is polled.
+    output: VecDeque<Output>,
     outbox: BTreeMap<CircleSlot, Waiting>,
     next_emit_ms: u64,
     next_tick_ms: Option<u64>,
     hello: [u8; HELLO_VALUE_LEN],
+    /// When the `HELLO` value is next drawn afresh.
     hello_ms: u64,
     /// Counts the `HELLO` values seen, to order them.
     hellos_seen: u64,
     peers: BTreeMap<PeerRef, Peer>,
     connecting: Option<Attempt>,
     accepts: Bucket,
+    /// The slot whose turn it is to be asked for a packet.
+    asking: usize,
+    /// The slot whose turn it is to have a frame built.
+    serving: usize,
     inbound: Bucket,
     emitted: u64,
     accepted: u64,
@@ -475,6 +500,7 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         let mut engine = Self {
             accepts: Bucket::full(config.accept_burst, now_ms),
             inbound: Bucket::full(config.inbound_burst, now_ms),
+            hello_ms: now_ms.saturating_add(config.hello_period_ms),
             config,
             rng,
             now_ms,
@@ -486,10 +512,11 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
             next_emit_ms: now_ms,
             next_tick_ms: None,
             hello,
-            hello_ms: now_ms,
             hellos_seen: 0,
             peers: BTreeMap::new(),
             connecting: None,
+            asking: 0,
+            serving: 0,
             emitted: 0,
             accepted: 0,
             sent: 0,
@@ -525,9 +552,9 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
             self.end(slot, End::Gone);
         }
         self.output
-            .retain(|queued| !queued.is_frame_of(link) && queued.output != Output::Close { link });
+            .retain(|output| !output.is_frame_of(link) && *output != Output::Close { link });
         if !self.admit(link, role, max_frame, peer) {
-            self.output.push_back(Queued::plain(Output::Close { link }));
+            self.output.push_back(Output::Close { link });
         }
         self.settle();
     }
@@ -538,8 +565,10 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
             return;
         }
         self.clock(now_ms);
-        if let Some(slot) = self.slot_of(link) {
-            self.end(slot, End::Gone);
+        match self.slot_of(link) {
+            Some(slot) => self.end(slot, End::Gone),
+            // Already ended with a `BYE` that can no longer be sent.
+            None => self.output.retain(|output| !output.is_frame_of(link)),
         }
         self.settle();
     }
@@ -567,7 +596,7 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         if let Some(known) = self.peers.get_mut(&peer) {
             known.rssi = rssi;
             known.seen_ms = self.now_ms;
-        } else if rssi >= self.config.rssi_floor && self.peers.len() < self.config.max_peers {
+        } else if rssi >= self.config.rssi_floor && self.make_room() {
             // A peer too weak to connect to is not worth a wake-up.
             let seen_ms = self.now_ms;
             self.peers.insert(
@@ -658,38 +687,66 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
 
     // ---- outputs ---------------------------------------------------------
 
-    /// The next thing for the radio layer to do, in order.
+    /// The next thing for the radio layer to do, in order, after running the
+    /// timers due at `now_ms`.
     ///
-    /// The engine queues at most [`Config::link_queue_frames`] frames per
-    /// link, one connect, and one close per link it was told of; it seals
-    /// more frames as these are taken.
-    pub fn poll_output(&mut self) -> Option<Output> {
-        let Queued { output, completes } = self.output.pop_front()?;
-        if let Output::Frame { link, .. } = &output {
-            if let Some(id) = completes {
-                self.store.sent(&id);
-                self.sent += 1;
+    /// A link frame is sealed by the call that returns it, so a lifetime it
+    /// announces is the one at `now_ms`. Links with frames to send take
+    /// turns, one frame each.
+    pub fn poll_output(&mut self, now_ms: u64) -> Option<Output> {
+        self.poll(None, now_ms)
+    }
+
+    /// As [`Self::poll_output`], for a radio layer whose links cannot all
+    /// send now: nothing comes out for a link that is not in `ready` but its
+    /// close, and that only once no frame waits ahead of it. A link that is
+    /// slow to take its frames so holds up no other, and its own frames are
+    /// built when it can send them.
+    pub fn poll_output_ready(&mut self, ready: &[LinkId], now_ms: u64) -> Option<Output> {
+        self.poll(Some(ready), now_ms)
+    }
+
+    fn poll(&mut self, ready: Option<&[LinkId]>, now_ms: u64) -> Option<Output> {
+        if !self.stopped {
+            self.clock(now_ms);
+            self.settle();
+        }
+        let can_send = |link: LinkId| ready.is_none_or(|ready| ready.contains(&link));
+        let queued = (0..self.output.len()).find(|&at| match self.output.get(at) {
+            Some(Output::Frame { link, .. }) => can_send(*link),
+            // After the `BYE` queued for its link.
+            Some(Output::Close { link }) => {
+                !(self.output.iter().take(at)).any(|ahead| ahead.is_frame_of(*link))
             }
-            if let Some(slot) = self.slot_of(*link) {
-                let refill = self.link_mut(slot).is_some_and(|link| {
-                    link.queued = link.queued.saturating_sub(1);
-                    link.blocked
-                });
-                if refill {
-                    self.pump(slot);
-                }
+            Some(Output::Connect { .. }) => true,
+            None => false,
+        });
+        if let Some(at) = queued {
+            return self.output.remove(at);
+        }
+        for _ in 0..self.links.len() {
+            let slot = self.serving;
+            self.serving = (slot + 1) % self.links.len();
+            let sends = (self.links.get(slot).and_then(Option::as_ref))
+                .is_some_and(|link| can_send(link.id));
+            if let Some(output) = sends.then(|| self.build(slot)).flatten() {
+                return Some(output);
             }
         }
-        Some(output)
+        None
     }
 
     /// The earliest time [`Self::advance`] has work; `None` once stopped.
     #[must_use]
     pub fn next_wake_ms(&self) -> Option<u64> {
-        (!self.stopped).then(|| {
-            self.next_tick_ms
-                .map_or(self.next_emit_ms, |tick| tick.min(self.next_emit_ms))
-        })
+        let stalls = self
+            .live()
+            .filter(|link| link.peer_hello.is_none())
+            .map(|link| link.up_ms.saturating_add(self.config.connect_timeout_ms));
+        // Only a phone with a link to greet wakes to draw a new `HELLO`.
+        let greeting = self.live().next().map(|_| self.hello_ms);
+        let timers = self.next_tick_ms.into_iter().chain(greeting).chain(stalls);
+        (!self.stopped).then(|| timers.fold(self.next_emit_ms, u64::min))
     }
 
     // ---- for session code ------------------------------------------------
@@ -736,22 +793,26 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
     fn clock(&mut self, now_ms: u64) {
         self.now_ms = self.now_ms.max(now_ms);
         self.store.advance(self.now_ms);
+        // Before anything a link could be greeted with: the tick stops while
+        // the phone is alone, and a value kept through that would show a
+        // later peer which phone this was hours ago.
+        if self.now_ms >= self.hello_ms {
+            self.renew_hello();
+        }
         if self.now_ms >= self.next_emit_ms {
             self.emit();
         }
+        self.drop_stalled();
         if self.next_tick_ms.is_some_and(|tick| self.now_ms >= tick) {
             self.next_tick_ms = Some(self.now_ms.saturating_add(self.config.tick_ms));
             self.tick();
         }
     }
 
-    /// Ends every input: gives each link its turn to produce frames, and
-    /// keeps the tick running only while there is a link or a peer to plan
-    /// for, so an isolated phone wakes for its emission slots alone.
+    /// Ends every input: keeps the tick running only while there is a link
+    /// or a peer to plan for, so an isolated phone wakes for its emission
+    /// slots alone.
     fn settle(&mut self) {
-        for slot in 0..self.links.len() {
-            self.pump(slot);
-        }
         let wanted =
             self.live().next().is_some() || !self.peers.is_empty() || self.connecting.is_some();
         self.next_tick_ms = match (wanted, self.next_tick_ms) {
@@ -765,6 +826,21 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         let jitter = self.config.emit_jitter_ms;
         let drawn = self.rng.gen_range(0..=jitter.saturating_mul(2));
         (self.config.emit_period_ms - jitter).saturating_add(drawn)
+    }
+
+    /// Draws the `HELLO` value afresh and greets every open link again. The
+    /// next draw is a whole number of periods from the last one due, not
+    /// from now: when it happens does not depend on when the engine was
+    /// called, so neither does anything drawn after it (T-PRIV-4).
+    fn renew_hello(&mut self) {
+        let period = self.config.hello_period_ms;
+        let missed = self.now_ms.saturating_sub(self.hello_ms) / period;
+        let ahead = missed.saturating_add(1).saturating_mul(period);
+        self.hello_ms = self.hello_ms.saturating_add(ahead);
+        self.hello = self.rng.gen();
+        for link in self.links.iter_mut().flatten() {
+            link.hello_due = matches!(link.phase, Phase::Open(_));
+        }
     }
 
     /// One emission slot: the outbox entry of the least recently served
@@ -797,16 +873,24 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
             .accept(packet, Origin::Local, expires_ms, &mut self.rng);
     }
 
+    /// Closes, with no frame, every link whose peer's `HELLO` has not come
+    /// within the connect timeout of the link coming up: a peer that stalls
+    /// the handshake or the greeting holds no slot.
+    fn drop_stalled(&mut self) {
+        let (now, limit) = (self.now_ms, self.config.connect_timeout_ms);
+        for slot in 0..self.links.len() {
+            let stalled = (self.links.get(slot).and_then(Option::as_ref)).is_some_and(|link| {
+                link.peer_hello.is_none() && now.saturating_sub(link.up_ms) >= limit
+            });
+            if stalled {
+                self.end(slot, End::Drop);
+            }
+        }
+    }
+
     /// The one coalesced tick.
     fn tick(&mut self) {
         let now = self.now_ms;
-        if now.saturating_sub(self.hello_ms) >= self.config.hello_period_ms {
-            self.hello = self.rng.gen();
-            self.hello_ms = now;
-            for link in self.links.iter_mut().flatten() {
-                link.hello_due = matches!(link.phase, Phase::Open(_));
-            }
-        }
         let timeout = self.config.connect_timeout_ms;
         if let Some(stale) = self
             .connecting
@@ -817,13 +901,13 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         self.forget_peers();
         for slot in 0..self.links.len() {
             self.review_offers(slot);
-            self.request(slot);
-            if let Some(link) = self.link_mut(slot) {
-                if link.peer_hello.is_some() {
-                    link.announcing = true;
-                    link.cursor = None;
-                    link.scan_ms = now;
-                }
+        }
+        self.request();
+        for link in self.links.iter_mut().flatten() {
+            if link.peer_hello.is_some() {
+                link.announcing = true;
+                link.cursor = None;
+                link.scan_ms = now;
             }
         }
         self.rotate();
@@ -882,16 +966,16 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         let Some(slot) = self.links.iter().position(Option::is_none) else {
             return false;
         };
-        let (phase, queued) = match role {
+        let phase = match role {
             Role::Central => {
                 let (initiator, hello) = Initiator::start(&mut self.rng);
-                self.output.push_back(Queued::plain(Output::Frame {
+                self.output.push_back(Output::Frame {
                     link: id,
                     bytes: hello.to_vec(),
-                }));
-                (Phase::Reply(initiator), 1)
+                });
+                Phase::Reply(initiator)
             }
-            Role::Peripheral => (Phase::Hello, 0),
+            Role::Peripheral => Phase::Hello,
         };
         let link = Link {
             id,
@@ -914,8 +998,6 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
             sends: VecDeque::new(),
             sending: None,
             assembly: Vec::new(),
-            queued,
-            blocked: false,
         };
         if let Some(free) = self.links.get_mut(slot) {
             *free = Some(link);
@@ -934,18 +1016,17 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
             if let Phase::Open(transport) = &mut link.phase {
                 let bye = frame::bye(link.size).and_then(|plain| transport.seal(&plain));
                 if let Some(bytes) = bye {
-                    self.output.push_back(Queued::plain(Output::Frame {
+                    self.output.push_back(Output::Frame {
                         link: link.id,
                         bytes,
-                    }));
+                    });
                 }
             }
         } else {
-            self.output.retain(|queued| !queued.is_frame_of(link.id));
+            self.output.retain(|output| !output.is_frame_of(link.id));
         }
         if how != End::Gone {
-            self.output
-                .push_back(Queued::plain(Output::Close { link: link.id }));
+            self.output.push_back(Output::Close { link: link.id });
         }
         if let Ok(slot) = u8::try_from(slot) {
             self.store.depart(slot);
@@ -985,11 +1066,10 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
                 };
                 link.phase = Phase::Open(transport);
                 link.hello_due = true;
-                link.queued += 1;
-                self.output.push_back(Queued::plain(Output::Frame {
+                self.output.push_back(Output::Frame {
                     link: link.id,
                     bytes: reply.to_vec(),
-                }));
+                });
                 true
             }
             Phase::Open(mut transport) => {
@@ -1037,7 +1117,11 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         };
         match &mut link.peer_hello {
             Some((known, _)) if *known == value => return true,
-            Some(known) => *known = (value, seen),
+            Some(known) => {
+                *known = (value, seen);
+                // Whoever this link stood in for showed the value it had.
+                link.alias = None;
+            }
             None => {
                 link.peer_hello = Some((value, seen));
                 link.announcing = true;
@@ -1066,15 +1150,15 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
             self.end(other, End::Bye);
             if let Some(keeper) = self.link_mut(kept) {
                 if reached.is_some() && reached != keeper.peer {
-                    keeper.alias = reached;
+                    keeper.alias = reached.map(|peer| (peer, now));
                 }
             }
         }
         true
     }
 
-    /// The peer's inventory: raises what is held, remembers what is not, and
-    /// asks for as much of that as the link's credit allows.
+    /// The peer's inventory: raises what is held and remembers what is not.
+    /// What is then asked for is settled over all links together.
     fn take_have(&mut self, slot: usize, entries: impl Iterator<Item = (PacketId, u8)>) {
         let cap = self.config.offers_per_link;
         let Ok(mark) = u8::try_from(slot) else {
@@ -1095,11 +1179,12 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
                 link.offers.insert(id, Offer { expires_ms, state });
             }
         }
-        self.request(slot);
+        self.request();
     }
 
     /// The peer's requests: each packet it was told of, once, while it is
-    /// held and unexpired. Anything else is ignored, so asking tells nothing.
+    /// held and may be sent. Anything else is ignored, so asking tells
+    /// nothing.
     fn take_want(&mut self, slot: usize, ids: impl Iterator<Item = PacketId>) {
         let cap = self.config.store_packets;
         let Ok(mark) = u8::try_from(slot) else {
@@ -1116,8 +1201,10 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
     }
 
     /// One chunk of a packet the peer is sending. A whole packet is taken
-    /// only if this link was asked for it.
+    /// only if this link was asked for it less than two request timeouts
+    /// ago.
     fn take_chunk(&mut self, slot: usize, index: u8, chunk: &[u8]) -> bool {
+        let (now, timeout) = (self.now_ms, self.config.want_timeout_ms);
         let Ok(mark) = u8::try_from(slot) else {
             return false;
         };
@@ -1137,32 +1224,24 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         };
         let packet = Packet::from_bytes(bytes);
         let id = packet.id();
-        let expires_ms = match link.offers.remove(&id) {
-            Some(Offer {
-                state: Ask::Asked { .. },
-                expires_ms,
-            }) => {
-                link.asked = link.asked.saturating_sub(1);
-                expires_ms
-            }
-            Some(Offer {
-                state: Ask::Abandoned,
-                expires_ms,
-            }) => expires_ms,
-            Some(Offer {
-                state: Ask::Offered,
-                ..
-            })
-            | None => return false,
+        let Some(offer) = (link.offers.remove(&id)).filter(|offer| offer.awaited(now, timeout))
+        else {
+            return false;
         };
+        if matches!(offer.state, Ask::Asked { .. }) {
+            link.asked = link.asked.saturating_sub(1);
+        }
         link.expected = link.expected.saturating_sub(1);
 
         if self.store.has_record(&id) {
+            // Given up on here, asked of another link and delivered by both:
+            // the second copy is dropped and changes nothing.
             self.duplicates += 1;
-            self.store.heard(&id, mark, expires_ms);
-        } else if self
+            return true;
+        }
+        if self
             .store
-            .accept(packet, Origin::Link(mark), expires_ms, &mut self.rng)
+            .accept(packet, Origin::Link(mark), offer.expires_ms, &mut self.rng)
         {
             self.accepted += 1;
         }
@@ -1184,154 +1263,142 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
 
     // ---- asking ----------------------------------------------------------
 
-    /// Drops offers whose packet has expired, asks again for what did not
-    /// arrive in time, and gives up after [`Config::want_asks`] tries.
+    /// Forgets offers whose packet expired unasked, gives up on requests a
+    /// timeout old, so that another link may be asked, and forgets those two
+    /// timeouts old.
     fn review_offers(&mut self, slot: usize) {
-        let (now, timeout, max_asks) = (
-            self.now_ms,
-            self.config.want_timeout_ms,
-            self.config.want_asks,
-        );
+        let (now, timeout) = (self.now_ms, self.config.want_timeout_ms);
         let Some(link) = self.links.get_mut(slot).and_then(Option::as_mut) else {
             return;
         };
-        let (asked, expected, wants) = (&mut link.asked, &mut link.expected, &mut link.wants);
-        // Requests not yet framed for offers since dropped or given up: with
-        // them gone the queue holds each live request once per try at most.
-        wants.retain(|id| {
+        let (asked, expected) = (&mut link.asked, &mut link.expected);
+        link.offers.retain(|_, offer| {
+            match offer.state {
+                Ask::Offered => return offer.expires_ms > now,
+                Ask::Asked { since_ms } if now.saturating_sub(since_ms) >= timeout => {
+                    offer.state = Ask::Abandoned { since_ms };
+                    *asked = asked.saturating_sub(1);
+                }
+                Ask::Asked { .. } | Ask::Abandoned { .. } => {}
+            }
+            let keep = offer.awaited(now, timeout);
+            *expected = expected.saturating_sub(usize::from(!keep));
+            keep
+        });
+        // A request not yet framed for an offer given up since must not be
+        // sent: the packet would arrive when another link's has.
+        let offers = &link.offers;
+        link.wants.retain(|id| {
             matches!(
-                link.offers.get(id),
+                offers.get(id),
                 Some(Offer {
                     state: Ask::Asked { .. },
                     ..
                 })
             )
         });
-        link.offers.retain(|id, offer| {
-            let Ask::Asked { since_ms, asks } = &mut offer.state else {
-                // A packet given up on may still arrive for a while.
-                let abandoned = matches!(offer.state, Ask::Abandoned);
-                let keep = offer
-                    .expires_ms
-                    .saturating_add(u64::from(abandoned) * timeout)
-                    > now;
-                *expected = expected.saturating_sub(usize::from(abandoned && !keep));
-                return keep;
-            };
-            if offer.expires_ms.saturating_add(timeout) <= now {
-                *asked = asked.saturating_sub(1);
-                *expected = expected.saturating_sub(1);
-                return false;
-            }
-            if now.saturating_sub(*since_ms) >= timeout {
-                if *asks < max_asks {
-                    *asks += 1;
-                    *since_ms = now;
-                    wants.push_back(*id);
-                } else {
-                    offer.state = Ask::Abandoned;
-                    *asked = asked.saturating_sub(1);
-                }
-            }
-            true
-        });
     }
 
-    /// Asks the link in `slot` for packets it announced, in id order: ones
-    /// with no record, that no link is being asked for, within the link's
-    /// window and credit and the rate limit over all links.
-    fn request(&mut self, slot: usize) {
+    /// Asks for packets the links announced while the rate limit over all
+    /// links has a token: lowest id first on each link, ones with no record
+    /// that no link is being asked for, within the link's window and credit.
+    ///
+    /// The tokens are shared out by turns, one request per link per turn,
+    /// and the turn carries on from call to call. A link that announces
+    /// without pause is so asked for no more than any other link that has
+    /// something to ask for, whoever's frame brought the call about.
+    fn request(&mut self) {
+        let slots = self.links.len();
+        let (now, rate, burst) = (
+            self.now_ms,
+            self.config.accept_per_min,
+            self.config.accept_burst,
+        );
+        // How far each link's offers have been looked through in this call.
+        let mut looked = vec![Bound::Unbounded; slots];
+        let mut passed = 0;
+        while passed < slots && self.accepts.has(rate, burst, now) {
+            let slot = self.asking;
+            let found = looked
+                .get_mut(slot)
+                .and_then(|from| self.next_to_ask(slot, from));
+            if let Some(id) = found {
+                self.accepts.take(rate, burst, now);
+                self.ask(slot, id);
+            }
+            passed = if found.is_some() { 0 } else { passed + 1 };
+            self.asking = (slot + 1) % slots;
+        }
+    }
+
+    /// The next packet to ask the link in `slot` for, in id order from
+    /// `from`, which is moved past it — to the end when the link has no
+    /// room or nothing more to ask for.
+    fn next_to_ask(&self, slot: usize, from: &mut Bound<PacketId>) -> Option<PacketId> {
         let now = self.now_ms;
-        let Some(link) = self.links.get_mut(slot).and_then(Option::as_mut) else {
-            return;
-        };
-        let mut offers = std::mem::take(&mut link.offers);
+        let link = self.links.get(slot)?.as_ref()?;
         let age_ms = now.saturating_sub(link.up_ms);
         let allowance = self
             .config
             .credit_initial
             .saturating_add(age_ms.saturating_mul(self.config.credit_per_min) / MINUTE_MS);
-        let (mut asked, mut charged) = (link.asked, link.charged);
-        let mut picked = Vec::new();
-        for (id, offer) in &mut offers {
-            if asked >= self.config.want_window || charged >= allowance {
-                break;
-            }
-            // This link's offers are out of `self` for the loop, so `live`
-            // shows the other links'.
-            let asked_elsewhere = || {
-                self.live().any(|other| {
-                    matches!(
-                        other.offers.get(id),
-                        Some(Offer {
-                            state: Ask::Asked { .. },
-                            ..
-                        })
-                    )
+        let room = link.asked < self.config.want_window && link.charged < allowance;
+        let asked_elsewhere = |id: &PacketId| {
+            self.links.iter().enumerate().any(|(other, link)| {
+                let offer = link.as_ref().and_then(|link| link.offers.get(id));
+                other != slot && offer.is_some_and(|offer| matches!(offer.state, Ask::Asked { .. }))
+            })
+        };
+        let found = room
+            .then(|| {
+                let mut rest = link.offers.range((*from, Bound::Unbounded));
+                rest.find(|(id, offer)| {
+                    matches!(offer.state, Ask::Offered)
+                        && offer.expires_ms > now
+                        && !self.store.has_record(id)
+                        && !asked_elsewhere(id)
                 })
-            };
-            if !matches!(offer.state, Ask::Offered)
-                || offer.expires_ms <= now
-                || self.store.has_record(id)
-                || asked_elsewhere()
-            {
-                continue;
-            }
-            let (rate, burst) = (self.config.accept_per_min, self.config.accept_burst);
-            if !self.accepts.take(rate, burst, now) {
-                break;
-            }
-            offer.state = Ask::Asked {
-                since_ms: now,
-                asks: 1,
-            };
-            asked += 1;
-            charged += 1;
-            picked.push(*id);
-        }
-        if let Some(link) = self.links.get_mut(slot).and_then(Option::as_mut) {
-            link.offers = offers;
-            link.asked = asked;
-            link.charged = charged;
-            link.expected += picked.len();
-            link.wants.extend(picked);
+            })
+            .flatten()
+            .map(|(id, _)| *id);
+        *from = Bound::Excluded(found.unwrap_or(PacketId([u8::MAX; 16])));
+        found
+    }
+
+    fn ask(&mut self, slot: usize, id: PacketId) {
+        let now = self.now_ms;
+        let Some(link) = self.link_mut(slot) else {
+            return;
+        };
+        if let Some(offer) = link.offers.get_mut(&id) {
+            offer.state = Ask::Asked { since_ms: now };
+            link.asked += 1;
+            link.expected += 1;
+            link.charged += 1;
+            link.wants.push_back(id);
         }
     }
 
     // ---- sending ---------------------------------------------------------
 
-    /// Seals frames for the link in `slot` until it has nothing to send or
-    /// its share of the output queue is full.
-    fn pump(&mut self, slot: usize) {
-        loop {
-            let limit = self.config.link_queue_frames;
-            let Some(link) = self.links.get_mut(slot).and_then(Option::as_mut) else {
-                return;
-            };
-            link.blocked = link.queued >= limit;
-            if link.blocked {
-                return;
-            }
-            let Some((plain, completes)) = self.next_frame(slot) else {
-                return;
-            };
-            let Some(link) = self.links.get_mut(slot).and_then(Option::as_mut) else {
-                return;
-            };
-            let Phase::Open(transport) = &mut link.phase else {
-                return;
-            };
-            let Some(bytes) = transport.seal(&plain) else {
-                self.end(slot, End::Drop);
-                return;
-            };
-            link.queued += 1;
-            let output = Output::Frame {
-                link: link.id,
-                bytes,
-            };
-            self.output.push_back(Queued { output, completes });
+    /// Seals the next frame the link in `slot` has to send.
+    fn build(&mut self, slot: usize) -> Option<Output> {
+        let (plain, completes) = self.next_frame(slot)?;
+        let link = self.links.get_mut(slot)?.as_mut()?;
+        let Phase::Open(transport) = &mut link.phase else {
+            return None;
+        };
+        let Some(bytes) = transport.seal(&plain) else {
+            self.end(slot, End::Drop);
+            // The close just queued: nothing else waits for this link.
+            return self.output.pop_back();
+        };
+        let link = link.id;
+        if let Some(id) = completes {
+            self.store.sent(&id);
+            self.sent += 1;
         }
+        Some(Output::Frame { link, bytes })
     }
 
     /// The next plaintext frame the link in `slot` has to send, and the
@@ -1352,8 +1419,8 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
             let Some(id) = link.wants.pop_front() else {
                 break;
             };
-            // An offer dropped since must not be asked for: its packet would
-            // arrive unasked.
+            // An offer given up since must not be asked for: its packet
+            // would arrive when another link's has.
             if matches!(
                 link.offers.get(&id),
                 Some(Offer {
@@ -1386,7 +1453,7 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         while link.sending.is_none() {
             let id = link.sends.pop_front()?;
             // Checked when the transfer starts, not when it was asked for: a
-            // packet that expired in the queue is not sent.
+            // packet that expired meanwhile is not sent.
             link.sending = self.store.packet(&id).map(|packet| Sending {
                 id,
                 packet,
@@ -1408,9 +1475,32 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
 
     /// Whether `peer` is reached by a link, or being connected to.
     fn linked(&self, peer: PeerRef) -> bool {
+        let (now, turn) = (self.now_ms, self.config.rotate_ms);
+        let stands_in = |link: &Link| {
+            (link.alias).is_some_and(|(alias, since_ms)| {
+                alias == peer && now.saturating_sub(since_ms) < turn
+            })
+        };
         self.live()
-            .any(|link| link.peer == Some(peer) || link.alias == Some(peer))
+            .any(|link| link.peer == Some(peer) || stands_in(link))
             || self.connecting.as_ref().is_some_and(|c| c.peer == peer)
+    }
+
+    /// Room in the peer table for one more. When it is full a peer picked at
+    /// random among those neither linked nor being dialled is forgotten, so
+    /// whoever advertises under many addresses keeps nobody out of it.
+    fn make_room(&mut self) -> bool {
+        if self.peers.len() < self.config.max_peers {
+            return true;
+        }
+        let idle: Vec<PeerRef> = (self.peers.keys().copied())
+            .filter(|peer| !self.linked(*peer))
+            .collect();
+        if idle.is_empty() {
+            return false;
+        }
+        let pick = self.rng.gen_range(0..idle.len());
+        (idle.get(pick)).is_some_and(|gone| self.peers.remove(gone).is_some())
     }
 
     /// Peers worth connecting to now, with their signal.
@@ -1484,7 +1574,7 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
     fn plan_links(&mut self) {
         // One attempt at a time, and none while the radio layer has yet to
         // take the last: an unpolled engine queues one connect, not many.
-        let unpolled = |queued: &Queued| matches!(queued.output, Output::Connect { .. });
+        let unpolled = |output: &Output| matches!(output, Output::Connect { .. });
         if self.connecting.is_some() || self.output.iter().any(unpolled) {
             return;
         }
@@ -1536,8 +1626,7 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
             kind,
             since_ms: self.now_ms,
         });
-        self.output
-            .push_back(Queued::plain(Output::Connect { peer }));
+        self.output.push_back(Output::Connect { peer });
     }
 }
 
@@ -1639,7 +1728,7 @@ mod tests {
         }
 
         fn raw_frame(&mut self, link: LinkId) -> Vec<u8> {
-            match self.engine.poll_output() {
+            match self.engine.poll_output(self.now) {
                 Some(Output::Frame { link: on, bytes }) if on == link => {
                     self.air.push(bytes.clone());
                     bytes
@@ -1734,11 +1823,21 @@ mod tests {
             wanted
         }
 
-        /// Carries out the next thing the engine has queued, if any.
+        /// Carries out the next thing the engine has for the radio layer, if
+        /// any.
         fn step(&mut self) -> bool {
-            let Some(output) = self.engine.poll_output() else {
-                return false;
-            };
+            let output = self.engine.poll_output(self.now);
+            output.map(|output| self.carry(output)).is_some()
+        }
+
+        /// As [`Self::pump`], with only the links in `ready` able to send.
+        fn pump_ready(&mut self, ready: &[LinkId]) {
+            while let Some(output) = self.engine.poll_output_ready(ready, self.now) {
+                self.carry(output);
+            }
+        }
+
+        fn carry(&mut self, output: Output) {
             match output {
                 Output::Frame { link, bytes } => {
                     assert_eq!(bytes.len(), FRAME, "a sealed frame of another length");
@@ -1760,7 +1859,6 @@ mod tests {
                 }
                 Output::Connect { peer } => self.connects.push(peer),
             }
-            true
         }
 
         fn pump(&mut self) {
@@ -1858,7 +1956,7 @@ mod tests {
             let mut moved = true;
             while std::mem::take(&mut moved) {
                 for node in 0..self.nodes.len() {
-                    while let Some(output) = self.nodes[node].poll_output() {
+                    while let Some(output) = self.nodes[node].poll_output(self.now) {
                         moved = true;
                         match output {
                             Output::Frame { link, bytes } => {
@@ -1902,9 +2000,53 @@ mod tests {
         }
     }
 
-    /// The outputs an engine with no scripted peers has queued.
+    /// What an engine with no scripted peers has for the radio layer, at the
+    /// time of its last input.
     fn drain(engine: &mut Engine) -> Vec<Output> {
-        std::iter::from_fn(|| engine.poll_output()).collect()
+        let now = engine.now_ms;
+        std::iter::from_fn(|| engine.poll_output(now)).collect()
+    }
+
+    /// Takes the handshake message the engine has queued for `link`.
+    fn handshake_of(engine: &mut Engine, link: LinkId, now: u64) -> Vec<u8> {
+        match engine.poll_output(now) {
+            Some(Output::Frame { link: on, bytes }) if on == link => bytes,
+            _ => panic!("the engine did not send its handshake message"),
+        }
+    }
+
+    /// Greets the engine on `link` as its peer and takes its own greeting:
+    /// a link whose peer never greets is closed at the stall deadline.
+    fn greet_as_peer(engine: &mut Engine, link: LinkId, mut peer: Transport, now: u64) {
+        let hello = frame::hello(&link.0.to_le_bytes(), size()).expect("encodes");
+        engine.receive(link, &peer.seal(&hello).expect("seals"), now);
+        while let Some(output) = engine.poll_output(now) {
+            assert!(
+                output.is_frame_of(link),
+                "something other than the greeting"
+            );
+        }
+    }
+
+    /// The engine connects out on `link` to a peer that shakes hands and
+    /// greets.
+    fn open_outgoing(engine: &mut Engine, link: LinkId, peer: PeerRef, now: u64) {
+        engine.link_up(link, Role::Central, FRAME, Some(peer), now);
+        let hello = handshake_of(engine, link, now);
+        let (transport, reply) =
+            noise::respond(&hello, &mut StdRng::seed_from_u64(link.0)).expect("a hello");
+        engine.receive(link, &reply, now);
+        greet_as_peer(engine, link, transport, now);
+    }
+
+    /// A peer connects in on `link`, shakes hands and greets.
+    fn open_incoming(engine: &mut Engine, link: LinkId, now: u64) {
+        engine.link_up(link, Role::Peripheral, FRAME, None, now);
+        let (initiator, hello) = Initiator::start(&mut StdRng::seed_from_u64(link.0));
+        engine.receive(link, &hello, now);
+        let reply = handshake_of(engine, link, now);
+        let transport = initiator.finish(&reply).expect("the engine's reply");
+        greet_as_peer(engine, link, transport, now);
     }
 
     fn connects(outputs: &[Output]) -> Vec<PeerRef> {
@@ -1968,6 +2110,32 @@ mod tests {
         assert!(rig.take(link) == vec![Seen::Hello(second)]);
     }
 
+    /// §6.1: the `HELLO` value is drawn afresh before a link can be greeted
+    /// with one older than its period — also after an hour alone, when no
+    /// tick ran, whether the phone woke for its emission slots meanwhile or
+    /// not at all. The next peer is not shown the value this phone had an
+    /// hour ago, nor the old value and then the new.
+    #[test]
+    fn a_phone_alone_for_an_hour_greets_its_next_link_with_a_fresh_value() {
+        for woken in [false, true] {
+            let mut rig = Rig::new(Config::default());
+            let old = rig.engine.hello;
+            if woken {
+                rig.run(60 * MINUTE_MS);
+            } else {
+                rig.now = 60 * MINUTE_MS;
+            }
+            let link = rig.dial(1);
+            let fresh = rig.engine.hello;
+            assert_ne!(fresh, old);
+            assert!(rig.take(link) == vec![Seen::Hello(fresh)]);
+            rig.greet(link, [1; 8]);
+            rig.run(MINUTE_MS);
+            let greeted_again = |seen: &Seen| matches!(seen, Seen::Hello(_));
+            assert!(!rig.take(link).iter().any(greeted_again));
+        }
+    }
+
     // ---- inventory flood --------------------------------------------------
 
     #[test]
@@ -2012,7 +2180,7 @@ mod tests {
         assert!(rig.haves(late).is_empty());
         rig.greet(late, [2; 8]);
         let told = rig.haves(late);
-        let mut expected: Vec<_> = ns.iter().map(|&n| (id(n), 200)).collect();
+        let mut expected: Vec<_> = ns.iter().map(|&n| (id(n), 199)).collect();
         expected.sort();
         assert!(told == expected);
         // Batched: as many per frame as fit.
@@ -2029,7 +2197,8 @@ mod tests {
         rig.run(TICK - 1001);
         assert!(rig.haves(other).is_empty());
         rig.run(1);
-        assert!(rig.haves(other) == vec![(id(1), 199)]);
+        // Four seconds old: 199 whole units are left, and one less is said.
+        assert!(rig.haves(other) == vec![(id(1), 198)]);
         rig.run(10 * TICK);
         assert!(rig.haves(other).is_empty());
     }
@@ -2044,7 +2213,7 @@ mod tests {
         rig.run(TICK);
 
         // Told to the other link, never to the one it came from.
-        assert!(rig.haves(other) == vec![(id(1), 198)]);
+        assert!(rig.haves(other) == vec![(id(1), 197)]);
         assert!(rig.take(source).is_empty());
 
         // Sent where it was asked for, once.
@@ -2097,13 +2266,14 @@ mod tests {
         let mut rig = Rig::new(trusting());
         let source = rig.peer(1);
         let other = rig.peer(2);
-        // Two units are gone by the first tick; three leave one unit then,
-        // and none by the tick after.
-        rig.feed(source, &[1], 2);
+        // Two units are gone by the first tick, and a packet is announced
+        // one unit short: three leave nothing to announce then, four leave
+        // one unit, and none by the tick after.
+        rig.feed(source, &[1], 3);
         rig.feed(source, &[2], 200);
-        rig.feed(source, &[3], 3);
+        rig.feed(source, &[3], 4);
         rig.run(TICK);
-        let mut told = vec![(id(2), 198), (id(3), 1)];
+        let mut told = vec![(id(2), 197), (id(3), 1)];
         told.sort();
         assert!(rig.haves(other) == told);
         rig.run(TICK);
@@ -2127,8 +2297,8 @@ mod tests {
         let liar = rig.peer(1);
         let honest = rig.peer(2);
         let downstream = rig.peer(3);
-        // Three units: one is left at the first tick, none by the second.
-        rig.feed(liar, &[1], 3);
+        // Four units: one is announced at the first tick, none by the second.
+        rig.feed(liar, &[1], 4);
         rig.run(TICK);
         assert!(rig.haves(downstream) == vec![(id(1), 1)]);
         rig.run(TICK);
@@ -2141,7 +2311,7 @@ mod tests {
         assert!(rig.haves(downstream).is_empty(), "not before the tick");
         rig.run(1);
         // Told a second time, with the honest lifetime less the wait.
-        assert!(rig.haves(downstream) == vec![(id(1), 178)]);
+        assert!(rig.haves(downstream) == vec![(id(1), 177)]);
         assert!(rig.haves(honest).is_empty() && rig.haves(liar).is_empty());
         rig.ask(downstream, &[id(1)]);
         assert_eq!(rig.take(downstream).len(), 3);
@@ -2157,7 +2327,7 @@ mod tests {
         rig.announce(honest, &[(id(1), 180)]);
         assert!(rig.wants(honest).is_empty(), "asked of one link at a time");
         rig.deliver(liar, &packet(1));
-        assert_eq!(rig.store().remaining(&id(1)), 180);
+        assert_eq!(rig.store().remaining(&id(1)), 179);
         // Both hold it: neither is told.
         rig.run(TICK);
         assert!(rig.take(liar).is_empty() && rig.take(honest).is_empty());
@@ -2538,21 +2708,118 @@ mod tests {
         assert_eq!(rig.wants(one).len() + rig.wants(two).len(), 5);
     }
 
-    /// §6.4: traffic inside the rate limit cannot fill the record table —
-    /// nor can packets asked for earlier and handed over late, up to a full
-    /// table of offers on each of the eight links.
+    /// §6.5: the rate limit is shared by turns. Two links announce three new
+    /// packets a second each and hand over all they are asked for; a third
+    /// announces one a second. With one request a second for all, the turn
+    /// passes round the three, so of the requests made once each had
+    /// something to ask for, every third is the third link's: its share is
+    /// at least the whole less two, over three.
     #[test]
-    fn the_record_table_holds_everything_the_rate_limit_lets_in_for_two_lifetimes() {
-        let config = Config::default();
-        assert_eq!(config.record_capacity(), 2048 + 240 * 40 + 41 + 8 * 2048);
-        let engine = engine(config, 1);
-        assert_eq!(engine.store().records(), 0);
+    fn a_link_that_announces_without_pause_is_asked_for_no_more_than_any_other() {
+        let mut rig = Rig::new(Config {
+            accept_per_min: 60,
+            accept_burst: 3,
+            ..trusting()
+        });
+        let links = [rig.peer(1), rig.peer(2), rig.peer(3)];
+        let mut names = BTreeMap::new();
+        let mut asked = [0usize; 3];
+        let mut announce = |rig: &mut Rig, link: LinkId, ns: std::ops::Range<u64>| {
+            names.extend(ns.clone().map(|n| (id(n), n)));
+            let entries: Vec<_> = ns.map(|n| (id(n), 250)).collect();
+            rig.announce(link, &entries);
+            // Whatever the link has been asked for by now, it hands over.
+            for (at, &link) in links.iter().enumerate() {
+                for wanted in rig.wants(link) {
+                    rig.deliver(link, &packet(names[&wanted]));
+                    if rig.now > 0 {
+                        asked[at] += 1;
+                    }
+                }
+            }
+        };
+        for second in 0..300 {
+            announce(&mut rig, links[0], second * 10..second * 10 + 3);
+            announce(&mut rig, links[1], second * 10 + 3..second * 10 + 6);
+            announce(&mut rig, links[2], second * 10 + 6..second * 10 + 7);
+            rig.run(1000);
+        }
+        let total: usize = asked.iter().sum();
+        assert!(total >= 295, "{total} requests in five minutes");
+        assert!(3 * asked[2] + 2 >= total, "{asked:?}");
+        assert!(rig.closed.is_empty());
     }
 
-    /// §6.4: two links let the engine ask for all it may, hold everything
-    /// back, hand it over at once and then keep up a steady flood. The table
-    /// is not filled, so the engine's own packets and honest ones still get
-    /// their records.
+    /// §6.4: the record table has room for every packet that can have a
+    /// record at one time. A link is asked for all the rate limit allows
+    /// from the first moment; it holds back what it is asked for in the
+    /// first two request timeouts and hands it over together at the last
+    /// instant it may, and everything after at once; the engine emits a
+    /// packet of its own every ten seconds. For two lifetimes and the wait
+    /// the table is never full and no emission goes without its record —
+    /// and a table with no room for the wait would have been full.
+    #[test]
+    fn the_record_table_is_never_filled_by_traffic_within_the_rate_limit() {
+        const LIFE: u64 = 2 * MINUTE_MS;
+        const TIMEOUT: u64 = 5000;
+        let config = Config {
+            life_ms: LIFE,
+            accept_per_min: 60,
+            accept_burst: 30,
+            want_timeout_ms: TIMEOUT,
+            emit_period_ms: 10_000,
+            ..trusting()
+        };
+        let capacity = config.record_capacity();
+        // The burst, a request a second for two lifetimes, and an emission
+        // every ten seconds: what a table that forgot the wait would hold.
+        let without_the_wait = 30 + 2 * 120 + 25;
+        assert!(capacity > without_the_wait);
+        let mut rig = Rig::new(config);
+        let link = rig.peer(1);
+        let last_instant = 2 * TIMEOUT - 1;
+
+        let mut names = BTreeMap::new();
+        let (mut held_back, mut most, mut emitted) = (Vec::new(), 0, 0);
+        for second in 0..(2 * LIFE + 4 * TIMEOUT) / 1000 {
+            let own = 1_000_000 + second;
+            rig.engine
+                .offer(CircleSlot(1), packet(own), u64::MAX, rig.now);
+            let fresh = second * 50..second * 50 + if second == 0 { 40 } else { 3 };
+            names.extend(fresh.clone().map(|n| (id(n), n)));
+            let entries: Vec<_> = fresh.map(|n| (id(n), 255)).collect();
+            rig.announce(link, &entries);
+            for step in [last_instant % 1000, 1000 - last_instant % 1000] {
+                held_back.extend(rig.wants(link));
+                if rig.now >= last_instant {
+                    for wanted in std::mem::take(&mut held_back) {
+                        rig.deliver(link, &packet(names[&wanted]));
+                    }
+                }
+                rig.run(step);
+            }
+            let stats = rig.engine.stats();
+            if stats.emitted > emitted {
+                emitted = stats.emitted;
+                assert!(rig.store().is_local(&id(own)), "an emission was refused");
+            }
+            most = most.max(stats.records);
+            assert!(stats.records < capacity, "{} of {capacity}", stats.records);
+        }
+        assert!(emitted >= 25 && rig.closed.is_empty());
+        assert!(
+            most >= without_the_wait,
+            "at most {most} records: the rate limit was not used in full"
+        );
+    }
+
+    /// §6.4: two links let the engine ask for all it may and hand nothing
+    /// over, announcing the same packets again every five seconds so that
+    /// the offers outlive any lifetime, then hand over at once everything
+    /// they were ever asked for. All but the requests of the last two
+    /// timeouts were given up for good: such a packet closes its link, and
+    /// the table gains no more than the rate limit let the engine ask for in
+    /// that time.
     #[test]
     fn packets_held_back_and_handed_over_late_do_not_fill_the_record_table() {
         let config = Config {
@@ -2564,41 +2831,38 @@ mod tests {
             credit_per_min: 600,
             ..quiet()
         };
-        let capacity = config.record_capacity();
         let mut rig = Rig::new(config);
         let hoards = [(rig.peer(1), 0..120u64), (rig.peer(2), 200..320)];
-        let mut asked = BTreeSet::new();
-        // Announced again every half minute, the offers outlive their
-        // packets' two minutes while the requests are given up on.
-        for _ in 0..8 {
+        let (mut asked, mut requests) = (BTreeSet::new(), 0);
+        for _ in 0..48 {
             for (link, ns) in &hoards {
                 let entries: Vec<_> = ns.clone().map(|n| (id(n), 255)).collect();
                 rig.announce(*link, &entries);
             }
-            rig.run(30_000);
+            rig.run(5000);
             for (link, _) in &hoards {
-                asked.extend(rig.wants(*link));
+                let wanted = rig.wants(*link);
+                requests += wanted.len();
+                asked.extend(wanted);
             }
         }
-        assert!(asked.len() > 200);
+        assert!(
+            requests > 200 && asked.len() > 30,
+            "{requests} requests for {} packets",
+            asked.len()
+        );
         for (link, ns) in &hoards {
             for n in ns.clone().filter(|&n| asked.contains(&id(n))) {
-                rig.deliver(*link, &packet(n));
+                if rig.peers.contains_key(link) {
+                    rig.deliver(*link, &packet(n));
+                }
             }
         }
-        assert_eq!(rig.store().records(), asked.len());
-
-        // Half the rate limit for two more lifetimes: a table with no room
-        // for what was held back was full within the first.
-        let mut most = 0;
-        for n in 1000..1120 {
-            rig.run(2000);
-            rig.feed(hoards[0].0, &[n], 255);
-            most = most.max(rig.store().records());
-        }
-        // The burst, four minutes of the rate and one emission: the old size.
-        assert!(most > 30 + 60 * 4 + 1 && most < capacity);
-        assert!(rig.closed.is_empty());
+        assert!(rig.closed == vec![hoards[0].0, hoards[1].0]);
+        // A request a second for the two timeouts, ten seconds, and the one
+        // the tokens' rounding allows.
+        assert!(rig.store().records() <= 11);
+        assert_eq!(rig.engine.stats().accepted, rig.store().records() as u64);
     }
 
     /// T-SEC-4: a flood costs the flooder's rows, not a smaller link's.
@@ -2646,7 +2910,7 @@ mod tests {
     }
 
     #[test]
-    fn a_request_not_answered_is_made_again_then_made_of_another_link() {
+    fn a_request_not_answered_in_time_is_made_of_another_link_and_not_again_of_the_first() {
         let mut rig = Rig::new(trusting());
         let slow = rig.peer(1);
         let other = rig.peer(2);
@@ -2657,20 +2921,105 @@ mod tests {
         rig.run(30_000 - TICK);
         assert!(rig.wants(slow).is_empty() && rig.wants(other).is_empty());
         rig.run(TICK);
-        assert!(rig.wants(slow) == vec![id(1)] && rig.wants(other).is_empty());
-        rig.run(30_000);
         assert!(rig.wants(slow).is_empty() && rig.wants(other) == vec![id(1)]);
-
+        // While either may still answer, neither is asked again, whatever
+        // it announces.
+        rig.announce(slow, &[(id(1), 250)]);
+        rig.announce(other, &[(id(1), 250)]);
+        rig.run(20_000);
+        assert!(rig.wants(slow).is_empty() && rig.wants(other).is_empty());
         rig.deliver(other, &packet(1));
         assert_eq!(rig.engine.stats().accepted, 1);
-        // The slow link's answer, late, is no violation: it was asked.
+        assert!(rig.closed.is_empty());
+    }
+
+    /// T-LIFE-2: a packet asked of two links, the first given up on, arrives
+    /// at most once on each. Only the first copy is stored; the second is
+    /// dropped and changes nothing but the count of duplicates; a third was
+    /// asked for by nobody. And whatever is announced, no link is asked for a
+    /// packet the engine has a record of.
+    #[test]
+    fn a_late_answer_to_a_request_given_up_is_dropped_and_changes_nothing() {
+        let mut rig = Rig::new(trusting());
+        let slow = rig.peer(1);
+        let other = rig.peer(2);
+        let watcher = rig.peer(3);
+        rig.announce(slow, &[(id(1), 100)]);
+        rig.announce(other, &[(id(1), 200)]);
+        rig.run(30_000);
+        assert!(rig.wants(slow) == vec![id(1)] && rig.wants(other) == vec![id(1)]);
+        rig.deliver(other, &packet(1));
+        rig.run(TICK);
+        // Told on to the watcher, and to the slow link, which announced less.
+        assert_eq!(rig.haves(watcher).len(), 1);
+        assert_eq!(rig.haves(slow).len(), 1);
+        rig.ask(watcher, &[id(1)]);
+        rig.engine.mark_read(id(1), false);
+        rig.take(watcher);
+
+        let charged = |rig: &Rig| -> Vec<u64> { rig.engine.live().map(|l| l.charged).collect() };
+        let before = (
+            rig.engine.stats(),
+            rig.store().expires_ms(&id(1)),
+            charged(&rig),
+        );
         rig.deliver(slow, &packet(1));
-        let stats = rig.engine.stats();
-        assert_eq!((stats.accepted, stats.duplicates, stats.links), (1, 1, 2));
+        let after = (
+            rig.engine.stats(),
+            rig.store().expires_ms(&id(1)),
+            charged(&rig),
+        );
+        assert_eq!(after.0.duplicates, 1);
+        let counted_once = Stats {
+            duplicates: 0,
+            ..after.0
+        };
+        assert!(counted_once == before.0 && after.1 == before.1 && after.2 == before.2);
+        assert_eq!(rig.engine.take_unread(9).len(), 1);
+
+        // Nothing is said because of it, and nothing asked, whatever the
+        // links announce from then on.
+        rig.run(2 * TICK);
+        for link in [slow, other, watcher] {
+            assert!(rig.take(link).is_empty());
+        }
+        rig.announce(slow, &[(id(1), 255)]);
+        rig.announce(other, &[(id(1), 255)]);
+        rig.run(2 * TICK);
+        for link in [slow, other, watcher] {
+            assert!(rig.wants(link).is_empty());
+        }
         assert!(rig.closed.is_empty());
         // A third copy was asked for by nobody.
         rig.send(slow, frame::pkt(&packet(1), 0, size()));
         assert!(rig.closed == vec![slow]);
+    }
+
+    /// §6.4: a request is forgotten two timeouts after it was made, however
+    /// long the peer says the packet lives and however often it says so. A
+    /// millisecond before, the packet is taken; from then on it closes the
+    /// link like any packet nobody asked for.
+    #[test]
+    fn an_answer_two_timeouts_late_was_asked_for_by_nobody() {
+        for late in [false, true] {
+            let mut rig = Rig::new(Config {
+                want_timeout_ms: 7000,
+                ..trusting()
+            });
+            let link = rig.peer(1);
+            rig.announce(link, &[(id(1), 255)]);
+            assert!(rig.wants(link) == vec![id(1)]);
+            for _ in 0..2 {
+                rig.run(TICK);
+                rig.announce(link, &[(id(1), 255)]);
+            }
+            rig.run(14_000 - u64::from(!late) - rig.now);
+            rig.deliver(link, &packet(1));
+            assert!(rig.wants(link).is_empty(), "asked for once");
+            assert_eq!(rig.closed.is_empty(), !late);
+            assert_eq!(rig.store().has_record(&id(1)), !late);
+            assert_eq!(rig.engine.stats().unread, usize::from(!late));
+        }
     }
 
     #[test]
@@ -2690,28 +3039,23 @@ mod tests {
     }
 
     /// A link whose frames the radio layer does not take: its requests wait,
-    /// and one whose offer expired while waiting is never sent — the packet
-    /// would arrive unasked — nor do such requests pile up.
+    /// and one given up on while waiting is never sent — its packet would
+    /// arrive when another link's may have — nor do such requests pile up.
     #[test]
-    fn requests_that_outlive_their_offer_are_never_sent_and_do_not_pile_up() {
+    fn requests_given_up_before_they_were_sent_are_never_sent_and_do_not_pile_up() {
         let mut rig = Rig::new(Config {
-            link_queue_frames: 1,
             want_window: 2,
             ..trusting()
         });
-        let source = rig.peer(1);
-        rig.feed(source, &[100], 250);
         let link = rig.dial(2);
-        // The greeting brings one inventory frame, which fills the queue.
         let sealed = rig.seal(link, frame::hello(&[2; 8], size()));
         rig.engine.receive(link, &sealed, 0);
         for round in 0..10u64 {
-            let short_lived = [(id(2 * round), 1), (id(2 * round + 1), 1)];
-            let sealed = rig.seal(link, frame::have(&short_lived, size()));
+            let fresh = [(id(2 * round), 250), (id(2 * round + 1), 250)];
+            let sealed = rig.seal(link, frame::have(&fresh, size()));
             rig.engine.receive(link, &sealed, rig.now);
             rig.now += 40_000;
             rig.engine.advance(rig.now);
-            assert_eq!(rig.engine.output.len(), 1);
             assert_consistent(&rig.engine);
         }
         rig.pump();
@@ -2719,26 +3063,96 @@ mod tests {
         assert!(rig.closed.is_empty());
     }
 
-    /// T-LIFE-1: asked for in time, but expired by its turn in the queue.
+    /// T-LIFE-1 and §3: a frame is built at the time of the poll that hands
+    /// it out. A packet asked for in time whose lifetime has run down by the
+    /// time the radio layer polls is not sent.
     #[test]
-    fn a_packet_that_expires_while_it_waits_to_be_sent_is_not_sent() {
-        let mut rig = Rig::new(Config {
-            link_queue_frames: 1,
-            ..trusting()
-        });
+    fn a_packet_that_expires_before_the_radio_layer_polls_is_not_sent() {
+        let mut rig = Rig::new(trusting());
         let source = rig.peer(1);
         rig.feed(source, &[1], 250);
         rig.feed(source, &[2], 3);
         let reader = rig.peer(2);
         assert_eq!(rig.haves(reader).len(), 2);
-        // Both are claimed now; the second waits behind the first's chunks.
+        // Both are claimed now; the engine is told nothing more, and the
+        // radio layer comes for the frames two units later.
         let sealed = rig.seal(reader, frame::want(&[id(1), id(2)], size()));
         rig.engine.receive(reader, &sealed, 0);
-        rig.now = 3 * UNIT;
-        rig.engine.advance(rig.now);
+        rig.now = 2 * UNIT;
         rig.pump();
         assert_eq!(rig.take(reader).len(), 3);
         assert_eq!(rig.engine.stats().sent, 1);
+    }
+
+    /// §3: the lifetime a frame announces is the one left when the frame is
+    /// polled, not when the engine last heard from anyone.
+    #[test]
+    fn a_lifetime_is_announced_as_it_stands_when_the_frame_is_polled() {
+        let mut rig = Rig::new(trusting());
+        let source = rig.peer(1);
+        let other = rig.peer(2);
+        rig.feed(source, &[1], 200);
+        rig.engine.advance(TICK);
+        // Polled three units after the tick that made the packet due: one
+        // unit and a bit were gone at the tick, four and a bit are now.
+        rig.now = TICK + 3 * UNIT;
+        rig.pump();
+        assert!(rig.haves(other) == vec![(id(1), 200 - 5 - 1)]);
+    }
+
+    /// §3: a link that cannot send holds up no other. Its frames are passed
+    /// over, and built when it can send, with what is true then.
+    #[test]
+    fn a_link_that_cannot_send_holds_up_no_other() {
+        let mut rig = Rig::new(trusting());
+        let source = rig.peer(1);
+        let slow = rig.peer(2);
+        let fast = rig.peer(3);
+        rig.feed(source, &[1, 2], 200);
+        rig.take(slow);
+        rig.take(fast);
+        rig.now = TICK;
+        rig.pump_ready(&[fast]);
+        let told = rig.haves(fast);
+        assert!(told.len() == 2 && told.iter().all(|entry| entry.1 == 197));
+        let sealed = rig.seal(fast, frame::want(&[id(1)], size()));
+        rig.engine.receive(fast, &sealed, rig.now);
+        rig.pump_ready(&[fast]);
+        assert_eq!((rig.take(fast).len(), rig.engine.stats().sent), (3, 1));
+        assert!(rig.take(slow).is_empty());
+
+        rig.now = TICK + 3 * UNIT;
+        rig.pump_ready(&[slow]);
+        let told = rig.haves(slow);
+        assert!(told.len() == 2 && told.iter().all(|entry| entry.1 == 194));
+        assert!(rig.take(fast).is_empty() && rig.closed.is_empty());
+    }
+
+    /// A close comes out only after the `BYE` queued for its link, and a
+    /// `BYE` for a link the radio layer has lost meanwhile is withdrawn, so
+    /// the close does not wait for ever.
+    #[test]
+    fn a_close_waits_for_its_bye_and_a_lost_link_takes_its_bye_with_it() {
+        let mut rig = Rig::new(trusting());
+        let first = rig.peer(1);
+        let duplicate = |rig: &mut Rig, link: u64| {
+            let link = rig.dial(link);
+            rig.take(link);
+            let sealed = rig.seal(link, frame::hello(&1u64.to_le_bytes(), size()));
+            rig.engine.receive(link, &sealed, 0);
+            link
+        };
+        let second = duplicate(&mut rig, 2);
+        rig.pump_ready(&[first]);
+        assert!(rig.closed.is_empty() && rig.take(second).is_empty());
+        rig.pump_ready(&[second]);
+        assert!(rig.take(second) == vec![Seen::Bye] && rig.closed == vec![second]);
+
+        let third = duplicate(&mut rig, 3);
+        rig.engine.link_down(third, 0);
+        rig.pump_ready(&[]);
+        assert!(rig.closed == vec![second, third] && rig.take(third).is_empty());
+        assert!(rig.engine.output.is_empty());
     }
 
     /// Requests a link makes faster than its packets go out are not queued
@@ -2748,26 +3162,26 @@ mod tests {
     fn a_links_send_queue_is_bounded_by_the_store() {
         let mut rig = Rig::new(Config {
             store_packets: 2,
-            link_queue_frames: 1,
             ..trusting()
         });
         let source = rig.peer(1);
         let reader = rig.peer(2);
         let (a, b, c, d) = (100, 101, 102, 103);
-        // Frames go in without anything being taken out, so the reader's
-        // queue stays as full as the test leaves it.
+        // Frames go in without anything being taken out, so what the reader
+        // is owed stays as the test leaves it.
         let inject = |rig: &mut Rig, link: LinkId, plain: Option<Vec<u8>>| {
             let sealed = rig.seal(link, plain);
             rig.engine.receive(link, &sealed, rig.now);
         };
         let ids = |ns: &[u64]| ns.iter().map(|&n| id(n)).collect::<Vec<PacketId>>();
 
-        // Two short-lived packets, asked for while they have a unit left: the
-        // first chunk of the first fills the reader's queue.
-        rig.feed(source, &[a, b], 3);
+        // Two short-lived packets, asked for while they have a unit to
+        // announce; the transfer of the first starts.
+        rig.feed(source, &[a, b], 4);
         rig.run(TICK);
         assert_eq!(rig.haves(reader).len(), 2);
         inject(&mut rig, reader, frame::want(&ids(&[a, b]), size()));
+        assert!(rig.step());
         // Their lifetime over, two more arrive in their place.
         rig.now = 3 * UNIT;
         rig.engine.advance(rig.now);
@@ -2782,11 +3196,11 @@ mod tests {
             }
         }
         assert!(rig.store().holds(&id(c)) && rig.store().holds(&id(d)));
-        // They are announced once the reader's queue has room, and the reader
-        // asks for both at once, behind the one still waiting.
+        // They are announced at the next tick, ahead of the transfer under
+        // way, and the reader asks for both at once, behind the one still
+        // waiting.
         rig.now += TICK;
-        rig.engine.advance(rig.now);
-        assert!(rig.step() && rig.step() && rig.step());
+        assert!(rig.step());
         assert_eq!(rig.haves(reader).len(), 2);
         inject(&mut rig, reader, frame::want(&ids(&[c, d]), size()));
         rig.pump();
@@ -2804,13 +3218,12 @@ mod tests {
         assert_eq!((chunks(&mut rig), rig.engine.stats().sent), (3, 3));
     }
 
+    /// Nothing is built for a link until the radio layer polls: an engine
+    /// whose links are slow to send queues no frame for them, however much
+    /// it has to say.
     #[test]
-    fn no_link_queues_more_frames_than_its_share() {
-        let cap = 4;
-        let mut rig = Rig::new(Config {
-            link_queue_frames: cap,
-            ..trusting()
-        });
+    fn nothing_is_built_for_a_link_before_it_is_polled() {
+        let mut rig = Rig::new(trusting());
         let source = rig.peer(1);
         let ns: Vec<u64> = (1..=300).collect();
         rig.feed(source, &ns, 250);
@@ -2818,9 +3231,9 @@ mod tests {
         let reader = rig.dial(2);
         let sealed = rig.seal(reader, frame::hello(&[2; 8], size()));
         rig.engine.receive(reader, &sealed, 0);
-        assert_eq!(rig.engine.output.len(), cap);
+        assert!(rig.engine.output.is_empty());
         while rig.step() {
-            assert!(rig.engine.output.len() <= cap);
+            assert!(rig.engine.output.is_empty());
         }
         let told = rig.haves(reader);
         assert_eq!(told.len(), 300);
@@ -2829,12 +3242,12 @@ mod tests {
         for batch in ids.chunks(size().want_capacity()) {
             let sealed = rig.seal(reader, frame::want(batch, size()));
             rig.engine.receive(reader, &sealed, 0);
-            assert!(rig.engine.output.len() <= cap);
+            assert!(rig.engine.output.is_empty());
         }
         let mut frames = 0;
         while rig.step() {
             frames += 1;
-            assert!(rig.engine.output.len() <= cap);
+            assert!(rig.engine.output.is_empty());
         }
         assert_eq!(frames, 900);
         assert_eq!(rig.engine.stats().sent, 300);
@@ -2915,7 +3328,7 @@ mod tests {
     #[test]
     fn a_clock_jump_over_many_slots_emits_one_packet() {
         let mut engine = engine(Config::default(), 3);
-        engine.link_up(LinkId(1), Role::Peripheral, FRAME, None, 0);
+        open_incoming(&mut engine, LinkId(1), 0);
         for slot in 0..10 {
             engine.offer(CircleSlot(slot), packet(u64::from(slot)), u64::MAX, 0);
         }
@@ -2948,8 +3361,9 @@ mod tests {
         assert!(engine.store().is_local(&id(1)));
         for held in engine.store().ids() {
             assert!(engine.store().is_local(&held));
-            // Drawn from the top quarter, less the time since.
-            assert!((189..=255).contains(&engine.store().remaining(&held)));
+            // Drawn from the top quarter, less up to ten seconds since,
+            // rounded down, less one.
+            assert!((188..=254).contains(&engine.store().remaining(&held)));
         }
         assert!(engine.take_unread(9).is_empty());
     }
@@ -3033,7 +3447,7 @@ mod tests {
             let told = rig.haves(neighbour);
             let about_it: Vec<_> = told.iter().filter(|entry| entry.0 == id(1)).collect();
             assert_eq!(about_it.len(), 1);
-            assert!((190..=255).contains(&about_it[0].1));
+            assert!((191..=254).contains(&about_it[0].1));
             rig.ask(neighbour, &[id(1)]);
             let trace = rig.take(neighbour);
             assert_eq!(rig.engine.stats().sent, 1);
@@ -3066,7 +3480,7 @@ mod tests {
             let dialled = connects(&drain(engine));
             assert!(dialled.len() <= 1, "one connect at a time");
             if let Some(&peer) = dialled.first() {
-                engine.link_up(LinkId(peer.0), Role::Central, FRAME, Some(peer), *now);
+                open_outgoing(engine, LinkId(peer.0), peer, *now);
                 return Some(peer);
             }
         }
@@ -3218,7 +3632,7 @@ mod tests {
             engine.advance(now);
             let outputs = drain(engine);
             for &peer in &connects(&outputs) {
-                engine.link_up(LinkId(peer.0), Role::Central, FRAME, Some(peer), now);
+                open_outgoing(engine, LinkId(peer.0), peer, now);
             }
             outputs
         };
@@ -3261,7 +3675,7 @@ mod tests {
                 assert_eq!(Some(link.0), last);
             }
             for &peer in &connects(&outputs) {
-                engine.link_up(LinkId(peer.0), Role::Central, FRAME, Some(peer), at);
+                open_outgoing(&mut engine, LinkId(peer.0), peer, at);
                 dialled.push((at, peer));
             }
         }
@@ -3278,7 +3692,7 @@ mod tests {
             let outputs = drain(&mut alone);
             assert!(closes(&outputs).is_empty());
             for &peer in &connects(&outputs) {
-                alone.link_up(LinkId(1), Role::Central, FRAME, Some(peer), at);
+                open_outgoing(&mut alone, LinkId(1), peer, at);
             }
         }
         assert_eq!(alone.count(false), 1);
@@ -3294,7 +3708,7 @@ mod tests {
         for seed in 0..24 {
             let mut engine = engine(config.clone(), seed);
             for link in 1..=4 {
-                engine.link_up(LinkId(link), Role::Peripheral, FRAME, None, 0);
+                open_incoming(&mut engine, LinkId(link), 0);
             }
             engine.advance(55_000);
             assert!(drain(&mut engine).is_empty());
@@ -3315,7 +3729,7 @@ mod tests {
         // With a slot still free there is nothing to make room for.
         let mut roomy = engine(config, 1);
         for link in 1..=3 {
-            roomy.link_up(LinkId(link), Role::Peripheral, FRAME, None, 0);
+            open_incoming(&mut roomy, LinkId(link), 0);
         }
         roomy.advance(300_000);
         assert!(drain(&mut roomy).is_empty());
@@ -3340,6 +3754,183 @@ mod tests {
         assert!(engine.peers.is_empty() && now < 400_000);
     }
 
+    /// §6.1: a full peer table keeps nobody out. Eight addresses fill it and
+    /// are sighted again every round, so none is ever forgotten; an honest
+    /// peer is sighted first in each round, the order that leaves it in the
+    /// table least often, since each of the up to eight re-entries that
+    /// follow puts it out with one chance in eight. With only the random
+    /// slot to fill, a round dials it with a chance of at least
+    /// (7/8)^8 × 1/8 > 0.043 whatever went before, so it stays undialled for
+    /// 400 rounds with a chance under 0.957^400 < 3 in 10^8.
+    #[test]
+    fn a_full_peer_table_does_not_keep_a_new_peer_out() {
+        let config = Config {
+            max_peers: 8,
+            max_outgoing: 1,
+            ..quiet()
+        };
+        let honest = PeerRef(100);
+        for seed in 0..8 {
+            let mut engine = engine(config.clone(), seed);
+            let flood = |engine: &mut Engine, now: u64| {
+                for address in 1..=8 {
+                    engine.sighting(PeerRef(address), -30, now);
+                }
+            };
+            flood(&mut engine, 0);
+            let mut dialled = false;
+            for round in 1..=400 {
+                let now = round * TICK;
+                engine.sighting(honest, -70, now - TICK);
+                flood(&mut engine, now - TICK);
+                engine.advance(now);
+                for peer in connects(&drain(&mut engine)) {
+                    dialled |= peer == honest;
+                    engine.connect_failed(peer, now);
+                }
+                assert_eq!(engine.peers.len(), 8);
+            }
+            assert!(dialled, "seed {seed}: never dialled");
+        }
+
+        // A peer that is linked is not the one forgotten.
+        let mut engine = engine(config, 1);
+        engine.sighting(honest, -70, 0);
+        open_outgoing(&mut engine, LinkId(1), honest, 0);
+        for address in 1..=200 {
+            engine.sighting(PeerRef(address), -30, 0);
+        }
+        assert!(engine.peers.contains_key(&honest) && engine.peers.len() == 8);
+    }
+
+    /// T-SEC-3: a peer that never answers the handshake, never starts it, or
+    /// shakes hands and never greets holds its slot until the connect
+    /// timeout from the link coming up, and not a tick longer: the link is
+    /// closed then, with no frame, and the engine wakes for it.
+    #[test]
+    fn a_link_whose_peer_never_greets_is_closed_at_the_deadline() {
+        let stalls: [fn(&mut Rig) -> LinkId; 3] = [
+            |rig| {
+                let link = LinkId(2);
+                rig.engine
+                    .link_up(link, Role::Central, FRAME, Some(PeerRef(7)), rig.now);
+                rig.raw_frame(link);
+                link
+            },
+            |rig| {
+                let link = LinkId(2);
+                rig.engine
+                    .link_up(link, Role::Peripheral, FRAME, None, rig.now);
+                link
+            },
+            |rig| rig.dial(2),
+        ];
+        for stall in stalls {
+            let mut rig = Rig::new(quiet());
+            let honest = rig.peer(1);
+            // Off the tick's beat: only the deadline itself wakes for it.
+            rig.now = 1234;
+            let stalled = stall(&mut rig);
+            rig.take(honest);
+            rig.take(stalled);
+            let before = (rig.engine.count(true), rig.engine.count(false));
+            let mut closed_at = None;
+            while let Some(wake) = rig.engine.next_wake_ms().filter(|&wake| wake <= 60_000) {
+                assert!(wake > rig.now, "woken again for the same instant");
+                rig.now = wake;
+                rig.engine.advance(wake);
+                rig.pump();
+                closed_at = closed_at.or_else(|| rig.closed.contains(&stalled).then_some(wake));
+            }
+            assert_eq!(closed_at, Some(1234 + 30_000));
+            assert!(rig.closed == vec![stalled] && rig.take(stalled).is_empty());
+            let after = (rig.engine.count(true), rig.engine.count(false));
+            assert_eq!(
+                after.0 + after.1 + 1,
+                before.0 + before.1,
+                "the slot is free"
+            );
+            assert_eq!(rig.engine.stats().links, 1, "a peer that greeted stays");
+        }
+    }
+
+    /// An incoming link greets with `value`; the engine then dials peer 7,
+    /// which greets with the same value, so that link is closed as the
+    /// second to one phone. Returns the link kept.
+    fn shadowed(rig: &mut Rig, value: [u8; 8]) -> LinkId {
+        let keeper = rig.dial(1);
+        rig.greet(keeper, value);
+        let dialled = rig.answer(2, PeerRef(7));
+        rig.greet(dialled, value);
+        assert!(rig.closed == vec![dialled]);
+        keeper
+    }
+
+    /// Runs `seconds` with peer 7 in sight, and reports whether it was
+    /// dialled.
+    fn dials_seven(rig: &mut Rig, seconds: u64) -> bool {
+        for _ in 0..seconds {
+            rig.engine.sighting(PeerRef(7), -50, rig.now);
+            rig.run(1000);
+        }
+        std::mem::take(&mut rig.connects) == vec![PeerRef(7)]
+    }
+
+    /// §6.1: a link that showed a peer's `HELLO` value first stands in for
+    /// that peer only while it shows that value. When its value changes the
+    /// peer is dialled again — so a neighbour that copied the value once
+    /// does not keep the peer away.
+    #[test]
+    fn a_peer_shadowed_by_another_link_is_dialled_again_when_that_links_value_changes() {
+        let mut rig = Rig::new(quiet());
+        let keeper = shadowed(&mut rig, [5; 8]);
+        // Long past the back-off of the closed link.
+        assert!(!dials_seven(&mut rig, 180));
+        rig.greet(keeper, [6; 8]);
+        assert!(dials_seven(&mut rig, 2 * TICK / 1000));
+    }
+
+    /// §6.1: and it stands in for that peer no longer than one turn, however
+    /// long it keeps showing the value.
+    #[test]
+    fn a_peer_shadowed_by_another_link_is_dialled_again_after_a_turn() {
+        let mut rig = Rig::new(Config {
+            rotate_ms: 5 * MINUTE_MS,
+            // The one incoming link is not rotated out meanwhile.
+            max_incoming: 2,
+            ..quiet()
+        });
+        shadowed(&mut rig, [5; 8]);
+        assert!(!dials_seven(&mut rig, 299));
+        assert!(dials_seven(&mut rig, 1 + TICK / 1000));
+    }
+
+    /// Why the first link to show a value is kept whatever the two links'
+    /// directions and however close together they come up: the second link
+    /// of a crossed pair of dials and a neighbour replaying the peer's value
+    /// look the same. A rule that sometimes kept the second link — one that
+    /// compared the two `HELLO` values, say — would let the replayer close a
+    /// link that had just formed. The peer's value is tried on either side
+    /// of the engine's own.
+    #[test]
+    fn a_value_replayed_on_a_second_link_never_closes_the_first_whatever_their_directions() {
+        for value in [[0; 8], [0xff; 8]] {
+            let mut rig = Rig::new(trusting());
+            let real = rig.answer(1, PeerRef(7));
+            rig.greet(real, value);
+            let replay = rig.dial(2);
+            rig.greet(replay, value);
+            assert!(rig.closed == vec![replay]);
+
+            let mut rig = Rig::new(trusting());
+            let real = rig.dial(1);
+            rig.greet(real, value);
+            let replay = rig.answer(2, PeerRef(7));
+            rig.greet(replay, value);
+            assert!(rig.closed == vec![replay]);
+        }
+    }
+
     // ---- mesh off ---------------------------------------------------------
 
     /// T-SEC-7.
@@ -3358,10 +3949,10 @@ mod tests {
         rig.engine
             .offer(CircleSlot(1), packet(9), u64::MAX, rig.now);
         rig.engine.sighting(PeerRef(4), -50, rig.now);
-        // Left queued for the reader: nothing of it may outlive the stop.
+        // Still owed to the reader: nothing of it may outlive the stop.
         let sealed = rig.seal(other, frame::want(&[id(2), id(3)], size()));
         rig.engine.receive(other, &sealed, rig.now);
-        assert!(!rig.engine.output.is_empty());
+        assert!(rig.engine.live().any(|link| !link.sends.is_empty()));
         rig.take(source);
         rig.take(other);
         let before = rig.engine.stats();
@@ -3401,7 +3992,7 @@ mod tests {
         rig.engine.link_down(LinkId(9), later);
         rig.engine.advance(later + 60 * MINUTE_MS);
         rig.engine.stop();
-        assert!(rig.engine.poll_output().is_none());
+        assert!(rig.engine.poll_output(later + 60 * MINUTE_MS).is_none());
         assert!(rig.engine.stats() == after);
         assert!(rig.engine.peers.is_empty() && rig.engine.outbox.is_empty());
     }
@@ -3531,19 +4122,18 @@ mod tests {
                 link.offers.values().filter(|o| wanted(&o.state)).count()
             };
             let asked = count(|state| matches!(state, Ask::Asked { .. }));
-            let abandoned = count(|state| matches!(state, Ask::Abandoned));
+            let abandoned = count(|state| matches!(state, Ask::Abandoned { .. }));
             assert_eq!(link.asked, asked);
             assert_eq!(link.expected, asked + abandoned);
             assert!(link.asked <= config.want_window);
             assert!(link.offers.len() <= config.offers_per_link);
             assert!(link.sends.len() <= config.store_packets);
-            assert!(link.wants.len() <= config.want_window * usize::from(config.want_asks));
+            assert!(link.wants.len() <= config.want_window);
             assert!(link.assembly.len() < PACKET_LEN);
-            let frames = engine.output.iter().filter(|q| q.is_frame_of(link.id));
-            assert_eq!(frames.count(), link.queued);
-            // The handshake reply rides on top of the share.
-            assert!(link.queued <= config.link_queue_frames + 1);
         }
+        // A handshake message or a `BYE`, and a close, for each link there
+        // can be, and one connect: every other frame is built when polled.
+        assert!(engine.output.len() <= 2 * engine.links.len() + 1);
         assert!(engine.store.held() <= config.store_packets);
         assert!(engine.store.records() <= config.record_capacity());
         assert!(engine.store.unread() <= config.unread_packets);
@@ -3598,7 +4188,6 @@ mod tests {
                 unread_packets: 4,
                 want_window: 3,
                 credit_initial: 4,
-                link_queue_frames: 3,
                 offers_per_link: 6,
                 inbound_per_min: 60_000,
                 inbound_burst: 1000,
@@ -3701,7 +4290,8 @@ mod tests {
         for at in (0..60 * MINUTE_MS).step_by(1000) {
             sight_ten(&mut engine, at);
             engine.advance(at);
-            // One connect, and a close for each incoming link rotated out.
+            // One connect, and a close for each link, whose peer never
+            // greeted.
             assert!(engine.output.len() <= 5);
         }
         assert_consistent(&engine);
@@ -3710,27 +4300,38 @@ mod tests {
 
     // ---- waking -----------------------------------------------------------
 
-    /// Everything one engine does over ten minutes with a peer that never
-    /// delivers, peers in sight that never answer and an outbox, when it is
-    /// advanced at its wake times and at `extra` times besides.
-    fn wake_trace(extra: &[u64]) -> Vec<(u64, u64, Vec<u8>)> {
-        let mut rig = Rig::new(Config::default());
-        let link = rig.peer(1);
+    /// Everything one engine does over ten minutes when it is advanced at its
+    /// wake times and at `extra` times besides: with a link that is asked for
+    /// packets and never delivers, a second that announced the same ones, a
+    /// third whose peer never greets, peers in sight that never answer, an
+    /// outbox, and a `HELLO` period off the tick's beat.
+    fn wake_trace(extra: &[u64]) -> Vec<(u64, u64, Vec<u64>)> {
+        let mut rig = Rig::new(Config {
+            hello_period_ms: 241_700,
+            ..Config::default()
+        });
+        let links = [rig.peer(1), rig.peer(2)];
         let entries: Vec<_> = (1..=5).map(|n| (id(n), 250)).collect();
-        rig.announce(link, &entries);
+        for link in links {
+            rig.announce(link, &entries);
+            rig.take(link);
+        }
         for peer in 1..=3 {
             rig.engine.sighting(PeerRef(peer), -50, 0);
         }
         rig.engine.offer(CircleSlot(1), packet(9), u64::MAX, 0);
-        rig.take(link);
+        // Off the tick's beat, so that only its own deadline wakes for it.
+        rig.now = 1234;
+        rig.dial(3);
 
         let mut extra = extra.iter().copied().peekable();
         let mut trace = Vec::new();
         while let Some(wake) = rig.engine.next_wake_ms().filter(|&wake| wake <= 600_000) {
+            assert!(wake > rig.now, "woken again for the same instant");
             while let Some(early) = extra.next_if(|&early| early < wake) {
                 rig.engine.advance(early);
                 assert!(
-                    rig.engine.poll_output().is_none(),
+                    rig.engine.poll_output(early).is_none(),
                     "work was due before the wake"
                 );
                 assert_eq!(rig.engine.next_wake_ms(), Some(wake));
@@ -3738,27 +4339,22 @@ mod tests {
             rig.now = wake;
             rig.engine.advance(wake);
             rig.pump();
-            let stats = rig.engine.stats();
-            for seen in rig.take(link) {
+            let emitted = rig.engine.stats().emitted;
+            for (link, seen) in std::mem::take(&mut rig.seen) {
                 let kind = match seen {
                     Seen::Hello(_) => 1,
-                    Seen::Have(entries) => 20 + entries.len(),
-                    Seen::Want(ids) => 40 + ids.len(),
+                    Seen::Have(entries) => 20 + entries.len() as u64,
+                    Seen::Want(ids) => 40 + ids.len() as u64,
                     Seen::Pkt(..) => 3,
                     Seen::Bye => 4,
                 };
-                trace.push((
-                    wake,
-                    stats.emitted,
-                    vec![u8::try_from(kind).expect("small")],
-                ));
+                trace.push((wake, emitted, vec![kind, link.0]));
+            }
+            for link in std::mem::take(&mut rig.closed) {
+                trace.push((wake, emitted, vec![5, link.0]));
             }
             for peer in std::mem::take(&mut rig.connects) {
-                trace.push((
-                    wake,
-                    stats.emitted,
-                    vec![100, u8::try_from(peer.0).expect("small")],
-                ));
+                trace.push((wake, emitted, vec![100, peer.0]));
             }
             for peer in 1..=3 {
                 rig.engine.sighting(PeerRef(peer), -50, wake);
@@ -3768,12 +4364,29 @@ mod tests {
     }
 
     #[test]
-    fn the_wake_trace_covers_requests_dials_and_emissions() {
+    fn the_wake_trace_covers_requests_dials_stalls_and_emissions() {
         let trace = wake_trace(&[]);
-        let of = |kind: u8| trace.iter().filter(|entry| entry.2[0] == kind).count();
-        assert!(of(45) >= 1, "the unanswered requests are made again");
-        assert!(of(100) >= 4, "peers are dialled again after their back-off");
-        assert!(of(21) >= 3, "emitted packets are announced");
+        let of = |named: &[u64]| -> Vec<u64> {
+            let entries = trace.iter().filter(|entry| entry.2.starts_with(named));
+            entries.map(|entry| entry.0).collect()
+        };
+        assert!(
+            of(&[45, 2]) == vec![30_000],
+            "the request given up is made of the other link"
+        );
+        assert!(
+            of(&[5, 3]) == vec![31_234],
+            "the link that never greeted is closed at its deadline"
+        );
+        assert!(
+            of(&[1, 1]) == vec![241_700, 483_400],
+            "the greeting is renewed at its period"
+        );
+        assert!(
+            of(&[100]).len() >= 4,
+            "peers are dialled again after their back-off"
+        );
+        assert!(of(&[21]).len() >= 3, "emitted packets are announced");
         assert!(trace.last().is_some_and(|last| last.1 >= 5));
     }
 

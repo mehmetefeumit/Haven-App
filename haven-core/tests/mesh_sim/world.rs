@@ -10,6 +10,11 @@
 //! number, and whatever is due at one instant runs in a fixed order — carried
 //! frames and other events in the order they were scheduled, then phones'
 //! timers in node order.
+//!
+//! A wire with a byte rate sends one frame at a time. The world is a radio
+//! layer that knows it: it asks an engine for a frame for such a wire only
+//! when the wire's sender is free, so the frame is built then and no other
+//! wire waits for it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -403,6 +408,10 @@ enum Event {
         from: Node,
         era: usize,
         addr: u64,
+    },
+    /// A wire of `node` with a byte rate has sent its frame.
+    Ready {
+        node: Node,
     },
     Chaos,
 }
@@ -902,7 +911,7 @@ impl World {
                 vec![0; bytes.len()]
             },
         };
-        let at = from.arrives_ms;
+        let (at, free_ms, node) = (from.arrives_ms, from.busy_ms, from.node);
         self.journal.push(crossing);
         self.schedule(
             at,
@@ -912,6 +921,9 @@ impl World {
                 bytes,
             },
         );
+        if free_ms > now {
+            self.schedule(free_ms, Event::Ready { node });
+        }
     }
 
     // ---- what a stranger does ----------------------------------------------
@@ -1122,6 +1134,7 @@ impl World {
                 }
             }
             Event::Dialled { from, era, addr } => self.dialled(from, era, addr),
+            Event::Ready { node } => self.after(node),
             Event::Chaos => {
                 let Some((rng, mean_ms)) = &mut self.chaos else {
                     return;
@@ -1160,14 +1173,26 @@ impl World {
         self.after(node);
     }
 
+    /// The links of `node` whose wire can send a frame now.
+    fn ready(&self, node: Node) -> Vec<LinkId> {
+        let ends = self.ends.range((node, 0)..=(node, u64::MAX));
+        ends.filter(|(_, &(wire, side))| {
+            let end = self.wires.get(&wire).and_then(|line| line.ends.get(side));
+            end.is_some_and(|end| end.busy_ms <= self.now)
+        })
+        .map(|(&(_, link), _)| LinkId(link))
+        .collect()
+    }
+
     /// After any call into the phone at `node`: carries out its outputs,
     /// plays its reader, notes what it emitted and when it next wants to run.
     fn after(&mut self, node: Node) {
         loop {
+            let (now, ready) = (self.now, self.ready(node));
             let Some(Slot::Phone(phone)) = self.nodes.get_mut(node) else {
                 return;
             };
-            let Some(output) = phone.engine.poll_output() else {
+            let Some(output) = phone.engine.poll_output_ready(&ready, now) else {
                 break;
             };
             match output {

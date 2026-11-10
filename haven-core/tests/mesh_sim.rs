@@ -403,11 +403,25 @@ fn delivered(latencies: &[Option<u64>]) -> usize {
 
 /// `n` phones nobody reads for but the world, which notes every arrival.
 fn crowd(n: u64, seed: u64) -> World {
+    crowd_of(n, seed, &Config::default())
+}
+
+fn crowd_of(n: u64, seed: u64, config: &Config) -> World {
     let mut world = World::new();
     for node in 0..n {
-        world.phone(Config::default(), seed * 1000 + node, Reader::Keyless);
+        world.phone(config.clone(), seed * 1000 + node, Reader::Keyless);
     }
     world
+}
+
+/// The plan's limits for phones whose links take `delay_ms` to cross: a
+/// link's handshake and greeting are three crossings, so past ten seconds a
+/// crossing the default connect timeout would close every link as stalled.
+fn patient(delay_ms: u64) -> Config {
+    Config {
+        connect_timeout_ms: Config::default().connect_timeout_ms.max(6 * delay_ms),
+        ..Config::default()
+    }
 }
 
 /// Every phone in range of every other.
@@ -475,14 +489,20 @@ fn a_cluster_delivers_every_packet_within_two_ticks() {
         "worst {:?}",
         worst(&took)
     );
-    // T-LIFE-2 in an honest mesh: no phone was sent a packet it had a record
-    // of, so every packet any phone sent in full was a first receipt, and no
-    // phone took a packet twice.
+    // T-LIFE-2 in an honest mesh: a phone asks for a packet only while it
+    // has no record of it, and of one link at a time; on links that answer
+    // within the request timeout no second link is ever asked, so every
+    // packet any phone sent in full was a first receipt, and no phone took a
+    // packet twice.
     let stats = |pick: fn(&Stats) -> u64| -> u64 {
         let phones = world.phones();
         phones.iter().map(|&n| pick(&world.engine(n).stats())).sum()
     };
-    assert_eq!(stats(|s| s.duplicates), 0, "sent to a phone that had it");
+    assert_eq!(
+        stats(|s| s.duplicates),
+        0,
+        "a packet was asked of two links"
+    );
     assert_eq!(stats(|s| s.sent), stats(|s| s.accepted));
     for node in world.phones() {
         let taken = &world.at(node).taken;
@@ -742,14 +762,21 @@ struct Churn {
     announced_past_life: usize,
 }
 
-/// An honest mesh on instant links: five phones, three more arriving, three
-/// restarting with nothing stored, for thirty-one minutes; a stranger dials
-/// each phone in turn every five seconds and is told its whole inventory.
-/// Run once for the tests that read it.
-fn honest_churn() -> &'static Churn {
-    static RUN: std::sync::OnceLock<Churn> = std::sync::OnceLock::new();
-    RUN.get_or_init(|| {
+/// The honest mesh on instant links, and on links an announcement takes one
+/// whole unit to cross. Each is run once for the tests that read it.
+fn honest_churn(delayed: bool) -> &'static Churn {
+    static RUNS: [std::sync::OnceLock<Churn>; 2] = [const { std::sync::OnceLock::new() }; 2];
+    RUNS[usize::from(delayed)].get_or_init(|| churn(if delayed { UNIT } else { 0 }))
+}
+
+/// An honest mesh whose links take `delay_ms`: five phones, three more
+/// arriving, three restarting with nothing stored, for thirty-one minutes; a
+/// stranger dials each phone in turn every five seconds, on an instant link,
+/// and is told its whole inventory.
+fn churn(delay_ms: u64) -> Churn {
+    {
         let mut world = crowd(5, 51);
+        world.radio.delay_ms = delay_ms;
         all_in_range(&mut world);
         world.scan(4000);
         let probe = listener(&mut world, 52);
@@ -811,73 +838,83 @@ fn honest_churn() -> &'static Churn {
             remembered_past_life: ended.len(),
             told,
         }
-    })
+    }
 }
 
-/// T-LIFE-1: in an honest run with arrivals and restarts, no phone announces
-/// a packet after its origin time + `L` — exactly: never with less than one
-/// whole unit of the origin's own lifetime left — though it remembers the
+/// T-LIFE-1: in an honest run with arrivals and restarts, on links an
+/// announcement crosses at once or in one whole unit, no phone announces a
+/// packet after its origin time + `L` — exactly: never with less than two
+/// whole units of the origin's own lifetime left — though it remembers the
 /// packet for longer.
 #[test]
 fn no_phone_announces_a_packet_after_its_lifetime() {
-    let run = honest_churn();
-    assert!(run.told.len() > 5000, "{} entries", run.told.len());
-    let mut near_the_end = 0;
-    for entry in &run.told {
+    for delayed in [false, true] {
+        let run = honest_churn(delayed);
+        assert!(run.told.len() > 5000, "{} entries", run.told.len());
+        let mut near_the_end = 0;
+        for entry in &run.told {
+            assert!(
+                entry.at_ms + 2 * UNIT <= entry.expires_ms,
+                "announced with under two units left"
+            );
+            assert!(entry.at_ms < entry.emitted_ms + LIFE);
+            near_the_end += u32::from(entry.units <= 2);
+        }
         assert!(
-            entry.at_ms + UNIT <= entry.expires_ms,
-            "announced with no unit left"
+            near_the_end > 30,
+            "{near_the_end} announcements in a packet's last units"
         );
-        assert!(entry.at_ms < entry.emitted_ms + LIFE);
-        near_the_end += u32::from(entry.at_ms + 3 * UNIT > entry.expires_ms);
+        // The phones do remember packets past their lifetime, and stay silent.
+        assert!(
+            run.remembered_past_life >= 20,
+            "{} packets remembered past their lifetime",
+            run.remembered_past_life
+        );
+        assert_eq!(run.announced_past_life, 0);
     }
-    assert!(
-        near_the_end > 30,
-        "{near_the_end} announcements in a packet's last units"
-    );
-    // The phones do remember packets past their lifetime, and stay silent.
-    assert!(
-        run.remembered_past_life >= 20,
-        "{} packets remembered past their lifetime",
-        run.remembered_past_life
-    );
-    assert_eq!(run.announced_past_life, 0);
 }
 
-/// T-LIFE-4: in the same honest run on instant links, the lifetime a phone
-/// announces never exceeds the packet's true one, and for a packet it
-/// emitted itself it is the true one, rounded down.
+/// T-LIFE-4: in the same honest runs the lifetime a phone announces is
+/// always at least one unit short of the packet's true one, and for a packet
+/// it emitted itself it is the true one, rounded down, less one. On instant
+/// links every hop costs a carried packet a unit more; a link that takes a
+/// whole unit gives exactly that unit back and no more. Either way no
+/// carried packet is announced with the top value.
 #[test]
 fn an_announced_lifetime_never_exceeds_the_true_one() {
-    let run = honest_churn();
-    let (mut own, mut carried, mut short) = (0, 0, 0);
-    for entry in &run.told {
-        let truth = (entry.expires_ms - entry.at_ms) / UNIT;
-        let units = u64::from(entry.units);
-        assert!(units <= truth, "announced {units} of {truth}");
-        if entry.own {
-            assert_eq!(units, truth);
-            own += 1;
-        } else {
-            carried += 1;
-            short += u32::from(units < truth);
+    for delayed in [false, true] {
+        let run = honest_churn(delayed);
+        let (mut own, mut carried, mut short) = (0, 0, 0);
+        for entry in &run.told {
+            let truth = (entry.expires_ms - entry.at_ms) / UNIT;
+            let units = u64::from(entry.units);
+            assert!(units < truth, "announced {units} of {truth}");
+            if entry.own {
+                assert_eq!(units + 1, truth);
+                own += 1;
+            } else {
+                assert!(delayed || units + 2 <= truth);
+                assert!(units <= 253);
+                carried += 1;
+                short += u32::from(units + 2 < truth || (delayed && units + 1 < truth));
+            }
         }
+        assert!(own > 300 && carried > 3000, "{own} own, {carried} carried");
+        assert!(
+            short > 300,
+            "{short} carried entries lost more than a unit a hop to rounding"
+        );
+        // No id was announced that no phone emitted: the run looked each one
+        // up.
+        let ids: BTreeSet<PacketId> = run.told.iter().map(|entry| entry.id).collect();
+        assert!(ids.len() > 100, "{} packets were announced", ids.len());
     }
-    assert!(own > 300 && carried > 3000, "{own} own, {carried} carried");
-    assert!(
-        short > 300,
-        "{short} carried entries lost a unit to rounding"
-    );
-    // No id was announced that no phone emitted: `honest_churn` looked each
-    // one up.
-    let ids: BTreeSet<PacketId> = run.told.iter().map(|entry| entry.id).collect();
-    assert!(ids.len() > 100, "{} packets were announced", ids.len());
 }
 
 /// `n` phones in a line, joined by wires the test chose, each link made at
 /// its own instant so the phones' ticks are not in step.
 fn wired_line(n: u64, seed: u64, radio: Radio) -> World {
-    let mut world = crowd(n, seed);
+    let mut world = crowd_of(n, seed, &patient(radio.delay_ms));
     for near in 0..usize::try_from(n).expect("small") - 1 {
         world.run_until(world.now + 700);
         world.link(near, near + 1, radio);
@@ -886,80 +923,91 @@ fn wired_line(n: u64, seed: u64, radio: Radio) -> World {
 }
 
 /// T-LIFE-1, on links with delay. A lifetime crosses a link as a duration,
-/// so the time an announcement spends in transit is added to it: the plan's
-/// "never after origin + `L`" holds exactly on instant links only. What the
-/// engine guarantees, and this pins on a four-hop line whose links each take
-/// nine seconds: the lifetime a phone `h` hops out holds ends later than the
-/// origin's by more than `h × (delay − unit)` and at most `h × delay`, and
-/// that phone announces the packet exactly while a whole unit of that is
-/// left. A packet that started with the full 255 units is therefore still
-/// announced there after origin + `L`.
+/// so the time an announcement takes to arrive is added to it, and
+/// announcing one unit less than is left takes a unit off. Pinned on a
+/// four-hop line: the lifetime the far phone holds ends later than the
+/// origin's by at most `hops × (delay − unit)` and by more than
+/// `hops × (delay − 2 units)`, and the far phone announces the packet exactly
+/// while two whole units of its own figure are left.
+///
+/// So on links that take up to one unit, a packet that started with the full
+/// 255 units is never announced after its origin's own figure, let alone
+/// after origin + `L`; on links that take three units it is, by between four
+/// and eight units.
 #[test]
-fn link_delay_stretches_a_lifetime_by_at_most_the_delay_per_hop() {
-    const DELAY: u64 = 9000;
+fn link_delay_stretches_a_lifetime_by_at_most_its_excess_over_one_unit_per_hop() {
     const HOPS: u64 = 4;
-    let radio = Radio {
-        max_frame: FRAME,
-        delay_ms: DELAY,
-        bytes_per_s: 0,
-    };
-    let mut world = wired_line(HOPS + 1, 53, radio);
-    let last = usize::try_from(HOPS).expect("small");
-    // The origin, played by a stranger so that its draw is the top one.
-    let origin = world.stranger(54);
-    let source = world.dial(origin, 0, wire());
-    let probe = listener(&mut world, 55);
-    for n in 1..=3 {
-        world.run_for(MINUTE);
-        let packet = junk(n);
-        let id = packet.id();
-        world.them_mut(origin).serve.insert(id, packet);
-        world.announce(origin, source, &[(id, 255)]);
-        let emitted_ms = world.now;
-        let expires_ms = emitted_ms + 255 * UNIT;
-        // A hop takes a tick and three crossings of its link.
-        world.run_for(HOPS * (TICK + 3 * DELAY));
-        assert_eq!(world.engine(0).store().expires_ms(&id), Some(expires_ms));
-        let held = world.engine(last).store().expires_ms(&id);
-        let held = held.expect("it crossed the line");
-        let stretch = held - expires_ms;
-        assert!(
-            stretch > HOPS * (DELAY - UNIT) && stretch <= HOPS * DELAY,
-            "stretched {stretch} ms"
-        );
+    for delay in [UNIT, 3 * UNIT] {
+        let radio = Radio {
+            max_frame: FRAME,
+            delay_ms: delay,
+            bytes_per_s: 0,
+        };
+        let mut world = wired_line(HOPS + 1, 53, radio);
+        let last = usize::try_from(HOPS).expect("small");
+        // The origin, played by a stranger so that its draw is the top one.
+        let origin = world.stranger(54);
+        let source = world.dial(origin, 0, wire());
+        let probe = listener(&mut world, 55);
+        for n in 1..=3 {
+            world.run_for(MINUTE);
+            let packet = junk(n);
+            let id = packet.id();
+            world.them_mut(origin).serve.insert(id, packet);
+            world.announce(origin, source, &[(id, 255)]);
+            let emitted_ms = world.now;
+            let expires_ms = emitted_ms + 255 * UNIT;
+            // A hop takes a tick and three crossings of its link.
+            world.run_for(HOPS * (TICK + 3 * delay));
+            assert_eq!(world.engine(0).store().expires_ms(&id), Some(expires_ms));
+            let held = world.engine(last).store().expires_ms(&id);
+            let held = held.expect("it crossed the line");
+            assert!(
+                held + HOPS * UNIT <= expires_ms + HOPS * delay
+                    && held + 2 * HOPS * UNIT > expires_ms + HOPS * delay,
+                "the origin's ends at {expires_ms}, the far phone's at {held}"
+            );
 
-        // Asked every five seconds around the end, the far phone announces
-        // the packet exactly while one unit of its own figure is left.
-        world.run_until(expires_ms - 20_000);
-        let mut last_announced = 0;
-        while world.now < held + 20_000 {
-            world.run_for(TICK);
-            let before = world.them(probe).haves().len();
-            let tap = world.dial(probe, last, wire());
-            world.run_until(world.now);
-            let entries = world.them(probe).haves().split_off(before);
-            let announced = entries.iter().any(|entry| entry.2 == id);
-            assert_eq!(announced, world.now + UNIT <= held, "at {}", world.now);
-            if announced {
-                last_announced = world.now;
+            // Asked every five seconds around the end, the far phone
+            // announces the packet exactly while two units of its own figure
+            // are left.
+            world.run_until(expires_ms - 40_000);
+            let mut last_announced = 0;
+            while world.now < held + 20_000 {
+                world.run_for(TICK);
+                let before = world.them(probe).haves().len();
+                let tap = world.dial(probe, last, wire());
+                world.run_until(world.now);
+                let entries = world.them(probe).haves().split_off(before);
+                let announced = entries.iter().any(|entry| entry.2 == id);
+                assert_eq!(announced, world.now + 2 * UNIT <= held, "at {}", world.now);
+                if announced {
+                    last_announced = world.now;
+                }
+                world.cut(tap);
             }
-            world.cut(tap);
+            assert!(last_announced > expires_ms - 40_000, "never announced");
+            if delay <= UNIT {
+                assert!(held <= expires_ms && last_announced + 2 * UNIT <= expires_ms);
+                assert!(last_announced < emitted_ms + LIFE);
+            } else {
+                assert!(
+                    last_announced > expires_ms,
+                    "last announced {} ms after its origin",
+                    last_announced - emitted_ms
+                );
+            }
         }
-        assert!(last_announced + UNIT <= expires_ms + HOPS * DELAY);
-        assert!(
-            last_announced > emitted_ms + LIFE,
-            "last announced {} ms after its origin",
-            last_announced - emitted_ms
-        );
     }
 }
 
 /// T-LIFE-5: on a line of eight hops — seven between phones and the one to
 /// the listener — the lifetime a packet is announced with at the far end is
-/// short of what its origin drew by less than eight units plus the time that
-/// actually passed.
+/// short of what its origin drew by at least eight units and by less than
+/// sixteen, beyond the time that actually passed: a hop costs the one unit
+/// held back and under one more to rounding.
 #[test]
-fn a_line_of_k_hops_loses_under_k_units_beyond_the_time_elapsed() {
+fn a_line_of_k_hops_loses_between_k_and_2k_units_beyond_the_time_elapsed() {
     const HOPS: u64 = 8;
     let mut world = wired_line(HOPS, 55, wire());
     let end = listener(&mut world, 56);
@@ -979,7 +1027,7 @@ fn a_line_of_k_hops_loses_under_k_units_beyond_the_time_elapsed() {
         let elapsed = at_ms - emission.at_ms;
         assert!(elapsed >= TICK, "the line was crossed in {elapsed} ms");
         assert!(
-            drawn - left < HOPS * UNIT + elapsed,
+            drawn - left >= HOPS * UNIT + elapsed && drawn - left < 2 * HOPS * UNIT + elapsed,
             "lost {} ms in {elapsed} ms",
             drawn - left
         );
@@ -988,24 +1036,22 @@ fn a_line_of_k_hops_loses_under_k_units_beyond_the_time_elapsed() {
     }
     assert!(followed >= 5, "{followed} packets crossed the line");
     assert!(
-        most > UNIT,
-        "rounding cost at most {most} ms: the hops left no trace to bound"
+        most > (HOPS + 1) * UNIT,
+        "rounding cost at most {} ms: the hops left no trace to bound",
+        most - HOPS * UNIT
     );
 }
 
-/// T-LIFE-1, in a cycle of slow links. Where an announcement takes longer
-/// to cross a link than one unit, phones that all hold a packet keep raising
-/// each other's figure for it: the lifetime no longer ends near its origin's.
-/// What still holds, and is all that holds: no phone keeps or announces the
-/// packet past its own first receipt + `L`.
-#[test]
-fn slow_links_in_a_cycle_never_carry_a_lifetime_past_first_receipt_plus_l() {
+/// Four phones, every pair joined by a link that takes `delay_ms`, and a
+/// packet handed to the first with 200 units. Returns the world, the packet,
+/// when it was handed over, and when each phone first took it.
+fn slow_cycle(delay_ms: u64) -> (World, PacketId, u64, Vec<u64>) {
     let radio = Radio {
         max_frame: FRAME,
-        delay_ms: 9000,
+        delay_ms,
         bytes_per_s: 0,
     };
-    let mut world = crowd(4, 57);
+    let mut world = crowd_of(4, 57, &patient(delay_ms));
     for a in 0..4 {
         for b in a + 1..4 {
             world.run_for(700);
@@ -1019,36 +1065,83 @@ fn slow_links_in_a_cycle_never_carry_a_lifetime_past_first_receipt_plus_l() {
     let id = packet.id();
     world.them_mut(origin).serve.insert(id, packet);
     world.announce(origin, source, &[(id, 200)]);
-    let ends = world.now + 200 * UNIT;
+    let handed = world.now;
 
-    world.run_for(2 * MINUTE);
+    world.run_for(2 * MINUTE + 6 * delay_ms);
     let first: Vec<u64> = (0..4)
         .map(|node| {
-            world
-                .at(node)
-                .taken
-                .iter()
-                .find(|t| t.id == id)
-                .map(|t| t.at_ms)
+            let taken = &world.at(node).taken;
+            taken.iter().find(|t| t.id == id).map(|t| t.at_ms)
         })
         .collect::<Option<_>>()
         .expect("every phone took it");
+    (world, id, handed, first)
+}
+
+/// T-LIFE-1, in a cycle. Phones that all hold a packet keep announcing it to
+/// each other, and each announcement that raises a lifetime by a unit is
+/// passed on. While an announcement crosses a link within one unit it can
+/// only arrive with less than the receiver was told before, so nothing goes
+/// round: no phone's figure ever ends after the one the packet came in
+/// with, and none announces it later than two units before that.
+#[test]
+fn a_cycle_of_links_that_take_up_to_one_unit_never_stretches_a_lifetime() {
+    let (mut world, id, handed, first) = slow_cycle(UNIT);
+    let ends = handed + 200 * UNIT;
+    let mut announced = 0;
     while world.now < ends + LIFE {
-        world.run_for(MINUTE);
+        world.run_for(MINUTE / 4);
         let now = world.now;
         for (node, &first) in first.iter().enumerate() {
             let store = world.settled(node).store();
-            let left = u64::from(store.remaining(&id)) * UNIT;
+            let left = u64::from(store.remaining(&id));
             assert!(
-                left == 0 || now + left <= first + LIFE,
+                store.expires_ms(&id).is_some_and(|theirs| theirs <= ends),
                 "phone {node} at {now}"
             );
-            assert!(store
-                .expires_ms(&id)
-                .is_some_and(|ends| ends <= first + LIFE));
+            assert!(left == 0 || now + (left + 1) * UNIT <= ends);
             assert_eq!(store.holds(&id), now < first + LIFE);
+            announced += u32::from(left > 0);
         }
     }
+    assert!(announced > 200, "the packet was live on {announced} looks");
+}
+
+/// T-LIFE-1, in a cycle of slow links. An announcement that takes longer
+/// than one unit can arrive with more than the receiver holds, by the
+/// excess, and where the excess is a unit or more it is passed on: the
+/// lifetime creeps up round the cycle. What bounds it: each time round a
+/// link adds at most `delay − unit` and takes at least `delay`, and no phone
+/// keeps or announces the packet past its own first receipt + `L`.
+#[test]
+fn a_cycle_of_slow_links_stretches_a_lifetime_by_the_excess_per_hop_and_never_past_the_cap() {
+    const DELAY: u64 = 3 * UNIT;
+    let (mut world, id, handed, first) = slow_cycle(DELAY);
+    let ends = handed + 200 * UNIT;
+    let mut most = 0;
+    while world.now < ends + LIFE {
+        world.run_for(MINUTE / 4);
+        let now = world.now;
+        let hops = (now - handed) / DELAY;
+        for (node, &first) in first.iter().enumerate() {
+            let store = world.settled(node).store();
+            let theirs = store.expires_ms(&id).expect("it has a record of it");
+            assert!(
+                theirs <= ends + hops * (DELAY - UNIT) && theirs <= first + LIFE,
+                "phone {node} at {now}: {theirs}"
+            );
+            let left = u64::from(store.remaining(&id));
+            assert!(left == 0 || now + (left + 1) * UNIT <= first + LIFE);
+            assert_eq!(store.holds(&id), now < first + LIFE);
+            most = most.max(theirs.saturating_sub(ends));
+        }
+    }
+    // It did creep, and stopped at the cap: under the lifetime's last
+    // quarter and the minute and a half the packet took to go round.
+    assert!(
+        most > 10 * UNIT && most <= 56 * UNIT + 2 * MINUTE + 6 * DELAY,
+        "stretched by {most} ms"
+    );
 }
 
 /// A phone with two strangers dialled in: one to feed it, one to watch it.
@@ -1178,8 +1271,9 @@ fn an_understated_lifetime_does_not_stop_delivery_once_the_honest_one_arrives() 
         .find(|e| e.id == id)
         .map(|e| e.expires_ms);
     let left = world.engine(3).store().expires_ms(&id);
+    // Three announcements, each a unit short and rounded down.
     assert!(
-        left <= true_left && left.map(|ms| ms + 4 * UNIT) > true_left,
+        left.map(|ms| ms + 3 * UNIT) <= true_left && left.map(|ms| ms + 6 * UNIT) > true_left,
         "{left:?} of {true_left:?}"
     );
     assert_eq!(
@@ -1240,7 +1334,7 @@ fn an_overstated_lifetime_holds_a_packet_no_longer_and_gets_it_taken_no_sooner()
         "the lie changed nothing"
     );
     assert!(
-        last_announced + UNIT <= first + LIFE,
+        last_announced + 2 * UNIT <= first + LIFE,
         "announced {} ms after first receipt",
         last_announced - first
     );
@@ -1272,13 +1366,63 @@ fn small_limits() -> Config {
     }
 }
 
-/// T-SEC-8: a peer floods a phone with packets as fast as its allowance and
-/// the phone's intake limit let it — including packets it let the phone ask
-/// for and held back, to hand over all at once on top of the steady flood.
-/// The record table never passes its capacity and is never filled, so the
-/// phone goes on taking an honest neighbour's packets and emitting its own;
-/// and whatever the flooder announces again, the phone takes no packet twice
-/// within the re-accept interval.
+/// A peer hoards on two links to `victim`: it lets the phone ask for all it
+/// may and hands nothing over, announcing the same packets again every five
+/// seconds for four minutes, then hands over at once everything it was ever
+/// asked for. Returns how many records that left the phone.
+fn hoard_and_dump(world: &mut World, flooder: Node, victim: Node) -> usize {
+    let hoards = [
+        world.dial(flooder, victim, wire()),
+        world.dial(flooder, victim, wire()),
+    ];
+    world.run_until(1000);
+    let banked: Vec<Vec<Packet>> = (1..=2)
+        .map(|link| (0..120).map(|n| junk(1000 * link + n)).collect())
+        .collect();
+    while world.now < 4 * MINUTE {
+        for (link, held) in banked.iter().enumerate() {
+            let entries: Vec<_> = held.iter().map(|p| (p.id(), 255)).collect();
+            world.announce(flooder, hoards[link], &entries);
+        }
+        world.run_for(5000);
+    }
+    let requests = world.them(flooder).wants();
+    let asked: BTreeSet<PacketId> = requests.iter().map(|w| w.2).collect();
+    assert!(
+        requests.len() > 200 && asked.len() > 30,
+        "the phone made {} requests for {} held-back packets",
+        requests.len(),
+        asked.len()
+    );
+
+    let before = world.engine(victim).stats().records;
+    for (link, held) in banked.iter().enumerate() {
+        for packet in held.iter().filter(|p| asked.contains(&p.id())) {
+            if world.is_up(hoards[link]) {
+                world.hand(flooder, hoards[link], packet);
+                world.run_until(world.now);
+            }
+        }
+    }
+    for link in hoards {
+        let cut_off = |c: &world::Closed| c.wire == link && c.by == Some(victim);
+        assert!(world.closed.iter().any(cut_off), "a hoarding link was kept");
+    }
+    world.engine(victim).stats().records - before
+}
+
+/// T-SEC-8: a peer floods a phone through two links. First it hoards: all
+/// but the requests of the last two timeouts were given up for good by the
+/// time it hands the packets over, so both links are cut off and next to
+/// nothing is taken. Then, on two new links, it offers twice what the
+/// phone's intake limit lets in for three lifetimes, and announces every
+/// packet again later.
+///
+/// The record table never reaches its capacity, so the phone goes on taking
+/// its honest neighbour's packets — within two ticks, though the flood wants
+/// every token of the intake limit — and emitting its own; and whatever the
+/// flooder announces again, the phone takes no packet twice within the
+/// re-accept interval.
 #[test]
 fn a_flood_within_its_allowance_neither_fills_the_record_table_nor_gets_a_packet_retaken() {
     let config = small_limits();
@@ -1290,57 +1434,34 @@ fn a_flood_within_its_allowance_neither_fills_the_record_table_nor_gets_a_packet
     world.link(honest, victim, wire());
     let flooder = world.stranger(73);
     world.them_mut(flooder).fresh_greetings = true;
+
+    // A request a second for the two timeouts, ten seconds, and one more
+    // that the tokens' rounding allows.
+    let dumped = hoard_and_dump(&mut world, flooder, victim);
+    assert!(dumped <= 11, "{dumped} held-back packets were taken");
+
+    // Two new links, and two new packets a second for an intake limit of
+    // one, each announced again later on the other link.
     let links = [
         world.dial(flooder, victim, wire()),
         world.dial(flooder, victim, wire()),
     ];
-
-    world.run_until(1000);
-
-    // Phase one: announce, let the phone ask, deliver nothing. The requests
-    // are given up on but would still be taken.
+    let started = world.now;
     let mut next = 0;
-    let mut banked: Vec<Vec<Packet>> = vec![Vec::new(), Vec::new()];
-    for (link, held) in banked.iter_mut().enumerate() {
-        held.extend((0..120).map(|n| junk(1000 * (link as u64 + 1) + n)));
-    }
-    let entries = |held: &[Packet]| held.iter().map(|p| (p.id(), 255)).collect::<Vec<_>>();
-    while world.now < 4 * MINUTE {
-        for (link, held) in banked.iter().enumerate() {
-            world.announce(flooder, links[link], &entries(held));
-        }
-        world.run_for(30_000);
-    }
-    let asked: BTreeSet<PacketId> = world.them(flooder).wants().iter().map(|w| w.2).collect();
-    assert!(
-        asked.len() > 200,
-        "the phone asked for {} held-back packets",
-        asked.len()
-    );
-
-    // Phase two: everything held back at once, then a steady flood of new
-    // packets at half the phone's intake limit, each announced again later.
-    for (link, held) in banked.iter().enumerate() {
-        for packet in held.iter().filter(|p| asked.contains(&p.id())) {
-            world.hand(flooder, links[link], packet);
-        }
-    }
-    let dumped = world.now;
-    let mut repeats: Vec<PacketId> = Vec::new();
+    let mut repeats: Vec<(PacketId, u8)> = Vec::new();
     let mut most = 0;
-    while world.now < dumped + 3 * life {
-        world.run_for(2000);
-        let packet = junk(next);
-        next += 1;
-        world
-            .them_mut(flooder)
-            .serve
-            .insert(packet.id(), packet.clone());
-        repeats.push(packet.id());
-        world.announce(flooder, links[0], &[(packet.id(), 255)]);
-        if next % 10 == 0 {
-            let again: Vec<_> = repeats.iter().map(|&id| (id, 255)).collect();
-            world.announce(flooder, links[1], &again);
+    while world.now < started + 3 * life {
+        world.run_for(1000);
+        let fresh: Vec<Packet> = (next..next + 2).map(junk).collect();
+        next += 2;
+        for packet in &fresh {
+            let them = world.them_mut(flooder);
+            them.serve.insert(packet.id(), packet.clone());
+            repeats.push((packet.id(), 255));
+        }
+        world.announce(flooder, links[0], &repeats[repeats.len() - 2..]);
+        if next % 20 == 0 {
+            world.announce(flooder, links[1], &repeats);
         }
         let stats = world.engine(victim).stats();
         most = most.max(stats.records);
@@ -1350,7 +1471,8 @@ fn a_flood_within_its_allowance_neither_fills_the_record_table_nor_gets_a_packet
             stats.records
         );
     }
-    assert!(most > 300, "the flood left {most} records at most");
+    // A request a second for the two lifetimes a record lasts.
+    assert!(most > 230, "the flood left {most} records at most");
     assert!(
         world.is_up(links[0]) && world.is_up(links[1]),
         "the flooder was cut off"
@@ -1359,6 +1481,7 @@ fn a_flood_within_its_allowance_neither_fills_the_record_table_nor_gets_a_packet
     // The phone's own emissions and its honest neighbour's all landed.
     let phone = world.at(victim);
     assert_eq!(phone.emissions.len() as u64, phone.engine.stats().emitted);
+    let mut landed = 0;
     for emission in &world.at(honest).emissions {
         if emission.at_ms + 2 * TICK > world.now {
             continue;
@@ -1369,7 +1492,9 @@ fn a_flood_within_its_allowance_neither_fills_the_record_table_nor_gets_a_packet
             late.is_some_and(|ms| ms <= 2 * TICK),
             "an honest packet took {late:?}"
         );
+        landed += 1;
     }
+    assert!(landed >= 5, "{landed} honest packets were due");
     // Nothing was taken twice within two lifetimes.
     let mut taken: BTreeMap<PacketId, u64> = BTreeMap::new();
     let mut retaken = 0;
@@ -1677,56 +1802,68 @@ fn a_phone_that_slept_through_many_slots_emits_one_packet_on_waking() {
     }
 }
 
-/// The units each packet a lone phone emitted started with, by the phone's
-/// own store, beside the units its one neighbour first heard for it.
-fn first_lifetimes(seed: u64) -> Vec<(u64, u8)> {
+/// What a neighbour that stays linked to `phone` first heard of each packet
+/// in `emissions`: the units the packet started with by its origin's store,
+/// how long after its emission it was announced, and the units announced.
+fn first_heard(world: &World, watcher: Node, emissions: &[Node]) -> Vec<(u64, u64, u8)> {
+    let heard = world.them(watcher);
+    let emissions = emissions.iter().flat_map(|&node| &world.at(node).emissions);
+    emissions
+        .filter_map(|e| {
+            let (at_ms, units) = heard.first_have(e.id)?;
+            Some(((e.expires_ms - e.at_ms) / UNIT, at_ms - e.at_ms, units))
+        })
+        .collect()
+}
+
+/// A lone phone and its one neighbour, for half an hour.
+fn first_lifetimes(seed: u64) -> Vec<(u64, u64, u8)> {
     let mut world = World::new();
     let phone = world.phone(Config::default(), seed, Reader::Keyless);
     let watcher = world.stranger(seed + 1);
     world.dial(watcher, phone, wire());
     world.run_until(30 * MINUTE);
-    let heard = world.them(watcher);
-    let emissions = world.at(phone).emissions.iter();
-    emissions
-        .filter_map(|e| Some(((e.expires_ms - e.at_ms) / UNIT, heard.first_have(e.id)?.1)))
-        .collect()
+    first_heard(&world, watcher, &[phone])
 }
 
 /// T-PRIV-7: the lifetime a phone's own packet starts with is the
-/// generator's draw from the top quarter, different from seed to seed; and
-/// every value a neighbour first hears for an own packet — the draw, less
-/// the tick it waited — it can also first hear for a carried one: a phone
-/// handed a packet with one unit more, a millisecond before its tick,
-/// announces exactly that value.
+/// generator's draw from the top quarter, different from seed to seed, and
+/// what a neighbour first hears for it on the phone's tick is that draw,
+/// less the time it waited for the tick in whole units rounded up, less
+/// one: 189 to 254, and 254 only when the slot fell on the tick itself.
 ///
-/// That is the whole of what holds. The top value an own packet shows, 254,
-/// needs a peer that announced 255, which an honest phone does only when its
-/// slot and its tick run in one call; and no carried packet is ever first
-/// announced with 255.
+/// A carried packet is first announced with what the phone was told for it,
+/// less the same. So every value but the top one is a value a carried
+/// packet shows too: a phone handed a packet with two units more, a
+/// millisecond before its tick, announces exactly it. That takes a peer
+/// that announced up to 255, though, and honest phones announce 254 at most:
+/// between honest phones a carried packet first shows 252 at most, and the
+/// values above that mark a packet as its announcer's own.
 #[test]
-fn an_own_packets_first_lifetime_is_drawn_and_is_one_a_carried_packet_can_show() {
-    let runs: Vec<Vec<(u64, u8)>> = (0..6)
+fn an_own_packets_first_lifetime_is_drawn_and_is_below_the_top_one_a_carried_packet_can_show() {
+    let runs: Vec<Vec<(u64, u64, u8)>> = (0..6)
         .map(|seed| first_lifetimes(910 + 10 * seed))
         .collect();
     assert!(runs[0] == first_lifetimes(910), "one seed, two sequences");
     assert!(runs[0] != runs[1], "two seeds, one sequence");
     let packets: usize = runs.iter().map(Vec::len).sum();
-    let drawn: BTreeSet<u64> = runs.iter().flatten().map(|&(start, _)| start).collect();
+    let drawn: BTreeSet<u64> = runs.iter().flatten().map(|run| run.0).collect();
     assert!(drawn.iter().all(|start| (192..=255).contains(start)));
     assert!(
         packets >= 100 && drawn.len() >= 40,
         "{} different starting values in {packets} packets",
         drawn.len()
     );
-    // A tick is a little over one unit: the first announcement has lost one
-    // unit or two.
     let mut own = BTreeSet::new();
-    for &(start, first) in runs.iter().flatten() {
-        let waited = start - u64::from(first);
-        assert!((1..=2).contains(&waited), "{start} first heard as {first}");
+    for &(start, waited, first) in runs.iter().flatten() {
+        assert!(waited <= TICK);
+        assert_eq!(u64::from(first), start - 1 - waited.div_ceil(UNIT));
         own.insert(first);
     }
+    assert!(own.iter().all(|first| (189..=254).contains(first)));
+    let top_own = own.last().copied();
 
+    // What a carried packet shows on the tick, for every value it is told.
     let (mut world, _, (feeder, fed), (watcher, _)) = sandwich(Config::default(), 92);
     world.run_until(3 * MINUTE);
     let phase = world
@@ -1736,21 +1873,50 @@ fn an_own_packets_first_lifetime_is_drawn_and_is_one_a_carried_packet_can_show()
         .map(|entry| entry.0 % TICK);
     let phase = phase.expect("the phone announced its own packets on its tick");
     let mut carried = BTreeSet::new();
-    for aim in 190..=254u8 {
+    for aim in 187..=253u8 {
         let tick = (world.now / TICK + 2) * TICK + phase;
         let packet = junk(u64::from(aim));
         let id = packet.id();
         world.them_mut(feeder).serve.insert(id, packet);
         world.run_until(tick - 1);
-        world.announce(feeder, fed, &[(id, aim + 1)]);
+        world.announce(feeder, fed, &[(id, aim + 2)]);
         world.run_until(tick);
         let heard = world.them(watcher).first_have(id);
         assert!(heard == Some((tick, aim)), "aimed at {aim}");
         carried.insert(aim);
     }
+    own.remove(&254);
     assert!(
         own.len() >= 40 && own.is_subset(&carried),
-        "an own packet showed a value no carried one did"
+        "an own packet showed a value below the top one that no carried one did"
+    );
+
+    // Between honest phones: three in a line, a neighbour on the middle one.
+    let (mut most_own, mut most_carried, mut heard) = (0, 0, 0);
+    for seed in 0..4 {
+        let mut world = wired_line(3, 930 + seed, wire());
+        let watcher = world.stranger(940 + seed);
+        world.dial(watcher, 1, wire());
+        world.run_until(30 * MINUTE);
+        for (start, waited, first) in first_heard(&world, watcher, &[1]) {
+            assert_eq!(u64::from(first), start - 1 - waited.div_ceil(UNIT));
+            most_own = most_own.max(first);
+        }
+        let others = first_heard(&world, watcher, &[0, 2]);
+        heard += others.len();
+        for (start, waited, first) in others {
+            // Told by its origin on that phone's tick, a unit and a wait
+            // short; then a unit and this phone's wait short of that.
+            assert!(u64::from(first) + 4 <= start && waited <= 2 * TICK);
+            assert!(first <= 252);
+            most_carried = most_carried.max(first);
+        }
+    }
+    assert!(heard >= 100, "{heard} carried packets were heard");
+    // Both came near their ceilings, 254 and 252: the gap is real.
+    assert!(
+        top_own.max(Some(most_own)) >= Some(252) && most_carried >= 250,
+        "own packets showed up to {top_own:?}, carried ones up to {most_carried}"
     );
 }
 
@@ -1904,8 +2070,9 @@ fn a_peer_that_breaks_the_link_protocol_is_cut_off_at_no_cost() {
     assert_eq!(world.neighbours(victim), BTreeSet::from([honest]));
 
     // A flood of announcements: five thousand ids, none ever delivered. The
-    // phone asks for a new link's allowance and its window, no more, and
-    // holds nothing for the rest.
+    // phone asks for a new link's allowance at once and for what the link's
+    // credit grows by after, each packet once, never more than a window's
+    // worth within one request timeout, and holds nothing for the rest.
     world.run_for(6000);
     let before = world.engine(victim).stats();
     let hoarder = world.stranger(151);
@@ -1919,13 +2086,22 @@ fn a_peer_that_breaks_the_link_protocol_is_cut_off_at_no_cost() {
         world.them(hoarder).wants().len() as u64,
         config.credit_initial
     );
+    let hoarding = world.now;
     world.run_for(40_000);
-    let asked: BTreeSet<PacketId> = world.them(hoarder).wants().iter().map(|w| w.2).collect();
-    assert_eq!(
-        asked.len(),
-        config.want_window,
-        "one window, asked for twice"
+    let requests = world.them(hoarder).wants();
+    let asked: BTreeSet<PacketId> = requests.iter().map(|w| w.2).collect();
+    assert_eq!(asked.len(), requests.len(), "a packet asked for twice");
+    let credit = config.credit_initial + config.credit_per_min * 40 / 60;
+    assert!(
+        asked.len() > config.want_window && asked.len() as u64 <= credit,
+        "{} requests in forty seconds",
+        asked.len()
     );
+    for at in (hoarding..=world.now).step_by(1000) {
+        let open = (at.saturating_sub(config.want_timeout_ms) + 1)..=at;
+        let outstanding = requests.iter().filter(|w| open.contains(&w.0)).count();
+        assert!(outstanding <= config.want_window, "{outstanding} at {at}");
+    }
     let after = world.engine(victim).stats();
     assert!(after.records <= before.records + 2 && after.held <= config.store_packets);
     assert!(after.records <= config.record_capacity() && after.unread <= config.unread_packets);
@@ -1949,14 +2125,21 @@ fn a_peer_that_breaks_the_link_protocol_is_cut_off_at_no_cost() {
     );
 }
 
-/// T-SEC-3, a stalled transfer: a peer announces a packet first, is asked
-/// for it, sends one chunk and stops. The phone asks it once more, gives up
-/// after two request timeouts and takes the packet from its honest
-/// neighbour at the next tick; the stalled chunk and the late remainder add
-/// no packet and no record. (The stalling link is not closed for it: the
-/// plan's "stalled frames close the link" is not what the engine does.)
+/// T-SEC-3 and T-LIFE-2, a stalled transfer: a peer announces a packet
+/// first, is asked for it, sends one chunk and stops. The phone asks it no
+/// second time; after one request timeout it takes the packet from its
+/// honest neighbour at its next tick. A packet asked of two links arrives at
+/// most once on each, and only the first copy is stored: the rest of the
+/// stalled transfer, arriving while the request given up is still open, is
+/// dropped and changes nothing but the count of duplicates, and a third copy
+/// was asked for by nobody. And whatever is announced afterwards, the phone
+/// never asks for a packet it has a record of.
+///
+/// (A transfer that stalls does not close its link at once: what the engine
+/// closes is a link whose greeting stalls, and one that answers a request
+/// more than two timeouts late.)
 #[test]
-fn a_stalled_transfer_delays_a_packet_by_two_timeouts_and_adds_nothing() {
+fn a_stalled_transfer_delays_a_packet_by_one_timeout_and_its_late_remainder_adds_nothing() {
     let timeout = Config::default().want_timeout_ms;
     let mut world = World::new();
     let victim = world.phone(Config::default(), 121, Reader::Keyless);
@@ -1964,15 +2147,17 @@ fn a_stalled_transfer_delays_a_packet_by_two_timeouts_and_adds_nothing() {
     world.link(honest, victim, wire());
     let staller = world.stranger(123);
     let stall = world.dial(staller, victim, wire());
+    let watcher = world.stranger(124);
+    world.dial(watcher, victim, wire());
     let packet = update(1);
     let id = packet.id();
     offer(&mut world, honest, 1, &packet);
-    let emitted = loop {
+    loop {
         world.run_for(100);
-        if let Some(emission) = world.at(honest).emissions.first() {
-            break emission.at_ms;
+        if !world.at(honest).emissions.is_empty() {
+            break;
         }
-    };
+    }
     // Before the honest phone's next tick announces it.
     world.announce(staller, stall, &[(id, 200)]);
     world.run_until(world.now);
@@ -1981,21 +2166,25 @@ fn a_stalled_transfer_delays_a_packet_by_two_timeouts_and_adds_nothing() {
         asked.len() == 1 && asked[0].2 == id,
         "the phone asked the staller"
     );
+    let asked_at = world.now;
     let chunks = world::chunks(&packet, world.frame_size(stall));
     world.say(staller, stall, Some(chunks[0].clone()));
 
-    world.run_until(emitted + 2 * timeout);
+    world.run_until(asked_at + timeout - 1);
     assert!(
         !world.engine(victim).store().has_record(&id),
-        "the stall cost nothing"
+        "the request was given up early"
     );
-    assert_eq!(world.them(staller).wants().len(), 2, "asked once more");
-    world.run_until(emitted + 2 * timeout + 3 * TICK);
+    world.run_until(asked_at + timeout + TICK);
     assert!(
         world.engine(victim).store().holds(&id),
         "the honest link was not asked"
     );
+    assert_eq!(world.them(staller).wants().len(), 1, "asked a second time");
+    world.run_for(2 * TICK);
     let before = world.engine(victim).stats();
+    let told = world.them(watcher).haves().len();
+    assert!(world.them(watcher).first_have(id).is_some());
 
     // The rest of the stalled transfer, late.
     for chunk in &chunks[1..] {
@@ -2003,15 +2192,34 @@ fn a_stalled_transfer_delays_a_packet_by_two_timeouts_and_adds_nothing() {
     }
     world.run_until(world.now);
     let after = world.engine(victim).stats();
-    assert_eq!(
-        (after.records, after.held, after.accepted),
-        (before.records, before.held, before.accepted)
-    );
     assert_eq!(after.duplicates, 1);
+    let but_for_the_count = Stats {
+        duplicates: 0,
+        ..after
+    };
+    assert!(
+        but_for_the_count == before,
+        "a second copy changed something"
+    );
+    world.run_for(2 * TICK);
     assert_eq!(
         world.at(victim).taken.iter().filter(|t| t.id == id).count(),
         1
     );
+    let heard = &world.them(watcher).haves()[told..];
+    assert!(heard.iter().all(|entry| entry.2 != id), "announced again");
+
+    // Announced again with any lifetime, it is asked for by no link; and a
+    // third copy closes the link it comes on.
+    world.announce(staller, stall, &[(id, 255)]);
+    world.run_for(2 * TICK);
+    assert_eq!(world.them(staller).wants().len(), 1);
+    assert!(world.is_up(stall));
+    world.hand(staller, stall, &packet);
+    world.run_until(world.now);
+    let cut_off = |c: &world::Closed| c.wire == stall && c.by == Some(victim);
+    assert!(world.closed.iter().any(cut_off));
+    assert_eq!(world.engine(victim).stats().duplicates, 1);
 }
 
 /// Emission slots every three to seven seconds, to fill a store of
@@ -2201,9 +2409,14 @@ fn tenth_limits() -> Config {
 /// delivery to the far phones stays at or above 1/2 overall. That is a
 /// share, not a promise for any one packet, and the plan claims nothing
 /// beyond the measurement (§6.5). The measured figures are in the assertion
-/// messages, with the one for packets *into* the attacked phone, for which
-/// there is no floor: the adversary's links take its intake tokens as they
-/// fall due (measured here: none of 26 arrived).
+/// messages.
+///
+/// Packets *into* the attacked phone have a floor too: its intake tokens go
+/// round its links by turns, so its four honest links, which between them
+/// want under three packets a minute, each get the turn that a seventh of
+/// twenty-four a minute gives, and every honest packet enters (measured
+/// here: 26 of 26; none did while the tokens went to whoever announced
+/// first).
 #[test]
 fn two_hops_from_a_flooding_adversary_honest_delivery_keeps_its_share() {
     let config = tenth_limits();
@@ -2274,9 +2487,166 @@ fn two_hops_from_a_flooding_adversary_honest_delivery_keeps_its_share() {
         "delivered of due: far to far {between:?}, attacked phone to far {outward:?}, \
          far to attacked phone {inward:?}"
     );
-    assert!(between.1 > 60 && outward.1 > 20, "{measured}");
+    assert!(
+        between.1 > 60 && outward.1 > 20 && inward.1 > 20,
+        "{measured}"
+    );
     assert_eq!(between.0, between.1, "{measured}");
+    assert_eq!(inward.0, inward.1, "{measured}");
     assert!(2 * overall.0 >= overall.1, "{measured}");
+}
+
+/// T-SEC-4, eclipse with a flood: an attacker holds every incoming slot of a
+/// phone whose one other link is to an honest neighbour with two phones
+/// behind it, and on each of its four links offers more than the phone's
+/// whole intake limit, without pause. The phone's requests go round its
+/// links by turns, so the honest link gets every turn it has a use for:
+/// every packet the three honest phones emit under the flood enters the
+/// attacked phone. Each takes at most a tick per hop to be announced there,
+/// two, and then a turn of the five links for itself and for each packet
+/// ahead of it — at most one from each other honest phone, whose slots are
+/// over a minute apart — and a turn is five tokens of the intake limit.
+#[test]
+fn an_attacker_that_holds_the_other_slots_and_floods_does_not_deafen_the_honest_link() {
+    let config = tenth_limits();
+    let token_ms = MINUTE / config.accept_per_min;
+    let mut world = World::new();
+    world.keep_bytes = false;
+    let victim = world.phone(config.clone(), 221, Reader::Keyless);
+    let honest: Vec<Node> = (0..3)
+        .map(|n| world.phone(config.clone(), 222 + n, Reader::Keyless))
+        .collect();
+    world.link(victim, honest[0], wire());
+    world.link(honest[0], honest[1], wire());
+    world.link(honest[0], honest[2], wire());
+    let attacker = world.stranger(229);
+    world.them_mut(attacker).fresh_greetings = true;
+    let mut links: Vec<u64> = (0..4)
+        .map(|_| world.dial(attacker, victim, wire()))
+        .collect();
+    world.run_until(MINUTE);
+    assert_eq!(world.wires_of(victim).len(), 5, "the attacker's links");
+
+    let (from, to) = (MINUTE, MINUTE + 3 * config.life_ms);
+    let mut next = 0;
+    while world.now < to {
+        for link in &mut links {
+            // The phone closes one incoming link in ten minutes: the
+            // attacker takes the slot again at once.
+            if !world.is_up(*link) {
+                *link = world.dial(attacker, victim, wire());
+                world.run_until(world.now);
+            }
+            let link = *link;
+            let fresh: Vec<Packet> = (next..next + 3).map(junk).collect();
+            next += 3;
+            for packet in &fresh {
+                let them = world.them_mut(attacker);
+                them.serve.insert(packet.id(), packet.clone());
+            }
+            let entries: Vec<_> = fresh.iter().map(|p| (p.id(), 255)).collect();
+            world.announce(attacker, link, &entries);
+        }
+        world.run_for(token_ms);
+    }
+    // The flood took all the phone's intake but the honest link's part.
+    let flooded = world.them(attacker).wants().len() as u64;
+    let allowed = config.accept_per_min * (to - from) / MINUTE;
+    assert!(
+        flooded * 10 >= allowed * 8,
+        "the attacked phone took {flooded} flood packets of {allowed} allowed"
+    );
+
+    let took = latencies(&world, from..to - 6 * TICK, &[victim]);
+    assert!(took.len() >= 20, "{} honest packets were due", took.len());
+    assert!(
+        worst(&took).is_some_and(|ms| ms <= 2 * TICK + 3 * 5 * token_ms),
+        "worst {:?} of {} packets, {} delivered",
+        worst(&took),
+        took.len(),
+        delivered(&took)
+    );
+}
+
+/// §3, a link that is slow to take its frames: a phone holding sixty packets
+/// gets two new neighbours in one instant, one on a link of 200 bytes a
+/// second, one on a link with no limit. The fast one has every packet in
+/// that instant. The slow one is sent one frame at a time, each built when
+/// the link is free for it — so what each inventory frame says of a lifetime
+/// is what was left when it went out, though the inventory takes longer
+/// than one unit to send.
+#[test]
+fn a_slow_link_neither_holds_up_a_fast_one_nor_is_told_a_stale_lifetime() {
+    const RATE: u64 = 200;
+    let config = Config {
+        credit_initial: 100,
+        ..Config::default()
+    };
+    let mut world = World::new();
+    let phone = world.phone(config, 231, Reader::Keyless);
+    let feeder = world.stranger(232);
+    let fed = world.dial(feeder, phone, wire());
+    world.run_until(1000);
+    let packets: Vec<Packet> = (0..60).map(junk).collect();
+    for packet in &packets {
+        let them = world.them_mut(feeder);
+        them.serve.insert(packet.id(), packet.clone());
+    }
+    let entries: Vec<_> = packets.iter().map(|p| (p.id(), 200)).collect();
+    world.announce(feeder, fed, &entries);
+    let mut ends: BTreeMap<PacketId, u64> = (packets.iter())
+        .map(|p| (p.id(), world.now + 200 * UNIT))
+        .collect();
+    world.run_until(20_000);
+    assert_eq!(world.engine(phone).stats().held, 60);
+    let radio = Radio {
+        max_frame: 185,
+        delay_ms: 20,
+        bytes_per_s: RATE,
+    };
+    let (slow, fast) = (world.stranger(233), world.stranger(234));
+    world.them_mut(slow).want_all = true;
+    world.them_mut(fast).want_all = true;
+    let slow_wire = world.dial(slow, phone, radio);
+    world.dial(fast, phone, wire());
+    world.run_until(world.now);
+    let got = &world.them(fast).got;
+    assert!(
+        got.len() == 60 && got.iter().all(|got| got.0 == 20_000),
+        "the fast link waited"
+    );
+
+    world.run_until(4 * MINUTE);
+    // One frame at a time on the slow wire, none waiting on it.
+    let airtime = |length: usize| (length as u64 * 1000).div_ceil(RATE);
+    let sent: Vec<&world::Crossing> = (world.journal.iter())
+        .filter(|c| c.wire == slow_wire && c.from == phone)
+        .collect();
+    assert!(sent.len() > 200, "{} frames on the slow link", sent.len());
+    for pair in sent.windows(2) {
+        let on_air = airtime(pair[0].bytes.len());
+        assert_eq!(pair[0].arrives_ms - pair[0].sent_ms, on_air + 20);
+        assert!(pair[1].sent_ms >= pair[0].sent_ms + on_air);
+    }
+
+    // Every lifetime it was told is the one left when the frame went out.
+    for emission in &world.at(phone).emissions {
+        ends.insert(emission.id, emission.expires_ms);
+    }
+    let told = world.them(slow).haves();
+    let in_transit = airtime(185) + 20;
+    for &(at_ms, _, id, units) in &told {
+        let left = ends[&id] - (at_ms - in_transit);
+        assert_eq!(u64::from(units), left / UNIT - 1);
+    }
+    let inventory: Vec<u64> = (told.iter().filter(|entry| entry.0 < 40_000))
+        .map(|entry| entry.0)
+        .collect();
+    assert!(
+        inventory.len() == 60 && inventory[59] - inventory[0] > UNIT,
+        "the inventory was sent within one unit"
+    );
+    assert!(told.len() > 60, "its own packets were announced there too");
 }
 
 // ---- counters and the unread queue -----------------------------------------
@@ -2472,8 +2842,8 @@ fn at_the_supported_size_latency_and_store_occupancy_stay_bounded() {
         "the fullest store held {peak} of {}",
         config.store_packets
     );
-    // T-LIFE-2 on links that take time: no phone was sent a packet it had a
-    // record of, and none took a packet twice.
+    // T-LIFE-2 on links that take time, but answer within the request
+    // timeout: no packet was asked of two links, and none was taken twice.
     for node in world.phones() {
         assert_eq!(world.engine(node).stats().duplicates, 0);
         let taken = &world.at(node).taken;
