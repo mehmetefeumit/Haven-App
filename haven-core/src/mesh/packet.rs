@@ -398,6 +398,20 @@ mod tests {
         assert!(open(&key(), &forged) == Some(parts(600)));
     }
 
+    /// Both format values are wire values every phone must agree on; the
+    /// vector above only carries `0x02`.
+    #[test]
+    fn the_byte_0x01_is_the_never_bridged_format() {
+        let mut plaintext = plaintext_of_600();
+        plaintext[0] = 0x01;
+        let opened = open(&key(), &forge(&key(), &plaintext, DOMAIN)).expect("a known format");
+        assert_eq!(opened.format, Format::NeverBridged);
+
+        let mut parts = parts(600);
+        parts.format = Format::NeverBridged;
+        assert!(opened == parts);
+    }
+
     #[test]
     fn a_packet_sealed_with_another_aad_does_not_open() {
         let plaintext = plaintext_of_600();

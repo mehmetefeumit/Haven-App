@@ -467,6 +467,50 @@ mod tests {
         }
     }
 
+    /// The handshake the product runs — Haven's prologue, empty payloads —
+    /// held to bytes computed outside this crate: the Noise specification
+    /// (revision 34) written out on Python `cryptography` 50.0.1's X25519,
+    /// HMAC-SHA256 and ChaCha20-Poly1305. Every public vector carries
+    /// payloads, so only this pins what hashing an empty one does.
+    #[test]
+    fn the_haven_handshake_matches_an_independent_implementation() {
+        const INIT_E: &str = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        const RESP_E: &str = "4142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60";
+        const HELLO: &str = "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c";
+        const REPLY: &str = "64b101b1d0be5a8704bd078f9895001fc03e8e9f9522f188dd128d9846d48466\
+                             aea2676cc8e1247abb73136f1206b6c4";
+        const HASH: &str = "a5f5b310ea183f551418fbf865cfde63c5bdbcafa664e3d4ee944d945c340caa";
+
+        let (initiator, hello) = Initiator::start(&mut Scripted::new(&unhex(INIT_E)));
+        assert_eq!(hello.to_vec(), unhex(HELLO));
+        let (mut responder, reply) =
+            respond(&hello, &mut Scripted::new(&unhex(RESP_E))).expect("a valid hello");
+        assert_eq!(reply.to_vec(), unhex(REPLY));
+        let mut initiator = initiator.finish(&reply).expect("a valid reply");
+
+        assert_eq!(
+            initiator.seal(b"first frame"),
+            Some(unhex(
+                "6423cec899ee71ad1b47d77c11f3d45bf01fc84c33828941546427"
+            ))
+        );
+        assert_eq!(
+            initiator.seal(b"second frame"),
+            Some(unhex(
+                "ffe213117e5b311489abff56461a279089f23d63b834741b51f70a2e"
+            ))
+        );
+        assert_eq!(
+            responder.seal(b"answer"),
+            Some(unhex("2b2abf8d09e2fed3b1158249507af1ca1c1dafebad33"))
+        );
+
+        let (initiator, _) =
+            Initiator::write_hello(&PROLOGUE, &[], &mut Scripted::new(&unhex(INIT_E)));
+        let (_, _, hash) = initiator.read_reply(&reply).expect("a valid reply");
+        assert_eq!(hash.to_vec(), unhex(HASH));
+    }
+
     #[test]
     fn the_public_handshake_is_the_haven_prologue_with_empty_payloads() {
         let prologue = b"haven/mesh/link\x01";
@@ -704,7 +748,9 @@ mod tests {
     fn every_secret_the_link_holds_wipes_itself_on_drop() {
         const fn assert_zeroize<T: Zeroize>() {}
         // x25519-dalek derives `Zeroize`, and the drop that calls it, only
-        // under its `zeroize` feature: losing the feature fails this build.
+        // under its `zeroize` feature. This holds the build as a whole to
+        // it: the MLS stack turns the feature on too, so it does not prove
+        // haven-core's own declaration is what does.
         assert_zeroize::<EphemeralSecret>();
         assert_zeroize::<SharedSecret>();
 
