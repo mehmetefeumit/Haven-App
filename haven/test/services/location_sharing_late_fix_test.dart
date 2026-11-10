@@ -54,11 +54,10 @@ Future<String?> _renderedAgePill(
           child: MemberMarker(
             initials: 'CC',
             publicKey: shown.pubkey,
-            fillColor: const Color(0xFF8800AA),
-            haloColor: const Color(0xFFFFFFFF),
             diameter: 48,
             nubLength: 0,
             angle: 0,
+            bearing: 0,
             offScreen: false,
             lastSeen: shown.timestamp,
           ),

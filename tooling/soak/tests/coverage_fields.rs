@@ -1,8 +1,8 @@
 //! `coverage.log`'s field set, pinned by equality, and every value's class.
 //!
 //! The same shape as `verdict_fields.rs`, for the second machine-readable file
-//! a night uploads: the monitor downloads it, so a field that drifts into it is
-//! a field that drifts into a public report. Both halves — a key the writer
+//! a night uploads: anyone who can read the run downloads it, so a field that
+//! drifts into it is a field that drifts into a downloadable report. Both halves — a key the writer
 //! emits and the table does not classify fails, and a classified key no sample
 //! reaches fails too — plus the vocabulary each literal is drawn from, proved
 //! whole by a wildcard-free match.
@@ -177,10 +177,11 @@ fn the_fault_list_is_the_whole_enum_and_not_one_variant_twice() {
 
 #[test]
 fn the_background_phase_literals_are_pinned_and_distinct_from_every_registry_id() {
-    // The monitor's knee reads PROBE_ROUND triples only; a teardown round
-    // folded into it would make the knee the schedule's length every night.
-    assert!(PROBE_ROUND == "nemesis", "the monitor reads this literal");
-    assert!(SETTLED_ROUND == "settled", "the monitor skips this literal");
+    // The knee (docs/SOAK_LANE.md) is read from PROBE_ROUND triples only; a
+    // teardown round folded into it would make the knee the schedule's length
+    // every night.
+    assert!(PROBE_ROUND == "nemesis", "the knee reads this literal");
+    assert!(SETTLED_ROUND == "settled", "the knee skips this literal");
     assert!(
         scenario_ids().len() == registry().len() + 2,
         "a background-phase literal collides with a registry id"

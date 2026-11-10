@@ -439,8 +439,8 @@ void main() {
   group('the recorder gate — the compiled default token is not traffic', () {
     // `wireRecorderDeclared` is false throughout this suite
     // (`log_needles_test.dart` pins that), so the parameter's default IS what
-    // an unproxied lane compiles: `e2e-flakiness-stress.yml` drives
-    // e2e_combined straight at strfry with no recorder anywhere in path.
+    // an unproxied run compiles: one straight at a relay with no recorder
+    // anywhere in path.
 
     test('the default token is refused, and no frame is written', () async {
       await connect();

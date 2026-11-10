@@ -2818,10 +2818,10 @@ void main() {
       // ONE gate over the whole proxy-only region, mirroring the pair's own
       // fail-closed send sites (`emitWireJournalSentinel` and
       // `announceCanaryManifest` both throw on an undeclared recorder). On a
-      // lane with no proxy in path — `e2e-flakiness-stress.yml` drives
-      // straight at strfry — the marker would be a harness verb written to a
-      // real relay, waiting out its budget for an ack nothing there can send,
-      // and the manifest would be canary content with no sidecar to reach.
+      // run with no proxy in path the marker would be a harness verb written
+      // to a real relay, waiting out its budget for an ack nothing there can
+      // send, and the manifest would be canary content with no sidecar to
+      // reach.
       // Skipping them cannot soften a WIRED lane: a journal with no sentinel
       // is META-FLOOR at every host oracle, never a pass.
       if (wireRecorderDeclared) {
@@ -5053,10 +5053,9 @@ void _assertResidualGroupAfterHandoff({
 /// The `p`-tag check is the exception and is kept for a weaker reason: a `p`
 /// on a 445 also violates C4's per-kind tag allow-list (445 → `{h,
 /// expiration}`), which is ungated and runs on both lanes. But C4 reads the
-/// wire journal, and `e2e-flakiness-stress.yml` drives this same scenario
-/// nightly with no recorder in path, so the drive-side check is not
-/// redundant there either — and it costs one `expect` in a loop that already
-/// walks every event.
+/// wire journal, and a run of this scenario with no recorder in path has
+/// none, so the drive-side check is not redundant there either — and it costs
+/// one `expect` in a loop that already walks every event.
 ///
 /// The forbidden-KIND half that used to live here (kinds 3 / 443 / 444 /
 /// 10051) moved UP into the standing privacy watch at the top of the
@@ -5233,10 +5232,9 @@ Future<void> _announceMlsGroupId({
   required List<String> routing,
   required String label,
 }) async {
-  // Lanes that declare NO recording proxy must not transmit this value at all.
-  // `e2e-flakiness-stress.yml` drives this same scenario straight at strfry
-  // (`HAVEN_E2E_RELAY: ws://10.0.2.2:7777`), and the real MLS group id reaching
-  // a relay is a Security Rule 4 violation, not a missing test signal. The
+  // Runs that declare NO recording proxy must not transmit this value at all:
+  // there it reaches a real relay, and the real MLS group id on a relay is a
+  // Security Rule 4 violation, not a missing test signal. The
   // library refuses too (TestRelay.announceMlsGroupId throws), so this gate is
   // the polite half of a fail-closed pair rather than the only one.
   if (!wireRecorderDeclared) {

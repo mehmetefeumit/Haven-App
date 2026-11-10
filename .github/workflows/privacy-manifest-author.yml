@@ -77,9 +77,8 @@ name: Privacy Manifest Author
 
 on:
   schedule:
-    # Tuesdays 07:00 UTC — clear of the Monday 06:00 dependency-audit and
-    # E2E-flakiness slots, so a weekly maintenance failure is attributable to
-    # one workflow at a glance.
+    # Tuesdays 07:00 UTC — clear of the Monday 06:00 dependency-audit slot, so
+    # a weekly maintenance failure is attributable to one workflow at a glance.
     - cron: '0 7 * * 2'
   workflow_dispatch:
 

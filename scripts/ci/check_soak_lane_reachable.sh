@@ -25,15 +25,12 @@
 #       admit the group the caller passes. A reusable workflow nothing calls
 #       runs on no commit.
 #
-#   L2  THE JOB NAME IS COUNTED. e2e-flakiness.yml selects lane jobs by a regex
-#       over the job display name. A soak job named outside it is invisible to
-#       every flakiness report, so a lane that starts failing intermittently
-#       would never appear in the one place that looks for exactly that. The
-#       regex is read FROM e2e-flakiness.yml rather than restated here, so the
-#       two cannot drift. A scheduler job that calls the lane under a matrix
-#       must also carry the matrix key in its own `name:`: the report groups
-#       rows by the full display name, every slot shares the inner job id, and
-#       without it four slots collapse into one row.
+#   L2  THE SLOT IS IN THE JOB NAME. A scheduler job that calls the lane under
+#       a matrix must carry the matrix key in its own `name:`.
+#       scripts/ci/file_soak_issue.sh finds each slot's job as `Soak Core
+#       (<profile>, <slot>) / e2e_soak_core_<profile>`, every slot shares the
+#       inner job id, and without the key no slot's job can be found, so every
+#       slot is filed red.
 #
 #   L3  THE ARTIFACT IS SELF-TESTED. rust-check.yml runs the shipped binary's
 #       `--self-test`. `cargo test` proves the code; the self-test proves the
@@ -133,7 +130,6 @@ readonly SELF_NAME='check_soak_lane_reachable'
 readonly CI_YML='.github/workflows/ci.yml'
 readonly LANE_YML='.github/workflows/soak-core.yml'
 readonly RUST_YML='.github/workflows/rust-check.yml'
-readonly FLAKINESS_YML='.github/workflows/e2e-flakiness.yml'
 readonly RUNNER_SH='tooling/e2e/ci/run-soak-core.sh'
 readonly GATE_SH='tooling/e2e/ci/logscan-gate.sh'
 readonly PROFILE_DIR='tooling/soak/profiles'
@@ -144,7 +140,7 @@ readonly SEED_SH='scripts/ci/soak_seed.sh'
 readonly SOAK_WORKFLOWS=2
 # Equality pin: a fixture added or removed without moving this line is a
 # self-test that no longer says what it runs.
-readonly SELF_TEST_FIXTURES=57
+readonly SELF_TEST_FIXTURES=56
 # The scheduler jobs L4/L7 skip by id, and why each has nothing to gate. Any
 # other job in a scheduler either calls the reusable or drives the rig itself.
 declare -A SCHEDULER_JOBS=(
@@ -267,36 +263,9 @@ check_ci_calls_the_lane() {
   return 0
 }
 
-# The regex e2e-flakiness.yml selects lane jobs with, read from that file.
-flakiness_job_re() { # flakiness_job_re <root>
-  local f="$1/${FLAKINESS_YML}"
-  [[ -f "${f}" ]] || return 1
-  uncommented "${f}" | grep -oE 'test\("[^"]+"\)' | head -1 | sed -e 's/^test("//' -e 's/")$//'
-}
-
-# L2 — the lane's job names are counted by the flakiness report.
-check_job_names_are_counted() {
-  local root="$1" re job rc=0 n=0
-  re="$(flakiness_job_re "${root}")"
-  if [[ -z "${re}" ]]; then
-    broken "could not read the lane-job regex out of ${FLAKINESS_YML}. This guard derives the naming rule from that file rather than restating it; with nothing extracted, every name below would pass."
-    return 2
-  fi
-  local f="${root}/${LANE_YML}"
-  [[ -f "${f}" ]] || { broken "${LANE_YML} not found."; return 2; }
-  while IFS=$'\t' read -r job _ _; do
-    [[ -n "${job}" ]] || continue
-    n=$(( n + 1 ))
-    if ! grep -qE -- "${re}" <<<"${job}"; then
-      fail "${LANE_YML}: job \`${job}\` does not match the lane-job pattern ${FLAKINESS_YML} counts (${re}). A lane outside it is invisible to every flakiness report, which is the one place an intermittently failing lane would otherwise surface."
-      rc=1
-    fi
-  done < <(lane_jobs "${f}")
-  if (( n == 0 )); then
-    broken "${LANE_YML} declares no job this guard can read — the job extractor has rotted, so every check over it is vacuous."
-    return 2
-  fi
-  # A scheduler's matrix caller must carry its matrix key in its `name:`.
+# L2 — a scheduler's matrix caller carries its matrix key in its `name:`.
+check_slot_names() {
+  local root="$1" job rc=0 n=0
   local wf first last body key name
   while IFS= read -r wf; do
     [[ "${wf}" == "${LANE_YML}" ]] && continue
@@ -305,14 +274,19 @@ check_job_names_are_counted() {
       grep -qF -- "uses: ./${LANE_YML}" <<<"${body}" || continue
       key="$(matrix_key "${body}")"
       [[ -n "${key}" ]] || continue
+      n=$(( n + 1 ))
       name="$(grep -m1 -E '^    name:' <<<"${body}" || true)"
       if [[ "${name}" != *"matrix.${key}"* ]]; then
-        fail "${wf}:${job} calls ${LANE_YML} under a matrix over \`${key}\` but its \`name:\` does not interpolate \`matrix.${key}\`. ${FLAKINESS_YML} groups rows by the full display name and every slot shares the inner job id, so the slots collapse into one row and a red loses its slot."
+        fail "${wf}:${job} calls ${LANE_YML} under a matrix over \`${key}\` but its \`name:\` does not interpolate \`matrix.${key}\`. file_soak_issue.sh finds each slot's job by that name and every slot shares the inner job id, so no slot's job can be found and every slot is filed red."
         rc=1
       fi
     done < <(lane_jobs "${root}/${wf}")
   done < <(soak_workflows "${root}")
-  log "L2: ${n} soak job(s) all match ${FLAKINESS_YML}'s pattern."
+  if (( n == 0 )); then
+    broken "no scheduler calls ${LANE_YML} under a matrix — the nightly is gone or the job extractor has rotted, so this check is vacuous."
+    return 2
+  fi
+  log "L2: ${n} matrix caller(s) of ${LANE_YML}, each naming its slot."
   return "${rc}"
 }
 
@@ -712,7 +686,7 @@ check_nightly_scheduler() {
 run_all() {
   local root="$1"
   check_ci_calls_the_lane "${root}" || true
-  check_job_names_are_counted "${root}" || true
+  check_slot_names "${root}" || true
   check_self_test_runs "${root}" || true
   check_scan_precedes_upload "${root}" || true
   check_scan_step_survives_the_reaper "${root}" || true
@@ -885,16 +859,6 @@ jobs:
       - name: Rig self-test
         run: cargo run --profile soak --bin haven-soak -- --self-test > "${RUNNER_TEMP}/soak-selftest.log" 2>&1
 YAML
-    cat > "${r}/${FLAKINESS_YML}" <<'YAML'
-name: E2E Flakiness
-on: [schedule]
-jobs:
-  report:
-    runs-on: ubuntu-latest
-    steps:
-      - run: |
-          gh run view --jq '[.jobs[] | select(.name | test("(^| / )(e2e_|scenario_[0-9]|flake_stress)"))]'
-YAML
     cat > "${r}/${RUNNER_SH}" <<'SH'
 #!/usr/bin/env bash
 source "${DIR}/logscan-gate.sh"
@@ -947,7 +911,7 @@ TOML
 
   local ok="${tmp}/ok"; _mk "${ok}"
   _case "a wired lane passes L1" 0 check_ci_calls_the_lane "${ok}"
-  _case "a wired lane passes L2" 0 check_job_names_are_counted "${ok}"
+  _case "a wired lane passes L2" 0 check_slot_names "${ok}"
   _case "a wired lane passes L3" 0 check_self_test_runs "${ok}"
   _case "a wired lane passes L4" 0 check_scan_precedes_upload "${ok}"
   _case "a wired lane passes L7" 0 check_scan_step_survives_the_reaper "${ok}"
@@ -985,24 +949,20 @@ TOML
     "${commented}/${CI_YML}"
   _case "a commented-out call is not a call" 1 check_ci_calls_the_lane "${commented}"
 
-  # --- L2.
-  local badname="${tmp}/badname"; _mk "${badname}"
-  sed -i 's/^  e2e_soak_core_pr:/  soak_core_pr:/' "${badname}/${LANE_YML}"
-  _case "a job name outside the flakiness pattern fails" 1 check_job_names_are_counted "${badname}"
-
-  # The slot must reach the row name, or four slots are one monitor row.
+  # --- L2. The slot must reach the job name, or the issue filer finds no
+  #     slot's job.
   local slotless="${tmp}/slotless"; _mk "${slotless}"
   sed -i '/^    name: Soak Core (nightly/d' "${slotless}/${NIGHTLY_YML}"
-  _case "a matrix caller with no name: fails" 1 check_job_names_are_counted "${slotless}"
+  _case "a matrix caller with no name: fails" 1 check_slot_names "${slotless}"
 
   local slotnotnamed="${tmp}/slotnotnamed"; _mk "${slotnotnamed}"
   sed -i 's/^    name: Soak Core (nightly, ${{ matrix.slot }})/    name: Soak Core (nightly)/' \
     "${slotnotnamed}/${NIGHTLY_YML}"
-  _case "a matrix caller whose name: drops the matrix key fails" 1 check_job_names_are_counted "${slotnotnamed}"
+  _case "a matrix caller whose name: drops the matrix key fails" 1 check_slot_names "${slotnotnamed}"
 
-  local nore="${tmp}/nore"; _mk "${nore}"
-  sed -i 's/test(".*")/select(.name)/' "${nore}/${FLAKINESS_YML}"
-  _case "an unreadable flakiness regex is BROKEN, not clean" 2 check_job_names_are_counted "${nore}"
+  local nocaller="${tmp}/nocaller"; _mk "${nocaller}"
+  sed -i 's|uses: ./.github/workflows/soak-core.yml|uses: ./.github/workflows/elsewhere.yml|' "${nocaller}/${NIGHTLY_YML}"
+  _case "no matrix caller at all is BROKEN, not clean" 2 check_slot_names "${nocaller}"
 
   # --- L3.
   local noself="${tmp}/noself"; _mk "${noself}"
@@ -1265,7 +1225,7 @@ main() {
     echo "own fixtures, executed nowhere. See docs/SOAK_LANE.md." >&2
     exit 1
   fi
-  log "OK — ci.yml drives the pr profile, the jobs are counted, the artifact is self-tested, the gate stands before every upload and again in a step no reaping can skip, and the profiles and deadlines agree."
+  log "OK — ci.yml drives the pr profile, each nightly slot is named, the artifact is self-tested, the gate stands before every upload and again in a step no reaping can skip, and the profiles and deadlines agree."
 }
 
 main "$@"

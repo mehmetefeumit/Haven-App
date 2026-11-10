@@ -2147,18 +2147,7 @@ class AppLocalizationsUr extends AppLocalizations {
   String get mapAttributionCreditsButton => 'نقشے کے کریڈٹس اور لائسنس';
 
   @override
-  String userLocationMarkerSemantics(String accuracy) {
-    return 'آپ کے مقام کا نشان$accuracy';
-  }
-
-  @override
-  String userLocationMarkerAccuracy(int meters) {
-    final intl.NumberFormat metersNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String metersString = metersNumberFormat.format(meters);
-
-    return '۔ درستگی: $metersString میٹر';
-  }
+  String get userLocationMarkerSemantics => 'آپ کے مقام کا نشان';
 
   @override
   String memberMarkerMinutesShort(int count) {

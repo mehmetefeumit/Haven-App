@@ -230,11 +230,6 @@ readonly KNOWN_UNWIRED_LANES=(
   # containment needs a recorder and is proved by the Rust layers.
   'e2e-profile.yml:e2e_profile_android'
   'e2e-profile.yml:e2e_profile_ios'
-
-  # Nightly repetition of the e2e_combined flow for flake measurement. It runs
-  # the same scenario N times in one job; N journals into one recorder would
-  # need per-iteration rotation the harness does not do.
-  'e2e-flakiness-stress.yml:flake_stress'
 )
 
 VIOLATIONS=0
@@ -589,7 +584,7 @@ check_oracle_runs() { # <records> <file> <job>
 # one list — the day a soak job does bring up a relay, the flag is demanded
 # without anybody having to remember why.
 # ---------------------------------------------------------------------------
-readonly LOGSCAN_RUNNER_RE='run-(single-avd-scenario|ios-sim-scenario|ios-bg-publish|b4-ios-real-gps|b7-ios-auth-tier|integration-tests|relay-customization|flake-stress|m7-background-catchup|b1-fgs-publish|b3-real-gps|b5-permission-revocation|b6-location-provider-toggle|b8-clock-skew|b9-network-reconnect|kp-rotation|soak-core)[.]sh'
+readonly LOGSCAN_RUNNER_RE='run-(single-avd-scenario|ios-sim-scenario|ios-bg-publish|b4-ios-real-gps|b7-ios-auth-tier|integration-tests|relay-customization|m7-background-catchup|b1-fgs-publish|b3-real-gps|b5-permission-revocation|b6-location-provider-toggle|b8-clock-skew|b9-network-reconnect|kp-rotation|soak-core)[.]sh'
 
 check_logscan_is_on() { # <records> <file> <job>
   local records="$1" file="$2" job="$3"

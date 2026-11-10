@@ -15,7 +15,7 @@
 # produce an "unset" or "neutral" build. It produces a LIVE-SYNC build, chosen
 # by nobody, under whatever name the lane happens to carry.
 #
-# That is not hypothetical. `e2e-flakiness-stress.yml` inherited `true` from the
+# That is not hypothetical. `e2e-flakiness-stress.yml` (since removed) inherited `true` from the
 # Phase-B flip and spent months running the ten M11 live-sync scenarios inside a
 # budget derived from the poll path (a 20-minute per-iteration DRIVE_TIMEOUT
 # against a suite e2e-android.yml gives 28 minutes), failing most nights on

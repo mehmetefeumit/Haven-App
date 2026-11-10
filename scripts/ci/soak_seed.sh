@@ -6,11 +6,10 @@
 #
 # ## Why this exists
 #
-# Two callers need the same seed for the same night: soak-nightly.yml's
-# `prepare` job, which hands each matrix slot its seed, and the flakiness
-# monitor, which names the seed each slot ran. A second copy of the formula is
-# a copy that can be narrowed on its own, and the monitor would then name a
-# seed no slot ran.
+# soak-nightly.yml's `prepare` job hands each matrix slot its seed from here,
+# and a night is reproduced from the same formula (`--seed`). A second copy of
+# it is a copy that can be narrowed on its own, and a reproduction would then
+# run a seed no slot ran.
 #
 # 16 hex is the rig's `seed: u64`, which `parse_u64` accepts with its `0x`
 # prefix — and never more: the banner is scanned as a `soak` sink, and
@@ -43,9 +42,6 @@
 #   soak_seed.sh --prepare <profile>                      the workflow's entry:
 #       SOAK_SLOT_COUNT (empty = DEFAULT_SLOTS, else 1-4) slots s1..sN, pinned when
 #       SOAK_PINNED_SEED is non-empty, derived from the run otherwise
-#   soak_seed.sh --default-slots                          the slots a scheduled
-#       night runs, one per line — what the flakiness monitor expects a night
-#       to hold, from the same constant --prepare reads
 #   soak_seed.sh --self-test
 #
 # Exit codes: 0 done; 2 refused (bad argument, API failure, malformed
@@ -153,7 +149,7 @@ prepare() { # <profile>
 
 # Pinned by equality against the fixtures that ran, because a fixture that
 # stops running is the one way a deleted fixture reports success.
-readonly SELF_TEST_FIXTURES=29
+readonly SELF_TEST_FIXTURES=28
 
 self_test() {
   local tmp fails=0 n=0 self
@@ -293,13 +289,6 @@ slot_list=["s1","s2","s3"]'
       '(27) a huge slot count is refused before any slot list is built'
   rc="$(SOAK_SLOT_COUNT=0 _run ok 2026-07-12T06:32:34Z --prepare nightly)"
   _ok "$(_c '[[ "${rc}" == 2 && ! -s "${calls}" ]]')" '(28) a slot count of zero is refused'
-  # (29) The monitor's expectation and a scheduled night's slots are one list.
-  local listed json
-  rc=0; listed="$(bash "${self}" --default-slots 2>/dev/null)" || rc=$?
-  json="$(printf '"%s",' ${listed})"
-  SOAK_SLOT_COUNT='' SOAK_PINNED_SEED='' _run ok 2026-07-12T06:32:34Z --prepare nightly >/dev/null
-  _ok "$(_c '[[ "${rc}" == 0 && -n "${listed}" ]] && grep -qxF "slot_list=[${json%,}]" "${gho}"')" \
-      '(29) --default-slots prints exactly the slots --prepare derives for a scheduled night'
 
   if (( fails )); then echo 'self-test: FAILED' >&2; return 1; fi
   if (( n != SELF_TEST_FIXTURES )); then
@@ -320,7 +309,6 @@ case "${1:-}" in
   --derive-run)  (( $# >= 2 )) || die 'usage: --derive-run <profile> <slot>...'; shift; derive_run "$@" ;;
   --pinned-seed) (( $# >= 2 )) || die 'usage: --pinned-seed <seed> <slot>...'; shift; pinned_seed "$@" ;;
   --prepare)     (( $# == 2 )) || die 'usage: --prepare <profile>'; prepare "$2" ;;
-  --default-slots) (( $# == 1 )) || die 'usage: --default-slots'; slots_upto "${DEFAULT_SLOTS}" ;;
   --self-test)   self_test ;;
-  *)             die 'usage: --seed | --derive-run | --pinned-seed | --prepare | --default-slots | --self-test (see the header)' ;;
+  *)             die 'usage: --seed | --derive-run | --pinned-seed | --prepare | --self-test (see the header)' ;;
 esac

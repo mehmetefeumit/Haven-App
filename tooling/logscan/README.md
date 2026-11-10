@@ -84,7 +84,7 @@ locally, on a reproduction, and delete what it writes.
 
 A lane with the wire proxy declares every value it mints over the control
 channel. A lane **without** one — every b-lane, the integration, relay-
-customization, flake-stress and profile lanes — mints its identities from
+customization and profile lanes — mints its identities from
 constants that are checked into the harness, so the host can declare them
 instead. Two flags do that, and the difference between them is what the manifest
 is allowed to hold.
@@ -236,13 +236,13 @@ dead capture and a mis-installed log backend all look clean to a needle search.
   **shape** plants still apply, so a dead capture is still caught. The harness
   prints its token either way — `LogNeedles.plant` declares only where a channel
   exists — so under this label an undeclared Dart token is the harness working
-  as designed and is NOT rc 3; ten nightly `E2E Flakiness Stress` runs were rc 3
-  on nothing else. Declaring `none` while a sidecar declared a plant is rc 2:
+  as designed and is NOT rc 3; ten nightly runs of the since-removed
+  `E2E Flakiness Stress` lane were rc 3 on nothing else. Declaring `none` while a sidecar declared a plant is rc 2:
   the two claims cannot both be true. So is SCANNING a `none` manifest while a
   `*.needles.decl` sidecar sits in its directory — a lane that recorded
   declarations must not certify itself as one that could not have, and the seal
   alone cannot catch it (`logscan_seal host` globs those sidecars and ignores
-  them, and three lanes seal before their first capture, when none exists yet).
+  them, and several lanes seal before their first capture, when none exists yet).
 * Which sink classes must carry the declared tokens is the policy's
   `declared_plants_expected`, not a list in the code. It is `true` for `logcat`
   and `drive`, and `false` for `ios`: no captured `log show` export has yet shown
@@ -646,11 +646,7 @@ permission-revocation `drive=7` — that lane alone drops the verdict,
 because ACT 1's green shape is the app dying under the driver mid-session, so a
 COMPLETE act 1 ends in a `DriverError` and prints none. Every one of them but
 the core flow and profile lanes, whose runner gates no relay log, also seals
-`relay=7`. The flake-stress lane is the one that seals `relay=7` ALONE, and
-its seal comes first, so every inner gate reuses that manifest and
-`run-single-avd-scenario.sh`'s `drive=18` never applies there: each of its
-iterations drives the whole core flow onto a device-wide capture, which is the
-shape the policy's own `drive` and `logcat` defaults were sized for. Each of the eleven runners above builds its own
+`relay=7`. Each of the eleven runners above builds its own
 skeleton fixture in its `--self-test` and reds if the floor ever exceeds
 it, so a red lane cannot be re-pinned from a transcript's length again.
 
@@ -759,8 +755,8 @@ forbids outright, and it is not hypothetical: a planted
 produced **zero** structural hits before this rule existed.
 
 Haven's own relay sockets are Rust-side, so today the only Dart WebSocket in the
-tree is the E2E harness's `TestRelay` client — and the flake-stress lane drives
-it against a real endpoint spelling. The measured occurrence is CI run
+tree is the E2E harness's `TestRelay` client — and the since-removed
+flake-stress lane drove it against a real endpoint spelling. The measured occurrence is CI run
 35664400984, whose harness lost its first dial to the hermetic relay and printed
 `Connection closed before full header was received, uri = http://10.0.2.2:7777`
 into both the logcat and the drive transcript.

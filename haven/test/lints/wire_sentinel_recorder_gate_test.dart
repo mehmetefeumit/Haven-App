@@ -3,13 +3,11 @@
 //
 // `TestRelay.emitWireJournalSentinel` refuses the compiled-default token, so a
 // caller that loses this gate cannot put a harness verb on a real relay — it
-// fails instead. And that failure lands in exactly one place: the nightly
-// e2e-flakiness-stress lane, which drives this scenario straight at strfry
-// (`HAVEN_E2E_RELAY: ws://10.0.2.2:7777`, no proxy in path). An ungated emit
-// there reported the scenario as failed on every iteration of every run for a
-// month, while the lane's whole purpose — measuring this scenario's flake rate
-// — measured nothing. No PR check could see it, because no PR lane runs
-// unproxied.
+// fails instead. That failure lands only on a run of this scenario straight at
+// a relay, with no proxy in path. The since-removed e2e-flakiness-stress lane
+// was one: an ungated emit there reported the scenario as failed on every
+// iteration of every run for a month, and no PR check could see it, because
+// no PR lane runs unproxied.
 //
 // So the gate is pinned HERE, where a plain `flutter test` sees it, exactly as
 // the MLS-group-id announce helper's gate is pinned in
@@ -194,9 +192,8 @@ void main() {
           'every sentinel emit must sit inside `$kRecorderGate`. Ungated, it '
           'writes a harness verb to whatever socket the lane opened and then '
           'waits out its whole budget for an ack only a recording proxy can '
-          'send — which is how e2e-flakiness-stress, the one lane that drives '
-          'this scenario with no proxy in path, spent a month reporting a '
-          'failed scenario instead of measuring its flake rate.',
+          'send — which is how a lane that drove this scenario with no '
+          'proxy in path spent a month reporting a failed scenario.',
     );
   });
 }

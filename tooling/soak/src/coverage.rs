@@ -1,9 +1,9 @@
 //! `coverage.log`: which (scenario, nemesis, invariant) triples a run reached,
 //! and the tick each was first reached at.
 //!
-//! The input to the 30-night duration review (`PLAN_PHASE2` OQ-L): a nightly
-//! whose LAST new triple keeps appearing early is a nightly that runs longer
-//! than it learns. Written beside `verdict.log`, with the same `.log` extension
+//! The input to a nightly duration review (`PLAN_PHASE2` OQ-L), read by hand
+//! from the uploaded artifacts: a nightly whose LAST new triple keeps
+//! appearing early is a nightly that runs longer than it learns. Written beside `verdict.log`, with the same `.log` extension
 //! every scan in the chain selects by, and pinned the same way — by equality,
 //! in `tests/coverage_fields.rs`.
 //!

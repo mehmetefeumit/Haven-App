@@ -88,6 +88,43 @@ void main() {
     });
   });
 
+  group('AvatarImageCache — keyFor', () {
+    test('formats the key as hash@px', () {
+      expect(AvatarImageCache.keyFor('abc', 156), 'abc@156');
+    });
+
+    test('distinct sizes give distinct keys', () {
+      expect(
+        AvatarImageCache.keyFor('abc', 104),
+        isNot(AvatarImageCache.keyFor('abc', 156)),
+      );
+    });
+
+    test('the same hash at two sizes is cached independently', () async {
+      final cache = AvatarImageCache.instance;
+      final small = await _makeImage();
+      final large = await _makeImage();
+      cache.put(AvatarImageCache.keyFor('h', 104), small);
+      cache.put(AvatarImageCache.keyFor('h', 156), large);
+      expect(cache.length, 2);
+      expect(cache.get(AvatarImageCache.keyFor('h', 104)), same(small));
+      expect(cache.get(AvatarImageCache.keyFor('h', 156)), same(large));
+    });
+
+    test('the same hash at two sizes is evicted independently', () async {
+      final cache = AvatarImageCache.instance;
+      final small = AvatarImageCache.keyFor('h', 104);
+      final large = AvatarImageCache.keyFor('h', 156);
+      cache.put(small, await _makeImage());
+      cache.put(large, await _makeImage());
+      for (var i = 0; i < AvatarImageCache.maxEntries - 1; i++) {
+        cache.put('other-$i', await _makeImage());
+      }
+      expect(cache.get(small), isNull, reason: 'the older size is the LRU');
+      expect(cache.get(large), isNotNull);
+    });
+  });
+
   group('AvatarImageCache — clear', () {
     test('clear empties the cache', () async {
       final cache = AvatarImageCache.instance;

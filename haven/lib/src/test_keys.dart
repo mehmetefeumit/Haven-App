@@ -200,6 +200,11 @@ abstract final class WidgetKeys {
   static Key markerTeardrop(String pubkeyHex) =>
       ValueKey('marker_teardrop_$pubkeyHex');
 
+  /// The [Semantics] node of a [MemberMarker], wrapping its tap-sized box
+  /// (not the larger paint footprint), keyed by the member's pubkey hex.
+  static Key markerSemantics(String pubkeyHex) =>
+      ValueKey('marker_semantics_$pubkeyHex');
+
   /// Root [Card] of the sharing-health banner.
   static const Key sharingHealthBanner = Key('sharing_health_banner');
 

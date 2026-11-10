@@ -6,8 +6,8 @@
 # `0x + sha256("<profile>|<date>|<slot>")[:16]`, where the date is the RUN's
 # `created_at` — so a re-run of a slot (rerun-runner-losses.yml) repeats the
 # same experiment rather than running the next day's. Four slots are four
-# repeats of every nightly arm over four schedules; the monitor attributes a red
-# to its slot because the `core` job's `name:` carries it.
+# repeats of every nightly arm over four schedules; the issue filer attributes a
+# red to its slot because the `core` job's `name:` carries it.
 #
 # # The cron, and the ledger it clears
 #
@@ -38,7 +38,7 @@
 # No arm is required to be red today (`EXPECTED_RED` in
 # tooling/soak/tests/oracles.rs is empty). `verdict.log` records a run's FIRST
 # violation only, so an expected-red arm early in the walk would mask every
-# later defect from the issue path and the monitor, and no night could be
+# later defect from the issue path, and no night could be
 # all-slot green: such an arm runs in `weekly` and is asserted red on every
 # commit by tooling/soak/tests/oracles.rs, and returns to the nightly in the
 # change that fixes it, as S23 `chained-commit-backlog` did with C7's, S05
@@ -112,8 +112,8 @@ jobs:
       fail-fast: false
       matrix:
         slot: ${{ fromJSON(needs.prepare.outputs.slot_list) }}
-    # The flakiness monitor groups rows by the FULL display name, and all slots
-    # share the inner job id; without the slot here four slots are one row.
+    # file_soak_issue.sh finds each slot's job by its FULL display name, and all
+    # slots share the inner job id; without the slot here no slot's job is found.
     name: Soak Core (nightly, ${{ matrix.slot }})
     # The reusable runs actions/checkout and inherits this job's grant.
     permissions:

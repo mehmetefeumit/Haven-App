@@ -61,10 +61,10 @@
 # The static half above covers the whole tree. The runtime half only reaches a
 # lane whose runner consults `drive_log_reports_test_failure`, and for most rows
 # in the manifest that consultation is one DELEGATION hop away:
-# run-integration-tests.sh, run-relay-customization.sh and run-flake-stress.sh
-# drive each target through run-single-avd-scenario.sh, while
+# run-integration-tests.sh and run-relay-customization.sh drive each target
+# through run-single-avd-scenario.sh, while
 # run-b4-ios-real-gps.sh and run-b7-ios-auth-tier.sh go through
-# run-ios-sim-scenario.sh, which is a sixth: it drives ios_bg_mirror_test.dart
+# run-ios-sim-scenario.sh, which is a fifth: it drives ios_bg_mirror_test.dart
 # for e2e-ios.yml directly and reaches the predicate only through the
 # ios-flake-lib.sh it sources. A runner refactor that stopped delegating —
 # inlining its own `flutter drive`, say — would delete the runtime backstop for

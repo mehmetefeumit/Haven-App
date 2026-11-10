@@ -880,16 +880,9 @@
 #     the other. Widening any of that turns a bounded re-run into the blanket
 #     retry tooling/e2e/ci/ios-flake-lib.sh exists to refuse.
 #
-#   Soak monitor section              scripts/ci/soak_monitor_section.sh
-#     The Soak Nightly rows of the weekly flakiness report. Its subject is the
-#     Actions API, read weekly by e2e-flakiness.yml, so it never runs in an
-#     enforcing mode here; the fixtures drive it against a stubbed `gh` and
-#     the real soak_seed.sh, and they are what keeps a streak from counting an
-#     unrun slot and a seed from naming a night no slot ran.
-#
 #   Soak seed derivation              scripts/ci/soak_seed.sh
-#     The one definition of a nightly slot's seed, shared by the scheduler and
-#     the monitor. Its subject is another workflow's behaviour (the run's
+#     The one definition of a nightly slot's seed, used by the scheduler and
+#     by every reproduction of a night. Its subject is another workflow's behaviour (the run's
 #     created_at, read once, never `/attempts/<n>`, never the local clock), so
 #     the fixtures are the whole proof.
 #
@@ -1633,7 +1626,7 @@ jobs:
         run: bash scripts/ci/check_profile_override_single_site.sh
 
       # A poll lane that inherits live-sync is a lane whose name is wrong about
-      # what it runs. e2e-flakiness-stress spent months running the M11 live
+      # what it runs. The since-removed e2e-flakiness-stress spent months running the M11 live
       # suite inside a poll-sized budget, red most nights, while its header said
       # it mirrored the poll lane; e2e-profile ran its two platform jobs on
       # OPPOSITE receive paths. Both were omissions, not decisions.
@@ -1827,10 +1820,6 @@ jobs:
       - name: E2E harness self-test (relay-customization leak gate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-relay-customization.sh --self-test
-
-      - name: E2E harness self-test (flake-stress leak gate)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/run-flake-stress.sh --self-test
 
       - name: E2E harness self-test (background-catchup leak gate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -2436,9 +2425,8 @@ jobs:
       # docs/CI_HARDENING_BACKLOG.md catalogues — written, reviewed, green on
       # its own fixtures, executed nowhere. Eight links: ci.yml calls the pr
       # profile on `needs: [rust-tooling]`, the caller that runs rust-check.yml's
-      # soak-tooling job (L1); the job names are inside the pattern
-      # e2e-flakiness.yml counts (read from that file, never restated), and a
-      # scheduler's matrix caller carries its slot in its name (L2);
+      # soak-tooling job (L1); a scheduler's matrix caller carries its slot in
+      # its name, which the issue filer finds each slot's job by (L2);
       # rust-check.yml runs the shipped binary's `--self-test` (L3); every job
       # in every soak-*.yml drives through the gated runner under an inner
       # deadline and uploads only after it (L4); every such job also scans in a
@@ -2453,7 +2441,7 @@ jobs:
 
       # Every link broken in turn over synthetic workflow trees, plus both
       # false-positive directions and every way the extractor could go blind
-      # (an unreadable flakiness regex, a job list it cannot parse, a profile
+      # (no matrix caller to read, a job list it cannot parse, a profile
       # declaring nothing). Count pinned by equality.
       - name: Soak lane-reachability guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -2469,20 +2457,6 @@ jobs:
       - name: Soak seed derivation self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/soak_seed.sh --self-test
-
-      # The flakiness monitor's Soak section runs weekly in e2e-flakiness.yml,
-      # never here — its subject is the Actions API — so its fixtures are the
-      # proof: per-slot rows grouped by the full job name (the slot count read
-      # from soak_seed.sh's DEFAULT_SLOTS, never restated), the seed derived by
-      # the REAL soak_seed.sh from each run's created_at (a fixed vector from an
-      # independent hash, never the job's start, never `/attempts/`), a red or a
-      # cancelled or an absent slot each ending the all-slot-green streak, the
-      # 14-day coverage knee, the 30-night review trigger, "no nights yet" at
-      # rc 0, and every refused API read exit 3 with nothing written. Count
-      # pinned by equality.
-      - name: Soak monitor section self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/soak_monitor_section.sh --self-test
 
       # The nightly's issue path. Not a `check_*`: its subject is the GitHub
       # API, so its fixtures are the proof — the body EQUALS the allowlist, each

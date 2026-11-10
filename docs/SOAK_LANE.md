@@ -1476,8 +1476,8 @@ than resolved silently (owner decision Q4).
 | `scripts/ci/check_soak_test_only.sh` | The rig stays out of the app and out of every build path; `test-utils` stays a DEV edge of `rust_builder` and is in no `[features]` alias of any manifest, `default` included (that one word would open the probe seams on every DEBUG build, where the `compile_error!` never fires); no shipped manifest sets `debug-assertions = true` under any `[profile.*]` (that one line disarms haven-core's `compile_error!`); no `{:?}` of a foreign type in the rig; the timeline field-class test exists and pins its count |
 | `scripts/ci/check_soak_clock_partition.sh` | The two clocks do not convert, and neither reaches the other's seams. Its seam vocabulary is derived from `haven-core`, so a rename is BROKEN rather than clean |
 | `scripts/ci/check_no_kp_lifetime_override.sh` | No shipped Rust path (`haven-core/src`, `haven/rust_builder/src`, comments included) names `key_package_lifetime`: S12's `kp-expired-rejected` sets the lifetime on purpose, and the same call in the product could lengthen `not_after` past the rotation (OD-8) |
-| `scripts/ci/check_soak_lane_reachable.sh` | Something RUNS the rig: `ci.yml` calls the `pr` profile on `needs: [rust-tooling]`, the caller of `rust-check.yml`'s `tooling` group, the job names are inside the pattern `e2e-flakiness.yml` counts and a scheduler's matrix caller carries its slot in its name, `rust-check.yml` self-tests the shipped binary, every job in every `soak-*.yml` (the count pinned) drives through the gated runner under an inner deadline and uploads only after it — in a scheduler the skip is structural (the job that `uses:` the reusable, and `prepare`/`file-issue` by id with their reasons), so a job running `run_soak_local.sh` or the bare rig is read and fails — every such job also scans in a step of its own whose condition the drive's outcome cannot switch off (L7), the profiles nest over (scenario, arm) pairs, the TOML's deadline equals the workflow's literal, and `soak-nightly.yml` calls the nightly with per-slot seeds, off every other cron, non-cancelling, each checkout granted, one artifact name per slot (L8) |
-| `scripts/ci/soak_seed.sh` (`--self-test`) | The one seed definition the scheduler and the monitor share: `0x` + 16 hex of `sha256("<profile>\|<date>\|<slot>")`, the date the RUN's `created_at`; a known vector from an independent hash, every refusal printing no seed, and a recording `gh` that reds if `/attempts/<n>` is ever read |
+| `scripts/ci/check_soak_lane_reachable.sh` | Something RUNS the rig: `ci.yml` calls the `pr` profile on `needs: [rust-tooling]`, the caller of `rust-check.yml`'s `tooling` group, a scheduler's matrix caller carries its slot in its name, which the issue filer finds each slot's job by, `rust-check.yml` self-tests the shipped binary, every job in every `soak-*.yml` (the count pinned) drives through the gated runner under an inner deadline and uploads only after it — in a scheduler the skip is structural (the job that `uses:` the reusable, and `prepare`/`file-issue` by id with their reasons), so a job running `run_soak_local.sh` or the bare rig is read and fails — every such job also scans in a step of its own whose condition the drive's outcome cannot switch off (L7), the profiles nest over (scenario, arm) pairs, the TOML's deadline equals the workflow's literal, and `soak-nightly.yml` calls the nightly with per-slot seeds, off every other cron, non-cancelling, each checkout granted, one artifact name per slot (L8) |
+| `scripts/ci/soak_seed.sh` (`--self-test`) | The one seed definition, used by the scheduler and every reproduction of a night: `0x` + 16 hex of `sha256("<profile>\|<date>\|<slot>")`, the date the RUN's `created_at`; a known vector from an independent hash, every refusal printing no seed, and a recording `gh` that reds if `/attempts/<n>` is ever read |
 | `check_e2e_step_timeout_ordering.sh` + `check_e2e_lane_budget.sh` | Extended with `is_soak_body()` (excluding `--self-test`). Before it, a plain `ubuntu-latest` `run:` step got C3 alone: the lane could have driven the rig with no inner deadline at all and both guards would have reported it compliant |
 | `check_no_identifier_logging.sh`, `check_no_key_logging.sh` | `tooling/soak` as its own root with its own floor in each |
 | `check_logscan_policy.sh` | `DECLARED_PLANTS_OFF['soak']` — the rig has no Dart channel, so a declared Dart plant would be a control nothing could satisfy; its `rust` shape plant is what proves the sink was reached |
@@ -1570,15 +1570,16 @@ date is involved) and `slots` 1–4.
 **The promotion rule.** An arm moves between tiers only in a commit that cites
 at least fourteen consecutive green nights — consecutive SCHEDULED nights,
 since there is no Sunday run, and green meaning ALL FOUR slots green, read from
-the four `core` jobs rather than from the run's conclusion — with zero rc 3 for
-that scenario (an rc 3 reds its slot, so a green night already has none).
+the four `core` jobs rather than from the run's conclusion (`gh run list
+--workflow soak-nightly.yml --event schedule`, then each run's jobs) — with
+zero rc 3 for that scenario (an rc 3 reds its slot, so a green night already has none).
 PR-gated ⊆ nightly-gated stays enforced by L5; nothing from Phase 2 moves to
 the PR lane before then.
 
 **No expected-red arm is in the nightly.** `verdict.log` records a run's
 FIRST violation only, so in the nightly an expected-red arm would be the
 violation every night reported: every later defect would be masked from the
-issue path and the monitor, no night could be all-slot green, and the
+issue path, no night could be all-slot green, and the
 fourteen-night count could never start. An arm required red runs in `weekly`
 (no scheduled execution until Phase 4) and is asserted red on every commit by
 `tests/oracles.rs` `EXPECTED_RED` in `cargo test` (the `soak-tooling` job),
@@ -1619,43 +1620,6 @@ would, with rc 0, which is how you walk a schedule up to the tick before the
 break.
 
 ---
-
-## The monitor
-
-The weekly flakiness report (`e2e-flakiness.yml`, Mondays) carries a **Soak
-Nightly** section written by `scripts/ci/soak_monitor_section.sh`. It reads the
-scheduled `Soak Nightly` runs of the last 30 days (a `workflow_dispatch` repro
-is not a night) and prints one row per slot, grouped by the full job name
-`Soak Core (nightly, <slot>) / e2e_soak_core_nightly`: decided nights, red
-nights, the slot's streak, the seed of the latest night and of the last red
-one — each DERIVED with `soak_seed.sh --seed nightly <run date> <slot>` from the
-run's `created_at`, so it names exactly the seed the slot ran — and the median
-minutes; then one row per night with each slot's outcome and EVERY issue that
-names its run — in the body that created it, or in a comment, because a key
-already open is commented on rather than filed again (an issue at gh's
-100-comment page is refused, exit 2, since a night past it could not be
-linked). The line **`consecutive all-slot-green nights: N`** is the promotion
-rule's count: read from the slot jobs, never from the run, and ended by any
-slot that is red, cancelled, skipped or absent. The nightly is not in the
-report's fail-rate table — that table reads `ci.yml`, `e2e-nightly.yml` and the
-stress loop, and a red night is a finding, not a wobble — and the section
-prints no rate. The PR-profile soak lane IS in the table, like any lane: it
-runs one fixed seed, so a red on main that comes and goes is rig
-non-determinism, which the 1 % target exists to catch. It also states when the **30-night cost review** is due
-— once thirty scheduled nights have completed, about the fifth Monday — and
-prints what that review reads: the per-slot median minutes and the coverage
-knee (the lower median, over each slot-night of the last 14 days — the artifact
-retention — of the first probe after the last new fault label: the largest
-`first_tick` among its `coverage.log`'s probe-round triples; neither the
-teardown round's `settled` triples, graded at the schedule's last tick every
-night, nor an arm's, which carry that arm's own world's tick, are read). The
-review is one commit changing `duration_secs` or the slot count
-and citing both. If the section's API reads fail (exit 3) or it refuses an input
-(exit 2) it writes nothing, the report's summary gets one fixed line saying
-which, and the step fails with that code, so a missing section never reads as
-a quiet week; before the first scheduled night it says "No nights yet" and
-stays green. The slots a night is expected to hold come from
-`soak_seed.sh --default-slots`, the list `--prepare` derives for a schedule.
 
 ## coverage.log
 

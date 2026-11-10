@@ -455,8 +455,8 @@ pub fn validate_out_path(path: &Path) -> Result<(), String> {
 /// the label is wrong and the relaxation would forgive precisely the lost
 /// declaration it exists to catch. A mislabelled lane is refused rather than
 /// quietly scanned — `logscan_seal host` globs the sidecars and then ignores
-/// them, and the pre-drive seals (the stress, integration and relay-customization
-/// lanes seal before their first capture) mean seal time cannot see one yet.
+/// them, and the pre-drive seals (several lanes seal before their first capture)
+/// mean seal time cannot see one yet.
 ///
 /// # Errors
 ///

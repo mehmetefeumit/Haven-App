@@ -164,7 +164,7 @@ note_violation() { fail_msg "$*"; VIOLATIONS=$((VIOLATIONS + 1)); }
 # the emulator action runs each of its lines as a separate shell.
 #
 # Full-line comments are stripped from the body. Without that, a step comment
-# mentioning `HAVEN_DRIVE_TIMEOUT=28m` (e2e-flakiness-stress.yml has one) would
+# mentioning `HAVEN_DRIVE_TIMEOUT=28m` (a lane workflow carried one) would
 # be read as a declaration. A trailing comment is no part of a scalar value
 # either: `timeout-minutes: 90  # sized below` is 90, not unreadable.
 #
@@ -1060,7 +1060,7 @@ self_test() {
   _expect "retry-bounded macOS lane: good passes, over-budget one fails" "${j}" 1 "Bad drive"
 
   # --- Fixture K: a step comment naming a timeout must NOT be read as a
-  #     declaration. e2e-flakiness-stress.yml carries exactly such a comment.
+  #     declaration. A lane workflow once carried exactly such a comment.
   local k="${tmp}/k"; mkdir -p "${k}"
   write_fixture "${k}/comment.yml" \
 'jobs:' \

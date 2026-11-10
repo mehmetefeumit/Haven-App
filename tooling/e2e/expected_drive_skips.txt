@@ -19,10 +19,10 @@
 #            drives ios_bg_mirror_test.dart and reaches the predicate only
 #            through the ios-flake-lib.sh it sources. Between them those four
 #            carry 17 of the 23 rows below (4 + 10 + 2 + 1, in that order), so the indirection
-#            is the load-bearing half of this claim, not a footnote to it. Two
-#            further runners delegate without carrying a row of their own —
-#            run-flake-stress.sh and run-b4-ios-real-gps.sh — and
-#            drive-log-lib.sh's header lists all five run-*.sh from that side.
+#            is the load-bearing half of this claim, not a footnote to it. One
+#            further runner delegates without carrying a row of its own —
+#            run-b4-ios-real-gps.sh — and drive-log-lib.sh's header lists all
+#            five run-*.sh from that side.
 #            The runtime half fails the lane when any reason below is
 #            seen in the reporter's output, or when the `~N` skipped column is
 #            non-zero. This is what makes a declared hatch impossible to FIRE

@@ -14,6 +14,7 @@ import 'package:haven/src/constants/feature_flags.dart';
 import 'package:haven/src/providers/member_profile_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
+import 'package:haven/src/widgets/map/marker_metrics.dart';
 
 /// Diameter (logical px) shared by both member-avatar branches so the image
 /// avatar and the initials [CircleAvatar] are always rendered at the same
@@ -61,24 +62,34 @@ class MemberAvatar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final colorScheme = Theme.of(context).colorScheme;
-    // Desaturated HSL hue derived from the pubkey gives each member a stable
-    // tint without the brand-blue/red collisions of Colors.primaries.
-    final hue = (pubkey.hashCode.abs() % 360).toDouble();
-    final tint = HSLColor.fromAHSL(1, hue, 0.30, 0.55).toColor();
+    final entry = avatarPaletteFor(pubkey);
 
     final initial = initialFor(displayName, pubkey);
 
     // Build the initials fallback once; reused by both branches.
     final initialsAvatar = CircleAvatar(
       radius: memberAvatarDiameter / 2,
-      backgroundColor: tint.withValues(alpha: 0.18),
-      foregroundColor: colorScheme.onSurface,
-      child: Text(
-        initial,
-        style: TextStyle(
-          fontWeight: FontWeight.w600,
-          color: colorScheme.onSurface,
+      backgroundColor: Colors.transparent,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [entry.top, entry.bottom],
+          ),
+        ),
+        child: SizedBox.square(
+          dimension: memberAvatarDiameter,
+          child: Center(
+            child: Text(
+              initial,
+              style: const TextStyle(
+                fontWeight: FontWeight.w600,
+                color: kAvatarInitialsColor,
+              ),
+            ),
+          ),
         ),
       ),
     );

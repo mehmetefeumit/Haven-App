@@ -145,8 +145,8 @@
 # The NDK's attempts are charged to the same budget by the same rules, so this
 # is the bound with them included; the install that succeeds is part of B. On
 # CI since the ubuntu-26.04 image that install has MEASURED at most ~1 min,
-# which leaves every line of the table below inside its cap (e2e-flakiness-
-# stress is the tightest: 16.9 + 1 + 3 = 20.9 < 22). What ENFORCES it is only
+# which leaves every line of the table below inside its cap (e2e-android and
+# e2e-profile are the tightest: 15.8 + 1 + 3 = 19.8 < 25). What ENFORCES it is only
 # NDK_ATTEMPT_SECS (5 min): a download five times slower than any measured
 # would still land, and would put that lane over its cap — the exposure Flutter's
 # own uncapped call already had, not one this script adds.
@@ -159,7 +159,6 @@
 # Against the MEASURED build times of CI run 35622556197 and the step caps in
 # force:
 #
-#   e2e-flakiness-stress  B = 16.9 min (worst of 96 runs)  -> 19.9 < cap 22
 #   e2e-integration       B = 15.9 min (7 APKs: 1 cold +   -> 18.9 < cap 35
 #                             6 warm)
 #   e2e-android, e2e-profile                               -> 18.8 < cap 25
@@ -170,10 +169,9 @@
 #                             runs 2026-09-19..21)
 #
 # So no `timeout-minutes` anywhere needs to move, and none may shrink below
-# these. Shrink the budget before you grow it: e2e-flakiness-stress's step cap
-# is 22 and its JOB cap is already GitHub's 360-minute ceiling, so that lane
-# cannot fund a bigger one, and the other job caps clear their step caps by only
-# 3-6 minutes (check_e2e_step_timeout_ordering.sh C6).
+# these. Shrink the budget before you grow it: the job caps clear their step
+# caps by only 3-6 minutes (check_e2e_step_timeout_ordering.sh C6), so a bigger
+# budget would have to be paid for in every lane's job cap.
 #
 # Usage:
 #   scripts/ci/build_apk_with_retry.sh <flutter-target-platform> [extra flutter args...]

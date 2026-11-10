@@ -26,9 +26,11 @@ import 'package:flutter/foundation.dart';
 
 /// Singleton bounded LRU cache for decoded avatar [ui.Image]s.
 ///
-/// Keyed by the profile picture's content-hash string (`Profile.pictureHash`),
-/// so the same avatar is decoded at most once per foreground session
-/// regardless of how many markers repaint.
+/// Keyed by [keyFor] — the profile picture's content-hash string
+/// (`Profile.pictureHash`) plus the decoded pixel size — so the same avatar is
+/// decoded at most once per size per foreground session regardless of how many
+/// markers repaint, and a pixel-ratio change re-decodes instead of serving a
+/// wrong-size image.
 class AvatarImageCache extends ChangeNotifier {
   AvatarImageCache._();
 
@@ -36,16 +38,23 @@ class AvatarImageCache extends ChangeNotifier {
 
   /// Maximum number of decoded images held simultaneously.
   ///
-  /// Each decoded marker thumbnail is roughly 96×96 RGBA = ~37 KiB; 20
-  /// entries ≈ 750 KiB — comfortably within the 8 MiB privacy cap.
+  /// A 52 dp head decoded at 3× is 156×156 RGBA ≈ 95 KiB for a square source
+  /// (a non-square one keeps its aspect, so its long side is larger); 20
+  /// entries ≈ 1.9 MiB — still within the 8 MiB privacy cap.
   static const int maxEntries = 20;
+
+  /// The cache key for [contentHash] decoded with its short side at
+  /// [targetPx] pixels.
+  static String keyFor(String contentHash, int targetPx) =>
+      '$contentHash@$targetPx';
 
   // LinkedHashMap preserves insertion order; we treat it as LRU by removing
   // and re-inserting on access (move-to-back).
   final LinkedHashMap<String, ui.Image> _cache =
       LinkedHashMap<String, ui.Image>();
 
-  /// Returns the cached [ui.Image] for [contentHash], or `null` on a miss.
+  /// Returns the cached [ui.Image] for [contentHash] (a [keyFor] key), or
+  /// `null` on a miss.
   ///
   /// A hit moves the entry to the back (most-recently-used position).
   ui.Image? get(String contentHash) {

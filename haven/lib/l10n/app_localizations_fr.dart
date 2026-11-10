@@ -2194,18 +2194,7 @@ class AppLocalizationsFr extends AppLocalizations {
   String get mapAttributionCreditsButton => 'Crédits et licence de la carte';
 
   @override
-  String userLocationMarkerSemantics(String accuracy) {
-    return 'Marqueur de votre position$accuracy';
-  }
-
-  @override
-  String userLocationMarkerAccuracy(int meters) {
-    final intl.NumberFormat metersNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String metersString = metersNumberFormat.format(meters);
-
-    return '. Précision : $metersString mètres';
-  }
+  String get userLocationMarkerSemantics => 'Marqueur de votre position';
 
   @override
   String memberMarkerMinutesShort(int count) {

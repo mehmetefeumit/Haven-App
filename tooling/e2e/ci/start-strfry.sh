@@ -37,7 +37,10 @@
 #                        none). One store under a second authority: the
 #                        location relay override must differ from the inbox
 #                        relay by host:port yet hold the events the harness
-#                        reads through the first port (e2e-flakiness-stress).
+#                        reads through the first port. On a proxied lane the
+#                        wire proxy's second route plays that part; a run
+#                        with no proxy needs this instead
+#                        (run-single-avd-scenario.sh names it).
 #   STRFRY_CONFIG        Config file name under tooling/e2e (default:
 #                        strfry.conf, NIP-77 off). `strfry-negentropy.conf`
 #                        is the same with NIP-77 on, for the

@@ -10,8 +10,8 @@
 # # No expected-red arm is here
 #
 # `verdict.log` records a run's FIRST violation only: an expected-red arm early
-# in the walk would mask every later defect from the issue path and the
-# monitor, and no night could ever be all-slot green, so the fourteen-night gate
+# in the walk would mask every later defect from the issue path, and no night
+# could ever be all-slot green, so the fourteen-night gate
 # could never start. An arm required red stays asserted so on every commit by
 # `tests/oracles.rs` `EXPECTED_RED` and runs in `weekly`; it returns here in the
 # same change that fixes its defect, as S23 `chained-commit-backlog` did with

@@ -2053,18 +2053,7 @@ class AppLocalizationsJa extends AppLocalizations {
   String get mapAttributionCreditsButton => '地図のクレジットとライセンス';
 
   @override
-  String userLocationMarkerSemantics(String accuracy) {
-    return 'あなたの位置マーカー$accuracy';
-  }
-
-  @override
-  String userLocationMarkerAccuracy(int meters) {
-    final intl.NumberFormat metersNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String metersString = metersNumberFormat.format(meters);
-
-    return '。精度: $metersStringメートル';
-  }
+  String get userLocationMarkerSemantics => 'あなたの位置マーカー';
 
   @override
   String memberMarkerMinutesShort(int count) {

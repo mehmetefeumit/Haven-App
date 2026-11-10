@@ -1,18 +1,20 @@
 /// Unified circle-member map marker for Haven.
 ///
-/// One continuous teardrop: a plain circular avatar bubble centred on the
-/// member while comfortably in view, growing a joined tail (pointing at the
-/// member's true location) as they near or leave the viewport edge, and
-/// shrinking to a tiny edge droplet welded to the border when far off-screen.
-/// Position, `diameter`, `nubLength`, and `angle` are recomputed every frame
-/// by the layer directly from the map camera, so the motion tracks the user's
-/// pan exactly; only the brief appear transition is animated here.
+/// One continuous pin: an avatar head floating above the member's coordinate
+/// on a short tail whose tip IS the coordinate, stretching and tilting as the
+/// head is held at the viewport edge, and shrinking to a tiny edge droplet
+/// welded to the border when far off-screen. Position, `diameter`,
+/// `nubLength`, and `angle` are recomputed every frame by the layer directly
+/// from the map camera, so the motion tracks the user's pan exactly; only the
+/// brief appear transition is animated here.
 library;
 
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/utils/marker_geometry.dart'
@@ -20,7 +22,9 @@ import 'package:haven/src/utils/marker_geometry.dart'
         CompassDirection,
         compassDirectionFromAngle,
         kDropletFullDiameter,
+        kDropletMaxTailOnScreen,
         kMinTapTarget;
+import 'package:haven/src/utils/reduce_motion.dart';
 import 'package:haven/src/widgets/map/marker_metrics.dart';
 
 /// Maps a [CompassDirection] to its localized name for accessibility labels.
@@ -98,23 +102,26 @@ String? _formatAgeForSemantics(AppLocalizations l10n, Duration age) {
   return l10n.memberMarkerMinutesAgoSemantics(age.inMinutes);
 }
 
-/// A circle member's marker — the unified teardrop (see the library doc).
+/// The hairline outside a marker's white ring, shared with the own dot. It
+/// holds 3:1 against the pale default basemap, where the ring cannot.
+const Color kMarkerKeyline = Color(0x73000000);
+
+/// A circle member's marker — the unified pin (see the library doc).
 ///
 /// When a decoded [ui.Image] is available for the member (supplied by the
 /// layer via [avatarImage]) it is clipped to the head circle and drawn with
-/// cover-fit semantics, replacing the initials glyph.  The teardrop tail,
-/// halo, shadow, age pill, and tap target are all unaffected; initials remain
-/// the fallback when [avatarImage] is null.
+/// cover-fit semantics, replacing the initials glyph.  The tail, ring,
+/// shadow, age pill, and tap target are all unaffected; initials remain the
+/// fallback when [avatarImage] is null.
 class MemberMarker extends StatefulWidget {
   /// Creates a member marker.
   const MemberMarker({
     required this.initials,
     required this.publicKey,
-    required this.fillColor,
-    required this.haloColor,
     required this.diameter,
     required this.nubLength,
     required this.angle,
+    required this.bearing,
     required this.offScreen,
     super.key,
     this.displayName,
@@ -129,30 +136,29 @@ class MemberMarker extends StatefulWidget {
   /// Initials to display (1-2 characters).
   final String initials;
 
-  /// Member pubkey hex — keys the teardrop painter for tests and seeds the hue.
+  /// Member pubkey hex — keys the painter for tests and selects the palette.
   final String publicKey;
 
   /// Local contact display name, used for the off-screen semantics label.
   final String? displayName;
 
-  /// Body colour (the member's per-pubkey hue).
-  final Color fillColor;
-
-  /// Halo (outline) colour, normally `colorScheme.surface`.
-  final Color haloColor;
-
   /// Current bubble diameter in logical pixels.
   final double diameter;
 
-  /// Current outward tail length (`0` ⇒ a plain circle on the member's spot).
+  /// Current tail length, measured from the rim (`0` ⇒ a plain circle).
   final double nubLength;
 
   /// Direction, in radians, from the bubble centre toward the member's true
-  /// location (screen space: `+x` east / `+y` south). Orients the tail.
+  /// location (screen space: `+x` east / `+y` south). Orients the tail only.
   final double angle;
 
-  /// Whether the member is truly off-screen — drives the semantics label, the
-  /// age-pill gate, and (with [nubLength]) the visual nub.
+  /// Direction, in radians, of the member's overshoot past the viewport (`0`
+  /// on-screen). Drives the spoken compass word: the tail of a member due east
+  /// just past the edge leans south-east, so [angle] would misreport it.
+  final double bearing;
+
+  /// Whether the member is truly off-screen — drives the semantics label and
+  /// the age-pill gate.
   final bool offScreen;
 
   /// Timestamp the location was originally recorded — drives the age pill and
@@ -190,10 +196,11 @@ class MemberMarker extends StatefulWidget {
   static const Duration _appearDuration = Duration(milliseconds: 180);
 
   /// The square paint-box size for a bubble of [diameter] — large enough that
-  /// the tail, halo, and shadow never clip. The layer positions the marker
-  /// centred on its bubble point using this, so the two stay in agreement.
+  /// the longest tail (reach 22 from the rim), ring, keyline and shadow never
+  /// clip. The layer positions the marker centred on its head using this, so
+  /// the two stay in agreement.
   static double footprintFor(double diameter) =>
-      math.max(diameter + 24, 48).toDouble();
+      math.max(diameter + 2 * kDropletMaxTailOnScreen + 24, kMinTapTarget);
 
   @override
   State<MemberMarker> createState() => _MemberMarkerState();
@@ -204,58 +211,46 @@ class _MemberMarkerState extends State<MemberMarker>
   late final AnimationController _controller;
   late final CurvedAnimation _fade;
   late final Animation<double> _scale;
-
-  bool _reduceMotion = false;
-  bool _appearStarted = false;
+  bool _pressed = false;
 
   @override
   void initState() {
     super.initState();
     _controller = AnimationController(
       duration: MemberMarker._appearDuration,
+      // The fade is the one cue reduce motion still gets, so the OS's
+      // disable-animations flag must not shrink it to a single frame.
+      animationBehavior: AnimationBehavior.preserve,
       vsync: this,
     );
     _fade = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
     _scale = Tween<double>(begin: 0.8, end: 1).animate(_fade);
     _controller.addStatusListener(_onStatusChanged);
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _reduceMotion = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
-    if (!_appearStarted) {
-      _appearStarted = true;
-      if (widget.exiting) {
-        // Constructed already departing (no live frame to fade from, e.g. the
-        // marker's keyed state was not reused). Snap hidden and let the layer
-        // drop us on the next frame rather than animating from nothing.
-        _controller.value = 0;
-        _scheduleExitComplete();
-        return;
-      }
-      _controller.value = _reduceMotion ? 1.0 : 0.0;
-      if (!_reduceMotion) _controller.forward();
+    if (widget.exiting) {
+      // Constructed already departing (no live frame to fade from, e.g. the
+      // marker's keyed state was not reused). Stay hidden and let the layer
+      // drop us on the next frame rather than animating from nothing.
+      _scheduleExitComplete();
+    } else {
+      _controller.forward();
     }
   }
 
   @override
   void didUpdateWidget(MemberMarker oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // Without a detector there is no `onTapCancel`, so the press would stick.
+    if (widget.onTap == null && _pressed) _pressed = false;
     if (widget.exiting == oldWidget.exiting) return;
     if (widget.exiting) {
       // The member left the circle (e.g. a circle switch): play the appear
-      // transition in reverse, then ask the layer to remove us.
-      if (_reduceMotion) {
-        _scheduleExitComplete();
-      } else {
-        // Driving the easeOut controller backwards samples the curve on a
-        // falling t, which reads as an easeIn (accelerating) exit — the
-        // Material-motion convention for a leaving element. Intentional: do
-        // not "fix" this to a literal easeIn reverseCurve (double inversion).
-        _controller.reverse();
-      }
-    } else if (!_reduceMotion) {
+      // transition in reverse, then ask the layer to remove us. Driving the
+      // easeOut controller backwards samples the curve on a falling t, which
+      // reads as an easeIn (accelerating) exit — the Material-motion
+      // convention for a leaving element. Intentional: do not "fix" this to a
+      // literal easeIn reverseCurve (double inversion).
+      _controller.reverse();
+    } else {
       // Re-joined mid-fade — reverse course and fade back in.
       _controller.forward();
     }
@@ -277,12 +272,23 @@ class _MemberMarkerState extends State<MemberMarker>
     }
   }
 
-  /// Reports exit completion after the current frame, used when there is no
-  /// transition to wait on (reduce-motion, or a marker born already exiting).
+  /// Reports exit completion after the current frame, for a marker born
+  /// already exiting, which has no transition to wait on.
   void _scheduleExitComplete() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && widget.exiting) widget.onExitComplete?.call();
     });
+  }
+
+  void _setPressed(bool pressed) {
+    if (_pressed != pressed) setState(() => _pressed = pressed);
+  }
+
+  /// The off-screen path's haptic lives in `focusMapOnPoint`; one per tap.
+  void _handleTap() {
+    _setPressed(false);
+    if (!widget.offScreen) unawaited(HapticFeedback.lightImpact());
+    widget.onTap?.call();
   }
 
   /// 1-2 initials; a single initial while small, the second once the bubble has
@@ -292,10 +298,11 @@ class _MemberMarkerState extends State<MemberMarker>
   String _semanticsLabel(AppLocalizations l10n, String? semanticsAge) {
     if (widget.offScreen) {
       // The compass bearing is real geography and is never mirrored under RTL;
-      // only the direction word is localized.
+      // only the direction word is localized. It comes from the overshoot
+      // bearing, never the tail angle (see [MemberMarker.bearing]).
       final direction = _compassDirectionLabel(
         l10n,
-        compassDirectionFromAngle(widget.angle),
+        compassDirectionFromAngle(widget.bearing),
       );
       final offName = widget.displayName?.trim();
       return (offName != null && offName.isNotEmpty)
@@ -318,7 +325,6 @@ class _MemberMarkerState extends State<MemberMarker>
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    final colorScheme = Theme.of(context).colorScheme;
     final footprint = MemberMarker.footprintFor(widget.diameter);
     final tapSize = math.max(widget.diameter, kMinTapTarget);
     final textScaler = MediaQuery.textScalerOf(
@@ -340,7 +346,7 @@ class _MemberMarkerState extends State<MemberMarker>
     // marker's tail and pill never collide.
     final pillBelow = widget.nubLength >= 0.5 && math.sin(widget.angle) < 0;
 
-    final visual = IgnorePointer(
+    final paintedVisual = IgnorePointer(
       child: CustomPaint(
         key: WidgetKeys.markerTeardrop(widget.publicKey),
         size: Size.square(footprint),
@@ -348,65 +354,101 @@ class _MemberMarkerState extends State<MemberMarker>
           diameter: widget.diameter,
           nubLength: widget.nubLength,
           angle: widget.angle,
-          fillColor: widget.fillColor,
-          haloColor: widget.haloColor,
+          palette: avatarPaletteFor(widget.publicKey),
           glyph: _glyph(),
-          glyphColor: onAvatarColor(widget.fillColor),
           textScaler: textScaler,
           avatarImage: widget.avatarImage,
         ),
       ),
     );
 
+    // Appear/exit/press scale about the tip, the one point that must not move
+    // off the member's coordinate.
+    final reach = widget.diameter / 2 + widget.nubLength;
+    final tip = Offset(
+      footprint / 2 + reach * math.cos(widget.angle),
+      footprint / 2 + reach * math.sin(widget.angle),
+    );
+    final tipAlignment = Alignment(
+      tip.dx / footprint * 2 - 1,
+      tip.dy / footprint * 2 - 1,
+    );
+    final visual = widget.onTap == null
+        ? paintedVisual
+        : AnimatedScale(
+            scale: _pressed ? 0.94 : 1,
+            // Reduce motion forbids movement, not the press state.
+            duration: reduceMotionOf(context)
+                ? Duration.zero
+                : Duration(milliseconds: _pressed ? 100 : 150),
+            curve: Curves.easeOut,
+            alignment: tipAlignment,
+            child: paintedVisual,
+          );
+    // Fade-only under reduce motion: it forbids movement, not opacity.
+    final Widget transition = reduceMotionOf(context)
+        ? FadeTransition(opacity: _fade, child: visual)
+        : FadeTransition(
+            opacity: _fade,
+            child: ScaleTransition(
+              scale: _scale,
+              alignment: tipAlignment,
+              child: visual,
+            ),
+          );
+
     // A departing marker fades out as a sighted-only flourish: expose no label
-    // and (via excludeSemantics) drop the age pill while exiting, so a screen
-    // reader never announces a member who has already left the selected circle.
-    // With an empty label and a null onTap (the layer makes exiting markers
-    // non-interactive), this node carries no semantic content and is pruned.
-    return Semantics(
-      label: widget.exiting ? '' : _semanticsLabel(l10n, semanticsAge),
-      button: widget.onTap != null,
-      excludeSemantics: true,
-      onTap: widget.onTap,
-      child: SizedBox(
-        width: footprint,
-        height: footprint,
-        // Clip.none so the age pill and an inward-biased tap target are not
-        // clipped by the footprint box (the layer clips the whole overlay to
-        // the viewport instead).
-        child: Stack(
-          alignment: Alignment.center,
-          clipBehavior: Clip.none,
-          children: [
-            if (_reduceMotion)
-              visual
-            else
-              FadeTransition(
-                opacity: _fade,
-                child: ScaleTransition(scale: _scale, child: visual),
-              ),
-            if (pillLabel != null)
-              _AgePill(
+    // while exiting, so a screen reader never announces a member who has
+    // already left the selected circle. With an empty label and a null onTap
+    // (the layer makes exiting markers non-interactive), this node carries no
+    // semantic content and is pruned.
+    return SizedBox(
+      width: footprint,
+      height: footprint,
+      // Clip.none so the age pill and an inward-biased tap target are not
+      // clipped by the footprint box (the layer clips the whole overlay to
+      // the safe rect instead).
+      child: Stack(
+        alignment: Alignment.center,
+        clipBehavior: Clip.none,
+        children: [
+          transition,
+          if (pillLabel != null)
+            ExcludeSemantics(
+              child: _AgePill(
                 label: pillLabel,
                 diameter: widget.diameter,
                 below: pillBelow,
-                colorScheme: colorScheme,
                 textScaler: textScaler,
               ),
-            if (widget.onTap != null)
-              Transform.translate(
-                offset: widget.tapOffset,
-                child: SizedBox(
-                  width: tapSize,
-                  height: tapSize,
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: widget.onTap,
-                  ),
-                ),
+            ),
+          // The semantics node is the tap-sized box, not the 120 px footprint,
+          // so a screen reader's focus ring matches what a finger can hit.
+          Transform.translate(
+            offset: widget.tapOffset,
+            child: Semantics(
+              key: WidgetKeys.markerSemantics(widget.publicKey),
+              container: true,
+              label: widget.exiting ? '' : _semanticsLabel(l10n, semanticsAge),
+              button: widget.onTap != null,
+              excludeSemantics: true,
+              onTap: widget.onTap == null ? null : _handleTap,
+              child: SizedBox(
+                width: tapSize,
+                height: tapSize,
+                child: widget.onTap == null
+                    ? null
+                    : GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTapDown: (_) => _setPressed(true),
+                        onTapUp: (_) => _setPressed(false),
+                        onTapCancel: () => _setPressed(false),
+                        onTap: _handleTap,
+                      ),
               ),
-          ],
-        ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -414,35 +456,36 @@ class _MemberMarkerState extends State<MemberMarker>
 
 /// The age pill anchored to the head's top corner (top by default, bottom when
 /// the tail points up so the two never collide).
+///
+/// Constant white ink, not theme colours: the basemap is chosen independently
+/// of the theme, so a `surface`-coloured pill vanished on a dark basemap.
 class _AgePill extends StatelessWidget {
   const _AgePill({
     required this.label,
     required this.diameter,
     required this.below,
-    required this.colorScheme,
     required this.textScaler,
   });
 
   final String label;
   final double diameter;
   final bool below;
-  final ColorScheme colorScheme;
   final TextScaler textScaler;
 
   @override
   Widget build(BuildContext context) {
-    // Sit just outside the head's right corner (diameter/2 ≈ head radius).
+    // On the head's frame rather than its face, and far enough in that the pill
+    // stays inside the safe rect when the head is held at the right inset.
     final r = diameter / 2;
     return Transform.translate(
-      offset: Offset(r * 0.5, below ? r * 0.7 : -r * 0.7),
+      offset: Offset(r * 0.55, below ? r * 0.8 : -r * 0.8),
       child: Container(
-        decoration: BoxDecoration(
-          color: colorScheme.surface,
-          borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: colorScheme.outline),
-          boxShadow: [
+        decoration: ShapeDecoration(
+          color: const Color(0xFFFFFFFF),
+          shape: const StadiumBorder(),
+          shadows: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.2),
+              color: Colors.black.withValues(alpha: 0.25),
               blurRadius: 4,
               offset: const Offset(0, 2),
             ),
@@ -452,10 +495,11 @@ class _AgePill extends StatelessWidget {
         child: Text(
           label,
           textScaler: textScaler,
-          style: TextStyle(
+          style: const TextStyle(
             fontSize: 11,
             fontWeight: FontWeight.w600,
-            color: colorScheme.onSurfaceVariant,
+            color: Color(0xFF525252),
+            fontFeatures: [ui.FontFeature.tabularFigures()],
             height: 1,
           ),
         ),
@@ -464,21 +508,26 @@ class _AgePill extends StatelessWidget {
   }
 }
 
-/// Paints the unified teardrop pointing along [angle].
+/// Ring stroke width for a head of [diameter]: 3 px at full size, easing to
+/// 1.5 px at the far bead.
+@visibleForTesting
+double markerRingWidthFor(double diameter) =>
+    1.5 + 1.5 * (diameter / kDropletFullDiameter).clamp(0.0, 1.0);
+
+/// Paints the pin pointing along [angle].
 ///
-/// The shape is a circle (the head) with two tangent lines meeting at a tip
+/// The shape is a circle (the head) with two concave flanks meeting at a tip
 /// [nubLength] beyond the rim; it degenerates to a plain circle when
-/// [nubLength] is negligible (the on-screen state). Three paint passes —
-/// shadow, halo stroke, body fill — for legibility over any basemap.
+/// [nubLength] is negligible. The canvas stays upright and the PATH is rotated
+/// instead, so the shadow always falls from the top of the screen and the
+/// gradient never turns with the tail.
 class _MarkerTeardropPainter extends CustomPainter {
   const _MarkerTeardropPainter({
     required this.diameter,
     required this.nubLength,
     required this.angle,
-    required this.fillColor,
-    required this.haloColor,
+    required this.palette,
     required this.glyph,
-    required this.glyphColor,
     required this.textScaler,
     this.avatarImage,
   });
@@ -486,10 +535,8 @@ class _MarkerTeardropPainter extends CustomPainter {
   final double diameter;
   final double nubLength;
   final double angle;
-  final Color fillColor;
-  final Color haloColor;
+  final AvatarPaletteEntry palette;
   final String glyph;
-  final Color glyphColor;
   final TextScaler textScaler;
 
   /// Pre-decoded avatar image; when non-null replaces the initials glyph in
@@ -499,70 +546,62 @@ class _MarkerTeardropPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final radius = diameter / 2;
-    final path = _teardropPath(radius, nubLength);
     final center = Offset(size.width / 2, size.height / 2);
-
-    // Lighten the halo and shadow as the bubble shrinks so a far edge droplet
-    // reads daintier than a full on-screen bubble (which keeps 3dp / 2dp).
     final scale = (diameter / kDropletFullDiameter).clamp(0.0, 1.0);
-    final haloWidth = 1.5 + 1.5 * scale;
+    final ringWidth = markerRingWidthFor(diameter);
     final elevation = 1.0 + 1.0 * scale;
+    final headRect = Rect.fromCircle(center: center, radius: radius);
+
+    final shape = teardropPath(radius, nubLength, ringWidth / 2).transform(
+      (Matrix4.translationValues(center.dx, center.dy, 0)..rotateZ(angle))
+          .storage,
+    );
 
     canvas
-      ..save()
-      ..translate(center.dx, center.dy)
-      ..rotate(angle)
-      // 1. Soft drop shadow lifts the bubble off busy tiles.
-      ..drawShadow(path, Colors.black.withValues(alpha: 0.4), elevation, false)
-      // 2. Halo stroke keeps a crisp edge over dark/saturated tiles.
+      // Soft drop shadow lifts the pin off busy tiles.
+      ..drawShadow(shape, Colors.black.withValues(alpha: 0.4), elevation, false)
+      // A hairline just outside the white ring keeps it, and the tip, readable
+      // on a pale basemap and on white roads.
       ..drawPath(
-        path,
+        shape,
         Paint()
-          ..color = haloColor
+          ..color = kMarkerKeyline
           ..style = PaintingStyle.stroke
-          ..strokeWidth = haloWidth
+          ..strokeWidth = ringWidth + 2
           ..strokeJoin = StrokeJoin.round
           ..isAntiAlias = true,
       )
-      // 3. Body fill in the member's hue.
+      // The gradient is measured in screen space, so it never turns with the
+      // tail.
       ..drawPath(
-        path,
+        shape,
         Paint()
-          ..color = fillColor
+          ..shader = LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [palette.top, palette.bottom],
+          ).createShader(headRect)
           ..style = PaintingStyle.fill
           ..isAntiAlias = true,
-      )
-      ..restore();
+      );
 
-    // Avatar image (when available) is drawn upright at the head centre,
-    // clipped to a circle of radius [radius].  Initials are the fallback.
+    // Avatar (when available) is drawn upright, clipped to the ring's
+    // centreline so no hairline of body colour shows inside the ring.
     final image = avatarImage;
     if (image != null) {
-      // Clip to the head circle; the canvas is currently in identity transform
-      // (we restored after the rotate block above), centred on the footprint.
-      final headRect = Rect.fromCircle(center: center, radius: radius);
-      final clipPath = Path()..addOval(headRect);
       canvas
         ..save()
-        ..clipPath(clipPath);
+        ..clipPath(Path()..addOval(headRect));
 
       // Cover-fit: scale the source so the shortest dimension fills the circle.
       final sw = image.width.toDouble();
       final sh = image.height.toDouble();
-      final scale = math.max(headRect.width / sw, headRect.height / sh);
-      final dw = sw * scale;
-      final dh = sh * scale;
-      final dst = Rect.fromCenter(
-        center: center,
-        width: dw,
-        height: dh,
-      );
-
+      final fit = math.max(headRect.width / sw, headRect.height / sh);
       canvas
         ..drawImageRect(
           image,
           Rect.fromLTWH(0, 0, sw, sh),
-          dst,
+          Rect.fromCenter(center: center, width: sw * fit, height: sh * fit),
           Paint()
             ..isAntiAlias = true
             ..filterQuality = FilterQuality.medium,
@@ -574,7 +613,7 @@ class _MarkerTeardropPainter extends CustomPainter {
         text: TextSpan(
           text: glyph,
           style: TextStyle(
-            color: glyphColor,
+            color: kAvatarInitialsColor,
             fontSize: diameter * 0.4,
             fontWeight: FontWeight.w600,
             height: 1,
@@ -588,6 +627,17 @@ class _MarkerTeardropPainter extends CustomPainter {
         Offset(center.dx - tp.width / 2, center.dy - tp.height / 2),
       );
     }
+
+    // The ring goes last: it covers the clip seam and the avatar's edge.
+    canvas.drawPath(
+      shape,
+      Paint()
+        ..color = const Color(0xFFFFFFFF)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = ringWidth
+        ..strokeJoin = StrokeJoin.round
+        ..isAntiAlias = true,
+    );
   }
 
   @override
@@ -595,38 +645,47 @@ class _MarkerTeardropPainter extends CustomPainter {
       old.diameter != diameter ||
       old.nubLength != nubLength ||
       old.angle != angle ||
-      old.fillColor != fillColor ||
-      old.haloColor != haloColor ||
+      old.palette.top != palette.top ||
+      old.palette.bottom != palette.bottom ||
       old.glyph != glyph ||
-      old.glyphColor != glyphColor ||
       old.textScaler != textScaler ||
       !identical(old.avatarImage, avatarImage);
 }
 
-/// Builds a teardrop [Path] in local space — a circle of [radius] centred at
-/// the origin with a tip [nub] pixels along `+x`. Degenerates to a plain circle
-/// when [nub] is negligible.
-Path _teardropPath(double radius, double nub) {
-  final path = Path();
-  if (nub <= 0.5) {
-    return path..addOval(Rect.fromCircle(center: Offset.zero, radius: radius));
+/// Builds the pin outline in local space — a circle of [radius] centred at the
+/// origin with its apex [nub] pixels past the rim along `+x`, pulled back by
+/// [apexInset] so a ring stroked on the outline reaches `radius + nub` exactly.
+///
+/// The flanks are concave: a quadratic from each tangent point whose control
+/// sits 30% of the way to the apex and 35% as far from the axis as the tangent
+/// point, giving a ~30° apex half-angle at the on-screen tail rather than the
+/// stubby ~46° of straight tangents. It is a plain circle when [nub] is
+/// negligible, or when the inset leaves no tail to draw.
+@visibleForTesting
+Path teardropPath(double radius, double nub, double apexInset) {
+  final apexX = radius + nub - apexInset;
+  if (nub <= 0.5 || apexX - radius <= 0.5) {
+    return Path()
+      ..addOval(Rect.fromCircle(center: Offset.zero, radius: radius));
   }
-  final tipDistance = radius + nub;
-  // Tangent point angle: cos(theta) = radius / distance-to-tip.
-  final theta = math.acos((radius / tipDistance).clamp(-1.0, 1.0));
+  // Tangent point angle: cos(theta) = radius / distance-to-apex.
+  final theta = math.acos((radius / apexX).clamp(-1.0, 1.0));
   final tangent = Offset(radius * math.cos(theta), radius * math.sin(theta));
-  return path
-    ..moveTo(tipDistance, 0)
-    ..lineTo(tangent.dx, tangent.dy)
+  final control = Offset(
+    tangent.dx + 0.3 * (apexX - tangent.dx),
+    tangent.dy * 0.35,
+  );
+  return Path()
+    ..moveTo(apexX, 0)
+    ..quadraticBezierTo(control.dx, control.dy, tangent.dx, tangent.dy)
     // Arc the long way around the back of the circle to the mirrored tangent
-    // point, leaving the front wedge for the two tangent lines and the tip.
+    // point, leaving the front wedge for the two flanks and the tip.
     ..arcTo(
       Rect.fromCircle(center: Offset.zero, radius: radius),
       theta,
       2 * math.pi - 2 * theta,
       false,
     )
-    // close() draws the second tangent line back to the tip and joins the
-    // stroke cleanly there.
+    ..quadraticBezierTo(control.dx, -control.dy, apexX, 0)
     ..close();
 }

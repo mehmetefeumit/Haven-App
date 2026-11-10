@@ -210,7 +210,6 @@ logscan-exit cleanup#1/lib:logscan_gate_dir#1 charge @
 
 reaper e2e-integration.yml::e2e_integration eight targets, each a full run-single-avd-scenario.sh; the deadline reaps a degraded run, the per-target drive timeout names a hung target
 reaper e2e-relay-customization.yml::e2e_relay_customization four targets, each up to two run-single-avd-scenario.sh runs; the deadline reaps a degraded run, the per-target drive timeout names a hung target
-reaper e2e-flakiness-stress.yml::flake_stress FLAKE_ITERATIONS runs of e2e_combined; the deadline reaps a degraded loop, each run's drive timeout names a hung iteration
 reaper e2e-background-catchup.yml::e2e_background_catchup three phase drives, a guest reboot and marker waits; sized from measurement, the per-phase drive timeout names a hung phase
 
 unit tooling/e2e/ci/run-integration-tests.sh
@@ -228,11 +227,6 @@ target run_one#1/drive_target#*/bash:run-single-avd-scenario.sh#1 charge @ times
 cue-poll run_one#1/drive_target#*/r2_cue_watch#1/sleep:R2_CUE_POLL_SECS#1 poll times ARGC
 cue-start run_one#1/drive_target#*/r2_cue_watch#1/r2_cue_pass#*/start_r2#1/bash:start-strfry.sh#1 charge @ times ARGC once the watcher returns after its one start
 cue-restore run_one#1/drive_target#*/start_r2#1/bash:start-strfry.sh#1 charge @ times ARGC
-logscan lib:logscan_gate_dir#1 charge @
-
-unit tooling/e2e/ci/run-flake-stress.sh
-strfry bash:start-strfry.sh#1 charge @ times ITERATIONS
-iteration bash:run-single-avd-scenario.sh#1 charge @ times ITERATIONS
 logscan lib:logscan_gate_dir#1 charge @
 
 unit tooling/e2e/ci/run-m7-background-catchup.sh

@@ -107,15 +107,14 @@ bool wireRecorderDeclaredFor(String token) =>
 ///
 /// This gates [TestRelay.announceMlsGroupId] and
 /// [TestRelay.emitWireJournalSentinel], and it is a SECURITY gate, not a
-/// convenience one. `e2e-flakiness-stress.yml` drives this same scenario
-/// against strfry directly (`HAVEN_E2E_RELAY: ws://10.0.2.2:7777`, no proxy).
-/// An unconditional announce there would put the REAL MLS group id on a relay
-/// socket every night — a direct Security Rule 4 violation — because the frame
-/// is written before the missing ack can be noticed 15 s later. The marker is
-/// not a Rule-4 value, but it is still a harness verb written to a real relay,
-/// and the ack it then waits out its full budget for cannot come from
-/// anything: emitted ungated, it failed every iteration of that lane — a flake
-/// measurement that measured nothing.
+/// convenience one. A run of this scenario straight at a relay, with no proxy
+/// in path, is what it guards: an unconditional announce there would put the
+/// REAL MLS group id on a relay socket — a direct Security Rule 4 violation —
+/// because the frame is written before the missing ack can be noticed 15 s
+/// later. The marker is not a Rule-4 value, but it is still a harness verb
+/// written to a real relay, and the ack it then waits out its full budget for
+/// cannot come from anything: emitted ungated, it failed every iteration of
+/// the since-removed lane that drove this scenario straight at strfry.
 bool get wireRecorderDeclared =>
     wireRecorderDeclaredFor(wireJournalSentinelToken);
 
@@ -1197,9 +1196,9 @@ class TestRelay {
   /// would leave the connections after a mid-run disconnect attributed to the
   /// app.
   ///
-  /// A no-op unless [wireRecorderDeclared]: on a lane with no proxy in path
-  /// (`e2e-flakiness-stress.yml` drives straight at strfry) the frame would
-  /// reach a real relay, which is pointless traffic and an unknown command.
+  /// A no-op unless [wireRecorderDeclared]: on a run with no proxy in path the
+  /// frame would reach a real relay, which is pointless traffic and an unknown
+  /// command.
   void _declareHarnessSocket() {
     if (!wireRecorderDeclared) return;
     if (_closed || !_writable) return;

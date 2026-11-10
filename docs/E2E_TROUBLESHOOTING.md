@@ -345,13 +345,11 @@ headroom (e2e-relay-customization) must never be able to publish the hole. Every
 restore is `continue-on-error: true` under a `timeout-minutes`, because an
 optimisation must never redden a lane that would have built cold.
 
-Two jobs are exempt, each with its reason on the line above its `runs-on`:
+One job is exempt, with its reason on the line above its `runs-on`:
 `release-build.yml`'s `android`, because it signs and ships the artifact and
 nothing would authenticate the dependencies a restored cache put on disk (no
 `verification-metadata.xml`; the Gradle distribution itself is pinned by
-`distributionSha256Sum`), and
-`e2e-flakiness-stress.yml`'s `flake_stress`, whose job cap is already GitHub's
-360-minute ceiling with 0.8 min of headroom, less than a restore step's cap.
+`distributionSha256Sum`).
 `scripts/ci/check_gradle_build_hardened.sh` enforces all of this (C1-C6).
 
 **The retry.** Every Gradle build a workflow invokes DIRECTLY — the E2E lanes'
@@ -374,8 +372,7 @@ exit code. The wrapper case is separate because the wrapper runs before Gradle
 and prints Java's wording (`Server returned HTTP response code: 504 for URL:
 …/gradle-8.14-all.zip`, CI run 42392657873), which neither Gradle's own retry
 nor the resolution signatures can see. It appears only when the dependency
-cache, which carries `~/.gradle/wrapper`, was not restored, and on every build
-of `e2e-flakiness-stress.yml`, which is exempt from that cache. A 404 there
+cache, which carries `~/.gradle/wrapper`, was not restored. A 404 there
 means a misnamed distribution and is not retried, and nor is a checksum
 mismatch, since the archive is pinned by `distributionSha256Sum`. The retry is
 safe because of the wrapper Flutter supplies (Gradle 2.10's jar): it deletes a
@@ -391,7 +388,7 @@ got before re-running:
 
 | The output carried | The annotation says | What to do |
 |---|---|---|
-| the wrapper's `Server returned HTTP response code: 408/429/5xx` for the distribution archive | the Gradle wrapper could not download the Gradle distribution; INFRASTRUCTURE, not a product failure | re-run; a recurrence on a lane that restores the dependency cache (which carries `~/.gradle/wrapper`) means it is not being restored |
+| the wrapper's `Server returned HTTP response code: 408/429/5xx` for the distribution archive | the Gradle wrapper could not download the Gradle distribution; INFRASTRUCTURE, not a product failure | re-run; a recurrence means the dependency cache (which carries `~/.gradle/wrapper`) is not being restored |
 | `status code 429` | a repository rate-limited this runner; INFRASTRUCTURE, not a product failure | re-run on a different runner; a recurrence means the cache is not being restored |
 | `Could not find …` + `Searched in the following locations` | Gradle could not find a coordinate in any repository, and that is also what a wrong version prints | read the Gradle error FIRST — if this commit changed a dependency, no re-run will fix it |
 | neither | no HTTP status was reported, so the cause is not knowable from here | usually infrastructure, but check the diff for a dependency change |
@@ -717,8 +714,8 @@ status. That last one is what `timeout … adb` returned in eight of run
 so: *"nothing was asked of `<device>` … That is this runner's tooling."*
 
 Where each lane installs: `run-single-avd-scenario.sh` Phase 2 (and through it
-e2e-android, e2e-profile, e2e-integration, e2e-relay-customization and
-e2e-flakiness-stress); Phase 1 of `run-b1-fgs-publish.sh`,
+e2e-android, e2e-profile, e2e-integration and e2e-relay-customization);
+Phase 1 of `run-b1-fgs-publish.sh`,
 `run-b3-real-gps.sh`, `run-b5-permission-revocation.sh`,
 `run-b6-location-provider-toggle.sh`, `run-b8-clock-skew.sh`,
 `run-b9-network-reconnect.sh` and `run-kp-rotation.sh`; B5's Phase 6 restore,
@@ -775,9 +772,8 @@ files, and the job log does not carry the drive log either.
 it — `scan_logs_or_contain` in `run-single-avd-scenario.sh`,
 `scan_log_or_contain` in `run-ios-sim-scenario.sh`, `bgp_scan_or_contain` in
 `run-ios-bg-publish.sh`, `logscan_gate_dir` over the whole log directory in the
-four directory-scanning runners (`run-integration-tests.sh`,
-`run-relay-customization.sh`, `run-flake-stress.sh`,
-`run-m7-background-catchup.sh`) and in the scenario runners' EXIT traps — every
+three directory-scanning runners (`run-integration-tests.sh`,
+`run-relay-customization.sh`, `run-m7-background-catchup.sh`) and in the scenario runners' EXIT traps — every
 one of them a call into `tooling/e2e/ci/logscan-gate.sh` — and the `Scan
 captured logs for secrets before upload` step in every workflow — **deletes
 every file it scanned before exiting non-zero**. The `if: failure()` upload that
@@ -840,7 +836,7 @@ the iOS lanes, the runner's own choice elsewhere):
   (`rotate-needle-dir.sh`), so a stalled attempt's sidecar never reaches the
   next attempt's seal.
 * **`host`** — every proxy-less device lane (`e2e-profile`, `e2e-integration`,
-  `e2e-relay-customization`, `e2e-flakiness-stress`, `e2e-background-catchup`,
+  `e2e-relay-customization`, `e2e-background-catchup`,
   the seven Android scenario lanes, the three iOS scenario lanes): nothing was
   declared over a channel, so the seal declares what the host knows —
   `tooling/e2e/ci/host-needles.sh`: the four fixed harness seeds derived to
@@ -1316,51 +1312,36 @@ SDK-mirror outage.
 | 2 | the script is broken, not the lane: no `FLUTTER_ROOT`, no SDK root, no `sdkmanager`, Flutter's `val ndkVersion` line moved, or `haven/android/app/build.gradle.kts` stopped taking `ndkVersion = flutter.ndkVersion` — teach `ndk_required_version` the new source |
 | 3 | with that annotation: the NDK did not install and verify — infrastructure (without it, rc 3 is the build's own) |
 
-## Failure mode 16 — `E2E Flakiness Stress` fails the same scenario every iteration
+## Failure mode 16 — `Bad state: no wire-journal sentinel ack within 15s` on a run with no recorder
 
-`e2e-flakiness-stress.yml` is the one lane that drives `e2e_combined.dart` with
-**no recording proxy in path**: it points the app straight at strfry
-(`HAVEN_E2E_RELAY: ws://10.0.2.2:7777`) and mints no `HAVEN_WIRE_SENTINEL`, so
-the app compiles `TestRelay`'s default token and `wireRecorderDeclared` is
-false. Everything that speaks the proxy's control vocabulary is therefore gated
-on `wireRecorderDeclared`: the needle declarations, the MLS-group-id
-announcement, the canary manifest, and the wire-journal sentinel.
+The `E2E Flakiness Stress` lane this entry first described has been removed;
+the number is kept so later entries keep theirs. It drove `e2e_combined.dart`
+straight at strfry, with no recording proxy in path, and from 2026-08-12 it
+failed every iteration with this message for a month: the scenario sent the
+wire-journal sentinel, a harness verb only the proxy answers, to a real relay.
 
-From 2026-08-12 the sentinel was not. Every iteration of every nightly run
-failed the last test in the file with `Bad state: no wire-journal sentinel ack
-within 15s. Either this connection does not run through the recording proxy, or
-the proxy is not recording.` — literally true and entirely expected on this
-lane: the harness verb went to a real relay, which neither intercepts nor
-answers it. The lane exists to measure this scenario's flake rate, and for that
-month it measured nothing. No push-triggered workflow runs it, so nothing
-surfaced the failure.
-
-If that message appears here again, the cause is a CALLER that lost its gate,
-never the relay. `TestRelay.emitWireJournalSentinel` refuses the compiled-default
-token before anything reaches the socket;
+So everything that speaks the proxy's control vocabulary is gated on
+`wireRecorderDeclared`: the needle declarations, the MLS-group-id announcement
+(Security Rule 4), the canary manifest and the sentinel. If the message appears
+on a run with no recorder, the cause is a CALLER that lost its gate, never the
+relay. `TestRelay.emitWireJournalSentinel` refuses the compiled-default token
+before anything reaches the socket;
 `haven/test/lints/wire_sentinel_recorder_gate_test.dart` fails on a PR when the
 scenario's `if (wireRecorderDeclared)` no longer covers EVERY emit; and the
 "recorder gate" group in `haven/test/e2e/test_relay_transport_test.dart` pins
 that an undeclared build writes no frame at all. On the WIRED lanes
-(`e2e-android.yml`, `e2e-ios.yml`) the same message still means the app was
-pointed past the proxy or the proxy stopped recording, and a missing sentinel
-there is a META-FLOOR at every host oracle, never a pass.
+(`e2e-android.yml`, `e2e-ios.yml`) the same message means the app was pointed
+past the proxy or the proxy stopped recording, and a missing sentinel there is
+a META-FLOOR at every host oracle, never a pass.
 
-The same lane then failed a second way once the log scanner reached it:
-**rc 3, "a Dart plant token in a scanned sink matches no declaration"**. The
-harness prints its plant token whether or not a recorder is listening and
-declares it only when one is (`log_needles.dart`), so on a
-`HAVEN_LOGSCAN_PROFILE: host` lane the token is undeclared by design, and the
-lost-declaration rule applies only to a manifest sealed WITH a declaration
-channel. One problem is reported per sink class carrying the token, so one
-token in logcat and drive reads as two. Conversely, **rc 2 "…but a
-`*.needles.decl` sidecar sits in /tmp/haven-soak/needles"** means the lane ran
-the recording proxy while sealing `host`: fix the profile
-(`HAVEN_LOGSCAN_PROFILE` / `WIRE_UPSTREAM`), never the manifest.
+On any `HAVEN_LOGSCAN_PROFILE: host` lane, **rc 2 "…but a `*.needles.decl`
+sidecar sits in /tmp/haven-soak/needles"** means the lane ran the recording
+proxy while sealing `host`: fix the profile (`HAVEN_LOGSCAN_PROFILE` /
+`WIRE_UPSTREAM`), never the manifest.
 
-Standing rule: a nightly-only lane is invisible to a push. After any change to
-the scanner, the gate or the shared harness, read the next morning's nightly and
-stress results, or replay their uploaded artifacts.
+Standing rule: a nightly-only run (`E2E Nightly`, `Soak Nightly`) is invisible
+to a push. After any change to the scanner, the gate or the shared harness,
+read the next morning's nightly results, or replay their uploaded artifacts.
 
 ## Failure mode 17 — iOS bg-publish: the drive "did not complete" right after `BACKGROUND_SHARING_DISABLED`
 
@@ -1810,17 +1791,6 @@ that background execution survives.
   the engine ON), so a silent re-inert to `false` turns it red. An intentional
   live-sync rollback (M11 plan §8) reverts 14b together with the default it
   pins — it correctly fails first.
-- Soak Nightly in the weekly flakiness report: its **Soak Nightly** section
-  (`scripts/ci/soak_monitor_section.sh`) prints per-slot rows with derived
-  seeds and the `consecutive all-slot-green nights` count; the nightly is not
-  in the fail-rate table (the table never read `soak-nightly.yml`), while the
-  PR-profile soak lane is, like any lane — one fixed seed, so an intermittent
-  red on main is rig non-determinism. That step red with exit 3 means a GitHub
-  API read failed and nothing was written — re-run the monitor; exit 2 is an
-  input it refuses (a `coverage.log` off its schema, a `soak_seed.sh
-  --default-slots` that answers no slot list, a soak issue at gh's
-  100-comment page), which is a repository fix, not a re-run. Either way the
-  step summary carries one fixed line saying which.
 - `rerun-runner-losses.yml` watches `Soak Nightly` as well as `CI`: a slot the
   runner lost is re-run once, together with `file-issue`; a lost `prepare`
   re-runs the whole night with the same seeds (they come from the run's

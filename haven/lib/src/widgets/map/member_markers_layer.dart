@@ -12,6 +12,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/feature_flags.dart';
@@ -19,10 +20,26 @@ import 'package:haven/src/providers/member_profile_provider.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/utils/marker_geometry.dart';
+import 'package:haven/src/utils/marker_glide.dart';
+import 'package:haven/src/utils/reduce_motion.dart';
 import 'package:haven/src/widgets/map/avatar_image_cache.dart';
 import 'package:haven/src/widgets/map/marker_metrics.dart';
 import 'package:haven/src/widgets/map/member_marker.dart';
 import 'package:latlong2/latlong.dart';
+
+/// Clips the overlay to the safe rect (see the layer's `build`).
+class _SafeRectClipper extends CustomClipper<Rect> {
+  const _SafeRectClipper(this.safeRect);
+
+  final Rect safeRect;
+
+  @override
+  Rect getClip(Size size) => safeRect;
+
+  @override
+  bool shouldReclip(_SafeRectClipper oldClipper) =>
+      oldClipper.safeRect != safeRect;
+}
 
 /// One member paired with its projected screen point and projection.
 class _MarkerEntry {
@@ -80,12 +97,39 @@ class MemberMarkersLayer extends StatefulWidget {
 /// Retains the member's last [location] so the marker keeps tracking the
 /// camera through the fade.
 class _ExitingMember {
-  const _ExitingMember({required this.location});
+  const _ExitingMember({required this.location, required this.position});
 
   final MemberLocation location;
+
+  /// Where the marker was DRAWN when it left, which mid-glide is not the fix.
+  final LatLng position;
 }
 
-class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
+/// A marker travelling from one fix to the next; [start] is on the ticker's
+/// clock.
+class _Glide {
+  const _Glide({required this.from, required this.to, required this.start});
+
+  final LatLng from;
+  final LatLng to;
+  final Duration start;
+}
+
+const _glideDuration = Duration(milliseconds: 400);
+
+class _MemberMarkersLayerState extends State<MemberMarkersLayer>
+    with SingleTickerProviderStateMixin {
+  /// Runs only while [_glides] is non-empty, so a map at rest schedules no
+  /// frames.
+  late final Ticker _ticker;
+
+  /// Active glides keyed by pubkey; an entry never outlives its member.
+  final Map<String, _Glide> _glides = <String, _Glide>{};
+
+  /// The ticker's clock as of the last frame. A glide started between frames
+  /// takes it as its start, so it may begin up to one frame early.
+  Duration _now = Duration.zero;
+
   /// Members that were live on the previous build but have since left the
   /// selected circle, kept mounted so they play the appear transition in
   /// reverse (the mirror of the fade/scale-in new members get) before being
@@ -100,15 +144,97 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
   final Map<String, _ExitingMember> _exiting = <String, _ExitingMember>{};
 
   @override
+  void initState() {
+    super.initState();
+    _ticker = createTicker(_onTick);
+  }
+
+  @override
+  void dispose() {
+    _ticker.dispose();
+    super.dispose();
+  }
+
+  void _onTick(Duration elapsed) {
+    _now = elapsed;
+    _glides.removeWhere((_, g) => elapsed - g.start >= _glideDuration);
+    if (_glides.isEmpty) _ticker.stop();
+    setState(() {});
+  }
+
+  /// Where [member] is drawn now: part-way along its glide, else at its fix.
+  LatLng _displayed(MemberLocation member) {
+    final glide = _glides[member.pubkey];
+    if (glide == null) return LatLng(member.latitude, member.longitude);
+    final t =
+        ((_now - glide.start).inMicroseconds / _glideDuration.inMicroseconds)
+            .clamp(0.0, 1.0);
+    return glideLerp(glide.from, glide.to, Curves.easeOutCubic.transform(t));
+  }
+
+  /// Starts a glide for each member whose fix moved, from where it is drawn.
+  void _startGlides(MemberMarkersLayer oldWidget) {
+    // A stopped ticker restarts its elapsed time at zero, so a stale `_now`
+    // would stamp a start in its future.
+    if (!_ticker.isActive) _now = Duration.zero;
+    final previous = {for (final m in oldWidget.members) m.pubkey: m};
+    final camera = MapCamera.of(context);
+    final viewport = edgeViewport(
+      viewport: camera.nonRotatedSize,
+      topInset: MediaQuery.maybeOf(context)?.viewPadding.top ?? 0,
+      bottomInset: widget.bottomInset,
+    );
+    final reduceMotion = reduceMotionOf(context);
+    final longSide = math.max(
+      camera.nonRotatedSize.width,
+      camera.nonRotatedSize.height,
+    );
+    for (final member in widget.members) {
+      final old = previous[member.pubkey];
+      if (old == null) {
+        _glides.remove(member.pubkey);
+        continue;
+      }
+      if (old.latitude == member.latitude &&
+          old.longitude == member.longitude) {
+        continue;
+      }
+      final from = _displayed(old);
+      final to = LatLng(member.latitude, member.longitude);
+      final fromPoint = camera.latLngToScreenOffset(from);
+      final toPoint = camera.latLngToScreenOffset(to);
+      if (reduceMotion ||
+          (toPoint - fromPoint).distance > longSide ||
+          (!viewport.safeRect.contains(fromPoint) &&
+              !viewport.safeRect.contains(toPoint))) {
+        _glides.remove(member.pubkey);
+        continue;
+      }
+      _glides[member.pubkey] = _Glide(from: from, to: to, start: _now);
+    }
+    if (_glides.isEmpty) {
+      _ticker.stop();
+    } else if (!_ticker.isActive) {
+      _ticker.start();
+    }
+  }
+
+  @override
   void didUpdateWidget(MemberMarkersLayer oldWidget) {
     super.didUpdateWidget(oldWidget);
     final live = <String>{for (final m in widget.members) m.pubkey};
-    // A member present last build but gone now begins fading out.
+    // A member present last build but gone now begins fading out, where it is
+    // drawn, not at a fix it never reached.
     for (final m in oldWidget.members) {
       if (!live.contains(m.pubkey)) {
-        _exiting[m.pubkey] = _ExitingMember(location: m);
+        _exiting[m.pubkey] = _ExitingMember(
+          location: m,
+          position: _displayed(m),
+        );
+        _glides.remove(m.pubkey);
       }
     }
+    _startGlides(oldWidget);
     // A member that reappeared renders live again; drop any fade-out copy so it
     // is never drawn twice. Its keyed marker state is reused and fades back in
     // via MemberMarker.didUpdateWidget.
@@ -129,7 +255,6 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
   @override
   Widget build(BuildContext context) {
     final camera = MapCamera.of(context);
-    final scheme = Theme.of(context).colorScheme;
     final topInset = MediaQuery.maybeOf(context)?.viewPadding.top ?? 0;
     final viewport = edgeViewport(
       viewport: camera.nonRotatedSize,
@@ -137,10 +262,8 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
       bottomInset: widget.bottomInset,
     );
 
-    _MarkerEntry entryFor(MemberLocation member) {
-      final point = camera.latLngToScreenOffset(
-        LatLng(member.latitude, member.longitude),
-      );
+    _MarkerEntry entryFor(MemberLocation member, LatLng position) {
+      final point = camera.latLngToScreenOffset(position);
       return _MarkerEntry(
         member: member,
         point: point,
@@ -148,7 +271,9 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
       );
     }
 
-    final entries = [for (final member in widget.members) entryFor(member)];
+    final entries = [
+      for (final member in widget.members) entryFor(member, _displayed(member)),
+    ];
     if (entries.isEmpty && _exiting.isEmpty) return const SizedBox.shrink();
 
     // Nudge overlapping OFF-SCREEN bubbles apart along their edge. On-screen
@@ -158,12 +283,21 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
       viewport.safeRect,
     );
 
-    // Draw far (small) bubbles first so nearer/larger ones sit on top.
-    entries.sort(
-      (a, b) => a.projection.diameter.compareTo(b.projection.diameter),
-    );
+    // Draw far (small) bubbles first so nearer/larger ones sit on top, and
+    // among equals the southern pin over the northern one (it is nearer the
+    // viewer), with the pubkey as the stable tie-break for co-located members.
+    entries.sort((a, b) {
+      final byDiameter = a.projection.diameter.compareTo(b.projection.diameter);
+      if (byDiameter != 0) return byDiameter;
+      final byY = a.point.dy.compareTo(b.point.dy);
+      return byY != 0 ? byY : a.member.pubkey.compareTo(b.member.pubkey);
+    });
 
+    // Marker ink is constant, not themed: the basemap is chosen independently
+    // of the theme. The clip is the SAFE rect so a tail is cut flat at the top
+    // inset as at the sides, the flat contact patch of a pin on the glass.
     return ClipRect(
+      clipper: _SafeRectClipper(viewport.safeRect),
       child: Stack(
         key: WidgetKeys.memberMarkersLayer,
         clipBehavior: Clip.none,
@@ -172,9 +306,8 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
           // (no taps, no spread) and just animate away in place.
           for (final exit in _exiting.values)
             _positioned(
-              entryFor(exit.location),
+              entryFor(exit.location, exit.position),
               null,
-              scheme,
               viewport.safeRect,
               exiting: true,
             ),
@@ -182,7 +315,6 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
             _positioned(
               entry,
               spread[entry.member.pubkey],
-              scheme,
               viewport.safeRect,
               exiting: false,
             ),
@@ -194,7 +326,6 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
   Widget _positioned(
     _MarkerEntry entry,
     Offset? spreadCenter,
-    ColorScheme scheme,
     Rect safeRect, {
     required bool exiting,
   }) {
@@ -207,10 +338,14 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
     var angle = proj.angle;
     final point = entry.point;
     if (point.dx.isFinite && point.dy.isFinite && center != proj.bubbleCenter) {
-      final tip = point - center;
-      final dist = tip.distance;
-      nubLength = math.min(dist, kDropletMaxNub);
-      angle = dist < 1e-3 ? 0 : tip.direction;
+      final tail = aimTail(
+        point: point,
+        center: center,
+        radius: proj.diameter / 2,
+        cap: proj.tailCap,
+      );
+      nubLength = tail.nubLength;
+      angle = tail.angle;
     }
 
     final footprint = MemberMarker.footprintFor(proj.diameter);
@@ -240,11 +375,10 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
       initials: markerInitials(member.displayName, member.pubkey),
       publicKey: member.pubkey,
       displayName: member.displayName,
-      fillColor: avatarHue(member.pubkey, scheme),
-      haloColor: scheme.surface,
       diameter: proj.diameter,
       nubLength: nubLength,
       angle: angle,
+      bearing: proj.bearing,
       offScreen: proj.offScreen,
       lastSeen: member.timestamp,
       onTap: onTap,
@@ -278,11 +412,10 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
       initials: p.initials,
       publicKey: p.publicKey,
       displayName: p.displayName,
-      fillColor: p.fillColor,
-      haloColor: p.haloColor,
       diameter: p.diameter,
       nubLength: p.nubLength,
       angle: p.angle,
+      bearing: p.bearing,
       offScreen: p.offScreen,
       lastSeen: p.lastSeen,
       onTap: p.onTap,
@@ -372,11 +505,10 @@ class _MarkerProps {
   const _MarkerProps({
     required this.initials,
     required this.publicKey,
-    required this.fillColor,
-    required this.haloColor,
     required this.diameter,
     required this.nubLength,
     required this.angle,
+    required this.bearing,
     required this.offScreen,
     required this.tapOffset,
     required this.exiting,
@@ -389,11 +521,10 @@ class _MarkerProps {
   final String initials;
   final String publicKey;
   final String? displayName;
-  final Color fillColor;
-  final Color haloColor;
   final double diameter;
   final double nubLength;
   final double angle;
+  final double bearing;
   final bool offScreen;
   final DateTime? lastSeen;
   final VoidCallback? onTap;
@@ -431,9 +562,9 @@ class _AvatarLoader extends ConsumerStatefulWidget {
 }
 
 class _AvatarLoaderState extends ConsumerState<_AvatarLoader> {
-  /// The content-hash currently being decoded, so a decode is scheduled at
-  /// most once per hash rather than on every rebuild (the layer rebuilds on
-  /// every camera frame). `null` when no decode is in flight.
+  /// The [AvatarImageCache.keyFor] key currently being decoded, so a decode is
+  /// scheduled at most once per key rather than on every rebuild (the layer
+  /// rebuilds on every camera frame). `null` when no decode is in flight.
   String? _decodingHash;
 
   @override
@@ -456,32 +587,61 @@ class _AvatarLoaderState extends ConsumerState<_AvatarLoader> {
     if (mounted) setState(() {});
   }
 
-  /// Decodes [bytes] for [hash] and stores the result in [AvatarImageCache].
+  /// Decodes [bytes] with its short side at [targetPx] and stores the result
+  /// under [key] in [AvatarImageCache].
   ///
   /// The decoded [ui.Image] is owned by [AvatarImageCache], which disposes it
   /// on LRU eviction and on background [AvatarImageCache.clear]. This state
   /// NEVER holds a long-lived reference to it — [build] reads the image back
   /// from the cache each frame — so a cache eviction can never leave us
   /// painting a disposed image (the prior use-after-dispose bug).
-  Future<void> _decodeBytes(String hash, List<int> bytes) async {
+  Future<void> _decodeBytes(String key, int targetPx, List<int> bytes) async {
     try {
-      final codec = await ui.instantiateImageCodec(Uint8List.fromList(bytes));
+      final buffer = await ui.ImmutableBuffer.fromUint8List(
+        Uint8List.fromList(bytes),
+      );
+      // The engine disposes the buffer itself once it has read the intrinsic
+      // size (a second dispose asserts), so only a failure before that point
+      // leaves it ours to release.
+      var sized = false;
+      final ui.Codec codec;
+      try {
+        codec = await ui.instantiateImageCodecWithSize(
+          buffer,
+          // `min` is what prevents upscaling: the API itself would enlarge a
+          // source smaller than the target. Setting one dimension keeps the
+          // aspect ratio.
+          getTargetSize: (intrinsicWidth, intrinsicHeight) {
+            sized = true;
+            final px = math.min(
+              targetPx,
+              math.min(intrinsicWidth, intrinsicHeight),
+            );
+            return intrinsicWidth <= intrinsicHeight
+                ? ui.TargetImageSize(width: px)
+                : ui.TargetImageSize(height: px);
+          },
+        );
+      } on Object {
+        if (!sized) buffer.dispose();
+        rethrow;
+      }
       final frame = await codec.getNextFrame();
       codec.dispose();
       if (!mounted) {
         frame.image.dispose();
         return;
       }
-      // Content-addressed: store under `hash` even if the member's avatar has
+      // Content-addressed: store under `key` even if the member's avatar has
       // since changed (a valid, reusable entry). `build` always reads the
-      // CURRENT hash from the cache, so a stale decode never displays.
-      AvatarImageCache.instance.put(hash, frame.image);
+      // CURRENT key from the cache, so a stale decode never displays.
+      AvatarImageCache.instance.put(key, frame.image);
       setState(() {}); // rebuild to read the now-cached image
     } on Object catch (e) {
       // Decode failure → fall back to initials (no raw error in the UI).
       debugPrint('[AvatarLoader] decode failed: ${e.runtimeType}');
     } finally {
-      if (_decodingHash == hash) _decodingHash = null;
+      if (_decodingHash == key) _decodingHash = null;
     }
   }
 
@@ -491,24 +651,27 @@ class _AvatarLoaderState extends ConsumerState<_AvatarLoader> {
         .watch(memberProfileProvider(widget.pubkeyHex))
         .valueOrNull;
     final hash = profile?.pictureHash;
+    final targetPx =
+        (kDropletFullDiameter * MediaQuery.devicePixelRatioOf(context)).ceil();
 
     // The cache is the SINGLE source of truth for the decoded image: we never
     // hold our own `ui.Image` reference, because the cache disposes images on
     // LRU eviction and on background clear (defeats use-after-dispose). On a
-    // miss, (re)decode exactly once per hash — `_decodingHash` guards against a
+    // miss, (re)decode exactly once per key — `_decodingHash` guards against a
     // per-frame decode storm while one is in flight. No known picture (`hash`
     // null) means no cache lookup and no decode — initials fallback.
     ui.Image? image;
     if (hash != null) {
-      image = AvatarImageCache.instance.get(hash);
+      final key = AvatarImageCache.keyFor(hash, targetPx);
+      image = AvatarImageCache.instance.get(key);
       final bytes = profile?.pictureBytes;
       if (image == null &&
-          _decodingHash != hash &&
+          _decodingHash != key &&
           bytes != null &&
           bytes.isNotEmpty) {
-        _decodingHash = hash;
+        _decodingHash = key;
         // Decode outside the synchronous build frame.
-        Future.microtask(() => _decodeBytes(hash, bytes));
+        Future.microtask(() => _decodeBytes(key, targetPx, bytes));
       }
     }
 
@@ -518,11 +681,10 @@ class _AvatarLoaderState extends ConsumerState<_AvatarLoader> {
       initials: p.initials,
       publicKey: p.publicKey,
       displayName: p.displayName,
-      fillColor: p.fillColor,
-      haloColor: p.haloColor,
       diameter: p.diameter,
       nubLength: p.nubLength,
       angle: p.angle,
+      bearing: p.bearing,
       offScreen: p.offScreen,
       lastSeen: p.lastSeen,
       onTap: p.onTap,

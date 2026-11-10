@@ -2151,18 +2151,7 @@ class AppLocalizationsTr extends AppLocalizations {
   String get mapAttributionCreditsButton => 'Harita katkıları ve lisansı';
 
   @override
-  String userLocationMarkerSemantics(String accuracy) {
-    return 'Konum işaretiniz$accuracy';
-  }
-
-  @override
-  String userLocationMarkerAccuracy(int meters) {
-    final intl.NumberFormat metersNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String metersString = metersNumberFormat.format(meters);
-
-    return '. Doğruluk: $metersString metre';
-  }
+  String get userLocationMarkerSemantics => 'Konum işaretiniz';
 
   @override
   String memberMarkerMinutesShort(int count) {

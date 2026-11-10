@@ -1,26 +1,138 @@
-/// Tests for shared marker metrics: hue, initials, and contrast foreground.
+/// Tests for shared marker metrics: palette and initials.
 ///
-/// Both the layer (which supplies a marker's `fillColor`) and any other caller
-/// derive the hue from [avatarHue] here, so a member reads as the same colour
-/// everywhere. The size no-pop match (`kDropletFullDiameter == kRingDiameter`)
+/// The size no-pop match (`kDropletFullDiameter == kRingDiameter`)
 /// is guarded in `marker_geometry_test.dart`.
 library;
+
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/widgets/map/marker_metrics.dart';
 
 void main() {
-  final scheme = ThemeData.light().colorScheme;
-
-  group('avatarHue', () {
-    test('is deterministic for a given pubkey', () {
-      expect(avatarHue('abc123', scheme), avatarHue('abc123', scheme));
+  group('avatarPaletteIndex', () {
+    test('is the first byte mod 8', () {
+      expect(avatarPaletteIndex('00${'a' * 62}'), 0);
+      expect(avatarPaletteIndex('08${'a' * 62}'), 0);
+      expect(avatarPaletteIndex('01${'a' * 62}'), 1);
+      expect(avatarPaletteIndex('ff${'0' * 62}'), 7);
+      expect(avatarPaletteIndex('FF${'0' * 62}'), 7);
     });
 
-    test('falls back to a surface tone when no key is available', () {
-      expect(avatarHue(null, scheme), scheme.surfaceContainerHigh);
-      expect(avatarHue('', scheme), scheme.surfaceContainerHigh);
+    test('is deterministic and ignores everything past the first byte', () {
+      final a = 'c3${'1' * 62}';
+      final b = 'c3${'e' * 62}';
+      expect(avatarPaletteIndex(a), avatarPaletteIndex(a));
+      expect(avatarPaletteIndex(a), avatarPaletteIndex(b));
+    });
+
+    test('is total: never throws and stays within the palette', () {
+      for (final key in [
+        '',
+        'a',
+        '7',
+        'zz${'0' * 62}',
+        'g1',
+        '-1',
+        '🦊🦊',
+        'deadbeef0123',
+        'ab' * 32,
+      ]) {
+        final i = avatarPaletteIndex(key);
+        expect(i, inInclusiveRange(0, kAvatarPalette.length - 1), reason: key);
+      }
+    });
+
+    test('a non-hex prefix falls back to the code-unit sum mod 8', () {
+      // 'z' = 122, so 'zz' sums to 244 and 244 % 8 = 4.
+      expect(avatarPaletteIndex('zz'), 4);
+      expect(avatarPaletteIndex(''), 0);
+      expect(avatarPaletteIndex('a'), 97 % 8);
+    });
+  });
+
+  group('kAvatarPalette', () {
+    double contrast(Color a, Color b) {
+      final la = a.computeLuminance();
+      final lb = b.computeLuminance();
+      final hi = la > lb ? la : lb;
+      final lo = la > lb ? lb : la;
+      return (hi + 0.05) / (lo + 0.05);
+    }
+
+    test('has exactly eight pairwise-distinct entries', () {
+      expect(kAvatarPalette, hasLength(8));
+      final tops = kAvatarPalette.map((e) => e.top.toARGB32()).toSet();
+      final bottoms = kAvatarPalette.map((e) => e.bottom.toARGB32()).toSet();
+      expect(tops, hasLength(8));
+      expect(bottoms, hasLength(8));
+    });
+
+    test('white initials clear WCAG AA on both stops of every entry', () {
+      for (final (i, e) in kAvatarPalette.indexed) {
+        expect(kAvatarInitialsColor, Colors.white);
+        expect(contrast(kAvatarInitialsColor, e.top), greaterThanOrEqualTo(4.5),
+            reason: 'top of entry $i');
+        expect(
+          contrast(kAvatarInitialsColor, e.bottom),
+          greaterThanOrEqualTo(4.5),
+          reason: 'bottom of entry $i',
+        );
+      }
+    });
+
+    test('each entry is a barely-visible top-lighter gradient in a tight band',
+        () {
+      for (final (i, e) in kAvatarPalette.indexed) {
+        expect(
+          e.top.computeLuminance(),
+          greaterThan(e.bottom.computeLuminance()),
+          reason: 'entry $i',
+        );
+        for (final c in [e.top, e.bottom]) {
+          expect(c.computeLuminance(), inInclusiveRange(0.06, 0.20),
+              reason: 'entry $i');
+        }
+      }
+    });
+
+    test('every constant regenerates from its documented OKLCH spec', () {
+      // (hue index k, top chroma, bottom chroma): L 0.52 top, 0.45 bottom,
+      // hue 20 + 45k, chroma 0.10 unless the entry comment says it was
+      // reduced to fit sRGB.
+      const chromas = <(double, double)>[
+        (0.10, 0.10),
+        (0.10, 0.10),
+        (0.10, 0.098),
+        (0.10, 0.10),
+        (0.088, 0.0765),
+        (0.10, 0.10),
+        (0.10, 0.10),
+        (0.10, 0.10),
+      ];
+      for (final (k, (topC, bottomC)) in chromas.indexed) {
+        final hue = 20.0 + 45.0 * k;
+        _expectWithinTwo(kAvatarPalette[k].top, _oklchToSrgb(0.52, topC, hue),
+            'top $k');
+        _expectWithinTwo(
+          kAvatarPalette[k].bottom,
+          _oklchToSrgb(0.45, bottomC, hue),
+          'bottom $k',
+        );
+      }
+    });
+
+    test('avatarPaletteFor reads the entry at avatarPaletteIndex', () {
+      for (final key in ['00ab', '07', 'ff', 'zz', '']) {
+        expect(
+          identical(
+            avatarPaletteFor(key),
+            kAvatarPalette[avatarPaletteIndex(key)],
+          ),
+          isTrue,
+        );
+      }
     });
   });
 
@@ -136,33 +248,43 @@ void main() {
       expect(markerGlyph('', 50), '');
     });
   });
+}
 
-  group('onAvatarColor', () {
-    test('dark foreground on a light background', () {
-      expect(onAvatarColor(const Color(0xFFFFFFFF)), Colors.black);
-    });
+/// Björn Ottosson's OKLab -> linear sRGB -> sRGB, as 8-bit channels.
+List<int> _oklchToSrgb(double l, double c, double hueDegrees) {
+  final h = hueDegrees * math.pi / 180;
+  final a = c * math.cos(h);
+  final b = c * math.sin(h);
+  final l_ = l + 0.3963377774 * a + 0.2158037573 * b;
+  final m_ = l - 0.1055613458 * a - 0.0638541728 * b;
+  final s_ = l - 0.0894841775 * a - 1.2914855480 * b;
+  final lc = l_ * l_ * l_;
+  final mc = m_ * m_ * m_;
+  final sc = s_ * s_ * s_;
+  final linear = [
+    4.0767416621 * lc - 3.3077115913 * mc + 0.2309699292 * sc,
+    -1.2684380046 * lc + 2.6097574011 * mc - 0.3413193965 * sc,
+    -0.0041960863 * lc - 0.7034186147 * mc + 1.7076147010 * sc,
+  ];
+  return [
+    for (final v in linear)
+      (255 *
+              (v <= 0.0031308
+                  ? 12.92 * v
+                  : 1.055 * math.pow(v, 1 / 2.4) - 0.055))
+          .clamp(0, 255)
+          .round(),
+  ];
+}
 
-    test('white foreground on a dark background', () {
-      expect(onAvatarColor(const Color(0xFF000000)), Colors.white);
-    });
-
-    test('chosen foreground clears WCAG AA across the avatar hue wheel', () {
-      double contrast(Color a, Color b) {
-        final la = a.computeLuminance();
-        final lb = b.computeLuminance();
-        final hi = la > lb ? la : lb;
-        final lo = la > lb ? lb : la;
-        return (hi + 0.05) / (lo + 0.05);
-      }
-
-      for (var hue = 0; hue < 360; hue += 5) {
-        final bg = HSLColor.fromAHSL(1, hue.toDouble(), 0.35, 0.55).toColor();
-        expect(
-          contrast(onAvatarColor(bg), bg),
-          greaterThanOrEqualTo(4.5),
-          reason: 'hue $hue must clear AA for the small initials',
-        );
-      }
-    });
-  });
+void _expectWithinTwo(Color actual, List<int> expected, String reason) {
+  final got = [
+    (actual.r * 255).round(),
+    (actual.g * 255).round(),
+    (actual.b * 255).round(),
+  ];
+  for (var i = 0; i < 3; i++) {
+    expect((got[i] - expected[i]).abs(), lessThanOrEqualTo(2),
+        reason: '$reason channel $i: got $got, spec $expected');
+  }
 }

@@ -403,9 +403,8 @@ fn scan(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<i32
         let manifest = read_manifest(path)?;
         // Checked at SCAN rather than at seal: the scan is where the label's
         // relaxation is applied, and it is the only moment that sees a sidecar
-        // written after a lane sealed (the stress, integration and
-        // relay-customization lanes seal before their first drive and every
-        // later gate reuses that manifest).
+        // written after a lane sealed (several lanes seal before their first
+        // drive, and every later gate reuses that manifest).
         if manifest.declared_plants == DeclaredPlants::None {
             refuse_mislabelled_channel(path)?;
         }

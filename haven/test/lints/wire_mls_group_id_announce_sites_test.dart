@@ -73,9 +73,8 @@ void main() {
       isTrue,
       reason:
           'the announce helper must skip when the build declares no recording '
-          'proxy. e2e-flakiness-stress.yml drives this scenario straight at '
-          'strfry, and an unconditional announce would put the REAL MLS group '
-          'id on a relay socket nightly — Security Rule 4.',
+          'proxy. On a run straight at a relay an unconditional announce would '
+          'put the REAL MLS group id on a relay socket — Security Rule 4.',
     );
   });
 }

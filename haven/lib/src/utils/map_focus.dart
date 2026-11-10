@@ -2,13 +2,18 @@
 library;
 
 import 'dart:async';
+import 'dart:math' as math;
+import 'dart:ui' show lerpDouble;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/map_controller_provider.dart';
+import 'package:haven/src/utils/marker_glide.dart';
+import 'package:haven/src/utils/reduce_motion.dart';
 import 'package:latlong2/latlong.dart';
 
 /// Recenters the shared map camera on [target], never zooming out below
@@ -27,9 +32,28 @@ void focusMapOnPoint({
   double minZoom = 14,
 }) {
   final controller = ref.read(mapControllerProvider);
-  final currentZoom = controller.camera.zoom;
-  final zoom = currentZoom < minZoom ? minZoom : currentZoom;
-  controller.move(target, zoom);
+  final camera = controller.camera;
+  final fromCenter = camera.center;
+  final fromZoom = camera.zoom;
+  final toZoom = math.max(fromZoom, minZoom);
+
+  // A far jump is cut: lerping centre and zoom from far away swoops the target
+  // off-screen mid-flight and bills a tile strip from the tile provider at
+  // every intermediate zoom.
+  final distance =
+      (camera.latLngToScreenOffset(target) -
+              camera.latLngToScreenOffset(fromCenter))
+          .distance;
+  final canGlide =
+      (toZoom - fromZoom).abs() <= 1 &&
+      distance <= 2 * camera.nonRotatedSize.longestSide &&
+      !reduceMotionOf(context);
+  if (canGlide) {
+    _glide.start(controller, fromCenter, fromZoom, target, toZoom);
+  } else {
+    _glide.cancel();
+    controller.move(target, toZoom);
+  }
 
   // `lightImpact` maps to `UIImpactFeedbackGenerator(.light)` on iOS and
   // conveys "action completed" rather than "value changing".
@@ -41,6 +65,69 @@ void focusMapOnPoint({
       Directionality.of(context),
     ),
   );
+}
+
+/// Stops any recentre glide in flight; the glide is process-global state.
+@visibleForTesting
+void cancelMapFocusGlide() => _glide.cancel();
+
+final _MapFocusGlide _glide = _MapFocusGlide();
+
+/// The one recentre tween. Any gesture on the map, a newer focus, or the map's
+/// disposal ends it, so it never fights the user or moves a disposed map.
+class _MapFocusGlide {
+  static const Duration _duration = Duration(milliseconds: 400);
+
+  Ticker? _ticker;
+  StreamSubscription<MapEvent>? _events;
+
+  void start(
+    MapController controller,
+    LatLng fromCenter,
+    double fromZoom,
+    LatLng target,
+    double toZoom,
+  ) {
+    cancel();
+    var lastCenter = fromCenter;
+    var lastZoom = fromZoom;
+    final ticker = Ticker((elapsed) {
+      // A zoom or home button moves the camera with the same source the glide
+      // emits itself, so a pose it did not set is the only sign of it.
+      final camera = controller.camera;
+      if (camera.center != lastCenter || camera.zoom != lastZoom) {
+        cancel();
+        return;
+      }
+      final t = elapsed.inMicroseconds / _duration.inMicroseconds;
+      if (t >= 1) {
+        cancel();
+        controller.move(target, toZoom);
+        return;
+      }
+      final c = Curves.easeInOutCubic.transform(t);
+      lastCenter = glideLerp(fromCenter, target, c);
+      lastZoom = lerpDouble(fromZoom, toZoom, c)!;
+      controller.move(lastCenter, lastZoom);
+    });
+    _ticker = ticker;
+    // `move` emits a `mapController` event, so the tween never cancels itself.
+    _events = controller.mapEventStream.listen(
+      (event) {
+        if (event.source != MapEventSource.mapController) cancel();
+      },
+      onDone: cancel,
+    );
+    unawaited(ticker.start());
+  }
+
+  void cancel() {
+    unawaited(_events?.cancel());
+    _events = null;
+    final ticker = _ticker;
+    _ticker = null;
+    ticker?.dispose();
+  }
 }
 
 /// Resets the shared map camera to Haven's default "home" view: centered on

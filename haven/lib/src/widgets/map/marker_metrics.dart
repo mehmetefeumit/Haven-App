@@ -19,40 +19,85 @@ const double kAvatarSize = 44;
 /// (a test guards the match) so the on-screen and edge sizes are identical.
 const double kRingDiameter = kAvatarSize + 8;
 
-/// Returns a desaturated avatar colour derived from [publicKey].
-///
-/// The same hue identifies a member at every size — full circle in view or
-/// tiny edge droplet. The hue is a quiet identifier, not a stable per-member
-/// brand: it derives from `String.hashCode`, which Dart randomises per isolate
-/// run, so the same pubkey may map to a different hue across app launches.
-/// Falls back to a neutral surface tone when no key is available.
-Color avatarHue(String? publicKey, ColorScheme scheme) {
-  if (publicKey == null || publicKey.isEmpty) {
-    return scheme.surfaceContainerHigh;
-  }
-  final hue = (publicKey.hashCode % 360).abs().toDouble();
-  // Desaturated tint — a quiet identifier, not louder than the chrome.
-  return HSLColor.fromAHSL(1, hue, 0.35, 0.55).toColor();
+/// One initials-disc palette entry: a barely-visible vertical gradient from
+/// [top] to [bottom] (screen space).
+class AvatarPaletteEntry {
+  /// Creates a palette entry.
+  const AvatarPaletteEntry({required this.top, required this.bottom});
+
+  /// Colour at the disc's top edge.
+  final Color top;
+
+  /// Colour at the disc's bottom edge.
+  final Color bottom;
 }
 
-/// Returns the foreground colour (black or white) with the higher WCAG
-/// contrast ratio against [background].
+/// The eight initials-disc colours: OKLCH hues 20° + 45°·k, lightness 0.52 at
+/// the top and 0.45 at the bottom, chroma 0.10 unless an entry's comment says
+/// it was reduced to fit sRGB. Every stop holds white text at >= 4.5:1.
+const List<AvatarPaletteEntry> kAvatarPalette = [
+  AvatarPaletteEntry(
+    // h 20: top L0.52 C0.10, bottom L0.45 C0.10
+    top: Color(0xFF9A4F51),
+    bottom: Color(0xFF843B3E),
+  ),
+  AvatarPaletteEntry(
+    // h 65: top L0.52 C0.10, bottom L0.45 C0.10
+    top: Color(0xFF905B20),
+    bottom: Color(0xFF7A4702),
+  ),
+  AvatarPaletteEntry(
+    // h 110: top L0.52 C0.10, bottom L0.45 C0.098 (reduced to fit sRGB)
+    top: Color(0xFF6D6E1D),
+    bottom: Color(0xFF595901),
+  ),
+  AvatarPaletteEntry(
+    // h 155: top L0.52 C0.10, bottom L0.45 C0.10
+    top: Color(0xFF307A4F),
+    bottom: Color(0xFF17653C),
+  ),
+  AvatarPaletteEntry(
+    // h 200: top L0.52 C0.088, bottom L0.45 C0.0765 (reduced to fit sRGB)
+    top: Color(0xFF02787D),
+    bottom: Color(0xFF006266),
+  ),
+  AvatarPaletteEntry(
+    // h 245: top L0.52 C0.10, bottom L0.45 C0.10
+    top: Color(0xFF2F6E9E),
+    bottom: Color(0xFF185A89),
+  ),
+  AvatarPaletteEntry(
+    // h 290: top L0.52 C0.10, bottom L0.45 C0.10
+    top: Color(0xFF685E9E),
+    bottom: Color(0xFF554A88),
+  ),
+  AvatarPaletteEntry(
+    // h 335: top L0.52 C0.10, bottom L0.45 C0.10
+    top: Color(0xFF8C5180),
+    bottom: Color(0xFF763E6B),
+  ),
+];
+
+/// Colour of initials on every [kAvatarPalette] disc.
+const Color kAvatarInitialsColor = Colors.white;
+
+/// Palette slot for [publicKey]: its first byte mod 8.
 ///
-/// Picking by max contrast (rather than a luminance threshold), with pure
-/// black as the dark option, guarantees at least ~4.58:1 against any
-/// background — clearing WCAG AA (4.5:1) for the small initials at every
-/// per-member hue.
-Color onAvatarColor(Color background) {
-  final bg = background.computeLuminance();
-  return _contrast(bg, 1) >= _contrast(bg, 0) ? Colors.white : Colors.black;
+/// The first byte of a pubkey is stable across launches, devices and SDK
+/// versions (unlike `String.hashCode`) and reveals only 3 bits of an already
+/// public key. A key without a hex first byte falls back to a code-unit sum
+/// so the function is total.
+int avatarPaletteIndex(String publicKey) {
+  final byte = publicKey.length >= 2
+      ? int.tryParse(publicKey.substring(0, 2), radix: 16)
+      : null;
+  if (byte != null) return byte % 8;
+  return publicKey.codeUnits.fold(0, (a, b) => (a + b) % 8);
 }
 
-/// WCAG contrast ratio between two relative luminances.
-double _contrast(double a, double b) {
-  final hi = a > b ? a : b;
-  final lo = a > b ? b : a;
-  return (hi + 0.05) / (lo + 0.05);
-}
+/// The palette entry for [publicKey]; every avatar and the map marker use it.
+AvatarPaletteEntry avatarPaletteFor(String publicKey) =>
+    kAvatarPalette[avatarPaletteIndex(publicKey)];
 
 /// Derives 1–2 display initials from a [displayName] or, failing that, a
 /// [pubkey].

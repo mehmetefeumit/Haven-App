@@ -1,192 +1,118 @@
-/// What the self-marker's pulse costs the rest of the map.
+/// What the self-marker costs the map and says to a screen reader.
 ///
-/// `flutter_map` wraps the WHOLE map — tiles, member markers, attribution — in
-/// a single `RepaintBoundary`. A widget inside it that repaints at the display
-/// refresh rate therefore repaints all of that with it, at 60 Hz, for as long
-/// as the map is on screen. The pulse animates forever by design (it is the
-/// "this is live" affordance), so the marker has to own the boundary that stops
-/// the repaint at itself.
-///
-/// The oracle is a sibling that counts its own `paint` calls. Painting a
-/// repaint boundary paints every descendant that is not itself a boundary, so
-/// a growing count IS the leak, and a flat one is its absence — proved in both
-/// directions here (the control below has no boundary and must grow).
+/// The dot is constant ink with nothing animating: `flutter_map` wraps the
+/// whole map in one `RepaintBoundary`, so any perpetual animation in here
+/// would redraw the tiles and every member marker at the display refresh
+/// rate. Its label carries no accuracy figure because none was ever real.
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/widgets/map/member_marker.dart' show kMarkerKeyline;
 import 'package:haven/src/widgets/map/user_location_marker.dart';
+import 'package:latlong2/latlong.dart';
 
 import '../../helpers/localized_app_harness.dart';
 
-/// Mutable paint tally, shared with the painter.
-class _Tally {
-  int value = 0;
-}
+const Color _core = Color(0xFF0A0A0A);
+const Color _white = Color(0xFFFFFFFF);
 
-/// Counts every time it is asked to paint.
-class _CountingPainter extends CustomPainter {
-  const _CountingPainter(this.tally);
+final Finder _boxes = find.descendant(
+  of: find.byType(UserLocationMarker),
+  matching: find.byType(DecoratedBox),
+);
 
-  final _Tally tally;
+List<BoxDecoration> _decorations(WidgetTester tester) => tester
+    .widgetList<DecoratedBox>(_boxes)
+    .map((box) => box.decoration as BoxDecoration)
+    .toList();
 
-  @override
-  void paint(Canvas canvas, Size size) => tally.value++;
-
-  // Never dirty itself: every count must come from an ANCESTOR repaint, which
-  // is the thing being measured.
-  @override
-  bool shouldRepaint(_CountingPainter oldDelegate) => false;
-}
-
-/// A sibling standing in for the tiles and the attribution.
-class _PaintCounter extends StatelessWidget {
-  const _PaintCounter(this.tally);
-
-  final _Tally tally;
-
-  @override
-  Widget build(BuildContext context) => CustomPaint(
-        size: const Size.square(20),
-        painter: _CountingPainter(tally),
-      );
-}
-
-/// The control: an endlessly animating widget with NO boundary of its own.
-class _UnboundedPulse extends StatefulWidget {
-  const _UnboundedPulse();
-
-  @override
-  State<_UnboundedPulse> createState() => _UnboundedPulseState();
-}
-
-class _UnboundedPulseState extends State<_UnboundedPulse>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    duration: const Duration(milliseconds: 1500),
-    vsync: this,
-  )..repeat();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => AnimatedBuilder(
-        animation: _controller,
-        builder: (context, child) => SizedBox.square(
-          dimension: 10 + 10 * _controller.value,
-          child: const ColoredBox(color: Colors.red),
-        ),
-      );
-}
-
-Future<void> _pumpUnderSharedBoundary(
-  WidgetTester tester,
-  Widget animating,
-  _Tally tally,
-) async {
+Future<void> _pump(WidgetTester tester, {ThemeData? theme}) async {
+  const marker = Scaffold(body: Center(child: UserLocationMarker()));
   await pumpLocalized(
     tester,
-    Scaffold(
-      // Stands in for `flutter_map`'s one boundary around the whole map.
-      body: RepaintBoundary(
-        child: Stack(
-          children: [_PaintCounter(tally), animating],
-        ),
-      ),
-    ),
-    // The pulse never settles by design.
+    theme == null ? marker : Theme(data: theme, child: marker),
     settle: false,
   );
   await tester.pump();
 }
 
-/// The pulse's own animated node — `AnimatedBuilder` also appears in the
-/// framework's page/scaffold machinery, so it is scoped to the marker.
-final Finder _pulse = find.descendant(
-  of: find.byType(UserLocationMarker),
-  matching: find.byType(AnimatedBuilder),
-);
-
 void main() {
-  testWidgets('the pulse repaints nothing but itself', (tester) async {
-    final tally = _Tally();
-    await _pumpUnderSharedBoundary(
-      tester,
-      const UserLocationMarker(),
-      tally,
-    );
-
-    final before = tally.value;
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pump(const Duration(milliseconds: 100));
-
-    expect(
-      tally.value,
-      before,
-      reason: 'every one of these frames would otherwise redraw the tiles and '
-          'the attribution, for a dot that moved four pixels',
-    );
-  });
-
-  testWidgets('the oracle sees the leak when the boundary is absent', (
+  testWidgets('the label is the fixed phrase with no accuracy claim', (
     tester,
   ) async {
-    // Anti-vacuity: without this, a marker that stopped animating altogether
-    // would pass the test above.
-    final tally = _Tally();
-    await _pumpUnderSharedBoundary(tester, const _UnboundedPulse(), tally);
+    await _pump(tester);
 
-    final before = tally.value;
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pump(const Duration(milliseconds: 100));
-
-    expect(
-      tally.value,
-      greaterThan(before),
-      reason: 'an animation with no boundary of its own repaints its siblings',
+    final l10n = AppLocalizations.of(
+      tester.element(find.byType(UserLocationMarker)),
     );
+    final label = tester
+        .getSemantics(find.byType(UserLocationMarker))
+        .label;
+
+    expect(label, l10n.userLocationMarkerSemantics);
+    expect(label, isNot(matches(RegExp(r'\d'))));
+    expect(label.toLowerCase(), isNot(contains('accuracy')));
   });
 
-  testWidgets('the pulse still pulses', (tester) async {
-    // The other half of the same promise: the boundary is a paint-scope
-    // change, never a reason for the live-location affordance to go static.
-    final tally = _Tally();
-    await _pumpUnderSharedBoundary(
-      tester,
-      const UserLocationMarker(),
-      tally,
-    );
+  testWidgets('nothing animates, now or later', (tester) async {
+    await _pump(tester);
+    expect(tester.hasRunningAnimations, isFalse);
 
-    final first = tester.getSize(_pulse);
-    await tester.pump(const Duration(milliseconds: 300));
-    final later = tester.getSize(_pulse);
-
-    expect(later, isNot(first));
+    await tester.pump(const Duration(seconds: 2));
+    expect(tester.hasRunningAnimations, isFalse);
   });
 
-  testWidgets('reduced motion still removes the pulse entirely', (
+  testWidgets('paints an ink core, a white 3 px ring and a keyline', (
     tester,
   ) async {
-    // WCAG 2.3.3: the boundary must not resurrect an animation the user asked
-    // the OS to switch off.
-    final tally = _Tally();
+    await _pump(tester);
+
+    final decorations = _decorations(tester);
+    expect(decorations, hasLength(2));
+    final [keyline, ring] = decorations;
+
+    expect(keyline.shape, BoxShape.circle);
+    final keylineBorder = keyline.border! as Border;
+    expect(keylineBorder.top.color, kMarkerKeyline);
+    expect(keylineBorder.top.width, 1);
+    expect(keyline.boxShadow, hasLength(1));
+    expect(
+      keyline.boxShadow!.single.color,
+      Colors.black.withValues(alpha: 0.25),
+    );
+    expect(keyline.boxShadow!.single.blurRadius, 4);
+    expect(keyline.boxShadow!.single.offset, const Offset(0, 2));
+
+    expect(ring.shape, BoxShape.circle);
+    expect(ring.color, _core);
+    final ringBorder = ring.border! as Border;
+    expect(ringBorder.top.color, _white);
+    expect(ringBorder.top.width, 3);
+  });
+
+  testWidgets('the outermost box is 26 dp: an 18 dp core, 3 dp ring, 1 px '
+      'keyline', (tester) async {
+    await _pump(tester);
+
+    expect(tester.getSize(_boxes.first), const Size.square(26));
+    expect(tester.getSize(_boxes.last), const Size.square(24));
+    expect(tester.getSize(find.byType(UserLocationMarker)).longestSide,
+        lessThanOrEqualTo(26));
+  });
+
+  testWidgets('stays 26 dp under the tight constraints a Marker imposes', (
+    tester,
+  ) async {
     await pumpLocalized(
       tester,
-      MediaQuery(
-        data: const MediaQueryData(disableAnimations: true),
-        child: Scaffold(
-          body: RepaintBoundary(
-            child: Stack(
-              children: [
-                _PaintCounter(tally),
-                const UserLocationMarker(),
-              ],
-            ),
+      const Scaffold(
+        body: Center(
+          child: SizedBox.square(
+            dimension: 32,
+            child: UserLocationMarker(),
           ),
         ),
       ),
@@ -194,6 +120,56 @@ void main() {
     );
     await tester.pump();
 
-    expect(_pulse, findsNothing);
+    expect(tester.getSize(_boxes.first), const Size.square(26));
+    expect(tester.getSize(_boxes.last), const Size.square(24));
+  });
+
+  testWidgets('the ink is identical under a light and a dark theme', (
+    tester,
+  ) async {
+    await _pump(tester, theme: ThemeData.light());
+    final light = _decorations(tester);
+    await _pump(tester, theme: ThemeData.dark());
+    final dark = _decorations(tester);
+
+    expect(dark.length, light.length);
+    for (var i = 0; i < light.length; i++) {
+      expect(dark[i].color, light[i].color);
+      expect(dark[i].border, light[i].border);
+      expect(dark[i].boxShadow, light[i].boxShadow);
+    }
+  });
+
+  testWidgets('sits at its point inside a MarkerLayer', (tester) async {
+    await pumpLocalized(
+      tester,
+      const Scaffold(
+        body: FlutterMap(
+          options: MapOptions(
+            initialCenter: LatLng(10, 20),
+            initialZoom: 5,
+          ),
+          children: [
+            MarkerLayer(
+              markers: [
+                Marker(
+                  point: LatLng(10, 20),
+                  width: 32,
+                  height: 32,
+                  child: UserLocationMarker(),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+      settle: false,
+    );
+    await tester.pump();
+
+    expect(tester.getSize(_boxes.first), const Size.square(26));
+    final marker = tester.getCenter(find.byType(UserLocationMarker));
+    final map = tester.getCenter(find.byType(FlutterMap));
+    expect((marker - map).distance, lessThan(0.5));
   });
 }

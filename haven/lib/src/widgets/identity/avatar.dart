@@ -13,7 +13,7 @@ import 'package:haven/src/widgets/map/marker_metrics.dart';
 /// A circular avatar for displaying user identity.
 ///
 /// Shows the user's image if available, otherwise falls back to
-/// initials or a generated color based on their public key.
+/// initials on a palette disc chosen by their public key.
 ///
 /// Security note: images are displayed from local bytes only
 /// ([imageBytes]) — never via a network URL — so no avatar data is
@@ -44,7 +44,7 @@ class HavenAvatar extends StatelessWidget {
   /// Initials to display as fallback (1-2 characters).
   final String? initials;
 
-  /// Public key for generating consistent fallback color.
+  /// Public key selecting the fallback disc's palette entry.
   final String? publicKey;
 
   /// Size of the avatar.
@@ -104,19 +104,28 @@ class HavenAvatar extends StatelessWidget {
             HavenAvatarSize.xlarge => 20.0,
           };
 
-    final backgroundColor = _generateColor(
-      publicKey,
-      Theme.of(context).colorScheme,
-    );
+    final key = publicKey;
+    final entry = key == null || key.isEmpty ? null : avatarPaletteFor(key);
+    final colorScheme = Theme.of(context).colorScheme;
+    final textColor = entry == null
+        ? colorScheme.onSurface
+        : kAvatarInitialsColor;
 
     Widget avatar = Container(
       width: resolvedDiameter,
       height: resolvedDiameter,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: backgroundColor,
+        color: entry == null ? colorScheme.surfaceContainerHigh : null,
+        gradient: entry == null
+            ? null
+            : LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [entry.top, entry.bottom],
+              ),
       ),
-      child: _buildContent(context, fontSize, backgroundColor),
+      child: _buildContent(context, fontSize, textColor),
     );
 
     if (showOnlineIndicator) {
@@ -154,7 +163,7 @@ class HavenAvatar extends StatelessWidget {
   Widget _buildContent(
     BuildContext context,
     double fontSize,
-    Color backgroundColor,
+    Color textColor,
   ) {
     final bytes = imageBytes;
     if (bytes != null && bytes.isNotEmpty) {
@@ -164,19 +173,19 @@ class HavenAvatar extends StatelessWidget {
           gaplessPlayback: true,
           fit: BoxFit.cover,
           errorBuilder: (context, error, stackTrace) {
-            return _buildFallback(context, fontSize, backgroundColor);
+            return _buildFallback(context, fontSize, textColor);
           },
         ),
       );
     }
 
-    return _buildFallback(context, fontSize, backgroundColor);
+    return _buildFallback(context, fontSize, textColor);
   }
 
   Widget _buildFallback(
     BuildContext context,
     double fontSize,
-    Color backgroundColor,
+    Color textColor,
   ) {
     final displayInitials = initials == null
         ? '?'
@@ -186,34 +195,13 @@ class HavenAvatar extends StatelessWidget {
       child: Text(
         displayInitials,
         style: TextStyle(
-          color: _onColor(backgroundColor),
+          color: textColor,
           fontSize: fontSize,
           fontWeight: FontWeight.w600,
         ),
       ),
     );
   }
-
-  Color _generateColor(String? key, ColorScheme scheme) {
-    if (key == null || key.isEmpty) {
-      return scheme.surfaceContainerHigh;
-    }
-
-    // Desaturated HSL hue derived from the pubkey. Saturation kept low so
-    // the avatar reads as a quiet identifier, not louder than the chrome.
-    final hash = key.hashCode;
-    final hue = (hash % 360).abs().toDouble();
-    return HSLColor.fromAHSL(1, hue, 0.35, 0.55).toColor();
-  }
-
-  /// Picks the max-contrast foreground (black or white) against [bg].
-  ///
-  /// Delegates to [onAvatarColor] from `marker_metrics.dart`, which
-  /// picks by WCAG contrast ratio rather than a luminance threshold —
-  /// guaranteeing ≥ 4.5:1 (WCAG AA) across every hue at the avatar's
-  /// saturation/lightness point, including mid-luminance tones where a
-  /// simple >0.5 threshold would pass only ~2:1.
-  Color _onColor(Color bg) => onAvatarColor(bg);
 
   String _buildSemanticLabel(AppLocalizations l10n) {
     final parts = <String>[l10n.avatarSemanticsLabel];

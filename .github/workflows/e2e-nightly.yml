@@ -12,11 +12,6 @@
 # (e2e-android.yml and e2e-integration.yml), so there is exactly one
 # definition of each lane — the nightly can't drift from what PRs run.
 #
-# The heavier flake-STRESS run (e2e_combined N times, fail on any) is a
-# SEPARATE nightly workflow (e2e-flakiness-stress.yml) so the plain
-# safety-net run and the multi-iteration stress run can fail (and be
-# triaged) independently.
-#
 # NOTE — fast-PR-subset split (CI-6, part b) is documented, not coded
 # here: trimming the PR check to a fast subset requires a Dart-side
 # `@Tags(['fast'])` annotation on the cheap tests plus
@@ -30,9 +25,7 @@ name: E2E Nightly
 on:
   workflow_dispatch:
   schedule:
-    # Nightly at 03:00 UTC — an hour before the flake-stress run (04:00)
-    # so the plain full-flow safety net reports first and the two heavy
-    # E2E jobs don't start simultaneously on the same schedule tick.
+    # Nightly at 03:00 UTC.
     - cron: '0 3 * * *'
 
 jobs:

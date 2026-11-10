@@ -2196,18 +2196,7 @@ class AppLocalizationsRu extends AppLocalizations {
   String get mapAttributionCreditsButton => 'Авторы карты и лицензия';
 
   @override
-  String userLocationMarkerSemantics(String accuracy) {
-    return 'Маркер вашего местоположения$accuracy';
-  }
-
-  @override
-  String userLocationMarkerAccuracy(int meters) {
-    final intl.NumberFormat metersNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String metersString = metersNumberFormat.format(meters);
-
-    return '. Точность: $metersString метров';
-  }
+  String get userLocationMarkerSemantics => 'Маркер вашего местоположения';
 
   @override
   String memberMarkerMinutesShort(int count) {

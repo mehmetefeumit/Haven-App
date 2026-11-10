@@ -2157,18 +2157,7 @@ class AppLocalizationsNe extends AppLocalizations {
   String get mapAttributionCreditsButton => 'नक्सा क्रेडिट र इजाजतपत्र';
 
   @override
-  String userLocationMarkerSemantics(String accuracy) {
-    return 'तपाईंको स्थान मार्कर$accuracy';
-  }
-
-  @override
-  String userLocationMarkerAccuracy(int meters) {
-    final intl.NumberFormat metersNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String metersString = metersNumberFormat.format(meters);
-
-    return '. शुद्धता: $metersString मिटर';
-  }
+  String get userLocationMarkerSemantics => 'तपाईंको स्थान मार्कर';
 
   @override
   String memberMarkerMinutesShort(int count) {

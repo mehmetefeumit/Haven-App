@@ -843,9 +843,9 @@ class _MapPageState extends ConsumerState<MapPage>
             markers: [
               Marker(
                 point: _currentLatLng,
-                width: 100,
-                height: 100,
-                child: const UserLocationMarker(accuracyRadius: 40),
+                width: 32,
+                height: 32,
+                child: const UserLocationMarker(),
               ),
             ],
           ),

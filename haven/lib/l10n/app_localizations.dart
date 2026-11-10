@@ -3204,17 +3204,11 @@ abstract class AppLocalizations {
   /// **'Map credits and licence'**
   String get mapAttributionCreditsButton;
 
-  /// Accessibility label for the user's own location marker on the map. {accuracy} is an optional accuracy clause (userLocationMarkerAccuracy) appended when an accuracy circle is shown, or empty otherwise.
+  /// Accessibility label for the user's own location marker on the map.
   ///
   /// In en, this message translates to:
-  /// **'Your location marker{accuracy}'**
-  String userLocationMarkerSemantics(String accuracy);
-
-  /// Optional accuracy clause appended to the user-location-marker accessibility label, e.g. '. Accuracy: 40 meters'. {meters} is an integer count of meters.
-  ///
-  /// In en, this message translates to:
-  /// **'. Accuracy: {meters} meters'**
-  String userLocationMarkerAccuracy(int meters);
+  /// **'Your location marker'**
+  String get userLocationMarkerSemantics;
 
   /// Compact age pill on a member marker for minutes, e.g. '5m'. The 'm' suffix is intentionally English (a compact time abbreviation).
   ///

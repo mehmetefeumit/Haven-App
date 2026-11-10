@@ -128,16 +128,6 @@ void main() {
   });
 
   // -------------------------------------------------------------------------
-  // A11Y contrast — §7.5 / P1 requirement.
-  //
-  // HavenAvatar._onColor must delegate to onAvatarColor (marker_metrics.dart)
-  // which guarantees ≥4.5:1 WCAG-AA. The observable behaviour tested here is
-  // that the actual Text foreground colour clears the AA threshold against the
-  // background colour chosen for the avatar at every point on the hue wheel
-  // that the avatar colour generator can produce.
-  // -------------------------------------------------------------------------
-
-  // -------------------------------------------------------------------------
   // Explicit diameter override — lets a caller size the avatar to match a
   // sibling widget (e.g. a Material CircleAvatar in the same list) instead of
   // the fixed HavenAvatarSize enum steps.
@@ -191,91 +181,77 @@ void main() {
     });
   });
 
-  group('HavenAvatar — WCAG-AA contrast (§7.5 A11Y)', () {
-    double contrastRatio(Color a, Color b) {
-      final la = a.computeLuminance();
-      final lb = b.computeLuminance();
-      final hi = la > lb ? la : lb;
-      final lo = la > lb ? lb : la;
-      return (hi + 0.05) / (lo + 0.05);
-    }
+  group('HavenAvatar — palette disc (§7.5 A11Y)', () {
+    const pubkey = 'deadbeef0123';
 
-    testWidgets(
-      '_onColor delegates to onAvatarColor: foreground clears '
-      'WCAG AA across the avatar hue wheel',
-      (tester) async {
-        // The avatar's _generateColor uses HSL(hue, 0.35, 0.55) for any
-        // non-null pubkey. Step through every hue in the same range that
-        // marker_metrics_test.dart validates onAvatarColor for.
-        for (var hue = 0; hue < 360; hue += 5) {
-          final bg = HSLColor.fromAHSL(
-            1,
-            hue.toDouble(),
-            0.35,
-            0.55,
-          ).toColor();
-
-          // Use onAvatarColor directly to derive the expected foreground,
-          // then verify the observable Text colour produced by HavenAvatar
-          // matches and clears the AA threshold.
-          final expectedFg = onAvatarColor(bg);
-          expect(
-            contrastRatio(expectedFg, bg),
-            greaterThanOrEqualTo(4.5),
-            reason:
-                'onAvatarColor must clear WCAG AA at hue $hue '
-                '(bg=$bg, fg=$expectedFg)',
-          );
-        }
-      },
-    );
-
-    testWidgets(
-      'HavenAvatar foreground text has correct WCAG-AA colour '
-      'for a light background pubkey',
-      (tester) async {
-        // Pick a pubkey whose hash yields a light background so that
-        // the black foreground is chosen and WCAG AA is satisfied.
-        // We use 'testpubkey_light' and inspect the rendered Text widget.
-        await tester.pumpWidget(
-          MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: Scaffold(
-              body: Center(
-                child: HavenAvatar(
-                  initials: 'TL',
-                  publicKey: 'testpubkey_light',
-                ),
-              ),
+    Future<void> pump(WidgetTester tester, {String? publicKey}) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: Center(
+              child: HavenAvatar(initials: 'TL', publicKey: publicKey),
             ),
           ),
-        );
-        await tester.pumpAndSettle();
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
 
-        final textWidget = tester.widget<Text>(
+    BoxDecoration discDecoration(WidgetTester tester) {
+      final container = tester.widget<Container>(
+        find
+            .descendant(
+              of: find.byType(HavenAvatar),
+              matching: find.byType(Container),
+            )
+            .first,
+      );
+      return container.decoration! as BoxDecoration;
+    }
+
+    testWidgets('paints the vertical gradient of avatarPaletteFor(pubkey) '
+        'with white initials', (tester) async {
+      await pump(tester, publicKey: pubkey);
+
+      final entry = avatarPaletteFor(pubkey);
+      final decoration = discDecoration(tester);
+      expect(decoration.shape, BoxShape.circle);
+      final gradient = decoration.gradient! as LinearGradient;
+      expect(gradient.begin, Alignment.topCenter);
+      expect(gradient.end, Alignment.bottomCenter);
+      expect(gradient.colors, [entry.top, entry.bottom]);
+
+      final text = tester.widget<Text>(
+        find.descendant(
+          of: find.byType(HavenAvatar),
+          matching: find.byType(Text),
+        ),
+      );
+      expect(text.style?.color, kAvatarInitialsColor);
+    });
+
+    testWidgets('keeps the neutral surface disc without a pubkey', (
+      tester,
+    ) async {
+      for (final key in [null, '']) {
+        await pump(tester, publicKey: key);
+
+        final scheme = Theme.of(
+          tester.element(find.byType(HavenAvatar)),
+        ).colorScheme;
+        final decoration = discDecoration(tester);
+        expect(decoration.gradient, isNull);
+        expect(decoration.color, scheme.surfaceContainerHigh);
+        final text = tester.widget<Text>(
           find.descendant(
             of: find.byType(HavenAvatar),
             matching: find.byType(Text),
           ),
         );
-        final fg = textWidget.style?.color;
-        expect(
-          fg,
-          isNotNull,
-          reason: 'foreground color must be set',
-        );
-        // Foreground must be either black or white — not a mid-tone.
-        final isBlack = fg!.computeLuminance() < 0.01;
-        final isWhite = fg.computeLuminance() > 0.99;
-        expect(
-          isBlack || isWhite,
-          isTrue,
-          reason:
-              'avatar foreground must be max-contrast black or white, '
-              'not a mid-tone (got $fg)',
-        );
-      },
-    );
+        expect(text.style?.color, scheme.onSurface);
+      }
+    });
   });
 }

@@ -2379,19 +2379,9 @@
     "description": "Accessibility label for the button that expands the map's attribution credits and licence."
   },
 
-  "userLocationMarkerSemantics": "Your location marker{accuracy}",
+  "userLocationMarkerSemantics": "Your location marker",
   "@userLocationMarkerSemantics": {
-    "description": "Accessibility label for the user's own location marker on the map. {accuracy} is an optional accuracy clause (userLocationMarkerAccuracy) appended when an accuracy circle is shown, or empty otherwise.",
-    "placeholders": {
-      "accuracy": { "type": "String" }
-    }
-  },
-  "userLocationMarkerAccuracy": ". Accuracy: {meters} meters",
-  "@userLocationMarkerAccuracy": {
-    "description": "Optional accuracy clause appended to the user-location-marker accessibility label, e.g. '. Accuracy: 40 meters'. {meters} is an integer count of meters.",
-    "placeholders": {
-      "meters": { "type": "int", "format": "decimalPattern" }
-    }
+    "description": "Accessibility label for the user's own location marker on the map."
   },
 
   "memberMarkerMinutesShort": "{count}m",
