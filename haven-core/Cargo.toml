@@ -185,13 +185,27 @@ sha2 = "0.10"
 # widening the dependency graph (check_mdk_supply_chain.sh).
 hmac = "0.12"
 
-# NOTE: the direct `chacha20poly1305` dependency was removed in DM-2. Its only
-# Haven consumer was the legacy REV-1 non-destructive content-type peek
-# (`nostr::mls::peek_crypto`), which the Dark Matter peeler's public
-# `peel_group_message` supersedes; that module is deleted. The kind-445
-# outer-layer AEAD now lives entirely inside `transport-nostr-peeler`, which
-# still pulls `chacha20poly1305` transitively on the workspace `0.10` line
-# (`cargo tree -i chacha20poly1305` must still show a single version).
+# The Bluetooth mesh's own two AEAD layers (`src/mesh`, plan
+# `docs/BLUETOOTH_MESH_PLAN.md` §4 and §6.7): the 1024-byte packet envelope and
+# the hand-written `Noise_NN_25519_ChaChaPoly_SHA256` link. All three crates
+# are already locked through the MLS stack (`hpke-rs-rust-crypto`,
+# `elliptic-curve`), so naming them adds no crate and no version to any
+# lockfile (check_mdk_supply_chain.sh).
+#
+# `chacha20poly1305` was a direct dependency until DM-2 for the legacy kind-445
+# content-type peek; that AEAD still lives entirely inside
+# `transport-nostr-peeler`, and the mesh never touches it (Rule 11). One
+# version, the `0.10` line (`cargo tree -i chacha20poly1305`). `alloc` is the
+# `Aead` trait the link's frames use, declared rather than inherited.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+# The 0.12 line of the two locked: it is the one built on the `hmac 0.12` /
+# `sha2 0.10` this crate already names. 0.13 sits on `digest 0.11`.
+hkdf = "0.12"
+# The 2.x line of the two locked: its `EphemeralSecret` takes the
+# `rand_core 0.6` generator traits `rand 0.8` implements; 3.x takes
+# `rand_core 0.10`'s (it is in the graph for `x-wing` alone). `zeroize` is what
+# makes the ephemeral scalar and the DH output wipe on drop.
+x25519-dalek = { version = "2", default-features = false, features = ["zeroize"] }
 
 # Image processing (avatar pipeline: decode/strip/downscale/re-encode).
 #

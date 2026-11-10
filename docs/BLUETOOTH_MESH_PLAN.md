@@ -312,6 +312,7 @@ plaintext   996 B
   padding           zero; the opener verifies it is all zero
 ```
 
+- Integers are big-endian.
 - The recipient rebuilds the event with `h` from the circle whose key opened
   the packet, recomputes `id`, and calls `Event::verify()`. A packet opened
   under the wrong circle's key fails there, because `id` binds `h`.
@@ -535,7 +536,9 @@ the routing id.
 Every frame after the handshake (§6.7) is `[type:1][body]`, encrypted:
 `HELLO` (the random value above), `HAVE`
 (entries of packet id + remaining-lifetime step, §6.4), `WANT` (packet ids), `PKT` (`[index:1][chunk]`), `BYE`. Each
-body has a fixed maximum checked before allocation. An unknown type, an
+body has a fixed maximum checked before allocation. Every frame is padded to
+the link's frame size before sealing, so a frame's length says nothing about
+its type or how many ids it carries. An unknown type, an
 oversized body, a frame that does not decrypt or a version mismatch closes
 the link.
 
@@ -609,9 +612,8 @@ the link.
 - Records are memory only. After a restart a phone may take live packets
   again, once, for their true remaining lifetime, and may count one as
   "passed on" a second time.
-- **Cost (§0.4 item 7a).** `HAVE` is not encrypted (§6.7), so a connected
-  neighbour, and a sniffer that follows that link, read the value. The
-  simulator fixes `L` (G-7).
+- **Cost (§0.4 item 7a).** The link is encrypted (§6.7), so only a connected
+  neighbour reads the value. The simulator fixes `L` (G-7).
 
 ### 6.5 Limits
 
@@ -645,7 +647,7 @@ delay, arrivals and restarts, fixes the slot period, lifetime and store size.
 
 Every link runs `Noise_NN_25519_ChaChaPoly_SHA256`, hand-written for this
 one pattern on crates already in the lockfiles (x25519-dalek,
-chacha20poly1305, sha2, hmac), with every secret zeroized.
+chacha20poly1305, hkdf, sha2), with every secret it holds zeroized.
 
 - The central sends its ephemeral key (32 bytes); the peripheral answers with
   its own plus a 16-byte tag (48 bytes). The prologue is `"haven/mesh/link"`
@@ -1100,9 +1102,9 @@ declared in `e2e_lane_budget.manifest`.
 
 ## 10. Milestones
 
-Each lands complete with its tests. Mesh code ships behind a compile-time
-define, default off (the `HAVEN_LIVE_SYNC` precedent, with coverage's
-flag-off run), until M5.
+Each lands complete with its tests. M1 is a library with no caller. From M2
+on, every call site ships behind a compile-time define, default off (the
+`HAVEN_LIVE_SYNC` precedent, with coverage's flag-off run), until M5.
 
 | M | Scope | Exit |
 |---|---|---|
