@@ -52,7 +52,8 @@ exactly as today, mesh on or off.
 - Its rule "never cache exporter-derived secrets" (R-9/G-11): knowingly
   reversed — the mesh keys for retained epochs are stored (§4.2).
 - Top-right toggle: the owner now specifies bottom-left.
-- Opt-in internet bridging: now never (D-7).
+- Opt-in internet bridging by any carrier: replaced by member bridging
+  (§5.5, D-7). A phone that cannot open a packet still never bridges it.
 - Simulator "routing only": replaced by §9.
 
 Its threat analysis (radio localisation, crowd counting, tracking,
@@ -118,6 +119,10 @@ forward-all-opaque, photos excluded) stands and is carried into §8.
     until a relay is reachable (list in §5.4).
 11. **The mesh carries no commits**, so a member who missed an epoch change
     cannot read members who took it, until relays return.
+11a. **Member bridging reaches a hop or two.** A fellow member's update can
+    be passed to the relays only within 218 seconds of its sealing (§5.5).
+    When it happens, a relay can infer that some member of that circle is
+    offline and within mesh reach of the bridging phone's network address.
 12. **After about 1000 location updates from one sender that a receiver never
     got** (about 20 h at the fastest cadence), that sender is unreadable to
     that receiver until the epoch changes, which needs relays [V, OpenMLS
@@ -288,7 +293,8 @@ packet     1024 B   every byte indistinguishable from random to a non-member
   tag        16 B
 
 plaintext   996 B
-  format      1 B   0x01 = tag layout [h, expiration]
+  format      1 B   0x01 = tag layout [h, expiration]; 0x02 = the same, and
+                    the sender's relay path attempted this event (§5.5)
   pubkey     32 B   the event's ephemeral key
   sig        64 B
   created_at  8 B
@@ -408,6 +414,63 @@ can notice (§0.4 item 8).
 **iOS background:** today a burst that could not receive seals nothing in two
 cases (§7.7 R1). With mesh on, such a burst now seals for the mesh only
 (D-8, decided).
+
+---
+
+### 5.5 Member bridging (D-7, decided)
+
+When a circle member's phone receives a fellow member's update over the mesh
+and has a working relay path, it publishes that same event to the circle's
+relays, so members far away can see someone who has no internet. A phone
+that cannot open a packet cannot bridge it: it knows neither the relays nor
+the routing id.
+
+- **Which events.** Only one that `mesh_drive` just ingested and the engine
+  answered as a new, authenticated application message — `Processed` with a
+  `MessageReceived` for this event's id, carrying a location. Not a
+  duplicate (a relay already delivered it), not an own echo, not buffered,
+  stale or rejected. Today's receive verdict folds these together
+  (`relay/catchup.rs:1327-1332`), so the mesh ingest gains one typed answer.
+- **The sender's consent, per event.** Envelope format `0x02` says the
+  sender's own relay path attempted this event. Format `0x01`, which
+  mesh-only seals (§7.7 R1) always carry, is never bridged: bridging one
+  would hand the relays an event the sender's phone refused to send them.
+  The value sits under the mesh key, so a member could flip it — but a member
+  can already publish the event itself; it binds honest phones.
+- **The bridger's own check.** Bridge exactly when this phone would send its
+  own fix at that event's epoch: `location_may_be_sent` holds for that epoch
+  (`manager.rs:4777-4812`) and the circle is not disbanded, leaving, holding
+  unread input or in a routing collision. So a bridger that has seen a
+  removal does not bridge an event sealed before it.
+- **The window.** Never when `location_is_spent` (`fanout.rs:2679`): the
+  send must begin within 218 s of `created_at` (228 s less the 10 s send
+  window), by the bridger's clock. The expiration is inside the signed
+  event; nothing can extend it.
+- **How.** One attempt per relay of the circle through
+  `FanoutSend::publish_location` (`fanout.rs:825-829`), on the verified,
+  signer-less publish client (Rule 16). No record, no retry, no confirm; a
+  bridge interrupted by a kill is lost. Its result goes nowhere — not to the
+  health model, and not to the clock-skew detector, which would otherwise
+  blame the bridger for the sender's clock. It runs inside the driven call
+  and only in a drive that publishes this phone's own location anyway, so it
+  never wakes the publish pool by itself.
+- **Bounds.** Per circle and sender: the newest update only, at most one per
+  72 s; plus a total per drive. A member flooding the mesh cannot make honest
+  phones exceed their normal publishing rate per member.
+- **Always on with mesh**, disclosed in the enable flow; no separate switch.
+- **Reach.** The chain is seal, announce tick, hop, the bridger's next own
+  publish (72–168 s apart): it serves members a hop or two away.
+- **What relays learn.** Authorship stays hidden (a fresh key per event), but
+  a bridged event arrives tens of seconds after its `created_at`, off the
+  bridger's own rhythm: a relay can infer that a member of that circle is
+  offline and within mesh reach of the bridger's address. If the sender also
+  reaches the relay, the same event from two connections links the two
+  addresses. For the sender it is a gain: its address never touches the
+  relay.
+- **Rules it changes.** Rule 13.1 ("only the fanout driver sends a kind
+  445") and the kind-445 table row gain this one send of an event the device
+  did not seal; a source pin holds it to one function, which may not name a
+  staged-commit symbol (`security_rule_gates.rs:4633-4658`).
 
 ---
 
@@ -750,6 +813,7 @@ iOS radio behaviour (§0.4 items 1, 4).
 | Malicious member | What the circle shares; which packets are the circle's | Other circles | Can send future-epoch application messages toward the engine buffer, bounded by §5.2 |
 | Removed member | Packets sealed at epochs they held, from members who have not seen the removal — on iOS in the background too (§7.7 R1) | Later epochs | An outage freezes epochs, so the window lasts as long as the outage |
 | Replay | — | — | Authentic replay is a duplicate or stale (§5.3) |
+| Relay operator | With member bridging: that a member of a circle is offline and within mesh reach of the bridger's address; two addresses linked when both send the same event | Who, where, content | §5.5 |
 | Device seizure | Lifetime counters; that mesh was used; mesh keys for retained epochs (the same epochs MDK already stores) | Carried packets (memory only) | — |
 | Flooder / address cycler / eclipse | — | — | §6.5 |
 
@@ -759,7 +823,7 @@ iOS radio behaviour (§0.4 items 1, 4).
   application messages cross the mesh, checked at both ends; a location
   reaches the mesh only after the relay path's send-time check; the engine
   holds no key and forwarding never depends on recognition; the mesh has
-  no sealing code of its own, never bridges a carried packet to a relay, never holds an MLS
+  no sealing code of its own, bridges to a relay only an event a member opened and only under §5.5, never holds an MLS
   session; the store is memory only; the advertisement is the UUID alone; no
   pairing; the mesh is lossy by design (the explicit carve-out from Rule 12's
   "never drop").
@@ -771,7 +835,11 @@ iOS radio behaviour (§0.4 items 1, 4).
   `INV-W-445-EXPIRATION-SCOPE`; `SECURITY.md` retention text;
   `UNRESOLVABLE_INPUT_MAX_AGE_SECS`'s rationale
   (`haven-core/src/nostr/mls/types.rs:563-592`), which assumes nothing
-  redelivers after 288 s; the stale "FFI exposes no streams" line; and for §7.7 R1,
+  redelivers after 288 s; the stale "FFI exposes no streams" line; for §5.5, Rule 13.1,
+  `haven-core/SECURITY.md:482-494`, the `publish_event` doc at
+  `api.rs:9121-9123`, `security_rule_gates.rs:1139-1157`,
+  `INV-R-PER-CIRCLE-PUBLISH-DECORRELATED` and a new invariant for the
+  relay-side inference; and for §7.7 R1,
   `haven-core/SECURITY.md:1693-1695`, the comment at
   `background_burst_coordinator.dart:573`, and
   `background_burst_coordinator_test.dart:476`, `:601`, `:621`, `:698-708`.
@@ -890,7 +958,8 @@ declared in `e2e_lane_budget.manifest`.
   frame class at any relay.
 - **T-INDEP-1b** `publish_location` returns the same outcome with zero added
   virtual time when the mesh engine is full, stalled, or gone.
-- **T-INDEP-1c** guard: one `mesh::` site under `relay/` and `nostr/`.
+- **T-INDEP-1c** guard: `mesh::` is named under `relay/` and `nostr/` only at
+  the hand-off and the bridge.
 - **T-INDEP-3** with relays down, locations arrive by mesh; when relays
   return nothing is duplicated on the map.
 - **T-INDEP-4** with mesh on and sharing off, swiping the app away leaves the
@@ -898,6 +967,21 @@ declared in `e2e_lane_budget.manifest`.
   Bluetooth manager exists while mesh is off.
 - The existing core-flow, background-catch-up and foreground-service lanes
   run their relay oracles once more with mesh on and a peer present.
+
+**Member bridging (D-7)**
+- **T-BRIDGE-1** a fellow member's update received by mesh within the window
+  appears at the circle's relay exactly once. **T-BRIDGE-2** at or past
+  218 s it is never sent. **T-BRIDGE-3** a duplicate, own echo, buffered or
+  stale event is never sent. **T-BRIDGE-4** format `0x01` (a mesh-only seal
+  included) is never sent. **T-BRIDGE-5** a commit or proposal is never sent.
+  **T-BRIDGE-6** an event at another epoch than the bridger's, or for a
+  circle that is held, leaving or disbanded, is never sent. **T-BRIDGE-7**
+  under a flooding member the per-sender and per-drive bounds hold.
+  **T-BRIDGE-8** a bridge's result reaches neither the health model nor the
+  clock-skew detector, and a drive that publishes nothing of its own bridges
+  nothing. **T-BRIDGE-9** (soak) A offline on mesh, B online, C far away
+  receives A's update; a member removed before the bridger's last receive
+  finds nothing of A's at the relay.
 
 **Delivery, reliability, performance**
 - **T-DELIV-*** line, star, cluster, partition and merge, a carrier walking
@@ -959,7 +1043,7 @@ flag-off run), until M5.
 |---|---|---|
 | M0 | Spikes, not merged: (a) one emulator + Bumble + a Rust peer on netsim on a hosted runner — ≥ 50 consecutive green runs, cold and snapshot boot, peripheral role, ≥ 2+2 links, negotiated MTU, time-to-first-link p99, usable capture; (b) measured sealed-location size; (c) notification re-post mechanism; (d) Swift → Rust smoke build; (e) CoreBluetooth mock in the simulator; (f) the Play declaration and App Review questions | G-1, G-2, G-4, G-6, G-8 answered here |
 | M1 | `MeshEngine` + `mesh_sim` with churn; parameters and D-1 decided from data | L1, L2; T-PRIV-1..4,6; T-SEC-3,4,8,SYBIL; T-DELIV; T-PERF-1,2 |
-| M2 | Keys in `SessionManager` + store, `mesh::offer`, `mesh_drive`, counters; soak scenarios; Rule 17 and the amended documents | L3; T-INDEP-1a..c,3; T-SEC-1,2,5,6,7; T-STAT-1 |
+| M2 | Keys in `SessionManager` + store, `mesh::offer`, `mesh_drive`, member bridging, counters; soak scenarios; Rule 17 and the amended documents | L3; T-INDEP-1a..c,3; T-SEC-1,2,5,6,7; T-BRIDGE-1..9; T-STAT-1 |
 | M3 | Android: `MeshService`, radio, C interface, notification, permissions, **and** the button, enable flow, sheet and 13 locales; L4 lane | T-BG-1, T-NOTIF, T-PRIV-5, T-PWR, T-RELAY-E2E, T-REL-1, T-PERF-3, T-STAT-2,3, T-INDEP-4; ui-ux review |
 | M4 | iOS: `HavenMeshRadio`, restoration, pending connects, notification; L5; the device matrix written and marked DEFERRED | L5 green |
 | M5 | Hardening, model E entries, privacy manifest, store declarations; the define flips on | Every gate closed or owner-accepted |
@@ -1028,17 +1112,10 @@ platform-gated until its platform's radio lands.
   reaches users without the project having run it on a real iPhone; an iOS
   radio fault would show only as the status line staying on "searching". The
   device checklist (L7) stays written and DEFERRED.
-- **D-7 Internet bridging.** Never in v1 (recommended).
-  - A phone that cannot open a packet cannot bridge it: it does not know the
-    relays, the routing id or even that it is a Nostr event. This follows
-    from the design and stays.
-  - A circle member who opens a fellow member's packet could publish that
-    same event to the circle's relays, so members far away see someone who
-    has no internet. But relays and Haven's own relay pool drop an event past
-    its 228-second expiration, so this only works for packets that crossed
-    the mesh within about three minutes; and it adds a second way for a
-    kind-445 to leave the device, in the code Rule 13 guards most closely.
-    A candidate for a later version.
+- **D-7 Internet bridging — DECIDED 2026-11-11: member bridging** (§5.5). A
+  phone that cannot open a packet still cannot bridge it. Accepted costs:
+  a second way for a kind-445 to leave the device, in the code Rule 13
+  guards; reach of a hop or two; the relay-side inference in §0.4 item 11a.
 - **D-8 Background reliability — DECIDED 2026-11-10:** as reliable as the
   platforms allow, costs stated (§7.7). Recorded as owner-directed under
   Rule 10: R1 widens the removed-member window on iOS.
@@ -1139,6 +1216,7 @@ platform-gated until its platform's radio lands.
 | D-3: auto-off | §7.6: 12 hours, reminder at 30 minutes, Keep on; T-AUTO-1..3; §0.4 item 9a |
 | D-9 (2026-11-11): mesh works with notifications denied | §7.1, §7.2, §7.6; T-NOTIF-3; F2 qualified |
 | D-2 (2026-11-11): real updates only | §5.1 rewritten (no outbox, no slots, no cover packets); §6.6 arithmetic; T-PRIV-4, T-SEC-7; §0.4 items 3, 7, 8 |
+| D-7 (2026-11-11): member bridging | §5.5 new; envelope format `0x02`; T-BRIDGE-1..9; Rule 13.1 and Rule 17 wording; §0.4 item 11a |
 | D-4, D-6, D-10 (2026-11-11) | Recorded in §11 as recommended / as milestoned |
 | D-11 (2026-11-11): Bluetooth wakes plus an offer to turn background sharing on; location keep-alive specified as a fallback | §11 D-11; G-10 |
 
