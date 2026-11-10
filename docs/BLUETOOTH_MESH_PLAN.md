@@ -11,7 +11,8 @@
 > of `docs/MESH_LOCATION_RELAY_DESIGN.md` (§0.3).
 > **Owner decisions of 2026-11-10** on packet lifetime (D-1), auto-off (D-3)
 > and background reliability (D-8) are recorded in §11 and designed in §6.4,
-> §7.6 and §7.7; §14 lists what they changed.
+> §7.6 and §7.7; §14 lists what they changed. Those edits had their own
+> independent review; its three HIGH findings are folded in (§14).
 > Evidence tags: **[V]** read from a primary source or this repo's code;
 > **[V2]** secondary source; **[U]** unverified — every [U] the plan depends
 > on is a gate in §11, never an assumption. Code citations are at `f1dd146`.
@@ -37,9 +38,9 @@ exactly as today, mesh on or off.
 
 | # | Decision | Why |
 |---|---|---|
-| 1 | A packet has **no cleartext field**: no version, hop count, timestamp, id or tag. It is 12 random bytes + ciphertext + 16-byte tag. Its remaining lifetime travels beside its id on each link, in coarse steps (§6.4, owner-directed). | Requirement F1. A hop count is "how far it comes from"; a timestamp is age, hence distance; a circle tag links a circle's packets. bitchat exposes sender id, recipient id, timestamp and TTL and calls metadata "the weakest part of this design" [V]. |
+| 1 | A packet has **no cleartext field**: no version, hop count, timestamp, id or tag. It is 12 random bytes + ciphertext + 16-byte tag. Its remaining lifetime travels beside its id on each link (§6.4, owner-directed). | Requirement F1. A hop count is "how far it comes from"; a timestamp is age, hence distance; a circle tag links a circle's packets. bitchat exposes sender id, recipient id, timestamp and TTL and calls metadata "the weakest part of this design" [V]. |
 | 2 | The packet wraps the **complete signed kind-445 event** under a mesh key derived from the circle's MLS epoch. Never the bare MLS message. | A bare `PrivateMessage` shows `group_id` and `epoch` in clear (RFC 9420 §6.3) — the real MLS group id (Rule 4). The kind-445 `h` tag is a permanent per-circle id [V]. MDK's ingest needs the verified event [V]. |
-| 3 | **One seal, two carriers.** The mesh takes the event the relay path sealed and passed its send-time check; it never seals. | No extra ratchet use. The engine dedups the relay copy and the mesh copy as one message, in either arrival order [V]. |
+| 3 | **One seal, two carriers.** The mesh takes the event the relay path sealed and passed its send-time check; it never seals. | No extra ratchet use, except the mesh-only seals of §7.7 R1. The engine dedups the relay copy and the mesh copy as one message, in either arrival order [V]. |
 | 4 | **All protocol logic is one sans-IO Rust state machine** (`haven_core::mesh::MeshEngine`); Kotlin and Swift only move bytes. | The only layer CI can test deterministically on every push. Neither bitchat app has multi-device radio tests in CI [V]. |
 | 5 | **The engine holds no key.** Wrapping and opening happen in the MLS session's own code; the engine stores and forwards opaque bytes. | Forwarding cannot depend on recognition by construction; no key material is reachable from the native radio interface. |
 | 6 | **Forward-all-opaque, flood by inventory, fixed emission schedule.** | No per-packet routing state. Membership-dependent forwarding would be a co-membership oracle. |
@@ -90,10 +91,12 @@ forward-all-opaque, photos excluded) stands and is carried into §8.
 7. **A neighbour that is a phone's only link knows which packets that phone
    emitted.** It cannot read them or tell a real update from a cover packet.
    Hiding origin from a lone neighbour is not possible.
-7a. **A connected neighbour learns each packet's age to within a few
-   minutes**, from the remaining lifetime announced with it (§6.4), and so
-   roughly how long it has travelled — not from where, whose it is or what it
-   says. This is the price of packets that expire everywhere (D-1).
+7a. **A connected neighbour, or a sniffer following that link, learns each
+   packet's age to within about five minutes**, from the remaining lifetime
+   announced with it (§6.4), and so roughly how long it has travelled — not
+   from where, whose it is or what it says. A very young packet is more
+   likely the announcing phone's own. This is the price of packets that
+   expire everywhere (D-1).
 7b. **A removed member can read fixes sealed before the phone learned of the
    removal**, for as long as the phone cannot reach a relay (§7.7).
 8. **Whether a phone is asleep is observable** from its emission rhythm.
@@ -103,7 +106,9 @@ forward-all-opaque, photos excluded) stands and is carried into §8.
 9. **A flooding mesh has a size ceiling** (§6.6).
 9a. **Mesh turns itself off 12 hours after it was turned on or last
     confirmed** (§7.6). An unattended phone stops relaying and sending by mesh
-    then.
+    then. On an iPhone that iOS has suspended, no packet moves after the
+    deadline, but the phone may keep advertising its presence until iOS next
+    runs Haven.
 10. **A circle is silent on mesh while the relay path would hold it**: a
     commit awaiting a relay acknowledgement (including one Haven makes itself,
     such as a departure eviction), a leave in progress, a disbanded circle, a
@@ -253,8 +258,9 @@ Android code is copied.
   `Publishing::mesh_drive`, one driven call the session owner makes at every
   drive, which opens packets the engine has not yet offered, ingests what
   opens and folds the counters.
-- **Independence (F5).** The mesh's only contact with the relay path is one
-  call, `mesh::offer`, inside `publish_location` after the `may_be_sent`
+- **Independence (F5).** The mesh's contact with the relay path is one
+  call, `mesh::offer` (plus the mesh-only mode of §7.7 R1, which adds no
+  relay traffic), inside `publish_location` after the `may_be_sent`
   check and before the relay send. It is synchronous, does no I/O, cannot
   fail or block, and returns `()`. A guard allows `mesh::` to be named in
   `relay/` and `nostr/` at that one site only.
@@ -398,7 +404,7 @@ duplicate, or shows as stale.
 
 ### 5.4 When a circle is silent on mesh
 
-Exactly when the relay path would not send: `SendHeld::AwaitingRelays`,
+When the relay path would not send: `SendHeld::AwaitingRelays`,
 `StagedWithoutRecord`, `DepartureDue`, `AwaitsForeground`, `RemovalUnmade`,
 `Leaving`, `Disbanded`, `RoutingCollision`, `StoredInput`
 (`fanout.rs:2967-3021`), plus `Expired`/`Superseded` at publish. Nothing
@@ -458,20 +464,24 @@ oversized body or a version mismatch closes the link.
 
 - Store: bounded (default 2048 packets ≈ 2 MB), memory only, never on disk.
   Own and carried packets are the same rows, evicted by the same rule.
-- **Lifetime.** Every packet lives `L` (default 20 min) from its origin,
-  counted in 8 steps of 2.5 min. A `HAVE` entry is the packet id plus the
-  steps remaining. Only durations cross a link, never a clock reading, so
-  phones need no common time.
-  - Origin: a phone starts each packet it emits, real or cover, at a random
-    one of the top three steps, so a full value does not mark a packet as
-    just born.
-  - Receipt at local time `t` with `r` steps announced: the phone records
-    `expires = t + r`.
-  - Announcing: steps remaining = `floor((expires − now) / step)`. At zero
-    the packet is no longer announced or sent, and is dropped. **A packet
-    whose lifetime has ended is relayed by no honest phone.**
-- **The record.** For every packet id it has accepted, a phone keeps
-  `{first received, expires, links it came from or went to}` on the
+- **Lifetime.** Every packet lives at most `L` (default 20 min) from its
+  origin. A `HAVE` entry is the packet id plus one byte: the lifetime
+  remaining, in 256 units of `L/256` (about 4.7 s), rounded down. Only
+  durations cross a link, never a clock reading, so phones need no common
+  time.
+  - Fine units matter. With coarse steps every hop would round a whole step
+    away, the packet would die after a handful of hops however fast they
+    were, and the value would count hops. At 4.7 s a hop loses under one
+    unit, so the value tracks elapsed time.
+  - Origin: a phone starts each packet it emits, real or cover, at a value
+    drawn uniformly from the top quarter (15–20 min), and writes its record
+    then. The draw is what blurs a packet's age to about five minutes.
+  - Receipt at local time `t` with `r` units announced: `expires = t + r`.
+  - Announcing: units remaining = `floor((expires − now) / unit)`. At zero
+    the packet is no longer announced or sent. **A packet whose lifetime has
+    ended is relayed by no honest phone.**
+- **The record.** For every packet id it has accepted or emitted, a phone
+  keeps `{first received, expires, links it came from or went to}` on the
   suspend-inclusive clock, for the **re-accept interval** `2 × L` (40 min)
   from first receipt — longer than the packet itself.
   - **No bounce-back:** a phone never asks for an id it has a record of,
@@ -483,22 +493,29 @@ oversized body or a version mismatch closes the link.
     would be taken as new. By then every honest copy has expired, so only a
     deliberate replay can return; it lives one lifetime at most and circle
     members refuse it as a duplicate.
-- **Lying peers.** A later announcement with a larger remaining value raises
-  `expires`, but never past `first received + L`: a peer that under-states a
-  packet's lifetime cannot cut it short where an honest path exists, and a
-  peer that over-states cannot make a phone hold a packet longer than `L` or
-  take it twice within 40 min. Over-stating to phones that never saw a packet
-  is no stronger than injecting a new one (§6.5).
-- A record is written only for a fully received, hash-checked packet. Records
-  are evicted strictly by age; at the cap the engine refuses new packets
-  rather than forget young ids.
+- **Lying peers.**
+  - Under-stating: a phone keeps a packet's bytes, unannounced, until
+    `first received + L`, and such rows are the first evicted under pressure.
+    If an honest peer later announces a larger value, `expires` is raised
+    (never past `first received + L`) and the packet is announced again on
+    the next tick. So a peer that hands over a packet early with a tiny
+    lifetime does not kill it where an honest path exists.
+  - Over-stating cannot make a phone hold a packet past `first received + L`
+    or take it twice within 40 min. Toward phones that never saw the packet
+    it is no stronger than injecting a new one (§6.5).
+  - The value adds no tracking handle beyond the packet id a connected peer
+    already sees [reviewed].
+- A record is written only for a fully received, hash-checked packet (or an
+  emitted one). Records are evicted strictly by age. The record table is
+  sized for the accept-rate limit × the re-accept interval, so a flood that
+  stays within the rate limit cannot fill it; at the cap the engine refuses
+  new packets rather than forget young ids.
 - Records are memory only. After a restart a phone may take live packets
   again, once, for their true remaining lifetime, and may count one as
   "passed on" a second time.
-- **Cost (§0.4 item 7a):** the remaining value tells a connected neighbour,
-  and a sniffer that follows that link, a packet's age in 2.5-minute steps.
-  The random start blurs the first five minutes. The simulator fixes `L` and
-  the step (G-7).
+- **Cost (§0.4 item 7a).** `HAVE` is not encrypted (§6.7), so a connected
+  neighbour, and a sniffer that follows that link, read the value. The
+  simulator fixes `L` (G-7).
 
 ### 6.5 Limits
 
@@ -534,7 +551,8 @@ scale, cover traffic (D-2) is the first cost to revisit.
 A per-link `Noise_NN` session would hide from a purely passive sniffer which
 packets cross a link. It gives nothing against an attacker who connects,
 which an open mesh allows, and adds a dependency in three lockfiles. `HELLO`
-carries a version so it can be added. D-5 presents both views.
+carries a version so it can be added. Since D-1 it would also hide packet
+ages from a passive sniffer; D-5 presents both views.
 
 ---
 
@@ -606,7 +624,7 @@ What wakes the processor for each periodic action:
 | Action | Android, sharing on | Android, sharing off | iOS, sharing on | iOS, sharing off |
 |---|---|---|---|---|
 | Advertise, filtered scan | Bluetooth controller | controller | controller | controller |
-| Inbound frame | radio event + timed wake lock held until the engine has sent what that frame made due | same | process running | Bluetooth wake (~10 s) |
+| Inbound frame | radio event + timed wake lock held through the engine's next announce tick, with a hard cap | same | process running | Bluetooth wake (~10 s) |
 | Emission slot, announce tick, hold expiry | location service's existing wake | allow-while-idle alarm (≥ ~9 min in Doze) and any radio event | process running | only on a Bluetooth wake |
 
 - No continuous wake lock is held for the mesh. A lock held while any link is
@@ -674,32 +692,43 @@ mesh off with fixed copy (Rule 8). The setting is cleared on identity delete.
 - Mesh turns itself off **12 hours** after it was turned on.
 - 30 minutes before, a notification says so and offers **Keep on**, which
   restarts the 12 hours from that moment without opening Haven. Turning mesh
-  on again, or tapping Keep on in the statistics sheet, does the same.
+  on again, or Keep on in the statistics sheet, does the same.
 - At the deadline the radio stops, the Android service ends, the ongoing
-  notification is replaced by one saying mesh turned off, and the button
-  shows off. The button's sheet shows the time left while mesh is on.
+  notification is replaced by one saying mesh has stopped, and the button
+  shows off. The stopped notice reuses the reminder's identifier, so no stale
+  Keep on can remain; after the deadline the only way back is to turn mesh
+  on. The sheet shows the time left while mesh is on.
 - The deadline is stored, survives restart and reboot, is cleared on identity
   delete, and can never be more than 12 hours ahead (a clock set backwards
-  does not extend it).
-- Android: one allow-while-idle alarm in `MeshService`. iOS: the reminder and
-  the turned-off notice are time-scheduled when mesh is turned on, so they
-  appear even while the app is suspended; the radio stops at the deadline if
-  the app is running, otherwise at its first wake after it.
+  does not extend it). Every wake of the mesh, on both platforms, checks the
+  deadline before doing any mesh work.
+- Android: one inexact allow-while-idle alarm in `MeshService` (needs no
+  permission; exact alarms would). It may fire late, so the check on every
+  wake is what enforces the deadline while the phone is in use.
+- iOS: the reminder and the stopped notice are time-scheduled when mesh is
+  turned on, so they appear while the app is suspended. If the app is running
+  the radio stops at the deadline. If iOS has suspended it, no packet moves
+  after the deadline — the first wake stops the radio — but the system may
+  keep advertising and scanning on Haven's behalf until then; the existing
+  background refresh task is requested for the deadline as a best-effort
+  earlier wake. Scheduled notices follow elapsed time and the stored deadline
+  follows the clock, so they can differ after a clock change.
 - **Why 12 hours.** It covers a festival day or a working day; a mesh left on
   by mistake ends within the night; an emergency that lasts longer costs one
   tap every 12 hours. The figure is not derived from a battery measurement
   (none exists). It is one constant.
 - **Cost.** A phone whose owner cannot confirm — injured, asleep, separated
   from it — stops relaying and stops sending its location by mesh 12 hours
-  after the last confirmation. 24 hours halves that risk and doubles the time
-  a forgotten mesh runs.
+  after the last confirmation, even if it is the only bridge between two
+  groups. 24 hours halves that risk and doubles the time a forgotten mesh
+  runs.
 
 ### 7.7 Background reliability: what was chosen and what it costs (D-8, decided)
 
 | | Chosen | What it buys | What it costs |
 |---|---|---|---|
-| R1 | An iOS background burst that could not receive **seals for the mesh only** when mesh is on. The relay send is skipped for that event, so the relay path still sends nothing from such a burst, as today. | A locked iPhone keeps sending its location by mesh when no relay answers. Today it seals nothing in two cases: the poll build when its catch-up did not complete, and the live build when no live session exists and none can be started (`background_burst_coordinator.dart:568-597`). The live build with a session already publishes after a failed open (`:598-606`). | (a) The fix is sealed at the last epoch the phone knows. If a commit the phone could not fetch removed a member, that person — holding the old keys, within reach of the mesh — can read it, until the phone next completes a receive. The Android service, the foreground path and the iOS live path with a session already carry this exposure. (b) Each such seal uses one MLS message generation, bringing §0.4 item 12 closer. The engine's own holds (§5.4) still apply. |
-| R2 | Android, asleep, sharing off: each radio event takes a timed wake lock held until the engine has sent what became due. | A sleeping Android phone forwards whenever traffic reaches it. | In a busy mesh the processor is awake most of the time. Battery cost unquantified: model E has no figure for an awake processor. Phones with sharing on already hold the location service's wake lock, so nothing is added there. |
+| R1 | An iOS background burst whose **receive failed** (not one stopped by withdrawn consent or by the app returning to the foreground) **seals for the mesh only** when mesh is on. The seal carries a mesh-only mark inside the opaque sealed value, so Dart cannot route it to a relay; `publish_location` runs its checks, hands the event to the mesh, skips the relay send, ends the record and answers a new `MeshOnly` outcome. A mesh-only seal drives nothing else: it does not re-send a pending commit (the circle stays silent instead), runs no repair or settle, and the burst skips its maintenance step, as its early return does today. The health model does not count it as a relay publish. | A locked iPhone keeps sending its location by mesh when no relay answers. Today it seals nothing in two cases: the poll build when its catch-up did not complete, and the live build when no live session exists and none can be started (`background_burst_coordinator.dart:578-589`). The live build with a session already publishes after a failed open (`:597-647`). | (a) The fix is sealed at the last epoch the phone knows. If a commit the phone could not fetch removed a member, that person — holding the old keys, within reach of the mesh — can read it, until the phone next completes a receive. The Android service (which publishes before it fetches), the foreground path and the iOS live path with a session already carry this exposure. (b) Each such seal uses one MLS message generation, bringing §0.4 item 12 closer. (c) It reverses a recorded rule ("nothing is sealed before a receive has run", `haven-core/SECURITY.md:1693-1695`) for the mesh carrier. The engine's own holds (§5.4), unread stored input included, still apply. |
+| R2 | Android, asleep, sharing off: each radio event takes a timed wake lock held through the engine's next announce tick, with a hard cap. | A sleeping Android phone forwards whenever traffic reaches it. | In a busy mesh the processor is awake most of the time. Battery cost unquantified: model E has no figure for an awake processor. Phones with sharing on already hold the location service's wake lock, so nothing is added there. |
 | R3 | iOS, sharing off: best effort. Turning mesh on with background sharing off says so and offers to turn background sharing on. | With background sharing on, the app keeps running and mesh is dependable in the background. | Without it, the app runs ~10 s per Bluetooth event and iOS may throttle it. The only way to make a non-sharing iPhone dependable is to keep a location session running for a user who is not sharing: a location permission prompt, the system's location indicator while not sharing, the location hardware powered, and App Review risk (guideline 2.5.4). Not adopted; D-11. |
 | R4 | The queue of packets waiting to be read (§5.2) is 8192 packets ≈ 8 MB. | A phone whose app was closed reads, on opening, what passed through it — about two hours' worth in a 100-phone crowd, longer in smaller ones. | 8 MB of memory while mesh is on; beyond the queue the oldest unread packets are dropped. |
 
@@ -716,8 +745,8 @@ iOS radio behaviour (§0.4 items 1, 4).
 
 | Adversary | Learns | Cannot learn | Residual |
 |---|---|---|---|
-| Passive sniffer | A phone runs Haven mesh; link timing and volume; sleep state | Circle, sender, content, age, hop count, real vs cover | Presence, counting, direction-finding |
-| Connected non-member | Packet ids; a neighbour's whole store; first-seen times; each packet's age in 2.5-minute steps | Same | Re-identifies a phone across address rotation; as a lone neighbour, knows which packets a phone emitted; with many nodes, first-seen timing points at an originating device |
+| Passive sniffer | A phone runs Haven mesh; link timing and volume; sleep state; on a link it can follow, packet ids and ages | Circle, sender, content, hop count, real vs cover | Presence, counting, direction-finding |
+| Connected non-member | Packet ids; a neighbour's whole store; first-seen times; each packet's age to within about five minutes | Same | Re-identifies a phone across address rotation; as a lone neighbour, knows which packets a phone emitted; with many nodes, first-seen timing points at an originating device |
 | Malicious member | What the circle shares; which packets are the circle's | Other circles | Can send future-epoch application messages toward the engine buffer, bounded by §5.2 |
 | Removed member | Packets sealed at epochs they held, from members who have not seen the removal — on iOS in the background too (§7.7 R1) | Later epochs | An outage freezes epochs, so the window lasts as long as the outage |
 | Replay | — | — | Authentic replay is a duplicate or stale (§5.3) |
@@ -742,7 +771,10 @@ iOS radio behaviour (§0.4 items 1, 4).
   `INV-W-445-EXPIRATION-SCOPE`; `SECURITY.md` retention text;
   `UNRESOLVABLE_INPUT_MAX_AGE_SECS`'s rationale
   (`haven-core/src/nostr/mls/types.rs:563-592`), which assumes nothing
-  redelivers after 288 s; the stale "FFI exposes no streams" line.
+  redelivers after 288 s; the stale "FFI exposes no streams" line; and for §7.7 R1,
+  `haven-core/SECURITY.md:1693-1695`, the comment at
+  `background_burst_coordinator.dart:573`, and
+  `background_burst_coordinator_test.dart:476`, `:601`, `:621`, `:698-708`.
 - Rule 15: a new `log_alias` class for a mesh link; Bluetooth addresses,
   peripheral identifiers, packet ids, per-peer RSSI and exact counts never
   reach a log; native lines allowlisted; redacting `Debug` with proof for
@@ -832,19 +864,23 @@ declared in `e2e_lane_budget.manifest`.
   a packet again within the re-accept interval.
 
 **Lifetime and bounce-back (D-1)**
-- **T-LIFE-1** in every simulator scenario, arrivals and restarts included,
-  no honest phone sends or announces a packet after its origin time + `L`.
+- **T-LIFE-1** in every honest simulator run, arrivals and restarts
+  included, no phone sends or announces a packet after its origin time + `L`.
 - **T-LIFE-2** no phone is ever sent a packet it holds a record of; a packet
-  crosses a link at most once and never toward where it came from.
-- **T-LIFE-3** a peer announcing one step for a fresh packet does not stop
-  its delivery where an honest path exists; a peer announcing the maximum
-  for an old packet cannot make any phone hold it past first receipt + `L`
-  or take it again within the re-accept interval.
-- **T-LIFE-4** in honest runs an announced remaining value never exceeds the
-  true one.
-- **T-PRIV-7** an own packet's first announcement is byte-identical in form
-  to a carried packet's with the same remaining value, and the starting step
-  is drawn from the generator.
+  crosses a link at most once and never toward where it came from; a packet
+  offered just before the re-accept interval ends is refused and at its end
+  is accepted.
+- **T-LIFE-3** an attacker with a head start that hands a fresh packet with
+  one unit to the only phone on the path downstream does not stop delivery
+  once the honest announcement arrives; a peer announcing the maximum for an
+  old packet cannot make any phone hold it past first receipt + `L` or take
+  it again within the re-accept interval.
+- **T-LIFE-4** in honest runs an announced value never exceeds the true one.
+- **T-LIFE-5** on a k-hop line the value lost is at most k units plus the
+  time actually elapsed.
+- **T-PRIV-7** every value an own packet can first be announced with is also
+  reachable by a carried packet, and the starting value is drawn from the
+  generator.
 
 **Independence**
 - **T-INDEP-1a** (soak) the same profile and seed run with mesh off, then on:
@@ -881,7 +917,8 @@ declared in `e2e_lane_budget.manifest`.
   own packets are not counted. **T-STAT-2** the lifetime value never
   decreases, includes everything up to the last fold, and resets on identity
   delete. **T-STAT-3** long-press, the semantics action, the Settings row and
-  the notification open the same sheet; it reads correctly through the
+  the notification open the same sheet; turning mesh on with background
+  sharing off on iOS shows the best-effort notice; the sheet reads correctly through the
   semantics tree; the button and the map controls do not overlap under
   right-to-left, 200 % text and small screens.
 - **T-NOTIF-1** mesh on ⇒ notification present; off ⇒ absent. **T-NOTIF-2**
@@ -891,14 +928,20 @@ declared in `e2e_lane_budget.manifest`.
   flow; process killed, the service returns; reboot with mesh on, mesh
   resumes; reboot with the permission revoked, no crash. The lane states it
   does not prove processor sleep.
-- **T-BG-2** an iOS burst that cannot receive: with mesh on it puts one
-  packet in the outbox and sends no relay `EVENT`; with mesh off it seals
-  nothing, as today.
+- **T-BG-2** an iOS burst whose receive failed: with mesh on it puts one
+  packet in the outbox and sends no relay frame of any kind, a pending commit
+  included; with mesh off it seals nothing, as today; a burst stopped by
+  withdrawn consent or by returning to the foreground seals nothing either
+  way.
+- **T-BG-3** packets whose lifetime ended while nobody read them are still
+  read at the next drive; past the queue's size the oldest are dropped.
 - **T-AUTO-1** on an injected clock mesh stops at the deadline and the
   turned-off notice replaces the ongoing one. **T-AUTO-2** the reminder
   appears 30 minutes before and Keep on moves the deadline 12 hours from
   then. **T-AUTO-3** the deadline survives restart and reboot, and a clock
-  set backwards never leaves more than 12 hours.
+  set backwards never leaves more than 12 hours. **T-AUTO-4** a wake after
+  the deadline does no mesh work before stopping; the pending iOS notices
+  are the two expected, and the stopped notice replaces the reminder.
 - **T-PWR-1..3** scan and advertise modes and connection priority from one
   constants site with a guard; link cap; no frames with no peers.
 - **T-LOG-1** planted identifiers absent from every sink in every lane.
@@ -1031,6 +1074,16 @@ platform-gated until its platform's radio lands.
 
 | Decision | Change |
 |---|---|
-| D-1: no bounce-back; a local record of when each packet was received; re-accept only after a set period; expired packets are not relayed | §6.4 rewritten: a 20-minute lifetime carried as steps on the link, a per-packet record kept 40 minutes, lying-peer rules; T-LIFE-1..4, T-PRIV-7; §0.4 item 7a |
+| D-1: no bounce-back; a local record of when each packet was received; re-accept only after a set period; expired packets are not relayed | §6.4 rewritten: a 20-minute lifetime carried on the link, a per-packet record kept 40 minutes, lying-peer rules; T-LIFE-1..5, T-PRIV-7; §0.4 item 7a |
 | D-8: reliable in foreground and background on every platform | §7.7: mesh-only sealing in iOS bursts that cannot receive, wake lock until sent on Android, a larger unread queue; D-11 raised; §0.4 items 2, 7b |
 | D-3: auto-off | §7.6: 12 hours, reminder at 30 minutes, Keep on; T-AUTO-1..3; §0.4 item 9a |
+
+The independent review of these edits found, and the text above fixes:
+
+| Finding | Change |
+|---|---|
+| Coarse lifetime steps lost a whole step per hop: packets died after 5–7 hops and the value counted hops | 256 fine units; random start over the top quarter; T-LIFE-5 |
+| A peer handing a packet over early with a tiny lifetime killed it downstream | Bytes kept until first receipt + `L`; re-announce when the value is raised; T-LIFE-3 restated |
+| "Relay send skipped" alone still let a mesh-only burst send other relay traffic | Mesh-only mark, `MeshOnly` outcome, nothing else driven; T-BG-2 widened |
+| A suspended iPhone can keep advertising past the deadline | Stated in §0.4 item 9a and §7.6; deadline checked on every wake; T-AUTO-4 |
+| The sniffer row said age was hidden | §8.1 corrected; D-5 note |
