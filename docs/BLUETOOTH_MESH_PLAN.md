@@ -524,9 +524,19 @@ the routing id.
   may not grant. Chosen by RSSI with hysteresis, **with one outgoing and one
   incoming slot filled at random and rotated**, so the nearest attacker
   cannot take every slot.
-- Two phones form links in both directions. `HELLO` carries a random value
-  regenerated every 15 minutes and never advertised; a phone seeing the same
-  value on two links closes one by a fixed rule.
+- Two phones form links in both directions. `HELLO` carries a random value,
+  never advertised, renewed at intervals drawn between 7.5 and 22.5 minutes
+  so its timing carries no rhythm; it is renewed on every input, so a phone
+  that was alone never greets a new link with an old value. Of the links
+  showing one value, the first to show it stays and the others are closed.
+  No rule can be both symmetric and safe from replay on an anonymous link, so
+  when two phones dial each other at the same instant both links may close;
+  a jittered back-off heals it. Residual: a peer linked to two phones can
+  present one's value to the other and so keep that pair apart, one pair per
+  attacker link; the shadowed phone is dialled again after each value change
+  and each rotation.
+- A link whose peer has not completed the handshake and greeted within 30 s
+  is closed.
 - GATT, not L2CAP (undocumented background behaviour on iOS).
 - Connection parameters: Android `CONNECTION_PRIORITY_LOW_POWER`; iOS
   `setDesiredConnectionLatency(.high)`.
@@ -552,8 +562,9 @@ the link.
 - The other side answers `WANT` for ids it lacks. Sends are paced on the
   platform's ready signals and chunked by the MTU each side negotiated.
 - A reassembled packet is accepted **only if its id is in that link's
-  outstanding `WANT` set**; otherwise it is discarded and asked for again, a
-  bounded number of times, then on another link. A dropped or reordered chunk
+  outstanding `WANT` set**. A request not answered within a timeout (30 s) is
+  made of another link that announced the packet, never twice of the same;
+  an answer more than two timeouts after its request is unsolicited. A dropped or reordered chunk
   therefore cannot mint a new packet, and an unsolicited `PKT` closes the
   link.
 - One mechanism only: a full id list for a 2048-packet store is 32 KB, under
@@ -576,9 +587,18 @@ the link.
     drawn uniformly from the top quarter (15–20 min), and writes its record
     then. The draw is what blurs a packet's age to about five minutes.
   - Receipt at local time `t` with `r` units announced: `expires = t + r`.
-  - Announcing: units remaining = `floor((expires − now) / unit)`. At zero
-    the packet is no longer announced or sent. **A packet whose lifetime has
-    ended is relayed by no honest phone.**
+  - Announcing: one unit less than the floor,
+    `floor((expires − now) / unit) − 1`, computed when the radio layer polls
+    the frame. A packet is announced, and a transfer started, only with two
+    whole units left. **A packet whose lifetime has ended is relayed by no
+    honest phone.**
+  - What that guarantees, with `d` the time from that poll to the peer
+    receiving the announcement: the receiver's end lies in
+    `(E + d − 2u, E + d − u]` for a sender's end `E`. While `d` is at most
+    one unit, no hop and no loop of honest phones extends a lifetime, and
+    nothing is announced or sent after origin + `L`. A slower hop adds at
+    most `d − u`, and no phone holds a packet past its own first receipt +
+    `L`. Each hop costs between one and two units beyond the time elapsed.
 - **The record.** For every packet id it has accepted or emitted, a phone
   keeps `{first received, expires, links it came from or went to}` on the
   suspend-inclusive clock, for the **re-accept interval** `2 × L` (40 min)
@@ -623,8 +643,15 @@ the link.
   turning the fairness rule against long-lived honest links.
 - A global rate limit on new inbound connections and on newly accepted
   packets.
-- A link that sends malformed frames or exceeds its credit repeatedly is
+- A link that sends malformed frames or a packet beyond its credit is
   closed.
+- The accept allowance is handed out in turns, one packet per link per turn,
+  so `k` flooding links take `k / (k + honest)` of it and no more.
+- The record table holds everything the allowance can let in over the
+  re-accept interval plus the two request timeouts an answer may take, plus
+  the phone's own emissions: 11,929 records at the defaults.
+- A full table of sighted peers replaces a random unlinked entry, so an
+  advertiser flooding addresses cannot keep honest phones out of it.
 - No proof of work: affordable for a phone means trivial for an attacker.
 - **Stated bound:** a per-link allowance must admit an honest bridge carrying
   a whole cluster, so one attacker link can inject about one maximum-size
@@ -993,19 +1020,24 @@ declared in `e2e_lane_budget.manifest`.
 
 **Lifetime and bounce-back (D-1)**
 - **T-LIFE-1** in every honest simulator run, arrivals and restarts
-  included, no phone sends or announces a packet after its origin time + `L`.
-- **T-LIFE-2** no phone is ever sent a packet it holds a record of; a packet
-  crosses a link at most once and never toward where it came from; a packet
-  offered just before the re-accept interval ends is refused and at its end
-  is accepted.
+  included, with announcements arriving within one unit: no phone sends or
+  announces a packet after its origin time + `L`, loops of phones included.
+  With slower links the excess is at most the sum of `d − u` over the path,
+  and never past a phone's own first receipt + `L`.
+- **T-LIFE-2** a phone never asks for a packet it has a record of. A packet
+  asked of two links (the first not answered within the request timeout)
+  arrives at most once on each; only the first copy is stored, the second
+  changes nothing but a duplicates count, and a third closes its link. A
+  packet never goes toward the link it came from; one offered just before
+  the re-accept interval ends is refused and at its end is accepted.
 - **T-LIFE-3** an attacker with a head start that hands a fresh packet with
   one unit to the only phone on the path downstream does not stop delivery
   once the honest announcement arrives; a peer announcing the maximum for an
   old packet cannot make any phone hold it past first receipt + `L` or take
   it again within the re-accept interval.
 - **T-LIFE-4** in honest runs an announced value never exceeds the true one.
-- **T-LIFE-5** on a k-hop line the value lost is at most k units plus the
-  time actually elapsed.
+- **T-LIFE-5** on a k-hop line the value lost is between k and 2k units
+  plus the time actually elapsed.
 - **T-PRIV-7** every value an own packet can first be announced with is also
   reachable by a carried packet, and the starting value is drawn from the
   generator.
@@ -1308,11 +1340,14 @@ The independent review of these edits found, and the text above fixes:
 `MeshEngine<R: RngCore + CryptoRng>` is driven only by calls, each taking
 `now_ms` from a clock that keeps counting during sleep:
 
-- in: `link_up(link, role, max_frame)`, `link_down(link)`, `receive(link,
-  bytes)`, `sighting(peer, rssi)`, `offer(slot, packet, expires_ms)`,
-  `purge(slot)`, `advance()`, `stop()`;
-- out: `poll_output()` yielding `Frame { link, bytes }`, `Close { link }`,
-  `Connect { peer }`; `next_wake_ms()`;
+- in: `link_up(link, role, max_frame, peer)`, `link_down(link)`,
+  `receive(link, bytes)`, `sighting(peer, rssi)`, `connect_failed(peer)`,
+  `offer(slot, packet, expires_ms)`, `purge(slot)`, `advance()`, `stop()`;
+- out: `poll_output(now_ms)` and `poll_output_ready(links, now_ms)` — the
+  second serves only links whose radio can send, so a slow link holds up no
+  other — yielding `Frame { link, bytes }`, `Close { link }`,
+  `Connect { peer }`; `next_wake_ms()`. A frame is built by the poll that
+  returns it, so its lifetime values are never stale;
 - for session code: `take_unread(max)` returning packets not yet offered to
   it, `mark_read(id, opened)`, `stats()`.
 
