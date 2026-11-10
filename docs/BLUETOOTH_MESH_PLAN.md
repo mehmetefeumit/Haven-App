@@ -1006,21 +1006,61 @@ platform-gated until its platform's radio lands.
   a remaining-lifetime value travels with each id on the link, a phone never
   takes back a packet it has a record of, and a record outlives its packet
   (§6.4). Accepted cost: §0.4 item 7a.
-- **D-2 Cover traffic.** Fixed-rate emission with cover packets (recommended:
-  hides whether and how much a phone shares; costs capacity, slows
-  multi-circle users, and makes "passed on" include cover packets) — or emit
-  only real updates.
+- **D-2 Cover traffic.** Fixed-rate emission with cover packets
+  (recommended) — or emit only real updates.
+  - With cover: a neighbour cannot tell whether a phone shares, with how many
+    circles, or whether a circle is held. Costs: every phone adds one packet
+    per slot to everyone's store (the ~150-phone ceiling of §6.6 counts all
+    phones, not only sharers); a user with `k` circles updates each every
+    `k × 90 s` on mesh; "passed on" counts cover packets.
+  - Without: more room when few phones share, faster multi-circle updates,
+    a cleaner counter. But a neighbour can count a phone's packets: it learns
+    that the phone shares, roughly with how many circles, and when one stops.
 - **D-3 Auto-off — DECIDED 2026-11-10.** 12 hours, with a reminder and a
   one-tap extension (§7.6).
-- **D-4 Lifetime counters.** In the encrypted store (recommended; shows on
-  seizure that mesh was used) — or session-only.
-- **D-5 Link encryption.** Leave out of v1 (recommended) — or add `Noise_NN`
-  now.
-- **D-6 iOS residuals.** Accept §0.4 items 1, 2, 4 and, if G-8 fails, a Swift
-  adapter unverified in CI, with physical verification deferred until devices
-  exist.
-- **D-7 Internet bridging.** Never (recommended): a phone with internet does
-  not publish what it carries.
+- **D-4 Lifetime counters.** In the encrypted store (recommended) — or in
+  plain app preferences — or none.
+  - Encrypted store: an examiner needs the unlocked device to read two
+    numbers that say mesh was used and how much; no times, circles or peers.
+    Counts since the last fold are lost if the process is killed.
+  - Plain preferences, written by the radio service: nothing is lost, but
+    the numbers are readable without the database key.
+  - None (session only): leaves no trace, but drops the app-lifetime
+    statistics requirement F4 asks for.
+- **D-5 Link encryption.** Add a per-link `Noise_NN` session in v1
+  (recommended since D-1) — or leave it out.
+  - With it: someone listening without connecting sees only timing and
+    volume — not packet ids, not which packets move, not the ages D-1 put on
+    the link. It gives nothing against an attacker who connects as a peer.
+    Costs: a Noise library to audit in three lockfiles, or hand-written
+    Noise; a handshake per link and 16 bytes per frame; a handshake parser
+    exposed to strangers; more engine states and tests.
+  - Without: smaller v1. But adding it later means a protocol-version change
+    in a mesh where old and new phones must still talk, so the unencrypted
+    mode cannot be retired for a long time.
+  - The first draft recommended leaving it out; D-1 changed the balance,
+    because packet ages now cross the link in clear.
+- **D-6 iOS residuals.** The limits in §0.4 items 1, 2 and 4 are Apple's and
+  are not a choice. The choice is whether iOS mesh reaches users before
+  anyone has run it on real iPhones:
+  - Ship both platforms when CI is green (the plan as milestoned). An
+    Android-only mesh would exclude iPhones from mixed crowds. Risk: an iOS
+    radio fault nobody has seen; the status line ("connected / searching")
+    is what a user would notice it by.
+  - Hold the iOS flag until the device checklist has been run once on two
+    iPhones and an Android phone (recommended), or ship iOS labelled
+    experimental if no devices can be had.
+- **D-7 Internet bridging.** Never in v1 (recommended).
+  - A phone that cannot open a packet cannot bridge it: it does not know the
+    relays, the routing id or even that it is a Nostr event. This follows
+    from the design and stays.
+  - A circle member who opens a fellow member's packet could publish that
+    same event to the circle's relays, so members far away see someone who
+    has no internet. But relays and Haven's own relay pool drop an event past
+    its 228-second expiration, so this only works for packets that crossed
+    the mesh within about three minutes; and it adds a second way for a
+    kind-445 to leave the device, in the code Rule 13 guards most closely.
+    A candidate for a later version.
 - **D-8 Background reliability — DECIDED 2026-11-10:** as reliable as the
   platforms allow, costs stated (§7.7). Recorded as owner-directed under
   Rule 10: R1 widens the removed-member window on iOS.
@@ -1063,8 +1103,17 @@ platform-gated until its platform's radio lands.
     leaves the device in that state; the App Review question is asked first.
     Until then the engine keeps its iOS-suspended behaviour: forward within
     the wake window, catch up on wake (§7.3).
-- **D-10 Offline sealing cadence.** Unchanged (as F5 implies) — or seal less
-  often while no relay is reachable, which postpones §0.4 item 12.
+- **D-10 Offline sealing cadence.** Unchanged (recommended) — or seal less
+  often while no relay is reachable.
+  - Each seal uses one MLS message number, sent or not. When a publish fails
+    Haven retries about every 72 s (`background_location_task.dart:2128-2176`),
+    so 1000 numbers last about 20 hours; a receiver out of reach for that
+    long cannot then read that sender until an epoch change, which needs a
+    relay (§0.4 item 12).
+  - Sealing every 5 minutes offline would stretch that to about 3.5 days.
+    But the phone cannot know it is offline except by failing, so a slower
+    cadence also delays the first relay update when the internet flickers
+    back — the case F5 exists for.
 
 ---
 
