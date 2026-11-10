@@ -231,8 +231,13 @@ impl Default for Config {
 
 impl Config {
     /// The size of the record table (§6.4): every packet that can be
-    /// requested or emitted within the `2 L` a record lasts, so traffic
-    /// inside the rate limit cannot fill it.
+    /// requested or emitted within the `2 L` a record lasts, and every packet
+    /// requested before that and still awaited, so traffic inside the rate
+    /// limit cannot fill it.
+    ///
+    /// The awaited ones count because a link may hold back what it was asked
+    /// for and hand it all over later: each link has at most
+    /// [`Self::offers_per_link`] such packets outstanding.
     #[must_use]
     pub fn record_capacity(&self) -> usize {
         let reaccept_ms = self.life_ms.saturating_mul(2);
@@ -242,7 +247,11 @@ impl Config {
             .saturating_add(self.accept_burst);
         let shortest_slot = self.emit_period_ms.saturating_sub(self.emit_jitter_ms);
         let emitted = reaccept_ms / shortest_slot.max(1) + 1;
-        usize::try_from(requested.saturating_add(emitted)).unwrap_or(usize::MAX)
+        let links = self.max_outgoing.saturating_add(self.max_incoming);
+        let awaited = self.offers_per_link.saturating_mul(links);
+        usize::try_from(requested.saturating_add(emitted))
+            .unwrap_or(usize::MAX)
+            .saturating_add(awaited)
     }
 
     /// Periods of at least a millisecond and no more links than a record
@@ -2529,13 +2538,67 @@ mod tests {
         assert_eq!(rig.wants(one).len() + rig.wants(two).len(), 5);
     }
 
-    /// §6.4: traffic inside the rate limit cannot fill the record table.
+    /// §6.4: traffic inside the rate limit cannot fill the record table —
+    /// nor can packets asked for earlier and handed over late, up to a full
+    /// table of offers on each of the eight links.
     #[test]
     fn the_record_table_holds_everything_the_rate_limit_lets_in_for_two_lifetimes() {
         let config = Config::default();
-        assert_eq!(config.record_capacity(), 2048 + 240 * 40 + 41);
+        assert_eq!(config.record_capacity(), 2048 + 240 * 40 + 41 + 8 * 2048);
         let engine = engine(config, 1);
         assert_eq!(engine.store().records(), 0);
+    }
+
+    /// §6.4: two links let the engine ask for all it may, hold everything
+    /// back, hand it over at once and then keep up a steady flood. The table
+    /// is not filled, so the engine's own packets and honest ones still get
+    /// their records.
+    #[test]
+    fn packets_held_back_and_handed_over_late_do_not_fill_the_record_table() {
+        let config = Config {
+            life_ms: 2 * MINUTE_MS,
+            accept_per_min: 60,
+            accept_burst: 30,
+            offers_per_link: 120,
+            want_timeout_ms: 5000,
+            credit_per_min: 600,
+            ..quiet()
+        };
+        let capacity = config.record_capacity();
+        let mut rig = Rig::new(config);
+        let hoards = [(rig.peer(1), 0..120u64), (rig.peer(2), 200..320)];
+        let mut asked = BTreeSet::new();
+        // Announced again every half minute, the offers outlive their
+        // packets' two minutes while the requests are given up on.
+        for _ in 0..8 {
+            for (link, ns) in &hoards {
+                let entries: Vec<_> = ns.clone().map(|n| (id(n), 255)).collect();
+                rig.announce(*link, &entries);
+            }
+            rig.run(30_000);
+            for (link, _) in &hoards {
+                asked.extend(rig.wants(*link));
+            }
+        }
+        assert!(asked.len() > 200);
+        for (link, ns) in &hoards {
+            for n in ns.clone().filter(|&n| asked.contains(&id(n))) {
+                rig.deliver(*link, &packet(n));
+            }
+        }
+        assert_eq!(rig.store().records(), asked.len());
+
+        // Half the rate limit for two more lifetimes: a table with no room
+        // for what was held back was full within the first.
+        let mut most = 0;
+        for n in 1000..1120 {
+            rig.run(2000);
+            rig.feed(hoards[0].0, &[n], 255);
+            most = most.max(rig.store().records());
+        }
+        // The burst, four minutes of the rate and one emission: the old size.
+        assert!(most > 30 + 60 * 4 + 1 && most < capacity);
+        assert!(rig.closed.is_empty());
     }
 
     /// T-SEC-4: a flood costs the flooder's rows, not a smaller link's.
