@@ -734,7 +734,7 @@ mesh off with fixed copy (Rule 8). The setting is cleared on identity delete.
 |---|---|---|---|
 | R1 | An iOS background burst whose **receive failed** (not one stopped by withdrawn consent or by the app returning to the foreground) **seals for the mesh only** when mesh is on. The seal carries a mesh-only mark inside the opaque sealed value, so Dart cannot route it to a relay; `publish_location` runs its checks, hands the event to the mesh, skips the relay send, ends the record and answers a new `MeshOnly` outcome. A mesh-only seal drives nothing else: it does not re-send a pending commit (the circle stays silent instead), runs no repair or settle, and the burst skips its maintenance step, as its early return does today. The health model does not count it as a relay publish. | A locked iPhone keeps sending its location by mesh when no relay answers. Today it seals nothing in two cases: the poll build when its catch-up did not complete, and the live build when no live session exists and none can be started (`background_burst_coordinator.dart:578-589`). The live build with a session already publishes after a failed open (`:597-647`). | (a) The fix is sealed at the last epoch the phone knows. If a commit the phone could not fetch removed a member, that person — holding the old keys, within reach of the mesh — can read it, until the phone next completes a receive. The Android service (which publishes before it fetches), the foreground path and the iOS live path with a session already carry this exposure. (b) Each such seal uses one MLS message generation, bringing §0.4 item 12 closer. (c) It reverses a recorded rule ("nothing is sealed before a receive has run", `haven-core/SECURITY.md:1693-1695`) for the mesh carrier. The engine's own holds (§5.4), unread stored input included, still apply. |
 | R2 | Android, asleep, sharing off: each radio event takes a timed wake lock held through the engine's next announce tick, with a hard cap. | A sleeping Android phone forwards whenever traffic reaches it. | In a busy mesh the processor is awake most of the time. Battery cost unquantified: model E has no figure for an awake processor. Phones with sharing on already hold the location service's wake lock, so nothing is added there. |
-| R3 | iOS, sharing off: best effort. Turning mesh on with background sharing off says so and offers to turn background sharing on. | With background sharing on, the app keeps running and mesh is dependable in the background. | Without it, the app runs ~10 s per Bluetooth event and iOS may throttle it. The only way to make a non-sharing iPhone dependable is to keep a location session running for a user who is not sharing: a location permission prompt, the system's location indicator while not sharing, the location hardware powered, and App Review risk (guideline 2.5.4). Not adopted; D-11. |
+| R3 | iOS, sharing off: best effort. Turning mesh on with background sharing off says so and offers to turn background sharing on. | With background sharing on, the app keeps running and mesh is dependable in the background. | Without it, the app runs ~10 s per Bluetooth event and iOS may throttle it. The only way to make a non-sharing iPhone dependable is to keep a location session running for a user who is not sharing: a location permission prompt, the system's location indicator while not sharing, the location hardware powered, and App Review risk (guideline 2.5.4). Not adopted now; specified as the fallback in D-11. |
 | R4 | The queue of packets waiting to be read (§5.2) is 8192 packets ≈ 8 MB. | A phone whose app was closed reads, on opening, what passed through it — about two hours' worth in a 100-phone crowd, longer in smaller ones. | 8 MB of memory while mesh is on; beyond the queue the oldest unread packets are dropped. |
 
 What no choice can buy: two locked iPhones that have never met finding each
@@ -1028,7 +1028,8 @@ platform-gated until its platform's radio lands.
   and works fully without notification permission. Consequence: nothing
   outside the app then shows that mesh is on, and the auto-off gives no
   warning (§7.6).
-- **D-11 Non-sharing iPhones in the background — OPEN.** Concerns only an
+- **D-11 Non-sharing iPhones in the background — DECIDED 2026-11-11: C,
+  with B prepared as a fallback.** Concerns only an
   iPhone with mesh on and background location sharing off (the setting is off
   until the user turns it on); with background sharing on, the app already
   keeps running. bitchat's iOS app declares only the two Bluetooth background
@@ -1051,8 +1052,17 @@ platform-gated until its platform's radio lands.
     is turned on** (the plan as written, §7.7 R3).
   - Neither A nor B changes how locked iPhones **find** each other; that
     depends on foreground state, not on whether the app is running (§7.2).
-  - Recommendation: C, with B kept as a prepared fallback if hardware shows
-    iOS throttling Bluetooth wakes (G-10).
+  - **Prepared fallback.** B is specified here and not built, so no unused
+    code ships. Trigger: G-10 on hardware, or field evidence, shows iOS
+    throttling or ending a suspended relay. Scope when triggered: with mesh
+    on and background sharing off, Haven arms its existing background
+    location session (`HavenBackgroundSessionHandler`) at the lowest accuracy
+    and discards every fix — nothing is sealed or sent; the enable flow asks
+    for location permission and says why; the privacy manifest and the
+    location usage strings gain the new purpose; a test proves no location
+    leaves the device in that state; the App Review question is asked first.
+    Until then the engine keeps its iOS-suspended behaviour: forward within
+    the wake window, catch up on wake (§7.3).
 - **D-10 Offline sealing cadence.** Unchanged (as F5 implies) — or seal less
   often while no relay is reachable, which postpones §0.4 item 12.
 
@@ -1108,6 +1118,7 @@ platform-gated until its platform's radio lands.
 | D-8: reliable in foreground and background on every platform | §7.7: mesh-only sealing in iOS bursts that cannot receive, wake lock until sent on Android, a larger unread queue; D-11 raised; §0.4 items 2, 7b |
 | D-3: auto-off | §7.6: 12 hours, reminder at 30 minutes, Keep on; T-AUTO-1..3; §0.4 item 9a |
 | D-9 (2026-11-11): mesh works with notifications denied | §7.1, §7.2, §7.6; T-NOTIF-3; F2 qualified |
+| D-11 (2026-11-11): Bluetooth wakes plus an offer to turn background sharing on; location keep-alive specified as a fallback | §11 D-11; G-10 |
 
 The independent review of these edits found, and the text above fixes:
 
