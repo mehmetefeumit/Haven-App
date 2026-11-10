@@ -129,7 +129,7 @@ forward-all-opaque, photos excluded) stands and is carried into §8.
 | Req | Text (short) | Where met | Proved by (§9.3) |
 |---|---|---|---|
 | F1 | Encrypted always; intermediaries learn nothing about whose, where, how far; minimal metadata | §4, §5, §6, §8 | T-PRIV-* |
-| F2 | Ongoing notification while mesh is on | §7.1, §7.2 | T-NOTIF-* |
+| F2 | Ongoing notification while mesh is on — when the user allows notifications (D-9) | §7.1, §7.2 | T-NOTIF-* |
 | F3 | Least power without degrading function | §7.3 | T-PWR-*, ESTIMATED model |
 | F4 | Hold the button: circle updates received / updates relayed for others; session and lifetime | §7.5 | T-STAT-* |
 | F5 | Relay path unchanged with mesh on or off | §3, §5.1 | T-INDEP-* |
@@ -582,7 +582,9 @@ ages from a passive sniffer; D-5 presents both views.
   the location notification, no identifier or count in its text; tapping it
   opens the statistics sheet. If the user swipes it away on Android 14+ it is
   posted again at the next screen-off (it cannot be dismissed on the lock
-  screen). Whether mesh may run with notifications denied is D-9.
+  screen). With notification permission denied mesh still runs (D-9,
+  decided): the service keeps working, its notice is hidden from the drawer,
+  and the button and its sheet are the indicators.
 - Play: the `connectedDevice` declaration is reviewed and Google's examples
   are accessories [V2]. G-4, asked in M0.
 
@@ -612,7 +614,7 @@ ages from a passive sniffer; D-5 presents both views.
 - **Indicator (F2)**: one local notification with a fixed identifier and
   passive interruption level, so it sits in Notification Centre; added again
   if absent at each move to background, each Bluetooth wake and each
-  relaunch; removed at mesh off. Authorization is requested in the enable
+  relaunch; removed at mesh off. A refusal does not stop mesh (D-9). Authorization is requested in the enable
   flow. iOS lets the user clear it; D-3 (auto-off) is the stronger answer to
   "forgot it on". A Live Activity is a later option, not v1: it needs a
   second signed target, iOS 16.1+, and ends after 8 h.
@@ -713,6 +715,9 @@ mesh off with fixed copy (Rule 8). The setting is cleared on identity delete.
   background refresh task is requested for the deadline as a best-effort
   earlier wake. Scheduled notices follow elapsed time and the stored deadline
   follows the clock, so they can differ after a clock change.
+- Without notification permission there is no reminder and no Keep on tap:
+  mesh stops at 12 hours and the app shows it the next time it is opened;
+  extending means opening Haven before then.
 - **Why 12 hours.** It covers a festival day or a working day; a mesh left on
   by mistake ends within the night; an emergency that lasts longer costs one
   tap every 12 hours. The figure is not derived from a battery measurement
@@ -923,7 +928,9 @@ declared in `e2e_lane_budget.manifest`.
   right-to-left, 200 % text and small screens.
 - **T-NOTIF-1** mesh on ⇒ notification present; off ⇒ absent. **T-NOTIF-2**
   after a cancel through a test notification listener, the next screen-off
-  posts it again.
+  posts it again. **T-NOTIF-3** with notification permission denied, mesh
+  turns on, carries packets, shows its state on the button and sheet, and
+  still turns off at the deadline.
 - **T-BG-1** (Android emulator) screen off and forced idle, packets still
   flow; process killed, the service returns; reboot with mesh on, mesh
   resumes; reboot with the permission revoked, no crash. The lane states it
@@ -990,7 +997,8 @@ platform-gated until its platform's radio lands.
 - **G-9** mesh-on does not change MLS session ownership or reclaim
   (T-INDEP-4).
 - **G-10** the timed-wake-lock design delivers frames on a sleeping Android
-  phone [U, hardware only].
+  phone, and iOS does not throttle a suspended relay woken by frequent
+  Bluetooth events [U, hardware only].
 
 ### Owner decisions
 
@@ -1016,13 +1024,35 @@ platform-gated until its platform's radio lands.
 - **D-8 Background reliability — DECIDED 2026-11-10:** as reliable as the
   platforms allow, costs stated (§7.7). Recorded as owner-directed under
   Rule 10: R1 widens the removed-member window on iOS.
-- **D-9 Notifications denied (still open; auto-off now limits the harm either
-  way).** Mesh cannot be turned on without notification
-  permission (recommended: F2 says there is always a notification) — or
-  allowed, with the button as the only indicator.
-- **D-11 iOS keep-alive for non-sharing users.** Leave a non-sharing iPhone
-  as a best-effort background relay (recommended) — or keep a location
-  session running while mesh is on, at the costs in §7.7 R3.
+- **D-9 Notifications denied — DECIDED 2026-11-11.** Mesh may be turned on
+  and works fully without notification permission. Consequence: nothing
+  outside the app then shows that mesh is on, and the auto-off gives no
+  warning (§7.6).
+- **D-11 Non-sharing iPhones in the background — OPEN.** Concerns only an
+  iPhone with mesh on and background location sharing off (the setting is off
+  until the user turns it on); with background sharing on, the app already
+  keeps running. bitchat's iOS app declares only the two Bluetooth background
+  modes and no keep-alive of any kind [V, `bitchat/Info.plist:50-54` at
+  `04995f6`; its location code serves its location channels].
+  - **A — Bluetooth wakes only (what bitchat does).** iOS runs Haven for
+    about 10 s on each Bluetooth event; the phone forwards inside that
+    window. No location permission, indicator or hardware; lowest battery;
+    plain App Review case. But nothing runs between events, iOS may throttle
+    or end an app that is woken constantly [V wording, never measured here],
+    and a restart loses the packets in memory.
+  - **B — keep a location session running whenever mesh is on.** The app
+    never suspends: forwarding, timers and cover packets run continuously and
+    the in-memory store survives. But it needs location permission from
+    someone who is not sharing, shows the system location indicator while not
+    sharing, keeps the processor awake (battery, unquantified), and uses the
+    location background mode for something other than location (guideline
+    2.5.4 risk).
+  - **C — A, plus an explicit offer to turn background sharing on when mesh
+    is turned on** (the plan as written, §7.7 R3).
+  - Neither A nor B changes how locked iPhones **find** each other; that
+    depends on foreground state, not on whether the app is running (§7.2).
+  - Recommendation: C, with B kept as a prepared fallback if hardware shows
+    iOS throttling Bluetooth wakes (G-10).
 - **D-10 Offline sealing cadence.** Unchanged (as F5 implies) — or seal less
   often while no relay is reachable, which postpones §0.4 item 12.
 
@@ -1077,6 +1107,7 @@ platform-gated until its platform's radio lands.
 | D-1: no bounce-back; a local record of when each packet was received; re-accept only after a set period; expired packets are not relayed | §6.4 rewritten: a 20-minute lifetime carried on the link, a per-packet record kept 40 minutes, lying-peer rules; T-LIFE-1..5, T-PRIV-7; §0.4 item 7a |
 | D-8: reliable in foreground and background on every platform | §7.7: mesh-only sealing in iOS bursts that cannot receive, wake lock until sent on Android, a larger unread queue; D-11 raised; §0.4 items 2, 7b |
 | D-3: auto-off | §7.6: 12 hours, reminder at 30 minutes, Keep on; T-AUTO-1..3; §0.4 item 9a |
+| D-9 (2026-11-11): mesh works with notifications denied | §7.1, §7.2, §7.6; T-NOTIF-3; F2 qualified |
 
 The independent review of these edits found, and the text above fixes:
 
