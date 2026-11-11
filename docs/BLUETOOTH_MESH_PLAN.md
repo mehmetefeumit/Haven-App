@@ -1517,14 +1517,70 @@ body). Built:
   circle's silence and no other's; and an ingest that fails ends its
   circle's turn in that drive.
 
+- **M2f**, member bridging (§5.5; `Publishing::publish_location_and_bridge`
+  and its private `bridge_locations`; `SessionManager::mesh_bridge_take` and
+  `mesh_bridge_check`; the candidates in the key ring's file). A mesh drive
+  keeps a fellow member's location to be passed on when the engine read it
+  for the first time and took it in, every packet of it this device opened
+  was format `0x02`, this device's last relay fetch of the circle was
+  answered to the end, and no leave is asked — the newest of each member,
+  four a circle, 32 in all, in memory alone. It is sent by the entry that
+  makes this device's own location send, after it, only when a relay took
+  that send and only to the circle's relays that did; each event is checked
+  against the engine in a hold of its own immediately before its send — the
+  check a location of this device's passes at the epoch the update was
+  sealed at, the circle still caught up and holding no fetched input unread
+  — and against its own stamps: begun before 218 s, no declared life over
+  228 s, not stamped ahead of the clock by more than a send. One attempt a
+  relay, no record, no retry, the answer read by nothing; one update a
+  member each 72 s. What a send does not pass on is dropped, and so is what
+  a circle kept when it falls silent on mesh, when its relay receive begins
+  again or the live plane pauses, with the circle, and with mesh.
+  **Finding 1 of the design's review** is met by tying what is kept to the
+  receive it was kept under, and by the caller's word: the entry is told
+  whether this drive's relay receive of the circle completed before it, and
+  passes nothing on otherwise. **A platform that publishes before it fetches
+  therefore bridges nothing** (the Android service, until it has a bridge
+  step after its fetch — not built). **Q-4** is met by construction: the
+  bridge has no entry of its own.
+  **Not as the design has it:** the engine announces an update under the
+  SHA-256 of the MLS message its event carries, not under the event's id
+  (MDK `content_dedup_id`), so the ingress keeps that digest with each held
+  packet and finds the update by it; the per-drive bound is the circle's own
+  share, since one send bridges for one circle; the sender's membership is
+  not read apart, because the engine authenticated the update at the epoch
+  the check requires the circle to stand on still; and the three time checks
+  are made in the key ring's file, beside the candidates.
+  **Not built here:** no FFI calls the entry, so nothing in the app bridges
+  yet; T-BRIDGE-9 (soak) comes with the rig's mesh plane and T-BRIDGE-12
+  with the enable flow. `CLAUDE.md` Rule 13.1 and its kind-445 row still say
+  that only the fanout driver sends a kind 445 under a record: the sentence
+  for the bridge is owed with the FFI that first reaches it.
+  With it, four findings of the review of M2e were applied. An update the
+  mesh brings stamps no inbound arrival, so it holds no epoch-rotation
+  repair back (`CircleManager::fold_mesh_update`); relay input the same hold
+  handed back stamps as ever. An update is counted where its packet is
+  settled, never while it is held. Proposals owed a send are kept one an
+  event id, sixteen at most, the oldest dropped; and the re-owe of one a
+  drive could not send is tested.
+
 Residuals of M2e. Two reads of the engine's own durable record of what it
 has processed still see an update the mesh brought first, both only after a
 relay-plane ingest of the same event has failed: the sweep then takes the
 event as the engine's (`relay/catchup.rs` `ingest_judged`), and the NIP-77
-pass's memory records it. The arrival stamp a mesh update writes is read by
-the health model and by the gate of the epoch-rotation repair, as any
-update's is. A peer's update the mesh brings ends the `Stalled` reading as
-one from a relay does; it arms no history walk and moves none.
+pass's memory records it. A mesh update writes one stamp, "a peer's fix
+arrived" (`last_peer_event_at_ms`), which the sharing-health model reads; it
+no longer writes the inbound-arrival stamp (`last_inbound_event_at_ms`) the
+gate of the epoch-rotation repair reads. A peer's update the mesh brings ends
+the `Stalled` reading as one from a relay does; it arms no history walk and
+moves none.
+
+Residuals of M2f. Which drive a send belongs to is the caller's word
+(`received`): this session can say only that its last fetch of the circle
+completed and nothing has ended it since, which is also true of a device
+that published before the fetch of its next tick. A relay subscriber of the
+circle's routing id, not only its operator, sees a bridged event arrive tens
+of seconds after its `created_at` (§0.4 item 11a names the operator).
 
 Residuals of M2b, both in the tracker row `T-MESH-EXPORTER`: epochs crossed
 inside one engine call, and epochs reached while mesh was off, have no key.
@@ -1538,9 +1594,9 @@ Not yet written, and owed with or before the first user-visible step: Rule
 paragraphs, and the privacy-manifest invariants for the keys at rest and the
 hand-off (§8.2).
 
-Next: member bridging, and the FFI — which exposes `seal_for_mesh` to the
-burst coordinator, calls
-`mesh_on_until`, `mesh_off`, `mesh_sharing_stopped`, drains `mesh_handoff`,
-hands `mesh_drive` what the engine's unread queue holds and marks each
-packet as the drive answers — with the soak scenarios and the amended
-documents.
+Next: the FFI — which exposes `seal_for_mesh` to the burst coordinator,
+calls `mesh_on_until`, `mesh_off`, `mesh_sharing_stopped`, drains
+`mesh_handoff`, hands `mesh_drive` what the engine's unread queue holds and
+marks each packet as the drive answers, and sends each location through
+`publish_location_and_bridge` with its drive's word on its receive — with
+the soak scenarios and the amended documents.

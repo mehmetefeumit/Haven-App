@@ -32,13 +32,14 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use super::{
-    GroupEvent, GroupId, LocationMessageResult, LocationToSend, SessionManager,
+    GroupEvent, GroupId, LocationMessageResult, LocationToSend, MemberId, SessionManager,
     DEFAULT_MAX_PAST_EPOCHS,
 };
 use crate::mesh::engine::CircleSlot;
 use crate::mesh::event::{parts_of, rebuild};
 use crate::mesh::handoff::Handoff;
 use crate::mesh::packet::{open, wrap, Format, MeshKey, Packet, PacketId};
+use crate::relay::fanout::LOCATION_SEND_MS;
 
 /// The longest mesh stays on without being asked for again: the deadline is
 /// never further ahead of the clock than this.
@@ -60,6 +61,23 @@ const DRIVE_PER_CIRCLE: usize = 32;
 /// cannot take its input in — or a member flooding one — costs no other
 /// circle a packet; past it the oldest goes.
 const HELD_PER_CIRCLE: usize = 64;
+
+/// How many updates of fellow members one circle keeps to pass on to its
+/// relays (plan §5.5), one a member: so also the most one send of this
+/// device's passes on.
+const BRIDGE_PER_CIRCLE: usize = 4;
+
+/// How many such updates every circle keeps together.
+const BRIDGE_WAITING: usize = 32;
+
+/// How long after one update of a member was passed on the next of that
+/// member is: what a member who floods the mesh gets of this device.
+const BRIDGE_SENDER_GAP_MS: u64 = 72_000;
+
+/// The longest lifetime an event that is passed on may declare, seconds:
+/// Haven's own for a location. A member cannot make this device publish an
+/// event stamped to last longer.
+const BRIDGE_LIFETIME_SECS: u64 = crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS;
 
 /// A mesh packet, as `Publishing::mesh_drive` is handed one by the mesh
 /// engine's owner. The driver does not name the mesh module
@@ -98,6 +116,9 @@ pub(super) struct Opened {
     /// The event the packet carried, rebuilt under the routing id of the
     /// key that opened it, and verified.
     pub(super) event: Event,
+    /// Whether the packet says a member may pass its event on to a relay
+    /// ([`Format::Bridgeable`]).
+    bridgeable: bool,
     /// The epoch of that key.
     pub(super) epoch: u64,
     /// The group-event exporter secret of that epoch.
@@ -195,6 +216,75 @@ impl EpochKey {
     }
 }
 
+/// An update a packet carried, kept until the engine takes it in.
+struct HeldUpdate {
+    packet: PacketId,
+    event: Event,
+    /// The digest of the MLS message the event carries: the id the engine
+    /// announces the update under once it reads it.
+    // zeroize-ok: a digest of ciphertext, an identifier and no secret
+    content: [u8; 32],
+    /// Whether every packet of it this device opened says a member may pass
+    /// it on to a relay. The mark is outside the signature, so one packet
+    /// that says no decides.
+    bridgeable: bool,
+}
+
+/// A fellow member's update this device took in by mesh, which it may pass
+/// on to the circle's relays at its own next send (plan §5.5).
+pub struct Candidate {
+    /// The member's own sealed event as its packet carried it, rebuilt and
+    /// verified: what that member's relay send would have been, byte for
+    /// byte.
+    event: Event,
+    /// The epoch it was sealed at.
+    epoch: u64,
+    /// Who sent it, as the engine authenticated it.
+    sender: MemberId,
+}
+
+impl Candidate {
+    /// `event`, if what the engine read in it for the first time — `update`,
+    /// as it announced it — is a location another member than `own` sent.
+    /// What this device sent itself the engine answers as an own echo and
+    /// announces nothing for; an account's other device is not a fellow
+    /// member either.
+    fn of(event: Event, update: &GroupEvent, own: &[u8; 32]) -> Option<Self> {
+        let GroupEvent::MessageReceived {
+            sender,
+            epoch,
+            payload,
+            ..
+        } = update
+        else {
+            return None;
+        };
+        (sender.as_slice() != own && !super::inner_location_content(payload).is_empty()).then(
+            || Self {
+                event,
+                epoch: epoch.0,
+                sender: sender.clone(),
+            },
+        )
+    }
+
+    /// The event, the epoch it was sealed at and its sender, if the event
+    /// may still be handed to a relay at `now_ms`: its declared lifetime is
+    /// no longer than [`BRIDGE_LIFETIME_SECS`], it is not stamped ahead of
+    /// this device's clock by more than a send takes, and a send begun now
+    /// has ended before the relays and every member drop it — so no later
+    /// than `min(declared, 228) − 10` seconds after it was sealed.
+    pub(super) fn in_time(self, now_ms: u64) -> Option<(Event, u64, MemberId)> {
+        let created = self.event.created_at.as_secs();
+        let expires = self.event.tags.expiration()?.as_secs();
+        let reach = now_ms.saturating_add(LOCATION_SEND_MS);
+        (expires.saturating_sub(created) <= BRIDGE_LIFETIME_SECS
+            && created.saturating_mul(1_000) <= reach
+            && reach < expires.saturating_mul(1_000))
+        .then_some((self.event, self.epoch, self.sender))
+    }
+}
+
 /// One circle's keys and its outbox slot.
 #[derive(Default)]
 struct CircleKeys {
@@ -214,26 +304,36 @@ struct CircleKeys {
     /// the engine has not taken in, oldest first, one an event id and at
     /// most [`HELD_PER_CIRCLE`]. The mesh engine hands a packet out once, so
     /// each is offered again from here at every drive.
-    held: VecDeque<(PacketId, Event)>,
+    held: VecDeque<HeldUpdate>,
+    /// The updates waiting to be passed on, the newest of each member and at
+    /// most [`BRIDGE_PER_CIRCLE`]. In memory alone, and gone whenever the
+    /// circle falls silent: an epoch change, input held unread, a leave.
+    bridge: Vec<Candidate>,
+    /// When an update of each member was last passed on, on the clock of the
+    /// drive that did.
+    bridged: Vec<(MemberId, u64)>,
 }
 
 impl CircleKeys {
-    /// Empties the circle's slot and ends the turn any send still holds.
+    /// Empties the circle's slot, ends the turn any send still holds, and
+    /// drops what waited to be passed on.
     fn silence(&mut self, ring: &MeshKeys) {
         self.turn += 1;
+        self.bridge.clear();
         if let Some(slot) = self.slot {
             ring.handoff.purge(slot);
         }
     }
 
     /// [`MeshKeys::hold`], for this circle.
-    fn hold(&mut self, packet: PacketId, event: Event) -> Vec<PacketId> {
-        if self.held.iter().any(|(_, held)| held.id == event.id) {
-            return vec![packet];
+    fn hold(&mut self, update: HeldUpdate) -> Vec<PacketId> {
+        if let Some(held) = (self.held.iter_mut()).find(|held| held.event.id == update.event.id) {
+            held.bridgeable &= update.bridgeable;
+            return vec![update.packet];
         }
-        self.held.push_back((packet, event));
+        self.held.push_back(update);
         let over = self.held.len().saturating_sub(HELD_PER_CIRCLE);
-        self.held.drain(..over).map(|(id, _)| id).collect()
+        self.held.drain(..over).map(|held| held.packet).collect()
     }
 
     fn rows(&self) -> Vec<StoredMeshKey> {
@@ -808,6 +908,7 @@ impl MeshKeys {
                     packet: packet.id(),
                     circle: group.clone(),
                     event,
+                    bridgeable: parts.format == Format::Bridgeable,
                     epoch: key.epoch,
                     exporter: key.exporter.clone(),
                 });
@@ -816,19 +917,26 @@ impl MeshKeys {
         })
     }
 
-    /// Holds the update a packet carried until the engine takes it in.
-    /// Answers the packets this settles: the packet itself when its circle
-    /// is gone or holds the event already, and the oldest ones past the
-    /// circle's quota.
-    fn hold(&self, opened: Opened) -> Vec<PacketId> {
+    /// Holds the update a packet carried until the engine takes it in;
+    /// `content` is the digest of the MLS message its event carries. Answers
+    /// the packets this settles: the packet itself when its circle is gone
+    /// or holds the event already, and the oldest ones past the circle's
+    /// quota.
+    fn hold(&self, opened: Opened, content: [u8; 32]) -> Vec<PacketId> {
         let Opened {
             packet,
             circle,
             event,
+            bridgeable,
             ..
         } = opened;
-        (self.ring().get_mut(&circle))
-            .map_or_else(|| vec![packet], |circle| circle.hold(packet, event))
+        let update = HeldUpdate {
+            packet,
+            event,
+            content,
+            bridgeable,
+        };
+        (self.ring().get_mut(&circle)).map_or_else(|| vec![packet], |circle| circle.hold(update))
     }
 
     /// What one drive offers the engine: for each circle that holds any, its
@@ -838,22 +946,86 @@ impl MeshKeys {
             .filter(|(_, circle)| !circle.held.is_empty())
             .map(|(group, circle)| {
                 let events = (circle.held.iter().take(DRIVE_PER_CIRCLE))
-                    .map(|(_, event)| event.clone())
+                    .map(|held| held.event.clone())
                     .collect();
                 (group.clone(), events)
             })
             .collect()
     }
 
-    /// The engine took in the event `id` of `group`: its packet, held no
+    /// The digest the engine announces the held event `id` of `group`
+    /// under, once it reads it.
+    fn content_of(&self, group: &GroupId, id: &EventId) -> Option<[u8; 32]> {
+        let ring = self.ring();
+        let content = (ring.get(group)?.held.iter())
+            .find(|held| held.event.id == *id)
+            .map(|held| held.content);
+        drop(ring);
+        content
+    }
+
+    /// The engine took in the event `id` of `group`: the update, held no
     /// longer.
-    fn taken_in(&self, group: &GroupId, id: &EventId) -> Option<PacketId> {
+    fn taken_in(&self, group: &GroupId, id: &EventId) -> Option<HeldUpdate> {
         let mut ring = self.ring();
         let held = &mut ring.get_mut(group)?.held;
-        let at = held.iter().position(|(_, event)| event.id == *id)?;
-        let packet = held.remove(at).map(|(packet, _)| packet);
+        let at = held.iter().position(|held| held.event.id == *id)?;
+        let update = held.remove(at);
         drop(ring);
-        packet
+        update
+    }
+
+    /// Keeps `candidate` to be passed on at `group`'s own next send: the
+    /// newest of its sender alone, and none past the circle's share or every
+    /// circle's together — the mesh is lossy by design, and so is this.
+    fn wait_to_bridge(&self, group: &GroupId, candidate: Candidate) {
+        let mut ring = self.ring();
+        let waiting: usize = ring.values().map(|circle| circle.bridge.len()).sum();
+        if let Some(circle) = ring.get_mut(group) {
+            let stamp = |event: &Event| (event.created_at, event.id);
+            let room = circle.bridge.len() < BRIDGE_PER_CIRCLE && waiting < BRIDGE_WAITING;
+            match (circle.bridge.iter_mut()).find(|waits| waits.sender == candidate.sender) {
+                Some(waits) if stamp(&candidate.event) > stamp(&waits.event) => *waits = candidate,
+                None if room => circle.bridge.push(candidate),
+                _ => {}
+            }
+        }
+        drop(ring);
+    }
+
+    /// What `group` kept to pass on, newest first — or, with `None`, what
+    /// every circle kept — taken: whatever is not sent by the drive that
+    /// takes it is never sent.
+    pub(super) fn take_bridge(&self, group: Option<&GroupId>) -> Vec<Candidate> {
+        let mut ring = self.ring();
+        let mut taken: Vec<Candidate> = match group {
+            Some(group) => (ring.get_mut(group))
+                .map(|circle| std::mem::take(&mut circle.bridge))
+                .unwrap_or_default(),
+            None => (ring.values_mut())
+                .flat_map(|circle| std::mem::take(&mut circle.bridge))
+                .collect(),
+        };
+        drop(ring);
+        taken.sort_by_key(|waits| std::cmp::Reverse((waits.event.created_at, waits.event.id)));
+        taken
+    }
+
+    /// Whether an update of `sender` may be passed on for `group` at
+    /// `now_ms`, [`BRIDGE_SENDER_GAP_MS`] after the last; if so, this one is
+    /// the last. A clock set back passes none on until it has caught up.
+    pub(super) fn bridges(&self, group: &GroupId, sender: &MemberId, now_ms: u64) -> bool {
+        let mut ring = self.ring();
+        let passes = ring.get_mut(group).is_some_and(|circle| {
+            (circle.bridged).retain(|(_, at)| now_ms.saturating_sub(*at) < BRIDGE_SENDER_GAP_MS);
+            let waits = circle.bridged.iter().any(|(member, _)| member == sender);
+            if !waits {
+                circle.bridged.push((sender.clone(), now_ms));
+            }
+            !waits
+        });
+        drop(ring);
+        passes
     }
 
     /// Wraps `event` under its circle's newest key, as a packet of `format`,
@@ -1094,15 +1266,26 @@ impl SessionManager {
 
     /// What becomes of a packet that opened and verified: held for the
     /// engine when its event is an `update` of its circle — an application
-    /// message of the epoch its key is of — and dropped as read when it is
-    /// anything else.
-    pub(super) fn mesh_keep(&self, opened: Opened, update: bool, drive: &mut MeshDrive) {
-        if !update {
+    /// message of the epoch its key is of, here by the digest of the MLS
+    /// message it carries — and dropped as read when it is anything else.
+    pub(super) fn mesh_keep(
+        &self,
+        opened: Opened,
+        update: Option<[u8; 32]>,
+        drive: &mut MeshDrive,
+    ) {
+        let Some(content) = update else {
             drive.read.push((opened.packet, true));
             return;
-        }
-        let settled = self.mesh_keys.hold(opened);
+        };
+        let settled = self.mesh_keys.hold(opened, content);
         (drive.read).extend(settled.into_iter().map(|id| (id, true)));
+    }
+
+    /// The id the engine announces the held `event` of `group` under once it
+    /// reads it ([`HeldUpdate::content`]).
+    pub(super) fn mesh_content(&self, group: &GroupId, event: &Event) -> Option<[u8; 32]> {
+        self.mesh_keys.content_of(group, &event.id)
     }
 
     /// What a drive offers the engine ([`MeshKeys::due`]).
@@ -1116,10 +1299,32 @@ impl SessionManager {
     }
 
     /// The engine took in `event`, which a packet carried for `group`: the
-    /// packet is read.
-    pub(crate) fn mesh_taken_in(&self, group: &GroupId, event: &Event, drive: &mut MeshDrive) {
-        if let Some(packet) = self.mesh_keys.taken_in(group, &event.id) {
-            drive.read.push((packet, true));
+    /// packet is read. `update` is what the engine announced if it read in
+    /// the event an update it had not read before
+    /// ([`Self::ingest_from_mesh`]); such an update is kept to be passed on
+    /// to the circle's relays (plan §5.5) when every packet of it said a
+    /// member may ([`Format::Bridgeable`]), it is a fellow member's location
+    /// ([`Candidate::of`]) and [`Self::keeps_to_pass_on`] holds. One the
+    /// engine had read already — a relay delivered it, or the mesh did
+    /// before — is announced as nothing, and so is never kept: an event is
+    /// passed on once, by its id, whatever packets carry it.
+    pub(crate) fn mesh_taken_in(
+        &self,
+        group: &GroupId,
+        event: &Event,
+        update: Option<&GroupEvent>,
+        drive: &mut MeshDrive,
+    ) {
+        let Some(held) = self.mesh_keys.taken_in(group, &event.id) else {
+            return;
+        };
+        drive.read.push((held.packet, true));
+        let own = self.identity_pubkey().to_bytes();
+        let candidate = update
+            .filter(|_| held.bridgeable && self.keeps_to_pass_on(group))
+            .and_then(|update| Candidate::of(held.event, update, &own));
+        if let Some(candidate) = candidate {
+            self.mesh_keys.wait_to_bridge(group, candidate);
         }
     }
 }
@@ -1222,6 +1427,14 @@ impl SessionManager {
     #[must_use]
     pub fn mesh_held_for_test(&self, group: &GroupId) -> usize {
         (self.mesh_keys.ring().get(group)).map_or(0, |circle| circle.held.len())
+    }
+
+    /// The ids of the events `group` keeps to pass on to its relays.
+    #[must_use]
+    pub fn mesh_bridge_waiting_for_test(&self, group: &GroupId) -> Vec<EventId> {
+        (self.mesh_keys.ring().get(group))
+            .map(|circle| circle.bridge.iter().map(|waits| waits.event.id).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -2579,6 +2792,12 @@ mod tests {
         opened.expect("its event verifies")
     }
 
+    /// The packet of the held `event` of `group`, taken as the engine's
+    /// having taken the event in takes it.
+    fn taken(fx: &Fixture, group: &GroupId, event: &Event) -> Option<PacketId> {
+        (fx.keys.taken_in(group, &event.id)).map(|held| held.packet)
+    }
+
     /// T-PERF-2: a packet costs one open a key the ring holds, at most, and
     /// none past the key that opens it — counted, not timed. What opens
     /// comes back as the event, under the routing id recorded for the key,
@@ -2651,22 +2870,22 @@ mod tests {
             "premise: two packets of one event"
         );
 
-        assert!(fx.keys.hold(read(&fx, &first)).is_empty());
+        assert!(fx.keys.hold(read(&fx, &first), [0; 32]).is_empty());
         assert!(
-            fx.keys.hold(read(&fx, &again)) == [again.id()],
+            fx.keys.hold(read(&fx, &again), [0; 32]) == [again.id()],
             "a second packet of a held event was held beside the first"
         );
         let due = fx.keys.due();
         assert!(due.len() == 1 && due[0].0 == group);
         assert!(due[0].1.len() == 1 && due[0].1[0].id == event.id);
 
-        assert!(fx.keys.taken_in(&group, &event.id) == Some(first.id()));
-        assert!(fx.keys.due().is_empty() && fx.keys.taken_in(&group, &event.id).is_none());
+        assert!(taken(&fx, &group, &event) == Some(first.id()));
+        assert!(fx.keys.due().is_empty() && taken(&fx, &group, &event).is_none());
         assert!(
-            fx.keys.hold(read(&fx, &later)).is_empty(),
+            fx.keys.hold(read(&fx, &later), [0; 32]).is_empty(),
             "a later packet of an update the engine took in was not offered to it again"
         );
-        assert!(fx.keys.taken_in(&group, &event.id) == Some(later.id()));
+        assert!(taken(&fx, &group, &event) == Some(later.id()));
     }
 
     /// Each circle holds its own quota: one that overflows loses its own
@@ -2682,7 +2901,7 @@ mod tests {
         for event in &kept {
             assert!(fx
                 .keys
-                .hold(read(&fx, &packet_of(event, 9, 0xb0)))
+                .hold(read(&fx, &packet_of(event, 9, 0xb0)), [0; 32])
                 .is_empty());
         }
 
@@ -2690,7 +2909,7 @@ mod tests {
         for _ in 0..HELD_PER_CIRCLE + 3 {
             let event = location();
             let packet = packet_of(&event, 4, 0xa0);
-            pushed_out.extend(fx.keys.hold(read(&fx, &packet)));
+            pushed_out.extend(fx.keys.hold(read(&fx, &packet), [0; 32]));
             packets.push(packet.id());
             events.push(event.id);
         }
@@ -2700,7 +2919,7 @@ mod tests {
         );
         let held = |group: &GroupId| {
             (fx.keys.ring().get(group).expect("held").held.iter())
-                .map(|(_, event)| event.id)
+                .map(|held| held.event.id)
                 .collect::<Vec<_>>()
         };
         assert_eq!(held(&flooded), events[3..]);
@@ -2727,18 +2946,296 @@ mod tests {
         let (event, other) = (location(), location());
         let packet = packet_of(&event, 4, 0xa0);
         let late = read(&fx, &packet_of(&other, 4, 0xa0));
-        assert!(fx.keys.hold(read(&fx, &packet)).is_empty());
+        assert!(fx.keys.hold(read(&fx, &packet), [0; 32]).is_empty());
         assert!(fx
             .keys
-            .hold(read(&fx, &packet_of(&other, 9, 0xb0)))
+            .hold(read(&fx, &packet_of(&other, 9, 0xb0)), [0; 32])
             .is_empty());
 
         fx.keys.forget(&fx.engine, &one);
         assert!(fx.keys.due().len() == 1 && fx.keys.try_keys(&packet).is_none());
         let late_packet = late.packet;
-        assert!(fx.keys.hold(late) == [late_packet]);
+        assert!(fx.keys.hold(late, [0; 32]) == [late_packet]);
 
         assert!(fx.keys.turn_off(&fx.engine));
         assert!(fx.keys.due().is_empty());
+    }
+
+    /// What the engine announces for a location `sender` sent at `epoch`.
+    fn announced(sender: u8, epoch: u64, payload: &[u8]) -> GroupEvent {
+        GroupEvent::MessageReceived {
+            group_id: circle(1),
+            message_id: super::super::MessageId::new(vec![sender; 32]),
+            sender: MemberId::new(vec![sender; 32]),
+            epoch: super::super::EpochId(epoch),
+            payload: payload.to_vec(),
+            retention: None,
+            authority: None,
+        }
+    }
+
+    const FIX: &[u8] = br#"{"kind":25442,"content":"{}"}"#;
+    const OWN: [u8; 32] = [0x0f; 32];
+
+    /// A location event sealed `age_secs` before [`NOW`] that declares
+    /// `life_secs` to live.
+    fn sealed_ago(age_secs: u64, life_secs: u64) -> Event {
+        let created = NOW / 1_000 - age_secs;
+        let tag = |tag: [&str; 2]| Tag::parse(tag).expect("a tag");
+        EventBuilder::new(Kind::Custom(KIND_GROUP_MESSAGE), BASE64.encode([7; 120]))
+            .tags([
+                tag(["h", &hex::encode([0x70; 32])]),
+                tag(["expiration", &(created + life_secs).to_string()]),
+            ])
+            .custom_created_at(Timestamp::from_secs(created))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign")
+    }
+
+    /// A candidate of `sender`, sealed `age_secs` before [`NOW`].
+    fn candidate(sender: u8, age_secs: u64) -> Candidate {
+        Candidate::of(sealed_ago(age_secs, 228), &announced(sender, 4, FIX), &OWN)
+            .expect("a fellow member's location")
+    }
+
+    fn waiting(fx: &Fixture, group: &GroupId) -> Vec<EventId> {
+        let ring = fx.keys.ring();
+        (ring.get(group).expect("held").bridge.iter())
+            .map(|waits| waits.event.id)
+            .collect()
+    }
+
+    /// Only a location another member sent is kept to be passed on: not
+    /// what this account sent, not an update that carries no location, and
+    /// nothing the engine announced that is not an update.
+    #[test]
+    fn only_a_fellow_members_location_is_a_candidate() {
+        let event = location();
+        let kept = Candidate::of(event.clone(), &announced(0xa1, 9, FIX), &OWN)
+            .expect("a fellow member's location is kept");
+        assert!(kept.event.id == event.id && kept.epoch == 9);
+        assert!(
+            kept.sender == MemberId::new(vec![0xa1; 32]),
+            "the candidate is not its sender's"
+        );
+
+        assert!(
+            Candidate::of(event.clone(), &announced(0x0f, 9, FIX), &OWN).is_none(),
+            "this account's own update was kept to be passed on"
+        );
+        for payload in [
+            &br#"{"kind":9,"content":"hello"}"#[..],
+            &br#"{"kind":25442,"content":""}"#[..],
+            b"not json",
+        ] {
+            assert!(
+                Candidate::of(event.clone(), &announced(0xa1, 9, payload), &OWN).is_none(),
+                "an update that carries no location was kept to be passed on"
+            );
+        }
+        let joined = GroupEvent::GroupCreated {
+            group_id: circle(1),
+        };
+        assert!(Candidate::of(event, &joined, &OWN).is_none());
+    }
+
+    /// The window an event may be passed on in, both ends, by this device's
+    /// clock: begun no later than ten seconds before a 228-second life ends
+    /// — and before a shorter declared one does — never for an event that
+    /// declares a longer life, and never for one stamped further ahead than
+    /// a send takes.
+    #[test]
+    fn an_event_is_passed_on_only_inside_its_own_window() {
+        let at = |event: &Event, now_ms: u64| {
+            Candidate::of(event.clone(), &announced(0xa1, 4, FIX), &OWN)
+                .expect("a candidate")
+                .in_time(now_ms)
+                .is_some()
+        };
+        let fresh = sealed_ago(0, 228);
+        assert!(at(&fresh, NOW) && at(&fresh, NOW + 217_999));
+        assert!(
+            !at(&fresh, NOW + 218_000) && !at(&fresh, NOW + 500_000),
+            "an event was passed on at or past 218 seconds"
+        );
+        let short = sealed_ago(0, 60);
+        assert!(at(&short, NOW + 49_999) && !at(&short, NOW + 50_000));
+        assert!(
+            !at(&sealed_ago(0, 229), NOW) && !at(&sealed_ago(0, 86_400 * 365), NOW),
+            "an event that declares a longer life than a location's was passed on"
+        );
+        // Stamped ahead of this clock: by a send's length at most.
+        assert!(at(&fresh, NOW - 10_000));
+        assert!(
+            !at(&fresh, NOW - 10_001),
+            "an event stamped ahead of the clock was passed on"
+        );
+        // An expiration before its own stamp, and none at all.
+        let tag = |tag: [&str; 2]| Tag::parse(tag).expect("a tag");
+        let bare = EventBuilder::new(Kind::Custom(KIND_GROUP_MESSAGE), "")
+            .tags([tag(["h", &hex::encode([0x70; 32])])])
+            .custom_created_at(Timestamp::from_secs(NOW / 1_000))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign");
+        assert!(!at(&bare, NOW));
+    }
+
+    /// A circle keeps the newest update of each member, at most
+    /// [`BRIDGE_PER_CIRCLE`] of them, and every circle together at most
+    /// [`BRIDGE_WAITING`]; what is taken comes newest first and leaves
+    /// nothing behind.
+    #[test]
+    fn a_circle_keeps_the_newest_of_each_member_and_a_bounded_number() {
+        let fx = on();
+        let group = circle(1);
+        fx.moves(&group, 4, 0xa0);
+
+        let (older, newer) = (candidate(0xa1, 30), candidate(0xa1, 10));
+        let (older_id, newer_id) = (older.event.id, newer.event.id);
+        fx.keys.wait_to_bridge(&group, newer);
+        fx.keys.wait_to_bridge(&group, older);
+        assert!(
+            waiting(&fx, &group) == [newer_id],
+            "an older update of a member replaced, or waits beside, a newer one"
+        );
+        fx.keys.wait_to_bridge(&group, candidate(0xa1, 5));
+        assert!(waiting(&fx, &group).len() == 1 && waiting(&fx, &group) != [newer_id]);
+        assert!(!waiting(&fx, &group).contains(&older_id));
+
+        for (sender, age) in (0xb0..).zip([40, 20, 60, 50, 1]) {
+            fx.keys.wait_to_bridge(&group, candidate(sender, age));
+        }
+        assert!(
+            waiting(&fx, &group).len() == BRIDGE_PER_CIRCLE,
+            "a circle kept more to pass on than its share"
+        );
+        let taken = fx.keys.take_bridge(Some(&group));
+        let stamps: Vec<_> = (taken.iter()).map(|waits| waits.event.created_at).collect();
+        assert!(taken.len() == BRIDGE_PER_CIRCLE && stamps.is_sorted_by(|a, b| a >= b));
+        assert!(waiting(&fx, &group).is_empty() && fx.keys.take_bridge(Some(&group)).is_empty());
+
+        // Every circle together.
+        let circles: Vec<GroupId> = (10..).take(BRIDGE_WAITING).map(circle).collect();
+        for other in &circles {
+            fx.moves(other, 2, 0xc0);
+            fx.keys.wait_to_bridge(other, candidate(0xa1, 3));
+        }
+        fx.keys.wait_to_bridge(&group, candidate(0xa2, 3));
+        assert!(
+            waiting(&fx, &group).is_empty(),
+            "every circle together kept more to pass on than the bound"
+        );
+        assert_eq!(fx.keys.take_bridge(None).len(), BRIDGE_WAITING);
+        // A circle the ring holds nothing of keeps nothing.
+        fx.keys.wait_to_bridge(&circle(200), candidate(0xa1, 3));
+        assert!(fx.keys.take_bridge(None).is_empty());
+    }
+
+    /// One update of a member is passed on, then none of that member for
+    /// [`BRIDGE_SENDER_GAP_MS`], whatever other members send; a clock set
+    /// back passes none on until it has caught up.
+    #[test]
+    fn a_member_is_passed_on_once_a_gap() {
+        let fx = on();
+        let group = circle(1);
+        fx.moves(&group, 4, 0xa0);
+        let (flooder, quiet) = (MemberId::new(vec![0xa1; 32]), MemberId::new(vec![0xa2; 32]));
+
+        assert!(fx.keys.bridges(&group, &flooder, NOW));
+        assert!(
+            !fx.keys.bridges(&group, &flooder, NOW)
+                && !fx
+                    .keys
+                    .bridges(&group, &flooder, NOW + BRIDGE_SENDER_GAP_MS - 1),
+            "a second update of one member was passed on inside the gap"
+        );
+        assert!(
+            fx.keys.bridges(&group, &quiet, NOW + 1),
+            "one member's update cost another member its own"
+        );
+        assert!(fx
+            .keys
+            .bridges(&group, &flooder, NOW + BRIDGE_SENDER_GAP_MS));
+        assert!(
+            !fx.keys.bridges(&group, &flooder, NOW),
+            "a clock set back passed a member's update on inside the gap"
+        );
+        assert!(!fx.keys.bridges(&circle(9), &flooder, NOW));
+    }
+
+    /// What a circle kept to pass on goes when the circle falls silent — an
+    /// epoch change, a silence asked for it or for every circle — with the
+    /// circle, and with mesh.
+    #[test]
+    fn what_waits_to_be_passed_on_goes_when_its_circle_falls_silent() {
+        let fx = on();
+        let (one, two) = (circle(1), circle(2));
+        fx.moves(&one, 4, 0xa0);
+        fx.moves(&two, 9, 0xb0);
+        let keep = |fx: &Fixture| {
+            for group in [&one, &two] {
+                fx.keys.wait_to_bridge(group, candidate(0xa1, 3));
+            }
+        };
+
+        keep(&fx);
+        fx.moves(&one, 5, 0xa0);
+        assert!(
+            waiting(&fx, &one).is_empty() && waiting(&fx, &two).len() == 1,
+            "an epoch change kept what waited, or cost another circle its own"
+        );
+        keep(&fx);
+        fx.keys.silence(&one);
+        assert!(waiting(&fx, &one).is_empty() && waiting(&fx, &two).len() == 1);
+        keep(&fx);
+        fx.keys.silence_all();
+        assert!(waiting(&fx, &one).is_empty() && waiting(&fx, &two).is_empty());
+        keep(&fx);
+        fx.keys.forget(&fx.engine, &one);
+        assert_eq!(fx.keys.take_bridge(None).len(), 1);
+        keep(&fx);
+        assert!(fx.keys.turn_off(&fx.engine));
+        assert!(fx.keys.take_bridge(None).is_empty());
+    }
+
+    /// A second packet of a held update that says a member may not pass it
+    /// on decides for the update, whichever came first.
+    #[test]
+    fn one_packet_that_forbids_passing_an_update_on_decides() {
+        let fx = on();
+        let group = circle(1);
+        fx.moves(&group, 4, 0xa0);
+        let never = |event: &Event| {
+            let parts = parts_of(event, Format::NeverBridged).expect("a location");
+            wrap(&peer_key(4, 0xa0), &parts, &mut OsRng).expect("fits")
+        };
+        let bridgeable = |fx: &Fixture, event: &Event| {
+            (fx.keys.taken_in(&group, &event.id))
+                .expect("held")
+                .bridgeable
+        };
+
+        let alone = location();
+        assert!(fx
+            .keys
+            .hold(read(&fx, &packet_of(&alone, 4, 0xa0)), [1; 32])
+            .is_empty());
+        assert_eq!(fx.keys.content_of(&group, &alone.id), Some([1; 32]));
+        assert!(bridgeable(&fx, &alone));
+
+        for first_forbids in [true, false] {
+            let event = location();
+            let (first, second) = if first_forbids {
+                (never(&event), packet_of(&event, 4, 0xa0))
+            } else {
+                (packet_of(&event, 4, 0xa0), never(&event))
+            };
+            assert!(fx.keys.hold(read(&fx, &first), [2; 32]).is_empty());
+            assert!(fx.keys.hold(read(&fx, &second), [2; 32]) == [second.id()]);
+            assert!(
+                !bridgeable(&fx, &event),
+                "an update one packet forbade passing on is marked as one that may be"
+            );
+        }
     }
 }

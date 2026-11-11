@@ -786,10 +786,88 @@ async fn a_packet_whose_event_the_engine_did_not_keep_is_held_and_offered_again(
         "a packet whose event the engine did not keep was reported read"
     );
     assert_eq!(reader.session().mesh_held_for_test(&group), 1);
+    // Its packet is held and offered again, and what the engine answers
+    // then is what counts: counted now, an update the engine reads again
+    // would be counted twice.
+    assert!(
+        taken.from_circles == 0 && counts(reader) == [0; 4],
+        "an update was counted though its packet is still held"
+    );
 
     let taken = drive(reader, Vec::new()).await;
     assert!(taken.read == [(packet.id(), true)] && ingests(reader) == 2);
     assert_eq!(reader.session().mesh_held_for_test(&group), 0);
+    assert!(
+        counts(reader)[0] <= 1,
+        "an update offered twice was counted twice"
+    );
+}
+
+/// The owner's rule that mesh on or off never changes the relay path: an
+/// update the mesh brings is stored and shown as any, and stamps no inbound
+/// arrival — the stamp that holds the epoch-rotation repair, a commit the
+/// relays see, back. The same update taken in from a relay stamps it as
+/// ever, and so does relay input a mesh drive's hold handed back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_update_the_mesh_brings_stamps_no_inbound_arrival() {
+    let (admin, others, group) = split(setup_circle(3, &[ONE]).await);
+    let (by_mesh, by_relay) = (&others[0], &others[1]);
+    mesh_on(&admin).await;
+    mesh_on(by_mesh).await;
+    let routing = ngid(&admin, &group).await;
+    let inbound_at = |member: &CircleMember| {
+        (member.circle.circle_rotation_state(&routing))
+            .expect("the stamps are read")
+            .last_inbound_event_at_ms
+    };
+    let (event, packet) = handed_off(&admin, &group).await;
+
+    let before = inbound_at(by_mesh);
+    let taken = drive(by_mesh, vec![packet]).await;
+    assert!(
+        has_fix(&taken.replayed, &admin, LATITUDE)
+            && stored_fix(by_mesh, &group, &admin, LATITUDE).await,
+        "premise: the update the mesh brought is stored and handed back"
+    );
+    assert!(
+        inbound_at(by_mesh) == before,
+        "an update the mesh brought stamped an inbound arrival: it would hold a repair back"
+    );
+
+    // The same update, from a relay.
+    let asked_at = i64::try_from(wall_ms()).expect("a time");
+    let (relays, clock) = (Relays::default(), ManualClock::at(0));
+    let polled = Publishing {
+        fanout: &relays,
+        publisher: &relays,
+        clock: &*clock,
+        deadline_ms: None,
+        mode: &DriveMode::Full,
+    };
+    let _ = (polled.ingest_for_poll(&by_relay.circle, &event).await).expect("taken in");
+    assert!(
+        inbound_at(by_relay).is_some_and(|at| at >= asked_at),
+        "an update a relay brought no longer stamps an inbound arrival"
+    );
+
+    // Relay input a mesh drive's hold hands back — a commit a relay plane
+    // left stranded — stamps as ever, beside an update that does not.
+    let (commit, pending) = stage_relays(admin.session(), &group, &[ONE, TWO]).await;
+    (admin.session().confirm_published(pending).await).expect("applied");
+    let _ = (by_mesh.session().process_event(&commit).await).expect("stored");
+    let stranded = (by_mesh.session().settle_receive_for_test(&group).await).expect("applied");
+    by_mesh.session().strand_effects_for_test(stranded);
+    let (_, packet) = handed_off(&admin, &group).await;
+    let asked_at = i64::try_from(wall_ms()).expect("a time");
+    let taken = drive(by_mesh, vec![packet]).await;
+    assert!(
+        has_fix(&taken.replayed, &admin, LATITUDE),
+        "premise: taken in"
+    );
+    assert!(
+        inbound_at(by_mesh).is_some_and(|at| at >= asked_at),
+        "relay input a mesh drive's hold handed back stamped no inbound arrival"
+    );
 }
 
 /// A wake that has ended begins no ingest: what opened is held for the next
@@ -1095,7 +1173,7 @@ async fn a_peers_update_ends_the_stalled_reading_whichever_carrier_brought_it() 
 async fn a_proposal_the_drive_could_write_no_record_for_is_sent_by_the_next_relay_drive() {
     use haven_core::nostr::mls::storage::set_fanout_write_fault_naming_for_test;
     use haven_core::relay::fanout::scripted::Answer;
-    use helpers::drive::{records_of, through, Recorder};
+    use helpers::drive::{records_of, through, within, Recorder};
     use helpers::mesh::a_leave_minted_again;
     use helpers::stranded::mls_db;
 
@@ -1127,17 +1205,33 @@ async fn a_proposal_the_drive_could_write_no_record_for_is_sent_by_the_next_rela
     let (transport, outbox) = (ScriptedFanout::default(), Recorder::acking(true));
     transport.answer(ONE, [Answer::Accepted; 8]);
     let clock = ManualClock::at(0);
-    let _ = through(&transport, &outbox, &clock, &DriveMode::Full)
+    let sent = || -> Vec<_> {
+        (outbox.handed().into_iter())
+            .filter(|(event, _)| event.id == proposal)
+            .collect()
+    };
+    // A relay drive that may make nothing new, and one with no room left in
+    // its wake, send nothing — and the proposal stays owed.
+    let _ = through(&transport, &outbox, &clock, &DriveMode::FinishOnly)
         .resume(&device.circle)
         .await;
-    let sent: Vec<_> = (outbox.handed().into_iter())
-        .filter(|(event, _)| event.id == proposal)
-        .collect();
+    let _ = within(&transport, &outbox, &clock, &DriveMode::Full, 1)
+        .resume(&device.circle)
+        .await;
     assert!(
-        sent.len() == 1 && sent[0].1 == [ONE],
-        "a proposal the drive could not record was lost, sent twice, or sent to another \
-         circle's relays"
+        sent().is_empty(),
+        "a drive that may send nothing sent the proposal"
     );
+    for _ in 0..2 {
+        let _ = through(&transport, &outbox, &clock, &DriveMode::Full)
+            .resume(&device.circle)
+            .await;
+        assert!(
+            sent().len() == 1 && sent()[0].1 == [ONE],
+            "a proposal the drive could not record was lost, sent twice, or sent to another \
+             circle's relays"
+        );
+    }
 }
 
 /// The four counts survive a restart; turning mesh on again starts the two

@@ -3165,38 +3165,52 @@ impl SessionManager {
     /// of an epoch this device holds the key of ([`Self::mesh_read`]).
     ///
     /// Returns whether the engine took the event in ([`Self::took_in`]),
-    /// whether it read in it a peer's update it had not read before, and the
-    /// batch of the hold. The engine says the second, off its own durable
-    /// records: it answers `Processed` for an application message it reads,
-    /// and a duplicate or an own echo for one it holds a record of — by the
-    /// event's id or, for the same update in another event, by a digest of
-    /// what it carries — whether a relay brought it, the mesh did in an
-    /// earlier process, or this device sent it (MDK
-    /// `message_processor/ingest.rs` 937-970, `store.rs`
-    /// `recorded_message_outcome`). A proposal the hold recorded keeps its
-    /// stored record, which the next relay drive sends.
+    /// whether it read in it a peer's update it had not read before, that
+    /// update as the engine announced it, and the rest of the hold's batch.
+    /// The engine says the second, off its own durable records: it answers
+    /// `Processed` for an application message it reads, and a duplicate or
+    /// an own echo for one it holds a record of — by the event's id or, for
+    /// the same update in another event, by a digest of what it carries —
+    /// whether a relay brought it, the mesh did in an earlier process, or
+    /// this device sent it (MDK `message_processor/ingest.rs` 937-970,
+    /// `store.rs` `recorded_message_outcome`). A proposal the hold recorded
+    /// keeps its stored record, which the next relay drive sends.
+    ///
+    /// The update is taken out of the batch, found by the digest it is
+    /// announced under ([`Self::application_at`]): the rest is relay input
+    /// the hold handed back, folded as any plane's, while the update is
+    /// folded as one the mesh brought (`CircleManager::fold_mesh_update`).
     ///
     /// # Errors
     ///
     /// As [`Self::process_event`]; the event is then not taken in.
     pub(crate) async fn ingest_from_mesh(
         &self,
+        group_id: &GroupId,
         event: &Event,
         now_ms: u64,
-    ) -> Result<(bool, bool, SessionEffects)> {
+    ) -> Result<(bool, bool, Option<GroupEvent>, SessionEffects)> {
         self.mesh_ingesting();
+        let content = self.mesh_content(group_id, event);
         let still = Still::always(&DriveMode::FinishOnly);
         let (screened, _) = self.staging_ingest(event, now_ms, still, true).await?;
         Ok(match screened {
-            ScreenedIngest::Ingested(ingested) => {
+            ScreenedIngest::Ingested(mut ingested) => {
                 let kept = Self::kept(&ingested);
                 #[cfg(any(test, feature = "test-utils"))]
                 let kept = kept && !self.mesh_ingest_unkept_for_test();
                 let new = matches!(ingested.outcome, IngestOutcome::Processed);
-                (kept, new, ingested.effects)
+                let events = &mut ingested.effects.events;
+                let update = (events.iter())
+                    .position(|announced| {
+                        matches!(announced, GroupEvent::MessageReceived { message_id, .. }
+                            if new && content.is_some_and(|id| message_id.as_slice() == id))
+                    })
+                    .map(|at| events.remove(at));
+                (kept, new, update, ingested.effects)
             }
             // Never taken in, however often it is offered.
-            ScreenedIngest::RejectedBeforeAuth(_) => (true, false, empty_effects()),
+            ScreenedIngest::RejectedBeforeAuth(_) => (true, false, None, empty_effects()),
         })
     }
 
@@ -3274,7 +3288,7 @@ impl SessionManager {
             panic!("injected classification panic (test seam)");
         }
         match self.projected(event, ctx).await {
-            Some((kind, Some(source_epoch))) if source_epoch == epoch => match kind {
+            Some((kind, Some(source_epoch), _)) if source_epoch == epoch => match kind {
                 OpenMlsContentKind::Proposal => IngestClass::Proposal,
                 OpenMlsContentKind::Commit => IngestClass::Commit,
                 OpenMlsContentKind::Application
@@ -3286,20 +3300,21 @@ impl SessionManager {
     }
 
     /// The kind and source epoch of the MLS message `event` carries, peeled
-    /// under `ctx`'s exporter secret and dropped at once; `None` when it
-    /// does not peel or parse.
+    /// under `ctx`'s exporter secret and dropped at once, with the SHA-256
+    /// of that message; `None` when it does not peel or parse.
     async fn projected(
         &self,
         event: &Event,
         ctx: &GroupContextSnapshot,
-    ) -> Option<(OpenMlsContentKind, Option<u64>)> {
+    ) -> Option<(OpenMlsContentKind, Option<u64>, [u8; 32])> {
         let msg = Self::event_to_transport_message(event).ok()?;
         let peeled = self.preview_peeler.peel_group_message(&msg, ctx).await;
         let PeeledContent::MlsMessage { bytes } = peeled.ok()?.content else {
             return None;
         };
         let projection = project_mls_message(&bytes).ok()?;
-        Some((projection.kind, projection.source_epoch))
+        let digest = <sha2::Sha256 as sha2::Digest>::digest(&bytes).into();
+        Some((projection.kind, projection.source_epoch, digest))
     }
 
     /// Whether `event` is an application message of `epoch`, the epoch
@@ -3311,25 +3326,38 @@ impl SessionManager {
     /// bound (Security Rule 12). One that does not peel or parse, or whose
     /// parse panics, is none.
     ///
+    /// An application message is answered by the SHA-256 of the MLS message
+    /// it carries: the id the engine announces the update under once it
+    /// reads it, whatever event carried it (MDK `message_processor/mod.rs`
+    /// `content_dedup_id`), and so how its own announcement is told from
+    /// every other in the batch ([`Self::ingest_from_mesh`]).
+    ///
     /// The secret is moved into a snapshot dropped before this returns
     /// (Rule 7), under the fixed label (Rule 11).
-    async fn is_application_at(&self, event: &Event, epoch: u64, exporter: &[u8; 32]) -> bool {
+    async fn application_at(
+        &self,
+        event: &Event,
+        epoch: u64,
+        exporter: &[u8; 32],
+    ) -> Option<[u8; 32]> {
         let mut secrets = HashMap::new();
         secrets.insert(DEFAULT_EXPORTER_LABEL.to_string(), exporter.to_vec());
         let ctx = GroupContextSnapshot::new(EpochId(epoch), secrets, None);
         let peel = std::panic::AssertUnwindSafe(self.projected(event, &ctx));
-        let projected = futures::FutureExt::catch_unwind(peel).await;
-        matches!(
-            projected,
-            Ok(Some((OpenMlsContentKind::Application, Some(source_epoch))))
-                if source_epoch == epoch
-        )
+        match futures::FutureExt::catch_unwind(peel).await {
+            Ok(Some((OpenMlsContentKind::Application, Some(source_epoch), digest)))
+                if source_epoch == epoch =>
+            {
+                Some(digest)
+            }
+            _ => None,
+        }
     }
 
     /// Reads the mesh packets `taken` (plan §5.2): each is tried under every
     /// key of the ring, the event one carried is rebuilt and verified, and
     /// only an application message of the very epoch its key is of is kept
-    /// for the engine ([`Self::is_application_at`]) — all before the engine
+    /// for the engine ([`Self::application_at`]) — all before the engine
     /// sees anything. `drive` is told of every packet settled here: one no
     /// key opened, one whose event fails any of this, a second packet of an
     /// event already held, one a circle's quota pushed out.
@@ -3354,7 +3382,7 @@ impl SessionManager {
                 continue;
             };
             let update = self
-                .is_application_at(&opened.event, opened.epoch, &opened.exporter)
+                .application_at(&opened.event, opened.epoch, &opened.exporter)
                 .await;
             self.mesh_keep(opened, update, drive);
         }
@@ -5768,7 +5796,9 @@ impl SessionManager {
     /// Forgets that `group_id` — or, with `None`, every circle — is caught
     /// up: what was fetched to the end may have gone stale since. Cleared
     /// when the live plane pauses or stops, and for a circle when a sweep of
-    /// it begins.
+    /// it begins. What the circle kept to pass on to its relays was kept
+    /// under the receive that ended, and goes with it
+    /// ([`Self::mesh_bridge_take`]).
     pub(crate) fn forget_caught_up(&self, group_id: Option<&GroupId>) {
         let mut caught_up = self
             .caught_up
@@ -5780,6 +5810,104 @@ impl SessionManager {
             }
             None => caught_up.clear(),
         }
+        drop(caught_up);
+        drop(self.mesh_keys.take_bridge(group_id));
+    }
+
+    /// Whether `group_id` is caught up in this session
+    /// ([`Self::mark_caught_up`]) and nothing has ended that since
+    /// ([`Self::forget_caught_up`]).
+    fn caught_up(&self, group_id: &GroupId) -> bool {
+        self.caught_up
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(group_id)
+    }
+
+    /// Whether a fellow member's location that reached `group_id` by mesh,
+    /// which the engine has just read for the first time, is kept to be
+    /// passed on to the circle's relays (plan §5.5): this device's last
+    /// fetch of the circle was answered to the end — an update that arrives
+    /// before a receive has completed is tied to no drive that may send it —
+    /// and this device has not asked to leave. A circle with a commit of
+    /// this device's pending, or input held unread, takes nothing in by mesh
+    /// at all (`Publishing::mesh_drive`). What is kept is checked again,
+    /// against the engine, immediately before it is sent
+    /// ([`Self::mesh_bridge_check`]).
+    fn keeps_to_pass_on(&self, group_id: &GroupId) -> bool {
+        self.caught_up(group_id) && !self.leaving(group_id)
+    }
+
+    /// What `group_id` kept to pass on to its relays (plan §5.5), newest
+    /// first, taken — the circle keeps none after this, so what the drive
+    /// that asks does not send is never sent. Nothing unless `received`: the
+    /// caller's word that this drive's own relay receive of the circle was
+    /// answered to the end before its send. Only the caller knows where a
+    /// drive begins; this session's own word, that the last receive
+    /// completed and nothing has ended it since, is read with the rest
+    /// ([`Self::mesh_bridge_check`]), and what was kept under a receive that
+    /// has ended is gone already ([`Self::forget_caught_up`]). A device that
+    /// publishes before it fetches so passes nothing on: a member a commit
+    /// it has not fetched removed could otherwise read, from the relays, an
+    /// update that reaches them today only within radio range.
+    pub(crate) fn mesh_bridge_take(
+        &self,
+        group_id: &GroupId,
+        received: bool,
+    ) -> Vec<self::mesh::Candidate> {
+        let waiting = self.mesh_keys.take_bridge(Some(group_id));
+        if received {
+            waiting
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The event of `update`, one [`Self::mesh_bridge_take`] handed out, and
+    /// the relays to hand it — or `None`: it is not sent. Read in one hold
+    /// of the engine, immediately before the send:
+    /// - the event can still reach a relay before it expires, and declares
+    ///   no longer a life than a location of Haven's (`Candidate::in_time`);
+    /// - a location this device sealed at the same epoch could be sent now
+    ///   ([`Self::location_may_be_sent`]): this device is a member, the
+    ///   circle stands stable on the very epoch the update was sealed at —
+    ///   so nobody removed since is handed it, and its sender, whom the
+    ///   engine authenticated at that epoch, is a member still — with
+    ///   nothing received left unresolved, no commit staged, no hold and no
+    ///   departure in the way;
+    /// - the circle is still caught up, and holds no fetched input unread;
+    /// - the relays are the circle's own, and among them only those of
+    ///   `accepted`, the relays that took this device's own send;
+    /// - no update of the same member was passed on in the last 72 seconds.
+    pub(crate) async fn mesh_bridge_check(
+        &self,
+        group_id: &GroupId,
+        update: self::mesh::Candidate,
+        accepted: &[String],
+        now_ms: u64,
+        mode: DriveMode,
+    ) -> Option<(Event, Vec<String>)> {
+        let (event, epoch, sender) = update.in_time(now_ms)?;
+        let mut session = self.engine().await.ok()?;
+        let stands =
+            self.location_may_be_sent(&mut session, group_id, EpochId(epoch), now_ms, mode)
+                && self.caught_up(group_id)
+                && !self.holds_unread_input(group_id);
+        let targets = if stands {
+            fanout_targets(&session, group_id).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        drop(session);
+        let accepted: Vec<RelayUrl> = (accepted.iter())
+            .filter_map(|relay| RelayUrl::parse(relay).ok())
+            .collect();
+        let targets: Vec<String> = (targets.into_iter())
+            .map(|endpoint| endpoint.0)
+            .filter(|relay| RelayUrl::parse(relay).is_ok_and(|url| accepted.contains(&url)))
+            .collect();
+        (!targets.is_empty() && self.mesh_keys.bridges(group_id, &sender, now_ms))
+            .then_some((event, targets))
     }
 
     /// Whether a full drive may stage `group_id`'s eviction left due: the
@@ -11439,6 +11567,13 @@ impl SessionManager {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn mark_caught_up_for_test(&self, group_id: &GroupId) {
         self.mark_caught_up(group_id);
+    }
+
+    /// Forgets that `group_id` is caught up, as a sweep of it that begins
+    /// does.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn forget_caught_up_for_test(&self, group_id: &GroupId) {
+        self.forget_caught_up(Some(group_id));
     }
 
     /// Waits until `group_id` is caught up in this session: on the marks

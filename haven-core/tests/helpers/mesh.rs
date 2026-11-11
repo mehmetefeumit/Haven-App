@@ -7,9 +7,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use haven_core::location::LocationMessage;
+use haven_core::mesh::event::parts_of;
 use haven_core::mesh::handoff::Op;
-use haven_core::mesh::packet::Packet;
+use haven_core::mesh::packet::{wrap, Format, MeshKey, Packet};
 use haven_core::nostr::mls::types::{GroupId, PublishWork, SessionEffects, TransportMessage};
 use haven_core::relay::fanout::scripted::ScriptedFanout;
 use haven_core::relay::fanout::{
@@ -17,7 +22,9 @@ use haven_core::relay::fanout::{
     UnrecordedPublisher,
 };
 use haven_core::relay::{PublishResult, RelayResult};
-use nostr::{Event, EventId};
+use nostr::{Event, EventBuilder, EventId, Keys, Kind, Tag, Timestamp};
+use rand::rngs::OsRng;
+use rand::RngCore as _;
 
 use super::drive::{through, ManualClock, Recorder, HOUR_MS};
 use super::removals::store;
@@ -248,4 +255,61 @@ pub async fn handed_off(member: &CircleMember, group: &GroupId) -> (Event, Packe
         [(at, Some(packet))] if Some(*at) == slot => (event, packet.clone()),
         _ => panic!("the send left no packet, or more than its own, for the mesh"),
     }
+}
+
+/// The exporter secret `member` stores for `group` at `epoch`.
+pub fn secret_of(member: &CircleMember, group: &GroupId, epoch: u64) -> [u8; 32] {
+    (rows(member, group).iter())
+        .find(|row| row.0 == epoch)
+        .expect("the member holds a key of that epoch")
+        .2
+}
+
+/// `event` in a packet of `format` under the circle's key of `epoch`, with a
+/// nonce of its own: what any member holding that key can make.
+pub fn packet_as(
+    member: &CircleMember,
+    group: &GroupId,
+    epoch: u64,
+    event: &Event,
+    format: Format,
+) -> Packet {
+    let key = MeshKey::derive(&secret_of(member, group, epoch));
+    let parts = parts_of(event, format).expect("an event a packet carries");
+    wrap(&key, &parts, &mut OsRng).expect("fits")
+}
+
+/// What a member can make of any `kind:445` of its circle: the MLS message
+/// `event` carries under the exporter secret `secret`, sealed again under it
+/// with a nonce of its own, in an event of the two tags a packet carries —
+/// stamped `created_at` and expiring `life_secs` later — signed by a key of
+/// its own. It verifies, and peels under `secret`.
+pub fn restamped(
+    event: &Event,
+    routing: &[u8; 32],
+    secret: &[u8; 32],
+    created_at: u64,
+    life_secs: u64,
+) -> Event {
+    let content = BASE64.decode(&event.content).expect("base64");
+    let (nonce, ciphertext) = content.split_at(12);
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(secret));
+    let mls = cipher
+        .decrypt(Nonce::from_slice(nonce), ciphertext)
+        .expect("the secret it was sealed under opens it");
+    let mut content = [0_u8; 12].to_vec();
+    OsRng.fill_bytes(&mut content);
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&content), mls.as_slice())
+        .expect("sealed");
+    content.extend(ciphertext);
+    let tag = |tag: [&str; 2]| Tag::parse(tag).expect("a tag");
+    EventBuilder::new(Kind::Custom(445), BASE64.encode(content))
+        .tags([
+            tag(["h", &hex::encode(routing)]),
+            tag(["expiration", &(created_at + life_secs).to_string()]),
+        ])
+        .custom_created_at(Timestamp::from_secs(created_at))
+        .sign_with_keys(&Keys::generate())
+        .expect("signed")
 }

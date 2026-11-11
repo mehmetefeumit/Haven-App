@@ -1141,7 +1141,12 @@ fn od4c_a_background_burst_cannot_publish_a_removal_bearing_auto_commit() {
 /// Every commit is staged under its durable fanout record in the hold that
 /// staged it and sent by the driver alone; a proposal too, except one no
 /// record could be written for, which the driver publishes once, in the full
-/// mode, through its publisher of unrecorded events. What once resolved a
+/// mode, through its publisher of unrecorded events. One `kind:445` leaves
+/// with no record at all and is none of these: a fellow member's location
+/// this device took in by Bluetooth, passed on by the driver's bridge (owner
+/// decision D-7, `the_bridge_sends_once_and_reads_no_answer`). It is an
+/// application message — the mesh's ingress admits nothing else — so no
+/// commit and no proposal leaves that way. What once resolved a
 /// commit beside it is gone — the circle manager's confirm, rollbacks and
 /// relay-update finish, the receive ladder, the removal-deferral table and its
 /// redemption — and so is every bridge symbol that handed one to Dart. The
@@ -1525,7 +1530,7 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
     // made of nothing but what `relay::fanout` exports, so a file that names
     // none of it cannot drive, under any name. Only the live plane's
     // processor names `Publishing`; nothing names a drive entry.
-    let names: [(&str, &[&str]); 19] = [
+    let names: [(&str, &[&str]); 20] = [
         // `Still` is what a pass decided under, read again where the act is
         // made. The other names are its test seams'
         // (`#[cfg(any(test, feature = "test-utils"))]`), which drive as the
@@ -1569,6 +1574,12 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
                 "own",
                 "release",
             ],
+        ),
+        // The mesh key ring: how long one location send takes, a constant,
+        // for the window a fellow member's update may be passed on in.
+        (
+            "haven-core/src/nostr/mls/manager/mesh.rs",
+            &["LOCATION_SEND_MS"],
         ),
         // The sweep: read like every other file. What it may name of the
         // driver is this, and what it does with it is counted further down.
@@ -3153,6 +3164,9 @@ fn the_drivers_public_surface_is_pinned() {
         "async fn seal_for_mesh",
         "async fn publish_location",
         "async fn mesh_drive",
+        // A location's own send, then the bridge: the one send of an event
+        // this device did not seal (`the_bridge_sends_once_and_reads_no_answer`).
+        "async fn publish_location_and_bridge",
         "mod scripted",
         "enum Answer",
         "struct Call",
@@ -4925,6 +4939,31 @@ fn a_mesh_drive_names_nothing_that_reaches_a_relay() {
         "`mesh_drive` no longer takes each event in once, in the order every receive plane \
          takes a circle's events in, finish-only, with no advance",
     );
+    // The update a packet carried is taken out of the hold's batch and folded
+    // by the one fold that stamps no inbound arrival: whether this device
+    // makes an epoch-rotation repair — a commit its relays see — may not turn
+    // on what a phone in radio range sent. And it is counted, and kept to be
+    // passed on, only where its packet is settled.
+    let circles = production_source(&repo_root().join("haven-core/src/circle/manager.rs"));
+    let update: String = fn_body(&circles, "pub(crate) async fn fold_mesh_update(")
+        .expect("the fold of a mesh update")
+        .split_whitespace()
+        .collect();
+    assert!(
+        body.contains(
+            "ifletSome(update)=update{(drive.replayed).extend(circle.fold_mesh_update(update)\
+             .await);}"
+        ) && update == "{self.fold_resolved_batch(std::slice::from_ref(&update)).await}"
+            && circles.matches("fold_mesh_update(").count() == 1,
+        "an update the mesh brought is folded where an inbound arrival is stamped",
+    );
+    assert!(
+        body.contains(
+            "iftaken_in{drive.from_circles+=u64::from(new);\
+             session.mesh_taken_in(&group_id,&event,update.as_ref(),&mutdrive);}"
+        ) && body.matches("from_circles+=").count() == 1,
+        "an update is counted, or kept to be passed on, though its packet is still held",
+    );
     let manager = production_source(&repo_root().join("haven-core/src/nostr/mls/manager.rs"));
     let ingest: String = fn_body(&manager, "pub(crate) async fn ingest_from_mesh(")
         .expect("the mesh ingest")
@@ -5101,6 +5140,116 @@ fn a_seal_for_the_mesh_names_nothing_that_reaches_a_relay() {
     assert!(
         relayed.contains("self.clock,self.deadline_ms,false,)"),
         "the relay path's seal marks its location as the mesh's alone",
+    );
+}
+
+/// Member bridging (plan §5.5, owner decision D-7; Security Rule 13.1 as
+/// amended): the one send of a `kind:445` this device did not seal, and the
+/// one with no fanout record. What keeps it to that is pinned here:
+///
+/// - it has one way in, `Publishing::publish_location_and_bridge`, which
+///   makes this device's own send first and hands the bridge only the relays
+///   that took it — so a drive that publishes nothing of its own passes
+///   nothing on, and no relay is told of a circle by this device that has not
+///   just taken this device's own update of it;
+/// - the bridge takes what the circle kept once, sends each event once,
+///   immediately behind its own check against the engine, and reads no
+///   answer: no record, no retry, nothing for the health model or the
+///   clock-skew detector;
+/// - the record's own send (`publish_location`) is untouched by it, and
+///   nothing else in the three source trees reaches the session's two bridge
+///   entries.
+///
+/// `tests/mesh_bridge_e2e.rs` holds the behaviour; this reads the paths
+/// those runs do not take.
+#[test]
+fn the_bridge_sends_once_and_reads_no_answer() {
+    let squash = |text: &str| -> String { text.split_whitespace().collect() };
+    let fanout = production_source(&repo_root().join("haven-core/src/relay/fanout.rs"));
+    let entry = squash(
+        fn_body(&fanout, "pub async fn publish_location_and_bridge(").expect("the bridge's entry"),
+    );
+    assert!(
+        entry
+            == "{letpublish=self.publish_location(circle,event).await;\
+                ifletSome(group_id)=circle.group_of_event(event){\
+                letaccepted=match&publish{\
+                LocationPublish::Sent(Ok(sent))=>sent.accepted_by.as_slice(),_=>&[],};\
+                self.bridge_locations(circle,&group_id,accepted,received).await;}publish}",
+        "the bridge's entry no longer makes this device's own send first, hands the bridge \
+         the relays that took it and no others, and answers with its own send's answer \
+         alone: {entry}",
+    );
+    let bridge = squash(fn_body(&fanout, "async fn bridge_locations(").expect("the bridge"));
+    assert!(
+        bridge.matches(".publish_location(").count() == 1
+            && bridge.contains("let_=self.fanout.publish_location(&event,&targets).await;")
+            && bridge.matches("mesh_bridge_take(").count() == 1
+            && bridge.contains("forupdateinsession.mesh_bridge_take(group_id,received){")
+            && bridge.contains(
+                "ifletSome((event,targets))=session.mesh_bridge_check(group_id,update,relays,\
+                 now_ms,mode).await{let_=self.fanout.publish_location(&event,&targets).await;}"
+            ),
+        "the bridge no longer takes what waits once and sends each event once, straight \
+         behind its own check, reading no answer: {bridge}",
+    );
+    for reads in [
+        "end_location",
+        "record",
+        "Pass",
+        "pass.",
+        "clock_rejected",
+        "self.publisher",
+        "send_unrecorded(",
+        "drive_rows(",
+        "settle(",
+        "absorb(",
+        "retry",
+    ] {
+        assert!(
+            !bridge.contains(reads),
+            "the bridge names `{reads}`: a passed-on event could then be recorded, retried, \
+             or its answer read",
+        );
+    }
+    assert!(
+        fanout.matches("bridge_locations(").count() == 2,
+        "the bridge has a caller beside `publish_location_and_bridge`: an update could be \
+         passed on by a drive that sent nothing of its own",
+    );
+    for file in scanned_sources() {
+        let name = file.to_string_lossy().replace('\\', "/");
+        let source = production_source(&file);
+        for entry in ["mesh_bridge_take(", "mesh_bridge_check("] {
+            let named = source.matches(entry).count();
+            let allowed = usize::from(
+                name.ends_with("haven-core/src/relay/fanout.rs")
+                    || name.ends_with("haven-core/src/nostr/mls/manager.rs"),
+            );
+            assert!(
+                named == allowed,
+                "{name} names `{entry}` {named} time(s): the bridge is its one caller",
+            );
+        }
+    }
+    // What is kept to be passed on is checked against the engine as a
+    // location of this device's own is, at the epoch it was sealed at, and
+    // handed to no relay but the circle's own that took this device's send.
+    let manager = production_source(&repo_root().join("haven-core/src/nostr/mls/manager.rs"));
+    let check = squash(
+        fn_body(&manager, "pub(crate) async fn mesh_bridge_check(").expect("the bridge's check"),
+    );
+    assert!(
+        check.contains("let(event,epoch,sender)=update.in_time(now_ms)?;")
+            && check.contains(
+                "self.location_may_be_sent(&mutsession,group_id,EpochId(epoch),now_ms,mode)\
+                 &&self.caught_up(group_id)&&!self.holds_unread_input(group_id);"
+            )
+            && check.contains("fanout_targets(&session,group_id)")
+            && check.contains("accepted.contains(&url)")
+            && check.contains("self.mesh_keys.bridges(group_id,&sender,now_ms)"),
+        "the bridge's check no longer reads, in one hold, what a location's own send reads: \
+         {check}",
     );
 }
 

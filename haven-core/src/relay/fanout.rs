@@ -809,8 +809,10 @@ pub trait FanoutSend: Send + Sync {
     ) -> FanoutTargetOutcome;
 
     /// Offers a location's `event` to every one of `targets` — relay URLs
-    /// exactly as its record froze them — once, inside the location window,
-    /// and answers what the transport did, unchanged: one relay's `OK` is a
+    /// exactly as its record froze them, or, for a fellow member's location
+    /// passed on under no record (`Publishing::bridge_locations`), the
+    /// circle's own that took this device's send — once, inside the location
+    /// window, and answers what the transport did, unchanged: one relay's `OK` is a
     /// success, and when no relay took it and a relay's `invalid:`,
     /// `blocked:` or unprefixed refusal blamed the timestamp it is
     /// [`RelayError::DeviceClockRejected`](crate::relay::RelayError::DeviceClockRejected)
@@ -4981,9 +4983,15 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
     /// floor, and an update it brings is recorded nowhere the relay path
     /// reads what it has seen (`SessionManager::staging_ingest`): the NIP-77
     /// pass still asks for it by id — the relay's copy is then a duplicate
-    /// to the engine — it is owed no refetch, and no history walk is armed
-    /// on it. A peer's update it brings does end the `Stalled` reading, as a
-    /// relay's does, which moves no walk (`SessionManager::ingest_from_mesh`).
+    /// to the engine — it is owed no refetch, no history walk is armed on
+    /// it, and it stamps no inbound arrival, so it holds no epoch-rotation
+    /// repair back (`CircleManager::fold_mesh_update`). A peer's update it
+    /// brings does end the `Stalled` reading, as a relay's does, which moves
+    /// no walk (`SessionManager::ingest_from_mesh`).
+    ///
+    /// A fellow member's update the engine reads here for the first time,
+    /// from a packet marked as one a member may pass on, is kept by the
+    /// session for [`Self::publish_location_and_bridge`]; this sends none.
     ///
     /// A circle with a commit of this device's pending, or holding fetched
     /// input unread, takes nothing in here either (Security Rules 12 and
@@ -5010,25 +5018,100 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
                 if !self.allows(0) {
                     break;
                 }
-                let Ok((taken_in, new, effects)) = session.ingest_from_mesh(&event, now_ms).await
+                let Ok((taken_in, new, update, effects)) =
+                    session.ingest_from_mesh(&group_id, &event, now_ms).await
                 else {
                     // The circle's other events stay held: what failed one
                     // ingest is not asked of the engine again in this drive.
                     drive.errored = true;
                     break;
                 };
+                if taken_in {
+                    // Counted where it is settled: one the engine read and
+                    // did not keep is held, and would be counted again.
+                    drive.from_circles += u64::from(new);
+                    session.mesh_taken_in(&group_id, &event, update.as_ref(), &mut drive);
+                }
                 let still = Still::always(&DriveMode::FinishOnly);
                 let (folded, _) = circle.fold_staged(effects, false, now_ms, still).await;
                 drive.replayed.extend(folded.results);
                 circle.owe_proposals(folded.proposals);
-                drive.from_circles += u64::from(new);
-                if taken_in {
-                    session.mesh_taken_in(&group_id, &event, &mut drive);
+                if let Some(update) = update {
+                    (drive.replayed).extend(circle.fold_mesh_update(update).await);
                 }
             }
         }
         circle.fold_mesh_counts(drive.from_circles, 0);
         drive
+    }
+
+    /// [`Self::publish_location`], and then member bridging (plan §5.5,
+    /// owner decision D-7): the locations fellow members of the same circle
+    /// sent by Bluetooth alone, which this device took in by mesh
+    /// ([`Self::mesh_drive`]), are passed on to the circle's relays, each
+    /// the member's own sealed event byte for byte.
+    ///
+    /// The one send of a `kind:445` this device did not seal, and the one
+    /// with no fanout record (Security Rule 13.1 as amended). It is made
+    /// only when this device's own location was taken by a relay in this
+    /// very call, and only to the relays that took it: a drive that sends
+    /// nothing of its own passes nothing on, and no relay hears of the
+    /// circle from this device that has not just heard this device's own
+    /// update of it. `received` is the caller's word that this drive's relay
+    /// receive of the circle was answered to the end BEFORE this call
+    /// (`SessionManager::mesh_bridge_take`): a caller that publishes before
+    /// it fetches says `false`, and passes nothing on.
+    ///
+    /// Whatever this call does not pass on is dropped: an update waits for
+    /// one send of this device's and no longer.
+    pub async fn publish_location_and_bridge(
+        &self,
+        circle: &CircleManager,
+        event: &nostr::Event,
+        received: bool,
+    ) -> LocationPublish {
+        let publish = self.publish_location(circle, event).await;
+        if let Some(group_id) = circle.group_of_event(event) {
+            let accepted = match &publish {
+                LocationPublish::Sent(Ok(sent)) => sent.accepted_by.as_slice(),
+                _ => &[],
+            };
+            self.bridge_locations(circle, &group_id, accepted, received)
+                .await;
+        }
+        publish
+    }
+
+    /// Passes on to `relays` — those that took this device's own send for
+    /// `group_id` — what the circle kept of its fellow members' updates,
+    /// newest first, each checked against the engine immediately before its
+    /// send (`SessionManager::mesh_bridge_check`).
+    ///
+    /// One attempt a relay, as a location's own send, under no record: none
+    /// is written, nothing is retried, and a send a kill cuts short is lost.
+    /// What the relays answer is read by nothing — not the sharing-health
+    /// model and not the clock-skew detector, which would blame this device
+    /// for another member's clock.
+    async fn bridge_locations(
+        &self,
+        circle: &CircleManager,
+        group_id: &GroupId,
+        relays: &[String],
+        received: bool,
+    ) {
+        let session = circle.session();
+        for update in session.mesh_bridge_take(group_id, received) {
+            if !self.allows(LOCATION_SEND_MS) {
+                break;
+            }
+            let (now_ms, mode) = (self.clock.now_ms(), self.mode.mode());
+            if let Some((event, targets)) = session
+                .mesh_bridge_check(group_id, update, relays, now_ms, mode)
+                .await
+            {
+                let _ = self.fanout.publish_location(&event, &targets).await;
+            }
+        }
     }
 
     /// The circle's older records first, as MDK's host resumes a group's

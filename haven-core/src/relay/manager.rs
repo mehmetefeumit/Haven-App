@@ -1024,7 +1024,9 @@ impl RelayManager {
     /// [`Self::publish_location_event`] without the refusal of an event that
     /// has a fanout record: the one send the record's own driver makes
     /// ([`FanoutTransport`]), on the same pool, in the same window, read by
-    /// the same classifier.
+    /// the same classifier. The driver's bridge sends through it too — a
+    /// fellow member's location, which has no record of this device's
+    /// (`Publishing::bridge_locations`).
     async fn send_location(
         client: &Client,
         clock: &SecondsClock,

@@ -493,6 +493,30 @@ every kind 1059
 `CLAUDE.md` Security Rule 13 states its six invariants; this section carries
 the rest.
 
+One `kind:445` can leave with no record at all, and it is neither a commit
+nor a proposal: with the Bluetooth mesh on, a fellow member's location this
+device took in by mesh is passed on to the circle's relays (member bridging,
+owner decision D-7, `docs/BLUETOOTH_MESH_PLAN.md` §5.5;
+`Publishing::publish_location_and_bridge`, which no entry of the bridge calls
+before the mesh's own FFI lands). It is that member's own sealed event, byte
+for byte; the mesh's ingress admits application messages alone, so no commit
+travels this way. It is sent only behind this device's own location send of
+the same circle, in the same call, and only to the relays that took that
+send; only in a drive whose relay receive completed before it — a device
+that publishes before it fetches passes nothing on; only an update the
+engine read for the first time, from packets that all mark it as one a
+member may pass on (never a mesh-only seal); and only while a location this
+device sealed at the same epoch could itself be sent
+(`SessionManager::location_may_be_sent`), so a member removed since is not
+handed it. One attempt a relay, never retried, its answer read by nothing;
+an event is passed on at most once, at most one a member each 72 seconds, at
+most four a send, no later than 218 seconds after it was sealed, and never
+when it declares a longer life than 228 seconds or is stamped ahead of this
+device's clock. What one send does not pass on is dropped
+(`tests/mesh_bridge_e2e.rs`;
+`security_rule_gates::the_bridge_sends_once_and_reads_no_answer`). What a
+relay can infer from it is in the plan, §0.4 item 11a.
+
 `haven-core/src/relay/fanout.rs` `drive_one` is the one place a commit that
 has a durable fanout row is confirmed or rolled back, and `drive_due` runs it
 for every stored row. Each send-side change has one entry that stages, drives

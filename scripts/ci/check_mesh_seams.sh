@@ -36,9 +36,10 @@
 #     meets the engine. It names no mesh module either: it is handed
 #     `MeshPacket`s, answers a `MeshDrive`, and calls the session's
 #     `mesh_read`, `ingest_from_mesh` and `mesh_taken_in` and the circle
-#     store's `fold_mesh_counts` — its row in FANOUT_MAY_NAME, and nothing
-#     else of the mesh. That it calls no relay is not a textual fact and is
-#     held by `haven-core/tests/mesh_drive_e2e.rs`.
+#     manager's `fold_mesh_update` and `fold_mesh_counts` — its row in
+#     FANOUT_MAY_NAME, and nothing else of the mesh. That it calls no relay
+#     is not a textual fact and is held by
+#     `haven-core/tests/mesh_drive_e2e.rs`.
 #
 #   * THE MESH-ONLY SEAL. `Publishing::seal_for_mesh` seals a location for
 #     the mesh alone. It reads whether mesh is on (`mesh_is_on`) and names
@@ -51,8 +52,16 @@
 #     `haven-core/tests/mesh_only_e2e.rs` and by the source gates in
 #     `haven-core/tests/security_rule_gates.rs`.
 #
-# Later steps of the mesh add `bridge_locations` and
-# `publish_location_and_bridge` to `relay/fanout.rs`. Each is admitted by
+#   * THE BRIDGE. `Publishing::bridge_locations` passes on to a circle's
+#     relays what its fellow members sent by Bluetooth alone (plan §5.5). It
+#     calls the session's `mesh_bridge_take` and `mesh_bridge_check` — its
+#     row — and nothing else of the mesh; its one caller,
+#     `publish_location_and_bridge`, names no mesh item at all, so it has no
+#     row. That the bridge sends once, behind this device's own accepted
+#     send, is held by `haven-core/tests/mesh_bridge_e2e.rs` and by the
+#     source gate `the_bridge_sends_once_and_reads_no_answer`.
+#
+# A later step that meets the mesh from `relay/fanout.rs` is admitted by
 # adding a row to FANOUT_MAY_NAME below — the function, and the mesh items its
 # body may name — never by loosening a check.
 #
@@ -131,12 +140,13 @@ readonly -a FANOUT_MAY_NAME=(
   'pub enum LocationPublish {|MeshOnly'
   'pub async fn seal_for_mesh(|seal_for_mesh mesh_is_on'
   'pub async fn publish_location(|mesh_offer mesh_only MeshOnly'
-  'pub async fn mesh_drive(|mesh_drive MeshPacket MeshDrive mesh_read ingest_from_mesh mesh_taken_in fold_mesh_counts'
+  'pub async fn mesh_drive(|mesh_drive MeshPacket MeshDrive mesh_read ingest_from_mesh mesh_taken_in fold_mesh_update fold_mesh_counts'
+  'async fn bridge_locations(|mesh_bridge_take mesh_bridge_check'
 )
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=42
+readonly SELF_TEST_FIXTURES=45
 
 readonly WORD='(^|[^A-Za-z0-9_])mesh([^A-Za-z0-9_]|$)'
 readonly ITEM='[A-Za-z0-9_]*[Mm][Ee][Ss][Hh][A-Za-z0-9_]*'
@@ -390,6 +400,21 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
         drive
     }
 
+    pub async fn publish_location_and_bridge(&self, circle: &CircleManager, event: &Event) -> LocationPublish {
+        let publish = self.publish_location(circle, event).await;
+        self.bridge_locations(circle, &group_id, accepted, received).await;
+        publish
+    }
+
+    async fn bridge_locations(&self, circle: &CircleManager, group_id: &GroupId, relays: &[String]) {
+        let session = circle.session();
+        for update in session.mesh_bridge_take(group_id, received) {
+            if let Some((event, targets)) = session.mesh_bridge_check(group_id, update, relays).await {
+                let _ = self.fanout.publish_location(&event, &targets).await;
+            }
+        }
+    }
+
     async fn older(&self, circle: &CircleManager) {}
 }
 RS
@@ -547,6 +572,18 @@ RS
   t="${tmp}/second-variant"; _tree "${t}"
   sed -i 's|^    MeshOnly,$|    MeshOnly,\n    MeshBridged,|' "${t}/${FANOUT}"
   _case "a second variant of the answer named for the mesh fails" 1 "names the mesh item 'MeshBridged'" "${t}"
+
+  t="${tmp}/bridge-other-item"; _tree "${t}"
+  sed -i 's|        for update in session.mesh_bridge_take(group_id, received) {|        let _ = session.mesh_read(Vec::new(), \&mut drive).await;\n        for update in session.mesh_bridge_take(group_id, received) {|' "${t}/${FANOUT}"
+  _case "a mesh item the bridge is not admitted for fails" 1 "names the mesh item 'mesh_read'" "${t}"
+
+  t="${tmp}/bridge-item-elsewhere"; _tree "${t}"
+  sed -i 's|        let publish = self.publish_location(circle, event).await;|        let publish = self.publish_location(circle, event).await;\n        let _ = circle.session().mesh_bridge_take(\&group_id, true);|' "${t}/${FANOUT}"
+  _case "the bridge's take named in its caller, which has no row, fails" 1 "names the mesh item 'mesh_bridge_take'" "${t}"
+
+  t="${tmp}/bridge-gone"; _tree "${t}"
+  sed -i 's|    async fn bridge_locations(|    async fn pass_on(|' "${t}/${FANOUT}"
+  _case "the bridge's row with its function gone is a misconfiguration, not a pass" 2 "does not declare 'async fn bridge_locations('" "${t}"
 
   t="${tmp}/seal-gone"; _tree "${t}"
   sed -i 's|    pub async fn seal_for_mesh(|    pub async fn seal_for_radio(|' "${t}/${FANOUT}"

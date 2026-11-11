@@ -3142,6 +3142,18 @@ impl CircleManager {
         (ingest, staged)
     }
 
+    /// The update a mesh packet carried, as the engine announced it
+    /// (`SessionManager::ingest_from_mesh`): persisted and folded as every
+    /// receive plane's fold does, and stamped as no inbound arrival
+    /// ([`Self::note_inbound_group_events`]). That stamp holds the
+    /// epoch-rotation repair back (`circle::rotation` gate 4), and a repair
+    /// is a commit the relays see: whether one is made may not turn on what
+    /// a phone in radio range sent.
+    pub(crate) async fn fold_mesh_update(&self, update: GroupEvent) -> Vec<LocationMessageResult> {
+        self.fold_resolved_batch(std::slice::from_ref(&update))
+            .await
+    }
+
     /// One batch of a resolution, persisted and folded
     /// ([`Self::persist_and_fold`]), with the two things only a resolution's
     /// fold owes: the arrival stamp for each fix it replayed, and the
@@ -5075,14 +5087,18 @@ impl CircleManager {
     /// Keeps `proposals` — each a proposal of this device's no record could
     /// be written for, which a fold handed back to a call that may send
     /// nothing — for the next relay drive, which sends each once as it would
-    /// have sent it itself (`Publishing::send_owed`). In memory: one a
-    /// process's end loses, the engine proposes again at its circle's next
+    /// have sent it itself (`Publishing::send_owed`). In memory, one an
+    /// event id and the newest [`OWED_PROPOSALS_CAP`]: one a process's end
+    /// or the cap loses, the engine proposes again at its circle's next
     /// epoch.
     pub(crate) fn owe_proposals(&self, proposals: Vec<Event>) {
-        self.owed_proposals
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend(proposals);
+        owe(
+            &mut self
+                .owed_proposals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            proposals,
+        );
     }
 
     /// What [`Self::owe_proposals`] kept, taken.
@@ -6772,6 +6788,21 @@ fn recorded_by(advanced: Staged, staged: &mut Vec<FanoutId>) -> SessionEffects {
     staged.extend(advanced.fanouts);
     staged.extend(advanced.proposals);
     advanced.effects
+}
+
+/// How many proposals [`CircleManager::owe_proposals`] keeps.
+const OWED_PROPOSALS_CAP: usize = 16;
+
+/// Adds `proposals` to `owed`, one an event id, and drops the oldest past
+/// [`OWED_PROPOSALS_CAP`].
+fn owe(owed: &mut Vec<Event>, proposals: Vec<Event>) {
+    for proposal in proposals {
+        if owed.iter().all(|kept| kept.id != proposal.id) {
+            owed.push(proposal);
+        }
+    }
+    let over = owed.len().saturating_sub(OWED_PROPOSALS_CAP);
+    owed.drain(..over);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15665,5 +15696,43 @@ mod tests {
         for (name, code) in unfollowed_handle_forms() {
             assert!(refuses(code), "{name}");
         }
+    }
+
+    /// Proposals owed a send are kept one an event id, and the newest
+    /// [`OWED_PROPOSALS_CAP`] alone: a call that may call no relay, repeated
+    /// without end, costs a bounded amount of memory, and the oldest is what
+    /// goes.
+    #[test]
+    fn owed_proposals_are_kept_once_each_and_a_bounded_number() {
+        let keys = nostr::Keys::generate();
+        let proposal = |n: usize| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(445), n.to_string())
+                .sign_with_keys(&keys)
+                .expect("signed")
+        };
+        let ids = |owed: &[Event]| owed.iter().map(|event| event.id).collect::<Vec<_>>();
+        let (first, second) = (proposal(0), proposal(1));
+        let mut owed = Vec::new();
+
+        owe(
+            &mut owed,
+            vec![first.clone(), second.clone(), first.clone()],
+        );
+        owe(&mut owed, vec![second.clone()]);
+        assert!(
+            ids(&owed) == [first.id, second.id],
+            "a proposal owed twice is kept twice, and would be sent twice"
+        );
+
+        let later: Vec<Event> = (2..OWED_PROPOSALS_CAP + 3).map(proposal).collect();
+        owe(&mut owed, later.clone());
+        assert!(
+            owed.len() == OWED_PROPOSALS_CAP,
+            "more proposals are kept than the cap"
+        );
+        assert!(
+            ids(&owed) == ids(&later[1..]),
+            "the cap did not drop the oldest, in order"
+        );
     }
 }
