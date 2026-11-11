@@ -10,11 +10,12 @@
 //! literal handed to one of those calls holds at most one statement (a single
 //! trailing `;` is allowed). Multi-statement SQL goes through `execute_batch`.
 
-const FILES: [&str; 11] = [
+const FILES: [&str; 12] = [
     "src/circle/storage.rs",
     "src/circle/storage_contamination.rs",
     "src/circle/storage_key_packages.rs",
     "src/circle/storage_member_directory.rs",
+    "src/circle/storage_mesh.rs",
     "src/circle/storage_profile.rs",
     "src/circle/storage_profile_sync.rs",
     "src/circle/storage_relay_prefs.rs",

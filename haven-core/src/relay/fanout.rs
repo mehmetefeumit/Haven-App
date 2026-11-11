@@ -4819,6 +4819,9 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
             let _ = session.end_location(&message).await;
             return LocationPublish::Superseded;
         }
+        // The one hand-off to the Bluetooth carrier, when the user has it
+        // on: a packet left behind, nothing waited for and no answer read.
+        session.mesh_offer(event, &record);
         let sent = self.fanout.publish_location(event, &record.relays).await;
         let _ = session.end_location(&message).await;
         LocationPublish::Sent(sent)

@@ -42,6 +42,7 @@ mod storage_contamination;
 mod storage_kept_input;
 mod storage_key_packages;
 mod storage_member_directory;
+mod storage_mesh;
 mod storage_profile;
 mod storage_profile_sync;
 mod storage_refused;

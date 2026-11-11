@@ -17,7 +17,9 @@ use std::path::PathBuf;
 
 use haven_core::circle::{Circle, CircleStorage, CircleType, LastKnownLocation};
 use haven_core::nostr::mls::types::GroupId;
-use haven_core::nostr::mls::{ChangeNote, CommitNotes as _, GroupIdExt as _, RestageWait};
+use haven_core::nostr::mls::{
+    ChangeNote, CommitNotes as _, GroupIdExt as _, MeshKeyStore as _, RestageWait, StoredMeshKey,
+};
 use nostr::{EventId, Keys};
 
 /// Long, high-entropy ASCII sentinel written into a TEXT column. Unlikely to
@@ -30,6 +32,12 @@ const SENTINEL_LKL_SENDER: &str = "M10_AT_REST_LAST_KNOWN_LOCATION_SENDER_SENTIN
 const NEEDLE_WRAPPER_ID: [u8; 32] = *b"M10_AT_REST_GIFTWRAP_WRAP_ID_XYZ";
 const NEEDLE_PUB_EVENT_ID: [u8; 32] = *b"M10_AT_REST_PUBLISHED_EVENT_IDXY";
 const NEEDLE_NOTED_CIRCLE: [u8; 32] = *b"M10_AT_REST_COMMIT_NOTES_CIRCLEX";
+/// A mesh key row: the circle's group-event exporter secret, and the routing
+/// id of its epoch.
+const NEEDLE_MESH_SECRET: [u8; 32] = *b"M2B_AT_REST_MESH_EXPORTER_SECRET";
+const NEEDLE_MESH_ROUTING: [u8; 32] = *b"M2B_AT_REST_MESH_KEY_ROUTING_IDX";
+/// The mesh deadline, as text: a wall-clock instant no test clock reaches.
+const MESH_DEADLINE_MS: u64 = 7_314_159_265_358_979;
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty()
@@ -39,15 +47,19 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// Scans `circles.db` and every sidecar for any of the sentinels/needles.
 fn assert_no_plaintext_at_rest(db_path: &std::path::Path, phase: &str) {
+    let deadline = MESH_DEADLINE_MS.to_string();
     let text_sentinels: &[&str] = &[
         SENTINEL_CURSOR_STREAM,
         SENTINEL_PUB_EVENT_DTAG,
         SENTINEL_LKL_SENDER,
+        &deadline,
     ];
     let blob_needles: &[&[u8]] = &[
         &NEEDLE_WRAPPER_ID,
         &NEEDLE_PUB_EVENT_ID,
         &NEEDLE_NOTED_CIRCLE,
+        &NEEDLE_MESH_SECRET,
+        &NEEDLE_MESH_ROUTING,
     ];
 
     let mut scanned_any = false;
@@ -81,6 +93,29 @@ fn assert_no_plaintext_at_rest(db_path: &std::path::Path, phase: &str) {
         }
     }
     assert!(scanned_any, "no db files were scanned ({phase})");
+}
+
+/// Writes one mesh key (secret + routing-id BLOB needles) and the mesh
+/// deadline, and reads both back through the cipher.
+fn seed_mesh_key(storage: &CircleStorage, circle: &GroupId) {
+    assert!(storage.set_mesh_on_until(Some(MESH_DEADLINE_MS)));
+    assert!(storage.save_mesh_keys(
+        circle,
+        &[StoredMeshKey {
+            epoch: 7,
+            routing: NEEDLE_MESH_ROUTING,
+            exporter: zeroize::Zeroizing::new(NEEDLE_MESH_SECRET),
+        }],
+    ));
+    let kept = storage.mesh_keys();
+    assert!(
+        storage.mesh_on_until() == Some(MESH_DEADLINE_MS)
+            && kept.len() == 1
+            && kept[0].0 == *circle
+            && kept[0].1.routing == NEEDLE_MESH_ROUTING
+            && *kept[0].1.exporter == NEEDLE_MESH_SECRET,
+        "a mesh key and its deadline must round-trip through the cipher"
+    );
 }
 
 /// Writes one row into each of the six tables (with the module's sentinels /
@@ -179,6 +214,9 @@ fn seed_and_verify_roundtrip(storage: &CircleStorage, now: i64) {
         snap.iter().any(|l| l.sender_pubkey == SENTINEL_LKL_SENDER),
         "last_known_location must round-trip through the cipher"
     );
+
+    // --- 6. mesh_keys and its deadline ---
+    seed_mesh_key(storage, &noted);
 
     // A circle row so the schema is not trivially empty (defense in depth).
     let circle = Circle {
@@ -333,6 +371,10 @@ fn wiped_sync_state_leaves_nothing_decryptable_at_rest() {
             .unwrap()
             .is_empty(),
         "last_known_locations must not survive the wipe"
+    );
+    assert!(
+        reopened.mesh_keys().is_empty() && reopened.mesh_on_until().is_none(),
+        "a mesh key or the mesh deadline survived the wipe"
     );
 
     // Byte-scan the freshly-minted file (defense-in-depth): the AUTHORITATIVE

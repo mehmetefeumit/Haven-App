@@ -297,6 +297,7 @@ impl CircleManager {
         let held_at_open = storage.held_invitation_count().unwrap_or(usize::MAX);
         session.install_refused_ledger(storage.clone());
         session.install_stall_evidence(storage.clone());
+        session.install_mesh_keys(storage.clone());
         Self::backfill_contamination_ledger(&storage);
         Self::prune_retired_profile_pool(&storage);
         Self::sweep_expired_directory_members(&storage);
@@ -434,6 +435,7 @@ impl CircleManager {
         let held_at_open = storage.held_invitation_count().unwrap_or(usize::MAX);
         session.install_refused_ledger(storage.clone());
         session.install_stall_evidence(storage.clone());
+        session.install_mesh_keys(storage.clone());
         Self::backfill_contamination_ledger(&storage);
         Self::prune_retired_profile_pool(&storage);
         Self::sweep_expired_directory_members(&storage);
@@ -2447,7 +2449,10 @@ impl CircleManager {
             self.storage.renew_leave_intent(mls_group_id, at_secs)
         } else {
             self.storage.mark_leave_intent(mls_group_id, at_secs)
-        }
+        }?;
+        // Nothing sealed before the leave was asked goes out by mesh.
+        self.session.mesh_silence(mls_group_id);
+        Ok(())
     }
 
     /// The engine's refusal of a leave, at the circle boundary. The two no

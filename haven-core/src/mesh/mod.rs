@@ -8,6 +8,7 @@
 pub mod engine;
 pub mod event;
 pub mod frame;
+pub mod handoff;
 pub mod noise;
 pub mod packet;
 pub mod store;

@@ -681,7 +681,10 @@ impl CircleStorage {
     /// device); it must be set before `PRAGMA key` to bind to the codec.
     /// `temp_store = MEMORY` keeps temp tables / sorter spills in RAM so no
     /// plaintext (e.g. a large avatar BLOB write) is ever written to an
-    /// unencrypted on-disk temp file.
+    /// unencrypted on-disk temp file. `secure_delete = ON` overwrites what a
+    /// delete frees, so a deleted row — a mesh key above all
+    /// (`storage_mesh`) — does not stay readable in a free page under the
+    /// database key; the MLS store opens with the same setting.
     ///
     /// # Debug/release split for `cipher_memory_security`
     ///
@@ -718,6 +721,7 @@ impl CircleStorage {
         conn.execute_batch(&format!(
             "PRAGMA cipher_memory_security = {CIPHER_MEMORY_SECURITY}; \
              PRAGMA temp_store = MEMORY; \
+             PRAGMA secure_delete = ON; \
              PRAGMA busy_timeout = 2000;",
         ))?;
         Ok(())
@@ -1230,6 +1234,22 @@ impl CircleStorage {
                 mls_group_id BLOB NOT NULL,
                 commit_id BLOB NOT NULL,
                 PRIMARY KEY (mls_group_id, commit_id)
+            ) WITHOUT ROWID;
+
+            -- A circle's mesh packet keys (`storage_mesh`): its group-event
+            -- exporter secret at each epoch the engine still retains, and
+            -- the routing id it had then, one row an epoch number. Written
+            -- only while mesh is on. A group id, an epoch and a key of the
+            -- circle's traffic at rest, here only: pruned with the engine's
+            -- window, dropped with the circle, and all dropped when mesh
+            -- goes off or its deadline (`user_settings.mesh_on_until`) is
+            -- found missing or passed.
+            CREATE TABLE IF NOT EXISTS mesh_keys (
+                mls_group_id BLOB NOT NULL,
+                epoch INTEGER NOT NULL,
+                routing_id BLOB NOT NULL,
+                secret BLOB NOT NULL,
+                PRIMARY KEY (mls_group_id, epoch)
             ) WITHOUT ROWID;
 
             -- A circle whose user-asked repair is being staged: written
@@ -2177,6 +2197,7 @@ impl CircleStorage {
             "repair_marks",
             "epoch_stall_evidence",
             "dropped_removals",
+            "mesh_keys",
         ] {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE mls_group_id = ?1"),
@@ -4937,6 +4958,20 @@ mod tests {
             pragma_i64(&storage, "busy_timeout"),
             2000,
             "circles.db must carry busy_timeout=2000 (M7-B marker defense-in-depth)"
+        );
+    }
+
+    /// What a delete frees is overwritten, on the encrypted path the product
+    /// opens; `storage_mesh` proves the effect on an unkeyed file's bytes.
+    #[test]
+    fn a_delete_in_circles_db_overwrites_what_it_frees() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = CircleStorage::new(&dir.path().join("wipe.db"), Some(&test_hex_key()))
+            .expect("create encrypted DB");
+        assert_eq!(
+            pragma_i64(&storage, "secure_delete"),
+            1,
+            "circles.db leaves deleted rows readable in its free pages",
         );
     }
 

@@ -1377,6 +1377,26 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_publish_client_no_subscription.sh --self-test
 
+      # The Bluetooth mesh meets the relay path at one call and keeps its keys
+      # in one file (docs/BLUETOOTH_MESH_PLAN.md T-INDEP-1c): under relay/ and
+      # nostr/ only nostr/mls/manager/mesh.rs names the mesh module, it reads
+      # the engine through one trait and re-exports nothing, and a location is
+      # offered to the mesh once, in publish_location, after its send-time
+      # checks and before its relay send.
+      - name: Mesh seams
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mesh_seams.sh
+
+      # Plants the mesh module's name in a second file by each path that
+      # reaches it, a re-export, the engine's type and the session's lock in
+      # the key ring, a second hand-off and one from the FFI crate, the
+      # hand-off before each send-time check and after the relay send, and a
+      # mesh item in the pool, a receive plane and the sweep — while a comment
+      # naming all of it still passes.
+      - name: Mesh seams guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mesh_seams.sh --self-test
+
       - name: SQLCipher logger omitted
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_sqlcipher_logger_omitted.sh

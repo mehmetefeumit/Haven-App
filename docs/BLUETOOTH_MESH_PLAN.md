@@ -1400,10 +1400,52 @@ simulated; the largest run is 16 phones with the store scaled to match.
 
 **M2 is under way**, to the code-level design in
 `docs/BLUETOOTH_MESH_M2_DESIGN.md` (reviewed; its last section overrides its
-body). Built: **M2a**, `mesh/event.rs` — a sealed location event to the
-envelope's contents and back, returned only if it verifies — with the test
-that pins MDK's tag layout and the size gate.
+body). Built:
 
-Next: M2b mesh keys (waits on the owner's decision Q-1 in the design), then
-the publish hand-off, `mesh_drive`, the mesh-only seal, member bridging, and
-the FFI with the soak scenarios, Rule 17 and the amended documents.
+- **M2a**, `mesh/event.rs` — a sealed location event to the envelope's
+  contents and back, returned only if it verifies — with the test that pins
+  MDK's tag layout and the size gate.
+- **M2b**, the key ring (`nostr/mls/manager/mesh.rs`, a child module of the
+  session manager; `circle/storage_mesh.rs`; the `mesh_keys` table). It keeps
+  `G_e` and the packet key per circle for the epoch the engine stands on and
+  the five before it, one key an epoch number, each with the routing id of
+  its epoch. A key is read only while the circle is stable and MDK's
+  exported epoch is that epoch, so a staged epoch's is never installed. A
+  reselected branch, or a key the engine's contradicts, drops every other
+  key of the circle. Keys exist only until the deadline
+  `user_settings.mesh_on_until`, never more than twelve hours ahead; with no
+  deadline or a passed one — at the open too — every row is deleted. A key is
+  kept only for a circle whose row stands, and goes with the circle. The
+  circle store now opens with `secure_delete`, as the MLS store does, so a
+  deleted key is overwritten in the file and not left in a free page (test:
+  `a_deleted_key_leaves_no_bytes_in_the_file`). Residual: the rollback
+  journal of the deleting transaction is unlinked, not wiped, and flash
+  storage keeps no promise about either; both hold ciphertext under the
+  database key.
+  **Not as the design has it:** a circle made or joined gets its first key at
+  its next state-bearing batch, its first send, or when mesh is next asked
+  for, because its row is saved after the batch that founded it; and nothing
+  is derived at the open — the stored rows are restored.
+- **M2c**, the hand-off (`mesh/handoff.rs`, `SessionManager::mesh_offer`):
+  one call in `publish_location`, after its checks and before its relay
+  send. The send-time check brings the circle's key in line in its own
+  engine hold and reads the circle's turn; the offer is made only if nothing
+  silenced the circle since — an epoch change, a commit or proposal of this
+  device's recorded, fetched input held unread, a leave asked, sharing
+  stopped, the circle's end, mesh off. A send waits for nothing of the
+  mesh's: the ring's lock is only tried, the store is not written, and a
+  deadline found passed is acted on by the next engine batch. `Handoff`
+  keeps the last offer or purge of each of 64 slots for the engine's owner
+  to take. Guard `scripts/ci/check_mesh_seams.sh` (T-INDEP-1c).
+
+Residuals of M2b, both in the tracker row `T-MESH-EXPORTER`: epochs crossed
+inside one engine call, and epochs reached while mesh was off, have no key.
+
+Not yet written, and owed with or before the first user-visible step: Rule
+17 and the Rule 5 sentence in `CLAUDE.md`, the `haven-core/SECURITY.md`
+paragraphs, and the privacy-manifest invariants for the keys at rest and the
+hand-off (§8.2).
+
+Next: `mesh_drive`, the mesh-only seal, member bridging, and the FFI — which
+calls `mesh_on_until`, `mesh_off`, `mesh_sharing_stopped` and drains
+`mesh_handoff` — with the soak scenarios and the amended documents.

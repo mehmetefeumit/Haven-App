@@ -123,6 +123,11 @@ use cgka_traits::peeler::GroupMessageMetadata;
 #[cfg(any(test, feature = "test-utils"))]
 use cgka_traits::transport::EncryptedPayload;
 
+mod mesh;
+
+use self::mesh::MeshKeys;
+pub use self::mesh::{MeshKeyStore, StoredMeshKey, MESH_ON_MAX_MS};
+
 // `redact_hex_sequences` lives in the neutral `crate::util` module. Re-exported
 // here so every `crate::nostr::mls::redact_hex_sequences` caller (circle/error,
 // relay/manager) keeps working unchanged.
@@ -517,6 +522,9 @@ pub struct SessionManager {
     /// What the NIP-77 pass keeps for the life of the process, never sent
     /// ([`crate::relay::negentropy::NegMemo`]).
     negentropy: std::sync::Mutex<crate::relay::negentropy::NegMemo>,
+    /// The mesh packet keys of each circle and the hand-off they fill, kept
+    /// only while mesh is on ([`Self::mesh_on_until`]).
+    mesh_keys: MeshKeys,
     /// The local identity public key (x-only). Used to stamp inner app-message
     /// pubkeys (W9) and to route welcomes.
     identity_pubkey: PublicKey,
@@ -1473,6 +1481,7 @@ impl SessionManager {
             groups_at_open,
             unread_input: std::sync::Mutex::new(UnreadInput::default()),
             negentropy: std::sync::Mutex::new(crate::relay::negentropy::NegMemo::default()),
+            mesh_keys: MeshKeys::new(),
             // A pass that failed may have left a rolled-back row unfinished,
             // and a commit the hydrate cleared is owed its retirement.
             session: Gated::new(
@@ -3855,6 +3864,7 @@ impl SessionManager {
             .map(|row| row.message_id().clone())
             .collect();
         session.forget_group_local(group_id).map_err(map_mls_err)?;
+        self.mesh_keys.forget(&*session, group_id);
         drop(session);
         // The rows went with the group (their foreign key cascades); the
         // process-wide registry must not go on refusing their events.
@@ -3900,6 +3910,7 @@ impl SessionManager {
         group_id: &GroupId,
         commits: impl IntoIterator<Item = &'a nostr::EventId>,
     ) {
+        self.mesh_keys.silence(group_id);
         self.unread()
             .pager
             .entry(group_id.clone())
@@ -4131,8 +4142,15 @@ impl SessionManager {
         Self::screen_before_auth(event).is_ok()
     }
 
+    /// As a live REQ beginning to hold stored replay for `group_id`.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn hold_live_replay_for_test(&self, group_id: &GroupId) {
+        self.hold_live_replay(group_id);
+    }
+
     /// A live REQ began holding stored replay for `group_id`.
     pub(crate) fn hold_live_replay(&self, group_id: &GroupId) {
+        self.mesh_keys.silence(group_id);
         *self.unread().live.entry(group_id.clone()).or_default() += 1;
     }
 
@@ -4728,23 +4746,29 @@ impl SessionManager {
             .iter()
             .find(|row| row.message_id() == message)
             .and_then(|row| Some((row, row.application_message()?)))
-            .map(|(row, application)| LocationToSend {
-                relays: row
-                    .request()
-                    .target
-                    .endpoints()
-                    .iter()
-                    .map(|endpoint| endpoint.as_str().to_owned())
-                    .collect(),
-                expires_at_secs: location_expiry_secs(row),
-                may_be_sent: sealed_here
+            .map(|(row, application)| {
+                let may_be_sent = sealed_here
                     && self.location_may_be_sent(
                         &mut session,
                         &application.group_id,
                         application.source_epoch,
                         now_ms,
                         mode,
-                    ),
+                    );
+                LocationToSend {
+                    relays: row
+                        .request()
+                        .target
+                        .endpoints()
+                        .iter()
+                        .map(|endpoint| endpoint.as_str().to_owned())
+                        .collect(),
+                    expires_at_secs: location_expiry_secs(row),
+                    may_be_sent,
+                    mesh_turn: may_be_sent
+                        .then(|| self.mesh_turn(&*session, &application.group_id, now_ms))
+                        .flatten(),
+                }
             });
         drop(session);
         Ok(found)
@@ -4812,14 +4836,17 @@ impl SessionManager {
     }
 
     /// Deletes every location record of `group_id`, unsent: its circle was
-    /// left. A store error leaves the rest for their expiration, and the
-    /// send's own check finds no circle row to send for.
+    /// left or disbanded, and its mesh keys go with them. A store error
+    /// leaves the rest for their expiration, and the send's own check finds
+    /// no circle row to send for.
     pub(crate) async fn end_location_records(&self, group_id: &GroupId) {
-        let rows = self
-            .reading()
-            .await
-            .outbound_fanouts_for_group(group_id)
-            .unwrap_or_default();
+        let rows = {
+            let session = self.reading().await;
+            self.mesh_keys.forget(&*session, group_id);
+            session
+                .outbound_fanouts_for_group(group_id)
+                .unwrap_or_default()
+        };
         for row in rows
             .iter()
             .filter(|row| row.application_message().is_some())
@@ -6949,6 +6976,7 @@ impl SessionManager {
                 }
             }
         }
+        self.silence_staged(fanouts.iter().chain(&proposals), &unrecorded);
         Staged {
             effects: SessionEffects {
                 events,
@@ -6961,6 +6989,18 @@ impl SessionManager {
             proposals,
             unrecorded,
             waiting,
+        }
+    }
+
+    /// No location is sent for a circle with a commit or a proposal of this
+    /// device's on its way, and none sealed before it goes out by mesh.
+    fn silence_staged<'a>(
+        &self,
+        recorded: impl Iterator<Item = &'a FanoutId>,
+        unrecorded: &'a [GroupId],
+    ) {
+        for group_id in recorded.map(FanoutId::group).chain(unrecorded) {
+            self.mesh_keys.silence(group_id);
         }
     }
 
@@ -9585,6 +9625,7 @@ impl SessionManager {
                 self.note_revalidated_removal(held, group_id, revalidated_commit_id);
             }
         }
+        self.sync_mesh_keys(held, batch.events(), batch.proposals());
     }
 
     /// Restarts the post-join quiet window of each circle `events` move to
@@ -10698,6 +10739,39 @@ impl SessionManager {
         self.stall()
             .restore_wedge_evidence(evidence.stall_evidence());
         self.stall_evidence = evidence;
+    }
+
+    /// Installs the store the mesh keys are kept in and restores what an
+    /// earlier process kept, if mesh is still on; with mesh off, stored keys
+    /// an earlier process left are deleted.
+    pub(crate) fn install_mesh_keys(&mut self, at_rest: Arc<dyn MeshKeyStore>) {
+        let now_ms = self.legacy_now_ms();
+        self.mesh_keys.install(at_rest, now_ms);
+    }
+
+    /// Turns the Bluetooth mesh's keys on until `until_ms`, wall-clock
+    /// milliseconds, and never for longer than [`MESH_ON_MAX_MS`] from now: a
+    /// deadline, not a flag, so keys an app that was never opened again left
+    /// behind end by themselves. From here each circle's packet keys are
+    /// kept, in memory and in the circle store, for the epoch it stands on
+    /// and the [`DEFAULT_MAX_PAST_EPOCHS`] before it, and a location's own
+    /// send leaves a packet for the mesh engine ([`Self::mesh_handoff`]).
+    /// Called again, it moves the deadline.
+    ///
+    /// Returns whether mesh is on: not for a deadline that is not ahead of
+    /// the clock, nor when the store did not take it — either is mesh off.
+    pub async fn mesh_on_until(&self, until_ms: u64) -> bool {
+        let session = self.reading().await;
+        let groups = session.live_group_ids().unwrap_or_default();
+        self.turn_mesh_on(&*session, until_ms, &groups)
+    }
+
+    /// Turns the mesh's keys off: every key is dropped, in memory and in the
+    /// store, with the deadline, and every packet left for the engine is
+    /// withdrawn. Returns whether the store took the delete; one it did not
+    /// take is asked again at the next engine call.
+    pub async fn mesh_off(&self) -> bool {
+        self.turn_mesh_off(&*self.reading().await)
     }
 
     fn stall(&self) -> std::sync::MutexGuard<'_, EpochStallDetector> {
@@ -15104,6 +15178,33 @@ fn self_remove_feature_registry() -> FeatureRegistry {
     registry
 }
 
+/// What the mesh key ring reads of the engine, and all it reads.
+impl self::mesh::Held for AccountDeviceSession {
+    fn stable_epoch(&self, group_id: &GroupId) -> Option<u64> {
+        match self.epoch_state(group_id) {
+            Some(EpochState::Stable { epoch }) => Some(epoch.0),
+            _ => None,
+        }
+    }
+
+    // The fixed label (Rule 11): the secret the kind-445 outer layer is
+    // keyed by, read and never re-derived under another.
+    fn exporter(&self, group_id: &GroupId) -> Option<(u64, zeroize::Zeroizing<Vec<u8>>)> {
+        self.exporter_secret_with_epoch(group_id, DEFAULT_EXPORTER_LABEL, 32)
+            .ok()
+            .map(|(epoch, secret)| (epoch.0, secret))
+    }
+
+    fn routing_id(&self, group_id: &GroupId) -> Option<[u8; 32]> {
+        let raw = self
+            .app_component(group_id, NOSTR_ROUTING_COMPONENT_ID)
+            .ok()??;
+        cgka_traits::app_components::decode_nostr_routing_v1(&raw)
+            .ok()
+            .map(|routing| routing.nostr_group_id)
+    }
+}
+
 impl std::fmt::Debug for SessionManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionManager")
@@ -15179,6 +15280,10 @@ pub struct LocationToSend {
     /// Whether it may be sent now
     /// (`SessionManager::location_may_be_sent`).
     pub may_be_sent: bool,
+    /// What the mesh hand-off needs of the check that read this
+    /// ([`SessionManager::mesh_offer`]); `None` when it may not be sent, mesh
+    /// is off or its circle has no key.
+    mesh_turn: Option<self::mesh::Turn>,
 }
 
 /// One stored application record, as a drive reads it.
