@@ -1696,6 +1696,22 @@ documentation. Two sessions in one process — which only a test has — share
 the one slot, and an entry made with a session whose mesh is off ends the
 engine.
 
+Review of M2g-1 (independent, read-only): no blocker. Fixed with it: the
+documents said a passed deadline's keys go "at the first bridge entry after
+it", which holds only while an engine runs — with none, a bridge entry reads
+the deadline and deletes nothing, and the core's own paths do; an ask made
+as the engine's deadline passed was answered `Off` (the confirmed deadline
+now moves before the engine is adopted,
+`an_ask_the_session_took_outlives_an_engine_deadline_that_passed_meanwhile`);
+`more` had no test (`a_drive_that_leaves_packets_unread_says_so_and_the_next_reads_them`).
+Left as found: an engine restarted in the same process after a panic takes
+the session's time left, which a wall clock set back since has frozen — the
+restart residual, in-process; `mesh_start`'s branch for a store that refuses
+the deadline has no test at the bridge, since the real store has no fault
+seam (the core's refusal is tested on its own store); an offer's 228 s cap
+counts from the entry that applies it, not from the seal. Not confirmed
+offline: that Darwin's `CLOCK_MONOTONIC` is free of wall-clock adjustments.
+
 Written with M2g-1: the `haven-core/SECURITY.md` section "Bluetooth mesh
 (opt-in second carrier)" and the scope notes beside the `kind:445`
 expiration and the coalesced burst; the privacy-manifest invariants for the

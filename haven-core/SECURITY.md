@@ -3323,8 +3323,10 @@ a group stands on and no other, so Haven keeps it itself (tracker
 - **Every deletion.** Mesh turned off (`mesh_stop` →
   `SessionManager::mesh_off`): every row and the deadline, in one transaction.
   The deadline passed: at the open of the store, at the next engine batch,
-  at the KeyPackage maintenance tick, at a mesh drive, before mesh is turned
-  on again, and at the first bridge entry after it (below). The window
+  at the KeyPackage maintenance tick, before mesh is turned on again, and —
+  only while a mesh engine runs in the process — at a mesh drive and at the
+  first bridge entry after it (below); with no engine running, a bridge
+  entry reads the deadline and deletes nothing. The window
   moved: the key of the epoch that fell out of it. A branch reselected, or a
   key the engine's contradicts: every other key of that circle. The circle
   left, disbanded, forgotten or deleted: its rows, with it. A delete the
@@ -3392,7 +3394,8 @@ never held across an `.await`
   instant and the engine's clock is not one, so what crosses is the time the
   event still has when it is applied — never more than a location's whole
   life (228 s), so a wall clock set back between the seal and the entry
-  cannot make a location wait longer — and an offer whose event has expired
+  cannot make a location wait in the outbox longer than that from the entry
+  — and an offer whose event has expired
   empties the slot instead. A wall clock that jumps afterwards moves nothing.
 - **The clock** is read in Rust for every entry and never handed in by a
   caller: `CLOCK_BOOTTIME` on Android and Linux, and on Apple targets

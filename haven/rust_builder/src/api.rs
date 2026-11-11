@@ -3252,7 +3252,7 @@ impl CircleManagerFfi {
             CoreCircleManager::new(path, &keys, Some(&circle_db_key)).map_err(|e| e.to_string())?;
         // A session opened while the mesh engine runs: the engine takes this
         // session's hand-off, or the one it holds is fed by nobody.
-        mesh_adopt(inner.session(), false);
+        mesh_adopt(inner.session());
         Ok(Self {
             inner: Arc::new(inner),
             own_pubkey_hex,
@@ -12944,27 +12944,29 @@ fn mesh_empty() -> u64 {
 /// Hands the running engine `session`'s hand-off and deadline, and answers
 /// whether one runs. A session that opens while the engine runs, and one
 /// asked for again, are so never left filling a hand-off nobody takes from.
-/// `confirmed` is whether the user has just asked for mesh: the deadline then
-/// moves to the session's; otherwise it only ever comes nearer.
-fn mesh_adopt(session: &haven_core::nostr::mls::SessionManager, confirmed: bool) -> bool {
+/// The engine's deadline only ever comes nearer here.
+fn mesh_adopt(session: &haven_core::nostr::mls::SessionManager) -> bool {
     let (left_ms, handoff) = (session.mesh_on_for_ms(), session.mesh_handoff());
-    with_mesh(Some(left_ms), |slot, now_ms| {
-        slot.adopt(handoff, now_ms);
-        if confirmed {
-            slot.until_ms = now_ms.saturating_add(left_ms);
-        }
-    })
-    .is_some()
+    with_mesh(Some(left_ms), |slot, now_ms| slot.adopt(handoff, now_ms)).is_some()
 }
 
 /// The engine for a session whose mesh is on: the running one, adopted, or a
 /// new one. No engine is started for a session whose mesh is off, nor over
-/// one that ended and is not yet paid for.
+/// one that ended and is not yet paid for. `confirmed` is whether the user
+/// has just asked for mesh.
 fn mesh_open(session: &haven_core::nostr::mls::SessionManager, confirmed: bool) -> MeshStartFfi {
-    if mesh_adopt(session, confirmed) {
+    let left_ms = session.mesh_on_for_ms();
+    if confirmed {
+        // Before the adoption below can find the old deadline passed: the
+        // user asked in its last moments, and the session has taken the ask.
+        let mut home = mesh_home();
+        if let MeshHome::On(slot) = &mut *home {
+            slot.until_ms = mesh_clock_ms().saturating_add(left_ms);
+        }
+    }
+    if mesh_adopt(session) {
         return MeshStartFfi::AlreadyOn;
     }
-    let left_ms = session.mesh_on_for_ms();
     let mut home = mesh_home();
     if left_ms == 0 || !matches!(*home, MeshHome::Off) {
         return MeshStartFfi::Off;
@@ -24307,12 +24309,12 @@ mod mesh_ffi_tests {
 
     use super::maintenance_real_ffi_tests::{install_test_seams, secret_bytes, DataDir};
     use super::{
-        mesh_clock_ms, mesh_empty, mesh_home, mesh_keep_on, mesh_reset_counts, mesh_resume,
-        mesh_sharing_stopped, mesh_start, mesh_stats, mesh_stop,
+        mesh_clock_ms, mesh_empty, mesh_home, mesh_keep_on, mesh_open, mesh_reset_counts,
+        mesh_resume, mesh_sharing_stopped, mesh_start, mesh_stats, mesh_stop,
         sealed_location_event_json_for_test, wipe_all_mls_state, with_mesh, CircleManagerFfi,
         LocationMessage, LocationMessageResultKindFfi, LocationPublishFfi, MeshHome, MeshSlot,
         MeshStartFfi, MeshStatsFfi, RelayManagerFfi, SealedLocationFfi, SendHeldFfi,
-        MESH_CLOCK_OVERRIDE_MS, MESH_OFFER_MAX_MS,
+        MESH_CLOCK_OVERRIDE_MS, MESH_DRIVE_PACKETS, MESH_OFFER_MAX_MS,
     };
 
     const SECOND: u64 = 1_000;
@@ -24922,6 +24924,76 @@ mod mesh_ffi_tests {
         assert!(
             gone(&device),
             "the entry after a deadline nobody held a session for left the keys"
+        );
+    }
+
+    /// The user asks for mesh in the deadline's last moments. The session
+    /// takes the ask; the engine's own deadline, passed by the time the
+    /// engine is handed that session, does not turn off what was just turned
+    /// on. A session that only opens again asked for nothing: the engine
+    /// ends, and its keys with it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_ask_the_session_took_outlives_an_engine_deadline_that_passed_meanwhile() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let device = Device::new("mesh_late_ask");
+        device.session().set_legacy_clock_for_test(wall_ms());
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+
+        // Where `mesh_start` stands once the store has taken its deadline,
+        // when the engine's passed after the entry that checked it.
+        bench.pass(MESH_ON_MAX_MS);
+        assert!(device.session().mesh_on_until(u64::MAX).await);
+        assert_eq!(mesh_open(device.session(), true), MeshStartFfi::AlreadyOn);
+        let stats = mesh_stats(&device.circle).await;
+        assert!(
+            stats.on && stats.on_for_ms == MESH_ON_MAX_MS,
+            "an ask made as the engine's deadline passed did not keep mesh on for twelve hours"
+        );
+
+        bench.pass(MESH_ON_MAX_MS);
+        assert!(device.session().mesh_on_until(u64::MAX).await);
+        assert_eq!(mesh_open(device.session(), false), MeshStartFfi::Off);
+        assert!(
+            !mesh_stats(&device.circle).await.on
+                && is_off()
+                && device.session().mesh_on_until_for_test() == 0,
+            "an engine past its deadline was kept by a session nobody asked through"
+        );
+    }
+
+    /// A drive reads so many packets and no more, and says when others still
+    /// wait: the next drive reads them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_drive_that_leaves_packets_unread_says_so_and_the_next_reads_them() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let relays = RelayManagerFfi::new_instance()
+            .await
+            .expect("relay manager");
+        let device = Device::new("mesh_more");
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        let unread = || engine(|slot| slot.engine.stats().unread).expect("an engine runs");
+
+        // One phone emits a cover packet a tick, for half an hour.
+        let mut near = Phone::new(1, TICK);
+        near.link();
+        run(&bench, &mut [&mut near], HOUR / 2);
+        let waiting = unread();
+        assert!(
+            waiting > MESH_DRIVE_PACKETS && waiting <= 2 * MESH_DRIVE_PACKETS,
+            "premise: more packets wait than one drive reads, and no more than two read"
+        );
+
+        let first = relays.mesh_drive_driven(&device.circle).await;
+        assert!(
+            first.more && !first.errored && unread() == waiting - MESH_DRIVE_PACKETS,
+            "a drive that left packets unread did not say so, or read more than its share"
+        );
+        let second = relays.mesh_drive_driven(&device.circle).await;
+        assert!(
+            !second.more && !second.errored && unread() == 0,
+            "the next drive left packets unread"
         );
     }
 
