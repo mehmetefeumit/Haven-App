@@ -335,6 +335,13 @@ class FakeChangeDriver implements CircleChangeDriver {
   /// The sealed locations [publishLocation] was handed, in order.
   final List<SealedLocationFfi> publishedSeals = [];
 
+  /// The `received` word each [publishLocation] carried, in order.
+  final List<bool> publishReceived = [];
+
+  /// What [meshDrive] answers, each consumed in order; once spent, nothing
+  /// read and nothing waiting.
+  List<MeshDriveFfi> meshDrives = [];
+
   @override
   Future<SealOutcomeFfi> sealLocation({
     required CircleManagerFfi circle,
@@ -354,11 +361,30 @@ class FakeChangeDriver implements CircleChangeDriver {
   }
 
   @override
+  Future<SealOutcomeFfi> sealLocationForMesh({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required double latitude,
+    required double longitude,
+  }) {
+    sealedFixes.add((latitude: latitude, longitude: longitude));
+    return _answer(
+      'sealLocationForMesh',
+      circle,
+      mlsGroupId,
+      false,
+      () => sealOutcome,
+    );
+  }
+
+  @override
   Future<LocationPublishFfi> publishLocation({
     required CircleManagerFfi circle,
     required SealedLocationFfi sealed,
+    required bool received,
   }) {
     publishedSeals.add(sealed);
+    publishReceived.add(received);
     return _answer(
       'publishLocation',
       circle,
@@ -367,6 +393,15 @@ class FakeChangeDriver implements CircleChangeDriver {
       () => publishAnswer,
     );
   }
+
+  @override
+  Future<MeshDriveFfi> meshDrive({required CircleManagerFfi circle}) =>
+      _answer('meshDrive', circle, null, false, () {
+        if (meshDrives.isEmpty) {
+          return const MeshDriveFfi(replayed: [], errored: false, more: false);
+        }
+        return meshDrives.removeAt(0);
+      });
 }
 
 /// A sealed location for a fake to hand round; it holds nothing.

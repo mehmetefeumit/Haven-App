@@ -134,6 +134,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/mesh_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/rust/api.dart';
@@ -430,7 +431,15 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
   /// tick that follows a reported burst joins or queues behind it.
   Future<void> _dispatchBurst(List<_BurstTarget> burst, int generation) {
     final sink = _tickSink;
-    if (sink == null) return _publishBurst(burst, generation);
+    if (sink == null) {
+      // The mesh rides the tick behind its relay publishes, and off the
+      // chain: nothing a relay is sent waits on it or fails with it.
+      return _publishBurst(burst, generation).whenComplete(() {
+        if (_isCurrent(generation) && _active) {
+          unawaited(ref.read(meshProvider.notifier).drive());
+        }
+      });
+    }
     // Every circle is handed over BEFORE the first await, so they all reach the
     // coordinator's due set while it is still empty and one burst carries them
     // — the joins it is built for. The ticks that queue a burst of their own
@@ -527,7 +536,10 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
     final circle = _circles[circleKey];
     if (circle == null) return;
     _lastChainPublishAt = DateTime.now();
-    await _publishCircle(circle, generation, fix: fix).timeout(
+    // No relay receive is part of a foreground tick, so it can point to none
+    // that completed before this send: nothing the mesh brought is passed on
+    // to a relay from here.
+    await _publishCircle(circle, generation, fix: fix, received: false).timeout(
       _publishLinkTimeout,
       onTimeout: () => debugPrint(
         '[LocationPublishScheduler] per-circle publish exceeded '
@@ -571,10 +583,17 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
   /// It never opens a window of its own: every plane takes ONE fix per burst,
   /// and a per-circle window here is what would put a variable acquisition
   /// inside the decorrelation gap (see [_publishBurst]).
+  ///
+  /// [received] and [meshOnly] are [BurstPublisher.publishInBurst]'s. A seal
+  /// for the mesh alone asks no relay, so nothing of it — a hold and a
+  /// failure included — is a verdict on the relay plane, and the health model
+  /// hears none of it.
   Future<void> _publishCircle(
     Circle circle,
     int generation, {
     required BurstFix fix,
+    required bool received,
+    bool meshOnly = false,
   }) async {
     if (!_isCurrent(generation) || !_active) return;
     try {
@@ -584,7 +603,10 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
         nostrGroupId: circle.nostrGroupId,
         latitude: fix.latitude,
         longitude: fix.longitude,
+        received: received,
+        meshOnly: meshOnly,
       );
+      if (meshOnly) return;
       switch (outcome) {
         // A send no relay took delivered nothing: recorded, so the
         // sharing-health model can see the plane die.
@@ -607,7 +629,7 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
     } on Object catch (e) {
       debugPrint('[LocationPublishScheduler] per-circle publish failed: '
           '${e.runtimeType}');
-      _recordPublishOutcome(circle, acked: false);
+      if (!meshOnly) _recordPublishOutcome(circle, acked: false);
     }
   }
 
@@ -721,8 +743,18 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
   }
 
   @override
-  Future<void> publishInBurst(Circle circle, BurstFix fix) =>
-      _publishCircle(circle, _generation, fix: fix);
+  Future<void> publishInBurst(
+    Circle circle,
+    BurstFix fix, {
+    required bool received,
+    required bool meshOnly,
+  }) => _publishCircle(
+    circle,
+    _generation,
+    fix: fix,
+    received: received,
+    meshOnly: meshOnly,
+  );
 
   // --- Test seams (mirror MaintenanceSchedulerNotifier) --------------------
 

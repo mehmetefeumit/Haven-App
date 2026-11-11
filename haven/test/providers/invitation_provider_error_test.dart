@@ -361,10 +361,14 @@ class _MockCircleServiceThrowsErrorOnProcess
     required List<int> mlsGroupId,
     required double latitude,
     required double longitude,
+    bool meshOnly = false,
   }) async => throw UnimplementedError();
 
   @override
-  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async =>
+  Future<LocationPublishFfi> publishSealedLocation(
+    LocationSealed seal, {
+    required bool received,
+  }) async =>
       throw UnimplementedError();
 
   @override
@@ -452,10 +456,14 @@ class _MockCircleServiceThrowsOnFirst
     required List<int> mlsGroupId,
     required double latitude,
     required double longitude,
+    bool meshOnly = false,
   }) async => throw UnimplementedError();
 
   @override
-  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async =>
+  Future<LocationPublishFfi> publishSealedLocation(
+    LocationSealed seal, {
+    required bool received,
+  }) async =>
       throw UnimplementedError();
 
   @override
@@ -546,10 +554,14 @@ class _MockCircleServiceMixedErrors
     required List<int> mlsGroupId,
     required double latitude,
     required double longitude,
+    bool meshOnly = false,
   }) async => throw UnimplementedError();
 
   @override
-  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async =>
+  Future<LocationPublishFfi> publishSealedLocation(
+    LocationSealed seal, {
+    required bool received,
+  }) async =>
       throw UnimplementedError();
 
   @override

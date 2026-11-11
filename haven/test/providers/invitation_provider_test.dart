@@ -640,10 +640,14 @@ class _MockCircleServiceWithInvitations
     required List<int> mlsGroupId,
     required double latitude,
     required double longitude,
+    bool meshOnly = false,
   }) async => throw UnimplementedError();
 
   @override
-  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async =>
+  Future<LocationPublishFfi> publishSealedLocation(
+    LocationSealed seal, {
+    required bool received,
+  }) async =>
       throw UnimplementedError();
 
   @override
@@ -726,10 +730,14 @@ class _ThrowingCircleServiceInvitations
     required List<int> mlsGroupId,
     required double latitude,
     required double longitude,
+    bool meshOnly = false,
   }) async => throw UnimplementedError();
 
   @override
-  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async =>
+  Future<LocationPublishFfi> publishSealedLocation(
+    LocationSealed seal, {
+    required bool received,
+  }) async =>
       throw UnimplementedError();
 
   @override
@@ -803,10 +811,14 @@ class _MockCircleServiceThrowsOnProcess
     required List<int> mlsGroupId,
     required double latitude,
     required double longitude,
+    bool meshOnly = false,
   }) async => throw UnimplementedError();
 
   @override
-  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async =>
+  Future<LocationPublishFfi> publishSealedLocation(
+    LocationSealed seal, {
+    required bool received,
+  }) async =>
       throw UnimplementedError();
 
   @override
@@ -1039,10 +1051,14 @@ class _MockCircleServiceReturnsNull
     required List<int> mlsGroupId,
     required double latitude,
     required double longitude,
+    bool meshOnly = false,
   }) async => throw UnimplementedError();
 
   @override
-  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async =>
+  Future<LocationPublishFfi> publishSealedLocation(
+    LocationSealed seal, {
+    required bool received,
+  }) async =>
       throw UnimplementedError();
 
   @override
@@ -1124,10 +1140,14 @@ class _MockCircleServiceMixedBatch
     required List<int> mlsGroupId,
     required double latitude,
     required double longitude,
+    bool meshOnly = false,
   }) async => throw UnimplementedError();
 
   @override
-  Future<LocationPublishFfi> publishSealedLocation(LocationSealed seal) async =>
+  Future<LocationPublishFfi> publishSealedLocation(
+    LocationSealed seal, {
+    required bool received,
+  }) async =>
       throw UnimplementedError();
 
   @override

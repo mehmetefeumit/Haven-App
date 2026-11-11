@@ -14,7 +14,8 @@
 ///    cursor, or start a session into the burst where it finds none.
 /// 2. `waitBacklogSettled()` — let the stored replay land, so a peer commit
 ///    received here is APPLIED before this burst encrypts (the location then
-///    goes out at the current epoch).
+///    goes out at the current epoch). Where the Bluetooth mesh is wired its
+///    drive is started here, behind the receive, and nothing waits for it.
 /// 3. one GPS fix behind the access gate, then one publish per circle that is
 ///    due AND still eligible when the pass reaches it, CSPRNG-staggered so two
 ///    circles never share a whole-second `created_at`.
@@ -24,6 +25,9 @@
 ///    would inspect nothing).
 /// 5. `settleBeforePause()` → `pauseSubscriptions()` → drain any commit-
 ///    critical publish still on the shared publish pool → shut that pool.
+///
+/// A burst whose receive FAILED sends no relay anything; with the mesh on it
+/// runs step 3 for the mesh alone, skips step 4 and closes (plan §7.7 R1).
 ///
 /// Between bursts there is no standing REQ and no socket: presence is revealed
 /// only at the instants the device publishes, which every circle relay already
@@ -251,7 +255,27 @@ abstract class BurstPublisher {
   Future<BurstFix?> openBurstPublishWindow(Iterable<Circle> circles);
 
   /// Publishes [circle] at [fix], recording the outcome. Never throws.
-  Future<void> publishInBurst(Circle circle, BurstFix fix);
+  ///
+  /// [received] is the burst's word that its own relay receive was answered
+  /// to the end before this send: only then may what fellow members sent by
+  /// the Bluetooth mesh be passed on to the relays behind it. With
+  /// [meshOnly] the fix is sealed for the mesh alone and no relay is asked.
+  Future<void> publishInBurst(
+    Circle circle,
+    BurstFix fix, {
+    required bool received,
+    required bool meshOnly,
+  });
+}
+
+/// The Bluetooth mesh as a burst uses it. A build without the mesh answers
+/// off and drives nothing.
+abstract class BurstMesh {
+  /// Whether the mesh is on, read afresh. Never throws.
+  Future<bool> isOn();
+
+  /// Takes in what the mesh received. Calls no relay; never throws.
+  Future<void> drive();
 }
 
 /// The maintenance a burst may fold onto its warm publish pool.
@@ -270,6 +294,18 @@ abstract class BurstMaintenance {
   /// Carries on every leave this device asked for, claiming no foreground.
   /// Never throws.
   Future<void> carryOnLeaves();
+}
+
+/// What became of a burst's relay receive.
+enum _Receive {
+  /// Answered to the end, with the burst still owning the wake.
+  completed,
+
+  /// Not answered to the end, by no choice of the user's.
+  failed,
+
+  /// The foreground took the burst back, or the consent was withdrawn.
+  stopped,
 }
 
 /// How many further rounds of driver entries one teardown adopts after the
@@ -348,6 +384,7 @@ class BackgroundBurstCoordinator implements BurstSink {
     Future<BurstStart?> Function(Duration budget) prepareStartIntoBurst =
         _startsNone,
     Future<bool> Function()? receiveWithoutSession,
+    BurstMesh? mesh,
     DateTime Function() now = DateTime.now,
   }) : _engine = engine,
        _publisher = publisher,
@@ -360,6 +397,7 @@ class BackgroundBurstCoordinator implements BurstSink {
        _foregrounded = foregrounded,
        _prepareStartIntoBurst = prepareStartIntoBurst,
        _receiveWithoutSession = receiveWithoutSession,
+       _mesh = mesh,
        _now = now;
 
   final SubscriptionService _engine;
@@ -433,6 +471,10 @@ class BackgroundBurstCoordinator implements BurstSink {
   /// build): the receive a burst runs in place of opening a session, which
   /// answers whether it completed. `null` where a live plane exists.
   final Future<bool> Function()? _receiveWithoutSession;
+
+  /// The Bluetooth mesh, or `null` where none is wired: every burst then
+  /// runs exactly as it did before the mesh existed.
+  final BurstMesh? _mesh;
 
   /// Circle keys waiting to be published, in the order their ticks arrived.
   ///
@@ -570,22 +612,34 @@ class BackgroundBurstCoordinator implements BurstSink {
         // catch-up, and only once it completed (decision 244); where a live
         // plane exists but finds no session — read from the typed lifecycle,
         // never from an error — by starting one into the burst (decision
-        // 190). A burst that cannot receive publishes nothing; one with a
-        // live plane says so to the health model as a failed open, one
-        // without says nothing (it holds no subscription to lose).
+        // 190). A burst that cannot receive sends no relay anything; one with
+        // a live plane says so to the health model as a failed open, one
+        // without says nothing (it holds no subscription to lose). With the
+        // Bluetooth mesh on, one whose receive FAILED seals for the mesh
+        // alone ([_sealedForMeshAlone]).
         var startedIntoBurst = false;
+        // Whether THIS burst's relay receive was answered to the end, by its
+        // typed outcome: what a publish may claim of it.
+        var received = false;
         final receiveWithoutSession = _receiveWithoutSession;
         if (receiveWithoutSession != null) {
-          if (!await _receivedWithoutSession(receiveWithoutSession)) {
-            _due.clear();
-            debugPrint('[BackgroundBurst] receive not completed: nothing '
-                'published');
+          final receive = await _receivedWithoutSession(receiveWithoutSession);
+          if (receive != _Receive.completed) {
+            if (!await _sealedForMeshAlone(receive)) {
+              debugPrint('[BackgroundBurst] receive not completed: nothing '
+                  'published');
+            }
             return;
           }
+          received = true;
         } else {
           switch (_engine.lifecycle()) {
             case LiveLifecycleFfi.noSession || LiveLifecycleFfi.stopped:
-              if (!await _startedIntoBurst(budget)) return;
+              final start = await _startedIntoBurst(budget);
+              if (start != _Receive.completed) {
+                await _endWithoutSession(start);
+                return;
+              }
               startedIntoBurst = true;
             case LiveLifecycleFfi.launched ||
                 LiveLifecycleFfi.foreground ||
@@ -616,9 +670,11 @@ class BackgroundBurstCoordinator implements BurstSink {
                   break;
                 case BurstOpenFfi.noSession:
                   final left = budget - _now().difference(startedAt);
-                  if (!await _startedIntoBurst(
+                  final start = await _startedIntoBurst(
                     left.isNegative ? Duration.zero : left,
-                  )) {
+                  );
+                  if (start != _Receive.completed) {
+                    await _endWithoutSession(start);
                     return;
                   }
               }
@@ -634,17 +690,20 @@ class BackgroundBurstCoordinator implements BurstSink {
           _onOpenOutcome(_openFailures);
         }
         if (opened && _burstEnabled()) {
-          final outcome = await _engine.waitBacklogSettled();
-          if (outcome == BacklogOutcomeFfi.timedOut) {
-            // A report, not a failure: an endpoint stayed silent, so this
-            // burst makes no promise about its epoch. Publish anyway — exactly
-            // what the foreground does with a slow REQ, and the alternative is
-            // a location gap for a relay problem.
-            debugPrint('[BackgroundBurst] backlog wait timed out — publishing '
-                'at the epoch we have');
+          switch (await _engine.waitBacklogSettled()) {
+            case BacklogOutcomeFfi.settled:
+              received = true;
+            case BacklogOutcomeFfi.timedOut:
+              // A report, not a failure: an endpoint stayed silent, so this
+              // burst makes no promise about its epoch. Publish anyway —
+              // exactly what the foreground does with a slow REQ, and the
+              // alternative is a location gap for a relay problem.
+              debugPrint('[BackgroundBurst] backlog wait timed out — '
+                  'publishing at the epoch we have');
           }
         }
-        await _publishPass();
+        _driveMesh();
+        await _publishPass(received: received);
       } finally {
         // ONE assignment, covering the ordinary exit AND every throw from
         // the links above. Latched true, every later tick joins this
@@ -669,38 +728,76 @@ class BackgroundBurstCoordinator implements BurstSink {
     }
   }
 
-  /// Runs [receive], and answers whether it completed while the burst still
-  /// owns the wake. Never throws.
-  Future<bool> _receivedWithoutSession(Future<bool> Function() receive) async {
+  /// Runs [receive], and answers what became of it: completed while the
+  /// burst still owns the wake, stopped by the foreground or a withdrawn
+  /// consent, or failed. Never throws.
+  Future<_Receive> _receivedWithoutSession(
+    Future<bool> Function() receive,
+  ) async {
+    var completed = false;
     try {
-      final completed = await receive();
-      return completed && !_foregrounded() && _burstEnabled();
+      completed = await receive();
     } on Object catch (e) {
       debugPrint('[BackgroundBurst] receive failed: ${e.runtimeType}');
-      return false;
+    }
+    if (_foregrounded() || !_burstEnabled()) return _Receive.stopped;
+    return completed ? _Receive.completed : _Receive.failed;
+  }
+
+  /// Starts a session into this burst where none runs (decision 190). Not
+  /// started is one of two things: the start failed, which is a failed open
+  /// told to the health model, or the burst was stopped — the foreground or
+  /// the consent took it back meanwhile, or the foreground took the engine
+  /// back while the start ran (its re-anchor, ordered behind this burst,
+  /// takes the session).
+  Future<_Receive> _startedIntoBurst(Duration budget) async {
+    if (!await _startIntoBurst(budget)) {
+      if (_foregrounded() || !_burstEnabled()) return _Receive.stopped;
+      _openFailures++;
+      _onOpenOutcome(_openFailures);
+      return _Receive.failed;
+    }
+    return _foregrounded() ? _Receive.stopped : _Receive.completed;
+  }
+
+  /// Ends a burst no session could be started for.
+  Future<void> _endWithoutSession(_Receive start) async {
+    if (!await _sealedForMeshAlone(start) && start == _Receive.failed) {
+      debugPrint('[BackgroundBurst] no session: nothing published');
     }
   }
 
-  /// Starts a session into this burst where none runs (decision 190): false
-  /// when nothing may be published — the start failed, which is a failed
-  /// open told to the health model unless the foreground or the consent took
-  /// the burst back meanwhile, or the foreground took the engine back while
-  /// it ran (its re-anchor, ordered behind this burst, takes the session).
-  Future<bool> _startedIntoBurst(Duration budget) async {
-    if (!await _startIntoBurst(budget)) {
-      _due.clear();
-      if (_foregrounded() || !_burstEnabled()) return false;
-      _openFailures++;
-      debugPrint('[BackgroundBurst] no session: nothing published');
-      _onOpenOutcome(_openFailures);
-      return false;
+  /// Ends a burst whose relay receive did not complete, and answers whether
+  /// it sealed for the Bluetooth mesh alone (plan §7.7 R1): only one whose
+  /// receive FAILED, with the mesh on and the burst still owning the wake —
+  /// so a phone no relay answers still shares by radio. No relay is asked
+  /// anything, and the maintenance fold is skipped as for any burst that
+  /// could not receive. Every other such burst publishes nothing: one the
+  /// foreground or a withdrawn consent stopped, and any with the mesh off.
+  ///
+  /// The cost is the plan's: the fix is sealed at the last epoch this phone
+  /// knows, so a member removed by a commit it could not fetch can read it
+  /// within radio range until the next receive completes.
+  Future<bool> _sealedForMeshAlone(_Receive receive) async {
+    final mesh = _mesh;
+    if (receive == _Receive.failed &&
+        mesh != null &&
+        await mesh.isOn() &&
+        !_foregrounded() &&
+        _burstEnabled()) {
+      _driveMesh();
+      await _publishPass(received: false, meshOnly: true);
+      return true;
     }
-    if (_foregrounded()) {
-      _due.clear();
-      return false;
-    }
-    return true;
+    _due.clear();
+    return false;
   }
+
+  /// Starts the mesh's own drive and waits for none of it: it rides the
+  /// burst behind the relay receive — what it takes in may be passed on only
+  /// behind a receive that completed — and the burst's relay links neither
+  /// wait on it nor fail with it.
+  void _driveMesh() => unawaited(_mesh?.drive().catchError((Object _) {}));
 
   /// Starts a session into this burst, if one may be started and the burst
   /// still owns the wake. Never throws.
@@ -744,7 +841,10 @@ class BackgroundBurstCoordinator implements BurstSink {
   /// Re-reads the due set after each pass so a tick that arrived mid-publish
   /// joins this burst. Terminates because every published circle enters
   /// [_encrypted] and is filtered out of the next pass.
-  Future<void> _publishPass() async {
+  Future<void> _publishPass({
+    required bool received,
+    bool meshOnly = false,
+  }) async {
     BurstFix? fix;
     while (_burstEnabled()) {
       final pending = _pendingCircles();
@@ -788,6 +888,10 @@ class BackgroundBurstCoordinator implements BurstSink {
         // long, and a withdrawal inside either must stop the publish that
         // follows it rather than the one after that.
         if (!_burstEnabled()) return;
+        // A seal for the mesh alone is made at an epoch no receive vouched
+        // for: none is made once the foreground, which receives first, has
+        // the engine back.
+        if (meshOnly && _foregrounded()) return;
         // ELIGIBILITY, re-read at the same point and for the same reason. The
         // pass reads [_pendingCircles] once per round, so without this a
         // circle the engine flags Unrecoverable mid-pass is still sent to for
@@ -804,7 +908,12 @@ class BackgroundBurstCoordinator implements BurstSink {
         // pass's next round and publish twice.
         _encrypted.add(entry.key);
         _due.remove(entry.key);
-        await _publisher.publishInBurst(circle, fix);
+        await _publisher.publishInBurst(
+          circle,
+          fix,
+          received: received,
+          meshOnly: meshOnly,
+        );
       }
     }
   }

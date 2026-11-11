@@ -34,6 +34,7 @@ import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
+import 'package:haven/src/providers/mesh_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/resume_extras_provider.dart';
@@ -1376,7 +1377,11 @@ class _MapShellState extends ConsumerState<MapShell>
     // `liveSyncEnabled`. Cancelled on dispose + explicitly invalidated in
     // `deleteIdentity` so no secret-bearing tick runs after logout. Their
     // arming gates refuse while the app is away.
-    ref.read(maintenanceSchedulerProvider.notifier);
+    ref
+      ..read(maintenanceSchedulerProvider.notifier)
+      // A Bluetooth mesh an earlier process left on gets its engine back at
+      // this read of its state; a build without the mesh reads nothing.
+      ..read(meshProvider);
     // Receive plane: the live-sync engine, when enabled; it reads for itself
     // whether a session is wanted. The flag-off pollers are relay contact.
     if (liveSyncEnabled) unawaited(_startLiveSync());
@@ -1822,6 +1827,7 @@ class _MapShellState extends ConsumerState<MapShell>
           receiveWithoutSession: liveSyncEnabled
               ? null
               : _receiveBeforeBurstSeal,
+          mesh: ref.read(meshProvider.notifier),
           onOpenOutcome: (failures) {
             if (!mounted) return;
             MapShell.recordBurstOpenOutcome(

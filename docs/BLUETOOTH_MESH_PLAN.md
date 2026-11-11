@@ -1683,10 +1683,10 @@ mesh-admissible event unkept, so that arm is tested through a test seam.
   time left (§7.6: "the sheet shows the time left").
   **Not built here.** The radio (M3): nothing calls `link_up`, `receive` or
   `poll_output` outside a test, and `with_mesh` has no radio-facing entry.
-  The Dart side (M2g-2): no Dart code calls a mesh entry, the burst
-  coordinator seals nothing for the mesh, and the one Dart caller of the
-  location send passes `received: false`, so nothing is passed on to a relay
-  by any build. The soak scenarios (T-INDEP-1a, T-BRIDGE-9).
+  The Dart side (M2g-2): at this step no Dart code called a mesh entry, the
+  burst coordinator sealed nothing for the mesh, and the one Dart caller of
+  the location send passed `received: false`; M2g-2a, below, is what stands
+  now. The soak scenarios (T-INDEP-1a, T-BRIDGE-9).
 
 Residuals of M2g-1. With no entry at all the engine sits in memory past its
 deadline; it does nothing, since only an entry runs it. Across a process
@@ -1719,6 +1719,103 @@ keys at rest, the hand-off, the ingress, the mesh-only seal, the engine and
 its deadline, the statistics, and the accepted deviation `MESH-BRIDGE` for
 what a relay infers from a passed-on update. `CLAUDE.md` is the owner's: the
 wording below is proposed, and not applied.
+
+- **M2g-2a**, the Dart side of the bridge, behind a build flag that is off
+  (`haven/lib/src/providers/mesh_provider.dart`,
+  `haven/lib/src/services/mesh_service.dart`). No UI: no button, no sheet,
+  no string. No Rust changed.
+  **The flag.** `const meshEnabled = bool.fromEnvironment('HAVEN_MESH')`,
+  default off, read through `meshEnabledProvider` so the default test run
+  executes both builds. Two gates, and no other way to a mesh entry
+  (`test/lints/mesh_entries_behind_flag_test.dart`): `meshServiceProvider`
+  answers `null` with the flag off, and the Android service's isolate, which
+  has no provider container, builds its mesh service only under the same
+  const (a constructor argument). With the flag off nothing reaches the
+  bridge whatever is asked of the mesh.
+  **The service.** `MeshService` (interface) and `NostrMeshService`: the
+  free entries through a seam (`MeshBridge`), the two driven ones through
+  `CircleChangeDriver` and so through `NostrRelayService`'s drive registry,
+  both among the entries a teardown waits out: neither asks a relay, and the
+  session is not released under either. Every failure leaves as one
+  fixed-text exception; nothing is logged.
+  **Resume** is inside the service: before the first entry made with a
+  session, once a session, keyed weakly on the `CircleManagerFfi` the circle
+  service hands back — so it cannot run before a manager exists, runs again
+  for a session opened since (a hand-back from the Android service), and
+  holds no handle past its owner's release. The shell reads the mesh state at
+  its start-up, with the identity resolved; the Android service's isolate
+  resumes at the first drive of its own session.
+  **State.** `meshProvider` holds what `mesh_stats` reports, whole, or
+  `null` in a build without the mesh; `turnOn`, `keepOn`, `turnOff`,
+  `resetCounts` and `refresh` each read it again. `turnOn` and `keepOn`
+  answer whether mesh is on, by the variant: `Started` and `AlreadyOn` are,
+  `Off` is not. It is dropped at a login and a logout.
+  **The drive** rides three wakes and adds none. A foreground publish tick
+  starts it once the tick's relay publishes are made, and does not wait for
+  it. An iOS background burst starts it behind the burst's relay receive —
+  after the backlog wait or the catch-up, before the first seal — and does
+  not wait for it. The Android service's cycle awaits it between its fetch
+  and the pool's close. What it read goes through the funnel a relay
+  drive's replay goes through (`LocationSharingService.ingestReplayed`; on
+  Android, the task's `_ingestReplayed`); where the map reads the cache it is
+  told, and where it polls the relays it is not, since telling it would ask
+  them. Up to four asks a drive while packets wait.
+  **`received`**, the word `publish_location_driven` takes. `true` from one
+  path: an iOS background burst, for that burst's own relay receive, by its
+  typed answer — with a live plane, an open or a start into the burst that
+  succeeded and `BacklogOutcomeFfi.settled`; with none, a catch-up that
+  swept, was answered by every relay and was not cut by its deadline
+  (`MapShell.catchupCompleted`). `false` from a burst whose open failed or
+  whose backlog wait timed out; from a seal for the mesh alone; from the
+  foreground tick and from the one-shot publisher, neither of which receives
+  anything first; and from the Android service, whose cycle publishes
+  (step 8) before it fetches (step 9). The relay path was not reordered to
+  make any of these `true`.
+  **The burst's mesh-only pass** (§7.7 R1): a burst whose receive FAILED —
+  a catch-up that did not complete, or no session and none that could be
+  started, the open that found its session gone included — asks whether mesh
+  is on; if it is and the burst still owns the wake, each due circle is
+  sealed for the mesh alone, the fold is skipped and the burst closes. One
+  the foreground took back or whose consent was withdrawn seals nothing;
+  with mesh off, and without the flag, the burst is as it was. The failed
+  open is still told to the health model; nothing of a mesh-only seal is.
+  **Sharing stopped**: `BackgroundSharingNotifier.setEnabled(enabled:
+  false)` calls `mesh_sharing_stopped`, once.
+  **Not as the design has it.** The foreground says `false`, not
+  "`LiveLifecycleFfi.foreground`, `caught_up` decides" (design F.2): a
+  standing subscription is no receive of this drive answered to the end,
+  and a socket that dropped unseen would make that `true` wrong. The poll
+  build's foreground says `false` too: its receive timer and its publish
+  tick are separate drives. No mirror test pass is added (design I): the
+  flag is injected at both gates, so the default run covers both arms; the
+  one const the mesh's Dart code branches on is `liveSyncEnabled`, in a file
+  the existing flag-off pass already runs. A mesh-only pass also stops when
+  the foreground takes the engine back mid-pass, which the relay pass
+  deliberately does not. Design J's line numbers for the burst tests had
+  drifted; the tests are found by name.
+  **Not built here.** Anything on screen (the button, the sheet, the enable
+  flow, the notices): nothing calls `turnOn` outside a test, so mesh cannot
+  be turned on in any build. The bridge step after the fetch on Android. The
+  radio. The soak scenarios.
+
+Residuals of M2g-2a. A burst does not wait for its mesh drive (the owner's
+rule: the relay path never waits on the mesh), so a circle's own send can
+begin before the drive has taken a fellow member's update in; that update is
+not passed on by that burst and is dropped at its pause. **Owner decision
+open:** keep that, or have the burst await the drive — bounded local work,
+no relay — before its first seal, which makes passing on certain and holds
+the publish for it. Nothing is passed on from Android or from the
+foreground on either platform. A drive is a driven entry like the others: a
+teardown that shuts the pool or hands the session back waits for one in
+flight. A device with no circle eligible to publish arms no tick and drives
+the mesh at none, so what it carried is counted as passed on only at a later
+drive; the statistics sheet will need a drive of its own. The state is read
+at build and after its own entries; a deadline that passes is not pushed.
+`LocationSharingService.publishLocation` takes `received` with a default of
+`false`, the safe word, so its many test call sites need not say it; the
+driver and the circle service require it. Eight of the Dart files this step
+touched were not `dart format`-clean before it, and were left as they were
+outside the changed lines.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 
@@ -1843,9 +1940,6 @@ New:
 > mesh on the same location event also travels in mesh packets, which
 > outlive its `expiration` by design (Rule 17).
 
-Next: M2g-2 — the Dart side behind `HAVEN_MESH`: the provider and the calls
-to `mesh_start`, `mesh_resume`, `mesh_keep_on`, `mesh_stop`,
-`mesh_sharing_stopped`, `mesh_stats` and `mesh_drive_driven`; the burst
-coordinator's mesh-only seal; each drive's own word for `received`, with a
-bridge step after the fetch on the platform that publishes before it; and
-the soak rig's mesh plane with its two scenarios.
+Next: what M2g-2a left — the soak rig's mesh plane with its two scenarios,
+and, if Android is to pass anything on, a bridge step after its fetch; then
+M3, the radio, and with it everything on screen.

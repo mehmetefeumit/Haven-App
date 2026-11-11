@@ -175,6 +175,10 @@ Future<List<MemberLocation>> _withEffectiveNames(
 /// belongs to `locationPublishSchedulerProvider`.) Returns the number of
 /// circles published to.
 ///
+/// It receives nothing first, so no send here claims a relay receive that
+/// completed before it (`received` stays `false`): nothing the Bluetooth mesh
+/// brought is passed on to a relay from a one-shot.
+///
 /// ## Decorrelation (privacy)
 ///
 /// The circles are published SEQUENTIALLY, in a CSPRNG order, with a CSPRNG

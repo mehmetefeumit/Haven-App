@@ -7506,7 +7506,7 @@
       "title": "A location sealed for the Bluetooth mesh alone is sent to no relay by any call, and nothing is sealed for a mesh that is off",
       "statement": "A fix sealed for the mesh alone (Publishing::seal_for_mesh, the bridge's seal_location_for_mesh_driven) is recorded as mesh-only in the session, in the hold that seals it: the send that follows hands it to the mesh as the packet format no member passes on to a relay, sends it to no relay and answers MeshOnly, whatever its caller does with the event, and a process that did not seal it sends it nowhere. The seal itself calls no relay, makes no commit and drives nothing; every hold that holds a relay seal holds it. With mesh off — and, at the bridge, with no engine running to carry it — nothing is sealed and the engine is not asked. A mesh-only seal that reaches a relay, or a seal made with mesh off, falsifies this.",
       "status": "ratcheted",
-      "residual": "No caller exists yet: no background burst seals this way, so 'a burst that cannot receive publishes nothing' still describes every build. When one does (docs/BLUETOOTH_MESH_PLAN.md §7.7 R1) the fix is sealed at the last epoch the phone knows: a member removed by a commit the phone could not fetch, holding the old keys and within radio range, can read it until the phone next completes a receive; and each such seal spends one MLS message generation.",
+      "residual": "One caller exists, and only in a build with the HAVEN_MESH define, which no shipped build passes: an iOS background burst whose relay receive failed, with mesh on and the burst still owning the wake (BackgroundBurstCoordinator, docs/BLUETOOTH_MESH_PLAN.md §7.7 R1). A burst the foreground took back or whose consent was withdrawn, any such burst with mesh off, and every burst of a build without the define seal nothing: 'a burst that cannot receive publishes nothing' still describes those. A fix so sealed is sealed at the last epoch the phone knows: a member removed by a commit the phone could not fetch, holding the old keys and within radio range, can read it until the phone next completes a receive; and each such seal spends one MLS message generation.",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
@@ -7543,6 +7543,26 @@
         {
           "file": "haven/rust_builder/src/api.rs",
           "name": "with_mesh_off_every_entry_is_a_typed_no_op"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "a receive that failed, mesh on: each due circle is sealed for the mesh alone, the fold is skipped and the burst closes"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "the same receive, mesh off: nothing is published, as before"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "a burst whose consent was withdrawn seals nothing, mesh on"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "a burst the foreground took back seals nothing, mesh on"
+        },
+        {
+          "file": "haven/test/services/nostr_circle_service_test.dart",
+          "name": "a seal for the mesh alone takes the mesh-only seal, and only it"
         }
       ],
       "guards": []
@@ -7550,7 +7570,7 @@
     {
       "id": "INV-R-MESH-BRIDGE-TELLS-A-RELAY-A-MEMBER-IS-NEARBY-AND-OFFLINE",
       "title": "A passed-on mesh update tells the circle's relays that a member is offline and near the device that passed it on",
-      "statement": "With the Bluetooth mesh on, a fellow member's location this device took in by mesh is passed on to the circle's relays: that member's own sealed event, byte for byte, once; only behind this device's own location send of the same circle, to the relays that took it; only in a drive whose relay receive completed before the send, which is the caller's word (every caller says 'not received' today, so nothing is passed on yet); only an update the engine read for the first time from packets that all mark it as one a member may pass on; only while a location this device sealed at the same epoch could itself be sent; one attempt a relay, never retried, its answer read by nothing; at most one a member each 72 seconds, four a send, none begun once passing on has run for one send's time, and none later than 218 seconds after it was sealed. Those bounds are tested. What they do not hide is the accepted cost: the event arrives tens of seconds after its created_at and off this device's own rhythm, so a relay of the circle — and any subscriber of its routing id — can infer that some member of that circle is offline and within radio reach of this device's network address, and when the sender reaches the relay too, one event from two connections links their addresses.",
+      "statement": "With the Bluetooth mesh on, a fellow member's location this device took in by mesh is passed on to the circle's relays: that member's own sealed event, byte for byte, once; only behind this device's own location send of the same circle, to the relays that took it; only in a drive whose relay receive completed before the send, which is the caller's word (in Dart, 'received' only from an iOS background burst whose own relay receive was answered to the end — a backlog wait that settled behind an open or a start that succeeded, or, where no live plane exists, a catch-up that completed; 'not received' from every foreground tick and one-shot publish, which receive nothing first, from a seal for the mesh alone, and from the Android service, whose cycle publishes before it fetches — so nothing is passed on from Android or from the foreground; and no build without the HAVEN_MESH define, which no shipped build passes, has a mesh to bring anything); only an update the engine read for the first time from packets that all mark it as one a member may pass on; only while a location this device sealed at the same epoch could itself be sent; one attempt a relay, never retried, its answer read by nothing; at most one a member each 72 seconds, four a send, none begun once passing on has run for one send's time, and none later than 218 seconds after it was sealed. Those bounds are tested. What they do not hide is the accepted cost: the event arrives tens of seconds after its created_at and off this device's own rhythm, so a relay of the circle — and any subscriber of its routing id — can infer that some member of that circle is offline and within radio reach of this device's network address, and when the sender reaches the relay too, one event from two connections links their addresses.",
       "status": "accepted_deviation",
       "accepted_deviation_id": "MESH-BRIDGE",
       "assertion_arb_keys": [],
@@ -7598,6 +7618,30 @@
         {
           "file": "haven-core/tests/security_rule_gates.rs",
           "name": "the_bridge_sends_once_and_reads_no_answer"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "\"received\" behind an open whose backlog settled"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "\"not received\" when an endpoint stayed silent"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "\"not received\" behind an open that failed"
+        },
+        {
+          "file": "haven/test/providers/location_publish_scheduler_provider_test.dart",
+          "name": "a foreground tick says \"not received\" for every circle"
+        },
+        {
+          "file": "haven/test/providers/location_sharing_provider_test.dart",
+          "name": "the one-shot publisher says \"not received\": it fetched nothing first"
+        },
+        {
+          "file": "haven/test/services/background_location_task_mesh_test.dart",
+          "name": "every send says \"not received\": the cycle publishes before it fetches"
         }
       ],
       "guards": []
@@ -7607,7 +7651,7 @@
       "title": "The mesh engine and every packet it carries live in memory only, and the first entry after the twelve-hour deadline drops them",
       "statement": "The mesh engine's store, its per-packet records, its outbox and its queue of unread packets are never written to disk. One engine a process, reached only through with_mesh, which before every engine call checks the deadline and applies what the session left for the engine — an offer for as long as its event still has by the wall clock and never longer than a location lives, a purge at once. The engine's clock is read in Rust for every entry and never handed in by a caller: monotonic and counting the time the device sleeps (CLOCK_BOOTTIME on Android and Linux, CLOCK_MONOTONIC on Apple targets), so no change of the wall clock moves a packet's lifetime or the deadline. Nobody turns mesh off at its deadline; the first entry after it does, before it runs anything: the engine is dropped with every packet it held, and an entry that holds the session deletes every key. Turning mesh off, and deleting the identity, drop the engine first. The engine's lock is never held across an await. Persisting a packet, taking the engine's clock from a caller, or running the engine after its deadline falsifies this.",
       "status": "ratcheted",
-      "residual": "With no entry at all the engine sits in memory past its deadline — it can do nothing, since only an entry runs it — and is freed at the next entry or when the process ends; the keys then end by the session's own wall-clock paths. No test can show that the clock runs while a device sleeps: that rests on the platform's documented behaviour (clock_gettime(3) on Apple, clock_gettime(2) on Linux), and on any other target the clock may stop with the machine. No radio is built: nothing links the engine to another phone in any build, and no Dart code starts it.",
+      "residual": "With no entry at all the engine sits in memory past its deadline — it can do nothing, since only an entry runs it — and is freed at the next entry or when the process ends; the keys then end by the session's own wall-clock paths. No test can show that the clock runs while a device sleeps: that rests on the platform's documented behaviour (clock_gettime(3) on Apple, clock_gettime(2) on Linux), and on any other target the clock may stop with the machine. No radio is built: nothing links the engine to another phone in any build. Dart starts and resumes the engine only in a build with the HAVEN_MESH define, which no shipped build passes, and there nothing on screen turns mesh on yet.",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
@@ -7709,6 +7753,84 @@
         {
           "file": "haven/rust_builder/src/api.rs",
           "name": "the_mesh_entries_log_nothing_and_format_nothing"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-E-MESH-DART-SIDE-IS-BEHIND-THE-BUILD-FLAG-AND-BESIDE-THE-RELAY-PATH",
+      "title": "No Dart code calls a Bluetooth mesh entry unless the build has the HAVEN_MESH define, and what it calls there changes no relay send",
+      "statement": "The Dart side of the Bluetooth mesh is compiled behind const meshEnabled = bool.fromEnvironment('HAVEN_MESH'), off unless a build passes the define; no build script or workflow passes it. With it off no Dart code calls a mesh entry whatever is asked of the mesh — the service provider answers null and the Android service's isolate builds no mesh service — so mesh cannot be turned on, no mesh key is stored and nothing is passed on to a relay. With it on: the engine of a mesh an earlier process left on is resumed once a session, before any other entry made with that session; a mesh drive rides a foreground publish tick behind its relay publishes, an iOS background burst behind its relay receive and the Android service's cycle behind its relay fetch, and adds no wake of its own; what a drive read goes where a relay drive's replay goes, and where the map polls the relays the drive does not make it fetch; no relay send waits for a drive, and a drive that failed changes no relay link, its order or what it answers; turning background sharing off withdraws what waits to go out by mesh; and the mesh's Dart code writes no log line. A mesh entry called with the flag off, a relay publish that waits for or fails with a mesh drive, or a drive that makes the device ask a relay falsifies this.",
+      "status": "ratcheted",
+      "residual": "In a build with the define nothing on screen turns mesh on yet: the provider's turnOn has no caller outside tests. A burst does not wait for its mesh drive, so an update the drive takes in after that circle's own send is not passed on by that burst. A drive and a seal both take the one engine lock in Rust, and a teardown waits for a drive in flight as for every driven entry, so the session is never released under an engine call. A device with no circle eligible to publish arms no tick and drives the mesh at none. MapShell's handlers are not mounted host-side: that a burst is handed the mesh, and that the start-up reads the mesh state, are pinned from the source.",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#the-dart-side-behind-haven_mesh"
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/providers/mesh_provider.dart",
+          "symbol": "meshEnabled"
+        },
+        {
+          "file": "haven/lib/src/services/mesh_service.dart",
+          "symbol": "NostrMeshService"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/providers/mesh_provider_test.dart",
+          "name": "off: no mesh entry is called, whatever is asked of the mesh"
+        },
+        {
+          "file": "haven/test/providers/mesh_provider_test.dart",
+          "name": "on: the same asks reach the bridge — the proof above is not of a mesh nothing drives"
+        },
+        {
+          "file": "haven/test/providers/mesh_provider_test.dart",
+          "name": "gets its engine back when the state is first read, before any other entry, and once"
+        },
+        {
+          "file": "haven/test/lints/mesh_entries_behind_flag_test.dart",
+          "name": "the mesh service is built only behind the build flag"
+        },
+        {
+          "file": "haven/test/services/mesh_service_test.dart",
+          "name": "is resumed before the first entry of a session, and once for it"
+        },
+        {
+          "file": "haven/test/services/background_location_task_mesh_test.dart",
+          "name": "a build without the mesh calls no mesh entry"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "the burst's relay links, their order and what they answer are the same with the mesh unwired, off, on, failing and stalled"
+        },
+        {
+          "file": "haven/test/providers/location_publish_scheduler_provider_test.dart",
+          "name": "the tick's relay publishes are the same with the mesh absent, on, failing and stalled — and the next tick is not held"
+        },
+        {
+          "file": "haven/test/services/background_location_task_mesh_test.dart",
+          "name": "the cycle's relay work is the same with the mesh absent, on and failing, and a drive that failed is logged nowhere"
+        },
+        {
+          "file": "haven/test/services/location_sharing_mesh_test.dart",
+          "name": "goes exactly where a relay drive's replay goes"
+        },
+        {
+          "file": "haven/test/providers/location_sharing_provider_test.dart",
+          "name": "a mesh drive asks no relay for anything"
+        },
+        {
+          "file": "haven/test/providers/mesh_provider_test.dart",
+          "name": "withdraws what waits to go out by mesh, once"
+        },
+        {
+          "file": "haven/test/services/location_sharing_mesh_test.dart",
+          "name": "is logged naming no peer, circle or place — and no carrier"
         }
       ],
       "guards": []

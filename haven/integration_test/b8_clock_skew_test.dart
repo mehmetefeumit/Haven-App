@@ -1266,6 +1266,7 @@ _publishViaProductionPath({
       publish = await relayService.publishLocation(
         circle: alice.circleManager,
         sealed: sealed,
+        received: false,
       );
     }
   } on Object catch (e) {

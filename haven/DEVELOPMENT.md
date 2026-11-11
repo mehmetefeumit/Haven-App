@@ -88,6 +88,21 @@ flutter devices
 flutter run
 ```
 
+### Build-time flags
+
+Two compile-time defines choose code paths. Each is a Dart `const` read with
+`bool.fromEnvironment`, so it is fixed when the app is built — `flutter drive`
+does not pass it again — and is given with `--dart-define=<NAME>=<value>` on
+`flutter run`, `flutter build` or `flutter test`.
+
+| Define | Default | What it selects |
+|---|---|---|
+| `HAVEN_LIVE_SYNC` | `true` | The live-sync receive engine. `false` builds the retained short-poll receive path (`lib/src/providers/live_sync_provider.dart`). Every CI job that builds the app must state its value (`scripts/ci/check_live_sync_define_declared.sh`). |
+| `HAVEN_MESH` | `false` | The Dart side of the Bluetooth mesh (`lib/src/providers/mesh_provider.dart`, `docs/BLUETOOTH_MESH_PLAN.md`). Off, no Dart code calls a mesh entry. No build script or workflow passes it; there is no radio and nothing on screen for it yet, so `true` is for development only. |
+
+Unit tests reach both `HAVEN_MESH` builds without the define: the flag is
+read through `meshEnabledProvider`, which a test overrides.
+
 ### Build APK
 
 Debug builds need no map key — the map renders error tiles (this is expected):

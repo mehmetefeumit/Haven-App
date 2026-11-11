@@ -352,7 +352,12 @@ class _BurstPublisher implements BurstPublisher {
   }
 
   @override
-  Future<void> publishInBurst(Circle circle, BurstFix fix) async {
+  Future<void> publishInBurst(
+    Circle circle,
+    BurstFix fix, {
+    required bool received,
+    required bool meshOnly,
+  }) async {
     published.add(circle.displayName);
   }
 }
@@ -461,6 +466,45 @@ class _HealthHarness {
 }
 
 void main() {
+  group('the Bluetooth mesh in the shell', () {
+    // `MapShell`'s handlers are not mounted host-side; what each reaches is
+    // pinned from the source, as the burst's other collaborators are. What
+    // the coordinator and the notifier do with the mesh is driven in
+    // `background_burst_coordinator_test.dart` and `mesh_provider_test.dart`.
+    String flat(String method) => methodSource(
+      File('lib/src/pages/map_shell.dart').readAsStringSync(),
+      className: '_MapShellState',
+      method: method,
+    ).replaceAll(RegExp(r'\s+'), ' ');
+
+    test('a burst is handed the mesh behind its build flag, never the '
+        "bridge's own entries", () {
+      expect(
+        flat('_installBurstCoordinator'),
+        contains('mesh: ref.read(meshProvider.notifier),'),
+      );
+      final shell = File('lib/src/pages/map_shell.dart').readAsStringSync();
+      for (final entry in [
+        'meshStart(',
+        'meshResume(',
+        'meshKeepOn(',
+        'meshStop(',
+        'meshStats(',
+        'meshResetCounts(',
+        'meshSharingStopped(',
+        'meshDriveDriven(',
+        'sealLocationForMeshDriven(',
+      ]) {
+        expect(shell, isNot(contains(entry)), reason: entry);
+      }
+    });
+
+    test('the start-up reads the mesh state once the identity is resolved: '
+        'what brings back the engine of a mesh left on', () {
+      expect(flat('_runStartupTasks'), contains('..read(meshProvider);'));
+    });
+  });
+
   group('a live-sync-off burst', () {
     // Decision 244: with no live plane at all, a burst receives through the
     // flag-off catch-up and seals only once it completed; the coordinator's

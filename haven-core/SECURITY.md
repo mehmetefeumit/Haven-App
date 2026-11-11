@@ -499,8 +499,9 @@ device took in by mesh is passed on to the circle's relays (member bridging,
 owner decision D-7, `docs/BLUETOOTH_MESH_PLAN.md` §5.5;
 `Publishing::publish_location_and_bridge`, which the bridge's
 `publish_location_driven` calls with its caller's word on the drive's
-receive — `false` from every Dart caller today, so nothing is passed on
-yet). It is that member's own sealed event, byte
+receive — `true` only from an iOS background burst whose own relay receive
+was answered to the end, `false` from every other Dart caller; "Member
+bridging" below). It is that member's own sealed event, byte
 for byte; the mesh's ingress admits application messages alone, so no commit
 travels this way. It is sent only behind this device's own location send of
 the same circle, in the same call, and only to the relays that took that
@@ -1719,10 +1720,10 @@ Android service's resume claims `false` and only finishes.
     with the circles and inbox relays a foreground start takes, once the
     background-sharing consent has loaded, where a live session is wanted
     and the burst still owns the wake; it then waits out the backlog and
-    pauses as any burst does. A burst that cannot start one publishes nothing
-    (nothing is sealed before a receive has run; the seal for the Bluetooth
-    mesh alone, which would be the one exception, has no caller — "The
-    mesh-only seal" below) and reports it to the
+    pauses as any burst does. A burst that cannot start one sends no relay
+    anything (nothing is sealed for a relay before a receive has run; in a
+    build with the Bluetooth mesh, and with mesh on, it seals for the mesh
+    alone — "The mesh-only seal" below) and reports it to the
     sharing-health model as a failed open, which raises the existing
     lost-subscription fault (`background_burst_coordinator_test.dart`); one
     the foreground took back, or whose consent was withdrawn, meanwhile,
@@ -3290,12 +3291,16 @@ twelve hours later.
 (`haven-core/src/mesh/`, `nostr/mls/manager/mesh.rs`) and the bridge
 (`haven/rust_builder/src/api.rs`, "Bluetooth mesh FFI") are built and tested.
 The radio is not: no code links the engine to another phone, so no packet
-leaves or reaches a device in any build. No Dart code calls a mesh entry yet
-either, so in a shipped build mesh cannot be turned on, no key below is ever
-stored, and member bridging passes nothing on (the one Dart caller of the
-location send says "not received"). This section states what the built parts
-guarantee when they are driven; the privacy cost of the radio itself is the
-plan's §0.4 and §8.1, and is owed here when the radio lands.
+leaves or reaches a device in any build. The Dart side is built behind the
+compile-time define `HAVEN_MESH`, which is off unless a build passes it and
+which no build script or workflow passes ("The Dart side" below): in a
+shipped build no Dart code calls a mesh entry, so mesh cannot be turned on,
+no key below is ever stored and member bridging passes nothing on. In a
+build with the define, nothing on screen turns mesh on yet either — the
+button is not built — so the same holds there until something calls the
+provider's `turnOn`. This section states what the built parts guarantee when
+they are driven; the privacy cost of the radio itself is the plan's §0.4 and
+§8.1, and is owed here when the radio lands.
 
 #### Keys at rest while mesh is on
 
@@ -3479,22 +3484,39 @@ member passes on, sends it to no relay and answers `MeshOnly`, whatever its
 caller does with the event. Every hold that holds a relay seal holds this
 one. The bridge seals nothing unless an engine runs to carry it.
 
-No caller exists: no burst seals this way yet, so "a burst that cannot
-receive publishes nothing" still describes every build. When a burst does,
-the cost is the plan's: the fix is sealed at the last epoch the phone knows,
+One caller exists, in a build with `HAVEN_MESH`: the iOS background burst
+(`BackgroundBurstCoordinator._sealedForMeshAlone`). A burst whose relay
+receive FAILED — where no live plane exists, a catch-up that did not
+complete; where one exists, no session and none that could be started —
+asks whether mesh is on, and if it is, and the burst still owns the wake,
+seals each due circle for the mesh alone, skips the maintenance fold and
+closes as any burst does. A burst the foreground took back, or whose consent
+was withdrawn, seals nothing, mesh on or off; so does every such burst with
+mesh off, and in a build without the define: "a burst that cannot receive
+publishes nothing" still describes those. A live build's burst whose open
+failed while a session exists publishes to the relays as before. No seal for
+the mesh alone is begun once the foreground has the engine back or consent
+is withdrawn, and nothing of one — a hold and a failure included — reaches
+the sharing-health model: no relay was asked.
+
+The cost is the plan's: the fix is sealed at the last epoch the phone knows,
 so a member removed by a commit it could not fetch can read it within radio
 range until the phone next completes a receive; each such seal spends one MLS
-message; and it reverses that sentence for the mesh carrier.
+message; and it reverses "nothing is sealed before a receive has run" for the
+mesh carrier.
 
-Proof: `haven-core/tests/mesh_only_e2e.rs` (T-BG-2).
+Proof: `haven-core/tests/mesh_only_e2e.rs` (T-BG-2);
+`haven/test/services/background_burst_coordinator_test.dart`, group "a burst
+that could not receive seals for the mesh alone (R1)".
 
 #### Member bridging
 
 Stated under "The fanout driver" above, with its bounds. The bridge's
 `publish_location_driven` takes the caller's word, `received`, that this
 drive's relay receive of the circle completed before the send; a caller that
-publishes before it fetches says `false` and passes nothing on, and the one
-Dart caller says `false` today. Passing on runs after this device's own send
+publishes before it fetches says `false` and passes nothing on. What each
+Dart caller says is under "The Dart side" below: `true` from one path only.
+Passing on runs after this device's own send
 and has one send's time (10 s) to itself: no send is begun once that has run,
 so a relay that took the own send and withholds its answer on what is passed
 on costs one wait, not one for each update, and passing on adds under two
@@ -3520,6 +3542,82 @@ address never touches the relay. Registered as the accepted deviation
 Residual. Which drive a send belongs to is the caller's word; the session can
 only say that its last fetch of the circle completed and nothing has ended it
 since.
+
+#### The Dart side, behind `HAVEN_MESH`
+
+`const meshEnabled = bool.fromEnvironment('HAVEN_MESH')`
+(`haven/lib/src/providers/mesh_provider.dart`), off unless a build passes
+`--dart-define=HAVEN_MESH=true`. Every Dart call of a mesh entry sits behind
+it, at two gates: `meshServiceProvider` answers `null` with the flag off, and
+the Android foreground service's isolate, which has no provider container,
+builds its mesh service only under the same const. The bridge's free mesh
+entries are named in `mesh_service.dart` alone and its two driven ones in
+`nostr_relay_service.dart` alone
+(`test/lints/mesh_entries_behind_flag_test.dart`); with the flag off nothing
+reaches the bridge whatever is asked of the mesh
+(`mesh_provider_test.dart`, "off: no mesh entry is called, whatever is asked
+of the mesh"; `background_location_task_mesh_test.dart`, "a build without
+the mesh calls no mesh entry").
+
+- **Resume.** `NostrMeshService` asks `mesh_resume` before the first entry it
+  makes with a session, once a session — keyed weakly on the manager handle,
+  so nothing here keeps a handle reachable past its owner's release (Rule
+  14). The app reads the mesh state when its shell starts with a resolved
+  identity, which is what brings back the engine of a mesh an earlier process
+  left on; the Android service's isolate resumes at the first drive of the
+  session it opened. The WorkManager catch-up worker makes no mesh call: it
+  is the process "that owns the session and never runs the engine" above.
+- **The drive** rides three wakes and adds none: a foreground publish tick,
+  once that tick's relay publishes are made; an iOS background burst, behind
+  the burst's relay receive (a burst that seals for the mesh alone included);
+  and the Android service's cycle, behind its relay fetch. What a drive read
+  goes where a relay drive's replay goes — the store row Rust already wrote,
+  the cache, the receive-liveness stamp and the clock check
+  (`location_sharing_mesh_test.dart`, "goes exactly where a relay drive's
+  replay goes") — and where the map polls the relays it is not told, since
+  telling it would ask them (`location_sharing_provider_test.dart`, "a mesh
+  drive asks no relay for anything", run under both receive paths).
+- **No relay send waits on it.** In the foreground and in a burst the drive
+  is started and not awaited: one that fails, or is still running, changes
+  no relay link, its order or what it answers
+  (`background_burst_coordinator_test.dart`, "the burst's relay links, their
+  order and what they answer are the same with the mesh unwired, off, on,
+  failing and stalled"; `location_publish_scheduler_provider_test.dart`,
+  "the tick's relay publishes are the same with the mesh absent, on, failing
+  and stalled"). The Android cycle awaits its drive, after its publishes and
+  its fetch and before it closes the pool; a drive that failed changes
+  nothing of that cycle's relay work
+  (`background_location_task_mesh_test.dart`). Two things still join the
+  two: both go through the one engine lock in Rust, so a seal can wait there
+  for a mesh ingest that holds it; and the drive is a driven entry like the
+  others, so a teardown that shuts the pool or hands the session back waits
+  for one in flight — the session is never released under an engine call.
+- **`received`, per caller.** `true` only from an iOS background burst, and
+  only for a relay receive of that burst with a typed answer: with a live
+  plane, an open or a start into the burst that succeeded and a backlog wait
+  that answered `Settled`; with none, a catch-up that swept, was answered by
+  every relay and was not cut by its deadline. `false` when the open failed
+  or an endpoint stayed silent, from a seal for the mesh alone, from every
+  foreground tick and every one-shot publish (neither receives first), and
+  from the Android service, whose cycle publishes before it fetches. So on
+  Android, and in the foreground on both platforms, nothing the mesh brought
+  is passed on to a relay.
+- **Sharing stopped.** Turning background sharing off
+  (`BackgroundSharingNotifier.setEnabled(enabled: false)`) calls
+  `mesh_sharing_stopped` once.
+- **Logs.** The mesh's Dart code writes no log line, and a location the mesh
+  brought is logged by the shared ingest under a name that names no carrier
+  (`location_sharing_mesh_test.dart`, "is logged naming no peer, circle or
+  place — and no carrier").
+
+Residuals. A burst does not wait for its mesh drive, so a circle's own send
+can begin before the drive has taken a fellow member's update in; that update
+is then not passed on by that burst, and what was kept is dropped at the
+burst's pause. A device with no circle eligible to publish arms no tick, so
+it drives the mesh at none: what it carried is counted as passed on only at
+its next drive. The state the provider holds is read when it is built and
+after each of its own entries; a deadline that passes is seen at the next
+read, not pushed.
 
 #### Statistics, and what crosses the bridge
 

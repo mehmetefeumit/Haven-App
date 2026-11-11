@@ -406,16 +406,25 @@ class LocationSharingService {
   /// [nostrGroupId] is the circle's PUBLIC `#h` value (never the real MLS
   /// group id, Security Rule 4) and keys the delivery-health record; it never
   /// reaches the wire from here.
+  ///
+  /// [received] is the caller's word that this drive's relay receive of the
+  /// circle was answered to the end before this call
+  /// ([CircleService.publishSealedLocation]); a caller that cannot point to
+  /// that receive leaves it `false`. [meshOnly] seals for the Bluetooth mesh
+  /// alone ([CircleService.sealLocation]).
   Future<LocationPublishOutcome> publishLocation({
     required List<int> mlsGroupId,
     required List<int> nostrGroupId,
     required double latitude,
     required double longitude,
+    bool received = false,
+    bool meshOnly = false,
   }) async {
     final seal = await _circleService.sealLocation(
       mlsGroupId: mlsGroupId,
       latitude: latitude,
       longitude: longitude,
+      meshOnly: meshOnly,
     );
     await _ingestSealReplay(mlsGroupId, seal.replayed);
     final LocationSealed sealed;
@@ -428,7 +437,10 @@ class LocationSharingService {
       case LocationSealed():
         sealed = seal;
     }
-    final publish = await _circleService.publishSealedLocation(sealed);
+    final publish = await _circleService.publishSealedLocation(
+      sealed,
+      received: received,
+    );
     // Reported to the detector before it is returned: every caller drops the
     // verdict once it has fed the health model, and a relay's "your timestamp
     // is out of range" must reach the clock banner.
@@ -479,10 +491,23 @@ class LocationSharingService {
     if (circle == null) return;
     await _ingestResults(
       circle: circle,
-      circleKey: _circleKey(circle),
       results: results,
       ownPubkeyHex: await _resolveOwnPubkey(),
       origin: '[LocationService] seal',
+    );
+  }
+
+  /// Takes in what a drive that asked no relay handed back — the Bluetooth
+  /// mesh's — through the funnel a poll's results take, each under the
+  /// circle its own group id names. Answers how many peer locations it
+  /// stored.
+  Future<int> ingestReplayed(List<LocationEventResult> results) async {
+    if (results.isEmpty) return 0;
+    return _ingestResults(
+      results: results,
+      ownPubkeyHex: await _resolveOwnPubkey(),
+      // Names no carrier: nothing of the mesh is logged.
+      origin: '[LocationService] replay',
     );
   }
 
@@ -735,11 +760,10 @@ class LocationSharingService {
   /// results are unrelated to it, and the caller has already marked the event
   /// seen.
   Future<int> _ingestResults({
-    required Circle circle,
-    required String circleKey,
     required List<LocationEventResult> results,
     required String? ownPubkeyHex,
     required String origin,
+    Circle? circle,
   }) async {
     // One lookup per distinct foreign group per batch (normally zero).
     final resolved = <String, Circle?>{};
@@ -817,11 +841,11 @@ class LocationSharingService {
   /// "ambient" shortcut here: every result is routed by its own id.
   Future<Circle?> _circleForResult(
     List<int> mlsGroupId,
-    Circle ambient,
+    Circle? ambient,
     Map<String, Circle?> memo,
   ) async {
     final key = _hexId(mlsGroupId);
-    if (key == _hexId(ambient.mlsGroupId)) return ambient;
+    if (ambient != null && key == _hexId(ambient.mlsGroupId)) return ambient;
     if (memo.containsKey(key)) return memo[key];
     Circle? found;
     try {
@@ -1195,7 +1219,6 @@ class LocationSharingService {
 
         newEvents += await _ingestResults(
           circle: circle,
-          circleKey: circleKey,
           results: results,
           ownPubkeyHex: ownPubkeyHex,
           origin: '[LocationService] evt=${_evtHandle(eventId)}',
@@ -1692,7 +1715,6 @@ class LocationSharingService {
         // short-circuits the decrypt-and-persist work.
         if (await _ingestResults(
               circle: circle,
-              circleKey: circleKey,
               results: results,
               ownPubkeyHex: ownPubkeyHex,
               origin: '[EvolutionPoller] evt=${_evtHandle(eventId)}',

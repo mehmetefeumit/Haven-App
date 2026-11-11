@@ -1864,6 +1864,7 @@ void _publishResolutionTests() {
       await expectLater(
         t.service.publishSealedLocation(
           LocationSealed(FakeSealedLocation(), replayed: const []),
+          received: false,
         ),
         throwsA(
           isA<CircleServiceException>().having(
@@ -1880,12 +1881,78 @@ void _publishResolutionTests() {
         ..assertNoNeedles([_hexOf(groupId), 'wss://x']);
     });
 
+    test('a seal for the mesh alone takes the mesh-only seal, and only it',
+        () async {
+      // Plan §7.7 R1: a seal that calls no relay and drives nothing. Taking
+      // the ordinary seal here would send a pending commit again and settle
+      // records from a burst that could reach no relay.
+      final t = build();
+      final sealed = FakeSealedLocation();
+      t.driver.sealOutcome = SealOutcomeFfi(
+        sealed: sealed,
+        replayed: const [],
+        errored: false,
+      );
+
+      final made = await t.service.sealLocation(
+        mlsGroupId: groupId,
+        latitude: 1.5,
+        longitude: -2.5,
+        meshOnly: true,
+      );
+
+      expect(t.driver.calls, ['sealLocationForMesh']);
+      expect((made as LocationSealed).sealed, same(sealed));
+      expect(t.driver.sealedFixes.single, (latitude: 1.5, longitude: -2.5));
+      expect(t.driver.groupIds.single, groupId);
+
+      // Held — the mesh off included — is a hold like any other.
+      t.driver.sealOutcome = const SealOutcomeFfi(
+        heldBy: SendHeldFfi.nothing,
+        replayed: [],
+        errored: false,
+      );
+      expect(
+        await t.service.sealLocation(
+          mlsGroupId: groupId,
+          latitude: 1,
+          longitude: 2,
+          meshOnly: true,
+        ),
+        isA<LocationSendHeld>(),
+      );
+    });
+
+    test('an ordinary seal never takes the mesh-only seal', () async {
+      final t = build();
+
+      await t.service.sealLocation(
+        mlsGroupId: groupId,
+        latitude: 1,
+        longitude: 2,
+      );
+
+      expect(t.driver.calls, ['sealLocation']);
+    });
+
+    test("a send carries its caller's word on the receive to the driver",
+        () async {
+      final t = build();
+      final seal = LocationSealed(FakeSealedLocation(), replayed: const []);
+
+      await t.service.publishSealedLocation(seal, received: false);
+      await t.service.publishSealedLocation(seal, received: true);
+
+      expect(t.driver.publishReceived, [false, true]);
+    });
+
     test("a sealed location's one send is the driver's answer", () async {
       final t = build()..driver.publishAnswer = LocationPublishFfi.clockBehind;
 
       expect(
         await t.service.publishSealedLocation(
           LocationSealed(FakeSealedLocation(), replayed: const []),
+          received: false,
         ),
         LocationPublishFfi.clockBehind,
       );
