@@ -15,11 +15,13 @@
 
 mod helpers;
 
+use chrono::Timelike as _;
 use haven_core::mesh::engine::{CircleSlot, Config, MeshEngine};
 use haven_core::mesh::event::rebuild;
 use haven_core::mesh::handoff::{Handoff, Op};
 use haven_core::mesh::packet::{cover_packet, open, MeshKey, Packet};
 use haven_core::nostr::mls::types::GroupId;
+use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::fanout::scripted::{Answer, LocationAnswer, ScriptedFanout};
 use haven_core::relay::fanout::{
     DriveMode, EvolutionStatus, LeaveStatus, LocationPublish, Publishing, LOCATION_SEND_MS,
@@ -570,12 +572,15 @@ async fn a_relay_is_sent_the_same_frames_with_mesh_on_and_off() {
             mode: &FULL,
         };
         for _ in 0..2 {
+            // To the whole second: a location's JSON is as long as the
+            // digits of its instants, and whether those end in zeros is
+            // chance, not something a relay is sent for mesh being on.
+            let mut fix = haven_core::location::LocationMessage::new(51.5, -0.12);
+            for instant in [&mut fix.timestamp, &mut fix.expires_at] {
+                *instant = instant.with_nanosecond(0).expect("a whole second");
+            }
             let outcome = driver
-                .seal_location(
-                    &admin.circle,
-                    &group,
-                    &haven_core::location::LocationMessage::new(51.5, -0.12),
-                )
+                .seal_location(&admin.circle, &group, &fix)
                 .await
                 .expect("the seal runs");
             let haven_core::relay::fanout::LocationSeal::Sealed { event, .. } = outcome.seal else {
@@ -705,4 +710,45 @@ async fn a_send_installs_a_missed_key_in_memory_and_the_next_batch_saves_it() {
         rows(&admin, &group).len() == 1 && rows(&admin, &group)[0].0 == at,
         "the key a send installed was not saved by the next engine batch",
     );
+}
+
+/// What silences a circle inside a send's hold, after its check.
+type MidCheck = Box<dyn FnOnce(&SessionManager) + Send>;
+
+/// A circle is silenced with no engine hold — sharing stopped, a leave
+/// asked, fetched input held. One silenced after a send's check began and
+/// before the send's key sync read the circle's turn is handed nothing by
+/// that send: the location was sealed before the circle fell silent. The
+/// relay send is made all the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_circle_silenced_while_a_send_checked_is_handed_nothing_by_that_send() {
+    let (admin, _others, group) = split(setup_circle(2, &[ONE]).await);
+    mesh_on(&admin).await;
+    let transport = ScriptedFanout::default();
+    let (outbox, clock) = (Recorder::acking(true), ManualClock::at(0));
+    let driver = through(&transport, &outbox, &clock, &FULL);
+    let held = group.clone();
+    let silences: [(MidCheck, usize); 3] = [
+        // Nothing falls silent: the send is handed off.
+        (Box::new(|_| {}), 1),
+        (Box::new(SessionManager::mesh_sharing_stopped), 0),
+        (
+            Box::new(move |session| session.hold_pager_commits_for_test(&held, &[])),
+            0,
+        ),
+    ];
+    for (silence, handed_off) in silences {
+        let event = sealed(&driver, &admin, &group).await;
+        let _ = waiting(&admin);
+        admin.session().after_send_check_for_test(silence);
+        assert!(matches!(
+            driver.publish_location(&admin.circle, &event).await,
+            LocationPublish::Sent(Ok(_))
+        ));
+        assert!(
+            offered(&admin).len() == handed_off,
+            "a send handed the mesh a location of a circle silenced while it checked, or \
+             handed it nothing with no circle silenced"
+        );
+    }
 }

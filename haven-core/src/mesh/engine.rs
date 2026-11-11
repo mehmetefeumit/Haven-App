@@ -339,7 +339,7 @@ impl Bucket {
 
 /// How a link got its slot.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
+enum Via {
     Incoming,
     /// Outgoing, chosen by signal strength.
     Nearest,
@@ -402,7 +402,7 @@ struct Link {
     /// when: reached through this link until its `HELLO` value changes or
     /// [`Config::rotate_ms`] has passed.
     alias: Option<(PeerRef, u64)>,
-    kind: Kind,
+    kind: Via,
     up_ms: u64,
     size: FrameSize,
     phase: Phase,
@@ -439,7 +439,7 @@ struct Peer {
 
 struct Attempt {
     peer: PeerRef,
-    kind: Kind,
+    kind: Via,
     since_ms: u64,
 }
 
@@ -961,7 +961,7 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
 
     fn count(&self, incoming: bool) -> usize {
         self.live()
-            .filter(|link| (link.kind == Kind::Incoming) == incoming)
+            .filter(|link| (link.kind == Via::Incoming) == incoming)
             .count()
     }
 
@@ -980,7 +980,7 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
                 if self.count(false) >= self.config.max_outgoing {
                     return false;
                 }
-                attempt.map_or(Kind::Nearest, |attempt| attempt.kind)
+                attempt.map_or(Via::Nearest, |attempt| attempt.kind)
             }
             Role::Peripheral => {
                 let (rate, burst) = (self.config.inbound_per_min, self.config.inbound_burst);
@@ -989,7 +989,7 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
                 {
                     return false;
                 }
-                Kind::Incoming
+                Via::Incoming
             }
         };
         let Some(slot) = self.links.iter().position(Option::is_none) else {
@@ -1560,7 +1560,7 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
     fn rotate(&mut self) {
         let (now, turn) = (self.now_ms, self.config.rotate_ms);
         let aged = |link: &Link| now.saturating_sub(link.up_ms) >= turn;
-        let slots_of = |links: &[Option<Link>], kind: Kind| -> Vec<usize> {
+        let slots_of = |links: &[Option<Link>], kind: Via| -> Vec<usize> {
             (0..links.len())
                 .filter(|&s| {
                     links
@@ -1571,7 +1571,7 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
                 .collect()
         };
 
-        let random = slots_of(&self.links, Kind::Random);
+        let random = slots_of(&self.links, Via::Random);
         let due = random
             .first()
             .filter(|&&s| self.links.get(s).and_then(Option::as_ref).is_some_and(aged));
@@ -1581,7 +1581,7 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
             }
         }
 
-        let incoming = slots_of(&self.links, Kind::Incoming);
+        let incoming = slots_of(&self.links, Via::Incoming);
         let all_aged = incoming
             .iter()
             .all(|&s| self.links.get(s).and_then(Option::as_ref).is_some_and(aged));
@@ -1611,23 +1611,23 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         else {
             return;
         };
-        let nearest = self.live().filter(|l| l.kind == Kind::Nearest).count();
-        let random = self.live().any(|l| l.kind == Kind::Random);
+        let nearest = self.live().filter(|l| l.kind == Via::Nearest).count();
+        let random = self.live().any(|l| l.kind == Via::Random);
         let outgoing = self.count(false);
         let limit = self.config.max_outgoing;
 
         if nearest < limit.saturating_sub(1) {
-            self.connect(best, Kind::Nearest);
+            self.connect(best, Via::Nearest);
         } else if !random && outgoing < limit {
             let pick = self.rng.gen_range(0..candidates.len());
             if let Some(&(peer, _)) = candidates.get(pick) {
-                self.connect(peer, Kind::Random);
+                self.connect(peer, Via::Random);
             }
         } else if let Some((slot, rssi)) = self.weakest_nearest() {
             let margin = i16::from(self.config.rssi_hysteresis);
             if i16::from(best_rssi) >= i16::from(rssi) + margin {
                 self.end(slot, End::Bye);
-                self.connect(best, Kind::Nearest);
+                self.connect(best, Via::Nearest);
             }
         }
     }
@@ -1641,12 +1641,12 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
                 let link = self.links.get(slot)?.as_ref()?;
                 let known = self.peers.get(&link.peer?)?;
                 let fresh = known.seen_ms.saturating_add(self.config.sighting_ttl_ms) > now;
-                (link.kind == Kind::Nearest && fresh).then_some((slot, known.rssi))
+                (link.kind == Via::Nearest && fresh).then_some((slot, known.rssi))
             })
             .min_by_key(|&(_, rssi)| rssi)
     }
 
-    fn connect(&mut self, peer: PeerRef, kind: Kind) {
+    fn connect(&mut self, peer: PeerRef, kind: Via) {
         self.connecting = Some(Attempt {
             peer,
             kind,

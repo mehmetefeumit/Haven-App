@@ -126,7 +126,7 @@ use cgka_traits::transport::EncryptedPayload;
 mod mesh;
 
 use self::mesh::MeshKeys;
-pub use self::mesh::{MeshKeyStore, StoredMeshKey, MESH_ON_MAX_MS};
+pub use self::mesh::{MeshDrive, MeshKeyStore, MeshPacket, StoredMeshKey, MESH_ON_MAX_MS};
 
 // `redact_hex_sequences` lives in the neutral `crate::util` module. Re-exported
 // here so every `crate::nostr::mls::redact_hex_sequences` caller (circle/error,
@@ -3119,6 +3119,42 @@ impl SessionManager {
         Ok((ScreenedIngest::Ingested(ingested), recorded))
     }
 
+    /// One event a mesh packet carried, into the engine:
+    /// [`Self::process_event_staging`] in the mode that makes nothing, and
+    /// never in the full one. Nothing a mesh packet leads to is committed,
+    /// and the stall detector, which a full drive's ingest alone feeds, sees
+    /// none of it: a packet is replayed by anyone in radio range, and must
+    /// not arm a history walk. The caller has verified the event and found
+    /// it an application message of an epoch this device holds the key of
+    /// ([`Self::mesh_read`]).
+    ///
+    /// Returns whether the engine took the event in ([`Self::took_in`]) and
+    /// the batch of the hold. A proposal the hold recorded keeps its stored
+    /// record, which the next relay drive sends.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::process_event`]; the event is then not taken in.
+    pub(crate) async fn ingest_from_mesh(
+        &self,
+        event: &Event,
+        now_ms: u64,
+    ) -> Result<(bool, SessionEffects)> {
+        self.mesh_ingesting();
+        let still = Still::always(&DriveMode::FinishOnly);
+        let (screened, _) = self.process_event_staging(event, now_ms, still).await?;
+        Ok(match screened {
+            ScreenedIngest::Ingested(ingested) => {
+                let kept = Self::kept(&ingested);
+                #[cfg(any(test, feature = "test-utils"))]
+                let kept = kept && !self.mesh_ingest_unkept_for_test();
+                (kept, ingested.effects)
+            }
+            // Never taken in, however often it is offered.
+            ScreenedIngest::RejectedBeforeAuth(_) => (true, empty_effects()),
+        })
+    }
+
     /// `events`, one circle's stored `kind:445`s, in the order the engine is
     /// to take them in, each with its [`IngestClass`]: ascending
     /// `(created_at, id)`, then every proposal at the circle's current epoch
@@ -3192,17 +3228,8 @@ impl SessionManager {
         if event.content == ORDER_PANIC_FOR_TEST {
             panic!("injected classification panic (test seam)");
         }
-        let Ok(msg) = Self::event_to_transport_message(event) else {
-            return IngestClass::Other;
-        };
-        let Ok(peeled) = self.preview_peeler.peel_group_message(&msg, ctx).await else {
-            return IngestClass::Other;
-        };
-        let PeeledContent::MlsMessage { bytes } = peeled.content else {
-            return IngestClass::Other;
-        };
-        match project_mls_message(&bytes) {
-            Ok(projection) if projection.source_epoch == Some(epoch) => match projection.kind {
+        match self.projected(event, ctx).await {
+            Some((kind, Some(source_epoch))) if source_epoch == epoch => match kind {
                 OpenMlsContentKind::Proposal => IngestClass::Proposal,
                 OpenMlsContentKind::Commit => IngestClass::Commit,
                 OpenMlsContentKind::Application
@@ -3211,6 +3238,82 @@ impl SessionManager {
             },
             _ => IngestClass::Other,
         }
+    }
+
+    /// The kind and source epoch of the MLS message `event` carries, peeled
+    /// under `ctx`'s exporter secret and dropped at once; `None` when it
+    /// does not peel or parse.
+    async fn projected(
+        &self,
+        event: &Event,
+        ctx: &GroupContextSnapshot,
+    ) -> Option<(OpenMlsContentKind, Option<u64>)> {
+        let msg = Self::event_to_transport_message(event).ok()?;
+        let peeled = self.preview_peeler.peel_group_message(&msg, ctx).await;
+        let PeeledContent::MlsMessage { bytes } = peeled.ok()?.content else {
+            return None;
+        };
+        let projection = project_mls_message(&bytes).ok()?;
+        Some((projection.kind, projection.source_epoch))
+    }
+
+    /// Whether `event` is an application message of `epoch`, the epoch
+    /// `exporter` is the group-event secret of: what the mesh ingress asks
+    /// before the engine sees a packet's event (plan §4.3). A commit or a
+    /// proposal a member wrapped is not one — taken in ahead of its proposal
+    /// a commit is dropped for good (T-COMMIT-BEFORE-PROPOSAL) — and neither
+    /// is a message of another epoch, which the engine would buffer without
+    /// bound (Security Rule 12). One that does not peel or parse, or whose
+    /// parse panics, is none.
+    ///
+    /// The secret is moved into a snapshot dropped before this returns
+    /// (Rule 7), under the fixed label (Rule 11).
+    async fn is_application_at(&self, event: &Event, epoch: u64, exporter: &[u8; 32]) -> bool {
+        let mut secrets = HashMap::new();
+        secrets.insert(DEFAULT_EXPORTER_LABEL.to_string(), exporter.to_vec());
+        let ctx = GroupContextSnapshot::new(EpochId(epoch), secrets, None);
+        let peel = std::panic::AssertUnwindSafe(self.projected(event, &ctx));
+        let projected = futures::FutureExt::catch_unwind(peel).await;
+        matches!(
+            projected,
+            Ok(Some((OpenMlsContentKind::Application, Some(source_epoch))))
+                if source_epoch == epoch
+        )
+    }
+
+    /// Reads the mesh packets `taken` (plan §5.2): each is tried under every
+    /// key of the ring, the event one carried is rebuilt and verified, and
+    /// only an application message of the very epoch its key is of is kept
+    /// for the engine ([`Self::is_application_at`]) — all before the engine
+    /// sees anything. `drive` is told of every packet settled here: one no
+    /// key opened, one whose event fails any of this, a second packet of an
+    /// event already held, one a circle's quota pushed out.
+    ///
+    /// The ring is brought in line with the engine first, in one hold, so a
+    /// deadline that has passed opens nothing.
+    ///
+    /// Returns, for each circle, the events to offer the engine now: what it
+    /// holds from this drive and from earlier ones, oldest first.
+    pub(crate) async fn mesh_read(
+        &self,
+        taken: Vec<MeshPacket>,
+        drive: &mut MeshDrive,
+    ) -> Vec<(GroupId, Vec<Event>)> {
+        {
+            let session = self.reading().await;
+            let circles = session.live_group_ids().unwrap_or_default();
+            self.sync_mesh_circles(&*session, &circles);
+        }
+        for packet in &taken {
+            let Some(opened) = self.mesh_opened(packet, drive) else {
+                continue;
+            };
+            let update = self
+                .is_application_at(&opened.event, opened.epoch, &opened.exporter)
+                .await;
+            self.mesh_keep(opened, update, drive);
+        }
+        self.mesh_due()
     }
 
     /// [`Self::order_for_ingest`], the events alone.
@@ -3942,12 +4045,18 @@ impl SessionManager {
                     .has_processed_transport_id(id)
                     .unwrap_or(false)
             },
-            |ingested| match ingested.outcome {
-                IngestOutcome::ResourceRefused { .. } => false,
-                IngestOutcome::Ignored { .. } => true,
-                _ => !ingested.left_object_unpersisted,
-            },
+            Self::kept,
         )
+    }
+
+    /// Whether the engine's answer to an ingest says it holds the event:
+    /// anything but a want of room.
+    const fn kept(ingested: &IngestEffects) -> bool {
+        match ingested.outcome {
+            IngestOutcome::ResourceRefused { .. } => false,
+            IngestOutcome::Ignored { .. } => true,
+            _ => !ingested.left_object_unpersisted,
+        }
     }
 
     /// What every ingest funnel notes of an event once the engine answered
@@ -4747,6 +4856,10 @@ impl SessionManager {
             .find(|row| row.message_id() == message)
             .and_then(|row| Some((row, row.application_message()?)))
             .map(|(row, application)| {
+                // Before the check: a circle silenced while it runs — a
+                // leave asked, fetched input held, with no engine hold — is
+                // then handed nothing by this send.
+                let silences = self.mesh_silences();
                 let may_be_sent = sealed_here
                     && self.location_may_be_sent(
                         &mut session,
@@ -4766,7 +4879,7 @@ impl SessionManager {
                     expires_at_secs: location_expiry_secs(row),
                     may_be_sent,
                     mesh_turn: may_be_sent
-                        .then(|| self.mesh_turn(&*session, &application.group_id, now_ms))
+                        .then(|| self.mesh_turn(&*session, &application.group_id, now_ms, silences))
                         .flatten(),
                 }
             });
@@ -10743,10 +10856,13 @@ impl SessionManager {
 
     /// Installs the store the mesh keys are kept in and restores what an
     /// earlier process kept, if mesh is still on; with mesh off, stored keys
-    /// an earlier process left are deleted.
+    /// an earlier process left are deleted, and so are those of a circle
+    /// whose row is gone.
     pub(crate) fn install_mesh_keys(&mut self, at_rest: Arc<dyn MeshKeyStore>) {
         let now_ms = self.legacy_now_ms();
-        self.mesh_keys.install(at_rest, now_ms);
+        let notes = Arc::clone(&self.commit_notes);
+        let stands = |group: &GroupId| notes.circle_stands(group) == Some(true);
+        self.mesh_keys.install(at_rest, now_ms, &stands);
     }
 
     /// Turns the Bluetooth mesh's keys on until `until_ms`, wall-clock
@@ -12482,12 +12598,18 @@ impl SessionManager {
     /// packages (`cgka-engine/src/key_package.rs:412-435,516-525`); they are
     /// deleted by reference instead (T-KP-EXPIRED-DELETE).
     ///
+    /// The maintenance tick's sweep of what has expired, so it also ends the
+    /// mesh keys of a deadline that has passed ([`Self::mesh_on_until`]).
+    ///
     /// # Errors
     ///
     /// Returns an error if a deletion or the write fails; the record is left
     /// as it was, so the next call retries.
     pub async fn sweep_expired_key_packages(&self, now_secs: u64) -> Result<bool> {
         let session = self.reading().await;
+        // The tick's other expiry: mesh keys whose deadline passed with no
+        // engine batch to see it (Security Rule 5).
+        self.sync_mesh_keys(&*session, &[], &[]);
         let Some(mut state) = session.key_package_lifecycle().map_err(map_mls_err)? else {
             return Ok(false);
         };

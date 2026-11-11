@@ -65,7 +65,7 @@ pub(crate) use manager::{
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use manager::{HandBackStop, StoreFault, ORDER_PANIC_FOR_TEST};
-pub use manager::{MeshKeyStore, StoredMeshKey, MESH_ON_MAX_MS};
+pub use manager::{MeshDrive, MeshKeyStore, MeshPacket, StoredMeshKey, MESH_ON_MAX_MS};
 pub use retention::{bounded_retention_secs, RetentionBoundPeeler};
 pub use signer::HavenIdentityProofSigner;
 pub use storage::StorageConfig;

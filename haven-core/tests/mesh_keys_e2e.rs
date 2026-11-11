@@ -679,3 +679,66 @@ async fn the_keys_and_the_deadline_live_in_the_circle_store_alone() {
         "a mesh key or the deadline outlived the circle store",
     );
 }
+
+/// A deadline that passes while no circle does anything ends the keys all
+/// the same: the maintenance tick's expiry sweep, which holds the session
+/// and reads its clock, deletes them from memory and from the table with no
+/// engine batch to see the deadline pass. A tick before it changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deadline_that_passes_with_no_engine_batch_ends_the_keys_at_the_maintenance_tick() {
+    let (admin, _others, group) = split(setup_circle(2, &[ONE]).await);
+    mesh_on(&admin).await;
+    let _ = commits(&admin, &group, 0).await;
+    let now = wall_ms();
+    let tick = || async {
+        (admin
+            .session()
+            .sweep_expired_key_packages(now / 1_000)
+            .await)
+            .expect("the sweep runs");
+    };
+
+    admin.session().set_legacy_clock_for_test(now + HOUR_MS / 2);
+    tick().await;
+    assert!(
+        epochs(&admin, &group).len() == 2 && row_count(&admin) == 2,
+        "a tick before the deadline cost a key"
+    );
+
+    admin.session().set_legacy_clock_for_test(now + 2 * HOUR_MS);
+    tick().await;
+    assert!(
+        epochs(&admin, &group).is_empty() && admin.session().mesh_on_until_for_test() == 0,
+        "a deadline that passed with no engine batch left the keys in memory"
+    );
+    assert!(
+        row_count(&admin) == 0 && stored_deadline(&admin).is_none(),
+        "a deadline that passed with no engine batch left the keys in the table"
+    );
+}
+
+/// A stored key whose circle has no row — the circle was left and the delete
+/// of its keys did not land — is not restored at the open, and is deleted;
+/// the keys of a circle that stands are restored beside it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_open_restores_no_key_of_a_circle_whose_row_is_gone() {
+    let (admin, _others, group) = split(setup_circle(2, &[ONE]).await);
+    mesh_on(&admin).await;
+    let gone = GroupId::new(vec![0x6e; 32]);
+    let written = store(&admin).execute(
+        "INSERT INTO mesh_keys (mls_group_id, epoch, routing_id, secret)
+         SELECT ?1, epoch, routing_id, secret FROM mesh_keys",
+        [gone.as_slice()],
+    );
+    assert!(
+        written.expect("the store is written") == 1 && row_count(&admin) == 2,
+        "premise: a key is stored for a circle with no row"
+    );
+
+    let admin = admin.reopen();
+    assert!(
+        epochs(&admin, &gone).is_empty() && rows(&admin, &gone).is_empty(),
+        "the open restored, or left stored, the key of a circle whose row is gone"
+    );
+    assert!(epochs(&admin, &group).len() == 1 && row_epochs(&admin, &group).len() == 1);
+}

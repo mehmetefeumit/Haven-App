@@ -18,7 +18,10 @@
 #     session it holds: it names no engine type, takes no engine lock, awaits
 #     nothing and never touches the second store handle, so it cannot run an
 #     engine call of its own or widen what is read off the engine. It
-#     re-exports nothing, so no other file reaches a mesh type through it.
+#     re-exports nothing, so no other file reaches a mesh type through it but
+#     by a name declared there — and every name it declares for others to use
+#     carries `mesh` (`MeshKeyStore`, `MeshPacket`, `MeshDrive`, …), which
+#     checks 3 and 5 read wherever it is used.
 #
 #   * THE HAND-OFF. `SessionManager::mesh_offer` is called once, by
 #     `Publishing::publish_location`, after that send's own checks (`Expired`,
@@ -29,7 +32,15 @@
 #     and the mesh would wait on a relay. A second call site is a second way
 #     onto the mesh this guard has not read.
 #
-# Later steps of the mesh add `mesh_drive`, `bridge_locations` and
+#   * THE INGRESS. `Publishing::mesh_drive` is where what the mesh received
+#     meets the engine. It names no mesh module either: it is handed
+#     `MeshPacket`s, answers a `MeshDrive`, and calls the session's
+#     `mesh_read`, `ingest_from_mesh` and `mesh_taken_in` and the circle
+#     store's `fold_mesh_counts` — its row in FANOUT_MAY_NAME, and nothing
+#     else of the mesh. That it calls no relay is not a textual fact and is
+#     held by `haven-core/tests/mesh_drive_e2e.rs`.
+#
+# Later steps of the mesh add `bridge_locations` and
 # `publish_location_and_bridge` to `relay/fanout.rs`. Each is admitted by
 # adding a row to FANOUT_MAY_NAME below — the function, and the mesh items its
 # body may name — never by loosening a check.
@@ -48,19 +59,28 @@
 #   3. `relay/fanout.rs` names a mesh item — any identifier containing `mesh`,
 #      in any case — only inside the body of a function listed in
 #      FANOUT_MAY_NAME, and only the items listed for it.
-#   4. `.mesh_offer(` is called exactly once in haven-core/src,
+#   4. `mesh_offer(` — the name followed by a parenthesis, however it is
+#      reached: a method call, `SessionManager::mesh_offer(&s, …)` — occurs
+#      exactly once outside its own `fn` in haven-core/src,
 #      haven/rust_builder/src and tooling/soak/src: in `relay/fanout.rs`, in
 #      `pub async fn publish_location`, after `if !record.may_be_sent` and
 #      before `self.fanout.publish_location(`.
-#   5. `relay/manager.rs`, `relay/catchup.rs`, `relay/verified.rs` and every
-#      file under `relay/live_sync/` name no mesh item at all.
+#   5. Under haven-core/src/relay and haven-core/src/nostr a mesh item — any
+#      identifier containing `mesh` — is named only in the key ring's file,
+#      in `nostr/mls/manager.rs` (the session manager that owns the ring and
+#      holds the engine for it), in `relay/fanout.rs` as check 3 admits, and
+#      in `nostr/mls/mod.rs` as the names of MOD_MAY_NAME, which it
+#      re-exports. So `relay/manager.rs`, `relay/catchup.rs`,
+#      `relay/verified.rs`, every file under `relay/live_sync/` and every
+#      other file of the two trees name none at all.
 #
 # What this scan covers, and no more. It reads names. It cannot see a mesh
-# type reached through a name without `mesh` in it — a method of
-# `SessionManager` that returns one, called from a file of check 5 under an
-# alias — nor a string a macro pastes into a path, nor anything under
-# `tests/`. That a location's send is the same with mesh on and off is held
-# by `haven-core/tests/mesh_handoff_e2e.rs`, not by this guard.
+# type reached through a name without `mesh` in it — a value a
+# `SessionManager` method returns, bound under another name — nor
+# `mesh_offer` passed as a function value and called under another name, nor
+# a string a macro pastes into a path, nor anything under `tests/`. That a
+# location's send is the same with mesh on and off is held by
+# `haven-core/tests/mesh_handoff_e2e.rs`, not by this guard.
 #
 # Usage:
 #   bash scripts/ci/check_mesh_seams.sh
@@ -80,6 +100,10 @@ readonly -a SOURCE_ROOTS=(haven-core/src haven/rust_builder/src tooling/soak/src
 readonly KEYS='haven-core/src/nostr/mls/manager/mesh.rs'
 readonly MANAGER='haven-core/src/nostr/mls/manager.rs'
 readonly FANOUT='haven-core/src/relay/fanout.rs'
+readonly MLS_MOD='haven-core/src/nostr/mls/mod.rs'
+# The key ring's public names `nostr/mls/mod.rs` re-exports, and every mesh
+# item it may name.
+readonly -a MOD_MAY_NAME=(MeshDrive MeshKeyStore MeshPacket StoredMeshKey MESH_ON_MAX_MS)
 readonly -a NO_MESH=(
   haven-core/src/relay/manager.rs
   haven-core/src/relay/catchup.rs
@@ -92,11 +116,12 @@ readonly NO_MESH_DIR='haven-core/src/relay/live_sync'
 # step adds its function here, with exactly what it calls.
 readonly -a FANOUT_MAY_NAME=(
   'pub async fn publish_location(|mesh_offer'
+  'pub async fn mesh_drive(|mesh_drive MeshPacket MeshDrive mesh_read ingest_from_mesh mesh_taken_in fold_mesh_counts'
 )
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=27
+readonly SELF_TEST_FIXTURES=37
 
 readonly WORD='(^|[^A-Za-z0-9_])mesh([^A-Za-z0-9_]|$)'
 readonly ITEM='[A-Za-z0-9_]*[Mm][Ee][Ss][Hh][A-Za-z0-9_]*'
@@ -158,7 +183,7 @@ run_check() {
   for tree in "${SEAM_TREES[@]}" "${SOURCE_ROOTS[@]}" "${NO_MESH_DIR}"; do
     [[ -d "${REPO_ROOT}/${tree}" ]] || { echo "ERROR: ${REPO_ROOT}/${tree} not found" >&2; exit 2; }
   done
-  for file in "${KEYS}" "${MANAGER}" "${FANOUT}" "${NO_MESH[@]}"; do
+  for file in "${KEYS}" "${MANAGER}" "${FANOUT}" "${MLS_MOD}" "${NO_MESH[@]}"; do
     [[ -f "${REPO_ROOT}/${file}" ]] || { echo "ERROR: ${REPO_ROOT}/${file} not found" >&2; exit 2; }
   done
   # Read whole before it is searched: a `grep -q` on a pipe ends the awk
@@ -230,7 +255,7 @@ run_check() {
   local sites=""
   while IFS= read -r file; do
     rel="${file#"${REPO_ROOT}/"}"
-    n="$({ code_view "${file}" | grep -oE '\.[[:space:]]*mesh_offer[[:space:]]*\(' || true; } | wc -l | tr -d ' ')"
+    n="$({ code_view "${file}" | grep -oE '(^|[^A-Za-z0-9_])(fn[[:space:]]+)?mesh_offer[[:space:]]*\(' | grep -vE 'fn[[:space:]]+mesh_offer' || true; } | wc -l | tr -d ' ')"
     if (( n > 0 )); then
       sites+="${rel}:${n} "
     fi
@@ -241,9 +266,9 @@ run_check() {
     range="$(fn_lines 'pub async fn publish_location(' <<<"${view}")"
     read -r first last <<<"${range}"
     body="$(sed -n "${first},${last}p" <<<"${view}" | tr -d '[:space:]')"
-    local checked="${body%%.mesh_offer(*}"
-    local after="${body#*.mesh_offer(}"
-    if [[ "${body}" != *".mesh_offer("* ]]; then
+    local checked="${body%%mesh_offer(*}"
+    local after="${body#*mesh_offer(}"
+    if [[ "${body}" != *"mesh_offer("* ]]; then
       fail "the one mesh_offer( call is not inside pub async fn publish_location."
     elif [[ "${checked}" != *"if!record.may_be_sent{"* || "${checked}" != *"iflocation_is_spent("* ]]; then
       fail "mesh_offer( is called before publish_location's send-time checks (location_is_spent, record.may_be_sent). A location the relay path answers Expired or Superseded would then still go out by Bluetooth — to a member removed since it was sealed."
@@ -252,19 +277,28 @@ run_check() {
     fi
   fi
 
-  # Check 5: the files that name no mesh item at all.
+  # Check 5: the files that name no mesh item at all — every file of the two
+  # trees but the key ring, the session manager, the driver (check 3) and,
+  # for the names it re-exports, nostr/mls/mod.rs.
   while IFS= read -r file; do
     rel="${file#"${REPO_ROOT}/"}"
-    hits="$(code_view "${file}" | grep -nE "${ITEM}" | cut -d: -f1 | tr '\n' ' ' || true)"
-    if [[ -n "${hits}" ]]; then
-      fail "${rel} names a mesh item (line(s) ${hits}). The publish pool, the receive planes, the catch-up sweep and the verifying client are the relay path itself: nothing of the mesh is read, called or waited on from them."
+    case "${rel}" in "${KEYS}" | "${MANAGER}" | "${FANOUT}") continue ;; esac
+    view="$(code_view "${file}")"
+    if [[ "${rel}" == "${MLS_MOD}" ]]; then
+      for item in "${MOD_MAY_NAME[@]}"; do
+        view="$(sed -E "s/(^|[^A-Za-z0-9_])${item}([^A-Za-z0-9_]|$)/\\1\\2/g" <<<"${view}")"
+      done
     fi
-  done < <({ for file in "${NO_MESH[@]}"; do echo "${REPO_ROOT}/${file}"; done; find "${REPO_ROOT}/${NO_MESH_DIR}" -type f -name '*.rs'; } | LC_ALL=C sort)
+    hits="$(grep -nE "${ITEM}" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    if [[ -n "${hits}" ]]; then
+      fail "${rel} names a mesh item (line(s) ${hits}). Under relay/ and nostr/ the mesh is reached from the key ring's file, the session manager that owns it and the driver's admitted functions, and nostr/mls/mod.rs re-exports the names of MOD_MAY_NAME. The publish pool, the receive planes, the catch-up sweep, the verifying client and every other file there are the relay path itself: nothing of the mesh is read, called or waited on from them."
+    fi
+  done < <(for tree in "${SEAM_TREES[@]}"; do find "${REPO_ROOT}/${tree}" -type f -name '*.rs'; done | LC_ALL=C sort)
 
   if (( FAILED )); then
     exit 1
   fi
-  log "OK: one file names the mesh module, it reads the engine through Held alone, and a location is offered to the mesh once, after its send-time checks and before its relay send."
+  log "OK: one file names the mesh module, it reads the engine through Held alone, a location is offered to the mesh once, after its send-time checks and before its relay send, and no other file of the relay path names a mesh item."
 }
 
 # ---------------------------------------------------------------------------
@@ -301,6 +335,24 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
         let sent = self.fanout.publish_location(event, &record.relays).await;
         let _ = session.end_location(&message).await;
         LocationPublish::Sent(sent)
+    }
+
+    pub async fn mesh_drive(
+        &self,
+        circle: &CircleManager,
+        taken: Vec<crate::nostr::mls::MeshPacket>,
+    ) -> crate::nostr::mls::MeshDrive {
+        let session = circle.session();
+        let mut drive = crate::nostr::mls::MeshDrive::default();
+        for (group_id, events) in session.mesh_read(taken, &mut drive).await {
+            for event in events {
+                if session.ingest_from_mesh(&event, now_ms).await.is_ok() {
+                    session.mesh_taken_in(&group_id, &event, &mut drive);
+                }
+            }
+        }
+        circle.fold_mesh_counts(drive.from_circles, 0);
+        drive
     }
 
     async fn older(&self, circle: &CircleManager) {}
@@ -342,7 +394,7 @@ impl SessionManager {
     pub(crate) fn mesh_offer(&self, event: &Event, record: &LocationToSend) {}
 }
 RS
-    printf 'pub use manager::{MeshKeyStore, MESH_ON_MAX_MS};\n' >"${t}/haven-core/src/nostr/mls/mod.rs"
+    printf 'pub use manager::{MeshDrive, MeshKeyStore, MeshPacket, MESH_ON_MAX_MS};\n' >"${t}/haven-core/src/nostr/mls/mod.rs"
     printf 'pub mod packet;\n' >"${t}/haven-core/src/mesh/mod.rs"
     printf 'pub fn api() {}\n' >"${t}/haven/rust_builder/src/api.rs"
     printf 'fn main() {}\n' >"${t}/tooling/soak/src/main.rs"
@@ -364,7 +416,7 @@ RS
 
   echo "check_mesh_seams.sh --self-test"
   local t="${tmp}/ok"; _tree "${t}"
-  _case "the tree shape passes: one hand-off, the child module, identifiers and comments that only mention the mesh" 0 '' "${t}"
+  _case "the tree shape passes: one hand-off, the ingress, the child module, identifiers and comments that only mention the mesh" 0 '' "${t}"
 
   # Check 1: the mesh module's name, however it is reached.
   t="${tmp}/crate-path"; _tree "${t}"
@@ -429,6 +481,22 @@ RS
   printf 'fn store(keys: &dyn MeshKeyStore) {}\n' >>"${t}/${FANOUT}"
   _case "a mesh type named in the driver fails" 1 "names the mesh item 'MeshKeyStore'" "${t}"
 
+  t="${tmp}/drive-other-item"; _tree "${t}"
+  sed -i 's|        circle.fold_mesh_counts(drive.from_circles, 0);|        let _ = session.mesh_handoff().take();|' "${t}/${FANOUT}"
+  _case "a mesh item mesh_drive is not admitted for fails" 1 "names the mesh item 'mesh_handoff'" "${t}"
+
+  t="${tmp}/drive-item-elsewhere"; _tree "${t}"
+  sed -i 's|        let record = session.location_to_send(&message).await;|        let record = session.location_to_send(\&message).await;\n        let _ = session.ingest_from_mesh(event, now_ms).await;|' "${t}/${FANOUT}"
+  _case "an item admitted for mesh_drive named in publish_location fails" 1 "names the mesh item 'ingest_from_mesh'" "${t}"
+
+  t="${tmp}/drive-type-outside"; _tree "${t}"
+  sed -i '1s|^|use crate::nostr::mls::MeshDrive;\n|' "${t}/${FANOUT}"
+  _case "the drive's type named outside mesh_drive fails" 1 "names the mesh item 'MeshDrive'" "${t}"
+
+  t="${tmp}/drive-module"; _tree "${t}"
+  sed -i 's|        taken: Vec<crate::nostr::mls::MeshPacket>,|        taken: Vec<crate::mesh::packet::Packet>,|' "${t}/${FANOUT}"
+  _case "the mesh module named in mesh_drive's own signature fails" 1 "${FANOUT} names the mesh module" "${t}"
+
   # Check 4: the one hand-off.
   t="${tmp}/second-call"; _tree "${t}"
   sed -i 's|    async fn older(&self, circle: &CircleManager) {}|    async fn older(\&self, circle: \&CircleManager) { circle.session().mesh_offer(event, \&record); }|' "${t}/${FANOUT}"
@@ -437,6 +505,14 @@ RS
   t="${tmp}/bridge-call"; _tree "${t}"
   printf 'pub fn offer(s: &SessionManager, e: &Event, r: &LocationToSend) { s.mesh_offer(e, r); }\n' >>"${t}/haven/rust_builder/src/api.rs"
   _case "mesh_offer( called from the FFI crate fails" 1 'must be called exactly once' "${t}"
+
+  t="${tmp}/qualified-call"; _tree "${t}"
+  printf 'pub fn offer(s: &SessionManager, e: &Event, r: &LocationToSend) { SessionManager::mesh_offer(s, e, r); }\n' >>"${t}/haven/rust_builder/src/api.rs"
+  _case "mesh_offer( called by its path, not as a method, fails" 1 'must be called exactly once' "${t}"
+
+  t="${tmp}/qualified-only"; _tree "${t}"
+  sed -i 's|        session.mesh_offer(event, &record);|        SessionManager::mesh_offer(session, event, \&record);|' "${t}/${FANOUT}"
+  _case "the one hand-off made by its path is still the one hand-off" 0 '' "${t}"
 
   t="${tmp}/no-call"; _tree "${t}"
   sed -i '/session.mesh_offer(event, &record);/d' "${t}/${FANOUT}"
@@ -467,7 +543,23 @@ RS
   printf 'fn f(s: &SessionManager, g: &GroupId) { s.mesh_silence(g); }\n' >>"${t}/haven-core/src/relay/catchup.rs"
   _case "a mesh item in the catch-up sweep fails" 1 'haven-core/src/relay/catchup.rs names a mesh item' "${t}"
 
+  t="${tmp}/other-relay-file"; _tree "${t}"
+  printf 'fn f(s: &SessionManager) { let _ = s.mesh_handoff().take(); }\n' >"${t}/haven-core/src/relay/negentropy.rs"
+  _case "a mesh item in any other file under relay/ fails" 1 'haven-core/src/relay/negentropy.rs names a mesh item' "${t}"
+
+  t="${tmp}/other-nostr-file"; _tree "${t}"
+  printf 'fn f(s: &SessionManager) { s.mesh_sharing_stopped(); }\n' >"${t}/haven-core/src/nostr/event.rs"
+  _case "a mesh item in any other file under nostr/ fails" 1 'haven-core/src/nostr/event.rs names a mesh item' "${t}"
+
+  t="${tmp}/mod-other-item"; _tree "${t}"
+  printf 'pub(crate) use manager::MeshKeys;\n' >>"${t}/haven-core/src/nostr/mls/mod.rs"
+  _case "a mesh item nostr/mls/mod.rs does not re-export by the list fails" 1 'haven-core/src/nostr/mls/mod.rs names a mesh item' "${t}"
+
   # Misconfiguration.
+  t="${tmp}/no-mod"; _tree "${t}"
+  rm "${t}/${MLS_MOD}"
+  _case "a missing nostr/mls/mod.rs is a misconfiguration" 2 '' "${t}"
+
   t="${tmp}/no-keys"; _tree "${t}"
   rm "${t}/${KEYS}"
   _case "a missing key ring is a misconfiguration" 2 '' "${t}"

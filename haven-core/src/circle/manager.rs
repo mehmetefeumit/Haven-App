@@ -5057,6 +5057,26 @@ impl CircleManager {
         }
     }
 
+    /// Adds what the mesh counted to its stored totals (plan §7.5): updates
+    /// from this device's circles a mesh drive read, and packets the mesh
+    /// engine passed on. Once a drive, never per packet, and nothing when
+    /// there is nothing to add. A write that fails loses what was counted
+    /// since the last one, as a kill would; a total never decreases.
+    pub fn fold_mesh_counts(&self, from_circles: u64, passed_on: u64) {
+        if from_circles != 0 || passed_on != 0 {
+            let _ = self.storage.add_mesh_counts(from_circles, passed_on);
+        }
+    }
+
+    /// The mesh's counts, to show: exact numbers, logged nowhere.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read.
+    pub fn mesh_counts(&self) -> Result<super::MeshCounts> {
+        self.storage.mesh_counts()
+    }
+
     /// The circle a `kind:445` event is addressed to, by its `#h` tag: what
     /// the event claims, before anything about it is authenticated.
     pub(crate) fn group_of_event(&self, event: &Event) -> Option<GroupId> {

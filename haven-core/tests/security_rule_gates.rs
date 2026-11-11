@@ -3149,6 +3149,7 @@ fn the_drivers_public_surface_is_pinned() {
         "async fn ingest_for_poll",
         "async fn seal_location",
         "async fn publish_location",
+        "async fn mesh_drive",
         "mod scripted",
         "enum Answer",
         "struct Call",
@@ -3379,12 +3380,21 @@ fn names_after(source: &str, prefix: &str) -> Vec<String> {
 /// drives, and the live plane in the lifecycle that drives — and a new
 /// caller shows here before it ships. `advance_for_drive` has a guard of its
 /// own (`scripts/ci/check_advance_convergence_sites.sh` A4).
+///
+/// One caller drives nothing, by design: the mesh's ingress
+/// (`Publishing::mesh_drive`), which may call no relay. It records no
+/// commit, so nothing it leaves holds a circle: its ingest and its fold are
+/// finish-only, with no advance (`a_mesh_drive_names_nothing_that_reaches_a_relay`),
+/// and in that mode staging records a proposal alone. A proposal's record
+/// holds neither sends nor inbound traffic, and the next relay drive sends
+/// it.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn every_caller_of_a_staging_entry_is_a_path_that_drives() {
     let squash = |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
     let entries = [
         ".process_event_staging(",
+        ".ingest_from_mesh(",
         ".send_staging(",
         ".send_staging_keeping(",
         ".requeue_removal_staging(",
@@ -3474,6 +3484,8 @@ fn every_caller_of_a_staging_entry_is_a_path_that_drives() {
         // The full advance that finds the foreground ended once it has the
         // engine: it settles as the plane that makes no commit does.
         "haven-core/src/nostr/mls/manager.rs: advance_for_drive_while -> settle_inputs_for_drive",
+        // The mesh's ingest: finish-only, so it records no commit.
+        "haven-core/src/nostr/mls/manager.rs: ingest_from_mesh -> process_event_staging",
         "haven-core/src/nostr/mls/manager.rs: process_event_staging_for_test -> process_event_staging",
         "haven-core/src/nostr/mls/manager.rs: remove_members_staging -> send_staging",
         "haven-core/src/nostr/mls/manager.rs: requeue_removal_staging -> send_staging_keeping",
@@ -3490,6 +3502,9 @@ fn every_caller_of_a_staging_entry_is_a_path_that_drives() {
         "haven-core/src/relay/fanout.rs: hand_over -> propose_admin_handoff_staging",
         "haven-core/src/relay/fanout.rs: ingest_for_poll -> fold_staged",
         "haven-core/src/relay/fanout.rs: ingest_for_poll -> process_event_staging",
+        // The mesh's ingress, which drives nothing (see above).
+        "haven-core/src/relay/fanout.rs: mesh_drive -> fold_staged",
+        "haven-core/src/relay/fanout.rs: mesh_drive -> ingest_from_mesh",
         "haven-core/src/relay/fanout.rs: post_join -> post_join_self_update_staging",
         "haven-core/src/relay/fanout.rs: reinvite_one -> stage_due_eviction",
         "haven-core/src/relay/fanout.rs: reissue_withdrawn -> stage_due_eviction",
@@ -4837,6 +4852,88 @@ fn assert_a_completed_location_send_is_never_made_again(root: &std::path::Path) 
             && drive.contains("let_=session.end_location(record.id.message()).await;"),
         "a drive sends a location record it finds, or keeps one: a fix whose send another \
          process began could be sent again, after its user stopped sharing",
+    );
+}
+
+/// The mesh's ingress sends nothing (Security Rule 13.1; the mesh design's
+/// review, finding 2): `Publishing::mesh_drive` names neither transport and
+/// none of the driver's functions that reach one, takes its events in the
+/// finish-only mode alone, and folds what the engine hands back without an
+/// advance. When a relay hears from this device may not follow from a packet
+/// anyone in radio range can replay. `tests/mesh_drive_e2e.rs` counts the
+/// calls; this reads the paths those runs do not take.
+#[test]
+fn a_mesh_drive_names_nothing_that_reaches_a_relay() {
+    let fanout = production_source(&repo_root().join("haven-core/src/relay/fanout.rs"));
+    let body: String = fn_body(&fanout, "pub async fn mesh_drive(")
+        .expect("the mesh drive")
+        .split_whitespace()
+        .collect();
+    for sends in [
+        "self.fanout",
+        "self.publisher",
+        "settle(",
+        "settle_staged(",
+        "drive_rows(",
+        "drive_due(",
+        "drive_one(",
+        "send_unrecorded(",
+        "unblock(",
+        "absorb(",
+        "dispose(",
+        "deliver_welcomes(",
+        "resume(",
+        "publish_location(",
+        "process_event_staging(",
+        "DriveMode::Full",
+        "self.mode",
+    ] {
+        assert!(
+            !body.contains(sends),
+            "`mesh_drive` names `{sends}`: a mesh packet could then make this device call a \
+             relay, or commit",
+        );
+    }
+    assert!(
+        body.contains("Still::always(&DriveMode::FinishOnly)")
+            && body.contains("circle.fold_staged(effects,false,now_ms,still)")
+            && body.matches("ingest_from_mesh(").count() == 1
+            && body.contains("for(_,event)insession.order_for_ingest(&group_id,events).await{"),
+        "`mesh_drive` no longer takes each event in once, in the order every receive plane \
+         takes a circle's events in, finish-only, with no advance",
+    );
+    let manager = production_source(&repo_root().join("haven-core/src/nostr/mls/manager.rs"));
+    let ingest: String = fn_body(&manager, "pub(crate) async fn ingest_from_mesh(")
+        .expect("the mesh ingest")
+        .split_whitespace()
+        .collect();
+    let relayed: String = fn_body(&manager, "pub(crate) async fn process_event_staging(")
+        .expect("the staging ingest")
+        .split_whitespace()
+        .collect();
+    assert!(
+        ingest.contains("letstill=Still::always(&DriveMode::FinishOnly);")
+            && ingest.contains("self.process_event_staging(event,now_ms,still).await?")
+            && relayed.contains("&result,mode==DriveMode::Full,);"),
+        "the mesh ingest is no longer finish-only, or an ingest in that mode feeds the stall \
+         detector",
+    );
+    // A location's send reads how often a circle fell silent BEFORE its
+    // send-time check, and hands that to the key sync after it: a circle
+    // silenced while the check ran — with no engine hold — gets no hand-off.
+    let send: String = fn_body(&manager, "pub(crate) async fn location_to_send(")
+        .expect("the send-time check")
+        .split_whitespace()
+        .collect();
+    let (read, check, sync) = (
+        send.find("letsilences=self.mesh_silences();"),
+        send.find("self.location_may_be_sent("),
+        send.find("self.mesh_turn(&*session,&application.group_id,now_ms,silences)"),
+    );
+    assert!(
+        read.is_some() && read < check && check < sync,
+        "a send no longer reads the ring's silences before its check and hands them to its \
+         key sync after it",
     );
 }
 

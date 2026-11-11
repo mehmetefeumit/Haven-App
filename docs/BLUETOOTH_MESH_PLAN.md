@@ -828,10 +828,12 @@ mesh off with fixed copy (Rule 8). The setting is cleared on identity delete.
 - **Updates from your circles** = unique packets that opened under one of
   this phone's keys and verified. **Passed on** = unique packets this phone
   did not emit and could not open, counted when first sent to another phone.
-- "Since turned on" survives a process restart while mesh stays on. Lifetime
-  values are two integers in the SQLCipher `user_settings` table, folded at
-  every drive and at mesh off: no timestamps, no per-circle or per-peer
-  breakdown. What was counted since the last fold is lost if the process is
+- "Since turned on" survives a process restart while mesh stays on. The
+  values are four integers in the SQLCipher `user_settings` table — the two
+  lifetime totals, and what each read when mesh was last turned on — folded
+  at every drive and at mesh off: no timestamps, no per-circle or per-peer
+  breakdown. An update is counted once by its event id, whatever number of
+  packets carried it. What was counted since the last fold is lost if the process is
   killed; the promise is that the lifetime value never decreases and includes
   everything up to the last fold.
 - Exact counts are shown, never logged (Rule 15).
@@ -1438,14 +1440,56 @@ body). Built:
   keeps the last offer or purge of each of 64 slots for the engine's owner
   to take. Guard `scripts/ci/check_mesh_seams.sh` (T-INDEP-1c).
 
+- **M2d**, the ingress (`Publishing::mesh_drive`; `SessionManager::mesh_read`
+  and `ingest_from_mesh`; the counts in `circle/storage_mesh.rs`). A drive
+  brings the ring in line with the engine, tries each packet under every
+  key, rebuilds and verifies the event, and — before the engine sees
+  anything — keeps only an application message whose inner epoch is the
+  epoch of the key that opened its packet. A commit, a proposal, and an
+  application message of any other epoch are read and dropped (T-SEC-1,
+  T-SEC-2, T-SEC-5). What is kept goes into the engine in the finish-only
+  mode, in `order_for_ingest`'s order, and is stored by the one persist site.
+  **The drive calls no relay**: nothing is settled, driven or unblocked; a
+  proposal the hold recorded keeps its record and an advance owed stays
+  owed, for the next relay drive. A circle with a commit of this device's
+  pending, or holding fetched input unread, takes nothing in; its packets,
+  and those the engine did not keep or erred on, are held — the verified
+  event, 64 a circle, 32 a circle a drive, oldest first — and go with the
+  circle and with mesh. "Updates from your circles" counts an update once by
+  its event id (the last 256 of a circle are remembered), when it is first
+  held. The four counts are in `user_settings`; the since-on pair starts
+  again when a deadline is stored where none stood.
+  **Not as the design has it:** the driver names no mesh module, so the
+  packets and the answer cross it as `MeshPacket` and `MeshDrive`, declared
+  beside the key ring; the ingest has no `observe` flag — the finish-only
+  mode is what leaves the stall detector unfed, and a source gate holds
+  that; the held list keeps opened events, not packets to open again;
+  `MeshDrive` carries no bridging input. The "passed on" side has its store
+  and its fold (`CircleManager::fold_mesh_counts`) and no caller yet, and a
+  reset of all four counts is not written: both come with the FFI.
+  With it, four findings of the review of M2b/M2c were fixed: a send reads
+  how often the ring fell silent before its send-time check, and gets no
+  hand-off if anything fell silent while it checked; a deadline that passed
+  with no engine batch ends the keys at the key-package maintenance tick,
+  at a mesh drive, and before mesh is turned on again; a forgotten circle's
+  delete the store refused is asked again, and the open restores no key of
+  a circle whose row is gone; and the seams guard reads `mesh_offer(`
+  however it is reached, and every mesh item under `relay/` and `nostr/`.
+
 Residuals of M2b, both in the tracker row `T-MESH-EXPORTER`: epochs crossed
 inside one engine call, and epochs reached while mesh was off, have no key.
+Residuals of M2d: an advance the engine is left owing after a mesh ingest
+handed stranded input back waits for the next relay drive, with nothing
+that asks for one; and no real engine answer was found that leaves a
+mesh-admissible event unkept, so that arm is tested through a test seam.
 
 Not yet written, and owed with or before the first user-visible step: Rule
 17 and the Rule 5 sentence in `CLAUDE.md`, the `haven-core/SECURITY.md`
 paragraphs, and the privacy-manifest invariants for the keys at rest and the
 hand-off (§8.2).
 
-Next: `mesh_drive`, the mesh-only seal, member bridging, and the FFI — which
-calls `mesh_on_until`, `mesh_off`, `mesh_sharing_stopped` and drains
-`mesh_handoff` — with the soak scenarios and the amended documents.
+Next: the mesh-only seal, member bridging, and the FFI — which calls
+`mesh_on_until`, `mesh_off`, `mesh_sharing_stopped`, drains `mesh_handoff`,
+hands `mesh_drive` what the engine's unread queue holds and marks each
+packet as the drive answers — with the soak scenarios and the amended
+documents.

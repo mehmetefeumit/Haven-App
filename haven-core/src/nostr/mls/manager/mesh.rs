@@ -1,5 +1,5 @@
-//! The mesh key ring and the publish hand-off (`docs/BLUETOOTH_MESH_PLAN.md`
-//! §4.2 and §5.1).
+//! The mesh key ring, the publish hand-off and the packets a drive reads
+//! (`docs/BLUETOOTH_MESH_PLAN.md` §4.2, §5.1 and §5.2).
 //!
 //! A mesh packet is sealed under `K_mesh = HKDF(G_e)`, `G_e` being a circle's
 //! group-event exporter secret at one epoch. This keeps `G_e` and `K_mesh`
@@ -12,27 +12,33 @@
 //! The one file under `nostr/` and `relay/` that names the mesh module
 //! (`scripts/ci/check_mesh_seams.sh`). It re-exports nothing, names no engine
 //! type and takes no lock of the engine's: what it reads of a circle it reads
-//! through [`Held`], off the session its caller holds.
+//! through [`Held`], off the session its caller holds. The driver's
+//! `mesh_drive` is handed packets and answers for them through
+//! [`MeshPacket`] and [`MeshDrive`], declared here under names that guard
+//! reads wherever they are used.
 //!
 //! Nothing here logs and no type is `Debug`: an epoch, a group id, a routing
 //! id and a slot are identifiers, and a key is a secret (Security Rules 6
 //! and 15).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use nostr::Event;
+use nostr::{Event, EventId};
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
-use super::{GroupEvent, GroupId, LocationToSend, SessionManager, DEFAULT_MAX_PAST_EPOCHS};
+use super::{
+    GroupEvent, GroupId, LocationMessageResult, LocationToSend, SessionManager,
+    DEFAULT_MAX_PAST_EPOCHS,
+};
 use crate::mesh::engine::CircleSlot;
-use crate::mesh::event::parts_of;
+use crate::mesh::event::{parts_of, rebuild};
 use crate::mesh::handoff::Handoff;
-use crate::mesh::packet::{wrap, Format, MeshKey};
+use crate::mesh::packet::{open, wrap, Format, MeshKey, Packet, PacketId};
 
 /// The longest mesh stays on without being asked for again: the deadline is
 /// never further ahead of the clock than this.
@@ -44,6 +50,64 @@ const PAST_EPOCHS: u64 = DEFAULT_MAX_PAST_EPOCHS as u64;
 
 // A slot is one bit of the mask a free one is found in.
 const _: () = assert!(Handoff::SLOTS <= u64::BITS);
+
+/// How many events one drive offers the engine for one circle: what a member
+/// who floods the mesh costs a drive, whatever it sends.
+const DRIVE_PER_CIRCLE: usize = 32;
+
+/// How many opened packets one circle keeps while the engine has not taken
+/// their events in. A quota of its own for each circle, so a circle that
+/// cannot take its input in — or a member flooding one — costs no other
+/// circle a packet; past it the oldest goes.
+const HELD_PER_CIRCLE: usize = 64;
+
+/// How many of a circle's updates back one is known to have been counted.
+const COUNTED_PER_CIRCLE: usize = 256;
+
+// Every held event was counted when it was first held, and stays known as
+// counted for as long as it is held.
+const _: () = assert!(COUNTED_PER_CIRCLE >= HELD_PER_CIRCLE);
+
+/// A mesh packet, as `Publishing::mesh_drive` is handed one by the mesh
+/// engine's owner. The driver does not name the mesh module
+/// (`scripts/ci/check_mesh_seams.sh`): it names this.
+pub type MeshPacket = Packet;
+
+/// What one `Publishing::mesh_drive` did with the mesh's packets.
+///
+/// **No `Debug`**: a packet id tells one packet from another and the count
+/// is exact (Security Rule 15).
+#[derive(Default)]
+#[must_use]
+pub struct MeshDrive {
+    /// Every packet this drive settled — one it was handed, or one an
+    /// earlier drive held — with whether it opened under one of this
+    /// device's keys: what the engine's owner marks read. A packet that
+    /// opened and whose event the engine has not taken in is held, not here;
+    /// a later drive answers for it.
+    pub read: Vec<(PacketId, bool)>,
+    /// How many updates from this device's circles the drive read for the
+    /// first time, each counted once by its event id. Stored already.
+    pub from_circles: u64,
+    /// The locations taken in, each stored already.
+    pub replayed: Vec<LocationMessageResult>,
+    /// Whether an ingest failed; its packet is held and offered again.
+    pub errored: bool,
+}
+
+/// A packet that opened under a key of `circle`, with what its event is
+/// checked against before the engine sees it.
+pub(super) struct Opened {
+    packet: PacketId,
+    circle: GroupId,
+    /// The event the packet carried, rebuilt under the routing id of the
+    /// key that opened it, and verified.
+    pub(super) event: Event,
+    /// The epoch of that key.
+    pub(super) epoch: u64,
+    /// The group-event exporter secret of that epoch.
+    pub(super) exporter: Zeroizing<[u8; 32]>,
+}
 
 /// What the ring reads of the engine. The session manager implements it for
 /// the session it holds, so a `&impl Held` is also the proof that its caller
@@ -151,15 +215,42 @@ struct CircleKeys {
     keys: Vec<EpochKey>,
     /// Whether the store holds something else than `keys`.
     unsaved: bool,
+    /// The packets that opened as an update of this circle and whose events
+    /// the engine has not taken in, oldest first, one an event id and at
+    /// most [`HELD_PER_CIRCLE`]. The mesh engine hands a packet out once, so
+    /// each is offered again from here at every drive.
+    held: VecDeque<(PacketId, Event)>,
+    /// The event ids of the last [`COUNTED_PER_CIRCLE`] updates counted,
+    /// oldest first. A member can wrap one event in any number of packets:
+    /// an update is counted by its event id, once.
+    counted: VecDeque<EventId>,
 }
 
 impl CircleKeys {
     /// Empties the circle's slot and ends the turn any send still holds.
-    fn silence(&mut self, handoff: &Handoff) {
+    fn silence(&mut self, ring: &MeshKeys) {
         self.turn += 1;
+        ring.silences.fetch_add(1, Ordering::Relaxed);
         if let Some(slot) = self.slot {
-            handoff.purge(slot);
+            ring.handoff.purge(slot);
         }
+    }
+
+    /// [`MeshKeys::hold`], for this circle.
+    fn hold(&mut self, packet: PacketId, event: Event) -> (bool, Vec<PacketId>) {
+        let first = !self.counted.contains(&event.id);
+        if first {
+            if self.counted.len() == COUNTED_PER_CIRCLE {
+                self.counted.pop_front();
+            }
+            self.counted.push_back(event.id);
+        }
+        if self.held.iter().any(|(_, held)| held.id == event.id) {
+            return (first, vec![packet]);
+        }
+        self.held.push_back((packet, event));
+        let over = self.held.len().saturating_sub(HELD_PER_CIRCLE);
+        (first, self.held.drain(..over).map(|(id, _)| id).collect())
     }
 
     fn rows(&self) -> Vec<StoredMeshKey> {
@@ -195,8 +286,11 @@ enum Caller<'a> {
     /// A location's send-time check, which has just read that the circle's
     /// row stands. The relay send is behind it, so it waits for nothing: the
     /// ring's lock is only tried, the store is not touched, and a deadline
-    /// that has passed is left for the next batch to act on.
-    Send,
+    /// that has passed is left for the next batch to act on. `silences` is
+    /// [`MeshKeys::silences`] as read before the check began: a circle can be
+    /// silenced with no engine hold, so one silenced while the check ran is
+    /// answered no turn.
+    Send { silences: u64 },
 }
 
 /// What the ring has cost, for a test to read; nothing in a shipped build.
@@ -208,6 +302,14 @@ struct Counts {
     wraps: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-utils"))]
     writes: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "test-utils"))]
+    opens: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "test-utils"))]
+    ingests: std::sync::atomic::AtomicUsize,
+    /// A test asked that the next mesh ingest read as one the engine kept
+    /// nothing of.
+    #[cfg(any(test, feature = "test-utils"))]
+    unkept: AtomicBool,
 }
 
 /// One thing the ring did that a test counts.
@@ -219,6 +321,10 @@ enum Cost {
     Wrap,
     /// A write asked of the store.
     Write,
+    /// A packet tried under one key (one AEAD open).
+    Open,
+    /// An event a packet carried handed to the engine.
+    Ingest,
 }
 
 impl Counts {
@@ -228,6 +334,8 @@ impl Counts {
             Cost::Derive => &self.derives,
             Cost::Wrap => &self.wraps,
             Cost::Write => &self.writes,
+            Cost::Open => &self.opens,
+            Cost::Ingest => &self.ingests,
         }
         .fetch_add(1, Ordering::Relaxed);
     }
@@ -250,14 +358,26 @@ pub(super) struct MeshKeys {
     /// Whether mesh went off and the store could not be told
     /// ([`Self::finish_off`]).
     undeleted: AtomicBool,
+    /// The circles forgotten whose stored keys the store did not delete:
+    /// asked again by [`Self::flush`].
+    forgotten: Mutex<Vec<GroupId>>,
+    /// How often any circle fell silent ([`CircleKeys::silence`]).
+    silences: AtomicU64,
     /// Never held across the store or the engine, so the hand-off, which
     /// only tries it, is never kept from it for longer than one packet takes
-    /// to seal.
+    /// to seal or to be tried under every key.
     ring: Mutex<HashMap<GroupId, CircleKeys>>,
     store: Arc<dyn MeshKeyStore>,
     handoff: Arc<Handoff>,
     counts: Counts,
+    /// Run once at a send's key sync, after its send-time check: where a
+    /// test silences a circle between the two.
+    #[cfg(any(test, feature = "test-utils"))]
+    after_send_check: Mutex<Option<SendCheckHook>>,
 }
+
+#[cfg(any(test, feature = "test-utils"))]
+type SendCheckHook = Box<dyn FnOnce(&SessionManager) + Send>;
 
 impl MeshKeys {
     /// Mesh off, nothing kept, no store.
@@ -267,10 +387,14 @@ impl MeshKeys {
             latest_ms: AtomicU64::new(0),
             owed: AtomicBool::new(false),
             undeleted: AtomicBool::new(false),
+            forgotten: Mutex::new(Vec::new()),
+            silences: AtomicU64::new(0),
             ring: Mutex::new(HashMap::new()),
             store: Arc::new(NoMeshKeyStore),
             handoff: Arc::new(Handoff::default()),
             counts: Counts::default(),
+            #[cfg(any(test, feature = "test-utils"))]
+            after_send_check: Mutex::new(None),
         }
     }
 
@@ -279,7 +403,17 @@ impl MeshKeys {
     /// stored, or one that has passed, every stored key is deleted instead.
     /// A stored deadline further ahead than [`MESH_ON_MAX_MS`] was written
     /// under a later clock, and is brought back to that.
-    pub(super) fn install(&mut self, store: Arc<dyn MeshKeyStore>, now_ms: u64) {
+    ///
+    /// `stands` says whether a circle's row still exists. A key of a circle
+    /// whose row is gone — left or disbanded, with the delete of its keys
+    /// unmade — is not restored: it is deleted, and a delete the store does
+    /// not take stays owed ([`Self::flush`]).
+    pub(super) fn install(
+        &mut self,
+        store: Arc<dyn MeshKeyStore>,
+        now_ms: u64,
+        stands: &dyn Fn(&GroupId) -> bool,
+    ) {
         self.store = store;
         let now = self.now(now_ms);
         let stored = self.store.mesh_on_until().unwrap_or(0);
@@ -289,7 +423,14 @@ impl MeshKeys {
             return;
         }
         let mut ring = HashMap::<GroupId, CircleKeys>::new();
+        let mut standing = HashMap::<GroupId, bool>::new();
         for (group, row) in self.store.mesh_keys() {
+            if !*standing
+                .entry(group.clone())
+                .or_insert_with(|| stands(&group))
+            {
+                continue;
+            }
             self.counts.one(Cost::Derive);
             (ring.entry(group).or_default().keys).push(EpochKey::new(
                 row.epoch,
@@ -311,6 +452,13 @@ impl MeshKeys {
                 self.owed.store(true, Ordering::Relaxed);
             }
         }
+        for (group, _) in standing.into_iter().filter(|(_, stands)| !stands) {
+            self.counts.one(Cost::Write);
+            if !self.store.save_mesh_keys(&group, &[]) {
+                self.forgotten().push(group);
+                self.owed.store(true, Ordering::Relaxed);
+            }
+        }
         *self.ring() = ring;
         self.until_ms.store(until, Ordering::Relaxed);
     }
@@ -322,6 +470,17 @@ impl MeshKeys {
 
     fn ring(&self) -> MutexGuard<'_, HashMap<GroupId, CircleKeys>> {
         self.ring.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn forgotten(&self) -> MutexGuard<'_, Vec<GroupId>> {
+        self.forgotten
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// How often any circle fell silent so far.
+    fn silences(&self) -> u64 {
+        self.silences.load(Ordering::Relaxed)
     }
 
     /// `now_ms`, or the latest instant seen if that is later.
@@ -358,7 +517,7 @@ impl MeshKeys {
     fn ring_for(&self, caller: Caller<'_>) -> Option<MutexGuard<'_, HashMap<GroupId, CircleKeys>>> {
         match caller {
             Caller::Batch { .. } => Some(self.ring()),
-            Caller::Send => self.ring.try_lock().ok(),
+            Caller::Send { .. } => self.ring.try_lock().ok(),
         }
     }
 
@@ -370,7 +529,11 @@ impl MeshKeys {
     /// Mesh on until `until_ms`, or until [`MESH_ON_MAX_MS`] from `now_ms` if
     /// that is sooner. A deadline that is not ahead of the clock, or that the
     /// store did not take, is mesh off. Returns whether mesh is on.
+    ///
+    /// A deadline that passed with nothing to see it is mesh off first: what
+    /// is turned on now starts with no key of before.
     fn turn_on<H: Held>(&self, held: &H, until_ms: u64, now_ms: u64) -> bool {
+        self.on(held, now_ms);
         let now = self.now(now_ms);
         let until = until_ms.min(now.saturating_add(MESH_ON_MAX_MS));
         if until <= now || !self.write_until(Some(until)) {
@@ -391,6 +554,7 @@ impl MeshKeys {
     fn clear(&self) -> bool {
         self.until_ms.store(0, Ordering::Relaxed);
         self.owed.store(false, Ordering::Relaxed);
+        self.forgotten().clear();
         let circles = std::mem::take(&mut *self.ring());
         for slot in circles.values().filter_map(|circle| circle.slot) {
             self.handoff.purge(slot);
@@ -444,7 +608,8 @@ impl MeshKeys {
     /// Any change silences the circle and leaves it to be saved
     /// ([`Self::flush`]). Epochs crossed inside one engine call get no key:
     /// only the epoch the engine stands on can be exported. For a send that
-    /// finds the ring's lock held, nothing: no turn, so no hand-off.
+    /// finds the ring's lock held, nothing: no turn, so no hand-off; and no
+    /// turn for a send during whose check any circle fell silent.
     fn align<H: Held>(
         &self,
         held: &H,
@@ -454,14 +619,14 @@ impl MeshKeys {
     ) -> Option<Turn> {
         let (rewound, on) = match caller {
             Caller::Batch { rewound, .. } => (rewound, self.on(held, now_ms)),
-            Caller::Send => (false, self.lit(now_ms)),
+            Caller::Send { .. } => (false, self.lit(now_ms)),
         };
         if !on {
             return None;
         }
         let Some((epoch, exporter)) = Self::current(held, group) else {
             if let Some(circle) = self.ring_for(caller)?.get_mut(group) {
-                circle.silence(&self.handoff);
+                circle.silence(self);
                 if rewound && !circle.keys.is_empty() {
                     circle.keys.clear();
                     circle.unsaved = true;
@@ -485,7 +650,7 @@ impl MeshKeys {
             }
             let Some(routing) = held.routing_id(group) else {
                 if let Some(circle) = self.ring_for(caller)?.get_mut(group) {
-                    circle.silence(&self.handoff);
+                    circle.silence(self);
                 }
                 return None;
             };
@@ -518,13 +683,16 @@ impl MeshKeys {
                 let free = (!taken).trailing_zeros();
                 circle.slot = (free < Handoff::SLOTS).then_some(CircleSlot(free));
             }
-            circle.silence(&self.handoff);
+            circle.silence(self);
             circle.unsaved = true;
             self.owed.store(true, Ordering::Relaxed);
         }
         let at = circle.turn;
+        // Read under the ring's lock, which every silence is made under.
+        let silenced = matches!(caller, Caller::Send { silences }
+            if self.silences() != silences + u64::from(changed));
         drop(ring);
-        Some(Turn {
+        (!silenced).then(|| Turn {
             circle: group.clone(),
             at,
         })
@@ -539,6 +707,20 @@ impl MeshKeys {
     fn flush<H: Held>(&self, _held: &H) {
         if !self.owed.swap(false, Ordering::Relaxed) {
             return;
+        }
+        // A forgotten circle's delete the store did not take, asked again —
+        // unless the circle is keyed again: its save replaces every row.
+        let forgotten = std::mem::take(&mut *self.forgotten());
+        for group in forgotten {
+            if let Some(circle) = self.ring().get_mut(&group) {
+                circle.unsaved = true;
+                continue;
+            }
+            self.counts.one(Cost::Write);
+            if !self.store.save_mesh_keys(&group, &[]) {
+                self.forgotten().push(group);
+                self.owed.store(true, Ordering::Relaxed);
+            }
         }
         let unsaved: Vec<(GroupId, Vec<StoredMeshKey>)> = (self.ring().iter_mut())
             .filter(|(_, circle)| circle.unsaved)
@@ -559,7 +741,8 @@ impl MeshKeys {
     }
 
     /// Drops `group`'s keys, in memory and in the store, and frees its slot:
-    /// the circle was left, disbanded or forgotten.
+    /// the circle was left, disbanded or forgotten. A delete the store does
+    /// not take stays owed ([`Self::flush`]).
     pub(super) fn forget<H: Held>(&self, _held: &H, group: &GroupId) {
         if !self.armed() {
             return;
@@ -569,7 +752,10 @@ impl MeshKeys {
             self.handoff.purge(slot);
         }
         self.counts.one(Cost::Write);
-        let _ = self.store.save_mesh_keys(group, &[]);
+        if !self.store.save_mesh_keys(group, &[]) {
+            self.forgotten().push(group.clone());
+            self.owed.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Empties `group`'s outbox slot: the relay path would not send for the
@@ -579,7 +765,7 @@ impl MeshKeys {
             return;
         }
         if let Some(circle) = self.ring().get_mut(group) {
-            circle.silence(&self.handoff);
+            circle.silence(self);
         }
     }
 
@@ -589,8 +775,73 @@ impl MeshKeys {
             return;
         }
         for circle in self.ring().values_mut() {
-            circle.silence(&self.handoff);
+            circle.silence(self);
         }
+    }
+
+    /// `packet` tried under every key of the ring, until one opens it: the
+    /// event it carried, rebuilt under that key's routing id — `None` in the
+    /// second place when it does not verify (Security Rule 16) — and what
+    /// the event is checked against next. `None` when no key opens it.
+    fn try_keys(&self, packet: &Packet) -> Option<(PacketId, Option<Opened>)> {
+        let ring = self.ring();
+        ring.iter().find_map(|(group, circle)| {
+            circle.keys.iter().find_map(|key| {
+                self.counts.one(Cost::Open);
+                let parts = open(&key.mesh, packet)?;
+                let opened = rebuild(&parts, &key.routing).map(|event| Opened {
+                    packet: packet.id(),
+                    circle: group.clone(),
+                    event,
+                    epoch: key.epoch,
+                    exporter: key.exporter.clone(),
+                });
+                Some((packet.id(), opened))
+            })
+        })
+    }
+
+    /// Holds the update a packet carried until the engine takes it in.
+    /// Answers whether the update is counted — the first time its event id
+    /// is held — and the packets this settles: the packet itself when its
+    /// circle is gone or holds the event already, and the oldest ones past
+    /// the circle's quota.
+    fn hold(&self, opened: Opened) -> (bool, Vec<PacketId>) {
+        let Opened {
+            packet,
+            circle,
+            event,
+            ..
+        } = opened;
+        (self.ring().get_mut(&circle)).map_or_else(
+            || (false, vec![packet]),
+            |circle| circle.hold(packet, event),
+        )
+    }
+
+    /// What one drive offers the engine: for each circle that holds any, its
+    /// oldest held events, at most [`DRIVE_PER_CIRCLE`].
+    fn due(&self) -> Vec<(GroupId, Vec<Event>)> {
+        (self.ring().iter())
+            .filter(|(_, circle)| !circle.held.is_empty())
+            .map(|(group, circle)| {
+                let events = (circle.held.iter().take(DRIVE_PER_CIRCLE))
+                    .map(|(_, event)| event.clone())
+                    .collect();
+                (group.clone(), events)
+            })
+            .collect()
+    }
+
+    /// The engine took in the event `id` of `group`: its packet, held no
+    /// longer.
+    fn taken_in(&self, group: &GroupId, id: &EventId) -> Option<PacketId> {
+        let mut ring = self.ring();
+        let held = &mut ring.get_mut(group)?.held;
+        let at = held.iter().position(|(_, event)| event.id == *id)?;
+        let packet = held.remove(at).map(|(packet, _)| packet);
+        drop(ring);
+        packet
     }
 
     /// Wraps `event` under its circle's newest key and leaves the packet in
@@ -655,23 +906,42 @@ impl SessionManager {
         }
     }
 
+    /// What a location's send-time check reads before it checks anything,
+    /// and hands [`Self::mesh_turn`] after ([`Caller::Send`]).
+    pub(super) fn mesh_silences(&self) -> u64 {
+        self.mesh_keys.silences()
+    }
+
     /// What a location's send-time check hands [`Self::mesh_offer`]: the
     /// circle's key brought in line with the engine in that check's own
     /// hold, where the circle stands stable on the epoch the location was
     /// sealed at. In memory only, and waiting for nothing ([`Caller::Send`]).
+    /// `silences` is [`Self::mesh_silences`], read before the check.
     pub(super) fn mesh_turn<H: Held>(
         &self,
         held: &H,
         group: &GroupId,
         now_ms: u64,
+        silences: u64,
     ) -> Option<Turn> {
-        self.mesh_keys.align(held, group, now_ms, Caller::Send)
+        #[cfg(any(test, feature = "test-utils"))]
+        {
+            let hook = (self.mesh_keys.after_send_check.lock())
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some(hook) = hook {
+                hook(self);
+            }
+        }
+        (self.mesh_keys).align(held, group, now_ms, Caller::Send { silences })
     }
 
     /// What every engine batch is owed (`Self::note_effects`): the keys of
     /// each circle a state-bearing event names brought in line with the
     /// engine, the circles a proposal names silenced, and what is unsaved
-    /// saved.
+    /// saved. With no event it is what a maintenance tick owes: a deadline
+    /// that has passed ends every key, in memory and in the store, though no
+    /// batch came to see it.
     ///
     /// A location received, invalidated or refused changes no key, and is
     /// the hot path: such an event visits no circle.
@@ -740,8 +1010,18 @@ impl SessionManager {
         until_ms: u64,
         groups: &[GroupId],
     ) -> bool {
+        self.mesh_keys.turn_on(held, until_ms, self.legacy_now_ms())
+            && self.sync_mesh_circles(held, groups)
+    }
+
+    /// The keys of every circle of `groups` brought in line with the engine
+    /// and saved, if mesh is on, which it answers: what turning mesh on and
+    /// every mesh drive begin with. A drive so reads a circle joined since
+    /// the last batch that named it, and ends the keys of a deadline that
+    /// has passed.
+    pub(super) fn sync_mesh_circles<H: Held>(&self, held: &H, groups: &[GroupId]) -> bool {
         let (keys, now_ms) = (&self.mesh_keys, self.legacy_now_ms());
-        if !keys.turn_on(held, until_ms, now_ms) {
+        if !keys.on(held, now_ms) {
             return false;
         }
         for group in groups {
@@ -763,6 +1043,50 @@ impl SessionManager {
     /// Mesh off ([`MeshKeys::turn_off`]).
     pub(super) fn turn_mesh_off<H: Held>(&self, held: &H) -> bool {
         self.mesh_keys.turn_off(held)
+    }
+
+    /// One packet a mesh drive was handed, tried under every key. `None`
+    /// when `drive` has its answer already: no key opened it, or one did and
+    /// the event it carried does not verify.
+    pub(super) fn mesh_opened(&self, packet: &MeshPacket, drive: &mut MeshDrive) -> Option<Opened> {
+        match self.mesh_keys.try_keys(packet) {
+            None => drive.read.push((packet.id(), false)),
+            Some((id, None)) => drive.read.push((id, true)),
+            Some((_, Some(opened))) => return Some(opened),
+        }
+        None
+    }
+
+    /// What becomes of a packet that opened and verified: held for the
+    /// engine and counted when its event is an `update` of its circle — an
+    /// application message of the epoch its key is of — and dropped as read
+    /// when it is anything else.
+    pub(super) fn mesh_keep(&self, opened: Opened, update: bool, drive: &mut MeshDrive) {
+        if !update {
+            drive.read.push((opened.packet, true));
+            return;
+        }
+        let (first, settled) = self.mesh_keys.hold(opened);
+        drive.from_circles += u64::from(first);
+        (drive.read).extend(settled.into_iter().map(|id| (id, true)));
+    }
+
+    /// What a drive offers the engine ([`MeshKeys::due`]).
+    pub(super) fn mesh_due(&self) -> Vec<(GroupId, Vec<Event>)> {
+        self.mesh_keys.due()
+    }
+
+    /// Counts one event handed to the engine by a mesh drive, for a test.
+    pub(super) fn mesh_ingesting(&self) {
+        self.mesh_keys.counts.one(Cost::Ingest);
+    }
+
+    /// The engine took in `event`, which a packet carried for `group`: the
+    /// packet is read.
+    pub(crate) fn mesh_taken_in(&self, group: &GroupId, event: &Event, drive: &mut MeshDrive) {
+        if let Some(packet) = self.mesh_keys.taken_in(group, &event.id) {
+            drive.read.push((packet, true));
+        }
     }
 }
 
@@ -828,6 +1152,43 @@ impl SessionManager {
     pub fn hold_mesh_ring_for_test(&self) -> impl Drop + '_ {
         self.mesh_keys.ring()
     }
+
+    /// Runs `hook` once, inside the next location's send-time hold, after
+    /// its check and before its key sync.
+    pub fn after_send_check_for_test(&self, hook: impl FnOnce(&Self) + Send + 'static) {
+        *(self.mesh_keys.after_send_check.lock()).unwrap_or_else(PoisonError::into_inner) =
+            Some(Box::new(hook));
+    }
+
+    /// How many times a packet was tried under a key, and how many events a
+    /// mesh drive handed the engine, since the session opened.
+    #[must_use]
+    pub fn mesh_reads_for_test(&self) -> (usize, usize) {
+        let counts = &self.mesh_keys.counts;
+        (
+            counts.opens.load(Ordering::Relaxed),
+            counts.ingests.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Makes the next mesh ingest read as one the engine answered with a
+    /// want of room, whatever it answered: no event a packet can carry draws
+    /// that answer from the engine on cue.
+    pub fn leave_next_mesh_ingest_unkept_for_test(&self) {
+        self.mesh_keys.counts.unkept.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`Self::leave_next_mesh_ingest_unkept_for_test`] was asked,
+    /// once.
+    pub(super) fn mesh_ingest_unkept_for_test(&self) -> bool {
+        self.mesh_keys.counts.unkept.swap(false, Ordering::Relaxed)
+    }
+
+    /// How many packets `group` holds for the engine.
+    #[must_use]
+    pub fn mesh_held_for_test(&self, group: &GroupId) -> usize {
+        (self.mesh_keys.ring().get(group)).map_or(0, |circle| circle.held.len())
+    }
 }
 
 #[cfg(test)]
@@ -842,7 +1203,7 @@ mod tests {
     use super::*;
     use crate::mesh::event::rebuild;
     use crate::mesh::handoff::Op;
-    use crate::mesh::packet::{open, Packet};
+    use crate::mesh::packet::{cover_packet, open, Packet};
     use crate::mesh::test_rng::Scripted;
     use crate::nostr::mls::GroupIdExt as _;
     use crate::nostr::KIND_GROUP_MESSAGE;
@@ -1029,8 +1390,13 @@ mod tests {
 
     /// A ring over `store`, opened at `now_ms`.
     fn opened(store: Arc<Store>, now_ms: u64) -> Fixture {
+        opened_without(store, now_ms, &[])
+    }
+
+    /// [`opened`], when the circles of `gone` have no row any more.
+    fn opened_without(store: Arc<Store>, now_ms: u64, gone: &[GroupId]) -> Fixture {
         let mut keys = MeshKeys::new();
-        keys.install(store.clone(), now_ms);
+        keys.install(store.clone(), now_ms, &|group| !gone.contains(group));
         let keys = Arc::new(keys);
         let ring = Arc::downgrade(&keys);
         *store.ring_is_free.lock().unwrap() = Some(Box::new(move || {
@@ -1076,7 +1442,9 @@ mod tests {
 
         /// A send-time check's sync of `group` at `now_ms`.
         fn send_at(&self, group: &GroupId, now_ms: u64) -> Option<Turn> {
-            self.keys.align(&self.engine, group, now_ms, Caller::Send)
+            let silences = self.keys.silences();
+            let caller = Caller::Send { silences };
+            self.keys.align(&self.engine, group, now_ms, caller)
         }
 
         /// `group` moves to `epoch` of `branch` in one batch.
@@ -1955,5 +2323,330 @@ mod tests {
             .expect("sign");
         fx.keys.offer(&turn, &commit, &mut Scripted::new(&[]));
         assert!(fx.waiting().is_empty() && fx.costs().1 == 2);
+    }
+
+    /// A send's turn is the one its check ran under. A circle is silenced
+    /// with no engine hold — a leave asked, fetched input held — so one
+    /// silenced after the check began and before the key sync read its turn
+    /// is handed nothing by that send; the key the sync itself installs is
+    /// no such silence.
+    #[test]
+    fn a_send_during_whose_check_a_circle_fell_silent_gets_no_turn() {
+        let fx = on();
+        let (one, two) = (circle(1), circle(2));
+        fx.moves(&one, 4, 0xa0);
+        fx.moves(&two, 9, 0xb0);
+        let (event, _) = (location(), fx.waiting());
+        let checked = |silences| {
+            let caller = Caller::Send { silences };
+            fx.keys.align(&fx.engine, &one, NOW, caller)
+        };
+
+        let silenced: [&dyn Fn(); 3] = [
+            &|| fx.keys.silence(&one),
+            &|| fx.keys.silence_all(),
+            // Any circle's: the count is the ring's.
+            &|| fx.keys.silence(&two),
+        ];
+        for silence in silenced {
+            let before = fx.keys.silences();
+            silence();
+            assert!(
+                checked(before).is_none(),
+                "a send took the turn of a circle silenced while it checked"
+            );
+        }
+        let _ = fx.waiting();
+
+        // The sync installs the key of an epoch the ring had missed: that
+        // silence is its own, and the send is offered.
+        fx.engine.stands(&one, 5, 0xa0, 0x70);
+        let turn = checked(fx.keys.silences()).expect("a turn");
+        let _ = fx.waiting();
+        offer(&fx, &turn, &event);
+        assert!(matches!(&fx.waiting()[..], [(0, Some(_))]));
+
+        // The same install with a silence beside it: none.
+        fx.engine.stands(&one, 6, 0xa0, 0x70);
+        let before = fx.keys.silences();
+        fx.keys.silence(&one);
+        assert!(checked(before).is_none() && fx.held(&one)[0] == (6, 0xa0));
+    }
+
+    /// A deadline that passed with no batch to see it is mesh off: turned on
+    /// again, the ring starts with no key of before, and neither does the
+    /// store.
+    #[test]
+    fn mesh_turned_on_again_after_its_deadline_passed_unseen_keeps_no_key_of_before() {
+        let fx = on();
+        let group = circle(1);
+        fx.moves(&group, 4, 0xa0);
+        assert!(fx.keys.turn_on(&fx.engine, NOW + 3 * HOUR, NOW + 2 * HOUR));
+        assert!(
+            fx.held(&group).is_empty() && fx.store.rows(&group).is_empty(),
+            "a key outlived the deadline it was kept under"
+        );
+        assert_eq!(fx.store.mesh_on_until(), Some(NOW + 3 * HOUR));
+        assert!(fx.sync_at(&group, NOW + 2 * HOUR, false, true).is_some());
+        assert_eq!(fx.held(&group), [(4, 0xa0)]);
+    }
+
+    /// A forgotten circle's delete the store refused stays owed: the next
+    /// batch asks again, and once it lands it is not made a third time. A
+    /// circle keyed again meanwhile is saved as a whole instead.
+    #[test]
+    fn a_forgotten_circles_delete_the_store_refused_is_asked_again() {
+        let fx = on();
+        let (one, two) = (circle(1), circle(2));
+        fx.moves(&one, 4, 0xa0);
+        fx.moves(&two, 9, 0xb0);
+
+        fx.store.refuses.store(true, Ordering::Relaxed);
+        fx.keys.forget(&fx.engine, &one);
+        assert!(fx.held(&one).is_empty());
+        assert!(
+            fx.stored(&one) == [(4, 0xa0)],
+            "premise: the store kept the forgotten circle's key"
+        );
+        // Still refused: still owed.
+        fx.batch(&two, false);
+        assert_eq!(fx.stored(&one), [(4, 0xa0)]);
+
+        fx.store.refuses.store(false, Ordering::Relaxed);
+        fx.batch(&two, false);
+        assert!(
+            fx.store.rows(&one).is_empty(),
+            "a forgotten circle's key stayed stored after the store took writes again"
+        );
+        assert_eq!(fx.stored(&two), [(9, 0xb0)]);
+        let writes = fx.store.writes();
+        fx.batch(&two, false);
+        assert!(
+            fx.store.writes() == writes,
+            "a delete that landed was made again"
+        );
+
+        // Forgotten, refused, and keyed again before the store answers: what
+        // is stored is the new key alone.
+        fx.store.refuses.store(true, Ordering::Relaxed);
+        fx.keys.forget(&fx.engine, &two);
+        fx.moves(&two, 10, 0xb1);
+        assert_eq!(fx.stored(&two), [(9, 0xb0)]);
+        fx.store.refuses.store(false, Ordering::Relaxed);
+        fx.batch(&one, false);
+        assert_eq!(fx.stored(&two), [(10, 0xb1)]);
+    }
+
+    /// A key whose circle has no row when the process opens — the circle was
+    /// left and the delete of its keys did not land — is not restored, and
+    /// is deleted; if the store refuses that too, the delete stays owed.
+    #[test]
+    fn the_open_restores_no_key_of_a_circle_whose_row_is_gone() {
+        let (left, kept) = (circle(1), circle(2));
+        let stored = || {
+            let fx = on();
+            fx.moves(&left, 4, 0xa0);
+            fx.moves(&left, 5, 0xa0);
+            fx.moves(&kept, 9, 0xb0);
+            fx.store
+        };
+
+        let fx = opened_without(stored(), NOW + 1, std::slice::from_ref(&left));
+        assert!(
+            fx.held(&left).is_empty() && fx.store.rows(&left).is_empty(),
+            "the open restored, or left stored, a key of a circle whose row is gone"
+        );
+        assert!(fx.held(&kept) == [(9, 0xb0)] && fx.stored(&kept) == [(9, 0xb0)]);
+        assert!(
+            fx.costs().0 == 1,
+            "a packet key was derived for a circle whose row is gone"
+        );
+
+        // The store refuses the delete: owed, and made by the next batch.
+        let store = stored();
+        store.refuses.store(true, Ordering::Relaxed);
+        let fx = opened_without(store, NOW + 1, std::slice::from_ref(&left));
+        assert!(fx.held(&left).is_empty() && fx.stored(&left).len() == 2);
+        fx.store.refuses.store(false, Ordering::Relaxed);
+        fx.engine.stands(&kept, 9, 0xb0, 0x70);
+        fx.batch(&kept, false);
+        assert!(
+            fx.store.rows(&left).is_empty(),
+            "a delete the store refused at the open was not asked again"
+        );
+    }
+
+    /// `event` in a packet sealed under the key of `epoch` on `branch`, with
+    /// a nonce of its own: every call is another packet of the same event.
+    fn packet_of(event: &Event, epoch: u64, branch: u8) -> Packet {
+        let parts = parts_of(event, Format::Bridgeable).expect("a location");
+        wrap(&peer_key(epoch, branch), &parts, &mut OsRng).expect("fits")
+    }
+
+    /// `packet`, opened and verified by the ring.
+    fn read(fx: &Fixture, packet: &Packet) -> Opened {
+        let (id, opened) = fx.keys.try_keys(packet).expect("a key opens it");
+        assert!(id == packet.id());
+        opened.expect("its event verifies")
+    }
+
+    /// T-PERF-2: a packet costs one open a key the ring holds, at most, and
+    /// none past the key that opens it — counted, not timed. What opens
+    /// comes back as the event, under the routing id recorded for the key,
+    /// with that key's epoch and secret; an event that does not verify under
+    /// that routing id comes back as none.
+    #[test]
+    fn a_packet_is_tried_once_under_each_key_and_no_further_than_the_one_that_opens() {
+        let fx = on();
+        let (one, two, elsewhere) = (circle(1), circle(2), circle(3));
+        for epoch in 1..=6 {
+            fx.moves(&one, epoch, 0xa0);
+        }
+        for epoch in 1..=3 {
+            fx.moves(&two, epoch, 0xb0);
+        }
+        fx.engine.stands(&elsewhere, 1, 0xc0, 0x71);
+        fx.batch(&elsewhere, false);
+        let keys = 6 + 3 + 1;
+        let opens = || fx.keys.counts.opens.load(Ordering::Relaxed);
+
+        let before = opens();
+        assert!(fx.keys.try_keys(&cover_packet(&mut OsRng)).is_none());
+        assert!(
+            opens() - before == keys,
+            "a packet no key opens was not tried under each key exactly once"
+        );
+
+        let event = location();
+        for (group, epoch, branch) in [(&one, 6, 0xa0), (&one, 1, 0xa0), (&two, 2, 0xb0)] {
+            let before = opens();
+            let opened = read(&fx, &packet_of(&event, epoch, branch));
+            assert!(
+                (1..=keys).contains(&(opens() - before)),
+                "a packet cost more opens than the ring holds keys"
+            );
+            assert!(opened.circle == *group && opened.epoch == epoch);
+            assert_eq!(*opened.exporter, secret(epoch, branch));
+            assert_eq!(opened.event.as_json(), event.as_json());
+        }
+
+        // Signed for another routing id than the one its key recorded, and
+        // a signature that is not the event's: opened, and no event.
+        let rerouted = fx.keys.try_keys(&packet_of(&event, 1, 0xc0));
+        assert!(matches!(rerouted, Some((_, None))));
+        let mut parts = parts_of(&event, Format::Bridgeable).expect("a location");
+        parts.sig[0] ^= 1;
+        let forged = wrap(&peer_key(6, 0xa0), &parts, &mut OsRng).expect("fits");
+        assert!(matches!(fx.keys.try_keys(&forged), Some((id, None)) if id == forged.id()));
+        // An abandoned branch's key of a held epoch opens nothing.
+        assert!(fx.keys.try_keys(&packet_of(&event, 6, 0xa1)).is_none());
+    }
+
+    /// An update is one event id, however many packets carry it: held once,
+    /// counted once, and its second packet is settled where it stands. Once
+    /// the engine took it in it is held no longer; a later packet of it is
+    /// offered to the engine again — which answers for a duplicate — and is
+    /// not counted again.
+    #[test]
+    fn an_update_is_held_and_counted_once_by_its_event_id() {
+        let fx = on();
+        let group = circle(1);
+        fx.moves(&group, 4, 0xa0);
+        let event = location();
+        let (first, again, later) = (
+            packet_of(&event, 4, 0xa0),
+            packet_of(&event, 4, 0xa0),
+            packet_of(&event, 4, 0xa0),
+        );
+        assert!(
+            first.id() != again.id(),
+            "premise: two packets of one event"
+        );
+
+        assert!(fx.keys.hold(read(&fx, &first)) == (true, Vec::new()));
+        assert!(
+            fx.keys.hold(read(&fx, &again)) == (false, vec![again.id()]),
+            "a second packet of a held event was held or counted beside the first"
+        );
+        let due = fx.keys.due();
+        assert!(due.len() == 1 && due[0].0 == group);
+        assert!(due[0].1.len() == 1 && due[0].1[0].id == event.id);
+
+        assert!(fx.keys.taken_in(&group, &event.id) == Some(first.id()));
+        assert!(fx.keys.due().is_empty() && fx.keys.taken_in(&group, &event.id).is_none());
+        assert!(
+            fx.keys.hold(read(&fx, &later)) == (false, Vec::new()),
+            "an update the engine took in was counted again in another packet"
+        );
+        assert!(fx.keys.taken_in(&group, &event.id) == Some(later.id()));
+    }
+
+    /// Each circle holds its own quota: one that overflows loses its own
+    /// oldest packets and none of another circle's, and a drive is offered
+    /// no more of a circle than its share, oldest first.
+    #[test]
+    fn a_circle_holds_its_own_quota_and_a_drive_is_offered_a_bounded_share_of_it() {
+        let fx = on();
+        let (flooded, quiet) = (circle(1), circle(2));
+        fx.moves(&flooded, 4, 0xa0);
+        fx.moves(&quiet, 9, 0xb0);
+        let kept: Vec<Event> = (0..2).map(|_| location()).collect();
+        for event in &kept {
+            assert!(fx.keys.hold(read(&fx, &packet_of(event, 9, 0xb0))) == (true, Vec::new()));
+        }
+
+        let (mut packets, mut events, mut pushed_out) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..HELD_PER_CIRCLE + 3 {
+            let event = location();
+            let packet = packet_of(&event, 4, 0xa0);
+            let (counted, settled) = fx.keys.hold(read(&fx, &packet));
+            assert!(counted);
+            pushed_out.extend(settled);
+            packets.push(packet.id());
+            events.push(event.id);
+        }
+        assert!(
+            pushed_out == packets[..3],
+            "a circle over its quota did not give up its own oldest packets, in order"
+        );
+        let held = |group: &GroupId| {
+            (fx.keys.ring().get(group).expect("held").held.iter())
+                .map(|(_, event)| event.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(held(&flooded), events[3..]);
+        assert!(
+            held(&quiet) == [kept[0].id, kept[1].id],
+            "one circle's flood cost another circle a held packet"
+        );
+
+        let due: HashMap<GroupId, Vec<EventId>> = (fx.keys.due().into_iter())
+            .map(|(group, events)| (group, events.iter().map(|event| event.id).collect()))
+            .collect();
+        assert_eq!(due[&flooded], events[3..3 + DRIVE_PER_CIRCLE]);
+        assert_eq!(due[&quiet], [kept[0].id, kept[1].id]);
+    }
+
+    /// What a circle holds goes with the circle and with mesh; a packet that
+    /// opened for a circle since forgotten is settled, not held or counted.
+    #[test]
+    fn what_a_circle_holds_goes_with_the_circle_and_with_mesh() {
+        let fx = on();
+        let (one, two) = (circle(1), circle(2));
+        fx.moves(&one, 4, 0xa0);
+        fx.moves(&two, 9, 0xb0);
+        let (event, other) = (location(), location());
+        let packet = packet_of(&event, 4, 0xa0);
+        let late = read(&fx, &packet_of(&other, 4, 0xa0));
+        assert!(fx.keys.hold(read(&fx, &packet)).0);
+        assert!(fx.keys.hold(read(&fx, &packet_of(&other, 9, 0xb0))).0);
+
+        fx.keys.forget(&fx.engine, &one);
+        assert!(fx.keys.due().len() == 1 && fx.keys.try_keys(&packet).is_none());
+        let late_packet = late.packet;
+        assert!(fx.keys.hold(late) == (false, vec![late_packet]));
+
+        assert!(fx.keys.turn_off(&fx.engine));
+        assert!(fx.keys.due().is_empty());
     }
 }

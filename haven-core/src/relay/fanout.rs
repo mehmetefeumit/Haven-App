@@ -4827,6 +4827,66 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
         LocationPublish::Sent(sent)
     }
 
+    /// Reads the Bluetooth mesh packets `taken` — what the mesh engine's
+    /// owner took from it — and takes in the locations members of this
+    /// device's circles sent (plan §5.2).
+    ///
+    /// A packet reaches the engine only as an application message of the
+    /// very epoch whose key opened it, verified (Security Rule 16) and
+    /// checked before the engine sees it: a commit or a proposal a member
+    /// wrapped never does. What the engine takes in is persisted by the one
+    /// site every receive plane shares, and a copy a relay delivered first
+    /// is a duplicate there.
+    ///
+    /// **Sends nothing.** No relay is called, whatever the engine hands
+    /// back: when a relay hears from this device must not follow from a
+    /// packet anyone in radio range can replay. A proposal the hold recorded
+    /// keeps its record and an advance owed stays owed, for the next relay
+    /// drive; nothing is committed ([`DriveMode::FinishOnly`]) and the stall
+    /// detector sees none of it. The mesh owns no cursor and no floor.
+    ///
+    /// A circle with a commit of this device's pending, or holding fetched
+    /// input unread, takes nothing in here either (Security Rules 12 and
+    /// 13.4) and is not driven for it. Its packets, and those the engine did
+    /// not take in — a want of room, an error, a wake that ended — are held
+    /// by the session, a bounded number for each circle, and offered again
+    /// at the next drive.
+    pub async fn mesh_drive(
+        &self,
+        circle: &CircleManager,
+        taken: Vec<crate::nostr::mls::MeshPacket>,
+    ) -> crate::nostr::mls::MeshDrive {
+        let (session, now_ms) = (circle.session(), self.clock.now_ms());
+        let mut drive = crate::nostr::mls::MeshDrive::default();
+        for (group_id, events) in session.mesh_read(taken, &mut drive).await {
+            if session.staged_commit(&group_id).await.is_some()
+                || session.holds_unread_input(&group_id)
+            {
+                continue;
+            }
+            for (_, event) in session.order_for_ingest(&group_id, events).await {
+                // An ingest waits for no relay and no engine deadline: it
+                // is begun for as long as the wake lasts.
+                if !self.allows(0) {
+                    break;
+                }
+                match session.ingest_from_mesh(&event, now_ms).await {
+                    Ok((taken_in, effects)) => {
+                        let still = Still::always(&DriveMode::FinishOnly);
+                        let (folded, _) = circle.fold_staged(effects, false, now_ms, still).await;
+                        drive.replayed.extend(folded.results);
+                        if taken_in {
+                            session.mesh_taken_in(&group_id, &event, &mut drive);
+                        }
+                    }
+                    Err(_) => drive.errored = true,
+                }
+            }
+        }
+        circle.fold_mesh_counts(drive.from_circles, 0);
+        drive
+    }
+
     /// The circle's older records first, as MDK's host resumes a group's
     /// frozen fanouts before it produces newer work for it
     /// (`marmot-account/src/runtime.rs` 2397-2402).

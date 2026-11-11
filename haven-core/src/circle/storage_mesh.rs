@@ -1,11 +1,13 @@
 //! The mesh key ring at rest, on `circles-v2.db`: the `mesh_keys` table in
 //! [`CircleStorage::initialize_schema`] and the deadline `mesh_on_until` in
-//! `user_settings` (`docs/BLUETOOTH_MESH_PLAN.md` §4.2).
+//! `user_settings` (`docs/BLUETOOTH_MESH_PLAN.md` §4.2); and the mesh's four
+//! counts, in `user_settings` too (§7.5).
 //!
 //! A row is a circle's group-event exporter secret at one epoch. Rows exist
 //! only while mesh is on, are replaced a circle at a time as the ring changes,
 //! go with their circle, and all go with the deadline. Nothing here logs: a
-//! failure is answered, not described (Security Rules 6 and 15).
+//! failure is answered, not described, and a count is exact (Security Rules 6
+//! and 15).
 
 #![allow(clippy::significant_drop_tightening)]
 
@@ -19,6 +21,49 @@ use crate::nostr::mls::{MeshKeyStore, StoredMeshKey};
 
 /// The `user_settings` key of the instant mesh goes off at.
 const MESH_ON_UNTIL_KEY: &str = "mesh_on_until";
+
+/// The `user_settings` keys of the two lifetime totals, each beside the key
+/// of what that total read when mesh was last turned on.
+const FROM_CIRCLES: [&str; 2] = ["mesh_from_circles_total", "mesh_from_circles_at_on"];
+const PASSED_ON: [&str; 2] = ["mesh_passed_on_total", "mesh_passed_on_at_on"];
+
+/// The mesh's statistics (plan §7.5): updates from this device's circles
+/// read off the mesh, and packets it could not read and passed on. No
+/// timestamp and no breakdown by circle or peer is kept.
+///
+/// **No `Debug`**: the counts are exact, and are shown, never logged
+/// (Security Rule 15).
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct MeshCounts {
+    /// Updates from this device's circles, ever.
+    pub from_circles_total: u64,
+    /// Packets passed on, ever.
+    pub passed_on_total: u64,
+    /// Updates from this device's circles since mesh was last turned on.
+    pub from_circles_since_on: u64,
+    /// Packets passed on since mesh was last turned on.
+    pub passed_on_since_on: u64,
+}
+
+/// The count stored under `key`: zero when none is, or it is no number.
+fn count(conn: &rusqlite::Connection, key: &str) -> Result<u64> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM user_settings WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(stored.and_then(|count| count.parse().ok()).unwrap_or(0))
+}
+
+fn set_count(conn: &rusqlite::Connection, key: &str, count: u64) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, ?2)",
+        params![key, count.to_string()],
+    )?;
+    Ok(())
+}
 
 impl CircleStorage {
     fn read_mesh_on_until(&self) -> Result<Option<u64>> {
@@ -43,6 +88,18 @@ impl CircleStorage {
             .map_err(|_| CircleError::Storage("Failed to acquire database lock".into()))?;
         let tx = conn.transaction()?;
         if let Some(until_ms) = until_ms {
+            // No deadline stood: mesh is being turned on, and what is
+            // counted "since turned on" starts from here.
+            let on: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM user_settings WHERE key = ?1)",
+                params![MESH_ON_UNTIL_KEY],
+                |row| row.get(0),
+            )?;
+            if !on {
+                for [total, at_on] in [FROM_CIRCLES, PASSED_ON] {
+                    set_count(&tx, at_on, count(&tx, total)?)?;
+                }
+            }
             tx.execute(
                 "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, ?2)",
                 params![MESH_ON_UNTIL_KEY, until_ms.to_string()],
@@ -118,6 +175,37 @@ impl CircleStorage {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Adds to the two lifetime totals, in one transaction. A total never
+    /// decreases: it stops at the largest number it can hold.
+    pub(crate) fn add_mesh_counts(&self, from_circles: u64, passed_on: u64) -> Result<()> {
+        let mut conn = self
+            .conn()
+            .lock()
+            .map_err(|_| CircleError::Storage("Failed to acquire database lock".into()))?;
+        let tx = conn.transaction()?;
+        for ([total, _], more) in [(FROM_CIRCLES, from_circles), (PASSED_ON, passed_on)] {
+            set_count(&tx, total, count(&tx, total)?.saturating_add(more))?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The mesh's counts as stored.
+    pub(crate) fn mesh_counts(&self) -> Result<MeshCounts> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|_| CircleError::Storage("Failed to acquire database lock".into()))?;
+        let (from_circles, passed_on) =
+            (count(&conn, FROM_CIRCLES[0])?, count(&conn, PASSED_ON[0])?);
+        Ok(MeshCounts {
+            from_circles_total: from_circles,
+            passed_on_total: passed_on,
+            from_circles_since_on: from_circles.saturating_sub(count(&conn, FROM_CIRCLES[1])?),
+            passed_on_since_on: passed_on.saturating_sub(count(&conn, PASSED_ON[1])?),
+        })
     }
 }
 
@@ -382,5 +470,75 @@ mod tests {
             rows(&storage) == 0,
             "a left circle whose MLS group is kept kept its keys"
         );
+    }
+
+    fn counts(storage: &CircleStorage) -> [u64; 4] {
+        let counts = storage.mesh_counts().unwrap();
+        [
+            counts.from_circles_total,
+            counts.passed_on_total,
+            counts.from_circles_since_on,
+            counts.passed_on_since_on,
+        ]
+    }
+
+    /// The two lifetime totals only grow; what is counted since mesh was
+    /// turned on starts again each time it is turned on, and at no other
+    /// time: not when the deadline moves, and not when mesh goes off.
+    #[test]
+    fn turning_mesh_on_starts_the_since_on_counts_and_nothing_else_does() {
+        let storage = CircleStorage::in_memory().unwrap();
+        assert_eq!(counts(&storage), [0; 4]);
+        // Counted before mesh was ever on: in the totals, and since-on too,
+        // there being no turn-on to count from.
+        storage.add_mesh_counts(2, 5).unwrap();
+        assert_eq!(counts(&storage), [2, 5, 2, 5]);
+
+        assert!(storage.set_mesh_on_until(Some(1_800_000_000_000)));
+        assert!(
+            counts(&storage) == [2, 5, 0, 0],
+            "turning mesh on did not start the since-on counts, or touched a total"
+        );
+        storage.add_mesh_counts(3, 0).unwrap();
+        storage.add_mesh_counts(0, 7).unwrap();
+        assert_eq!(counts(&storage), [5, 12, 3, 7]);
+
+        // The deadline moves: mesh stayed on.
+        assert!(storage.set_mesh_on_until(Some(1_800_000_600_000)));
+        assert!(
+            counts(&storage) == [5, 12, 3, 7],
+            "moving the deadline started the since-on counts again"
+        );
+        // Off keeps what was counted while it was on, to show.
+        assert!(storage.set_mesh_on_until(None));
+        assert_eq!(counts(&storage), [5, 12, 3, 7]);
+        // On again: from here.
+        assert!(storage.set_mesh_on_until(Some(1_800_001_000_000)));
+        storage.add_mesh_counts(1, 1).unwrap();
+        assert_eq!(counts(&storage), [6, 13, 1, 1]);
+    }
+
+    /// A total stops at the largest number it can hold, and one that is no
+    /// number counts from zero: neither is an error, and neither is a
+    /// decrease of a total that could be read.
+    #[test]
+    fn a_total_saturates_and_one_that_is_no_number_counts_from_zero() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage.add_mesh_counts(u64::MAX - 1, 4).unwrap();
+        storage.add_mesh_counts(9, 0).unwrap();
+        assert_eq!(counts(&storage)[..2], [u64::MAX, 4]);
+
+        storage
+            .conn()
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE user_settings SET value = 'many' WHERE key = 'mesh_passed_on_total'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(counts(&storage)[1], 0);
+        storage.add_mesh_counts(0, 2).unwrap();
+        assert_eq!(counts(&storage)[..2], [u64::MAX, 2]);
     }
 }
