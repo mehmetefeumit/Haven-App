@@ -1,9 +1,9 @@
 # Mesh aura — the on-map indicator for the Bluetooth mesh
 
-Status: **draft, independent confirmation pending.** Drafted by a Flutter
-specialist agent on 2026-11-11 from the owner's request below; built in M3
-with the mesh button (`docs/BLUETOOTH_MESH_PLAN.md` §7.5). Nothing here is
-built yet.
+Status: **drafted by a Flutter specialist agent and confirmed with changes
+by an independent Opus 5.5 review, both 2026-11-11**; the review's changes
+are folded in below and listed in §10. Built in M3 with the mesh button
+(`docs/BLUETOOTH_MESH_PLAN.md` §7.5). Nothing here is built yet.
 
 The owner's request: when the mesh is turned on, a soft blue wave ripples
 out of the mesh button to the edges of the screen and leaves a blue hue
@@ -30,7 +30,8 @@ checked is marked **unverified**.
   edge strips and four radial-gradient corners.
 - **Own-location ripple** — `OwnLocationRipple`
   (`haven/lib/src/widgets/map/own_location_ripple.dart`), the same wrapper
-  chain, two `drawCircle` calls with radial gradients.
+  chain, two `drawCircle` calls with radial gradients. Its marker exists
+  only while it animates (§3).
 - **Nothing at rest.** Off: the overlay builds `SizedBox.shrink()`. On and
   settled: both controllers are stopped — no ticker, no scheduled frame; the
   hue is a static picture in its own layer. The hue does not "breathe": a
@@ -52,12 +53,14 @@ checked is marked **unverified**.
 
 ## 2. Geometry (`haven/lib/src/utils/mesh_aura_geometry.dart`, pure functions)
 
-`meshButtonRect(Size shell)`, `waveReach(Size, Offset origin)`,
+`meshButtonRect(Size shell, EdgeInsets viewPadding)`,
+`waveReach(Size, Offset origin)`,
 `waveDuration(double reach)`, `waveBand(double reach)`, `hueWidth(Size)`.
 
 - **Origin:** the centre of `meshButtonRect`, the same function the button's
   `Positioned` uses — no `GlobalKey` lookup. A fixed left corner, the same in
-  RTL (plan §7.5).
+  RTL (plan §7.5), held clear of a landscape sensor housing:
+  `left = 16 + viewPadding.left` (landscape is supported on both platforms).
 - **Reach:** the distance to the farthest corner of the app's window, read
   from the size the painter is handed each frame. Front radius =
   `easeOutSine(t) × (reach + band)`.
@@ -79,14 +82,23 @@ checked is marked **unverified**.
   the whole wave fades over the last 30 % of its run.
 - **Hue:** width `clamp(0.06·shortestSide, 20, 32)`, corner radius 44. Alpha
   by distance inward: 0.50 at the edge, 0.28 at 15 %, 0.09 at 50 %, 0 at
-  100 %. Fades in over the second half of the wave; fades out in 300 ms.
+  100 %. Fades in over the second half of the wave; fades out in 300 ms,
+  after which the overlay builds `SizedBox.shrink()` again. The review
+  found 0.50 strong for a hue that may stay twelve hours; 0.35 at the edge
+  is the alternative to try first on a device.
 - **Resize** (fold, unfold, rotation, split-screen): everything is derived
   from the current size and the progress `t`; nothing remembers the old
-  size.
+  size. The duration is fixed when the wave starts, so the front jumps once
+  if the window changes mid-wave.
 - **Foldables:** `MediaQuery.displayFeatures` is not consulted [10]; the hue
   frames the window and the wave crosses a crease unbroken.
-- **Cutouts and rounded corners:** the hue is edge to edge and ignores safe-
-  area padding. That Flutter exposes no display corner radius is
+- **Where "the edge" is.** The hue frames Haven's window. On iOS and on
+  Android 15+ that is the whole screen. On Android 14 and below the app is
+  not edge to edge today (no `SystemUiMode.edgeToEdge`, no short-edge
+  cutout mode), so the hue stops above the navigation bar and, in
+  landscape, beside the cutout's black bar. Making the app edge to edge
+  everywhere changes every page's insets and is a separate task (§9).
+- **Cutouts and rounded corners:** the hue ignores safe-area padding. That Flutter exposes no display corner radius is
   **unverified**; radius 44 follows typical bezels and still fills a square
   corner.
 - All lengths are logical pixels, so the band and the hue have the same
@@ -98,8 +110,15 @@ checked is marked **unverified**.
   the status banners**: the whole perimeter of the window stays framed
   whatever the sheet's height, and a warning banner is never tinted.
 - The ripple is a second `Marker` in the existing own-location `MarkerLayer`
-  (`map_page.dart`), listed before the dot. The layer projects it, so it
-  follows pan, zoom and rotation and is culled off-screen [11].
+  (`map_page.dart`), listed before the dot and present only while it
+  animates. The layer projects it, so it follows pan, zoom and rotation and
+  is culled off-screen [11]. Both markers carry keys: the layer keys each
+  child by its marker's key, and its world-copy loop can otherwise shift
+  indices and remount the ripple mid-animation. The layer is built by a
+  static builder extracted from `map_page.dart`, as `MapShell.buildLayers`
+  is, so a widget test can pump the real composition.
+- The aura belongs to the map screen: a route pushed above it (Settings,
+  the statistics sheet) covers it.
 - Own location off-screen, unknown, or location access blocked: no ripple
   and no substitute.
 
@@ -111,9 +130,12 @@ checked is marked **unverified**.
 - Off, the 12 h auto-off, Bluetooth switched off, permission revoked: each
   is "not running" — the 300 ms fade. The hue never claims a mesh that is
   not running.
-- Backgrounded mid-animation: snapped to the settled state.
+- Backgrounded mid-animation: no listener is needed — a ticker takes its
+  elapsed time from frame timestamps and no frame runs in the background,
+  so the first frame after resume lands on the settled state.
 - Rapid taps: the controllers run from where they are; nothing queues.
-- A ripple while one runs, or within 5 s of the last: dropped.
+- One ripple per publish pass, however many circles it sent for; one that
+  arrives while another runs is dropped.
 
 ## 5. Accessibility
 
@@ -121,9 +143,12 @@ checked is marked **unverified**.
   in over 300 ms; the ripple is a fixed halo that only changes opacity.
 - **Never colour alone:** the state is the button's icon, label and
   semantics (plan §7.5); the aura is decoration on top and is excluded from
-  semantics. The button is a live region; no announcement per ripple.
-- **Photosensitivity:** one slow, low-contrast wave; at most one ripple per
-  5 s (in practice about one a minute); no red, no loop (WCAG 2.3.1,
+  semantics. A change the user did not make — the auto-off, Bluetooth
+  switched off — is announced with `SemanticsService.sendAnnouncement`, the
+  app's existing pattern; the user's own tap is not announced twice, and no
+  ripple is announced.
+- **Photosensitivity:** one slow, low-contrast wave and an occasional
+  ripple; no red, no loop, nothing near three flashes a second (WCAG 2.3.1,
   2.2.2) [15].
 
 ## 6. Colour
@@ -138,22 +163,30 @@ water, 1.69 on dark land.
 
 ## 7. Signals the UI needs
 
-- **S1 "running":** true only while the radio is operating — permission
-  held, Bluetooth on, deadline not passed. Pushed on change and readable
-  synchronously at resume.
-- **S2 "own location sent":** a bare edge — no circle, count or time.
-  Delivered only while the app is in the foreground, never replayed, never
-  logged (Security Rule 15).
-- **What "sent" means.** Three candidates:
-  - *handed to the mesh* — immediate, but nothing has left the phone and it
-    may expire unsent;
-  - *emitted in its slot* — cheap, but with no phone connected nothing was
-    transmitted;
-  - *taken by at least one phone* — strictly true, but needs per-packet
-    bookkeeping and may fire minutes later.
-
-  Drafted choice: **emitted in its slot while at least one link is up.**
-  With nobody in range the user sees the hue and no ripples.
+- **S1 "running":** true only while the mesh engine's radio is actually
+  advertising or scanning — a fact read from the engine, not inferred from
+  its inputs (permission, Bluetooth on, deadline). Pushed on change, and at
+  resume read live and synchronously, compared with the deadline at that
+  moment, so the first frame after a resume never shows a stale hue.
+- **S2 "own location handed to the mesh":** not a new signal. Dart already
+  makes the call that publishes a location; the ripple fires when that call
+  answers that the location was sent or sealed for the mesh, S1 is true and
+  at least one phone is connected. Nothing crosses the bridge to say which
+  radio emission was real.
+- **Why the hand-off and not the emission.** The mesh sends in fixed slots
+  with cover packets in between so that a neighbour cannot tell a real
+  packet from a cover one (plan §5.1). A ripple at the real emission would
+  need the engine to tell the UI which emission was real — a real-versus-
+  cover bit outside the engine — and would mark that exact packet for
+  anyone who sees the screen while capturing the radio. A ripple at the
+  hand-off needs no such signal. It means "your location was handed to the
+  mesh", and the packet goes out at the next slot, up to about two minutes
+  later.
+- **What remains.** Someone watching the unlocked screen learns when a
+  location was handed over, and can guess that the next emission is real.
+  The same screen already shows the location and its updates. Android
+  blocks screenshots and recording of the app (`FLAG_SECURE`); iOS screen
+  recording and mirroring are not blocked.
 
 ## 8. Tests (no hardware)
 
@@ -174,8 +207,13 @@ platforms and Flutter versions [21].
   hue on the new edges; "not running" removes the hue within 300 ms; ten
   rapid toggles settle on the last; a pause snaps; no semantics node.
 - Ripple: its centre is the dot's before and after a move, zoom and
-  rotation; a second event within 5 s is ignored; idle has no layer and
-  repaints no map; reduce motion keeps the radius constant.
+  rotation; a second hand-off while one runs is ignored; idle has no marker
+  and no layer and repaints no map; reduce motion keeps the radius constant;
+  no ripple while S1 is false or no phone is connected.
+- S1: Bluetooth off, permission revoked, and a deadline that passed while
+  the app was suspended each give no hue on the first frame after resume.
+- Log anonymity: a log-capture test that nothing is logged when a ripple
+  fires (Security Rule 15).
 - Shell: the order is sheet, aura, banners, and a banner's remedy is still
   tappable.
 
@@ -186,15 +224,31 @@ deferred with the power measurements.
 
 ## 9. Open decisions
 
-1. **Privacy (owner, Rule 10).** The ripple shows on the screen which
-   emission slot carried a real location and which a cover packet. Someone
-   who can see the unlocked screen while capturing the radio can tell the
-   two apart for this phone. The same screen already shows the location.
-2. "Sent" as in §7, or the strict "taken by at least one phone".
-3. Aura above the sheet (whole window framed) or below it (map only).
-4. Whether a ring round the own-location dot may read as radio range or as
-   accuracy; it is small (96 logical px) and brief.
-5. Whether the button is held clear of a landscape cutout.
+1. **Ripple at the hand-off (drafted here) or at the real emission.** The
+   emission is the literal "broadcast" moment but creates the real-versus-
+   cover signal described in §7; choosing it is the owner's decision under
+   Security Rule 10.
+2. **Edge to edge on Android 14 and below** — leave the hue inside the
+   system bars there, or make the whole app edge to edge as its own task.
+3. Aura above the sheet (whole window framed; a faint tint, about 0.05, on
+   the sheet's side edges) or below it (map only; hidden when the sheet is
+   tall). Drafted: above.
+4. Edge alpha 0.50 or 0.35 — a judgement to make on a real screen.
+
+## 10. What the confirmation review changed
+
+- The ripple fires at the hand-off, not at the emission (§7): no real-
+  versus-cover signal leaves the engine.
+- S1 is the radio's actual state, read live at resume (§7).
+- The Android edge-to-edge difference is stated (§2).
+- The button rect accounts for a landscape sensor housing (§2).
+- The ripple marker exists only while animating, both markers are keyed,
+  and the layer gets a testable static builder (§3).
+- Dropped: the lifecycle listener and the 5 s gate (§4). Added: the
+  overlay returns to nothing after the fade (§2), announcements only for
+  changes the user did not make (§5), a log-capture test (§8).
+- Not verified by either pass: behaviour on a real device, including iOS
+  Control Centre ending the mesh (plan §0.4), and smoothness.
 
 ## References
 
