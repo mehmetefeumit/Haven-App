@@ -3569,6 +3569,7 @@ dependencies = [
  "nostr-sdk",
  "oslog",
  "rand 0.8.5",
+ "rustix",
  "serde_json",
  "tokio",
  "url",

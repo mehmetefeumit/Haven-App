@@ -717,6 +717,46 @@ async fn a_deadline_that_passes_with_no_engine_batch_ends_the_keys_at_the_mainte
     );
 }
 
+/// How long mesh stays on is what the engine's owner sets its own deadline
+/// by: the whole of what was asked and never more than twelve hours, less as
+/// this session's clock runs, no more when that clock is set back, and
+/// nothing once the deadline has passed or mesh is off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn how_long_mesh_stays_on_is_read_off_the_deadline_and_a_clock_set_back_adds_nothing() {
+    let (admin, _others, _group) = split(setup_circle(2, &[ONE]).await);
+    let session = admin.session();
+    let now = wall_ms();
+    session.set_legacy_clock_for_test(now);
+    assert!(
+        session.mesh_on_for_ms() == 0,
+        "mesh is off and has time left"
+    );
+
+    assert!(session.mesh_on_until(u64::MAX).await);
+    assert!(
+        session.mesh_on_for_ms() == MESH_ON_MAX_MS,
+        "mesh asked for without end is not on for twelve hours"
+    );
+    session.set_legacy_clock_for_test(now + HOUR_MS);
+    assert_eq!(session.mesh_on_for_ms(), MESH_ON_MAX_MS - HOUR_MS);
+    session.set_legacy_clock_for_test(now - HOUR_MS);
+    assert!(
+        session.mesh_on_for_ms() == MESH_ON_MAX_MS - HOUR_MS,
+        "a clock set back brought the deadline further away"
+    );
+
+    assert!(session.mesh_on_until(now + 2 * HOUR_MS).await);
+    assert_eq!(session.mesh_on_for_ms(), HOUR_MS);
+    session.set_legacy_clock_for_test(now + 2 * HOUR_MS);
+    assert!(
+        session.mesh_on_for_ms() == 0,
+        "mesh has time left at its deadline"
+    );
+    assert!(session.mesh_on_until(u64::MAX).await);
+    assert!(session.mesh_off().await);
+    assert!(session.mesh_on_for_ms() == 0, "mesh has time left once off");
+}
+
 /// A stored key whose circle has no row — the circle was left and the delete
 /// of its keys did not land — is not restored at the open, and is deleted;
 /// the keys of a circle that stands are restored beside it.

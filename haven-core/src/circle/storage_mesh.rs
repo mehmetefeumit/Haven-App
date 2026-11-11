@@ -192,6 +192,21 @@ impl CircleStorage {
         Ok(())
     }
 
+    /// Forgets all four counts (plan §7.5, the sheet's reset): the totals
+    /// and what each read when mesh was last turned on, in one transaction.
+    pub(crate) fn reset_mesh_counts(&self) -> Result<()> {
+        let mut conn = self
+            .conn()
+            .lock()
+            .map_err(|_| CircleError::Storage("Failed to acquire database lock".into()))?;
+        let tx = conn.transaction()?;
+        for key in FROM_CIRCLES.into_iter().chain(PASSED_ON) {
+            tx.execute("DELETE FROM user_settings WHERE key = ?1", params![key])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// The mesh's counts as stored.
     pub(crate) fn mesh_counts(&self) -> Result<MeshCounts> {
         let conn = self
@@ -516,6 +531,27 @@ mod tests {
         assert!(storage.set_mesh_on_until(Some(1_800_001_000_000)));
         storage.add_mesh_counts(1, 1).unwrap();
         assert_eq!(counts(&storage), [6, 13, 1, 1]);
+    }
+
+    /// A reset forgets every count and nothing else: mesh stays on, its keys
+    /// stay, and what is counted after it is counted from zero.
+    #[test]
+    fn a_reset_forgets_all_four_counts_and_leaves_mesh_as_it_was() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage.add_mesh_counts(2, 5).unwrap();
+        assert!(storage.set_mesh_on_until(Some(1_800_000_000_000)));
+        storage.save_mesh_keys(&GroupId::from_slice(&[1; 32]), &[key(4, 0xa4)]);
+        storage.add_mesh_counts(3, 7).unwrap();
+        assert_eq!(counts(&storage), [5, 12, 3, 7]);
+
+        storage.reset_mesh_counts().unwrap();
+        assert!(counts(&storage) == [0; 4], "a reset left a count standing");
+        assert!(
+            storage.mesh_on_until() == Some(1_800_000_000_000) && rows(&storage) == 1,
+            "a reset touched the deadline or a key"
+        );
+        storage.add_mesh_counts(1, 2).unwrap();
+        assert_eq!(counts(&storage), [1, 2, 1, 2]);
     }
 
     /// A total stops at the largest number it can hold, and one that is no

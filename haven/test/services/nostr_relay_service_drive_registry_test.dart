@@ -144,6 +144,7 @@ class _Pool implements RelayManagerFfi {
   Future<LocationPublishFfi> publishLocationDriven({
     required CircleManagerFfi circle,
     required SealedLocationFfi sealed,
+    required bool received,
   }) => _park(LocationPublishFfi.accepted);
 
   @override

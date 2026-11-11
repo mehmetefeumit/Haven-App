@@ -111,6 +111,12 @@
       "source": "MARMOT_PROTOCOL_KNOWLEDGE.md#the-d-slot-id-is-shape-normative",
       "summary": "The kind-30443 `d` slot id is a public, per-account coordinate every relay serving that account's KeyPackages can read. mint_d draws 32 bytes (64 hex chars), the width the Nostr transport binding fixes; builds before that fix drew 16 (32 hex chars), and THE BINDING MAKES THAT MALFORMED, NOT MERELY NARROW: `d` is 'exactly one tag, exactly one 64-character lowercase hex value decoding to 32 bytes', and 'if a required singleton tag is missing, repeated, has no value, or has extra values beyond the one defined here, the event is malformed' (transports/nostr.md), while foundation/key-packages.md requires an inviter to 'reject malformed or incompatible candidates before selecting one'. THE INVITABILITY COST IS NOW CLOSED, NOT ACCEPTED: a one-time, crash-safe retirement (decide_kp_slot_retirement, run by maintain_key_package ahead of the ordinary decision; sentinel kp_slot_retirement_done_v1) re-publishes the SAME tracked package into a freshly minted conformant slot and, only after a relay OK-ACKS it, publishes one NIP-09 kind-5 deletion of the orphaned coordinate ('a' = 30443:<pubkey>:<old d>, plus the observed id as 'e' and k=30443). Moving the same package rather than minting one keeps an in-flight Welcome against the retired coordinate decryptable, which holds for a tracked package whose lifetime is readable; an adopted slot (which holds no package) or a dead or unreadable package is replaced by fresh material instead, and the superseded material is deleted once the replacement is acked. The sentinel latches only on a completed migration, so a failed publish, an unacked retraction or an unanswered probe resumes instead of latching — and an unacked retraction does not consume the tick either, so a relay that never acks a kind-5 cannot starve rotation, republish-if-missing and heal behind it. WHAT REMAINS ACCEPTED is the historical residue: NIP-09 deletion is advisory ('relays SHOULD delete'), so a relay that ignores the request — or that was unreachable while the migration ran and comes back serving the old event — can keep the 32-hex coordinate publicly readable, and no client can force its removal. That residue is an era marker (which build of Haven first published the account), not key material: the value is CSPRNG-random and non-derived (never from an account key, MLS leaf key, KeyPackageRef or device label). A lenient peer that still selects the orphan is not stranded where the package was MOVED — it carries the same one this device holds — until that package is next rotated or reaches Lifetime.not_after, the spec's own deletion bounds; where it had to be minted, the orphan advertises material the account no longer tracks, so such a peer can fail to invite it. Proofs: haven/rust_builder/src/api.rs tc8_a_pre_fix_install_is_retired_onto_a_conformant_slot_via_real_ffi, tc9_a_conformant_install_is_never_retired_via_real_ffi, tc10_no_retraction_until_the_replacement_is_acked_via_real_ffi, tc11_an_already_published_replacement_is_adopted_via_real_ffi, tc12_a_conformant_account_scrubs_a_leftover_orphan_via_real_ffi, tc13_a_refused_retraction_leaves_the_migration_open_via_real_ffi, tc14_a_never_acked_retraction_does_not_starve_rotation_via_real_ffi, tc15_an_unreadable_row_is_retired_onto_fresh_material_via_real_ffi; slot shape pinned by haven-core/tests/kp_rotation_e2e.rs::a_first_publish_mints_a_binding_shaped_random_slot_id.",
       "forbidden_claim": "Copy must not present the slot id as carrying nothing a relay can use, and must not claim that retiring the old slot ERASES it: NIP-09 deletion is a request relays SHOULD honour, so an old 32-hex coordinate can stay publicly readable on a relay that ignores it, identifying which era of Haven first published the account. Copy must equally not claim that every Haven account is invitable by any Marmot client the moment it is installed — the retirement needs one tick with a reachable KeyPackage relay to complete, and an account with no reachable relay is unreachable for ordinary reasons anyway. The id is random and reveals no key material."
+    },
+    {
+      "id": "MESH-BRIDGE",
+      "source": "haven-core/SECURITY.md#member-bridging",
+      "summary": "With the Bluetooth mesh on, a device passes on to a circle's relays the location a fellow member sent by Bluetooth alone (member bridging, owner decision D-7, docs/BLUETOOTH_MESH_PLAN.md §5.5), so members far away can see someone who has no internet. The event is the sender's own, signed by its one-use key, so authorship stays hidden — but it reaches the relay tens of seconds after its created_at and off the bridging device's own publish rhythm. A relay of the circle, and any subscriber of the circle's routing id there, can infer that some member of that circle is offline and within radio reach of the bridging device's network address; when the sender reaches the same relay too, one event arriving from two connections links their two addresses. Bridging is on whenever mesh is on, with no separate switch.",
+      "forbidden_claim": "Copy must not claim that turning the mesh on changes nothing a relay can learn, that a relay cannot tell an update was carried by another member's phone, or that a member without internet is invisible to the circle's relays. It MAY state that a passed-on update is the sender's own encrypted event, that the relay does not learn who sent it or what it says, and that the offline sender's network address never reaches the relay."
     }
   ],
   "non_claim_arb_keys": {
@@ -2769,7 +2775,7 @@
       "guards": [
         "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml"
       ],
-      "residual": "Bounded to the traffic THIS device authors, which is all it can bound. In a circle created by a client that declared no 0x8005 component, another member's own location 445s still carry no expiration: they may be retained indefinitely AND, to any relay watching the circle's public #h, they are indistinguishable from membership changes — so in such a mixed circle the un-stamped class contains another member's LOCATION UPDATES, not only control messages. The un-stamped class is every group-control message, not membership alone — an admin handoff and a relay-set change are UpdateAppComponents commits and are un-stamped too, which is what `expiration_separates_location_from_control_and_no_other_tag_appears` actually publishes. The Privacy-page sentence that stated this discriminator (scoped to the messages this device sends) was removed with the page on 2026-08-29; SECURITY.md's discriminator bullet is now its only statement. Haven still cannot repair the group itself: writing the component is admin-gated upstream (require_admin on the UpdateAppComponents path) and a joiner is not an admin, and doing it inside the join path would stage an epoch-advancing commit whose non-publication pins the group in PendingPublish and buffers every inbound message forever, which is a worse loss than the leak. The residue is disclosed nowhere: nothing in the app tells the user that in such a circle another member's location 445s may sit on a relay indefinitely and read as group control — and since the owner removed the in-app explanation layer on 2026-08-29 there is no surface left to disclose it on, so it is recorded in SECURITY.md rather than held open as a copy decision. SECOND: the bound MASKS the group-level declaration, and it masks it in three pre-existing proofs, not one. `seal_location_attaches_group_retention_expiration` and `expired_tag_does_not_block_ingest` (src/circle/manager.rs) and the E2E wire oracle (tooling/e2e/wire_allowlist.json, kind 445 `required: [h, expiration]`) all now pass with create_group's 0x8005 declaration removed, because the bound supplies the tag they look for; `live_sync_cursor_replay_e2e.rs`'s expiration precondition is masked the same way. NOTHING AT THE WIRE LEVEL still proves Haven declares 0x8005 to its peers, and the component is the only thing governing every OTHER member's client. Held at host level instead, by `a_locally_created_circle_declares_havens_retention_window_to_every_member` (both parties read the window back out of group state) and `a_shorter_group_policy_reaches_the_wire_as_declared` (a foreign circle's narrower window reaches the wire as declared, which the bound could not fake). Closing it on the wire needs an allow-list entry that asserts the delta VALUE against the circle's declared window rather than the tag's presence — owned by the E2E lane, not by this crate. THIRD: the bound honours an arbitrarily short declared window, so a circle whose creator declares e.g. 1 s has every Haven member's location dropped by a NIP-40-honouring relay almost immediately. Deliberately not floored — a floor would ask relays to hold location ciphertext LONGER than the circle declared, and would not restore visibility, since the same component governs every other member's client. SECURITY.md's no-gap invariant is scoped to circles Haven created for exactly this reason — and, since PUB-COALESCE, to rosters of at most kMaxCirclesPerBurst circles as well — which is every roster the app admits, because kMaxCirclesPerAccount (10) refuses the eleventh (INV-W-445-EXPIRATION-WINDOW). That window is no longer undisclosed: the circle-details subtitle reports the EFFECTIVE window for the messages this device sends into that circle — in seconds when it is under a minute, so a narrow foreign window reads as alarming rather than being rounded away — held by INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT. What the sheet does not say is WHY it is short: it reports the number, not that another client chose it."
+      "residual": "Bounded to the traffic THIS device authors, which is all it can bound. In a circle created by a client that declared no 0x8005 component, another member's own location 445s still carry no expiration: they may be retained indefinitely AND, to any relay watching the circle's public #h, they are indistinguishable from membership changes — so in such a mixed circle the un-stamped class contains another member's LOCATION UPDATES, not only control messages. The un-stamped class is every group-control message, not membership alone — an admin handoff and a relay-set change are UpdateAppComponents commits and are un-stamped too, which is what `expiration_separates_location_from_control_and_no_other_tag_appears` actually publishes. The Privacy-page sentence that stated this discriminator (scoped to the messages this device sends) was removed with the page on 2026-08-29; SECURITY.md's discriminator bullet is now its only statement. Haven still cannot repair the group itself: writing the component is admin-gated upstream (require_admin on the UpdateAppComponents path) and a joiner is not an admin, and doing it inside the join path would stage an epoch-advancing commit whose non-publication pins the group in PendingPublish and buffers every inbound message forever, which is a worse loss than the leak. The residue is disclosed nowhere: nothing in the app tells the user that in such a circle another member's location 445s may sit on a relay indefinitely and read as group control — and since the owner removed the in-app explanation layer on 2026-08-29 there is no surface left to disclose it on, so it is recorded in SECURITY.md rather than held open as a copy decision. SECOND: the bound MASKS the group-level declaration, and it masks it in three pre-existing proofs, not one. `seal_location_attaches_group_retention_expiration` and `expired_tag_does_not_block_ingest` (src/circle/manager.rs) and the E2E wire oracle (tooling/e2e/wire_allowlist.json, kind 445 `required: [h, expiration]`) all now pass with create_group's 0x8005 declaration removed, because the bound supplies the tag they look for; `live_sync_cursor_replay_e2e.rs`'s expiration precondition is masked the same way. NOTHING AT THE WIRE LEVEL still proves Haven declares 0x8005 to its peers, and the component is the only thing governing every OTHER member's client. Held at host level instead, by `a_locally_created_circle_declares_havens_retention_window_to_every_member` (both parties read the window back out of group state) and `a_shorter_group_policy_reaches_the_wire_as_declared` (a foreign circle's narrower window reaches the wire as declared, which the bound could not fake). Closing it on the wire needs an allow-list entry that asserts the delta VALUE against the circle's declared window rather than the tag's presence — owned by the E2E lane, not by this crate. THIRD: the bound honours an arbitrarily short declared window, so a circle whose creator declares e.g. 1 s has every Haven member's location dropped by a NIP-40-honouring relay almost immediately. Deliberately not floored — a floor would ask relays to hold location ciphertext LONGER than the circle declared, and would not restore visibility, since the same component governs every other member's client. SECURITY.md's no-gap invariant is scoped to circles Haven created for exactly this reason — and, since PUB-COALESCE, to rosters of at most kMaxCirclesPerBurst circles as well — which is every roster the app admits, because kMaxCirclesPerAccount (10) refuses the eleventh (INV-W-445-EXPIRATION-WINDOW). That window is no longer undisclosed: the circle-details subtitle reports the EFFECTIVE window for the messages this device sends into that circle — in seconds when it is under a minute, so a narrow foreign window reads as alarming rather than being rounded away — held by INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT. What the sheet does not say is WHY it is short: it reports the number, not that another client chose it. SCOPE NOTE (Bluetooth mesh, opt-in): the expiration bounds what RELAYS are asked to keep, not what the mesh carries. With mesh on, the same signed event travels inside a packet whose own lifetime is twenty minutes, and a phone that carried it keeps it in an unread queue until its app reads it — so the ciphertext is held by phones in radio range past the instant relays drop it, by design (docs/BLUETOOTH_MESH_PLAN.md §6.4). The expiration is inside the signed event and nothing extends it; a member that takes the event in late judges its age by the MLS-authenticated inner timestamp. No radio is built yet, so no packet leaves a device in any shipped build."
     },
     {
       "id": "INV-W-445-EXPIRATION-WINDOW",
@@ -4807,7 +4813,7 @@
     {
       "id": "INV-R-PER-CIRCLE-PUBLISH-DECORRELATED",
       "title": "One burst publishes every eligible circle; only the CSPRNG stagger keeps their created_at stamps apart, and how much it buys shrinks with the roster",
-      "statement": "Circles publish in ONE jittered burst per interval — up to kMaxCirclesPerBurst (11) of them, the rest deferred to the next tick, a branch kMaxCirclesPerAccount (10) keeps out of production reach — with consecutive encrypts at least kPublishStaggerMinGap (2 s) apart, so no two circles share a kind-445 created_at. The per-gap CEILING is kPublishStaggerMaxGap (9 s) only for small bursts: PublishStagger.maxGapFor prices each gap at the burst's own size, so it shrinks to 3333 ms at kMaxCirclesPerAccount (10) — the largest burst a bounded roster produces — and to a flat 3 s one circle further on, at the cap. The per-circle schedules this invariant used to enforce are gone, and so is the claim they carried: every relay carrying ANY of your circles now sees the same burst rhythm, so relays each holding only ONE of your circles can match the timing and tell those circles belong to the same phone. Two costs the record did not previously carry, both stated here rather than in the deviation alone. FIRST, the surviving archive claim is NARROWER than 'the stagger is the archive-adversary defence': after coalescing the archive reader gets the link anyway, from the shared inter-burst interval sequence. What the stagger still buys is ROSTER-SCOPED, because the observer reads no milliseconds — only floor(created_at) — so its alphabet is the whole-second delta, and maxGapFor thins that alphabet monotonically as the burst grows: {2..9} (eight values) at n <= 4, {2..6} at n = 6, {2..5} at n = 8, and {2,3,4} at n = kMaxCirclesPerAccount (10), the largest burst a bounded roster produces; {2,3} is maxGapFor's answer one circle further on and no observer reaches it while the bound holds. Both production call sites price the gap at the real burst size — the foreground tick through sampleGaps(count), the background pass through sampleGap(totalPublishes: total) where total is _encrypted.length + pending.length. COALESCING CAUSED THE THINNING: pre-P5 every gap was priced at the default totalPublishes = 2, so the alphabet was always eight. At small rosters the downgrade in KIND is real — a byte-identical created_at is a zero-cost equality join over a whole-network index (created_at_A == created_at_B, decisive on a single burst), while eight admissible offsets force a windowed correlation that must first hypothesise WHICH two circles share a device and then test that against a sequence of offsets. AT THE ROSTER BOUND IT BARELY IS: a three-element alphabet is three shifted equality joins over that same whole-network index, still un-targeted mass linkage, so what survives at ten circles is a constant factor rather than a change in kind. SECOND, coalescing makes the NUMBER of circles you are in a SINGLE-RELAY observable. Backgrounded on iOS the burst's engine socket connects the WHOLE relay union — every circle's relays AND the inbox relays (relay_union) — at the open and disconnects at the pause after the staggered pass, so the connect-to-disconnect span grows by one stagger gap per additional eligible circle (mean 5.5 s while the per-gap ceiling is the full 9 s, narrowing toward 2.5 s as the burst approaches the cap, the pass bounded by kPublishStaggerMaxSpread = 30 s) and is measurable server-side by ANY relay in that union: one carrying a single circle of yours, or an inbox relay carrying none of them. Sharply: the old scheme leaked the circle count only as a RATE, to shared relays that already read it off the multiplexed #h filter; the new one leaks it as a DURATION, to relays that previously could not know it at all. The account bound caps that estimator at ten, one circle under where the per-gap ceiling saturates. Since 2026-10-31 each circle Haven creates gets its own three relays from the eight-entry location pool, none of them an inbox relay, so a device in several such circles holds a wider union than when every default circle rode the inbox's seed relays: more operators can read that duration estimator, and circles on disjoint relay sets — the case PUB-COALESCE's cost (1) links by their shared rhythm — become the common case. Restoring per-circle schedules is not the fix and is not proposed (it never decorrelated anything at a shared relay, and cost one radio wake per circle per interval); what falsifies THIS entry is a burst that publishes two circles inside one whole second, a stagger drawn from anything but a CSPRNG, or a per-gap floor at or below one second.",
+      "statement": "Circles publish in ONE jittered burst per interval — up to kMaxCirclesPerBurst (11) of them, the rest deferred to the next tick, a branch kMaxCirclesPerAccount (10) keeps out of production reach — with consecutive encrypts at least kPublishStaggerMinGap (2 s) apart, so no two circles share a kind-445 created_at. The per-gap CEILING is kPublishStaggerMaxGap (9 s) only for small bursts: PublishStagger.maxGapFor prices each gap at the burst's own size, so it shrinks to 3333 ms at kMaxCirclesPerAccount (10) — the largest burst a bounded roster produces — and to a flat 3 s one circle further on, at the cap. The per-circle schedules this invariant used to enforce are gone, and so is the claim they carried: every relay carrying ANY of your circles now sees the same burst rhythm, so relays each holding only ONE of your circles can match the timing and tell those circles belong to the same phone. Two costs the record did not previously carry, both stated here rather than in the deviation alone. FIRST, the surviving archive claim is NARROWER than 'the stagger is the archive-adversary defence': after coalescing the archive reader gets the link anyway, from the shared inter-burst interval sequence. What the stagger still buys is ROSTER-SCOPED, because the observer reads no milliseconds — only floor(created_at) — so its alphabet is the whole-second delta, and maxGapFor thins that alphabet monotonically as the burst grows: {2..9} (eight values) at n <= 4, {2..6} at n = 6, {2..5} at n = 8, and {2,3,4} at n = kMaxCirclesPerAccount (10), the largest burst a bounded roster produces; {2,3} is maxGapFor's answer one circle further on and no observer reaches it while the bound holds. Both production call sites price the gap at the real burst size — the foreground tick through sampleGaps(count), the background pass through sampleGap(totalPublishes: total) where total is _encrypted.length + pending.length. COALESCING CAUSED THE THINNING: pre-P5 every gap was priced at the default totalPublishes = 2, so the alphabet was always eight. At small rosters the downgrade in KIND is real — a byte-identical created_at is a zero-cost equality join over a whole-network index (created_at_A == created_at_B, decisive on a single burst), while eight admissible offsets force a windowed correlation that must first hypothesise WHICH two circles share a device and then test that against a sequence of offsets. AT THE ROSTER BOUND IT BARELY IS: a three-element alphabet is three shifted equality joins over that same whole-network index, still un-targeted mass linkage, so what survives at ten circles is a constant factor rather than a change in kind. SECOND, coalescing makes the NUMBER of circles you are in a SINGLE-RELAY observable. Backgrounded on iOS the burst's engine socket connects the WHOLE relay union — every circle's relays AND the inbox relays (relay_union) — at the open and disconnects at the pause after the staggered pass, so the connect-to-disconnect span grows by one stagger gap per additional eligible circle (mean 5.5 s while the per-gap ceiling is the full 9 s, narrowing toward 2.5 s as the burst approaches the cap, the pass bounded by kPublishStaggerMaxSpread = 30 s) and is measurable server-side by ANY relay in that union: one carrying a single circle of yours, or an inbox relay carrying none of them. Sharply: the old scheme leaked the circle count only as a RATE, to shared relays that already read it off the multiplexed #h filter; the new one leaks it as a DURATION, to relays that previously could not know it at all. The account bound caps that estimator at ten, one circle under where the per-gap ceiling saturates. Since 2026-10-31 each circle Haven creates gets its own three relays from the eight-entry location pool, none of them an inbox relay, so a device in several such circles holds a wider union than when every default circle rode the inbox's seed relays: more operators can read that duration estimator, and circles on disjoint relay sets — the case PUB-COALESCE's cost (1) links by their shared rhythm — become the common case. Restoring per-circle schedules is not the fix and is not proposed (it never decorrelated anything at a shared relay, and cost one radio wake per circle per interval); what falsifies THIS entry is a burst that publishes two circles inside one whole second, a stagger drawn from anything but a CSPRNG, or a per-gap floor at or below one second. SCOPE NOTE (Bluetooth mesh, opt-in): one send falls outside the burst's rhythm altogether — a fellow member's location passed on to the circle's relays behind this device's own send (member bridging). It is another member's event, its created_at tens of seconds older than the send, and it is no part of the stagger; what a relay reads from it is INV-R-MESH-BRIDGE-TELLS-A-RELAY-A-MEMBER-IS-NEARBY-AND-OFFLINE.",
       "status": "accepted_deviation",
       "accepted_deviation_id": "PUB-COALESCE",
       "assertion_arb_keys": [],
@@ -7307,6 +7313,402 @@
         {
           "file": "haven-core/tests/application_output_ack_e2e.rs",
           "name": "a_welcome_delivered_on_the_live_plane_joins_nothing"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-K-MESH-KEYS-KEPT-ONLY-WHILE-MESH-IS-ON",
+      "title": "A circle's mesh keys exist, in memory and at rest, only until the mesh deadline, and for the engine's own window of epochs",
+      "statement": "A Bluetooth mesh packet is sealed under a key derived from a circle's group-event exporter secret at one epoch. Haven keeps that secret per circle for the epoch the engine stands stable on and the five before it (DEFAULT_MAX_PAST_EPOCHS) — in the session's key ring and in the mesh_keys table of the SQLCipher circles-v2.db — and ONLY until the deadline user_settings.mesh_on_until, which is never more than twelve hours ahead of the session's clock (MESH_ON_MAX_MS) and which a clock set back does not move further away while the process lives. Every key and the deadline are deleted, in one transaction, when mesh is turned off; when the deadline has passed, at the open of the store, at the next engine batch, at the KeyPackage maintenance tick, at a mesh drive, before mesh is turned on again and at the first bridge entry after it; a circle's keys go with the circle; a staged epoch's secret is never read; and the store overwrites what it deletes (secure_delete). With mesh never turned on, nothing is derived and nothing is stored. Keeping a key past the deadline, storing one with mesh off, or widening the window beyond the engine's falsifies this.",
+      "status": "ratcheted",
+      "residual": "It is a second at-rest copy of a secret MDK's own store already holds for the same epochs, under the same keyring service. The rollback journal of the deleting transaction is unlinked, not wiped, and flash storage keeps no promise about overwritten pages; both hold ciphertext under the database key. Across a process restart the time left is the wall clock's word alone: a wall clock set back while Haven is not running lengthens it, never past twelve hours from the open. A process that owns the session and never runs the mesh engine keeps the keys current until the deadline. Tracker row T-MESH-EXPORTER carries the upstream ask that would let the ring store nothing.",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#keys-at-rest-while-mesh-is-on"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/nostr/mls/manager/mesh.rs",
+          "symbol": "MESH_ON_MAX_MS"
+        },
+        {
+          "file": "haven-core/src/circle/storage_mesh.rs",
+          "symbol": "MESH_ON_UNTIL_KEY"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mesh_keys_e2e.rs",
+          "name": "keys_are_pruned_in_step_with_the_engines_window_in_memory_and_in_the_table"
+        },
+        {
+          "file": "haven-core/tests/mesh_keys_e2e.rs",
+          "name": "a_staged_epochs_key_is_installed_at_its_confirm_and_never_at_a_rollback"
+        },
+        {
+          "file": "haven-core/tests/mesh_keys_e2e.rs",
+          "name": "the_open_deletes_stored_keys_unless_a_deadline_still_stands"
+        },
+        {
+          "file": "haven-core/tests/mesh_keys_e2e.rs",
+          "name": "with_mesh_off_nothing_is_derived_or_stored_and_what_was_stored_is_deleted"
+        },
+        {
+          "file": "haven-core/tests/mesh_keys_e2e.rs",
+          "name": "leaving_disbanding_or_forgetting_a_circle_leaves_no_row_of_it"
+        },
+        {
+          "file": "haven-core/tests/mesh_keys_e2e.rs",
+          "name": "a_deadline_that_passes_with_no_engine_batch_ends_the_keys_at_the_maintenance_tick"
+        },
+        {
+          "file": "haven-core/tests/mesh_keys_e2e.rs",
+          "name": "how_long_mesh_stays_on_is_read_off_the_deadline_and_a_clock_set_back_adds_nothing"
+        },
+        {
+          "file": "haven-core/src/circle/storage_mesh.rs",
+          "name": "a_deleted_key_leaves_no_bytes_in_the_file"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "mesh_is_started_once_kept_on_and_stopped_with_its_engine_and_keys"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "the_first_entry_after_the_deadline_turns_mesh_off_with_its_engine_and_keys"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "wiping_local_state_leaves_no_engine_key_or_count"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-E-MESH-ONE-HANDOFF-AFTER-THE-SEND-CHECK",
+      "title": "A location reaches the Bluetooth mesh at one place, after the checks a relay send passes, and the relay send waits for nothing of the mesh's",
+      "statement": "The mesh has no sealing code of its own. A sealed location is handed to it by one call, SessionManager::mesh_offer, made once in the location's own send after its send-time checks and before its relay send: an event the relay path would not send never reaches the mesh. The hand-off waits for nothing — a lock is only tried, the store is not written, and a packet that cannot be left is dropped — so a location's relay send answers the same, and a relay is sent the same frames, with mesh on and off. Whatever silences a circle on the relay path (an epoch change, a commit or proposal of this device's recorded, fetched input held unread, a leave asked, sharing stopped, the circle's end, mesh off) empties that circle's outbox slot before the engine can emit from it, and a session that opens while the engine runs is handed to it with the last session's outbox purged. A second call site, a hand-off before the send-time checks, or a relay send that waits on the mesh falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#the-one-hand-off"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/nostr/mls/manager/mesh.rs",
+          "symbol": "mesh_offer"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mesh_handoff_e2e.rs",
+          "name": "a_send_the_relay_path_refuses_never_reaches_the_hand_off"
+        },
+        {
+          "file": "haven-core/tests/mesh_handoff_e2e.rs",
+          "name": "a_circle_that_falls_silent_has_its_slot_emptied"
+        },
+        {
+          "file": "haven-core/tests/mesh_handoff_e2e.rs",
+          "name": "a_location_send_answers_the_same_whatever_becomes_of_the_hand_off"
+        },
+        {
+          "file": "haven-core/tests/mesh_handoff_e2e.rs",
+          "name": "a_relay_is_sent_the_same_frames_with_mesh_on_and_off"
+        },
+        {
+          "file": "haven-core/tests/mesh_handoff_e2e.rs",
+          "name": "a_circle_silenced_while_a_send_checked_is_handed_nothing_by_that_send"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "an_offer_is_applied_for_as_long_as_its_event_has_left_and_a_purge_empties_its_slot"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_session_opened_while_the_engine_runs_hands_off_to_it"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "sharing_stopped_withdraws_a_location_before_the_engine_emits_it"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_mesh_seams.sh"
+      ]
+    },
+    {
+      "id": "INV-E-MESH-INGRESS-VERIFIED-APPLICATION-MESSAGES-ONLY",
+      "title": "The mesh hands the engine only verified application messages of the epoch whose key opened them, calls no relay and changes nothing a relay is asked",
+      "statement": "A packet the mesh received reaches the MLS engine only if it opens under a key of one of this device's circles, the event rebuilt from it passes Event::verify() (id and signature, Security Rule 16), and — checked before the engine sees anything — it is an application message whose inner epoch is the epoch of the key that opened the packet. A commit, a proposal, and an application message of any other epoch are read and dropped, so no group state changes by radio. The drive calls no relay whatever the engine hands back, so when a relay hears from this device never follows from a packet anyone in radio range can replay; and it changes nothing a relay is asked: the mesh owns no cursor and no floor, an update it brings is recorded nowhere the relay path reads what it has seen, it arms no history walk and stamps no inbound arrival. A circle with a commit of this device's pending, or holding fetched input unread, takes nothing in, and what waits for it is bounded per circle. Skipping verify(), admitting a commit or proposal, or sending to a relay from the drive falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#the-mesh-ingress"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/relay/fanout.rs",
+          "symbol": "mesh_drive"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mesh_drive_e2e.rs",
+          "name": "a_packet_that_carries_no_authentic_event_of_its_keys_circle_never_reaches_the_engine"
+        },
+        {
+          "file": "haven-core/tests/mesh_drive_e2e.rs",
+          "name": "a_commit_or_a_proposal_a_member_wrapped_never_reaches_the_engine"
+        },
+        {
+          "file": "haven-core/tests/mesh_drive_e2e.rs",
+          "name": "an_application_message_of_another_epoch_than_its_keys_never_reaches_the_engine"
+        },
+        {
+          "file": "haven-core/tests/mesh_drive_e2e.rs",
+          "name": "a_circle_awaiting_its_own_commit_holds_a_bounded_number_and_starves_no_other"
+        },
+        {
+          "file": "haven-core/tests/mesh_drive_e2e.rs",
+          "name": "a_circle_holding_fetched_input_unread_takes_nothing_in_by_mesh"
+        },
+        {
+          "file": "haven-core/tests/mesh_drive_e2e.rs",
+          "name": "a_drive_that_hands_back_stranded_relay_input_still_calls_no_relay"
+        },
+        {
+          "file": "haven-core/tests/mesh_drive_e2e.rs",
+          "name": "an_update_the_mesh_brings_stamps_no_inbound_arrival"
+        },
+        {
+          "file": "haven-core/tests/mesh_drive_e2e.rs",
+          "name": "what_the_mesh_brings_arms_no_history_walk_and_moves_none"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_members_location_crosses_the_mesh_to_a_fellow_member_and_is_counted_once"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_mesh_seams.sh"
+      ]
+    },
+    {
+      "id": "INV-E-MESH-ONLY-SEAL-REACHES-NO-RELAY",
+      "title": "A location sealed for the Bluetooth mesh alone is sent to no relay by any call, and nothing is sealed for a mesh that is off",
+      "statement": "A fix sealed for the mesh alone (Publishing::seal_for_mesh, the bridge's seal_location_for_mesh_driven) is recorded as mesh-only in the session, in the hold that seals it: the send that follows hands it to the mesh as the packet format no member passes on to a relay, sends it to no relay and answers MeshOnly, whatever its caller does with the event, and a process that did not seal it sends it nowhere. The seal itself calls no relay, makes no commit and drives nothing; every hold that holds a relay seal holds it. With mesh off — and, at the bridge, with no engine running to carry it — nothing is sealed and the engine is not asked. A mesh-only seal that reaches a relay, or a seal made with mesh off, falsifies this.",
+      "status": "ratcheted",
+      "residual": "No caller exists yet: no background burst seals this way, so 'a burst that cannot receive publishes nothing' still describes every build. When one does (docs/BLUETOOTH_MESH_PLAN.md §7.7 R1) the fix is sealed at the last epoch the phone knows: a member removed by a commit the phone could not fetch, holding the old keys and within radio range, can read it until the phone next completes a receive; and each such seal spends one MLS message generation.",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#the-mesh-only-seal"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/relay/fanout.rs",
+          "symbol": "seal_for_mesh"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mesh_only_e2e.rs",
+          "name": "a_location_sealed_for_the_mesh_alone_reaches_a_peer_by_mesh_and_no_relay"
+        },
+        {
+          "file": "haven-core/tests/mesh_only_e2e.rs",
+          "name": "a_location_sealed_for_the_mesh_alone_is_sent_to_no_relay_by_any_later_call"
+        },
+        {
+          "file": "haven-core/tests/mesh_only_e2e.rs",
+          "name": "with_mesh_off_nothing_is_sealed_and_the_engine_is_not_asked"
+        },
+        {
+          "file": "haven-core/tests/mesh_only_e2e.rs",
+          "name": "what_holds_a_relay_seal_holds_a_seal_for_the_mesh_alone"
+        },
+        {
+          "file": "haven-core/tests/mesh_only_e2e.rs",
+          "name": "a_refused_send_of_a_location_sealed_for_the_mesh_alone_reaches_neither_carrier"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "with_mesh_off_every_entry_is_a_typed_no_op"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-R-MESH-BRIDGE-TELLS-A-RELAY-A-MEMBER-IS-NEARBY-AND-OFFLINE",
+      "title": "A passed-on mesh update tells the circle's relays that a member is offline and near the device that passed it on",
+      "statement": "With the Bluetooth mesh on, a fellow member's location this device took in by mesh is passed on to the circle's relays: that member's own sealed event, byte for byte, once; only behind this device's own location send of the same circle, to the relays that took it; only in a drive whose relay receive completed before the send, which is the caller's word (every caller says 'not received' today, so nothing is passed on yet); only an update the engine read for the first time from packets that all mark it as one a member may pass on; only while a location this device sealed at the same epoch could itself be sent; one attempt a relay, never retried, its answer read by nothing; at most one a member each 72 seconds, four a send, none begun once passing on has run for one send's time, and none later than 218 seconds after it was sealed. Those bounds are tested. What they do not hide is the accepted cost: the event arrives tens of seconds after its created_at and off this device's own rhythm, so a relay of the circle — and any subscriber of its routing id — can infer that some member of that circle is offline and within radio reach of this device's network address, and when the sender reaches the relay too, one event from two connections links their addresses.",
+      "status": "accepted_deviation",
+      "accepted_deviation_id": "MESH-BRIDGE",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#member-bridging",
+        "haven-core/SECURITY.md#the-fanout-driver-staged-in-the-engines-hold-resolved-on-proof"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/relay/fanout.rs",
+          "symbol": "publish_location_and_bridge"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mesh_bridge_e2e.rs",
+          "name": "a_fellow_members_update_is_passed_on_to_the_relays_once_byte_for_byte"
+        },
+        {
+          "file": "haven-core/tests/mesh_bridge_e2e.rs",
+          "name": "nothing_but_a_new_update_marked_for_it_is_ever_passed_on"
+        },
+        {
+          "file": "haven-core/tests/mesh_bridge_e2e.rs",
+          "name": "a_member_removed_by_a_commit_not_yet_fetched_is_never_handed_an_update_by_the_relays"
+        },
+        {
+          "file": "haven-core/tests/mesh_bridge_e2e.rs",
+          "name": "an_update_is_passed_on_only_to_the_relays_that_took_this_devices_own_send"
+        },
+        {
+          "file": "haven-core/tests/mesh_bridge_e2e.rs",
+          "name": "an_event_is_passed_on_only_inside_the_window_its_own_stamps_give"
+        },
+        {
+          "file": "haven-core/tests/mesh_bridge_e2e.rs",
+          "name": "a_flooding_member_gets_its_newest_update_passed_on_once_a_gap"
+        },
+        {
+          "file": "haven-core/tests/mesh_bridge_e2e.rs",
+          "name": "passing_on_begins_no_send_once_it_has_run_for_one_sends_time"
+        },
+        {
+          "file": "haven-core/tests/security_rule_gates.rs",
+          "name": "the_bridge_sends_once_and_reads_no_answer"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-D-MESH-ENGINE-IS-MEMORY-ONLY-AND-ENDS-AT-ITS-DEADLINE",
+      "title": "The mesh engine and every packet it carries live in memory only, and the first entry after the twelve-hour deadline drops them",
+      "statement": "The mesh engine's store, its per-packet records, its outbox and its queue of unread packets are never written to disk. One engine a process, reached only through with_mesh, which before every engine call checks the deadline and applies what the session left for the engine — an offer for as long as its event still has by the wall clock and never longer than a location lives, a purge at once. The engine's clock is read in Rust for every entry and never handed in by a caller: monotonic and counting the time the device sleeps (CLOCK_BOOTTIME on Android and Linux, CLOCK_MONOTONIC on Apple targets), so no change of the wall clock moves a packet's lifetime or the deadline. Nobody turns mesh off at its deadline; the first entry after it does, before it runs anything: the engine is dropped with every packet it held, and an entry that holds the session deletes every key. Turning mesh off, and deleting the identity, drop the engine first. The engine's lock is never held across an await. Persisting a packet, taking the engine's clock from a caller, or running the engine after its deadline falsifies this.",
+      "status": "ratcheted",
+      "residual": "With no entry at all the engine sits in memory past its deadline — it can do nothing, since only an entry runs it — and is freed at the next entry or when the process ends; the keys then end by the session's own wall-clock paths. No test can show that the clock runs while a device sleeps: that rests on the platform's documented behaviour (clock_gettime(3) on Apple, clock_gettime(2) on Linux), and on any other target the clock may stop with the machine. No radio is built: nothing links the engine to another phone in any build, and no Dart code starts it.",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#the-engines-home-its-clock-and-its-deadline"
+      ],
+      "symbols": [
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "symbol": "with_mesh"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "symbol": "mesh_clock_ms"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "the_first_entry_after_the_deadline_turns_mesh_off_with_its_engine_and_keys"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_wall_clock_that_jumps_moves_no_offer_and_none_waits_longer_than_a_location_lives"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "the_engines_clock_is_the_devices_and_does_not_run_backwards"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "the_engine_lock_is_taken_only_where_nothing_can_be_awaited"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "wiping_local_state_leaves_no_engine_key_or_count"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "an_engine_call_that_panics_ends_that_engine_and_no_other"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-D-MESH-STATISTICS-ARE-FOUR-COUNTS-SHOWN-NEVER-LOGGED",
+      "title": "The mesh keeps four counts and nothing else about its use, shows them, and logs none; no identifier crosses the bridge",
+      "statement": "What the device records of its mesh use is four integers in user_settings of the SQLCipher circles-v2.db: two lifetime totals — updates from this device's circles the engine read for the first time out of a mesh packet, and packets this device carried, could not open and sent on — and what each read when mesh was last turned on. No timestamp, and no breakdown by circle, peer or packet. Each update and each passed-on packet is counted once, whatever is replayed; a total never decreases; turning mesh on starts the since-on pair and nothing else does; a reset forgets all four; deleting the identity deletes them with the store. The exact counts are shown to the user and never logged: the types that carry them have no Debug, the mesh's part of the bridge writes no log line, and what crosses the bridge is a fieldless state, bools, those counts, the time left until the deadline and the locations every receive path already hands over — never a packet, packet id, key, epoch, group id, slot or relay, and never how many phones are linked, only whether one is.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#statistics-and-what-crosses-the-bridge"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/storage_mesh.rs",
+          "symbol": "MeshCounts"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/circle/storage_mesh.rs",
+          "name": "turning_mesh_on_starts_the_since_on_counts_and_nothing_else_does"
+        },
+        {
+          "file": "haven-core/src/circle/storage_mesh.rs",
+          "name": "a_reset_forgets_all_four_counts_and_leaves_mesh_as_it_was"
+        },
+        {
+          "file": "haven-core/tests/mesh_drive_e2e.rs",
+          "name": "a_cycle_of_replayed_packets_counts_each_update_once_whatever_comes_between"
+        },
+        {
+          "file": "haven-core/tests/mesh_drive_e2e.rs",
+          "name": "this_devices_own_update_a_member_wrapped_again_is_not_counted"
+        },
+        {
+          "file": "haven-core/tests/mesh_drive_e2e.rs",
+          "name": "the_counts_survive_a_restart_and_turning_mesh_on_starts_the_since_on_pair_alone"
+        },
+        {
+          "file": "haven-core/tests/mesh_drive_e2e.rs",
+          "name": "a_mesh_drive_logs_no_identifier"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "passed_on_is_counted_once_from_the_engine_and_outlives_a_restart"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "what_was_passed_on_is_added_to_the_totals_when_mesh_goes_off"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "what_the_mesh_entries_answer_with_has_no_field_an_identifier_could_cross_in"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "the_mesh_entries_log_nothing_and_format_nothing"
         }
       ],
       "guards": []

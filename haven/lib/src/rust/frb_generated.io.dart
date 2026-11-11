@@ -572,6 +572,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MemberKeyPackageFfi dco_decode_member_key_package_ffi(dynamic raw);
 
   @protected
+  MeshDriveFfi dco_decode_mesh_drive_ffi(dynamic raw);
+
+  @protected
+  MeshStartFfi dco_decode_mesh_start_ffi(dynamic raw);
+
+  @protected
+  MeshStatsFfi dco_decode_mesh_stats_ffi(dynamic raw);
+
+  @protected
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
@@ -1422,6 +1431,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MemberKeyPackageFfi sse_decode_member_key_package_ffi(
     SseDeserializer deserializer,
   );
+
+  @protected
+  MeshDriveFfi sse_decode_mesh_drive_ffi(SseDeserializer deserializer);
+
+  @protected
+  MeshStartFfi sse_decode_mesh_start_ffi(SseDeserializer deserializer);
+
+  @protected
+  MeshStatsFfi sse_decode_mesh_stats_ffi(SseDeserializer deserializer);
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
@@ -2492,6 +2510,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     MemberKeyPackageFfi self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_mesh_drive_ffi(MeshDriveFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_mesh_start_ffi(MeshStartFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_mesh_stats_ffi(MeshStatsFfi self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);

@@ -32,7 +32,7 @@ use haven_core::relay::fanout::scripted::Answer;
 use haven_core::relay::fanout::scripted::ScriptedFanout;
 use haven_core::relay::fanout::{
     is_owned, DriveMode, FanoutClock as _, FanoutSend, FanoutTargetOutcome, LocationPublish,
-    LocationSeal, Publishing, Taken, UnrecordedPublisher,
+    LocationSeal, Publishing, Taken, UnrecordedPublisher, LOCATION_SEND_MS,
 };
 use haven_core::relay::{DeviceClockComplaint, PublishResult, RelayError, RelayResult};
 use helpers::drive::{
@@ -946,6 +946,47 @@ async fn what_happens_while_one_update_is_sent_stops_the_ones_behind_it() {
             }
         );
         (bridger.member.session()).mark_caught_up_for_test(&group);
+    }
+}
+
+/// Passing on has one send's time of a wake to itself: once that has run no
+/// further send is begun and what waited is dropped, so a relay that
+/// withholds its answer on a passed-on event costs the call one wait, not
+/// one for each update it kept. A millisecond short of it, every update goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passing_on_begins_no_send_once_it_has_run_for_one_sends_time() {
+    let (admin, others, group) = split(setup_circle(4, &[ONE]).await);
+    let senders = [&admin, &others[0], &others[2]];
+    for sender in senders {
+        mesh_on(sender).await;
+    }
+    let bridger = Bridger::new(&others[1], &group).await;
+    let mut now = wall_ms();
+
+    for (first_takes_ms, passes) in [(LOCATION_SEND_MS, 1), (LOCATION_SEND_MS - 1, 3)] {
+        let mut packets = Vec::new();
+        for sender in senders {
+            packets.push(handed_off(sender, &group).await.1);
+        }
+        now += SENDER_GAP_MS + LOCATION_SEND_MS;
+        bridger.at(now);
+        let _ = bridger.takes_in(packets).await;
+        assert!(bridger.keeps().len() == 3, "premise: one of each member");
+        let clock = Arc::clone(&bridger.clock);
+        // Its own send is the first; the first passed on, the second.
+        *bridger.relays.during.lock().unwrap() = Some((
+            2,
+            Box::new(move || clock.set(now + first_takes_ms - ManualClock::ORIGIN)),
+        ));
+        assert!(matches!(
+            bridger.publishes(true).await,
+            LocationPublish::Sent(Ok(_))
+        ));
+        assert!(
+            bridger.passed_on().len() == passes && bridger.keeps().is_empty(),
+            "the first passed-on send took {first_takes_ms} ms, and not {passes} went or \
+             one was kept"
+        );
     }
 }
 

@@ -5131,6 +5131,12 @@ impl CircleManager {
         self.storage.mesh_counts()
     }
 
+    /// Forgets the mesh's counts, all four: the user's reset. A write that
+    /// fails leaves them as they were, to be read again.
+    pub fn reset_mesh_counts(&self) {
+        let _ = self.storage.reset_mesh_counts();
+    }
+
     /// The circle a `kind:445` event is addressed to, by its `#h` tag: what
     /// the event claims, before anything about it is authenticated.
     pub(crate) fn group_of_event(&self, event: &Event) -> Option<GroupId> {

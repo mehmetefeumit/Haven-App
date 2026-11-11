@@ -1419,7 +1419,8 @@ cd haven-core && cargo clippy --all-targets -- -D warnings
 | Mint a KeyPackage + 30443 event | `build_kp_maintenance_events(session, keys, own_kp_relays, existing_d, prev_created_at)` |
 | Create a circle | `relay::fanout::Publishing::create_circle` (bridge `create_circle_driven`); underneath, `SessionManager::create_group` returns `FoundingGroupCreated` — nothing to confirm |
 | Add / remove members, relay change, hand-over, step-down, repair | `Publishing::{add_members, remove_members, update_relays, admin_handoff, self_demote, repair_rotation}` — stage under a durable record, drive, answer a typed outcome (bridge `*_driven`) |
-| Send a location | `Publishing::seal_location` / `publish_location` (bridge `seal_location_driven` / `publish_location_driven`) |
+| Send a location | `Publishing::seal_location` / `publish_location_and_bridge`, whose own send is `publish_location` (bridge `seal_location_driven` / `publish_location_driven`); for the Bluetooth mesh alone, `Publishing::seal_for_mesh` (bridge `seal_location_for_mesh_driven`) and the same send |
+| Read what the Bluetooth mesh received | `Publishing::mesh_drive` (bridge `mesh_drive_driven`) — application messages only, no relay called (`docs/BLUETOOTH_MESH_PLAN.md` §5.2) |
 | Receive | `process_event(&event)` → branch on `IngestOutcome`, drain `GroupEvent`s |
 | Tick convergence | `advance_convergence(gid)` after ingest batches |
 | Drive stored records | `Publishing::resume` (bridge `resume_driven`) |

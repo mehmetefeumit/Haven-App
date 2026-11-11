@@ -585,6 +585,12 @@ pub enum HeldRowKind {
 /// rule is only ever applied to application messages, which change no group
 /// state (see [`SessionManager::sweep_unresolvable_inputs`]).
 ///
+/// The Bluetooth mesh, when the user has it on, is a second such mismatch: a
+/// packet carries its event for the packet's lifetime — twenty minutes — and
+/// the queue of packets not yet read keeps it longer, so the mesh can deliver
+/// an application message again after this rule called it unresolvable. The
+/// cost is the same one dropped update, and the rule's scope is unchanged.
+///
 /// [`RECEIVER_EXPIRATION_GRACE_SECS`]: crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS
 /// [`SessionManager::sweep_unresolvable_inputs`]: crate::nostr::mls::SessionManager::sweep_unresolvable_inputs
 pub const UNRESOLVABLE_INPUT_MAX_AGE_SECS: u64 =

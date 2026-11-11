@@ -135,7 +135,8 @@ abstract interface class CircleChangeDriver {
   });
 
   /// Sends a location [sealLocation] sealed, once, to the relays its record
-  /// names, and ends its record whatever was answered.
+  /// names, and ends its record whatever was answered. With the Bluetooth
+  /// mesh on, that send also leaves the sealed event for the mesh.
   Future<LocationPublishFfi> publishLocation({
     required CircleManagerFfi circle,
     required SealedLocationFfi sealed,

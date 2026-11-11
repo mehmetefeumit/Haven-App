@@ -497,8 +497,10 @@ One `kind:445` can leave with no record at all, and it is neither a commit
 nor a proposal: with the Bluetooth mesh on, a fellow member's location this
 device took in by mesh is passed on to the circle's relays (member bridging,
 owner decision D-7, `docs/BLUETOOTH_MESH_PLAN.md` §5.5;
-`Publishing::publish_location_and_bridge`, which no entry of the bridge calls
-before the mesh's own FFI lands). It is that member's own sealed event, byte
+`Publishing::publish_location_and_bridge`, which the bridge's
+`publish_location_driven` calls with its caller's word on the drive's
+receive — `false` from every Dart caller today, so nothing is passed on
+yet). It is that member's own sealed event, byte
 for byte; the mesh's ingress admits application messages alone, so no commit
 travels this way. It is sent only behind this device's own location send of
 the same circle, in the same call, and only to the relays that took that
@@ -512,7 +514,8 @@ device sealed at the same epoch could itself be sent
 (`SessionManager::location_may_be_sent`), so a member removed since is not
 handed it. One attempt a relay, never retried, its answer read by nothing;
 an event is passed on at most once, at most one a member each 72 seconds, at
-most four a send, no later than 218 seconds after it was sealed, and never
+most four a send and none begun once passing on has run for one send's time,
+no later than 218 seconds after it was sealed, and never
 when it declares a longer life than 228 seconds or is stamped ahead of this
 device's clock. What one send does not pass on is dropped
 (`tests/mesh_bridge_e2e.rs`;
@@ -1717,7 +1720,9 @@ Android service's resume claims `false` and only finishes.
     background-sharing consent has loaded, where a live session is wanted
     and the burst still owns the wake; it then waits out the backlog and
     pauses as any burst does. A burst that cannot start one publishes nothing
-    (nothing is sealed before a receive has run) and reports it to the
+    (nothing is sealed before a receive has run; the seal for the Bluetooth
+    mesh alone, which would be the one exception, has no caller — "The
+    mesh-only seal" below) and reports it to the
     sharing-health model as a failed open, which raises the existing
     lost-subscription fault (`background_burst_coordinator_test.dart`); one
     the foreground took back, or whose consent was withdrawn, meanwhile,
@@ -2934,7 +2939,7 @@ Haven uses SQLCipher (encrypted SQLite) for all persistent databases. Encryption
 | Database | Purpose | Service ID | Key ID |
 |----------|---------|------------|--------|
 | `session-v2.sqlite` | MLS group state (MDK v0.10.4 `AccountDeviceSession`; WAL) | `com.oblivioustech.haven` | `mls.session.key.v2` |
-| `circles-v2.db` | Circle metadata, contacts, memberships | `com.oblivioustech.haven` | `circles.db.key.v2` |
+| `circles-v2.db` | Circle metadata, contacts, memberships; each circle's Bluetooth mesh keys, only while mesh is on ("Bluetooth mesh" below) | `com.oblivioustech.haven` | `circles.db.key.v2` |
 | `tiles-v2.db` | Encrypted map-tile cache | `com.oblivioustech.haven` | `tiles.db.key.v2` |
 
 The stores that builds before the MDK v0.10.4 migration wrote — `session.sqlite`,
@@ -3272,6 +3277,273 @@ pubkeys, group ids, or event ids.
 The iOS keychain accessibility tradeoff that lets a locked-but-unlocked-since-
 boot device read the SQLCipher key during a background wake is documented under
 *Database Encryption* above (owner-approved, `ThisDeviceOnly`, never synced).
+
+### Bluetooth mesh (opt-in second carrier)
+
+The Bluetooth mesh (`docs/BLUETOOTH_MESH_PLAN.md`) is a second carrier for the
+location events the relay path already seals: the same signed `kind:445`
+event, wrapped in a packet under a key only the circle's members hold, passed
+phone to phone. It is off unless the user turns it on, and it turns itself off
+twelve hours later.
+
+**What exists in this tree, and what does not.** The Rust core
+(`haven-core/src/mesh/`, `nostr/mls/manager/mesh.rs`) and the bridge
+(`haven/rust_builder/src/api.rs`, "Bluetooth mesh FFI") are built and tested.
+The radio is not: no code links the engine to another phone, so no packet
+leaves or reaches a device in any build. No Dart code calls a mesh entry yet
+either, so in a shipped build mesh cannot be turned on, no key below is ever
+stored, and member bridging passes nothing on (the one Dart caller of the
+location send says "not received"). This section states what the built parts
+guarantee when they are driven; the privacy cost of the radio itself is the
+plan's §0.4 and §8.1, and is owed here when the radio lands.
+
+#### Keys at rest while mesh is on
+
+A packet is sealed under `K_mesh = HKDF(G_e)`, `G_e` being a circle's
+`marmot/group-event` exporter secret at epoch `e` — the secret the outer layer
+of every `kind:445` of that epoch is keyed from. MDK exports it for the epoch
+a group stands on and no other, so Haven keeps it itself (tracker
+`T-MESH-EXPORTER`):
+
+- **What.** Per circle, `G_e` and the routing id of that epoch, for the epoch
+  the engine stands stable on and the five before it
+  (`DEFAULT_MAX_PAST_EPOCHS`, the engine's own window): one key an epoch
+  number. `K_mesh` is derived when a row is loaded and is never stored. A
+  staged epoch's secret is never read: a key is taken only while the circle is
+  stable and MDK's exported epoch is that epoch.
+- **Where.** In memory, in the session's key ring, and in the `mesh_keys`
+  table of `circles-v2.db` — SQLCipher, under `circles.db.key.v2`. MDK's own
+  store already holds a full snapshot of each of those epochs under the same
+  keyring service, so this is a second at-rest copy of a secret the device
+  holds, not a new one.
+- **Until when.** Only until the deadline `user_settings.mesh_on_until`, which
+  is never more than twelve hours ahead of the session's clock
+  (`MESH_ON_MAX_MS`); a clock set back brings it no further away while the
+  process lives, because the latest instant seen is what is compared.
+- **Every deletion.** Mesh turned off (`mesh_stop` →
+  `SessionManager::mesh_off`): every row and the deadline, in one transaction.
+  The deadline passed: at the open of the store, at the next engine batch,
+  at the KeyPackage maintenance tick, at a mesh drive, before mesh is turned
+  on again, and at the first bridge entry after it (below). The window
+  moved: the key of the epoch that fell out of it. A branch reselected, or a
+  key the engine's contradicts: every other key of that circle. The circle
+  left, disbanded, forgotten or deleted: its rows, with it. A delete the
+  store refuses is asked again at the next engine call.
+  Identity deleted: `wipe_all_mls_state` empties the engine's slot first, then
+  deletes the database file and its keyring key.
+- **`secure_delete`.** The circle store opens with `PRAGMA secure_delete`, so
+  a deleted row is overwritten in the file, not left in a free page
+  (`circle::storage_mesh::tests::a_deleted_key_leaves_no_bytes_in_the_file`).
+
+Residuals. The rollback journal of the deleting transaction is unlinked, not
+wiped, and flash storage keeps no promise about overwritten pages; both hold
+ciphertext under the database key. Across a process restart the time left is
+the wall clock's word alone — a wall clock set back while Haven is not running
+lengthens it, never past twelve hours from the open. An epoch crossed inside
+one engine call, and one reached while mesh was off, has no key, so a peer
+still on it is not read over mesh. A process that owns the session and never
+runs the engine (a catch-up worker) keeps the keys current until the deadline
+and hands nothing off.
+
+Proof: `haven-core/tests/mesh_keys_e2e.rs` (T-SEC-6);
+`mesh_ffi_tests::mesh_is_started_once_kept_on_and_stopped_with_its_engine_and_keys`
+and
+`the_first_entry_after_the_deadline_turns_mesh_off_with_its_engine_and_keys`
+in `haven/rust_builder/src/api.rs`.
+
+#### The one hand-off
+
+A location reaches the mesh at exactly one place: `Publishing::publish_location`
+calls `SessionManager::mesh_offer` once, after the send-time checks a relay
+send passes and before the relay send. The event is wrapped under the newest
+key of its circle and left in `mesh::handoff::Handoff` — the last thing said
+of each of 64 slots, a slot being an opaque local number. The mesh has no
+sealing code of its own and never holds an MLS session.
+
+The relay send waits for nothing of the mesh's: the ring's lock is only
+tried, the store is not written, and a packet that cannot be left is dropped
+— the mesh is lossy by design, the explicit carve-out from Rule 12's "never
+drop". A relay is sent the same frames with mesh on and off
+(`mesh_handoff_e2e::a_relay_is_sent_the_same_frames_with_mesh_on_and_off`).
+
+What silences a circle on the relay path empties its slot before the engine
+can emit from it: an epoch change, a commit or proposal of this device's
+recorded, fetched input held unread, a leave asked, sharing stopped
+(`mesh_sharing_stopped`), the circle's end, mesh off
+(`mesh_handoff_e2e::a_circle_that_falls_silent_has_its_slot_emptied`). A send
+the relay path refuses never reaches the hand-off. Guard:
+`scripts/ci/check_mesh_seams.sh`.
+
+#### The engine's home, its clock and its deadline
+
+One engine a process, in the bridge's `MESH` slot, reached only through
+`with_mesh`. Before every engine call, in this order: the deadline is
+checked; what the session left in the hand-off is applied; then the call
+runs. The lock is taken only in functions that are not `async`, so it is
+never held across an `.await`
+(`mesh_ffi_tests::the_engine_lock_is_taken_only_where_nothing_can_be_awaited`).
+
+- **Memory only.** The engine's store, its per-packet records, its outbox and
+  its queue of unread packets are never written to disk. They are dropped
+  with the engine: at mesh off, at the deadline, at `wipe_all_mls_state`, and
+  when the process ends.
+- **Applying the hand-off.** A purge empties its outbox slot. An offer fills
+  it until its event expires: the event's `expiration` is a wall-clock
+  instant and the engine's clock is not one, so what crosses is the time the
+  event still has when it is applied — never more than a location's whole
+  life (228 s), so a wall clock set back between the seal and the entry
+  cannot make a location wait longer — and an offer whose event has expired
+  empties the slot instead. A wall clock that jumps afterwards moves nothing.
+- **The clock** is read in Rust for every entry and never handed in by a
+  caller: `CLOCK_BOOTTIME` on Android and Linux, and on Apple targets
+  `CLOCK_MONOTONIC`, which there "will continue to increment while the system
+  is asleep" (`clock_gettime(3)`). Both are monotonic and count the time the
+  device sleeps, which `std::time::Instant` does not on either, so a packet's
+  lifetime and the twelve hours are spent asleep as awake and no change of
+  the wall clock moves them. On any other target (Windows) the engine's clock
+  may stop while the machine sleeps; no radio is planned there.
+- **The deadline.** Nobody turns mesh off at its deadline; the first entry
+  after it does, before it runs anything. The engine's own deadline is on the
+  engine's clock, set when the user asks for mesh or keeps it on, and every
+  entry that holds the session brings it no later than the session's own. An
+  entry that finds either passed drops the engine with every packet it held
+  and calls `SessionManager::mesh_off`, so every key is deleted. An entry
+  that holds no session — none exists in this build; the radio's will be —
+  drops the engine at once and leaves the keys to the next entry that holds
+  one, and failing that to the core's own paths above.
+- **A session that opens while the engine runs** is handed to it
+  (`CircleManagerFfi::new`), and so is one that asks for a mesh already on:
+  the engine takes that session's hand-off, and what the last one left in the
+  outbox — under slot numbers the new session does not use — is purged.
+- **An engine call that panics** leaves no engine to run again.
+
+Residual. With no entry at all the engine sits in memory past its deadline:
+it can do nothing, since only an entry runs it, but it is freed only at the
+next entry or when the process ends. `mesh_resume` restarts an engine for a
+mesh an earlier process left on, under the stored deadline; a restart never
+moves it.
+
+Proof, all in `mesh_ffi_tests`:
+`an_offer_is_applied_for_as_long_as_its_event_has_left_and_a_purge_empties_its_slot`,
+`a_wall_clock_that_jumps_moves_no_offer_and_none_waits_longer_than_a_location_lives`,
+`a_session_opened_while_the_engine_runs_hands_off_to_it`,
+`sharing_stopped_withdraws_a_location_before_the_engine_emits_it`,
+`wiping_local_state_leaves_no_engine_key_or_count`,
+`an_engine_call_that_panics_ends_that_engine_and_no_other`.
+
+#### The mesh ingress
+
+`RelayManagerFfi::mesh_drive_driven` hands `Publishing::mesh_drive` up to 256
+packets the engine has not handed out. Each is tried under every key. One
+that opens is rebuilt into its event and must pass `Event::verify()` — id and
+signature, Security Rule 16 — and then, **before the engine sees anything**,
+must be an application message whose inner epoch is the epoch of the key that
+opened its packet. A commit, a proposal, and an application message of any
+other epoch are read and dropped; so is whatever no key opens. What is kept
+goes into the engine in the mode that makes no commit, in
+`order_for_ingest`'s order, and is stored by the one site every receive plane
+shares; a copy a relay delivered first is a duplicate there.
+
+The drive **calls no relay**, whatever the engine hands back, so when a relay
+hears from this device never follows from a packet anyone in radio range can
+replay. It **changes nothing a relay is asked**: the mesh owns no cursor and
+no floor, an update it brings is recorded nowhere the relay path reads what
+it has seen — the NIP-77 pass still asks for it by id — it is owed no
+refetch, arms no history walk and stamps no inbound arrival. A circle with a
+commit of this device's pending, or holding fetched input unread, takes
+nothing in (Rules 12 and 13.4); its packets, and those the engine did not
+keep or erred on, are held — 64 a circle, 32 a circle a drive — and offered
+again.
+
+Residuals. An update the mesh brought first is seen by two reads of the
+engine's own record of what it has processed, both only after a relay-plane
+ingest of the same event failed (the catch-up sweep's judgement, and the
+NIP-77 pass's memory). A peer's update the mesh brings ends the `Stalled`
+reading as a relay's does. An advance the engine is left owing after a mesh
+ingest handed stranded input back waits for the next relay drive.
+
+Proof: `haven-core/tests/mesh_drive_e2e.rs` (T-SEC-1, T-SEC-2, T-SEC-5,
+T-STAT-1, T-BG-3, T-INDEP-3);
+`mesh_ffi_tests::a_members_location_crosses_the_mesh_to_a_fellow_member_and_is_counted_once`.
+
+#### The mesh-only seal
+
+`RelayManagerFfi::seal_location_for_mesh_driven` seals a fix for the mesh
+alone (`Publishing::seal_for_mesh`, plan §7.7 R1): the seal calls no relay,
+makes no commit and drives nothing; the location is recorded in the session
+as mesh-only, so the send that follows hands it to the mesh as the format no
+member passes on, sends it to no relay and answers `MeshOnly`, whatever its
+caller does with the event. Every hold that holds a relay seal holds this
+one. The bridge seals nothing unless an engine runs to carry it.
+
+No caller exists: no burst seals this way yet, so "a burst that cannot
+receive publishes nothing" still describes every build. When a burst does,
+the cost is the plan's: the fix is sealed at the last epoch the phone knows,
+so a member removed by a commit it could not fetch can read it within radio
+range until the phone next completes a receive; each such seal spends one MLS
+message; and it reverses that sentence for the mesh carrier.
+
+Proof: `haven-core/tests/mesh_only_e2e.rs` (T-BG-2).
+
+#### Member bridging
+
+Stated under "The fanout driver" above, with its bounds. The bridge's
+`publish_location_driven` takes the caller's word, `received`, that this
+drive's relay receive of the circle completed before the send; a caller that
+publishes before it fetches says `false` and passes nothing on, and the one
+Dart caller says `false` today. Passing on runs after this device's own send
+and has one send's time (10 s) to itself: no send is begun once that has run,
+so a relay that took the own send and withholds its answer on what is passed
+on costs one wait, not one for each update, and passing on adds under two
+sends' time to a call whatever the relays do — which is the most the next
+circle's own location waits behind it
+(`mesh_bridge_e2e::passing_on_begins_no_send_once_it_has_run_for_one_sends_time`).
+Within one drive a circle's own location can so still be sent after another
+circle's passed-on updates; sending every circle's own first would take one
+entry for the whole drive, and the entries are one a circle.
+
+**What a relay learns (owner decision D-7, accepted).** Authorship stays
+hidden — the event is signed by a fresh key, as every `kind:445` is — but a
+passed-on event reaches a relay tens of seconds after its `created_at`, off
+the bridging device's own rhythm. A relay of the circle, and anyone
+subscribed to the circle's routing id there, can infer that some member of
+that circle is offline and within radio reach of the bridging device's
+network address; when the sender reaches the relay too, the same event from
+two connections links their two addresses. For the sender it is a gain: its
+address never touches the relay. Registered as the accepted deviation
+`MESH-BRIDGE`
+(`INV-R-MESH-BRIDGE-TELLS-A-RELAY-A-MEMBER-IS-NEARBY-AND-OFFLINE`).
+
+Residual. Which drive a send belongs to is the caller's word; the session can
+only say that its last fetch of the circle completed and nothing has ended it
+since.
+
+#### Statistics, and what crosses the bridge
+
+The statistics are four integers in `user_settings` of `circles-v2.db`: two
+lifetime totals — updates from this device's circles the engine read for the
+first time out of a mesh packet, and packets this device carried, could not
+open and sent on — and what each read when mesh was last turned on. No
+timestamp, and no breakdown by circle, peer or packet. An update is counted
+once, off the engine's own durable record; a passed-on packet once, when it
+has been both tried under this device's keys and sent on. They are folded at
+every drive, at every read of the statistics, at mesh off and at the
+deadline; what was counted since the last fold is lost if the process is
+killed, and a total never decreases. A reset forgets all four.
+
+Exact counts are shown and never logged (Rule 15). What the mesh's entries
+answer with is a fieldless state (`MeshStartFfi`), bools, those four counts
+and the time left until the deadline (`MeshStatsFfi`), and the location every
+receive path already hands over (`MeshDriveFfi`); neither struct has a
+`Debug`. No packet, packet id, key, epoch, group id, slot or relay crosses,
+and "linked" is whether any phone is linked, never how many. The mesh's part
+of the bridge writes no log line.
+
+Proof: `mesh_ffi_tests::passed_on_is_counted_once_from_the_engine_and_outlives_a_restart`,
+`what_was_passed_on_is_added_to_the_totals_when_mesh_goes_off`,
+`what_the_mesh_entries_answer_with_has_no_field_an_identifier_could_cross_in`,
+`the_mesh_entries_log_nothing_and_format_nothing`;
+`mesh_drive_e2e::a_cycle_of_replayed_packets_counts_each_update_once_whatever_comes_between`.
 
 ### Test-Utils Feature
 
@@ -4342,6 +4614,15 @@ What this does **not** provide, including one property the retired design had:
   residue itself, disclosed nowhere in the app: another member's location 445s
   in such a circle. Recorded as the residual on
   `INV-W-445-EXPIRATION-SCOPE`.
+- **It bounds what relays are asked to keep, not what the Bluetooth mesh
+  carries.** With the mesh on (opt-in; "Bluetooth mesh" above), the same
+  signed event travels inside a packet whose own lifetime is twenty minutes,
+  and a phone that carried it keeps it in a queue until its app reads it. The
+  `expiration` is inside the signed event and nothing extends it: a relay
+  still drops the event on time, and a member that takes it in after that
+  judges its age by the MLS-authenticated inner timestamp as ever. But the
+  ciphertext is held by phones in radio range past the instant relays drop
+  it, by design. Recorded on `INV-W-445-EXPIRATION-SCOPE`.
 - It does not hide publish cadence; that is the jittered scheduler's job, in
   the next section.
 - Expiry is a **request**. A relay is free to ignore NIP-40 and retain the
@@ -4454,6 +4735,14 @@ plane. This is an accepted deviation, registered as `PUB-COALESCE` in
 `docs/privacy/privacy_invariants.json`; the invariant it replaces
 (`INV-R-PER-CIRCLE-PUBLISH-DECORRELATED`) is downgraded to it rather than
 deleted.
+
+**One send falls outside the burst's rhythm.** With the Bluetooth mesh on, a
+fellow member's location this device took in by mesh is passed on to the
+circle's relays behind this device's own send of that circle ("The fanout
+driver" above). It is another member's event: its `created_at` is tens of
+seconds older than the send, and it is no part of the stagger. What a relay
+reads from it is recorded as
+`INV-R-MESH-BRIDGE-TELLS-A-RELAY-A-MEMBER-IS-NEARBY-AND-OFFLINE`.
 
 **What was given up was never held.** Per-circle decorrelation did not survive a
 *shared* relay: the live-sync engine's multiplexed `#h` REQ already tells any

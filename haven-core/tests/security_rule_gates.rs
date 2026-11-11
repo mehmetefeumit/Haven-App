@@ -1657,6 +1657,7 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
                 "EvolutionOutcome",
                 "EvolutionStatus",
                 "EvolutionStatus as _",
+                "FanoutClock",
                 "LeaveOutcome",
                 "LeaveStatus as _",
                 "LocationPublish",
@@ -4684,12 +4685,14 @@ fn assert_no_rust_function_publishes_a_location_and_a_commit(root: &std::path::P
             .is_some_and(|n| n.starts_with("frb_generated"))
     });
 
-    // The legacy entry, the transport both entries share, and the driver's
-    // own send of a recorded location.
+    // The legacy entry, the transport both entries share, the driver's own
+    // send of a recorded location, and the entry that passes a fellow
+    // member's mesh update on behind it — the one the bridge calls.
     let location_publishes = [
         concat!("publish_location", "_event"),
         concat!("send_", "location("),
         concat!(".publish_", "location("),
+        concat!(".publish_location", "_and_bridge("),
     ];
     let pending_words = [
         "PendingStateRef",

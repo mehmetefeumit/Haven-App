@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `acknowledged_by`, `answer_standing`, `answer`, `answer`, `answer`, `answer`, `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_location_result`, `count`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `ensure_own_identity`, `fetch_my_profile_at`, `foreground_claim`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `leave_intent_stands`, `lifecycle_in`, `live_event_to_ffi`, `live_lifecycle_of`, `live_session_core`, `logscan_plant_token`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `max_log_level`, `member_key_packages`, `mint_key_package`, `new`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `now_secs`, `own_cached_view`, `own_profile_to_retract`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `pubkey_of`, `publish_and_promote`, `publishing`, `redact_directory_err`, `redact_profile_err`, `refusal_of`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_entry`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `retain_own_events`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `start_session_as`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Driving`, `InMemoryStorage`, `KpMintPlan`, `KpRetirementInputs`, `KpRetirementTick`, `ProfileStampLists`, `StagedPublish`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These functions are ignored because they are not marked as `pub`: `acknowledged_by`, `adopt`, `answer_standing`, `answer`, `answer`, `answer`, `answer`, `apply`, `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_location_result`, `count`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `device_clock_ms`, `ensure_own_identity`, `fetch_my_profile_at`, `foreground_claim`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `leave_intent_stands`, `lifecycle_in`, `live_event_to_ffi`, `live_lifecycle_of`, `live_session_core`, `logscan_plant_token`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `max_log_level`, `member_key_packages`, `mesh_adopt`, `mesh_clock_ms`, `mesh_empty`, `mesh_entry`, `mesh_home`, `mesh_open`, `mesh_owed`, `mint_key_package`, `new`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `now_secs`, `own_cached_view`, `own_profile_to_retract`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `pubkey_of`, `publish_and_promote`, `publishing`, `redact_directory_err`, `redact_profile_err`, `refusal_of`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_entry`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `retain_own_events`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `start_session_as`, `sync_reason_to_ffi`, `tile_err_to_string`, `unfolded`, `unknown`, `usable_profile_pool`, `with_mesh`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Driving`, `InMemoryStorage`, `KpMintPlan`, `KpRetirementInputs`, `KpRetirementTick`, `MeshHome`, `MeshSlot`, `ProfileStampLists`, `StagedPublish`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
 /// Returns the per-process log handle for `value`, e.g. `circle#a91f3c`.
@@ -88,7 +88,9 @@ Future<void> useInMemoryKeyringForTest() =>
 /// and stopped any live subscriptions BEFORE calling this — that is the Flutter
 /// layer's responsibility. No Rust global holds the manager, so there is
 /// nothing for this function to `.take()`. (Rule 14: at most one live session
-/// per DB file — the handle drop closes it.)
+/// per DB file — the handle drop closes it.) The one global it empties is the
+/// Bluetooth mesh engine's, first: the packets it carried, its outbox and its
+/// unread queue go before the keys that could read them.
 ///
 /// "Dropped" means the Dart side called `dispose()` on the handle, NOT merely
 /// nulled its reference: a `RustOpaque` that is only unreferenced is released
@@ -551,6 +553,49 @@ void setBlossomServerForTest({required String url}) =>
 /// no log and renders through no `Debug`.
 String? sealedLocationEventJsonForTest({required SealedLocationFfi sealed}) =>
     RustLib.instance.api.crateApiSealedLocationEventJsonForTest(sealed: sealed);
+
+/// Turns the Bluetooth mesh on for twelve hours from now (plan §7.6): the
+/// deadline is stored, each circle's packet keys are kept from here, and an
+/// engine runs in this process. Asked while mesh is on, it restarts the
+/// twelve hours. [`MeshStartFfi::Off`] when the store did not take the
+/// deadline: nothing is on.
+Future<MeshStartFfi> meshStart({required CircleManagerFfi circle}) =>
+    RustLib.instance.api.crateApiMeshStart(circle: circle);
+
+/// Starts the engine for a mesh an earlier process left on, under the
+/// deadline that process stored: what a process that is to carry the mesh
+/// calls when it starts. The deadline does not move — a restart is not the
+/// user asking again. [`MeshStartFfi::Off`] when no deadline stands.
+Future<MeshStartFfi> meshResume({required CircleManagerFfi circle}) =>
+    RustLib.instance.api.crateApiMeshResume(circle: circle);
+
+/// Keep on (plan §7.6): restarts the twelve hours, if mesh is on. After the
+/// deadline it answers [`MeshStartFfi::Off`] and turns nothing on: the only
+/// way back is [`mesh_start`].
+Future<MeshStartFfi> meshKeepOn({required CircleManagerFfi circle}) =>
+    RustLib.instance.api.crateApiMeshKeepOn(circle: circle);
+
+/// Turns the Bluetooth mesh off: the engine is dropped with every packet it
+/// carried, what it had passed on is added to the stored totals, every
+/// location left for it is withdrawn, and every stored key and the deadline
+/// are deleted.
+Future<void> meshStop({required CircleManagerFfi circle}) =>
+    RustLib.instance.api.crateApiMeshStop(circle: circle);
+
+/// The user stopped sharing: every location waiting to go out by mesh is
+/// withdrawn. Mesh stays on and still receives and carries.
+void meshSharingStopped({required CircleManagerFfi circle}) =>
+    RustLib.instance.api.crateApiMeshSharingStopped(circle: circle);
+
+/// The mesh's state and counts, with what the engine passed on since the
+/// last fold added to the stored totals first. A store that cannot be read
+/// shows zeros.
+Future<MeshStatsFfi> meshStats({required CircleManagerFfi circle}) =>
+    RustLib.instance.api.crateApiMeshStats(circle: circle);
+
+/// Forgets the mesh's counts, all four (plan §7.5, the sheet's reset).
+Future<void> meshResetCounts({required CircleManagerFfi circle}) =>
+    RustLib.instance.api.crateApiMeshResetCounts(circle: circle);
 
 /// M8-4 subscription-health maintenance tick (Dart-timer-driven, no secret).
 ///
@@ -2461,6 +2506,18 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
     required List<int> identitySecretBytes,
   });
 
+  /// Reads what the Bluetooth mesh received and takes in the locations
+  /// members of this device's circles sent (plan §5.2): up to 256 packets
+  /// the engine has not handed out, and those an earlier drive held. Calls
+  /// no relay and changes nothing a relay is asked
+  /// (`Publishing::mesh_drive`).
+  ///
+  /// Each packet the drive settles is marked read in the engine, which is
+  /// what makes one this device could not open count as passed on once it
+  /// has also been sent on; what the engine passed on since the last fold
+  /// is then added to the stored totals. With mesh off, nothing.
+  Future<MeshDriveFfi> meshDriveDriven({required CircleManagerFfi circle});
+
   /// Creates a new relay manager.
   static Future<RelayManagerFfi> newInstance() =>
       RustLib.instance.api.crateApiRelayManagerFfiNewInstance();
@@ -2471,7 +2528,9 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   ///
   /// A group message (kind 445) is refused before any relay is asked: a
   /// commit, a proposal and a location leave the device only under a
-  /// durable fanout record, through the fanout driver (Security Rule 13).
+  /// durable fanout record, through the fanout driver (Security Rule 13) —
+  /// and a fellow member's location the mesh brought, which has no record,
+  /// only behind this device's own send ([`Self::publish_location_driven`]).
   /// So is a gift wrap (kind 1059): every Welcome, a founding one included,
   /// is sent from its delivery record by the driver
   /// ([`Self::create_circle_driven`]).
@@ -2491,9 +2550,25 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
 
   /// Sends a location [`Self::seal_location_driven`] sealed, once, to the
   /// relays its record names, and ends its record whatever was answered.
+  /// One [`Self::seal_location_for_mesh_driven`] sealed goes to the
+  /// Bluetooth mesh and to no relay ([`LocationPublishFfi::MeshOnly`]).
+  ///
+  /// Then member bridging (plan §5.5): the locations fellow members of the
+  /// same circle sent by Bluetooth alone, which [`Self::mesh_drive_driven`]
+  /// took in, are passed on to the relays that took this send — the one
+  /// `kind:445` this device sends that it did not seal, under no fanout
+  /// record (Security Rule 13.1). `received` is the caller's word that
+  /// THIS drive's relay receive of the circle was answered to the end
+  /// before this call: a caller that publishes before it fetches says
+  /// `false` and passes nothing on, or a member a commit it has not
+  /// fetched removed could read an offline member's fix from the relays.
+  /// Passing on runs after this device's own send and begins no send
+  /// once it has run for one send's time, so it adds under two to the
+  /// call whatever a relay does with its answers.
   Future<LocationPublishFfi> publishLocationDriven({
     required CircleManagerFfi circle,
     required SealedLocationFfi sealed,
+    required bool received,
   });
 
   /// Drives the re-invites MDK owes — fresh key packages looked up through
@@ -2562,12 +2637,28 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
 
   /// Seals a fix for the circle and records it, in one engine hold, after
   /// its records are driven. The sealed event goes to
-  /// [`Self::publish_location_driven`] and nowhere else.
+  /// [`Self::publish_location_driven`] and nowhere else; that send hands
+  /// it to the circle's relays and, with mesh on, to the Bluetooth mesh.
   Future<SealOutcomeFfi> sealLocationDriven({
     required CircleManagerFfi circle,
     required List<int> mlsGroupId,
     required LocationMessage location,
     required bool foreground,
+  });
+
+  /// Seals a fix for the Bluetooth mesh alone (plan §7.7 R1): what a
+  /// background burst whose relay receive failed seals, so that a phone no
+  /// relay answers still shares by radio. Calls no relay and drives
+  /// nothing; [`Self::publish_location_driven`] then hands the event to
+  /// the mesh and to no relay.
+  ///
+  /// Nothing is sealed, and the engine is not asked, unless mesh is on
+  /// with its engine running in this process ([`SendHeldFfi::Nothing`]):
+  /// a seal nothing carries would spend an MLS message for no reader.
+  Future<SealOutcomeFfi> sealLocationForMeshDriven({
+    required CircleManagerFfi circle,
+    required List<int> mlsGroupId,
+    required LocationMessage location,
   });
 
   /// Steps this device down from admin: a leaving admin's second step.
@@ -4314,6 +4405,113 @@ class MemberKeyPackageFfi {
           nip65Relays == other.nip65Relays &&
           nip65WriteRelays == other.nip65WriteRelays &&
           authorNpub == other.authorNpub;
+}
+
+/// What [`RelayManagerFfi::mesh_drive_driven`] read off the mesh.
+///
+/// **No `Debug`**. No packet or packet id crosses: a location does, as every
+/// receive path hands one over.
+class MeshDriveFfi {
+  /// The locations taken in; each is stored already.
+  final List<LocationMessageResultFfi> replayed;
+
+  /// Whether an ingest failed; what it was handed is kept and offered
+  /// again at the next drive.
+  final bool errored;
+
+  /// Whether packets still wait to be read: drive again.
+  final bool more;
+
+  const MeshDriveFfi({
+    required this.replayed,
+    required this.errored,
+    required this.more,
+  });
+
+  @override
+  int get hashCode => replayed.hashCode ^ errored.hashCode ^ more.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MeshDriveFfi &&
+          runtimeType == other.runtimeType &&
+          replayed == other.replayed &&
+          errored == other.errored &&
+          more == other.more;
+}
+
+/// What turning the Bluetooth mesh on, resuming it or keeping it on did.
+enum MeshStartFfi {
+  /// Mesh is on, and this call started its engine.
+  started,
+
+  /// Mesh is on, and its engine was running already.
+  alreadyOn,
+
+  /// Mesh is off.
+  off,
+}
+
+/// The Bluetooth mesh as its statistics sheet shows it (plan §7.5).
+///
+/// **No `Debug`**: the counts are exact — shown to the user, never logged
+/// (Security Rule 15). No packet, key, circle or peer is named, and how many
+/// phones are linked does not cross: only whether one is.
+class MeshStatsFfi {
+  /// Whether mesh is on with its engine running in this process.
+  final bool on_;
+
+  /// Whether at least one phone is linked.
+  final bool linked;
+
+  /// How long until mesh turns itself off, milliseconds; zero when off.
+  final BigInt onForMs;
+
+  /// Updates from this device's circles since mesh was last turned on.
+  final BigInt fromCirclesSinceOn;
+
+  /// Packets passed on since mesh was last turned on.
+  final BigInt passedOnSinceOn;
+
+  /// Updates from this device's circles, ever.
+  final BigInt fromCirclesTotal;
+
+  /// Packets passed on, ever.
+  final BigInt passedOnTotal;
+
+  const MeshStatsFfi({
+    required this.on_,
+    required this.linked,
+    required this.onForMs,
+    required this.fromCirclesSinceOn,
+    required this.passedOnSinceOn,
+    required this.fromCirclesTotal,
+    required this.passedOnTotal,
+  });
+
+  @override
+  int get hashCode =>
+      on_.hashCode ^
+      linked.hashCode ^
+      onForMs.hashCode ^
+      fromCirclesSinceOn.hashCode ^
+      passedOnSinceOn.hashCode ^
+      fromCirclesTotal.hashCode ^
+      passedOnTotal.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MeshStatsFfi &&
+          runtimeType == other.runtimeType &&
+          on_ == other.on_ &&
+          linked == other.linked &&
+          onForMs == other.onForMs &&
+          fromCirclesSinceOn == other.fromCirclesSinceOn &&
+          passedOnSinceOn == other.passedOnSinceOn &&
+          fromCirclesTotal == other.fromCirclesTotal &&
+          passedOnTotal == other.passedOnTotal;
 }
 
 /// What the profile relays answered about the local user's OWN kind-0 on one

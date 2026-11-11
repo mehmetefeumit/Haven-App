@@ -600,8 +600,13 @@ impl MeshKeys {
 
     /// Whether a deadline stands that has not passed at `now_ms`.
     fn lit(&self, now_ms: u64) -> bool {
-        let until = self.until_ms.load(Ordering::Relaxed);
-        until != 0 && self.now(now_ms) < until
+        self.left_ms(now_ms) != 0
+    }
+
+    /// How long from `now_ms` the deadline is; zero when none stands or it
+    /// has passed.
+    fn left_ms(&self, now_ms: u64) -> u64 {
+        (self.until_ms.load(Ordering::Relaxed)).saturating_sub(self.now(now_ms))
     }
 
     /// Whether mesh is on at `now_ms`. A deadline that has passed turns it
@@ -1093,6 +1098,16 @@ impl SessionManager {
     #[must_use]
     pub fn mesh_handoff(&self) -> Arc<Handoff> {
         self.mesh_keys.handoff()
+    }
+
+    /// How long mesh stays on by this session's clock, milliseconds: never
+    /// more than [`MESH_ON_MAX_MS`], and zero when it is off. What the mesh
+    /// engine's owner sets the engine's own deadline by. Reads the deadline
+    /// alone, as [`Self::mesh_is_on`] does: one found passed is left for the
+    /// next engine batch to act on.
+    #[must_use]
+    pub fn mesh_on_for_ms(&self) -> u64 {
+        self.mesh_keys.left_ms(self.legacy_now_ms())
     }
 
     /// The user stopped sharing: nothing sealed before this goes out by

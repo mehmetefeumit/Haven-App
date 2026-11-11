@@ -1009,6 +1009,11 @@ class NostrRelayService implements RelayService, CircleChangeDriver {
     () async => (await _ensureInitialized()).publishLocationDriven(
       circle: circle,
       sealed: sealed,
+      // Whether this drive's relay receive of the circle completed before
+      // this send is not known here: no caller says. `false` is the answer
+      // of a caller that publishes before it fetches, and passes none of a
+      // fellow member's mesh updates on to the relays.
+      received: false,
     ),
   );
 

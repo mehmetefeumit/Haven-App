@@ -58,6 +58,14 @@ planes = { package = "haven-local-relay", path = "../../tooling/e2e/local-relay"
 [patch.crates-io]
 libsqlite3-sys = { git = "https://github.com/rusqlite/rusqlite.git", rev = "5ae7fdf83085c595fd54f977b3a56ccacabaf16b" }
 
+# The Bluetooth mesh engine's clock (`mesh_clock_ms` in src/api.rs): one that
+# keeps running while the device sleeps, which `std::time::Instant` does not.
+# The version every lockfile already resolves, so no lockfile gains a crate; but
+# only the desktop Linux keyring built it before, so Android and iOS now compile
+# `rustix` and `errno` (and `linux-raw-sys` on Android) for the first time.
+[target.'cfg(any(target_os = "android", target_os = "linux", target_vendor = "apple"))'.dependencies]
+rustix = { version = "1", features = ["time"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "0.2", features = ["keychain"] }
 

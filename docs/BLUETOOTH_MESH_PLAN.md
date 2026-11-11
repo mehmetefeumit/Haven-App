@@ -500,7 +500,9 @@ the routing id.
   publish, so it never wakes the publish pool by itself.
 - **Bounds.** Per circle and sender: the newest update only, at most one per
   72 s; plus a total per drive. The sender is MLS-authenticated, so a member
-  flooding the mesh gets one bridge per 72 s.
+  flooding the mesh gets one bridge per 72 s. Passing on begins no send once
+  it has run for one send's time (10 s) in a call, so a relay that withholds
+  its answers costs one wait, and what waited is dropped.
 - **Always on with mesh**, disclosed in the enable flow; no separate switch.
 - **Reach.** The chain is seal, announce tick, hop, the bridger's next
   receive-then-publish (72–168 s apart): it serves members a hop or two
@@ -836,8 +838,8 @@ mesh off with fixed copy (Rule 8). The setting is cleared on identity delete.
 - "Since turned on" survives a process restart while mesh stays on. The
   values are four integers in the SQLCipher `user_settings` table — the two
   lifetime totals, and what each read when mesh was last turned on — folded
-  at every drive and at mesh off: no timestamps, no per-circle or per-peer
-  breakdown. An update is counted once, when the engine answers that it read
+  at every drive, at every read of the sheet, at mesh off and at the
+  deadline: no timestamps, no per-circle or per-peer breakdown. An update is counted once, when the engine answers that it read
   it — off the engine's own durable record of what it has processed, so no
   number of packets, no replay, no restart and no turning mesh off and on
   counts it again. What was counted since the last fold is lost if the process is
@@ -1590,7 +1592,8 @@ the bridge tests read the device clock at each drive unless a test sets
 one, and the flooding test stamps its own events. Open, for the FFI step:
 - a relay that takes this device's own send and withholds its answer on a
   passed-on event costs a send's wait for each, so in a background burst
-  every circle's own location is sent before anything is passed on;
+  every circle's own location is sent before anything is passed on (met in
+  M2g-1, below, by bounding what passing on may take of a call);
 - bridge tests that set a clock and still use events stamped by the device
   hold only while the test runs for less than about ten seconds;
 - not tested: a buffered update (T-BRIDGE-3), a proposal beside the commit
@@ -1609,14 +1612,224 @@ handed stranded input back waits for the next relay drive, with nothing
 that asks for one; and no real engine answer was found that leaves a
 mesh-admissible event unkept, so that arm is tested through a test seam.
 
-Not yet written, and owed with or before the first user-visible step: Rule
-17 and the Rule 5 sentence in `CLAUDE.md`, the `haven-core/SECURITY.md`
-paragraphs, and the privacy-manifest invariants for the keys at rest and the
-hand-off (§8.2).
+- **M2g-1**, the Rust side of the bridge (`haven/rust_builder/src/api.rs`,
+  "Bluetooth mesh FFI"), with the security documentation that was owed. The
+  engine has a home: one a process, in the static `MESH`, reached only
+  through `with_mesh`, which before every engine call checks the deadline,
+  then applies what the session left in the hand-off — a purge empties its
+  slot; an offer fills it for as long as its event still has by the wall
+  clock, never longer than a location lives (228 s), and one already expired
+  empties the slot instead — and only then runs the call. The lock is taken
+  only in functions that are not `async`.
+  **The engine's clock** is read in Rust for every entry (design answer
+  Q-6): `CLOCK_BOOTTIME` on Android and Linux, `CLOCK_MONOTONIC` on Apple
+  targets, both through `rustix`, with no `unsafe`. Apple's `clock_gettime(3)`
+  says of `CLOCK_MONOTONIC` that it "will continue to increment while the
+  system is asleep", and of `CLOCK_UPTIME_RAW` — what `std::time::Instant`
+  reads there — that it does not. `rustix` 1.1.3 was in all three lockfiles
+  already, so no lockfile gains a crate or a version; but until now only the
+  desktop Linux keyring pulled it in, so the Android and iOS libraries
+  compile it for the first time — `rustix` and `errno` on both,
+  `linux-raw-sys` on Android (`cargo tree -i rustix --target …`, measured
+  2026-11-11). **Owner decision open:** keep that (no `unsafe` in Haven's
+  code, two or three more crates in the mobile libraries), or read the clock
+  through `libc`, which every target already builds, at the price of one
+  `unsafe` call. On any other target (Windows) the clock is `Instant`, which
+  may stop while the machine sleeps: no radio is planned there.
+  **Entries.** `mesh_start` (twelve hours from now; asked while on, it
+  restarts them), `mesh_resume` (an engine for a mesh an earlier process left
+  on, under the stored deadline, which a restart never moves), `mesh_keep_on`
+  (restarts the twelve hours if mesh is on; after the deadline it turns
+  nothing on), `mesh_stop`, `mesh_sharing_stopped`, `mesh_stats`,
+  `mesh_reset_counts`, and on the relay manager `mesh_drive_driven`,
+  `seal_location_for_mesh_driven` and `publish_location_driven`, which now
+  takes `received` and goes through `publish_location_and_bridge`. What
+  crosses is a fieldless state, bools, the four counts, the time left, and
+  the locations every receive path hands over; neither new struct has a
+  `Debug`, and the mesh's part of the bridge writes no log line.
+  **The deadline** (design answer Q-7) is enforced where an entry is made:
+  the engine keeps its own on the engine's clock, every entry that holds the
+  session brings it no later than the session's, and the first entry after
+  either drops the engine with every packet it held and calls
+  `SessionManager::mesh_off`, so every key is deleted. An entry that holds no
+  session — the radio's, when it is built — drops the engine at once and
+  leaves the keys to the next entry that holds one.
+  **Finding 7** is met at the session's open (`CircleManagerFfi::new`) and at
+  every start, resume and keep-on: the engine takes that session's hand-off,
+  and what the last session left in the outbox, under slot numbers the new
+  one does not use, is purged.
+  **Counts.** "Passed on" is fed from the engine's own count: each packet a
+  drive settles is marked read in the engine, and what the engine has counted
+  since the last fold is added to the stored totals at every drive, every
+  read of the statistics, at mesh off and at the deadline. The reset of all
+  four is written (`CircleManager::reset_mesh_counts`).
+  **The open item of M2f** — a relay that takes this device's own send and
+  withholds its answer on a passed-on event — is met in the core, by giving
+  the bridge its own share of a wake: passing on begins no send once it has
+  run for one send's time, so it adds under two to a call whatever the relays
+  do. "Every circle's own location first" would need one entry for a whole
+  drive's locations; the entries stay one a circle, as the app calls them.
+  **Not as the design has it.** No entry takes `now_ms` (Q-6). `mesh_start`
+  alone could not keep the deadline's promise — a start after a restart would
+  have moved it — so `mesh_resume` and `mesh_keep_on` are entries of their
+  own, and the answer is `Started` / `AlreadyOn` / `Off`. `mesh_drive_driven`
+  takes neither `foreground` nor `receive_completed`: the core's drive reads
+  neither, and it answers `more` when packets still wait. The slot is three
+  states, not an `Option`: an engine ended by its deadline at an entry with
+  no session leaves what it had passed on, and the keys, owed to the next
+  entry that holds one. A poisoned lock does not read as "off" for ever: the
+  engine whose call panicked is dropped. `seal_location_for_mesh_driven`
+  seals nothing unless an engine runs to carry it. `mesh_stats` carries the
+  time left (§7.6: "the sheet shows the time left").
+  **Not built here.** The radio (M3): nothing calls `link_up`, `receive` or
+  `poll_output` outside a test, and `with_mesh` has no radio-facing entry.
+  The Dart side (M2g-2): no Dart code calls a mesh entry, the burst
+  coordinator seals nothing for the mesh, and the one Dart caller of the
+  location send passes `received: false`, so nothing is passed on to a relay
+  by any build. The soak scenarios (T-INDEP-1a, T-BRIDGE-9).
 
-Next: the FFI — which exposes `seal_for_mesh` to the burst coordinator,
-calls `mesh_on_until`, `mesh_off`, `mesh_sharing_stopped`, drains
-`mesh_handoff`, hands `mesh_drive` what the engine's unread queue holds and
-marks each packet as the drive answers, and sends each location through
-`publish_location_and_bridge` with its drive's word on its receive — with
-the soak scenarios and the amended documents.
+Residuals of M2g-1. With no entry at all the engine sits in memory past its
+deadline; it does nothing, since only an entry runs it. Across a process
+restart the time left is the wall clock's word alone. No test can show that
+the engine's clock runs while a device sleeps; that rests on the platforms'
+documentation. Two sessions in one process — which only a test has — share
+the one slot, and an entry made with a session whose mesh is off ends the
+engine.
+
+Written with M2g-1: the `haven-core/SECURITY.md` section "Bluetooth mesh
+(opt-in second carrier)" and the scope notes beside the `kind:445`
+expiration and the coalesced burst; the privacy-manifest invariants for the
+keys at rest, the hand-off, the ingress, the mesh-only seal, the engine and
+its deadline, the statistics, and the accepted deviation `MESH-BRIDGE` for
+what a relay infers from a passed-on update. `CLAUDE.md` is the owner's: the
+wording below is proposed, and not applied.
+
+### Proposed CLAUDE.md wording (owner to approve)
+
+Each is the text as it stands, then the text proposed. Nothing in
+`CLAUDE.md` has been changed.
+
+**1. The stale sentence in "FFI Wrapper Pattern" (Architecture).**
+
+Old:
+
+> FFI does not expose Rust async streams; relay subscriptions use polling
+> (manual refresh / app resume). Upgrading to `StreamSink` via
+> `flutter_rust_bridge` is a known follow-up.
+
+New:
+
+> The live-sync engine pushes decrypted events to Dart over one
+> `StreamSink<FfiRelayEvent>` (`LiveSyncFfi`); the flag-off build polls
+> (manual refresh / app resume).
+
+**2. Security Rule 5 (Secret Lifecycle).** One clause, inserted after the
+clause on snapshots and checkpoints.
+
+Old:
+
+> … fork-recovery snapshots and own-commit checkpoints are bounded by
+> convergence policy v1 `max_rewind_commits` = 5; a superseded KeyPackage's
+> private material is deleted when …
+
+New:
+
+> … fork-recovery snapshots and own-commit checkpoints are bounded by
+> convergence policy v1 `max_rewind_commits` = 5; while the Bluetooth mesh is
+> on, each circle's `marmot/group-event` exporter secret is also kept by
+> Haven — for the epoch the circle stands on and the same 5 before it, never
+> for a staged epoch, in memory and in `circles-v2.db` — and every one is
+> deleted when mesh is turned off, when its deadline (`mesh_on_until`, never
+> more than 12 hours ahead) has passed, and with its circle (tracker
+> `T-MESH-EXPORTER`); a superseded KeyPackage's private material is deleted
+> when …
+
+**3. Security Rule 13, invariant 1 (One way out).** One sentence, appended.
+
+Old (the invariant's last sentence):
+
+> The relay layer refuses any event that has a record, and the FFI's plain
+> publish entry refuses every kind 445 and every kind 1059
+> (`security_rule_gates::a_fanout_is_the_only_way_a_commit_leaves_the_device`;
+> `the_plain_publish_refuses_a_gift_wrap`;
+> `fanout_driver_e2e::nothing_but_the_driver_sends_an_event_that_has_a_fanout_row`).
+
+New (that sentence, then):
+
+> One kind 445 leaves with no record, and it is neither a commit nor a
+> proposal: with the Bluetooth mesh on, a fellow member's location the mesh
+> brought is passed on by `Publishing::publish_location_and_bridge` — that
+> member's own sealed event, byte for byte, behind this device's own location
+> send of the same circle and only to the relays that took it, only when the
+> caller says the drive's relay receive completed first, once, one attempt a
+> relay, never retried, its answer read by nothing
+> (`mesh_bridge_e2e`;
+> `security_rule_gates::the_bridge_sends_once_and_reads_no_answer`).
+
+**4. Security Rule 16 (Relay Events Are Verified By Haven).** One sentence,
+inserted after "A NIP-77 session carries no event; every event a pass leads
+to is fetched by id on the publish client and passes `verify()` like any
+other."
+
+New sentence:
+
+> The Bluetooth mesh is the one ingress that is not a relay client: the event
+> rebuilt from a mesh packet passes `Event::verify()` in
+> `mesh::event::rebuild` before anything is handed it, and
+> `Publishing::mesh_drive` gives the engine only an application message of
+> the epoch whose key opened its packet (Rule 17).
+
+**5. New Security Rule 17.**
+
+> 17. **Bluetooth Mesh**: the mesh is a second carrier for the location
+> events the relay path seals, never a second protocol
+> (`docs/BLUETOOTH_MESH_PLAN.md`). No cleartext field in a packet; the
+> advertisement is the service UUID alone; no pairing. Only application
+> messages cross it, checked at both ends: a location reaches the mesh only
+> through the one hand-off (`SessionManager::mesh_offer`, once, in
+> `Publishing::publish_location`, after the send-time check and before the
+> relay send; `scripts/ci/check_mesh_seams.sh`), and a packet reaches the MLS
+> engine only as an event that passed `Event::verify()` (Rule 16) and is an
+> application message of the very epoch whose key opened it — never a commit
+> or a proposal. The mesh has no sealing code of its own and never holds an
+> MLS session (Rule 14); the mesh engine holds no key, and forwarding never
+> depends on recognition. Mesh keys exist, in memory and at rest, only until
+> the deadline `mesh_on_until`, never more than 12 hours ahead, and every
+> path that ends mesh deletes them (Rule 5). The engine's store is memory
+> only: one engine a process, reached only through `with_mesh`, on a
+> monotonic clock that counts sleep and is read in Rust, its lock never held
+> across an `.await`; the first entry after the deadline drops it.
+> `mesh_drive` calls no relay and changes nothing a relay is asked; the mesh
+> passes on to a relay only an event a member opened, and only as Rule 13.1's
+> bridge. The mesh is lossy by design — the explicit carve-out from Rule 12's
+> "never drop". Nothing of it is logged, and no packet, packet id, key,
+> epoch, slot or link count crosses the bridge (Rule 15). NEVER give the mesh
+> a way to seal, a second hand-off, an ingest that skips `verify()` or the
+> epoch check, a store on disk, or a clock handed in by a caller.
+
+**6. The kind-445 row of "Protocol Quick Reference".** The last sentence.
+
+Old:
+
+> Sent only by the fanout driver (Rule 13): a commit, or a proposal with a
+> durable MDK fanout record, until a relay acknowledges it (a proposal no
+> record could be written for, once), a location once per relay and never
+> past its `expiration`; the FFI's plain publish entry refuses a kind 445.
+
+New:
+
+> Sent to relays only by the fanout driver (Rule 13): a commit, or a proposal
+> with a durable MDK fanout record, until a relay acknowledges it (a proposal
+> no record could be written for, once), a location once per relay and never
+> past its `expiration` — and, with the Bluetooth mesh on, a fellow member's
+> location the mesh brought, once, with no record, within 218 s of its
+> sealing (Rule 13.1); the FFI's plain publish entry refuses a kind 445. With
+> mesh on the same location event also travels in mesh packets, which
+> outlive its `expiration` by design (Rule 17).
+
+Next: M2g-2 — the Dart side behind `HAVEN_MESH`: the provider and the calls
+to `mesh_start`, `mesh_resume`, `mesh_keep_on`, `mesh_stop`,
+`mesh_sharing_stopped`, `mesh_stats` and `mesh_drive_driven`; the burst
+coordinator's mesh-only seal; each drive's own word for `received`, with a
+bridge step after the fetch on the platform that publishes before it; and
+the soak rig's mesh plane with its two scenarios.

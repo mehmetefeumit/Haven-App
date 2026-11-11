@@ -1180,7 +1180,9 @@ fn delete_mls_session_db_files(data_dir: &str) -> Result<(), String> {
 /// and stopped any live subscriptions BEFORE calling this — that is the Flutter
 /// layer's responsibility. No Rust global holds the manager, so there is
 /// nothing for this function to `.take()`. (Rule 14: at most one live session
-/// per DB file — the handle drop closes it.)
+/// per DB file — the handle drop closes it.) The one global it empties is the
+/// Bluetooth mesh engine's, first: the packets it carried, its outbox and its
+/// unread queue go before the keys that could read them.
 ///
 /// "Dropped" means the Dart side called `dispose()` on the handle, NOT merely
 /// nulled its reference: a `RustOpaque` that is only unreferenced is released
@@ -1211,6 +1213,8 @@ fn delete_mls_session_db_files(data_dir: &str) -> Result<(), String> {
 /// a decryptable `circles-v2.db` / `session-v2.sqlite` + keyring key at rest. The
 /// error string is generic/opaque — no path, key id, or backend detail (Security).
 pub async fn wipe_all_mls_state(data_dir: String) -> Result<(), String> {
+    // What it had passed on is not kept: the store that counts it goes too.
+    let _ = mesh_empty();
     run_blocking(move || {
         // Delete DB files first (POSIX-safe even if a descriptor briefly
         // outlives the handle drop), THEN remove the keyring keys so a fresh
@@ -3244,12 +3248,15 @@ impl CircleManagerFfi {
         let circle_db_key = get_or_create_circle_db_key()?;
         let path = Path::new(&data_dir);
         let own_pubkey_hex = keys.public_key().to_hex();
-        CoreCircleManager::new(path, &keys, Some(&circle_db_key))
-            .map(|inner| Self {
-                inner: Arc::new(inner),
-                own_pubkey_hex,
-            })
-            .map_err(|e| e.to_string())
+        let inner =
+            CoreCircleManager::new(path, &keys, Some(&circle_db_key)).map_err(|e| e.to_string())?;
+        // A session opened while the mesh engine runs: the engine takes this
+        // session's hand-off, or the one it holds is fed by nobody.
+        mesh_adopt(inner.session(), false);
+        Ok(Self {
+            inner: Arc::new(inner),
+            own_pubkey_hex,
+        })
     }
 
     // ==================== Circle Lifecycle ====================
@@ -7609,10 +7616,13 @@ impl IngestOutcomeFfi {
     }
 }
 
-/// A location [`RelayManagerFfi::seal_location_driven`] sealed and
-/// recorded. Opaque: nothing of it — the event, its circle's id, the relays
-/// its record names — is Dart's to read; it is handed to
-/// [`RelayManagerFfi::publish_location_driven`] and to nothing else.
+/// A location [`RelayManagerFfi::seal_location_driven`] or
+/// [`RelayManagerFfi::seal_location_for_mesh_driven`] sealed and recorded.
+/// Opaque: nothing of it — the event, its circle's id, the relays its record
+/// names — is Dart's to read; it is handed to
+/// [`RelayManagerFfi::publish_location_driven`] and to nothing else. Whether
+/// that send reaches the relays, or the Bluetooth mesh alone, is recorded in
+/// the session by the seal, not here.
 #[frb(opaque)]
 pub struct SealedLocationFfi {
     event: nostr::Event,
@@ -8607,7 +8617,8 @@ impl RelayManagerFfi {
 
     /// Seals a fix for the circle and records it, in one engine hold, after
     /// its records are driven. The sealed event goes to
-    /// [`Self::publish_location_driven`] and nowhere else.
+    /// [`Self::publish_location_driven`] and nowhere else; that send hands
+    /// it to the circle's relays and, with mesh on, to the Bluetooth mesh.
     pub async fn seal_location_driven(
         &self,
         circle: &CircleManagerFfi,
@@ -8630,17 +8641,116 @@ impl RelayManagerFfi {
 
     /// Sends a location [`Self::seal_location_driven`] sealed, once, to the
     /// relays its record names, and ends its record whatever was answered.
+    /// One [`Self::seal_location_for_mesh_driven`] sealed goes to the
+    /// Bluetooth mesh and to no relay ([`LocationPublishFfi::MeshOnly`]).
+    ///
+    /// Then member bridging (plan §5.5): the locations fellow members of the
+    /// same circle sent by Bluetooth alone, which [`Self::mesh_drive_driven`]
+    /// took in, are passed on to the relays that took this send — the one
+    /// `kind:445` this device sends that it did not seal, under no fanout
+    /// record (Security Rule 13.1). `received` is the caller's word that
+    /// THIS drive's relay receive of the circle was answered to the end
+    /// before this call: a caller that publishes before it fetches says
+    /// `false` and passes nothing on, or a member a commit it has not
+    /// fetched removed could read an offline member's fix from the relays.
+    /// Passing on runs after this device's own send and begins no send
+    /// once it has run for one send's time, so it adds under two to the
+    /// call whatever a relay does with its answers.
     pub async fn publish_location_driven(
         &self,
         circle: &CircleManagerFfi,
         sealed: &SealedLocationFfi,
+        received: bool,
     ) -> LocationPublishFfi {
         let driving = Driving::new(&self.inner, circle, false);
         driving
             .publishing()
-            .publish_location(&circle.inner, &sealed.event)
+            .publish_location_and_bridge(&circle.inner, &sealed.event, received)
             .await
             .into()
+    }
+
+    /// Seals a fix for the Bluetooth mesh alone (plan §7.7 R1): what a
+    /// background burst whose relay receive failed seals, so that a phone no
+    /// relay answers still shares by radio. Calls no relay and drives
+    /// nothing; [`Self::publish_location_driven`] then hands the event to
+    /// the mesh and to no relay.
+    ///
+    /// Nothing is sealed, and the engine is not asked, unless mesh is on
+    /// with its engine running in this process ([`SendHeldFfi::Nothing`]):
+    /// a seal nothing carries would spend an MLS message for no reader.
+    pub async fn seal_location_for_mesh_driven(
+        &self,
+        circle: &CircleManagerFfi,
+        mls_group_id: Vec<u8>,
+        location: &LocationMessage,
+    ) -> Result<SealOutcomeFfi, String> {
+        if mesh_entry(circle, |_, _| ()).await.is_none() {
+            return Ok(SealOutcomeFfi {
+                sealed: None,
+                held_by: Some(SendHeldFfi::Nothing),
+                refusal: None,
+                replayed: Vec::new(),
+                retry_after_ms: None,
+                errored: false,
+                clock_rejected: None,
+            });
+        }
+        let driving = Driving::new(&self.inner, circle, false);
+        SealOutcomeFfi::answer(
+            driving
+                .publishing()
+                .seal_for_mesh(
+                    &circle.inner,
+                    &GroupId::from_slice(&mls_group_id),
+                    &location.inner,
+                )
+                .await,
+        )
+    }
+
+    /// Reads what the Bluetooth mesh received and takes in the locations
+    /// members of this device's circles sent (plan §5.2): up to 256 packets
+    /// the engine has not handed out, and those an earlier drive held. Calls
+    /// no relay and changes nothing a relay is asked
+    /// (`Publishing::mesh_drive`).
+    ///
+    /// Each packet the drive settles is marked read in the engine, which is
+    /// what makes one this device could not open count as passed on once it
+    /// has also been sent on; what the engine passed on since the last fold
+    /// is then added to the stored totals. With mesh off, nothing.
+    pub async fn mesh_drive_driven(&self, circle: &CircleManagerFfi) -> MeshDriveFfi {
+        let taken = mesh_entry(circle, |slot, _| {
+            slot.engine.take_unread(MESH_DRIVE_PACKETS)
+        })
+        .await;
+        let Some(taken) = taken else {
+            return MeshDriveFfi {
+                replayed: Vec::new(),
+                errored: false,
+                more: false,
+            };
+        };
+        let driving = Driving::new(&self.inner, circle, false);
+        let drive = driving.publishing().mesh_drive(&circle.inner, taken).await;
+        let settled = mesh_entry(circle, |slot, _| {
+            for (packet, opened) in &drive.read {
+                slot.engine.mark_read(*packet, *opened);
+            }
+            (slot.unfolded(), slot.engine.stats().unread != 0)
+        })
+        .await;
+        let (passed_on, more) = settled.unwrap_or_default();
+        circle.inner.fold_mesh_counts(0, passed_on);
+        MeshDriveFfi {
+            replayed: drive
+                .replayed
+                .into_iter()
+                .map(convert_location_result)
+                .collect(),
+            errored: drive.errored,
+            more,
+        }
     }
 
     /// Leaves the circle: the intent is written first, and from then nothing
@@ -9124,7 +9234,9 @@ impl RelayManagerFfi {
     ///
     /// A group message (kind 445) is refused before any relay is asked: a
     /// commit, a proposal and a location leave the device only under a
-    /// durable fanout record, through the fanout driver (Security Rule 13).
+    /// durable fanout record, through the fanout driver (Security Rule 13) —
+    /// and a fellow member's location the mesh brought, which has no record,
+    /// only behind this device's own send ([`Self::publish_location_driven`]).
     /// So is a gift wrap (kind 1059): every Welcome, a founding one included,
     /// is sent from its delivery record by the driver
     /// ([`Self::create_circle_driven`]).
@@ -11101,9 +11213,10 @@ mod tests {
 
     /// Every driver entry of the bridge builds its publish half from this
     /// manager's own client and drives through `Publishing`, whose entries
-    /// each drive the circle's due records (plan §0.1, PR-L5); and the list
-    /// of them is exactly this one: an entry added that holds the transport
-    /// and drives nothing fails here.
+    /// each drive the circle's due records (plan §0.1, PR-L5) — but for the
+    /// two of the Bluetooth mesh, whose `Publishing` entries call no relay
+    /// at all; and the list of them is exactly this one: an entry added
+    /// that holds the transport and drives nothing fails here.
     #[test]
     fn every_transport_holding_entry_drives_due_fanouts() {
         let source = include_str!("api.rs");
@@ -11136,6 +11249,7 @@ mod tests {
                 "create_circle_driven",
                 "ingest_driven",
                 "leave_driven",
+                "mesh_drive_driven",
                 "publish_location_driven",
                 "reinvite_driven",
                 "remove_members_driven",
@@ -11143,6 +11257,7 @@ mod tests {
                 "resume_driven",
                 "resume_leave_driven",
                 "seal_location_driven",
+                "seal_location_for_mesh_driven",
                 "self_demote_driven",
                 "update_circle_relays_driven",
             ],
@@ -12619,6 +12734,399 @@ mod tests {
     // conversion for a cursor value crossing this boundary. There is no such
     // value any more — a cursor advance is earned by a completed observation
     // window, which only haven-core's receive planes observe.
+}
+
+// ============================ Bluetooth mesh FFI =============================
+//
+// The mesh engine's home (`docs/BLUETOOTH_MESH_PLAN.md` §5, §7.5, §7.6). One
+// engine a process, in `MESH`, reached only through `with_mesh`, which applies
+// what the open session left for it before every engine call and runs nothing
+// once the deadline has passed. The lock is taken only in functions that are
+// not `async`, so it is never held across an `.await`. The radio is not built
+// yet: nothing here links the engine to another phone.
+
+use haven_core::mesh::engine::{CircleSlot, Config as MeshConfig, MeshEngine};
+use haven_core::mesh::handoff::{Handoff, Op};
+
+/// How many packets one [`RelayManagerFfi::mesh_drive_driven`] reads.
+const MESH_DRIVE_PACKETS: usize = 256;
+
+/// The longest an offered location waits in the engine's outbox: a location
+/// event's whole life. One stamped to expire later than this from now was
+/// stamped under a wall clock that has since been set back.
+const MESH_OFFER_MAX_MS: u64 = haven_core::location::LOCATION_MESSAGE_RETENTION_SECS * 1_000;
+
+/// The device's clock for the mesh engine, milliseconds from an arbitrary
+/// origin: monotonic, and running while the device sleeps, so a packet's
+/// lifetime and the twelve-hour deadline are spent asleep as awake, and no
+/// change of the wall clock moves either. `CLOCK_BOOTTIME` on Android and
+/// Linux; on Apple targets `CLOCK_MONOTONIC`, which there "will continue to
+/// increment while the system is asleep" (`clock_gettime(3)`).
+/// `std::time::Instant` stops with the device on both.
+#[cfg(any(target_os = "android", target_os = "linux", target_vendor = "apple"))]
+fn device_clock_ms() -> u64 {
+    #[cfg(target_vendor = "apple")]
+    const CLOCK: rustix::time::ClockId = rustix::time::ClockId::Monotonic;
+    #[cfg(not(target_vendor = "apple"))]
+    const CLOCK: rustix::time::ClockId = rustix::time::ClockId::Boottime;
+    let now = rustix::time::clock_gettime(CLOCK);
+    let secs = u64::try_from(now.tv_sec).unwrap_or(0);
+    let nanos = u64::try_from(now.tv_nsec).unwrap_or(0);
+    secs.saturating_mul(1_000).saturating_add(nanos / 1_000_000)
+}
+
+/// No mesh radio is built for any other target; an engine there, which
+/// nothing links, runs on a clock that may stop while the machine sleeps.
+#[cfg(not(any(target_os = "android", target_os = "linux", target_vendor = "apple")))]
+fn device_clock_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let start = START.get_or_init(std::time::Instant::now);
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The engine's clock: read here, in Rust, for every engine entry, and
+/// never handed in by a caller. In every shipped build it is the device's —
+/// the `#[cfg(test)]` twin below is the only thing that can move it.
+#[cfg(not(test))]
+fn mesh_clock_ms() -> u64 {
+    device_clock_ms()
+}
+
+/// Test-only override for [`mesh_clock_ms`]; `0` is the device's clock.
+#[cfg(test)]
+static MESH_CLOCK_OVERRIDE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+fn mesh_clock_ms() -> u64 {
+    match MESH_CLOCK_OVERRIDE_MS.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => device_clock_ms(),
+        set => set,
+    }
+}
+
+/// The engine and what its owner keeps beside it.
+struct MeshSlot {
+    engine: MeshEngine<rand::rngs::OsRng>,
+    /// Where the open session leaves the locations it wraps.
+    handoff: Arc<Handoff>,
+    /// When mesh turns itself off, on the engine's clock.
+    until_ms: u64,
+    /// What the engine's passed-on count read when it was last added to the
+    /// stored totals.
+    folded: u64,
+}
+
+impl MeshSlot {
+    /// Applies what the session left since the last engine call (plan §5.1):
+    /// a purge empties its slot, an offer fills it until its event expires.
+    /// The event's expiration is a wall-clock instant and the engine's clock
+    /// is not one, so what crosses is how long the event still has by
+    /// `wall_ms`, read once, here.
+    fn apply(&mut self, now_ms: u64, wall_ms: u64) {
+        for (slot, op) in self.handoff.take() {
+            let left_ms = match &op {
+                Op::Offer {
+                    expires_at_secs, ..
+                } => expires_at_secs
+                    .saturating_mul(1_000)
+                    .saturating_sub(wall_ms),
+                Op::Purge => 0,
+            };
+            match op {
+                Op::Offer { packet, .. } if left_ms != 0 => {
+                    let expires_ms = now_ms.saturating_add(left_ms.min(MESH_OFFER_MAX_MS));
+                    self.engine.offer(slot, packet, expires_ms, now_ms);
+                }
+                // An offer whose event has expired still replaces what
+                // waited: nothing older goes out in its place.
+                Op::Offer { .. } | Op::Purge => self.engine.purge(slot, now_ms),
+            }
+        }
+    }
+
+    /// Takes `handoff` in place of the one held, if it is another: a session
+    /// opened since. A session numbers its slots afresh, so what the last
+    /// one left in the outbox would answer to no purge of this one's, and
+    /// goes.
+    fn adopt(&mut self, handoff: Arc<Handoff>, now_ms: u64) {
+        if !Arc::ptr_eq(&self.handoff, &handoff) {
+            for slot in 0..Handoff::SLOTS {
+                self.engine.purge(CircleSlot(slot), now_ms);
+            }
+            self.handoff = handoff;
+        }
+    }
+
+    /// What the engine passed on since this was last asked.
+    fn unfolded(&mut self) -> u64 {
+        let passed_on = self.engine.stats().passed_on;
+        passed_on.saturating_sub(std::mem::replace(&mut self.folded, passed_on))
+    }
+}
+
+/// What the process holds of the mesh.
+enum MeshHome {
+    /// No engine.
+    Off,
+    /// Mesh is on.
+    On(Box<MeshSlot>),
+    /// The deadline passed: the engine is gone, and the entry that holds a
+    /// session — the one that found it passed, or the next — turns the
+    /// session's mesh off and adds this many passed-on packets to the stored
+    /// totals ([`mesh_entry`]).
+    Ended(u64),
+}
+
+static MESH: Mutex<MeshHome> = Mutex::new(MeshHome::Off);
+
+fn mesh_home() -> std::sync::MutexGuard<'static, MeshHome> {
+    MESH.lock().unwrap_or_else(|poisoned| {
+        // An engine call panicked: that engine is not run again.
+        let mut home = poisoned.into_inner();
+        *home = MeshHome::Off;
+        MESH.clear_poison();
+        home
+    })
+}
+
+/// Runs `f` on the engine, at the engine's clock: the only way to it.
+///
+/// Before `f`, every time: the deadline, then the hand-off. `session_left_ms`
+/// is how long the caller's session says mesh stays on, when the caller holds
+/// one; the engine's own deadline is brought no later than that. An entry
+/// that finds the deadline passed — by the engine's clock, which no change of
+/// the wall clock moves, or by the session's — drops the engine with every
+/// packet it held, and runs nothing. `None` when no engine runs.
+fn with_mesh<T>(
+    session_left_ms: Option<u64>,
+    f: impl FnOnce(&mut MeshSlot, u64) -> T,
+) -> Option<T> {
+    let mut home = mesh_home();
+    let MeshHome::On(slot) = &mut *home else {
+        return None;
+    };
+    let now_ms = mesh_clock_ms();
+    if let Some(left_ms) = session_left_ms {
+        slot.until_ms = slot.until_ms.min(now_ms.saturating_add(left_ms));
+    }
+    if now_ms >= slot.until_ms {
+        let passed_on = slot.unfolded();
+        *home = MeshHome::Ended(passed_on);
+        return None;
+    }
+    let wall_ms =
+        haven_core::relay::fanout::FanoutClock::now_ms(&haven_core::relay::fanout::WallClock);
+    slot.apply(now_ms, wall_ms);
+    Some(f(slot, now_ms))
+}
+
+/// What an engine that ended by its deadline had passed on, taken: the
+/// caller holds the session that is still to be turned off.
+fn mesh_owed() -> Option<u64> {
+    let mut home = mesh_home();
+    let MeshHome::Ended(passed_on) = *home else {
+        return None;
+    };
+    *home = MeshHome::Off;
+    Some(passed_on)
+}
+
+/// Drops the engine with everything it held — packets, records, outbox,
+/// unread queue. Answers what it had passed on that no stored total has yet.
+fn mesh_empty() -> u64 {
+    match std::mem::replace(&mut *mesh_home(), MeshHome::Off) {
+        MeshHome::On(mut slot) => slot.unfolded(),
+        MeshHome::Ended(passed_on) => passed_on,
+        MeshHome::Off => 0,
+    }
+}
+
+/// Hands the running engine `session`'s hand-off and deadline, and answers
+/// whether one runs. A session that opens while the engine runs, and one
+/// asked for again, are so never left filling a hand-off nobody takes from.
+/// `confirmed` is whether the user has just asked for mesh: the deadline then
+/// moves to the session's; otherwise it only ever comes nearer.
+fn mesh_adopt(session: &haven_core::nostr::mls::SessionManager, confirmed: bool) -> bool {
+    let (left_ms, handoff) = (session.mesh_on_for_ms(), session.mesh_handoff());
+    with_mesh(Some(left_ms), |slot, now_ms| {
+        slot.adopt(handoff, now_ms);
+        if confirmed {
+            slot.until_ms = now_ms.saturating_add(left_ms);
+        }
+    })
+    .is_some()
+}
+
+/// The engine for a session whose mesh is on: the running one, adopted, or a
+/// new one. No engine is started for a session whose mesh is off, nor over
+/// one that ended and is not yet paid for.
+fn mesh_open(session: &haven_core::nostr::mls::SessionManager, confirmed: bool) -> MeshStartFfi {
+    if mesh_adopt(session, confirmed) {
+        return MeshStartFfi::AlreadyOn;
+    }
+    let left_ms = session.mesh_on_for_ms();
+    let mut home = mesh_home();
+    if left_ms == 0 || !matches!(*home, MeshHome::Off) {
+        return MeshStartFfi::Off;
+    }
+    let now_ms = mesh_clock_ms();
+    *home = MeshHome::On(Box::new(MeshSlot {
+        engine: MeshEngine::new(MeshConfig::default(), rand::rngs::OsRng, now_ms),
+        handoff: session.mesh_handoff(),
+        until_ms: now_ms.saturating_add(left_ms),
+        folded: 0,
+    }));
+    MeshStartFfi::Started
+}
+
+/// [`with_mesh`] for a caller that holds the session, which is every entry
+/// until the radio is built. Where the twelve-hour deadline is enforced when
+/// nobody turned mesh off: an entry that finds it passed — this one, or an
+/// earlier one that held no session — turns the session's mesh off too, so
+/// every key is deleted, and adds what the engine had passed on to the
+/// stored totals.
+async fn mesh_entry<T>(
+    circle: &CircleManagerFfi,
+    f: impl FnOnce(&mut MeshSlot, u64) -> T,
+) -> Option<T> {
+    let session = circle.inner.session();
+    let ran = with_mesh(Some(session.mesh_on_for_ms()), f);
+    if ran.is_none() {
+        if let Some(passed_on) = mesh_owed() {
+            circle.inner.fold_mesh_counts(0, passed_on);
+            let _ = session.mesh_off().await;
+        }
+    }
+    ran
+}
+
+/// What turning the Bluetooth mesh on, resuming it or keeping it on did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshStartFfi {
+    /// Mesh is on, and this call started its engine.
+    Started,
+    /// Mesh is on, and its engine was running already.
+    AlreadyOn,
+    /// Mesh is off.
+    Off,
+}
+
+/// Turns the Bluetooth mesh on for twelve hours from now (plan §7.6): the
+/// deadline is stored, each circle's packet keys are kept from here, and an
+/// engine runs in this process. Asked while mesh is on, it restarts the
+/// twelve hours. [`MeshStartFfi::Off`] when the store did not take the
+/// deadline: nothing is on.
+pub async fn mesh_start(circle: &CircleManagerFfi) -> MeshStartFfi {
+    let session = circle.inner.session();
+    let _ = mesh_entry(circle, |_, _| ()).await;
+    // As far ahead as the session allows, which is twelve hours by its clock.
+    if !session.mesh_on_until(u64::MAX).await {
+        circle.inner.fold_mesh_counts(0, mesh_empty());
+        return MeshStartFfi::Off;
+    }
+    mesh_open(session, true)
+}
+
+/// Starts the engine for a mesh an earlier process left on, under the
+/// deadline that process stored: what a process that is to carry the mesh
+/// calls when it starts. The deadline does not move — a restart is not the
+/// user asking again. [`MeshStartFfi::Off`] when no deadline stands.
+pub async fn mesh_resume(circle: &CircleManagerFfi) -> MeshStartFfi {
+    let _ = mesh_entry(circle, |_, _| ()).await;
+    mesh_open(circle.inner.session(), false)
+}
+
+/// Keep on (plan §7.6): restarts the twelve hours, if mesh is on. After the
+/// deadline it answers [`MeshStartFfi::Off`] and turns nothing on: the only
+/// way back is [`mesh_start`].
+pub async fn mesh_keep_on(circle: &CircleManagerFfi) -> MeshStartFfi {
+    let _ = mesh_entry(circle, |_, _| ()).await;
+    if circle.inner.session().mesh_on_for_ms() == 0 {
+        return MeshStartFfi::Off;
+    }
+    mesh_start(circle).await
+}
+
+/// Turns the Bluetooth mesh off: the engine is dropped with every packet it
+/// carried, what it had passed on is added to the stored totals, every
+/// location left for it is withdrawn, and every stored key and the deadline
+/// are deleted.
+pub async fn mesh_stop(circle: &CircleManagerFfi) {
+    circle.inner.fold_mesh_counts(0, mesh_empty());
+    let _ = circle.inner.session().mesh_off().await;
+}
+
+/// The user stopped sharing: every location waiting to go out by mesh is
+/// withdrawn. Mesh stays on and still receives and carries.
+#[frb(sync)]
+pub fn mesh_sharing_stopped(circle: &CircleManagerFfi) {
+    circle.inner.session().mesh_sharing_stopped();
+}
+
+/// The Bluetooth mesh as its statistics sheet shows it (plan §7.5).
+///
+/// **No `Debug`**: the counts are exact — shown to the user, never logged
+/// (Security Rule 15). No packet, key, circle or peer is named, and how many
+/// phones are linked does not cross: only whether one is.
+pub struct MeshStatsFfi {
+    /// Whether mesh is on with its engine running in this process.
+    pub on: bool,
+    /// Whether at least one phone is linked.
+    pub linked: bool,
+    /// How long until mesh turns itself off, milliseconds; zero when off.
+    pub on_for_ms: u64,
+    /// Updates from this device's circles since mesh was last turned on.
+    pub from_circles_since_on: u64,
+    /// Packets passed on since mesh was last turned on.
+    pub passed_on_since_on: u64,
+    /// Updates from this device's circles, ever.
+    pub from_circles_total: u64,
+    /// Packets passed on, ever.
+    pub passed_on_total: u64,
+}
+
+/// The mesh's state and counts, with what the engine passed on since the
+/// last fold added to the stored totals first. A store that cannot be read
+/// shows zeros.
+pub async fn mesh_stats(circle: &CircleManagerFfi) -> MeshStatsFfi {
+    let running = mesh_entry(circle, |slot, now_ms| {
+        let linked = slot.engine.stats().links != 0;
+        (linked, slot.until_ms - now_ms, slot.unfolded())
+    })
+    .await;
+    let (linked, on_for_ms, passed_on) = running.unwrap_or_default();
+    circle.inner.fold_mesh_counts(0, passed_on);
+    let counts = circle.inner.mesh_counts().unwrap_or_default();
+    MeshStatsFfi {
+        on: running.is_some(),
+        linked,
+        on_for_ms,
+        from_circles_since_on: counts.from_circles_since_on,
+        passed_on_since_on: counts.passed_on_since_on,
+        from_circles_total: counts.from_circles_total,
+        passed_on_total: counts.passed_on_total,
+    }
+}
+
+/// Forgets the mesh's counts, all four (plan §7.5, the sheet's reset).
+pub async fn mesh_reset_counts(circle: &CircleManagerFfi) {
+    // What the engine passed on before the reset is not counted after it.
+    let _ = mesh_entry(circle, |slot, _| slot.unfolded()).await;
+    circle.inner.reset_mesh_counts();
+}
+
+/// What [`RelayManagerFfi::mesh_drive_driven`] read off the mesh.
+///
+/// **No `Debug`**. No packet or packet id crosses: a location does, as every
+/// receive path hands one over.
+pub struct MeshDriveFfi {
+    /// The locations taken in; each is stored already.
+    pub replayed: Vec<LocationMessageResultFfi>,
+    /// Whether an ingest failed; what it was handed is kept and offered
+    /// again at the next drive.
+    pub errored: bool,
+    /// Whether packets still wait to be read: drive again.
+    pub more: bool,
 }
 
 // ========================= M3c: Live-Sync Engine FFI =========================
@@ -23506,11 +24014,11 @@ mod driver_real_ffi_tests {
             .expect("the seal");
         let sealed = sealed.sealed.expect("a location sealed");
         assert_eq!(
-            relays.publish_location_driven(&alice, &sealed).await,
+            relays.publish_location_driven(&alice, &sealed, false).await,
             LocationPublishFfi::Accepted,
         );
         assert_eq!(
-            relays.publish_location_driven(&alice, &sealed).await,
+            relays.publish_location_driven(&alice, &sealed, false).await,
             LocationPublishFfi::Ended,
             "a recorded location was sent twice",
         );
@@ -23777,5 +24285,1311 @@ mod publish_event_ffi_tests {
                 .collect::<Vec<_>>(),
             [Some(DeviceClockComplaintFfi::Ahead), None]
         );
+    }
+}
+
+/// The Bluetooth mesh's bridge entries over real sessions: the one engine of
+/// the process in `MESH`, the session's own hand-off, and — where a packet
+/// has to cross between phones — engines of the test's own linked to it
+/// in-process, frame for frame, as a radio would.
+#[cfg(test)]
+mod mesh_ffi_tests {
+    use std::sync::atomic::Ordering;
+
+    use haven_core::mesh::engine::{CircleSlot, Config, LinkId, MeshEngine, Output, Role};
+    use haven_core::mesh::handoff::{Handoff, Op};
+    use haven_core::mesh::packet::{cover_packet, Packet};
+    use haven_core::nostr::mls::types::GroupId;
+    use haven_core::nostr::mls::MESH_ON_MAX_MS;
+    use nostr::Keys;
+    use nostr_relay_builder::MockRelay;
+    use rand::rngs::OsRng;
+
+    use super::maintenance_real_ffi_tests::{install_test_seams, secret_bytes, DataDir};
+    use super::{
+        mesh_clock_ms, mesh_empty, mesh_home, mesh_keep_on, mesh_reset_counts, mesh_resume,
+        mesh_sharing_stopped, mesh_start, mesh_stats, mesh_stop,
+        sealed_location_event_json_for_test, wipe_all_mls_state, with_mesh, CircleManagerFfi,
+        LocationMessage, LocationMessageResultKindFfi, LocationPublishFfi, MeshHome, MeshSlot,
+        MeshStartFfi, MeshStatsFfi, RelayManagerFfi, SealedLocationFfi, SendHeldFfi,
+        MESH_CLOCK_OVERRIDE_MS, MESH_OFFER_MAX_MS,
+    };
+
+    const SECOND: u64 = 1_000;
+    const HOUR: u64 = 3_600 * SECOND;
+    /// The engine's tick: what a packet waits to be announced.
+    const TICK: u64 = 5 * SECOND;
+    /// Past the latest an engine's first emission slot can fall, and the
+    /// ticks it takes what was emitted to cross a link.
+    const PAST_A_SLOT: u64 = 140 * SECOND;
+    const FRAME: usize = 512;
+
+    /// One test's hold of the process's mesh: the engine's clock is the
+    /// test's, and both go back to nothing when the test ends, pass or fail.
+    struct Bench;
+
+    impl Bench {
+        /// The engine's clock at a fixed instant, and no engine.
+        fn new() -> Self {
+            install_test_seams();
+            let _ = mesh_empty();
+            MESH_CLOCK_OVERRIDE_MS.store(1_000 * HOUR, Ordering::SeqCst);
+            Self
+        }
+
+        /// Moves the engine's clock on.
+        fn pass(&self, ms: u64) {
+            MESH_CLOCK_OVERRIDE_MS.fetch_add(ms, Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for Bench {
+        fn drop(&mut self) {
+            let _ = mesh_empty();
+            MESH_CLOCK_OVERRIDE_MS.store(0, Ordering::SeqCst);
+        }
+    }
+
+    /// Reads the engine as a radio entry does, holding no session.
+    fn engine<T>(read: impl FnOnce(&mut MeshSlot) -> T) -> Option<T> {
+        with_mesh(None, |slot, _| read(slot))
+    }
+
+    fn is_off() -> bool {
+        matches!(*mesh_home(), MeshHome::Off)
+    }
+
+    /// Another phone: an engine of the test's own, wired to the one in the
+    /// slot. It emits nothing by itself unless told to.
+    struct Phone {
+        engine: MeshEngine<OsRng>,
+        wire: LinkId,
+    }
+
+    impl Phone {
+        /// A phone that emits a cover packet every `emits_every_ms`.
+        fn new(wire: u64, emits_every_ms: u64) -> Self {
+            let config = Config {
+                emit_period_ms: emits_every_ms,
+                emit_jitter_ms: 0,
+                ..Config::default()
+            };
+            Self {
+                engine: MeshEngine::new(config, OsRng, mesh_clock_ms()),
+                wire: LinkId(wire),
+            }
+        }
+
+        fn quiet(wire: u64) -> Self {
+            Self::new(wire, 1 << 40)
+        }
+
+        /// Connects to the engine in the slot, which takes the link as an
+        /// incoming one.
+        fn link(&mut self) {
+            let (wire, now) = (self.wire, mesh_clock_ms());
+            engine(|slot| {
+                slot.engine
+                    .link_up(wire, Role::Peripheral, FRAME, None, now)
+            })
+            .expect("premise: an engine runs");
+            self.engine.link_up(wire, Role::Central, FRAME, None, now);
+        }
+
+        /// The radio lost the link; each side keeps what it carries.
+        fn unlink(&mut self) {
+            let (wire, now) = (self.wire, mesh_clock_ms());
+            let _ = engine(|slot| slot.engine.link_down(wire, now));
+            self.engine.link_down(wire, now);
+        }
+    }
+
+    /// Carries frames between the engine in the slot and `phones` until all
+    /// are quiet.
+    fn carry(phones: &mut [&mut Phone]) {
+        let mut moved = true;
+        while std::mem::take(&mut moved) {
+            while let Some(output) = with_mesh(None, |slot, now| slot.engine.poll_output(now))
+                .expect("premise: an engine runs")
+            {
+                moved = true;
+                let Output::Frame { link, bytes } = output else {
+                    panic!("premise: the engine keeps its links");
+                };
+                let now = mesh_clock_ms();
+                let phone = (phones.iter_mut().find(|phone| phone.wire == link)).expect("wired");
+                phone.engine.receive(link, &bytes, now);
+            }
+            for phone in phones.iter_mut() {
+                let now = mesh_clock_ms();
+                while let Some(output) = phone.engine.poll_output(now) {
+                    moved = true;
+                    let Output::Frame { link, bytes } = output else {
+                        panic!("premise: a phone keeps its link");
+                    };
+                    engine(|slot| slot.engine.receive(link, &bytes, now));
+                }
+            }
+        }
+    }
+
+    /// Runs the engine in the slot and `phones` for `ms`, a tick at a time.
+    fn run(bench: &Bench, phones: &mut [&mut Phone], ms: u64) {
+        carry(phones);
+        for _ in 0..ms / TICK {
+            bench.pass(TICK);
+            let now = mesh_clock_ms();
+            engine(|slot| slot.engine.advance(now));
+            for phone in phones.iter_mut() {
+                phone.engine.advance(now);
+            }
+            carry(phones);
+        }
+    }
+
+    /// A device: its identity, its store's directory and its open session.
+    struct Device {
+        keys: Keys,
+        dir: DataDir,
+        circle: CircleManagerFfi,
+    }
+
+    impl Device {
+        fn new(tag: &str) -> Self {
+            let (keys, dir) = (Keys::generate(), DataDir::new(tag));
+            let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys)).expect("opens");
+            Self { keys, dir, circle }
+        }
+
+        /// The session closed and opened again, as a restart opens it.
+        fn reopened(self) -> Self {
+            let Self { keys, dir, circle } = self;
+            drop(circle);
+            let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys)).expect("reopens");
+            Self { keys, dir, circle }
+        }
+
+        fn session(&self) -> &haven_core::nostr::mls::SessionManager {
+            self.circle.inner.session()
+        }
+
+        /// A circle of this device's, on `relay`, with `invited` in it.
+        async fn founds(&self, relay: &str, invited: &[&Self]) -> GroupId {
+            let mut members = Vec::new();
+            for device in invited {
+                let package = haven_core::relay::maintenance::build_kp_maintenance_events(
+                    device.session(),
+                    &device.keys,
+                    &[relay.to_owned()],
+                    None,
+                    None,
+                )
+                .await
+                .expect("a key package")
+                .event;
+                members.push(haven_core::circle::MemberKeyPackage {
+                    key_package_event: package,
+                    inbox_relays: vec![relay.to_owned()],
+                    nip65_relays: Vec::new(),
+                    nip65_write_relays: Vec::new(),
+                });
+            }
+            let config =
+                haven_core::circle::CircleConfig::new("Mesh").with_relays(vec![relay.to_owned()]);
+            let created = (self.circle.inner)
+                .create_circle(&self.keys, members, &config)
+                .await
+                .expect("a circle");
+            for (device, welcome) in invited.iter().zip(&created.welcome_events) {
+                (device.circle.inner)
+                    .process_gift_wrapped_invitation(&device.keys, &welcome.event)
+                    .await
+                    .expect("the Welcome is read");
+                (device.circle.inner)
+                    .accept_invitation(&welcome.event.id)
+                    .await
+                    .expect("the circle is joined");
+            }
+            created.circle.mls_group_id
+        }
+
+        /// A fix sealed and sent to the circle's relay, through the bridge,
+        /// by a caller whose relay receive did or did not complete first:
+        /// what the send answered, and the event's id.
+        async fn sends(
+            &self,
+            relays: &RelayManagerFfi,
+            group: &GroupId,
+            received: bool,
+        ) -> (LocationPublishFfi, nostr::EventId) {
+            let sealed = relays
+                .seal_location_driven(&self.circle, group.as_slice().to_vec(), &fix(), true)
+                .await
+                .expect("the seal runs")
+                .sealed
+                .expect("premise: a location is sealed");
+            let answer = relays
+                .publish_location_driven(&self.circle, &sealed, received)
+                .await;
+            (answer, id_of(&sealed))
+        }
+
+        /// [`Self::sends`], as a caller that publishes before it fetches.
+        async fn shares(&self, relays: &RelayManagerFfi, group: &GroupId) -> LocationPublishFfi {
+            self.sends(relays, group, false).await.0
+        }
+
+        /// How many epochs of `group` this device holds a mesh key for.
+        fn keys_of(&self, group: &GroupId) -> usize {
+            self.session().mesh_key_epochs_for_test(group).len()
+        }
+    }
+
+    fn fix() -> LocationMessage {
+        LocationMessage {
+            inner: haven_core::location::LocationMessage::new(51.5, -0.12),
+        }
+    }
+
+    /// The id of the event a sealed location carries.
+    fn id_of(sealed: &SealedLocationFfi) -> nostr::EventId {
+        let json = sealed_location_event_json_for_test(sealed).expect("a debug build");
+        <nostr::Event as nostr::JsonUtil>::from_json(json)
+            .expect("an event")
+            .id
+    }
+
+    /// Whether the relay at `url` holds the event `id`.
+    async fn relay_holds(url: &str, id: nostr::EventId) -> bool {
+        !haven_core::relay::RelayManager::new()
+            .fetch_events(nostr::Filter::new().id(id), &[url.to_owned()], None)
+            .await
+            .expect("read the relay back")
+            .is_empty()
+    }
+
+    /// A relay that refuses every event while its switch is on.
+    #[derive(Debug)]
+    struct Refusing(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl nostr_relay_builder::builder::WritePolicy for Refusing {
+        fn admit_event<'a>(
+            &'a self,
+            _event: &'a nostr::Event,
+            _addr: &'a std::net::SocketAddr,
+        ) -> nostr_sdk::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult>
+        {
+            let refuses = self.0.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if refuses {
+                    nostr_relay_builder::builder::PolicyResult::Reject("blocked: closed".into())
+                } else {
+                    nostr_relay_builder::builder::PolicyResult::Accept
+                }
+            })
+        }
+    }
+
+    /// The device's wall clock, which a session reads when a test set none.
+    fn wall_ms() -> u64 {
+        haven_core::relay::fanout::FanoutClock::now_ms(&haven_core::relay::fanout::WallClock)
+    }
+
+    fn counts(stats: &MeshStatsFfi) -> [u64; 4] {
+        [
+            stats.from_circles_since_on,
+            stats.passed_on_since_on,
+            stats.from_circles_total,
+            stats.passed_on_total,
+        ]
+    }
+
+    /// How many locations wait in the engine's outbox for an emission slot.
+    fn waiting() -> usize {
+        engine(|slot| slot.engine.stats().outbox).expect("premise: an engine runs")
+    }
+
+    async fn relay() -> (MockRelay, String, RelayManagerFfi) {
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+        let relays = RelayManagerFfi::new_instance()
+            .await
+            .expect("relay manager");
+        (relay, url, relays)
+    }
+
+    /// A slot of the test's own, outside `MESH`: the hand-off it is given and
+    /// an engine whose emission slots fall every `emits_every_ms`.
+    fn slot(handoff: &std::sync::Arc<Handoff>, emits_every_ms: u64) -> MeshSlot {
+        let config = Config {
+            emit_period_ms: emits_every_ms,
+            emit_jitter_ms: 0,
+            ..Config::default()
+        };
+        MeshSlot {
+            engine: MeshEngine::new(config, OsRng, 0),
+            handoff: std::sync::Arc::clone(handoff),
+            until_ms: u64::MAX,
+            folded: 0,
+        }
+    }
+
+    /// Whether the engine emitted `packet` — put it in its store, where its
+    /// links are told of it — by `at_ms`.
+    fn emits(slot: &mut MeshSlot, packet: &Packet, at_ms: u64) -> bool {
+        slot.engine.advance(at_ms);
+        slot.engine.store().holds(&packet.id())
+    }
+
+    /// The hand-off's offers and purges reach the engine as the last thing
+    /// said of each slot, an offer for as long as its event still has by the
+    /// wall clock: one already expired fills nothing and empties what waited,
+    /// and a purge wins over the offer before it.
+    #[test]
+    fn an_offer_is_applied_for_as_long_as_its_event_has_left_and_a_purge_empties_its_slot() {
+        const WALL: u64 = 1_800_000_000_000;
+        let handoff = std::sync::Arc::new(Handoff::default());
+        let packets: Vec<Packet> = (0..5).map(|_| cover_packet(&mut OsRng)).collect();
+        let ends = |after_ms: u64| (WALL + after_ms) / SECOND;
+
+        // An engine whose emission slots fall every ten seconds.
+        let mut ten = slot(&handoff, 10 * SECOND);
+        handoff.offer(CircleSlot(0), packets[0].clone(), ends(100 * SECOND));
+        // Expires before the first emission slot.
+        handoff.offer(CircleSlot(1), packets[1].clone(), ends(5 * SECOND));
+        // Offered, then purged.
+        handoff.offer(CircleSlot(2), packets[2].clone(), ends(100 * SECOND));
+        handoff.purge(CircleSlot(2));
+        ten.apply(0, WALL);
+        assert!(
+            ten.engine.stats().outbox == 2,
+            "an offer and one that expires soon were not both taken, or a purged one was"
+        );
+        // Already expired when it is applied, over one that waited.
+        handoff.offer(CircleSlot(3), packets[3].clone(), ends(100 * SECOND));
+        ten.apply(0, WALL);
+        handoff.offer(CircleSlot(3), packets[4].clone(), ends(0));
+        ten.apply(0, WALL);
+        assert!(
+            ten.engine.stats().outbox == 2,
+            "an expired offer was taken, or left what it replaced waiting"
+        );
+        assert!(handoff.take().is_empty(), "applying left something waiting");
+
+        for at in [10, 20, 30, 40, 50] {
+            ten.engine.advance(at * SECOND);
+        }
+        assert!(
+            ten.engine.store().holds(&packets[0].id())
+                && packets[1..]
+                    .iter()
+                    .all(|packet| !ten.engine.store().holds(&packet.id())),
+            "something other than the one live offer was emitted"
+        );
+    }
+
+    /// An event's expiration is a wall-clock instant; the engine's clock is
+    /// not. What crosses is the time the event has left when it is applied,
+    /// so a wall clock that jumps afterwards moves nothing, and one that was
+    /// set back between the seal and the entry cannot make a location wait
+    /// in the outbox for longer than a location lives.
+    #[test]
+    fn a_wall_clock_that_jumps_moves_no_offer_and_none_waits_longer_than_a_location_lives() {
+        const WALL: u64 = 1_800_000_000_000;
+        let handoff = std::sync::Arc::new(Handoff::default());
+        let packet = cover_packet(&mut OsRng);
+        let year_ms = 365 * 24 * HOUR;
+
+        // Sealed to expire in 100 s; the wall clock then jumps a year ahead.
+        // The engine's clock did not: the packet goes out in its slot.
+        let mut jumped = slot(&handoff, 50 * SECOND);
+        handoff.offer(
+            CircleSlot(0),
+            packet.clone(),
+            (WALL + 100 * SECOND) / SECOND,
+        );
+        jumped.apply(0, WALL);
+        handoff.purge(CircleSlot(9));
+        jumped.apply(SECOND, WALL + year_ms);
+        assert!(
+            emits(&mut jumped, &packet, 50 * SECOND),
+            "a wall clock that jumped ahead after the offer was applied expired it"
+        );
+
+        // The wall clock was set back a year before the entry: the event
+        // looks a year from its end. An emission slot just inside a
+        // location's life takes it; one just past it does not.
+        for (slot_at, goes) in [
+            (MESH_OFFER_MAX_MS - SECOND, true),
+            (MESH_OFFER_MAX_MS, false),
+        ] {
+            let mut set_back = slot(&handoff, slot_at);
+            handoff.offer(
+                CircleSlot(0),
+                packet.clone(),
+                (WALL + 100 * SECOND) / SECOND,
+            );
+            set_back.apply(0, WALL - year_ms);
+            assert!(
+                emits(&mut set_back, &packet, slot_at) == goes,
+                "under a wall clock set back, a slot at {slot_at} ms {} the location",
+                if goes { "did not take" } else { "took" }
+            );
+        }
+    }
+
+    /// The engine's clock is the device's, read in Rust, unless a test set
+    /// it: it never runs backwards and is not the zero an unset override is.
+    #[test]
+    fn the_engines_clock_is_the_devices_and_does_not_run_backwards() {
+        let first = super::device_clock_ms();
+        let second = super::device_clock_ms();
+        assert!(first != 0 && second >= first);
+    }
+
+    /// With mesh off every entry answers typed, starts no engine, turns
+    /// nothing on and asks the engine for nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn with_mesh_off_every_entry_is_a_typed_no_op() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let _bench = Bench::new();
+        let device = Device::new("mesh_off");
+        let relays = RelayManagerFfi::new_instance()
+            .await
+            .expect("relay manager");
+
+        assert_eq!(mesh_resume(&device.circle).await, MeshStartFfi::Off);
+        assert_eq!(mesh_keep_on(&device.circle).await, MeshStartFfi::Off);
+        mesh_sharing_stopped(&device.circle);
+        mesh_stop(&device.circle).await;
+        mesh_reset_counts(&device.circle).await;
+        let stats = mesh_stats(&device.circle).await;
+        assert!(
+            !stats.on && !stats.linked && stats.on_for_ms == 0 && counts(&stats) == [0; 4],
+            "mesh that was never on shows as something"
+        );
+        let drive = relays.mesh_drive_driven(&device.circle).await;
+        assert!(drive.replayed.is_empty() && !drive.errored && !drive.more);
+        let sealed = relays
+            .seal_location_for_mesh_driven(&device.circle, vec![7; 32], &fix())
+            .await
+            .expect("a seal with mesh off is an outcome");
+        assert!(
+            sealed.sealed.is_none() && sealed.held_by == Some(SendHeldFfi::Nothing),
+            "a location was sealed for a mesh that is off"
+        );
+        assert!(
+            is_off() && device.session().mesh_on_for_ms() == 0,
+            "an entry made with mesh off started an engine or turned mesh on"
+        );
+    }
+
+    /// Turning mesh on stores a twelve-hour deadline, keys every circle and
+    /// starts one engine; asked again it is the same engine; Keep on moves
+    /// the deadline and nothing else; turning it off drops the engine,
+    /// withdraws what waited for it and deletes every key; and after that
+    /// Keep on turns nothing back on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mesh_is_started_once_kept_on_and_stopped_with_its_engine_and_keys() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let (_relay, url, relays) = relay().await;
+        let device = Device::new("mesh_start");
+        let group = device.founds(&url, &[]).await;
+        assert!(device.keys_of(&group) == 0, "a key exists with mesh off");
+        let wall = wall_ms();
+        device.session().set_legacy_clock_for_test(wall);
+
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        let stats = mesh_stats(&device.circle).await;
+        assert!(
+            stats.on && !stats.linked && stats.on_for_ms == MESH_ON_MAX_MS,
+            "mesh turned on is not on for twelve hours"
+        );
+        assert!(device.keys_of(&group) == 1, "the circle has no mesh key");
+
+        // The engine a second start finds is the first: it has emitted.
+        bench.pass(PAST_A_SLOT);
+        let emitted = engine(|slot| {
+            slot.engine.advance(mesh_clock_ms());
+            slot.engine.stats().emitted
+        });
+        assert!(
+            emitted == Some(1),
+            "premise: the engine's first slot passed"
+        );
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::AlreadyOn);
+        assert!(
+            engine(|slot| slot.engine.stats().emitted) == Some(1),
+            "a second start replaced the engine"
+        );
+
+        // An hour on, by both clocks: eleven left, and Keep on makes twelve.
+        device.session().set_legacy_clock_for_test(wall + HOUR);
+        bench.pass(HOUR - PAST_A_SLOT);
+        assert_eq!(
+            mesh_stats(&device.circle).await.on_for_ms,
+            MESH_ON_MAX_MS - HOUR
+        );
+        assert_eq!(mesh_keep_on(&device.circle).await, MeshStartFfi::AlreadyOn);
+        assert!(
+            mesh_stats(&device.circle).await.on_for_ms == MESH_ON_MAX_MS
+                && engine(|slot| slot.engine.stats().emitted).is_some_and(|emitted| emitted >= 1),
+            "Keep on did not restart the twelve hours, or started another engine"
+        );
+
+        // A location waits for the engine when mesh is turned off.
+        device.session().set_legacy_clock_for_test(0);
+        assert_eq!(
+            device.shares(&relays, &group).await,
+            LocationPublishFfi::Accepted
+        );
+        mesh_stop(&device.circle).await;
+        assert!(is_off(), "mesh off left an engine");
+        assert!(
+            (device.session().mesh_handoff().take().iter()).all(|(_, op)| matches!(op, Op::Purge)),
+            "mesh off left a location waiting for the engine"
+        );
+        assert!(
+            device.keys_of(&group) == 0 && device.session().mesh_on_until_for_test() == 0,
+            "mesh off left a key or the deadline"
+        );
+        assert!(!mesh_stats(&device.circle).await.on);
+
+        assert_eq!(mesh_keep_on(&device.circle).await, MeshStartFfi::Off);
+        assert!(
+            is_off() && device.session().mesh_on_for_ms() == 0,
+            "Keep on turned mesh back on after it was off"
+        );
+    }
+
+    /// Nobody turns mesh off at its deadline: the first entry after it does.
+    /// By the engine's clock when the wall clock stood still or was set
+    /// back; by the session's when the wall clock ran ahead; and when the
+    /// entry that finds it held no session, the next one that holds one
+    /// deletes the keys. In each the engine is gone before anything runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_first_entry_after_the_deadline_turns_mesh_off_with_its_engine_and_keys() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let (_relay, url, relays) = relay().await;
+        let device = Device::new("mesh_deadline");
+        let group = device.founds(&url, &[]).await;
+        let gone = |device: &Device| {
+            is_off()
+                && device.keys_of(&group) == 0
+                && device.session().mesh_on_until_for_test() == 0
+        };
+
+        // The engine's clock reaches the deadline; the wall clock has not
+        // moved since mesh was turned on.
+        device.session().set_legacy_clock_for_test(wall_ms());
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        bench.pass(MESH_ON_MAX_MS - 1);
+        assert!(
+            mesh_stats(&device.circle).await.on && device.keys_of(&group) == 1,
+            "mesh went off before its deadline"
+        );
+        bench.pass(1);
+        let drive = relays.mesh_drive_driven(&device.circle).await;
+        assert!(
+            drive.replayed.is_empty() && !drive.more && gone(&device),
+            "an entry at the deadline, by the engine's clock, left mesh on"
+        );
+        assert!(!mesh_stats(&device.circle).await.on);
+
+        // The wall clock reaches the deadline; the engine's has not moved.
+        device.session().set_legacy_clock_for_test(0);
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        let until = device.session().mesh_on_until_for_test();
+        device.session().set_legacy_clock_for_test(until);
+        assert!(
+            !mesh_stats(&device.circle).await.on && gone(&device),
+            "an entry at the deadline, by the session's clock, left mesh on"
+        );
+
+        // An entry that holds no session finds the deadline passed: the
+        // engine goes at once, the keys with the next entry that holds one.
+        device.session().set_legacy_clock_for_test(0);
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        bench.pass(MESH_ON_MAX_MS);
+        assert!(
+            engine(|_| ()).is_none() && matches!(*mesh_home(), MeshHome::Ended(0)),
+            "an entry past the deadline ran the engine, or kept it"
+        );
+        assert!(device.keys_of(&group) == 1, "premise: no session was told");
+        assert_eq!(mesh_resume(&device.circle).await, MeshStartFfi::Off);
+        assert!(
+            gone(&device),
+            "the entry after a deadline nobody held a session for left the keys"
+        );
+    }
+
+    /// A session that opens while the engine runs is handed to it: what that
+    /// session seals reaches the outbox, and what the last one left there —
+    /// under slot numbers the new one does not use — is gone. So is another
+    /// session that asks for a mesh already on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_opened_while_the_engine_runs_hands_off_to_it() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let _bench = Bench::new();
+        let (_relay, url, relays) = relay().await;
+        let device = Device::new("mesh_reopened");
+        let group = device.founds(&url, &[]).await;
+        // A second session whose mesh is on, which the engine is not handed
+        // when it starts.
+        let other = Device::new("mesh_reopened_other");
+        let others = other.founds(&url, &[]).await;
+        assert!(other.session().mesh_on_until(u64::MAX).await);
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        assert_eq!(
+            device.shares(&relays, &group).await,
+            LocationPublishFfi::Accepted
+        );
+        assert!(
+            waiting() == 1,
+            "a location sent before an engine entry did not reach the outbox at it"
+        );
+
+        let device = device.reopened();
+        assert!(
+            waiting() == 0,
+            "what the closed session left in the outbox outlived it"
+        );
+        assert_eq!(
+            device.shares(&relays, &group).await,
+            LocationPublishFfi::Accepted
+        );
+        assert!(
+            waiting() == 1,
+            "a session opened while the engine ran hands off to nobody"
+        );
+
+        assert_eq!(mesh_start(&other.circle).await, MeshStartFfi::AlreadyOn);
+        assert!(waiting() == 0);
+        assert_eq!(
+            other.shares(&relays, &others).await,
+            LocationPublishFfi::Accepted
+        );
+        assert!(
+            waiting() == 1,
+            "a session that asked for a mesh already on hands off to nobody"
+        );
+    }
+
+    /// What is said after a location is sent decides: sharing stopped empties
+    /// the outbox at the next engine entry, before any emission slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sharing_stopped_withdraws_a_location_before_the_engine_emits_it() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let (_relay, url, relays) = relay().await;
+        let device = Device::new("mesh_sharing_stopped");
+        let group = device.founds(&url, &[]).await;
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        assert_eq!(
+            device.shares(&relays, &group).await,
+            LocationPublishFfi::Accepted
+        );
+        assert!(waiting() == 1, "premise: the location waits for its slot");
+        assert_eq!(
+            device.shares(&relays, &group).await,
+            LocationPublishFfi::Accepted
+        );
+        mesh_sharing_stopped(&device.circle);
+        assert!(
+            waiting() == 0,
+            "a location sent before sharing stopped still waits to go out"
+        );
+        bench.pass(PAST_A_SLOT);
+        assert!(
+            engine(|slot| {
+                slot.engine.advance(mesh_clock_ms());
+                slot.engine.stats().emitted
+            }) == Some(1)
+                && mesh_stats(&device.circle).await.on,
+            "premise: mesh stays on and its slot was served"
+        );
+    }
+
+    /// A restart is not the user asking again. A session opened while the
+    /// engine runs cannot lengthen the engine's deadline, whatever the wall
+    /// clock it opens under; and an engine started for a mesh an earlier
+    /// process left on runs for what is left of the stored deadline, not for
+    /// twelve hours more.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn neither_a_reopened_session_nor_a_restart_restarts_the_twelve_hours() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let device = Device::new("mesh_resume");
+        let wall = wall_ms();
+        device.session().set_legacy_clock_for_test(wall);
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+
+        // An hour passes by the engine's clock. The session that opens then
+        // reads the device's wall clock, which stands where the test began:
+        // set back an hour. By it, twelve hours are left.
+        bench.pass(HOUR);
+        let device = device.reopened();
+        assert!(
+            device.session().mesh_on_for_ms() > MESH_ON_MAX_MS - HOUR,
+            "premise: the session that opened counts more time left than the engine"
+        );
+        assert!(
+            mesh_stats(&device.circle).await.on_for_ms == MESH_ON_MAX_MS - HOUR,
+            "a session opened under a wall clock set back lengthened the engine's deadline"
+        );
+        assert_eq!(mesh_resume(&device.circle).await, MeshStartFfi::AlreadyOn);
+        assert_eq!(
+            mesh_stats(&device.circle).await.on_for_ms,
+            MESH_ON_MAX_MS - HOUR
+        );
+
+        // The process ends and another starts three hours after mesh was
+        // turned on: its engine has nine hours.
+        let _ = mesh_empty();
+        let device = device.reopened();
+        device.session().set_legacy_clock_for_test(wall + 3 * HOUR);
+        assert_eq!(mesh_resume(&device.circle).await, MeshStartFfi::Started);
+        assert!(
+            mesh_stats(&device.circle).await.on_for_ms == MESH_ON_MAX_MS - 3 * HOUR,
+            "an engine resumed after a restart was given twelve hours again"
+        );
+    }
+
+    /// A fix sealed for the mesh alone is handed to the engine and to no
+    /// relay, and answers as that. With mesh on in the session and no engine
+    /// in this process to carry it, nothing is sealed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fix_is_sealed_for_the_mesh_alone_only_where_an_engine_carries_it() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let _bench = Bench::new();
+        let (_relay, url, relays) = relay().await;
+        let device = Device::new("mesh_only");
+        let group = device.founds(&url, &[]).await;
+        let seals = || async {
+            relays
+                .seal_location_for_mesh_driven(&device.circle, group.as_slice().to_vec(), &fix())
+                .await
+                .expect("the seal runs")
+        };
+
+        // Mesh on as an earlier process left it: keys, a deadline, no engine.
+        assert!(device.session().mesh_on_until(u64::MAX).await);
+        let unsealed = seals().await;
+        assert!(
+            unsealed.sealed.is_none() && unsealed.held_by == Some(SendHeldFfi::Nothing),
+            "a fix was sealed for a mesh no engine in this process carries"
+        );
+
+        assert_eq!(mesh_resume(&device.circle).await, MeshStartFfi::Started);
+        let sealed = seals().await.sealed.expect("a fix sealed for the mesh");
+        assert_eq!(
+            relays
+                .publish_location_driven(&device.circle, &sealed, false)
+                .await,
+            LocationPublishFfi::MeshOnly
+        );
+        assert!(
+            waiting() == 1 && !relay_holds(&url, id_of(&sealed)).await,
+            "a fix sealed for the mesh alone did not reach the engine, or reached a relay"
+        );
+    }
+
+    /// Member bridging through the bridge: a member with no relay sends by
+    /// mesh alone; a fellow member takes her update in by mesh and then
+    /// sends its own. Her update reaches the relay only when that send's
+    /// caller says its relay receive completed first — a caller that
+    /// publishes before it fetches passes nothing on, and what it does not
+    /// pass on is dropped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_mesh_update_is_passed_on_to_the_relay_only_on_the_callers_word_that_it_received() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let refuses = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let relay = nostr_relay_builder::LocalRelay::new(
+            nostr_relay_builder::RelayBuilder::default()
+                .write_policy(Refusing(std::sync::Arc::clone(&refuses))),
+        );
+        relay.run().await.expect("run the relay");
+        let url = relay.url().await.to_string();
+        let relays = RelayManagerFfi::new_instance()
+            .await
+            .expect("relay manager");
+        let (alice, bob) = (Device::new("mesh_bridge_a"), Device::new("mesh_bridge_b"));
+        let group = alice.founds(&url, &[&bob]).await;
+        bob.session().mark_caught_up_for_test(&group);
+        let mut carrier = Phone::quiet(1);
+
+        for received in [false, true] {
+            // The relay takes nothing of hers: her update leaves by mesh alone.
+            assert_eq!(mesh_start(&alice.circle).await, MeshStartFfi::Started);
+            refuses.store(true, Ordering::SeqCst);
+            let (answer, update) = alice.sends(&relays, &group, false).await;
+            refuses.store(false, Ordering::SeqCst);
+            assert!(
+                answer != LocationPublishFfi::Accepted && !relay_holds(&url, update).await,
+                "premise: the relay took nothing of hers"
+            );
+            carrier.link();
+            run(&bench, &mut [&mut carrier], PAST_A_SLOT);
+            carrier.unlink();
+            mesh_stop(&alice.circle).await;
+
+            assert_eq!(mesh_start(&bob.circle).await, MeshStartFfi::Started);
+            carrier.link();
+            run(&bench, &mut [&mut carrier], 4 * TICK);
+            carrier.unlink();
+            let _ = relays.mesh_drive_driven(&bob.circle).await;
+            assert!(
+                bob.session().mesh_bridge_waiting_for_test(&group) == [update],
+                "premise: her update waits for this device's own send"
+            );
+
+            let (answer, _) = bob.sends(&relays, &group, received).await;
+            assert_eq!(answer, LocationPublishFfi::Accepted);
+            assert!(
+                relay_holds(&url, update).await == received,
+                "a send whose caller said received = {received} {} the mesh update on",
+                if received { "did not pass" } else { "passed" }
+            );
+            assert!(
+                bob.session()
+                    .mesh_bridge_waiting_for_test(&group)
+                    .is_empty(),
+                "an update one send did not pass on still waits"
+            );
+            mesh_stop(&bob.circle).await;
+        }
+    }
+
+    /// The whole way, through the bridge: one member seals and sends with
+    /// mesh on; the packet leaves her engine in its slot, crosses to a phone
+    /// that can read nothing of it, and from that phone to a fellow member's
+    /// engine, whose drive shows the location and counts it — once, however
+    /// often it is driven. A location is all that crosses back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_members_location_crosses_the_mesh_to_a_fellow_member_and_is_counted_once() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let (_relay, url, relays) = relay().await;
+        let (alice, bob) = (Device::new("mesh_trip_alice"), Device::new("mesh_trip_bob"));
+        let group = alice.founds(&url, &[&bob]).await;
+
+        assert_eq!(mesh_start(&alice.circle).await, MeshStartFfi::Started);
+        assert_eq!(
+            alice.shares(&relays, &group).await,
+            LocationPublishFfi::Accepted
+        );
+        let mut carrier = Phone::quiet(1);
+        carrier.link();
+        run(&bench, &mut [&mut carrier], PAST_A_SLOT);
+        assert!(
+            mesh_stats(&alice.circle).await.linked,
+            "premise: the two phones are linked"
+        );
+        assert!(
+            carrier.engine.stats().accepted >= 1,
+            "nothing left the sender's engine in its emission slot"
+        );
+        carrier.unlink();
+        mesh_stop(&alice.circle).await;
+
+        assert_eq!(mesh_start(&bob.circle).await, MeshStartFfi::Started);
+        carrier.link();
+        run(&bench, &mut [&mut carrier], 4 * TICK);
+        let drive = relays.mesh_drive_driven(&bob.circle).await;
+        assert!(
+            !drive.errored
+                && !drive.more
+                && drive.replayed.len() == 1
+                && drive.replayed[0].kind == LocationMessageResultKindFfi::Location,
+            "the fellow member's drive did not show the one location the mesh brought"
+        );
+        assert!(
+            counts(&mesh_stats(&bob.circle).await) == [1, 0, 1, 0],
+            "the update was not counted once as one from this device's circles"
+        );
+
+        let again = relays.mesh_drive_driven(&bob.circle).await;
+        assert!(again.replayed.is_empty() && !again.errored);
+        assert!(
+            counts(&mesh_stats(&bob.circle).await) == [1, 0, 1, 0],
+            "an update already read was counted again"
+        );
+    }
+
+    /// "Passed on" is the engine's own count of packets this phone carried,
+    /// could not open and sent on, added to the stored totals at each drive
+    /// and each read of the statistics — each packet once. The totals
+    /// survive a restart, as does what was counted since mesh was turned on
+    /// while it stays on; turning mesh on again starts that count afresh; a
+    /// reset forgets all four.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn passed_on_is_counted_once_from_the_engine_and_outlives_a_restart() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let relays = RelayManagerFfi::new_instance()
+            .await
+            .expect("relay manager");
+        let device = Device::new("mesh_passed_on");
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+
+        // One phone emits cover packets; they cross this one to another.
+        // Fifty-five seconds in all: this phone's own first slot is not
+        // reached, so every packet the far one takes is one this phone
+        // carried.
+        let (mut near, mut far) = (Phone::new(1, 5 * SECOND), Phone::quiet(2));
+        near.link();
+        far.link();
+        run(&bench, &mut [&mut near, &mut far], 5 * TICK);
+        let carried = far.engine.stats().accepted;
+        assert!(carried >= 2, "premise: packets crossed this phone");
+        assert!(
+            counts(&mesh_stats(&device.circle).await) == [0; 4],
+            "a packet not yet tried under this device's keys was counted as passed on"
+        );
+
+        let drive = relays.mesh_drive_driven(&device.circle).await;
+        assert!(drive.replayed.is_empty() && !drive.errored && !drive.more);
+        let stored = device.circle.inner.mesh_counts().expect("the store reads");
+        assert!(
+            stored.passed_on_total == carried,
+            "a drive did not add what the engine had passed on to the stored totals"
+        );
+        for _ in 0..2 {
+            assert!(
+                counts(&mesh_stats(&device.circle).await) == [0, carried, 0, carried],
+                "what was passed on is not what the next phone took, counted once"
+            );
+        }
+
+        // More cross: some are sent on before a drive reads them, some read
+        // before they are sent on. Each is counted once both have happened.
+        run(&bench, &mut [&mut near, &mut far], 2 * TICK);
+        let _ = relays.mesh_drive_driven(&device.circle).await;
+        run(&bench, &mut [&mut near, &mut far], 2 * TICK);
+        near.unlink();
+        run(&bench, &mut [&mut far], 2 * TICK);
+        let _ = relays.mesh_drive_driven(&device.circle).await;
+        let all = far.engine.stats().accepted;
+        assert!(all > carried, "premise: more packets crossed this phone");
+        let carried = all;
+        assert!(
+            counts(&mesh_stats(&device.circle).await) == [0, carried, 0, carried],
+            "a packet read before it was sent on, or sent on before it was read, was not \
+             counted once"
+        );
+
+        // The process ends with nothing unfolded; the next finds every count.
+        let _ = mesh_empty();
+        let device = device.reopened();
+        let stats = mesh_stats(&device.circle).await;
+        assert!(
+            !stats.on && counts(&stats) == [0, carried, 0, carried],
+            "a restart lost a count, or left an engine running"
+        );
+        assert_eq!(mesh_resume(&device.circle).await, MeshStartFfi::Started);
+        let stats = mesh_stats(&device.circle).await;
+        assert!(
+            stats.on && counts(&stats) == [0, carried, 0, carried],
+            "resuming a mesh left on started its since-on counts again"
+        );
+
+        mesh_stop(&device.circle).await;
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        assert!(
+            counts(&mesh_stats(&device.circle).await) == [0, 0, 0, carried],
+            "turning mesh on did not start the since-on count, or touched a total"
+        );
+        mesh_reset_counts(&device.circle).await;
+        assert_eq!(counts(&mesh_stats(&device.circle).await), [0; 4]);
+    }
+
+    /// What the engine passed on and no fold has yet added is shown by the
+    /// next read of the statistics, and is not lost when mesh goes off:
+    /// neither when it is turned off, nor when an entry that holds no session
+    /// finds the deadline passed. A reset counts nothing passed on before it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn what_was_passed_on_is_added_to_the_totals_when_mesh_goes_off() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let relays = RelayManagerFfi::new_instance()
+            .await
+            .expect("relay manager");
+        let device = Device::new("mesh_passed_on_off");
+        let mut total = 0;
+
+        for ending in ["read", "turned off", "deadline", "reset"] {
+            assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+            // Packets reach this phone and are read, and only then sent on:
+            // the engine counts them after the drive's fold.
+            let (mut near, mut far) = (Phone::new(1, 5 * SECOND), Phone::quiet(2));
+            near.link();
+            run(&bench, &mut [&mut near], 4 * TICK);
+            near.unlink();
+            let _ = relays.mesh_drive_driven(&device.circle).await;
+            far.link();
+            run(&bench, &mut [&mut far], 2 * TICK);
+            let sent_on = far.engine.stats().accepted;
+            assert!(sent_on >= 2, "premise: packets crossed this phone");
+
+            match ending {
+                "read" => {
+                    let stats = mesh_stats(&device.circle).await;
+                    assert!(
+                        stats.on && counts(&stats) == [0, sent_on, 0, total + sent_on],
+                        "a read of the statistics did not show what the engine had passed on"
+                    );
+                    mesh_stop(&device.circle).await;
+                }
+                "turned off" => mesh_stop(&device.circle).await,
+                "deadline" => {
+                    bench.pass(MESH_ON_MAX_MS);
+                    assert!(engine(|_| ()).is_none());
+                    assert!(
+                        matches!(*mesh_home(), MeshHome::Ended(owed) if owed == sent_on),
+                        "an engine ended by its deadline did not keep what it had passed on"
+                    );
+                }
+                _ => {
+                    mesh_reset_counts(&device.circle).await;
+                    assert!(
+                        counts(&mesh_stats(&device.circle).await) == [0; 4],
+                        "a packet passed on before a reset was counted after it"
+                    );
+                    return;
+                }
+            }
+            total += sent_on;
+            let stats = mesh_stats(&device.circle).await;
+            assert!(
+                !stats.on && counts(&stats) == [0, sent_on, 0, total],
+                "what the engine had passed on was lost when mesh was {ending}"
+            );
+        }
+    }
+
+    /// Deleting the identity leaves nothing of the mesh: no engine, and in
+    /// the store that replaces the wiped one no deadline, key or count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wiping_local_state_leaves_no_engine_key_or_count() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let _bench = Bench::new();
+        let (_relay, url, _relays) = relay().await;
+        let device = Device::new("mesh_wipe");
+        let group = device.founds(&url, &[]).await;
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        device.circle.inner.fold_mesh_counts(2, 3);
+        assert!(
+            !is_off()
+                && device.keys_of(&group) == 1
+                && counts(&mesh_stats(&device.circle).await) == [2, 3, 2, 3],
+            "premise: an engine, a key and counts"
+        );
+
+        let Device { keys, dir, circle } = device;
+        drop(circle);
+        wipe_all_mls_state(dir.as_str()).await.expect("the wipe");
+        assert!(is_off(), "the wipe left the mesh engine");
+
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys)).expect("opens anew");
+        let stats = mesh_stats(&circle).await;
+        assert!(
+            !stats.on && stats.on_for_ms == 0 && counts(&stats) == [0; 4],
+            "the wipe left a count"
+        );
+        assert!(
+            circle.inner.session().mesh_on_for_ms() == 0
+                && circle
+                    .inner
+                    .session()
+                    .mesh_key_epochs_for_test(&group)
+                    .is_empty()
+                && mesh_resume(&circle).await == MeshStartFfi::Off,
+            "the wipe left a deadline or a key"
+        );
+    }
+
+    /// An engine call that panics leaves no engine to be run again, and the
+    /// mesh the session still has on gets a new one when it is resumed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_engine_call_that_panics_ends_that_engine_and_no_other() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let _bench = Bench::new();
+        let device = Device::new("mesh_poisoned");
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+
+        let panicked = std::panic::catch_unwind(|| engine(|_| panic!("an engine call panics")));
+        assert!(panicked.is_err(), "premise: the call panicked");
+        assert!(
+            is_off() && engine(|_| ()).is_none(),
+            "an engine whose call panicked is still there to be run"
+        );
+        assert_eq!(mesh_resume(&device.circle).await, MeshStartFfi::Started);
+        assert!(mesh_stats(&device.circle).await.on);
+    }
+
+    /// The text of `fn name`'s body in `source`, from its header.
+    fn body_of<'a>(source: &'a str, header: &str) -> &'a str {
+        let at = source.find(header).expect("the function is declared");
+        let rest = &source[at..];
+        &rest[..rest.find("\n}\n").expect("the function ends")]
+    }
+
+    /// Everything of this file that ships: all of it before this module.
+    fn shipped() -> &'static str {
+        let source = include_str!("api.rs");
+        let at = source.find(concat!("mod mesh_ffi", "_tests {"));
+        &source[..at.expect("this module is declared")]
+    }
+
+    /// The engine's lock is never held across an `.await`: `MESH` is named
+    /// by the one function that locks it, and every function that calls that
+    /// one — and so holds the guard — is not `async`, where nothing can be
+    /// awaited. The closure `with_mesh` runs under the lock is a plain one.
+    #[test]
+    fn the_engine_lock_is_taken_only_where_nothing_can_be_awaited() {
+        let source = shipped();
+        let named: Vec<&str> = source
+            .lines()
+            .filter(|line| line.contains("MESH.") || line.contains("&MESH"))
+            .collect();
+        assert!(
+            named.len() == 2
+                && named
+                    .iter()
+                    .all(|line| body_of(source, "fn mesh_home()").contains(line)),
+            "the engine's static is named outside the one function that locks it: {named:?}"
+        );
+
+        let (mut holder, mut holders) = ("", Vec::new());
+        for line in source.lines() {
+            let header = line.trim_start();
+            if header.starts_with("fn ")
+                || header.starts_with("pub fn ")
+                || header.starts_with("async fn ")
+                || header.starts_with("pub async fn ")
+            {
+                holder = header;
+            } else if line.contains("mesh_home()") {
+                holders.push(holder);
+            }
+        }
+        holders.dedup();
+        assert!(
+            holders.len() == 4,
+            "premise: with_mesh, mesh_owed, mesh_empty and mesh_open take the lock, not {holders:?}"
+        );
+        assert!(
+            holders.iter().all(|holder| !holder.contains("async")),
+            "the engine's lock is taken in an async function: {holders:?}"
+        );
+        assert!(
+            body_of(source, "fn with_mesh<T>(").contains("f: impl FnOnce(&mut MeshSlot, u64) -> T"),
+            "what runs under the engine's lock is no longer a plain closure"
+        );
+    }
+
+    /// The mesh's part of the bridge writes no log line and renders no value.
+    #[test]
+    fn the_mesh_entries_log_nothing_and_format_nothing() {
+        let source = shipped();
+        let start = source
+            .find("// ============================ Bluetooth mesh FFI")
+            .expect("the section is declared");
+        let end = source
+            .find("// ========================= M3c: Live-Sync Engine FFI")
+            .expect("the next section is declared");
+        let mut read = vec![&source[start..end]];
+        for header in [
+            // Split, so that no test reading this file for the entries it
+            // declares takes these two lines for declarations.
+            concat!("    pub async", " fn seal_location_for_mesh_driven("),
+            concat!("    pub async", " fn mesh_drive_driven("),
+        ] {
+            let at = source.find(header).expect("the entry is declared");
+            let rest = &source[at..];
+            read.push(&rest[..rest.find("\n    }\n").expect("the entry ends")]);
+        }
+        for text in read {
+            for banned in [
+                "log::",
+                "println!",
+                "eprintln!",
+                "format!",
+                "{:?}",
+                "to_string()",
+            ] {
+                assert!(
+                    !text.contains(banned),
+                    "the mesh's part of the bridge uses `{banned}`"
+                );
+            }
+        }
+    }
+
+    /// The declared fields of `pub struct name`, as `name: Type`.
+    fn fields_of(name: &str) -> Vec<String> {
+        let source = shipped();
+        let header = format!("pub struct {name} {{");
+        let at = source.find(&header).expect("the type is declared");
+        let body = &source[at + header.len()..];
+        let body = &body[..body.find('}').expect("the declaration ends")];
+        body.lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("pub "))
+            .map(|line| line["pub ".len()..].trim_end_matches(',').to_owned())
+            .collect()
+    }
+
+    /// Nothing the mesh's entries answer with can carry an identifier: a
+    /// state is a bool or a fieldless variant, a count is a number the user
+    /// is shown, "linked" is never how many, and the one value with content
+    /// is the location every receive path already hands over. No packet, id,
+    /// key, epoch, slot or relay has a field to cross in, and neither struct
+    /// can be rendered.
+    #[test]
+    fn what_the_mesh_entries_answer_with_has_no_field_an_identifier_could_cross_in() {
+        assert_eq!(
+            fields_of("MeshStatsFfi"),
+            [
+                "on: bool",
+                "linked: bool",
+                "on_for_ms: u64",
+                "from_circles_since_on: u64",
+                "passed_on_since_on: u64",
+                "from_circles_total: u64",
+                "passed_on_total: u64",
+            ]
+        );
+        assert_eq!(
+            fields_of("MeshDriveFfi"),
+            [
+                "replayed: Vec<LocationMessageResultFfi>",
+                "errored: bool",
+                "more: bool",
+            ]
+        );
+        let source = shipped();
+        for name in ["MeshStatsFfi", "MeshDriveFfi"] {
+            let at = source
+                .find(&format!("pub struct {name} {{"))
+                .expect("declared");
+            let before = source[..at].trim_end();
+            assert!(
+                !before.ends_with(']') && !source.contains(&format!("Debug for {name}")),
+                "{name} carries exact counts or a location and can be rendered"
+            );
+        }
+        let rendered: Vec<String> = [
+            MeshStartFfi::Started,
+            MeshStartFfi::AlreadyOn,
+            MeshStartFfi::Off,
+        ]
+        .iter()
+        .map(|answer| format!("{answer:?}"))
+        .collect();
+        assert_eq!(rendered, ["Started", "AlreadyOn", "Off"]);
     }
 }

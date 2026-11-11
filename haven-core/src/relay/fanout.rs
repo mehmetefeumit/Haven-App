@@ -5063,7 +5063,9 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
     /// it fetches says `false`, and passes nothing on.
     ///
     /// Whatever this call does not pass on is dropped: an update waits for
-    /// one send of this device's and no longer.
+    /// one send of this device's and no longer. Passing on begins no send
+    /// once it has run for one send's time, so it adds under two to the
+    /// call, whatever the relays do.
     pub async fn publish_location_and_bridge(
         &self,
         circle: &CircleManager,
@@ -5092,6 +5094,12 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
     /// What the relays answer is read by nothing — not the sharing-health
     /// model and not the clock-skew detector, which would blame this device
     /// for another member's clock.
+    ///
+    /// Its own share of the wake is one send's time ([`LOCATION_SEND_MS`]):
+    /// no send is begun once that has run, so a relay that took this
+    /// device's own send and withholds its answer on what is passed on costs
+    /// the call one wait, not one for each update, and the next circle's own
+    /// send is not kept behind them.
     async fn bridge_locations(
         &self,
         circle: &CircleManager,
@@ -5100,8 +5108,9 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
         received: bool,
     ) {
         let session = circle.session();
+        let until_ms = self.clock.now_ms().saturating_add(LOCATION_SEND_MS);
         for update in session.mesh_bridge_take(group_id, received) {
-            if !self.allows(LOCATION_SEND_MS) {
+            if self.clock.now_ms() >= until_ms || !self.allows(LOCATION_SEND_MS) {
                 break;
             }
             let (now_ms, mode) = (self.clock.now_ms(), self.mode.mode());
