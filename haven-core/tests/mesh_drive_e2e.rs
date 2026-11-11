@@ -797,9 +797,12 @@ async fn a_packet_whose_event_the_engine_did_not_keep_is_held_and_offered_again(
     let taken = drive(reader, Vec::new()).await;
     assert!(taken.read == [(packet.id(), true)] && ingests(reader) == 2);
     assert_eq!(reader.session().mesh_held_for_test(&group), 0);
+    // New to the engine when it was not kept, and kept when it was no
+    // longer new: counted at neither. An undercount only a store fault of
+    // this device's reaches, and never a second count.
     assert!(
-        counts(reader)[0] <= 1,
-        "an update offered twice was counted twice"
+        counts(reader)[0] == 0,
+        "an update offered twice was counted at an offer it was not both new and kept at"
     );
 }
 

@@ -228,6 +228,12 @@ struct HeldUpdate {
     /// it on to a relay. The mark is outside the signature, so one packet
     /// that says no decides.
     bridgeable: bool,
+    /// The circle's turn when the packet was opened: an update is passed on
+    /// only if nothing silenced its circle between the key that opened it
+    /// and the engine taking it in — a branch reselected in that very hold
+    /// leaves the epoch number as it was, and the key no longer the
+    /// circle's.
+    turn: u64,
 }
 
 /// A fellow member's update this device took in by mesh, which it may pass
@@ -930,13 +936,19 @@ impl MeshKeys {
             bridgeable,
             ..
         } = opened;
-        let update = HeldUpdate {
-            packet,
-            event,
-            content,
-            bridgeable,
-        };
-        (self.ring().get_mut(&circle)).map_or_else(|| vec![packet], |circle| circle.hold(update))
+        (self.ring().get_mut(&circle)).map_or_else(
+            || vec![packet],
+            |circle| {
+                let turn = circle.turn;
+                circle.hold(HeldUpdate {
+                    packet,
+                    event,
+                    content,
+                    bridgeable,
+                    turn,
+                })
+            },
+        )
     }
 
     /// What one drive offers the engine: for each circle that holds any, its
@@ -978,8 +990,21 @@ impl MeshKeys {
     /// Keeps `candidate` to be passed on at `group`'s own next send: the
     /// newest of its sender alone, and none past the circle's share or every
     /// circle's together — the mesh is lossy by design, and so is this.
+    #[cfg(test)]
     fn wait_to_bridge(&self, group: &GroupId, candidate: Candidate) {
+        Self::keep(&mut self.ring(), group, candidate);
+    }
+
+    /// [`Self::keep`], if `group` stands at `turn` still: the turn its
+    /// packet was opened at ([`HeldUpdate::turn`]).
+    fn wait_to_bridge_at(&self, group: &GroupId, candidate: Candidate, turn: u64) {
         let mut ring = self.ring();
+        if ring.get(group).is_some_and(|circle| circle.turn == turn) {
+            Self::keep(&mut ring, group, candidate);
+        }
+    }
+
+    fn keep(ring: &mut HashMap<GroupId, CircleKeys>, group: &GroupId, candidate: Candidate) {
         let waiting: usize = ring.values().map(|circle| circle.bridge.len()).sum();
         if let Some(circle) = ring.get_mut(group) {
             let stamp = |event: &Event| (event.created_at, event.id);
@@ -990,7 +1015,6 @@ impl MeshKeys {
                 _ => {}
             }
         }
-        drop(ring);
     }
 
     /// What `group` kept to pass on, newest first — or, with `None`, what
@@ -1319,12 +1343,12 @@ impl SessionManager {
             return;
         };
         drive.read.push((held.packet, true));
-        let own = self.identity_pubkey().to_bytes();
+        let (own, turn) = (self.identity_pubkey().to_bytes(), held.turn);
         let candidate = update
             .filter(|_| held.bridgeable && self.keeps_to_pass_on(group))
             .and_then(|update| Candidate::of(held.event, update, &own));
         if let Some(candidate) = candidate {
-            self.mesh_keys.wait_to_bridge(group, candidate);
+            self.mesh_keys.wait_to_bridge_at(group, candidate, turn);
         }
     }
 }
@@ -3078,6 +3102,33 @@ mod tests {
             .sign_with_keys(&Keys::generate())
             .expect("sign");
         assert!(!at(&bare, NOW));
+    }
+
+    /// An update is kept to pass on only at the turn its packet was opened
+    /// at: a circle silenced in between — a branch reselected, an epoch
+    /// moved — may no longer be the one its key was of.
+    #[test]
+    fn an_update_is_kept_only_if_nothing_silenced_its_circle_since_its_packet_opened() {
+        let fx = on();
+        let group = circle(1);
+        fx.moves(&group, 4, 0xa0);
+        let turn = |fx: &Fixture| fx.keys.ring().get(&group).expect("keyed").turn;
+
+        let opened_at = turn(&fx);
+        fx.keys
+            .wait_to_bridge_at(&group, candidate(0xa1, 10), opened_at);
+        assert!(waiting(&fx, &group).len() == 1, "premise: kept at its turn");
+        let _ = fx.keys.take_bridge(Some(&group));
+
+        fx.keys.silence(&group);
+        assert!(turn(&fx) != opened_at, "premise: a silence is a new turn");
+        fx.keys
+            .wait_to_bridge_at(&group, candidate(0xa2, 10), opened_at);
+        assert!(
+            waiting(&fx, &group).is_empty(),
+            "an update was kept to pass on though its circle was silenced since its \
+             packet was opened"
+        );
     }
 
     /// A circle keeps the newest update of each member, at most

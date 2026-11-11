@@ -502,8 +502,10 @@ before the mesh's own FFI lands). It is that member's own sealed event, byte
 for byte; the mesh's ingress admits application messages alone, so no commit
 travels this way. It is sent only behind this device's own location send of
 the same circle, in the same call, and only to the relays that took that
-send; only in a drive whose relay receive completed before it — a device
-that publishes before it fetches passes nothing on; only an update the
+send; only in a drive whose relay receive completed before it, which is
+what the drive's caller states and the core re-checks only as "caught up,
+nothing fetched and unread" — a device that publishes before it fetches
+passes nothing on; only an update the
 engine read for the first time, from packets that all mark it as one a
 member may pass on (never a mesh-only seal); and only while a location this
 device sealed at the same epoch could itself be sent

@@ -169,6 +169,11 @@ struct Bridger<'a> {
     group: &'a GroupId,
     relays: Relays,
     clock: Arc<ManualClock>,
+    /// Whether a test set the clock ([`Self::at`]). Until one does, each
+    /// drive reads the device's own: the events its fellow members seal are
+    /// stamped by that, and a clock left where the test began would fall
+    /// behind them by however long the test has run.
+    pinned: AtomicBool,
     own: Mutex<Vec<EventId>>,
 }
 
@@ -183,16 +188,27 @@ impl<'a> Bridger<'a> {
             group,
             relays: Relays::default(),
             clock: ManualClock::at(0),
+            pinned: AtomicBool::new(false),
             own: Mutex::new(Vec::new()),
         };
-        bridger.at(wall_ms());
+        bridger.clock();
         bridger
     }
 
-    /// Sets the clock of this member's relay drives, milliseconds since the
-    /// Unix epoch.
+    /// Sets the clock of this member's drives, milliseconds since the Unix
+    /// epoch, for the rest of the test.
     fn at(&self, now_ms: u64) {
+        self.pinned.store(true, Ordering::SeqCst);
         self.clock.set(now_ms - ManualClock::ORIGIN);
+    }
+
+    /// The clock a drive reads: where a test set it, or else the device's
+    /// own as it now stands.
+    fn clock(&self) -> &ManualClock {
+        if !self.pinned.load(Ordering::SeqCst) {
+            self.clock.set(wall_ms() - ManualClock::ORIGIN);
+        }
+        &self.clock
     }
 
     /// One mesh drive with `taken`, in the mode in which a relay drive may
@@ -202,7 +218,7 @@ impl<'a> Bridger<'a> {
         let driver = Publishing {
             fanout: &relays,
             publisher: &relays,
-            clock: &*self.clock,
+            clock: self.clock(),
             deadline_ms: None,
             mode: &DriveMode::Full,
         };
@@ -215,7 +231,7 @@ impl<'a> Bridger<'a> {
         Publishing {
             fanout: &self.relays,
             publisher: &self.relays,
-            clock: &*self.clock,
+            clock: self.clock(),
             deadline_ms: None,
             mode: &DriveMode::Full,
         }
@@ -842,12 +858,14 @@ async fn a_flooding_member_gets_its_newest_update_passed_on_once_a_gap() {
     let sender = &others[0];
     mesh_on(sender).await;
     let bridger = Bridger::new(&others[1], &group).await;
-    let start = wall_ms();
+    // Every event is stamped from this one instant, so that how long the
+    // test runs decides nothing.
+    let start = wall_ms() / SECOND_MS * SECOND_MS;
     bridger.at(start);
 
     let mut flood = Vec::new();
-    for _ in 0..3 {
-        flood.push(handed_off(sender, &group).await);
+    for before_secs in [3, 2, 1] {
+        flood.push(stamped(sender, &group, start / SECOND_MS - before_secs, 228).await);
     }
     let newest = (flood.iter())
         .map(|(event, _)| (event.created_at, event.id))
@@ -867,7 +885,7 @@ async fn a_flooding_member_gets_its_newest_update_passed_on_once_a_gap() {
         (SENDER_GAP_MS - 1, false),
         (SENDER_GAP_MS, true),
     ] {
-        let (event, packet) = handed_off(sender, &group).await;
+        let (event, packet) = stamped(sender, &group, start / SECOND_MS, 228).await;
         bridger.at(start + after_ms);
         let passed = ids(&bridger.bridges(vec![packet]).await);
         assert!(
@@ -1045,9 +1063,9 @@ async fn with_mesh_off_the_entry_is_a_locations_own_send_and_nothing_more() {
         group: &group,
         relays: Relays::default(),
         clock: ManualClock::at(0),
+        pinned: AtomicBool::new(false),
         own: Mutex::new(Vec::new()),
     };
-    bridger.at(wall_ms());
 
     let plain = bridger.seals().await;
     let publish = (bridger.driver())

@@ -1582,6 +1582,26 @@ that published before the fetch of its next tick. A relay subscriber of the
 circle's routing id, not only its operator, sees a bridged event arrive tens
 of seconds after its `created_at` (§0.4 item 11a names the operator).
 
+M2f was reviewed (Opus 5.5, 2026-11-11): no blocker or high finding. Fixed
+since: an update is kept to pass on only if nothing silenced its circle
+between the opening of its packet and the engine taking it in, so a branch
+reselected in that hold — same epoch number, another key — keeps nothing;
+the bridge tests read the device clock at each drive unless a test sets
+one, and the flooding test stamps its own events. Open, for the FFI step:
+- a relay that takes this device's own send and withholds its answer on a
+  passed-on event costs a send's wait for each, so in a background burst
+  every circle's own location is sent before anything is passed on;
+- bridge tests that set a clock and still use events stamped by the device
+  hold only while the test runs for less than about ten seconds;
+- not tested: a buffered update (T-BRIDGE-3), a proposal beside the commit
+  of T-BRIDGE-5 (the same ingress gate), "once ever" across a restart (the
+  engine's durable record is relied on), and the health model of T-BRIDGE-8
+  other than by its source gate;
+- a device clock set back after a jump forward keeps one member's updates
+  from being passed on until the clock passes that instant.
+The implementing agent ran no mutation pass on M2f; one was run on the turn
+check alone.
+
 Residuals of M2b, both in the tracker row `T-MESH-EXPORTER`: epochs crossed
 inside one engine call, and epochs reached while mesh was off, have no key.
 Residuals of M2d: an advance the engine is left owing after a mesh ingest
