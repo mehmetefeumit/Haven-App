@@ -212,6 +212,11 @@ const _allowedSites = <String, int>{
   '$_maintenance._armLeaveFollowUp': 1,
   '$_maintenance._armProfileAntiEntropy': 1,
   '$_maintenance._armRelayList': 1,
+  // The own-profile publish retry: armed only while the app is resumed and
+  // reaching the profile plane, never the engine, so it is no new wake.
+  'lib/src/providers/profile_sync_provider.dart#'
+          'OwnProfileSyncController._armFrom':
+      1,
   'lib/src/providers/sharing_health_provider.dart#'
           'SharingHealthNotifier.syncTick':
       1,
@@ -259,7 +264,7 @@ const _allowedSites = <String, int>{
 
 /// The sum of [_allowedSites]: a second pin, so an edit that moves a count
 /// from one site to another is still a visible change of this number.
-const _allowedTotal = 43;
+const _allowedTotal = 44;
 
 /// The sites of [_allowedSites] that reach the MLS or the live-sync engine,
 /// reviewed by hand: the existing wakes. A timer's callback reaches through
