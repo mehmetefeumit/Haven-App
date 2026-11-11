@@ -320,8 +320,10 @@ plaintext   996 B
 - A test re-read at every MDK bump pins the tag layout that formats `0x01`
   and `0x02` mean.
 - A cover packet is 1024 CSPRNG bytes.
-- One size. An event that does not fit is not sent over mesh. Content is
-  computed at 590–640 B, not measured; M0 measures it (G-2).
+- One size. An event that does not fit is not sent over mesh. Measured in a
+  real circle: 546 bytes of content for an ordinary location and 595 for the
+  largest the type can serialise, against the 881 limit; a test fails if it
+  passes 700 (G-2).
 - Packet id = `SHA-256(packet)[..16]`, computed locally.
 - The engine never parses, decompresses or allocates from packet contents.
 - The service UUID is held as 16 raw bytes in Rust and the platform UUID is
@@ -1164,7 +1166,8 @@ platform-gated until its platform's radio lands.
 - **G-1** the L4 design runs reliably on a hosted runner [U]. If it does not,
   the Android radio has no per-PR proof and requirement N1 is unmet for it;
   a self-hosted runner needs an owner decision.
-- **G-2** a sealed location fits 881 B of content [computed, not measured].
+- **G-2** *answered:* a sealed location is 546–595 bytes of content against
+  the 881 limit, pinned by a test (§4.1).
 - **G-3** *answered:* Haven seals with no relay reachable in the foreground
   and in the Android foreground service; not in an iOS background burst (D-8).
 - **G-4** Google Play accepts `connectedDevice` for phone-to-phone; App
@@ -1365,7 +1368,7 @@ and seeded generators; it owns topology, loss, per-link byte rate and delays.
 packet envelope, the Noise NN link, link frames, the store with records and
 lifetimes, the engine and the multi-node simulator. A library with no caller.
 
-- 168 unit and property tests, 38 simulator tests; the crate's other 2,005
+- 181 unit and property tests, 38 simulator tests; the crate's other 2,005
   unit tests still pass; no crate or version added to any lockfile.
 - Reviewed by independent Opus 5.5 passes: the cryptography (no blocker or
   high finding), the engine (3 high, 4 medium, 3 low — all applied), and a
@@ -1387,6 +1390,12 @@ Known and not fixed, both low:
 Parameters still to be fixed from data (G-7): the 150-phone scale was not
 simulated; the largest run is 16 phones with the store scaled to match.
 
-**Next: M2** — mesh keys in `SessionManager`, `mesh::offer` in
-`publish_location`, `mesh_drive`, member bridging, counters, the soak
-scenarios, Rule 17 and the amended documents, behind the compile-time define.
+**M2 is under way**, to the code-level design in
+`docs/BLUETOOTH_MESH_M2_DESIGN.md` (reviewed; its last section overrides its
+body). Built: **M2a**, `mesh/event.rs` — a sealed location event to the
+envelope's contents and back, returned only if it verifies — with the test
+that pins MDK's tag layout and the size gate.
+
+Next: M2b mesh keys (waits on the owner's decision Q-1 in the design), then
+the publish hand-off, `mesh_drive`, the mesh-only seal, member bridging, and
+the FFI with the soak scenarios, Rule 17 and the amended documents.

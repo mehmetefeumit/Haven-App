@@ -6,6 +6,7 @@
 //! seeded or scripted one in tests.
 
 pub mod engine;
+pub mod event;
 pub mod frame;
 pub mod noise;
 pub mod packet;
