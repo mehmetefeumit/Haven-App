@@ -97,8 +97,9 @@ forward-all-opaque, photos excluded) stands and is carried into §8.
    packet's age to within about five minutes**, from the remaining lifetime
    announced with it (§6.4), and so roughly how long it has travelled — not
    from where, whose it is or what it says. A very young packet is more
-   likely the announcing phone's own. This is the price of packets that
-   expire everywhere (D-1).
+   likely the announcing phone's own, and about 1 own packet in 67 shows a
+   value no carried packet shows between honest phones. This is the price of
+   packets that expire everywhere (D-1).
 7b. **A removed member can read fixes sealed before the phone learned of the
    removal**, for as long as the phone cannot reach a relay (§7.7).
 8. **Whether a phone is asleep is observable** from its emission rhythm. (A
@@ -985,7 +986,8 @@ declared in `e2e_lane_budget.manifest`.
   the nonce equals the generator's output, the length is exactly 12+996+16
   and the AAD is the constant; a guard pins `OsRng` in production.
 - **T-PRIV-3** forwarding traces are identical for a member and a non-member,
-  and for own and carried packets, including eviction.
+  and for own and carried packets, including eviction. Under store pressure
+  own packets are one class among the links', evicted by the same rule.
 - **T-PRIV-4** a node's emissions are identical in count and timing with 0, 1
   and 10 sharing circles, with a circle held, and across a clock jump (one
   packet on waking).
@@ -1039,8 +1041,11 @@ declared in `e2e_lane_budget.manifest`.
 - **T-LIFE-5** on a k-hop line the value lost is between k and 2k units
   plus the time actually elapsed.
 - **T-PRIV-7** every value an own packet can first be announced with is also
-  reachable by a carried packet, and the starting value is drawn from the
-  generator.
+  reachable by a carried packet on the wire, and the starting value is drawn
+  from the generator. Between honest phones the top two values an own packet
+  can show (252 and 253 of 255) are above anything a carried one shows: about
+  1 own packet in 67 is recognisable that way by a connected neighbour
+  (§0.4 item 7a).
 
 **Independence**
 - **T-INDEP-1a** (soak) the same profile and seed run with mesh off, then on:
@@ -1353,3 +1358,34 @@ The independent review of these edits found, and the text above fixes:
 
 `tests/mesh_sim.rs` runs N engines on a virtual radio with a logical clock
 and seeded generators; it owns topology, loss, per-link byte rate and delays.
+
+## 16. Implementation status
+
+**M1 is built** (`haven-core/src/mesh/`, `haven-core/tests/mesh_sim*`): the
+packet envelope, the Noise NN link, link frames, the store with records and
+lifetimes, the engine and the multi-node simulator. A library with no caller.
+
+- 167 unit and property tests, 38 simulator tests; the crate's other 2,005
+  unit tests still pass; no crate or version added to any lockfile.
+- Reviewed by independent Opus 5.5 passes: the cryptography (no blocker or
+  high finding), the engine (3 high, 4 medium, 3 low — all applied), and a
+  re-review of those fixes (2 defects the fixes introduced and 1 loosened
+  test — applied).
+- Not run here: the coverage gate, the integration-test suite, and
+  `cargo clippy --all-targets` to a clean exit — it stops on three errors in
+  two existing test files on rustc 1.97.1, none in mesh code.
+
+Known and not fixed, both low:
+
+- A link whose radio never becomes ready keeps its connection until the
+  radio layer drops it, because the close waits behind an unsent `BYE`; the
+  engine has already freed the slot.
+- A peer evicted from a full table of sighted peers returns without its
+  back-off, so a flood of sightings can shorten it.
+
+Parameters still to be fixed from data (G-7): the 150-phone scale was not
+simulated; the largest run is 16 phones with the store scaled to match.
+
+**Next: M2** — mesh keys in `SessionManager`, `mesh::offer` in
+`publish_location`, `mesh_drive`, member bridging, counters, the soak
+scenarios, Rule 17 and the amended documents, behind the compile-time define.

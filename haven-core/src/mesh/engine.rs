@@ -46,7 +46,9 @@
 //! the one way to exceed it is an unsolicited packet, which closes the link.
 //! A request not answered within [`Config::want_timeout_ms`] is given up and
 //! may be made of another link; its packet is still taken for as long again,
-//! and after that it was asked for by nobody.
+//! and after that it was asked for by nobody. Until then it counts against
+//! [`Config::want_window`]: a link that is slow to answer is asked for no
+//! more than it can still deliver in time.
 //!
 //! **Rate limit.** Requests over all links are limited together, and the
 //! limit is shared out by turns, one request per link per turn: a link that
@@ -168,11 +170,13 @@ pub struct Config {
     /// §6.3: the period of the one tick on which new packets are announced
     /// to every link, requests are reviewed and links are planned.
     pub tick_ms: u64,
-    /// §6.3: the most packets asked of one link and not yet received.
+    /// §6.3: the most packets one link may still deliver: asked of it, not
+    /// received, and still taken if they come.
     pub want_window: usize,
     /// §6.3: how long a request waits for its packet before another link
     /// that announced it may be asked. The packet is still taken for as long
-    /// again; after that it was asked for by nobody.
+    /// again, and keeps its place in the window meanwhile; after that it was
+    /// asked for by nobody.
     pub want_timeout_ms: u64,
     /// §6.3: the most announcements remembered per link for packets not yet
     /// held; further ones are ignored.
@@ -193,7 +197,9 @@ pub struct Config {
     pub max_outgoing: usize,
     /// §6.1: the most incoming links. Both together at most 32.
     pub max_incoming: usize,
-    /// §6.1: how often the `HELLO` value is drawn afresh.
+    /// §6.1: the middle of the interval after which the `HELLO` value is
+    /// drawn afresh; each interval is drawn between half of it and one and a
+    /// half.
     pub hello_period_ms: u64,
     /// §6.1: the weakest signal a peer is connected to at.
     pub rssi_floor: i8,
@@ -404,9 +410,8 @@ struct Link {
     cursor: Option<PacketId>,
     scan_ms: u64,
     offers: BTreeMap<PacketId, Offer>,
-    /// Offers in [`Ask::Asked`].
-    asked: usize,
-    /// Offers in [`Ask::Asked`] or [`Ask::Abandoned`].
+    /// Offers in [`Ask::Asked`] or [`Ask::Abandoned`]: the packets the peer
+    /// may still send, which is what the window counts.
     expected: usize,
     /// Packets ever asked of this link: what its credit is spent on.
     charged: u64,
@@ -500,7 +505,7 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         let mut engine = Self {
             accepts: Bucket::full(config.accept_burst, now_ms),
             inbound: Bucket::full(config.inbound_burst, now_ms),
-            hello_ms: now_ms.saturating_add(config.hello_period_ms),
+            hello_ms: now_ms,
             config,
             rng,
             now_ms,
@@ -522,6 +527,7 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
             sent: 0,
             duplicates: 0,
         };
+        engine.hello_ms = now_ms.saturating_add(engine.hello_interval());
         engine.next_emit_ms = now_ms.saturating_add(engine.slot_delay());
         engine
     }
@@ -796,9 +802,7 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         // Before anything a link could be greeted with: the tick stops while
         // the phone is alone, and a value kept through that would show a
         // later peer which phone this was hours ago.
-        if self.now_ms >= self.hello_ms {
-            self.renew_hello();
-        }
+        self.renew_hello();
         if self.now_ms >= self.next_emit_ms {
             self.emit();
         }
@@ -828,18 +832,30 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         (self.config.emit_period_ms - jitter).saturating_add(drawn)
     }
 
-    /// Draws the `HELLO` value afresh and greets every open link again. The
-    /// next draw is a whole number of periods from the last one due, not
-    /// from now: when it happens does not depend on when the engine was
-    /// called, so neither does anything drawn after it (T-PRIV-4).
-    fn renew_hello(&mut self) {
+    /// How long one `HELLO` value lasts: drawn per value, between half the
+    /// period and one and a half. On a fixed beat the time of day at which a
+    /// phone's value changes would be the same for as long as it runs, and
+    /// whoever saw it change at two meetings could tell them to be one phone.
+    fn hello_interval(&mut self) -> u64 {
         let period = self.config.hello_period_ms;
-        let missed = self.now_ms.saturating_sub(self.hello_ms) / period;
-        let ahead = missed.saturating_add(1).saturating_mul(period);
-        self.hello_ms = self.hello_ms.saturating_add(ahead);
-        self.hello = self.rng.gen();
-        for link in self.links.iter_mut().flatten() {
-            link.hello_due = matches!(link.phase, Phase::Open(_));
+        let longest = period.saturating_add(period / 2);
+        self.rng.gen_range(period.div_ceil(2)..=longest)
+    }
+
+    /// Draws the `HELLO` value afresh, once for every interval that has
+    /// ended, and greets every open link again. An interval runs from when
+    /// the last one ended, not from now, and each is drawn even when many
+    /// ended unseen: what the generator has been asked for by any instant
+    /// does not depend on when the engine was called, so neither does
+    /// anything drawn after it (T-PRIV-4).
+    fn renew_hello(&mut self) {
+        while self.now_ms >= self.hello_ms {
+            let interval = self.hello_interval();
+            self.hello_ms = self.hello_ms.saturating_add(interval);
+            self.hello = self.rng.gen();
+            for link in self.links.iter_mut().flatten() {
+                link.hello_due = matches!(link.phase, Phase::Open(_));
+            }
         }
     }
 
@@ -991,7 +1007,6 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
             cursor: None,
             scan_ms: now,
             offers: BTreeMap::new(),
-            asked: 0,
             expected: 0,
             charged: 0,
             wants: VecDeque::new(),
@@ -1228,9 +1243,6 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         else {
             return false;
         };
-        if matches!(offer.state, Ask::Asked { .. }) {
-            link.asked = link.asked.saturating_sub(1);
-        }
         link.expected = link.expected.saturating_sub(1);
 
         if self.store.has_record(&id) {
@@ -1271,13 +1283,12 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         let Some(link) = self.links.get_mut(slot).and_then(Option::as_mut) else {
             return;
         };
-        let (asked, expected) = (&mut link.asked, &mut link.expected);
+        let expected = &mut link.expected;
         link.offers.retain(|_, offer| {
             match offer.state {
                 Ask::Offered => return offer.expires_ms > now,
                 Ask::Asked { since_ms } if now.saturating_sub(since_ms) >= timeout => {
                     offer.state = Ask::Abandoned { since_ms };
-                    *asked = asked.saturating_sub(1);
                 }
                 Ask::Asked { .. } | Ask::Abandoned { .. } => {}
             }
@@ -1342,7 +1353,10 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
             .config
             .credit_initial
             .saturating_add(age_ms.saturating_mul(self.config.credit_per_min) / MINUTE_MS);
-        let room = link.asked < self.config.want_window && link.charged < allowance;
+        // A request given up still has its place: the peer has it queued and
+        // will answer, and requests made in its place would wait behind it
+        // until an answer came too late to be taken.
+        let room = link.expected < self.config.want_window && link.charged < allowance;
         let asked_elsewhere = |id: &PacketId| {
             self.links.iter().enumerate().any(|(other, link)| {
                 let offer = link.as_ref().and_then(|link| link.offers.get(id));
@@ -1372,7 +1386,6 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
         };
         if let Some(offer) = link.offers.get_mut(&id) {
             offer.state = Ask::Asked { since_ms: now };
-            link.asked += 1;
             link.expected += 1;
             link.charged += 1;
             link.wants.push_back(id);
@@ -2096,44 +2109,118 @@ mod tests {
         assert_eq!(rig.engine.stats().links, 1);
     }
 
+    const HELLO_PERIOD: u64 = 15 * MINUTE_MS;
+
+    /// §6.1: a `HELLO` value lasts half a period at least and one and a half
+    /// at most, and a new one is sent on every open link.
     #[test]
-    fn the_hello_value_is_drawn_afresh_every_fifteen_minutes_and_sent_again() {
+    fn the_hello_value_is_drawn_afresh_within_half_a_period_of_fifteen_minutes_and_sent_again() {
         let mut rig = Rig::new(quiet());
         let link = rig.peer(1);
         let first = rig.engine.hello;
         rig.take(link);
-        rig.run(15 * MINUTE_MS - TICK);
-        assert!(rig.take(link).is_empty());
-        rig.run(TICK);
+        rig.run(HELLO_PERIOD / 2 - 1);
+        assert!(rig.take(link).is_empty() && rig.engine.hello == first);
+        rig.run(HELLO_PERIOD + 1);
         let second = rig.engine.hello;
         assert_ne!(first, second);
-        assert!(rig.take(link) == vec![Seen::Hello(second)]);
+        let sent = rig.take(link);
+        assert!(sent.last() == Some(&Seen::Hello(second)));
+        assert!(sent.iter().all(|seen| matches!(seen, Seen::Hello(_))));
+    }
+
+    /// When an engine with one link up sends a new `HELLO`, over ten hours.
+    fn renewals(seed: u64) -> Vec<u64> {
+        let mut rig = Rig {
+            engine: engine(quiet(), seed),
+            ..Rig::new(quiet())
+        };
+        let link = rig.peer(1);
+        rig.take(link);
+        let greeting = |seen: &Seen| matches!(seen, Seen::Hello(_));
+        let mut times = Vec::new();
+        while rig.now < 600 * MINUTE_MS {
+            let wake = rig.engine.next_wake_ms().expect("running");
+            rig.run(wake - rig.now);
+            if rig.take(link).iter().any(greeting) {
+                times.push(wake);
+            }
+        }
+        times
+    }
+
+    /// §6.1, the renewal's phase: on a fixed beat the time of day at which a
+    /// phone's value changes, modulo the period, would be the same for as
+    /// long as it runs, and whoever saw it change at two meetings could tell
+    /// them to be one phone. Each value lasts a time drawn for it: one
+    /// phone's renewals keep no phase, and two phones started in the same
+    /// instant do not renew together.
+    #[test]
+    fn the_hello_value_changes_at_drawn_intervals_that_keep_no_phase() {
+        let (one, other) = (renewals(1), renewals(2));
+        for times in [&one, &other] {
+            assert!(times.len() >= 26, "{} renewals in ten hours", times.len());
+            let starts = std::iter::once(&0).chain(times.iter());
+            let lasted: Vec<u64> = starts
+                .zip(times.iter())
+                .map(|(from, to)| to - from)
+                .collect();
+            assert!(lasted
+                .iter()
+                .all(|ms| (HELLO_PERIOD / 2..=HELLO_PERIOD * 3 / 2).contains(ms)));
+            let lengths: BTreeSet<u64> = lasted.iter().copied().collect();
+            assert!(lengths.len() > lasted.len() / 2, "the intervals repeat");
+            let phases: BTreeSet<u64> = times.iter().map(|at| at % HELLO_PERIOD).collect();
+            assert!(phases.len() > times.len() / 2, "the renewals keep a phase");
+            // No beat: the phases are spread over the period.
+            let ends = phases.first().zip(phases.last());
+            assert!(ends.is_some_and(|(min, max)| max - min > HELLO_PERIOD / 2));
+        }
+        assert!(
+            one.iter().zip(&other).skip(3).all(|(a, b)| a != b),
+            "two phones renew at the same instants"
+        );
     }
 
     /// §6.1: the `HELLO` value is drawn afresh before a link can be greeted
-    /// with one older than its period — also after an hour alone, when no
-    /// tick ran, whether the phone woke for its emission slots meanwhile or
-    /// not at all. The next peer is not shown the value this phone had an
-    /// hour ago, nor the old value and then the new.
+    /// with one older than one and a half periods — also when the phone was
+    /// alone, when no tick ran, whether it woke for its emission slots
+    /// meanwhile or not at all. The next peer is not shown the value this
+    /// phone had an hour or a day ago, nor that value and then a new one:
+    /// every interval that ended unseen is over by the first greeting, and
+    /// the next greeting comes when the one then under way ends.
     #[test]
-    fn a_phone_alone_for_an_hour_greets_its_next_link_with_a_fresh_value() {
-        for woken in [false, true] {
-            let mut rig = Rig::new(Config::default());
-            let old = rig.engine.hello;
-            if woken {
-                rig.run(60 * MINUTE_MS);
-            } else {
-                rig.now = 60 * MINUTE_MS;
+    fn a_phone_alone_for_a_period_and_a_half_greets_its_next_link_with_a_fresh_value() {
+        for alone in [HELLO_PERIOD * 3 / 2, 60 * MINUTE_MS, 24 * 60 * MINUTE_MS] {
+            for woken in [false, true] {
+                let mut rig = Rig::new(Config::default());
+                let old = rig.engine.hello;
+                if woken {
+                    rig.run(alone);
+                } else {
+                    rig.now = alone;
+                }
+                let link = rig.dial(1);
+                let fresh = rig.engine.hello;
+                assert_ne!(fresh, old);
+                assert!(rig.take(link) == vec![Seen::Hello(fresh)]);
+                rig.greet(link, [1; 8]);
+                let greeting = |seen: &Seen| matches!(seen, Seen::Hello(_));
+                let ends = rig.engine.hello_ms;
+                assert!(ends > rig.now && ends <= rig.now + HELLO_PERIOD * 3 / 2);
+                rig.run(ends - 1 - rig.now);
+                assert!(!rig.take(link).iter().any(greeting));
+                rig.run(1);
+                let again = rig.engine.hello;
+                assert!(again != fresh && rig.take(link).contains(&Seen::Hello(again)));
             }
-            let link = rig.dial(1);
-            let fresh = rig.engine.hello;
-            assert_ne!(fresh, old);
-            assert!(rig.take(link) == vec![Seen::Hello(fresh)]);
-            rig.greet(link, [1; 8]);
-            rig.run(MINUTE_MS);
-            let greeted_again = |seen: &Seen| matches!(seen, Seen::Hello(_));
-            assert!(!rig.take(link).iter().any(greeted_again));
         }
+        // Alone for less than half a period, it has the value it started with.
+        let mut rig = Rig::new(Config::default());
+        let old = rig.engine.hello;
+        rig.now = HELLO_PERIOD / 2 - 1;
+        let link = rig.dial(1);
+        assert!(rig.take(link) == vec![Seen::Hello(old)]);
     }
 
     // ---- inventory flood --------------------------------------------------
@@ -2690,6 +2777,55 @@ mod tests {
         assert_eq!(rig.wants(link).len(), 2);
     }
 
+    /// §6.3: a request given up keeps its place in the window for as long as
+    /// its packet is still taken. A peer has been asked for it and will
+    /// answer, however slowly; requests made in its place would queue behind
+    /// it there, and their answers come too late to be taken. So the
+    /// requests a link may still answer never number more than the window,
+    /// and each of them, answered at the last instant, is taken.
+    #[test]
+    fn a_request_given_up_keeps_its_place_in_the_window_while_its_packet_is_still_taken() {
+        const TIMEOUT: u64 = 7000;
+        let config = Config {
+            want_window: 5,
+            want_timeout_ms: TIMEOUT,
+            ..trusting()
+        };
+        let mut rig = Rig::new(config);
+        let link = rig.peer(1);
+        let names: BTreeMap<PacketId, u64> = (1..=40).map(|n| (id(n), n)).collect();
+        let entries: Vec<_> = names.keys().map(|id| (*id, 250)).collect();
+        rig.announce(link, &entries);
+
+        // Every request, with when it was made; answered in its last
+        // millisecond, when the peer is slow, or never.
+        let mut asked: Vec<(u64, PacketId)> = Vec::new();
+        let (mut answered, mut most) = (0, 0);
+        while rig.now < 150_000 {
+            asked.extend(rig.wants(link).into_iter().map(|id| (rig.now, id)));
+            let open = |at: &u64| rig.now - at < 2 * TIMEOUT;
+            let still_taken = asked.iter().filter(|(at, _)| open(at)).count();
+            assert!(still_taken <= 5, "{still_taken} at {}", rig.now);
+            most = most.max(still_taken);
+            let last_instant = |at: &u64| rig.now - at == 2 * TIMEOUT - 1;
+            let due: Vec<PacketId> = (asked.iter())
+                .filter(|(at, id)| last_instant(at) && names[id].is_multiple_of(2))
+                .map(|(_, id)| *id)
+                .collect();
+            for id in due {
+                rig.deliver(link, &packet(names[&id]));
+                answered += 1;
+            }
+            rig.run(1);
+        }
+        assert!(rig.closed.is_empty(), "an answer in time closed the link");
+        assert_eq!((answered, rig.engine.stats().accepted), (20, 20));
+        // The window was full, and turned over: all forty were asked for,
+        // each once.
+        let ids: BTreeSet<PacketId> = asked.iter().map(|(_, id)| *id).collect();
+        assert_eq!((most, asked.len(), ids.len()), (5, 40, 40));
+    }
+
     #[test]
     fn requests_over_all_links_stay_within_the_rate_limit() {
         let mut rig = Rig::new(Config {
@@ -3058,6 +3194,9 @@ mod tests {
             rig.engine.advance(rig.now);
             assert_consistent(&rig.engine);
         }
+        // The requests made on the last tick are given up in their turn.
+        rig.now += 40_000;
+        rig.engine.advance(rig.now);
         rig.pump();
         assert!(rig.wants(link).is_empty());
         assert!(rig.closed.is_empty());
@@ -3363,7 +3502,7 @@ mod tests {
             assert!(engine.store().is_local(&held));
             // Drawn from the top quarter, less up to ten seconds since,
             // rounded down, less one.
-            assert!((188..=254).contains(&engine.store().remaining(&held)));
+            assert!((188..=253).contains(&engine.store().remaining(&held)));
         }
         assert!(engine.take_unread(9).is_empty());
     }
@@ -4123,9 +4262,8 @@ mod tests {
             };
             let asked = count(|state| matches!(state, Ask::Asked { .. }));
             let abandoned = count(|state| matches!(state, Ask::Abandoned { .. }));
-            assert_eq!(link.asked, asked);
             assert_eq!(link.expected, asked + abandoned);
-            assert!(link.asked <= config.want_window);
+            assert!(link.expected <= config.want_window);
             assert!(link.offers.len() <= config.offers_per_link);
             assert!(link.sends.len() <= config.store_packets);
             assert!(link.wants.len() <= config.want_window);
@@ -4378,9 +4516,13 @@ mod tests {
             of(&[5, 3]) == vec![31_234],
             "the link that never greeted is closed at its deadline"
         );
+        // Each interval between half the period and one and a half.
+        let greetings = of(&[1, 1]);
+        let mut lasted = std::iter::once(&0).chain(&greetings).zip(&greetings);
         assert!(
-            of(&[1, 1]) == vec![241_700, 483_400],
-            "the greeting is renewed at its period"
+            !greetings.is_empty()
+                && lasted.all(|(from, to)| (120_850..=362_550).contains(&(to - from))),
+            "the greeting is renewed when its interval ends"
         );
         assert!(
             of(&[100]).len() >= 4,

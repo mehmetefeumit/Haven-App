@@ -42,8 +42,12 @@ pub const LIFETIME_UNITS: u64 = 256;
 pub const MAX_LINKS: u8 = 32;
 
 /// The units an emitted packet starts with are drawn from the top quarter of
-/// the lifetime (§6.4); the draw blurs a packet's age.
-const ORIGIN_UNITS: std::ops::RangeInclusive<u64> = 192..=255;
+/// the lifetime, short of its last unit (§6.4); the draw blurs a packet's
+/// age. The last unit is left out so that the most an own packet is first
+/// announced with, the draw less one, is what a carried packet shows that
+/// a peer announced with 255: 253. A draw of 255 would show 254, and mark
+/// the packet as its announcer's own (T-PRIV-7).
+const ORIGIN_UNITS: std::ops::RangeInclusive<u64> = 192..=254;
 
 /// Where a row came from: the class it is counted in when the store is full.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -204,7 +208,7 @@ impl Store {
     }
 
     /// When a packet emitted now expires: now plus a number of units drawn
-    /// uniformly from the top quarter of the lifetime.
+    /// uniformly from the top quarter of the lifetime, short of its last.
     pub fn origin_expiry<R: RngCore>(&self, rng: &mut R) -> u64 {
         self.now_ms
             .saturating_add(rng.gen_range(ORIGIN_UNITS) * self.unit_ms)
@@ -580,8 +584,9 @@ mod tests {
     const LIFE: u64 = 20 * 60 * 1000;
     const UNIT: u64 = 4687;
 
-    // The draw's bounds are the lifetime's top quarter, to within a unit.
-    const _: () = assert!(192 * UNIT >= LIFE * 3 / 4 - UNIT && 255 * UNIT < LIFE);
+    // The draw's bounds are the lifetime's top quarter, to within a unit at
+    // the bottom and short of the last unit at the top.
+    const _: () = assert!(192 * UNIT >= LIFE * 3 / 4 - UNIT && 254 * UNIT < LIFE - UNIT);
 
     fn store(packets: usize, records: usize, unread: usize) -> Store {
         Store::new(Limits {
@@ -1093,12 +1098,13 @@ mod tests {
     }
 
     /// T-PRIV-7: the starting lifetime is the generator's draw from the top
-    /// quarter, every step of it reachable.
+    /// quarter, every step of it reachable but the last: 255 is never drawn,
+    /// so no own packet is first announced with 254.
     #[test]
-    fn an_emitted_packet_starts_in_the_top_quarter_of_the_lifetime() {
+    fn an_emitted_packet_starts_in_the_top_quarter_of_the_lifetime_short_of_its_last_unit() {
         let mut store = roomy();
         store.advance(1000);
-        let drawn = StdRng::seed_from_u64(7).gen_range(192..=255u64);
+        let drawn = StdRng::seed_from_u64(7).gen_range(192..=254u64);
         assert_eq!(
             store.origin_expiry(&mut StdRng::seed_from_u64(7)),
             1000 + drawn * UNIT
@@ -1108,7 +1114,7 @@ mod tests {
         let seen: BTreeSet<u64> = (0..5000)
             .map(|_| (store.origin_expiry(&mut rng) - 1000) / UNIT)
             .collect();
-        assert!(seen.iter().copied().eq(192..=255));
+        assert!(seen.iter().copied().eq(192..=254));
     }
 
     #[derive(Clone, Debug)]
