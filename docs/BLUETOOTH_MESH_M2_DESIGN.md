@@ -1058,3 +1058,14 @@ Extra test demanded for M2d: a member re-wraps a current-epoch commit under a
 past epoch's mesh key, and a commit ahead of its proposal under its own
 epoch's key — no ingest, zero relay sends from `mesh_drive`, and the circle
 still converges through the relay path.
+
+### From the review of M2a (`31bef3d`): no finding above advisory
+
+- A member holding the event's ephemeral key can re-sign one event id with
+  another nonce: different signature bytes, different packet, the same id,
+  and every copy verifies. So "once per event" — the mesh ingest's
+  duplicate check and the one-bridge-per-update bound — is keyed by event id,
+  never by packet id or signature.
+- `rebuild` relies on `packet::open` for the 881-byte content bound; it gets
+  no other caller without that bound.
+
