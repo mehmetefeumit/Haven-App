@@ -43,7 +43,7 @@ that a value printed by a step whose stdout is the public job log was contained
 timezone (the host log stamp is structural); single-branch soundness if a
 future MDK bump wires app witnesses.
 
-Five more, specific to this tier and listed here so nobody has to infer them:
+Six more, specific to this tier and listed here so nobody has to infer them:
 
 * **The KeyPackage plane is DISCOVERY-free.** A world's members are still
   invited from key packages minted in process and handed to `create_circle` as
@@ -121,6 +121,18 @@ Five more, specific to this tier and listed here so nobody has to infer them:
   cannot declare them and no scan can search for them by value. What covers
   them is the structural rules (S1/S4/S8 in `tooling/logscan`), which match on
   SHAPE. That is a real gap, and it is the same one PLAN §8.2 records.
+* **The Bluetooth radio is a double, and its clock is a number.** S27 and S28
+  run the product's own mesh engines, one a device, and the product's own
+  hand-off, mesh drive, mesh-only seal and bridge. What carries frames between
+  two engines is the rig (`rig/mesh.rs`): a scenario says which devices are in
+  range, every frame an engine hands its radio reaches the peer at once and
+  whole, and the engines' clock is stepped, never read. Green therefore says
+  nothing about Bluetooth — advertising, connection limits, loss, throughput,
+  a platform's background rules — nor about the app's own engine home
+  (`with_mesh` in the bridge, its sleep-counting clock and its twelve-hour
+  deadline), which the rig mirrors by rule and does not run. The offline
+  member of S28 is offline by a refusing endpoint and an engine never told of
+  the circle, not by a socket that is gone.
 * **A `{:?}` of a value bound to a local name is outside the source guard.**
   `check_soak_test_only.sh` check 5 bans the Debug format family over any
   `haven_core`/`cgka`/`nostr`/`openmls` value, matched per invocation. A
@@ -186,11 +198,12 @@ the next foreground sweep makes.
 
 ## Which scenarios have lane execution, and where
 
-Twenty-four scenarios exist: **S01, S02, S03, S04, S05, S06, S08, S09, S10, S11,
-S12, S13, S14, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26**.
+Twenty-six scenarios exist: **S01, S02, S03, S04, S05, S06, S08, S09, S10, S11,
+S12, S13, S14, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27,
+S28**.
 
 * `pr` (the profile `ci.yml` calls on every push) runs **S01's single-relay
-  outage arm, S06, S11 and S13**.
+  outage arm, S06, S11, S13, and the Bluetooth mesh's S27 and S28**.
 * `nightly` runs every other nightly arm — **S02, S03, S04, S05, S08, S09, S10,
   S12, S14, S16, S17, S18, S19, S20, S21, S22, S23, S24 and S26** beside the PR set (S05
   without `kill-receive-auto-commit`, S03 without `lost-commit-unnamed`, S17
@@ -381,7 +394,7 @@ canonical endpoint for every circle and would heal it by the other path.
 ### What the crate's own tests run instead, and how much of it
 
 `tests/oracles.rs` runs **every registered arm** as its own test — all
-sixty-six but the two excluded — rather
+seventy but the two excluded — rather
 than one "smallest arm" per scenario. That
 distinction is the whole point: an ordering over arms tie-breaks positionally,
 and the version that ordered by derived deadline left most of the registry with
@@ -392,7 +405,7 @@ bounds each start at the 684-second delivery-silence window, and
 excluded set is exactly those two arms — so a new arm cannot join it silently.
 
 Beside the sweep there is **one deliberate mis-configuration control per
-scenario**, twenty-three in all, each running the real arm against a world arranged
+scenario**, twenty-six in all, each running the real arm against a world arranged
 so the condition it grades cannot arise — a partition armed on the witness
 instead of the victim, an endpoint that is gone so no commit is ever stored to
 be lost, a second endpoint that never returns, a
@@ -403,7 +416,7 @@ above an absent device, a race in which neither sibling can be confirmed, no
 subscription open for a forgery to land on, no plane serving the KeyPackage slot
 a rotation would be decided for (and, S12's second control, a package minted
 unexpired so the engine has nothing to refuse), nothing reaching a relay to be refused by one,
-a store with no backlog for a catch-up sweep to drain, a seed the relay serves whole so no commit is buried under it, a closed endpoint with nothing to duplicate, and relays that all answer so nothing holds a circle or is owed — each requiring the verdict to be
+a store with no backlog for a catch-up sweep to drain, a seed the relay serves whole so no commit is buried under it, a closed endpoint with nothing to duplicate, relays that all answer so nothing holds a circle or is owed, and mesh devices out of radio range of each other so nothing is read from the mesh — each requiring the verdict to be
 **rc 3**, the world proving nothing, rather than the rc 0 every oracle would
 otherwise hand it.
 
@@ -559,6 +572,93 @@ relays (three to include an answering one, which the crate's own sweep and
 pool's reconnect ladder and the lookback, which the nightly's slack does not
 hold.
 
+### S27: one script, the mesh off and then on (T-INDEP-1a)
+
+S27's `mesh-off-then-on` grades the Bluetooth mesh's independence promise
+(`docs/BLUETOOTH_MESH_PLAN.md` §9.3): turning the mesh on changes nothing a
+relay sees of a device. One script runs twice in one world — the mesh off,
+then on with every device in radio range of every other — and the two passes
+are compared:
+
+* per device, the multiset of the `EVENT` frames it sent a relay, each as
+  (plane, kind, tag names, `expiration − created_at`, what the relay answered
+  that device's endpoint), read off the planes' own record;
+* the answer of every seal and every send, in order;
+* a mesh drive (`Publishing::mesh_drive`) asks its transport to send nothing
+  and leaves every circle's cursor and backfill floor where they were;
+* a device reads from the mesh only an update whose send-time check passed.
+
+Any difference is `relay-path-moved`, at rc 1. O7 grades every frame of both
+passes as it does for every arm. Two things differ by design and are counted
+apart: the seal made for the mesh alone (`Publishing::seal_for_mesh`: nothing
+is sealed with the mesh off, no relay is handed it with it on), and the one
+update a device passes on to the relay — any other frame carrying an event
+its sender did not seal is a finding.
+
+The script: every device seals and sends, each send read by every peer's live
+plane before the mesh carries anything, so the mesh's copy is a duplicate and
+nothing is passed on; one device's own endpoint then refuses its events
+(`refuse-oversize`, no socket closed), it seals and sends, its peers read the
+update from the mesh alone and the next device to send passes it on; a device
+seals for the mesh alone; a device sends a location a whole life after
+sealing it — expired, not sent, and never handed to the mesh; one more send
+passes nothing on.
+
+Its five canaries are the mesh's own doing: frames crossed links, an update
+was read from the mesh before any relay had it, that update was passed on, a
+location was sealed for the mesh alone, and the refusing endpoint refused in
+both passes. Its control puts no device in range of another: rc 3.
+
+**What it is not.** Not two runs of a profile: an arm has one world, so the
+passes share its circles, relays and sessions, the mesh-off pass first. The
+comparison is by shape and never by value, so a relay-visible change that
+keeps every frame's shape and answer — a different `created_at`, say — is not
+seen here; `haven-core`'s T-INDEP-1b and the wire lanes hold those.
+
+### S28: member bridging end to end (T-BRIDGE-9)
+
+S28 grades the bridge (plan §5.5) over real relays, in a circle built outside
+the world's table. Three members: one offline and on mesh — its own endpoint
+refuses its events and its engine is never told of the circle, so no relay
+takes anything from it or tells it anything; one online and in its radio
+range; one far away, with a relay and no mesh.
+
+* `bridged-to-the-far-member`. First the online member sends in a drive whose
+  caller says its relay receive had NOT completed (`received = false`): the
+  relay takes its own send, and nothing of the offline member's reaches the
+  relay then or later. Then, for the offline member's next update, a drive
+  whose receive completed: the update is passed on once a relay, byte for
+  byte, and the far member's live plane delivers it. An update at a relay
+  past the first gate, passed on twice or altered is `bridged-past-its-gate`;
+  one passed on and never delivered is `probe-not-delivered`.
+* `removed-member-finds-nothing`. The online member removes the far one. The
+  offline member never hears of it and seals its next update at the epoch
+  the removed member can still read; the online member reads it from the
+  mesh and sends with its receive completed. Nothing of the offline member's
+  reaches the relay: not its store, not the online member's transport, and
+  not the removed member's own view — every kind 445 the relay serves it for
+  the circle's routing id, which does show the online member's own
+  post-removal send (`bridged-past-its-gate` otherwise).
+
+Each arm's five canaries are the premises of what it grades: mesh on, the
+bridger caught up and frames across the link; the offline member's own sends
+refused; the update read from the mesh by the bridger; the bridger's own send
+taken by a relay; and, for the removal, that it stands on the bridger while
+the offline member's epoch has not moved, and that the removed member's view
+reaches the relay. The control puts the two mesh members out of range: rc 3.
+
+**What it does not soak.** With three devices the bridger is also the
+remover, so it knows of the removal from its own commit; a bridger that has
+not yet fetched a removal another member made is the first arm's unreceived
+drive, and `haven-core`'s T-BRIDGE-10. The bridge's 218-second window, its
+72-second spacing per member and its per-drive bounds are wall-clock terms
+the arms never reach (`mesh_bridge_e2e` holds them).
+
+Both scenarios seed every mesh engine from the run's seed, and neither's
+relay frames depend on it: `tests/oracles.rs` runs each arm twice under one
+seed and once under another and requires the same verdict and the same
+digest of every `EVENT` frame sent.
+
 ### S05's receive-plane kill: swept since MDK v0.10.4 (C9)
 
 S05's `kill-receive-auto-commit` subscribes ONE device's live engine to an
@@ -709,11 +809,12 @@ and `relay_health()` reports every expected REQ live. It is swept, and it runs
 in the NIGHTLY as the burial arm's control — the same world and every step but
 the cap, so a night that holds it says the live plane serves a commit under
 forgeries at all, which is the premise the burial arm rests on. The priced
-nightly plus its margin is 6 191 s of 6 240 (`tests/budget.rs` is the gate;
+nightly plus its margin is 6 271.25 s of 6 300 (`tests/budget.rs` is the gate;
 the budget was raised from 4 800 when S16 `processed-ids-growth` joined, from
 4 860 when R4 returned the burial to the nightly beside the recorded arm and
-S20's two pile-ups, and from 5 100 when S26 joined, with the deadline, the step
-cap and the job cap that move with it: 114 m, 118, 156; W9p's re-pricing onto
+S20's two pile-ups, from 5 100 when S26 joined, and from 6 240 when S27 and
+S28 joined, with the deadline, the step cap and the job cap that move with
+it: 115 m, 118, 156; W9p's re-pricing onto
 the driver's own waits lowered the run and left the budget, which moves only
 when the run outgrows it).
 Measured 2026-10-26 in `cargo test`, ten runs each, all green: the burial
@@ -1256,14 +1357,16 @@ Three numbers that are easy to conflate, and are not the same thing:
 
 | Number | What it is |
 |---|---|
-| **1320 s** (`pr`) | the RUN budget: the work the profile TOML declares — the ARMS *and* the background nemesis phase the driver walks before them. `tests/budget.rs` proves Σ(derived deadline of every declared arm) + Σ(one graded round per scheduled probe, plus the teardown round) + margin fits it |
-| **23m** | the inner DEADLINE, the budget plus twice the margin so a hung run is killed with time left to finalise. `run-with-deadline.sh` prints which bound fired and its number, where a bare `timeout` would leave an anonymous 124 |
-| **25 / 65 min** | the drive step's cap and the job's |
+| **1440 s** (`pr`) | the RUN budget: the work the profile TOML declares — the ARMS *and* the background nemesis phase the driver walks before them. `tests/budget.rs` proves Σ(derived deadline of every declared arm) + Σ(one graded round per scheduled probe, plus the teardown round) + margin fits it |
+| **25m** | the inner DEADLINE, the budget plus twice the margin so a hung run is killed with time left to finalise. `run-with-deadline.sh` prints which bound fired and its number, where a bare `timeout` would leave an anonymous 124 |
+| **27 / 65 min** | the drive step's cap and the job's |
 
 **Why the ceiling sits so far above the measured run (D4).** A healthy `pr` run
-measures about **twenty seconds**; the budget above is **1 320**. The two are
+measures **about a hundred seconds** (104 to 119 s over four runs, 2026-11-11:
+seven worlds built and torn down, the three mesh arms themselves 0 s, 4 s and
+5 s); the budget above is **1 440**. The two are
 not in tension, because a derived bound is only ever PAID when something fails
-to happen. The arms cost ~261 s of bound and the background schedule ~1 016 s —
+to happen. The arms cost ~341 s of bound and the background schedule ~1 016 s —
 five graded probe rounds at the pool's own 123-second reconnect ladder plus the
 teardown sweep — and every one of those seconds is a ceiling on a wait that
 normally returns in milliseconds. Pricing the phase at anything less would be
@@ -1271,13 +1374,13 @@ asserting a bound the product does not have, which is the one thing this table
 may not do.
 
 The cost of the wider ceiling is therefore not lane time. It is **how long a
-HUNG run blocks a pull request before it is reaped**: 23 minutes instead of 6.
-Nothing else changes — the p95 stays at build + ~20 s, and what names WHAT went
+HUNG run blocks a pull request before it is reaped**: 25 minutes instead of 6.
+Nothing else changes — the p95 stays at build plus the run, and what names WHAT went
 wrong is still the rig's rc taxonomy, never the deadline.
 
 **Recorded, for the lane's owner:** the `pr` job cap sits at **65**, above the
-sum of its step caps (10 scanner + 25 rig build + 25 drive = 60), so the
-drive's own 23-minute deadline is what reaps a hung run rather than the job's
+sum of its step caps (10 scanner + 25 rig build + 27 drive = 62), so the
+drive's own 25-minute deadline is what reaps a hung run rather than the job's
 anonymous timeout — which is the outcome the ordering rules exist to prevent.
 The other two jobs are the same shape (156 against 153, 355 against 340). What
 is still missing is C6's other term: job cap ≥ Σ step caps **+ declared
@@ -1295,9 +1398,9 @@ can finalise — reads as an anonymous timeout.
 `timeout` around the rig itself. `check_e2e_lane_budget.sh` prices a lane as
 (the sum of its bounded waits + a flat 180 s unbounded-work allowance it
 declares once for every lane) and refuses a deadline below that, so an inner
-bound large enough to let a healthy run finish — the 1320 s budget — cannot sit
-under the 1380 s deadline: with the allowance it prices the lane at 1500 s and
-would force the deadline to about 25 m for no diagnostic gain, since the rig's
+bound large enough to let a healthy run finish — the 1440 s budget — cannot sit
+under the 1500 s deadline: with the allowance it prices the lane at 1620 s and
+would force the deadline to about 27 m for no diagnostic gain, since the rig's
 own rc taxonomy is what names WHAT went wrong and a deadline only ever names
 THAT it hung. The
 `cargo run` is unbounded work that is not a wait, so the budget guard prices it

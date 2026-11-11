@@ -862,7 +862,7 @@ async fn deliver(
                     if !write(to_client, frame.bytes()).await {
                         return false;
                     }
-                    ledger.note_ok(event_id, status, &message);
+                    ledger.note_ok(endpoint.device, event_id, status, &message);
                     return true;
                 }
                 RelayMessage::Event {
@@ -980,7 +980,7 @@ async fn write_forged(json: &str, to_client: &mut OwnedWriteHalf, endpoint: Endp
             event_id,
             status,
             message,
-        }) => ledger.note_ok(event_id, status, &message),
+        }) => ledger.note_ok(endpoint.device, event_id, status, &message),
         // An injected `EVENT` is recorded as a delivery like any other: it
         // really went out, and the ledger is the record of what the client was
         // sent, not of who composed it.

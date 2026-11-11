@@ -25,11 +25,11 @@
 #
 #   run budget   the work the profile TOML declares — the arms AND the
 #                background nemesis phase the driver walks before them
-#                (pr: 1320 s). The rig owns it; `tests/budget.rs` proves the
+#                (pr: 1440 s). The rig owns it; `tests/budget.rs` proves the
 #                priced run fits. It is a ceiling of worst-case product
-#                constants, not an expectation: a healthy pr run measures about
-#                twenty seconds.
-#   deadline     run-with-deadline.sh 23m / 114m / 300m — above the run budget
+#                constants, not an expectation: a healthy pr run measures
+#                about a hundred seconds.
+#   deadline     run-with-deadline.sh 25m / 115m / 300m — above the run budget
 #                so a hung run is killed with time left to finalise, and
 #                ATTRIBUTABLE where a bare 124 would not be.
 #   step cap     above the deadline + the 1 min SIGTERM→SIGKILL grace.
@@ -86,17 +86,18 @@ on:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # pr — the per-commit profile: S01 (single-relay outage arm), S06, S11, S13.
+  # pr — the per-commit profile: S01 (single-relay outage arm), S06, S11, S13,
+  # and the Bluetooth mesh's S27 and S28.
   # ---------------------------------------------------------------------------
   e2e_soak_core_pr:
     name: e2e_soak_core_pr
     if: ${{ inputs.profile == 'pr' }}
     runs-on: ubuntu-latest
-    # Inner deadline 23m (the profile's own `deadline_secs`, which
-    # `check_soak_lane_reachable.sh` L6 ties to this literal), drive step cap 25
-    # (budget 23 + 1 kill grace + 0 boot = 24, and C2 fails on budget >= cap),
-    # job cap 65 — above the SUM of the step caps (10 scanner + 25 rig + 25
-    # drive = 60) so the drive's own deadline, not the job's, is what reaps a
+    # Inner deadline 25m (the profile's own `deadline_secs`, which
+    # `check_soak_lane_reachable.sh` L6 ties to this literal), drive step cap 27
+    # (budget 25 + 1 kill grace + 0 boot = 26, and C2 fails on budget >= cap),
+    # job cap 65 — above the SUM of the step caps (10 scanner + 25 rig + 27
+    # drive = 62) so the drive's own deadline, not the job's, is what reaps a
     # hung run: a job-level reap cancels the scan-and-contain steps below. The
     # cold build is what makes the sum this large: haven-core pulls
     # libsqlite3-sys with bundled-sqlcipher-vendored-openssl, so a cache miss
@@ -153,8 +154,8 @@ jobs:
 
       - name: Run the soak (pr profile)
         id: soak
-        timeout-minutes: 25
-        run: bash tooling/e2e/ci/run-with-deadline.sh 23m "soak-core pr" -- bash tooling/e2e/ci/run-soak-core.sh pr
+        timeout-minutes: 27
+        run: bash tooling/e2e/ci/run-with-deadline.sh 25m "soak-core pr" -- bash tooling/e2e/ci/run-soak-core.sh pr
 
       # Scan-before-upload, as its OWN step and on every outcome short of a
       # cancellation, exactly as every other lane carries one. The drive above
@@ -205,15 +206,16 @@ jobs:
   # nightly — pr plus the all-relay and rolling S01 arms, S02, S03's nightly
   # arm, S04, S05's four swept arms, S08's three arms (`buried-past-the-cap`
   # among them since its C8 fix), S09, S10, S12, S14, S16, S17's two ClosedKind
-  # arms, S18, S19, S20, S21, S22, S23, S24 and S26. No arm is expected red.
+  # arms, S18, S19, S20, S21, S22, S23, S24, S26, S27 and S28. No arm is
+  # expected red.
   # Dispatched by soak-nightly.yml, once per matrix slot.
   # ---------------------------------------------------------------------------
   e2e_soak_core_nightly:
     name: e2e_soak_core_nightly
     if: ${{ inputs.profile == 'nightly' }}
     runs-on: ubuntu-latest
-    # Deadline 114m (the profile's `deadline_secs`, L6-tied), drive step cap 118
-    # (budget 114 + 1 kill grace + 0 boot = 115, and C2 fails on budget >= cap);
+    # Deadline 115m (the profile's `deadline_secs`, L6-tied), drive step cap 118
+    # (budget 115 + 1 kill grace + 0 boot = 116, and C2 fails on budget >= cap);
     # job cap 156 is above the step-cap sum (10 + 25 + 118 = 153) so the drive
     # reaps before the job. The four move together: a raise of the profile's
     # budget is a raise of all of them.
@@ -255,7 +257,7 @@ jobs:
       - name: Run the soak (nightly profile)
         id: soak
         timeout-minutes: 118
-        run: bash tooling/e2e/ci/run-with-deadline.sh 114m "soak-core nightly" -- bash tooling/e2e/ci/run-soak-core.sh nightly
+        run: bash tooling/e2e/ci/run-with-deadline.sh 115m "soak-core nightly" -- bash tooling/e2e/ci/run-soak-core.sh nightly
 
       # The pr job's comment says why this step exists and why it is gated on
       # the checkout rather than on the drive.

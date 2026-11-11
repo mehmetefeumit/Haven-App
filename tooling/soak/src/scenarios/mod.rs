@@ -55,18 +55,23 @@ pub mod s23_chained_backlog;
 pub mod s24_routing_collision;
 pub mod s25_silent_relays;
 pub mod s26_identity_planes;
+pub mod s27_mesh_independence;
+pub mod s28_member_bridging;
 
 use std::fmt;
 use std::time::Duration;
 
 use haven_core::circle::MemberKeyPackage;
-
+use haven_core::nostr::mls::types::GroupId;
+use haven_core::relay::fanout::{FanoutClock, LocationSeal, SendHeld};
+use haven_core::relay::live_sync::LiveSyncEvent;
 use nostr::Event;
+use tokio::sync::broadcast::Receiver;
 
 use crate::oracle::bounds;
 use crate::oracle::undecryptable;
 use crate::oracle::vacuity::{grade, ExpectationFloor, Observed};
-use crate::oracle::{Invariant, Reach, Recovery, Round, Verdict};
+use crate::oracle::{Invariant, ProbeToken, Reach, Recovery, Round, Verdict};
 use crate::profiles::WorldShape;
 use crate::rc::Rc;
 use crate::relay::SimRelay;
@@ -391,11 +396,17 @@ pub enum Scenario {
     /// and read back by every peer, every key package looked up where it was
     /// published: the identity planes, graded by O7.
     IdentityPlanes,
+    /// **S27** — one script with the Bluetooth mesh off, then on: every
+    /// device's relay path is the same.
+    MeshIndependence,
+    /// **S28** — an offline member's update reaches a far member through an
+    /// online member's relay, and never past the bridge's gates.
+    MemberBridging,
 }
 
 impl Scenario {
     /// Every scenario this crate runs.
-    pub const REGISTRY: [Self; 24] = [
+    pub const REGISTRY: [Self; 26] = [
         Self::RelayOutage,
         Self::ReceiverPartition,
         Self::LostCommit,
@@ -420,6 +431,8 @@ impl Scenario {
         Self::RoutingCollision,
         Self::SilentRelays,
         Self::IdentityPlanes,
+        Self::MeshIndependence,
+        Self::MemberBridging,
     ];
 
     /// The id the profiles, the timeline and `--list-scenarios` spell.
@@ -450,6 +463,8 @@ impl Scenario {
             Self::RoutingCollision => "S24",
             Self::SilentRelays => "S25",
             Self::IdentityPlanes => "S26",
+            Self::MeshIndependence => "S27",
+            Self::MemberBridging => "S28",
         }
     }
 
@@ -481,6 +496,8 @@ impl Scenario {
             Self::RoutingCollision => "ROUTING COLLISION ON DISTINCT RELAYS",
             Self::SilentRelays => "DEAD AND EOSE-SILENT RELAYS",
             Self::IdentityPlanes => "IDENTITY PLANES UNDER FAULTS",
+            Self::MeshIndependence => "MESH OFF THEN ON, ONE RELAY PATH",
+            Self::MemberBridging => "MEMBER BRIDGING END TO END",
         }
     }
 
@@ -512,6 +529,8 @@ impl Scenario {
             Self::RoutingCollision => &s24_routing_collision::ARMS,
             Self::SilentRelays => &s25_silent_relays::ARMS,
             Self::IdentityPlanes => &s26_identity_planes::ARMS,
+            Self::MeshIndependence => &s27_mesh_independence::ARMS,
+            Self::MemberBridging => &s28_member_bridging::ARMS,
         }
     }
 
@@ -596,6 +615,10 @@ impl Scenario {
             }
             Self::SilentRelays => Box::pin(s25_silent_relays::run(world, arm, tick)).await?,
             Self::IdentityPlanes => Box::pin(s26_identity_planes::run(world, arm, tick)).await?,
+            Self::MeshIndependence => {
+                Box::pin(s27_mesh_independence::run(world, arm, tick)).await?
+            }
+            Self::MemberBridging => Box::pin(s28_member_bridging::run(world, arm, tick)).await?,
         };
         // Every arm, once, over everything its world sent: O7's subject is
         // the whole wire, so no arm grades it and none is exempt from it.
@@ -1216,6 +1239,83 @@ pub(crate) async fn drive_until_settled<T: TimelineSink, L: LogDrain>(
     Ok(pending_record(world.device(device)?, circle)
         .await?
         .is_none())
+}
+
+/// A location carrying `probe` that `device`'s driver seals for `group` on
+/// `clock`: the event, or what held the send.
+///
+/// # Errors
+///
+/// [`RigError::Core`] with [`Step::Publish`] when the seal failed outright.
+pub(crate) async fn seal_probe<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    device: DeviceTag,
+    group: &GroupId,
+    probe: ProbeToken,
+    clock: &dyn FanoutClock,
+) -> Result<Result<Event, SendHeld>, RigError> {
+    let sealed = world
+        .seal_fix(device, group, &probe.as_location(), clock)
+        .await?;
+    Ok(match sealed.seal {
+        LocationSeal::Sealed { event, .. } => Ok(*event),
+        LocationSeal::Deferred(held) => Err(held),
+    })
+}
+
+/// A listener on each of `peers`' engine buses, opened before a send so that
+/// nothing the send delivers is missed.
+///
+/// # Errors
+///
+/// [`RigError::SessionNotLive`] if a peer runs no engine.
+pub(crate) fn listen<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    peers: &[DeviceTag],
+) -> Result<Vec<(DeviceTag, Receiver<LiveSyncEvent>)>, RigError> {
+    peers
+        .iter()
+        .map(|&peer| Ok((peer, world.device(peer)?.engine()?.bus().subscribe())))
+        .collect()
+}
+
+/// Waits, at most `bound`, for every listener's engine to deliver `probe`
+/// from `sender_hex` — a relay's copy, taken in by its live plane. The first
+/// peer whose engine never did; one whose listener fell behind counts as
+/// that.
+pub(crate) async fn undelivered_to(
+    listeners: &mut [(DeviceTag, Receiver<LiveSyncEvent>)],
+    sender_hex: &str,
+    probe: ProbeToken,
+    bound: Duration,
+) -> Option<DeviceTag> {
+    let started = tokio::time::Instant::now();
+    let mut ticker = tokio::time::interval(CONDITION_POLL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut waiting: Vec<usize> = (0..listeners.len()).collect();
+    loop {
+        waiting.retain(|&index| {
+            let (_, bus) = &mut listeners[index];
+            loop {
+                match bus.try_recv() {
+                    Ok(LiveSyncEvent::Location {
+                        ref sender_pubkey,
+                        ref content,
+                        ..
+                    }) if sender_pubkey == sender_hex && probe.carried_by(content) => {
+                        return false;
+                    }
+                    Ok(_) => {}
+                    Err(_) => return true,
+                }
+            }
+        });
+        let &first = waiting.first()?;
+        if started.elapsed() >= bound {
+            return Some(listeners[first].0);
+        }
+        ticker.tick().await;
+    }
 }
 
 /// How many location deliveries `device` has folded for `circle`.

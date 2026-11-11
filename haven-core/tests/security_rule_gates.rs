@@ -1530,7 +1530,7 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
     // made of nothing but what `relay::fanout` exports, so a file that names
     // none of it cannot drive, under any name. Only the live plane's
     // processor names `Publishing`; nothing names a drive entry.
-    let names: [(&str, &[&str]); 20] = [
+    let names: [(&str, &[&str]); 23] = [
         // `Still` is what a pass decided under, read again where the act is
         // made. The other names are its test seams'
         // (`#[cfg(any(test, feature = "test-utils"))]`), which drive as the
@@ -1704,6 +1704,11 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
             ],
         ),
         ("tooling/soak/src/rig/device.rs", &["RelayMappedFanout"]),
+        // The mesh plane turns a device's mesh on by the device's clock.
+        (
+            "tooling/soak/src/rig/mesh.rs",
+            &["FanoutClock as _", "WallClock"],
+        ),
         (
             "tooling/soak/src/rig/world.rs",
             &[
@@ -1720,7 +1725,12 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
         // row go before stepping the clock; the seam drives nothing.
         (
             "tooling/soak/src/scenarios/mod.rs",
-            &["fanout_row_let_go_for_test"],
+            &[
+                "FanoutClock",
+                "LocationSeal",
+                "SendHeld",
+                "fanout_row_let_go_for_test",
+            ],
         ),
         (
             "tooling/soak/src/scenarios/s05_publish_confirm.rs",
@@ -1766,6 +1776,22 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
                 "WallClock",
                 "drive_one",
             ],
+        ),
+        // The two mesh scenarios read the driver's answers; their sends and
+        // their mesh drives are the world's entries over `DeviceDriver`.
+        (
+            "tooling/soak/src/scenarios/s27_mesh_independence.rs",
+            &[
+                "FanoutClock",
+                "LocationPublish",
+                "LocationSeal",
+                "SendHeld",
+                "WallClock",
+            ],
+        ),
+        (
+            "tooling/soak/src/scenarios/s28_member_bridging.rs",
+            &["LocationPublish", "WallClock"],
         ),
     ];
     let files = scanned_sources();

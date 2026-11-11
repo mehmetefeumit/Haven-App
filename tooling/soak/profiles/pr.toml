@@ -1,19 +1,24 @@
 # The per-PR soak profile.
 #
-# Four scenarios over one location relay, and one account relay that carries
+# Six scenarios over one location relay, and one account relay that carries
 # every device's inbox and key package apart from it (O7 grades the split on
 # every PR); no profile relay. The set is pinned here rather than left to a run:
 # S01's single-relay outage alone carries the pool's own 123-second reconnect
 # ladder, and any S17 arm starts at the 684-second delivery-silence window.
+# S27 and S28 are the Bluetooth mesh's two soak promises (T-INDEP-1a,
+# T-BRIDGE-9): they run on every PR because the relay path they hold still is
+# the one every PR can move.
 #
 # `run_budget_secs` is the work — the ARMS and the background nemesis phase the
 # driver walks before them, both priced at the product's own worst-case
 # constants by `tests/budget.rs`. It is a CEILING, not an expectation: a healthy
-# run measures about twenty seconds, because a bound is only paid when
-# something fails to happen. The four scenarios cost about 261 s of bound and
-# the background schedule about 1 016 s (one graded round per scheduled probe
-# at the pool's reconnect ladder, plus the teardown sweep), so 1 320 s is the
-# smallest whole minute that holds the priced run plus the margin.
+# run measures about a hundred seconds, because a bound is only paid when
+# something fails to happen. The six scenarios cost 341.25 s of bound — the
+# two mesh scenarios' three arms 26.75 s each, undisturbed and one probe
+# round — and the background schedule about 1 016 s (one graded round per
+# scheduled probe at the pool's reconnect ladder, plus the teardown sweep), so
+# 1 440 s is the smallest whole minute that holds the priced run, 1 357 s, plus
+# the margin.
 #
 # `deadline_secs` is the timeout the lane arms above it — the budget plus twice
 # the margin, as every profile here does — so a hung run is killed with time
@@ -21,8 +26,8 @@
 # wider ceiling costs is how long a HUNG run blocks a pull request before it is
 # reaped; it costs a healthy one nothing.
 name = "pr"
-run_budget_secs = 1320
-deadline_secs = 1380
+run_budget_secs = 1440
+deadline_secs = 1500
 margin_secs = 30
 duration_secs = 120
 tick_ms = 250
@@ -49,3 +54,11 @@ arms = ["quiet-circle-resume"]
 [[scenarios]]
 id = "S13"
 arms = ["hydration-quarantine"]
+
+[[scenarios]]
+id = "S27"
+arms = ["mesh-off-then-on"]
+
+[[scenarios]]
+id = "S28"
+arms = ["bridged-to-the-far-member", "removed-member-finds-nothing"]

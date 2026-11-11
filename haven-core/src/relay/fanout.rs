@@ -6031,7 +6031,24 @@ impl<T: FanoutSend> FanoutSend for RelayMappedFanout<T> {
         targets: &[String],
     ) -> RelayResult<PublishResult> {
         let routed: Vec<String> = targets.iter().map(|target| (self.route)(target)).collect();
-        self.inner.publish_location(event, &routed).await
+        let mut sent = self.inner.publish_location(event, &routed).await?;
+        // Answered under each target's frozen spelling, as a record's answers
+        // are: what reads a result by relay knows the circle's relays, never
+        // the address a rig dialled.
+        let dialled: Vec<_> = (routed.iter())
+            .map(|relay| nostr::RelayUrl::parse(relay).ok())
+            .collect();
+        let relays = (sent.accepted_by.iter_mut())
+            .chain(&mut sent.failed)
+            .chain(sent.rejected_by.iter_mut().map(|(relay, _)| relay));
+        for relay in relays {
+            let answered = nostr::RelayUrl::parse(relay.as_str()).ok();
+            let at = (dialled.iter()).position(|url| answered.is_some() && *url == answered);
+            if let Some(at) = at {
+                relay.clone_from(&targets[at]);
+            }
+        }
+        Ok(sent)
     }
 }
 
@@ -6216,6 +6233,27 @@ mod tests {
 
     fn id_of(message: &TransportMessage) -> EventId {
         EventId::from_slice(message.id.as_slice()).expect("a 32-byte event id")
+    }
+
+    /// A mapped transport answers a location under each target's frozen
+    /// spelling, whatever address it dialled: member bridging reads the
+    /// relays that took a send against the circle's own.
+    #[tokio::test]
+    async fn a_mapped_transport_answers_a_location_under_its_frozen_targets() {
+        let mapped = RelayMappedFanout::new(scripted::ScriptedFanout::default(), |target| {
+            target.replace("frozen", "dialled")
+        });
+        let event =
+            SessionManager::transport_message_to_event(&fanout_message()).expect("an event");
+        let frozen = ["wss://frozen.example.com".to_owned()];
+
+        let sent = (mapped.publish_location(&event, &frozen).await).expect("accepted");
+
+        assert_eq!(sent.accepted_by, frozen);
+        assert_eq!(
+            mapped.inner.location_calls()[0].targets,
+            ["wss://dialled.example.com"],
+        );
     }
 
     fn endpoint(url: &str) -> TransportEndpoint {

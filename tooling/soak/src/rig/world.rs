@@ -14,6 +14,7 @@ use haven_core::circle::MemberKeyPackage;
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::storage::is_session_live;
 use haven_core::nostr::mls::types::{ConvergedRoster, FanoutMls, GroupId};
+use haven_core::nostr::mls::{MeshDrive, MeshPacket};
 use haven_core::relay::fanout::{
     FanoutClock, LeaveStatus, LocationPublish, PollOutcome, ResumeOutcome, SealOutcome, WallClock,
 };
@@ -628,6 +629,8 @@ pub struct SimWorld<R: RelayPlane, T: TimelineSink, L: LogDrain> {
     /// written by something that is not a tick — an arm publishing between
     /// ticks — still says WHEN in the schedule it happened.
     tick: AtomicU64,
+    /// The run's seed, for what an arm draws from it; zero until a run says.
+    seed: u64,
 }
 
 impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
@@ -725,7 +728,20 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
                 u32::try_from(shape.circles).map_err(|_| RigError::ShapeMismatch)?,
             ),
             tick: AtomicU64::new(0),
+            seed: 0,
         })
+    }
+
+    /// Records the seed this world's run was minted from.
+    pub const fn seed_with(&mut self, seed: u64) {
+        self.seed = seed;
+    }
+
+    /// The run's seed: what an arm seeds its own generators from, so a run is
+    /// reproduced from its seed alone.
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.seed
     }
 
     /// Attaches `sink` and declares everything this world already holds.
@@ -1257,6 +1273,76 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
             .publishing()
             .publish_location(sender.manager()?, event)
             .await)
+    }
+
+    /// Seals `location` for `group` on `device` for the Bluetooth mesh alone
+    /// (`Publishing::seal_for_mesh`), on `clock`: sealed under its record, or
+    /// what holds it — nothing, with mesh off.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::Core`] with [`Step::Publish`] when the seal failed outright.
+    pub async fn seal_for_mesh(
+        &self,
+        device: DeviceTag,
+        group: &GroupId,
+        location: &LocationMessage,
+        clock: &dyn FanoutClock,
+    ) -> Result<SealOutcome, RigError> {
+        let sender = self.device(device)?;
+        let driver = DeviceDriver::new(sender, clock)?;
+        driver
+            .publishing()
+            .seal_for_mesh(sender.manager()?, group, location)
+            .await
+            .map_err(|_| RigError::Core(Step::Publish))
+    }
+
+    /// Sends a location `device`'s driver sealed as the app does
+    /// (`Publishing::publish_location_and_bridge`), on `clock`, `received`
+    /// its caller's word that the drive's relay receive completed first.
+    /// Returns the send's answer and every event the driver's transport was
+    /// asked to send: the location, then what the device passed on.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError`] if the device has no session.
+    pub async fn publish_and_bridge(
+        &self,
+        device: DeviceTag,
+        event: &Event,
+        received: bool,
+        clock: &dyn FanoutClock,
+    ) -> Result<(LocationPublish, Vec<Event>), RigError> {
+        let sender = self.device(device)?;
+        let driver = DeviceDriver::new(sender, clock)?;
+        let answer = driver
+            .publishing()
+            .publish_location_and_bridge(sender.manager()?, event, received)
+            .await;
+        Ok((answer, driver.recorded()))
+    }
+
+    /// Hands `device`'s session the Bluetooth mesh packets `taken`
+    /// (`Publishing::mesh_drive`). Returns what the drive did and how many
+    /// events its transport and its publisher were asked to send.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError`] if the device has no session.
+    pub async fn mesh_drive(
+        &self,
+        device: DeviceTag,
+        taken: Vec<MeshPacket>,
+    ) -> Result<(MeshDrive, usize), RigError> {
+        let receiver = self.device(device)?;
+        let driver = DeviceDriver::new(receiver, &WallClock)?;
+        let drive = driver
+            .publishing()
+            .mesh_drive(receiver.manager()?, taken)
+            .await;
+        let sent = driver.recorded().len() + driver.unrecorded().len();
+        Ok((drive, sent))
     }
 
     /// Hands `event` to `device` as the app's poll does: ingested, the engine

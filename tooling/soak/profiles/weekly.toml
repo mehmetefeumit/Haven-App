@@ -130,3 +130,11 @@ arms = ["dead-and-silent-relays"]
 [[scenarios]]
 id = "S26"
 arms = ["identity-planes-under-faults"]
+
+[[scenarios]]
+id = "S27"
+arms = ["mesh-off-then-on"]
+
+[[scenarios]]
+id = "S28"
+arms = ["bridged-to-the-far-member", "removed-member-finds-nothing"]

@@ -60,6 +60,8 @@ use haven_soak::scenarios::s23_chained_backlog::one_commit_control;
 use haven_soak::scenarios::s24_routing_collision::uncollided_control;
 use haven_soak::scenarios::s25_silent_relays::answering_control;
 use haven_soak::scenarios::s26_identity_planes::no_pool_control;
+use haven_soak::scenarios::s27_mesh_independence::{self, sent_digest};
+use haven_soak::scenarios::s28_member_bridging;
 use haven_soak::scenarios::Scenario;
 use haven_soak::timeline::Timeline;
 
@@ -1349,7 +1351,7 @@ const EXPECTED_RED: [(Scenario, &str); 0] = [];
 
 /// Every (scenario, arm) the sweep below runs, written out so that an arm added
 /// to a scenario without a test here fails rather than widening a loop.
-const SWEPT: [(Scenario, &str); 65] = [
+const SWEPT: [(Scenario, &str); 68] = [
     (Scenario::RelayOutage, "single-relay-outage"),
     (Scenario::RelayOutage, "all-relay-outage"),
     (Scenario::RelayOutage, "rolling-outage"),
@@ -1433,6 +1435,9 @@ const SWEPT: [(Scenario, &str); 65] = [
     (Scenario::RoutingCollision, "collided-circles-leave-apart"),
     (Scenario::SilentRelays, "dead-and-silent-relays"),
     (Scenario::IdentityPlanes, "identity-planes-under-faults"),
+    (Scenario::MeshIndependence, "mesh-off-then-on"),
+    (Scenario::MemberBridging, "bridged-to-the-far-member"),
+    (Scenario::MemberBridging, "removed-member-finds-nothing"),
 ];
 
 /// The world one arm is run in: the PR profile's own shape, widened only where
@@ -1948,6 +1953,103 @@ async fn s26_identity_planes_with_no_pool_prove_nothing() {
     floor_is_unusable(&report);
 
     world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s27_mesh_off_then_on_holds() {
+    happy_path(Scenario::MeshIndependence, "mesh-off-then-on").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s27_devices_out_of_radio_range_prove_nothing_about_the_mesh() {
+    // The mis-configuration: mesh on at every device and none in range of
+    // another, so no frame crosses a link and nothing is read from the mesh.
+    let mut world = build_shaped_world(&shape_for("mesh-off-then-on")).await;
+
+    let report = s27_mesh_independence::out_of_range_control(&mut world, pr_tick())
+        .await
+        .expect("the scenario runs");
+    floor_is_unusable(&report);
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s28_bridged_to_the_far_member_holds() {
+    happy_path(Scenario::MemberBridging, "bridged-to-the-far-member").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s28_removed_member_finds_nothing_holds() {
+    happy_path(Scenario::MemberBridging, "removed-member-finds-nothing").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s28_members_out_of_radio_range_prove_nothing_about_bridging() {
+    // The mis-configuration: the offline member is in nobody's range, so the
+    // online one reads nothing from the mesh and has nothing to pass on.
+    let mut world = build_shaped_world(&shape_for("bridged-to-the-far-member")).await;
+
+    let report = s28_member_bridging::out_of_range_control(&mut world, pr_tick())
+        .await
+        .expect("the scenario runs");
+    floor_is_unusable(&report);
+
+    world.teardown().await.expect("teardown");
+}
+
+/// One arm run in a world of its own under `seed`: its verdict, and the
+/// digest of every `EVENT` frame its devices sent a relay.
+async fn seeded(scenario: Scenario, label: &str, seed: u64) -> (Rc, Vec<String>, [u8; 32]) {
+    let mut world = build_shaped_world(&shape_for(label)).await;
+    world.seed_with(seed);
+    let report = scenario
+        .run(&mut world, arm_of(scenario, label), pr_tick())
+        .await
+        .expect("the scenario runs");
+    let graded = std::iter::once(report.floor.to_string())
+        .chain(
+            (report.graded.iter())
+                .map(|(invariant, verdict)| format!("{} {verdict}", invariant.id())),
+        )
+        .collect();
+    let digest = sent_digest(&world);
+    world.teardown().await.expect("teardown");
+    (report.rc(), graded, digest)
+}
+
+/// Every generator of the mesh plane is seeded from the run's seed, so one
+/// seed's two runs answer alike; and nothing a mesh engine draws reaches a
+/// relay, so another seed's run sends the same frames.
+async fn reproduced_by_its_seed(scenario: Scenario, label: &str) {
+    let first = seeded(scenario, label, 0x5eed).await;
+    assert!(
+        first.0 == Rc::Clean,
+        "premise: the arm holds under this seed"
+    );
+    assert!(
+        seeded(scenario, label, 0x5eed).await == first,
+        "the same seed gives the same verdict and the same frames"
+    );
+    assert!(
+        seeded(scenario, label, 0x0dd).await == first,
+        "another seed gives the same verdict and the same frames"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s27_is_reproduced_by_its_seed_and_no_seed_moves_a_relay_frame() {
+    reproduced_by_its_seed(Scenario::MeshIndependence, "mesh-off-then-on").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s28_bridging_is_reproduced_by_its_seed_and_no_seed_moves_a_relay_frame() {
+    reproduced_by_its_seed(Scenario::MemberBridging, "bridged-to-the-far-member").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s28_removal_is_reproduced_by_its_seed_and_no_seed_moves_a_relay_frame() {
+    reproduced_by_its_seed(Scenario::MemberBridging, "removed-member-finds-nothing").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2760,7 +2862,7 @@ fn every_registered_scenario_has_a_mis_configuration_control() {
     // The controls above, by the scenario each one controls. Written out
     // so that a scenario added to the registry without a control fails here
     // rather than inheriting somebody else's.
-    const CONTROLLED: [Scenario; 24] = [
+    const CONTROLLED: [Scenario; 26] = [
         Scenario::RelayOutage,
         Scenario::ReceiverPartition,
         Scenario::LostCommit,
@@ -2785,6 +2887,8 @@ fn every_registered_scenario_has_a_mis_configuration_control() {
         Scenario::RoutingCollision,
         Scenario::SilentRelays,
         Scenario::IdentityPlanes,
+        Scenario::MeshIndependence,
+        Scenario::MemberBridging,
     ];
     assert!(
         CONTROLLED.len() == Scenario::REGISTRY.len(),
