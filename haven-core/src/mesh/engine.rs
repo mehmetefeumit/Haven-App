@@ -47,8 +47,9 @@
 //! A request not answered within [`Config::want_timeout_ms`] is given up and
 //! may be made of another link; its packet is still taken for as long again,
 //! and after that it was asked for by nobody. Until then it counts against
-//! [`Config::want_window`]: a link that is slow to answer is asked for no
-//! more than it can still deliver in time.
+//! [`Config::want_window`], so requests do not pile up behind a slow link; a
+//! link too slow to deliver a window within two timeouts is still closed by
+//! its late answers.
 //!
 //! **Rate limit.** Requests over all links are limited together, and the
 //! limit is shared out by turns, one request per link per turn: a link that
@@ -70,6 +71,11 @@ use super::packet::{cover_packet, Packet, PacketId, PACKET_LEN};
 use super::store::{Limits, Origin, Store, MAX_LINKS};
 
 const MINUTE_MS: u64 = 60_000;
+
+/// How many ended `HELLO` intervals one call draws before it gives up
+/// catching up: far more than any sleep spans (seven weeks at the default
+/// period), few enough that a clock jumping by years returns at once.
+const HELLO_CATCH_UP: u32 = 10_000;
 
 /// One radio link, named by the caller. The engine never reuses or
 /// interprets it.
@@ -847,15 +853,22 @@ impl<R: RngCore + CryptoRng> MeshEngine<R> {
     /// the last one ended, not from now, and each is drawn even when many
     /// ended unseen: what the generator has been asked for by any instant
     /// does not depend on when the engine was called, so neither does
-    /// anything drawn after it (T-PRIV-4).
+    /// anything drawn after it (T-PRIV-4). Past [`HELLO_CATCH_UP`] intervals
+    /// the next one runs from now instead, so the loop always ends.
     fn renew_hello(&mut self) {
+        let mut drawn = 0;
         while self.now_ms >= self.hello_ms {
             let interval = self.hello_interval();
-            self.hello_ms = self.hello_ms.saturating_add(interval);
             self.hello = self.rng.gen();
             for link in self.links.iter_mut().flatten() {
                 link.hello_due = matches!(link.phase, Phase::Open(_));
             }
+            drawn += 1;
+            if drawn == HELLO_CATCH_UP {
+                self.hello_ms = self.now_ms.saturating_add(interval);
+                break;
+            }
+            self.hello_ms = self.hello_ms.saturating_add(interval);
         }
     }
 
@@ -2189,6 +2202,61 @@ mod tests {
     /// phone had an hour or a day ago, nor that value and then a new one:
     /// every interval that ended unseen is over by the first greeting, and
     /// the next greeting comes when the one then under way ends.
+    /// A generator that counts what it is asked for. The traits are named in
+    /// full: proptest's prelude brings in another `RngCore`.
+    struct Counting(StdRng, u64);
+
+    impl rand::RngCore for Counting {
+        fn next_u32(&mut self) -> u32 {
+            self.1 += 1;
+            rand::RngCore::next_u32(&mut self.0)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.1 += 1;
+            rand::RngCore::next_u64(&mut self.0)
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            self.1 += 1;
+            rand::RngCore::fill_bytes(&mut self.0, dest);
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+            self.1 += 1;
+            rand::RngCore::try_fill_bytes(&mut self.0, dest)
+        }
+    }
+
+    impl rand::CryptoRng for Counting {}
+
+    /// The clock is the phone's own, but a wrong unit or a value near the end
+    /// of its range must cost a bounded amount of work, not a loop over every
+    /// interval since the engine began.
+    #[test]
+    fn a_clock_that_jumps_by_centuries_costs_a_bounded_amount_of_work() {
+        for now in [1_000 * 365 * 24 * 60 * MINUTE_MS, u64::MAX - 1, u64::MAX] {
+            let rng = Counting(StdRng::seed_from_u64(7), 0);
+            let mut engine = MeshEngine::new(Config::default(), rng, 0);
+            let old = engine.hello;
+            let before = engine.rng.1;
+
+            engine.advance(now);
+            assert_ne!(engine.hello, old);
+            // An interval and an eight-byte value a step, and one emission:
+            // well under sixteen draws a step. A thousand years of intervals
+            // unbounded would be tens of millions of steps.
+            let bound = 16 * u64::from(HELLO_CATCH_UP);
+            assert!(engine.rng.1 - before < bound);
+            assert!(engine.hello_ms >= now);
+
+            // And it stays bounded on every later call at that instant.
+            let before = engine.rng.1;
+            engine.advance(now);
+            assert!(engine.rng.1 - before < bound);
+        }
+    }
+
     #[test]
     fn a_phone_alone_for_a_period_and_a_half_greets_its_next_link_with_a_fresh_value() {
         for alone in [HELLO_PERIOD * 3 / 2, 60 * MINUTE_MS, 24 * 60 * MINUTE_MS] {

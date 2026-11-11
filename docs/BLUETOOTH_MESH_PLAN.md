@@ -1365,12 +1365,13 @@ and seeded generators; it owns topology, loss, per-link byte rate and delays.
 packet envelope, the Noise NN link, link frames, the store with records and
 lifetimes, the engine and the multi-node simulator. A library with no caller.
 
-- 167 unit and property tests, 38 simulator tests; the crate's other 2,005
+- 168 unit and property tests, 38 simulator tests; the crate's other 2,005
   unit tests still pass; no crate or version added to any lockfile.
 - Reviewed by independent Opus 5.5 passes: the cryptography (no blocker or
   high finding), the engine (3 high, 4 medium, 3 low — all applied), and a
   re-review of those fixes (2 defects the fixes introduced and 1 loosened
-  test — applied).
+  test — applied), and a last check of those (all three fixed; one
+  hardening added: a clock that jumps by years costs bounded work).
 - Not run here: the coverage gate, the integration-test suite, and
   `cargo clippy --all-targets` to a clean exit — it stops on three errors in
   two existing test files on rustc 1.97.1, none in mesh code.
