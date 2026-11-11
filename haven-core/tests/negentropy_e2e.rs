@@ -1318,6 +1318,119 @@ async fn an_expired_id_a_relay_reports_is_asked_once_and_holds_nothing() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// The mesh changes nothing a relay is asked
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A location the Bluetooth mesh brought first is asked of its relay as one
+/// this device never met: the frames a relay receives in a catch-up sweep and
+/// its NIP-77 pass are the same, in kind and in number, and the by-id ask
+/// names the location, whether or not a mesh packet delivered it before. A
+/// relay cannot learn from what it is asked that this device was within
+/// radio reach of a member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_is_asked_the_same_whether_or_not_the_mesh_brought_an_update_first() {
+    use haven_core::mesh::handoff::Op;
+    use haven_core::relay::fanout::scripted::ScriptedFanout;
+    use haven_core::relay::fanout::{DriveMode, LocationPublish, LocationSeal};
+    use helpers::drive::{through, ManualClock, Recorder};
+
+    /// One frame as a relay can tell it from another: its verb, the names
+    /// of its filter's fields, and how many ids the filter asks for.
+    fn shape(frame: &Frame) -> (String, Vec<String>, usize) {
+        let json = frame.json().expect("a JSON frame");
+        let filter = json.get(2).and_then(|filter| filter.as_object());
+        (
+            frame.verb().expect("a verb"),
+            filter.map_or_else(Vec::new, |filter| filter.keys().cloned().collect()),
+            filter
+                .and_then(|filter| filter.get("ids")?.as_array().map(Vec::len))
+                .unwrap_or(0),
+        )
+    }
+
+    let mut wires = Vec::new();
+    for by_mesh_first in [false, true] {
+        let relay = SeededRelay::run().await;
+        let wire = NegWire::in_front_of(&relay.url, NegPolicy::Forward).await;
+        let urls = vec![wire.url.clone()];
+        let pair = pair().await;
+        let circle = pair.circle(&urls).await;
+        let an_hour_on = (now_secs() + 3_600) * 1_000;
+        for device in [&pair.alice, &pair.bob] {
+            assert!(
+                device.session().mesh_on_until(an_hour_on).await,
+                "premise: mesh is on"
+            );
+        }
+
+        // Alice's own send: the relay's copy, and the packet her mesh emits.
+        let (transport, outbox) = (ScriptedFanout::default(), Recorder::acking(true));
+        let clock = ManualClock::at(0);
+        let driver = through(&transport, &outbox, &clock, &DriveMode::Full);
+        let sealed = driver
+            .seal_location(
+                &pair.alice,
+                &circle.mls_group_id,
+                &LocationMessage::new(48.85, 2.35),
+            )
+            .await
+            .expect("alice seals");
+        let LocationSeal::Sealed { event, .. } = sealed.seal else {
+            panic!("premise: the send is sealed");
+        };
+        let handoff = pair.alice.session().mesh_handoff();
+        let _ = handoff.take();
+        assert!(matches!(
+            driver.publish_location(&pair.alice, &event).await,
+            LocationPublish::Sent(Ok(_))
+        ));
+        let [(_, Op::Offer { packet, .. })] = &handoff.take()[..] else {
+            panic!("premise: the send left one packet for the mesh");
+        };
+        // Below a pile the pager cannot page past: the location is
+        // reachable by NIP-77 alone.
+        relay.seed(std::slice::from_ref(&event)).await;
+        let above = event.created_at.as_secs() + 1;
+        relay.seed(&junk(&circle.hex(), 500, above)).await;
+        wait_until_after(above).await;
+
+        if by_mesh_first {
+            let taken = driver.mesh_drive(&pair.bob, vec![packet.clone()]).await;
+            assert!(
+                taken.read == [(packet.id(), true)] && taken.replayed.len() == 1,
+                "premise: the mesh brought the location first"
+            );
+        }
+        assert!(
+            pair.bob.session().engine_processed(&event.id) == by_mesh_first,
+            "premise: the engine holds the location only where the mesh brought it"
+        );
+
+        let _ = run_catchup_all_circles(&pair.bob, &RelayManager::new(), 60).await;
+
+        assert!(
+            pair.bob.session().engine_processed(&event.id),
+            "premise: the sweep's pass brought the relay's copy"
+        );
+        assert_eq!(
+            by_id_asks(&wire),
+            vec![vec![event.id.to_hex()]],
+            "the relay was not asked by id for a location it holds (mesh first: {by_mesh_first})"
+        );
+        let mut sent: Vec<_> = (wire.frames().iter())
+            .filter(|frame| frame.dir == Dir::ToRelay)
+            .map(shape)
+            .collect();
+        sent.sort();
+        wires.push((wire.connections(), sent));
+    }
+    assert!(
+        wires[0] == wires[1],
+        "a relay was asked something else once the mesh had brought the update first"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Log anonymity (Security Rule 15)
 // ═══════════════════════════════════════════════════════════════════════════
 

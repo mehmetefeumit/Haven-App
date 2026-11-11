@@ -7744,6 +7744,9 @@ pub enum LocationPublishFfi {
     /// As [`Self::ClockAhead`], with no direction, or with relays that
     /// disagreed on it.
     ClockUnspecified,
+    /// It was sealed for the Bluetooth mesh alone: handed to the mesh, and
+    /// to no relay. Neither a relay's answer nor a failure.
+    MeshOnly,
 }
 
 /// Which way the relays said this device's clock is off (FFI mirror of
@@ -7788,6 +7791,7 @@ impl From<haven_core::relay::fanout::LocationPublish> for LocationPublishFfi {
             P::Superseded => Self::Superseded,
             P::Ended => Self::Ended,
             P::InFlight => Self::InFlight,
+            P::MeshOnly => Self::MeshOnly,
         }
     }
 }
@@ -10948,6 +10952,7 @@ mod tests {
             clock(C::Ahead),
             clock(C::Behind),
             clock(C::Unspecified),
+            P::MeshOnly,
         ]
         .into_iter()
         .map(L::from)
@@ -10965,6 +10970,7 @@ mod tests {
                 L::ClockAhead,
                 L::ClockBehind,
                 L::ClockUnspecified,
+                L::MeshOnly,
             ],
         );
     }

@@ -3148,6 +3148,9 @@ fn the_drivers_public_surface_is_pinned() {
         "async fn circle_recovery",
         "async fn ingest_for_poll",
         "async fn seal_location",
+        // The seal for the mesh alone: it calls no relay
+        // (`a_seal_for_the_mesh_names_nothing_that_reaches_a_relay`).
+        "async fn seal_for_mesh",
         "async fn publish_location",
         "async fn mesh_drive",
         "mod scripted",
@@ -3381,19 +3384,23 @@ fn names_after(source: &str, prefix: &str) -> Vec<String> {
 /// caller shows here before it ships. `advance_for_drive` has a guard of its
 /// own (`scripts/ci/check_advance_convergence_sites.sh` A4).
 ///
-/// One caller drives nothing, by design: the mesh's ingress
-/// (`Publishing::mesh_drive`), which may call no relay. It records no
-/// commit, so nothing it leaves holds a circle: its ingest and its fold are
-/// finish-only, with no advance (`a_mesh_drive_names_nothing_that_reaches_a_relay`),
-/// and in that mode staging records a proposal alone. A proposal's record
-/// holds neither sends nor inbound traffic, and the next relay drive sends
-/// it.
+/// Two callers drive nothing, by design: the mesh's ingress
+/// (`Publishing::mesh_drive`) and the seal for the mesh alone
+/// (`Publishing::seal_for_mesh`), which may call no relay. Neither records a
+/// commit, so nothing either leaves holds a circle: the ingest and its fold,
+/// and the seal, are finish-only (`a_mesh_drive_names_nothing_that_reaches_a_relay`,
+/// `a_seal_for_the_mesh_names_nothing_that_reaches_a_relay`), and in that
+/// mode staging records a proposal alone. A proposal's record holds neither
+/// sends nor inbound traffic, and the next relay drive sends it. The seal's
+/// own record is a location's: its send ends it, and a drive ends one a dead
+/// process left.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn every_caller_of_a_staging_entry_is_a_path_that_drives() {
     let squash = |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
     let entries = [
         ".process_event_staging(",
+        ".staging_ingest(",
         ".ingest_from_mesh(",
         ".send_staging(",
         ".send_staging_keeping(",
@@ -3485,7 +3492,9 @@ fn every_caller_of_a_staging_entry_is_a_path_that_drives() {
         // engine: it settles as the plane that makes no commit does.
         "haven-core/src/nostr/mls/manager.rs: advance_for_drive_while -> settle_inputs_for_drive",
         // The mesh's ingest: finish-only, so it records no commit.
-        "haven-core/src/nostr/mls/manager.rs: ingest_from_mesh -> process_event_staging",
+        "haven-core/src/nostr/mls/manager.rs: ingest_from_mesh -> staging_ingest",
+        // A relay's event, through the body it shares with the mesh's.
+        "haven-core/src/nostr/mls/manager.rs: process_event_staging -> staging_ingest",
         "haven-core/src/nostr/mls/manager.rs: process_event_staging_for_test -> process_event_staging",
         "haven-core/src/nostr/mls/manager.rs: remove_members_staging -> send_staging",
         "haven-core/src/nostr/mls/manager.rs: requeue_removal_staging -> send_staging_keeping",
@@ -3513,6 +3522,8 @@ fn every_caller_of_a_staging_entry_is_a_path_that_drives() {
         "haven-core/src/relay/fanout.rs: requeue_removal -> requeue_removal_staging",
         "haven-core/src/relay/fanout.rs: resume -> serve_deadlines",
         "haven-core/src/relay/fanout.rs: resume -> stage_due_eviction",
+        // The seal for the mesh alone, which drives nothing (see above).
+        "haven-core/src/relay/fanout.rs: seal_for_mesh -> seal_location_staging",
         "haven-core/src/relay/fanout.rs: seal_location -> repair_deferred_send_staging",
         "haven-core/src/relay/fanout.rs: seal_location -> seal_location_staging",
         "haven-core/src/relay/fanout.rs: step_down -> propose_self_demote_staging",
@@ -4844,6 +4855,18 @@ fn assert_a_completed_location_send_is_never_made_again(root: &std::path::Path) 
         "a location's own send no longer ends its record with the transport's answer, \
          whatever that answer is: a send that returned could be made again",
     );
+    // A location sealed for the mesh alone leaves between the hand-off and
+    // the transport, its record ended: nothing stands between the two that
+    // could let it through to a relay, and nothing is left to send later.
+    assert!(
+        own.contains(
+            "session.mesh_offer(event,&record);ifrecord.mesh_only{\
+             let_=session.end_location(&message).await;returnLocationPublish::MeshOnly;}\
+             letsent=self.fanout.publish_location(event,&record.relays).await;"
+        ) && own.matches("mesh_only").count() == 1,
+        "a location sealed for the mesh alone is no longer turned back, its record ended, \
+         immediately before the one relay send",
+    );
     let drive =
         squash(fn_body(&fanout, "async fn settle_locations(").expect("the drive's location pass"));
     assert!(
@@ -4907,13 +4930,13 @@ fn a_mesh_drive_names_nothing_that_reaches_a_relay() {
         .expect("the mesh ingest")
         .split_whitespace()
         .collect();
-    let relayed: String = fn_body(&manager, "pub(crate) async fn process_event_staging(")
+    let relayed: String = fn_body(&manager, "async fn staging_ingest(")
         .expect("the staging ingest")
         .split_whitespace()
         .collect();
     assert!(
         ingest.contains("letstill=Still::always(&DriveMode::FinishOnly);")
-            && ingest.contains("self.process_event_staging(event,now_ms,still).await?")
+            && ingest.contains("self.staging_ingest(event,now_ms,still,true).await?")
             && relayed.contains("&result,mode==DriveMode::Full,);"),
         "the mesh ingest is no longer finish-only, or an ingest in that mode feeds the stall \
          detector",
@@ -4926,7 +4949,7 @@ fn a_mesh_drive_names_nothing_that_reaches_a_relay() {
         .split_whitespace()
         .collect();
     let (read, check, sync) = (
-        send.find("letsilences=self.mesh_silences();"),
+        send.find("letsilences=self.mesh_silences(&application.group_id);"),
         send.find("self.location_may_be_sent("),
         send.find("self.mesh_turn(&*session,&application.group_id,now_ms,silences)"),
     );
@@ -4934,6 +4957,150 @@ fn a_mesh_drive_names_nothing_that_reaches_a_relay() {
         read.is_some() && read < check && check < sync,
         "a send no longer reads the ring's silences before its check and hands them to its \
          key sync after it",
+    );
+}
+
+/// What a relay is asked does not turn on what the mesh brought (the mesh
+/// design's rule that the relay path is the same with mesh on and off): an
+/// event a packet carried is noted nowhere the relay path reads what it has
+/// seen, and a circle's unread input is held before the circle falls silent.
+/// `tests/negentropy_e2e.rs` compares the frames a relay is sent; this reads
+/// the paths that run does not take.
+#[test]
+fn what_the_mesh_brings_is_noted_nowhere_the_relay_path_reads() {
+    let manager = production_source(&repo_root().join("haven-core/src/nostr/mls/manager.rs"));
+    let relayed: String = fn_body(&manager, "async fn staging_ingest(")
+        .expect("the staging ingest")
+        .split_whitespace()
+        .collect();
+    // What a relay is asked may not turn on what the mesh brought: an event
+    // a packet carried never reaches the notes a relay's event leaves — the
+    // NIP-77 pass's memory, the pager's hold, the stall detector's arm — and
+    // the engine's word that it let the event go is taken out of its batch
+    // before the batch is noted, so that it is owed no refetch.
+    let body = |signature: &str| -> String {
+        fn_body(&manager, signature)
+            .unwrap_or_else(|| panic!("{signature}"))
+            .split_whitespace()
+            .collect()
+    };
+    assert!(
+        relayed.contains(
+            "ifletOk(batch)=&mutresult{batch.effects.events.retain(|refused|{!matches!(refused,\
+             GroupEvent::TransportObjectResourceRefused{message_id,..}if*message_id==id)});}}\
+             else{self.note_ingested("
+        ) && relayed.contains("letmutresult=self.ingest_faulted(result);iffrom_mesh{")
+            && relayed.matches("note_ingested(").count() == 1
+            && manager.matches("self.staging_ingest(").count() == 2
+            && body("pub(crate) async fn process_event_staging(")
+                == "{self.staging_ingest(event,now_ms,still,false).await}",
+        "an event the mesh brought is noted as one a relay served, or a relay's as the mesh's",
+    );
+    // A circle falls silent on mesh only once its hold stands: a seal that
+    // begins after the silence then reads the hold.
+    for signature in [
+        "pub(crate) fn hold_pager_commits<'a>(",
+        "pub(crate) fn hold_live_replay(",
+    ] {
+        let text = body(signature);
+        let (stands, silenced) = (
+            text.find("self.unread()"),
+            text.find("self.mesh_keys.silence(group_id);"),
+        );
+        assert!(
+            stands.is_some()
+                && stands < silenced
+                && text.ends_with("self.mesh_keys.silence(group_id);}"),
+            "a circle is silenced on mesh before its unread input is held",
+        );
+    }
+}
+
+/// The seal for the mesh alone sends nothing (plan §7.7 R1): a burst whose
+/// receive failed may put a location on the radio, and may not make this
+/// device call a relay — not for a commit of its own that is pending, not
+/// for a record its hold wrote, not for a repair. `Publishing::seal_for_mesh`
+/// names neither transport and none of the driver's functions that reach
+/// one, seals in the finish-only mode whatever its caller's, and marks what
+/// it seals as the mesh's alone in the hold that records it.
+/// `tests/mesh_only_e2e.rs` counts the calls; this reads the paths those
+/// runs do not take.
+#[test]
+fn a_seal_for_the_mesh_names_nothing_that_reaches_a_relay() {
+    let fanout = production_source(&repo_root().join("haven-core/src/relay/fanout.rs"));
+    let body: String = fn_body(&fanout, "pub async fn seal_for_mesh(")
+        .expect("the seal for the mesh")
+        .split_whitespace()
+        .collect();
+    for sends in [
+        "self.fanout",
+        "self.publisher",
+        "settle(",
+        "settle_staged(",
+        "drive_rows(",
+        "drive_due(",
+        "drive_one(",
+        "send_unrecorded(",
+        "unblock(",
+        "absorb(",
+        "dispose(",
+        "deliver_welcomes(",
+        "resume(",
+        "older(",
+        "publish_location(",
+        "repair_deferred_send_staging(",
+        "DriveMode::Full",
+        "self.mode",
+    ] {
+        assert!(
+            !body.contains(sends),
+            "`seal_for_mesh` names `{sends}`: a seal for the mesh alone could then make this \
+             device call a relay, or commit",
+        );
+    }
+    let (off, staging) = (
+        body.find("if!session.mesh_is_on(now_ms){returnOk(deferred(SendHeld::Nothing,None));}"),
+        body.find(".seal_location_staging("),
+    );
+    assert!(
+        off.is_some() && off < body.find(".await") && off < staging,
+        "`seal_for_mesh` asks the engine for something before it has read that mesh is on",
+    );
+    assert!(
+        body.contains(
+            ".seal_location_staging(group_id,location,now_ms,\
+             Still::always(&DriveMode::FinishOnly),self.clock,self.deadline_ms,true,)"
+        ) && body.contains(
+            ".sealed_or_held(circle,group_id,sealed,departure_due,&DriveMode::FinishOnly,)"
+        ),
+        "`seal_for_mesh` no longer seals finish-only, marked as the mesh's alone",
+    );
+    // The mark is kept with the record's entry in the hold that writes the
+    // record, and read back by the send-time check — from the session, which
+    // a process that did not seal the location does not share.
+    let manager = production_source(&repo_root().join("haven-core/src/nostr/mls/manager.rs"));
+    let record: String = fn_body(&manager, "fn record_location(")
+        .expect("the record's hold")
+        .split_whitespace()
+        .collect();
+    let send: String = fn_body(&manager, "pub(crate) async fn location_to_send(")
+        .expect("the send-time check")
+        .split_whitespace()
+        .collect();
+    assert!(
+        record.contains(".insert(recorded.id.message().clone(),mesh_only);")
+            && send.contains("letmay_be_sent=sealed_here.is_some()&&self.location_may_be_sent(")
+            && send.contains("mesh_only:sealed_here==Some(true),"),
+        "the mesh-only mark is no longer written with the record and read at its send",
+    );
+    // The other seal — the relay path's — marks nothing.
+    let relayed: String = fn_body(&fanout, "pub async fn seal_location(")
+        .expect("the relay path's seal")
+        .split_whitespace()
+        .collect();
+    assert!(
+        relayed.contains("self.clock,self.deadline_ms,false,)"),
+        "the relay path's seal marks its location as the mesh's alone",
     );
 }
 

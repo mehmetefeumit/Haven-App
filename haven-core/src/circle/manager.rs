@@ -166,6 +166,11 @@ pub struct CircleManager {
     /// spends: spent when the fanout driver's confirm applies it
     /// ([`Self::confirm_fanout`]).
     rotation_fanouts: Mutex<HashMap<MessageId, [u8; 32]>>,
+    /// Proposals no record could be written for that a fold handed back to
+    /// a call which may call no relay — a mesh drive, a seal for the mesh
+    /// alone — each owed its one send by the next relay drive
+    /// ([`Self::owe_proposals`]).
+    owed_proposals: Mutex<Vec<Event>>,
     /// Fired whenever a circle's row moved to new relays, by whichever plane
     /// applied the change: the live session's follow waits on it
     /// ([`Self::routing_moved`]).
@@ -307,6 +312,7 @@ impl CircleManager {
             pending_welcomes: PendingWelcomeStore::new(),
             data_dir: data_dir.to_path_buf(),
             rotation_fanouts: Mutex::new(HashMap::new()),
+            owed_proposals: Mutex::new(Vec::new()),
             routing_moved: tokio::sync::Notify::new(),
             #[cfg(any(test, feature = "test-utils"))]
             skip_next_follow: std::sync::atomic::AtomicBool::new(false),
@@ -445,6 +451,7 @@ impl CircleManager {
             pending_welcomes: PendingWelcomeStore::new(),
             data_dir: data_dir.to_path_buf(),
             rotation_fanouts: Mutex::new(HashMap::new()),
+            owed_proposals: Mutex::new(Vec::new()),
             routing_moved: tokio::sync::Notify::new(),
             #[cfg(any(test, feature = "test-utils"))]
             skip_next_follow: std::sync::atomic::AtomicBool::new(false),
@@ -4795,10 +4802,17 @@ impl CircleManager {
     /// behind it; a drain cut short leaves the send to MDK's preflight, which
     /// queues it behind what is still untried.
     ///
+    /// `mesh_only` is recorded with the location in the hold that seals it
+    /// (`SessionManager::send_location_staging`).
+    ///
     /// # Errors
     ///
     /// [`CircleError::NotFound`] for a circle this device does not hold, a
     /// store or engine failure otherwise. A deferral is not an error here.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one send: its circle, its fix, its instant and mode, its wake, and its carrier"
+    )]
     pub(crate) async fn seal_location_staging(
         &self,
         mls_group_id: &GroupId,
@@ -4807,6 +4821,7 @@ impl CircleManager {
         still: Still<'_>,
         clock: &dyn crate::relay::fanout::FanoutClock,
         deadline_ms: Option<u64>,
+        mesh_only: bool,
     ) -> Result<StagedSeal> {
         let circle = self
             .storage
@@ -4867,7 +4882,7 @@ impl CircleManager {
 
         let (staged, recorded) = self
             .session
-            .send_location_staging(mls_group_id, content, now_ms, still)
+            .send_location_staging(mls_group_id, content, now_ms, still, mesh_only)
             .await
             .map_err(CircleError::from_session)?;
         let Staged {
@@ -5055,6 +5070,29 @@ impl CircleManager {
                 log::warn!("a relay's owed floor was not cleared");
             }
         }
+    }
+
+    /// Keeps `proposals` — each a proposal of this device's no record could
+    /// be written for, which a fold handed back to a call that may send
+    /// nothing — for the next relay drive, which sends each once as it would
+    /// have sent it itself (`Publishing::send_owed`). In memory: one a
+    /// process's end loses, the engine proposes again at its circle's next
+    /// epoch.
+    pub(crate) fn owe_proposals(&self, proposals: Vec<Event>) {
+        self.owed_proposals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(proposals);
+    }
+
+    /// What [`Self::owe_proposals`] kept, taken.
+    pub(crate) fn take_owed_proposals(&self) -> Vec<Event> {
+        std::mem::take(
+            &mut *self
+                .owed_proposals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// Adds what the mesh counted to its stored totals (plan §7.5): updates
@@ -14815,7 +14853,7 @@ mod tests {
         funnels.sort();
         assert_eq!(
             funnels,
-            ["hand_back", "ingest", "process_event_staging"],
+            ["hand_back", "ingest", "staging_ingest"],
             "anti-vacuity: the ingest funnels are not the three this pin reads",
         );
         assert_eq!(
@@ -15122,7 +15160,8 @@ mod tests {
                 "send_inner",
                 "departure_holds_a_send",
                 "ingest",
-                "process_event_staging",
+                // A relay's event and, never noted as one, a mesh packet's.
+                "staging_ingest",
                 "advance_once_for_receive",
                 "advance_convergence",
                 // The staging send's hold, with its hand-back, behind the

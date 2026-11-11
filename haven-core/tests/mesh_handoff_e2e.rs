@@ -719,22 +719,28 @@ type MidCheck = Box<dyn FnOnce(&SessionManager) + Send>;
 /// asked, fetched input held. One silenced after a send's check began and
 /// before the send's key sync read the circle's turn is handed nothing by
 /// that send: the location was sealed before the circle fell silent. The
-/// relay send is made all the same.
+/// relay send is made all the same. Another circle's silence is not this
+/// one's: its send is handed off.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_circle_silenced_while_a_send_checked_is_handed_nothing_by_that_send() {
     let (admin, _others, group) = split(setup_circle(2, &[ONE]).await);
+    let other = found_circle(&admin, &[], &[TWO]).await;
     mesh_on(&admin).await;
     let transport = ScriptedFanout::default();
     let (outbox, clock) = (Recorder::acking(true), ManualClock::at(0));
     let driver = through(&transport, &outbox, &clock, &FULL);
     let held = group.clone();
-    let silences: [(MidCheck, usize); 3] = [
+    let silences: [(MidCheck, usize); 4] = [
         // Nothing falls silent: the send is handed off.
         (Box::new(|_| {}), 1),
         (Box::new(SessionManager::mesh_sharing_stopped), 0),
         (
             Box::new(move |session| session.hold_pager_commits_for_test(&held, &[])),
             0,
+        ),
+        (
+            Box::new(move |session| session.hold_pager_commits_for_test(&other, &[])),
+            1,
         ),
     ];
     for (silence, handed_off) in silences {
@@ -748,7 +754,7 @@ async fn a_circle_silenced_while_a_send_checked_is_handed_nothing_by_that_send()
         assert!(
             offered(&admin).len() == handed_off,
             "a send handed the mesh a location of a circle silenced while it checked, or \
-             handed it nothing with no circle silenced"
+             handed it nothing though its own circle was not"
         );
     }
 }

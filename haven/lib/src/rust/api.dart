@@ -4229,6 +4229,10 @@ enum LocationPublishFfi {
   /// As [`Self::ClockAhead`], with no direction, or with relays that
   /// disagreed on it.
   clockUnspecified,
+
+  /// It was sealed for the Bluetooth mesh alone: handed to the mesh, and
+  /// to no relay. Neither a relay's answer nor a failure.
+  meshOnly,
 }
 
 /// Which kind of value a [`log_alias`] call is aliasing.

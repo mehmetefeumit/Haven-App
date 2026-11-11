@@ -414,9 +414,11 @@ outbox and the unread queue at once.
 2. At each drive `mesh_drive` takes the packets not yet offered to it, tries
    the keys, rebuilds, verifies, applies §4.3, and hands the event to the
    driver's ingest for its circle through `order_for_ingest`.
-3. The mesh plane owns no relay cursor, touches no `relay_floors`, and does
-   not feed the stall detector (`observe = false`), so a crafted packet
-   cannot arm a history walk.
+3. The mesh plane owns no relay cursor, touches no `relay_floors`, records
+   nothing where the relay path reads what it has seen (the NIP-77 pass
+   still asks a relay for an update the mesh brought first), and arms no
+   history walk: only a full relay drive's ingest arms one. A peer's update
+   it brings does end the `Stalled` reading, which moves no walk (§16).
 4. Bounds: a per-circle cap on events per drive and a drain budget; nothing
    is drained into a circle held for a pending commit (it would grow the
    engine's uncapped buffer, Rule 12). A packet is marked done only when the
@@ -825,15 +827,20 @@ mesh off with fixed copy (Rule 8). The setting is cleared on identity delete.
   Footnote: "Passed-on packets can't be read by this phone. They include
   other people's updates and cover traffic." One status line ("Mesh is on ·
   connected / searching / off") and a reset action.
-- **Updates from your circles** = unique packets that opened under one of
-  this phone's keys and verified. **Passed on** = unique packets this phone
-  did not emit and could not open, counted when first sent to another phone.
+- **Updates from your circles** = updates of other members that the MLS
+  engine read for the first time out of a mesh packet. One a relay delivered
+  first is not counted, nor is this phone's own, nor one read before — in
+  this process or an earlier one, in the same packet or another. **Passed
+  on** = unique packets this phone did not emit and could not open, counted
+  when first sent to another phone.
 - "Since turned on" survives a process restart while mesh stays on. The
   values are four integers in the SQLCipher `user_settings` table — the two
   lifetime totals, and what each read when mesh was last turned on — folded
   at every drive and at mesh off: no timestamps, no per-circle or per-peer
-  breakdown. An update is counted once by its event id, whatever number of
-  packets carried it. What was counted since the last fold is lost if the process is
+  breakdown. An update is counted once, when the engine answers that it read
+  it — off the engine's own durable record of what it has processed, so no
+  number of packets, no replay, no restart and no turning mesh off and on
+  counts it again. What was counted since the last fold is lost if the process is
   killed; the promise is that the lifetime value never decreases and includes
   everything up to the last fold.
 - Exact counts are shown, never logged (Rule 15).
@@ -1455,26 +1462,69 @@ body). Built:
   pending, or holding fetched input unread, takes nothing in; its packets,
   and those the engine did not keep or erred on, are held — the verified
   event, 64 a circle, 32 a circle a drive, oldest first — and go with the
-  circle and with mesh. "Updates from your circles" counts an update once by
-  its event id (the last 256 of a circle are remembered), when it is first
-  held. The four counts are in `user_settings`; the since-on pair starts
-  again when a deadline is stored where none stood.
+  circle and with mesh. "Updates from your circles" counts an update when
+  the engine reads it for the first time (§7.5). The four counts are in
+  `user_settings`; the since-on pair starts again when a deadline is stored
+  where none stood.
   **Not as the design has it:** the driver names no mesh module, so the
   packets and the answer cross it as `MeshPacket` and `MeshDrive`, declared
   beside the key ring; the ingest has no `observe` flag — the finish-only
-  mode is what leaves the stall detector unfed, and a source gate holds
-  that; the held list keeps opened events, not packets to open again;
+  mode is what keeps the stall detector from arming a history walk on a
+  mesh packet, and a source gate holds that; the held list keeps opened
+  events, not packets to open again;
   `MeshDrive` carries no bridging input. The "passed on" side has its store
   and its fold (`CircleManager::fold_mesh_counts`) and no caller yet, and a
   reset of all four counts is not written: both come with the FFI.
   With it, four findings of the review of M2b/M2c were fixed: a send reads
-  how often the ring fell silent before its send-time check, and gets no
-  hand-off if anything fell silent while it checked; a deadline that passed
+  its circle's turn before its send-time check, and gets no hand-off if the
+  circle fell silent while it checked; a deadline that passed
   with no engine batch ends the keys at the key-package maintenance tick,
   at a mesh drive, and before mesh is turned on again; a forgotten circle's
   delete the store refused is asked again, and the open restores no key of
   a circle whose row is gone; and the seams guard reads `mesh_offer(`
   however it is reached, and every mesh item under `relay/` and `nostr/`.
+
+- **M2e**, the mesh-only seal (`Publishing::seal_for_mesh`, §7.7 R1). It
+  seals as `seal_location` does, in the mode that makes no commit whatever
+  its caller's, and calls no relay: a commit of this device's that is
+  pending stays pending and defers the seal as awaiting relays; an eviction
+  that is due is left due and holds it; unread fetched input, a leave and a
+  disband hold it as they hold a relay seal; no repair runs and nothing is
+  driven. With mesh off nothing is sealed and the engine is not asked.
+  `publish_location` runs the same send-time checks, hands the event to the
+  mesh as format `0x01`, skips the relay send, ends the record and answers
+  `LocationPublish::MeshOnly`; a normal seal is unchanged and goes out as
+  `0x02`. The bridge maps the new answer (`LocationPublishFfi::MeshOnly`)
+  and the four Dart switches over it take it as neither a relay's answer,
+  a failure nor a held send.
+  **Not as §7.7 has it:** the mark is not inside the sealed value Dart
+  holds. It is kept by the session, with the record's own entry and written
+  in the hold that records the seal, so Rust routes the event whatever its
+  caller does with it, and a process that did not seal it answers
+  `Superseded` (design answer Q-3).
+  **Not built here:** `seal_for_mesh` is not exposed over the bridge and the
+  burst coordinator does not call it; both come with the FFI (M2g), and
+  until then nothing in the app makes a mesh-only seal.
+  With it, the findings of the review of M2d were applied. "From your
+  circles" is counted off the engine's answer, not off a window of ids (§7.5).
+  An update the mesh brings is noted nowhere the relay path reads what it
+  has seen — not in the NIP-77 pass's memory, so the pass still asks for it
+  by id, and not in the refused ledger — so a relay is asked the same
+  whether or not the mesh brought it first. A proposal no record could be
+  written for, handed back to a drive or a seal that may call no relay, is
+  kept and sent by the next relay drive. A circle's unread input is held
+  before the circle is silenced; a send's hand-off is cancelled by its own
+  circle's silence and no other's; and an ingest that fails ends its
+  circle's turn in that drive.
+
+Residuals of M2e. Two reads of the engine's own durable record of what it
+has processed still see an update the mesh brought first, both only after a
+relay-plane ingest of the same event has failed: the sweep then takes the
+event as the engine's (`relay/catchup.rs` `ingest_judged`), and the NIP-77
+pass's memory records it. The arrival stamp a mesh update writes is read by
+the health model and by the gate of the epoch-rotation repair, as any
+update's is. A peer's update the mesh brings ends the `Stalled` reading as
+one from a relay does; it arms no history walk and moves none.
 
 Residuals of M2b, both in the tracker row `T-MESH-EXPORTER`: epochs crossed
 inside one engine call, and epochs reached while mesh was off, have no key.
@@ -1488,7 +1538,8 @@ Not yet written, and owed with or before the first user-visible step: Rule
 paragraphs, and the privacy-manifest invariants for the keys at rest and the
 hand-off (§8.2).
 
-Next: the mesh-only seal, member bridging, and the FFI — which calls
+Next: member bridging, and the FFI — which exposes `seal_for_mesh` to the
+burst coordinator, calls
 `mesh_on_until`, `mesh_off`, `mesh_sharing_stopped`, drains `mesh_handoff`,
 hands `mesh_drive` what the engine's unread queue holds and marks each
 packet as the drive answers — with the soak scenarios and the amended

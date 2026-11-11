@@ -599,6 +599,10 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
         // Another send of the same location is under way: nothing to say.
         case LocationPublishInFlight():
           break;
+        // Handed to the mesh alone: no relay was asked, so there is neither
+        // a relay verdict nor a held send to record.
+        case LocationPublishMeshOnly():
+          break;
       }
     } on Object catch (e) {
       debugPrint('[LocationPublishScheduler] per-circle publish failed: '

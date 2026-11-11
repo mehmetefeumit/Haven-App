@@ -11848,6 +11848,7 @@ impl SseDecode for crate::api::LocationPublishFfi {
             7 => crate::api::LocationPublishFfi::ClockAhead,
             8 => crate::api::LocationPublishFfi::ClockBehind,
             9 => crate::api::LocationPublishFfi::ClockUnspecified,
+            10 => crate::api::LocationPublishFfi::MeshOnly,
             _ => unreachable!("Invalid variant for LocationPublishFfi: {}", inner),
         };
     }
@@ -14734,6 +14735,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::LocationPublishFfi {
             Self::ClockAhead => 7.into_dart(),
             Self::ClockBehind => 8.into_dart(),
             Self::ClockUnspecified => 9.into_dart(),
+            Self::MeshOnly => 10.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -16761,6 +16763,7 @@ impl SseEncode for crate::api::LocationPublishFfi {
                 crate::api::LocationPublishFfi::ClockAhead => 7,
                 crate::api::LocationPublishFfi::ClockBehind => 8,
                 crate::api::LocationPublishFfi::ClockUnspecified => 9,
+                crate::api::LocationPublishFfi::MeshOnly => 10,
                 _ => {
                     unimplemented!("");
                 }

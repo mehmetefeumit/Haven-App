@@ -61,13 +61,6 @@ const DRIVE_PER_CIRCLE: usize = 32;
 /// circle a packet; past it the oldest goes.
 const HELD_PER_CIRCLE: usize = 64;
 
-/// How many of a circle's updates back one is known to have been counted.
-const COUNTED_PER_CIRCLE: usize = 256;
-
-// Every held event was counted when it was first held, and stays known as
-// counted for as long as it is held.
-const _: () = assert!(COUNTED_PER_CIRCLE >= HELD_PER_CIRCLE);
-
 /// A mesh packet, as `Publishing::mesh_drive` is handed one by the mesh
 /// engine's owner. The driver does not name the mesh module
 /// (`scripts/ci/check_mesh_seams.sh`): it names this.
@@ -86,8 +79,10 @@ pub struct MeshDrive {
     /// opened and whose event the engine has not taken in is held, not here;
     /// a later drive answers for it.
     pub read: Vec<(PacketId, bool)>,
-    /// How many updates from this device's circles the drive read for the
-    /// first time, each counted once by its event id. Stored already.
+    /// How many updates from peers in this device's circles the engine read
+    /// for the first time in this drive: one it had read before — from a
+    /// relay, or from the mesh in any process — and one of this device's own
+    /// are none. Stored already.
     pub from_circles: u64,
     /// The locations taken in, each stored already.
     pub replayed: Vec<LocationMessageResult>,
@@ -220,37 +215,25 @@ struct CircleKeys {
     /// most [`HELD_PER_CIRCLE`]. The mesh engine hands a packet out once, so
     /// each is offered again from here at every drive.
     held: VecDeque<(PacketId, Event)>,
-    /// The event ids of the last [`COUNTED_PER_CIRCLE`] updates counted,
-    /// oldest first. A member can wrap one event in any number of packets:
-    /// an update is counted by its event id, once.
-    counted: VecDeque<EventId>,
 }
 
 impl CircleKeys {
     /// Empties the circle's slot and ends the turn any send still holds.
     fn silence(&mut self, ring: &MeshKeys) {
         self.turn += 1;
-        ring.silences.fetch_add(1, Ordering::Relaxed);
         if let Some(slot) = self.slot {
             ring.handoff.purge(slot);
         }
     }
 
     /// [`MeshKeys::hold`], for this circle.
-    fn hold(&mut self, packet: PacketId, event: Event) -> (bool, Vec<PacketId>) {
-        let first = !self.counted.contains(&event.id);
-        if first {
-            if self.counted.len() == COUNTED_PER_CIRCLE {
-                self.counted.pop_front();
-            }
-            self.counted.push_back(event.id);
-        }
+    fn hold(&mut self, packet: PacketId, event: Event) -> Vec<PacketId> {
         if self.held.iter().any(|(_, held)| held.id == event.id) {
-            return (first, vec![packet]);
+            return vec![packet];
         }
         self.held.push_back((packet, event));
         let over = self.held.len().saturating_sub(HELD_PER_CIRCLE);
-        (first, self.held.drain(..over).map(|(id, _)| id).collect())
+        self.held.drain(..over).map(|(id, _)| id).collect()
     }
 
     fn rows(&self) -> Vec<StoredMeshKey> {
@@ -272,6 +255,12 @@ pub(super) struct Turn {
     at: u64,
 }
 
+/// What a send reads of its circle before its send-time check
+/// ([`MeshKeys::before`]): the circle's turn, `None` while the ring holds
+/// nothing of it, and how often a circle the ring holds nothing of fell
+/// silent.
+pub(super) type Before = (Option<u64>, u64);
+
 /// On whose behalf a circle's keys are brought in line.
 #[derive(Clone, Copy)]
 enum Caller<'a> {
@@ -286,11 +275,11 @@ enum Caller<'a> {
     /// A location's send-time check, which has just read that the circle's
     /// row stands. The relay send is behind it, so it waits for nothing: the
     /// ring's lock is only tried, the store is not touched, and a deadline
-    /// that has passed is left for the next batch to act on. `silences` is
-    /// [`MeshKeys::silences`] as read before the check began: a circle can be
+    /// that has passed is left for the next batch to act on. `before` is
+    /// [`MeshKeys::before`] as read before the check began: a circle can be
     /// silenced with no engine hold, so one silenced while the check ran is
-    /// answered no turn.
-    Send { silences: u64 },
+    /// answered no turn. `None` when the ring's lock was held then.
+    Send { before: Option<Before> },
 }
 
 /// What the ring has cost, for a test to read; nothing in a shipped build.
@@ -361,8 +350,10 @@ pub(super) struct MeshKeys {
     /// The circles forgotten whose stored keys the store did not delete:
     /// asked again by [`Self::flush`].
     forgotten: Mutex<Vec<GroupId>>,
-    /// How often any circle fell silent ([`CircleKeys::silence`]).
-    silences: AtomicU64,
+    /// How often a circle the ring holds nothing of fell silent, or every
+    /// circle did: what a send of such a circle is checked against, since no
+    /// turn is kept for it ([`Self::before`]).
+    unkeyed_silences: AtomicU64,
     /// Never held across the store or the engine, so the hand-off, which
     /// only tries it, is never kept from it for longer than one packet takes
     /// to seal or to be tried under every key.
@@ -388,7 +379,7 @@ impl MeshKeys {
             owed: AtomicBool::new(false),
             undeleted: AtomicBool::new(false),
             forgotten: Mutex::new(Vec::new()),
-            silences: AtomicU64::new(0),
+            unkeyed_silences: AtomicU64::new(0),
             ring: Mutex::new(HashMap::new()),
             store: Arc::new(NoMeshKeyStore),
             handoff: Arc::new(Handoff::default()),
@@ -478,9 +469,15 @@ impl MeshKeys {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// How often any circle fell silent so far.
-    fn silences(&self) -> u64 {
-        self.silences.load(Ordering::Relaxed)
+    /// What a send reads of `group` before its send-time check; `None` when
+    /// the ring's lock is held, and the send then gets no turn.
+    fn before(&self, group: &GroupId) -> Option<Before> {
+        let ring = self.ring.try_lock().ok()?;
+        // Read under the ring's lock, which every silence is made under.
+        Some((
+            ring.get(group).map(|circle| circle.turn),
+            self.unkeyed_silences.load(Ordering::Relaxed),
+        ))
     }
 
     /// `now_ms`, or the latest instant seen if that is later.
@@ -609,7 +606,8 @@ impl MeshKeys {
     /// ([`Self::flush`]). Epochs crossed inside one engine call get no key:
     /// only the epoch the engine stands on can be exported. For a send that
     /// finds the ring's lock held, nothing: no turn, so no hand-off; and no
-    /// turn for a send during whose check any circle fell silent.
+    /// turn for a send during whose check its circle fell silent — another
+    /// circle's silence is not this one's.
     fn align<H: Held>(
         &self,
         held: &H,
@@ -688,9 +686,21 @@ impl MeshKeys {
             self.owed.store(true, Ordering::Relaxed);
         }
         let at = circle.turn;
-        // Read under the ring's lock, which every silence is made under.
-        let silenced = matches!(caller, Caller::Send { silences }
-            if self.silences() != silences + u64::from(changed));
+        // The key this sync installed bumped the turn once itself. A circle
+        // the ring held nothing of had no turn to read: it stands at the
+        // turn its entry was made with, and no such circle fell silent.
+        let silenced = match caller {
+            Caller::Batch { .. } => false,
+            Caller::Send { before: None } => true,
+            Caller::Send {
+                before: Some((Some(turn), _)),
+            } => turn + u64::from(changed) != at,
+            Caller::Send {
+                before: Some((None, unkeyed)),
+            } => {
+                at != u64::from(changed) || unkeyed != self.unkeyed_silences.load(Ordering::Relaxed)
+            }
+        };
         drop(ring);
         (!silenced).then(|| Turn {
             circle: group.clone(),
@@ -764,8 +774,11 @@ impl MeshKeys {
         if !self.armed() {
             return;
         }
-        if let Some(circle) = self.ring().get_mut(group) {
-            circle.silence(self);
+        match self.ring().get_mut(group) {
+            Some(circle) => circle.silence(self),
+            None => {
+                self.unkeyed_silences.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -774,7 +787,9 @@ impl MeshKeys {
         if !self.armed() {
             return;
         }
-        for circle in self.ring().values_mut() {
+        let mut ring = self.ring();
+        self.unkeyed_silences.fetch_add(1, Ordering::Relaxed);
+        for circle in ring.values_mut() {
             circle.silence(self);
         }
     }
@@ -802,21 +817,18 @@ impl MeshKeys {
     }
 
     /// Holds the update a packet carried until the engine takes it in.
-    /// Answers whether the update is counted — the first time its event id
-    /// is held — and the packets this settles: the packet itself when its
-    /// circle is gone or holds the event already, and the oldest ones past
-    /// the circle's quota.
-    fn hold(&self, opened: Opened) -> (bool, Vec<PacketId>) {
+    /// Answers the packets this settles: the packet itself when its circle
+    /// is gone or holds the event already, and the oldest ones past the
+    /// circle's quota.
+    fn hold(&self, opened: Opened) -> Vec<PacketId> {
         let Opened {
             packet,
             circle,
             event,
             ..
         } = opened;
-        (self.ring().get_mut(&circle)).map_or_else(
-            || (false, vec![packet]),
-            |circle| circle.hold(packet, event),
-        )
+        (self.ring().get_mut(&circle))
+            .map_or_else(|| vec![packet], |circle| circle.hold(packet, event))
     }
 
     /// What one drive offers the engine: for each circle that holds any, its
@@ -844,12 +856,18 @@ impl MeshKeys {
         packet
     }
 
-    /// Wraps `event` under its circle's newest key and leaves the packet in
-    /// the hand-off — if the circle still stands at `turn`, has a slot, and
-    /// the event is one a packet carries. Otherwise, and when the ring's
-    /// lock is held, nothing: the caller is the relay send, and the mesh is
-    /// lossy by design.
-    fn offer<R: RngCore + CryptoRng>(&self, turn: &Turn, event: &Event, rng: &mut R) {
+    /// Wraps `event` under its circle's newest key, as a packet of `format`,
+    /// and leaves it in the hand-off — if the circle still stands at `turn`,
+    /// has a slot, and the event is one a packet carries. Otherwise, and
+    /// when the ring's lock is held, nothing: the caller is the relay send,
+    /// and the mesh is lossy by design.
+    fn offer<R: RngCore + CryptoRng>(
+        &self,
+        turn: &Turn,
+        event: &Event,
+        format: Format,
+        rng: &mut R,
+    ) {
         let Ok(circles) = self.ring.try_lock() else {
             return;
         };
@@ -859,7 +877,7 @@ impl MeshKeys {
         let (Some(slot), Some(key)) = (circle.slot, circle.keys.first()) else {
             return;
         };
-        let Some(parts) = parts_of(event, Format::Bridgeable) else {
+        let Some(parts) = parts_of(event, format) else {
             return;
         };
         self.counts.one(Cost::Wrap);
@@ -900,16 +918,32 @@ impl SessionManager {
     /// key or slot, the circle was silenced since the check read `record`,
     /// the event does not fit a packet, or the ring's lock is held.
     /// Synchronous, no I/O, no engine hold; cannot fail and cannot wait.
+    ///
+    /// A location sealed for the mesh alone goes out as the format no member
+    /// passes on to a relay (plan §4.1): it never passed a send-time check
+    /// made after a receive.
     pub(crate) fn mesh_offer(&self, event: &Event, record: &LocationToSend) {
         if let Some(turn) = &record.mesh_turn {
-            self.mesh_keys.offer(turn, event, &mut OsRng);
+            let format = if record.mesh_only {
+                Format::NeverBridged
+            } else {
+                Format::Bridgeable
+            };
+            self.mesh_keys.offer(turn, event, format, &mut OsRng);
         }
     }
 
-    /// What a location's send-time check reads before it checks anything,
-    /// and hands [`Self::mesh_turn`] after ([`Caller::Send`]).
-    pub(super) fn mesh_silences(&self) -> u64 {
-        self.mesh_keys.silences()
+    /// Whether mesh is on at `now_ms`, read off the deadline alone: no
+    /// engine hold, no lock, and a deadline found passed is left for the
+    /// next engine batch to act on.
+    pub(crate) fn mesh_is_on(&self, now_ms: u64) -> bool {
+        self.mesh_keys.lit(now_ms)
+    }
+
+    /// What a location's send-time check reads of `group` before it checks
+    /// anything, and hands [`Self::mesh_turn`] after ([`Caller::Send`]).
+    pub(super) fn mesh_silences(&self, group: &GroupId) -> Option<Before> {
+        self.mesh_keys.before(group)
     }
 
     /// What a location's send-time check hands [`Self::mesh_offer`]: the
@@ -922,7 +956,7 @@ impl SessionManager {
         held: &H,
         group: &GroupId,
         now_ms: u64,
-        silences: u64,
+        silences: Option<Before>,
     ) -> Option<Turn> {
         #[cfg(any(test, feature = "test-utils"))]
         {
@@ -933,7 +967,8 @@ impl SessionManager {
                 hook(self);
             }
         }
-        (self.mesh_keys).align(held, group, now_ms, Caller::Send { silences })
+        let caller = Caller::Send { before: silences };
+        self.mesh_keys.align(held, group, now_ms, caller)
     }
 
     /// What every engine batch is owed (`Self::note_effects`): the keys of
@@ -1058,16 +1093,15 @@ impl SessionManager {
     }
 
     /// What becomes of a packet that opened and verified: held for the
-    /// engine and counted when its event is an `update` of its circle — an
-    /// application message of the epoch its key is of — and dropped as read
-    /// when it is anything else.
+    /// engine when its event is an `update` of its circle — an application
+    /// message of the epoch its key is of — and dropped as read when it is
+    /// anything else.
     pub(super) fn mesh_keep(&self, opened: Opened, update: bool, drive: &mut MeshDrive) {
         if !update {
             drive.read.push((opened.packet, true));
             return;
         }
-        let (first, settled) = self.mesh_keys.hold(opened);
-        drive.from_circles += u64::from(first);
+        let settled = self.mesh_keys.hold(opened);
         (drive.read).extend(settled.into_iter().map(|id| (id, true)));
     }
 
@@ -1442,8 +1476,8 @@ mod tests {
 
         /// A send-time check's sync of `group` at `now_ms`.
         fn send_at(&self, group: &GroupId, now_ms: u64) -> Option<Turn> {
-            let silences = self.keys.silences();
-            let caller = Caller::Send { silences };
+            let before = self.keys.before(group);
+            let caller = Caller::Send { before };
             self.keys.align(&self.engine, group, now_ms, caller)
         }
 
@@ -1511,7 +1545,7 @@ mod tests {
     }
 
     fn offer(fx: &Fixture, turn: &Turn, event: &Event) {
-        fx.keys.offer(turn, event, &mut OsRng);
+        fx.keys.offer(turn, event, Format::Bridgeable, &mut OsRng);
     }
 
     /// The key of `epoch` on `branch`, as a peer derives it.
@@ -2256,7 +2290,7 @@ mod tests {
                 (has_returned.recv_timeout(std::time::Duration::from_mins(1))).is_ok()
             });
             locked.1.recv().expect("the lock is held");
-            fx.keys.offer(&turn, &event, &mut OsRng);
+            fx.keys.offer(&turn, &event, Format::Bridgeable, &mut OsRng);
             // Nor does the send-time check before it: no turn, so no offer.
             fx.engine.stands(&group, 5, 0xa0, 0x70);
             let checked = fx.send_at(&group, NOW);
@@ -2276,7 +2310,8 @@ mod tests {
     }
 
     /// One packet, one fresh twelve-byte nonce from the generator, under the
-    /// newest key; an event a packet cannot carry draws nothing.
+    /// newest key, marked with the format it was offered as; an event a
+    /// packet cannot carry draws nothing.
     #[test]
     fn an_offer_seals_once_under_the_newest_key_with_a_nonce_from_the_generator() {
         let fx = on();
@@ -2288,7 +2323,7 @@ mod tests {
 
         let nonce: [u8; 12] = std::array::from_fn(|i| 0xc0 + u8::try_from(i).expect("small"));
         let mut rng = Scripted::new(&nonce);
-        fx.keys.offer(&turn, &event, &mut rng);
+        fx.keys.offer(&turn, &event, Format::Bridgeable, &mut rng);
         assert!(rng.is_spent() && fx.costs().1 == 1);
         let [(0, Some(packet))] = &fx.waiting()[..] else {
             panic!("one packet waits");
@@ -2297,15 +2332,18 @@ mod tests {
             packet.as_bytes()[..12] == nonce,
             "the packet's nonce is not the generator's twelve bytes"
         );
-        assert!(open(&peer_key(5, 0xa0), packet).is_some());
+        let format = |packet| open(&peer_key(5, 0xa0), packet).map(|parts| parts.format);
+        assert_eq!(format(packet), Some(Format::Bridgeable));
         assert!(open(&peer_key(4, 0xa0), packet).is_none());
         let [(
             _,
             Op::Offer {
-                expires_at_secs, ..
+                packet,
+                expires_at_secs,
             },
         )] = &{
-            fx.keys.offer(&turn, &event, &mut OsRng);
+            fx.keys
+                .offer(&turn, &event, Format::NeverBridged, &mut OsRng);
             fx.keys.handoff.take()
         }[..]
         else {
@@ -2315,13 +2353,18 @@ mod tests {
             *expires_at_secs == EXPIRES_AT_SECS,
             "the offer does not carry its event's expiration"
         );
+        assert!(
+            format(packet) == Some(Format::NeverBridged),
+            "an offer made as never bridged does not say so in its packet"
+        );
 
         // A commit carries no expiration: not a shape a packet holds.
         let commit = EventBuilder::new(Kind::Custom(KIND_GROUP_MESSAGE), BASE64.encode([7; 120]))
             .tags([Tag::parse(["h", &hex::encode([0x70; 32])]).expect("a tag")])
             .sign_with_keys(&Keys::generate())
             .expect("sign");
-        fx.keys.offer(&turn, &commit, &mut Scripted::new(&[]));
+        fx.keys
+            .offer(&turn, &commit, Format::Bridgeable, &mut Scripted::new(&[]));
         assert!(fx.waiting().is_empty() && fx.costs().1 == 2);
     }
 
@@ -2329,48 +2372,94 @@ mod tests {
     /// with no engine hold — a leave asked, fetched input held — so one
     /// silenced after the check began and before the key sync read its turn
     /// is handed nothing by that send; the key the sync itself installs is
-    /// no such silence.
+    /// no such silence, and neither is the silence of another circle.
     #[test]
-    fn a_send_during_whose_check_a_circle_fell_silent_gets_no_turn() {
+    fn a_send_during_whose_check_its_circle_fell_silent_gets_no_turn() {
         let fx = on();
         let (one, two) = (circle(1), circle(2));
         fx.moves(&one, 4, 0xa0);
         fx.moves(&two, 9, 0xb0);
         let (event, _) = (location(), fx.waiting());
-        let checked = |silences| {
-            let caller = Caller::Send { silences };
-            fx.keys.align(&fx.engine, &one, NOW, caller)
+        let checked = |group: &GroupId, before| {
+            let caller = Caller::Send { before };
+            fx.keys.align(&fx.engine, group, NOW, caller)
         };
 
-        let silenced: [&dyn Fn(); 3] = [
-            &|| fx.keys.silence(&one),
-            &|| fx.keys.silence_all(),
-            // Any circle's: the count is the ring's.
-            &|| fx.keys.silence(&two),
-        ];
+        let silenced: [&dyn Fn(); 2] = [&|| fx.keys.silence(&one), &|| fx.keys.silence_all()];
         for silence in silenced {
-            let before = fx.keys.silences();
+            let before = fx.keys.before(&one);
             silence();
             assert!(
-                checked(before).is_none(),
+                checked(&one, before).is_none(),
                 "a send took the turn of a circle silenced while it checked"
             );
         }
         let _ = fx.waiting();
 
+        // Another circle's silence, and one of a circle the ring holds
+        // nothing of, are not this circle's: the send is offered.
+        let before = fx.keys.before(&one);
+        fx.keys.silence(&two);
+        fx.keys.silence(&circle(3));
+        let turn = checked(&one, before).expect("a turn");
+        let _ = fx.waiting();
+        offer(&fx, &turn, &event);
+        assert!(
+            matches!(&fx.waiting()[..], [(0, Some(_))]),
+            "another circle's silence cost this one its hand-off"
+        );
+
         // The sync installs the key of an epoch the ring had missed: that
         // silence is its own, and the send is offered.
         fx.engine.stands(&one, 5, 0xa0, 0x70);
-        let turn = checked(fx.keys.silences()).expect("a turn");
+        let turn = checked(&one, fx.keys.before(&one)).expect("a turn");
         let _ = fx.waiting();
         offer(&fx, &turn, &event);
         assert!(matches!(&fx.waiting()[..], [(0, Some(_))]));
 
         // The same install with a silence beside it: none.
         fx.engine.stands(&one, 6, 0xa0, 0x70);
-        let before = fx.keys.silences();
+        let before = fx.keys.before(&one);
         fx.keys.silence(&one);
-        assert!(checked(before).is_none() && fx.held(&one)[0] == (6, 0xa0));
+        assert!(checked(&one, before).is_none() && fx.held(&one)[0] == (6, 0xa0));
+
+        // A send that found the ring's lock held when it began gets none.
+        assert!(checked(&one, None).is_none());
+    }
+
+    /// A circle the ring holds nothing of — made since the last batch — has
+    /// no turn to read. Its first send installs its key and is offered; one
+    /// during whose check it fell silent, by itself or with every circle, is
+    /// not, though the ring kept no turn for it.
+    #[test]
+    fn a_circle_with_no_key_yet_that_fell_silent_while_a_send_checked_gets_no_turn() {
+        type Silence<'a> = &'a dyn Fn(&Fixture, &GroupId);
+        let silenced: [(Silence<'_>, bool); 4] = [
+            (&|_, _| {}, true),
+            (&|fx, group| fx.keys.silence(group), false),
+            (&|fx, _| fx.keys.silence_all(), false),
+            // A keyed circle's silence is not this one's.
+            (&|fx, _| fx.keys.silence(&circle(2)), true),
+        ];
+        for (silence, offered) in silenced {
+            let fx = on();
+            let (new, keyed) = (circle(1), circle(2));
+            fx.moves(&keyed, 9, 0xb0);
+            fx.engine.stands(&new, 4, 0xa0, 0x70);
+            let before = fx.keys.before(&new);
+            assert!(
+                matches!(before, Some((None, _))),
+                "premise: the ring holds nothing"
+            );
+            silence(&fx, &new);
+            let caller = Caller::Send { before };
+            let turn = fx.keys.align(&fx.engine, &new, NOW, caller);
+            assert!(
+                turn.is_some() == offered && fx.held(&new) == [(4, 0xa0)],
+                "a circle with no key yet was offered though it fell silent, or was not though \
+                 nothing silenced it"
+            );
+        }
     }
 
     /// A deadline that passed with no batch to see it is mesh off: turned on
@@ -2543,12 +2632,11 @@ mod tests {
     }
 
     /// An update is one event id, however many packets carry it: held once,
-    /// counted once, and its second packet is settled where it stands. Once
-    /// the engine took it in it is held no longer; a later packet of it is
-    /// offered to the engine again — which answers for a duplicate — and is
-    /// not counted again.
+    /// and its second packet is settled where it stands. Once the engine
+    /// took it in it is held no longer; a later packet of it is offered to
+    /// the engine again, which answers for a duplicate.
     #[test]
-    fn an_update_is_held_and_counted_once_by_its_event_id() {
+    fn an_update_is_held_once_by_its_event_id() {
         let fx = on();
         let group = circle(1);
         fx.moves(&group, 4, 0xa0);
@@ -2563,10 +2651,10 @@ mod tests {
             "premise: two packets of one event"
         );
 
-        assert!(fx.keys.hold(read(&fx, &first)) == (true, Vec::new()));
+        assert!(fx.keys.hold(read(&fx, &first)).is_empty());
         assert!(
-            fx.keys.hold(read(&fx, &again)) == (false, vec![again.id()]),
-            "a second packet of a held event was held or counted beside the first"
+            fx.keys.hold(read(&fx, &again)) == [again.id()],
+            "a second packet of a held event was held beside the first"
         );
         let due = fx.keys.due();
         assert!(due.len() == 1 && due[0].0 == group);
@@ -2575,8 +2663,8 @@ mod tests {
         assert!(fx.keys.taken_in(&group, &event.id) == Some(first.id()));
         assert!(fx.keys.due().is_empty() && fx.keys.taken_in(&group, &event.id).is_none());
         assert!(
-            fx.keys.hold(read(&fx, &later)) == (false, Vec::new()),
-            "an update the engine took in was counted again in another packet"
+            fx.keys.hold(read(&fx, &later)).is_empty(),
+            "a later packet of an update the engine took in was not offered to it again"
         );
         assert!(fx.keys.taken_in(&group, &event.id) == Some(later.id()));
     }
@@ -2592,16 +2680,17 @@ mod tests {
         fx.moves(&quiet, 9, 0xb0);
         let kept: Vec<Event> = (0..2).map(|_| location()).collect();
         for event in &kept {
-            assert!(fx.keys.hold(read(&fx, &packet_of(event, 9, 0xb0))) == (true, Vec::new()));
+            assert!(fx
+                .keys
+                .hold(read(&fx, &packet_of(event, 9, 0xb0)))
+                .is_empty());
         }
 
         let (mut packets, mut events, mut pushed_out) = (Vec::new(), Vec::new(), Vec::new());
         for _ in 0..HELD_PER_CIRCLE + 3 {
             let event = location();
             let packet = packet_of(&event, 4, 0xa0);
-            let (counted, settled) = fx.keys.hold(read(&fx, &packet));
-            assert!(counted);
-            pushed_out.extend(settled);
+            pushed_out.extend(fx.keys.hold(read(&fx, &packet)));
             packets.push(packet.id());
             events.push(event.id);
         }
@@ -2628,7 +2717,7 @@ mod tests {
     }
 
     /// What a circle holds goes with the circle and with mesh; a packet that
-    /// opened for a circle since forgotten is settled, not held or counted.
+    /// opened for a circle since forgotten is settled, not held.
     #[test]
     fn what_a_circle_holds_goes_with_the_circle_and_with_mesh() {
         let fx = on();
@@ -2638,13 +2727,16 @@ mod tests {
         let (event, other) = (location(), location());
         let packet = packet_of(&event, 4, 0xa0);
         let late = read(&fx, &packet_of(&other, 4, 0xa0));
-        assert!(fx.keys.hold(read(&fx, &packet)).0);
-        assert!(fx.keys.hold(read(&fx, &packet_of(&other, 9, 0xb0))).0);
+        assert!(fx.keys.hold(read(&fx, &packet)).is_empty());
+        assert!(fx
+            .keys
+            .hold(read(&fx, &packet_of(&other, 9, 0xb0)))
+            .is_empty());
 
         fx.keys.forget(&fx.engine, &one);
         assert!(fx.keys.due().len() == 1 && fx.keys.try_keys(&packet).is_none());
         let late_packet = late.packet;
-        assert!(fx.keys.hold(late) == (false, vec![late_packet]));
+        assert!(fx.keys.hold(late) == [late_packet]);
 
         assert!(fx.keys.turn_off(&fx.engine));
         assert!(fx.keys.due().is_empty());

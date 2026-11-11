@@ -40,6 +40,17 @@
 #     else of the mesh. That it calls no relay is not a textual fact and is
 #     held by `haven-core/tests/mesh_drive_e2e.rs`.
 #
+#   * THE MESH-ONLY SEAL. `Publishing::seal_for_mesh` seals a location for
+#     the mesh alone. It reads whether mesh is on (`mesh_is_on`) and names
+#     nothing else of the mesh: the mark is kept by the session, and the one
+#     hand-off above is where such a location meets the mesh, as the format no
+#     member passes on to a relay. `publish_location` reads the mark
+#     (`mesh_only`) and answers `MeshOnly`, the one variant of
+#     `LocationPublish` that names the mesh. That the seal calls no relay,
+#     and that a mesh-only location is never sent to one, is held by
+#     `haven-core/tests/mesh_only_e2e.rs` and by the source gates in
+#     `haven-core/tests/security_rule_gates.rs`.
+#
 # Later steps of the mesh add `bridge_locations` and
 # `publish_location_and_bridge` to `relay/fanout.rs`. Each is admitted by
 # adding a row to FANOUT_MAY_NAME below — the function, and the mesh items its
@@ -58,7 +69,8 @@
 #      `.reading(`, `.session`) nor `message_store`.
 #   3. `relay/fanout.rs` names a mesh item — any identifier containing `mesh`,
 #      in any case — only inside the body of a function listed in
-#      FANOUT_MAY_NAME, and only the items listed for it.
+#      FANOUT_MAY_NAME (or, for the one variant, the enum listed there), and
+#      only the items listed for it.
 #   4. `mesh_offer(` — the name followed by a parenthesis, however it is
 #      reached: a method call, `SessionManager::mesh_offer(&s, …)` — occurs
 #      exactly once outside its own `fn` in haven-core/src,
@@ -111,17 +123,20 @@ readonly -a NO_MESH=(
 )
 readonly NO_MESH_DIR='haven-core/src/relay/live_sync'
 
-# The functions of relay/fanout.rs whose bodies may name a mesh item, each
-# with the items it may name: `<declaration prefix>|<item> <item> …`. A later
-# step adds its function here, with exactly what it calls.
+# The functions of relay/fanout.rs whose bodies may name a mesh item — and
+# the one enum that declares a variant named for the mesh — each with the
+# items it may name: `<declaration prefix>|<item> <item> …`. A later step adds
+# its function here, with exactly what it calls.
 readonly -a FANOUT_MAY_NAME=(
-  'pub async fn publish_location(|mesh_offer'
+  'pub enum LocationPublish {|MeshOnly'
+  'pub async fn seal_for_mesh(|seal_for_mesh mesh_is_on'
+  'pub async fn publish_location(|mesh_offer mesh_only MeshOnly'
   'pub async fn mesh_drive(|mesh_drive MeshPacket MeshDrive mesh_read ingest_from_mesh mesh_taken_in fold_mesh_counts'
 )
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=37
+readonly SELF_TEST_FIXTURES=42
 
 readonly WORD='(^|[^A-Za-z0-9_])mesh([^A-Za-z0-9_]|$)'
 readonly ITEM='[A-Za-z0-9_]*[Mm][Ee][Ss][Hh][A-Za-z0-9_]*'
@@ -321,7 +336,23 @@ pub trait FanoutSend {
     async fn publish_location(&self, event: &Event, targets: &[String]) -> Sent;
 }
 
+pub enum LocationPublish {
+    Sent(Sent),
+    Expired,
+    Superseded,
+    /// Sealed by seal_for_mesh.
+    MeshOnly,
+}
+
 impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
+    pub async fn seal_for_mesh(&self, circle: &CircleManager, group_id: &GroupId) -> SealOutcome {
+        let session = circle.session();
+        if !session.mesh_is_on(now_ms) {
+            return deferred(SendHeld::Nothing);
+        }
+        circle.seal_location_staging(group_id, now_ms, true).await
+    }
+
     pub async fn publish_location(&self, circle: &CircleManager, event: &Event) -> LocationPublish {
         let session = circle.session();
         let record = session.location_to_send(&message).await;
@@ -332,6 +363,10 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
             return LocationPublish::Superseded;
         }
         session.mesh_offer(event, &record);
+        if record.mesh_only {
+            let _ = session.end_location(&message).await;
+            return LocationPublish::MeshOnly;
+        }
         let sent = self.fanout.publish_location(event, &record.relays).await;
         let _ = session.end_location(&message).await;
         LocationPublish::Sent(sent)
@@ -497,6 +532,26 @@ RS
   sed -i 's|        taken: Vec<crate::nostr::mls::MeshPacket>,|        taken: Vec<crate::mesh::packet::Packet>,|' "${t}/${FANOUT}"
   _case "the mesh module named in mesh_drive's own signature fails" 1 "${FANOUT} names the mesh module" "${t}"
 
+  t="${tmp}/seal-other-item"; _tree "${t}"
+  sed -i 's|        circle.seal_location_staging(group_id, now_ms, true).await|        session.mesh_sharing_stopped();\n        circle.seal_location_staging(group_id, now_ms, true).await|' "${t}/${FANOUT}"
+  _case "a mesh item seal_for_mesh is not admitted for fails" 1 "names the mesh item 'mesh_sharing_stopped'" "${t}"
+
+  t="${tmp}/seal-offers"; _tree "${t}"
+  sed -i 's|        circle.seal_location_staging(group_id, now_ms, true).await|        let _ = record.mesh_only;\n        circle.seal_location_staging(group_id, now_ms, true).await|' "${t}/${FANOUT}"
+  _case "the mark's own name read in seal_for_mesh, where only publish_location may, fails" 1 "names the mesh item 'mesh_only'" "${t}"
+
+  t="${tmp}/answer-elsewhere"; _tree "${t}"
+  sed -i 's|    async fn older(&self, circle: &CircleManager) {}|    async fn older(\&self, circle: \&CircleManager) -> LocationPublish { LocationPublish::MeshOnly }|' "${t}/${FANOUT}"
+  _case "the mesh-only answer made in another function of the driver fails" 1 "names the mesh item 'MeshOnly'" "${t}"
+
+  t="${tmp}/second-variant"; _tree "${t}"
+  sed -i 's|^    MeshOnly,$|    MeshOnly,\n    MeshBridged,|' "${t}/${FANOUT}"
+  _case "a second variant of the answer named for the mesh fails" 1 "names the mesh item 'MeshBridged'" "${t}"
+
+  t="${tmp}/seal-gone"; _tree "${t}"
+  sed -i 's|    pub async fn seal_for_mesh(|    pub async fn seal_for_radio(|' "${t}/${FANOUT}"
+  _case "a row whose function is gone is a misconfiguration, not a pass" 2 "does not declare 'pub async fn seal_for_mesh('" "${t}"
+
   # Check 4: the one hand-off.
   t="${tmp}/second-call"; _tree "${t}"
   sed -i 's|    async fn older(&self, circle: &CircleManager) {}|    async fn older(\&self, circle: \&CircleManager) { circle.session().mesh_offer(event, \&record); }|' "${t}/${FANOUT}"
@@ -527,7 +582,7 @@ RS
   _case "mesh_offer( before the expiry check fails" 1 "before publish_location's send-time checks" "${t}"
 
   t="${tmp}/after-send"; _tree "${t}"
-  sed -i '/session.mesh_offer(event, &record);/d; s|        let _ = session.end_location(&message).await;|        session.mesh_offer(event, \&record);\n        let _ = session.end_location(\&message).await;|' "${t}/${FANOUT}"
+  sed -i '/session.mesh_offer(event, &record);/d; s|        let sent = self.fanout.publish_location(event, &record.relays).await;|        let sent = self.fanout.publish_location(event, \&record.relays).await;\n        session.mesh_offer(event, \&record);|' "${t}/${FANOUT}"
   _case "mesh_offer( after the relay send fails" 1 "not called before publish_location's relay send" "${t}"
 
   # Check 5: the relay path's own files.

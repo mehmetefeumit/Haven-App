@@ -2141,6 +2141,11 @@ class BackgroundLocationTaskHandler extends TaskHandler {
                 LocationPublishFfi.inFlight:
               debugPrint('[BackgroundTask] sealed location not sent');
               continue;
+            // Handed to the mesh alone: no relay was asked, so nothing is
+            // stamped, nothing failed, and the circle stays due for its
+            // relays.
+            case LocationPublishFfi.meshOnly:
+              continue;
           }
 
           // Re-arm the whole burst so far onto ONE due (`nextBurstDue`), off

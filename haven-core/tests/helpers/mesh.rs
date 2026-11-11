@@ -3,17 +3,129 @@
 //! the test's own, and the hand-off through the drain the engine's owner
 //! makes.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use haven_core::location::LocationMessage;
 use haven_core::mesh::handoff::Op;
 use haven_core::mesh::packet::Packet;
-use haven_core::nostr::mls::types::GroupId;
+use haven_core::nostr::mls::types::{GroupId, PublishWork, SessionEffects, TransportMessage};
 use haven_core::relay::fanout::scripted::ScriptedFanout;
-use haven_core::relay::fanout::{DriveMode, LocationPublish, LocationSeal, Publishing};
-use nostr::Event;
+use haven_core::relay::fanout::{
+    DriveMode, FanoutSend, FanoutTargetOutcome, LocationPublish, LocationSeal, Publishing, Taken,
+    UnrecordedPublisher,
+};
+use haven_core::relay::{PublishResult, RelayResult};
+use nostr::{Event, EventId};
 
 use super::drive::{through, ManualClock, Recorder, HOUR_MS};
 use super::removals::store;
 use super::CircleMember;
+
+/// Relays that take everything, behind a count of every call made to them,
+/// of every kind: a relay taken, a record's event sent, a location sent, an
+/// event with no record published.
+#[derive(Default)]
+pub struct WatchedRelays {
+    calls: AtomicUsize,
+    inner: ScriptedFanout,
+}
+
+impl WatchedRelays {
+    /// How many calls of any kind were made.
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl FanoutSend for WatchedRelays {
+    async fn take(&self, target: &str) -> Option<Taken> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.take(target).await
+    }
+
+    async fn publish(
+        &self,
+        target: &str,
+        message: &TransportMessage,
+        taken: Taken,
+    ) -> FanoutTargetOutcome {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.publish(target, message, taken).await
+    }
+
+    async fn publish_location(
+        &self,
+        event: &Event,
+        targets: &[String],
+    ) -> RelayResult<PublishResult> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.publish_location(event, targets).await
+    }
+}
+
+impl UnrecordedPublisher for WatchedRelays {
+    fn publish_unrecorded<'a>(
+        &'a self,
+        _event: &'a Event,
+        _relays: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { true })
+    }
+}
+
+/// `device`, which asked to leave `group`, after a commit of the circle's
+/// admin moved the circle on: what the engine's full advance hands back —
+/// its leave, minted again for the epoch reached — as a call that died
+/// before recording it leaves it, and the id of that proposal's event.
+pub async fn a_leave_minted_again(
+    device: &CircleMember,
+    admin: &CircleMember,
+    peer: &CircleMember,
+    group: &GroupId,
+    relay: &str,
+) -> (SessionEffects, EventId) {
+    let transport = ScriptedFanout::default();
+    transport.answer(
+        relay,
+        [haven_core::relay::fanout::scripted::Answer::Accepted; 8],
+    );
+    let (outbox, clock) = (Recorder::acking(true), ManualClock::at(0));
+    let _ = through(&transport, &outbox, &clock, &DriveMode::Full)
+        .leave(&device.circle, group, &device.keys.public_key())
+        .await
+        .expect("the leave is proposed");
+    let commit = super::removals::confirmed(
+        admin,
+        &admin
+            .session()
+            .remove_members(group, &[peer.pubkey_hex()])
+            .await
+            .expect("the admin removes the peer"),
+    )
+    .await;
+    let _ = (device.session().process_event(&commit).await).expect("the commit is taken in");
+    let mut minted =
+        (device.session().settle_receive_for_test(group).await).expect("the commit is applied");
+    // A receive advance takes inputs only; the full one mints the leave again.
+    minted.publish.extend(
+        (device.session().advance_convergence(group).await)
+            .expect("the full advance")
+            .publish,
+    );
+    let proposal = minted
+        .publish
+        .iter()
+        .find_map(|work| match work {
+            PublishWork::Proposal { msg, .. } => EventId::from_slice(msg.id.as_slice()).ok(),
+            _ => None,
+        })
+        .expect("premise: the engine minted the leave again for the epoch the commit reached");
+    (minted, proposal)
+}
 
 /// One `mesh_keys` row: its epoch, routing id and secret.
 pub type KeyRow = (u64, [u8; 32], [u8; 32]);

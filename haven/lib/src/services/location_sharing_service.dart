@@ -205,6 +205,14 @@ final class LocationPublishInFlight extends LocationPublishOutcome {
   const LocationPublishInFlight();
 }
 
+/// The location was sealed for the Bluetooth mesh alone and handed to it.
+/// No relay was asked, so there is no relay verdict, and nothing held it.
+@immutable
+final class LocationPublishMeshOnly extends LocationPublishOutcome {
+  /// Creates a [LocationPublishMeshOnly].
+  const LocationPublishMeshOnly();
+}
+
 /// Service for sharing and receiving locations through circles.
 ///
 /// Coordinates the encryption, relay publishing, fetching, and
@@ -448,6 +456,8 @@ class LocationSharingService {
         return const LocationPublishDeferred();
       case LocationPublishFfi.inFlight:
         return const LocationPublishInFlight();
+      case LocationPublishFfi.meshOnly:
+        return const LocationPublishMeshOnly();
     }
   }
 

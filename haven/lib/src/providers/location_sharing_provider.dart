@@ -324,6 +324,9 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
             continue;
           case LocationPublishInFlight():
             continue;
+          // No relay was asked: neither a verdict nor a held send.
+          case LocationPublishMeshOnly():
+            continue;
           case LocationPublishSent(acked: final a):
             acked = a;
         }

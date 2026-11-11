@@ -324,6 +324,7 @@ void main() {
             LocationPublishSent(acked: false) => 'not acked',
             LocationPublishDeferred() => 'held',
             LocationPublishInFlight() => 'in flight',
+            LocationPublishMeshOnly() => 'mesh only',
           };
         }
 
@@ -339,6 +340,8 @@ void main() {
           LocationPublishFfi.superseded: 'held',
           LocationPublishFfi.ended: 'held',
           LocationPublishFfi.inFlight: 'in flight',
+          // Handed to the mesh alone: no relay verdict, and not held.
+          LocationPublishFfi.meshOnly: 'mesh only',
         });
       });
 

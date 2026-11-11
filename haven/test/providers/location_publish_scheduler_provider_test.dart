@@ -27,6 +27,7 @@ import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/sharing_health_provider.dart';
+import 'package:haven/src/rust/api.dart' show LocationPublishFfi;
 import 'package:haven/src/services/background_burst_coordinator.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -1249,6 +1250,28 @@ void main() {
         reason: 'a deferral is not a publish verdict — recording one would '
             'mis-attribute the outage to the relay plane',
       );
+    });
+
+    test('a send handed to the mesh alone routes to no health input',
+        () async {
+      // No relay was asked: there is no publish verdict to record, and
+      // nothing held the circle, so no deferral either. Recording one would
+      // tell the user their sharing is held, or that a relay failed.
+      final a = TestCircleFactory.createCircle(
+        mlsGroupId: const [1],
+        nostrGroupId: const [10],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+      );
+      final spy = _SpyHealthNotifier();
+      final env = build([a], health: spy);
+      final notifier = await ready(env.container);
+      env.mock.publishAnswers = [LocationPublishFfi.meshOnly];
+
+      await notifier.triggerTickForTest();
+
+      expect(env.mock.methodCalls, contains('publishSealedLocation'));
+      expect(spy.deferredKeys, isEmpty);
+      expect(spy.publishOutcomes, isEmpty);
     });
 
     test('the held line names no circle', () async {
