@@ -26,22 +26,31 @@
 #   5. HTTPS-only Blossom: no plaintext `http://` literal in profile code
 #      paths (loopback exempt — debug/e2e builds only), and the
 #      DEFAULT_BLOSSOM_SERVER constant must be an `https://` URL.
-#   6. Retraction no-op gate structurally bound at the RETRACTION SITE.
+#   6. Retraction no-op gate structurally bound at the PUBLISH SITE.
 #      Publishing a public profile is UNCONDITIONAL (public-by-default,
 #      owner-directed 2026-07-16, matching White Noise): there is no consent
 #      flag and normal publishers carry no gate. The one publish-side invariant
 #      that survives is the retraction no-op gate: every fn on the explicit
-#      retraction allowlist (CONSENT_GATE_EXEMPT_FNS — the ONLY fns that build a
-#      blank kind-0 republish / kind-5 deletion) must call has_published_profile()
-#      BEFORE it initiates that footprint, so a "delete/remove" action can never
-#      CREATE the first public event for a pubkey that never published (security
-#      review F2). Non-allowlisted publishers are NOT checked here (they publish
-#      unconditionally by design). Unit tests (#[cfg(test)] modules) are skipped
-#      (brace-walked out). A retraction fn that drops its has_published_profile()
-#      gate fails this check. Its second half (6b) pins the ORDER the two FFI
-#      retractions read that gate in: profile_sync_lock() must be taken BEFORE
-#      the gate read, or the gate decides on state an in-flight sync is about to
-#      change.
+#      allowlist (CONSENT_GATE_EXEMPT_FNS — the fns whose publish may carry NO
+#      saved content: the own-profile outbox pass, whose pending set may be a
+#      photo removal or an owed blank alone, and the FFI deletion's blank
+#      kind-0 / kind-5) must call has_published_profile() BEFORE it initiates
+#      that footprint, so a "delete/remove" action can never CREATE the first
+#      public event for a pubkey that never published (security review F2) —
+#      and must initiate the footprint in its OWN body: a publish moved into a
+#      helper is one the gate no longer binds, so an allowlisted fn with no
+#      footprint in its body fails, every footprint in the outbox file
+#      (circle/profile_sync.rs) must sit inside an allowlisted body, and the
+#      outbox pass and the FFI deletion must both be found. Non-allowlisted
+#      publishers are NOT checked here (they publish unconditionally by
+#      design). Unit tests (#[cfg(test)] modules) are skipped (brace-walked
+#      out). 6b pins the ORDER: profile_sync_lock() must be taken BEFORE the
+#      gate read, in the outbox pass and the FFI deletion alike, or the gate
+#      decides on state an in-flight sync is about to change. 6c pins that the
+#      FFI photo removal is a LOCAL edit — it stages the removal
+#      (stage_own_picture_removal, confined to its definition, the manager
+#      pass-through and that fn) and names no footprint, relay client, secret,
+#      sync lock or relay read — so the outbox pass publishes it under the gate.
 #   7+ further structural checks; the last one (15) confines the sanitized-upload
 #      types (ProcessedAvatar / StagedPicture) — their construction to
 #      haven-core/src/avatar, the cache constructor and the staging entry point
@@ -108,27 +117,33 @@ KIND0_CTORS='::Custom|::from_u16|::Other|\.custom|\.fromU16'
 KIND0_PATTERN="Kind::Metadata|Kind\.metadata|EventBuilder::metadata|Kind(${KIND0_CTORS})?[[:space:]]*\([[:space:]]*0[[:space:]]*\)"
 
 # ---------------------------------------------------------------------------
-# Retraction allowlist (checks 4+6) — the ONLY fns that build a profile event
-# by way of a blank kind-0 republish / kind-5 deletion. Normal publishing is
-# unconditional (public-by-default), so publishers carry no gate; retraction is
-# special because it must be a no-op for a never-published pubkey:
+# Retraction allowlist (checks 4+6) — the fns whose publish may carry NO saved
+# content: a blank kind-0 republish / kind-5 deletion, or the own-profile
+# outbox pass, whose pending set may be a photo removal or an owed blank alone.
+# Normal publishing is unconditional (public-by-default), so publishers carry
+# no gate; a publish that may carry nothing saved is special because it must be
+# a no-op for a never-published pubkey:
 #
-#   * check 4 still confines these fns to the profile module / FFI block;
-#   * check 6 requires each allowlisted fn to be gated on
-#     has_published_profile() BEFORE the event construction, so a retraction
-#     can never mint a first public event for a pubkey that never published
-#     (security review F2).
+#   * check 4 still confines kind-0 construction to the profile module / FFI
+#     block, which is where these fns build their events;
+#   * check 6 requires each allowlisted fn to initiate its footprint in its own
+#     body and to be gated on has_published_profile() BEFORE it, so a
+#     retraction can never mint a first public event for a pubkey that never
+#     published (security review F2); 6b requires the sync lock to be taken
+#     EARLIER in that same body.
 #
 # Extending this list is a deliberate, reviewable act: a name may be added
-# ONLY for a builder that is provably incapable of emitting new profile
-# content (blank kind-0 or kind-5 deletion only). Names per plan §4.1/§5.
+# ONLY for a publisher whose event may carry no saved content (a blank kind-0,
+# a kind-5 deletion, or the outbox pass that publishes a pending removal).
+# Names per plan §4.1/§5 and the profile instant-save plan §4.2.
 # ---------------------------------------------------------------------------
 readonly -a CONSENT_GATE_EXEMPT_FNS=(
   delete_public_profile      # historical core name (plan D10); no such fn exists today — kept so
                              # the allowlist stays a superset if it is reintroduced.
   delete_my_public_profile   # FFI: blank kind-0 + kind-5 retraction (plan §5). NOT a Blossom
                              # DELETE — none exists in the profile module; the blob survives.
-  remove_my_profile_picture  # FFI: clears the picture field via retraction republish (plan §5)
+  sync_own_profile           # core: publishes the outbox; a pending set with nothing saved
+                             # (photo removal, owed blank) must never mint a first public event
 )
 
 # ---------------------------------------------------------------------------
@@ -236,6 +251,422 @@ location_vetting_violations() {
 }
 
 # ---------------------------------------------------------------------------
+# Shared fn-body machinery for checks 6, 6b, 6c and 15, defined ahead of the
+# --self-test dispatch because the planted-violation fixtures exercise it.
+# ---------------------------------------------------------------------------
+
+# Comment-aware view (m7 technique): strips /* */ and // — ONE output line per
+# input line (line numbers preserved). Char-level, not string-aware: a URL's
+# `//` truncates the rest of that line, which is safe here because none of the
+# check-6 tokens can legitimately share a line with a URL literal.
+code_view() {
+  awk "${LITERAL_FREE}"'
+    {
+      line = $0; out = ""; i = 1; n = length(line)
+      while (i <= n) {
+        if (inblock) {
+          e = index(substr(line, i), "*/")
+          if (e == 0) { i = n + 1 } else { i += e + 1; inblock = 0 }
+        } else {
+          two = substr(line, i, 2)
+          if (two == "/*") { inblock = 1; i += 2 }
+          else if (two == "//") { i = n + 1 }
+          else { out = out substr(line, i, 1); i += 1 }
+        }
+      }
+      print out
+    }' "$1"
+}
+
+# Blanks the code of any numbered line ("<lineno>:<code>", as emitted by
+# extract_code) that sits inside a `#[cfg(test)]` module, brace-walked the same
+# way check_consent_gate marks test lines. Line numbers are preserved (blanked
+# lines keep their "<lineno>:" prefix) so reporting stays accurate and no scan
+# is shifted. Used by check 5's http:// scan — production Blossom traffic stays
+# strictly HTTPS-only, while test code may assert require_https REJECTS a
+# non-loopback http:// URL (which necessarily requires the literal) — and by
+# production_code below. Rust-only by construction — Dart/FFI sources have no
+# `#[cfg(test)]` mod so they pass through unchanged.
+strip_test_modules() {
+  awk "${LITERAL_FREE}"'
+    {
+      match($0, /^[0-9]+/); lineno[NR] = substr($0, 1, RLENGTH)
+      code[NR] = substr($0, RLENGTH + 2)
+    }
+    END {
+      depth = 0; intest = 0; pending = 0; testdepth = 0
+      for (j = 1; j <= NR; j++) {
+        t = code[j]
+        if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
+        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+        tmp = lfree; c = gsub(/[}]/, "", tmp)
+        if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
+          intest = 1; testdepth = depth; pending = 0
+        }
+        istest[j] = intest
+        depth += o - c
+        if (intest && depth <= testdepth) intest = 0
+      }
+      for (j = 1; j <= NR; j++) {
+        if (istest[j]) print lineno[j] ":"
+        else print lineno[j] ":" code[j]
+      }
+    }'
+}
+
+# Emits "<lineno>:<code>" for a file's PRODUCTION Rust only: comments stripped
+# (code_view, so a token in a doc comment is not a call) and `#[cfg(test)]`
+# module bodies blanked (strip_test_modules, so fixtures are free to construct
+# and stage whatever they like). Line numbers are preserved either way.
+production_code() {
+  code_view "$1" | grep -nE '.*' | strip_test_modules
+}
+
+# Fails unless every PRODUCTION call of a token lives in one of the allowed
+# files. $1 = identifier, $2 = failure message, $3.. = allowed file paths.
+#
+# Anchored on a non-identifier boundary AND a following `(` so a longer
+# identifier that merely ENDS in the token never matches, and a bare fn
+# reference is not mistaken for a call. Definition lines are not special-cased:
+# every definition already lives in an allowed file.
+confine_calls() {
+  local token="$1" desc="$2"
+  shift 2
+  local -a allowed=("$@")
+  local -a candidates=()
+  local f a is_allowed hits found=""
+  mapfile -t candidates < <(grep -rlE --include='*.rs' \
+    "(^|[^A-Za-z0-9_])${token}[[:space:]]*\(" "${CORE_SRC_DIR}" "${API_FILE}" 2>/dev/null | sort)
+  for f in "${candidates[@]}"; do
+    is_allowed=""
+    for a in "${allowed[@]}"; do
+      if [[ "${f}" == "${a}" ]]; then is_allowed="yes"; break; fi
+    done
+    if [[ -n "${is_allowed}" ]]; then continue; fi
+    hits="$(production_code "${f}" \
+      | grep -E "(^|[^A-Za-z0-9_])${token}[[:space:]]*\(" || true)"
+    if [[ -n "${hits}" ]]; then
+      found+="$(printf '%s\n' "${hits}" | sed "s#^#${f}:#")"$'\n'
+    fi
+  done
+  if [[ -n "${found}" ]]; then
+    printf '%s' "${found}" >&2
+    fail "${desc}"
+  fi
+}
+
+# Fails unless every PRODUCTION call of a token inside ONE file sits within one
+# named fn's body (check-6 fn-body-span walk). $1 = file, $2 = identifier,
+# $3 = fn name, $4 = failure message.
+confine_calls_to_fn() {
+  local file="$1" token="$2" target="$3" desc="$4" hits
+  hits="$(code_view "${file}" | awk -v file="${file}" -v target="${target}" \
+    -v tokre="(^|[^A-Za-z0-9_])${token}[[:space:]]*[(]" "${LITERAL_FREE}"'
+    { lines[NR] = $0 }
+    END {
+      n = NR
+      # Pass 1: mark `#[cfg(test)]` mod bodies (brace-walked), as check 6 does.
+      depth = 0; intest = 0; pending = 0; testdepth = 0
+      for (j = 1; j <= n; j++) {
+        t = lines[j]
+        if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
+        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+        tmp = lfree; c = gsub(/[}]/, "", tmp)
+        if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
+          intest = 1; testdepth = depth; pending = 0
+        }
+        if (intest) in_test[j] = 1
+        depth += o - c
+        if (intest && depth <= testdepth) intest = 0
+      }
+      # Pass 2: the target fn body span.
+      lo = 0; hi = 0
+      for (i = 1; i <= n && !lo; i++) {
+        if (in_test[i]) continue
+        if (!match(lines[i], /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/)) continue
+        frag = substr(lines[i], RSTART, RLENGTH)
+        sub(/^.*fn[[:space:]]+/, "", frag)
+        if (frag != target) continue
+        depth = 0; seen = 0
+        for (j = i; j <= n; j++) {
+          t = lines[j]
+          lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+          tmp = lfree; c = gsub(/[}]/, "", tmp)
+          depth += o - c
+          if (o > 0) seen = 1
+          if (seen && depth <= 0) { lo = i; hi = j; break }
+          if (!seen && index(t, ";") > 0) break
+        }
+      }
+      # Pass 3: report every production call outside that span. With no span at
+      # all (fn renamed or gone) EVERY call is outside it, which is the correct
+      # answer: the confinement no longer describes anything.
+      for (i = 1; i <= n; i++) {
+        if (in_test[i]) continue
+        if (lines[i] !~ tokre) continue
+        if (lo && i >= lo && i <= hi) continue
+        printf "%s:%d: outside fn %s\n", file, i, target
+      }
+    }')"
+  if [[ -n "${hits}" ]]; then
+    printf '%s\n' "${hits}" >&2
+    fail "${desc}"
+  fi
+}
+
+# Emits "<lineno>:<code>" for the whole span (signature line to closing brace)
+# of the first PRODUCTION fn named $4 that starts between lines $2 and $3 of
+# $1, in code view; nothing when no such fn has a body there.
+fn_body_view() {
+  local file="$1" minline="$2" maxline="$3" target="$4"
+  code_view "${file}" | awk \
+    -v minline="${minline}" -v maxline="${maxline}" -v target="${target}" "${LITERAL_FREE}"'
+    { lines[NR] = $0 }
+    END {
+      n = NR
+      depth = 0; intest = 0; pending = 0; testdepth = 0
+      for (j = 1; j <= n; j++) {
+        t = lines[j]
+        if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
+        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+        tmp = lfree; c = gsub(/[}]/, "", tmp)
+        if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
+          intest = 1; testdepth = depth; pending = 0
+        }
+        if (intest) in_test[j] = 1
+        depth += o - c
+        if (intest && depth <= testdepth) intest = 0
+      }
+      for (i = 1; i <= n; i++) {
+        if (i < minline || i > maxline || in_test[i]) continue
+        if (!match(lines[i], /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/)) continue
+        frag = substr(lines[i], RSTART, RLENGTH)
+        sub(/^.*fn[[:space:]]+/, "", frag)
+        if (frag != target) continue
+        depth = 0; seen = 0; bodyless = 0
+        for (j = i; j <= n; j++) {
+          t = lines[j]
+          lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+          tmp = lfree; c = gsub(/[}]/, "", tmp)
+          depth += o - c
+          if (o > 0) seen = 1
+          if (seen && depth <= 0) break
+          if (!seen && index(t, ";") > 0) { bodyless = 1; break }
+        }
+        if (bodyless) continue
+        if (j > n) j = n
+        for (l = i; l <= j; l++) print l ":" lines[l]
+        exit
+      }
+    }'
+}
+
+# Footprint-call tokens for checks 6 and 6c (awk dynamic ERE — bracket forms
+# instead of backslash escapes, which `awk -v` would mangle). A "footprint
+# call" is a CALL to one of the primitives that create a public footprint: the
+# profile module's publishers (publish_metadata / offer_metadata), the relay
+# layer they stand on (publish_event / publish_profile_event /
+# offer_profile_event — named too, so a caller that skips the module's wrapper
+# is still a footprint), or upload_profile_picture (Blossom upload). Anchored on
+# a non-identifier boundary AND a following `(` so that (a) a longer identifier
+# that merely ENDS in a token — e.g. a wrapper named `retry_publish_metadata` —
+# never matches, and (b) only actual call sites, never a bare fn reference, are
+# caught.
+FOOTPRINT_TOKENS_AWK='(^|[^A-Za-z0-9_])(publish_metadata|offer_metadata|publish_event|publish_profile_event|offer_profile_event|upload_profile_picture)[[:space:]]*[(]'
+
+check_consent_gate() {
+  # $1 = file, $2 = first line to consider, $3 = last line to consider,
+  # $4 = "bind-all" to also require EVERY footprint call in the span to sit
+  # inside an allowlisted fn body, $5 = space-separated allowlisted names that
+  # MUST be found in the span. Emits one "file:line: ..." violation per
+  # offence; empty output = OK.
+  #
+  # Publishing is unconditional (public-by-default), so ordinary publishers are
+  # NOT checked. For every PRODUCTION fn whose NAME is on
+  # CONSENT_GATE_EXEMPT_FNS: its body must initiate a public footprint (a call
+  # to a footprint primitive) — one that does not has had its publish moved to
+  # a helper the gate does not bind — and has_published_profile() must precede
+  # the first such call (the retraction no-op gate). Any non-allowlist fn is
+  # skipped, except under "bind-all", where a footprint call outside every
+  # allowlisted body is itself the violation. #[cfg(test)] modules are
+  # brace-walked out.
+  local file="$1" minline="$2" maxline="$3" bind_all="${4:-}" required="${5:-}"
+  code_view "${file}" | awk \
+    -v file="${file}" -v minline="${minline}" -v maxline="${maxline}" \
+    -v retract_gate='has_published_profile' \
+    -v footre="${FOOTPRINT_TOKENS_AWK}" \
+    -v bind_all="${bind_all}" -v required="${required}" \
+    -v allow="${CONSENT_GATE_EXEMPT_FNS[*]}" "${LITERAL_FREE}"'
+    { lines[NR] = $0 }
+    END {
+      nallow = split(allow, aw, " ")
+      for (k = 1; k <= nallow; k++) allowset[aw[k]] = 1
+      nreq = split(required, rq, " ")
+      n = NR
+
+      # Pass 1: mark lines inside a `#[cfg(test)]` mod block (brace-walked) so
+      # unit tests that call the ungated primitives directly are not flagged.
+      depth = 0; intest = 0; pending = 0; testdepth = 0
+      for (j = 1; j <= n; j++) {
+        t = lines[j]
+        if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
+        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+        tmp = lfree; c = gsub(/[}]/, "", tmp)
+        if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
+          intest = 1; testdepth = depth; pending = 0
+        }
+        if (intest) in_test[j] = 1
+        depth += o - c
+        if (intest && depth <= testdepth) intest = 0
+      }
+
+      # Pass 2: per production fn ON THE RETRACTION ALLOWLIST, require a
+      # footprint call in its own body and has_published_profile() before the
+      # first one.
+      for (i = 1; i <= n; i++) {
+        if (i < minline || i > maxline) continue
+        if (in_test[i]) continue
+        if (!match(lines[i], /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/)) continue
+        frag = substr(lines[i], RSTART, RLENGTH)
+        sub(/^.*fn[[:space:]]+/, "", frag)
+        name = frag
+        # Walk the fn body by brace depth from the signature line. A `;`
+        # before the first `{` means a bodyless decl (trait sig) — skip it so
+        # the walk cannot leak into the next fn.
+        depth = 0; seen = 0; bodyless = 0
+        retline = 0; publine = 0
+        for (j = i; j <= n; j++) {
+          t = lines[j]
+          # Strip the fn declaration (`fn NAME`) from the line before footprint
+          # matching so a primitive definition line (e.g. `fn publish_metadata(`)
+          # cannot self-match a footprint token.
+          st = t
+          gsub(/(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/, " ", st)
+          if (!retline && index(t, retract_gate) > 0) retline = j
+          if (!publine && st ~ footre) publine = j
+          lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+          tmp = lfree; c = gsub(/[}]/, "", tmp)
+          depth += o - c
+          if (o > 0) seen = 1
+          if (seen && depth <= 0) break
+          if (!seen && index(t, ";") > 0) { bodyless = 1; break }
+        }
+        if (bodyless || !(name in allowset)) continue
+        found[name] = 1
+        if (j > n) j = n
+        for (l = i; l <= j; l++) covered[l] = 1
+        if (publine == 0) {
+          printf "%s:%d: fn %s (retraction allowlist) initiates no profile public footprint in its own body — its publish left the body where the has_published_profile() gate binds it\n", file, i, name
+          continue
+        }
+        if (retline == 0 || retline > publine)
+          printf "%s:%d: fn %s (retraction allowlist) initiates a profile public footprint without a preceding has_published_profile() no-op gate (retraction must never CREATE a first public event)\n", file, publine, name
+      }
+
+      # Pass 3 (bind-all): a footprint call outside every allowlisted body.
+      if (bind_all != "") {
+        for (i = 1; i <= n; i++) {
+          if (i < minline || i > maxline || in_test[i] || covered[i]) continue
+          st = lines[i]
+          gsub(/(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/, " ", st)
+          if (st ~ footre)
+            printf "%s:%d: profile public footprint outside every allowlisted fn body — a publish moved into a helper the has_published_profile() gate does not bind\n", file, i
+        }
+      }
+      for (k = 1; k <= nreq; k++)
+        if (!(rq[k] in found))
+          printf "%s:%d: fn %s (retraction allowlist) not found in the scanned span — the gate check would pass vacuously\n", file, minline, rq[k]
+    }'
+}
+
+check_lock_before_gate() {
+  # $1 = file, $2 = first line to consider, $3 = last line to consider.
+  # Emits one "file:line: ..." violation per offending fn; empty output = OK.
+  local file="$1" minline="$2" maxline="$3"
+  code_view "${file}" | awk \
+    -v file="${file}" -v minline="${minline}" -v maxline="${maxline}" \
+    -v lock='profile_sync_lock' \
+    -v retract_gate='has_published_profile' \
+    -v allow="${CONSENT_GATE_EXEMPT_FNS[*]}" "${LITERAL_FREE}"'
+    { lines[NR] = $0 }
+    END {
+      nallow = split(allow, aw, " ")
+      for (k = 1; k <= nallow; k++) allowset[aw[k]] = 1
+      n = NR
+
+      # Pass 1: mark `#[cfg(test)]` mod bodies (brace-walked), as check 6 does.
+      depth = 0; intest = 0; pending = 0; testdepth = 0
+      for (j = 1; j <= n; j++) {
+        t = lines[j]
+        if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
+        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+        tmp = lfree; c = gsub(/[}]/, "", tmp)
+        if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
+          intest = 1; testdepth = depth; pending = 0
+        }
+        if (intest) in_test[j] = 1
+        depth += o - c
+        if (intest && depth <= testdepth) intest = 0
+      }
+
+      # Pass 2: per production fn on the retraction allowlist that reads the
+      # gate, require the lock strictly EARLIER in the same body.
+      checked = 0
+      for (i = 1; i <= n; i++) {
+        if (i < minline || i > maxline) continue
+        if (in_test[i]) continue
+        if (!match(lines[i], /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/)) continue
+        frag = substr(lines[i], RSTART, RLENGTH)
+        sub(/^.*fn[[:space:]]+/, "", frag)
+        name = frag
+        if (!(name in allowset)) continue
+        depth = 0; seen = 0; bodyless = 0
+        gateline = 0; lockline = 0
+        for (j = i; j <= n; j++) {
+          t = lines[j]
+          if (!gateline && index(t, retract_gate) > 0) gateline = j
+          if (!lockline && index(t, lock) > 0) lockline = j
+          lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
+          tmp = lfree; c = gsub(/[}]/, "", tmp)
+          depth += o - c
+          if (o > 0) seen = 1
+          if (seen && depth <= 0) break
+          if (!seen && index(t, ";") > 0) { bodyless = 1; break }
+        }
+        if (bodyless || gateline == 0) continue
+        checked++
+        if (lockline == 0 || lockline >= gateline)
+          printf "%s:%d: fn %s (retraction allowlist) reads its has_published_profile() gate without having taken profile_sync_lock() on an EARLIER line of the same body\n", file, gateline, name
+      }
+      if (checked == 0)
+        printf "%s:%d: no allowlisted retraction fn reads has_published_profile() in the scanned span — the ordering check would pass vacuously\n", file, minline
+    }'
+}
+
+# Check 6c: emits one violation per way the FFI photo removal, in $1 between
+# lines $2 and $3, is not a purely LOCAL edit; empty output = OK. Its body must
+# call stage_own_picture_removal( and must name no footprint primitive, relay
+# client, identity secret, sync lock or relay read — the outbox pass publishes
+# the staged removal under the gate, so a removal that reached the network
+# itself would be a retraction the gate no longer sees.
+readonly REMOVAL_REACH_RE='RelayManager::new|keys_from_secret_bytes|profile_sync_lock|read_own_profile_on_relays|upload_profile_picture'
+removal_violations() {
+  local file="$1" minline="$2" maxline="$3" body hits
+  body="$(fn_body_view "${file}" "${minline}" "${maxline}" remove_my_profile_picture)"
+  if [[ -z "${body}" ]]; then
+    echo "${file}:${minline}: fn remove_my_profile_picture not found in the scanned span — the local-removal check would pass vacuously"
+    return
+  fi
+  hits="$(printf '%s\n' "${body}" | grep -E "${FOOTPRINT_TOKENS_AWK}|${REMOVAL_REACH_RE}" || true)"
+  if [[ -n "${hits}" ]]; then
+    printf '%s\n' "${hits}" | sed "s#^#${file}:#; s#\$#: remove_my_profile_picture reaches past the local row (a footprint, relay client, secret, sync lock or relay read)#"
+  fi
+  if ! printf '%s\n' "${body}" | grep -qE 'stage_own_picture_removal[[:space:]]*\('; then
+    echo "${file}:${minline}: remove_my_profile_picture does not call stage_own_picture_removal( — the removal is no longer the local outbox edit"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # --self-test: check 3's pattern against fixture lines. Every MDK v0.10.4 crate
 # must be caught — the pattern once named only the earlier `mdk` crates, so a
 # `use cgka_engine::…` in the profile module passed — and ordinary profile code
@@ -334,6 +765,165 @@ if [[ "${1:-}" == "--self-test" ]]; then
   st_expect_red 'an empty terminator' VETTED "${st_row_a}" \
     '| `wss://b.example` | pass | pass | pass | pass | pass | op-b |  |'
   log "self-test OK: checks 9b, 12b and 14b refuse every planted violation and pass the clean fixtures"
+
+  # Checks 6, 6b and 6c over planted fixtures. Each fixture is the shape the
+  # rule exists for; every one must fail, and the clean one must pass all
+  # three. Every window is the whole file.
+  st_gate() { # <file> [bind-all] [required...]: check 6 over the whole file
+    local f="$1"; shift
+    check_consent_gate "${f}" 1 999999999 "$@"
+  }
+  printf '%s\n' \
+    'use crate::profile::{build_metadata_event, offer_metadata, publish_metadata};' \
+    '' \
+    'impl CircleManager {' \
+    '    pub async fn sync_own_profile(&self, keys: &Keys) -> Result<ProfileSyncReport> {' \
+    '        let _guard = self.profile_sync_lock().lock().await;' \
+    '        let published_here = self.storage.has_published_profile(&own_pk)?;' \
+    '        let relay = RelayManager::new();' \
+    '        if let Some(debt) = self.storage.profile_publish_debt(&own_pk)? {' \
+    '            let offer = offer_metadata(&relay, &debt.event, &owed).await.ok();' \
+    '        }' \
+    '        let plan = self.plan_publish(&own_pk, published_here)?;' \
+    '        let event = build_metadata_event(keys, &plan.merged, None)?;' \
+    '        let result = offer_metadata(&relay, &event, &pool).await;' \
+    '        Ok(report)' \
+    '    }' \
+    '' \
+    '    fn plan_publish(&self, own_pk: &PublicKey, published_here: bool) -> Result<Plan> {' \
+    '        Ok(Plan { merged: "{}" })' \
+    '    }' \
+    '}' \
+    '' \
+    'impl RelayManagerFfi {' \
+    '    pub async fn remove_my_profile_picture(&self) -> Result<ProfileMetadataFfi, String> {' \
+    '        let now = profile_now_secs();' \
+    '        run_blocking(move || inner.stage_own_picture_removal(&own_hex, now)).await' \
+    '    }' \
+    '' \
+    '    pub async fn delete_my_public_profile(&self, secret: Vec<u8>) -> Result<(), String> {' \
+    '        let keys = keys_from_secret_bytes(secret)?;' \
+    '        let _sync_guard = self.inner.profile_sync_lock().lock().await;' \
+    '        let published_here = self.inner.has_published_profile(&own_pk)?;' \
+    '        if !published_here {' \
+    '            return Ok(());' \
+    '        }' \
+    '        let relay = RelayManager::new();' \
+    '        publish_metadata(&relay, &blank, &write_relays).await?;' \
+    '        Ok(())' \
+    '    }' \
+    '}' \
+    '' \
+    '#[cfg(test)]' \
+    'mod tests {' \
+    '    #[test]' \
+    '    fn a_fixture_publishes_ungated() {' \
+    '        let _ = offer_metadata(&relay, &event, &pool);' \
+    '    }' \
+    '}' > "${st_tmp}/retraction_clean.rs"
+  st_clean_gate="$(st_gate "${st_tmp}/retraction_clean.rs" bind-all 'sync_own_profile delete_my_public_profile')"
+  [[ -z "${st_clean_gate}" ]] || fail "self-test: check 6 refuses the clean fixture: ${st_clean_gate}"
+  st_clean_lock="$(check_lock_before_gate "${st_tmp}/retraction_clean.rs" 1 999999999)"
+  [[ -z "${st_clean_lock}" ]] || fail "self-test: check 6b refuses the clean fixture: ${st_clean_lock}"
+  st_clean_removal="$(removal_violations "${st_tmp}/retraction_clean.rs" 1 999999999)"
+  [[ -z "${st_clean_removal}" ]] || fail "self-test: check 6c refuses the clean fixture: ${st_clean_removal}"
+
+  # (a) The outbox pass offers the owed event before it reads the gate.
+  printf '%s\n' \
+    'impl CircleManager {' \
+    '    pub async fn sync_own_profile(&self, keys: &Keys) -> Result<ProfileSyncReport> {' \
+    '        let _guard = self.profile_sync_lock().lock().await;' \
+    '        let relay = RelayManager::new();' \
+    '        let offer = offer_metadata(&relay, &debt.event, &owed).await.ok();' \
+    '        let published_here = self.storage.has_published_profile(&own_pk)?;' \
+    '        let result = offer_metadata(&relay, &event, &pool).await;' \
+    '        Ok(report)' \
+    '    }' \
+    '}' > "${st_tmp}/retraction_offer_before_gate.rs"
+  [[ -n "$(st_gate "${st_tmp}/retraction_offer_before_gate.rs" bind-all sync_own_profile)" ]] \
+    || fail "self-test: check 6 lets sync_own_profile offer the owed kind-0 before its gate read"
+
+  # (b) One of the two offers moved into a helper the gate does not bind. The
+  # pass still publishes in its own body, so only the bind-all rule sees it.
+  printf '%s\n' \
+    'impl CircleManager {' \
+    '    pub async fn sync_own_profile(&self, keys: &Keys) -> Result<ProfileSyncReport> {' \
+    '        let _guard = self.profile_sync_lock().lock().await;' \
+    '        let published_here = self.storage.has_published_profile(&own_pk)?;' \
+    '        let relay = RelayManager::new();' \
+    '        self.resend_owed(&relay, &own_pk).await?;' \
+    '        let result = offer_metadata(&relay, &event, &pool).await;' \
+    '        Ok(report)' \
+    '    }' \
+    '' \
+    '    async fn resend_owed(&self, relay: &RelayManager, own_pk: &PublicKey) -> Result<()> {' \
+    '        let offer = offer_metadata(relay, &debt.event, &owed).await.ok();' \
+    '        Ok(())' \
+    '    }' \
+    '}' > "${st_tmp}/retraction_partial_helper.rs"
+  [[ -n "$(st_gate "${st_tmp}/retraction_partial_helper.rs" bind-all sync_own_profile)" ]] \
+    || fail "self-test: check 6 lets one of sync_own_profile's publishes move into an unbound helper"
+  [[ -z "$(st_gate "${st_tmp}/retraction_partial_helper.rs" '' sync_own_profile)" ]] \
+    || fail "self-test: check 6 refuses the partial helper move without the bind-all rule, so the rule proves nothing"
+
+  # (c) The gate is read before the lock is taken.
+  printf '%s\n' \
+    'impl CircleManager {' \
+    '    pub async fn sync_own_profile(&self, keys: &Keys) -> Result<ProfileSyncReport> {' \
+    '        let published_here = self.storage.has_published_profile(&own_pk)?;' \
+    '        let _guard = self.profile_sync_lock().lock().await;' \
+    '        let result = offer_metadata(&relay, &event, &pool).await;' \
+    '        Ok(report)' \
+    '    }' \
+    '}' > "${st_tmp}/retraction_gate_before_lock.rs"
+  [[ -n "$(check_lock_before_gate "${st_tmp}/retraction_gate_before_lock.rs" 1 999999999)" ]] \
+    || fail "self-test: check 6b lets sync_own_profile read its gate before taking the lock"
+
+  # (d) The photo removal publishes itself; a second one takes the secret and
+  # the lock and stages nothing; a file without the fn at all.
+  printf '%s\n' \
+    'impl RelayManagerFfi {' \
+    '    pub async fn remove_my_profile_picture(&self) -> Result<ProfileMetadataFfi, String> {' \
+    '        let row = inner.stage_own_picture_removal(&own_hex, now)?;' \
+    '        let _ = offer_metadata(&relay, &event, &pool).await;' \
+    '        Ok(row)' \
+    '    }' \
+    '}' > "${st_tmp}/removal_publishes.rs"
+  printf '%s\n' \
+    'impl RelayManagerFfi {' \
+    '    pub async fn remove_my_profile_picture(&self, secret: Vec<u8>) -> Result<(), String> {' \
+    '        let keys = keys_from_secret_bytes(secret)?;' \
+    '        let _sync_guard = self.inner.profile_sync_lock().lock().await;' \
+    '        Ok(())' \
+    '    }' \
+    '}' > "${st_tmp}/removal_locks.rs"
+  for f in removal_publishes removal_locks retraction_gate_before_lock; do
+    [[ -n "$(removal_violations "${st_tmp}/${f}.rs" 1 999999999)" ]] \
+      || fail "self-test: check 6c passes the planted removal fixture ${f}"
+  done
+  [[ -n "$(check_lock_before_gate "${st_tmp}/removal_publishes.rs" 1 999999999)" ]] \
+    || fail "self-test: check 6b passes vacuously over a file where no allowlisted fn reads the gate"
+
+  # (e) An allowlisted fn with no footprint in its own body — the whole
+  # publish moved to a helper, where the gate no longer binds it — and the
+  # same file asked for a name it does not hold.
+  printf '%s\n' \
+    'impl RelayManagerFfi {' \
+    '    pub async fn delete_my_public_profile(&self, secret: Vec<u8>) -> Result<(), String> {' \
+    '        let _sync_guard = self.inner.profile_sync_lock().lock().await;' \
+    '        let published_here = self.inner.has_published_profile(&own_pk)?;' \
+    '        self.retract(&keys, published_here).await' \
+    '    }' \
+    '' \
+    '    async fn retract(&self, keys: &Keys, published_here: bool) -> Result<(), String> {' \
+    '        publish_metadata(&relay, &blank, &write_relays).await' \
+    '    }' \
+    '}' > "${st_tmp}/retraction_no_footprint.rs"
+  [[ -n "$(st_gate "${st_tmp}/retraction_no_footprint.rs" '' delete_my_public_profile)" ]] \
+    || fail "self-test: check 6 lets an allowlisted fn keep no footprint in its own body"
+  [[ -n "$(st_gate "${st_tmp}/retraction_no_footprint.rs" '' sync_own_profile)" ]] \
+    || fail "self-test: check 6 passes vacuously when a required allowlisted fn is absent"
+  log "self-test OK: checks 6, 6b and 6c refuse every planted retraction fixture and pass the clean one"
   exit 0
 fi
 
@@ -473,42 +1063,6 @@ extract_code() {
   fi
 }
 
-# Blanks the code of any numbered line ("<lineno>:<code>", as emitted by
-# extract_code) that sits inside a `#[cfg(test)]` module, brace-walked the same
-# way check_consent_gate marks test lines. Line numbers are preserved (blanked
-# lines keep their "<lineno>:" prefix) so reporting stays accurate and no scan
-# is shifted. Used ONLY by check 5's http:// scan: production Blossom traffic
-# stays strictly HTTPS-only, while test code may assert require_https REJECTS a
-# non-loopback http:// URL (which necessarily requires the literal). Rust-only
-# by construction — Dart/FFI sources have no `#[cfg(test)]` mod so they pass
-# through unchanged.
-strip_test_modules() {
-  awk "${LITERAL_FREE}"'
-    {
-      match($0, /^[0-9]+/); lineno[NR] = substr($0, 1, RLENGTH)
-      code[NR] = substr($0, RLENGTH + 2)
-    }
-    END {
-      depth = 0; intest = 0; pending = 0; testdepth = 0
-      for (j = 1; j <= NR; j++) {
-        t = code[j]
-        if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
-        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
-        tmp = lfree; c = gsub(/[}]/, "", tmp)
-        if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
-          intest = 1; testdepth = depth; pending = 0
-        }
-        istest[j] = intest
-        depth += o - c
-        if (intest && depth <= testdepth) intest = 0
-      }
-      for (j = 1; j <= NR; j++) {
-        if (istest[j]) print lineno[j] ":"
-        else print lineno[j] ":" code[j]
-      }
-    }'
-}
-
 scan_profile_paths() {
   # $1 = human description, $2 = forbidden regex (ERE), $3 = optional label
   # filter (only scan sources with this label; empty = all), $4 = optional ERE
@@ -593,10 +1147,11 @@ scan_profile_paths \
 # so no Dart file — profile-named or not — may build kind-0). Whole-line
 # comments are dropped, mirroring the profile-path scans.
 #
-# The retraction builders (CONSENT_GATE_EXEMPT_FNS above) are NOT exempt from
-# this confinement — they live inside profile/; check 6 additionally requires
-# them to carry the has_published_profile() no-op gate. A kind-0 builder added
-# anywhere else fails here.
+# The retraction publishers (CONSENT_GATE_EXEMPT_FNS above) are NOT exempt from
+# this confinement — they build their events through the profile module's
+# builders; check 6 additionally requires them to carry the
+# has_published_profile() no-op gate. A kind-0 builder added anywhere else
+# fails here.
 # ---------------------------------------------------------------------------
 log "Scanning the complement (everything outside the profile module) for kind-0 construction ..."
 COMMENT_HIT='^[^:]+:[0-9]+:[[:space:]]*//'
@@ -663,19 +1218,28 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Check 6: retraction no-op gate structurally bound at the retraction SITE.
+# Check 6: retraction no-op gate structurally bound at the PUBLISH SITE.
 #
 # Publishing a public profile is unconditional (public-by-default), so ordinary
 # publishers carry no gate and are NOT checked here. The surviving invariant is
-# the retraction no-op gate: a "delete/remove" action must never CREATE the
-# first public event for a pubkey that never published (security review F2).
+# the retraction no-op gate: a publish that may carry nothing saved — the FFI
+# deletion's blank kind-0 / kind-5, or the own-profile outbox pass
+# (circle/profile_sync.rs) whose pending set may be a photo removal or an owed
+# blank alone — must never CREATE the first public event for a pubkey that
+# never published (security review F2).
 #
-# Function-body-span technique (check_m7_native_wake_guards.sh): for every
-# PRODUCTION Rust fn on the retraction allowlist (CONSENT_GATE_EXEMPT_FNS) whose
-# (comment-stripped) body INITIATES a public footprint — a CALL to a footprint
-# primitive (publish_metadata / publish_event, or upload_profile_picture) — a
-# call to has_published_profile() must appear BEFORE that first footprint. Any
-# fn NOT on the allowlist is skipped: it publishes unconditionally by design.
+# Function-body-span technique (check_m7_native_wake_guards.sh): every
+# PRODUCTION Rust fn on the retraction allowlist (CONSENT_GATE_EXEMPT_FNS) must
+# INITIATE a public footprint in its own (comment-stripped) body — a CALL to a
+# footprint primitive (publish_metadata / offer_metadata, the relay layer under
+# them, or upload_profile_picture) — and a call to has_published_profile() must
+# appear BEFORE the first one. An allowlisted fn with NO footprint in its body
+# is a violation: its publish moved into a helper, where the gate no longer
+# binds it. In the outbox file every footprint call must sit inside an
+# allowlisted body, so moving ONE of the pass's two publishes out cannot keep
+# this green either; and the outbox pass and the FFI deletion must both be
+# found, or the check would pass vacuously. Any other fn is skipped: it
+# publishes unconditionally by design.
 #
 # Unit tests (#[cfg(test)] modules) are excluded (brace-walked out). Token
 # reintroduction in dead comments cannot pass (the span is comment-stripped); a
@@ -684,114 +1248,8 @@ fi
 # ---------------------------------------------------------------------------
 log "Checking retraction no-op gate binding at profile retraction call sites ..."
 
-# Comment-aware view (m7 technique): strips /* */ and // — ONE output line per
-# input line (line numbers preserved). Char-level, not string-aware: a URL's
-# `//` truncates the rest of that line, which is safe here because none of the
-# check-6 tokens can legitimately share a line with a URL literal.
-code_view() {
-  awk "${LITERAL_FREE}"'
-    {
-      line = $0; out = ""; i = 1; n = length(line)
-      while (i <= n) {
-        if (inblock) {
-          e = index(substr(line, i), "*/")
-          if (e == 0) { i = n + 1 } else { i += e + 1; inblock = 0 }
-        } else {
-          two = substr(line, i, 2)
-          if (two == "/*") { inblock = 1; i += 2 }
-          else if (two == "//") { i = n + 1 }
-          else { out = out substr(line, i, 1); i += 1 }
-        }
-      }
-      print out
-    }' "$1"
-}
-
-# Footprint-call tokens for check 6 (awk dynamic ERE — bracket forms instead of
-# backslash escapes, which `awk -v` would mangle). A "footprint call" is a CALL
-# to one of the publish/upload primitives that create a public footprint:
-# publish_metadata / publish_event (relay publish), or upload_profile_picture
-# (Blossom upload). Anchored on a non-identifier boundary AND a following `(` so
-# that (a) a longer identifier that merely ENDS in a token — e.g. a wrapper
-# named `retry_publish_metadata` — never matches, and (b) only actual call
-# sites, never a bare fn reference, are caught.
-FOOTPRINT_TOKENS_AWK='(^|[^A-Za-z0-9_])(publish_metadata|publish_event|upload_profile_picture)[[:space:]]*[(]'
-
-check_consent_gate() {
-  # $1 = file, $2 = first line to consider, $3 = last line to consider.
-  # Emits one "file:line: ..." violation per offending fn; empty output = OK.
-  #
-  # Publishing is unconditional (public-by-default), so ordinary publishers are
-  # NOT checked. Only the retraction allowlist is enforced: for every PRODUCTION
-  # fn whose NAME is on CONSENT_GATE_EXEMPT_FNS and whose body initiates a public
-  # footprint (a call to a footprint primitive), require has_published_profile()
-  # to precede the first such call (the retraction no-op gate). Any non-allowlist
-  # fn is skipped. #[cfg(test)] modules are brace-walked out.
-  local file="$1" minline="$2" maxline="$3"
-  code_view "${file}" | awk \
-    -v file="${file}" -v minline="${minline}" -v maxline="${maxline}" \
-    -v retract_gate='has_published_profile' \
-    -v footre="${FOOTPRINT_TOKENS_AWK}" \
-    -v allow="${CONSENT_GATE_EXEMPT_FNS[*]}" "${LITERAL_FREE}"'
-    { lines[NR] = $0 }
-    END {
-      nallow = split(allow, aw, " ")
-      for (k = 1; k <= nallow; k++) allowset[aw[k]] = 1
-      n = NR
-
-      # Pass 1: mark lines inside a `#[cfg(test)]` mod block (brace-walked) so
-      # unit tests that call the ungated primitives directly are not flagged.
-      depth = 0; intest = 0; pending = 0; testdepth = 0
-      for (j = 1; j <= n; j++) {
-        t = lines[j]
-        if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
-        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
-        tmp = lfree; c = gsub(/[}]/, "", tmp)
-        if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
-          intest = 1; testdepth = depth; pending = 0
-        }
-        if (intest) in_test[j] = 1
-        depth += o - c
-        if (intest && depth <= testdepth) intest = 0
-      }
-
-      # Pass 2: per production fn ON THE RETRACTION ALLOWLIST, find the first
-      # footprint call and require has_published_profile() to precede it.
-      for (i = 1; i <= n; i++) {
-        if (i < minline || i > maxline) continue
-        if (in_test[i]) continue
-        if (!match(lines[i], /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/)) continue
-        frag = substr(lines[i], RSTART, RLENGTH)
-        sub(/^.*fn[[:space:]]+/, "", frag)
-        name = frag
-        # Walk the fn body by brace depth from the signature line. A `;`
-        # before the first `{` means a bodyless decl (trait sig) — skip it so
-        # the walk cannot leak into the next fn.
-        depth = 0; seen = 0; bodyless = 0
-        retline = 0; publine = 0
-        for (j = i; j <= n; j++) {
-          t = lines[j]
-          # Strip the fn declaration (`fn NAME`) from the line before footprint
-          # matching so a primitive definition line (e.g. `fn publish_metadata(`)
-          # cannot self-match a footprint token.
-          st = t
-          gsub(/(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/, " ", st)
-          if (!retline && index(t, retract_gate) > 0) retline = j
-          if (!publine && st ~ footre) publine = j
-          lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
-          tmp = lfree; c = gsub(/[}]/, "", tmp)
-          depth += o - c
-          if (o > 0) seen = 1
-          if (seen && depth <= 0) break
-          if (!seen && index(t, ";") > 0) { bodyless = 1; break }
-        }
-        if (bodyless || publine == 0) continue
-        if (!(name in allowset)) continue
-        if (retline == 0 || retline > publine)
-          printf "%s:%d: fn %s (retraction allowlist) initiates a profile public footprint without a preceding has_published_profile() no-op gate (retraction must never CREATE a first public event)\n", file, publine, name
-      }
-    }'
-}
+PROFILE_SYNC_FILE="${REPO_ROOT}/haven-core/src/circle/profile_sync.rs"
+[[ -f "${PROFILE_SYNC_FILE}" ]] || { echo "ERROR: ${PROFILE_SYNC_FILE} not found" >&2; exit 2; }
 
 gate_violations=""
 for f in "${core_profile_files[@]}"; do
@@ -800,104 +1258,80 @@ for f in "${core_profile_files[@]}"; do
     gate_violations+="${v}"$'\n'
   fi
 done
-v="$(check_consent_gate "${API_FILE}" "${api_begin_line}" "${api_end_line}")"
+v="$(check_consent_gate "${PROFILE_SYNC_FILE}" 1 999999999 bind-all sync_own_profile)"
+if [[ -n "${v}" ]]; then
+  gate_violations+="${v}"$'\n'
+fi
+v="$(check_consent_gate "${API_FILE}" "${api_begin_line}" "${api_end_line}" '' delete_my_public_profile)"
 if [[ -n "${v}" ]]; then
   gate_violations+="${v}"$'\n'
 fi
 if [[ -n "${gate_violations}" ]]; then
   printf '%s' "${gate_violations}" >&2
-  fail "retraction footprint without its has_published_profile() no-op gate — an allowlisted retraction builder must be structurally bound to has_published_profile() so it never CREATES a first public event"
+  fail "retraction footprint without its has_published_profile() no-op gate — an allowlisted publisher must initiate its footprint in its own body, after the gate read, so it never CREATES a first public event; a publish moved into a helper is one the gate no longer binds"
 fi
 
 # ---------------------------------------------------------------------------
 # Check 6b: the retraction lock is taken BEFORE the no-op gate is read.
 #
-# The FFI retractions hold CircleManager::profile_sync_lock() for their whole
-# body, and must take it BEFORE reading has_published_profile(). A sync commits
-# exactly the row that gate reads, so a gate evaluated outside the lock decides
-# on state an in-flight sync is about to change: the retraction then runs
-# against a snapshot that no longer holds, and the sync republishes the
-# just-retracted metadata with a NEWER created_at while every local check
-# reports success. Check 6 pins that the gate EXISTS; nothing pinned WHEN it is
-# read.
+# The outbox pass and the FFI deletion hold CircleManager::profile_sync_lock()
+# for their whole body, and must take it BEFORE reading has_published_profile().
+# A sync commits exactly the row that gate reads, so a gate evaluated outside
+# the lock decides on state an in-flight sync is about to change: the
+# retraction then runs against a snapshot that no longer holds, and the sync
+# republishes the just-retracted metadata with a NEWER created_at while every
+# local check reports success. Check 6 pins that the gate EXISTS; nothing
+# pinned WHEN it is read.
 #
-# Same fn-body-span walk as check 6, scoped to the api.rs profile block: the
-# lock lives in the FFI layer (`CircleManager::profile_sync_lock` exists
-# because the retraction bodies do), so only the allowlisted names PRESENT
-# there are checked — and if none of them is, the check fails rather than
-# passing vacuously.
+# Same fn-body-span walk as check 6, over the outbox file and the api.rs
+# profile block: only the allowlisted names PRESENT in each are checked — and
+# if none of them reads the gate there, that span fails rather than passing
+# vacuously. The lock must be taken in the SAME body as the gate read, which is
+# why both of the outbox pass's publishes stay in sync_own_profile's own body
+# rather than in an allowlisted helper.
 # ---------------------------------------------------------------------------
 log "Checking the retraction lock is taken before the no-op gate is read ..."
 
-check_lock_before_gate() {
-  # $1 = file, $2 = first line to consider, $3 = last line to consider.
-  # Emits one "file:line: ..." violation per offending fn; empty output = OK.
-  local file="$1" minline="$2" maxline="$3"
-  code_view "${file}" | awk \
-    -v file="${file}" -v minline="${minline}" -v maxline="${maxline}" \
-    -v lock='profile_sync_lock' \
-    -v retract_gate='has_published_profile' \
-    -v allow="${CONSENT_GATE_EXEMPT_FNS[*]}" "${LITERAL_FREE}"'
-    { lines[NR] = $0 }
-    END {
-      nallow = split(allow, aw, " ")
-      for (k = 1; k <= nallow; k++) allowset[aw[k]] = 1
-      n = NR
-
-      # Pass 1: mark `#[cfg(test)]` mod bodies (brace-walked), as check 6 does.
-      depth = 0; intest = 0; pending = 0; testdepth = 0
-      for (j = 1; j <= n; j++) {
-        t = lines[j]
-        if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
-        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
-        tmp = lfree; c = gsub(/[}]/, "", tmp)
-        if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
-          intest = 1; testdepth = depth; pending = 0
-        }
-        if (intest) in_test[j] = 1
-        depth += o - c
-        if (intest && depth <= testdepth) intest = 0
-      }
-
-      # Pass 2: per production fn on the retraction allowlist that reads the
-      # gate, require the lock strictly EARLIER in the same body.
-      checked = 0
-      for (i = 1; i <= n; i++) {
-        if (i < minline || i > maxline) continue
-        if (in_test[i]) continue
-        if (!match(lines[i], /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/)) continue
-        frag = substr(lines[i], RSTART, RLENGTH)
-        sub(/^.*fn[[:space:]]+/, "", frag)
-        name = frag
-        if (!(name in allowset)) continue
-        depth = 0; seen = 0; bodyless = 0
-        gateline = 0; lockline = 0
-        for (j = i; j <= n; j++) {
-          t = lines[j]
-          if (!gateline && index(t, retract_gate) > 0) gateline = j
-          if (!lockline && index(t, lock) > 0) lockline = j
-          lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
-          tmp = lfree; c = gsub(/[}]/, "", tmp)
-          depth += o - c
-          if (o > 0) seen = 1
-          if (seen && depth <= 0) break
-          if (!seen && index(t, ";") > 0) { bodyless = 1; break }
-        }
-        if (bodyless || gateline == 0) continue
-        checked++
-        if (lockline == 0 || lockline >= gateline)
-          printf "%s:%d: fn %s (retraction allowlist) reads its has_published_profile() gate without having taken profile_sync_lock() on an EARLIER line of the same body\n", file, gateline, name
-      }
-      if (checked == 0)
-        printf "%s:%d: no allowlisted retraction fn reads has_published_profile() in the profile FFI block — the ordering check would pass vacuously\n", file, minline
-    }'
-}
-
-lock_violations="$(check_lock_before_gate "${API_FILE}" "${api_begin_line}" "${api_end_line}")"
-if [[ -n "${lock_violations}" ]]; then
-  printf '%s' "${lock_violations}" >&2
-  fail "an FFI retraction reads its has_published_profile() no-op gate outside the own-profile sync lock — take CircleManager::profile_sync_lock() BEFORE the gate read and hold it for the whole body, or an in-flight sync republishes the metadata the retraction is removing with a NEWER created_at while every local check reports success"
+lock_violations="$(check_lock_before_gate "${PROFILE_SYNC_FILE}" 1 999999999)"
+v="$(check_lock_before_gate "${API_FILE}" "${api_begin_line}" "${api_end_line}")"
+if [[ -n "${v}" ]]; then
+  lock_violations+=$'\n'"${v}"
 fi
+if [[ -n "${lock_violations}" ]]; then
+  printf '%s\n' "${lock_violations}" >&2
+  fail "a retraction reads its has_published_profile() no-op gate outside the own-profile sync lock — take CircleManager::profile_sync_lock() BEFORE the gate read and hold it for the whole body, or an in-flight sync republishes the metadata the retraction is removing with a NEWER created_at while every local check reports success"
+fi
+
+# ---------------------------------------------------------------------------
+# Check 6c: the FFI photo removal is a LOCAL edit.
+#
+# `remove_my_profile_picture` stages the removal (stage_own_picture_removal:
+# one transaction that drops the photo's bytes, clears the row and queues the
+# clear) and nothing more; the outbox pass publishes it under the lock and the
+# gate (check 6). A removal that read the gate itself, outside the lock, could
+# find "never published" while a first publish is in flight and stage nothing,
+# and that publish would then commit the photo as synced; one that published
+# itself would be a retraction the gate no longer sees. So its body names no
+# footprint primitive, no relay client, no identity secret, no sync lock and no
+# relay read, and must call stage_own_picture_removal( — which in turn is
+# called only from its definition, the CircleManager pass-through and that fn.
+# ---------------------------------------------------------------------------
+log "Checking the FFI photo removal stays a local edit ..."
+
+removal="$(removal_violations "${API_FILE}" "${api_begin_line}" "${api_end_line}")"
+if [[ -n "${removal}" ]]; then
+  printf '%s\n' "${removal}" >&2
+  fail "remove_my_profile_picture is no longer a purely local edit — it must stage the removal with stage_own_picture_removal() and touch no footprint primitive, relay client, identity secret, sync lock or relay read; the outbox pass (sync_own_profile) publishes the removal under the lock and the no-op gate"
+fi
+
+confine_calls 'stage_own_picture_removal' \
+  "stage_own_picture_removal() called outside its definition (haven-core/src/circle/storage_profile_sync.rs), the CircleManager pass-through (manager.rs) and the FFI photo removal (api.rs) — the clear it queues is published by the outbox pass, so nothing else may stage one" \
+  "${REPO_ROOT}/haven-core/src/circle/storage_profile_sync.rs" \
+  "${REPO_ROOT}/haven-core/src/circle/manager.rs" \
+  "${API_FILE}"
+
+confine_calls_to_fn "${API_FILE}" 'stage_own_picture_removal' 'remove_my_profile_picture' \
+  "the FFI stages an own-picture removal outside remove_my_profile_picture — that fn is the one local removal entry point check 6c binds, so staging a clear anywhere else in api.rs would queue a retraction publish from a path the check does not see"
 
 # ---------------------------------------------------------------------------
 # Check 7: the §1.7 union invariant — kind-0 fetches must cover the union of
@@ -1495,14 +1929,6 @@ if [[ "${sanitizer_call}" != "OK" ]]; then
   fail "the FFI own-picture save must call process_own_avatar inside save_my_profile_picture_local's own body (found: '${sanitizer_call:-nothing}') — raw picker bytes enter there and are staged for a public Blossom upload, so the EXIF/GPS-stripping re-encode has to happen on that exact path"
 fi
 
-# Emits "<lineno>:<code>" for a file's PRODUCTION Rust only: comments stripped
-# (code_view, so a token in a doc comment is not a call) and `#[cfg(test)]`
-# module bodies blanked (strip_test_modules, so fixtures are free to construct
-# and stage whatever they like). Line numbers are preserved either way.
-production_code() {
-  code_view "$1" | grep -nE '.*' | strip_test_modules
-}
-
 # The production view of api.rs still reaches its live-sync bridge near the end
 # of its production code: a brace inside a literal once cut such a walk short
 # at about line 11282, and every check over api.rs below would then see only
@@ -1510,98 +1936,6 @@ production_code() {
 if ! grep -qE '^[0-9]+:.*fn live_event_to_ffi\(' <<<"$(production_code "${API_FILE}")"; then
   fail "[view] the production view of api.rs ends before its live-sync bridge (fn live_event_to_ffi): the brace walk was cut short, or the function was renamed."
 fi
-
-# Fails unless every PRODUCTION call of a token lives in one of the allowed
-# files. $1 = identifier, $2 = failure message, $3.. = allowed file paths.
-#
-# Anchored on a non-identifier boundary AND a following `(` so a longer
-# identifier that merely ENDS in the token never matches, and a bare fn
-# reference is not mistaken for a call. Definition lines are not special-cased:
-# every definition already lives in an allowed file.
-confine_calls() {
-  local token="$1" desc="$2"
-  shift 2
-  local -a allowed=("$@")
-  local -a candidates=()
-  local f a is_allowed hits found=""
-  mapfile -t candidates < <(grep -rlE --include='*.rs' \
-    "(^|[^A-Za-z0-9_])${token}[[:space:]]*\(" "${CORE_SRC_DIR}" "${API_FILE}" 2>/dev/null | sort)
-  for f in "${candidates[@]}"; do
-    is_allowed=""
-    for a in "${allowed[@]}"; do
-      if [[ "${f}" == "${a}" ]]; then is_allowed="yes"; break; fi
-    done
-    if [[ -n "${is_allowed}" ]]; then continue; fi
-    hits="$(production_code "${f}" \
-      | grep -E "(^|[^A-Za-z0-9_])${token}[[:space:]]*\(" || true)"
-    if [[ -n "${hits}" ]]; then
-      found+="$(printf '%s\n' "${hits}" | sed "s#^#${f}:#")"$'\n'
-    fi
-  done
-  if [[ -n "${found}" ]]; then
-    printf '%s' "${found}" >&2
-    fail "${desc}"
-  fi
-}
-
-# Fails unless every PRODUCTION call of a token inside ONE file sits within one
-# named fn's body (check-6 fn-body-span walk). $1 = file, $2 = identifier,
-# $3 = fn name, $4 = failure message.
-confine_calls_to_fn() {
-  local file="$1" token="$2" target="$3" desc="$4" hits
-  hits="$(code_view "${file}" | awk -v file="${file}" -v target="${target}" \
-    -v tokre="(^|[^A-Za-z0-9_])${token}[[:space:]]*[(]" "${LITERAL_FREE}"'
-    { lines[NR] = $0 }
-    END {
-      n = NR
-      # Pass 1: mark `#[cfg(test)]` mod bodies (brace-walked), as check 6 does.
-      depth = 0; intest = 0; pending = 0; testdepth = 0
-      for (j = 1; j <= n; j++) {
-        t = lines[j]
-        if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
-        lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
-        tmp = lfree; c = gsub(/[}]/, "", tmp)
-        if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
-          intest = 1; testdepth = depth; pending = 0
-        }
-        if (intest) in_test[j] = 1
-        depth += o - c
-        if (intest && depth <= testdepth) intest = 0
-      }
-      # Pass 2: the target fn body span.
-      lo = 0; hi = 0
-      for (i = 1; i <= n && !lo; i++) {
-        if (in_test[i]) continue
-        if (!match(lines[i], /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/)) continue
-        frag = substr(lines[i], RSTART, RLENGTH)
-        sub(/^.*fn[[:space:]]+/, "", frag)
-        if (frag != target) continue
-        depth = 0; seen = 0
-        for (j = i; j <= n; j++) {
-          t = lines[j]
-          lfree = literal_free(t); tmp = lfree; o = gsub(/[{]/, "", tmp)
-          tmp = lfree; c = gsub(/[}]/, "", tmp)
-          depth += o - c
-          if (o > 0) seen = 1
-          if (seen && depth <= 0) { lo = i; hi = j; break }
-          if (!seen && index(t, ";") > 0) break
-        }
-      }
-      # Pass 3: report every production call outside that span. With no span at
-      # all (fn renamed or gone) EVERY call is outside it, which is the correct
-      # answer: the confinement no longer describes anything.
-      for (i = 1; i <= n; i++) {
-        if (in_test[i]) continue
-        if (lines[i] !~ tokre) continue
-        if (lo && i >= lo && i <= hi) continue
-        printf "%s:%d: outside fn %s\n", file, i, target
-      }
-    }')"
-  if [[ -n "${hits}" ]]; then
-    printf '%s\n' "${hits}" >&2
-    fail "${desc}"
-  fi
-}
 
 log "Checking the sanitized-cache constructor and the staging entry point stay confined ..."
 confine_calls 'from_sanitized_cache' \
@@ -1642,4 +1976,4 @@ if ! grep -A6 -E 'pub[[:space:]]+fn[[:space:]]+stage_own_profile_picture[[:space
   exit 2
 fi
 
-log "OK: public-profile privacy boundaries hold — no Image.network, no circle/group tokens, import boundary intact (incl. no discovery plane), kind-0 confined to the profile module, HTTPS-only Blossom, retraction no-op gate bound at every retraction call site, union-only kind-0 fetch entry points, one author per kind-0 REQ, CSPRNG-only randomness (the location pool's included), no profile-plane NIP-65, every named plane-separation test present, no lib-test install of the profile- or location-pool override, the Dart fallback relay lists still mirror their Rust constants, every profile-pool relay ships with a recorded pass/pass vetting row (retirees stay out), every location-pool relay ships with a recorded L1-L4 pass row, operator and terminator (no operator twice), every uploadable picture is constructed by the sanitizer alone, the cache constructor and the staging entry point stay confined to their named callers, and both FFI retractions read their no-op gate under the sync lock."
+log "OK: public-profile privacy boundaries hold — no Image.network, no circle/group tokens, import boundary intact (incl. no discovery plane), kind-0 confined to the profile module, HTTPS-only Blossom, retraction no-op gate bound at every retraction call site, union-only kind-0 fetch entry points, one author per kind-0 REQ, CSPRNG-only randomness (the location pool's included), no profile-plane NIP-65, every named plane-separation test present, no lib-test install of the profile- or location-pool override, the Dart fallback relay lists still mirror their Rust constants, every profile-pool relay ships with a recorded pass/pass vetting row (retirees stay out), every location-pool relay ships with a recorded L1-L4 pass row, operator and terminator (no operator twice), every uploadable picture is constructed by the sanitizer alone, the cache constructor and the staging entry point stay confined to their named callers, the outbox pass and the FFI deletion initiate their footprint in their own body and read their no-op gate under the sync lock, every footprint in the outbox file sits inside an allowlisted body, and the FFI photo removal is a local edit that only stages the clear."

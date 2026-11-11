@@ -1626,24 +1626,6 @@ class AppLocalizationsHi extends AppLocalizations {
       'सहेजना विफल, फिर कोशिश करें';
 
   @override
-  String get profileSyncStatusSyncing =>
-      'आपकी सार्वजनिक प्रोफ़ाइल पर सिंक हो रहा है…';
-
-  @override
-  String get profileSyncStatusPartial =>
-      'प्रकाशित — कुछ रिले पर अभी भी सिंक हो रहा है';
-
-  @override
-  String get profileSyncStatusSynced => 'सार्वजनिक प्रोफ़ाइल अपडेट है';
-
-  @override
-  String get profileSyncStatusFailed => 'अभी तक सिंक नहीं हो सका।';
-
-  @override
-  String get profileSyncStatusRetrySemantics =>
-      'अपनी प्रोफ़ाइल प्रकाशित करने के लिए फिर कोशिश करें';
-
-  @override
   String get npubQrCopiedSnack => 'सार्वजनिक कुंजी क्लिपबोर्ड पर कॉपी की गई';
 
   @override
@@ -1716,8 +1698,7 @@ class AppLocalizationsHi extends AppLocalizations {
   String get photoHeaderChangePhotoSemantics => 'प्रोफ़ाइल फ़ोटो बदलें';
 
   @override
-  String get avatarPickerPhotoUpdated =>
-      'फ़ोटो अपडेट हुई। यह आपकी सार्वजनिक Nostr प्रोफ़ाइल पर प्रकाशित होगी।';
+  String get avatarPickerPhotoUpdatedAnnouncement => 'फ़ोटो अपडेट की गई।';
 
   @override
   String get avatarPickerPhotoRemoved => 'फ़ोटो हटाई गई।';

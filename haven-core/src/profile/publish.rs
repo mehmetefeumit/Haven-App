@@ -17,13 +17,13 @@
 //! * [`build_blank_metadata_event`] — the retraction builder (empty `{}`,
 //!   bypasses the name rule). Together with
 //!   [`build_nip09_deletion`](crate::relay::publishers::build_nip09_deletion)
-//!   these form the retraction allowlist honored by
-//!   `scripts/ci/check_profile_privacy_boundaries.sh`
-//!   (`delete_public_profile` / `delete_my_public_profile` /
-//!   `remove_my_profile_picture`). They emit blank/deletion content only and,
-//!   per the retraction no-op gate, are reached only when
-//!   `has_published_profile()` — a retraction must never mint the *first* public
-//!   event for a pubkey that never published.
+//!   it is what `delete_my_public_profile` publishes. That fn and
+//!   `sync_own_profile` (whose pending set may be a photo removal or an owed
+//!   blank alone) are the retraction allowlist of
+//!   `scripts/ci/check_profile_privacy_boundaries.sh`: each reads
+//!   `has_published_profile()` under the sync lock before anything leaves the
+//!   device, so a publish carrying no saved content never mints the *first*
+//!   public event for a pubkey that never published.
 //!
 //! No group identifiers ever appear here: kind-0 events carry no `h` tag and
 //! no group id (test-pinned).
@@ -195,6 +195,31 @@ pub async fn publish_metadata(
             "no relay accepted the event".to_string(),
         ))
     }
+}
+
+/// Offers a signed kind-0 to `relays` once, each relay sent the moment its
+/// own connect succeeds.
+///
+/// Every relay's bucket is returned even when none accepted: the sync pass
+/// decides coverage from the buckets and a read-back, so a refusal is an
+/// answer here, not an error.
+///
+/// # Errors
+///
+/// * [`ProfileError::NoRelays`] if `relays` is empty.
+/// * [`ProfileError::Relay`] if a relay URL is not dialable.
+pub async fn offer_metadata(
+    relay: &RelayManager,
+    event: &Event,
+    relays: &[String],
+) -> Result<PublishResult> {
+    if relays.is_empty() {
+        return Err(ProfileError::NoRelays);
+    }
+    relay
+        .offer_profile_event(event, relays)
+        .await
+        .map_err(ProfileError::relay)
 }
 
 #[cfg(test)]
@@ -618,5 +643,76 @@ mod tests {
             matches!(err, ProfileError::NoRelays),
             "the only remaining precondition is a non-empty relay set"
         );
+    }
+
+    // ---- offer_metadata ----------------------------------------------------
+
+    use crate::relay::scripted_relay::{ScriptedRelay, Verdict};
+
+    fn an_event() -> Event {
+        build_metadata_event(
+            &Keys::generate(),
+            &ProfileMetadata::from_metadata(Metadata::new().display_name("Alice")),
+            None,
+        )
+        .expect("build")
+    }
+
+    #[tokio::test]
+    async fn offer_metadata_fails_closed_on_empty_relays() {
+        let relay = RelayManager::new();
+        let err = offer_metadata(&relay, &an_event(), &[])
+            .await
+            .expect_err("empty relays must fail closed");
+        assert!(matches!(err, ProfileError::NoRelays));
+    }
+
+    #[tokio::test]
+    async fn offer_metadata_maps_a_refused_relay_url_to_a_relay_error() {
+        let relay = RelayManager::new();
+        let err = offer_metadata(
+            &relay,
+            &an_event(),
+            &["http://not-a-relay.example".to_string()],
+        )
+        .await
+        .expect_err("a plaintext http url is no relay");
+        assert!(matches!(err, ProfileError::Relay(_)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn offer_metadata_offers_without_any_consent_gate() {
+        // Publishing is unconditional (public-by-default): a non-empty relay
+        // set is the only precondition, and the event reaches the relay.
+        let live = ScriptedRelay::start();
+        let event = an_event();
+        let result = offer_metadata(&RelayManager::new(), &event, &[live.url().to_string()])
+            .await
+            .expect("an offer to a live relay is a harvest");
+        assert_eq!(result.accepted_by.len(), 1, "{result:?}");
+        assert_eq!(
+            live.published().iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![event.id],
+            "the relay holds the offered event, byte for byte"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn offer_metadata_reports_a_refusal_as_a_bucket_not_an_error() {
+        // The sync pass reads each relay's bucket (and reads the relay back);
+        // collapsing "nobody accepted" into an `Err` would hide which relays
+        // answered.
+        let refuser = ScriptedRelay::start();
+        refuser.on_publish(|_| Verdict::Refuse("blocked: not here".to_string()));
+        let result = offer_metadata(
+            &RelayManager::new(),
+            &an_event(),
+            &[refuser.url().to_string()],
+        )
+        .await
+        .expect("a refusing relay still answered");
+        assert!(result.accepted_by.is_empty() && !result.is_success());
+        assert_eq!(result.rejected_by.len(), 1);
+        assert_eq!(refuser.offers(), 1, "an offer is one attempt");
     }
 }

@@ -17,8 +17,8 @@
 ///   state on the Identity page.
 /// - Local saves publish UNCONDITIONALLY — there is no consent gate
 ///   (public-by-default, owner-directed 2026-07-16, matching the White Noise
-///   reference app). Retraction ([ProfileService.removeOwnAvatar]) is, as
-///   before, always allowed.
+///   reference app). Retraction ([ProfileService.removeOwnAvatar]) is local
+///   like every save; the next sync publishes it.
 /// - Bytes are re-fetched per use from the encrypted Rust store (Rule 9);
 ///   this provider holds no long-lived secret material.
 library;

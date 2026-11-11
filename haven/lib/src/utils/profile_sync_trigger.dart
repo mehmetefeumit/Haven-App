@@ -23,10 +23,10 @@ import 'package:haven/src/providers/profile_sync_provider.dart';
 
 /// Runs one own-profile sync pass immediately, unconditionally.
 ///
-/// Use right after a local save (`ProfileService.updateOwnProfile` /
-/// `ProfileService.setOwnAvatar` returning), where a fresh edit is known to
-/// be pending — the point of a save is for it to reach the network as soon
-/// as possible.
+/// Use right after a local save (`ProfileService.updateOwnProfile`,
+/// `ProfileService.setOwnAvatar` or `ProfileService.removeOwnAvatar`
+/// returning), where a fresh edit is known to be pending — the point of a
+/// save is for it to reach the network as soon as possible.
 ///
 /// Fire-and-forget: never throws to the caller and does not await network
 /// completion, so it is safe to call from a widget that may unmount before
@@ -39,11 +39,8 @@ void triggerProfileSync(WidgetRef ref) {
 
 /// Syncs only if the local outbox is pending AND the persisted backoff
 /// permits another attempt now — never unconditionally (relay metadata
-/// minimization). The resume/cold-start entry point, and what a photo
-/// removal calls afterwards: the removal can publish what was waiting, and
-/// with nothing left pending this only re-reads the status. It only re-reads
-/// it, too, for a removal some relay did not take: that one is left waiting
-/// with its first retry not yet due.
+/// minimization); when pending but not due it arms the controller's retry
+/// timer instead. The resume/cold-start entry point.
 ///
 /// Fire-and-forget, same contract as [triggerProfileSync].
 void triggerProfileSyncRetry(WidgetRef ref) {

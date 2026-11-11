@@ -477,7 +477,7 @@ async fn a_profile_edit_staged_before_the_update_does_not_survive_the_reset() {
             .expect("the pre-update circle store");
         let edits = PendingEdits {
             display_name: Some("Unsent Pseudonym".to_string()),
-            about: None,
+            ..PendingEdits::default()
         };
         old.stage_own_profile_edits(&me, &edits, 1_700_000_000)
             .expect("stage the name");

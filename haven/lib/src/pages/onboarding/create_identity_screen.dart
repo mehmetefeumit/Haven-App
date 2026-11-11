@@ -196,9 +196,7 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
     // (3)(4) Persist locally, then trigger the public kind-0 publish.
     // Publishing is unconditional (public-by-default, owner-directed). The
     // publish itself is fire-and-forget (`triggerProfileSync`) so a
-    // slow/unreachable relay can never stall entry into the app; its
-    // progress is what `ProfileSyncStatusLine` reports later, on the
-    // Identity page.
+    // slow/unreachable relay can never stall entry into the app.
     try {
       await ref.read(identityServiceProvider).setDisplayName(name);
       if (!mounted) return;

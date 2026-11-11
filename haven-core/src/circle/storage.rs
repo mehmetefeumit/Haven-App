@@ -1401,14 +1401,14 @@ impl CircleStorage {
             -- Two coverage counters, because published and readable-by-every-
             -- peer are different facts: `published_version` is the newest
             -- version at least ONE relay acknowledged, `synced_version` the
-            -- newest version EVERY attempted relay acknowledged. A peer's
+            -- newest version EVERY usable pool relay serves. A peer's
             -- relay-assignment salt is private to their install, so an edit that
             -- landed on some relays is still the old name for anyone assigned
-            -- elsewhere. Hence: pending = `local_version > synced_version`;
-            -- partial = pending AND `published_version >= local_version`.
+            -- elsewhere. Hence: pending = `local_version > synced_version`.
             --
-            -- `edits_json` is the accumulated `PendingEdits` set (see
-            -- crate::profile::outbox), `picture_staged` marks sanitized bytes
+            -- `edits_json` is the accumulated `PendingEdits` set, a pending
+            -- photo removal included (see crate::profile::outbox),
+            -- `picture_staged` marks sanitized bytes
             -- cached with an empty `url` awaiting a Blossom upload, and
             -- `sync_attempts` / `next_retry_at` carry the persisted retry ladder
             -- (crate::profile::PROFILE_SYNC_BACKOFF_SECS) so an auto-retry
@@ -1422,6 +1422,19 @@ impl CircleStorage {
                 picture_staged    INTEGER NOT NULL DEFAULT 0,
                 sync_attempts     INTEGER NOT NULL DEFAULT 0,
                 next_retry_at     INTEGER NOT NULL DEFAULT 0
+            );
+
+            -- The one signed kind-0 the outbox still owes to part of the pool,
+            -- and the pool relays known to serve it (JSON array of URLs). A row
+            -- exists only for an event that carries every pending item at
+            -- `version` = `profile_sync_state.local_version` and that at least
+            -- one relay acknowledged; every write that bumps `local_version`
+            -- deletes it, so a retry can never re-send a superseded profile.
+            CREATE TABLE IF NOT EXISTS profile_publish_debt (
+                pubkey       TEXT    PRIMARY KEY,
+                version      INTEGER NOT NULL,
+                event_json   TEXT    NOT NULL,
+                covered_json TEXT    NOT NULL DEFAULT '[]'
             );
 
             -- Cached, re-encoded profile pictures. Keyed by pubkey (hex), again
@@ -6712,6 +6725,67 @@ mod tests {
             Some(12_345),
             "cursor must persist across reopen"
         );
+    }
+
+    // ==================== profile publish ledger ====================
+
+    fn table_columns(storage: &CircleStorage, table: &str) -> Vec<(String, i64)> {
+        let conn = storage.conn().lock().unwrap();
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let columns = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        columns
+    }
+
+    #[test]
+    fn the_profile_publish_debt_table_holds_one_signed_event_per_pubkey() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let columns = table_columns(&storage, "profile_publish_debt");
+        assert_eq!(
+            columns,
+            vec![
+                ("pubkey".to_string(), 1),
+                ("version".to_string(), 0),
+                ("event_json".to_string(), 0),
+                ("covered_json".to_string(), 0),
+            ],
+            "one row per pubkey (the primary key), replaced whole"
+        );
+        assert!(
+            table_columns(&storage, "profile_sync_state")
+                .iter()
+                .all(|(name, _)| name != "staged_picture_url"),
+            "a re-upload of the same bytes is idempotent; no upload URL is persisted"
+        );
+    }
+
+    #[test]
+    fn a_database_created_before_the_ledger_gains_the_table_on_open() {
+        // No migration: the open's `CREATE TABLE IF NOT EXISTS` batch is all an
+        // existing install needs.
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("circles.db");
+        let key = test_hex_key();
+        {
+            let storage = CircleStorage::new(&db_path, Some(&key)).unwrap();
+            storage
+                .conn()
+                .lock()
+                .unwrap()
+                .execute_batch("DROP TABLE profile_publish_debt")
+                .unwrap();
+            assert!(table_columns(&storage, "profile_publish_debt").is_empty());
+        }
+
+        let storage = CircleStorage::new(&db_path, Some(&key)).unwrap();
+        assert_eq!(table_columns(&storage, "profile_publish_debt").len(), 4);
     }
 }
 

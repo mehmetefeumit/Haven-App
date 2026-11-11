@@ -922,18 +922,19 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
             &alice.hex(),
             &PendingEdits {
                 display_name: Some("Quiet Wanderer".to_owned()),
-                about: None,
+                ..PendingEdits::default()
             },
             now,
         )
         .expect("the edit is staged");
     let synced = alice
         .circle
-        .sync_own_profile(&alice.keys, now)
+        .sync_own_profile(&alice.keys, || now)
         .await
         .expect("the sync runs");
     assert!(
-        synced.relays_acked == 3,
+        synced.outcome == haven_core::circle::ProfileSyncOutcome::Published
+            && !synced.still_pending,
         "the profile did not reach the whole profile pool"
     );
     let read = fetch_profiles_assigned(

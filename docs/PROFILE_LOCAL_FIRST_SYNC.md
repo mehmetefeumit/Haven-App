@@ -1,8 +1,10 @@
 # Own-profile editing: local-first outbox + honest sync (design record)
 
-**Status: SHIPPED 2026-08-22.** Supersedes the write-path section of
-`PUBLIC_PROFILE_MIGRATION_PLAN.md`. Read paths, privacy boundaries and the
-retraction gates described there are unchanged.
+**Status: SHIPPED 2026-08-22; write path and coverage SUPERSEDED 2026-11-10
+(instant save).** Supersedes the write-path section of
+`PUBLIC_PROFILE_MIGRATION_PLAN.md`. Read paths and privacy boundaries described
+there are unchanged; the photo removal's retraction gate moved into the sync
+(below), the deletion's stayed where it was.
 
 ## Why
 
@@ -15,91 +17,175 @@ worker and a 30 s-budget Blossom upload in front. The save button stayed
 disabled for the whole duration (worst ≈ 74 s / ≈ 104 s; typical 5–15 s), and a
 name save disabled the photo controls through a shared loading flag.
 
+The 2026-08-22 shape left three things the owner asked to be gone on
+2026-11-10: a visible sync status ("Syncing…", "Published — still syncing to
+some relays", a Retry button), a photo removal that was still a synchronous
+retraction with a spinner (1–2 s typical, ≤ ~29 s), and a partial-coverage
+retry that signed a NEW kind-0 for the WHOLE pool on every pass, forever —
+every relay that took a pass held a new public `created_at`, a mark of when
+the app was opened.
+
 ## What it is now
 
 The White Noise pattern (local-first save, background publish) with the one
 thing White Noise lacks: the UI never claims network success it did not get.
+The principle that reconciles that with "no hint of background work": **the UI
+claims device truth only.** "Saved", "Photo updated" and "Photo removed."
+assert that the device holds the edit and will publish it; no screen renders a
+relay outcome as a state of the profile. The durable outbox, the honesty of the
+*internal* state, and "complete = every usable pool relay serves it" all stay.
 
 ```
-save tap ──► stage edit locally (ms) ──► UI live again, status line: "Syncing…"
-                  │  durable outbox row (SQLCipher profile_sync_state)
-                  ▼
-          sync_own_profile (idempotent, serialized)
-            ├─ Blossom upload of staged picture  ∥  concurrent whole-pool
-            │                                       merge-base read (12 s budget)
-            ├─ merge_base → merge_edits → sign kind-0 → publish to EVERY pool
-            │  relay concurrently, each send bounded (6 s ack), ALL acks kept
-            └─ commit: full-pool ack ⇒ "synced"; ≥1 ack ⇒ "published, partial"
-               (stays pending; re-published opportunistically with persisted
-               exponential backoff); 0 acks ⇒ "failed" + Retry
+save / photo / remove tap ──► stage locally (ms): row rewritten, outbox row,
+        │                     local_version+1, ladder reset, owed event dropped
+        │                     (a removal also drops staged AND published bytes)
+        ▼  UI live at once; nothing on screen says synced, syncing or failed
+sync_own_profile(keys, clock)   (idempotent, serialized under profile_sync_lock;
+        │                        gate read `has_published_profile` before any footprint)
+        ├─ owed event for local_version?  ── yes ──► RE-SEND PASS
+        │      offer the IDENTICAL signed kind-0 only to uncovered(pool, covered)
+        │      read back each relay that answered: Holds ⇒ covered,
+        │      Newer ⇒ cache it, drop the debt, fall through to ONE full pass,
+        │      Lacks / not drained ⇒ still owed (timestamp refusal + Lacks ⇒
+        │      one fresh signing per edit, then owed)
+        │      commit_profile_coverage: covered ⊇ pool ⇒ clean; else ladder
+        └─ no ──► FULL PASS
+               Blossom upload of staged picture  ∥  read_own_profile_on_relays
+               (every pool relay at once, ≤ 5 s connect + 4 s REQ each)
+               cache the newest copy if newer than the row
+               nothing saved to publish (a clear alone / an owed blank)?
+                 retraction_gate ⇒ Publish | Settle (level locally, send nothing)
+                                           | Hold (stay on the ladder)
+               upload failed with text or a clear pending ⇒ publish text-only
+               merge_base → merge_edits → sign ONE kind-0 → offer_metadata to
+               EVERY pool relay, each sent as soon as its own connect succeeds
+               commit_profile_sync: every relay ⇒ clean; ≥1 ack ⇒ pending with
+               the event + covered set as the owed event, ladder advanced;
+               0 acks ⇒ pending, ladder advanced, nothing owed (signs fresh)
 ```
 
-Triggers: after every local save, on cold start and on app resume (only when
-the outbox is pending **and** the backoff says it is due), and the Retry
-button (bypasses backoff; shown only in the failed state). A photo removal is
-followed by a re-read of the status through the same due-gated entry
-(`triggerProfileSyncRetry`): it publishes only what is pending and due, and
-while a sync is in flight it neither starts nor queues another. Never from the
-background isolates.
+Triggers: `sync()` after every local save, photo and removal (unconditional; a
+fresh edit resets the ladder); `retryIfPending()` on cold start, on app resume
+and from ONE foreground timer armed to the ladder's relative due time
+(`next_retry_in_secs`) — only while the outbox is pending, the backoff is not
+yet due and the app is `resumed`; it is cancelled on pause/hide/detach and on
+an identity-scope reset, re-armed on resume, and never armed from a pass that
+left the state due. While a sync is in flight another trigger neither starts
+nor queues one. Never from the background isolates.
 
 ### Key pieces
 
 | Layer | Where | Role |
 |---|---|---|
-| Pure outbox logic | `haven-core/src/profile/outbox.rs` | `PendingEdits` (sparse, accumulating), `merge_base` (the fetched row is the base unless it is older than the local one — a superseded copy a relay replays is not built on; local row also on a total read miss; `created_at` floor = max(fetched, local)) |
-| Concurrent own read | `haven-core/src/profile/fetch.rs::fetch_own_profile` | whole pool, `buffer_unordered(PROFILE_MAX_INFLIGHT_RELAYS)`, `PROFILE_OWN_FETCH_BUDGET`; the answers are resolved together (newest `created_at`, lower id on a tie) |
-| Profile-plane publish | `haven-core/src/relay/manager.rs::publish_profile_event` | per-relay `send_event` under `PROFILE_PUBLISH_ACK_TIMEOUT`; no outer timeout; 2 attempts / 1 s backoff; location path untouched |
-| Durable outbox | `haven-core/src/circle/storage_profile_sync.rs` | `profile_sync_state` (local / synced / published versions, sparse `edits_json`, `picture_staged`, `sync_attempts`, `next_retry_at`); commit is one transaction with a compare-and-set clear |
-| Orchestration | `haven-core/src/circle/profile_sync.rs::sync_own_profile` | holds `profile_sync_lock`; outcomes, never `Err`, for upload/publish failures |
+| Pure outbox logic | `haven-core/src/profile/outbox.rs` | `PendingEdits` (sparse, accumulating; `clear_picture` + `clear_version` + the once-per-edit `resigned` marker ride in `edits_json`, no column), `merge_base` (the fetched row is the base unless it is older than the local one — a superseded copy a relay replays is not built on; local row also on a total read miss; `created_at` floor = max(fetched, local)), `served_against` (a relay's served kind-0s against ours by `(created_at, lower id)`: `Holds` / `Newer` / `Lacks`), `uncovered` (parsed-URL set difference, pool order), `owed_event_from_json` (`verify()` + own pubkey + kind 0 on load) |
+| Own read | `haven-core/src/profile/fetch.rs::read_own_profile_on_relays` on `read_own_per_relay` | every pool relay at once, each bounded by its own connect + `PROFILE_AUTHOR_FETCH_TIMEOUT` (together `PROFILE_OWN_READ_BOUND`, 9 s); events served before a missed `EOSE` are kept; `newest_own_copy` resolves across relays (newest `created_at`, lower id on a tie); `Published / Absent / Unverified` |
+| Profile-plane offer | `haven-core/src/relay/manager.rs::offer_profile_event` (`offer_metadata` in `profile/publish.rs`) | per relay concurrently: connect, then `send_event` under `PROFILE_PUBLISH_ACK_TIMEOUT`; a failed connect is `Unanswered`, never sent; ONE attempt, the full harvest returned even with no ack; `publish_profile_event` (2 attempts / 1 s backoff) stays for the deletion; location path untouched |
+| Retraction gate | `haven-core/src/profile/consent.rs::retraction_gate` | pure: `(published_here, OwnReadVerdict, local_dated) → Publish / Settle / Hold`; evaluated in `sync_own_profile` on what the pass will ACTUALLY publish |
+| Durable outbox + ledger | `haven-core/src/circle/storage_profile_sync.rs` | `profile_sync_state` (local / synced / published versions, sparse `edits_json`, `picture_staged`, `sync_attempts`, `next_retry_at`) and `profile_publish_debt` (`pubkey, version, event_json, covered_json`; `CREATE TABLE IF NOT EXISTS`, no migration); `stage_own_picture_removal`, `commit_profile_sync`, `profile_publish_debt` + `commit_profile_coverage`, `discard_profile_publish_debt`, `settle_profile_sync`; every commit is one transaction with a compare-and-set |
+| Orchestration | `haven-core/src/circle/profile_sync.rs::sync_own_profile` | holds `profile_sync_lock`; takes a clock so the backoff is dated at pass END; outcomes, never `Err`, for upload/publish failures; `ProfileSyncReport { outcome, still_pending }` (no counts) |
 | Sealed upload type | `haven-core/src/avatar/image.rs::StagedPicture` | only the sanitizer (or cache rehydration, which recomputes the hash) can mint bytes that reach Blossom |
-| FFI | `haven/rust_builder/src/api.rs` | `save_my_profile_local`, `save_my_profile_picture_local`, `sync_my_profile` (pending + pool pre-checks before any key is built), `profile_pending_state`; `get_cached_profile` is async |
-| Flutter | `providers/profile_sync_provider.dart`, `widgets/identity/profile_sync_status_line.dart` | one coalescing controller (unknown / syncing / partial / synced / failed), one status line at page scope, live region announces transitions only |
+| FFI | `haven/rust_builder/src/api.rs` | `save_my_profile_local`, `save_my_profile_picture_local`, `remove_my_profile_picture` (no secret, no lock, no relay: `stage_own_picture_removal`, returns the stored row), `sync_my_profile` (pending + pool pre-checks before any key is built; clock = `profile_now_secs`), `profile_pending_state` (`pending`, `retry_due`, `next_retry_in_secs: Option<u32>` — relative, ≤ the longest rung, never an instant); `delete_my_public_profile` keeps its own gate and lock; `get_cached_profile` is async |
+| Flutter | `providers/profile_sync_provider.dart` | one stateless coalescing `OwnProfileSyncController` (`Notifier<void>`, identity-scoped, non-autoDispose, absent from background isolates): `sync()` unconditional, `retryIfPending()` due-gated, the one foreground timer, a bare `WidgetsBindingObserver` that cancels it off-`resumed` and calls `retryIfPending()` on resume. No widget, no status, no Retry |
 
 ## Invariants this design adds (all CI- or test-pinned)
 
-- A local save publishes nothing; only a sync does (relay-side event count).
-- The outbox marker clears only for the version actually acked, and fully only
-  on a full-pool ack (`stage v1, stage v2, commit v1 ⇒ still pending`).
-- `delete_my_public_profile` / `remove_my_profile_picture` hold the sync lock
-  **before** reading the retraction gate (guard-checked), so an in-flight sync
-  cannot resurrect retracted data; their cancels are narrow (removing a photo
-  keeps a pending name edit — unless the removal is built on the cached row,
-  which already carries the name: it is then published with the removal and
-  the outbox records it as published, in the commit's own transaction). The
-  gate and the base come from ONE read of the pool, and a removal with no
-  relay copy and no dated row publishes nothing. A deletion leaves the dated
-  record of the blank it published as the own row — written with the record
-  of the publish in one transaction — so a relay that still serves the
-  deleted profile is neither cached again nor built on. A photo saved while a
-  removal runs is neither settled nor deleted by it, and a name the removal
-  did not publish — queued before it, or saved while it was being published
-  — stays queued and stays on the row.
-- A photo removal some pool relay did not acknowledge is never recorded as
-  synced: that relay still serves the photo. The removal's row, publish
-  record and coverage are one transaction (`commit_profile_sync`); with
-  nothing else pending it leaves the profile it published as a new pending
-  version, partly published, with the ladder advanced, so the next due sync
-  sends it to the whole pool again. With an edit pending it adds nothing —
-  that edit's sync republishes the whole profile to the whole pool, and the
-  edit must not read as partly published when no relay was sent it. The
-  blank a deletion publishes is owed the same way, by the same statement
-  (`write_unqueued_publish_owed`) in the wipe's own transaction
-  (`wipe_all_profiles`); its retry publishes a blank again, because the row
-  it builds on is the dated blank. Either backoff runs from when the
-  retraction was RECORDED, not from when it began, so the status re-read
-  that follows never finds the retry already due.
-- The copy a sync or a retraction reads for its base is cached when it is
-  newer than the row, BEFORE the publish: a publish that fails still leaves
-  the row at the newest copy read, so the retry cannot build on an older one
-  another relay serves (`a_newer_copy_read_for_a_publish_that_failed_is_what_the_retry_builds_on`).
+- A local save, photo or removal publishes nothing; only a sync does
+  (relay-side event count). The removal is one SQLCipher transaction with no
+  lock, no secret and no network: staged and published bytes deleted,
+  `picture` cleared on the row, `clear_picture` staged with `clear_version` =
+  the new `local_version`, ladder reset, owed event dropped.
+- The outbox marker clears only for the version actually published, and fully
+  only when every usable pool relay serves it (`stage v1, stage v2, commit v1
+  ⇒ still pending`).
+- **The owed event.** `profile_publish_debt` holds a row only for a COMPLETE
+  signed event (every pending item at `version == local_version`) that at
+  least one relay acknowledged, with the relays known to serve it. Every
+  staging call (text, picture, removal), the reset and a redirect delete it in
+  the same transaction, so a stale re-send can never put a superseded or
+  deleted profile back on a relay that missed the later event. It is
+  `verify()`-ed on load and dropped if the cached own row is newer than it (a
+  fetch cached another client's copy). A re-send goes only to
+  `uncovered(pool, covered)`; the OK of a re-send is ignored for coverage —
+  only a read-back that serves our id (`Holds`) covers a relay; `Newer`
+  redirects (cache, drop the debt, one full pass in the same call, never a
+  second); `Lacks` or an unfinished answer keeps it owed. Complete =
+  `covered ⊇ usable pool`, so a relay that leaves the pool (retired,
+  contaminated, removed by the user) ends its debt at the next pass with no
+  network.
+- A timestamp-classified refusal of the owed event (prefix only; the text is
+  never logged) with a `Lacks` read-back earns ONE fresh signing per edit
+  (`resigned`, reset by every staging call); a relay that refuses the fresh
+  event too simply stays owed on the ladder and can never force a new event
+  onto the healthy relays every pass.
+- **What clears a pending removal.** Staging a new photo does NOT reset the
+  clear; an uploaded URL wins over it in `to_edits`. Every commit at least one
+  relay acknowledged — complete, partial, text-only fallback, coverage —
+  clears `clear_picture` iff its version ≥ `clear_version` (by construction
+  such an event carried `picture ""` or a URL), inside that commit's
+  transaction, BEFORE the own row is rewritten from the event plus what is
+  still pending. A removal staged after a new photo gets a newer
+  `clear_version` and is still published; a partially published photo clears
+  the earlier removal and keeps its URL on the row; no later pass publishes
+  `picture ""` after a URL was published. `settle_profile_sync` never levels
+  a version with a staged photo.
+- **The gate lives where the publish is.** `sync_own_profile` reads
+  `has_published_profile` under the lock before any footprint. A pending set
+  with saved content (a text edit, a staged picture) publishes
+  unconditionally; one carrying nothing saved (a clear alone, an owed blank)
+  goes through `retraction_gate`, evaluated after the upload outcome is known:
+  Publish (a relay copy was found, or published here with a dated row), Settle
+  (never published and every relay answered Absent — leveled locally, nothing
+  sent, never a version with a staged photo), Hold (unanswered, or nothing to
+  build on — stays on the ladder; the old fail-closed, kept). The removal must
+  not read the gate itself: a tap-time read outside the lock could find "never
+  published" while a first publish is in flight and stage nothing, and that
+  publish would commit the photo as synced; always staging the clear closes it
+  (the in-flight commit's CAS fails on the moved `local_version`, its
+  `published_events` row arms the gate truthfully, the next pass publishes the
+  clear). `delete_my_public_profile` keeps its own lock, gate and
+  `PROFILE_RETRACTION_UNVERIFIED` fail-closed in `api.rs`.
+- The deletion's blank goes into the same ledger: `wipe_all_profiles` records
+  the blank's publication, dates the own row from it, and — when `covered`
+  does not cover the pool — owes it (`write_unqueued_publish_owed`) and writes
+  the debt row in the wipe's own transaction, so the retry re-sends the
+  identical blank; the kind-5 targets the id actually last published.
+- The copy a pass reads for its base is cached when it is newer than the row,
+  BEFORE the publish: a publish that fails still leaves the row at the newest
+  copy read, so the retry cannot build on an older one another relay serves
+  (`a_newer_copy_read_for_a_publish_that_failed_is_what_the_retry_builds_on`);
+  a redirect caches the newer copy before it discards the debt, so the rebuild's
+  floor includes it even if that relay does not answer the second read.
+- An upload failure no longer aborts the pass: a pending text edit or clear
+  publishes with the picture untouched (`to_edits(None)`), commits as
+  not-complete (no debt row; `picture_staged` and the edits kept; ladder
+  advanced). A successful commit re-stamps the staged picture row only
+  `WHERE sha256 = ?` of the uploaded bytes, so a photo picked mid-upload never
+  receives the previous photo's URL.
 - Staging never arms the retraction gate (picture rows with an empty URL do not
   count) and never disarms it (a seen kind-0 with `event_created_at > 0` counts).
 - Everything uploaded went through `process_own_avatar` (private fields on
   `StagedPicture`; guard check on constructors and staging call sites).
 - `profile_sync_state` rows are reset in place, never deleted (version reuse
   would let a stale sync clear a newer marker).
-- Auto-retries honour the persisted ladder; no unconditional network call on
-  start/resume; no profile-sync symbol in the background isolates.
+- Retries honour the persisted ladder; the foreground timer arms only when
+  pending, not due and `resumed`, never from a pass that left the state due;
+  no unconditional network call on start/resume; no profile-sync symbol in the
+  background isolates. The backoff is dated at pass end (a slow upload cannot
+  come back already due); a clock moved back past the longest rung reads as
+  due (one retry, never a loop).
+- Guard (`check_profile_privacy_boundaries.sh`): `sync_own_profile` is the
+  allowlisted fn whose publish may carry no saved content, with the gate read
+  bound lexically before the first footprint and the lock before the gate in
+  its OWN body; an allowlisted fn with no footprint in its body is a failure;
+  every footprint token (`offer_metadata`, `offer_profile_event`,
+  `publish_profile_event`) in `profile_sync.rs` sits inside an allowlisted body;
+  `remove_my_profile_picture` is held local (no footprint, no
+  `RelayManager::new`, no secret, no lock).
+- No relay URL, event id, pubkey, instant or relay prose reaches a log
+  (`a_resend_and_a_redirect_log_no_relay_url_event_id_or_pubkey`,
+  `a_profile_offer_logs_counts_only`,
+  `an_owed_event_that_does_not_verify_is_discarded_and_its_line_names_nothing`);
+  the report and the FFI state carry no counts and no instants.
 - The supplied identity secret must match the manager's construction identity.
 
 ## Deliberately rejected (do not re-add)
@@ -111,13 +197,49 @@ background isolates.
   each read from their own salted top-2) resolve the profile.
 - **Splitting the retraction functions out of `api.rs`** — the CI guard binds
   the consent gate to the first publish-footprint call in the *same* function
-  body; a wrapper would silently un-bind it.
+  body; a wrapper would silently un-bind it. *Superseded in form 2026-11-10
+  (OD-R2): the removal's publish moved into `sync_own_profile`, and the guard
+  now binds more tightly than before — an allowlisted fn with no footprint in
+  its own body fails, and every footprint token in `profile_sync.rs` must sit
+  inside an allowlisted body — so the reason for the rejection is closed, not
+  waived. The deletion stays in `api.rs`.*
 - **"Discard pending edit" action** — would create a path to a never-published
   profile, contradicting the owner's publish-unconditionally directive; editing
   again is the cancel.
 - **Taking the sync lock inside the local-save path** — it would serialize
   instant saves behind a background sync (the regression this work removes) to
   close a window that needs a whole-profile delete concurrent with a rename.
+- **A lock, a secret or a network read in the removal path** — the removal is
+  a save; the gate it used to read at tap time is read by the sync, under the
+  lock, on what the pass will actually publish.
+- **A new event per retry pass** — a new `created_at` and id on every relay
+  that takes a pass is a public mark of when the app was opened; the one
+  signed event is re-sent instead.
+- **Reading the OK string as coverage** — nostr-rs-relay and khatru answer OK
+  true to an OLDER replaceable, strfry answers OK false with a non-standard
+  prefix; an ack after a re-send proves only that the relay judged it.
+  Coverage is a read-back ordered by `(created_at, lowest id)`.
+- **Reading healthy relays before a re-send** — a round trip to every relay,
+  dead ones included, that still could not prove the send took. The send is
+  what should land; the read-back follows it, and only to relays that
+  answered the offer.
+- **A cap on a relay that never serves the event** (OD-R1) — the cost is one
+  dial, one EVENT and at most one REQ to that relay alone, foreground only, on
+  the 6 h rung; a cap would make "complete" untrue for that relay's readers.
+- **A `staged_picture_url` column** — a Blossom re-upload of the same bytes is
+  idempotent (BUD-02: 200 for an existing blob); the rare repeat is one PUT to
+  a host that already saw the hash, and a persisted URL could name a blob the
+  server has since collected.
+- **Skipping the read on a "first" publish** — an imported nsec has no local
+  trace of another client's fields; **starting the publish before every relay
+  answered the read** — a slow relay may hold the newest copy, and the
+  per-relay bound is already the floor.
+- **A visible sync status line** (and its Retry) — it rendered a relay outcome
+  as a state of the profile; the Identity page renders identically in every
+  publish state.
+- **A connectivity-package trigger** — link state is not reachability; it
+  would fire outside the ladder; a new dependency not justified.
+- **A timer that arms from a pass that left the state due** — a tight loop.
 
 ## Accepted costs
 
@@ -125,23 +247,34 @@ background isolates.
   client **added** since our last fetch is lost and a field it **changed** is
   reverted. Requires every pool relay to fail the read; accepted so offline
   edits are never stranded (pinned by test so nobody "fixes" it into deferral).
-- A partial-coverage publish — a save's, a photo removal's or a deletion's
-  blank — is retried once per due trigger by reading the pool and signing a
-  NEW kind-0 for the whole pool: the same content, `created_at` = the time
-  of the pass, hence a new event id. On the ladder that is at most four
-  passes in the first hour and then at most one per six hours, with **no
-  cap** while one pool relay never acknowledges, and every relay that takes
-  a pass holds a new public `created_at` — a mark of when the app was
-  opened. The debt ends only when every relay of the usable pool acknowledges
-  one pass, or when the relay that never does leaves the pool (retired in an
-  app release, or excluded as contaminated); until then the status reads
-  "published — still syncing to some relays". Not bounded yet: the owner
-  decision is whether to re-send the ONE signed event instead (healthy relays
-  then answer "duplicate" and store nothing), and when a relay that holds a
-  newer copy from another client — and so refuses the older event for good —
-  ends the debt.
-- Removing a photo is still a synchronous retraction (≈1–2 s typical, ≤ ~29 s
-  worst) — the honest shape for a destructive action; it shows a spinner.
+- **Resolved 2026-11-10 (was the open owner decision).** A partial-coverage
+  publish — a save's, a removal's or a deletion's blank — re-sends the ONE
+  signed event only to the relays that do not yet serve it, confirms by
+  reading each answering relay back, and is redirected onto a newer copy
+  another client wrote. On the ladder that is at most four passes in the
+  first hour and then at most one per six hours, with **no cap** (OD-R1)
+  while one usable pool relay never serves it: one dial, one EVENT and at
+  most one REQ to that relay alone per pass, foreground only, no new
+  `created_at`; healthy relays see no connection and no frame. The debt ends
+  when every relay of the usable pool serves it, when the relay that never
+  does leaves the pool, or when a later save, removal, deletion or redirect
+  supersedes it.
+- An offline removal is instant on the device while the photo stays public
+  until the next pass lands — the same window every other edit has (OD-F3);
+  the confirm dialog's disclosure that the image file stays on the server is
+  unchanged.
+- In the SIGNING pass a relay's OK counts as covered without a read-back; a
+  relay that held a newer copy AND did not answer that pass's read is
+  believed covered until the next edit (needs both on one relay).
+- A pass no relay acknowledged records nothing and signs fresh next time (no
+  metadata cost: no relay saw the earlier event).
+- During a Blossom outage each rung signs a text-only event while the picture
+  stays staged: peers see the new name (and a pending removal) with the old
+  photo until Blossom recovers.
+- One timestamp re-sign per edit; a relay that refuses that one too stays
+  owed, with no further re-sign.
+- Each re-send pass costs one own-profile REQ per owed relay that answered the
+  offer (never a covered relay, never a silent one).
 - Location-plane `try_publish_once` still discards partial acks under its outer
   timeout — a separate follow-up (`publish_before_apply_send_e2e.rs` is its
   proving ground).

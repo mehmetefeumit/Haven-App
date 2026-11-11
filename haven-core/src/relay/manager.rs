@@ -979,6 +979,68 @@ impl RelayManager {
         .await
     }
 
+    /// Offers a public-profile event to `relays` once, each relay sent the
+    /// moment its own connect succeeds, and harvests every relay's answer.
+    ///
+    /// The sync pass's send. One relay's slow handshake holds back no other
+    /// relay, and a relay whose connect failed is never sent (it is
+    /// unanswered, not refused). There is no in-call retry: the cold-socket
+    /// race the [`publish_profile_event`](Self::publish_profile_event) ladder
+    /// covers cannot occur once each send follows its own connect, and the
+    /// outbox's persisted ladder owns every retry.
+    ///
+    /// # Errors
+    ///
+    /// Only before any relay is dialled: an event a fanout record holds, or a
+    /// relay URL that may not be dialled. Otherwise always `Ok`, even when no
+    /// relay accepted.
+    pub async fn offer_profile_event(
+        &self,
+        event: &Event,
+        relays: &[String],
+    ) -> RelayResult<PublishResult> {
+        Self::refuse_fanout_owned(event)?;
+        let relay_urls = Self::validate_relay_urls(relays)?;
+        log::debug!(
+            "[RelayManager] offer_profile_event: sending kind {} to {} relay(s)",
+            event.kind.as_u16(),
+            bucket(relay_urls.len())
+        );
+        Self::register_publish_relays(&self.client, &relay_urls).await;
+        Ok(Self::offer_harvest(
+            &self.client,
+            &relay_urls,
+            event,
+            CONNECTION_TIMEOUT,
+            PROFILE_PUBLISH_ACK_TIMEOUT,
+        )
+        .await)
+    }
+
+    /// Per relay concurrently: connect within `connect`, then send and wait
+    /// `ack` for its `OK`. The relays must already be registered.
+    async fn offer_harvest(
+        client: &Client,
+        relay_urls: &[RelayUrl],
+        event: &Event,
+        connect: Duration,
+        ack: Duration,
+    ) -> PublishResult {
+        let offers = relay_urls.iter().map(|url| async move {
+            if client
+                .try_connect_relay(url.as_str(), connect)
+                .await
+                .is_err()
+            {
+                return (url.to_string(), AckOutcome::Unanswered);
+            }
+            send_to_one(client, url, event, ack).await
+        });
+        let outcomes = futures::future::join_all(offers).await;
+        recover_wedged_publish_sockets(client, relay_urls).await;
+        Self::fold_harvest(event, outcomes)
+    }
+
     /// Publishes a kind-445 LOCATION event: one bounded fan-out, no retry.
     ///
     /// The third publish path, and the cheapest, because a location sample is
@@ -1102,21 +1164,25 @@ impl RelayManager {
         let sends = relay_urls
             .iter()
             .map(|url| send_to_one(client, url, event, ack_timeout));
+        let outcomes = futures::future::join_all(sends).await;
+        // A silent relay is EITHER slow or holding this event unsent forever;
+        // only the second is freed here, and only after the ack window closed.
+        recover_wedged_publish_sockets(client, relay_urls).await;
+        Self::fold_harvest(event, outcomes)
+    }
 
+    /// Folds each relay's [`AckOutcome`] into a [`PublishResult`].
+    fn fold_harvest(event: &Event, outcomes: Vec<(String, AckOutcome)>) -> PublishResult {
         let mut accepted_by = Vec::new();
         let mut rejected_by = Vec::new();
         let mut failed = Vec::new();
-        for (url, outcome) in futures::future::join_all(sends).await {
+        for (url, outcome) in outcomes {
             match outcome {
                 AckOutcome::Accepted => accepted_by.push(url),
                 AckOutcome::Refused(reason) => rejected_by.push((url, reason)),
                 AckOutcome::Unanswered => failed.push(url),
             }
         }
-
-        // A silent relay is EITHER slow or holding this event unsent forever;
-        // only the second is freed here, and only after the ack window closed.
-        recover_wedged_publish_sockets(client, relay_urls).await;
 
         // Counts only: which relays a device publishes to is itself linkable
         // metadata and a refusal is remote prose (Rule 8), so neither a URL nor
@@ -1734,6 +1800,24 @@ impl RelayManager {
         filter: Filter,
         relays: &[String],
     ) -> RelayResult<Vec<RelayFetchOutcome>> {
+        self.fetch_events_per_relay_within(filter, relays, DEFAULT_TIMEOUT)
+            .await
+    }
+
+    /// [`Self::fetch_events_per_relay`] with each relay's `REQ` bounded by
+    /// `req_timeout` instead of [`DEFAULT_TIMEOUT`].
+    ///
+    /// The connect keeps [`CONNECTION_TIMEOUT`]. Every relay is asked at once.
+    ///
+    /// # Errors
+    ///
+    /// Never, as [`Self::fetch_events_per_relay`].
+    pub async fn fetch_events_per_relay_within(
+        &self,
+        filter: Filter,
+        relays: &[String],
+        req_timeout: Duration,
+    ) -> RelayResult<Vec<RelayFetchOutcome>> {
         let client = &self.client;
 
         let fetch_futures = relays.iter().map(|relay| {
@@ -1792,7 +1876,8 @@ impl RelayManager {
                     };
                 };
 
-                let (drained, events) = Self::read_one_relays_answer(&handle, filter).await;
+                let (drained, events) =
+                    Self::read_one_relays_answer(&handle, filter, req_timeout).await;
                 RelayFetchOutcome {
                     relay_url,
                     responded: true,
@@ -1933,7 +2018,7 @@ impl RelayManager {
     /// That handler is a separate task with its own receiver, so it learns
     /// NOTHING from this loop giving up: on the intake cap, on a `CLOSED`, or on
     /// a disconnect it goes on waiting for an `EOSE` that may never come, and
-    /// closes only when its own [`DEFAULT_TIMEOUT`] expires. The REQ stays open
+    /// closes only when its own `req_timeout` expires. The REQ stays open
     /// for the rest of that timeout while the relay keeps streaming into a
     /// bounded broadcast channel nobody is reading — the next page's read shares
     /// that channel, so it can be pushed into `Lagged` and reported unfinished
@@ -1968,7 +2053,11 @@ impl RelayManager {
     /// event of a replaceable coordinate is the one NIP-01 keeps (Marmot
     /// `transports/nostr.md:304-307`), and it is the order of the pooled
     /// `Events` collection this replaced.
-    async fn read_one_relays_answer(relay: &Relay, filter: Filter) -> (bool, Vec<Event>) {
+    async fn read_one_relays_answer(
+        relay: &Relay,
+        filter: Filter,
+        req_timeout: Duration,
+    ) -> (bool, Vec<Event>) {
         let intake_cap = filter.limit.unwrap_or(MAX_EVENTS_PER_UNLIMITED_REQ);
         let id = SubscriptionId::generate();
         let mut notifications = relay.notifications();
@@ -1976,7 +2065,7 @@ impl RelayManager {
         let opts = SubscribeOptions::default().close_on(Some(
             SubscribeAutoCloseOptions::default()
                 .exit_policy(ReqExitPolicy::ExitOnEOSE)
-                .timeout(Some(DEFAULT_TIMEOUT)),
+                .timeout(Some(req_timeout)),
         ));
         // auto-closing REQ: `opts` exits on EOSE, so this registers nothing in
         // the pool's long-lived subscription map and the socket can still sleep.
@@ -1994,7 +2083,7 @@ impl RelayManager {
         let mut events: Vec<Event> = Vec::new();
         let mut seen: HashSet<EventId> = HashSet::new();
         let mut arrivals: usize = 0;
-        let drained = tokio::time::timeout(DEFAULT_TIMEOUT, async {
+        let drained = tokio::time::timeout(req_timeout, async {
             loop {
                 match notifications.recv().await {
                     Ok(RelayNotification::Message { message }) => match message {
@@ -5878,6 +5967,7 @@ mod tests {
         for expected in [
             "try_publish_once",
             "try_publish_once_harvesting",
+            "offer_harvest",
             "publish_event_background",
             "send_to_one",
             "publish",
@@ -5912,6 +6002,7 @@ mod tests {
             [
                 "publish_event",
                 "publish_profile_event",
+                "offer_profile_event",
                 "publish_location_event",
                 "publish_event_background",
                 "publish_location"
@@ -6831,5 +6922,295 @@ mod tests {
                 "a location publish must not name a relay: {line}",
             );
         }
+    }
+
+    // ---- the profile offer and the per-relay read bound ----------------------
+
+    /// A relay that was free a moment ago and now refuses every connection.
+    async fn dead_relay_for_offer() -> String {
+        format!("ws://127.0.0.1:{}", ephemeral_port().await)
+    }
+
+    /// The live relay's admission signal: the id of each event it is offered,
+    /// so a test can wait for the offer to ARRIVE rather than for time to pass.
+    /// It fires as the relay judges the event, before the relay records it, so
+    /// a test reads the id it carries rather than racing `published()`.
+    fn admissions_of(relay: &ScriptedRelay) -> tokio::sync::mpsc::UnboundedReceiver<EventId> {
+        let (admitted, admissions) = tokio::sync::mpsc::unbounded_channel::<EventId>();
+        relay.on_publish(move |event| {
+            let _ = admitted.send(event.id);
+            Verdict::Keep
+        });
+        admissions
+    }
+
+    /// The old shape connected EVERY relay before it sent to any, so one relay
+    /// whose handshake never ends held back the whole offer. With the connect
+    /// bound at an hour, that shape cannot deliver to the live relay inside the
+    /// 60 s wait; one that sends each relay the moment its own connect succeeds
+    /// delivers at once. The wait is a bound the outcome does not depend on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_profile_offer_reaches_a_live_relay_while_another_relays_handshake_hangs() {
+        let _ = allow_ws_loopback_for_test();
+        let live = ScriptedRelay::start();
+        let mut admissions = admissions_of(&live);
+        let urls =
+            RelayManager::validate_relay_urls(&[live.url().to_string(), hung_relay_url().await])
+                .expect("ws:// loopback urls validate with the opt-in installed");
+        let manager = RelayManager::new();
+        RelayManager::register_publish_relays(&manager.client, &urls).await;
+        let event = throwaway_note("offered past a hung handshake");
+
+        let offering = RelayManager::offer_harvest(
+            &manager.client,
+            &urls,
+            &event,
+            Duration::from_hours(1),
+            PROFILE_PUBLISH_ACK_TIMEOUT,
+        );
+        tokio::pin!(offering);
+        let delivered = tokio::time::timeout(Duration::from_mins(1), async {
+            tokio::select! {
+                _ = &mut offering => None,
+                got = admissions.recv() => got,
+            }
+        })
+        .await;
+
+        assert_eq!(
+            delivered.ok().flatten(),
+            Some(event.id),
+            "the live relay was not offered the event while the other relay's handshake hung"
+        );
+        assert_eq!(live.offers(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_profile_offer_never_sends_to_a_relay_it_could_not_connect() {
+        let live = ScriptedRelay::start();
+        let dead = dead_relay_for_offer().await;
+        let relays = vec![live.url().to_string(), dead];
+        let expected = RelayManager::validate_relay_urls(&relays).expect("valid urls");
+        let event = throwaway_note("never sent to a dead relay");
+
+        let result = RelayManager::new()
+            .offer_profile_event(&event, &relays)
+            .await
+            .expect("an offer is always a harvest");
+
+        assert_eq!(result.event_id, event.id);
+        assert_eq!(result.accepted_by, vec![expected[0].to_string()]);
+        // A send into a socket that never opened would have been a refusal.
+        // Not connected means not sent, which is silence.
+        assert_eq!(result.failed, vec![expected[1].to_string()]);
+        assert!(result.rejected_by.is_empty(), "{result:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_profile_offer_is_one_attempt_and_reports_every_relay() {
+        let keeping = ScriptedRelay::start();
+        let refusing = ScriptedRelay::start();
+        refusing.on_publish(|_| Verdict::Refuse("blocked: not here".to_string()));
+        let relays = vec![
+            keeping.url().to_string(),
+            refusing.url().to_string(),
+            dead_relay_for_offer().await,
+        ];
+        let expected = RelayManager::validate_relay_urls(&relays).expect("valid urls");
+
+        let result = RelayManager::new()
+            .offer_profile_event(&throwaway_note("one attempt"), &relays)
+            .await
+            .expect("an offer is always a harvest");
+
+        assert_eq!(result.accepted_by, vec![expected[0].to_string()]);
+        assert_eq!(result.rejected_by.len(), 1, "{result:?}");
+        assert_eq!(result.rejected_by[0].0, expected[1].to_string());
+        assert_eq!(result.failed, vec![expected[2].to_string()]);
+        assert_eq!((keeping.offers(), refusing.offers()), (1, 1));
+
+        // Even when nobody accepts, the offer is a harvest and not an error,
+        // and a refusal is not asked again in the call: the persisted ladder
+        // owns every retry.
+        let alone = ScriptedRelay::start();
+        alone.on_publish(|_| Verdict::Refuse("blocked: not here".to_string()));
+        let refused = RelayManager::new()
+            .offer_profile_event(&throwaway_note("refused once"), &[alone.url().to_string()])
+            .await
+            .expect("a refusal is a bucket");
+        assert!(refused.accepted_by.is_empty() && refused.rejected_by.len() == 1);
+        assert_eq!(alone.offers(), 1, "an offer is not retried within the call");
+    }
+
+    /// Every bucket of the harvest is non-empty, so a line that printed any of
+    /// them instead of counting them leaks here: one relay refuses with prose
+    /// that quotes a URL, one accepts, and nothing listens on the third port.
+    #[tokio::test]
+    async fn a_profile_offer_logs_counts_only() {
+        let _ = allow_ws_loopback_for_test();
+        let (_refuser, refused_url, _seen) =
+            refusing_relay("blocked because wss://leak.example said so").await;
+        let accepting = LocalRelay::new(RelayBuilder::default());
+        accepting.run().await.expect("local relay runs");
+        let relays = vec![
+            refused_url,
+            accepting.url().await.to_string(),
+            format!("ws://127.0.0.1:{}", ephemeral_port().await),
+        ];
+        let event = throwaway_note("who is listening");
+
+        let manager = RelayManager::new();
+        let lines = capture_log_lines(async {
+            let result = manager
+                .offer_profile_event(&event, &relays)
+                .await
+                .expect("an offer is always a harvest");
+            assert!(result.is_success(), "one relay accepted: {result:?}");
+        })
+        .await;
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("[RelayManager] offer_profile_event:")),
+            "the offer path has to have spoken for its silence to mean anything: {lines:?}",
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("[RelayManager] publish harvest:")),
+            "the harvest summary is the line most likely to grow a url: {lines:?}",
+        );
+        let event_id = event.id.to_hex();
+        for line in &lines {
+            for needle in [
+                "ws://",
+                "wss://",
+                "127.0.0.1",
+                "leak.example",
+                event_id.as_str(),
+            ] {
+                assert!(
+                    !line.contains(needle),
+                    "a profile offer named `{needle}` in its log: {line}"
+                );
+            }
+            assert!(
+                !line.contains(&event_id[..8]),
+                "a profile offer logged an event id prefix: {line}"
+            );
+        }
+    }
+
+    /// A relay holding its answer can never end it, so the only thing that can
+    /// stop the read is its own bound. With the bound at zero that is
+    /// immediate, and nothing about the outcome depends on time passing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_per_relay_read_ends_at_its_own_req_bound() {
+        let (_never_opened, held) = tokio::sync::watch::channel(false);
+        let holding = ScriptedRelay::start();
+        holding.answer(
+            |_| true,
+            vec![crate::relay::scripted_relay::Frame::Hold(held)],
+        );
+        let answering = ScriptedRelay::start();
+        let filter = Filter::new().kind(Kind::TextNote);
+        let manager = RelayManager::new();
+
+        let cut = manager
+            .fetch_events_per_relay_within(
+                filter.clone(),
+                &[holding.url().to_string()],
+                Duration::ZERO,
+            )
+            .await
+            .expect("a read never fails as a whole");
+        assert_eq!(cut.len(), 1);
+        assert!(cut[0].responded, "the relay was reached");
+        assert!(!cut[0].drained, "a held answer was reported as ended");
+
+        // Anti-vacuity: with room to finish, the same call reports a relay
+        // that ends its answer as drained, so the false above is the bound.
+        let finished = manager
+            .fetch_events_per_relay_within(
+                filter,
+                &[answering.url().to_string()],
+                Duration::from_mins(1),
+            )
+            .await
+            .expect("a read never fails as a whole");
+        assert!(finished[0].responded && finished[0].drained);
+    }
+
+    /// Five relays each hold their `REQ` behind a gate, with the read's bound
+    /// at an hour so nothing can end it early: all five must be asked before
+    /// any is released. A read that kept fewer in flight could only reach the
+    /// last ones by waiting out the bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn fetch_events_per_relay_within_asks_every_relay_at_once() {
+        let (open, gate) = tokio::sync::watch::channel(false);
+        let (asked_tx, mut asked_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
+        let relays: Vec<ScriptedRelay> = (0..5)
+            .map(|i| {
+                let relay = ScriptedRelay::start();
+                let asked_tx = asked_tx.clone();
+                relay.answer(
+                    move |_| {
+                        let _ = asked_tx.send(i);
+                        true
+                    },
+                    vec![
+                        crate::relay::scripted_relay::Frame::Hold(gate.clone()),
+                        crate::relay::scripted_relay::Frame::Eose,
+                    ],
+                );
+                relay
+            })
+            .collect();
+        let urls: Vec<String> = relays.iter().map(|r| r.url().to_string()).collect();
+
+        let manager = RelayManager::new();
+        let fetching = manager.fetch_events_per_relay_within(
+            Filter::new().kind(Kind::TextNote),
+            &urls,
+            Duration::from_hours(1),
+        );
+        tokio::pin!(fetching);
+        let mut asked = HashSet::new();
+        let all_asked = tokio::time::timeout(Duration::from_mins(1), async {
+            while asked.len() < urls.len() {
+                tokio::select! {
+                    _ = &mut fetching => return false,
+                    got = asked_rx.recv() => match got {
+                        Some(i) => { asked.insert(i); }
+                        None => return false,
+                    },
+                }
+            }
+            true
+        })
+        .await;
+        assert!(
+            matches!(all_asked, Ok(true)),
+            "only {} of 5 relays were asked while the others were held",
+            asked.len(),
+        );
+
+        open.send(true).expect("release the relays");
+        let outcomes = tokio::time::timeout(Duration::from_mins(1), fetching)
+            .await
+            .expect("released relays end their answers")
+            .expect("a read never fails as a whole");
+        assert_eq!(outcomes.len(), urls.len());
+        assert!(outcomes.iter().all(|o| o.responded && o.drained));
+    }
+
+    #[test]
+    fn the_own_read_bound_is_the_relay_layers_connect_bound_plus_one_author_fetch() {
+        assert_eq!(
+            crate::profile::config::PROFILE_OWN_READ_BOUND,
+            CONNECTION_TIMEOUT + crate::profile::PROFILE_AUTHOR_FETCH_TIMEOUT,
+            "the soak oracle's bound for an own-profile read drifted from the dial it waits on"
+        );
     }
 }

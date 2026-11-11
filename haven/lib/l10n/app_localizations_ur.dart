@@ -1624,23 +1624,6 @@ class AppLocalizationsUr extends AppLocalizations {
       'محفوظ کرنا ناکام، دوبارہ کوشش کریں';
 
   @override
-  String get profileSyncStatusSyncing => 'آپ کا عوامی پروفائل سنک ہو رہا ہے…';
-
-  @override
-  String get profileSyncStatusPartial =>
-      'شائع ہو گیا — کچھ ریلے پر ابھی سنک ہو رہا ہے';
-
-  @override
-  String get profileSyncStatusSynced => 'عوامی پروفائل تازہ ترین ہے';
-
-  @override
-  String get profileSyncStatusFailed => 'ابھی سنک نہ ہو سکا۔';
-
-  @override
-  String get profileSyncStatusRetrySemantics =>
-      'اپنا پروفائل دوبارہ شائع کرنے کی کوشش کریں';
-
-  @override
   String get npubQrCopiedSnack => 'عوامی کلید کلپ بورڈ پر کاپی ہو گئی';
 
   @override
@@ -1713,8 +1696,7 @@ class AppLocalizationsUr extends AppLocalizations {
   String get photoHeaderChangePhotoSemantics => 'پروفائل تصویر تبدیل کریں';
 
   @override
-  String get avatarPickerPhotoUpdated =>
-      'تصویر اپ ڈیٹ ہو گئی۔ یہ آپ کے عوامی Nostr پروفائل پر شائع کی جائے گی۔';
+  String get avatarPickerPhotoUpdatedAnnouncement => 'تصویر اپ ڈیٹ ہو گئی۔';
 
   @override
   String get avatarPickerPhotoRemoved => 'تصویر ہٹا دی گئی۔';

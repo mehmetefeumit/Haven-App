@@ -28,7 +28,7 @@
 // and holds it for the whole (single-statement or transactional) operation.
 #![allow(clippy::significant_drop_tightening)]
 
-use nostr::{EventId, JsonUtil, Metadata, PublicKey};
+use nostr::{Event, JsonUtil, Metadata, PublicKey};
 use rusqlite::{params, Connection, OptionalExtension};
 use zeroize::Zeroizing;
 
@@ -37,7 +37,7 @@ use super::manager::CircleManager;
 use super::storage::CircleStorage;
 use crate::profile::types::{CachedProfile, ProfileMetadata, ProfileState};
 use crate::profile::ProfileRelaySalt;
-use crate::profile::{merge_edits, picture_is_current, PICTURE_CACHE_MAX_PEOPLE};
+use crate::profile::{merge_edits, picture_is_current, uncovered, PICTURE_CACHE_MAX_PEOPLE};
 
 /// `user_settings` key holding the per-install profile-relay salt as 64
 /// lowercase hex characters.
@@ -810,16 +810,15 @@ impl CircleStorage {
     /// Deletes the cached picture row for a single pubkey hex (per-pubkey, unlike
     /// the wholesale [`Self::wipe_all_profiles`]).
     ///
-    /// Called when a member removes their `picture` (so the stale bytes stop
-    /// rendering) and when the local user removes their own picture — without
-    /// this the removed avatar reappears from the byte cache and persists across
-    /// restart (bugs HIGH-1 / HIGH-2). Deleting an absent row is a harmless
-    /// no-op.
+    /// Called when a member removes their `picture`, so the stale bytes stop
+    /// rendering — without this the removed avatar reappears from the byte
+    /// cache and persists across restart (bugs HIGH-1 / HIGH-2). Deleting an
+    /// absent row is a harmless no-op. The local user's own removal does not
+    /// come here: [`Self::stage_own_picture_removal`] deletes every own picture
+    /// row in its own transaction.
     ///
     /// A STAGED row (empty `url`) is left: it is not a cached copy of a
     /// published picture but bytes the user saved and has not uploaded yet.
-    /// The own-picture removal cancels what was staged when it began; a photo
-    /// saved while it ran is the user's newer wish and must outlive it.
     ///
     /// # Errors
     ///
@@ -953,11 +952,11 @@ impl CircleStorage {
     ///
     /// # A blank some relay did not take is owed
     ///
-    /// Unless every relay the blank was sent to acknowledged it
-    /// (`fully_acked`), the relay that did not still serves the deleted
-    /// profile. After the reset, in this transaction, the blank becomes the
-    /// version the own row owes ([`Self::write_unqueued_publish_owed`]), so
-    /// the sync publishes a blank to the whole pool again on its ladder.
+    /// Unless `covered` (the relays that took the blank) covers `pool`, a
+    /// relay that did not still serves the deleted profile. After the reset,
+    /// in this transaction, the blank becomes the version the own row owes
+    /// ([`Self::write_unqueued_publish_owed`]) and the owed event, so the sync
+    /// re-sends that same blank to the rest of the pool on its ladder.
     ///
     /// # Errors
     ///
@@ -965,11 +964,13 @@ impl CircleStorage {
     pub fn wipe_all_profiles(
         &self,
         own_pubkey: &PublicKey,
-        blank_id: &EventId,
-        blank_created_at: i64,
-        fully_acked: bool,
+        blank: &Event,
+        covered: &[String],
+        pool: &[String],
         now: i64,
     ) -> Result<()> {
+        let blank_created_at = i64::try_from(blank.created_at.as_secs())
+            .map_err(|_| CircleError::Storage("kind-0 timestamp out of range".to_string()))?;
         let mut conn = self
             .conn()
             .lock()
@@ -988,10 +989,16 @@ impl CircleStorage {
                 fetched_at: now,
             },
         )?;
-        Self::write_published_event_row(&tx, 0, "", blank_id, own_pubkey, now)?;
+        Self::write_published_event_row(&tx, 0, "", &blank.id, own_pubkey, now)?;
         Self::reset_profile_sync_rows(&tx, None)?;
-        if !fully_acked {
+        if !uncovered(pool, covered).is_empty() {
             Self::write_unqueued_publish_owed(&tx, &own_hex, now)?;
+            let owed_version: i64 = tx.query_row(
+                "SELECT local_version FROM profile_sync_state WHERE pubkey = ?1",
+                params![own_hex],
+                |r| r.get(0),
+            )?;
+            Self::write_publish_debt(&tx, &own_hex, owed_version, blank, covered)?;
         }
         Self::delete_salt_row(&tx)?;
         tx.commit()?;
@@ -1331,6 +1338,17 @@ mod tests {
         )
         .optional()
         .unwrap()
+    }
+
+    /// A signed blank of `keys` and the pool its wipe records: one relay,
+    /// which took it, unless a test says otherwise.
+    fn blank_of(keys: &nostr::Keys) -> (nostr::Event, Vec<String>) {
+        let blank = crate::profile::build_blank_metadata_event(keys, None).expect("blank");
+        (blank, vec!["wss://a.example".to_string()])
+    }
+
+    fn ts_of(event: &nostr::Event) -> i64 {
+        i64::try_from(event.created_at.as_secs()).expect("a timestamp")
     }
 
     fn known_profile(
@@ -2125,7 +2143,12 @@ mod tests {
         // PRAGMA table_info structural assertion: the cache MUST NOT carry any
         // circle / group identifier (Rule 4 / Security review).
         let storage = CircleStorage::in_memory().unwrap();
-        for table in ["profiles", "profile_pictures", "profile_sync_state"] {
+        for table in [
+            "profiles",
+            "profile_pictures",
+            "profile_sync_state",
+            "profile_publish_debt",
+        ] {
             let conn = storage.conn().lock().unwrap();
             let mut stmt = conn
                 .prepare(&format!("PRAGMA table_info({table})"))
@@ -2189,7 +2212,8 @@ mod tests {
     #[test]
     fn wipe_all_profiles_clears_both_tables() {
         let storage = CircleStorage::in_memory().unwrap();
-        let me = nostr::Keys::generate().public_key();
+        let keys = nostr::Keys::generate();
+        let me = keys.public_key();
         let me_hex = me.to_hex();
         storage
             .upsert_profile(&known_profile("aa", "alice", 1, 1))
@@ -2203,8 +2227,9 @@ mod tests {
         storage
             .upsert_profile_picture(&me_hex, "https://x/me", &[0x33; 32], b"c", b"t", 1)
             .unwrap();
+        let (blank, pool) = blank_of(&keys);
         storage
-            .wipe_all_profiles(&me, &EventId::all_zeros(), 7, true, 9)
+            .wipe_all_profiles(&me, &blank, &pool, &pool, 9)
             .unwrap();
         assert!(storage.get_profile("aa").unwrap().is_none());
         assert!(storage.get_profile_picture("aa").unwrap().is_none());
@@ -2217,7 +2242,7 @@ mod tests {
             .expect("the own record");
         assert_eq!(own.metadata, ProfileMetadata::default());
         assert_eq!(own.state, ProfileState::Known);
-        assert_eq!((own.event_created_at, own.fetched_at), (7, 9));
+        assert_eq!((own.event_created_at, own.fetched_at), (ts_of(&blank), 9));
         // ...and its publication is on record, for the NIP-09 deletion a
         // later retraction names.
         assert_eq!(
@@ -2225,7 +2250,7 @@ mod tests {
                 .last_published_event(0, "", &me)
                 .unwrap()
                 .map(|record| record.event_id),
-            Some(EventId::all_zeros())
+            Some(blank.id)
         );
     }
 
@@ -2239,9 +2264,15 @@ mod tests {
         // blank was published" beside the profile the blank replaced, never
         // the blank's row with no record of its publish, and never a wiped
         // profile whose refused blank nothing will send again.
-        for refused_table in ["profiles", "published_events", "profile_sync_state"] {
+        for refused_table in [
+            "profiles",
+            "published_events",
+            "profile_sync_state",
+            "profile_publish_debt",
+        ] {
             let storage = CircleStorage::in_memory().unwrap();
-            let me = nostr::Keys::generate().public_key();
+            let keys = nostr::Keys::generate();
+            let me = keys.public_key();
             let me_hex = me.to_hex();
             let held = known_profile(&me_hex, "old", 5, 5);
             storage.upsert_profile(&held).unwrap();
@@ -2264,9 +2295,11 @@ mod tests {
                 ))
                 .unwrap();
 
+            let (blank, mut pool) = blank_of(&keys);
+            pool.push("wss://b.example".to_string());
             assert!(
                 storage
-                    .wipe_all_profiles(&me, &EventId::all_zeros(), 9, false, 9)
+                    .wipe_all_profiles(&me, &blank, &pool[..1], &pool, 9)
                     .is_err(),
                 "anti-vacuity: the write to {refused_table} was refused"
             );
@@ -2292,18 +2325,14 @@ mod tests {
         let storage = CircleStorage::in_memory().unwrap();
         let keys = nostr::Keys::generate();
         let own = keys.public_key().to_hex();
+        let (blank, pool) = blank_of(&keys);
         storage
-            .wipe_all_profiles(
-                &keys.public_key(),
-                &EventId::all_zeros(),
-                2_000,
-                true,
-                2_000,
-            )
+            .wipe_all_profiles(&keys.public_key(), &blank, &pool, &pool, 2_000)
             .unwrap();
+        let at = ts_of(&blank);
 
         assert!(!storage
-            .upsert_profile_if_newer(&known_profile(&own, "deleted", 1_999, 3_000))
+            .upsert_profile_if_newer(&known_profile(&own, "deleted", at - 1, 3_000))
             .unwrap());
         assert_eq!(
             storage.get_profile(&own).unwrap().unwrap().metadata,
@@ -2312,7 +2341,7 @@ mod tests {
         assert!(storage.has_published_profile(&keys.public_key()).unwrap());
         assert!(
             storage
-                .upsert_profile_if_newer(&known_profile(&own, "republished", 2_001, 3_000))
+                .upsert_profile_if_newer(&known_profile(&own, "republished", at + 1, 3_000))
                 .unwrap(),
             "a profile published after the blank, from another client, is adopted"
         );
@@ -2332,28 +2361,21 @@ mod tests {
                     &own,
                     &crate::profile::PendingEdits {
                         display_name: Some("Queued".to_string()),
-                        about: None,
+                        ..crate::profile::PendingEdits::default()
                     },
                     1_000,
                 )
                 .unwrap();
 
+            let (blank, mut pool) = blank_of(&keys);
+            pool.push("wss://b.example".to_string());
+            let covered = if fully_acked { &pool[..] } else { &pool[..1] };
             storage
-                .wipe_all_profiles(
-                    &keys.public_key(),
-                    &EventId::all_zeros(),
-                    2_000,
-                    fully_acked,
-                    2_001,
-                )
+                .wipe_all_profiles(&keys.public_key(), &blank, covered, &pool, 2_001)
                 .unwrap();
 
             let state = storage.profile_pending_state(&own, 2_001).unwrap();
-            assert_eq!(
-                (state.pending, state.partial),
-                (!fully_acked, !fully_acked),
-                "fully_acked = {fully_acked}",
-            );
+            assert_eq!(state.pending, !fully_acked, "fully_acked = {fully_acked}");
             let owed = storage.pending_profile_sync(&own).unwrap();
             if fully_acked {
                 assert!(owed.is_none());
@@ -2364,6 +2386,18 @@ mod tests {
                 owed.edits.is_empty() && !owed.picture_staged,
                 "what was queued must not come back with the blank",
             );
+            let raw: (i64, i64) = storage
+                .conn()
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT local_version, published_version FROM profile_sync_state
+                     WHERE pubkey = ?1",
+                    params![own],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(raw.0, raw.1, "the owed blank reached a relay");
             let first_rung = crate::profile::PROFILE_SYNC_BACKOFF_SECS[0];
             let due_at = |now| storage.profile_pending_state(&own, now).unwrap().retry_due;
             assert!(!due_at(2_001 + first_rung - 1));
@@ -3041,8 +3075,10 @@ mod tests {
 
         // Wiping with no salt stored leaves none (the retraction path can run
         // on an install that never fetched a member's profile).
-        let me = nostr::Keys::generate().public_key();
-        let wipe = || storage.wipe_all_profiles(&me, &EventId::all_zeros(), 1, true, 1);
+        let keys = nostr::Keys::generate();
+        let me = keys.public_key();
+        let (blank, pool) = blank_of(&keys);
+        let wipe = || storage.wipe_all_profiles(&me, &blank, &pool, &pool, 1);
         wipe().unwrap();
         assert_eq!(stored_salt_hex(&storage), None);
 
@@ -3269,5 +3305,134 @@ mod tests {
         let got = storage.get_profile("aa").unwrap().unwrap();
         assert_eq!(got.state, ProfileState::Known);
         assert_eq!(got.metadata.name(), Some("resolved"));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn a_wipe_discards_the_owed_event_and_owes_the_blank_to_the_relays_that_did_not_take_it() {
+        // The deleted profile is still on every relay that did not take the
+        // blank, and the event owed before the wipe must never go out again
+        // over it: the ledger holds the blank, byte for byte, and the relays
+        // that took it.
+        let pool = vec!["wss://a.example".to_string(), "wss://b.example".to_string()];
+        let build = |previous: u64| -> (nostr::Keys, nostr::Event) {
+            let keys = nostr::Keys::generate();
+            let blank =
+                crate::profile::build_blank_metadata_event(&keys, Some(previous)).expect("blank");
+            (keys, blank)
+        };
+        let owed_before_the_wipe = |storage: &CircleStorage, keys: &nostr::Keys| {
+            let own = keys.public_key().to_hex();
+            storage
+                .stage_own_profile_edits(
+                    &own,
+                    &crate::profile::PendingEdits {
+                        display_name: Some("Queued".to_string()),
+                        ..crate::profile::PendingEdits::default()
+                    },
+                    1_000,
+                )
+                .unwrap();
+            let metadata = ProfileMetadata::from_metadata(Metadata::new().display_name("Queued"));
+            let event = crate::profile::build_metadata_event(keys, &metadata, Some(3_999_999_999))
+                .expect("event");
+            storage
+                .commit_profile_sync(&crate::circle::ProfileSyncCommit {
+                    pubkey: &keys.public_key(),
+                    version: 1,
+                    merged: &metadata,
+                    event: &event,
+                    uploaded_picture: None,
+                    covered: &pool[..1],
+                    pool: &pool,
+                    complete: true,
+                    now: 1_001,
+                })
+                .unwrap();
+            assert!(
+                storage
+                    .profile_publish_debt(&keys.public_key(), 1)
+                    .unwrap()
+                    .is_some(),
+                "anti-vacuity: an event is owed before the wipe"
+            );
+        };
+
+        // One relay took the blank: the other is owed that blank.
+        let storage = CircleStorage::in_memory().unwrap();
+        let (keys, blank) = build(4_000_000_000);
+        let own = keys.public_key().to_hex();
+        owed_before_the_wipe(&storage, &keys);
+
+        storage
+            .wipe_all_profiles(&keys.public_key(), &blank, &pool[..1], &pool, 2_001)
+            .unwrap();
+
+        assert!(
+            storage
+                .profile_publish_debt(&keys.public_key(), 1)
+                .unwrap()
+                .is_none(),
+            "the pre-wipe event would sign the deleted profile back"
+        );
+        let owed = storage
+            .pending_profile_sync(&own)
+            .unwrap()
+            .expect("the blank is owed");
+        assert!(owed.edits.is_empty() && !owed.picture_staged);
+        let debt = storage
+            .profile_publish_debt(&keys.public_key(), owed.local_version)
+            .unwrap()
+            .expect("the blank is in the ledger");
+        assert_eq!(debt.event, blank, "the retry re-sends the identical blank");
+        assert_eq!(debt.covered, pool[..1].to_vec());
+        let record = storage
+            .get_profile(&own)
+            .unwrap()
+            .expect("the blank's record");
+        assert_eq!(record.metadata, ProfileMetadata::default());
+        assert_eq!(
+            record.event_created_at,
+            i64::try_from(blank.created_at.as_secs()).unwrap()
+        );
+        assert_eq!(
+            storage
+                .last_published_event(0, "", &keys.public_key())
+                .unwrap()
+                .map(|r| r.event_id),
+            Some(blank.id)
+        );
+        let first_rung = crate::profile::PROFILE_SYNC_BACKOFF_SECS[0];
+        assert!(
+            !storage
+                .profile_pending_state(&own, 2_001)
+                .unwrap()
+                .retry_due
+        );
+        assert!(
+            storage
+                .profile_pending_state(&own, 2_001 + first_rung)
+                .unwrap()
+                .retry_due
+        );
+
+        // Every relay took the blank: nothing is owed, nothing is in the ledger.
+        let storage = CircleStorage::in_memory().unwrap();
+        let (keys, blank) = build(4_000_000_000);
+        owed_before_the_wipe(&storage, &keys);
+        storage
+            .wipe_all_profiles(&keys.public_key(), &blank, &pool, &pool, 2_001)
+            .unwrap();
+        let own = keys.public_key().to_hex();
+        assert!(storage.pending_profile_sync(&own).unwrap().is_none());
+        let rows: i64 = storage
+            .conn()
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM profile_publish_debt", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 }

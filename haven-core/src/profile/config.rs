@@ -83,15 +83,13 @@ pub const PROFILE_BATCH_DEADLINE: Duration = Duration::from_secs(20);
 /// conspicuous as a simultaneous burst to a network observer.
 pub const PROFILE_MAX_INFLIGHT_RELAYS: usize = 4;
 
-/// Wall-clock budget for reading the local user's OWN newest kind-0 back from
-/// every pool relay concurrently ([`crate::profile::fetch::fetch_own_profile`]).
+/// The longest an own-profile read takes
+/// ([`crate::profile::fetch::read_own_per_relay`]).
 ///
-/// Per relay the worst case is a 5 s WebSocket handshake plus a
-/// [`PROFILE_AUTHOR_FETCH_TIMEOUT`] `REQ` — 9 s — and the relays are queried
-/// concurrently, so this is a fail-safe with real headroom rather than the time
-/// a healthy read costs. It also makes the [`PROFILE_BATCH_DEADLINE`] carried by
-/// each one-relay cycle dead code on this path: 20 s can never be reached under
-/// a 12 s outer budget.
+/// Per relay: a 5 s WebSocket handshake plus one
+/// [`PROFILE_AUTHOR_FETCH_TIMEOUT`] `REQ`. Every pool relay is read at once,
+/// so this bounds the whole read; it is intrinsic to the per-relay bounds, not
+/// a deadline anything enforces.
 ///
 /// # Why fanning out here is not the disclosure the in-flight cap guards
 ///
@@ -102,7 +100,8 @@ pub const PROFILE_MAX_INFLIGHT_RELAYS: usize = 4;
 /// assignment salt is private to their install, so we cannot know which relay
 /// they read us from). The write is already an N-way burst; reading it back
 /// shows each relay nothing it does not already store.
-pub const PROFILE_OWN_FETCH_BUDGET: Duration = Duration::from_secs(12);
+pub const PROFILE_OWN_READ_BOUND: Duration =
+    Duration::from_secs(5 + PROFILE_AUTHOR_FETCH_TIMEOUT.as_secs());
 
 /// Retry ladder (seconds) for an own-profile sync that did not fully land:
 /// `30s → 2min → 8min → 30min → 6h`, then 6h forever.
@@ -277,30 +276,6 @@ mod tests {
     }
 
     #[test]
-    fn own_fetch_budget_clears_one_relays_worst_case_and_kills_the_inner_deadline() {
-        // Read through `let` so the assertions are not compile-time constants
-        // (clippy::assertions_on_constants) and a mutation fails readably.
-        let budget = PROFILE_OWN_FETCH_BUDGET;
-        let req = PROFILE_AUTHOR_FETCH_TIMEOUT;
-        let batch = PROFILE_BATCH_DEADLINE;
-        // The 5 s WebSocket handshake bound the relay layer applies before any
-        // REQ (`relay::manager::CONNECTION_TIMEOUT`, not importable from here).
-        let connect = Duration::from_secs(5);
-
-        assert!(
-            budget > connect + req,
-            "a budget below one relay's own worst case would cut off a slow but \
-             perfectly healthy relay before it could answer",
-        );
-        assert!(
-            budget < batch,
-            "the per-cycle batch deadline must stay unreachable under this \
-             budget, or two deadlines would race and the documented one would \
-             not be the one that fires",
-        );
-    }
-
-    #[test]
     fn sync_backoff_ladder_is_non_empty_and_strictly_grows() {
         // An empty ladder would index nothing and leave a failed sync retrying
         // on every trigger; a non-increasing one would never back off at all.
@@ -315,5 +290,25 @@ mod tests {
                 "the ladder must grow monotonically: {pair:?}",
             );
         }
+    }
+
+    #[test]
+    fn the_own_read_bound_is_one_connect_and_one_author_fetch() {
+        // A relay's own worst case, with the relays read at once: the 5 s
+        // WebSocket handshake bound of the relay layer
+        // (`relay::manager::CONNECTION_TIMEOUT`, pinned to this value by
+        // `manager.rs::the_own_read_bound_is_the_relay_layers_connect_bound_plus_one_author_fetch`)
+        // plus one author `REQ`.
+        let bound = PROFILE_OWN_READ_BOUND;
+        assert_eq!(
+            bound,
+            Duration::from_secs(5) + PROFILE_AUTHOR_FETCH_TIMEOUT,
+            "the soak oracle reads this as the longest an own-profile read takes"
+        );
+        assert_eq!(bound, Duration::from_secs(9));
+        assert!(
+            bound < PROFILE_BATCH_DEADLINE,
+            "the per-cycle batch deadline must stay unreachable on this path"
+        );
     }
 }

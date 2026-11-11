@@ -37,6 +37,48 @@ pub const fn has_published_profile(
     published_kind0 || has_known_picture || seen_kind0
 }
 
+/// What one read of every pool relay found of the local user's own kind-0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnReadVerdict {
+    /// At least one relay served a copy.
+    Found,
+    /// Every relay ended its answer and none served one.
+    Absent,
+    /// No copy was served and at least one relay did not end its answer.
+    Unanswered,
+}
+
+/// What a sync does with a pending set that carries no saved content (a photo
+/// removal alone, or an owed deletion blank).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetractionGate {
+    /// Build on what is known and publish.
+    Publish,
+    /// Nothing public exists: level the pending set locally, send nothing.
+    Settle,
+    /// Keep it pending on the retry ladder.
+    Hold,
+}
+
+/// Decides a retraction-only publish.
+///
+/// It never mints a first public event (`!published_here` publishes only on a
+/// copy actually read) and never overwrites a profile this device cannot see
+/// (`published_here` with neither a copy read nor a dated own row holds).
+#[must_use]
+pub const fn retraction_gate(
+    published_here: bool,
+    read: OwnReadVerdict,
+    local_dated: bool,
+) -> RetractionGate {
+    match (read, published_here) {
+        (OwnReadVerdict::Found, _) => RetractionGate::Publish,
+        (_, true) if local_dated => RetractionGate::Publish,
+        (OwnReadVerdict::Absent, false) => RetractionGate::Settle,
+        _ => RetractionGate::Hold,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,5 +100,56 @@ mod tests {
         assert!(has_published_profile(false, true, false));
         assert!(has_published_profile(false, false, true));
         assert!(has_published_profile(true, true, true));
+    }
+
+    // ---- the retraction gate ------------------------------------------------
+
+    #[test]
+    fn the_retraction_gate_never_mints_and_never_overwrites_an_unseen_profile() {
+        use OwnReadVerdict::{Absent, Found, Unanswered};
+        use RetractionGate::{Hold, Publish, Settle};
+
+        // (published_here, read, local_dated) -> gate. `!published_here` with a
+        // dated row cannot occur (a dated row is itself the third arm of
+        // `has_published_profile`), so those cells are not pinned.
+        let table = [
+            // A relay copy was found: there is a profile to build on.
+            (false, Found, false, Publish),
+            (true, Found, false, Publish),
+            (true, Found, true, Publish),
+            // Published here and the row is dated: the row is the base.
+            (true, Absent, true, Publish),
+            (true, Unanswered, true, Publish),
+            // Published here but nothing visible to build on: never overwrite
+            // a profile this device cannot see.
+            (true, Absent, false, Hold),
+            (true, Unanswered, false, Hold),
+            // Never published and every relay said so: nothing to retract.
+            (false, Absent, false, Settle),
+            // Never published and the read did not finish: could not ask.
+            (false, Unanswered, false, Hold),
+        ];
+        for (published_here, read, local_dated, expected) in table {
+            assert_eq!(
+                retraction_gate(published_here, read, local_dated),
+                expected,
+                "published_here={published_here} read={read:?} local_dated={local_dated}",
+            );
+        }
+
+        // The two promises, over every cell rather than the pinned ones.
+        for published_here in [false, true] {
+            for read in [Found, Absent, Unanswered] {
+                for local_dated in [false, true] {
+                    let gate = retraction_gate(published_here, read, local_dated);
+                    if !published_here && read != Found {
+                        assert_ne!(gate, Publish, "a retraction minted a first public event");
+                    }
+                    if published_here && read != Found && !local_dated {
+                        assert_eq!(gate, Hold, "an unseen profile was overwritten");
+                    }
+                }
+            }
+        }
     }
 }

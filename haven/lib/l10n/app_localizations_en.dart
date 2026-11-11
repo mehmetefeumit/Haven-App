@@ -1615,22 +1615,6 @@ class AppLocalizationsEn extends AppLocalizations {
   String get displayNameCardSaveFailedAnnouncement => 'Save failed, try again';
 
   @override
-  String get profileSyncStatusSyncing => 'Syncing to your public profile…';
-
-  @override
-  String get profileSyncStatusPartial =>
-      'Published — still syncing to some relays';
-
-  @override
-  String get profileSyncStatusSynced => 'Public profile up to date';
-
-  @override
-  String get profileSyncStatusFailed => 'Couldn\'t sync yet.';
-
-  @override
-  String get profileSyncStatusRetrySemantics => 'Retry publishing your profile';
-
-  @override
   String get npubQrCopiedSnack => 'Public key copied to clipboard';
 
   @override
@@ -1702,8 +1686,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get photoHeaderChangePhotoSemantics => 'Change profile photo';
 
   @override
-  String get avatarPickerPhotoUpdated =>
-      'Photo updated. It will be published to your public Nostr profile.';
+  String get avatarPickerPhotoUpdatedAnnouncement => 'Photo updated.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Photo removed.';

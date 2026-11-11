@@ -1,58 +1,39 @@
-/// Own-profile local-outbox sync trigger and the status the UI renders.
+/// Own-profile local-outbox sync trigger and foreground retry timer.
 ///
 /// Local saves ([ProfileService.updateOwnProfile], [ProfileService
-/// .setOwnAvatar]) merge onto the local cache and return in milliseconds —
-/// they no longer touch a relay. [ProfileService.syncOwnProfile] is what
+/// .setOwnAvatar], [ProfileService.removeOwnAvatar]) land on the local cache
+/// in milliseconds and touch no relay. [ProfileService.syncOwnProfile] is what
 /// actually publishes, and this notifier is the ONE place in the widget
 /// layer that calls it, so overlapping triggers (a name edit landing beside
 /// a resume trigger, say) coalesce into a single relay round trip instead of
 /// each opening its own connections for the same publish — mirrors
 /// `MemberProfileRefreshNotifier`'s `_inFlight`/queued shape
-/// (`member_profile_refresh_provider.dart`).
+/// (`member_profile_refresh_provider.dart`). The UI renders no publish state;
+/// this notifier holds none.
 library;
 
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/profile_service.dart';
 
-/// What the UI may honestly say about the own profile's publish state.
-enum ProfileSyncStatus {
-  /// The first local read has not resolved yet. Renders NOTHING — never
-  /// claim "up to date" before this settles.
-  unknown,
-
-  /// A sync pass is currently running.
-  syncing,
-
-  /// Something has published to at least one relay, but not the whole pool
-  /// (or a newer edit landed mid-flight) — still pending.
-  partial,
-
-  /// Every relay in the pool has acknowledged the current version.
-  synced,
-
-  /// The last sync attempt could not publish at all (upload/publish
-  /// failure, or too few relays survive), and the persisted backoff is not
-  /// due yet — or the local outbox itself could not be read.
-  failed,
-}
-
-/// Notifier owning the own-profile sync trigger and the [ProfileSyncStatus]
-/// the UI renders.
-///
-/// One shared status for the WHOLE own profile — not one per field — BY
-/// DESIGN: a name edit and a photo edit both land in the same kind-0 event,
-/// so there is exactly one publish state to report (see
-/// `widgets/identity/profile_sync_status_line.dart`).
+/// Notifier owning the own-profile sync trigger and its one retry timer.
 ///
 /// Non-autoDispose (the `MemberProfileRefreshNotifier` precedent): [sync]
-/// starts a fire-and-forget `Future` that later assigns `state`, so the
-/// notifier must not be disposable mid-flight — e.g. a user navigating away
-/// from the Identity page while a publish is still in flight.
-class OwnProfileSyncController extends Notifier<ProfileSyncStatus> {
+/// starts a fire-and-forget `Future`, so the notifier must not be disposable
+/// mid-flight — e.g. a user navigating away from the Identity page while a
+/// publish is still in flight.
+///
+/// The timer re-attempts a save the persisted ladder is still waiting on, and
+/// runs only while the app is resumed: the main isolate stays alive under the
+/// Android foreground service and the iOS location session, so a timer
+/// surviving a pause would dial relays from a backgrounded process. A bare
+/// [WidgetsBindingObserver] rather than `AppLifecycleListener`, which asserts
+/// on real Android transitions (see `AppForegroundNotifier`).
+class OwnProfileSyncController extends Notifier<void>
+    with WidgetsBindingObserver {
   /// Whether a sync is currently in flight.
   bool _inFlight = false;
 
@@ -60,23 +41,37 @@ class OwnProfileSyncController extends Notifier<ProfileSyncStatus> {
   /// while [_inFlight].
   bool _queued = false;
 
-  /// Set once this notifier is torn down. Checked before every `state`
-  /// assignment so a stale in-flight task can never write to a disposed
-  /// notifier.
+  /// Set once this notifier is torn down, so a stale in-flight task stops.
   bool _disposed = false;
 
+  Timer? _timer;
+
   @override
-  ProfileSyncStatus build() {
+  void build() {
     _inFlight = false;
     _queued = false;
     _disposed = false;
-    ref.onDispose(() => _disposed = true);
-    // Resolve whatever the local outbox already holds (a save queued in a
-    // prior session, or nothing) without forcing a network round trip up
-    // front — retryIfPending() itself decides whether the backoff permits a
-    // sync.
-    unawaited(retryIfPending());
-    return ProfileSyncStatus.unknown;
+    WidgetsBinding.instance.addObserver(this);
+    ref.onDispose(() {
+      _disposed = true;
+      _timer?.cancel();
+      _timer = null;
+      WidgetsBinding.instance.removeObserver(this);
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_disposed) return;
+    if (state == AppLifecycleState.resumed) {
+      // map_shell's resume handler returns on its debounce before its own
+      // retry trigger, so without this a brief app switch would cancel the
+      // timer and never re-arm it.
+      unawaited(retryIfPending());
+    } else {
+      _timer?.cancel();
+      _timer = null;
+    }
   }
 
   /// Runs one sync pass, coalescing overlapping calls into at most one
@@ -92,16 +87,13 @@ class OwnProfileSyncController extends Notifier<ProfileSyncStatus> {
       return;
     }
     _inFlight = true;
-    state = ProfileSyncStatus.syncing;
     try {
-      final service = ref.read(profileServiceProvider);
-      final result = await service.syncOwnProfile();
+      await ref.read(profileServiceProvider).syncOwnProfile();
       if (_disposed) return;
-      state = await _resolveAfterSync(service, result);
+      await _arm();
     } on Object catch (e) {
-      // Rule 8: never surface raw text — the status enum carries no message.
+      // Rule 8: never surface raw text.
       debugPrint('[Profile] sync failed: ${e.runtimeType}');
-      if (!_disposed) state = ProfileSyncStatus.failed;
     } finally {
       _inFlight = false;
       final queued = _queued;
@@ -112,91 +104,68 @@ class OwnProfileSyncController extends Notifier<ProfileSyncStatus> {
     }
   }
 
-  /// Consults the persisted pending/partial/backoff state and syncs ONLY
-  /// when a save is pending AND the backoff permits another attempt now —
-  /// never unconditionally (relay metadata minimization). This is the
-  /// resume/cold-start entry point, and what a photo removal calls
-  /// afterwards (`utils/profile_sync_trigger.dart`'s
-  /// `triggerProfileSyncRetry`).
+  /// Consults the persisted backoff and syncs ONLY when a save is pending AND
+  /// the ladder permits another attempt now — never unconditionally (relay
+  /// metadata minimization). This is the resume/cold-start/timer entry point.
   ///
-  /// When pending but not yet due, resolves the resting `partial`/`failed`
-  /// state without touching the network. While a sync is in flight it does
-  /// nothing: it neither starts nor queues another.
+  /// When pending but not yet due it arms the retry timer instead. While a
+  /// sync is in flight it does nothing: it neither starts nor queues another,
+  /// and that pass arms the timer itself when it ends.
   Future<void> retryIfPending() async {
     if (_disposed) return;
-    final service = ref.read(profileServiceProvider);
     final ProfilePendingState pendingState;
     try {
-      pendingState = await service.pendingSyncState();
+      pendingState = await ref.read(profileServiceProvider).pendingSyncState();
     } on Object catch (e) {
-      // Defensive only: ProfileService.pendingSyncState already fails closed
-      // and documents that it never throws — this branch exists so a
-      // non-conforming implementation still cannot claim "up to date".
+      // Defensive only: pendingSyncState already fails closed and never
+      // throws; a non-conforming implementation still arms nothing.
       debugPrint(
         '[Profile] retryIfPending: pendingSyncState failed: ${e.runtimeType}',
       );
-      if (!_disposed) state = ProfileSyncStatus.failed;
       return;
     }
-    // A sync in flight is already publishing what is pending and resolves
-    // the status itself. Calling sync() here would queue a follow-up that
-    // runs the moment it ends — a second publish at once, past the backoff
-    // it has just recorded.
     if (_disposed || _inFlight) return;
-    if (!pendingState.pending) {
-      state = ProfileSyncStatus.synced;
-      return;
-    }
-    if (pendingState.retryDue) {
+    if (pendingState.pending && pendingState.retryDue) {
       await sync();
       return;
     }
-    state = pendingState.partial
-        ? ProfileSyncStatus.partial
-        : ProfileSyncStatus.failed;
+    _armFrom(pendingState);
   }
 
-  /// Maps one sync pass's [result] to the resting [ProfileSyncStatus].
-  ///
-  /// Distinguishes WHY a [ProfileSyncOutcome.published] pass is still
-  /// pending: full relay-pool coverage with a newer edit landed mid-flight
-  /// queues exactly one immediate follow-up (via [_queued], drained by
-  /// [sync]'s `finally`); merely partial coverage does not — the persisted
-  /// backoff, not an immediate retry, is what re-attempts that one (relay
-  /// metadata minimization — an unreachable/slow relay must not turn into a
-  /// tight retry loop).
-  Future<ProfileSyncStatus> _resolveAfterSync(
-    ProfileService service,
-    ProfileSyncResult result,
-  ) async {
-    switch (result.outcome) {
-      case ProfileSyncOutcome.published:
-        final fullyAcked =
-            result.relaysAttempted > 0 &&
-            result.relaysAcked >= result.relaysAttempted;
-        if (fullyAcked && !result.stillPending) {
-          return ProfileSyncStatus.synced;
-        }
-        if (fullyAcked && result.stillPending) {
-          _queued = true;
-        }
-        return ProfileSyncStatus.partial;
-      case ProfileSyncOutcome.uploadFailed:
-      case ProfileSyncOutcome.publishFailed:
-      case ProfileSyncOutcome.poolUnderflow:
-        return ProfileSyncStatus.failed;
-      case ProfileSyncOutcome.nothingPending:
-        final pendingState = await service.pendingSyncState();
-        if (!pendingState.pending) return ProfileSyncStatus.synced;
-        return pendingState.partial
-            ? ProfileSyncStatus.partial
-            : ProfileSyncStatus.failed;
+  /// Re-reads the outbox after a pass and arms (or clears) the timer.
+  Future<void> _arm() async {
+    try {
+      _armFrom(await ref.read(profileServiceProvider).pendingSyncState());
+    } on Object catch (e) {
+      debugPrint('[Profile] arm: pendingSyncState failed: ${e.runtimeType}');
     }
+  }
+
+  /// The one timer: armed only for a pending, not-due save with a known wait,
+  /// and only while resumed; a state still due arms nothing (no tight loop).
+  void _armFrom(ProfilePendingState s) {
+    _timer?.cancel();
+    _timer = null;
+    final wait = s.nextRetryInSecs;
+    if (_disposed ||
+        !s.pending ||
+        s.retryDue ||
+        wait == null ||
+        WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+      return;
+    }
+    _timer = Timer(Duration(seconds: wait < 1 ? 1 : wait), () {
+      _timer = null;
+      if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+        return;
+      }
+      unawaited(retryIfPending());
+    });
   }
 }
 
-/// Provider owning the own-profile sync trigger and status.
+/// Provider owning the own-profile sync trigger and retry timer.
 final ownProfileSyncProvider =
-    NotifierProvider<OwnProfileSyncController, ProfileSyncStatus>(
+    NotifierProvider<OwnProfileSyncController, void>(
       OwnProfileSyncController.new,
     );

@@ -1237,7 +1237,10 @@ identified. Three disabled reasons are needed, not two: *already staged*
 
 One semantics node per row. The list is **not** a live region — a `liveRegion`
 re-announces its whole subtree on every rebuild (documented in-repo at
-`profile_sync_status_line.dart:32-33`). Instead: one debounced announcement per
+`profile_sync_status_line.dart:32-33` when this was written; that widget goes
+with the profile sync status line in the 2026-11-10 instant-save change — the
+rule stands).
+Instead: one debounced announcement per
 *settled* query (400 ms **and** the result set actually changed). Zero results is
 announced once. **Visual filtering stays 0 ms.**
 
