@@ -493,9 +493,14 @@ class LocationSharingService {
       circle: circle,
       results: results,
       ownPubkeyHex: await _resolveOwnPubkey(),
-      origin: '[LocationService] seal',
+      origin: _replayOrigin,
     );
   }
+
+  /// One origin for every result a drive handed back rather than a fetch: a
+  /// log line then cannot tell a location the Bluetooth mesh brought — whose
+  /// sender was within radio range — from one a seal's drive replayed.
+  static const _replayOrigin = '[LocationService] replay';
 
   /// Takes in what a drive that asked no relay handed back — the Bluetooth
   /// mesh's — through the funnel a poll's results take, each under the
@@ -506,8 +511,7 @@ class LocationSharingService {
     return _ingestResults(
       results: results,
       ownPubkeyHex: await _resolveOwnPubkey(),
-      // Names no carrier: nothing of the mesh is logged.
-      origin: '[LocationService] replay',
+      origin: _replayOrigin,
     );
   }
 

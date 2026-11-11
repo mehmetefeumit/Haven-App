@@ -2289,6 +2289,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
               '— aborting remaining fetches.',
             );
             await _yieldToForeground();
+            yieldedToForeground = true;
             break;
           }
           // LAST statement before the fetch, deliberately after the awaited
@@ -2307,7 +2308,9 @@ class BackgroundLocationTaskHandler extends TaskHandler {
             );
           }
         }
-        await _driveMesh();
+        // Not behind a hand-back: the foreground is waiting for the session
+        // this drive would be made on.
+        if (!yieldedToForeground) await _driveMesh();
       }
 
       // 9b. Close the publish pool. The relay work of this cycle is done, and

@@ -7831,6 +7831,10 @@
         {
           "file": "haven/test/services/location_sharing_mesh_test.dart",
           "name": "is logged naming no peer, circle or place — and no carrier"
+        },
+        {
+          "file": "haven/test/services/location_sharing_mesh_test.dart",
+          "name": "is logged exactly as a location a seal's relay drive replayed is: no line tells which carrier brought a peer within radio range"
         }
       ],
       "guards": []

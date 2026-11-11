@@ -122,10 +122,16 @@ class NostrMeshService implements MeshService {
   /// session, and never before its manager exists, since the manager is what
   /// the resume is asked with. A process that opens a session without this
   /// leaves that mesh's keys kept and its hand-off filling with no engine to
-  /// take from it.
+  /// take from it. A resume that failed is asked again by the next entry:
+  /// remembered, it would refuse every later one, turning mesh off included.
   Future<CircleManagerFfi> _session() async {
     final circle = await _circleManager();
-    await (_resumed[circle] ??= _bridge.resume(circle));
+    try {
+      await (_resumed[circle] ??= _bridge.resume(circle));
+    } on Object {
+      _resumed[circle] = null;
+      rethrow;
+    }
     return circle;
   }
 

@@ -3606,9 +3606,11 @@ the mesh calls no mesh entry").
   (`BackgroundSharingNotifier.setEnabled(enabled: false)`) calls
   `mesh_sharing_stopped` once.
 - **Logs.** The mesh's Dart code writes no log line, and a location the mesh
-  brought is logged by the shared ingest under a name that names no carrier
-  (`location_sharing_mesh_test.dart`, "is logged naming no peer, circle or
-  place — and no carrier").
+  brought is logged by the shared ingest in the very line a location a seal's
+  relay drive replayed is, so no line tells which carrier brought it — that
+  its sender was within radio range (`location_sharing_mesh_test.dart`, "is
+  logged naming no peer, circle or place — and no carrier", "is logged
+  exactly as a location a seal's relay drive replayed is").
 
 Residuals. A burst does not wait for its mesh drive, so a circle's own send
 can begin before the drive has taken a fellow member's update in; that update

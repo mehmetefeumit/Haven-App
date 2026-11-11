@@ -296,5 +296,28 @@ void main() {
         );
       },
     );
+
+    test(
+      "is logged exactly as a location a seal's relay drive replayed is: "
+      'no line tells which carrier brought a peer within radio range',
+      () async {
+        final logs = LogCapture.install();
+        await build().service.ingestReplayed([_fix(1, _peer)]);
+        final t = build()..mock.sealReplays = [_fix(1, _peer)];
+        await t.service.publishLocation(
+          mlsGroupId: a.mlsGroupId,
+          nostrGroupId: a.nostrGroupId,
+          latitude: 51.5,
+          longitude: -0.127,
+        );
+
+        final lines = logs.lines
+            .whereType<String>()
+            .where((line) => line.contains('→ location'))
+            .toList();
+        expect(lines, hasLength(2), reason: 'one by mesh, one by the seal');
+        expect(lines.first, lines.last);
+      },
+    );
   });
 }

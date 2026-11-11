@@ -3618,6 +3618,18 @@ void main() {
         expect(env.publisher.published, isEmpty);
         expect(env.log.sublist(env.log.length - 3), closed);
       });
+
+      test('its window is opened for no circle, so one that fails is told to '
+          "the health model as nobody's failed relay publish", () async {
+        // The publisher attributes a failed window to the circles it was
+        // opened for (`location_publish_scheduler_provider_test.dart`, "a
+        // window that fails is recorded against every circle waiting on it").
+        final env = meshOnlyBurst()..publisher.refuseWindow = true;
+
+        await tick(env, _circle('a', 1));
+
+        expect(env.publisher.windows, [isEmpty]);
+      });
     });
   });
 }

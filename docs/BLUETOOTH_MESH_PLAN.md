@@ -1817,6 +1817,23 @@ driver and the circle service require it. Eight of the Dart files this step
 touched were not `dart format`-clean before it, and were left as they were
 outside the changed lines.
 
+Review of M2g-2a (independent, read-only): no blocker. Fixed, each with a
+test that fails without the fix. A mesh-only pass opened its GPS window for
+its due circles, so a window that failed was recorded against each as a
+failed relay publish — with mesh off the same burst records nothing; it now
+opens the window for no circle. A location the mesh brought was logged
+under an origin no relay plane used, which told a reader of logs that its
+sender had been within radio range; it and a seal's replay now share one.
+The Android cycle drove the mesh behind a foreground that had taken
+ownership back mid-fetch, on the session the foreground was waiting for; it
+no longer does. A resume that failed was remembered for its session, and so
+refused every later entry, turning mesh off included; the next entry now
+asks again. Raised and not so: that a logout leaves the engine in memory —
+`wipe_all_mls_state`, which the logout calls, empties it first. Not
+confirmed by the review: how long a mesh drive holds the engine lock on a
+device, and whether a drive round that outlasts a burst's teardown brings
+back an idle relay manager.
+
 ### Proposed CLAUDE.md wording (owner to approve)
 
 Each is the text as it stands, then the text proposed. Nothing in

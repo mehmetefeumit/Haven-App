@@ -90,7 +90,7 @@ flutter run
 
 ### Build-time flags
 
-Two compile-time defines choose code paths. Each is a Dart `const` read with
+Two of the app's compile-time defines choose a receive or carrier path. Each is a Dart `const` read with
 `bool.fromEnvironment`, so it is fixed when the app is built — `flutter drive`
 does not pass it again — and is given with `--dart-define=<NAME>=<value>` on
 `flutter run`, `flutter build` or `flutter test`.

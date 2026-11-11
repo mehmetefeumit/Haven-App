@@ -12,6 +12,7 @@
 //  * a build without the mesh calls no mesh entry, and the cycle's relay work
 //    is the same whatever the mesh does.
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/mesh_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -180,6 +181,23 @@ void main() {
     await harness.tick(DateTime.now());
     await teardown;
 
+    expect(mesh.calls, isEmpty);
+  });
+
+  test('a foreground that takes ownership back during the fetch gets the '
+      'session with no mesh drive made on it first', () async {
+    final mesh = FakeMeshService();
+    final harness = await BackgroundTaskHarness.start(
+      circles: [circleFixture(seed: 1), circleFixture(seed: 2)],
+      mesh: mesh,
+      meshBuild: true,
+    );
+    harness.sharing.onFetch = (_) =>
+        BackgroundLocationManager.markForegroundActive(active: true);
+
+    await harness.tick(DateTime.now());
+
+    expect(harness.sharing.fetched, hasLength(1), reason: 'premise');
     expect(mesh.calls, isEmpty);
   });
 }

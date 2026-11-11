@@ -78,6 +78,17 @@ void main() {
       expect(bridge.calls.first, 'resume');
     });
 
+    test('whose resume failed is asked for again by the next entry, which '
+        'is then made', () async {
+      bridge.throws['resume'] = StateError('boom');
+      await expectLater(service.stop(), throwsA(isA<MeshServiceException>()));
+      bridge.throws.clear();
+
+      await service.stop();
+
+      expect(bridge.calls, ['resume', 'resume', 'stop']);
+    });
+
     test('is not asked for before a session exists', () async {
       final unopened = NostrMeshService(
         circleManager: () async => throw StateError('no session'),

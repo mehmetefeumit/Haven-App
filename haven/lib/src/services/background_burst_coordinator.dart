@@ -249,7 +249,8 @@ abstract class BurstPublisher {
   /// publishes nothing. [circles] is passed so the publisher can attribute a
   /// FAILED window to the circles that were waiting on it — without it, a
   /// dead GPS would reach the sharing-health model only as silence, minutes
-  /// later.
+  /// later. A pass that seals for the Bluetooth mesh alone passes none: its
+  /// failed window is no failed relay publish.
   ///
   /// Never throws.
   Future<BurstFix?> openBurstPublishWindow(Iterable<Circle> circles);
@@ -852,7 +853,7 @@ class BackgroundBurstCoordinator implements BurstSink {
       // The window opens on the first pass only: one fix per burst, and a
       // window that refused once will refuse the joiners too.
       fix ??= await _publisher.openBurstPublishWindow(
-        pending.map((e) => e.circle),
+        meshOnly ? const [] : pending.map((e) => e.circle),
       );
       if (fix == null) {
         // The window refuses for a reason that belongs to the DEVICE, never to
