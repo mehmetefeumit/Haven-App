@@ -3,8 +3,10 @@
 > Status: **DESIGN for milestone M2 of `docs/BLUETOOTH_MESH_PLAN.md` — drafted
 > and independently reviewed 2026-11-11; not yet implemented beyond M2a.**
 > The review's findings and its answers to the open questions are in the last
-> section and OVERRIDE the body wherever they differ. One question (Q-1, what
-> key material is stored at rest) awaits the owner's decision.
+> section and OVERRIDE the body wherever they differ. **Q-1 is decided (owner,
+> 2026-11-11): option (a)** — the group-event exporter is stored per retained
+> epoch in the encrypted store, pruned with the engine's window, deleted on
+> leave and when mesh goes off.
 
 Repo at `1c7aac4`. Read-only study; nothing in the repo was changed.
 Abbreviations: `mgr` = `haven-core/src/nostr/mls/manager.rs`, `fan` =

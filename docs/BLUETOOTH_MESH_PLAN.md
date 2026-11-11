@@ -339,8 +339,16 @@ plaintext   996 B
 - Kept per circle for the current epoch and up to 5 past epochs, pruned in
   step with the engine's retention (Rule 5), in memory under `Zeroizing` and
   **in the SQLCipher store**, so a process restart does not lose the keys for
-  peers who are still on an older epoch. MDK already persists the secrets for
-  the same epochs; this adds a derivative of them, not a longer window.
+  peers who are still on an older epoch.
+- **What is stored is `G_e` itself** (owner-directed 2026-11-11), and
+  `K_mesh` is derived from it on load. The receiver's check that a packet is
+  an application message (§4.3) has to remove the kind-445 outer layer, which
+  only `G_e` does, and MDK hands out `G_e` for the current epoch alone. MDK's
+  own database already keeps full snapshots of the same epochs and both
+  databases are keyed under one keyring service, so the copy adds nothing an
+  attacker who can open one could not already reach. It is written only while
+  mesh is on, deleted when mesh goes off, on leave, disband and identity
+  delete, and never crosses the FFI.
 - A key read while a commit is staged is the staged epoch's: it is installed
   only when the commit is confirmed and discarded on rollback.
 - Receivers try every stored key: at most 10 circles × 6 epochs = 60
