@@ -8,6 +8,11 @@
 > only; M3e; M3f.
 > The radio's pure Kotlin is built and tested on the JVM (M3f). No Android
 > adapter is, and no `MeshNative`: the shim's exports (M3b) have no caller.
+> **Revised 2026-11-12 for M3g's first step** — what Android itself logs,
+> the device name, and what Haven does about them: §M, researched in the
+> platform's source and confirmed by an independent pass, with §0, §1,
+> §B, §F, §H to §L and §12 brought into line. Paper only: nothing of §M
+> is built, and nothing of it has run on an emulator or a device.
 
 Studied at `132f5ca` (this file is in the tree since `8a76cf0`), with another
 agent's uncommitted work in `haven-core/`,
@@ -34,6 +39,7 @@ carries one of:
 | **[E]** | an emulator lane | **no** — CI only, **and its feasibility is unproven** (G-1, G-6) |
 | **[H]** | a real device | **no** — DEFERRED; the project has none |
 | **[U]** | nothing: unverified. What the confirming review read on an AOSP mirror or from memory, and what either pass has only from a search summary, stays [U] and says which | — |
+| **[V]**, **[V1]** | §M, and where another section cites §M: a platform source file or reference page, fetched and read by the confirming pass ([V]) or by the research pass alone ([V1]). A reading of source, not a run; from API 33 always on a LineageOS mirror, never on the AOSP host (§M.0) | — |
 
 CI (`ci.yml`) runs on pushes to `main` and pull requests to `main`
 (`.github/workflows/ci.yml:22-26`); this branch has no pull request. So
@@ -54,7 +60,7 @@ and G-10 are unanswered.
 | F-3 | **"Keep on … without opening Haven" (plan §7.6) is impossible when no session-owning isolate is alive**: restarting the twelve hours is a write to the session's store (`mesh_keep_on` → `mesh_on_until`, `api:13044-13050`). | — | Q-3: the notification's Keep on opens Haven, or does so only when no Dart isolate is alive. |
 | F-4 | **A stopped service has nothing to bring it back when Bluetooth returns.** Android 12+ refuses a foreground-service start from the background outside a fixed list [A5]. One entry on it is "the user turns off battery optimizations for your app", which Haven asks for and a user may decline (`background_location_manager.dart:181-186`); but a Bluetooth state change reaches no manifest receiver (**[U]**, the review's word), so in a stopped state nothing would hear it. Plan §7.1 has the service "wait for Bluetooth to come on". | [A5] | The service stays in the foreground, radio idle, while Bluetooth is off: a state "paused" that the plan does not name (§B.6, Q-8). |
 | F-5 | **The timed wake lock of plan §7.7 R2 is expected to hold in Doze, so its cost is real.** The Doze page says the system "ignores wake locks" [A7], with no exception. AOSP disables an app's partial wake lock in device idle only when its process state is worse than bound-foreground-service and it is not allowlisted (`PowerManagerService.setWakeLockDisabledStateLocked`; read by the review on a LineageOS 22.1 mirror, by the draft from memory — **[U]** here). | [A7]; mirror | A phone with a foreground service keeps the lock while dozing: R2 works as planned on AOSP, and a busy mesh keeps such a phone awake (§G, §H, Q-13). Vendor builds: [H]. The draft had this the other way round. |
-| F-6 | **A connected peer can read the phone's Bluetooth name, and sees more than Haven's service.** "No characteristic exposes a name" (plan §6.1) holds for Haven's service only. Android's Generic Access service carries Device Name. Per AOSP change `5fc5174` ("Selectively hide Device Name characteristic", bug 254314964) it is readable without encryption by a peer that connected through a *discoverable* advertisement, **or that this phone connected to**; earlier stacks let anyone read it (**[U]** as to the text: the review had it from search summaries). Advertisements are discoverable by default; `setDiscoverable(false)` exists from API 34 [A15, A16]. And Android keeps one attribute table a device, shared by every app (**[U]**, both passes' memory), so a peer also sees other apps' services. | [A15], [A16]; rest [U] | An attacker who advertises Haven's service UUID — public in the APK — is dialled by every Haven phone in range and reads each one's Bluetooth name, on every API level: a stable identifier across address rotation, often the owner's name. Plan §0.4 item 6 ("identity stay[s] hidden") is false. §B.3 hides the name from inbound peers on API 34+; nothing hides it from a peer Haven dials. §D discloses it; Q-6, Q-11. |
+| F-6 | **A connected peer can read the phone's Bluetooth name, and sees more than Haven's service.** "No characteristic exposes a name" (plan §6.1) holds for Haven's service only. Android's Generic Access service carries Device Name. Per AOSP change `5fc5174` ("Selectively hide Device Name characteristic", bug 254314964) it is readable without encryption by a peer that connected through a *discoverable* advertisement, **or that this phone connected to**; earlier stacks let anyone read it (**[U]** as to the text: the review had it from search summaries). Advertisements are discoverable by default; `setDiscoverable(false)` exists from API 34 [A15, A16]. And Android keeps one attribute table a device, shared by every app (**[U]**, both passes' memory), so a peer also sees other apps' services. | [A15], [A16]; rest [U] | An attacker who advertises Haven's service UUID — public in the APK — is dialled by every Haven phone in range and reads each one's Bluetooth name, on every API level: a stable identifier across address rotation, often the owner's name. Plan §0.4 item 6 ("identity stay[s] hidden") is false. §B.3 hides the name from inbound peers on API 34+; nothing hides it from a peer Haven dials. §D discloses it; Q-6, Q-11. **As researched, 2026-11-12 (§M.7):** the stack's rule is read, in a mirror, from 14 QPR3; it does not hold on a controller with neither extended nor multi advertising; and from Android 16 a peer's stack reads the name on every link, no app asking. |
 | F-7 | **The plan's button placement cites code that is elsewhere.** `MapControls` is positioned in `haven/lib/src/pages/map/map_page.dart:659-667`, inside the `map` layer, not in `MapShell.buildLayers` (`map_shell.dart:1013-1073`); the collapsed height is a private constant there (`map_page.dart:181`, `:645`) with a twin in the sheet (`circles_bottom_sheet.dart:43`). | — | The button takes its rect from `aura` §2's `meshButtonRect`; the 0.12 becomes one shared constant (§E.1). |
 | F-8 | **`rust_builder` has no `unsafe_code` lint**, and `frb_generated.rs` holds 223 `unsafe`s (`haven/rust_builder/src/lib.rs:1-19`, `Cargo.toml` has no `[lints]`). "`unsafe` confined to the shim" (plan §3) is not checkable today. | — | M3b denies `unsafe_code` crate-wide and allows it on two modules (§A.6). |
 | F-9 | **`jni` is already resolved**: `jni 0.21.1`, through `android-native-keyring-store` (`haven/rust_builder/Cargo.lock:76-82`, `:2085`), and that crate already exports a JNI function from this library (`kt/HavenApplication.kt:57`;
@@ -62,7 +68,7 @@ and G-10 are unanswered.
 | F-10 | **Notification text has no native l10n pipeline.** The location notification's text is localized in Dart and handed over (`background_location_manager.dart:295-301`). | — | Mesh notices do the same; a notice posted after a reboot uses the copy of the last start (§B.7). |
 | F-11 | **`permission_handler` is deliberately not a dependency** (`haven/pubspec.yaml:72-74`), and `MainActivity` is one line. | — | The Bluetooth prompt is asked by Haven's own channel in `MainActivity` (§C). |
 | F-12 | **The emulator's peripheral role may hold one inbound link at a time.** A third party found on emulator 37.1.11 / API 35 that an advertising emulator "stops advertising, so a second central cannot see it until the first disconnects" [A9]. G-6 asks for 2+2 links. | [A9], one report | The netsim lane may be unable to show two inbound links whatever Haven does (§F). |
-| F-13 | **Android's own Bluetooth classes log peer addresses from inside Haven's process, in every build.** `android.bluetooth.BluetoothGatt` and `BluetoothGattServer` run in the app's process with `DBG = true` and call `Log.d` with the raw address: `onSearchComplete() = Device=` + address, `onDescriptorWrite() - Device=` + address (client, lines 419, 708), `onMtuChanged() - device=` + address (server, line 360) — LineageOS 22.1 mirror of `packages/modules/Bluetooth/framework/java/android/bluetooth/`, fetched 2026-11-11 [A20]; the review reports Android 11 the same. `BluetoothDevice.toString()` is redacted only for apps targeting 34+, and those three lines do not use it. | [A20] | Every link, in either role, writes a peer's address to logcat under Haven's pid. No public API avoids it. Rule 15 as written forbids it; the logscan of any radio lane would flag it. An owner decision before M3g, not a discovery on the lane: Q-10. |
+| F-13 | **Android's own Bluetooth classes log peer addresses from inside Haven's process, in every build.** `android.bluetooth.BluetoothGatt` and `BluetoothGattServer` run in the app's process with `DBG = true` and call `Log.d` with the raw address: `onSearchComplete() = Device=` + address, `onDescriptorWrite() - Device=` + address (client, lines 419, 708), `onMtuChanged() - device=` + address (server, line 360) — LineageOS 22.1 mirror of `packages/modules/Bluetooth/framework/java/android/bluetooth/`, fetched 2026-11-11 [A20]; the review reports Android 11 the same. `BluetoothDevice.toString()` is redacted only for apps targeting 34+, and those three lines do not use it. | [A20] | Every link, in either role, writes a peer's address to logcat under Haven's pid. No public API avoids it. Rule 15 as written forbids it; the logscan of any radio lane would flag it. An owner decision before M3g, not a discovery on the lane: Q-10. **As researched, 2026-11-12 (§M.1–§M.3):** "no public API avoids it" holds for the calls and not for the lines — from API 30 a process decides what its own log calls write. What the lines hold differs by release, and a GATT server is told of every LE connection of the phone, not of Haven's peers alone. |
 | F-14 | **The mesh service shares Haven's one process with the UI and the location service**, and the manifest disables the plugin's `RestartReceiver` (`AndroidManifest.xml`, `android:enabled="false"`). Android's Bluetooth calls throw when the adapter changes state under them. | — | An exception that escapes a mesh callback kills background sharing over relays until a reboot or a launch. §B.1: nothing thrown leaves the mesh thread. |
 | F-15 | **`HAVEN_MESH` is a Dart define; a manifest is not gated by it**, and nothing in Gradle reads a define today: `haven/android/app/build.gradle.kts` reads `key.properties` and the environment variable `HAVEN_RELEASE_WRAPPER` (`:126`) and nothing else. | — | From M3g every release would declare three Bluetooth permissions, a `connectedDevice` service and a boot receiver for a feature that is off, with G-4 (Play's declaration) open. §B.8 gates the manifest; Q-12. |
 | F-16 | **`mesh_open` adopts and installs under two lock acquisitions** (`api:12967-12973`): it adopts (no engine), then locks again and answers `Off` if the home is no longer `Off`. Harmless today; with `radio_resume` an engine installed in between leaves the session answered `Off` beside a running engine whose hand-off nobody fills, and Dart remembers a resume's answer for the session (`mesh_service.dart:127-136`). | — | §A.3: adopt-or-install under one acquisition. |
@@ -93,7 +99,7 @@ complete with its tests, behind `HAVEN_MESH` (default off).
 | **M3d** | l10n: every string, 13 locales | [D], parity tool, `gen-l10n` |
 | **M3e** | UI: button, intro sheet, statistics sheet, Settings row, aura | [D] |
 | **M3f** | Kotlin: pure radio logic, JVM tests, the `android-unit` lane | [J], [G]; the lane itself [U] until a pull request runs it |
-| **M3g** | Kotlin: `MeshService`, GATT adapters, notices, manifest, channel | [C]; behaviour [E]/[H] |
+| **M3g** | Kotlin: `MeshService`, GATT adapters, notices, manifest, channel; and what §M requires before any of them: the process's log lever with its checks, the API 30 answer, the bond watch | [C]; behaviour [E]/[H] |
 | **M3h** | The L4 lane: loopback radio first, then netsim | [E] |
 | **M3i** | Documents, privacy manifest, device matrix | [G] |
 
@@ -101,6 +107,24 @@ Between M3e and M3g a flag-on Android build shows a button whose start
 answers "Couldn't turn mesh on": the channel has no native end yet. No
 script or workflow passes the flag. M3d does not wait on Q-6: the sentence
 about the Bluetooth name is written (§D) before any copy is translated.
+
+**M3g's first step is done on paper (§M).** Q-10 asked for the inventory
+and the levers before any adapter; they are researched and independently
+confirmed in source, unproved on any device. What M3g builds because of
+them, beside the adapters:
+
+- the log lever of §M.2 — a logger for the process and the floor behind
+  it — installed before any Bluetooth object exists, kept for the life of
+  the process, checked at every radio start and while the radio runs.
+  Where it lives is M3g's to settle within §M.2's constraints;
+- the rule of §M.3: no radio below API 30, answered `unsupported`; no
+  radio without the lever in force;
+- the bond watch of §M.4, and no call or permission that could pair;
+- `setDiscoverable(false)` from API 34 (§B.3, §M.7), as designed before;
+- nothing for a peer's address type (§M.6), and no renaming of the phone.
+
+M3h owes the proofs of §M.9, and a mesh lane that does not pass on a
+capture Haven's process wrote nothing to (§M.8).
 
 ---
 
@@ -664,14 +688,23 @@ connection changes nothing for the peer, which sees the disconnect).
   kept as two `Long` constants each and built at run time — a canonical-form
   UUID in a tracked file fails `check_no_committed_secrets.sh` (plan §13),
   the standard descriptor's included.
-- **Advertisement.** Flags and the service UUID: 21 of 31 bytes. No name,
+- **Advertisement.** The service UUID, and the Flags field where the
+  stack adds one. Below API 34 it does: 21 of 31 bytes. From API 34
+  `setDiscoverable(false)` [A15] takes Flags away — the stack adds it
+  only to an advertisement that is connectable and discoverable — and
+  the 18-byte UUID field is the whole payload (§M.7 [V]; the draft had
+  21 bytes on every level). No name,
   no TX power, no service data, no scan response. bitchat puts a peer id in
   service data (`bc:BluetoothGattServerManager.kt:404`); Haven does not.
   Legacy `startAdvertising`, `ADVERTISE_MODE_LOW_POWER`, connectable, no
-  timeout, on every API level (Q-9). From API 34, `setDiscoverable(false)`
-  [A15], so that a peer connecting in cannot read Device Name unencrypted
-  (F-6, [U]); whether an iPhone finds a non-discoverable advertisement is
-  **[U]**, recorded for M4. Start failures
+  timeout, on every API level the radio runs on (Q-9; §M.3).
+  `setDiscoverable(false)` is there so that a peer connecting in cannot
+  read Device Name unencrypted (F-6) — the stack's rule from 14 QPR3,
+  as read in a mirror, and not its rule on a controller with neither
+  extended nor multi advertising, where the setting is ignored (§M.7).
+  Whether an iPhone
+  finds an advertisement without Flags is **[U]**, recorded for M4.
+  Start failures
   (`bc:BluetoothGattServerManager.kt:418-429` lists them): too many
   advertisers and internal error are retried at the next Bluetooth-on or
   service start, never in a loop; unsupported means central-only.
@@ -703,8 +736,11 @@ connection changes nothing for the peer, which sees the disconnect).
   client interface is what exhausts Android's GATT clients
   (`bc:BluetoothGattClientManager.kt:493`).
 - **Incoming link.** The server's `onConnectionStateChange` is not a link:
-  it also fires for connections other apps and this app's own client make
-  **[U — widely reported, not confirmed today]**. A link is up when a
+  it also fires for connections other apps and this app's own client
+  make — on Android 16 the stack tells every registered application of
+  every LE link of the phone and the server side passes it on unfiltered
+  (§M.1 [V], one release read; observed on none). Such a connection is
+  never a link, and what the platform logs of it is §M.1's. A link is up when a
   central enables notifications on Haven's characteristic and its MTU is at
   least 51: `onLinkUp(central = false, mtu, address = null)`. It is down at
   disconnect or when notifications are disabled.
@@ -714,6 +750,18 @@ connection changes nothing for the peer, which sees the disconnect).
 - **Close.** `cancelConnection` on the server, `disconnect` then `close` on
   a client. **[U]** whether `cancelConnection` ends a connection the server
   did not itself `connect` to; the lane answers.
+- **No bonding (§M.4).** No attribute of Haven's carries an encrypted,
+  authenticated or signed permission; nothing calls `createBond`, reads a
+  characteristic or writes one with a response; the transport is
+  `TRANSPORT_LE`. The one write that has a response is the descriptor's,
+  and the platform answers a peer's refusal of it (ATT 0x05 or 0x0F) by
+  asking again with authentication, before Haven's callback runs — a
+  hostile peer can raise a pairing dialog that way, and any central can
+  ask to pair. The lever: the running service registers for
+  `ACTION_BOND_STATE_CHANGED`, and a device Haven is linked or linking
+  with that enters `BOND_BONDING` is closed at once, as a failed step
+  above. Whether that stops the pairing before keys are exchanged, and
+  whether the dialog shows anyway, is unproved (§M.9).
 - **Bluetooth off / no advertiser.** §B.6.
 
 ### B.4 Native limits
@@ -750,7 +798,10 @@ asked for, the engine is told the connect failed.
   would call `resume` with nothing left and leave the refusal to Rust). It
   answers the deadline copy to store, or null — a stop the service makes,
   through `MeshThread.stop(notice = true)`. The session-less resume (Q-2)
-  is one `if` of it.
+  is one `if` of it. **As researched, 2026-11-12:** the rule of §M.3
+  comes before the permission — the API level, then the lever of §M.2
+  installed and checked — and before any Bluetooth object. `StartPolicy`
+  gains that input, and its [J] test, with M3g.
 - **The deadline is enforced by the engine**, read at every pump. The copy
   in `MeshPrefs` serves only a restart with no engine and the alarm. Like
   the session's own across a restart (`haven-core/SECURITY.md`,
@@ -827,10 +878,20 @@ fixed copy and a time; nothing identifying.
 | API | Asked at run time | Notes |
 |---|---|---|
 | 31+ | `BLUETOOTH_SCAN`, `BLUETOOTH_ADVERTISE`, `BLUETOOTH_CONNECT` — one "Nearby devices" dialog [A2] | `BLUETOOTH_SCAN` declared `neverForLocation`: "some BLE beacons are filtered from the scan results" [A2]; **[U]** that a plain service-UUID advertisement is not one |
-| 29–30 | nothing | `BLUETOOTH`, `BLUETOOTH_ADMIN` are install-time. Searching needs fine location granted, Location switched on, and, from a service, background location [A2] |
-| 23–28 | nothing | as above with coarse or fine location, and no background permission |
+| 30 | nothing | `BLUETOOTH`, `BLUETOOTH_ADMIN` are install-time. Searching needs fine location granted, Location switched on, and, from a service, background location [A2] |
+| 29 | — **the radio is not started (§M.3)** | as API 30. Kept as the record of what the level would have needed |
+| 23–28 | — **the radio is not started (§M.3)** | as API 30 with coarse or fine location, and no background permission. Kept as the record |
 
-Mesh never asks for location. Below API 31 a phone without it advertises,
+**The radio starts on API 30 and later, and nowhere else (§M.3).** Below
+it nothing lets a process keep the platform's Bluetooth lines out of its
+own log (§M.2), so under the owner's condition (Q-10) the radio is not
+started: `start` answers `unsupported`, before a foreground start and
+before any Bluetooth object. Phones on Android 6 to 10 cannot use the
+mesh; the rest of Haven runs there as before (`minSdk` 23). The draft
+had the mesh on every level from 23; `PermissionMatrix` (M3f) still
+answers for 23–29, which no start reaches.
+
+Mesh never asks for location. On API 30 a phone without it advertises,
 accepts links and cannot search: the status line says so.
 
 **The mesh manifest is in no build that has the flag off (F-15).** Every
@@ -883,18 +944,34 @@ any `.kt` under a `mesh/` directory of `app/src`, a `Log.`, `Timber.`,
 in the JVM tests. `aRadioPortThatThrowsStopsTheRadioAndNothingEscapes`
 plants an address in what is thrown and reads both standard streams empty.
 
-**Android logs for it (F-13).** The framework's GATT classes, running in
-Haven's process, write each peer's Bluetooth address to logcat at debug
-level in every build, in both roles; Haven cannot turn that off and no
-other public API makes a link. What the line holds: a peer's address as
-it was on the air — random and rotating on a phone ([U], §H), fixed on a
-device that does not randomize — with the log's own timestamp. Who can
-read it: someone with the phone and `adb` (USB debugging on and the
-computer authorized), a bug report the user shares, and system apps
-holding `READ_LOGS`; an ordinary app has read only its own process's log
-since Android 4.1 (**[U]**, from memory). The system's Bluetooth process
-logs the same addresses under its own pid whatever Haven does. Whether
-Rule 15 gives here is the owner's to say: Q-10.
+**Android logs for it (F-13); from API 30 Haven's process need not
+carry it (§M).** The framework's GATT classes run in Haven's process and
+write to logcat, at debug level in every build and in both roles, the
+address of whatever connected — in full on every release read up to
+15 QPR2, its last two bytes from 16 (§M.1) — with the log's own
+timestamp. A GATT server
+is told of every LE connection of the phone, so the addresses are not
+Haven's peers' alone. The draft said here that Haven cannot turn that
+off. That holds for the calls — no other public API makes a link — and
+for every level below API 30. From API 30 a process decides what its own
+log calls write (§M.2): Haven installs a logger that writes nothing but
+lines under its own tags, with the process's minimum priority raised
+behind it, before any Bluetooth object exists, and starts no radio where
+that is not in force (§M.3). The platform also prints whatever a callback
+of Haven's throws, and an uncaught exception leaves the process for the
+system's crash records whatever the lever does: §B.1's wrapper is what
+keeps both empty.
+
+What this costs Haven's own diagnostics, and what stays whatever Haven
+does — the system's Bluetooth process logs the same links under its own
+pid — is §M.8. Who can read a process's log: someone with the phone and
+`adb` (USB debugging on and the computer authorized), a bug report the
+user shares, and apps holding `READ_LOGS` — protection level
+`signature|privileged|development` — which from Android 13 need a
+consent at each use ([V], §M.1); an ordinary app is given only its own
+uid's entries ([V] at
+Android 6.0; "since Android 4.1" is from memory, **[U]**). Decided by
+the owner, on conditions: Q-10.
 
 ### B.10 Tests
 
@@ -1353,7 +1430,11 @@ notification`), **T-NOTIF-3**, **T-AUTO** with the reminder and the stopped
 notice (the deadline shortened by a debug-only extra, never a sleep),
 **T-INDEP-4** (app swiped away with mesh on and sharing off; the catch-up
 worker and a relaunch obtain the session), **T-LOG-1** for Haven's own
-lines (logscan over the lane's sinks, with planted peer numbers), and that
+lines (logscan over the lane's sinks, with planted peer numbers) — **as
+researched, 2026-11-12: not as written.** The real `MeshService` runs
+here, so the lever of §M.2 is in force from the first turn-on and
+Haven's process writes no line for a scanner to read; what the lane must
+show instead is §M.8's requirement — and that
 the flag-on build's merged manifest has every mesh entry (§B.8).
 
 **Of the Kotlin, JNI and engine pipeline only**, and labelled so in the
@@ -1370,7 +1451,12 @@ relay oracles once more with mesh on and a peer present": `e2e-android.yml`,
 input that builds with the flag, turns mesh on and attaches one loopback
 peer, and are called once more from `ci.yml` with it. Their oracles are
 unchanged; a red there is the mesh moving the relay path. Three more
-emulator jobs a push.
+emulator jobs a push. Each of the three runs the log scanner over its
+captures today (`HAVEN_LOGSCAN`), and the scanner's positive controls
+are lines Haven's process writes; from the turn-on that process writes
+none (§M.8). Every read of Haven's log in them — a control, or an oracle
+that takes its signal from a line, which was not surveyed for this
+revision — is found and given another signal before the lane counts.
 
 **It proves nothing about Bluetooth**: no adapter of §B.1 runs, and so
 nothing of F-13 either — the framework's own log lines appear only with a
@@ -1404,8 +1490,10 @@ air** — the advertisement's bytes, and, **in both directions (Haven dialled,
 and Haven dialling)**, the whole attribute table a peer is shown and what
 Device Name answers, with `setDiscoverable(false)` and without (F-6);
 §B.3's link sequence against a real Bluetooth stack; the [U]s of §B.3;
-the `neverForLocation` [U]; and what the framework logs (F-13), under
-whatever rule Q-10 gives the scanner.
+the `neverForLocation` [U]; and what the framework logs (F-13): on API 30
+and later, that none of it is under Haven's pid, with an address planted
+(§M.9 item 1), and what the Bluetooth process writes under its own, for
+the scanner rule Q-10 asks for.
 
 **If it cannot be made reliable:** the adapters have no proof per push;
 requirement N1 is unmet for them (plan G-1's own words); the loopback lane
@@ -1479,14 +1567,18 @@ security-reviewer on M3a, M3b and §B.3–B.4 before they land (plan §8.3).
 | **A fault in the mesh ends the relay path's process** (F-14) | every callback inside `MeshThread.run`; every export inside `radio_guarded` | §B.1, §A.6 | `aRadioPortThatThrowsStopsTheRadioAndNothingEscapes` [J]; `every_export_is_one_guarded_call` [L]; guard [G] |
 | Handshake cost | two scalar multiplications a connection, behind the inbound limit | engine | plan §6.7 |
 | Tracking by advertisement | the service UUID alone; no name, data or power | `AdvertiserAdapter` | `theAdvertisementIsTheServiceUuidAlone` [J]; on air [E] netsim |
-| Tracking by address | Android advertises under a resolvable private address, rotated about every 15 minutes **[U — a 2026 paper's figure, from a search summary]**; Haven sets none. An AOSP fix (bug 246692649) for rotation stopping after a connection exists; which releases have it is **[U]** | platform | [H] |
+| Tracking by address | Haven sets none and cannot: the address, in both roles, is the build's (§M.5). AOSP's default is a resolvable private address, rotated every 15 minutes on Android 6–11 and at a random 7 to 15 on 12L and 13 ([V1]), and the same from 14 unless a vendor's property says otherwise ([V]). An AOSP fix (bug 246692649) for rotation stopping after a connection exists; which releases have it is **[U]** | platform | [H] |
+| **The phone's own address fixed**, where a vendor ships LE privacy off or a public or static address policy | **none**: no public API chooses the address or tells which kind it is (§M.5) | platform | residual, stated; [H] |
 | Re-identification across rotation by the packets held, or by a link kept open | **none**: plan §0.4 item 6, accepted | — | disclosed (§D) |
-| **The phone's Bluetooth name, read by a peer that connects in** | API 34+: `setDiscoverable(false)` (F-6, [U] as to the stack's rule). Below 34, and on a stack older than the AOSP change: **none** | `AdvertiserAdapter` | T-PRIV-5 [E] netsim, both directions; [H] |
-| **The same name, read by a peer Haven dials** — anyone advertising Haven's public UUID | **none**, on every API level | — | disclosed, and the name shown (§D, §E.2); Q-6, Q-11 |
+| **The phone's Bluetooth name, read by a peer that connects in** | API 34+: `setDiscoverable(false)` (F-6; the stack's rule [V] in a mirror from 14 QPR3, §M.7). **None** on API 30–33, and none on a controller with neither extended nor multi advertising, where the stack ignores the setting | `AdvertiserAdapter` | T-PRIV-5 [E] netsim, both directions; [H] |
+| **The same name, read by a peer Haven dials** — anyone advertising Haven's public UUID | **none**, on every API level ([V], §M.7). From Android 16 the peer's stack reads it on every link, no app asking | — | disclosed, and the name shown (§D, §E.2); Q-6, Q-11 |
 | **Other apps' Bluetooth services, seen by any connected peer** (one attribute table a device, [U]) | **none** | platform | T-PRIV-5 records the table; disclosed in `meshIntroName` |
 | What Haven's characteristic reveals | nothing readable: write and notify only, every byte after the handshake sealed (plan §6.7) | engine | T-PRIV-8 [L, exists] |
 | A Bluetooth address in a log, a notice or across the bridge **by Haven's code** | the package logs nothing; `PeerTable` keeps addresses in Kotlin memory only; the channel carries a state and two bools | §B.9, §C.1 | `anAddressNeverReachesTheEngine` [J]; `nothing_is_logged_…` [D]; T-LOG-1 [E] |
-| **A peer's address in logcat by Android's code, under Haven's pid** (F-13) | **none**: no public API links without it | platform | Q-10; netsim lane or [H] to see it |
+| **An address in logcat by Android's code, under Haven's pid** (F-13) — a peer's, and that of any other device that connects to the phone (§M.1) | the process's own logger, and the floor behind it, in force before any Bluetooth object exists, or no radio; below API 30, no radio (§M.2, §M.3). Not built | §M | Q-10; [E]/[H], §M.9 items 1–3 and 7 — nothing run |
+| **The same links in the system's own records, outside Haven's process**: the Bluetooth process's log, and from Android 16 the names it reads of peers (§M.7) | **none** | platform | residual, stated (§M.8) |
+| **A crash or a `Log.wtf` in Haven's process, recorded by the system** with the exception's message (`am_crash`, `am_wtf`, DropBox) | nothing thrown leaves the mesh thread (§B.1), and the package builds no message from an address (§B.9). What a platform exception's message carries is unread | §B.1, §M.8 | `aRadioPortThatThrowsStopsTheRadioAndNothingEscapes` [J] for the wrapper; the system's record [E] |
+| **A peer makes the phone ask to pair** — by refusing the descriptor write, or as a central asking outright | nothing of Haven's asks for security; a device that enters `BOND_BONDING` while linked or linking is closed (§B.3). The system's consent dialog may show all the same; an accepted pairing would hand the stranger the phone's identity address (**[U]**, the specification from memory) | `MeshService`, the adapters; §M.4 | [E]/[H], §M.9 item 4 |
 | The radio reaching a key or a session | no radio entry takes one; the engine is keyless | §A.4 | `the_radio_entries_take_no_session` [L] |
 | A radio with the store saying off | bounded to one process start until the first session entry; turn-off stops the radio first; no reconcile runs inside a transition | §A.4, §C.3, §C.4 | `a_session_whose_mesh_is_off_ends_…` [L]; `a_stopped_event_in_the_middle_of_a_turn_off_starts_nothing` [D] |
 | The deadline copy at rest | an app-private preference: that mesh was on, and until when. The counters went to the encrypted store for less (D-4) | `MeshPrefs` | Q-2 |
@@ -1495,8 +1587,13 @@ security-reviewer on M3a, M3b and §B.3–B.4 before they land (plan §8.3).
 
 **What stays exposed whatever M3 does**, beyond plan §0.4: the phone's
 Bluetooth name to any peer Haven dials, and to any peer at all below API
-34; the list of other apps' Bluetooth services; and, under Haven's pid in
-the device's own log, the addresses it linked with.
+34 or on a controller that ignores the setting; the list of other apps'
+Bluetooth services; the phone's own address where its vendor does not
+randomize it; and the system's records of the links, outside Haven's
+process. The whole list is §M.8. The draft ended this paragraph with the
+addresses Haven linked with, under its own pid in the device's log: on
+the levels the radio runs on they are not written there (§M.2, §M.3) —
+as read in source, and unproved on a device.
 
 ---
 
@@ -1509,9 +1606,16 @@ the device's own log, the addresses it linked with.
 - `docs/privacy/privacy_invariants.json`: invariants for the advertisement,
   the GATT table, the notices, the deadline copy, the session-less engine;
   accepted deviations for the Bluetooth name and, if Q-10 is answered that
-  way, for the framework's log lines.
-- `plan` §0.4 item 6 (identity) and item 3 (after a reboot, after the
-  first unlock); §16: M3's status, each "not as the plan has it" of §0.
+  way, for the framework's log lines. **As decided and researched,
+  2026-11-12:** Q-10 is answered that way. The deviation is what §M.8
+  lists and no more, written when M3g builds the lever and not before:
+  both documents describe what is built.
+- `plan` §0.4 item 6 (identity; and "after its Bluetooth address
+  rotates", which is the build's to do and not every build's, §M.5) and
+  item 3 (after a reboot, after the first unlock); a new item there, that
+  phones on Android 6 to 10 cannot use the mesh (§M.3); §7.1, which has
+  the radio on every level from 23; §16: M3's status, each "not as the
+  plan has it" of §0.
 - `haven/lib/src/providers/mesh_provider.dart`'s "No radio is built yet"
   and `api:12745-12746`'s "The radio is not built yet".
 - `docs/MESH_DEVICE_MATRIX.md`: new, Android half, DEFERRED.
@@ -1520,7 +1624,8 @@ the device's own log, the addresses it linked with.
   in the proposed Rule 17, "the radio's entries take no session and open
   none; a radio entry may start a keyless engine under a deadline no later
   than twelve hours and the first session entry overrules it"; in Rule 15,
-  whatever Q-10 decides; the mesh lanes in the CI section.
+  whatever Q-10 decides — the owner approves the wording (Q-10, item 4),
+  from §M.8; the mesh lanes in the CI section.
 
 ---
 
@@ -1561,6 +1666,31 @@ record of what was weighed.
   The inventory and the levers are **not established yet**: they are
   M3g's first step, researched against the platform's source and
   documentation and confirmed independently before code.
+
+  **As researched, 2026-11-12 (§M).** Established on paper — a research
+  pass, then an independent confirmation that fetched every cited file
+  again — and proved on no emulator or device (§M.9). By item:
+  1. The inventory is §M.1, by release band and not by API level: the
+     lines changed within API 35 and again within API 36. No line names this
+     phone's own address or name. One finding widens the question: a
+     GATT server is told of every LE connection of the phone, so the
+     addresses would be those of the user's own devices too.
+  2. The choices are §M.4 to §M.7, and one identifier is not among
+     them: this phone's address is private and rotating by AOSP's
+     default, a vendor's to change, and an app can neither choose it nor
+     see which it has (§M.5). The condition reaches what "Haven's
+     choices decide"; nothing here says every identifier is random.
+  3. No other call makes the link (§L). But from API 30 a process
+     decides what its own log calls write, and with the lever of §M.2
+     in force none of the platform's Bluetooth lines is written from
+     Haven's process at all. "All of them or the radio is not started"
+     becomes the rule of §M.3: API 30 or later, the lever in force and
+     checked, never bonded — or no radio. Its price: phones on Android 6
+     to 10 cannot use the mesh.
+  4. What is left is §M.8, stated there and in none of the three
+     documents yet: they describe what is built. Under Haven's pid
+     nothing of the platform's is left to scope a scanner rule to; the
+     rule is for the Bluetooth process's own lines.
 - **Q-11 (and Q-6) — the Bluetooth name: accept and disclose**; and, in the
   owner's words, "if there is a way to remove/obfuscate this information,
   do it". Disclosure is built (the intro sheet's name step, M3d/M3e).
@@ -1568,6 +1698,17 @@ record of what was weighed.
   `setDiscoverable(false)` from API 34 is designed and unverified (§B.3);
   renaming the phone's Bluetooth name (Q-6 (c)) changes a system setting
   the user's other devices see, and is not taken without the owner's word.
+
+  **As researched, 2026-11-12 (§M.7).** No way that is Haven's to take
+  withholds the name from a peer this phone dials, on any release.
+  `setDiscoverable(false)` withholds it from a peer that connects in,
+  from API 34, except on a controller with neither extended nor multi
+  advertising; it also takes the Flags field out of the advertisement,
+  and whether an iPhone still finds that is unproved (M4). From Android
+  16 a peer's stack reads the name on every link without any app asking.
+  Renaming stays untaken: an app may do it, for every Bluetooth use of
+  the phone. So the name is accepted and disclosed, with
+  `setDiscoverable(false)` where it exists.
 - **Q-13 — a linked stranger can keep the phone awake: accept and record.**
   Recorded in §H; narrowed, not bounded, by M3f's review (a link or frame
   the engine closes at once holds no lock).
@@ -1679,6 +1820,10 @@ address to logcat from Haven's process, and Haven cannot stop it.
   not at all.
 - **Recommended: (a)** — but it is a pillar giving, so it is the owner's
   word, before M3g, not a lane's finding.
+- *As researched, 2026-11-12:* the question was weighed on "Haven cannot
+  stop it", which is false from API 30 (§M.2), and on "the address is the
+  one the peer showed everyone", which leaves out the user's other
+  devices (§M.1). The decision above stands; §M.3 is what it now asks.
 
 **Q-11. A phone Haven dials reads this phone's Bluetooth name (F-6).** No
 setting prevents it; anyone can be dialled by advertising Haven's UUID.
@@ -1688,6 +1833,8 @@ setting prevents it; anyone can be dialled by advertising Haven's UUID.
 - **Recommended: accept and disclose.** The dual role is what makes a mesh;
   a phone that never dials cannot link to another Android phone that
   hides its name the same way.
+- *As researched, 2026-11-12:* "no setting prevents it" is confirmed in
+  source for every release read (§M.7).
 
 **Q-12. Keep the mesh out of the manifest while the flag is off (F-15)?**
 - *Gate it (designed, §B.8):* ordinary releases declare nothing new and do
@@ -1730,21 +1877,50 @@ notification dismissal on Android 14 [A4]; `connectedDevice`'s
 prerequisites [A1]; the boot and package-replaced exemptions [A5]; the
 wake lock in Doze (the review, on a mirror — [U] here, [H] for vendors).
 
+**Settled by the research of 2026-11-12, in source and on no device**
+(§M; from API 33 in a LineageOS mirror, the AOSP host unreachable):
+what the framework's GATT classes log, per release (§M.1); that a
+process can keep those lines out of its own log from API 30, by two
+mechanisms, and what undoes each (§M.2); who may read logcat (§M.1);
+the retry that lets a peer raise a pairing dialog, and that no public
+call stops a pairing but dropping the link (§M.4); this phone's address
+type and rotation by release, and that an app cannot choose it (§M.5);
+`getAddressType()` and where it means anything (§M.6); the Device Name
+permission from 14 QPR3, that a dialled peer always reads the name, what
+`setDiscoverable(false)` changes and where it is ignored, and the name
+read a 16 stack makes on every link (§M.7); that the server's connection
+callback fires for every LE connection of the phone (read on 16 only).
+
 **Still open:**
 
 - F-12, and netsim on a hosted runner at all (§F.3).
 - Whether `cancelConnection` ends an inbound connection; `startForeground`
   in a sticky restart on Android 12+; whether the server's connection
-  callback fires for other apps' connections; whether a no-response
+  callback fires for other apps' connections on a release other than 16,
+  and on any device; whether a no-response
   write is paced by its callback; re-posting a dismissed foreground
   notification; that a Bluetooth state change reaches no manifest
   receiver.
 - Whether `neverForLocation` filters a plain service-UUID advertisement;
   whether an iPhone finds a non-discoverable advertisement; iOS's typical
   MTU; the legacy advertise mode's interval.
-- The text of AOSP `5fc5174` and which releases carry it; the shared
-  attribute table (memory); the scan downgrade on Android 15 (the review's
-  reading); address rotation and its AOSP fix; who may read logcat.
+- The text of AOSP `5fc5174`, and whether Android 14.0.0 itself carries
+  it (read at 14 QPR3); the shared attribute table (memory); the scan
+  downgrade on Android 15 (the review's reading); the AOSP fix for
+  address rotation stopping after a connection.
+- **New with §M.** Everything of §M.9: that the lever leaves Haven's
+  pid empty on a real phone, a vendor's included; that nothing in the
+  process moves the floor; that the check sees a property; that dropping
+  the link stops a pairing; that `setDiscoverable(false)` stops a
+  peer-initiated bond; that a 16 stack's name read is stored and logged
+  on a user build; whether an app may clear its own log entries. And
+  beside it: every [V] of §M on the AOSP host itself; every vendor's
+  Bluetooth stack and `liblog`; the Bluetooth Core Specification, not
+  fetched — so that an address cannot be resolved without a bond, and
+  what a pairing exchanges, are from memory; an iPhone's own Device
+  Name; whether the logger sees the binary event-log writes; how the
+  logger's being in force is read back (§M.2); the defaults of the
+  platform flags §M names.
 - Play's declaration: `support.google.com` [A13] and Bumble's pages
   `google.github.io` [A14] are outside this session's network.
 - That the Flutter tool hands Gradle the defines as designed, and AGP's
@@ -1756,7 +1932,8 @@ wake lock in Doze (the review, on a mirror — [U] here, [H] for vendors).
 - That the shim compiles for Android, links under its nine names and is
   callable: no Android target where M3b was built ([C], [E]).
 - [A9] and [A10] were read through a summarizing fetch, not in full.
-- Nothing was built or run for this design or its revision.
+- Nothing was built or run for this design or its revisions, §M's
+  included.
 
 ---
 
@@ -1793,6 +1970,48 @@ Fetched 2026-11-11 unless marked.
 - bitchat-android at `14ab73c4`: `BluetoothGattClientManager.kt`,
   `BluetoothGattServerManager.kt`, `BluetoothPacketBroadcaster.kt`,
   `app/src/main/AndroidManifest.xml`.
+
+**For §M, fetched 2026-11-12**, by the research pass and again by its
+confirmation; neither pass's report is in the tree. `AM/<repo>@<tag>` is
+`raw.githubusercontent.com/aosp-mirror/<repo>/<tag>/…`, Google's GitHub
+mirror at an AOSP release tag; `LO/<repo>@<branch>` is
+`raw.githubusercontent.com/LineageOS/<repo>/<branch>/…`.
+`android.googlesource.com`, `cs.android.com`, `source.android.com` and
+`www.bluetooth.com` were **not reachable** in either pass.
+
+- [A21] `AM/platform_frameworks_base`, tags `android-6.0.0_r1` to
+  `android-14.0.0_r1`: `core/java/android/bluetooth/` (the Bluetooth
+  classes, to Android 12L only), `core/java/android/util/Log.java`,
+  `core/jni/android_util_Log.cpp`, `RuntimeInit.java`,
+  `ActivityManagerService.java`, `LogcatManagerService.java`,
+  `core/res/AndroidManifest.xml`.
+- [A22] `AM/platform_system_core`: `liblog/` and `base/logging.cpp` at
+  `android-10.0.0_r1` and `android-11.0.0_r1`; `logd/` at
+  `android-6.0.0_r1`.
+- [A23] `LO/android_packages_modules_Bluetooth` (the framework classes
+  and the stack from API 33), `LO/android_system_logging` (`liblog/`),
+  `LO/android_frameworks_base`, and — the research pass only —
+  `LO/android_system_bt` (the stack to 12L, `cm-13.0` to
+  `lineage-19.1`). Branch to release, by each branch's
+  `LO/android_build` `core/build_id.mk`: `lineage-20.0`
+  TQ3A.230901.001, 13 QPR3, API 33 · `lineage-21.0` AP2A.240905.003,
+  14 QPR3, API 34 — not Android 14.0.0 · `lineage-22.0`
+  AP3A.241105.008, 15 · `lineage-22.1` AP4A.250205.002, 15 QPR1 ·
+  `lineage-22.2` BP1A.250505.005, 15 QPR2, all API 35 · `lineage-23.0`
+  BP2A.250805.005, 16 · `lineage-23.1` BP3A.250905.014, 16 QPR1 ·
+  `lineage-23.2` BP4A.251205.006, 16 QPR2, all API 36 · `lineage-24.0`
+  CP2A.260605.016, the release after 16, its number an inference.
+- [A24] https://developer.android.com/ndk/reference/group/logging and
+  https://developer.android.com/ndk/guides/using-newer-apis
+- [A25] developer.android.com reference pages: `BluetoothDevice`
+  (`toString`, `getAddressType`, `setPairingConfirmation`,
+  `cancelBondProcess`, `ACTION_BOND_STATE_CHANGED`),
+  `BluetoothAdapter#setName`, `Manifest.permission#READ_LOGS`; and
+  [A15], [A16] again.
+- [A26] `flutter/flutter`, branch `master` (no pinned revision):
+  `fml/logging.cc`, `shell/platform/android/flutter_main.cc`.
+- [A27] `android_logger 0.15.1`, `src/lib.rs`, as resolved in
+  `haven/rust_builder/Cargo.lock`.
 
 ---
 
@@ -1851,4 +2070,688 @@ applied.
   server class logs too (`onMtuChanged() - device=` + address,
   `BluetoothGattServer.java:360` on the mirror), so both roles write an
   address; Q-10's second option is therefore "no Android radio".
+  **As researched, 2026-11-12:** there is still no other call; but from
+  API 30 the process can keep the lines themselves out of its log
+  (§M.2), so the second option was narrower than it read here.
 - `max_peers` is at `eng:264`, not `:263`.
+
+---
+
+## M. Android's own logs, the device name, and what Haven does about them
+
+The owner's decisions on Q-10 and Q-11 (§J) asked for facts before any
+adapter. They are here: what the platform does, what Haven does about
+it, what is left. It is M3g's brief for everything that is not an
+adapter.
+
+### M.0 How this was established, and how far
+
+Two read-only passes on 2026-11-12: a research pass, then an independent
+confirmation that fetched each cited file again, corrected the first and
+added to it. Where they differ the confirmation is followed (§M.10).
+Neither built or ran anything: no emulator, no device.
+
+**The AOSP hosts were not reachable in either pass.** Read instead
+(§12, [A21]–[A27]): `developer.android.com`; Google's GitHub mirror of
+AOSP at release tags (`AM/…`), which carries the Bluetooth classes only
+to Android 12L; and, for everything from API 33, LineageOS branches
+(`LO/…`), each tied to a release by its build ID. A LineageOS branch is
+a fork: it can differ from the AOSP tag by its own patches and by
+monthly backports, and `lineage-21.0` is 14 QPR3, not Android 14.0.0. So
+**every statement here about API 33 and later is "read in a mirror, to
+be confirmed on the AOSP host"**, and none is about a vendor's build: no
+vendor's Bluetooth stack, framework or `liblog` was read. The Bluetooth
+classes also ship as a module, updatable from Android 16 (**[U]**, a
+search summary), so a phone's can be newer than its API level:
+`SDK_INT` does not say which column of §M.1 a phone is in.
+
+Tags, in this section: **[V]** fetched and read by the confirming pass —
+what the research cited, read again, or what the confirmation added;
+**[V1]** read by the research pass alone; **[U]** unverified, saying
+why; **[E]**, **[H]** needs an emulator or a device (§M.9). A [V] is a
+reading of source, never an observation.
+
+Short forms: `fw/` is `framework/java/android/bluetooth/` and `sys/` is
+`system/`, both in `LO/android_packages_modules_Bluetooth`; up to 12L
+`fw/` is `core/java/android/bluetooth/` in `AM/platform_frameworks_base`.
+`liblog/` is in `LO/android_system_logging`, and in
+`AM/platform_system_core` at Android 10 and 11. `@6.0`, `@11`, `@12.1`
+are the AOSP tags `android-6.0.0_r1` and so on; `-22.2` is the branch
+`lineage-22.2`. The confirmation found the research's line numbers two
+to four off in places; a number here is the confirmation's where it
+gave one.
+
+### M.1 What the platform writes from Haven's process
+
+`BluetoothGatt` and `BluetoothGattServer` run in the app's process and
+log with `Log.d` under their own names. Through Android 16 QPR0 the gate
+is `DBG = true`, a constant compiled into the platform: the same on a
+user build, and nothing in Haven's build type changes it. From 16 QPR1
+there is no gate ([V]: `fw/BluetoothGatt.java:41-42` @6.0, `:49-50`
+@12.1, `-20.0:59-60`, `-23.0:64-65`; `-23.1:67`, `-24.0:71`;
+`fw/BluetoothGattServer.java:44-45` @6.0, `-22.2:51-52`, `-23.1:56`).
+
+**The address of whatever connected**, for the calls of §B.3. "Full" is
+`AA:BB:CC:DD:EE:FF`; "tail" is `XX:XX:XX:XX:EE:FF`.
+
+| Lines | API 23–33 | 34 – 35 QPR1 | 35 QPR2 | 36 (16 QPR0) | 16 QPR1 and later |
+|---|---|---|---|---|---|
+| **Call sites**, written as Haven calls — client `connect()`, `configureMTU()`, `discoverServices()`, `cancelOpen()`; server `cancelConnection()` | full | tail¹ | tail¹ | tail¹ | tail¹ |
+| **Callbacks, first group** — client `onClientConnectionState` (at connect and at disconnect), `onConfigureMTU`, `onConnectionUpdated`, `onServiceChanged`; server `onServerConnectionState`, `onConnectionUpdated`, `onPhyUpdate`, `onExecuteWrite` | full | full | full | tail | tail¹ |
+| **Callbacks, second group** — client `onSearchComplete`, `onPhyUpdate`; server `onMtuChanged` | full | full | tail | tail | tail¹ |
+
+¹ The line prints the `BluetoothDevice`. Its `toString()` is the tail,
+on API 34 and later, only for an app that targets 34 or later, and the
+full address otherwise; Haven targets 35
+(`haven/android/app/build.gradle.kts:48`).
+
+- [V]: `connect()` (`fw/BluetoothGatt.java:723` @6.0, `:932` @12.1,
+  `-20.0:977`; `-21.0:1200`, `-22.2:1195`, `-23.2:1104`; gone in
+  `-24.0`); `onClientConnectionState` (`-21.0:375-378`, `-22.2:367-371`,
+  `-23.0:380-385`, `-23.2:404-407`); `onConfigureMTU` (`-21.0:849-850`,
+  `-22.2:849-850`, `-23.0:877-878`, `-23.2:834`); `onSearchComplete`
+  (`-21.0:424`, `-22.2:419-420`, `-23.2:450`); the client's
+  `onPhyUpdate`, `onConnectionUpdated`, `onServiceChanged`
+  (`-22.2:298-301`, `:881-882`, `:917`; `-23.0:909-910`, `:947-948`);
+  `onServerConnectionState` (`fw/BluetoothGattServer.java:97-98` @6.0,
+  `-21.0:112-119`, `-22.2:107-109`, `-23.1:105-113`); `onMtuChanged`
+  (`-21.0:361`, `-22.2:363-364`, `-23.2:359`); the tail
+  (`fw/BluetoothUtils.java -21.0:201-206`, `-24.0:208-213`; on 13 it
+  kept three bytes, `-20.0:184-189`); `toString()`
+  (`fw/BluetoothDevice.java -20.0:1413-1415`, `-22.2:1065-1066`,
+  `:1635-1640`, and its reference page).
+- [V1]: the other four call-site lines, and the server's
+  `onConnectionUpdated`, `onPhyUpdate` and `onExecuteWrite` — a peer
+  triggers the last by sending Execute Write. The confirmation saw the
+  server's whole family print the tail at `-23.0` (`:308-450`) and did
+  not read each release.
+- The branches for 15 and 15 QPR1 were not read for this table; 14 QPR3
+  and 15 QPR2 on either side of them were, and F-13's own reading of
+  15 QPR1 [A20] agrees for the second group. The client's callbacks in
+  the last column were read at 16 QPR2, the server's at 16 QPR1.
+
+What else is written:
+
+- **Haven's UUIDs, on every release**: the characteristic's, in
+  `setCharacteristicNotification() - uuid:`; the service's, in
+  `addService() - service:` and `onServiceAdded() … uuid=` ([V]:
+  `fw/BluetoothGatt.java:1159` @6.0, `-24.0:1776-1781`;
+  `fw/BluetoothGattServer.java -21.0:1001`, `:143-146`, `-23.2:954`,
+  `:134-137`). `registerApp() - UUID=` is a random value a registration
+  ([V1]). They name no user: they say this phone ran Haven's mesh, in
+  which role, and when.
+- **A line a frame**, with the peer's address (`onNotify`,
+  `onCharacteristicWrite`, `onDescriptorWrite`, `onNotificationSent`,
+  the write requests): behind `VDBG`, a constant `false` through 16
+  QPR0. From 16 QPR1 `VDBG` is `Log.isLoggable("bluetooth",
+  Log.VERBOSE)`, so `setprop log.tag.bluetooth VERBOSE` from a shell
+  turns them on ([V]: `fw/BluetoothGatt.java -23.1:647-648`,
+  `-23.2:563-567`; `fw/BluetoothGattServer.java:275` @6.0,
+  `-24.0:294-295`).
+- **Whatever a callback of Haven's throws**: `Log.w(TAG, "Unhandled
+  exception in callback", ex)`, message and stack ([V]:
+  `fw/BluetoothGatt.java -23.2:276`; in the server's callbacks too from
+  `-24.0`, `fw/BluetoothGattServer.java:118` and after).
+- **Scanner, advertiser, adapter, the value classes**: registration
+  numbers and fixed text, no identifier at the default level. One error
+  line, `ScanRecord`'s `unable to parse scan record:`, would print a
+  peer's raw advertising bytes; behind a service-UUID filter it is
+  expected unreachable — an inference, untested ([V1], all of it).
+- **This phone**: no line in the app's process prints its own address or
+  its name ([V1]: the research's reading of the classes above; the
+  confirmation did not look again).
+
+**A GATT server is told of every LE connection of the phone.** On
+Android 16 the stack calls every registered application's connection
+callback for every link, and the server side passes it on unfiltered to
+the `onServerConnectionState` line above ([V], the confirmation's
+finding: `sys/stack/gatt/gatt_main.cc -23.0:927-949`;
+`sys/bta/gatt/bta_gatts_act.cc -23.0:561-591`) — the user's watch,
+earbuds, car, another app's link. For a bonded device the stack has put
+the identity address in place of the one on the air (`gatt_consolidate`,
+`-23.0:968-975`). Read on 16 only; observed nowhere; the client side not
+traced (§M.9 item 7). If it holds where that line prints the address in
+full — through 15 QPR2 — Haven's process would log, with no lever, the
+fixed addresses of the user's own devices. So what Q-10 weighed as "the
+address a peer showed everyone in range" is more than that, and nothing
+Haven decides about its peers reaches it.
+
+**Who can read a process's log.** `adb logcat`, with USB debugging on
+and the computer authorized; a bug report, which needs Developer
+options; an app holding `READ_LOGS` (`signature|privileged|development`),
+asked at each use from Android 13; an ordinary app is given its own
+uid's entries only ([V]: `core/res/AndroidManifest.xml:4521-4522`
+@14.0.0_r1; `LogcatManagerService.java:73`, `:409`, `:413-417`
+@13.0.0_r1; `logd/LogBuffer.cpp:638` @6.0. [V1]: the developer pages for
+logcat and bug reports).
+
+### M.2 The lever: from API 30 a process decides what its log calls write
+
+Every line of §M.1 goes `android.util.Log` → `println_native` →
+`__android_log_buf_write`, in the process's own `liblog` ([V]:
+`Log.java:158`, `android_util_Log.cpp:94` @11; the second file is
+byte-identical at Android 11, 13, 14 and
+`LO/android_frameworks_base@lineage-23.2`). So does everything else the
+process logs ([V]): `System.out` and `System.err`
+(`RuntimeInit.java:430`, `:432` @11), the Flutter engine and Dart's
+`print` (`fml/logging.cc:139`,
+`shell/platform/android/flutter_main.cc:184` [A26]), and Haven's Rust
+lines (`android_logger 0.15.1`, `src/lib.rs:100`, `:109`). Two public
+NDK functions, each "available since API level 30" [A24], act on that
+path.
+
+**The floor — `__android_log_set_minimum_priority`**, "the minimum
+priority that will be logged for this process".
+
+- *Where it is checked.* `__android_log_buf_write` asks
+  `__android_log_is_loggable` and returns before anything is written
+  ([V]: `liblog/logger_write.cpp` ~318 @11; `-20.0:322`, `-21.0:381`,
+  `-22.2:381`, `-23.2:388`, `-24.0:383`).
+  `__android_log_write_log_message` does not check, so a caller that
+  goes straight to it passes the floor; none is among the writers in
+  Haven's process named above ([V]).
+- *A property can only lower it, tag by tag, and is read live.* A line
+  is written when its priority is at least the lower of the floor and
+  the tag's property level ([V]: `liblog/properties.cpp` ~276-289 @11,
+  `-20.0:245-255`, `-24.0:248-258`), the property being
+  `log.tag.<tag>`, `persist.log.tag.<tag>`, `log.tag` or
+  `persist.log.tag` (~112-119 @11). The lookup is cached against the
+  property area's serial (~65, ~151-152 @11): a `setprop` made after
+  the radio started counts at the next log call. A shell can set one
+  and a vendor's image can ship one; that an app cannot is from memory
+  (**[U]**).
+- *Code in the process can move it.* libbase's `SetMinimumLogSeverity`
+  writes the same value, `ScopedLogSeverity` puts an old one back when
+  its scope ends, and `InitLogging` sets it from `ANDROID_LOG_TAGS`
+  ([V]: `base/logging.cpp:564-568` @11). `android_logger` does not call
+  it. Whether ART, the Flutter engine or a plugin does, in Haven's
+  process, is **[U]**: the confirmation's search found nothing and was
+  inconclusive.
+- The value is atomic ([V]: `liblog/logger_write.cpp:148-151` @11).
+
+**The logger — `__android_log_set_logger`**: `__android_log_buf_write`
+→ `__android_log_write_log_message` → the function installed, in place
+of the write to `logd` ([V]: `liblog/logger_write.cpp -24.0:358-377`,
+`:383`).
+
+- It sits after the loggability check. It is handed every line the
+  check let through, and what it drops no property brings back, for any
+  tag, set before or after.
+- It is handed the crash buffer's lines too ([V]).
+- The pointer is a plain static, not atomic ([V]: `-24.0:168`,
+  `:173-174`): it has to be set before other threads log.
+- The binary event-log, security and statistics writes skip the
+  loggability check ([V]: the same file); whether they reach the logger
+  neither pass says (**[U]**).
+
+Below API 30 neither exists: Android 10's `__android_log_buf_write` has
+no check, and there is no setter ([V]: `liblog/logger_write.cpp`
+@10.0.0_r1); `DBG` is a constant and the write is unconditional. With
+`minSdk` 23 (`haven/android/app/build.gradle.kts:43`) the two symbols
+are looked up at run time — weak references under `__builtin_available`,
+or `dlopen` and `dlsym`; `liblog` is on every release ([V]: [A24]).
+
+**Decided here.**
+
+1. **The logger is the lever.** It writes a line only when the line's
+   tag is one of Haven's own, and drops every other line of the process,
+   at every priority. The floor alone does not meet "all of them": a
+   property set while the mesh runs lowers it for a tag, which a check
+   made at the radio's start never sees, and code in the process can
+   move it. Neither undoes a logger.
+2. **The floor is the second line**, raised to `ANDROID_LOG_FATAL` with
+   it (`SILENT` is documented as internal, [V1]), for the case that the
+   logger is not what is in force.
+3. **Before any Bluetooth object exists**, on every path that can start
+   the radio: the channel's `start`, and the service's own start after
+   a boot or a sticky restart, where no Dart isolate runs.
+4. **For the life of the process once the mesh has been on in it.** GATT
+   callbacks — a disconnect, a close, an MTU or connection update —
+   arrive after mesh is turned off; taking the lever away then would let
+   them through, and buy diagnostics only.
+5. **Checked at ERROR, not DEBUG**: `Log.isLoggable(tag, Log.ERROR)` is
+   false for each tag the platform's Bluetooth classes write under — the
+   research lists them; M3g pins the list against the classes it calls.
+   `Log.isLoggable` evaluates the function the write does ([V]:
+   `android_util_Log.cpp:45-47`). The research proposed DEBUG. With the
+   floor at FATAL and `log.tag.BluetoothGatt` set to E the threshold is
+   E: DEBUG reads false while every warning and error of the tag is
+   written, the "Unhandled exception" line among them. ERROR false is
+   D, I, W and E all dropped.
+6. **Checked again while the radio runs**, not only at its start: the
+   property is live, and the check answers for the tags asked at the
+   instant asked. How often is M3g's — a term of the one wake (§B.5),
+   not a new alarm. A check that fails stops the radio (§M.3).
+
+**What the floor costs — stated by neither pass.** The floor is one
+value for the process, not one for each tag. While it stands at FATAL, Haven's
+own lines below FATAL are dropped before the logger sees them, and the
+logger's list decides only what is written where a property has lowered
+the threshold. "Haven's own lines are still written" and "the floor
+stands above ERROR" cannot both hold. Designed with the floor raised,
+because the check of item 5 is the floor's and means nothing without it:
+once the mesh has been on, Haven's process writes nothing below FATAL.
+If M3g finds Haven's own lines must be kept (§M.8), the floor's level is
+the owner's to decide; it is not lowered on the way.
+
+**Haven's own tags, as defined today** — nowhere as a list of Android
+tags for this purpose. What there is:
+
+- Rust: the targets `haven_core` and `rust_lib_haven`, the allow-list of
+  `HavenTargetFilter` (`api:168-193`). `android_logger` tags a record
+  with its module path (`src/lib.rs:178-189` [A27]), so the Android tag
+  is one of the two, or begins with one and `::`.
+- Kotlin: `HavenApplication`, the one tag that has a log call — two
+  rows, both of that file, in `scripts/ci/native_log_allowlist.txt`,
+  held both ways by `check_native_log_allowlist.sh`.
+- Dart: none of its own. `debugPrint` is `print`, which the engine
+  writes under the engine's tag — `flutter`, in the scanner's policy —
+  as it writes every Dart package's. In a release build it is a no-op in
+  every entry point (`check_release_log_silencer.sh`).
+- The runtime scanner's `owned_tags` (`tooling/logscan/policy.toml:135`):
+  the lines the scanner answers for — `flutter`, the two Rust targets,
+  `RustStdoutStderr`, `frb_user`, `HavenApplication`, `MainActivity`,
+  `PublishWakeLock`. More than Haven's code calls a log under, and the
+  shared `flutter` is among them.
+
+**To be established by M3g, not guessed here:** the logger's own list —
+which of these it holds, by what match (the scanner's is: equal, or the
+entry followed by `::`), and what keeps one definition from drifting
+from the others. A tag is free text any code in the process can write
+under. `flutter` in the list passes every Dart package's `print`;
+`flutter` out of it drops Haven's own Dart lines in a debug build.
+
+**Where it lives is M3g's to settle.** The constraints:
+
+- Both functions are NDK symbols; Kotlin cannot call them. It is native
+  code: the Rust library — already loaded in `HavenApplication.onCreate`,
+  which runs before any Activity, Service or worker
+  (`kt/HavenApplication.kt`) — or a native source of a kind the app's
+  build does not have today.
+- In Rust it needs `unsafe`, for the symbol lookup and the C callback,
+  in a crate that denies `unsafe_code` outside two pinned modules
+  (§A.6, F-8): a third site is a change to that guard, and
+  security-reviewer's. `libc` is not a direct dependency of
+  `rust_builder` today; adding one is dependency-auditor's.
+- The function runs inside `liblog`, on whichever thread logs: it must
+  not log, block, allocate without bound or unwind into C.
+- "Before other threads log" and "when mesh is first turned on" are
+  different moments: by a turn-on the engine, the Rust runtime and the
+  UI have been logging for the life of the process. Either the lever
+  goes in at process start, in a build that has the mesh — and then
+  §M.8's cost is every such process's, mesh on or off — or M3g shows
+  that the late write of that pointer is safe. Not settled here.
+- The floor can be read back (`__android_log_get_minimum_priority`,
+  [V1]); neither pass names a read-back for the logger. "Installed and
+  checked" (§M.3) needs a check that fails when the logger in force is
+  not Haven's. What that check is, is M3g's.
+- One process holds the UI, the location service and the mesh (F-14):
+  the lever, and its cost, are all three's.
+- What can be held where: the list's predicate, [L] or [J]; that the
+  platform's lines are absent, only where `liblog` is — [E], §M.9
+  item 1, which is also the planted-identifier proof Rule 15 asks of
+  any change to what is logged.
+
+### M.3 The rule
+
+The owner's "all of them or the radio is not started" (Q-10), as it now
+reads. The radio is started only where every one of these holds:
+
+1. **API 30 or later.** Below it no lever exists.
+2. **The lever of §M.2 — logger and floor — installed and checked**
+   before any Bluetooth object exists; and a check that fails later
+   stops the radio.
+3. **Nothing that could bond** (§M.4).
+4. The advertisement of §B.3: the service UUID, no name, no data, and
+   not discoverable from API 34.
+
+**What it costs: phones on Android 6 to 10 (API 23–29) cannot use the
+mesh.** Haven's `minSdk` stays 23 and the rest of Haven runs there. The
+research weighed one other route, for API 29 alone — L2CAP channels,
+whose classes print no full address at the default level ([V1];
+spot-checked by the confirmation at 15 QPR2) — and it is not taken: a
+second transport, the same name exposure, for one release.
+
+**How the native side says so.** The Dart side has the state:
+`MeshRadioStart.unsupported` (`haven/lib/src/services/mesh_radio.dart:32-33`)
+becomes `MeshTurnOn.unsupported` and sets `meshUnsupportedProvider`, and
+`meshAvailableProvider` then takes the button, its sheets, the Settings
+row and the aura away for the life of the process
+(`haven/lib/src/providers/mesh_provider.dart:324-328`, `:486-495`); the
+copy is `meshErrorUnsupported`. Plan §16 keeps `unsupported` for
+"hardware that can never run the mesh", anything passing being `failed`,
+because of what Dart does with it. An Android release is not hardware,
+and is as fixed for a process: the plan's sentence is widened to say so
+(plan §16), and the code's two comments that say "hardware" are M3g's to
+reword. So:
+
+- API below 30, or either symbol not found: the channel's `start`
+  answers `unsupported` — before `startForeground`, before any Bluetooth
+  object, with nothing stored by the service.
+- The lever in, and a check failing: `failed` at a start; for a running
+  radio, a stop the user did not make, with the stopped notice (§B.5).
+- The service's own starts — boot, a sticky restart — make the same
+  checks first. Below API 30 they have nothing to resume: no start ever
+  set the flag.
+
+**Not as the Dart side is built.** `unsupported` is learned at step 5 of
+turning on (§C.2): after the intro sheet and the name step, and after
+`mesh.start()` stored the deadline and the keys, which the unwind then
+deletes. On an Android 6–10 phone with the flag on, the button is there
+until its first tap in each process. Answering before the button is
+drawn is a change to the seam of §C.1 — M3g's, with its [D] test.
+
+### M.4 Never bond
+
+A bond would hand a stranger this phone's identity address and the key
+that resolves every address it rotates to (**[U]**: the specification,
+from memory; not fetched). Haven needs none: every byte after the
+handshake is sealed by Haven (plan §6.7).
+
+- **Haven asks for no security.** The stack answers "insufficient
+  authentication" or "insufficient encryption" for an attribute only
+  under a permission bit that asks for it ([V1]:
+  `sys/stack/gatt/gatt_db.cc -22.2:74-122`, `:604-664`). Haven's
+  characteristic and descriptor carry none, nothing calls `createBond`,
+  and the transport is `TRANSPORT_LE`.
+- **A peer can make the phone ask.** When an operation is refused with
+  ATT 0x05 or 0x0F the framework sends it again asking for
+  authentication — `AUTHENTICATION_NO_MITM`, then `AUTHENTICATION_MITM` —
+  before the app's callback runs: in `onCharacteristicRead`,
+  `onCharacteristicWrite`, `onDescriptorRead` and `onDescriptorWrite`,
+  on every release read ([V]: `fw/BluetoothGatt.java:329`, `:389`,
+  `:477`, `:530` @6.0; `-22.2:493`, `:564`, `:679`, `:741`; `-24.0:483`,
+  `:546`, `:640`, `:692`). Haven reads nothing, and its frames are
+  writes without response, which have no answer to refuse. The
+  descriptor write of §B.3 has one: a hostile peer that refuses it
+  starts a pairing from this phone. And as a peripheral, any central
+  may ask to pair (**[U]**, memory).
+- **The user is asked first**, on a phone with a screen, on the Just
+  Works path ([V]: `sys/stack/smp/smp_act.cc -22.2:1431-1438`). So the
+  harm is a system dialog a stranger can raise, and a bond if the user
+  accepts it, which no public call removes.
+- **The one public lever** is `ACTION_BOND_STATE_CHANGED`, which needs
+  `BLUETOOTH_CONNECT` and no more ([V], [A25]): a device Haven is linked
+  or linking with that enters `BOND_BONDING` has its link dropped at
+  once (§B.3). Nothing better is public ([V], [A25]):
+  `setPairingConfirmation` is privileged; `cancelBondProcess` is public
+  only from API 37, and privileged for a bond the app did not start;
+  `removeBond` is not public.
+- **Unproved**: that dropping the link ends the pairing before keys are
+  exchanged, and whether the dialog shows for a moment all the same
+  (§M.9 item 4). The reference says of `setDiscoverable(false)` that
+  "devices connecting to non-discoverable advertisements cannot
+  initiate bonding" [A16]; neither pass found code that enforces it —
+  the flag is stored and no pairing code read uses it ([V]:
+  `sys/stack/btm/btm_ble_sec.cc -22.2:1541`) — so nothing rests on it
+  (§M.9 item 5).
+
+### M.5 This phone's address: the identifier Haven does not decide
+
+- **An app cannot choose it.** `setOwnAddressType`, on both advertising
+  builders, is a system API that needs `BLUETOOTH_PRIVILEGED` ([V]:
+  `fw/le/AdvertisingSetParameters.java -22.2:549-556`; absent from the
+  public reference [A16]). Nor read it: `BluetoothAdapter.getAddress()`
+  answers a constant since Android 6.0 ([V1]).
+- **AOSP's default is private and rotating, in both roles — and it is a
+  build's setting.** LE privacy is on by default: a compile-time value
+  a vendor's header overrides on Android 6 to 12L, a system property
+  from 13 — from 14 `bluetooth.core.gap.le.privacy.enabled`, default
+  true ([V] from 14: `sys/btif/src/btif_dm.cc -21.0:2256-2260`,
+  `-24.0:2397-2400`; [V1] before). With it on, an advertisement goes out
+  under a resolvable private address and a dial under the host's current
+  one ([V1]). With it off the stack's own comment is "always use public
+  address" ([V1]: `sys/stack/btm/btm_ble_gap.cc -22.2:755-757`).
+- **Rotation.** Every 15 minutes on Android 6 to 11; at a random 7 to
+  15 minutes on 12L and 13 ([V1]); the same from 14, where two system
+  properties let a device move both ends ([V]:
+  `sys/main/shim/acl_api.cc -21.0:84-88`). From 15 QPR2, behind a flag
+  whose default was not read: at the first moment the phone is awake
+  after about 7 to 9 minutes, and by 13 to 15 at the latest ([V]:
+  `sys/gd/hci/le_address_manager.cc -22.2:571-600`).
+- **Stopping and starting the advertisement gives a new advertising
+  address** where the controller has extended advertising or Android's
+  multi-advertising command, and not where it has neither. There, from
+  12L, the advertisement goes out under the address the phone dials with: a
+  peer that is dialled and also sees the advertisement can tie the two
+  roles until the next rotation ([V1]:
+  `sys/gd/hci/le_advertising_manager.cc -22.2:455-471`; the confirmation
+  did not look again).
+- That such an address cannot be traced to the phone without a bond is
+  the specification's, from memory (**[U]**).
+
+**What Haven can and cannot say.** It can say that it never bonds, dials
+over LE only, and puts nothing in the advertisement but the service
+UUID. It cannot say that this phone's address is private, or that it
+rotates: that is the build's, an app can neither set it nor find out,
+and no vendor's stack was read. On a phone whose vendor turned LE
+privacy off, a fixed address is on the air in both roles, and in every
+peer's records, and Haven does not know. Of the identifiers Q-10 lists
+this is the one Haven's choices do not decide, and **nothing in this
+design may say that all identifiers are random.** Restarting the
+advertisement on a schedule, to retire an address sooner than the
+platform does, was weighed by the research and is not designed: the
+rule does not need it, and it does nothing on the controllers above.
+
+### M.6 A peer's address type: not designed in
+
+`BluetoothDevice.getAddressType()` is public from API 35 and answers
+public, random, anonymous or unknown, "random" being resolvable,
+non-resolvable and static alike ([V], [A25]). It means something for a
+scan result, which the Bluetooth process builds with the real type
+([V]: `le_scan/TransitionalScanHelper.java -22.2:385`). The device a
+GATT server is handed is built from the address alone and always says
+public, through 16 QPR0 ([V]: `fw/BluetoothGattServer.java
+-22.2:121-122`, `fw/BluetoothDevice.java -22.2:1571-1573`); from 16
+QPR1 it is not known (**[U]**). So "refuse a peer whose address is not
+private" can be decided only for a link this phone dials, on API 35 and
+later — and telling a static address from a private one there rests on
+the address's top bits, from memory of the specification (**[U]**).
+
+The research proposed it, to keep fixed addresses out of logs. It is
+not designed in:
+
+- With the lever, no address is written from Haven's process, private or
+  fixed. The condition it served is met without it.
+- What is left is the Bluetooth process's own record (§M.8). To keep a
+  fixed address out of that, the refusal would have to hold in both
+  directions, and it cannot: two Haven phones link both ways (plan
+  §6.1), and the incoming half cannot be judged on any release read.
+  The other devices of §M.1 it does not touch at all.
+- It costs links: a phone whose vendor does not randomize could no
+  longer be dialled by a newer phone.
+
+A rule that holds for one direction on two API levels is the "some
+parts" Q-10 rules out. Should the owner want the partial form, it is one
+check before `connectGatt`.
+
+### M.7 The device name
+
+- **The characteristic.** Android's own Generic Access service is on
+  every LE link, in either role, and carries Device Name. Through
+  Android 13 any connected peer may read it ([V]:
+  `sys/stack/gap/gap_ble.cc -20.0:438`; Android 6 and 7 [V1]). From
+  14 QPR3 its permission is "encrypted, or discoverable" ([V]:
+  `-21.0:425`, `-22.2:460`, `-24.0:468`); whether Android 14.0.0 itself
+  has it is **[U]**.
+- **A peer this phone dials can always read it.** That permission passes
+  without encryption when the link "can read discoverable
+  characteristics", and for a link this phone made as the central the
+  stack answers true — its comment: "if we are the central, the peer can
+  always see discoverable characteristics" ([V]:
+  `sys/stack/gatt/gatt_db.cc -22.2:111-122`; `sys/main/shim/acl.cc
+  -21.0:1673-1684`, `-22.2:1606-1617`, `-24.0:1408-1419`). There is no
+  setting, on any release.
+- **`setDiscoverable(false)`**, from API 34 [A15, A16], does two things.
+  A peer that connected in is refused the name unless the link is
+  encrypted: incoming links only. And the stack no longer adds the Flags
+  field, which it adds only to an advertisement that is connectable and
+  discoverable ([V]: `sys/gd/hci/le_advertising_manager.cc
+  -22.2:1056-1070`; `fw/le/BluetoothLeAdvertiser.java -22.2:151`,
+  `:165`): §B.3's 21 bytes are 18 from API 34. On a controller with
+  neither extended nor multi advertising the stack ignores the setting
+  for the name — such a link always counts as discoverable, under a
+  TODO ([V]: `sys/gd/hci/acl_manager/le_impl.h -21.0:510-522`,
+  `-22.2:543`, `-24.0:621`).
+- **From Android 16 the stack reads a peer's name itself**, on every LE
+  connection, in either role, with no app asking; at 15 QPR2 the same
+  code is behind a flag; at 14 QPR3 it is absent ([V]:
+  `sys/stack/btm/btm_ble_sec.cc -22.2:1575-1579`, `-23.0:1614-1617`,
+  `-24.0:1310-1313`; `sys/stack/acl/btm_acl.cc -23.0:967-983`). So every
+  Android 16 phone a Haven phone dials fetches this phone's name, and a
+  Haven phone on 16 fetches its peers' — into the Bluetooth process,
+  not Haven's. That the name is then stored, and logged in clear: the
+  code is there (`sys/btif/src/btif_dm.cc -23.0:1912`, `:1917-1918`),
+  the path from the read to it was not traced, and what a user build
+  keeps of that log level is not known (**[U]**; §M.9 item 6). The same
+  stack may read Appearance too, behind a flag — a device category, not
+  an identifier ([V] for the code: `btm_ble_sec.cc -23.0:1619-1634`;
+  the flag's default **[U]**).
+- **Renaming the phone.** `BluetoothAdapter.setName` needs
+  `BLUETOOTH_CONNECT` (`BLUETOOTH_ADMIN` on API 30) and is open to an
+  ordinary app ([V]: [A25];
+  `AdapterService.java -22.2:2439-2450`). It renames the phone for every
+  Bluetooth use — the car, the headphones, every pairing list — and the
+  Bluetooth process logs the new name. It is a way, and not Haven's to
+  take without the owner's word (Q-11). Neither pass found another.
+
+**Conclusion (Q-11): accepted and disclosed, with
+`setDiscoverable(false)` where it exists.** That withholds the name from
+peers that connect in, on API 34 and later, on controllers that honour
+it. Nothing withholds it from a peer this phone dials. The disclosure is
+built (§D, §E.2). Unproved, and bearing on M4: whether an iPhone finds
+an advertisement with no Flags field — the research's memory is that
+CoreBluetooth does not need one — and what an iPhone answers for its
+own name.
+
+### M.8 What is left, and what the lever costs
+
+**Left, with all of the above in force, on a phone the radio runs on:**
+
+1. **The system's Bluetooth process**, under its own pid, and `dumpsys
+   bluetooth_manager` in a bug report: that Haven's uid registered a
+   client and a server; each link's time; each peer's address — in full
+   in some lines of 13 and 14, its tail from 15 QPR2 in the lines read;
+   and from 16 the names it read of peers ([V1], a brief reading, not
+   an inventory; the names **[U]** as in §M.7). Outside Haven: nothing
+   Haven does changes it.
+2. **The system's crash records.** A `Log.wtf` and an uncaught exception
+   have their lines dropped in the process and then go to
+   system_server, which writes `am_wtf` or `am_crash` — the exception's
+   class and message — and a DropBox entry ([V]: `Log.java:311-319`,
+   `RuntimeInit.java:73-74`, `ActivityManagerService.java:9850-9854`,
+   `:10059`, `:10065`, all @11). "Nothing thrown leaves the mesh thread"
+   (§B.1) bounds it for the mesh; the record is of the whole process.
+3. **Lines written before the lever was in**: in the log's buffer until
+   it turns over, and in any capture already taken. No Bluetooth object
+   existed then, so they hold nothing of the mesh. Whether an app may
+   clear its own entries is **[U]** (§M.9 item 8).
+4. **The name**: to every peer this phone dials, on every release; to
+   every peer on API 30 to 33; and to every peer on 34 and later where
+   the controller ignores the setting.
+5. **Appearance**, to an Android 16 peer.
+6. **This phone's address, fixed**, on a build that does not randomize
+   it (§M.5).
+7. **On every peer's phone**: this phone's address of the moment and,
+   where it could be read, its name.
+8. A packet capture the user switched on in Developer options holds
+   everything on the air (**[U]**, memory).
+9. **Android 6 to 10: no mesh.**
+
+**What the lever takes from Haven itself**, for the whole process and
+for as long as it lives:
+
+- Every line the logger does not list: the Flutter engine's, Dart's
+  `print` and `debugPrint`, `System.out` and `System.err`, a Java
+  crash's stack, every plugin's and every dependency's ([V], §M.2). And
+  while the floor stands, Haven's own listed lines below FATAL with
+  them.
+- **Debug builds.** Once the mesh has been on in a process, logcat shows
+  nothing of what Haven does afterwards — the relay path, the location
+  service and the UI included. A release build loses its Rust warnings
+  and errors (`api:158-164`); its Dart side is silent already.
+- **CI lanes that read logcat.** The runtime scanner asks every `logcat`
+  capture for positive controls — a Rust and a Kotlin token written at
+  launch, and the harness's Dart token (`tooling/logscan/policy.toml:135`;
+  `tooling/logscan/README.md`, "Positive controls") — and each proves
+  only that the process reached the sink when it was written. After the
+  lever is in, a scan that finds no identifier under Haven's pid has
+  read no line of Haven's: it says nothing of Haven's own lines, and
+  nothing of the platform's unless something shows the capture was
+  live. **Required of M3h, and not designed here:** a lane with the mesh
+  on does not count such a scan as a pass. It shows, with an address
+  planted through a real link in each role, that no line of the
+  platform's is under Haven's pid at any priority; it shows, by a
+  control that is not one of the dropped lines, that the capture was
+  live and was that process's; and what it still claims of Haven's own
+  lines (T-LOG-1) it proves by something that is written. The three
+  relay lanes that gain a `mesh` input (§F.2) come under the same
+  requirement.
+
+### M.9 To be proved on a device or an emulator before the flag flips
+
+None of it is proved. Each is [E] where an emulator's Bluetooth stack
+can show it — itself unproven (§F.3) — and [H] otherwise; a vendor's
+build is always [H].
+
+1. **The lever leaves Haven's pid empty.** Proved by: a full link in
+   both roles with an address planted, then the log filtered to Haven's
+   pid holding no line of the platform's — on API 30, 33, 34, 35, 36 and
+   on vendors' builds, whose `liblog` and Bluetooth classes are unread.
+2. **Nothing in the process moves the floor.** Proved by: the minimum
+   read back unchanged across a session with the engine, every plugin
+   and the location service running.
+3. **The check sees a property.** Proved by: `log.tag.<tag>` set to E
+   over `adb`, and `Log.isLoggable(tag, Log.ERROR)` turning true and the
+   radio stopping.
+4. **Dropping the link ends a pairing.** Proved by: a peer that refuses
+   the descriptor write, and a central that asks to pair; no bond is
+   stored afterwards; and whether the system's dialog showed.
+5. **`setDiscoverable(false)` and bonding; iPhones and Flags.** Proved
+   by: a peer connected to the non-discoverable advertisement failing
+   to start a bond; and an iPhone's scan reporting an advertisement
+   that has no Flags field (M4).
+6. **The Android 16 name read, on a user build.** Proved by: a name
+   planted on a peer, a link, and the Bluetooth process's log and its
+   store searched for it.
+7. **The server's callback for the phone's other connections.** Proved
+   by: a second device connecting to the phone and not to Haven, and
+   whether the server's callback fires in Haven's process, on each
+   release.
+8. **Whether an app may clear its own log entries.** `logd` lets a
+   client without privilege clear its own uid's ([V]:
+   `CommandListener.cpp -22.2:87-96`); whether SELinux lets an app send
+   the command is unread. Proved by: trying it.
+9. **What the source read could not settle**: the address type a
+   16 QPR1 server-side device carries; Android 14.0.0 against 14 QPR3
+   for the name's permission; the defaults of the flags
+   `name_discovery_for_le_pairing`, `non_wake_alarm_for_rpa_rotation`
+   and `read_le_appearance`. Proved by: the AOSP host, once it can be
+   read, for the first two; a phone of each release for the flags.
+
+### M.10 Where the confirmation and the research differ
+
+The confirmation is followed in each.
+
+- **The check.** The research: `isLoggable(tag, DEBUG)` false proves the
+  floor. Contradicted: it must be ERROR (§M.2 item 5).
+- **The lever.** The research: the floor, with the logger "the finer
+  alternative". The confirmation: the logger, or both — a property is
+  read live, and libbase's setters move the floor (§M.2). It also added
+  that `__android_log_write_log_message` skips the floor, that the
+  logger's pointer is not atomic, and that the lever stays for the life
+  of the process.
+- **"Silences the process."** Not as a whole: `Log.wtf` and a crash
+  leave for system_server (§M.8 item 2).
+- **Added by the confirmation**: the server's callback for every LE
+  connection of the phone (§M.1); `cancelBondProcess` from API 37, no
+  lever (§M.4); Appearance (§M.7).
+- **Narrowed**: the research states that a 16 stack logs and stores the
+  name it read; the confirmation found the code and not the path to it,
+  nor what a user build keeps (§M.7).
+- **Line numbers**: the confirmation's.
+
+Not from either pass, and this design's own: that the floor costs
+Haven's own lines (§M.2); that a peer's address type is left out (§M.6),
+which the research proposed and the confirmation called decidable; the
+mapping to `unsupported` and `failed` (§M.3).

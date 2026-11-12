@@ -730,7 +730,9 @@ chacha20poly1305, hkdf, sha2), with every secret it holds zeroized.
   `BLUETOOTH`/`BLUETOOTH_ADMIN` with `maxSdkVersion="30"`. On API 29–30
   searching in the background needs background location; on API 23–30 it
   needs Location on. Where that is missing the status line says the phone can
-  be found but cannot search.
+  be found but cannot search. **As researched, 2026-11-12 (§16):** the radio
+  is started on API 30 and later only; what this says of API 23–29 stands as
+  what those levels would have needed.
 - Scan: one `ScanFilter`, `SCAN_MODE_LOW_POWER`. Advertise: low power,
   connectable, interval chosen for iOS background discovery (1022.5 ms on
   API 26+ [U, Apple's recommended list not re-fetched]). `requestMtu(517)`.
@@ -2986,6 +2988,51 @@ pull request is opened now and every lane, old and new, must pass; and the
 conditional guarantee on emission times (R1) is enough, R2 not owed. None
 of the log or name levers is established yet: M3g begins with that
 research.
+
+Research for M3g: Android's logs and the device name (2026-11-12),
+recorded in full in `docs/BLUETOOTH_MESH_M3_DESIGN.md` §M. **Paper only:
+nothing is built, and nothing has run on an emulator or a device.**
+Checked by a research pass over the platform's source and reference
+pages, then an independent confirmation that fetched every cited source
+again, corrected the first and added to it. The AOSP hosts were
+unreachable in both: from API 33 the source read is LineageOS mirrors
+tied to build IDs, and no vendor's build was read.
+**Established, in source.** Android's GATT classes write, from Haven's
+process and in every build, the address of whatever connected — in full
+on every release read up to 15 QPR2, its last two bytes from 16 — and a
+GATT server is told of every LE connection of the phone, not of Haven's
+peers alone (read on Android 16). From API 30
+a process decides what its own log calls write: a minimum priority,
+which a system property can lower at any moment, and a logger, which
+nothing outside the process undoes. A peer can make the phone raise a
+pairing dialog; the one public lever is to drop the link. The phone's
+own address is the build's: private and rotating by AOSP's default, and
+an app can neither choose it nor see which it has. A peer this phone
+dials can always read its Bluetooth name; `setDiscoverable(false)`, from
+API 34, withholds it from a peer that connects in, except on a
+controller with neither extended nor multi advertising.
+**The rule that follows** (design §M.3). The radio is started only on
+API 30 or later; only with Haven's own logger, which writes nothing but
+lines under Haven's tags, and the raised minimum behind it — in force
+before any Bluetooth object exists, kept for the life of the process,
+checked at every start and while the radio runs; and never bonded: no
+permission or call that could pair, and a link dropped the moment its
+device starts to bond. Below API 30 `start` answers `unsupported`, which
+widens (e) of "Owed by the native unit" above: hardware that can never
+run the mesh, or an Android release below 11. **Phones on Android 6 to
+10 cannot use the mesh.** The name stays accepted and disclosed; the
+phone is not renamed; a peer's address type is not judged (design §M.6,
+§M.7); and nothing may claim that every identifier is random.
+**Left, and owed.** What stays exposed is design §M.8. The lever costs
+Haven's own diagnostics for the whole process, so a mesh lane must not
+pass by scanning a capture nothing was written to (M3h). Where the lever
+lives, its list of tags, and whether the raised minimum — which drops
+Haven's own lines too — stays as the second line, are M3g's first
+decisions, the last the owner's if it must give. Nine things are to be
+proved before the flag flips (design §M.9). `haven-core/SECURITY.md`,
+the privacy manifest and `CLAUDE.md` are unchanged: they describe what
+is built. §0.4 owes, with M3g, an item for Android 6 to 10 and, in
+item 6, that address rotation is the build's; §7.1 carries a note now.
 
 ### Proposed CLAUDE.md wording (owner to approve)
 
