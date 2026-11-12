@@ -1,6 +1,8 @@
 /// Identity-creation screen — the second and final onboarding step.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,9 +11,9 @@ import 'package:haven/src/constants/text_input_privacy.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
-import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
+import 'package:haven/src/providers/own_reachability_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -27,7 +29,7 @@ import 'package:haven/src/widgets/identity/public_profile_notice.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Final onboarding screen: creates the Nostr identity and captures a display
-/// name in one action, then enters the map.
+/// name in one action, then enters the map once others can invite the user.
 ///
 /// The display-name field is pre-filled with a random anonymous
 /// "Adjective Archetype" name (see [generateAnonymousName]) so a user can stay
@@ -40,19 +42,29 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 ///    [IdentityService.hasIdentity] check skips re-creation so an existing key
 ///    is never overwritten. (The Rust core also fails closed on a duplicate
 ///    create, as a backstop.)
-/// 2. Fire-and-forget the KeyPackage publish (kind 30443/443 + relay lists).
-/// 3. Save the display name locally (a fast SQLCipher write; no relay yet).
-/// 4. Save the optional photo, if one was chosen, LOCALLY too — chained
+/// 2. Seed default relays — before anything is published, since an unseeded
+///    relay list reads as empty and a publish to it does nothing.
+/// 3. Start the reachability publish: relay lists (kind 10002, then 10050),
+///    then the KeyPackage (kind 30443).
+/// 4. Save the display name locally (a fast SQLCipher write; no relay yet).
+/// 5. Save the optional photo, if one was chosen, LOCALLY too — chained
 ///    *after* the name save so the local merge always carries the name —
 ///    then trigger the background publish of the public kind-0 profile
 ///    (public-by-default, unconditional — owner-directed, matching White
 ///    Noise; disclosed by [PublicProfileNotice] above the field). Name and
 ///    photo publish together in ONE kind-0 event once the trigger's sync
 ///    pass runs.
-/// 5. Seed default relays.
-/// 6. Run the background-location prominent disclosure → permission → enable
+/// 6. "Finishing setup…": wait, up to [finishSetupTimeout], until the
+///    reachability publish proves others can invite the user
+///    ([OwnReachability.ready]). On a timeout or a proven failure the screen
+///    shows a fixed error with Retry, which publishes again without creating
+///    anything again; there is no way past it. Owner decision OD-C
+///    (2026-11-12), matching White Noise: for this step it replaces the rule
+///    that a slow relay never stalls entry, because a user who enters before
+///    this is shown a QR code nobody can invite.
+/// 7. Run the background-location prominent disclosure → permission → enable
 ///    sequence (the sole Google Play "disclose before collection" point).
-/// 7. Mark onboarding complete; `AppRouter` swaps in the map shell.
+/// 8. Mark onboarding complete; `AppRouter` swaps in the map shell.
 ///
 /// There is no "Skip": the name (pre-filled or edited) is always saved and
 /// published. Adding a profile photo is optional — an avatar circle above
@@ -63,7 +75,11 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 /// two edits out of order).
 class CreateIdentityScreen extends ConsumerStatefulWidget {
   /// Creates an identity-creation screen.
-  const CreateIdentityScreen({super.key, this.pickPhoto = pickAndCropAvatar});
+  const CreateIdentityScreen({
+    super.key,
+    this.pickPhoto = pickAndCropAvatar,
+    this.finishSetupTimeout = const Duration(seconds: 60),
+  });
 
   /// Gallery pick + crop function, injectable for widget tests that cannot
   /// drive the native photo picker.
@@ -72,6 +88,11 @@ class CreateIdentityScreen extends ConsumerStatefulWidget {
   /// fake that returns fixed bytes (or `null` to simulate cancel).
   @visibleForTesting
   final Future<Uint8List?> Function(BuildContext context) pickPhoto;
+
+  /// How long "Finishing setup…" waits for the reachability publish before
+  /// offering Retry. Injectable so a test can reach it on a fake clock.
+  @visibleForTesting
+  final Duration finishSetupTimeout;
 
   @override
   ConsumerState<CreateIdentityScreen> createState() =>
@@ -82,6 +103,15 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
   bool _busy = false;
+
+  /// Waiting for the reachability publish ("Finishing setup…").
+  bool _finishing = false;
+
+  /// The reachability publish timed out or proved a failure: Retry is offered.
+  bool _setupFailed = false;
+
+  /// The identity exists and the profile is saved: a Retry only publishes.
+  bool _profileSaved = false;
   bool _userEdited = false;
   bool _selectedOnFirstFocus = false;
   Future<void>? _restoreFuture;
@@ -148,107 +178,142 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
 
   Future<void> _finish() async {
     if (_busy) return;
-    setState(() => _busy = true);
+    setState(() {
+      _busy = true;
+      _setupFailed = false;
+    });
     // Capture context-derived objects BEFORE any await so we never touch
     // `context` across an async gap.
     final l10n = AppLocalizations.of(context);
     final messenger = ScaffoldMessenger.of(context);
+    final reachability = ref.read(ownReachabilityProvider.notifier);
 
-    // (1) Create the keypair — only when none exists (idempotent resume).
-    final hasIdentity = await ref.read(identityServiceProvider).hasIdentity();
-    if (!mounted) return;
-    if (!hasIdentity) {
-      await ref.read(identityNotifierProvider.notifier).createIdentity();
+    final Future<void> publish;
+    if (_profileSaved) {
+      publish = reachability.republish();
+    } else {
+      // (1) Create the keypair — only when none exists (idempotent resume).
+      final hasIdentity = await ref.read(identityServiceProvider).hasIdentity();
       if (!mounted) return;
-      // createIdentity() never rethrows (AsyncValue.guard) — inspect the
-      // notifier's error state instead of wrapping it in a try/catch.
-      if (ref.read(identityNotifierProvider).hasError) {
+      if (!hasIdentity) {
+        await ref.read(identityNotifierProvider.notifier).createIdentity();
+        if (!mounted) return;
+        // createIdentity() never rethrows (AsyncValue.guard) — inspect the
+        // notifier's error state instead of wrapping it in a try/catch.
+        if (ref.read(identityNotifierProvider).hasError) {
+          setState(() => _busy = false);
+          messenger.showSnackBar(
+            SnackBar(
+              content: Text(l10n.onboardingCreateIdentityError),
+              backgroundColor: HavenSecurityColors.danger,
+            ),
+          );
+          return;
+        }
+      }
+
+      // (2) Seed default relays BEFORE the publish below: an unseeded list
+      // reads as empty, and a publish to it does nothing. Best-effort — the
+      // Rust tick seeds an unseeded list itself as a backstop.
+      try {
+        final relayPrefs = await ref.read(
+          relayPreferencesServiceProvider.future,
+        );
+        await relayPrefs.seedDefaultsIfUnseeded();
+      } on Object catch (e) {
+        debugPrint('Seed defaults during onboarding failed: ${e.runtimeType}');
+      }
+      if (!mounted) return;
+
+      // (3) Relay lists (10002, then 10050), then the KeyPackage (30443).
+      // Started now so it runs while the profile is saved; awaited in (6).
+      publish = reachability.republish();
+
+      // Make sure the existing-name restore has finished before reading the
+      // field, so a very fast tap on a resume can't publish a fresh random
+      // name over the user's previously-saved one.
+      await _restoreFuture;
+      if (!mounted) return;
+
+      // Resolve the name: an explicit edit wins; else keep any name already
+      // saved on a prior attempt; else fall back to a freshly generated one.
+      // Never publish an empty name.
+      final name = await _resolveName();
+      if (!mounted) return;
+
+      // (4)(5) Persist locally, then trigger the public kind-0 publish.
+      // Publishing is unconditional (public-by-default, owner-directed). The
+      // kind-0 publish itself is fire-and-forget (`triggerProfileSync`): an
+      // invitation does not need it.
+      try {
+        await ref.read(identityServiceProvider).setDisplayName(name);
+        if (!mounted) return;
+        ref.invalidate(displayNameProvider);
+        // Save the public kind-0 profile LOCALLY: the display name always,
+        // and the optional photo only if one was picked, in series (name ->
+        // photo) so (a) the two edits can't land out of order in the local
+        // merge and (b) the photo is gated on the name save SUCCEEDING — a
+        // picture-only kind-0 must never publish without the intended name.
+        // Both are fast, local-only SQLCipher writes (no relay/Blossom I/O),
+        // so they are awaited directly; a genuine local failure is logged and
+        // swallowed so it can never block onboarding completion.
+        final photo = _pickedPhoto;
+        await _saveOnboardingProfileLocally(
+          ref.read(profileServiceProvider),
+          name,
+          photo,
+        );
+        if (!mounted) return;
+        triggerProfileSync(ref);
+      } on IdentityServiceException {
+        if (!mounted) return;
         setState(() => _busy = false);
         messenger.showSnackBar(
           SnackBar(
-            content: Text(l10n.onboardingCreateIdentityError),
+            content: Text(l10n.onboardingDisplayNameError),
             backgroundColor: HavenSecurityColors.danger,
           ),
         );
         return;
       }
+      _profileSaved = true;
     }
 
-    // (2) Fire-and-forget the KeyPackage publish (kind 30443/443 + the kind-10002
-    // NIP-65 KeyPackage-relay list + kind-10050 inbox list). Idempotent: re-firing on
-    // a resume rotates the KeyPackage rather than duplicating it.
-    ref
-      ..invalidate(keyPackagePublisherProvider)
-      ..read(keyPackagePublisherProvider);
-
-    // Make sure the existing-name restore has finished before reading the
-    // field, so a very fast tap on a resume can't publish a fresh random name
-    // over the user's previously-saved one.
-    await _restoreFuture;
+    // (6) Finishing setup: nobody can invite this account until its relay
+    // lists and KeyPackage are where an inviter looks.
+    setState(() => _finishing = true);
+    final ready = await _awaitReachable(publish);
     if (!mounted) return;
-
-    // Resolve the name: an explicit edit wins; else keep any name already saved
-    // on a prior attempt; else fall back to a freshly generated one. Never
-    // publish an empty name.
-    final name = await _resolveName();
-    if (!mounted) return;
-
-    // (3)(4) Persist locally, then trigger the public kind-0 publish.
-    // Publishing is unconditional (public-by-default, owner-directed). The
-    // publish itself is fire-and-forget (`triggerProfileSync`) so a
-    // slow/unreachable relay can never stall entry into the app.
-    try {
-      await ref.read(identityServiceProvider).setDisplayName(name);
-      if (!mounted) return;
-      ref.invalidate(displayNameProvider);
-      // Save the public kind-0 profile LOCALLY: the display name always,
-      // and the optional photo only if one was picked, in series (name ->
-      // photo) so (a) the two edits can't land out of order in the local
-      // merge and (b) the photo is gated on the name save SUCCEEDING — a
-      // picture-only kind-0 must never publish without the intended name.
-      // Both are now fast, local-only SQLCipher writes (no relay/Blossom
-      // I/O), so they are awaited directly rather than fired-and-forgotten;
-      // a genuine local failure is logged and swallowed so it can never
-      // block onboarding completion.
-      final photo = _pickedPhoto;
-      await _saveOnboardingProfileLocally(
-        ref.read(profileServiceProvider),
-        name,
-        photo,
-      );
-      if (!mounted) return;
-      // The actual publish is what can be slow/unreachable — fire-and-forget
-      // via the shared sync controller so it never stalls entry into the
-      // app; the name/photo appear on other clients once it lands.
-      triggerProfileSync(ref);
-    } on IdentityServiceException {
-      if (!mounted) return;
-      setState(() => _busy = false);
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text(l10n.onboardingDisplayNameError),
-          backgroundColor: HavenSecurityColors.danger,
-        ),
-      );
+    if (!ready) {
+      setState(() {
+        _busy = false;
+        _finishing = false;
+        _setupFailed = true;
+      });
       return;
     }
 
-    // (5) Seed default relays before completing so the first publish has a
-    // populated list. Best-effort — the provider self-heals on read.
-    try {
-      final relayPrefs = await ref.read(relayPreferencesServiceProvider.future);
-      await relayPrefs.seedDefaultsIfUnseeded();
-    } on Object catch (e) {
-      debugPrint('Seed defaults during onboarding failed: ${e.runtimeType}');
-    }
-
-    // (6) First-run location setup: prominent disclosure → permission →
+    // (7) First-run location setup: prominent disclosure → permission →
     // background sharing. Declining is fine — the user still enters the app.
-    if (mounted) await _setUpLocationSharing();
+    await _setUpLocationSharing();
 
     if (!mounted) return;
-    // (7) Complete onboarding — AppRouter swaps in the main shell.
+    // (8) Complete onboarding — AppRouter swaps in the main shell.
     await ref.read(onboardingControllerProvider.notifier).markCompleted();
+  }
+
+  /// Whether [publish] proved others can invite this account within
+  /// [CreateIdentityScreen.finishSetupTimeout]. A timeout leaves the publish
+  /// running; a Retry supersedes it.
+  Future<bool> _awaitReachable(Future<void> publish) async {
+    try {
+      await publish.timeout(widget.finishSetupTimeout);
+    } on TimeoutException {
+      debugPrint('[Onboarding] finishing setup timed out');
+      return false;
+    }
+    if (!mounted) return false;
+    return ref.read(ownReachabilityProvider).status == OwnReachability.ready;
   }
 
   /// Resolves the display name to save + publish.
@@ -314,8 +379,10 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
             child: _AvatarPicker(
               photoBytes: _pickedPhoto,
               nameController: _controller,
-              onTap: _busy ? null : _onPickPhoto,
-              onRemove: _pickedPhoto == null
+              // Once the profile is saved a Retry only publishes, so an edit
+              // here would be silently dropped; the Identity page edits it.
+              onTap: _busy || _profileSaved ? null : _onPickPhoto,
+              onRemove: _pickedPhoto == null || _profileSaved
                   ? null
                   : () => setState(() => _pickedPhoto = null),
             ),
@@ -329,6 +396,7 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
               child: TextField(
                 controller: _controller,
                 focusNode: _focusNode,
+                enabled: !_profileSaved,
                 textCapitalization: TextCapitalization.words,
                 textInputAction: TextInputAction.done,
                 // Publishing this name is the user's choice; the keyboard's
@@ -353,6 +421,32 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
               ),
             ),
           ),
+          if (_setupFailed) ...[
+            const SizedBox(height: HavenSpacing.sm),
+            Semantics(
+              liveRegion: true,
+              child: Row(
+                key: WidgetKeys.createIdentitySetupError,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    LucideIcons.circleAlert,
+                    size: 20,
+                    color: theme.colorScheme.error,
+                  ),
+                  const SizedBox(width: HavenSpacing.sm),
+                  Expanded(
+                    child: Text(
+                      l10n.onboardingFinishSetupError,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: theme.colorScheme.error,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
       primaryAction: FilledButton(
@@ -360,19 +454,46 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
         onPressed: _busy ? null : _finish,
         style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(52)),
         child: _busy
-            ? Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                  const SizedBox(width: HavenSpacing.sm),
-                  Text(l10n.onboardingCreateIdentityLoading),
-                ],
+            ? _BusyLabel(
+                label: _finishing
+                    ? l10n.onboardingFinishingSetup
+                    : l10n.onboardingCreateIdentityLoading,
               )
-            : Text(l10n.onboardingCreateIdentityCta),
+            : Text(
+                _setupFailed
+                    ? l10n.commonRetry
+                    : l10n.onboardingCreateIdentityCta,
+              ),
+      ),
+    );
+  }
+}
+
+/// The CTA's busy content: a spinner announced as progress with [label], and
+/// [label] itself, announced again whenever it changes.
+class _BusyLabel extends StatelessWidget {
+  const _BusyLabel({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      liveRegion: true,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              semanticsLabel: label,
+            ),
+          ),
+          const SizedBox(width: HavenSpacing.sm),
+          ExcludeSemantics(child: Text(label)),
+        ],
       ),
     );
   }

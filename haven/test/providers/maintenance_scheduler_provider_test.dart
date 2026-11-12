@@ -14,6 +14,7 @@ import 'package:haven/src/providers/live_sync_provider.dart'
     show liveSyncEnabled;
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
+import 'package:haven/src/providers/own_reachability_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/background_location_manager.dart';
@@ -96,11 +97,15 @@ class _FakeMaintenanceService extends MaintenanceService {
     return kpOutcome;
   }
 
+  /// What the relay-list task reports. Defaults to both lists confirmed on
+  /// an own relay; set it to drive the relay-list retry ladder.
+  RelayListMaintenanceResult relayListOutcome = relayListsCurrent;
+
   @override
   Future<RelayListMaintenanceResult> maintainRelayList() async {
     relayListCalls++;
     if (relayListGate != null) await _gated(relayListGate!);
-    return const RelayListMaintenanceResult.empty();
+    return relayListOutcome;
   }
 
   /// The foreground claim each health tick carried, in call order.
@@ -314,6 +319,28 @@ Duration _timeToNextKpTick(
   }
   fail('no KeyPackage tick arrived within $deadline');
 }
+
+/// Steps [async] forward until [fake] records another relay-list tick, and
+/// returns how long that took — [_timeToNextKpTick] for the relay-list task.
+Duration _timeToNextRelayListTick(
+  FakeAsync async,
+  _FakeMaintenanceService fake, {
+  Duration deadline = const Duration(minutes: 45),
+}) {
+  final before = fake.relayListCalls;
+  var waited = Duration.zero;
+  while (waited < deadline) {
+    async
+      ..elapse(_tickSamplingStep)
+      ..flushMicrotasks();
+    waited += _tickSamplingStep;
+    if (fake.relayListCalls > before) return waited;
+  }
+  fail('no relay-list tick arrived within $deadline');
+}
+
+RelayListMaintenanceResult _bothLists(RelayListCategoryResult c) =>
+    RelayListMaintenanceResult(inbox: c, keyPackage: c);
 
 /// Matches a duration inside the scheduler's documented ±25 % jitter envelope
 /// around [nominal], allowing one sampling step of slack on each side.
@@ -1356,7 +1383,7 @@ void main() {
         );
         expect(
           retry,
-          _withinJitterOf(keyPackageRetryPromptDelay),
+          _withinJitterOf(reachabilityRetryPromptDelay),
           reason: 'a relay-side failure retries on the prompt ladder',
         );
 
@@ -1377,10 +1404,10 @@ void main() {
 
         // 60 s, 2 min, 4 min, then capped at 5 min — each jittered ±25 %.
         final expected = <Duration>[
-          keyPackageRetryPromptDelay,
-          keyPackageRetryPromptDelay * 2,
-          keyPackageRetryPromptDelay * 4,
-          keyPackageRetryMaxDelay,
+          reachabilityRetryPromptDelay,
+          reachabilityRetryPromptDelay * 2,
+          reachabilityRetryPromptDelay * 4,
+          reachabilityRetryMaxDelay,
         ];
         for (var i = 0; i < expected.length; i++) {
           final gap = _timeToNextKpTick(async, fake);
@@ -1500,11 +1527,280 @@ void main() {
         expect(gap, _withinJitterOf(keyPackageRetryLaterDelay));
         expect(
           gap,
-          greaterThan(keyPackageRetryPromptDelay * 1.25),
+          greaterThan(reachabilityRetryPromptDelay * 1.25),
           reason: 'a broken local call must not be hammered on the prompt '
               'ladder',
         );
         expect(gap, lessThan(nominalFloor));
+
+        container.dispose();
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The relay-list task used to re-arm at 30 min whatever the tick found, so a
+  // list no relay took left the account unfindable for half an hour. It now
+  // retries on the KeyPackage's prompt ladder — in the foreground only, so
+  // the P4 background-burst budget is unchanged.
+  // -------------------------------------------------------------------------
+  group('MaintenanceScheduler — relay-list retry ladder', () {
+    /// The relay-list nominal cadence's earliest firing (jitter floor).
+    const nominalFloor = Duration(minutes: 22, seconds: 30);
+
+    void foreground() {
+      TestWidgetsFlutterBinding.ensureInitialized()
+          .handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    }
+
+    test('an unconfirmed list retries on the ladder while it stays so', () {
+      fakeAsync((async) {
+        foreground();
+        final fake = _FakeMaintenanceService()
+          ..relayListOutcome = const RelayListMaintenanceResult.failed();
+        final container = _containerWith(fake)
+          ..read(maintenanceSchedulerProvider.notifier);
+
+        _timeToNextRelayListTick(async, fake); // the scheduled first tick
+
+        final expected = <Duration>[
+          reachabilityRetryPromptDelay,
+          reachabilityRetryPromptDelay * 2,
+          reachabilityRetryPromptDelay * 4,
+          reachabilityRetryMaxDelay,
+        ];
+        for (var i = 0; i < expected.length; i++) {
+          final gap = _timeToNextRelayListTick(async, fake);
+          expect(
+            gap,
+            _withinJitterOf(expected[i]),
+            reason: 'retry ${i + 1} should sit on the ladder at ${expected[i]}',
+          );
+          expect(gap, lessThan(nominalFloor));
+        }
+
+        container.dispose();
+      });
+    });
+
+    test('every way a list can be left unconfirmed retries promptly', () {
+      for (final outcome in [
+        // No relay acknowledged the republish.
+        const RelayListCategoryResult(
+          action: RelayListMaintenanceAction.unacknowledged,
+          ownConfirmed: false,
+          respondersProbed: 2,
+        ),
+        // Nothing answered at all.
+        const RelayListCategoryResult(
+          action: RelayListMaintenanceAction.alreadyCurrent,
+          ownConfirmed: false,
+        ),
+        // Only a lookup relay took it; no own relay serves it.
+        const RelayListCategoryResult(
+          action: RelayListMaintenanceAction.republished,
+          ownConfirmed: false,
+          respondersProbed: 1,
+        ),
+      ]) {
+        fakeAsync((async) {
+          foreground();
+          final fake = _FakeMaintenanceService()
+            ..relayListOutcome = _bothLists(outcome);
+          final container = _containerWith(fake)
+            ..read(maintenanceSchedulerProvider.notifier);
+
+          _timeToNextRelayListTick(async, fake);
+          expect(
+            _timeToNextRelayListTick(async, fake),
+            _withinJitterOf(reachabilityRetryPromptDelay),
+            reason: '$outcome',
+          );
+
+          container.dispose();
+        });
+      }
+    });
+
+    test('what only the user can change keeps the nominal cadence', () {
+      for (final action in [
+        RelayListMaintenanceAction.suppressed,
+        RelayListMaintenanceAction.nothingConfigured,
+        RelayListMaintenanceAction.awaitingResetAcknowledgement,
+      ]) {
+        fakeAsync((async) {
+          foreground();
+          final fake = _FakeMaintenanceService()
+            ..relayListOutcome = _bothLists(
+              RelayListCategoryResult(action: action, ownConfirmed: false),
+            );
+          final container = _containerWith(fake)
+            ..read(maintenanceSchedulerProvider.notifier);
+
+          _timeToNextRelayListTick(async, fake);
+          expect(
+            _timeToNextRelayListTick(async, fake),
+            _withinJitterOf(relayListMaintenanceInterval),
+            reason: '${action.name}: a timer cannot add a relay or answer the '
+                'reset notice',
+          );
+
+          container.dispose();
+        });
+      }
+    });
+
+    test('a confirmed tick clears the ladder', () {
+      fakeAsync((async) {
+        foreground();
+        final fake = _FakeMaintenanceService()
+          ..relayListOutcome = const RelayListMaintenanceResult.failed();
+        final container = _containerWith(fake)
+          ..read(maintenanceSchedulerProvider.notifier);
+
+        _timeToNextRelayListTick(async, fake); // scheduled first tick
+        _timeToNextRelayListTick(async, fake); // retry 1
+        _timeToNextRelayListTick(async, fake); // retry 2
+
+        fake.relayListOutcome = relayListsCurrent;
+        _timeToNextRelayListTick(async, fake); // the tick that confirms
+
+        expect(
+          _timeToNextRelayListTick(async, fake),
+          _withinJitterOf(relayListMaintenanceInterval),
+        );
+
+        container.dispose();
+      });
+    });
+
+    test('in the background a failed fold keeps the nominal deadline', () async {
+      // A burst folds the task in only when it is due. An escalated deadline
+      // here would make every 72-168 s burst a relay-list publish.
+      final binding = TestWidgetsFlutterBinding.ensureInitialized();
+      addTearDown(
+        () => binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+      );
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      final t0 = DateTime(2026, 11, 12, 12);
+      var now = t0;
+      final fake = _FakeMaintenanceService()
+        ..relayListOutcome = const RelayListMaintenanceResult.failed();
+      final container = _containerWith(fake, clock: () => now);
+      addTearDown(container.dispose);
+      final notifier = container.read(maintenanceSchedulerProvider.notifier);
+
+      now = t0.add(const Duration(minutes: 1));
+      await notifier.runRelayListIfDue(now);
+      expect(fake.relayListCalls, 1);
+
+      // Bursts at the ladder's every rung, and a little past its cap.
+      for (final later in [
+        reachabilityRetryPromptDelay * 1.25,
+        reachabilityRetryMaxDelay * 1.25,
+        const Duration(minutes: 22),
+      ]) {
+        await notifier.runRelayListIfDue(now.add(later));
+      }
+      expect(
+        fake.relayListCalls,
+        1,
+        reason: 'no background fold before the nominal deadline',
+      );
+
+      await notifier.runRelayListIfDue(now.add(const Duration(minutes: 38)));
+      expect(fake.relayListCalls, 2, reason: 'and one once it is due');
+    });
+
+    test('the first relay-list tick waits for the login publish to settle', () {
+      fakeAsync((async) {
+        foreground();
+        final login = Completer<KeyPackageMaintenanceOutcome>();
+        final fake = _FakeMaintenanceService();
+        final container = _containerWith(fake, loginPublish: login.future)
+          ..read(maintenanceSchedulerProvider.notifier);
+
+        async
+          ..elapse(const Duration(seconds: 90))
+          ..flushMicrotasks();
+        expect(
+          fake.relayListCalls,
+          0,
+          reason: 'a probe beside the login publish reads the lists it is '
+              'still writing',
+        );
+
+        login.complete(
+          const KeyPackageMaintenancePublished(
+            relaysAcked: 1,
+            isFreshSlotMinted: true,
+          ),
+        );
+        async.flushMicrotasks();
+        expect(fake.relayListCalls, 1);
+
+        container.dispose();
+      });
+    });
+  });
+
+  group('MaintenanceScheduler — readiness writes', () {
+    test('each tick reports its outcome to the readiness fold', () async {
+      final fake = _FakeMaintenanceService()
+        ..kpOutcome = const KeyPackageMaintenancePublished(
+          relaysAcked: 1,
+          isFreshSlotMinted: false,
+        );
+      final container = _containerWith(fake);
+      addTearDown(container.dispose);
+      final scheduler = container.read(maintenanceSchedulerProvider.notifier);
+
+      await scheduler.triggerRelayListTickForTest();
+      await scheduler.triggerKeyPackageTickForTest();
+
+      final reach = container.read(ownReachabilityProvider);
+      expect(reach.relayLists, same(relayListsCurrent));
+      expect(reach.keyPackage, same(fake.kpOutcome));
+      expect(reach.status, OwnReachability.ready);
+    });
+
+    test('a tick of a logged-out generation writes nothing', () async {
+      final gate = Completer<void>();
+      final fake = _FakeMaintenanceService()..relayListGate = gate;
+      final container = _containerWith(fake);
+      addTearDown(container.dispose);
+      final scheduler = container.read(maintenanceSchedulerProvider.notifier);
+      container.read(ownReachabilityProvider);
+
+      final tick = scheduler.triggerRelayListTickForTest();
+      await pumpEventQueue();
+      expect(fake.foldInFlight, isTrue, reason: 'anti-vacuity: in flight');
+      // A logout invalidates the identity scope, the scheduler included.
+      container.invalidate(maintenanceSchedulerProvider);
+      gate.complete();
+      await tick;
+
+      expect(container.read(ownReachabilityProvider).relayLists, isNull);
+    });
+
+    test('an adopted-only KeyPackage tick retries promptly', () {
+      fakeAsync((async) {
+        // The package an inviter would fetch is one a reinstall's old self
+        // minted and this device cannot open.
+        final fake = _FakeMaintenanceService()
+          ..kpOutcome = const KeyPackageMaintenanceHealthy(
+            canonicalOnRelays: 1,
+            respondersProbed: 1,
+            isStableSlotSeeded: true,
+          );
+        final container = _containerWith(fake)
+          ..read(maintenanceSchedulerProvider.notifier);
+
+        _timeToNextKpTick(async, fake);
+        expect(
+          _timeToNextKpTick(async, fake),
+          _withinJitterOf(reachabilityRetryPromptDelay),
+        );
 
         container.dispose();
       });

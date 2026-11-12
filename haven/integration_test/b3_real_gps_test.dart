@@ -375,10 +375,10 @@ void main() {
 
       final relayManager = await RelayManagerFfi.newInstance();
       try {
-        final bobKp = await relayManager.fetchMemberKeypackage(
+        final bobKp = (await relayManager.fetchMemberKeypackage(
           pubkey: bob.pubkeyHex,
           circle: aliceManager,
-        );
+        )).member;
         if (bobKp == null) {
           throw StateError(
             '[b3] fetchMemberKeypackage returned null for Bob — his '

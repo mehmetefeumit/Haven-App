@@ -99,6 +99,7 @@ KpMaintenanceOutcomeFfi _republishAckedBy(int relaysAcked) {
     relaysHealed: relaysAcked,
     relayErrors: relaysAcked == 0 ? 1 : 0,
     expiredInitKeyPurged: false,
+    publishedCurrent: relaysAcked > 0,
     retiredMalformedSlot: false,
   );
 }
@@ -121,6 +122,7 @@ KpMaintenanceOutcomeFfi _unprobedTick({required int relaysTargeted}) {
     relaysHealed: 0,
     relayErrors: 0,
     expiredInitKeyPurged: false,
+    publishedCurrent: false,
     retiredMalformedSlot: false,
   );
 }
@@ -270,6 +272,7 @@ void main() {
             relaysHealed: 0,
             relayErrors: 0,
             expiredInitKeyPurged: false,
+            publishedCurrent: true,
             retiredMalformedSlot: false,
           ),
         );

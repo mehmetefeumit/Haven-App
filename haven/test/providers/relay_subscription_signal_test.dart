@@ -500,7 +500,7 @@ class _StubMaintenanceService extends MaintenanceService {
 
   @override
   Future<RelayListMaintenanceResult> maintainRelayList() async =>
-      const RelayListMaintenanceResult.empty();
+      relayListsCurrent;
 
   @override
   Future<KeyPackageMaintenanceOutcome> maintainKeyPackage() async =>

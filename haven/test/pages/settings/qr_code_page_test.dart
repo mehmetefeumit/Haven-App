@@ -15,6 +15,7 @@ import 'package:haven/src/pages/settings/qr_code_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
+import 'package:haven/src/widgets/identity/reachability_status_row.dart';
 
 const _testNpub = 'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspcd5tr';
 
@@ -70,6 +71,19 @@ void main() {
       await tester.pumpWidget(_build(identity: _fakeIdentity));
       await tester.pumpAndSettle();
       expect(find.byType(NpubQrCode), findsOneWidget);
+    });
+
+    testWidgets('says whether others can invite you, above the code', (
+      tester,
+    ) async {
+      // Scanning the code is only useful once this says ready.
+      await tester.pumpWidget(_build(identity: _fakeIdentity));
+      await tester.pumpAndSettle();
+      expect(find.byType(ReachabilityStatusRow), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.byType(ReachabilityStatusRow)).dy,
+        lessThan(tester.getTopLeft(find.byType(NpubQrCode)).dy),
+      );
     });
 
     testWidgets('shows the npub as selectable text', (tester) async {

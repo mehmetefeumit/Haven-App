@@ -535,10 +535,10 @@ void main() {
 
         relayManager = await RelayManagerFfi.newInstance();
 
-        final fetchedBaseline = await relayManager.fetchMemberKeypackage(
+        final fetchedBaseline = (await relayManager.fetchMemberKeypackage(
           pubkey: alice.pubkeyHex,
           circle: bob.user.circleManager,
-        );
+        )).member;
         if (fetchedBaseline == null) {
           debugPrint(kBaselineUnfetchableMarker);
           throw StateError(
@@ -779,10 +779,10 @@ void main() {
         // `not_before`/`not_after` at Add time — the check RFC 9420 requires
         // and the one the whole 84-day defect turns on.
         // -------------------------------------------------------------------
-        final rotatedKp = await relayManager.fetchMemberKeypackage(
+        final rotatedKp = (await relayManager.fetchMemberKeypackage(
           pubkey: alice.pubkeyHex,
           circle: bob.user.circleManager,
-        );
+        )).member;
         if (rotatedKp == null) {
           debugPrint('$kSupersedeFailedMarker reason=refetch_null');
           throw StateError(
@@ -1063,10 +1063,10 @@ Future<_WirePackage?> _awaitDifferentPackage({
 }) async {
   final sw = Stopwatch()..start();
   while (sw.elapsed < timeout) {
-    final fetched = await relayManager.fetchMemberKeypackage(
+    final fetched = (await relayManager.fetchMemberKeypackage(
       pubkey: pubkey,
       circle: inviter,
-    );
+    )).member;
     if (fetched != null) {
       final pkg = _WirePackage.fromEventJson(
         fetched.keyPackageJson,

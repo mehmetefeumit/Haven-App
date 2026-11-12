@@ -471,8 +471,10 @@ final profileRelaysProvider =
 ///   [inboxRelaysProvider]);
 /// * `KeyPackage` — the KeyPackage list (kind 30443 plus its kind-10002
 ///   advertisement, [keyPackageRelaysProvider]);
-/// * `Discovery` — the read-only discovery plane ([discoveryRelays]), which
-///   serves this account's `KeyPackage` / NIP-65 lookups of *other* users.
+/// * `Discovery` — the discovery (lookup) plane ([discoveryRelays]), which
+///   serves this account's `KeyPackage` / NIP-65 lookups of *other* users and
+///   holds the copy of its own relay lists (owner decision OD-B,
+///   2026-11-12).
 ///   "This IP asked for pubkey X's KeyPackage" is a stronger co-membership
 ///   signal than a kind-0 lookup, which is why Rust records it.
 ///

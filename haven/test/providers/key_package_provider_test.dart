@@ -23,10 +23,13 @@
 ///   keyPackagePublisherInvalidatorProvider invalidates
 library;
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/own_reachability_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
@@ -50,6 +53,12 @@ class _RecordingRelay extends MockRelayService {
   int kpCalls = 0;
   int relayListCalls = 0;
 
+  /// Both tasks, in call order.
+  final List<String> calls = [];
+
+  /// When set, the relay-list task parks on it.
+  Completer<void>? relayListGate;
+
   KeyPackageMaintenanceOutcome kpResult =
       const KeyPackageMaintenancePublished(
         relaysAcked: 2,
@@ -63,6 +72,7 @@ class _RecordingRelay extends MockRelayService {
     required List<int> identitySecretBytes,
   }) async {
     kpCalls++;
+    calls.add('kp');
     return kpResult;
   }
 
@@ -72,7 +82,9 @@ class _RecordingRelay extends MockRelayService {
     required List<int> identitySecretBytes,
   }) async {
     relayListCalls++;
-    return const RelayListMaintenanceResult.empty();
+    calls.add('relayList');
+    await relayListGate?.future;
+    return relayListsCurrent;
   }
 }
 
@@ -192,6 +204,70 @@ void main() {
         expect(relay.relayListCalls, 1);
       },
     );
+
+    ProviderContainer containerFor(_RecordingRelay relay) {
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            _MockIdentityService(identityExists: true),
+          ),
+          maintenanceServiceProvider.overrideWithValue(
+            MaintenanceService(
+              relayService: relay,
+              circleManagerFactory: () async => _FakeCircleManager(),
+              identitySecretBytes: () async => List.generate(32, (i) => i),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      return container;
+    }
+
+    test('publishes the relay lists before the KeyPackage', () async {
+      // `transports/nostr.md`: the kind 10002 says where the KeyPackage goes,
+      // and the 10050 is up before anyone can send a Welcome.
+      final relay = _RecordingRelay();
+      final container = containerFor(relay);
+
+      await container.read(keyPackagePublisherProvider.future);
+
+      expect(relay.calls, ['relayList', 'kp']);
+    });
+
+    test('reports both outcomes to the readiness fold', () async {
+      final relay = _RecordingRelay();
+      final container = containerFor(relay);
+
+      final kp = await container.read(keyPackagePublisherProvider.future);
+
+      final reach = container.read(ownReachabilityProvider);
+      expect(reach.keyPackage, same(kp));
+      expect(reach.relayLists, same(relayListsCurrent));
+      expect(reach.status, OwnReachability.ready);
+    });
+
+    test('a run superseded meanwhile reports nothing', () async {
+      // A logout (or a newer run) disposes the run in flight; what it learns
+      // afterwards is no longer this identity's to report.
+      final gate = Completer<void>();
+      final relay = _RecordingRelay()..relayListGate = gate;
+      final container = containerFor(relay);
+      container.read(ownReachabilityProvider);
+
+      unawaited(container.read(keyPackagePublisherProvider.future));
+      await pumpEventQueue();
+      expect(relay.calls, ['relayList'], reason: 'anti-vacuity: in flight');
+      container.invalidate(keyPackagePublisherProvider);
+      gate.complete();
+      await pumpEventQueue();
+
+      expect(relay.calls, ['relayList', 'kp'], reason: 'the run finished');
+      final reach = container.read(ownReachabilityProvider);
+      expect(reach.relayLists, isNull);
+      expect(reach.keyPackage, isNull);
+      expect(reach.status, OwnReachability.checking);
+    });
 
     test('surfaces a published tick as published', () async {
       final relay = _RecordingRelay()

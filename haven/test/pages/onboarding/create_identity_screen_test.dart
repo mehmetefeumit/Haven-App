@@ -7,6 +7,7 @@
 /// the empty-name fallback, and the existing-name preservation on resume.
 library;
 
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -20,12 +21,15 @@ import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_service.dart';
+import 'package:haven/src/services/maintenance_service.dart';
+import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:haven/src/widgets/identity/public_profile_notice.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/localized_app_harness.dart';
+import '../../helpers/log_capture.dart';
 import '../../mocks/mock_circle_service.dart';
 import '../../mocks/mock_profile_service.dart';
 import '../../mocks/mock_relay_preferences_service.dart';
@@ -44,7 +48,10 @@ void main() {
     required _RecordingIdentityService service,
     MockProfileService? profileService,
     _FakeLocationService? locationService,
+    _FakeMaintenance? maintenance,
+    MockRelayPreferencesService? relayPrefs,
   }) {
+    final prefs = relayPrefs ?? MockRelayPreferencesService();
     return [
       identityServiceProvider.overrideWithValue(service),
       onboardingControllerProvider.overrideWith(
@@ -57,11 +64,12 @@ void main() {
       profileServiceProvider.overrideWithValue(
         profileService ?? MockProfileService(),
       ),
-      relayPreferencesServiceProvider.overrideWith(
-        (ref) async => MockRelayPreferencesService(),
-      ),
+      relayPreferencesServiceProvider.overrideWith((ref) async => prefs),
       locationServiceProvider.overrideWithValue(
         locationService ?? _FakeLocationService(),
+      ),
+      maintenanceServiceProvider.overrideWithValue(
+        maintenance ?? _FakeMaintenance(prefs),
       ),
     ];
   }
@@ -383,6 +391,215 @@ void main() {
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getBool(kOnboardingCompletedKey), isNot(true));
   });
+
+  // ── Finishing setup (owner decision OD-C, 2026-11-12) ────────────────────
+  //
+  // The user enters only once others can invite them: a QR code shown before
+  // the relay lists and KeyPackage are where an inviter looks is one nobody
+  // can use.
+
+  const setupError =
+      "Couldn't finish setting up your account. Check your connection and "
+      'try again.';
+
+  Future<bool> onboardingCompleted() async =>
+      (await SharedPreferences.getInstance()).getBool(
+        kOnboardingCompletedKey,
+      ) ??
+      false;
+
+  testWidgets(
+    'seeds the default relays before anything is published, and publishes '
+    'the relay lists before the KeyPackage',
+    (tester) async {
+      final prefs = MockRelayPreferencesService();
+      final maintenance = _FakeMaintenance(prefs);
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: _RecordingIdentityService(),
+          maintenance: maintenance,
+          relayPrefs: prefs,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+
+      expect(
+        maintenance.seededAtFirstPublish,
+        isTrue,
+        reason: 'an unseeded relay list reads as empty: a publish before the '
+            'seed does nothing, and the QR code is shown anyway',
+      );
+      expect(maintenance.calls, ['relayList', 'kp']);
+    },
+  );
+
+  testWidgets(
+    'waits on "Finishing setup…" and enters only once others can invite the '
+    'user',
+    (tester) async {
+      final maintenance = _FakeMaintenance(MockRelayPreferencesService());
+      final landed = Completer<KeyPackageMaintenanceOutcome>();
+      maintenance.kpAnswers.add(() => landed.future);
+      final semantics = tester.ensureSemantics();
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: _RecordingIdentityService(),
+          maintenance: maintenance,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+
+      expect(find.text('Finishing setup…'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel('Finishing setup…'),
+        findsOneWidget,
+        reason: 'the wait is announced as progress, not just drawn',
+      );
+      expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsNothing);
+      expect(await onboardingCompleted(), isFalse);
+
+      landed.complete(_published);
+      await pumpFrames(tester);
+      expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsOneWidget);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      expect(await onboardingCompleted(), isTrue);
+      semantics.dispose();
+    },
+  );
+
+  testWidgets(
+    'a publish that never settles times out to a fixed error with Retry, '
+    'which resumes without creating or saving anything again',
+    (tester) async {
+      final logs = LogCapture.install();
+      addTearDown(logs.restore);
+      final service = _RecordingIdentityService();
+      final maintenance = _FakeMaintenance(MockRelayPreferencesService());
+      maintenance.kpAnswers.add(
+        () => Completer<KeyPackageMaintenanceOutcome>().future,
+      );
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service, maintenance: maintenance),
+        settle: false,
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      expect(find.text(setupError), findsNothing, reason: 'still waiting');
+
+      await tester.pump(const Duration(seconds: 60));
+      await pumpFrames(tester);
+
+      expect(find.text(setupError), findsOneWidget);
+      expect(find.text('Retry'), findsOneWidget);
+      expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsNothing);
+      expect(await onboardingCompleted(), isFalse);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).enabled,
+        isFalse,
+        reason: 'the name is saved; an edit here would be silently dropped',
+      );
+      logs.assertContains('[Onboarding] finishing setup timed out');
+
+      // The relays come back.
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      expect(await onboardingCompleted(), isTrue);
+      expect(service.createIdentityCalls, 1);
+      expect(service.setDisplayNameCalls, hasLength(1));
+      expect(maintenance.calls, ['relayList', 'kp', 'relayList', 'kp']);
+    },
+  );
+
+  testWidgets(
+    'a proven failure shows the error at once, not after the full wait',
+    (tester) async {
+      final maintenance = _FakeMaintenance(MockRelayPreferencesService());
+      maintenance.kpAnswers.add(
+        () async => const KeyPackageMaintenanceFailed(
+          KeyPackageFailureKind.publishNotAcked,
+        ),
+      );
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: _RecordingIdentityService(),
+          maintenance: maintenance,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      // Well inside the 60 s wait.
+      await pumpFrames(tester);
+
+      expect(find.text(setupError), findsOneWidget);
+      expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsNothing);
+
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'a publisher that throws shows fixed copy only and logs no identifier',
+    (tester) async {
+      final logs = LogCapture.install();
+      addTearDown(logs.restore);
+      final maintenance = _FakeMaintenance(MockRelayPreferencesService())
+        ..relayListThrows = StateError(
+          'npub1plantedplanted at wss://planted.example',
+        );
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: _RecordingIdentityService(),
+          maintenance: maintenance,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+
+      expect(find.text(setupError), findsOneWidget);
+      expect(find.textContaining('planted'), findsNothing);
+      expect(find.textContaining('StateError'), findsNothing);
+      logs
+        ..assertContains('[Reachability] republish failed')
+        ..assertNoNeedles(['npub1plantedplanted', 'wss://planted.example']);
+    },
+  );
 
   // ── Optional profile photo ────────────────────────────────────────────────
 
@@ -737,4 +954,54 @@ class _FakeLocationService implements LocationService {
 
   @override
   Future<bool> isLocationServiceEnabled() => throw UnimplementedError();
+}
+
+/// A KeyPackage tick an own relay acknowledged: this device's current
+/// package is served.
+const _published = KeyPackageMaintenancePublished(
+  relaysAcked: 1,
+  isFreshSlotMinted: true,
+);
+
+/// A [MaintenanceService] whose two publishing tasks are recorded and
+/// scripted, so the publisher onboarding waits on runs without the bridge.
+class _FakeMaintenance extends MaintenanceService {
+  _FakeMaintenance(this._prefs)
+    : super(
+        relayService: MockRelayService(),
+        circleManagerFactory: () async => throw UnimplementedError(),
+        identitySecretBytes: () async => const <int>[],
+      );
+
+  final MockRelayPreferencesService _prefs;
+
+  /// Each task, in call order.
+  final List<String> calls = [];
+
+  /// Whether the default relays were seeded when the first publish began.
+  bool? seededAtFirstPublish;
+
+  /// What successive KeyPackage steps answer, one each; an own relay
+  /// acknowledging the package once these run out.
+  final List<Future<KeyPackageMaintenanceOutcome> Function()> kpAnswers = [];
+
+  /// When set, the relay-list step throws it.
+  Object? relayListThrows;
+
+  @override
+  Future<RelayListMaintenanceResult> maintainRelayList() async {
+    calls.add('relayList');
+    seededAtFirstPublish ??= _prefs.didSeed;
+    final boom = relayListThrows;
+    if (boom != null) throw boom;
+    return relayListsCurrent;
+  }
+
+  @override
+  Future<KeyPackageMaintenanceOutcome> maintainKeyPackage() async {
+    calls.add('kp');
+    seededAtFirstPublish ??= _prefs.didSeed;
+    if (kpAnswers.isEmpty) return _published;
+    return kpAnswers.removeAt(0)();
+  }
 }

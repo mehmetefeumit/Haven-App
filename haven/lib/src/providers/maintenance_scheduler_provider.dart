@@ -5,9 +5,11 @@
 ///
 /// - **`KeyPackage`** (kinds 30443 + 443) — republish-if-missing so a peer can
 ///   always fetch fresh init-key material to invite the user. Nominal 10 min.
-/// - **Relay list** (kind 10050 inbox + kind 10002 NIP-65 `KeyPackage`) — republish-if-
-///   drifted so the user's own relays keep advertising where to reach them.
-///   Nominal 30 min.
+/// - **Relay list** (kind 10002 NIP-65 `KeyPackage`, then kind 10050 inbox) —
+///   republish-if-drifted so the user's own relays, and the lookup relays
+///   inviters search, keep advertising where to reach them. Nominal 30 min;
+///   a list no own relay confirms retries on the same prompt ladder as the
+///   `KeyPackage`, in the foreground only.
 /// - **Subscription health** (M8-4) — heal dropped live-sync relay connections
 ///   by re-anchoring subscriptions at their cursors. Nominal 15 min. Engine-
 ///   coupled: its FFI self-gates on the engine `SESSION`, so it is an inert
@@ -67,7 +69,9 @@
 /// The first tick of each task fires after a short *initial settle* delay
 /// rather than waiting a full interval — prompt enough to be a real startup
 /// safety net, but not racing the app's first frames. In addition, the first
-/// `KeyPackage` tick performs a **causal handoff**: it `await`s the login-time
+/// `KeyPackage` tick (and the first relay-list tick, which would otherwise
+/// probe the lists the login publish is still writing) performs a **causal
+/// handoff**: it `await`s the login-time
 /// publish (`keyPackagePublisherProvider`, read in `MapShell.initState`) to
 /// *settle* (timeout-capped, best-effort) before probing. This closes a
 /// NIP-33 fragmentation edge: if maintenance probed before the login publish
@@ -117,6 +121,7 @@ import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart'
     show liveSyncEnabled;
 import 'package:haven/src/providers/member_profile_refresh_provider.dart';
+import 'package:haven/src/providers/own_reachability_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/leaver_backstop.dart' show LeaveCarryOn;
@@ -134,14 +139,15 @@ const Duration keyPackageMaintenanceInterval = Duration(minutes: 10);
 
 /// First retry delay after a `KeyPackage` tick reported a *transient* failure
 /// ([KeyPackageRetryDisposition.retryPromptly]) — a relay that did not answer,
-/// or a publish no relay acknowledged.
+/// or a publish no relay acknowledged — or a relay-list tick left a list
+/// unconfirmed ([RelayListMaintenanceResult.needsPromptRetry]).
 ///
-/// Doubles per consecutive failure up to [keyPackageRetryMaxDelay]. The whole
-/// ladder sits strictly inside the nominal interval's jitter floor (see that
+/// Doubles per consecutive failure up to [reachabilityRetryMaxDelay]. The whole
+/// ladder sits strictly inside both nominal intervals' jitter floors (see that
 /// constant), so a failing tick always comes back sooner than a healthy one —
 /// which is the entire point: between the failed publish and the next
 /// successful one, nobody can invite this account.
-const Duration keyPackageRetryPromptDelay = Duration(seconds: 60);
+const Duration reachabilityRetryPromptDelay = Duration(seconds: 60);
 
 /// Flat retry delay after a `KeyPackage` tick reported a *local* failure
 /// ([KeyPackageRetryDisposition.retryLater]) — a broken FFI call or MLS store.
@@ -150,12 +156,12 @@ const Duration keyPackageRetryPromptDelay = Duration(seconds: 60);
 /// condition does not heal on a relay's timescale.
 const Duration keyPackageRetryLaterDelay = Duration(minutes: 5);
 
-/// Cap on the `KeyPackage` retry ladder.
+/// Cap on the `KeyPackage` and relay-list retry ladder.
 ///
 /// Chosen so the jittered retry (max `5 min × 1.25` = 6 min 15 s) stays below
-/// the jittered nominal floor (`10 min × 0.75` = 7 min 30 s). A retry that can
-/// land later than the ordinary cadence is not a retry.
-const Duration keyPackageRetryMaxDelay = Duration(minutes: 5);
+/// the lower jittered nominal floor (`KeyPackage`: `10 min × 0.75` = 7 min
+/// 30 s). A retry that can land later than the ordinary cadence is not a retry.
+const Duration reachabilityRetryMaxDelay = Duration(minutes: 5);
 
 /// Nominal relay-list maintenance interval (jittered ±25 % per tick).
 const Duration relayListMaintenanceInterval = Duration(minutes: 30);
@@ -182,9 +188,9 @@ const Duration _healthInitialDelay = Duration(seconds: 90);
 /// guaranteed no-op. This is the *idle-session* safety net.
 const Duration _profileAntiEntropyInitialDelay = Duration(minutes: 10);
 
-/// Cap on how long the first `KeyPackage` tick waits for the login publish to
-/// settle before proceeding regardless (a wedged publish must not stall
-/// maintenance forever).
+/// Cap on how long the first `KeyPackage` and relay-list ticks wait for the
+/// login publish to settle before proceeding regardless (a wedged publish must
+/// not stall maintenance forever).
 const Duration _loginPublishSettleTimeout = Duration(seconds: 60);
 
 /// Clock behind the deadline bookkeeping the background burst fold reads.
@@ -223,10 +229,18 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
   /// the login-publish causal handoff. Reset per generation in [build].
   bool _awaitedLoginPublish = false;
 
+  /// The same handoff for the first relay-list tick: one that ran beside the
+  /// login publish would probe the lists it is still writing.
+  bool _relayListAwaitedLoginPublish = false;
+
   /// Consecutive `KeyPackage` ticks that reported a retryable failure. Drives
   /// the retry ladder; reset to 0 by any tick that did not. Reset per
   /// generation in [build].
   int _keyPackageFailureStreak = 0;
+
+  /// Consecutive foreground relay-list ticks that left a list unconfirmed.
+  /// Reset to 0 by a tick that did not; reset per generation in [build].
+  int _relayListFailureStreak = 0;
 
   /// Monotonic lifecycle counter. Riverpod reuses this notifier instance across
   /// an `invalidate`+re-read, so a settling tick from a superseded lifecycle
@@ -265,7 +279,9 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
     _healthInFlight = false;
     _profileAntiEntropyInFlight = false;
     _awaitedLoginPublish = false;
+    _relayListAwaitedLoginPublish = false;
     _keyPackageFailureStreak = 0;
+    _relayListFailureStreak = 0;
     // A carry-on of the previous lifecycle ends at its next generation check
     // and is no caller's to join.
     _carryingOn = null;
@@ -697,6 +713,9 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
       // is a no-op (build() already reset the flag for the new lifecycle).
       if (_isCurrent(generation)) {
         _keyPackageInFlight = false;
+        if (outcome != null) {
+          ref.read(ownReachabilityProvider.notifier).recordKeyPackage(outcome);
+        }
         _armKeyPackage(_nextKeyPackageDelay(outcome), generation);
       }
     }
@@ -715,6 +734,13 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
   /// which is treated as a local failure rather than as success.
   Duration _nextKeyPackageDelay(KeyPackageMaintenanceOutcome? outcome) {
     final disposition = switch (outcome) {
+      // An adopted slot serves a package this device cannot open, and only a
+      // later tick mints into it; an inviter can pick the old one meanwhile.
+      KeyPackageMaintenanceHealthy(
+        isStableSlotSeeded: true,
+        publishedCurrent: false,
+      ) =>
+        KeyPackageRetryDisposition.retryPromptly,
       KeyPackageMaintenanceHealthy() ||
       KeyPackageMaintenancePublished() => null,
       KeyPackageMaintenanceFailed(:final disposition) => disposition,
@@ -733,13 +759,36 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
     if (disposition == KeyPackageRetryDisposition.retryLater) {
       return _jittered(keyPackageRetryLaterDelay);
     }
-    // Doubling ladder, capped. The shift exponent is clamped so a long-lived
-    // failure streak cannot overflow it.
-    final doublings = math.min(_keyPackageFailureStreak - 1, 16);
-    final scaled = keyPackageRetryPromptDelay * (1 << doublings);
+    return _promptRetryDelay(_keyPackageFailureStreak);
+  }
+
+  /// The jittered rung [streak] of the prompt retry ladder: 60 s doubling to
+  /// the 5 min cap. The shift exponent is clamped so a long-lived failure
+  /// streak cannot overflow it.
+  Duration _promptRetryDelay(int streak) {
+    final doublings = math.min(streak - 1, 16);
+    final scaled = reachabilityRetryPromptDelay * (1 << doublings);
     return _jittered(
-      scaled > keyPackageRetryMaxDelay ? keyPackageRetryMaxDelay : scaled,
+      scaled > reachabilityRetryMaxDelay ? reachabilityRetryMaxDelay : scaled,
     );
+  }
+
+  /// Decides when the next relay-list tick should run.
+  ///
+  /// A list no own relay confirms is one an inviter may not find, so the tick
+  /// comes back on the prompt ladder — in the foreground only. A backgrounded
+  /// app records the nominal deadline: a burst folds the task in when it is
+  /// due, and an escalated deadline would make every burst a relay-list
+  /// publish, the cost P4 exists to remove. [result] is null only when the
+  /// tick threw before a verdict.
+  Duration _nextRelayListDelay(RelayListMaintenanceResult? result) {
+    if (result != null && !result.needsPromptRetry) {
+      _relayListFailureStreak = 0;
+      return _jittered(relayListMaintenanceInterval);
+    }
+    if (!appIsResumed()) return _jittered(relayListMaintenanceInterval);
+    _relayListFailureStreak++;
+    return _promptRetryDelay(_relayListFailureStreak);
   }
 
   // --- Relay-list task ------------------------------------------------------
@@ -750,21 +799,29 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
       return;
     }
     _relayListInFlight = true;
+    RelayListMaintenanceResult? result;
     try {
-      final result = await ref
-          .read(maintenanceServiceProvider)
-          .maintainRelayList();
+      if (!_relayListAwaitedLoginPublish) {
+        _relayListAwaitedLoginPublish = true;
+        await _awaitLoginPublishSettled();
+        if (!_isCurrent(generation)) return;
+      }
+      result = await ref.read(maintenanceServiceProvider).maintainRelayList();
       debugPrint(
         '[Maintenance] relay-list tick: inbox=${result.inbox.action.name}, '
         'keyPackage=${result.keyPackage.action.name}',
       );
     } on Object catch (e) {
       debugPrint('[Maintenance] relay-list tick threw: ${e.runtimeType}');
+      result = const RelayListMaintenanceResult.failed();
     } finally {
       // Reset ONLY for the current generation (see the KeyPackage tick's note).
       if (_isCurrent(generation)) {
         _relayListInFlight = false;
-        _armRelayList(_jittered(relayListMaintenanceInterval), generation);
+        if (result != null) {
+          ref.read(ownReachabilityProvider.notifier).recordRelayLists(result);
+        }
+        _armRelayList(_nextRelayListDelay(result), generation);
       }
     }
   }

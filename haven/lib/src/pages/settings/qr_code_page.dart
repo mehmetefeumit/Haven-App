@@ -12,6 +12,7 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
+import 'package:haven/src/widgets/identity/reachability_status_row.dart';
 
 /// Page that displays the user's public key as a QR code for sharing.
 class QrCodePage extends ConsumerWidget {
@@ -61,6 +62,9 @@ class QrCodePage extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // Above the code: scanning it is only useful once this says ready.
+          const ReachabilityStatusRow(),
+          const SizedBox(height: HavenSpacing.base),
           Center(
             child: NpubQrCode(
               npub: identity.npub,
