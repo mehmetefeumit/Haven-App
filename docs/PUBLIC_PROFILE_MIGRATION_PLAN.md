@@ -11,6 +11,15 @@
 > the pending marker fully clears only on full-pool ack). `get_cached_profile` is now
 > async. The read paths, privacy boundaries, and retraction gates below still describe
 > the shipped behaviour; constants named in §file-layout sketches may have drifted.
+>
+> **Superseded detail (2026-11-10, instant save):** `remove_my_profile_picture` is
+> no longer a synchronous retraction and takes no secret — it stages a photo
+> removal locally (`stage_own_picture_removal`) and `sync_my_profile` publishes it;
+> the retraction no-op gate for that publish is read inside `sync_own_profile`
+> (`retraction_gate`: publish / settle / hold), while `delete_my_public_profile`
+> keeps its own gate. A partially acknowledged publish re-sends the identical
+> signed event only to the relays that do not yet serve it. Design of record:
+> `docs/PROFILE_LOCAL_FIRST_SYNC.md`.
 
 Haven migrates from MLS-encrypted in-group profile sharing (display names piggybacked in
 location JSON, avatars as padded kind-445 chunk messages) to standard public Nostr

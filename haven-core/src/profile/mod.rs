@@ -56,23 +56,27 @@ pub use blossom::{
 pub use config::{
     blossom_server, set_blossom_server_for_test, AVATAR_MIME, BLOSSOM_AUTH_EXPIRY_SECS,
     BLOSSOM_TIMEOUT, DEFAULT_BLOSSOM_SERVER, PROFILE_AUTHOR_FETCH_TIMEOUT, PROFILE_BATCH_DEADLINE,
-    PROFILE_INTER_REQ_JITTER_MS, PROFILE_MAX_INFLIGHT_RELAYS, PROFILE_OWN_FETCH_BUDGET,
+    PROFILE_INTER_REQ_JITTER_MS, PROFILE_MAX_INFLIGHT_RELAYS, PROFILE_OWN_READ_BOUND,
     PROFILE_PER_AUTHOR_LIMIT, PROFILE_PICTURE_MAX_DOWNLOAD_BYTES, PROFILE_SYNC_BACKOFF_SECS,
 };
-pub use consent::has_published_profile;
+pub use consent::{has_published_profile, retraction_gate, OwnReadVerdict, RetractionGate};
 pub use error::{ProfileError, Result};
 pub use fetch::{
-    fetch_own_profile, fetch_profiles_assigned, read_own_profile_on_relays, AssignedFetch,
-    OwnProfileOnRelays,
+    fetch_profiles_assigned, read_own_per_relay, read_own_profile_on_relays, AssignedFetch,
+    OwnProfileOnRelays, OwnRelayRead,
 };
 pub use merge::{enforce_name_rule, merge_edits};
-pub use outbox::{merge_base, PendingEdits, PendingSnapshot};
+pub use outbox::{
+    merge_base, owed_event_from_json, served_against, uncovered, PendingEdits, PendingSnapshot,
+    Served,
+};
 pub use parse::parse_newest_metadata;
 pub use picture_cache::{
     picture_is_current, picture_sync_action, PictureSyncAction, PICTURE_CACHE_MAX_PEOPLE,
 };
 pub use publish::{
-    build_blank_metadata_event, build_metadata_event, build_nip09_deletion, publish_metadata,
+    build_blank_metadata_event, build_metadata_event, build_nip09_deletion, offer_metadata,
+    publish_metadata,
 };
 pub use relay_pool::{
     production_profile_relays, profile_relay_pool_default, resolve_profile_pool,

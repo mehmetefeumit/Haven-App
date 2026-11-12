@@ -2,8 +2,7 @@
 ///
 /// Shows the user's avatar (tap to view full screen when set, or to add one
 /// when not), an "Edit Photo" action, and a "Remove" action (only when a
-/// photo is set, behind a confirmation). The own-profile sync status line
-/// lives once, at page scope (`identity_page.dart`) — not here.
+/// photo is set, behind a confirmation).
 library;
 
 import 'dart:typed_data';
@@ -23,12 +22,9 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 /// Identity-page header for viewing and changing the user's profile photo.
 ///
 /// `_busy` is LOCAL, purely-widget state — it gates only the pick/remove
-/// affordances in THIS header, and is deliberately independent of the
-/// page-scoped `ProfileSyncStatusLine`'s `ownProfileSyncProvider`-driven
-/// state: an in-flight background publish (e.g. from a name edit elsewhere
-/// on the page) must never disable picking a new photo, and picking a new
-/// photo must never appear to change the sync status of a prior, unrelated
-/// publish still in flight.
+/// affordances in THIS header, and is deliberately independent of
+/// `ownProfileSyncProvider`: an in-flight background publish (e.g. from a name
+/// edit elsewhere on the page) must never disable picking a new photo.
 class IdentityPhotoHeader extends ConsumerStatefulWidget {
   /// Creates the identity photo header.
   const IdentityPhotoHeader({super.key});
@@ -40,11 +36,6 @@ class IdentityPhotoHeader extends ConsumerStatefulWidget {
 
 class _IdentityPhotoHeaderState extends ConsumerState<IdentityPhotoHeader> {
   bool _busy = false;
-
-  /// Whether a removal is in flight specifically — a subset of [_busy]
-  /// (which also spans the native picker) that gates ONLY the Remove
-  /// button's own spinner, so picking a new photo never shows it.
-  bool _removing = false;
 
   @override
   Widget build(BuildContext context) {
@@ -99,17 +90,7 @@ class _IdentityPhotoHeaderState extends ConsumerState<IdentityPhotoHeader> {
                     ? null
                     : () => _confirmAndRemove(context),
                 icon: const Icon(LucideIcons.trash2, size: 18),
-                // The synchronous retraction call has no other visible
-                // feedback while it is in flight — show a spinner in place
-                // of the label rather than leaving only the greyed-out
-                // button (`circles_bottom_sheet.dart`'s leave/remove idiom).
-                label: _removing
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : Text(l10n.photoHeaderRemove),
+                label: Text(l10n.photoHeaderRemove),
                 style: TextButton.styleFrom(
                   foregroundColor: colorScheme.error,
                 ),
@@ -132,9 +113,9 @@ class _IdentityPhotoHeaderState extends ConsumerState<IdentityPhotoHeader> {
     }
   }
 
-  /// Confirms with the user, then removes the avatar (broadcasting a tombstone
-  /// to every circle). Mirrors the destructive-confirm pattern used for
-  /// identity deletion.
+  /// Confirms with the user, then removes the avatar locally (the publish
+  /// follows in the background). Mirrors the destructive-confirm pattern used
+  /// for identity deletion.
   Future<void> _confirmAndRemove(BuildContext context) async {
     final colorScheme = Theme.of(context).colorScheme;
     final l10n = AppLocalizations.of(context);
@@ -158,19 +139,11 @@ class _IdentityPhotoHeaderState extends ConsumerState<IdentityPhotoHeader> {
     );
     if (confirmed != true) return;
     if (!context.mounted) return;
-    setState(() {
-      _busy = true;
-      _removing = true;
-    });
+    setState(() => _busy = true);
     try {
       await removeOwnAvatar(context, ref);
     } finally {
-      if (mounted) {
-        setState(() {
-          _busy = false;
-          _removing = false;
-        });
-      }
+      if (mounted) setState(() => _busy = false);
     }
   }
 }

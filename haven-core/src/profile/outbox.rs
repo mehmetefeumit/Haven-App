@@ -11,6 +11,9 @@
 //! back as a [`PendingSnapshot`], and the sync orchestration resolves the base
 //! object to merge onto via [`merge_base`].
 
+use std::cmp::Reverse;
+
+use nostr::{Event, JsonUtil, Kind, Metadata, PublicKey, RelayUrl};
 use serde::{Deserialize, Serialize};
 
 use super::types::{CachedProfile, ProfileEdits, ProfileMetadata};
@@ -35,6 +38,18 @@ pub struct PendingEdits {
     /// Pending `about`, or `None` when untouched.
     #[serde(default)]
     pub about: Option<String>,
+    /// A photo removal is pending: publish an empty `picture` unless an
+    /// uploaded URL supersedes it.
+    #[serde(default)]
+    pub clear_picture: bool,
+    /// The `local_version` the pending removal was staged at.
+    #[serde(default)]
+    pub clear_version: i64,
+    /// A pass already signed these edits afresh because a relay refused the
+    /// owed copy as too old. Once per edit: a relay refusing every timestamp
+    /// would otherwise force a new event onto the healthy relays every pass.
+    #[serde(default)]
+    pub resigned: bool,
 }
 
 impl PendingEdits {
@@ -53,24 +68,28 @@ impl PendingEdits {
                 .clone()
                 .or_else(|| self.display_name.clone()),
             about: newer.about.clone().or_else(|| self.about.clone()),
+            clear_picture: self.clear_picture || newer.clear_picture,
+            clear_version: self.clear_version.max(newer.clear_version),
+            resigned: newer.resigned,
         }
     }
 
     /// Whether nothing is pending.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.display_name.is_none() && self.about.is_none()
+        self.display_name.is_none() && self.about.is_none() && !self.clear_picture
     }
 
     /// Widens the pending set into the full [`ProfileEdits`] to publish,
-    /// attaching the picture URL resolved at sync time (`None` leaves the
-    /// published `picture` field untouched).
+    /// attaching the picture URL resolved at sync time. Without one, a pending
+    /// removal publishes an empty `picture`; otherwise the published `picture`
+    /// field is left untouched.
     #[must_use]
     pub fn to_edits(&self, picture: Option<String>) -> ProfileEdits {
         ProfileEdits {
             display_name: self.display_name.clone(),
             about: self.about.clone(),
-            picture,
+            picture: picture.or_else(|| self.clear_picture.then(String::new)),
         }
     }
 }
@@ -160,6 +179,67 @@ pub fn merge_base(
     (base, floor)
 }
 
+/// How a relay's answer to an own-author `REQ` stands against the event we
+/// sent it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Served {
+    /// The newest own kind-0 it serves is ours.
+    Holds,
+    /// It serves an own kind-0 that NIP-01 orders after ours.
+    Newer,
+    /// It serves only older own kind-0s, or none.
+    Lacks,
+}
+
+/// Orders what a relay served against `ours` by NIP-01 replaceable order
+/// (later `created_at`, then the lower id).
+///
+/// An OK is no evidence: relays answer OK true to an older replaceable they
+/// will not store. An own kind-0 whose content is not metadata is skipped, as
+/// [`parse_newest_metadata`](super::parse::parse_newest_metadata) skips it.
+#[must_use]
+pub fn served_against(own: &PublicKey, ours: &Event, served: &[Event]) -> Served {
+    let newest = served
+        .iter()
+        .filter(|e| {
+            e.pubkey == *own && e.kind == Kind::Metadata && Metadata::from_json(&e.content).is_ok()
+        })
+        .max_by_key(|e| (e.created_at, Reverse(e.id)));
+    match newest {
+        Some(e) if e.id == ours.id => Served::Holds,
+        Some(e) if (e.created_at, Reverse(e.id)) > (ours.created_at, Reverse(ours.id)) => {
+            Served::Newer
+        }
+        _ => Served::Lacks,
+    }
+}
+
+/// The pool relays, as given and in pool order, that `covered` does not name.
+///
+/// Compared in parsed form, so a trailing slash or a host's case cannot make a
+/// covered relay owed again.
+#[must_use]
+pub fn uncovered(pool: &[String], covered: &[String]) -> Vec<String> {
+    let parsed = |url: &str| RelayUrl::parse(url).ok();
+    let covered: Vec<Option<RelayUrl>> = covered.iter().map(|c| parsed(c)).collect();
+    pool.iter()
+        .filter(|relay| {
+            let relay = parsed(relay);
+            relay.is_none() || !covered.contains(&relay)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Loads a persisted owed kind-0 only if it is still a genuine own metadata
+/// event: the bytes must hash to their id under a valid signature.
+#[must_use]
+pub fn owed_event_from_json(json: &str, own: &PublicKey) -> Option<Event> {
+    Event::from_json(json)
+        .ok()
+        .filter(|e| e.verify().is_ok() && e.pubkey == *own && e.kind == Kind::Metadata)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +252,7 @@ mod tests {
         PendingEdits {
             display_name: display_name.map(str::to_string),
             about: about.map(str::to_string),
+            ..PendingEdits::default()
         }
     }
 
@@ -390,7 +471,7 @@ mod tests {
     fn the_published_name_is_the_same_whether_the_base_was_fetched_or_local() {
         // The asymmetry this closes. The base is normally the freshly-FETCHED
         // relay copy, which carries the name exactly as it was typed
-        // (`resolve_author` builds it in memory and never touches the DB
+        // (`newest_own_copy` builds it in memory and never touches the DB
         // sanitizer), and falls back to the SANITIZED local row only when every
         // pool relay is unreachable. Sanitizing in the builder is what makes
         // both paths emit the same bytes, so what leaves the device does not
@@ -436,5 +517,290 @@ mod tests {
             Some(true),
             "unknown fields this device DID see still survive the fallback",
         );
+    }
+
+    // ---- the pending photo removal -----------------------------------------
+
+    use nostr::{Event, EventBuilder, Kind, PublicKey, Timestamp};
+
+    fn removal(clear_version: i64) -> PendingEdits {
+        PendingEdits {
+            clear_picture: true,
+            clear_version,
+            ..PendingEdits::default()
+        }
+    }
+
+    #[test]
+    fn a_pending_clear_survives_accumulate_and_json_and_old_rows_decode_without_it() {
+        // The removal is a pending edit like the others: a later save must not
+        // swallow it, and a row written before it existed must still decode.
+        let folded = removal(3).accumulate(&edits(Some("Renamed"), None));
+        assert!(folded.clear_picture, "a later save dropped the removal");
+        assert_eq!(folded.clear_version, 3);
+        assert_eq!(folded.display_name.as_deref(), Some("Renamed"));
+        let folded = PendingEdits::default().accumulate(&removal(2));
+        assert!(folded.clear_picture && folded.clear_version == 2);
+
+        // A newer removal wins the version either way round, so a removal
+        // staged after a new photo is still published.
+        assert_eq!(removal(2).accumulate(&removal(5)).clear_version, 5);
+        assert_eq!(removal(5).accumulate(&removal(2)).clear_version, 5);
+
+        assert!(
+            !removal(1).is_empty(),
+            "a lone removal is pending work, or nothing would publish it"
+        );
+        let json = serde_json::to_string(&removal(4)).expect("serialize");
+        let back: PendingEdits = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, removal(4), "round-trip changed the removal: {json}");
+
+        let old: PendingEdits =
+            serde_json::from_str(r#"{"display_name":"Alice","about":null}"#).expect("old row");
+        assert!(!old.clear_picture);
+        assert_eq!(old.clear_version, 0);
+        assert_eq!(old.display_name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn a_fresh_save_resets_the_resigned_mark_and_old_rows_decode_without_it() {
+        let resigned = PendingEdits {
+            resigned: true,
+            ..edits(Some("Signed Twice"), None)
+        };
+        let folded = resigned.accumulate(&edits(None, Some("bio")));
+        assert!(!folded.resigned, "a new edit earns one fresh signing again");
+        assert_eq!(folded.display_name.as_deref(), Some("Signed Twice"));
+        assert!(
+            PendingEdits::default().accumulate(&resigned).resigned,
+            "the newer set's mark is the one kept",
+        );
+        assert!(
+            PendingEdits {
+                resigned: true,
+                ..PendingEdits::default()
+            }
+            .is_empty(),
+            "the mark alone is not pending work",
+        );
+        let json = serde_json::to_string(&resigned).expect("serialize");
+        let back: PendingEdits = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, resigned, "round-trip lost the mark: {json}");
+        let old: PendingEdits =
+            serde_json::from_str(r#"{"display_name":"Alice","clear_picture":true}"#)
+                .expect("old row");
+        assert!(!old.resigned);
+    }
+
+    #[test]
+    fn to_edits_clears_the_picture_for_a_pending_removal() {
+        assert_eq!(removal(1).to_edits(None).picture.as_deref(), Some(""));
+        assert_eq!(
+            removal(1)
+                .to_edits(Some("https://x/new.jpg".to_string()))
+                .picture
+                .as_deref(),
+            Some("https://x/new.jpg"),
+            "an uploaded URL wins over a removal staged before it"
+        );
+        assert_eq!(
+            edits(Some("Alice"), None).to_edits(None).picture,
+            None,
+            "without a removal the published picture stays untouched"
+        );
+        let base = row(
+            r#"{"display_name":"Me","picture":"https://x/old.jpg"}"#,
+            100,
+        )
+        .metadata;
+        let published = merge_edits(&base, &removal(1).to_edits(None));
+        assert_eq!(published.picture(), None, "the removal strips the picture");
+        assert_eq!(published.display_name(), Some("Me"));
+    }
+
+    // ---- served_against / uncovered -----------------------------------------
+
+    fn kind0(keys: &Keys, content: &str, created_at: u64) -> Event {
+        EventBuilder::new(Kind::Metadata, content)
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("sign kind0")
+    }
+
+    /// Two events of one author at one second: `(lower id, higher id)`.
+    fn tied_pair(keys: &Keys, created_at: u64) -> (Event, Event) {
+        let a = kind0(keys, r#"{"name":"tie-a"}"#, created_at);
+        let b = kind0(keys, r#"{"name":"tie-b"}"#, created_at);
+        if a.id < b.id {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    }
+
+    #[test]
+    fn served_against_holds_only_for_our_own_id() {
+        let keys = Keys::generate();
+        let own = keys.public_key();
+        let ours = kind0(&keys, r#"{"name":"ours"}"#, 100);
+        let older = kind0(&keys, r#"{"name":"older"}"#, 50);
+        assert_eq!(
+            served_against(&own, &ours, std::slice::from_ref(&ours)),
+            Served::Holds
+        );
+        assert_eq!(
+            served_against(&own, &ours, &[older, ours.clone()]),
+            Served::Holds,
+            "an older revision beside ours does not change the verdict"
+        );
+
+        // The relay serves an event NIP-01 ranks below ours at the same second:
+        // it does not hold ours, whatever its OK said.
+        let (lower, higher) = tied_pair(&keys, 200);
+        assert_eq!(served_against(&own, &lower, &[higher]), Served::Lacks);
+    }
+
+    #[test]
+    fn served_against_reads_a_later_created_at_as_newer() {
+        let keys = Keys::generate();
+        let own = keys.public_key();
+        let ours = kind0(&keys, r#"{"name":"ours"}"#, 100);
+        let later = kind0(&keys, r#"{"name":"later"}"#, 101);
+        assert_eq!(
+            served_against(&own, &ours, std::slice::from_ref(&later)),
+            Served::Newer
+        );
+        assert_eq!(
+            served_against(&own, &ours, &[ours.clone(), later]),
+            Served::Newer,
+            "serving ours as well does not hide the newer copy"
+        );
+    }
+
+    #[test]
+    fn served_against_reads_a_tie_with_a_lower_id_as_newer() {
+        // NIP-01 keeps the lowest id on a tie, so a relay serving the lower id
+        // has replaced ours even though both are dated alike.
+        let keys = Keys::generate();
+        let own = keys.public_key();
+        let (lower, higher) = tied_pair(&keys, 300);
+        assert_eq!(served_against(&own, &higher, &[lower]), Served::Newer);
+    }
+
+    #[test]
+    fn served_against_reads_older_or_nothing_as_lacking() {
+        let keys = Keys::generate();
+        let own = keys.public_key();
+        let ours = kind0(&keys, r#"{"name":"ours"}"#, 100);
+        assert_eq!(served_against(&own, &ours, &[]), Served::Lacks);
+        let older = kind0(&keys, r#"{"name":"older"}"#, 99);
+        assert_eq!(served_against(&own, &ours, &[older]), Served::Lacks);
+    }
+
+    #[test]
+    fn served_against_ignores_an_own_kind0_whose_content_is_not_metadata() {
+        // The redirect caches through `newest_own_copy`, which skips such an
+        // event: read as newer, it would redirect onto nothing and force a
+        // fresh whole-pool signing on every pass.
+        let keys = Keys::generate();
+        let own = keys.public_key();
+        let ours = kind0(&keys, r#"{"name":"ours"}"#, 100);
+        let malformed = kind0(&keys, "not metadata", 900);
+        assert_eq!(
+            served_against(&own, &ours, std::slice::from_ref(&malformed)),
+            Served::Lacks
+        );
+        assert_eq!(
+            served_against(&own, &ours, &[malformed, ours.clone()]),
+            Served::Holds
+        );
+    }
+
+    #[test]
+    fn served_against_ignores_other_authors_and_kinds() {
+        // A relay may answer a single-author REQ with anything. Only our own
+        // kind-0s order against ours.
+        let keys = Keys::generate();
+        let own = keys.public_key();
+        let ours = kind0(&keys, r#"{"name":"ours"}"#, 100);
+        let stranger = kind0(&Keys::generate(), r#"{"name":"theirs"}"#, 900);
+        let own_note = EventBuilder::new(Kind::TextNote, "hello")
+            .custom_created_at(Timestamp::from(900))
+            .sign_with_keys(&keys)
+            .expect("sign note");
+        assert_eq!(
+            served_against(&own, &ours, &[stranger.clone(), own_note.clone()]),
+            Served::Lacks,
+            "another author's or another kind's newer event was read as ours"
+        );
+        assert_eq!(
+            served_against(&own, &ours, &[stranger, own_note, ours.clone()]),
+            Served::Holds
+        );
+    }
+
+    #[test]
+    fn uncovered_compares_relays_in_their_parsed_form() {
+        let pool = vec![
+            "wss://a.example".to_string(),
+            "wss://B.example/".to_string(),
+            "wss://c.example".to_string(),
+        ];
+        let covered = vec![
+            "wss://A.example/".to_string(),
+            "wss://b.example".to_string(),
+        ];
+        assert_eq!(
+            uncovered(&pool, &covered),
+            vec!["wss://c.example".to_string()],
+            "a trailing slash or a host's case made a covered relay owed again"
+        );
+        assert_eq!(uncovered(&pool, &pool), Vec::<String>::new());
+        assert_eq!(uncovered(&pool, &[]), pool, "pool order is kept");
+        assert_eq!(
+            uncovered(&pool[..1], &["wss://other.example".to_string()]),
+            vec!["wss://a.example".to_string()],
+            "a relay outside the pool covers nothing in it"
+        );
+    }
+
+    // ---- owed_event_from_json ----------------------------------------------
+
+    #[test]
+    fn owed_event_from_json_refuses_a_tampered_signature_another_author_and_another_kind() {
+        let keys = Keys::generate();
+        let own: PublicKey = keys.public_key();
+        let event = kind0(&keys, r#"{"name":"owed"}"#, 100);
+        assert_eq!(
+            owed_event_from_json(&event.as_json(), &own),
+            Some(event.clone()),
+            "anti-vacuity: an untouched owed event loads"
+        );
+
+        let tampered = event
+            .as_json()
+            .replace(r#"{\"name\":\"owed\"}"#, r#"{\"name\":\"forged\"}"#);
+        assert_ne!(tampered, event.as_json(), "the tamper changed nothing");
+        assert_eq!(
+            owed_event_from_json(&tampered, &own),
+            None,
+            "bytes that do not hash to their id are not ours to send"
+        );
+
+        assert_eq!(
+            owed_event_from_json(&event.as_json(), &Keys::generate().public_key()),
+            None,
+            "an event of another author"
+        );
+        let note = EventBuilder::new(Kind::TextNote, "owed")
+            .sign_with_keys(&keys)
+            .expect("sign note");
+        assert_eq!(
+            owed_event_from_json(&note.as_json(), &own),
+            None,
+            "an own event of another kind"
+        );
+        assert_eq!(owed_event_from_json("not json", &own), None);
+        assert_eq!(owed_event_from_json("", &own), None);
     }
 }

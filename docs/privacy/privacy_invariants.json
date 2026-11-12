@@ -121,7 +121,7 @@
   ],
   "non_claim_arb_keys": {
     "avatarPickerPhotoRemoved": {
-      "reason": "Snackbar confirming a photo removal that at least one profile relay acknowledged: the profile without the picture was published and the cached bytes were dropped. It is not a local-only action, and it does not say the removal reached every relay. Honest only because (1) the confirmation dialog (photoHeaderRemoveBody) precedes it and states that the hosted image survives, and (2) the sync status line on the same page never reads up to date while a relay the removal was sent to has not acknowledged it (INV-P-PHOTO-REMOVAL-IS-OWED-TO-EVERY-POOL-RELAY). On its own it must never read as a deletion promise, nor as removed from every relay. Its @description does not yet record this constraint.",
+      "reason": "Spoken announcement only, no visible string, confirming that the photo was removed from this device and queued for removal from the public profile. It claims nothing about any relay: the removal is a local save the next sync publishes, and what a relay has not yet taken is owed on the retry ladder with no screen reporting it (INV-P-PHOTO-REMOVAL-IS-OWED-TO-EVERY-POOL-RELAY, INV-P-PROFILE-UI-CLAIMS-LOCAL-TRUTH-ONLY). Honest because the confirmation dialog (photoHeaderRemoveBody) precedes it and states that the hosted image survives. On its own it must never read as a deletion promise, nor as removed from every relay.",
       "forbidden_additions": [
         "deleted",
         "permanently",
@@ -5792,14 +5792,13 @@
     {
       "id": "INV-P-PROFILE-PUBLISH-IS-UNCONDITIONAL",
       "title": "A saved name or photo is published publicly, with no gate",
-      "statement": "Saving a display name or avatar stages the edit in the durable profile outbox and unconditionally triggers a sync that reaches publish_metadata for a kind-0 signed by the identity key — no consent flag, no toggle and no Dart-side short-circuit; the only thing between a save and the publish is transport availability (the outbox retries on cold start and resume until the pool acks). This becomes false only by adding a gate, which the copy would then be wrong about.",
+      "statement": "Saving a display name or avatar stages the edit in the durable profile outbox and unconditionally triggers a sync that reaches offer_metadata for a kind-0 signed by the identity key — no consent flag, no toggle and no Dart-side short-circuit; the only thing between a save and the publish is transport availability (the outbox retries on cold start, resume and a foreground timer until every pool relay serves it). This becomes false only by adding a gate, which the copy would then be wrong about.",
       "status": "accepted_deviation",
       "accepted_deviation_id": "R10",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
         "profileIsPublicNoticeTitle",
         "profileIsPublicNoticeBody",
-        "avatarPickerPhotoUpdated",
         "qrCodeExplainerUsername"
       ],
       "doc_anchors": [
@@ -5821,10 +5820,14 @@
       "symbols": [
         {
           "file": "haven-core/src/profile/publish.rs",
-          "symbol": "publish_metadata"
+          "symbol": "offer_metadata"
         }
       ],
       "tests": [
+        {
+          "file": "haven-core/src/profile/publish.rs",
+          "name": "offer_metadata_offers_without_any_consent_gate"
+        },
         {
           "file": "haven-core/src/profile/publish.rs",
           "name": "publish_metadata_publishes_without_any_consent_gate"
@@ -5847,11 +5850,15 @@
         },
         {
           "file": "haven/test/widgets/identity/avatar_picker_test.dart",
-          "name": "picked + cropped image flows to setOwnAvatar with a square lock, shows success, and deletes both temp files"
+          "name": "picked + cropped image flows to setOwnAvatar with a square lock, announces the success without a SnackBar, and deletes both temp files"
         },
         {
           "file": "haven/test/providers/profile_sync_provider_test.dart",
           "name": "resumes a save a prior session left pending (retryDue)"
+        },
+        {
+          "file": "haven/test/lints/map_shell_profile_sync_retry_wiring_test.dart",
+          "name": "triggerProfileSyncRetry is wired at both the cold-start and resume profile-refresh call sites"
         }
       ],
       "guards": [
@@ -5860,7 +5867,7 @@
     },
     {
       "id": "INV-P-PROFILE-REMOVAL-IS-NOT-DELETION",
-      "title": "Removing a photo republishes a blank profile; the hosted blob stays",
+      "title": "Deleting the profile republishes a blank one; a removed photo's hosted file stays",
       "statement": "delete_my_public_profile republishes a blank kind-0 and best-effort NIP-09-deletes the last kind-0, and issues NO Blossom blob DELETE (no delete helper exists in the profile module); this becomes false only if a Blossom DELETE lands, at which point the copy would understate what Haven does.",
       "status": "ratcheted",
       "residual": "No test or guard fails if the blank-republish is removed, and none asserts the absence of a Blossom DELETE. (The internal docs that used to claim a DELETE is issued — SECURITY.md's best-effort-delete bullet and check_profile_privacy_boundaries.sh's CONSENT_GATE_EXEMPT_FNS comment — were both corrected 2026-08-13; do not 'restore consistency' by reinstating the false claim.)",
@@ -6442,7 +6449,7 @@
     {
       "id": "INV-P-OWN-PROFILE-EDIT-NEVER-BUILT-ON-A-SUPERSEDED-COPY",
       "title": "An edit to the user's own profile is not merged onto a relay copy older than the dated own-profile row this device holds.",
-      "statement": "A kind-0 is replaced whole, so every own-profile publish is the freshest known object with the edit applied. A relay may answer the merge-base read with a superseded copy of the user's own profile: it is genuinely signed, so verification admits it. (1) merge_base takes the relays' copy as the base only when it is at least as new as the dated own-profile row this device holds; an older answer is not built on, so fields removed since — a payment address, a photo, a name — are not signed back under the identity key. Ties go to the relays' copy, and the lower event id decides a tie between relays, as NIP-01 keeps it. (2) That row is written when a profile fetch caches the copy, when the read a sync or a retraction makes for its base finds a newer one (before the publish, so a publish that then fails still leaves the row at the newest copy read), when a relay acknowledges a publish, and as the blank's record when the profile is deleted — dated as the blank is, written only after a relay acknowledged the blank and in one transaction with the record of its publication, so a relay that never took the blank can neither get the deleted profile cached again nor get the next edit built on it. Once written from an event the row records that event's whole metadata object, the fields Haven does not model included. (3) sync_own_profile and remove_my_profile_picture both resolve their base this way; when no relay serves the profile the base is the cached row, and a photo removal with neither a relay copy nor a dated row publishes nothing — never an empty or name-only profile over one this device cannot see. Outside this promise: a device holding no dated row (a fresh import of the key, or the first edit after the storage reset before a fetch has landed) builds on whatever the answering relays serve; and a process killed between a relay's acknowledgement and the local write has published a profile its row does not record, so until a fetch serves that profile back the row is older than what the device signed. Reverting merge_base to prefer any fetched copy, resolving the own read by arrival order, dropping the cache of the copy read before a publish, wiping the own row on deletion without recording the blank, or publishing a removal built on nothing, falsifies this.",
+      "statement": "A kind-0 is replaced whole, so every own-profile publish is the freshest known object with the edit applied. A relay may answer the merge-base read with a superseded copy of the user's own profile: it is genuinely signed, so verification admits it. (1) merge_base takes the relays' copy as the base only when it is at least as new as the dated own-profile row this device holds; an older answer is not built on, so fields removed since — a payment address, a photo, a name — are not signed back under the identity key. Ties go to the relays' copy, and the lower event id decides a tie between relays, as NIP-01 keeps it. (2) That row is written when a profile fetch caches the copy, when the read a sync or a deletion makes for its base finds a newer one (before the publish, so a publish that then fails still leaves the row at the newest copy read), when a re-send's read-back finds a newer copy (before the owed event is discarded, so the rebuild's floor includes it), when a relay acknowledges a publish, and as the blank's record when the profile is deleted — dated as the blank is, written only after a relay acknowledged the blank and in one transaction with the record of its publication, so a relay that never took the blank can neither get the deleted profile cached again nor get the next edit built on it. Once written from an event the row records that event's whole metadata object, the fields Haven does not model included. (3) sync_own_profile resolves every base this way, a staged photo removal included, and an owed event older than the cached row is dropped unsent; when no relay serves the profile the base is the cached row, and a pending set carrying nothing saved with neither a relay copy nor a dated row publishes nothing — never an empty or name-only profile over one this device cannot see. Outside this promise: a device holding no dated row (a fresh import of the key, or the first edit after the storage reset before a fetch has landed) builds on whatever the answering relays serve; and a process killed between a relay's acknowledgement and the local write has published a profile its row does not record, so until a fetch serves that profile back the row is older than what the device signed. Reverting merge_base to prefer any fetched copy, resolving the own read by arrival order, dropping the cache of the copy read before a publish, wiping the own row on deletion without recording the blank, or publishing a removal built on nothing, falsifies this.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
@@ -6454,15 +6461,15 @@
         },
         {
           "file": "haven-core/src/profile/fetch.rs",
-          "symbol": "fetch_own_profile"
+          "symbol": "read_own_profile_on_relays"
         },
         {
           "file": "haven-core/src/circle/profile_sync.rs",
           "symbol": "sync_own_profile"
         },
         {
-          "file": "haven/rust_builder/src/api.rs",
-          "symbol": "remove_my_profile_picture"
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "symbol": "profile_publish_debt"
         },
         {
           "file": "haven/rust_builder/src/api.rs",
@@ -6488,7 +6495,7 @@
         },
         {
           "file": "haven-core/src/profile/fetch.rs",
-          "name": "own_read_breaks_a_tie_by_the_lower_id_not_by_which_relay_answers"
+          "name": "own_presence_read_breaks_a_tie_by_lowest_id_not_pool_order"
         },
         {
           "file": "haven-core/tests/forged_relay_event_e2e.rs",
@@ -6496,11 +6503,23 @@
         },
         {
           "file": "haven/rust_builder/src/api.rs",
-          "name": "removing_the_photo_never_signs_back_what_a_stale_relay_copy_still_carries"
+          "name": "a_synced_photo_removal_never_signs_back_what_a_stale_relay_copy_still_carries"
         },
         {
           "file": "haven/rust_builder/src/api.rs",
-          "name": "removing_the_photo_when_no_relay_serves_the_profile_keeps_the_rest_of_it"
+          "name": "a_synced_photo_removal_no_relay_serves_keeps_the_rest_of_the_profile"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_newer_copy_a_fetch_cached_supersedes_the_owed_event"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "an_owed_relay_that_acks_but_serves_a_newer_copy_redirects_onto_it"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "name": "an_owed_event_older_than_the_cached_row_is_superseded"
         },
         {
           "file": "haven/rust_builder/src/api.rs",
@@ -6520,11 +6539,11 @@
         },
         {
           "file": "haven/rust_builder/src/api.rs",
-          "name": "removing_the_photo_builds_on_the_copy_the_gate_read_and_asks_each_relay_once"
+          "name": "a_sync_publishing_a_photo_removal_asks_each_relay_once"
         },
         {
           "file": "haven/rust_builder/src/api.rs",
-          "name": "a_photo_removal_with_nothing_to_build_on_publishes_nothing"
+          "name": "a_synced_photo_removal_with_nothing_to_build_on_publishes_nothing"
         },
         {
           "file": "haven-core/src/circle/storage_profile.rs",
@@ -6536,7 +6555,7 @@
         },
         {
           "file": "haven/rust_builder/src/api.rs",
-          "name": "a_newer_copy_read_for_a_removal_that_failed_is_what_the_retry_builds_on"
+          "name": "a_newer_copy_read_for_a_photo_removal_that_failed_is_what_the_retry_builds_on"
         },
         {
           "file": "haven/rust_builder/src/api.rs",
@@ -6551,8 +6570,8 @@
     },
     {
       "id": "INV-P-PHOTO-REMOVAL-IS-OWED-TO-EVERY-POOL-RELAY",
-      "title": "A photo removal or profile deletion a profile relay did not acknowledge is left owed, and after such a removal the status line never reads up to date.",
-      "statement": "Peers read a profile from the pool relays their own install is assigned, so a relay that did not take the kind-0 without the picture goes on serving the photo to them. (1) remove_my_profile_picture publishes to the whole usable pool and records the row, the publish and the coverage in one transaction (commit_profile_sync). Unless every relay it was sent to acknowledged it, the removal is not recorded as synced: with nothing else pending, the profile it published becomes a new pending version, partly published, with the retry ladder advanced; with an edit pending — queued before the removal or saved while it was being published — nothing is added, because that edit's own sync republishes the whole profile to the whole pool, and the edit is not reported as partly published when no relay was sent it. (2) The next due sync publishes the newest copy of the profile it reads — the profile without the picture, unless a strictly newer copy has appeared since — to every pool relay again, on the same persisted backoff as any partially acknowledged save and never at once: the backoff is dated when the removal is recorded, not when it began, and the status re-read that follows a removal neither starts nor queues a sync while one is in flight. Only a full acknowledgement clears it. (3) After such a removal the status line never reads up to date: it shows the partial state when the removal, or an edit it carried, is the version owed, and the pending edit's own state when an edit it did not carry is what will take it to the pool. (4) delete_my_public_profile leaves the blank it published owed in the same way, by the same statement (write_unqueued_publish_owed), in the transaction that wipes the cache (wipe_all_profiles); the retry publishes a blank again and no field of the deleted profile, even when the relay that refused the blank is the only one to answer the retry's read. Outside this promise: a relay that never acknowledges keeps the state at partial, and every retry pass signs a NEW kind 0 with a new public created_at for the whole pool — at most four passes in the first hour and then one per six hours, only while the app is opened, with no cap until every pool relay acknowledges or that relay leaves the pool (owner decision owed); a relay no longer in this install's usable pool is never sent the removal, and the outbox reads synced without it; a removal or deletion no relay acknowledged fails and records nothing; the kind-5 that accompanies a deletion is sent once; nothing in the app calls the deletion yet; and the hosted image file is not deleted (INV-P-PROFILE-REMOVAL-IS-NOT-DELETION). Recording a partially acknowledged removal or blank as synced, marking a pending edit published by it, dating the backoff from before the publish, republishing without the backoff, building the retry on an older copy a relay still serves, or dropping the status re-read after a removal, falsifies this.",
+      "title": "A photo removal or profile deletion stays owed until every usable pool relay serves it; each retry re-sends the same signed event only to the relays that do not.",
+      "statement": "Peers read a profile from the pool relays their own install is assigned, so a relay that did not take the kind-0 without the picture goes on serving the photo to them. (1) remove_my_profile_picture is local: one transaction (stage_own_picture_removal) that drops the staged and the published bytes, clears the row's picture, stages the clear as an outbox edit with the local_version it was staged at, resets the retry ladder and discards any owed event; it signs nothing, takes no secret and no lock, and contacts no relay. (2) sync_own_profile publishes it under the sync lock after reading the retraction gate before any footprint: a pending set with nothing saved in it (the clear alone, or an owed blank) is decided by retraction_gate on what the pass will actually publish — publish when a relay copy was found or this device published and holds a dated row; settle, leveled locally with nothing sent, only when never published here and every relay answered that none holds a profile, and never a version that still carries a staged photo; hold on the ladder otherwise. A new photo staged after the removal does not cancel it (the removal is published first; the uploaded URL wins once it exists), and a commit at least one relay acknowledged clears the removal only when its version is at or past the one it was staged at, inside that commit's transaction. (3) A complete event at least one relay acknowledged is kept with the relays that serve it (profile_publish_debt); the next due sync re-sends that identical event only to the relays not yet covered, ignores their OK for coverage, reads each answering relay back and orders what it serves against the event by (created_at, lowest id): serving the event's own id covers it (commit_profile_coverage, served_against), a newer copy another client wrote redirects the debt onto that copy with one fresh signing for the whole pool, less or an unfinished answer leaves it owed; a timestamp refusal with nothing served earns one fresh signing per edit and then stays owed. The backoff is dated when the pass ends, not when it began; every save, removal, deletion or redirect discards the owed event; the owed set empties with no network when the relay that owed it leaves the usable pool; and no screen reports any of it — the debt is visible only in the outbox and is retried on the ladder and by the foreground timer. (4) delete_my_public_profile leaves the blank it published owed in the same way, by the same statement (write_unqueued_publish_owed) and the same ledger, in the transaction that wipes the cache (wipe_all_profiles); the retry re-sends the identical blank and no field of the deleted profile, even when the relay that refused the blank is the only one to answer. Outside this promise: there is no cap — an owed relay costs one dial, one EVENT and at most one REQ to that relay alone, at most four passes in the first hour and then one per six hours, only while the app is open, until it serves the event or leaves the pool (owner decision 2026-11-10); in the pass that signs the event a relay's acknowledgement counts as covered without a read-back; a pass no relay acknowledged records nothing and signs fresh next time; the kind-5 that accompanies a deletion is sent once; nothing in the app calls the deletion yet; and the hosted image file is not deleted (INV-P-PROFILE-REMOVAL-IS-NOT-DELETION). Letting the removal sign, lock or dial, reading the gate outside the sync lock, recording a partially served removal or blank as synced, counting a re-send's OK as coverage, signing a new event for relays that already serve it, dating the backoff from before the publish, building the retry on an older copy a relay still serves, or re-signing more than once per edit on a timestamp refusal, falsifies this.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
@@ -6572,7 +6591,7 @@
         },
         {
           "file": "haven/lib/src/widgets/identity/avatar_picker.dart",
-          "symbol": "triggerProfileSyncRetry"
+          "symbol": "syncController.sync"
         },
         {
           "file": "haven/rust_builder/src/api.rs",
@@ -6587,6 +6606,22 @@
           "symbol": "write_unqueued_publish_owed"
         },
         {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "symbol": "stage_own_picture_removal"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "symbol": "commit_profile_coverage"
+        },
+        {
+          "file": "haven-core/src/profile/outbox.rs",
+          "symbol": "served_against"
+        },
+        {
+          "file": "haven-core/src/profile/consent.rs",
+          "symbol": "retraction_gate"
+        },
+        {
           "file": "haven/lib/src/providers/profile_sync_provider.dart",
           "symbol": "retryIfPending"
         }
@@ -6594,7 +6629,15 @@
       "tests": [
         {
           "file": "haven/rust_builder/src/api.rs",
-          "name": "a_removal_one_relay_refused_is_owed_until_a_sync_reaches_that_relay"
+          "name": "a_photo_removal_cancels_a_staged_upload_and_reaches_no_relay"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "the_ffi_removal_needs_no_secret_and_takes_no_lock"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_photo_removal_one_relay_refused_is_resent_identically_to_that_relay_alone"
         },
         {
           "file": "haven/rust_builder/src/api.rs",
@@ -6602,11 +6645,71 @@
         },
         {
           "file": "haven/rust_builder/src/api.rs",
-          "name": "a_name_saved_while_the_removal_is_published_is_kept_and_reads_as_unsent"
+          "name": "a_name_saved_while_a_removal_is_being_published_stays_pending_and_is_published_next"
         },
         {
           "file": "haven/rust_builder/src/api.rs",
-          "name": "a_removal_only_some_relays_took_leaves_the_name_it_carried_partly_published"
+          "name": "a_photo_removal_one_relay_missed_keeps_the_name_it_carried_pending_until_that_relay_serves_it"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_photo_saved_while_a_removal_is_being_published_is_kept_and_stays_pending"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "an_owed_relay_that_acks_khatru_style_while_serving_a_newer_copy_redirects"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_retry_resends_the_identical_event_only_to_the_relay_that_has_not_served_it"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "an_owed_relay_that_acks_but_serves_a_newer_copy_redirects_onto_it"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "an_owed_relay_that_acks_but_serves_nothing_stays_owed"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_second_timestamp_refusal_does_not_resign_again"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_relay_leaving_the_pool_ends_its_debt"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_photo_removal_is_local_and_the_next_sync_publishes_the_cleared_picture"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_photo_removal_by_an_account_that_never_published_publishes_nothing"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_removal_staged_while_a_publish_is_in_flight_is_neither_lost_nor_reported_synced"
+        },
+        {
+          "file": "haven-core/tests/profile_local_first_sync_e2e.rs",
+          "name": "a_slow_sync_dates_its_backoff_from_when_it_ends"
+        },
+        {
+          "file": "haven-core/tests/profile_offline_save_e2e.rs",
+          "name": "a_photo_removal_offline_is_instant_and_stays_owed"
+        },
+        {
+          "file": "haven-core/src/profile/consent.rs",
+          "name": "the_retraction_gate_never_mints_and_never_overwrites_an_unseen_profile"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "name": "every_staging_discards_the_owed_event"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile_sync.rs",
+          "name": "a_commit_at_or_after_the_removal_clears_it_and_an_older_one_does_not"
         },
         {
           "file": "haven-core/src/circle/storage_profile_sync.rs",
@@ -6625,8 +6728,12 @@
           "name": "an_unqueued_publish_every_relay_took_leaves_the_outbox_as_it_was"
         },
         {
-          "file": "haven/test/pages/identity_page_test.dart",
-          "name": "a removal a relay did not take is reported as still syncing beside \"Photo removed.\", and is not republished at once"
+          "file": "haven/test/widgets/identity/avatar_picker_test.dart",
+          "name": "removeOwnAvatar announces Photo removed without a SnackBar and triggers a sync"
+        },
+        {
+          "file": "haven/test/providers/profile_sync_provider_test.dart",
+          "name": "a pending save that is not yet due arms exactly one timer and syncs nothing until it fires"
         },
         {
           "file": "haven/rust_builder/src/api.rs",
@@ -6649,8 +6756,16 @@
           "name": "a_relay_still_serving_the_deleted_profile_gets_the_blank_and_nothing_back"
         },
         {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_lagging_relay_that_keeps_the_blank_but_serves_the_deleted_copy_stays_owed"
+        },
+        {
           "file": "haven-core/src/circle/storage_profile.rs",
           "name": "a_blank_some_relay_refused_is_owed_and_one_every_relay_took_is_not"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile.rs",
+          "name": "a_wipe_discards_the_owed_event_and_owes_the_blank_to_the_relays_that_did_not_take_it"
         },
         {
           "file": "haven-core/src/circle/storage_profile.rs",
@@ -6659,6 +6774,47 @@
         {
           "file": "haven/test/providers/profile_sync_provider_test.dart",
           "name": "neither starts nor queues a sync while one is in flight"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-P-PROFILE-UI-CLAIMS-LOCAL-TRUTH-ONLY",
+      "title": "The Identity page and the two photo flows render and announce the same in every publish state",
+      "statement": "No screen reports a relay outcome as a state of the user's profile. The Identity page renders the local profile row and nothing else: no publish status, no progress copy, no Retry, and the same widget tree whether the outbox is clean, pending and due, pending and backing off, left over from a failed pass, or being synced right now; a sync in flight disables nothing on it. The copy a save, a photo set or a photo removal shows or announces describes the device only — the edit is held locally and will be published — and never says synced, published, syncing or up to date; the name card announces the saved outcome and an assertive local failure, never a progress message, and the two photo flows announce their local outcome politely with no SnackBar on success. What a relay has or has not taken is visible only in the outbox and retried by the controller (INV-P-PHOTO-REMOVAL-IS-OWED-TO-EVERY-POOL-RELAY). The claim is bounded to the Identity page, the display-name card and the two photo flows, not to every future surface; a widget that renders ProfilePendingState or ProfileSyncResult on that page, or copy that names the network, falsifies it.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "docs/PROFILE_LOCAL_FIRST_SYNC.md#what-it-is-now",
+        "docs/PROFILE_LOCAL_FIRST_SYNC.md#deliberately-rejected-do-not-re-add"
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/providers/profile_sync_provider.dart",
+          "symbol": "OwnProfileSyncController"
+        },
+        {
+          "file": "haven/lib/src/widgets/identity/avatar_picker.dart",
+          "symbol": "pickAndSetOwnAvatar"
+        },
+        {
+          "file": "haven/lib/src/widgets/identity/avatar_picker.dart",
+          "symbol": "removeOwnAvatar"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/pages/identity_page_test.dart",
+          "name": "the Identity page renders identically in every publish state"
+        },
+        {
+          "file": "haven/test/widgets/identity/display_name_card_test.dart",
+          "name": "a local save announces only the outcome, never a progress message"
+        },
+        {
+          "file": "haven/test/widgets/identity/avatar_picker_test.dart",
+          "name": "picked + cropped image flows to setOwnAvatar with a square lock, announces the success without a SnackBar, and deletes both temp files"
         }
       ],
       "guards": []

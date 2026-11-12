@@ -77,7 +77,7 @@ pub use storage_member_directory::{
 };
 pub use storage_mesh::MeshCounts;
 pub use storage_profile::{CachedProfileView, PROFILE_MISS_BACKOFF_SECS};
-pub use storage_profile_sync::{ProfilePendingState, ProfileSyncCommit};
+pub use storage_profile_sync::{ProfileDebt, ProfilePendingState, ProfileSyncCommit};
 pub use storage_relay_prefs::{PublishedEventRecord, UserRelayRow};
 pub use types::{
     default_relays, sanitize_circle_name, set_default_relays_for_test, Circle, CircleConfig,

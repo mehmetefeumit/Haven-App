@@ -3399,7 +3399,6 @@ fn wire__crate__api__CircleManagerFfi_remove_my_profile_picture_impl(
             let api_that = <RustOpaqueMoi<
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
             >>::sse_decode(&mut deserializer);
-            let api_identity_secret_bytes = <Vec<u8>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -3423,7 +3422,6 @@ fn wire__crate__api__CircleManagerFfi_remove_my_profile_picture_impl(
                         let api_that_guard = api_that_guard.unwrap();
                         let output_ok = crate::api::CircleManagerFfi::remove_my_profile_picture(
                             &*api_that_guard,
-                            api_identity_secret_bytes,
                         )
                         .await?;
                         Ok(output_ok)
@@ -12843,12 +12841,12 @@ impl SseDecode for crate::api::ProfilePendingStateFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_pending = <bool>::sse_decode(deserializer);
-        let mut var_partial = <bool>::sse_decode(deserializer);
         let mut var_retryDue = <bool>::sse_decode(deserializer);
+        let mut var_nextRetryInSecs = <Option<u32>>::sse_decode(deserializer);
         return crate::api::ProfilePendingStateFfi {
             pending: var_pending,
-            partial: var_partial,
             retry_due: var_retryDue,
+            next_retry_in_secs: var_nextRetryInSecs,
         };
     }
 }
@@ -12900,13 +12898,9 @@ impl SseDecode for crate::api::ProfileSyncResultFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_outcome = <crate::api::ProfileSyncOutcomeFfi>::sse_decode(deserializer);
-        let mut var_relaysAcked = <u32>::sse_decode(deserializer);
-        let mut var_relaysAttempted = <u32>::sse_decode(deserializer);
         let mut var_stillPending = <bool>::sse_decode(deserializer);
         return crate::api::ProfileSyncResultFfi {
             outcome: var_outcome,
-            relays_acked: var_relaysAcked,
-            relays_attempted: var_relaysAttempted,
             still_pending: var_stillPending,
         };
     }
@@ -15549,8 +15543,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::ProfilePendingStateFfi {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.pending.into_into_dart().into_dart(),
-            self.partial.into_into_dart().into_dart(),
             self.retry_due.into_into_dart().into_dart(),
+            self.next_retry_in_secs.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -15639,8 +15633,6 @@ impl flutter_rust_bridge::IntoDart for crate::api::ProfileSyncResultFfi {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.outcome.into_into_dart().into_dart(),
-            self.relays_acked.into_into_dart().into_dart(),
-            self.relays_attempted.into_into_dart().into_dart(),
             self.still_pending.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -17836,8 +17828,8 @@ impl SseEncode for crate::api::ProfilePendingStateFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.pending, serializer);
-        <bool>::sse_encode(self.partial, serializer);
         <bool>::sse_encode(self.retry_due, serializer);
+        <Option<u32>>::sse_encode(self.next_retry_in_secs, serializer);
     }
 }
 
@@ -17882,8 +17874,6 @@ impl SseEncode for crate::api::ProfileSyncResultFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <crate::api::ProfileSyncOutcomeFfi>::sse_encode(self.outcome, serializer);
-        <u32>::sse_encode(self.relays_acked, serializer);
-        <u32>::sse_encode(self.relays_attempted, serializer);
         <bool>::sse_encode(self.still_pending, serializer);
     }
 }

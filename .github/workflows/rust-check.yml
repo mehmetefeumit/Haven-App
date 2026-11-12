@@ -706,18 +706,16 @@ jobs:
             echo "::error::LOCATION_PUBLISH_ATTEMPTS is no longer 1 in haven-core/src/relay/manager.rs; tooling/soak/src/oracle/bounds.rs::location_publish_window assumes a single attempt."
             status=1
           }
-          # And the ones behind `profile_publish_ladder()` and
+          # And the ones behind `profile_offer()` and
           # `key_package_round_trip()` (S26's identity-plane turn).
           for want in \
             '^pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs\(5\);' \
             '^const DEFAULT_TIMEOUT: Duration = Duration::from_secs\(10\);' \
             '^const MAX_PUBLISH_ATTEMPTS: u32 = 3;' \
             '^const PUBLISH_RETRY_BACKOFF: Duration = Duration::from_secs\(2\);' \
-            '^const PROFILE_PUBLISH_MAX_ATTEMPTS: u32 = 2;' \
-            '^const PROFILE_PUBLISH_RETRY_BACKOFF: Duration = Duration::from_secs\(1\);' \
             '^const PROFILE_PUBLISH_ACK_TIMEOUT: Duration = Duration::from_secs\(6\);'; do
             grep -qE "${want}" "${loc}" || {
-              echo "::error::a relay-manager constant moved in haven-core/src/relay/manager.rs; tooling/soak/src/oracle/bounds.rs::profile_publish_ladder / key_package_round_trip derive from it."
+              echo "::error::a relay-manager constant moved in haven-core/src/relay/manager.rs; tooling/soak/src/oracle/bounds.rs::profile_offer / key_package_round_trip derive from it."
               status=1
             }
           done

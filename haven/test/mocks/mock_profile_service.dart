@@ -25,8 +25,10 @@ import 'package:haven/src/services/profile_service.dart';
 /// Saving is unconditional (no consent gate) — [updateOwnProfile] and
 /// [setOwnAvatar] always run. [pendingSyncState] defaults to "clean"
 /// (`pending: false`) so a test that never touches sync state does not
-/// accidentally drive [syncOwnProfile] via `OwnProfileSyncController`'s
-/// own build()-time `retryIfPending()`.
+/// accidentally drive [syncOwnProfile] through `OwnProfileSyncController`.
+/// Its `nextRetryInSecs` defaults to null for the same reason: a non-null
+/// value on a pending, not-due state arms the controller's foreground retry
+/// timer in every widget test.
 class MockProfileService implements ProfileService {
   /// Creates a mock profile service.
   ///
@@ -139,8 +141,6 @@ class MockProfileService implements ProfileService {
   /// Ignored while [syncResultQueue] is non-empty.
   ProfileSyncResult nextSyncResult = const ProfileSyncResult(
     outcome: ProfileSyncOutcome.nothingPending,
-    relaysAcked: 0,
-    relaysAttempted: 0,
     stillPending: false,
   );
 
@@ -152,12 +152,20 @@ class MockProfileService implements ProfileService {
   final List<ProfileSyncResult> syncResultQueue = [];
 
   /// The state [pendingSyncState] returns. Defaults to "clean" (nothing
-  /// pending) — see the class doc for why that default matters.
+  /// pending, `nextRetryInSecs` null) — see the class doc for why that
+  /// default matters.
   ProfilePendingState nextPendingState = const ProfilePendingState(
     pending: false,
-    partial: false,
     retryDue: false,
   );
+
+  /// How many times [syncOwnProfile] has been called.
+  int get syncOwnProfileCalls =>
+      methodCalls.where((c) => c.method == 'syncOwnProfile').length;
+
+  /// How many times [pendingSyncState] has been called.
+  int get pendingSyncStateCalls =>
+      methodCalls.where((c) => c.method == 'pendingSyncState').length;
 
   /// Every `shouldThrowOn*` flag throws this exact exception, matching
   /// the real implementation's convention of never leaking a raw `$e` /

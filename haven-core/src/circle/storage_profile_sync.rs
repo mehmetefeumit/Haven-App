@@ -10,22 +10,25 @@
 //!
 //! # The versioning contract
 //!
-//! Every save bumps `local_version`, and so does a publish that carried no
-//! saved version and that some relay did not take (a photo removal, or the
-//! blank of a profile deletion): what it published is then the version still
-//! owed. A publish reports back TWO
-//! coverage facts, because "it published" and "every peer can read it" are
-//! different:
+//! Every save bumps `local_version` (a photo removal is a save), and so does
+//! a profile deletion's blank that some relay did not take: the blank is then
+//! the version still owed. A publish records TWO coverage facts, because "it
+//! published" and "every peer can read it" are different:
 //!
 //! * `published_version` — the newest version at least ONE relay acknowledged;
-//! * `synced_version` — the newest version EVERY attempted relay acknowledged.
+//! * `synced_version` — the newest version EVERY usable pool relay serves.
 //!
-//! So `pending = local_version > synced_version`, and a pending edit that has
-//! already landed somewhere (`published_version >= local_version`) is
-//! *partial* rather than unsent. A peer's relay-assignment salt is private to
-//! their install, so a partial publish really is still the old name for
-//! everyone assigned to a relay that refused it — reporting it as synced would
-//! be the app claiming a network success it did not get.
+//! So `pending = local_version > synced_version`. A peer's relay-assignment
+//! salt is private to their install, so a partial publish really is still the
+//! old name for everyone assigned to a relay that does not serve it.
+//!
+//! # The owed event
+//!
+//! A complete event (it carries every pending item at `local_version`) that
+//! some relays acknowledged is kept in `profile_publish_debt` with the relays
+//! that serve it, so a retry re-sends those exact bytes to the rest instead of
+//! signing a new kind-0 for the whole pool. Every write that bumps
+//! `local_version` deletes it.
 //!
 //! [`Self::commit_profile_sync`] is a compare-and-set on that counter: it may
 //! only clear the pending set for the exact version it published. An edit saved
@@ -45,55 +48,70 @@
 // connection lock once at the top and holds it for the whole operation.
 #![allow(clippy::significant_drop_tightening)]
 
-use nostr::{EventId, PublicKey};
+use nostr::{Event, JsonUtil, PublicKey};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::error::{CircleError, Result};
 use super::storage::CircleStorage;
 use crate::avatar::StagedPicture;
 use crate::profile::types::{CachedProfile, ProfileMetadata, ProfileState};
-use crate::profile::{merge_edits, PendingEdits, PendingSnapshot, PROFILE_SYNC_BACKOFF_SECS};
+use crate::profile::{
+    merge_edits, owed_event_from_json, uncovered, PendingEdits, PendingSnapshot,
+    PROFILE_SYNC_BACKOFF_SECS,
+};
 
-/// What the UI may honestly say about the own profile right now.
-///
-/// Deliberately three independent facts rather than one enum: "there is
-/// unpublished work", "that work has reached at least one relay" and "the
-/// persisted backoff allows another attempt" are decided here, while how they
-/// render is a UI concern.
+/// Whether the own profile has unpublished work, and when the persisted
+/// retry ladder next permits an attempt.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProfilePendingState {
-    /// A save has not been fully acknowledged yet (`local > synced`).
+    /// A save is not yet served by every pool relay (`local > synced`).
     pub pending: bool,
-    /// Pending, but already accepted by at least one relay for this version.
-    pub partial: bool,
     /// The persisted retry ladder permits another attempt now.
     pub retry_due: bool,
+    /// Seconds until the next attempt is due: `Some` only when pending and
+    /// not due, never more than the longest rung. Relative, never an instant
+    /// (Security Rule 15).
+    pub next_retry_in_secs: Option<u32>,
 }
 
-/// Everything one successful own-profile publish must record, as a single
-/// parameter object.
+/// The owed kind-0 and the pool relays known to serve it.
 ///
-/// A struct rather than nine positional arguments: several of them are
-/// same-typed integers whose transposition would silently corrupt the coverage
-/// counters.
+/// No `Debug`: a signed event and relay URLs (Security Rule 15).
+pub struct ProfileDebt {
+    /// The `local_version` the event carries.
+    pub version: i64,
+    /// The signed event, verified on load.
+    pub event: Event,
+    /// The relays that serve it, as recorded.
+    pub covered: Vec<String>,
+}
+
+/// Everything one own-profile publish that at least one relay acknowledged
+/// must record, as a single parameter object.
+///
+/// A struct rather than positional arguments: several of them are same-typed
+/// slices or integers whose transposition would silently corrupt the coverage
+/// record.
 pub struct ProfileSyncCommit<'a> {
     /// The local user's identity pubkey. Its hex is the key for every profile
     /// row, derived here so the two can never disagree.
     pub pubkey: &'a PublicKey,
-    /// The `local_version` this publish carried — the compare-and-set subject
-    /// — or `None` when it carried nothing the outbox was holding: a photo
-    /// removal with nothing queued, or with a queued edit it was not built on.
-    pub published_version: Option<i64>,
+    /// The `local_version` this publish carried — the compare-and-set subject.
+    pub version: i64,
     /// The metadata that was actually published.
     pub merged: &'a ProfileMetadata,
-    /// The published kind-0's event id (for a future NIP-09 retraction).
-    pub event_id: &'a EventId,
-    /// The published kind-0's `created_at`, in Unix seconds.
-    pub event_created_at: i64,
-    /// The Blossom URL a staged picture was uploaded to, if one was.
-    pub uploaded_picture_url: Option<&'a str>,
-    /// Whether EVERY attempted relay acknowledged the event.
-    pub fully_acked: bool,
+    /// The published kind-0.
+    pub event: &'a Event,
+    /// The Blossom URL a staged picture was uploaded to and the sha256 of the
+    /// bytes it was uploaded from, if one was.
+    pub uploaded_picture: Option<(&'a str, &'a [u8])>,
+    /// The pool relays known to serve the event.
+    pub covered: &'a [String],
+    /// The usable pool this publish was for.
+    pub pool: &'a [String],
+    /// Whether the event carries every pending item at `version` (no upload
+    /// failed).
+    pub complete: bool,
     /// Injected clock, in Unix seconds.
     pub now: i64,
 }
@@ -146,46 +164,51 @@ impl CircleStorage {
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
         let tx = conn.transaction()?;
+        let row = Self::stage_edits_on(&tx, pubkey_hex, edits, now)?;
+        tx.commit()?;
+        Ok(row)
+    }
 
-        let existing = tx
-            .query_row(
-                "SELECT pubkey, metadata_json, state, event_created_at, fetched_at
-                 FROM profiles WHERE pubkey = ?1",
-                params![pubkey_hex],
-                Self::map_profile_row,
-            )
-            .optional()?;
-
-        let base = existing
-            .as_ref()
-            .map_or_else(ProfileMetadata::default, |row| row.metadata.clone());
-        let row = CachedProfile {
-            pubkey_hex: pubkey_hex.to_string(),
-            metadata: merge_edits(&base, &edits.to_edits(None)),
-            state: ProfileState::Known,
-            event_created_at: existing.as_ref().map_or(0, |row| row.event_created_at),
-            fetched_at: existing.as_ref().map_or(now, |row| row.fetched_at),
-        };
-        // The row the UI renders is the row that was STORED, sanitizer and all
-        // — not the one assembled above.
-        let row = Self::write_profile_row(&tx, &row)?;
-
-        // Accumulate rather than replace: renaming and then editing the bio must
-        // publish BOTH. A replace would drop the rename with no error anywhere.
-        let accumulated = Self::read_raw_pending_edits(&tx, pubkey_hex)?.accumulate(edits);
-        let edits_json = serde_json::to_string(&accumulated)
-            .map_err(|e| CircleError::Storage(format!("Failed to encode pending edits: {e}")))?;
+    /// Removes the own photo LOCALLY and queues the removal for publication,
+    /// returning the profile row the UI should render immediately.
+    ///
+    /// One transaction: every picture row (staged and published bytes alike)
+    /// is deleted, the cached row loses its `picture`, the removal is staged
+    /// at the new `local_version` with the retry ladder reset, and the owed
+    /// event is dropped. No lock, no secret, no network: the sync publishes
+    /// the removal, and decides there whether there is anything to retract.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::stage_own_profile_edits`].
+    pub fn stage_own_picture_removal(&self, pubkey_hex: &str, now: i64) -> Result<CachedProfile> {
+        let mut conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let tx = conn.transaction()?;
         tx.execute(
-            "INSERT INTO profile_sync_state (pubkey, local_version, edits_json)
-             VALUES (?1, 1, ?2)
-             ON CONFLICT(pubkey) DO UPDATE SET
-                local_version = local_version + 1,
-                edits_json    = excluded.edits_json,
-                sync_attempts = 0,
-                next_retry_at = 0",
-            params![pubkey_hex, edits_json],
+            "DELETE FROM profile_pictures WHERE pubkey = ?1",
+            params![pubkey_hex],
         )?;
-
+        let local_version: i64 = tx
+            .query_row(
+                "SELECT local_version FROM profile_sync_state WHERE pubkey = ?1",
+                params![pubkey_hex],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let removal = PendingEdits {
+            clear_picture: true,
+            clear_version: local_version + 1,
+            ..PendingEdits::default()
+        };
+        let row = Self::stage_edits_on(&tx, pubkey_hex, &removal, now)?;
+        tx.execute(
+            "UPDATE profile_sync_state SET picture_staged = 0 WHERE pubkey = ?1",
+            params![pubkey_hex],
+        )?;
         tx.commit()?;
         Ok(row)
     }
@@ -196,7 +219,8 @@ impl CircleStorage {
     /// does not exist until a Blossom upload succeeds — see
     /// [`Self::commit_profile_sync`], which re-stamps the row), the outbox marks
     /// a picture staged, `local_version` is bumped and the retry ladder is
-    /// reset.
+    /// reset. A pending photo removal stays pending: until this picture's
+    /// upload succeeds, the removal is what a sync publishes.
     ///
     /// Takes the sealed [`StagedPicture`] rather than loose slices: what lands
     /// in this row is exactly what a later sync PUTs to a public Blossom host,
@@ -235,6 +259,18 @@ impl CircleStorage {
                 next_retry_at  = 0",
             params![pubkey_hex],
         )?;
+        let raw = Self::read_raw_pending_edits(&tx, pubkey_hex)?;
+        if raw.resigned {
+            Self::write_raw_pending_edits(
+                &tx,
+                pubkey_hex,
+                &PendingEdits {
+                    resigned: false,
+                    ..raw
+                },
+            )?;
+        }
+        Self::delete_publish_debt(&tx, pubkey_hex)?;
         tx.commit()?;
         Ok(())
     }
@@ -270,10 +306,10 @@ impl CircleStorage {
         }))
     }
 
-    /// The three facts the UI needs about the own profile's publication state.
+    /// Whether the own profile has unpublished work and when a retry is due.
     ///
     /// A pubkey with no outbox row has never saved anything: nothing pending,
-    /// nothing partial, and no backoff standing in the way of a future attempt.
+    /// and no backoff standing in the way of a future attempt.
     ///
     /// # Errors
     ///
@@ -283,26 +319,32 @@ impl CircleStorage {
             .conn()
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        let row: Option<(i64, i64, i64, i64)> = conn
+        let row: Option<(i64, i64, i64)> = conn
             .query_row(
-                "SELECT local_version, synced_version, published_version, next_retry_at
+                "SELECT local_version, synced_version, next_retry_at
                  FROM profile_sync_state WHERE pubkey = ?1",
                 params![pubkey_hex],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let Some((local, synced, published, next_retry_at)) = row else {
+        let Some((local, synced, next_retry_at)) = row else {
             return Ok(ProfilePendingState {
                 pending: false,
-                partial: false,
                 retry_due: true,
+                next_retry_in_secs: None,
             });
         };
         let pending = local > synced;
+        let wait = next_retry_at.saturating_sub(now);
+        // A wait longer than the longest rung was dated on a clock since set
+        // back; one retry now beats waiting hours for the clock to catch up.
+        let retry_due = wait <= 0 || wait > sync_backoff_secs(i64::MAX);
         Ok(ProfilePendingState {
             pending,
-            partial: pending && published >= local,
-            retry_due: now >= next_retry_at,
+            retry_due,
+            next_retry_in_secs: (pending && !retry_due)
+                .then(|| u32::try_from(wait).ok())
+                .flatten(),
         })
     }
 
@@ -345,32 +387,24 @@ impl CircleStorage {
         Ok(())
     }
 
-    /// Records one successful own-profile publish: the metadata, the picture
-    /// URL, the published-event row, and how far the publish's coverage got.
-    /// Returns the profile row as it was stored.
+    /// Records one own-profile publish at least one relay acknowledged, and
+    /// returns the profile row as it was stored.
     ///
-    /// One transaction, so the cache, the publication record and the coverage
-    /// counters can never disagree about what was published. Every write goes
+    /// What is recorded: the metadata, the picture URL, the published-event
+    /// row, and how far its coverage got.
+    ///
+    /// One transaction, so the cache, the publication record, the coverage
+    /// counters and the owed event can never disagree. Every write goes
     /// through a `&Connection` helper rather than the public method that wraps
     /// it: the connection mutex is a plain `std::sync::Mutex` and re-entering it
     /// would deadlock, not block.
     ///
-    /// The compare-and-set: `published_version` and (on a full acknowledgement)
-    /// `synced_version` only ever move FORWARD, and the pending set is cleared
-    /// only when the version that was published is still the newest one saved.
-    /// A partial acknowledgement leaves the edit pending and advances the retry
-    /// ladder instead, so an opportunistic re-publish paces itself.
-    ///
-    /// # A partial acknowledgement is always owed
-    ///
-    /// A publish that carried no outbox version and that some relay did not
-    /// take would otherwise read as done, with nothing left to send it again
-    /// — and the relay that refused a photo removal goes on serving the photo.
-    /// So with nothing else pending, the published profile itself becomes the
-    /// pending version, partly published, on the same ladder. With an edit
-    /// pending nothing is added: that edit's sync republishes the whole
-    /// profile to the whole pool, and marking it would report an edit no relay
-    /// was sent as partly published.
+    /// The compare-and-set: `published_version` and (once every pool relay
+    /// serves the event) `synced_version` only ever move FORWARD, and the
+    /// pending set is cleared only when the version that was published is
+    /// still the newest one saved. Short of full coverage the ladder advances,
+    /// and a complete event for the newest version is kept as the owed event
+    /// with the relays that took it.
     ///
     /// # The row keeps what is still pending
     ///
@@ -385,29 +419,32 @@ impl CircleStorage {
     /// As [`Self::stage_own_profile_edits`].
     pub fn commit_profile_sync(&self, c: &ProfileSyncCommit<'_>) -> Result<CachedProfile> {
         let pubkey_hex = c.pubkey.to_hex();
+        let event_created_at = i64::try_from(c.event.created_at.as_secs())
+            .map_err(|_| CircleError::Storage("kind-0 timestamp out of range".to_string()))?;
         let mut conn = self
             .conn()
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
         let tx = conn.transaction()?;
 
-        if let Some(url) = c.uploaded_picture_url {
+        if let Some((url, sha256)) = c.uploaded_picture {
             // Re-stamp the staged row (cached with an empty `url`) with the URL
-            // the upload resolved to. The bytes are read back and rewritten
-            // through the same single writer every other picture write uses.
-            let staged: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = tx
+            // the upload resolved to, only while it still holds the bytes that
+            // were uploaded: a photo picked or removed since keeps its own row.
+            let staged: Option<(Vec<u8>, Vec<u8>)> = tx
                 .query_row(
-                    "SELECT sha256, canonical, thumbnail FROM profile_pictures WHERE pubkey = ?1",
-                    params![pubkey_hex],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    "SELECT canonical, thumbnail FROM profile_pictures
+                     WHERE pubkey = ?1 AND sha256 = ?2",
+                    params![pubkey_hex, sha256],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
-            if let Some((sha256, canonical, thumbnail)) = staged {
+            if let Some((canonical, thumbnail)) = staged {
                 Self::write_profile_picture_row(
                     &tx,
                     &pubkey_hex,
                     url,
-                    &sha256,
+                    sha256,
                     &canonical,
                     &thumbnail,
                     c.now,
@@ -415,33 +452,52 @@ impl CircleStorage {
             }
         }
 
-        Self::write_published_event_row(&tx, 0, "", c.event_id, c.pubkey, c.now)?;
+        Self::write_published_event_row(&tx, 0, "", &c.event.id, c.pubkey, c.now)?;
 
-        match (c.published_version, c.fully_acked) {
-            (Some(version), true) => {
-                tx.execute(
-                    "UPDATE profile_sync_state SET
-                        published_version = MAX(published_version, ?2),
-                        synced_version    = MAX(synced_version, ?2),
-                        edits_json     = CASE WHEN local_version = ?2 THEN '{}' ELSE edits_json END,
-                        picture_staged = CASE WHEN local_version = ?2 THEN 0 ELSE picture_staged END,
-                        sync_attempts     = 0,
-                        next_retry_at     = 0
-                     WHERE pubkey = ?1",
-                    params![pubkey_hex, version],
-                )?;
+        if c.complete && uncovered(c.pool, c.covered).is_empty() {
+            tx.execute(
+                "UPDATE profile_sync_state SET
+                    published_version = MAX(published_version, ?2),
+                    synced_version    = MAX(synced_version, ?2),
+                    edits_json     = CASE WHEN local_version = ?2 THEN '{}' ELSE edits_json END,
+                    picture_staged = CASE WHEN local_version = ?2 THEN 0 ELSE picture_staged END,
+                    sync_attempts     = 0,
+                    next_retry_at     = 0
+                 WHERE pubkey = ?1",
+                params![pubkey_hex, c.version],
+            )?;
+            tx.execute(
+                "DELETE FROM profile_publish_debt WHERE pubkey = ?1 AND version <= ?2",
+                params![pubkey_hex, c.version],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE profile_sync_state
+                 SET published_version = MAX(published_version, ?2)
+                 WHERE pubkey = ?1",
+                params![pubkey_hex, c.version],
+            )?;
+            Self::write_sync_attempt_row(&tx, &pubkey_hex, c.now)?;
+            if c.complete {
+                Self::write_publish_debt(&tx, &pubkey_hex, c.version, c.event, c.covered)?;
             }
-            (Some(version), false) => {
-                tx.execute(
-                    "UPDATE profile_sync_state
-                     SET published_version = MAX(published_version, ?2)
-                     WHERE pubkey = ?1",
-                    params![pubkey_hex, version],
-                )?;
-                Self::write_sync_attempt_row(&tx, &pubkey_hex, c.now)?;
-            }
-            (None, true) => {}
-            (None, false) => Self::write_unqueued_publish_owed(&tx, &pubkey_hex, c.now)?,
+        }
+
+        // Before the row is rewritten from what is still pending. A version at
+        // or after the removal carried it out: `to_edits` puts an empty picture
+        // in every event built while the removal is pending, unless an uploaded
+        // URL superseded it.
+        let raw = Self::read_raw_pending_edits(&tx, &pubkey_hex)?;
+        if raw.clear_picture && c.version >= raw.clear_version {
+            Self::write_raw_pending_edits(
+                &tx,
+                &pubkey_hex,
+                &PendingEdits {
+                    clear_picture: false,
+                    clear_version: 0,
+                    ..raw
+                },
+            )?;
         }
 
         let metadata = Self::read_pending_edits(&tx, &pubkey_hex)?.map_or_else(
@@ -454,7 +510,7 @@ impl CircleStorage {
                 pubkey_hex,
                 metadata,
                 state: ProfileState::Known,
-                event_created_at: c.event_created_at,
+                event_created_at,
                 fetched_at: c.now,
             },
         )?;
@@ -463,38 +519,208 @@ impl CircleStorage {
         Ok(stored)
     }
 
-    /// Cancels a STAGED picture upload and nothing else.
+    /// The owed event for `version`, or `None` when nothing is owed for it.
     ///
-    /// The narrow sibling of [`Self::clear_profile_sync_state`], for "remove my
-    /// photo": it drops the sanitized bytes queued for Blossom, but a queued
-    /// display-name edit has nothing to do with the photo and must still
-    /// publish. Cancelling the whole outbox here would discard that rename with
-    /// no error anywhere.
-    ///
-    /// Only the STAGED (empty-`url`) row is deleted — a picture with a real URL
-    /// is a published artefact, which the retraction republish is what removes.
-    /// The version counters and the retry ladder are deliberately untouched:
-    /// the bump the staging made stays pending, so the kind-0 that no longer
-    /// names a picture still gets published.
+    /// Loads only while `version` is still the newest saved. A row that does
+    /// not verify as a genuine own kind-0, or that is older than the cached own
+    /// row (a newer profile was fetched since), is deleted and not returned:
+    /// re-sending it could only put a superseded profile back on a relay.
     ///
     /// # Errors
     ///
     /// As [`Self::stage_own_profile_edits`].
-    pub fn cancel_staged_profile_picture(&self, pubkey_hex: &str) -> Result<()> {
+    pub fn profile_publish_debt(
+        &self,
+        own: &PublicKey,
+        version: i64,
+    ) -> Result<Option<ProfileDebt>> {
+        let pubkey_hex = own.to_hex();
         let mut conn = self
             .conn()
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
         let tx = conn.transaction()?;
-        tx.execute(
-            "DELETE FROM profile_pictures WHERE pubkey = ?1 AND url = ''",
-            params![pubkey_hex],
-        )?;
-        tx.execute(
-            "UPDATE profile_sync_state SET picture_staged = 0 WHERE pubkey = ?1",
-            params![pubkey_hex],
-        )?;
+        let row: Option<(String, String)> = tx
+            .query_row(
+                "SELECT d.event_json, d.covered_json FROM profile_publish_debt d
+                 JOIN profile_sync_state s ON s.pubkey = d.pubkey
+                 WHERE d.pubkey = ?1 AND d.version = ?2 AND s.local_version = ?2",
+                params![pubkey_hex, version],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((event_json, covered_json)) = row else {
+            return Ok(None);
+        };
+        let (Some(event), Ok(covered)) = (
+            owed_event_from_json(&event_json, own),
+            serde_json::from_str::<Vec<String>>(&covered_json),
+        ) else {
+            log::warn!("profile outbox: the owed kind-0 was unreadable; discarding it");
+            Self::delete_publish_debt(&tx, &pubkey_hex)?;
+            tx.commit()?;
+            return Ok(None);
+        };
+        let cached_created_at: Option<i64> = tx
+            .query_row(
+                "SELECT event_created_at FROM profiles WHERE pubkey = ?1",
+                params![pubkey_hex],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let superseded = cached_created_at.is_some_and(|cached| {
+            u64::try_from(cached).is_ok_and(|cached| cached > event.created_at.as_secs())
+        });
+        if superseded {
+            Self::delete_publish_debt(&tx, &pubkey_hex)?;
+            tx.commit()?;
+            return Ok(None);
+        }
         tx.commit()?;
+        Ok(Some(ProfileDebt {
+            version,
+            event,
+            covered,
+        }))
+    }
+
+    /// Records that `newly_covered` relays now serve the owed event of
+    /// `version`.
+    ///
+    /// Once every relay of `pool` does, the outbox is clean; otherwise the
+    /// ladder advances. A compare-and-set on both the owed event's version and
+    /// `local_version`, so a pass that a save, a removal, a deletion or a
+    /// redirect overtook changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::stage_own_profile_edits`].
+    pub fn commit_profile_coverage(
+        &self,
+        pubkey_hex: &str,
+        version: i64,
+        newly_covered: &[String],
+        pool: &[String],
+        now: i64,
+    ) -> Result<()> {
+        let mut conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let tx = conn.transaction()?;
+        let covered_json: Option<String> = tx
+            .query_row(
+                "SELECT d.covered_json FROM profile_publish_debt d
+                 JOIN profile_sync_state s ON s.pubkey = d.pubkey
+                 WHERE d.pubkey = ?1 AND d.version = ?2 AND s.local_version = ?2",
+                params![pubkey_hex, version],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(covered_json) = covered_json else {
+            return Ok(());
+        };
+        let mut covered: Vec<String> = serde_json::from_str(&covered_json).unwrap_or_default();
+        covered.extend(uncovered(newly_covered, &covered));
+        if uncovered(pool, &covered).is_empty() {
+            tx.execute(
+                "UPDATE profile_sync_state SET
+                    published_version = MAX(published_version, ?2),
+                    synced_version    = MAX(synced_version, ?2),
+                    edits_json        = '{}',
+                    picture_staged    = 0,
+                    sync_attempts     = 0,
+                    next_retry_at     = 0
+                 WHERE pubkey = ?1",
+                params![pubkey_hex, version],
+            )?;
+            Self::delete_publish_debt(&tx, pubkey_hex)?;
+        } else {
+            tx.execute(
+                "UPDATE profile_publish_debt SET covered_json = ?2 WHERE pubkey = ?1",
+                params![pubkey_hex, encode_covered(&covered)?],
+            )?;
+            Self::write_sync_attempt_row(&tx, pubkey_hex, now)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Drops the owed event of `version`, if it is still that one.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::stage_own_profile_edits`].
+    pub fn discard_profile_publish_debt(&self, pubkey_hex: &str, version: i64) -> Result<()> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "DELETE FROM profile_publish_debt WHERE pubkey = ?1 AND version = ?2",
+            params![pubkey_hex, version],
+        )?;
+        Ok(())
+    }
+
+    /// Marks the pending edits of `version` as signed afresh once already
+    /// ([`PendingEdits::resigned`]), if it is still the newest saved.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::stage_own_profile_edits`].
+    pub fn mark_profile_resigned(&self, pubkey_hex: &str, version: i64) -> Result<()> {
+        let mut conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let tx = conn.transaction()?;
+        let current: Option<i64> = tx
+            .query_row(
+                "SELECT local_version FROM profile_sync_state WHERE pubkey = ?1",
+                params![pubkey_hex],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if current == Some(version) {
+            let raw = Self::read_raw_pending_edits(&tx, pubkey_hex)?;
+            Self::write_raw_pending_edits(
+                &tx,
+                pubkey_hex,
+                &PendingEdits {
+                    resigned: true,
+                    ..raw
+                },
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Levels `version` as settled with nothing sent.
+    ///
+    /// For a pending set that carries nothing public to retract. A
+    /// compare-and-set on `local_version`, and never while a photo is staged,
+    /// so content the user saved is never discarded.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::stage_own_profile_edits`].
+    pub fn settle_profile_sync(&self, pubkey_hex: &str, version: i64) -> Result<()> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "UPDATE profile_sync_state SET
+                synced_version    = MAX(synced_version, ?2),
+                published_version = MAX(published_version, ?2),
+                edits_json        = '{}',
+                sync_attempts     = 0,
+                next_retry_at     = 0
+             WHERE pubkey = ?1 AND local_version = ?2 AND picture_staged = 0",
+            params![pubkey_hex, version],
+        )?;
         Ok(())
     }
 
@@ -548,13 +774,16 @@ impl CircleStorage {
              WHERE ?1 IS NULL OR pubkey = ?1",
             params![pubkey_hex],
         )?;
+        conn.execute(
+            "DELETE FROM profile_publish_debt WHERE ?1 IS NULL OR pubkey = ?1",
+            params![pubkey_hex],
+        )?;
         Ok(())
     }
 
     /// Leaves the profile just published as the version the outbox owes, on an
     /// ALREADY-LOCKED connection: for a publish that carried no saved version
-    /// and that some relay did not take — a photo removal, or the blank of a
-    /// profile deletion.
+    /// and that some relay did not take — the blank of a profile deletion.
     ///
     /// A compare-and-set: only a row with nothing pending takes the new
     /// version, and the retry ladder advances only when one did.
@@ -621,6 +850,105 @@ impl CircleStorage {
             .map_or_else(PendingEdits::default, decode_pending_edits))
     }
 
+    /// The shared body of every local edit, on an ALREADY-LOCKED connection.
+    ///
+    /// Merges `edits` onto the cached row (neither `event_created_at` nor
+    /// `fetched_at` moves on an existing row), folds them into the pending
+    /// set, bumps `local_version`, resets the ladder and drops the owed event.
+    fn stage_edits_on(
+        conn: &Connection,
+        pubkey_hex: &str,
+        edits: &PendingEdits,
+        now: i64,
+    ) -> Result<CachedProfile> {
+        let existing = conn
+            .query_row(
+                "SELECT pubkey, metadata_json, state, event_created_at, fetched_at
+                 FROM profiles WHERE pubkey = ?1",
+                params![pubkey_hex],
+                Self::map_profile_row,
+            )
+            .optional()?;
+
+        let base = existing
+            .as_ref()
+            .map_or_else(ProfileMetadata::default, |row| row.metadata.clone());
+        let row = CachedProfile {
+            pubkey_hex: pubkey_hex.to_string(),
+            metadata: merge_edits(&base, &edits.to_edits(None)),
+            state: ProfileState::Known,
+            event_created_at: existing.as_ref().map_or(0, |row| row.event_created_at),
+            fetched_at: existing.as_ref().map_or(now, |row| row.fetched_at),
+        };
+        // The row the UI renders is the row that was STORED, sanitizer and all
+        // — not the one assembled above.
+        let row = Self::write_profile_row(conn, &row)?;
+
+        // Accumulate rather than replace: renaming and then editing the bio must
+        // publish BOTH. A replace would drop the rename with no error anywhere.
+        let accumulated = Self::read_raw_pending_edits(conn, pubkey_hex)?.accumulate(edits);
+        conn.execute(
+            "INSERT INTO profile_sync_state (pubkey, local_version, edits_json)
+             VALUES (?1, 1, ?2)
+             ON CONFLICT(pubkey) DO UPDATE SET
+                local_version = local_version + 1,
+                edits_json    = excluded.edits_json,
+                sync_attempts = 0,
+                next_retry_at = 0",
+            params![pubkey_hex, encode_pending_edits(&accumulated)?],
+        )?;
+        Self::delete_publish_debt(conn, pubkey_hex)?;
+        Ok(row)
+    }
+
+    /// Replaces the stored pending set, leaving the counters alone.
+    fn write_raw_pending_edits(
+        conn: &Connection,
+        pubkey_hex: &str,
+        edits: &PendingEdits,
+    ) -> Result<()> {
+        conn.execute(
+            "UPDATE profile_sync_state SET edits_json = ?2 WHERE pubkey = ?1",
+            params![pubkey_hex, encode_pending_edits(edits)?],
+        )?;
+        Ok(())
+    }
+
+    /// Records `event` as owed for `version` with the relays that serve it, on
+    /// an ALREADY-LOCKED connection, only while `version` is the newest saved.
+    pub(super) fn write_publish_debt(
+        conn: &Connection,
+        pubkey_hex: &str,
+        version: i64,
+        event: &Event,
+        covered: &[String],
+    ) -> Result<()> {
+        conn.execute(
+            "INSERT INTO profile_publish_debt (pubkey, version, event_json, covered_json)
+             SELECT ?1, ?2, ?3, ?4 FROM profile_sync_state
+             WHERE pubkey = ?1 AND local_version = ?2
+             ON CONFLICT(pubkey) DO UPDATE SET
+                version      = excluded.version,
+                event_json   = excluded.event_json,
+                covered_json = excluded.covered_json",
+            params![
+                pubkey_hex,
+                version,
+                event.as_json(),
+                encode_covered(covered)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn delete_publish_debt(conn: &Connection, pubkey_hex: &str) -> rusqlite::Result<()> {
+        conn.execute(
+            "DELETE FROM profile_publish_debt WHERE pubkey = ?1",
+            params![pubkey_hex],
+        )?;
+        Ok(())
+    }
+
     /// Advances the retry ladder on an ALREADY-LOCKED connection.
     ///
     /// Read-then-write (rather than a SQL `CASE` ladder) keeps
@@ -651,6 +979,16 @@ impl CircleStorage {
     }
 }
 
+fn encode_pending_edits(edits: &PendingEdits) -> Result<String> {
+    serde_json::to_string(edits)
+        .map_err(|e| CircleError::Storage(format!("Failed to encode pending edits: {e}")))
+}
+
+fn encode_covered(covered: &[String]) -> Result<String> {
+    serde_json::to_string(covered)
+        .map_err(|_| CircleError::Storage("Failed to encode relay coverage".to_string()))
+}
+
 /// Decodes a stored pending set, falling back to "nothing pending" on a value
 /// that will not parse.
 ///
@@ -667,7 +1005,7 @@ fn decode_pending_edits(edits_json: &str) -> PendingEdits {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind};
+    use nostr::Keys;
 
     fn storage() -> CircleStorage {
         CircleStorage::in_memory().expect("in-memory storage must initialize")
@@ -680,14 +1018,14 @@ mod tests {
     fn name_edit(display_name: &str) -> PendingEdits {
         PendingEdits {
             display_name: Some(display_name.to_string()),
-            about: None,
+            ..PendingEdits::default()
         }
     }
 
     fn bio_edit(about: &str) -> PendingEdits {
         PendingEdits {
-            display_name: None,
             about: Some(about.to_string()),
+            ..PendingEdits::default()
         }
     }
 
@@ -698,16 +1036,8 @@ mod tests {
         StagedPicture::from_sanitized_cache(canonical.to_vec(), thumbnail.to_vec())
     }
 
-    /// A throwaway event used ONLY as an `.id` source. Its kind is irrelevant
-    /// (the commit records kind 0 explicitly), so a non-kind-0 builder keeps
-    /// kind-0 construction confined to `profile/` per the CI guard.
-    fn any_event_id(keys: &Keys) -> EventId {
-        EventBuilder::new(Kind::TextNote, "x")
-            .sign_with_keys(keys)
-            .expect("sign")
-            .id
-    }
-
+    /// The complete publish of `version`, carrying "Synced" and dated
+    /// `FAR + now`, taken by both relays of a two-relay pool or by one.
     fn commit(
         storage: &CircleStorage,
         keys: &Keys,
@@ -715,37 +1045,40 @@ mod tests {
         fully_acked: bool,
         now: i64,
     ) -> Result<CachedProfile> {
-        let merged = ProfileMetadata::from_metadata(nostr::Metadata::new().display_name("Synced"));
+        let merged = meta("Synced");
+        let event = kind0_at(keys, &merged, u64::try_from(now).expect("a timestamp"));
+        let pool = relays(&["a", "b"]);
+        let covered = if fully_acked { &pool[..] } else { &pool[..1] };
         storage.commit_profile_sync(&ProfileSyncCommit {
             pubkey: &keys.public_key(),
-            published_version: Some(version),
+            version,
             merged: &merged,
-            event_id: &any_event_id(keys),
-            event_created_at: now,
-            uploaded_picture_url: None,
-            fully_acked,
+            event: &event,
+            uploaded_picture: None,
+            covered,
+            pool: &pool,
+            complete: true,
             now,
         })
     }
 
-    /// A publish that carried nothing the outbox held: a photo removal.
+    /// A publish that carried nothing the outbox held — a deletion's blank —
+    /// recorded as the wipe records it: owed only when some relay did not
+    /// take it.
     fn commit_unqueued(
         storage: &CircleStorage,
         keys: &Keys,
         fully_acked: bool,
         now: i64,
-    ) -> Result<CachedProfile> {
-        let merged = ProfileMetadata::from_metadata(nostr::Metadata::new().display_name("Synced"));
-        storage.commit_profile_sync(&ProfileSyncCommit {
-            pubkey: &keys.public_key(),
-            published_version: None,
-            merged: &merged,
-            event_id: &any_event_id(keys),
-            event_created_at: now,
-            uploaded_picture_url: None,
-            fully_acked,
-            now,
-        })
+    ) -> Result<()> {
+        if fully_acked {
+            return Ok(());
+        }
+        let mut conn = storage.conn().lock().unwrap();
+        let tx = conn.transaction()?;
+        CircleStorage::write_unqueued_publish_owed(&tx, &keys.public_key().to_hex(), now)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// The raw outbox columns, for assertions that must see the counters
@@ -780,41 +1113,6 @@ mod tests {
             storage.get_profile(&hex()).unwrap().unwrap().metadata,
             row.metadata,
             "returned row must equal the stored row"
-        );
-    }
-
-    #[test]
-    fn commit_profile_sync_returns_the_row_it_stored() {
-        // The photo removal renders what this hands back. Its base is normally
-        // a RELAY copy, so the assembled metadata can carry a name the
-        // sanitizer rewrites on the way into the row.
-        let storage = storage();
-        let keys = Keys::generate();
-        let merged = ProfileMetadata::from_metadata(
-            nostr::Metadata::new().display_name("Ada\u{202E}  Lovelace"),
-        );
-        let row = storage
-            .commit_profile_sync(&ProfileSyncCommit {
-                pubkey: &keys.public_key(),
-                published_version: Some(1),
-                merged: &merged,
-                event_id: &any_event_id(&keys),
-                event_created_at: 1_000,
-                uploaded_picture_url: None,
-                fully_acked: true,
-                now: 1_001,
-            })
-            .unwrap();
-
-        assert_eq!(row.metadata.display_name(), Some("Ada Lovelace"));
-        let stored = storage
-            .get_profile(&keys.public_key().to_hex())
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.metadata, row.metadata);
-        assert_eq!(
-            (stored.event_created_at, stored.fetched_at),
-            (row.event_created_at, row.fetched_at)
         );
     }
 
@@ -1018,49 +1316,12 @@ mod tests {
 
         assert!(storage.pending_profile_sync(&pubkey_hex).unwrap().is_none());
         let state = storage.profile_pending_state(&pubkey_hex, 1_001).unwrap();
-        assert!(!state.pending && !state.partial);
+        assert!(!state.pending);
         // The published metadata and its real `created_at` replaced the staged row.
         let stored = storage.get_profile(&pubkey_hex).unwrap().unwrap();
         assert_eq!(stored.metadata.display_name(), Some("Synced"));
-        assert_eq!(stored.event_created_at, 1_001);
+        assert_eq!(stored.event_created_at, i64::try_from(FAR).unwrap() + 1_001);
         assert_eq!(raw(&storage, &pubkey_hex).unwrap().3, 0, "ladder reset");
-    }
-
-    #[test]
-    fn a_partial_ack_keeps_the_edit_pending_and_records_its_coverage() {
-        // Two of eight relays taking the event is still the OLD name for every
-        // peer whose private assignment salt points them elsewhere, so this must
-        // stay pending — but it is not "unsent" either, and the distinction is
-        // what the UI reports honestly.
-        let storage = storage();
-        let keys = Keys::generate();
-        let pubkey_hex = keys.public_key().to_hex();
-        storage
-            .stage_own_profile_edits(&pubkey_hex, &name_edit("Alice"), 1_000)
-            .unwrap();
-        commit(&storage, &keys, 1, false, 1_001).expect("commit");
-
-        let state = storage.profile_pending_state(&pubkey_hex, 1_001).unwrap();
-        assert!(state.pending, "a partial publish is not synced");
-        assert!(state.partial, "but it HAS reached a relay");
-        assert!(
-            !state.retry_due,
-            "and the retry ladder paces the opportunistic re-publish",
-        );
-        let (local, synced, published, attempts, next_retry_at) =
-            raw(&storage, &pubkey_hex).unwrap();
-        assert_eq!((local, synced, published), (1, 0, 1));
-        assert_eq!(attempts, 1);
-        assert_eq!(next_retry_at, 1_001 + PROFILE_SYNC_BACKOFF_SECS[0]);
-        assert_eq!(
-            storage
-                .pending_profile_sync(&pubkey_hex)
-                .unwrap()
-                .unwrap()
-                .edits,
-            name_edit("Alice"),
-            "the pending set survives so the re-publish carries it",
-        );
     }
 
     #[test]
@@ -1083,16 +1344,19 @@ mod tests {
                 .display_name("Alice")
                 .website(nostr::Url::parse("https://w.example.com").unwrap()),
         );
+        let event = kind0_at(&keys, &published, 1_002);
+        let pool = relays(&["a"]);
 
         let row = storage
             .commit_profile_sync(&ProfileSyncCommit {
                 pubkey: &keys.public_key(),
-                published_version: Some(1),
+                version: 1,
                 merged: &published,
-                event_id: &any_event_id(&keys),
-                event_created_at: 1_002,
-                uploaded_picture_url: None,
-                fully_acked: true,
+                event: &event,
+                uploaded_picture: None,
+                covered: &pool,
+                pool: &pool,
+                complete: true,
                 now: 1_002,
             })
             .unwrap();
@@ -1110,7 +1374,7 @@ mod tests {
                 published.as_metadata().website,
                 "everything else is what was published",
             );
-            assert_eq!(row.event_created_at, 1_002);
+            assert_eq!(row.event_created_at, ts(&event));
         }
     }
 
@@ -1134,7 +1398,7 @@ mod tests {
         commit_unqueued(&storage, &keys, false, 2_000).unwrap();
 
         let state = storage.profile_pending_state(&pubkey_hex, 2_000).unwrap();
-        assert!(state.pending && state.partial);
+        assert!(state.pending);
         assert!(!state.retry_due, "the re-publish waits out the ladder");
         assert_eq!(
             raw(&storage, &pubkey_hex).unwrap(),
@@ -1171,7 +1435,7 @@ mod tests {
         commit_unqueued(&storage, &keys, false, 2_000).unwrap();
 
         let state = storage.profile_pending_state(&pubkey_hex, 2_000).unwrap();
-        assert!(state.pending && state.partial && !state.retry_due);
+        assert!(state.pending && !state.retry_due);
         assert_eq!(
             raw(&storage, &pubkey_hex).unwrap(),
             (1, 0, 1, 1, 2_000 + PROFILE_SYNC_BACKOFF_SECS[0]),
@@ -1192,12 +1456,13 @@ mod tests {
             .stage_own_profile_edits(&pubkey_hex, &name_edit("Alice"), 1_000)
             .unwrap();
 
-        let row = commit_unqueued(&storage, &keys, false, 2_000).unwrap();
+        commit_unqueued(&storage, &keys, false, 2_000).unwrap();
+        let row = storage.get_profile(&pubkey_hex).unwrap().unwrap();
 
         let state = storage.profile_pending_state(&pubkey_hex, 2_000).unwrap();
         assert!(state.pending, "the name is still to be published");
-        assert!(!state.partial, "and no relay has been sent it");
         assert!(state.retry_due);
+        // `published_version` 0: no relay has been sent the name.
         assert_eq!(raw(&storage, &pubkey_hex).unwrap(), (1, 0, 0, 0, 0));
         assert_eq!(
             row.metadata.display_name(),
@@ -1273,22 +1538,29 @@ mod tests {
         let storage = storage();
         let keys = Keys::generate();
         let pubkey_hex = keys.public_key().to_hex();
+        let picture = staged(b"canonical", b"thumb");
         storage
-            .stage_own_profile_picture(&pubkey_hex, &staged(b"canonical", b"thumb"), 1_000)
+            .stage_own_profile_picture(&pubkey_hex, &picture, 1_000)
             .unwrap();
         let merged = ProfileMetadata::from_metadata(
             nostr::Metadata::new()
                 .picture(nostr::Url::parse("https://blossom.example/abc").unwrap()),
         );
+        let event = kind0_at(&keys, &merged, 1_001);
+        let pool = relays(&["a"]);
         storage
             .commit_profile_sync(&ProfileSyncCommit {
                 pubkey: &keys.public_key(),
-                published_version: Some(1),
+                version: 1,
                 merged: &merged,
-                event_id: &any_event_id(&keys),
-                event_created_at: 1_001,
-                uploaded_picture_url: Some("https://blossom.example/abc"),
-                fully_acked: true,
+                event: &event,
+                uploaded_picture: Some((
+                    "https://blossom.example/abc",
+                    picture.sha256().as_slice(),
+                )),
+                covered: &pool,
+                pool: &pool,
+                complete: true,
                 now: 1_001,
             })
             .expect("commit");
@@ -1379,52 +1651,6 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_a_staged_picture_keeps_a_pending_name_edit() {
-        // "Remove my photo" and "rename me" are independent saves. Cancelling
-        // the whole outbox here would silently discard the rename.
-        let storage = storage();
-        storage
-            .stage_own_profile_edits(&hex(), &name_edit("Alice"), 1_000)
-            .unwrap();
-        storage
-            .stage_own_profile_picture(&hex(), &staged(b"c", b"t"), 1_001)
-            .unwrap();
-
-        storage.cancel_staged_profile_picture(&hex()).unwrap();
-
-        assert!(
-            storage.get_profile_picture(&hex()).unwrap().is_none(),
-            "the queued upload's bytes go with the upload",
-        );
-        assert!(!storage.profile_picture_is_staged(&hex()).unwrap());
-        let snapshot = storage
-            .pending_profile_sync(&hex())
-            .unwrap()
-            .expect("the rename is still queued");
-        assert_eq!(snapshot.edits.display_name.as_deref(), Some("Alice"));
-        assert!(!snapshot.picture_staged);
-    }
-
-    #[test]
-    fn cancelling_a_staged_picture_keeps_a_published_one() {
-        // A picture with a real URL is a PUBLISHED artefact: only the queued
-        // upload is cancelled here, never the bytes the app still renders.
-        let storage = storage();
-        storage
-            .upsert_profile_picture(
-                &hex(),
-                "https://blossom.example/abc",
-                &[0x11; 32],
-                b"c",
-                b"t",
-                1,
-            )
-            .unwrap();
-        storage.cancel_staged_profile_picture(&hex()).unwrap();
-        assert!(storage.get_profile_picture(&hex()).unwrap().is_some());
-    }
-
-    #[test]
     fn clearing_the_state_keeps_a_published_picture() {
         // A picture with a real URL is a PUBLISHED artefact; cancelling the
         // outbox must not silently delete the bytes the app still renders.
@@ -1459,8 +1685,10 @@ mod tests {
             .stage_own_profile_edits(&pubkey_hex, &name_edit("Alice v2"), 1_002)
             .unwrap();
 
+        let blank = crate::profile::build_blank_metadata_event(&keys, None).unwrap();
+        let pool = relays(&["a"]);
         storage
-            .wipe_all_profiles(&keys.public_key(), &any_event_id(&keys), 1_003, true, 1_003)
+            .wipe_all_profiles(&keys.public_key(), &blank, &pool, &pool, 1_003)
             .unwrap();
 
         let (local, synced, published, _, _) =
@@ -1552,7 +1780,7 @@ mod tests {
                 nostr::Metadata::new().display_name("Other Client"),
             ),
             state: ProfileState::Known,
-            event_created_at: 5_000,
+            event_created_at: i64::try_from(FAR).unwrap() + 5_000,
             fetched_at: 5_000,
         };
         assert!(storage.upsert_profile_if_newer(&fetched).unwrap());
@@ -1633,5 +1861,1299 @@ mod tests {
             .record_profile_misses(&[keys.public_key().to_hex()], 1_000)
             .unwrap();
         assert!(!storage.has_published_profile(&keys.public_key()).unwrap());
+    }
+
+    // ======================================================================
+    // Instant save: the coverage ledger, the local photo removal, the
+    // retry pacing.
+    // ======================================================================
+
+    use nostr::{Event, JsonUtil, ToBech32};
+
+    /// Far enough ahead of the wall clock that the profile builder stamps
+    /// exactly `FAR + offset`, so an event's `created_at` is a test input.
+    const FAR: u64 = 4_000_000_000;
+    /// The `now` of [`commit_new`].
+    const NOW: i64 = 1_001;
+
+    fn meta(name: &str) -> ProfileMetadata {
+        ProfileMetadata::from_metadata(nostr::Metadata::new().display_name(name))
+    }
+
+    fn meta_with_picture(name: &str, url: &str) -> ProfileMetadata {
+        ProfileMetadata::from_metadata(
+            nostr::Metadata::new()
+                .display_name(name)
+                .picture(nostr::Url::parse(url).expect("a url")),
+        )
+    }
+
+    fn kind0_at(keys: &Keys, metadata: &ProfileMetadata, offset: u64) -> Event {
+        crate::profile::build_metadata_event(keys, metadata, Some(FAR + offset - 1))
+            .expect("sign kind0")
+    }
+
+    fn ts(event: &Event) -> i64 {
+        i64::try_from(event.created_at.as_secs()).expect("a timestamp")
+    }
+
+    fn relays(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| format!("wss://{n}.example")).collect()
+    }
+
+    fn sorted(mut urls: Vec<String>) -> Vec<String> {
+        urls.sort();
+        urls
+    }
+
+    /// Commits `event` as the publish of `version`; `merged` is what the event
+    /// carries.
+    fn commit_new(
+        storage: &CircleStorage,
+        keys: &Keys,
+        version: i64,
+        event: &Event,
+        covered: &[String],
+        pool: &[String],
+        complete: bool,
+    ) -> Result<CachedProfile> {
+        let merged = ProfileMetadata::from_metadata(
+            nostr::Metadata::from_json(&event.content).expect("content is metadata"),
+        );
+        storage.commit_profile_sync(&ProfileSyncCommit {
+            pubkey: &keys.public_key(),
+            version,
+            merged: &merged,
+            event,
+            uploaded_picture: None,
+            covered,
+            pool,
+            complete,
+            now: NOW,
+        })
+    }
+
+    fn version_of(storage: &CircleStorage, pubkey_hex: &str) -> i64 {
+        storage
+            .pending_profile_sync(pubkey_hex)
+            .unwrap()
+            .expect("something is pending")
+            .local_version
+    }
+
+    fn debt_rows(storage: &CircleStorage) -> i64 {
+        storage
+            .conn()
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM profile_publish_debt", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+
+    /// Stages a name, then records a publish of it that only the first relay of
+    /// `pool` took: a debt row at the returned version.
+    fn owe_event(storage: &CircleStorage, keys: &Keys, pool: &[String]) -> (i64, Event) {
+        let hex = keys.public_key().to_hex();
+        storage
+            .stage_own_profile_edits(&hex, &name_edit("Owed"), 1_000)
+            .unwrap();
+        let version = version_of(storage, &hex);
+        let event = kind0_at(keys, &meta("Owed"), 1);
+        commit_new(storage, keys, version, &event, &pool[..1], pool, true).unwrap();
+        (version, event)
+    }
+
+    fn own_row_with_picture(storage: &CircleStorage, hex: &str, url: &str) {
+        storage
+            .upsert_profile(&CachedProfile {
+                pubkey_hex: hex.to_string(),
+                metadata: meta_with_picture("Me", url),
+                state: ProfileState::Known,
+                event_created_at: 500,
+                fetched_at: 600,
+            })
+            .unwrap();
+    }
+
+    // ---- the local photo removal -------------------------------------------
+
+    #[test]
+    fn a_removal_clears_the_picture_locally_in_one_transaction() {
+        // Both kinds of bytes a removal can find: a published picture, and one
+        // staged for an upload that has not happened.
+        for staged_only in [false, true] {
+            let storage = storage();
+            let hex = Keys::generate().public_key().to_hex();
+            own_row_with_picture(&storage, &hex, "https://blossom.example/abc");
+            storage
+                .stage_own_profile_edits(&hex, &name_edit("Me"), 650)
+                .unwrap();
+            storage.record_profile_sync_attempt(&hex, 650).unwrap();
+            if staged_only {
+                storage
+                    .stage_own_profile_picture(&hex, &staged(b"c", b"t"), 700)
+                    .unwrap();
+            } else {
+                storage
+                    .upsert_profile_picture(
+                        &hex,
+                        "https://blossom.example/abc",
+                        &[0x11; 32],
+                        b"c",
+                        b"t",
+                        1,
+                    )
+                    .unwrap();
+            }
+            storage.record_profile_sync_attempt(&hex, 700).unwrap();
+            let (before, ..) = raw(&storage, &hex).unwrap();
+
+            let row = storage.stage_own_picture_removal(&hex, 800).unwrap();
+
+            assert!(
+                storage.get_profile_picture(&hex).unwrap().is_none(),
+                "the bytes are gone (staged_only={staged_only})"
+            );
+            assert_eq!(storage.get_profile_picture_url(&hex).unwrap(), None);
+            assert!(!storage.profile_picture_is_staged(&hex).unwrap());
+            assert_eq!(
+                row.metadata.picture(),
+                None,
+                "the avatar falls back at once"
+            );
+            assert_eq!(row.metadata.display_name(), Some("Me"));
+            assert_eq!(
+                (row.event_created_at, row.fetched_at),
+                (500, 600),
+                "a local edit moves neither the supersede floor nor the staleness clock"
+            );
+            let stored = storage.get_profile(&hex).unwrap().unwrap();
+            assert_eq!(
+                stored.metadata, row.metadata,
+                "the row returned is the row stored"
+            );
+
+            let snapshot = storage
+                .pending_profile_sync(&hex)
+                .unwrap()
+                .expect("pending");
+            assert_eq!(snapshot.local_version, before + 1);
+            assert!(snapshot.edits.clear_picture);
+            assert_eq!(snapshot.edits.clear_version, snapshot.local_version);
+            assert!(!snapshot.picture_staged);
+            let (_, _, _, attempts, next_retry_at) = raw(&storage, &hex).unwrap();
+            assert_eq!((attempts, next_retry_at), (0, 0), "the ladder is reset");
+            assert!(storage.profile_pending_state(&hex, 800).unwrap().retry_due);
+        }
+    }
+
+    #[test]
+    fn a_removal_that_cannot_finish_leaves_everything_as_it_was() {
+        // The bytes, the row's picture, the pending clear and the version bump
+        // land together or not at all: a removal that dropped the bytes and
+        // lost the clear would leave the photo public with nothing owed.
+        let storage = storage();
+        let hex = Keys::generate().public_key().to_hex();
+        own_row_with_picture(&storage, &hex, "https://blossom.example/abc");
+        storage
+            .upsert_profile_picture(
+                &hex,
+                "https://blossom.example/abc",
+                &[0x11; 32],
+                b"c",
+                b"t",
+                1,
+            )
+            .unwrap();
+        storage
+            .stage_own_profile_edits(&hex, &name_edit("Me"), 650)
+            .unwrap();
+        let before = raw(&storage, &hex).unwrap();
+        storage
+            .conn()
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refused_insert BEFORE INSERT ON profile_sync_state
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;
+                 CREATE TRIGGER refused_update BEFORE UPDATE ON profile_sync_state
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+
+        assert!(
+            storage.stage_own_picture_removal(&hex, 800).is_err(),
+            "anti-vacuity: the outbox write was refused"
+        );
+
+        assert!(storage.get_profile_picture(&hex).unwrap().is_some());
+        assert_eq!(
+            storage
+                .get_profile(&hex)
+                .unwrap()
+                .unwrap()
+                .metadata
+                .picture(),
+            Some("https://blossom.example/abc")
+        );
+        assert_eq!(raw(&storage, &hex).unwrap(), before);
+        assert!(
+            !storage
+                .pending_profile_sync(&hex)
+                .unwrap()
+                .unwrap()
+                .edits
+                .clear_picture
+        );
+    }
+
+    #[test]
+    fn a_removal_keeps_a_pending_name_edit() {
+        // "Remove my photo" and "rename me" are independent saves.
+        let storage = storage();
+        storage
+            .stage_own_profile_edits(&hex(), &name_edit("Alice"), 1_000)
+            .unwrap();
+        storage
+            .stage_own_profile_picture(&hex(), &staged(b"c", b"t"), 1_001)
+            .unwrap();
+
+        storage.stage_own_picture_removal(&hex(), 1_002).unwrap();
+
+        assert!(storage.get_profile_picture(&hex()).unwrap().is_none());
+        assert!(!storage.profile_picture_is_staged(&hex()).unwrap());
+        let snapshot = storage
+            .pending_profile_sync(&hex())
+            .unwrap()
+            .expect("pending");
+        assert_eq!(snapshot.edits.display_name.as_deref(), Some("Alice"));
+        assert!(snapshot.edits.clear_picture && !snapshot.picture_staged);
+        assert_eq!(snapshot.local_version, 3);
+    }
+
+    #[test]
+    fn a_new_photo_staged_after_a_removal_keeps_the_removal_pending_until_a_picture_is_published() {
+        // Remove A, pick B, then B's upload fails or the app is offline: A's
+        // removal must still go out with the next pass, or A would be signed
+        // back onto every relay.
+        let storage = storage();
+        own_row_with_picture(&storage, &hex(), "https://blossom.example/a");
+        storage.stage_own_picture_removal(&hex(), 1_000).unwrap();
+        storage
+            .stage_own_profile_picture(&hex(), &staged(b"b", b"b"), 1_001)
+            .unwrap();
+
+        let snapshot = storage
+            .pending_profile_sync(&hex())
+            .unwrap()
+            .expect("pending");
+        assert!(snapshot.picture_staged);
+        assert!(
+            snapshot.edits.clear_picture,
+            "staging a photo must not forget the removal"
+        );
+        assert_eq!(snapshot.edits.clear_version, 1);
+        assert_eq!(snapshot.local_version, 2);
+        assert_eq!(
+            snapshot
+                .edits
+                .to_edits(Some("https://blossom.example/b".to_string()))
+                .picture
+                .as_deref(),
+            Some("https://blossom.example/b"),
+            "once B is uploaded its URL is what publishes"
+        );
+        assert_eq!(
+            snapshot.edits.to_edits(None).picture.as_deref(),
+            Some(""),
+            "until then the removal is what publishes"
+        );
+    }
+
+    #[test]
+    fn a_removal_staged_after_a_new_photo_gets_a_newer_clear_version() {
+        let storage = storage();
+        storage
+            .stage_own_profile_picture(&hex(), &staged(b"a", b"a"), 1_000)
+            .unwrap();
+        storage.stage_own_picture_removal(&hex(), 1_001).unwrap();
+        storage
+            .stage_own_profile_picture(&hex(), &staged(b"b", b"b"), 1_002)
+            .unwrap();
+        storage.stage_own_picture_removal(&hex(), 1_003).unwrap();
+
+        let snapshot = storage
+            .pending_profile_sync(&hex())
+            .unwrap()
+            .expect("pending");
+        assert_eq!(
+            (snapshot.local_version, snapshot.edits.clear_version),
+            (4, 4)
+        );
+        assert!(!snapshot.picture_staged);
+    }
+
+    #[test]
+    fn the_resigned_mark_holds_only_its_version_and_every_staging_resets_it() {
+        type Stage = fn(&CircleStorage);
+        let storage = storage();
+        let resigned = |storage: &CircleStorage| {
+            storage
+                .pending_profile_sync(&hex())
+                .unwrap()
+                .expect("pending")
+                .edits
+                .resigned
+        };
+        storage
+            .stage_own_profile_edits(&hex(), &name_edit("Once"), 1_000)
+            .unwrap();
+        storage.mark_profile_resigned(&hex(), 0).unwrap();
+        assert!(!resigned(&storage), "a superseded version marks nothing");
+
+        let stagings: [(&str, Stage); 3] = [
+            ("a name", |s| {
+                s.stage_own_profile_edits(&hex(), &name_edit("Again"), 1_001)
+                    .map(drop)
+                    .unwrap();
+            }),
+            ("a photo", |s| {
+                s.stage_own_profile_picture(&hex(), &staged(b"p", b"p"), 1_001)
+                    .unwrap();
+            }),
+            ("a removal", |s| {
+                s.stage_own_picture_removal(&hex(), 1_001)
+                    .map(drop)
+                    .unwrap();
+            }),
+        ];
+        for (what, stage) in stagings {
+            let version = version_of(&storage, &hex());
+            storage.mark_profile_resigned(&hex(), version).unwrap();
+            assert!(
+                resigned(&storage),
+                "the mark holds for {what}'s predecessor"
+            );
+            stage(&storage);
+            assert!(!resigned(&storage), "staging {what} must reset the mark");
+        }
+    }
+
+    #[test]
+    fn a_fetch_while_a_removal_is_pending_does_not_bring_the_picture_back() {
+        let storage = storage();
+        own_row_with_picture(&storage, &hex(), "https://blossom.example/abc");
+        storage.stage_own_picture_removal(&hex(), 1_000).unwrap();
+
+        let fetched = CachedProfile {
+            pubkey_hex: hex(),
+            metadata: meta_with_picture("Other Client", "https://blossom.example/abc"),
+            state: ProfileState::Known,
+            event_created_at: 5_000,
+            fetched_at: 5_000,
+        };
+        assert!(storage.upsert_profile_if_newer(&fetched).unwrap());
+
+        let stored = storage.get_profile(&hex()).unwrap().unwrap();
+        assert_eq!(stored.metadata.picture(), None, "the removal is re-applied");
+        assert_eq!(
+            stored.metadata.display_name(),
+            Some("Other Client"),
+            "everything else is the relay's"
+        );
+        assert_eq!(stored.event_created_at, 5_000);
+    }
+
+    // ---- what clears a pending removal -------------------------------------
+
+    #[test]
+    fn a_commit_at_or_after_the_removal_clears_it_and_an_older_one_does_not() {
+        let pool = relays(&["a", "b"]);
+        for complete in [true, false] {
+            // The commit's version is the removal's: the removal went out.
+            let storage = storage();
+            let keys = Keys::generate();
+            let hex = keys.public_key().to_hex();
+            own_row_with_picture(&storage, &hex, "https://blossom.example/a");
+            storage.stage_own_picture_removal(&hex, 1_000).unwrap();
+            let event = kind0_at(&keys, &meta("Me"), 1);
+            commit_new(&storage, &keys, 1, &event, &pool[..1], &pool, complete).unwrap();
+            let snapshot = storage
+                .pending_profile_sync(&hex)
+                .unwrap()
+                .expect("partial");
+            assert!(
+                !snapshot.edits.clear_picture,
+                "a relay took the removal (complete={complete}); it must not be sent again"
+            );
+
+            // A text edit before the removal: its commit predates the removal.
+            let storage = self::storage();
+            storage
+                .stage_own_profile_edits(&hex, &name_edit("Me"), 1_000)
+                .unwrap();
+            storage.stage_own_picture_removal(&hex, 1_001).unwrap();
+            commit_new(&storage, &keys, 1, &event, &pool[..1], &pool, complete).unwrap();
+            let snapshot = storage
+                .pending_profile_sync(&hex)
+                .unwrap()
+                .expect("pending");
+            assert!(
+                snapshot.edits.clear_picture,
+                "a publish of version 1 must not retire the removal staged as version 2 \
+                 (complete={complete})"
+            );
+            assert_eq!(snapshot.edits.clear_version, 2);
+
+            // A text edit after the removal carries the removal: its commit is
+            // at or after it.
+            let storage = self::storage();
+            storage.stage_own_picture_removal(&hex, 1_000).unwrap();
+            storage
+                .stage_own_profile_edits(&hex, &name_edit("Me"), 1_001)
+                .unwrap();
+            commit_new(&storage, &keys, 2, &event, &pool[..1], &pool, complete).unwrap();
+            let snapshot = storage
+                .pending_profile_sync(&hex)
+                .unwrap()
+                .expect("pending");
+            assert!(!snapshot.edits.clear_picture, "complete={complete}");
+        }
+    }
+
+    /// Remove photo A, pick B, and publish B to one relay of two.
+    fn a_new_photo_published_to_one_relay_of_two() -> (CircleStorage, Keys, String) {
+        let storage = storage();
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let pool = relays(&["a", "b"]);
+        own_row_with_picture(&storage, &hex, "https://blossom.example/a");
+        storage.stage_own_picture_removal(&hex, 1_000).unwrap();
+        let b = staged(b"b-canonical", b"b-thumb");
+        storage.stage_own_profile_picture(&hex, &b, 1_001).unwrap();
+        let url = "https://blossom.example/b";
+        let merged = meta_with_picture("Me", url);
+        let event = kind0_at(&keys, &merged, 1);
+        storage
+            .commit_profile_sync(&ProfileSyncCommit {
+                pubkey: &keys.public_key(),
+                version: 2,
+                merged: &merged,
+                event: &event,
+                uploaded_picture: Some((url, b.sha256().as_slice())),
+                covered: &pool[..1],
+                pool: &pool,
+                complete: true,
+                now: NOW,
+            })
+            .unwrap();
+        (storage, keys, hex)
+    }
+
+    #[test]
+    fn a_partially_published_new_photo_clears_the_removal_and_keeps_its_url_on_the_row() {
+        let (storage, _keys, hex) = a_new_photo_published_to_one_relay_of_two();
+
+        let snapshot = storage
+            .pending_profile_sync(&hex)
+            .unwrap()
+            .expect("partial");
+        assert!(
+            !snapshot.edits.clear_picture,
+            "B went out; the removal of A is behind it"
+        );
+        assert_eq!(
+            storage.get_profile_picture_url(&hex).unwrap().as_deref(),
+            Some("https://blossom.example/b")
+        );
+        assert_eq!(
+            &*storage.get_profile_picture(&hex).unwrap().unwrap(),
+            b"b-canonical"
+        );
+        assert_eq!(
+            storage
+                .get_profile(&hex)
+                .unwrap()
+                .unwrap()
+                .metadata
+                .picture(),
+            Some("https://blossom.example/b"),
+            "a removal still pending would strip B from the row on every re-apply"
+        );
+    }
+
+    #[test]
+    fn a_later_upload_failure_never_publishes_an_empty_picture_after_a_photo_url_was_published() {
+        let (storage, _keys, hex) = a_new_photo_published_to_one_relay_of_two();
+
+        // The next pass finds Blossom down: it publishes the text alone.
+        let snapshot = storage
+            .pending_profile_sync(&hex)
+            .unwrap()
+            .expect("partial");
+        assert_eq!(
+            snapshot.edits.to_edits(None).picture,
+            None,
+            "an empty picture would remove B from every relay"
+        );
+    }
+
+    #[test]
+    fn an_upload_failure_after_a_removal_publishes_the_removal_not_the_old_picture() {
+        let storage = storage();
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let pool = relays(&["a", "b"]);
+        own_row_with_picture(&storage, &hex, "https://blossom.example/a");
+        storage
+            .upsert_profile_picture(
+                &hex,
+                "https://blossom.example/a",
+                &[0x11; 32],
+                b"a",
+                b"a",
+                1,
+            )
+            .unwrap();
+        storage.stage_own_picture_removal(&hex, 1_000).unwrap();
+        storage
+            .stage_own_profile_picture(&hex, &staged(b"b", b"b"), 1_001)
+            .unwrap();
+
+        // Blossom is down for B: the pass publishes with no uploaded URL.
+        let edits = storage.pending_profile_sync(&hex).unwrap().unwrap().edits;
+        assert_eq!(
+            edits.to_edits(None).picture.as_deref(),
+            Some(""),
+            "'untouched' would leave A on every relay the pass reaches"
+        );
+        let event = kind0_at(&keys, &meta("Me"), 1);
+        commit_new(&storage, &keys, 2, &event, &pool[..1], &pool, false).unwrap();
+
+        let snapshot = storage
+            .pending_profile_sync(&hex)
+            .unwrap()
+            .expect("B is owed");
+        assert!(snapshot.picture_staged, "B is still waiting for its upload");
+        assert!(!snapshot.edits.clear_picture, "A's removal went out");
+        assert_eq!(
+            snapshot.edits.to_edits(None).picture,
+            None,
+            "and a second failure must not publish it again as an empty picture"
+        );
+        assert_eq!(
+            debt_rows(&storage),
+            0,
+            "a text-only publish is no complete event"
+        );
+        assert_eq!(
+            storage
+                .get_profile(&hex)
+                .unwrap()
+                .unwrap()
+                .metadata
+                .picture(),
+            None
+        );
+        assert_eq!(
+            &*storage.get_profile_picture(&hex).unwrap().unwrap(),
+            b"b",
+            "B's staged bytes are kept"
+        );
+    }
+
+    #[test]
+    fn a_commit_that_raced_a_removal_never_puts_the_removed_picture_back() {
+        // Photo A is uploaded and its publish is in flight when the user
+        // removes it. The commit that follows must neither re-create the
+        // deleted bytes nor retire the newer removal.
+        let storage = storage();
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let pool = relays(&["a", "b"]);
+        let a = staged(b"a-canonical", b"a-thumb");
+        storage.stage_own_profile_picture(&hex, &a, 1_000).unwrap();
+        storage.stage_own_picture_removal(&hex, 1_001).unwrap();
+        let url = "https://blossom.example/a";
+        let merged = meta_with_picture("Me", url);
+        let event = kind0_at(&keys, &merged, 1);
+
+        storage
+            .commit_profile_sync(&ProfileSyncCommit {
+                pubkey: &keys.public_key(),
+                version: 1,
+                merged: &merged,
+                event: &event,
+                uploaded_picture: Some((url, a.sha256().as_slice())),
+                covered: &pool,
+                pool: &pool,
+                complete: true,
+                now: NOW,
+            })
+            .unwrap();
+
+        assert!(
+            storage.get_profile_picture(&hex).unwrap().is_none(),
+            "the commit resurrected the bytes the user removed"
+        );
+        let snapshot = storage
+            .pending_profile_sync(&hex)
+            .unwrap()
+            .expect("removal owed");
+        assert!(
+            snapshot.edits.clear_picture,
+            "the newer removal is still owed"
+        );
+        assert_eq!(
+            storage
+                .get_profile(&hex)
+                .unwrap()
+                .unwrap()
+                .metadata
+                .picture(),
+            None,
+            "the row keeps the removal over the event that carried the picture"
+        );
+    }
+
+    // ---- the owed event ----------------------------------------------------
+
+    #[test]
+    fn every_staging_discards_the_owed_event() {
+        // A re-send of a superseded event could resurrect an old profile on a
+        // relay that missed the later one.
+        let pool = relays(&["a", "b"]);
+        for op in ["edit", "picture", "removal", "reset"] {
+            let storage = storage();
+            let keys = Keys::generate();
+            let hex = keys.public_key().to_hex();
+            let (version, _) = owe_event(&storage, &keys, &pool);
+            assert!(
+                storage
+                    .profile_publish_debt(&keys.public_key(), version)
+                    .unwrap()
+                    .is_some(),
+                "anti-vacuity: the event is owed before `{op}`"
+            );
+
+            match op {
+                "edit" => {
+                    storage
+                        .stage_own_profile_edits(&hex, &name_edit("Later"), 2_000)
+                        .unwrap();
+                }
+                "picture" => storage
+                    .stage_own_profile_picture(&hex, &staged(b"c", b"t"), 2_000)
+                    .unwrap(),
+                "removal" => {
+                    storage.stage_own_picture_removal(&hex, 2_000).unwrap();
+                }
+                _ => storage.clear_profile_sync_state(&hex).unwrap(),
+            }
+
+            assert_eq!(debt_rows(&storage), 0, "`{op}` left the owed event behind");
+            assert!(storage
+                .profile_publish_debt(&keys.public_key(), version)
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn the_owed_event_is_written_only_with_an_acknowledgement_and_only_for_the_current_version() {
+        let pool = relays(&["a", "b"]);
+
+        // Nothing staged, nothing recorded: no row from a save alone.
+        let storage1 = storage();
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        storage1
+            .stage_own_profile_edits(&hex, &name_edit("Owed"), 1_000)
+            .unwrap();
+        assert!(storage1
+            .profile_publish_debt(&keys.public_key(), 1)
+            .unwrap()
+            .is_none());
+
+        // A text-only publish (the upload failed) is not a complete event.
+        let event = kind0_at(&keys, &meta("Owed"), 1);
+        commit_new(&storage1, &keys, 1, &event, &pool[..1], &pool, false).unwrap();
+        assert_eq!(debt_rows(&storage1), 0);
+        assert_eq!(
+            raw(&storage1, &hex).unwrap().2,
+            1,
+            "but a relay did take it"
+        );
+
+        // A complete event for a version a later save has passed.
+        let storage2 = self::storage();
+        storage2
+            .stage_own_profile_edits(&hex, &name_edit("Owed"), 1_000)
+            .unwrap();
+        storage2
+            .stage_own_profile_edits(&hex, &name_edit("Owed v2"), 1_001)
+            .unwrap();
+        commit_new(&storage2, &keys, 1, &event, &pool[..1], &pool, true).unwrap();
+        assert_eq!(
+            debt_rows(&storage2),
+            0,
+            "the event no longer carries every pending item"
+        );
+
+        // A complete event every relay took owes nothing.
+        let storage3 = self::storage();
+        storage3
+            .stage_own_profile_edits(&hex, &name_edit("Owed"), 1_000)
+            .unwrap();
+        commit_new(&storage3, &keys, 1, &event, &pool, &pool, true).unwrap();
+        assert_eq!(debt_rows(&storage3), 0);
+
+        // A complete event some relay took is owed to the rest, for its version.
+        let storage4 = self::storage();
+        let (version, owed) = owe_event(&storage4, &keys, &pool);
+        let debt = storage4
+            .profile_publish_debt(&keys.public_key(), version)
+            .unwrap()
+            .expect("a complete event one relay of two took is owed");
+        assert_eq!(debt.version, version);
+        assert_eq!(debt.event, owed);
+        assert_eq!(debt.covered, pool[..1].to_vec());
+        assert!(storage4
+            .profile_publish_debt(&keys.public_key(), version + 1)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn a_partial_commit_keeps_the_edit_pending_and_records_its_coverage() {
+        let storage = storage();
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let pool = relays(&["a", "b"]);
+        let (version, _) = owe_event(&storage, &keys, &pool);
+
+        let state = storage.profile_pending_state(&hex, NOW).unwrap();
+        assert!(state.pending, "a partial publish is not synced");
+        assert!(!state.retry_due, "and the ladder paces the re-send");
+        assert_eq!(
+            raw(&storage, &hex).unwrap(),
+            (version, 0, version, 1, NOW + PROFILE_SYNC_BACKOFF_SECS[0])
+        );
+        assert_eq!(
+            storage.pending_profile_sync(&hex).unwrap().unwrap().edits,
+            name_edit("Owed"),
+            "the pending set survives so a fresh signing would carry it"
+        );
+        assert_eq!(debt_rows(&storage), 1);
+        assert_eq!(
+            storage
+                .profile_publish_debt(&keys.public_key(), version)
+                .unwrap()
+                .expect("owed to the relay that did not take it")
+                .covered,
+            pool[..1].to_vec(),
+            "the relay that acknowledged is the one recorded as serving it"
+        );
+    }
+
+    #[test]
+    fn a_full_commit_clears_the_outbox_and_deletes_the_debt() {
+        let storage = storage();
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let pool = relays(&["a", "b"]);
+        let (version, event) = owe_event(&storage, &keys, &pool);
+        assert_eq!(debt_rows(&storage), 1);
+
+        let row = commit_new(&storage, &keys, version, &event, &pool, &pool, true).unwrap();
+
+        assert!(storage.pending_profile_sync(&hex).unwrap().is_none());
+        assert_eq!(debt_rows(&storage), 0);
+        assert_eq!(
+            raw(&storage, &hex).unwrap(),
+            (version, version, version, 0, 0)
+        );
+        assert_eq!(row.event_created_at, ts(&event));
+        assert_eq!(
+            storage
+                .last_published_event(0, "", &keys.public_key())
+                .unwrap()
+                .map(|record| record.event_id),
+            Some(event.id)
+        );
+    }
+
+    #[test]
+    fn a_commit_returns_the_row_it_stored() {
+        // The sanitizer rewrites a name on the way into the row, and the row
+        // the UI renders is the one stored.
+        let storage = storage();
+        let keys = Keys::generate();
+        let pool = relays(&["a"]);
+        let merged = meta("Ada\u{202E}  Lovelace");
+        let event = kind0_at(&keys, &merged, 1);
+        let row = storage
+            .commit_profile_sync(&ProfileSyncCommit {
+                pubkey: &keys.public_key(),
+                version: 1,
+                merged: &merged,
+                event: &event,
+                uploaded_picture: None,
+                covered: &pool,
+                pool: &pool,
+                complete: true,
+                now: NOW,
+            })
+            .unwrap();
+        assert_eq!(row.metadata.display_name(), Some("Ada Lovelace"));
+        let stored = storage
+            .get_profile(&keys.public_key().to_hex())
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.metadata, row.metadata);
+        assert_eq!(row.event_created_at, ts(&event));
+        assert_eq!(
+            (stored.event_created_at, stored.fetched_at),
+            (row.event_created_at, row.fetched_at)
+        );
+    }
+
+    #[test]
+    fn coverage_completes_only_when_every_pool_relay_is_covered() {
+        let storage = storage();
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let pool = relays(&["a", "b", "c"]);
+        let (version, event) = owe_event(&storage, &keys, &pool);
+
+        storage
+            .commit_profile_coverage(&hex, version, &pool[1..2], &pool, 2_000)
+            .unwrap();
+
+        let debt = storage
+            .profile_publish_debt(&keys.public_key(), version)
+            .unwrap()
+            .expect("one relay is still owed");
+        assert_eq!(sorted(debt.covered), sorted(pool[..2].to_vec()));
+        assert_eq!(debt.event, event, "the owed event is never re-signed");
+        assert!(storage.profile_pending_state(&hex, 2_000).unwrap().pending);
+        let (_, synced, _, attempts, next_retry_at) = raw(&storage, &hex).unwrap();
+        assert_eq!(synced, 0);
+        assert_eq!(
+            attempts, 2,
+            "a pass that leaves a relay owed advances the ladder"
+        );
+        assert_eq!(next_retry_at, 2_000 + PROFILE_SYNC_BACKOFF_SECS[1]);
+
+        storage
+            .commit_profile_coverage(&hex, version, &pool[2..], &pool, 3_000)
+            .unwrap();
+
+        assert!(storage.pending_profile_sync(&hex).unwrap().is_none());
+        assert_eq!(debt_rows(&storage), 0);
+        assert_eq!(
+            raw(&storage, &hex).unwrap(),
+            (version, version, version, 0, 0)
+        );
+        assert!(!storage.profile_pending_state(&hex, 3_000).unwrap().pending);
+    }
+
+    #[test]
+    fn coverage_for_a_superseded_version_changes_nothing() {
+        let pool = relays(&["a", "b"]);
+
+        // A save after the debt was written supersedes it.
+        let storage = storage();
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let (version, _) = owe_event(&storage, &keys, &pool);
+        storage
+            .stage_own_profile_edits(&hex, &name_edit("Later"), 1_500)
+            .unwrap();
+        let before = raw(&storage, &hex).unwrap();
+        storage
+            .commit_profile_coverage(&hex, version, &pool[1..], &pool, 2_000)
+            .unwrap();
+        assert_eq!(raw(&storage, &hex).unwrap(), before);
+        assert_eq!(
+            storage.pending_profile_sync(&hex).unwrap().unwrap().edits,
+            name_edit("Later")
+        );
+
+        // A debt discarded for a redirect cannot be completed by a stale pass.
+        let storage = self::storage();
+        let (version, _) = owe_event(&storage, &keys, &pool);
+        storage.discard_profile_publish_debt(&hex, version).unwrap();
+        assert_eq!(debt_rows(&storage), 0);
+        let before = raw(&storage, &hex).unwrap();
+        storage
+            .commit_profile_coverage(&hex, version, &pool[1..], &pool, 2_000)
+            .unwrap();
+        assert_eq!(raw(&storage, &hex).unwrap(), before);
+        assert!(storage.profile_pending_state(&hex, 2_000).unwrap().pending);
+    }
+
+    #[test]
+    fn a_pool_that_shrank_inside_the_covered_set_completes_the_debt() {
+        // A relay that left the pool (retired, removed by the user) ends its
+        // debt with no network.
+        let storage = storage();
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let pool = relays(&["a", "b"]);
+        let (version, _) = owe_event(&storage, &keys, &pool);
+
+        storage
+            .commit_profile_coverage(&hex, version, &[], &pool[..1], 2_000)
+            .unwrap();
+
+        assert!(storage.pending_profile_sync(&hex).unwrap().is_none());
+        assert_eq!(debt_rows(&storage), 0);
+        assert_eq!(
+            raw(&storage, &hex).unwrap(),
+            (version, version, version, 0, 0)
+        );
+    }
+
+    #[test]
+    fn an_owed_event_older_than_the_cached_row_is_superseded() {
+        // Another client's newer profile was cached after our event went out:
+        // re-sending ours would be a stale event onto a relay that moved on.
+        let storage = storage();
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let pool = relays(&["a", "b"]);
+        let (version, _) = owe_event(&storage, &keys, &pool);
+        assert!(
+            storage
+                .profile_publish_debt(&keys.public_key(), version)
+                .unwrap()
+                .is_some(),
+            "anti-vacuity: the event is loadable while it is the newest"
+        );
+
+        assert!(storage
+            .upsert_profile_if_newer(&CachedProfile {
+                pubkey_hex: hex,
+                metadata: meta("Other Client"),
+                state: ProfileState::Known,
+                event_created_at: i64::try_from(FAR + 50).unwrap(),
+                fetched_at: 3_000,
+            })
+            .unwrap());
+
+        assert!(storage
+            .profile_publish_debt(&keys.public_key(), version)
+            .unwrap()
+            .is_none());
+        assert_eq!(debt_rows(&storage), 0, "the superseded row is discarded");
+    }
+
+    #[tokio::test]
+    async fn an_owed_event_that_does_not_verify_is_discarded_and_its_line_names_nothing() {
+        let pool = relays(&["a", "b"]);
+        for corrupt in ["tampered", "not json"] {
+            let storage = storage();
+            let keys = Keys::generate();
+            let (version, event) = owe_event(&storage, &keys, &pool);
+            let stored = if corrupt == "tampered" {
+                event.as_json().replace("Owed", "Tampered")
+            } else {
+                "{not json".to_string()
+            };
+            assert_ne!(stored, event.as_json());
+            storage
+                .conn()
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE profile_publish_debt SET event_json = ?1",
+                    params![stored],
+                )
+                .unwrap();
+
+            let lines = crate::test_log::capture_log_lines(async {
+                assert!(
+                    storage
+                        .profile_publish_debt(&keys.public_key(), version)
+                        .unwrap()
+                        .is_none(),
+                    "{corrupt}: an event that does not verify must not be sent"
+                );
+            })
+            .await;
+
+            assert_eq!(debt_rows(&storage), 0, "{corrupt}: the row is discarded");
+            assert!(
+                !lines.is_empty(),
+                "{corrupt}: the discard has to have spoken for its silence to mean anything"
+            );
+            let own_hex = keys.public_key().to_hex();
+            let id_hex = event.id.to_hex();
+            let npub = keys.public_key().to_bech32().unwrap();
+            let needles = [
+                own_hex.as_str(),
+                &own_hex[..8],
+                id_hex.as_str(),
+                &id_hex[..8],
+                npub.as_str(),
+                "wss://",
+                "Tampered",
+            ];
+            for line in &lines {
+                for needle in needles {
+                    assert!(
+                        !line.to_lowercase().contains(&needle.to_lowercase()),
+                        "{corrupt}: a log line named `{needle}`: {line}"
+                    );
+                }
+            }
+        }
+    }
+
+    // ---- the upload's re-stamp ---------------------------------------------
+
+    #[test]
+    fn a_restamp_never_puts_an_old_url_on_newly_staged_bytes() {
+        let storage = storage();
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let pool = relays(&["a"]);
+        let a = staged(b"a-canonical", b"a-thumb");
+        let b = staged(b"b-canonical", b"b-thumb");
+        storage.stage_own_profile_picture(&hex, &a, 1_000).unwrap();
+        // The user picks B while A's publish is in flight.
+        storage.stage_own_profile_picture(&hex, &b, 1_001).unwrap();
+
+        let url_a = "https://blossom.example/a";
+        let merged = meta_with_picture("Me", url_a);
+        let event = kind0_at(&keys, &merged, 1);
+        storage
+            .commit_profile_sync(&ProfileSyncCommit {
+                pubkey: &keys.public_key(),
+                version: 1,
+                merged: &merged,
+                event: &event,
+                uploaded_picture: Some((url_a, a.sha256().as_slice())),
+                covered: &pool,
+                pool: &pool,
+                complete: true,
+                now: NOW,
+            })
+            .unwrap();
+
+        assert_eq!(
+            storage.get_profile_picture_url(&hex).unwrap().as_deref(),
+            Some(""),
+            "B's bytes were stamped with A's URL, so B would read as published \
+             and never be uploaded"
+        );
+        assert_eq!(
+            &*storage.get_profile_picture(&hex).unwrap().unwrap(),
+            b"b-canonical"
+        );
+        assert!(
+            storage.profile_picture_is_staged(&hex).unwrap(),
+            "B is still waiting for its upload"
+        );
+
+        // Anti-vacuity: the commit for the bytes that ARE staged stamps them.
+        let url_b = "https://blossom.example/b";
+        let merged = meta_with_picture("Me", url_b);
+        let event = kind0_at(&keys, &merged, 2);
+        storage
+            .commit_profile_sync(&ProfileSyncCommit {
+                pubkey: &keys.public_key(),
+                version: 2,
+                merged: &merged,
+                event: &event,
+                uploaded_picture: Some((url_b, b.sha256().as_slice())),
+                covered: &pool,
+                pool: &pool,
+                complete: true,
+                now: NOW,
+            })
+            .unwrap();
+        assert_eq!(
+            storage.get_profile_picture_url(&hex).unwrap().as_deref(),
+            Some(url_b)
+        );
+        assert!(!storage.profile_picture_is_staged(&hex).unwrap());
+    }
+
+    // ---- settling ------------------------------------------------------------
+
+    #[test]
+    fn settling_an_unpublishable_removal_leaves_nothing_pending() {
+        let storage = storage();
+        storage
+            .stage_own_profile_picture(&hex(), &staged(b"c", b"t"), 1_000)
+            .unwrap();
+        storage.stage_own_picture_removal(&hex(), 1_001).unwrap();
+        storage.record_profile_sync_attempt(&hex(), 1_002).unwrap();
+        let version = version_of(&storage, &hex());
+
+        storage.settle_profile_sync(&hex(), version).unwrap();
+
+        assert!(storage.pending_profile_sync(&hex()).unwrap().is_none());
+        assert_eq!(
+            raw(&storage, &hex()).unwrap(),
+            (version, version, version, 0, 0),
+            "levelled, and the ladder reset"
+        );
+        // The pending set is empty: nothing of the removal rides the next save.
+        storage
+            .stage_own_profile_edits(&hex(), &name_edit("Alice"), 2_000)
+            .unwrap();
+        let next = storage.pending_profile_sync(&hex()).unwrap().unwrap();
+        assert!(!next.edits.clear_picture);
+        assert_eq!(next.edits.display_name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn settling_a_version_a_later_save_has_passed_changes_nothing() {
+        let storage = storage();
+        storage.stage_own_picture_removal(&hex(), 1_000).unwrap();
+        let version = version_of(&storage, &hex());
+        storage
+            .stage_own_profile_edits(&hex(), &name_edit("Alice"), 1_001)
+            .unwrap();
+        let before = raw(&storage, &hex()).unwrap();
+
+        storage.settle_profile_sync(&hex(), version).unwrap();
+
+        assert_eq!(raw(&storage, &hex()).unwrap(), before);
+        assert!(storage.pending_profile_sync(&hex()).unwrap().is_some());
+    }
+
+    #[test]
+    fn settling_changes_nothing_while_a_photo_is_staged() {
+        let storage = storage();
+        storage
+            .stage_own_profile_picture(&hex(), &staged(b"first", b"t1"), 1_000)
+            .unwrap();
+        storage.stage_own_picture_removal(&hex(), 1_001).unwrap();
+        storage
+            .stage_own_profile_picture(&hex(), &staged(b"second", b"t2"), 1_002)
+            .unwrap();
+        storage.record_profile_sync_attempt(&hex(), 1_003).unwrap();
+        let version = version_of(&storage, &hex());
+        let before = (
+            raw(&storage, &hex()).unwrap(),
+            storage.pending_profile_sync(&hex()).unwrap(),
+        );
+
+        storage.settle_profile_sync(&hex(), version).unwrap();
+
+        assert_eq!(
+            (
+                raw(&storage, &hex()).unwrap(),
+                storage.pending_profile_sync(&hex()).unwrap(),
+            ),
+            before,
+            "the photo saved after the removal is still owed"
+        );
+        assert!(before
+            .1
+            .is_some_and(|s| s.picture_staged && s.edits.clear_picture));
+        assert_eq!(
+            storage
+                .get_profile_picture(&hex())
+                .unwrap()
+                .as_deref()
+                .map(Vec::as_slice),
+            Some(&b"second"[..])
+        );
+    }
+
+    // ---- retry pacing --------------------------------------------------------
+
+    #[test]
+    fn next_retry_in_secs_is_relative_and_absent_when_due_or_clean() {
+        let storage = storage();
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+
+        // No outbox row: nothing pending, nothing to wait for.
+        let state = storage.profile_pending_state(&hex, 1_000).unwrap();
+        assert_eq!(
+            (state.pending, state.retry_due, state.next_retry_in_secs),
+            (false, true, None)
+        );
+
+        // Pending and never tried: due now, so no wait is reported.
+        storage
+            .stage_own_profile_edits(&hex, &name_edit("Alice"), 1_000)
+            .unwrap();
+        let state = storage.profile_pending_state(&hex, 1_000).unwrap();
+        assert_eq!(
+            (state.pending, state.retry_due, state.next_retry_in_secs),
+            (true, true, None)
+        );
+
+        // Pending and backing off: the wait is a duration, counting down.
+        storage.record_profile_sync_attempt(&hex, 1_000).unwrap();
+        for (now, left) in [(1_000, 30), (1_010, 20), (1_029, 1)] {
+            let state = storage.profile_pending_state(&hex, now).unwrap();
+            assert!(state.pending && !state.retry_due);
+            assert_eq!(state.next_retry_in_secs, Some(left), "now={now}");
+        }
+        for now in [1_030, 1_031] {
+            let state = storage.profile_pending_state(&hex, now).unwrap();
+            assert!(state.retry_due);
+            assert_eq!(state.next_retry_in_secs, None, "due at now={now}");
+        }
+
+        // The longest wait is the longest rung, however often it has failed.
+        let last = *PROFILE_SYNC_BACKOFF_SECS.last().unwrap();
+        for _ in 0..PROFILE_SYNC_BACKOFF_SECS.len() + 2 {
+            storage.record_profile_sync_attempt(&hex, 5_000).unwrap();
+        }
+        let waiting = storage
+            .profile_pending_state(&hex, 5_000)
+            .unwrap()
+            .next_retry_in_secs;
+        assert_eq!(waiting, Some(u32::try_from(last).unwrap()));
+
+        // Clean: nothing pending, so nothing to wait for.
+        let event = kind0_at(&keys, &meta("Alice"), 1);
+        let pool = relays(&["a"]);
+        commit_new(&storage, &keys, 1, &event, &pool, &pool, true).unwrap();
+        let state = storage.profile_pending_state(&hex, 5_000).unwrap();
+        assert_eq!((state.pending, state.next_retry_in_secs), (false, None));
+    }
+
+    #[test]
+    fn a_clock_moved_back_past_the_longest_rung_makes_the_retry_due() {
+        // `next_retry_at` was dated on a clock that has since been set back.
+        // Waiting for it to catch up could be hours; one retry now is the
+        // failure to prefer, and it re-dates the ladder from the new clock.
+        let storage = storage();
+        storage
+            .stage_own_profile_edits(&hex(), &name_edit("Alice"), 100_000)
+            .unwrap();
+        storage
+            .record_profile_sync_attempt(&hex(), 100_000)
+            .unwrap();
+        let next = 100_000 + PROFILE_SYNC_BACKOFF_SECS[0];
+        let last = *PROFILE_SYNC_BACKOFF_SECS.last().unwrap();
+
+        // Set back by a little: still waiting, and the wait is what remains.
+        let state = storage.profile_pending_state(&hex(), 99_900).unwrap();
+        assert!(state.pending && !state.retry_due);
+        assert_eq!(state.next_retry_in_secs, Some(130));
+
+        // A wait of exactly the longest rung is legitimate; one second more is
+        // a clock that moved.
+        let state = storage.profile_pending_state(&hex(), next - last).unwrap();
+        assert!(!state.retry_due);
+        assert_eq!(state.next_retry_in_secs, Some(u32::try_from(last).unwrap()));
+        let state = storage
+            .profile_pending_state(&hex(), next - last - 1)
+            .unwrap();
+        assert!(state.pending && state.retry_due);
+        assert_eq!(state.next_retry_in_secs, None);
     }
 }

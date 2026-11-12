@@ -924,9 +924,9 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// rows.
   ///
   /// A blank some pool relay did not acknowledge is not a finished deletion:
-  /// that relay still serves the profile. The blank is left pending, partly
-  /// published, with the retry ladder advanced, for
-  /// [`Self::sync_my_profile`] to publish a blank to the whole pool again.
+  /// that relay still serves the profile. The identical blank is left owed
+  /// to the relays that did not take it, with the retry ladder advanced, for
+  /// [`Self::sync_my_profile`] to re-send to them alone.
   ///
   /// # Errors
   ///
@@ -1291,8 +1291,8 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required String giftWrapEventJson,
   });
 
-  /// Whether the own profile has unpublished work, how far it got, and
-  /// whether the persisted backoff permits another attempt.
+  /// Whether the own profile has unpublished work, whether the persisted
+  /// backoff permits another attempt, and if not, how long until it does.
   ///
   /// The read a resume trigger consults before calling
   /// [`Self::sync_my_profile`], so a clean install never dials a relay just
@@ -1434,36 +1434,19 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required String senderPubkey,
   });
 
-  /// Removes the local user's OWN profile picture (retraction republish).
+  /// Removes the local user's OWN profile picture, LOCALLY, and queues the
+  /// removal for publication, returning the row the UI should render.
   ///
-  /// A **no-op unless a profile was published** (`has_published_profile`) — a
-  /// retraction must never mint a first public event for a pubkey that never
-  /// published. Otherwise it clears the `picture` field on the freshest kind-0
-  /// — the relays' copy, or the cached one when that is newer or no relay
-  /// served one — and republishes. With neither a relay copy nor a dated
-  /// cached one it publishes nothing and fails: an empty profile is never
-  /// published over one this device cannot see.
-  ///
-  /// Either way, a photo still QUEUED for upload is cancelled: it was going
-  /// to publish the picture the user is removing. One saved while the
-  /// removal is running is kept, and stays queued. A queued NAME edit has
-  /// nothing to do with the photo and stays queued — unless the removal is
-  /// built on the cached row, which already carries it: the name is then
-  /// published with the removal and recorded as published.
-  ///
-  /// A removal some pool relay did not acknowledge is not finished: that
-  /// relay still serves the photo. It is left pending, partly published,
-  /// with the retry ladder advanced, for [`Self::sync_my_profile`] to
-  /// republish to the whole pool.
+  /// One transaction: the photo's bytes (published and staged alike) are
+  /// dropped, the row loses its `picture`, and the removal is staged with the
+  /// retry ladder reset. No secret, no lock, no relay: [`Self::sync_my_profile`]
+  /// publishes it, and decides under its lock whether there is anything
+  /// public to remove it from — a removal never mints a first public event.
   ///
   /// # Errors
   ///
-  /// Returns a redacted error string on a secret that is not this account's
-  /// identity, when no copy of the profile could be read to build on, or on
-  /// relay or database failure.
-  Future<ProfileMetadataFfi> removeMyProfilePicture({
-    required List<int> identitySecretBytes,
-  });
+  /// Returns a redacted error string on database failure.
+  Future<ProfileMetadataFfi> removeMyProfilePicture();
 
   /// Removes a relay from one category.
   ///
@@ -4626,23 +4609,25 @@ class ProfileMetadataFfi {
 /// Three independent facts rather than one enum: how they render is a UI
 /// concern, and collapsing them here would decide it in Rust.
 class ProfilePendingStateFfi {
-  /// A save has not been fully acknowledged yet.
+  /// A save is not yet served by every pool relay.
   final bool pending;
-
-  /// Pending, but already accepted by at least one relay for this version.
-  final bool partial;
 
   /// The persisted retry ladder permits another attempt now.
   final bool retryDue;
 
+  /// Seconds until the next attempt is due: `Some` only when pending and
+  /// not due. Relative, never an instant (Security Rule 15).
+  final int? nextRetryInSecs;
+
   const ProfilePendingStateFfi({
     required this.pending,
-    required this.partial,
     required this.retryDue,
+    this.nextRetryInSecs,
   });
 
   @override
-  int get hashCode => pending.hashCode ^ partial.hashCode ^ retryDue.hashCode;
+  int get hashCode =>
+      pending.hashCode ^ retryDue.hashCode ^ nextRetryInSecs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -4650,8 +4635,8 @@ class ProfilePendingStateFfi {
       other is ProfilePendingStateFfi &&
           runtimeType == other.runtimeType &&
           pending == other.pending &&
-          partial == other.partial &&
-          retryDue == other.retryDue;
+          retryDue == other.retryDue &&
+          nextRetryInSecs == other.nextRetryInSecs;
 }
 
 /// A reference to a stored profile picture (no bytes).
@@ -4741,16 +4726,17 @@ class ProfilePoolStatusFfi {
 /// No catch-all variant, deliberately: a new core outcome must force Dart to
 /// decide what it means rather than folding into "something went wrong".
 enum ProfileSyncOutcomeFfi {
-  /// Everything saved is already fully acknowledged; no network was touched.
+  /// Nothing needed sending: nothing was pending, the pool already serves
+  /// what was, or there was nothing public to retract.
   nothingPending,
 
-  /// A kind-0 was published and at least one relay acknowledged it.
+  /// A relay newly took the profile this pass.
   published,
 
-  /// The staged picture could not be uploaded; nothing was published.
+  /// The staged picture could not be uploaded, and nothing else was pending.
   uploadFailed,
 
-  /// The kind-0 was built but no relay accepted it.
+  /// No relay newly took the profile, or the retraction gate held it back.
   publishFailed,
 
   /// Too few uncontaminated profile relays remain to publish at all.
@@ -4767,30 +4753,19 @@ class ProfileSyncResultFfi {
   /// What the pass did.
   final ProfileSyncOutcomeFfi outcome;
 
-  /// How many relays acknowledged the published event.
-  final int relaysAcked;
-
-  /// How many relays the publish was attempted against.
-  final int relaysAttempted;
-
-  /// Whether a save is STILL unpublished after this pass — the honest answer
-  /// even for [`ProfileSyncOutcomeFfi::Published`], because a partial
-  /// acknowledgement (or an edit saved mid-flight) leaves work behind.
+  /// Whether a save is STILL not served by every pool relay after this
+  /// pass — the honest answer even for [`ProfileSyncOutcomeFfi::Published`],
+  /// because a relay that missed it (or an edit saved mid-flight) leaves
+  /// work behind.
   final bool stillPending;
 
   const ProfileSyncResultFfi({
     required this.outcome,
-    required this.relaysAcked,
-    required this.relaysAttempted,
     required this.stillPending,
   });
 
   @override
-  int get hashCode =>
-      outcome.hashCode ^
-      relaysAcked.hashCode ^
-      relaysAttempted.hashCode ^
-      stillPending.hashCode;
+  int get hashCode => outcome.hashCode ^ stillPending.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -4798,8 +4773,6 @@ class ProfileSyncResultFfi {
       other is ProfileSyncResultFfi &&
           runtimeType == other.runtimeType &&
           outcome == other.outcome &&
-          relaysAcked == other.relaysAcked &&
-          relaysAttempted == other.relaysAttempted &&
           stillPending == other.stillPending;
 }
 

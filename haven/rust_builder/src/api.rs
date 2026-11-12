@@ -4800,15 +4800,12 @@ impl CircleManagerFfi {
 // region (its own top-level `impl CircleManagerFfi`) so the privacy CI guard
 // (scripts/ci/check_profile_privacy_boundaries.sh) can scope its scan exactly.
 
-use haven_core::circle::{
-    ProfilePendingState, ProfileSyncCommit, ProfileSyncOutcome, ProfileSyncReport,
-};
+use haven_core::circle::{ProfilePendingState, ProfileSyncOutcome, ProfileSyncReport};
 use haven_core::profile::{
-    build_blank_metadata_event, build_metadata_event, build_nip09_deletion,
-    download_profile_picture, fetch_own_profile, fetch_profiles_assigned, merge_base, merge_edits,
-    picture_sync_action, publish_metadata, read_own_profile_on_relays, AssignedFetch,
-    CachedProfile, OwnProfileOnRelays, PendingEdits, PictureSyncAction, ProfileEdits, ProfileError,
-    ProfileState, PROFILE_INTER_REQ_JITTER_MS,
+    build_blank_metadata_event, build_nip09_deletion, download_profile_picture,
+    fetch_profiles_assigned, picture_sync_action, publish_metadata, read_own_profile_on_relays,
+    AssignedFetch, CachedProfile, OwnProfileOnRelays, PendingEdits, PictureSyncAction,
+    ProfileError, ProfileState, PROFILE_INTER_REQ_JITTER_MS,
 };
 // Only the test modules build a profile row by hand.
 #[cfg(test)]
@@ -4830,12 +4827,10 @@ fn redact_profile_err(e: impl std::fmt::Display) -> String {
 /// mean" is not a question the UI may answer for a caller that got it wrong.
 const PROFILE_IDENTITY_MISMATCH: &str = "Secret does not match this identity";
 
-/// Refusal of a profile retraction whose target could not be checked: nothing
+/// Refusal of a profile deletion whose target could not be checked: nothing
 /// local says a profile was published and no profile relay answered, so the
-/// retraction can neither run nor honestly report that there was nothing to
-/// retract — or a photo removal found no copy of the profile to republish
-/// without the photo, on any relay or on this device. A constant, for the same
-/// reason as [`PROFILE_IDENTITY_MISMATCH`].
+/// deletion can neither run nor honestly report that there was nothing to
+/// delete. A constant, for the same reason as [`PROFILE_IDENTITY_MISMATCH`].
 const PROFILE_RETRACTION_UNVERIFIED: &str =
     "Could not read the public profile to retract; nothing was published";
 
@@ -4961,13 +4956,14 @@ fn profile_stamp_lists(outcome: &AssignedFetch) -> ProfileStampLists {
 /// decide what it means rather than folding into "something went wrong".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileSyncOutcomeFfi {
-    /// Everything saved is already fully acknowledged; no network was touched.
+    /// Nothing needed sending: nothing was pending, the pool already serves
+    /// what was, or there was nothing public to retract.
     NothingPending,
-    /// A kind-0 was published and at least one relay acknowledged it.
+    /// A relay newly took the profile this pass.
     Published,
-    /// The staged picture could not be uploaded; nothing was published.
+    /// The staged picture could not be uploaded, and nothing else was pending.
     UploadFailed,
-    /// The kind-0 was built but no relay accepted it.
+    /// No relay newly took the profile, or the retraction gate held it back.
     PublishFailed,
     /// Too few uncontaminated profile relays remain to publish at all.
     PoolUnderflow,
@@ -4983,13 +4979,10 @@ pub enum ProfileSyncOutcomeFfi {
 pub struct ProfileSyncResultFfi {
     /// What the pass did.
     pub outcome: ProfileSyncOutcomeFfi,
-    /// How many relays acknowledged the published event.
-    pub relays_acked: u32,
-    /// How many relays the publish was attempted against.
-    pub relays_attempted: u32,
-    /// Whether a save is STILL unpublished after this pass — the honest answer
-    /// even for [`ProfileSyncOutcomeFfi::Published`], because a partial
-    /// acknowledgement (or an edit saved mid-flight) leaves work behind.
+    /// Whether a save is STILL not served by every pool relay after this
+    /// pass — the honest answer even for [`ProfileSyncOutcomeFfi::Published`],
+    /// because a relay that missed it (or an edit saved mid-flight) leaves
+    /// work behind.
     pub still_pending: bool,
 }
 
@@ -4997,12 +4990,10 @@ impl ProfileSyncResultFfi {
     /// A pass that never reached the network, at a known pending state.
     ///
     /// Mirrors `ProfileSyncReport::no_network`: the FFI short-circuits are the
-    /// same two answers the core gives, so they must report the same counts.
+    /// same two answers the core gives.
     const fn no_network(outcome: ProfileSyncOutcomeFfi, still_pending: bool) -> Self {
         Self {
             outcome,
-            relays_acked: 0,
-            relays_attempted: 0,
             still_pending,
         }
     }
@@ -5017,8 +5008,6 @@ impl ProfileSyncResultFfi {
                 ProfileSyncOutcome::PublishFailed => ProfileSyncOutcomeFfi::PublishFailed,
                 ProfileSyncOutcome::PoolUnderflow => ProfileSyncOutcomeFfi::PoolUnderflow,
             },
-            relays_acked: report.relays_acked,
-            relays_attempted: report.relays_attempted,
             still_pending: report.still_pending,
         }
     }
@@ -5031,12 +5020,13 @@ impl ProfileSyncResultFfi {
 /// concern, and collapsing them here would decide it in Rust.
 #[derive(Debug, Clone, Copy)]
 pub struct ProfilePendingStateFfi {
-    /// A save has not been fully acknowledged yet.
+    /// A save is not yet served by every pool relay.
     pub pending: bool,
-    /// Pending, but already accepted by at least one relay for this version.
-    pub partial: bool,
     /// The persisted retry ladder permits another attempt now.
     pub retry_due: bool,
+    /// Seconds until the next attempt is due: `Some` only when pending and
+    /// not due. Relative, never an instant (Security Rule 15).
+    pub next_retry_in_secs: Option<u32>,
 }
 
 impl ProfilePendingStateFfi {
@@ -5044,8 +5034,8 @@ impl ProfilePendingStateFfi {
     const fn from_state(state: ProfilePendingState) -> Self {
         Self {
             pending: state.pending,
-            partial: state.partial,
             retry_due: state.retry_due,
+            next_retry_in_secs: state.next_retry_in_secs,
         }
     }
 }
@@ -5496,15 +5486,12 @@ impl CircleManagerFfi {
         published_here: bool,
         now: i64,
     ) -> Result<Option<CachedProfile>, String> {
-        let fetched = if published_here {
-            fetch_own_profile(relay, own_pk, pool, now).await.0
-        } else {
-            match read_own_profile_on_relays(relay, own_pk, pool, now).await {
-                OwnProfileOnRelays::Published(copy) => Some(*copy),
-                OwnProfileOnRelays::Absent => None,
-                OwnProfileOnRelays::Unverified => {
-                    return Err(PROFILE_RETRACTION_UNVERIFIED.to_string());
-                }
+        let fetched = match read_own_profile_on_relays(relay, own_pk, pool, now).await {
+            OwnProfileOnRelays::Published(copy) => Some(*copy),
+            OwnProfileOnRelays::Absent => None,
+            OwnProfileOnRelays::Unverified if published_here => None,
+            OwnProfileOnRelays::Unverified => {
+                return Err(PROFILE_RETRACTION_UNVERIFIED.to_string());
             }
         };
         if let Some(copy) = &fetched {
@@ -5890,6 +5877,7 @@ impl CircleManagerFfi {
             let edits = PendingEdits {
                 display_name,
                 about,
+                ..PendingEdits::default()
             };
             let cached = inner
                 .stage_own_profile_edits(&own_hex, &edits, now)
@@ -6011,16 +5999,18 @@ impl CircleManagerFfi {
         // keyed on THIS manager's pubkey; signing them with a different key
         // would publish one account's saved edit under another's identity.
         self.ensure_own_identity(&keys)?;
+        // The clock itself, not `now`: a pass is dated when it ends, so a slow
+        // upload cannot leave its retry already due.
         let report = self
             .inner
-            .sync_own_profile(&keys, now)
+            .sync_own_profile(&keys, profile_now_secs)
             .await
             .map_err(redact_profile_err)?;
         Ok(ProfileSyncResultFfi::from_report(&report))
     }
 
-    /// Whether the own profile has unpublished work, how far it got, and
-    /// whether the persisted backoff permits another attempt.
+    /// Whether the own profile has unpublished work, whether the persisted
+    /// backoff permits another attempt, and if not, how long until it does.
     ///
     /// The read a resume trigger consults before calling
     /// [`Self::sync_my_profile`], so a clean install never dials a relay just
@@ -6202,175 +6192,29 @@ impl CircleManagerFfi {
         })
     }
 
-    /// Removes the local user's OWN profile picture (retraction republish).
+    /// Removes the local user's OWN profile picture, LOCALLY, and queues the
+    /// removal for publication, returning the row the UI should render.
     ///
-    /// A **no-op unless a profile was published** (`has_published_profile`) — a
-    /// retraction must never mint a first public event for a pubkey that never
-    /// published. Otherwise it clears the `picture` field on the freshest kind-0
-    /// — the relays' copy, or the cached one when that is newer or no relay
-    /// served one — and republishes. With neither a relay copy nor a dated
-    /// cached one it publishes nothing and fails: an empty profile is never
-    /// published over one this device cannot see.
-    ///
-    /// Either way, a photo still QUEUED for upload is cancelled: it was going
-    /// to publish the picture the user is removing. One saved while the
-    /// removal is running is kept, and stays queued. A queued NAME edit has
-    /// nothing to do with the photo and stays queued — unless the removal is
-    /// built on the cached row, which already carries it: the name is then
-    /// published with the removal and recorded as published.
-    ///
-    /// A removal some pool relay did not acknowledge is not finished: that
-    /// relay still serves the photo. It is left pending, partly published,
-    /// with the retry ladder advanced, for [`Self::sync_my_profile`] to
-    /// republish to the whole pool.
+    /// One transaction: the photo's bytes (published and staged alike) are
+    /// dropped, the row loses its `picture`, and the removal is staged with the
+    /// retry ladder reset. No secret, no lock, no relay: [`Self::sync_my_profile`]
+    /// publishes it, and decides under its lock whether there is anything
+    /// public to remove it from — a removal never mints a first public event.
     ///
     /// # Errors
     ///
-    /// Returns a redacted error string on a secret that is not this account's
-    /// identity, when no copy of the profile could be read to build on, or on
-    /// relay or database failure.
-    pub async fn remove_my_profile_picture(
-        &self,
-        identity_secret_bytes: Vec<u8>,
-    ) -> Result<ProfileMetadataFfi, String> {
-        let keys = keys_from_secret_bytes(identity_secret_bytes)?;
-        // Before the lock: a secret that is not ours must not cancel this
-        // account's staged upload, and must never sign a retraction republish
-        // for someone else's pubkey.
-        self.ensure_own_identity(&keys)?;
-        // Taken BEFORE the gate read and held for the whole body: an in-flight
-        // sync would otherwise republish the picture this call is removing,
-        // with a NEWER `created_at`, while every local check reported success.
-        let _sync_guard = self.inner.profile_sync_lock().lock().await;
-        let own_pk = keys.public_key();
-        let own_hex = own_pk.to_hex();
+    /// Returns a redacted error string on database failure.
+    pub async fn remove_my_profile_picture(&self) -> Result<ProfileMetadataFfi, String> {
+        let inner = self.inner.clone();
+        let own_hex = self.own_pubkey_hex.clone();
         let now = profile_now_secs();
-
-        // Retraction no-op gate: never mint a first public event for a pubkey
-        // that never published a profile — and never mistake a profile the
-        // storage reset forgot for one that does not exist.
-        let published_here = self
-            .inner
-            .has_published_profile(&own_pk)
-            .map_err(redact_profile_err)?;
-        // The local cancel comes before the relay read-back can fail closed: a
-        // photo queued for upload must not be published later by the sync
-        // retry just because this removal could not be verified.
-        self.inner
-            .cancel_staged_profile_picture(&own_hex)
-            .map_err(redact_profile_err)?;
-        // Against the WHOLE usable pool, the read and the republish both. A
-        // retraction that reached only a subset would leave the removed avatar
-        // live on every other pool relay — and those are precisely the relays
-        // some peers are assigned to read us from, so the "removed" picture
-        // would keep rendering for them.
-        let relay = haven_core::relay::RelayManager::new();
-        let write_relays = self
-            .inner
-            .usable_profile_relays()
-            .map_err(redact_profile_err)?;
-        let fetched = self
-            .own_profile_to_retract(&relay, own_pk, &write_relays, published_here, now)
-            .await?;
-        if !published_here && fetched.is_none() {
-            return Ok(self
-                .inner
-                .get_profile(&own_hex)
-                .map_err(redact_profile_err)?
-                .map_or_else(
-                    || ProfileMetadataFfi::unknown(own_hex.clone()),
-                    |cp| ProfileMetadataFfi::from_cached(&cp, false, None),
-                ));
-        }
-
-        // The outbox BEFORE the row: a save landing between the two reads then
-        // leaves its edit queued, where the other order would report an edit
-        // this event never carried as published.
-        let queued = self
-            .inner
-            .pending_profile_sync(&own_hex)
-            .map_err(redact_profile_err)?;
-        let local = self
-            .inner
-            .get_profile(&own_hex)
-            .map_err(redact_profile_err)?;
-        // No relay served the profile and this device holds no dated copy of
-        // it: there is nothing to remove a photo FROM. What the device does
-        // hold — nothing, or a name saved here and never sent — would be
-        // published over a profile it cannot see.
-        if fetched.is_none() && !local.as_ref().is_some_and(|row| row.event_created_at > 0) {
-            return Err(PROFILE_RETRACTION_UNVERIFIED.to_string());
-        }
-        // The same base a sync takes: the relays' copy unless it is older than
-        // the cached row — a superseded copy is not built on — and the cached
-        // row when no relay served one. The floor is the newest `created_at`
-        // of the two, so a same-second edit still deterministically supersedes
-        // under NIP-01 (otherwise a peer's forced re-fetch resolves the stale
-        // profile — the relay keeps the old event on a `created_at` tie).
-        let (base, prev_created_at) = merge_base(fetched.as_ref(), local.as_ref());
-        let merged = merge_edits(
-            &base,
-            &ProfileEdits {
-                picture: Some(String::new()),
-                ..ProfileEdits::default()
-            },
-        );
-        let event =
-            build_metadata_event(&keys, &merged, prev_created_at).map_err(redact_profile_err)?;
-        let published = publish_metadata(&relay, &event, &write_relays)
-            .await
-            .map_err(redact_profile_err)?;
-        let event_created_at = i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX);
-
-        // What the outbox holds is settled by this event when applying it
-        // again would change nothing: a removal built on the cached row
-        // already carries a queued name, and one built on the relays' copy
-        // does not. Settled, it is recorded as a sync of that version is, or
-        // the name would read "not published" while every relay serves it. A
-        // photo staged since this removal cancelled the last one is never
-        // settled: it has not been uploaded, and this event names no picture.
-        let settled = queued.as_ref().filter(|queued| {
-            !queued.picture_staged
-                && merge_edits(&merged, &queued.edits.to_edits(None)).sanitized()
-                    == merged.sanitized()
-        });
-        // One transaction for the row, the publish and the coverage, settled
-        // or not. A removal some relay did not take is left owed there, so the
-        // sync retry sends it to the whole pool again: that relay still serves
-        // the photo to every peer reading the profile from it.
-        //
-        // The row rendered is the row as STORED, never the row as assembled:
-        // `merged` is normally built on the RELAY copy, which another Nostr
-        // client may have written, so the assembled row still carries
-        // whatever name that client published. Rendering it would show the
-        // user exactly the text the sanitizer stripped out of both the DB row
-        // and the event. The commit also keeps on the row what is queued when
-        // it writes — a name saved and not yet sent, even one saved during
-        // the publish above — as a fetch that rewrites the row does.
-        let stored = self
-            .inner
-            .commit_profile_sync(&ProfileSyncCommit {
-                pubkey: &own_pk,
-                published_version: settled.map(|queued| queued.local_version),
-                merged: &merged,
-                event_id: &event.id,
-                event_created_at,
-                uploaded_picture_url: None,
-                fully_acked: published.accepted_by.len() == published.total_attempted(),
-                // Read here, not taken from the start: the round on the
-                // relays can outlast the first backoff rung, and a retry
-                // dated from the start would come back already due.
-                now: profile_now_secs(),
-            })
-            .map_err(redact_profile_err)?;
-        // Drop the cached picture BYTES too — updating only the kind-0 row would
-        // leave the old bytes in `profile_pictures`, so the removed avatar would
-        // re-render from cache and persist across restart (bug HIGH-1). A photo
-        // staged while this removal ran is not among them.
-        self.inner
-            .delete_profile_picture(&own_hex)
-            .map_err(redact_profile_err)?;
-        Ok(ProfileMetadataFfi::from_cached(&stored, false, None))
+        run_blocking(move || {
+            inner
+                .stage_own_picture_removal(&own_hex, now)
+                .map(|row| ProfileMetadataFfi::from_cached(&row, false, None))
+                .map_err(redact_profile_err)
+        })
+        .await
     }
 
     /// Deletes the local user's OWN public profile (best-effort, plan D10).
@@ -6389,9 +6233,9 @@ impl CircleManagerFfi {
     /// rows.
     ///
     /// A blank some pool relay did not acknowledge is not a finished deletion:
-    /// that relay still serves the profile. The blank is left pending, partly
-    /// published, with the retry ladder advanced, for
-    /// [`Self::sync_my_profile`] to publish a blank to the whole pool again.
+    /// that relay still serves the profile. The identical blank is left owed
+    /// to the relays that did not take it, with the retry ladder advanced, for
+    /// [`Self::sync_my_profile`] to re-send to them alone.
     ///
     /// # Errors
     ///
@@ -6481,14 +6325,15 @@ impl CircleManagerFfi {
         // it is: the deleted profile is still on any relay that did not take
         // the blank, and nothing older than this row is built on or cached
         // again. A blank some relay did not take is left owed there too, so
-        // the sync retry sends a blank to the whole pool again — its backoff
-        // running from now, not from before the round on the relays.
+        // the sync retry re-sends that same blank to the relays that missed
+        // it — its backoff running from now, not from before the round on the
+        // relays.
         self.inner
             .wipe_all_profiles(
                 &own_pk,
-                &blank.id,
-                i64::try_from(blank.created_at.as_secs()).unwrap_or(i64::MAX),
-                published.accepted_by.len() == published.total_attempted(),
+                &blank,
+                &published.accepted_by,
+                &write_relays,
                 profile_now_secs(),
             )
             .map_err(redact_profile_err)?;
@@ -12665,8 +12510,6 @@ mod tests {
         for (core_outcome, expected_ffi) in cases {
             let report = ProfileSyncReport {
                 outcome: core_outcome,
-                relays_acked: 2,
-                relays_attempted: 5,
                 still_pending: true,
             };
             let ffi = ProfileSyncResultFfi::from_report(&report);
@@ -12674,8 +12517,6 @@ mod tests {
                 ffi.outcome, expected_ffi,
                 "core outcome {core_outcome:?} must map to {expected_ffi:?}, not                  something else — a swapped arm here would misreport a failed                  publish as a success (or vice versa) to the UI",
             );
-            assert_eq!(ffi.relays_acked, 2, "counts must pass through untouched");
-            assert_eq!(ffi.relays_attempted, 5);
             assert!(ffi.still_pending);
         }
     }
@@ -12686,34 +12527,31 @@ mod tests {
         // counts and `still_pending: false` must also survive verbatim.
         let report = ProfileSyncReport {
             outcome: ProfileSyncOutcome::Published,
-            relays_acked: 3,
-            relays_attempted: 3,
             still_pending: false,
         };
         let ffi = ProfileSyncResultFfi::from_report(&report);
         assert_eq!(ffi.outcome, ProfileSyncOutcomeFfi::Published);
-        assert_eq!(ffi.relays_acked, 3);
-        assert_eq!(ffi.relays_attempted, 3);
         assert!(!ffi.still_pending);
     }
 
     #[test]
     fn profile_pending_state_ffi_from_state_maps_every_field_independently() {
-        // The three flags are independent facts (see `ProfilePendingState`'s
+        // The three fields are independent facts (see `ProfilePendingState`'s
         // own doc) — this proves `from_state` cannot mix them up (e.g.
-        // `partial` accidentally read from `retry_due`) by varying each
-        // combination rather than only the all-true/all-false corners.
-        for (pending, partial, retry_due) in [
-            (false, false, true),
-            (true, false, false),
-            (true, true, false),
-            (true, true, true),
-            (true, false, true),
+        // `retry_due` accidentally read from `pending`) by varying each
+        // combination rather than only the all-true/all-false corners. The
+        // seconds-until-retry rides along untouched, including its extremes.
+        for (pending, retry_due, next_retry_in_secs) in [
+            (false, true, None),
+            (true, false, Some(30)),
+            (true, false, Some(1)),
+            (true, false, Some(21_600)),
+            (true, true, None),
         ] {
             let state = ProfilePendingState {
                 pending,
-                partial,
                 retry_due,
+                next_retry_in_secs,
             };
             let ffi = ProfilePendingStateFfi::from_state(state);
             assert_eq!(
@@ -12721,12 +12559,12 @@ mod tests {
                 "pending must pass through for {state:?}"
             );
             assert_eq!(
-                ffi.partial, partial,
-                "partial must pass through for {state:?}"
-            );
-            assert_eq!(
                 ffi.retry_due, retry_due,
                 "retry_due must pass through for {state:?}",
+            );
+            assert_eq!(
+                ffi.next_retry_in_secs, next_retry_in_secs,
+                "next_retry_in_secs must pass through for {state:?}",
             );
         }
     }
@@ -20110,244 +19948,6 @@ mod maintenance_real_ffi_tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn remove_picture_cancels_a_staged_upload_without_publishing() {
-        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
-        install_test_seams();
-
-        let keys = Keys::generate();
-        let own_hex = keys.public_key().to_hex();
-        let dir = DataDir::new("profile_remove_staged");
-        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
-            .expect("CircleManagerFfi::new");
-        // Every profile relay answers "nothing": genuinely never published.
-        let _relays = reachable_profile_plane(&circle).await;
-
-        circle
-            .save_my_profile_local(Some("Keep My Name".to_string()), None)
-            .await
-            .expect("save name locally");
-        let staged = circle
-            .save_my_profile_picture_local(tiny_png())
-            .await
-            .expect("save picture locally");
-        assert_eq!(staged.pubkey_hex, own_hex, "staging keys on the OWN pubkey");
-        assert!(
-            circle
-                .inner
-                .profile_picture_is_staged(&own_hex)
-                .expect("staged read"),
-            "the sanitized bytes are queued for upload",
-        );
-
-        let after = circle
-            .remove_my_profile_picture(secret_bytes(&keys))
-            .await
-            .expect("remove picture");
-
-        assert!(!after.has_picture);
-        assert!(
-            !circle
-                .inner
-                .profile_picture_is_staged(&own_hex)
-                .expect("staged read after remove"),
-            "the queued upload is cancelled, not left to publish the removed photo",
-        );
-        assert!(
-            circle
-                .inner
-                .get_profile_picture(&own_hex)
-                .expect("picture read")
-                .is_none(),
-            "and its bytes go with it",
-        );
-        assert!(
-            !circle
-                .inner
-                .has_published_profile(&keys.public_key())
-                .expect("gate read"),
-            "removing a never-published picture must not mint a first public event",
-        );
-
-        let snapshot = circle
-            .inner
-            .pending_profile_sync(&own_hex)
-            .expect("outbox read")
-            .expect("the rename is still queued");
-        assert_eq!(
-            snapshot.edits.display_name.as_deref(),
-            Some("Keep My Name"),
-            "a queued NAME edit has nothing to do with the photo and must survive",
-        );
-        assert_eq!(
-            circle
-                .get_cached_profile(own_hex)
-                .await
-                .expect("cached read")
-                .and_then(|p| p.display_name),
-            Some("Keep My Name".to_string()),
-        );
-    }
-
-    /// A relay can answer with a superseded copy of the user's own profile —
-    /// genuinely signed, so nothing refuses it. Removing the photo republishes
-    /// the profile, and built on that copy it would sign back every field the
-    /// user has removed since.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn removing_the_photo_never_signs_back_what_a_stale_relay_copy_still_carries() {
-        use haven_core::profile::build_metadata_event;
-        use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
-        use nostr::JsonUtil as _;
-
-        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
-        install_test_seams();
-        let keys = Keys::generate();
-        let dir = DataDir::new("profile_remove_stale_base");
-        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
-            .expect("CircleManagerFfi::new");
-        retire_curated_profile_pool(&circle);
-        let pool = [
-            ScriptedRelay::start(),
-            ScriptedRelay::start(),
-            ScriptedRelay::start(),
-        ];
-        for relay in &pool {
-            circle
-                .inner
-                .add_user_relay(relay.url(), RelayType::Profile)
-                .expect("seed a profile relay");
-        }
-        assert_profile_pool_is_local(&circle, 3);
-        let profile = |content: &str| {
-            ProfileMetadata::from_metadata(nostr::Metadata::from_json(content).expect("metadata"))
-        };
-
-        // What one pool relay still serves, and what superseded it: the copy
-        // this device published last, with the payment address gone.
-        let stale = build_metadata_event(
-            &keys,
-            &profile(
-                r#"{"display_name":"Old","lud16":"old@wallet.example.com","picture":"https://p.example.com/old.jpg"}"#,
-            ),
-            None,
-        )
-        .expect("the superseded profile");
-        let current = profile(r#"{"display_name":"Me","picture":"https://p.example.com/new.jpg"}"#);
-        let current_event = build_metadata_event(&keys, &current, Some(stale.created_at.as_secs()))
-            .expect("the current profile");
-        let now = profile_now_secs();
-        circle
-            .inner
-            .upsert_profile(&CachedProfile {
-                pubkey_hex: keys.public_key().to_hex(),
-                metadata: current,
-                state: ProfileState::Known,
-                event_created_at: i64::try_from(current_event.created_at.as_secs())
-                    .expect("a present-day timestamp"),
-                fetched_at: now,
-            })
-            .expect("cache the current profile");
-        circle
-            .inner
-            .record_published_event(0, "", &current_event.id, &keys.public_key(), now)
-            .expect("record its publication");
-        pool[0].answer(|_| true, vec![Frame::Event(stale), Frame::Eose]);
-
-        circle
-            .remove_my_profile_picture(secret_bytes(&keys))
-            .await
-            .expect("remove the picture");
-
-        let republished: Vec<nostr::Event> = pool
-            .iter()
-            .flat_map(ScriptedRelay::published)
-            .filter(|event| event.kind.as_u16() == 0)
-            .collect();
-        assert_eq!(republished.len(), 3, "the removal goes to every pool relay");
-        for event in republished {
-            assert!(event.content.contains(r#""display_name":"Me""#));
-            assert!(
-                !event.content.contains("lud16") && !event.content.contains("picture"),
-                "the removal signed back a field of a superseded copy"
-            );
-        }
-    }
-
-    /// When no relay serves the profile inside the read's budget, the removal
-    /// is built on the copy this device holds. Built on nothing, it would
-    /// publish an empty profile over the user's name.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn removing_the_photo_when_no_relay_serves_the_profile_keeps_the_rest_of_it() {
-        use haven_core::profile::build_metadata_event;
-        use haven_core::relay::scripted_relay::ScriptedRelay;
-        use nostr::JsonUtil as _;
-
-        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
-        install_test_seams();
-        let keys = Keys::generate();
-        let dir = DataDir::new("profile_remove_read_miss");
-        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
-            .expect("CircleManagerFfi::new");
-        retire_curated_profile_pool(&circle);
-        // Three relays that hold nothing and take what is published to them.
-        let pool = [
-            ScriptedRelay::start(),
-            ScriptedRelay::start(),
-            ScriptedRelay::start(),
-        ];
-        for relay in &pool {
-            circle
-                .inner
-                .add_user_relay(relay.url(), RelayType::Profile)
-                .expect("seed a profile relay");
-        }
-        assert_profile_pool_is_local(&circle, 3);
-        let current = ProfileMetadata::from_metadata(
-            nostr::Metadata::from_json(
-                r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg","lud16":"me@wallet.example.com"}"#,
-            )
-            .expect("metadata"),
-        );
-        let current_event =
-            build_metadata_event(&keys, &current, None).expect("the current profile");
-        let now = profile_now_secs();
-        circle
-            .inner
-            .upsert_profile(&CachedProfile {
-                pubkey_hex: keys.public_key().to_hex(),
-                metadata: current,
-                state: ProfileState::Known,
-                event_created_at: i64::try_from(current_event.created_at.as_secs())
-                    .expect("a present-day timestamp"),
-                fetched_at: now,
-            })
-            .expect("cache the current profile");
-        circle
-            .inner
-            .record_published_event(0, "", &current_event.id, &keys.public_key(), now)
-            .expect("record its publication");
-
-        circle
-            .remove_my_profile_picture(secret_bytes(&keys))
-            .await
-            .expect("remove the picture");
-
-        let republished: Vec<nostr::Event> = pool
-            .iter()
-            .flat_map(ScriptedRelay::published)
-            .filter(|event| event.kind.as_u16() == 0)
-            .collect();
-        assert_eq!(republished.len(), 3, "the removal goes to every pool relay");
-        for event in republished {
-            assert!(
-                event.content.contains(r#""display_name":"Me""#)
-                    && event.content.contains("me@wallet.example.com"),
-                "the removal dropped the rest of the profile"
-            );
-            assert!(!event.content.contains("picture"));
-        }
-    }
-
     /// One account whose whole profile pool is three scripted relays: they
     /// hold nothing, acknowledge every publish, and say only what a test
     /// scripts for them.
@@ -20658,7 +20258,7 @@ mod maintenance_real_ffi_tests {
             .profile_pending_state()
             .await
             .expect("pending state");
-        assert!(!state.pending && !state.partial);
+        assert!(!state.pending);
         assert!(fx
             .circle
             .inner
@@ -20699,9 +20299,10 @@ mod maintenance_real_ffi_tests {
 
     /// A deletion one relay refused is not done: that relay goes on serving
     /// the whole deleted profile. The blank is left owed — sent, but not
-    /// everywhere — on the same backoff as any publish some relay did not
-    /// take. What the device shows of the profile is the deleted state all the
-    /// same, and the retraction gate stays armed.
+    /// everywhere — in the coverage ledger, with the two relays that took it
+    /// recorded as covered, on the same backoff as any publish some relay did
+    /// not take. What the device shows of the profile is the deleted state all
+    /// the same, and the retraction gate stays armed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_deletion_one_relay_refused_leaves_the_blank_owed() {
         use haven_core::profile::PROFILE_SYNC_BACKOFF_SECS;
@@ -20724,9 +20325,32 @@ mod maintenance_real_ffi_tests {
             .profile_pending_state()
             .await
             .expect("pending state");
+        assert!(state.pending, "a deletion one relay refused reads as done");
+        // The blank is owed as the very event two relays hold, and the
+        // ledger names exactly those two.
+        let owed_version = fx
+            .circle
+            .inner
+            .pending_profile_sync(&fx.own_hex())
+            .expect("outbox read")
+            .expect("the blank is owed")
+            .local_version;
+        let debt = fx
+            .circle
+            .inner
+            .profile_publish_debt(&fx.keys.public_key(), owed_version)
+            .expect("debt read")
+            .expect("the blank is in the ledger");
+        assert_eq!(debt.event.id, blanks[0].id);
+        assert_eq!(debt.covered.len(), 2);
+        let host = |relay: &haven_core::relay::scripted_relay::ScriptedRelay| {
+            relay.url().trim_start_matches("ws://").to_string()
+        };
+        let covers = |relay| debt.covered.iter().any(|url| url.contains(&host(relay)));
+        assert!(covers(&fx.pool[0]) && covers(&fx.pool[1]));
         assert!(
-            state.pending && state.partial,
-            "a deletion one relay refused reads as done"
+            !covers(&fx.pool[2]),
+            "the relay that refused the blank is recorded as holding it"
         );
         // The deletion's own clock reading lies between the two taken here.
         let due_at = |now| {
@@ -20774,10 +20398,12 @@ mod maintenance_real_ffi_tests {
             .expect("gate read"));
     }
 
-    /// The next sync takes the owed blank to the relay that refused it, and
-    /// only a blank: nothing is left to publish after that.
+    /// The next sync takes the IDENTICAL owed blank to the relay that refused
+    /// it, and to that relay alone: nothing is left to publish after that.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_blank_one_relay_refused_reaches_it_with_the_next_sync() {
+        use haven_core::relay::scripted_relay::Frame;
+
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
         let fx = ScriptedProfilePool::start("profile_delete_owed_then_sync");
@@ -20785,8 +20411,14 @@ mod maintenance_real_ffi_tests {
         let first_blank = fx.profiles_sent().remove(0);
 
         refusing.store(false, Ordering::SeqCst);
+        // Once it has kept the blank, the relay serves it.
+        fx.pool[2].answer(
+            |_| true,
+            vec![Frame::Event(first_blank.clone()), Frame::Eose],
+        );
         let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
         assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+        assert!(!synced.still_pending);
 
         let reached_it: Vec<_> = fx.pool[2]
             .published()
@@ -20799,9 +20431,9 @@ mod maintenance_real_ffi_tests {
             "the relay that refused the blank was not sent it again"
         );
         assert!(profile_fields(&reached_it[0]).is_empty());
-        assert!(
-            reached_it[0].created_at > first_blank.created_at,
-            "the blank sent again supersedes the first"
+        assert_eq!(
+            reached_it[0].id, first_blank.id,
+            "the blank sent again is not the blank the other relays hold"
         );
         let state = fx
             .circle
@@ -20809,7 +20441,7 @@ mod maintenance_real_ffi_tests {
             .await
             .expect("pending state");
         assert!(
-            !state.pending && !state.partial,
+            !state.pending,
             "a blank every relay now holds still reads as owed"
         );
         assert!(matches!(
@@ -20822,8 +20454,9 @@ mod maintenance_real_ffi_tests {
         ));
         assert_eq!(
             fx.profiles_sent().len(),
-            5,
-            "and nothing is sent after that"
+            3,
+            "the two relays that held the blank were not sent it again, and nothing \
+             is sent after that"
         );
     }
 
@@ -20847,10 +20480,7 @@ mod maintenance_real_ffi_tests {
             .profile_pending_state()
             .await
             .expect("pending state");
-        assert!(
-            !state.pending && !state.partial,
-            "a deletion every relay took reads as owed"
-        );
+        assert!(!state.pending, "a deletion every relay took reads as owed");
         assert!(matches!(
             fx.circle
                 .sync_my_profile(fx.secret())
@@ -20863,28 +20493,55 @@ mod maintenance_real_ffi_tests {
     }
 
     /// While the blank is owed, the relay that refused it still serves the
-    /// deleted profile — and may be the only one to answer the retry's read.
-    /// The retry publishes the blank again; no field of the deleted profile
-    /// comes back, on the relays or on the device.
+    /// deleted profile until it has kept the blank. The retry sends it the
+    /// identical blank alone; no field of the deleted profile comes back, on
+    /// the relays or on the device, and nothing is owed once the relay serves
+    /// the blank.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_relay_still_serving_the_deleted_profile_gets_the_blank_and_nothing_back() {
-        use haven_core::relay::scripted_relay::Frame;
+        use haven_core::relay::scripted_relay::{Frame, Verdict};
+        use std::sync::atomic::AtomicBool;
 
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
         let fx = ScriptedProfilePool::start("profile_delete_owed_old_served");
         let (refusing, deleted) = delete_with_one_relay_refusing(&fx).await;
+        let first_blank = fx.profiles_sent().remove(0);
 
-        fx.pool[2].answer(|_| true, vec![Frame::Event(deleted), Frame::Eose]);
         refusing.store(false, Ordering::SeqCst);
+        let kept = std::sync::Arc::new(AtomicBool::new(false));
+        let keeping = kept.clone();
+        fx.pool[2].on_publish(move |_| {
+            keeping.store(true, Ordering::SeqCst);
+            Verdict::Keep
+        });
+        let before = kept.clone();
+        fx.pool[2].answer(
+            move |_| !before.load(Ordering::SeqCst),
+            vec![Frame::Event(deleted), Frame::Eose],
+        );
+        let after = kept.clone();
+        fx.pool[2].answer(
+            move |_| after.load(Ordering::SeqCst),
+            vec![Frame::Event(first_blank), Frame::Eose],
+        );
         let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
         assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
 
         let sent = fx.profiles_sent();
-        assert_eq!(sent.len(), 5, "anti-vacuity: the retry reached every relay");
+        assert_eq!(
+            sent.len(),
+            3,
+            "anti-vacuity: the retry reached the relay that refused the blank"
+        );
         assert!(
             sent.iter().all(|event| profile_fields(event).is_empty()),
             "the retry signed a field of the deleted profile back"
+        );
+        assert_eq!(
+            distinct_ids(&sent).len(),
+            1,
+            "the retry did not send the identical blank"
         );
         let cached = fx
             .circle
@@ -20978,48 +20635,6 @@ mod maintenance_real_ffi_tests {
         );
     }
 
-    /// Right after the storage reset this device holds nothing of its own
-    /// profile, so the removal has to find it on the relays — and the copy
-    /// that read returns is the one to build on. Asking the pool a second time
-    /// costs each relay a second request, and when that one misses, the
-    /// removal would publish an empty profile over the one it had just seen.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn removing_the_photo_builds_on_the_copy_the_gate_read_and_asks_each_relay_once() {
-        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
-        install_test_seams();
-        let fx = ScriptedProfilePool::start("profile_remove_gate_copy");
-        // Each relay serves the profile to the first request and to no other.
-        let asked = fx.count_requests(&fx.profile(DELETED_PROFILE, None), |before| before == 0);
-
-        fx.circle
-            .remove_my_profile_picture(fx.secret())
-            .await
-            .expect("remove the picture");
-
-        let sent = fx.profiles_sent();
-        assert_eq!(sent.len(), 3, "the removal goes to every pool relay");
-        for event in &sent {
-            let fields = profile_fields(event);
-            assert_eq!(
-                fields.get("lud16").map(String::as_str),
-                Some(r#""old@wallet.example.com""#),
-                "the removal dropped the rest of the profile"
-            );
-            assert_eq!(
-                fields.get("display_name").map(String::as_str),
-                Some(r#""Old""#)
-            );
-            assert!(!fields.contains_key("picture"));
-        }
-        for relay in &asked {
-            assert_eq!(
-                relay.load(Ordering::SeqCst),
-                1,
-                "one removal is one request to each relay"
-            );
-        }
-    }
-
     /// A deletion right after the reset reads the pool once too: the read that
     /// finds the profile is the read that dates the blank.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -21053,206 +20668,9 @@ mod maintenance_real_ffi_tests {
         }
     }
 
-    /// With no relay serving the profile and no dated copy of it on the
-    /// device there is nothing to remove a photo FROM. Publishing what the
-    /// device does hold — nothing, or a name saved here and never sent —
-    /// would replace a profile it cannot see.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_photo_removal_with_nothing_to_build_on_publishes_nothing() {
-        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
-        install_test_seams();
-        for name_saved_here in [false, true] {
-            let fx = ScriptedProfilePool::start("profile_remove_no_base");
-            // This device published a profile once, and holds no copy of it.
-            fx.circle
-                .inner
-                .record_published_event(
-                    0,
-                    "",
-                    &nostr::EventId::all_zeros(),
-                    &fx.keys.public_key(),
-                    profile_now_secs(),
-                )
-                .expect("record a publication");
-            if name_saved_here {
-                fx.circle
-                    .save_my_profile_local(Some("Saved Here".to_string()), None)
-                    .await
-                    .expect("save a name");
-            }
-
-            let refused = fx
-                .circle
-                .remove_my_profile_picture(fx.secret())
-                .await
-                .expect_err("there is no profile to remove the photo from");
-
-            assert_eq!(refused, super::PROFILE_RETRACTION_UNVERIFIED);
-            assert!(
-                fx.profiles_sent().is_empty(),
-                "a profile was published over one this device cannot see"
-            );
-        }
-    }
-
-    /// A removal built on the cached row publishes a name still waiting in the
-    /// outbox, because the row already carries it. From then on the name is
-    /// public, and the outbox must say so.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_name_the_photo_removal_published_no_longer_reads_as_unpublished() {
-        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
-        install_test_seams();
-        let fx = ScriptedProfilePool::start("profile_remove_settles_queue");
-        let current = fx.profile(
-            r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg"}"#,
-            None,
-        );
-        fx.hold_as_published(&current);
-        // No relay serves the profile, so the removal is built on the row.
-        let asked = fx.count_requests(&current, |_| false);
-        fx.circle
-            .save_my_profile_local(Some("Renamed".to_string()), None)
-            .await
-            .expect("queue a name");
-        assert!(
-            fx.circle
-                .profile_pending_state()
-                .await
-                .expect("pending state")
-                .pending,
-            "anti-vacuity: the name is waiting to be published"
-        );
-
-        fx.circle
-            .remove_my_profile_picture(fx.secret())
-            .await
-            .expect("remove the picture");
-
-        let sent = fx.profiles_sent();
-        assert_eq!(sent.len(), 3);
-        for event in &sent {
-            assert_eq!(
-                profile_fields(event)
-                    .get("display_name")
-                    .map(String::as_str),
-                Some(r#""Renamed""#),
-                "anti-vacuity: the removal published the queued name"
-            );
-        }
-        let state = fx
-            .circle
-            .profile_pending_state()
-            .await
-            .expect("pending state");
-        assert!(
-            !state.pending,
-            "a name every relay acknowledged still reads as not published"
-        );
-        assert!(matches!(
-            fx.circle
-                .sync_my_profile(fx.secret())
-                .await
-                .expect("sync")
-                .outcome,
-            super::ProfileSyncOutcomeFfi::NothingPending
-        ));
-        assert_eq!(
-            fx.profiles_sent().len(),
-            3,
-            "and nothing is published twice"
-        );
-        for relay in &asked {
-            assert_eq!(
-                relay.load(Ordering::SeqCst),
-                1,
-                "one removal is one request to each relay"
-            );
-        }
-    }
-
     const WITH_ADDRESS: &str = r#"{"display_name":"Me","lud16":"old@wallet.example.com","picture":"https://p.example.com/a.jpg"}"#;
     const WITHOUT_ADDRESS: &str =
         r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg"}"#;
-
-    /// A copy read for a removal is a copy this device has read, whether or
-    /// not the removal then lands. Another client removed the payment address;
-    /// the removal reads that newer copy and no relay takes its publish. On
-    /// the retry the only relay to answer never took the newer copy: built on
-    /// its old one, the removal would sign the address back.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_newer_copy_read_for_a_removal_that_failed_is_what_the_retry_builds_on() {
-        use haven_core::relay::scripted_relay::Frame;
-
-        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
-        install_test_seams();
-        let fx = ScriptedProfilePool::start("profile_remove_failed_then_retry");
-        let held = fx.profile(WITH_ADDRESS, None);
-        fx.hold_as_published(&held);
-        let newer = fx.profile(WITHOUT_ADDRESS, Some(held.created_at.as_secs() + 10));
-        fx.pool[1].answer(|_| true, vec![Frame::Event(newer), Frame::Eose]);
-        let refusing = fx.refuse_writes();
-
-        fx.circle
-            .remove_my_profile_picture(fx.secret())
-            .await
-            .expect_err("no relay took the removal");
-        assert!(fx.profiles_sent().is_empty());
-
-        fx.pool[1].answer(|_| true, vec![Frame::Eose]);
-        fx.pool[0].answer(|_| true, vec![Frame::Event(held), Frame::Eose]);
-        refusing.store(false, Ordering::SeqCst);
-        fx.circle
-            .remove_my_profile_picture(fx.secret())
-            .await
-            .expect("remove the picture");
-
-        let sent = fx.profiles_sent();
-        assert_eq!(sent.len(), 3);
-        for event in &sent {
-            let fields = profile_fields(event);
-            assert_eq!(
-                fields.get("display_name").map(String::as_str),
-                Some(r#""Me""#)
-            );
-            assert!(!fields.contains_key("picture"));
-            assert!(
-                !fields.contains_key("lud16"),
-                "a field another client removed was signed back into the profile"
-            );
-        }
-    }
-
-    /// Right after the reset the device has no record of its profile, so the
-    /// removal's read of the pool is also what says a profile exists. When
-    /// the publish then fails, that knowledge must not go with it: a retry
-    /// that every relay answers with nothing would otherwise report the
-    /// photo removed and publish nothing.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_removal_that_failed_after_finding_the_profile_is_not_a_noop_on_the_retry() {
-        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
-        install_test_seams();
-        let fx = ScriptedProfilePool::start("profile_remove_failed_after_gate");
-        // Each relay serves the profile to the first request and to no other.
-        let _asked = fx.count_requests(&fx.profile(WITH_ADDRESS, None), |before| before == 0);
-        let refusing = fx.refuse_writes();
-
-        fx.circle
-            .remove_my_profile_picture(fx.secret())
-            .await
-            .expect_err("no relay took the removal");
-        refusing.store(false, Ordering::SeqCst);
-        fx.circle
-            .remove_my_profile_picture(fx.secret())
-            .await
-            .expect("remove the picture");
-
-        let sent = fx.profiles_sent();
-        assert_eq!(sent.len(), 3, "the retry removed nothing");
-        for event in &sent {
-            let fields = profile_fields(event);
-            assert!(fields.contains_key("lud16") && !fields.contains_key("picture"));
-        }
-    }
 
     /// The same for a deletion no relay took: the profile is still public, and
     /// the next edit is built on the newest copy the failed deletion read.
@@ -21304,21 +20722,507 @@ mod maintenance_real_ffi_tests {
         }
     }
 
-    /// A photo saved while the previous one is being removed is the user's
-    /// newer wish. The removal read the outbox after that save, so it must
-    /// neither report the new photo published nor delete its bytes.
+    /// The retry's backoff runs from when a deletion was RECORDED, not from
+    /// when it began. A deletion that spent longer on the relays than the
+    /// first rung would otherwise come back with its retry already due, and
+    /// the status re-read that follows would republish to the whole pool at
+    /// once. (The removal arm of this promise lives in the sync:
+    /// `a_slow_sync_through_the_ffi_dates_its_backoff_from_when_it_ends`.)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_photo_saved_while_the_old_one_is_being_removed_is_kept() {
+    async fn a_slow_retraction_does_not_leave_its_retry_already_due() {
+        use haven_core::profile::PROFILE_SYNC_BACKOFF_SECS;
+        use std::sync::atomic::AtomicI64;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_retract_slow");
+        fx.hold_as_published(&fx.profile(WITHOUT_ADDRESS, None));
+        // The publish "takes" longer than the first rung: this task's clock
+        // jumps ahead at the moment the refusing relay is offered the blank.
+        let took = PROFILE_SYNC_BACKOFF_SECS[0] + 10;
+        let ahead = std::sync::Arc::new(AtomicI64::new(0));
+        let offered = ahead.clone();
+        fx.pool[2].refuse(move |_| {
+            offered.store(took, Ordering::SeqCst);
+            true
+        });
+
+        let state = super::PROFILE_CLOCK_AHEAD_SECS
+            .scope(ahead.clone(), async {
+                fx.circle
+                    .delete_my_public_profile(fx.secret())
+                    .await
+                    .expect("delete the public profile");
+                fx.circle
+                    .profile_pending_state()
+                    .await
+                    .expect("pending state")
+            })
+            .await;
+
+        assert_eq!(
+            ahead.load(Ordering::SeqCst),
+            took,
+            "anti-vacuity: the clock moved while the blank was being published"
+        );
+        assert!(state.pending);
+        assert!(
+            !state.retry_due,
+            "a deletion that took longer than the first rung came back with its retry due"
+        );
+        assert!(state.next_retry_in_secs.is_some());
+    }
+
+    // ------------------------------------------------------------------------
+    // Photo removal is a local outbox edit; the sync publishes it.
+    // ------------------------------------------------------------------------
+
+    /// The removal the user taps, and the sync it is followed by.
+    async fn remove_then_sync(fx: &ScriptedProfilePool) -> super::ProfileSyncResultFfi {
+        fx.circle
+            .remove_my_profile_picture()
+            .await
+            .expect("remove the picture");
+        fx.circle.sync_my_profile(fx.secret()).await.expect("sync")
+    }
+
+    /// The distinct events among `sent`, by id.
+    fn distinct_ids(sent: &[nostr::Event]) -> std::collections::BTreeSet<nostr::EventId> {
+        sent.iter().map(|event| event.id).collect()
+    }
+
+    /// A staged upload is cancelled by the removal itself, with no relay
+    /// reached, no secret handed in, and the queued name untouched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_photo_removal_cancels_a_staged_upload_and_reaches_no_relay() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_remove_staged_local");
+        let own_hex = fx.own_hex();
+        fx.circle
+            .save_my_profile_local(Some("Keep My Name".to_string()), None)
+            .await
+            .expect("save name locally");
+        let staged = fx
+            .circle
+            .save_my_profile_picture_local(tiny_png())
+            .await
+            .expect("save picture locally");
+        assert_eq!(staged.pubkey_hex, own_hex, "staging keys on the OWN pubkey");
+        assert!(
+            fx.circle
+                .inner
+                .profile_picture_is_staged(&own_hex)
+                .expect("staged read"),
+            "anti-vacuity: the sanitized bytes are queued for upload"
+        );
+
+        let after = fx
+            .circle
+            .remove_my_profile_picture()
+            .await
+            .expect("remove picture");
+
+        assert!(!after.has_picture);
+        assert!(
+            !fx.circle
+                .inner
+                .profile_picture_is_staged(&own_hex)
+                .expect("staged read after remove"),
+            "the queued upload is cancelled, not left to publish the removed photo"
+        );
+        assert!(
+            fx.circle
+                .inner
+                .get_profile_picture(&own_hex)
+                .expect("picture read")
+                .is_none(),
+            "and its bytes go with it"
+        );
+        assert!(
+            !fx.circle
+                .inner
+                .has_published_profile(&fx.keys.public_key())
+                .expect("gate read"),
+            "removing a never-published picture must not mint a first public event"
+        );
+        let snapshot = fx
+            .circle
+            .inner
+            .pending_profile_sync(&own_hex)
+            .expect("outbox read")
+            .expect("the rename is still queued");
+        assert_eq!(
+            snapshot.edits.display_name.as_deref(),
+            Some("Keep My Name"),
+            "a queued NAME edit has nothing to do with the photo and must survive"
+        );
+        assert_eq!(
+            fx.circle
+                .get_cached_profile(own_hex)
+                .await
+                .expect("cached read")
+                .and_then(|p| p.display_name),
+            Some("Keep My Name".to_string())
+        );
+        for relay in &fx.pool {
+            assert_eq!(relay.connections(), 0, "the removal dialled a relay");
+            assert_eq!(relay.offers(), 0, "the removal offered a relay an event");
+        }
+    }
+
+    /// The removal needs neither the identity secret nor the sync lock: it
+    /// completes while a sync (or a deletion) holds the lock, and no relay
+    /// sees it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_ffi_removal_needs_no_secret_and_takes_no_lock() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_remove_no_lock");
+        fx.hold_as_published(&fx.profile(WITHOUT_ADDRESS, None));
+
+        let held = fx.circle.inner.profile_sync_lock().lock().await;
+        let shown = tokio::time::timeout(
+            Duration::from_mins(1),
+            fx.circle.remove_my_profile_picture(),
+        )
+        .await
+        .expect("the removal waited on the sync lock")
+        .expect("remove the picture");
+        drop(held);
+
+        assert!(!shown.has_picture);
+        assert!(
+            fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending,
+            "the removal is owed to the next sync"
+        );
+        for relay in &fx.pool {
+            assert_eq!(relay.connections(), 0, "the removal dialled a relay");
+            assert_eq!(relay.offers(), 0, "the removal offered a relay an event");
+        }
+    }
+
+    /// Built on the relays' copy, not on a superseded one a single relay still
+    /// serves: a field the user has since removed is never signed back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_synced_photo_removal_never_signs_back_what_a_stale_relay_copy_still_carries() {
         use haven_core::relay::scripted_relay::Frame;
 
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
-        let fx = ScriptedProfilePool::start("profile_remove_races_a_save");
+        let fx = ScriptedProfilePool::start("profile_sync_remove_stale_base");
+        let stale = fx.profile(
+            r#"{"display_name":"Old","lud16":"old@wallet.example.com","picture":"https://p.example.com/old.jpg"}"#,
+            None,
+        );
+        let current = fx.profile(
+            r#"{"display_name":"Me","picture":"https://p.example.com/new.jpg"}"#,
+            Some(stale.created_at.as_secs()),
+        );
+        fx.hold_as_published(&current);
+        fx.pool[0].answer(|_| true, vec![Frame::Event(stale), Frame::Eose]);
+
+        let synced = remove_then_sync(&fx).await;
+
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3, "the removal goes to every pool relay");
+        for event in &sent {
+            let fields = profile_fields(event);
+            assert_eq!(
+                fields.get("display_name").map(String::as_str),
+                Some(r#""Me""#)
+            );
+            assert!(
+                !fields.contains_key("lud16") && !fields.contains_key("picture"),
+                "the removal signed back a field of a superseded copy"
+            );
+        }
+    }
+
+    /// When no relay serves the profile, the removal is built on the copy this
+    /// device holds. Built on nothing, it would publish an empty profile over
+    /// the user's name.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_synced_photo_removal_no_relay_serves_keeps_the_rest_of_the_profile() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_sync_remove_read_miss");
+        fx.hold_as_published(&fx.profile(
+            r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg","lud16":"me@wallet.example.com"}"#,
+            None,
+        ));
+
+        let synced = remove_then_sync(&fx).await;
+
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3, "the removal goes to every pool relay");
+        for event in &sent {
+            let fields = profile_fields(event);
+            assert_eq!(
+                fields.get("display_name").map(String::as_str),
+                Some(r#""Me""#),
+                "the removal dropped the rest of the profile"
+            );
+            assert_eq!(
+                fields.get("lud16").map(String::as_str),
+                Some(r#""me@wallet.example.com""#)
+            );
+            assert!(!fields.contains_key("picture"));
+        }
+    }
+
+    /// Right after the storage reset this device holds nothing of its own
+    /// profile, so the sync has to find it on the relays, and the copy that
+    /// read returns is the one to build on. Asking the pool a second time
+    /// costs each relay a second request, and when that one misses, the
+    /// removal would publish an empty profile over the one it had just seen.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sync_publishing_a_photo_removal_asks_each_relay_once() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_sync_remove_gate_copy");
+        // Each relay serves the profile to the first request and to no other.
+        let asked = fx.count_requests(&fx.profile(DELETED_PROFILE, None), |before| before == 0);
+
+        let synced = remove_then_sync(&fx).await;
+
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3, "the removal goes to every pool relay");
+        for event in &sent {
+            let fields = profile_fields(event);
+            assert_eq!(
+                fields.get("lud16").map(String::as_str),
+                Some(r#""old@wallet.example.com""#),
+                "the removal dropped the rest of the profile"
+            );
+            assert_eq!(
+                fields.get("display_name").map(String::as_str),
+                Some(r#""Old""#)
+            );
+            assert!(!fields.contains_key("picture"));
+        }
+        for relay in &asked {
+            assert_eq!(
+                relay.load(Ordering::SeqCst),
+                1,
+                "one removal sync is one request to each relay"
+            );
+        }
+    }
+
+    /// With no relay serving the profile and no dated copy of it on the
+    /// device there is nothing to remove a photo FROM. Publishing what the
+    /// device does hold would replace a profile it cannot see. (The old arm
+    /// that also saved a name here is dropped: a pending SAVE publishes on a
+    /// total read miss by owner decision, so the two cannot coexist.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_synced_photo_removal_with_nothing_to_build_on_publishes_nothing() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_sync_remove_no_base");
+        // This device published a profile once, and holds no copy of it.
+        fx.circle
+            .inner
+            .record_published_event(
+                0,
+                "",
+                &nostr::EventId::all_zeros(),
+                &fx.keys.public_key(),
+                profile_now_secs(),
+            )
+            .expect("record a publication");
+
+        let synced = remove_then_sync(&fx).await;
+
+        assert_eq!(
+            synced.outcome,
+            ProfileSyncOutcomeFfi::PublishFailed,
+            "there is no profile to remove the photo from"
+        );
+        assert!(synced.still_pending);
+        assert!(
+            fx.profiles_sent().is_empty(),
+            "a profile was published over one this device cannot see"
+        );
+        assert!(
+            fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending,
+            "the removal is owed, not dropped"
+        );
+    }
+
+    /// A removal and a name queued before it are one event, and settle
+    /// together: from then on the name is public, and the outbox says so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_photo_removal_and_a_queued_name_publish_as_one_event_and_settle_together() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_sync_remove_settles_queue");
+        let current = fx.profile(
+            r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg"}"#,
+            None,
+        );
+        fx.hold_as_published(&current);
+        // No relay serves the profile, so the event is built on the row.
+        let asked = fx.count_requests(&current, |_| false);
+        fx.circle
+            .save_my_profile_local(Some("Renamed".to_string()), None)
+            .await
+            .expect("queue a name");
+
+        let synced = remove_then_sync(&fx).await;
+
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+        assert!(!synced.still_pending);
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(
+            distinct_ids(&sent).len(),
+            1,
+            "the removal and the name are one event"
+        );
+        for event in &sent {
+            let fields = profile_fields(event);
+            assert_eq!(
+                fields.get("display_name").map(String::as_str),
+                Some(r#""Renamed""#),
+                "anti-vacuity: the event carries the queued name"
+            );
+            assert!(!fields.contains_key("picture"));
+        }
+        assert!(
+            !fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending,
+            "a name every relay acknowledged still reads as not published"
+        );
+        assert!(matches!(
+            fx.circle
+                .sync_my_profile(fx.secret())
+                .await
+                .expect("sync")
+                .outcome,
+            ProfileSyncOutcomeFfi::NothingPending
+        ));
+        assert_eq!(
+            fx.profiles_sent().len(),
+            3,
+            "and nothing is published twice"
+        );
+        for relay in &asked {
+            assert_eq!(
+                relay.load(Ordering::SeqCst),
+                1,
+                "one sync is one request to each relay"
+            );
+        }
+    }
+
+    /// A copy read for a removal is a copy this device has read, whether or
+    /// not the publish then lands. Another client removed the payment address;
+    /// the sync reads that newer copy and no relay takes its publish. On the
+    /// retry the only relay to answer never took the newer copy: built on its
+    /// old one, the removal would sign the address back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_newer_copy_read_for_a_photo_removal_that_failed_is_what_the_retry_builds_on() {
+        use haven_core::relay::scripted_relay::Frame;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_sync_remove_failed_then_retry");
+        let held = fx.profile(WITH_ADDRESS, None);
+        fx.hold_as_published(&held);
+        let newer = fx.profile(WITHOUT_ADDRESS, Some(held.created_at.as_secs() + 10));
+        fx.pool[1].answer(|_| true, vec![Frame::Event(newer), Frame::Eose]);
+        let refusing = fx.refuse_writes();
+
+        let failed = remove_then_sync(&fx).await;
+        assert_eq!(failed.outcome, ProfileSyncOutcomeFfi::PublishFailed);
+        assert!(fx.profiles_sent().is_empty());
+
+        fx.pool[1].answer(|_| true, vec![Frame::Eose]);
+        fx.pool[0].answer(|_| true, vec![Frame::Event(held), Frame::Eose]);
+        refusing.store(false, Ordering::SeqCst);
+        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3);
+        for event in &sent {
+            let fields = profile_fields(event);
+            assert_eq!(
+                fields.get("display_name").map(String::as_str),
+                Some(r#""Me""#)
+            );
+            assert!(!fields.contains_key("picture"));
+            assert!(
+                !fields.contains_key("lud16"),
+                "a field another client removed was signed back into the profile"
+            );
+        }
+    }
+
+    /// Right after the reset the device has no record of its profile, so the
+    /// sync's read of the pool is also what says a profile exists. When the
+    /// publish then fails, that knowledge must not go with it: a retry that
+    /// every relay answers with nothing would otherwise settle the removal
+    /// and publish nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_photo_removal_whose_first_sync_failed_is_published_by_the_next() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_sync_remove_failed_after_gate");
+        // Each relay serves the profile to the first request and to no other.
+        let _asked = fx.count_requests(&fx.profile(WITH_ADDRESS, None), |before| before == 0);
+        let refusing = fx.refuse_writes();
+
+        let failed = remove_then_sync(&fx).await;
+        assert_eq!(failed.outcome, ProfileSyncOutcomeFfi::PublishFailed);
+        refusing.store(false, Ordering::SeqCst);
+        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3, "the retry removed nothing");
+        for event in &sent {
+            let fields = profile_fields(event);
+            assert!(fields.contains_key("lud16") && !fields.contains_key("picture"));
+        }
+    }
+
+    /// A photo saved while a removal is being published is the user's newer
+    /// wish. The publish carried the removal, so it must neither report the
+    /// new photo published nor delete its bytes, and the removal it did
+    /// publish must not linger to strip the new photo later. (The new photo's
+    /// own upload needs a Blossom server, which this binary does not run.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_photo_saved_while_a_removal_is_being_published_is_kept_and_stays_pending() {
+        use haven_core::relay::scripted_relay::Frame;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_sync_remove_races_a_save");
         let current = fx.profile(WITHOUT_ADDRESS, None);
         fx.hold_as_published(&current);
-        // One relay holds the removal's read until the save has landed: the
-        // read comes after the removal cancelled what was queued, and before
-        // it looks at the outbox.
+        fx.circle
+            .remove_my_profile_picture()
+            .await
+            .expect("remove the picture");
+        // One relay holds the sync's read until the save has landed: the read
+        // comes after the sync took the outbox, and before it records what it
+        // published.
         let (asked, was_asked) = std::sync::mpsc::channel::<()>();
         let (answer, may_answer) = std::sync::mpsc::channel::<()>();
         let may_answer = std::sync::Mutex::new(may_answer);
@@ -21331,16 +21235,18 @@ mod maintenance_real_ffi_tests {
             vec![Frame::Event(current), Frame::Eose],
         );
 
-        let (removed, ()) = tokio::join!(fx.circle.remove_my_profile_picture(fx.secret()), async {
-            reached(was_asked, "the removal read the pool").await;
+        let (synced, ()) = tokio::join!(fx.circle.sync_my_profile(fx.secret()), async {
+            reached(was_asked, "the sync read the pool").await;
             fx.circle
                 .save_my_profile_picture_local(tiny_png())
                 .await
                 .expect("save a new photo");
             drop(answer);
         });
-        removed.expect("remove the picture");
+        let synced = synced.expect("sync");
 
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+        assert!(synced.still_pending, "the new photo is still owed");
         let sent = fx.profiles_sent();
         assert_eq!(sent.len(), 3);
         assert!(sent
@@ -21359,10 +21265,70 @@ mod maintenance_real_ffi_tests {
                 .get_profile_picture(&fx.own_hex())
                 .expect("picture read")
                 .is_some(),
-            "the removal deleted a photo saved after it began"
+            "the sync deleted a photo saved after it began"
         );
+        let snapshot = fx
+            .circle
+            .inner
+            .pending_profile_sync(&fx.own_hex())
+            .expect("outbox read")
+            .expect("the new photo is still queued");
+        assert!(
+            !snapshot.edits.clear_picture,
+            "a removal every relay took lingers and would strip the new photo"
+        );
+    }
+
+    /// A removal one relay missed carries a name queued before it. Until that
+    /// relay serves the event, the name is not published: the outbox keeps it,
+    /// and the next sync takes the identical event to that relay alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_photo_removal_one_relay_missed_keeps_the_name_it_carried_pending_until_that_relay_serves_it(
+    ) {
+        use haven_core::relay::scripted_relay::Frame;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_sync_remove_partial");
+        fx.hold_as_published(&fx.profile(WITHOUT_ADDRESS, None));
+        fx.circle
+            .save_my_profile_local(Some("Renamed".to_string()), None)
+            .await
+            .expect("queue a name");
+        let refusing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let refuses = refusing.clone();
+        fx.pool[2].refuse(move |_| refuses.load(Ordering::SeqCst));
+
+        let first = remove_then_sync(&fx).await;
+
+        assert_eq!(first.outcome, ProfileSyncOutcomeFfi::Published);
+        assert!(first.still_pending);
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 2, "two relays of three took the removal");
+        assert!(sent.iter().all(|event| profile_fields(event)
+            .get("display_name")
+            .is_some_and(|name| name == r#""Renamed""#)));
         assert!(
             fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending,
+            "a name one relay refused reads as published everywhere"
+        );
+
+        refusing.store(false, Ordering::SeqCst);
+        fx.pool[2].answer(|_| true, vec![Frame::Event(sent[0].clone()), Frame::Eose]);
+        let second = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+
+        assert_eq!(second.outcome, ProfileSyncOutcomeFfi::Published);
+        assert!(!second.still_pending);
+        let reached_it = fx.pool[2].published();
+        assert_eq!(reached_it.len(), 1);
+        assert_eq!(reached_it[0].id, sent[0].id, "the event was signed again");
+        assert_eq!(fx.profiles_sent().len(), 3);
+        assert!(
+            !fx.circle
                 .profile_pending_state()
                 .await
                 .expect("pending state")
@@ -21370,84 +21336,47 @@ mod maintenance_real_ffi_tests {
         );
     }
 
-    /// A removal that settles the outbox reports the coverage it got, like a
-    /// sync: two relays of three is a name some peers still cannot read.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_removal_only_some_relays_took_leaves_the_name_it_carried_partly_published() {
-        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
-        install_test_seams();
-        let fx = ScriptedProfilePool::start("profile_remove_partial");
-        fx.hold_as_published(&fx.profile(WITHOUT_ADDRESS, None));
-        fx.circle
-            .save_my_profile_local(Some("Renamed".to_string()), None)
-            .await
-            .expect("queue a name");
-        fx.pool[2].refuse(|_| true);
-
-        fx.circle
-            .remove_my_profile_picture(fx.secret())
-            .await
-            .expect("remove the picture");
-
-        let sent = fx.profiles_sent();
-        assert_eq!(sent.len(), 2, "two relays of three took the removal");
-        assert!(sent.iter().all(|event| profile_fields(event)
-            .get("display_name")
-            .is_some_and(|name| name == r#""Renamed""#)));
-        let state = fx
-            .circle
-            .profile_pending_state()
-            .await
-            .expect("pending state");
-        assert!(
-            state.pending && state.partial,
-            "a name one relay refused reads as published everywhere"
-        );
-    }
-
     /// A removal one relay refused is not done: that relay goes on serving the
-    /// photo to every peer who reads the profile there. With nothing queued to
-    /// carry it, the profile without the picture is itself left owed — sent,
-    /// but not everywhere — and the next sync takes it to the whole pool. Not
-    /// at once: the retry waits out the first rung of the ladder, as after any
-    /// publish some relay did not take.
+    /// photo to every peer who reads the profile there. The next sync takes
+    /// the IDENTICAL event to that relay alone, and not at once: the retry
+    /// waits out the first rung of the ladder, as after any publish some relay
+    /// did not take.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_removal_one_relay_refused_is_owed_until_a_sync_reaches_that_relay() {
+    async fn a_photo_removal_one_relay_refused_is_resent_identically_to_that_relay_alone() {
         use haven_core::profile::PROFILE_SYNC_BACKOFF_SECS;
         use haven_core::relay::scripted_relay::Frame;
         use std::sync::atomic::AtomicBool;
 
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
-        let fx = ScriptedProfilePool::start("profile_remove_owed");
+        let fx = ScriptedProfilePool::start("profile_sync_remove_owed");
         let pictured = fx.profile(WITHOUT_ADDRESS, None);
         fx.hold_as_published(&pictured);
         let refusing = std::sync::Arc::new(AtomicBool::new(true));
         let refuses = refusing.clone();
         fx.pool[2].refuse(move |_| refuses.load(Ordering::SeqCst));
+        // The relay that refuses still serves the profile WITH the photo.
+        fx.pool[2].answer(|_| true, vec![Frame::Event(pictured), Frame::Eose]);
 
-        let before = profile_now_secs();
         fx.circle
-            .remove_my_profile_picture(fx.secret())
+            .remove_my_profile_picture()
             .await
             .expect("remove the picture");
+        let before = profile_now_secs();
+        let first = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
         let after = profile_now_secs();
 
-        assert_eq!(
-            fx.profiles_sent().len(),
-            2,
-            "two relays of three took the removal"
-        );
+        assert_eq!(first.outcome, ProfileSyncOutcomeFfi::Published);
+        assert!(first.still_pending);
+        let removal = fx.profiles_sent();
+        assert_eq!(removal.len(), 2, "two relays of three took the removal");
         let state = fx
             .circle
             .profile_pending_state()
             .await
             .expect("pending state");
-        assert!(
-            state.pending && state.partial,
-            "a removal one relay refused reads as done"
-        );
-        // The removal's own clock reading lies between the two taken here.
+        assert!(state.pending, "a removal one relay refused reads as done");
+        // The sync's own clock reading lies between the two taken here.
         let due_at = |now| {
             fx.circle
                 .inner
@@ -21464,32 +21393,37 @@ mod maintenance_real_ffi_tests {
             "the first retry waits longer than the first rung of the ladder"
         );
 
-        // The relay that refused still serves the profile WITH the photo, and
-        // is the only one to answer the retry's read: built on that copy, the
-        // retry would publish the photo back to every relay.
-        fx.pool[2].answer(|_| true, vec![Frame::Event(pictured), Frame::Eose]);
         refusing.store(false, Ordering::SeqCst);
-        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
-        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+        fx.pool[2].answer(
+            |_| true,
+            vec![Frame::Event(removal[0].clone()), Frame::Eose],
+        );
+        let second = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        assert_eq!(second.outcome, ProfileSyncOutcomeFfi::Published);
+        assert!(!second.still_pending);
+
         let reached_it = fx.pool[2].published();
         assert_eq!(
             reached_it.len(),
             1,
-            "the relay that refused the removal was not sent it again"
+            "the relay that refused the removal was sent it once"
         );
-        let fields = profile_fields(&reached_it[0]);
-        assert!(!fields.contains_key("picture"));
         assert_eq!(
-            fields.get("display_name").map(String::as_str),
-            Some(r#""Me""#)
+            reached_it[0].id, removal[0].id,
+            "the event sent again is the one every other relay holds"
         );
-        let state = fx
-            .circle
-            .profile_pending_state()
-            .await
-            .expect("pending state");
+        assert!(!profile_fields(&reached_it[0]).contains_key("picture"));
+        assert_eq!(
+            fx.pool[0].published().len() + fx.pool[1].published().len(),
+            2,
+            "a relay that held the removal was sent it again"
+        );
         assert!(
-            !state.pending && !state.partial,
+            !fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending,
             "a removal every relay now holds still reads as owed"
         );
         assert!(matches!(
@@ -21502,93 +21436,44 @@ mod maintenance_real_ffi_tests {
         ));
         assert_eq!(
             fx.profiles_sent().len(),
-            5,
+            3,
             "and nothing is sent after that"
         );
     }
 
-    /// The retry's backoff runs from when a retraction was RECORDED, not from
-    /// when it began. A removal or a deletion that spent longer on the relays
-    /// than the first rung would otherwise come back with its retry already
-    /// due, and the status re-read that follows would republish to the whole
-    /// pool at once.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_slow_retraction_does_not_leave_its_retry_already_due() {
-        use haven_core::profile::PROFILE_SYNC_BACKOFF_SECS;
-        use std::sync::atomic::AtomicI64;
-
-        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
-        install_test_seams();
-        for deleting in [false, true] {
-            let fx = ScriptedProfilePool::start("profile_retract_slow");
-            fx.hold_as_published(&fx.profile(WITHOUT_ADDRESS, None));
-            // The publish "takes" longer than the first rung: this task's
-            // clock jumps ahead at the moment the refusing relay is offered
-            // the retraction.
-            let took = PROFILE_SYNC_BACKOFF_SECS[0] + 10;
-            let ahead = std::sync::Arc::new(AtomicI64::new(0));
-            let offered = ahead.clone();
-            fx.pool[2].refuse(move |_| {
-                offered.store(took, Ordering::SeqCst);
-                true
-            });
-
-            let state = super::PROFILE_CLOCK_AHEAD_SECS
-                .scope(ahead.clone(), async {
-                    if deleting {
-                        fx.circle
-                            .delete_my_public_profile(fx.secret())
-                            .await
-                            .expect("delete the public profile");
-                    } else {
-                        fx.circle
-                            .remove_my_profile_picture(fx.secret())
-                            .await
-                            .expect("remove the picture");
-                    }
-                    fx.circle
-                        .profile_pending_state()
-                        .await
-                        .expect("pending state")
-                })
-                .await;
-
-            assert_eq!(
-                ahead.load(Ordering::SeqCst),
-                took,
-                "anti-vacuity: the clock moved while the retraction was being published"
-            );
-            assert!(state.pending && state.partial, "deleting = {deleting}");
-            assert!(
-                !state.retry_due,
-                "a retraction that took longer than the first rung came back with its retry \
-                 due (deleting = {deleting})"
-            );
-        }
-    }
-
     /// The other side of the rule above: a removal every relay took owes
-    /// nothing, and no sync follows it.
+    /// nothing, and no sync follows it. Until the sync, the removal is only
+    /// local.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_removal_every_relay_took_owes_nothing() {
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
-        let fx = ScriptedProfilePool::start("profile_remove_not_owed");
+        let fx = ScriptedProfilePool::start("profile_sync_remove_not_owed");
         fx.hold_as_published(&fx.profile(WITHOUT_ADDRESS, None));
 
         fx.circle
-            .remove_my_profile_picture(fx.secret())
+            .remove_my_profile_picture()
             .await
             .expect("remove the picture");
-
-        assert_eq!(fx.profiles_sent().len(), 3);
-        let state = fx
-            .circle
-            .profile_pending_state()
-            .await
-            .expect("pending state");
+        assert!(fx.profiles_sent().is_empty(), "the removal itself is local");
         assert!(
-            !state.pending && !state.partial,
+            fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending
+        );
+        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+        assert!(!synced.still_pending);
+        assert_eq!(fx.profiles_sent().len(), 3);
+        assert!(
+            !fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending,
             "a removal every relay took reads as owed"
         );
         assert!(matches!(
@@ -21604,20 +21489,23 @@ mod maintenance_real_ffi_tests {
 
     /// A name saved while the removal is being published is the user's newer
     /// wish, and no relay has been sent it. It stays queued, it stays on the
-    /// row the name field reads, and it does not read as partly published:
-    /// the removal is what one relay refused, and the name's own sync takes
-    /// both to the whole pool.
+    /// row the name field reads, and no event is owed for it yet; the next
+    /// sync publishes it to the whole pool without the removed photo.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_name_saved_while_the_removal_is_published_is_kept_and_reads_as_unsent() {
+    async fn a_name_saved_while_a_removal_is_being_published_stays_pending_and_is_published_next() {
         use std::sync::atomic::AtomicBool;
 
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
-        let fx = ScriptedProfilePool::start("profile_remove_publish_races_a_save");
+        let fx = ScriptedProfilePool::start("profile_sync_remove_publish_races_a_save");
         fx.hold_as_published(&fx.profile(WITHOUT_ADDRESS, None));
+        fx.circle
+            .remove_my_profile_picture()
+            .await
+            .expect("remove the picture");
         // One relay holds its answer to the removal until the save has landed,
-        // and then refuses it: the save falls after the removal read the
-        // outbox and before it records what it published.
+        // and then refuses it: the save falls after the sync read the outbox
+        // and before it records what it published.
         let (offered, was_offered) = std::sync::mpsc::channel::<()>();
         let (answer, may_answer) = std::sync::mpsc::channel::<()>();
         let may_answer = std::sync::Mutex::new(may_answer);
@@ -21629,7 +21517,7 @@ mod maintenance_real_ffi_tests {
             refuses.load(Ordering::SeqCst)
         });
 
-        let (removed, ()) = tokio::join!(fx.circle.remove_my_profile_picture(fx.secret()), async {
+        let (synced, ()) = tokio::join!(fx.circle.sync_my_profile(fx.secret()), async {
             reached(was_offered, "the removal was offered to the pool").await;
             fx.circle
                 .save_my_profile_local(Some("Renamed".to_string()), None)
@@ -21637,7 +21525,7 @@ mod maintenance_real_ffi_tests {
                 .expect("save a name");
             drop(answer);
         });
-        let shown = removed.expect("remove the picture");
+        assert!(synced.expect("sync").still_pending);
 
         let removal = fx.profiles_sent();
         assert_eq!(removal.len(), 2, "two relays of three took the removal");
@@ -21653,34 +21541,26 @@ mod maintenance_real_ffi_tests {
             .await
             .expect("cached read")
             .expect("the own row");
-        for view in [&shown, &cached] {
-            assert_eq!(
-                view.display_name.as_deref(),
-                Some("Renamed"),
-                "the name the user saved is gone from the row their name field reads"
-            );
-            assert!(!view.has_picture);
-        }
-        let state = fx
-            .circle
-            .profile_pending_state()
-            .await
-            .expect("pending state");
-        assert!(state.pending, "a name no relay was sent reads as published");
-        assert!(
-            !state.partial,
-            "a name no relay was sent reads as published to some"
-        );
         assert_eq!(
+            cached.display_name.as_deref(),
+            Some("Renamed"),
+            "the name the user saved is gone from the row their name field reads"
+        );
+        assert!(!cached.has_picture);
+        let queued = fx
+            .circle
+            .inner
+            .pending_profile_sync(&fx.own_hex())
+            .expect("outbox read")
+            .expect("the name is still queued");
+        assert_eq!(queued.edits.display_name.as_deref(), Some("Renamed"));
+        assert!(
             fx.circle
                 .inner
-                .pending_profile_sync(&fx.own_hex())
-                .expect("outbox read")
-                .expect("the name is still queued")
-                .edits
-                .display_name
-                .as_deref(),
-            Some("Renamed")
+                .profile_publish_debt(&fx.keys.public_key(), queued.local_version)
+                .expect("debt read")
+                .is_none(),
+            "an event that does not carry the newest save is owed to nobody"
         );
 
         refusing.store(false, Ordering::SeqCst);
@@ -21707,14 +21587,59 @@ mod maintenance_real_ffi_tests {
         );
     }
 
-    /// A photo queued for upload and then removed leaves the outbox owing one
-    /// thing: a profile that names no picture. The removal publishes exactly
-    /// that, so nothing is left for a sync to send a second time.
+    /// A name queued beside a removal is published with it onto the newer copy
+    /// another client wrote, keeping that client's field.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_removal_that_cancels_a_queued_photo_leaves_nothing_to_publish() {
+    async fn a_queued_name_and_a_photo_removal_are_published_onto_the_relays_newer_copy() {
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
-        let fx = ScriptedProfilePool::start("profile_remove_cancelled_photo");
+        let fx = ScriptedProfilePool::start("profile_sync_remove_keeps_queue");
+        let held = fx.profile(
+            r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg"}"#,
+            None,
+        );
+        fx.hold_as_published(&held);
+        let newer = fx.profile(
+            r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg","website":"https://w.example.com"}"#,
+            Some(held.created_at.as_secs() + 10),
+        );
+        let _asked = fx.count_requests(&newer, |_| true);
+        fx.circle
+            .save_my_profile_local(Some("Renamed".to_string()), None)
+            .await
+            .expect("queue a name");
+
+        let synced = remove_then_sync(&fx).await;
+
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
+        let sent = fx.profiles_sent();
+        assert_eq!(sent.len(), 3);
+        for event in &sent {
+            let fields = profile_fields(event);
+            assert_eq!(
+                fields.get("display_name").map(String::as_str),
+                Some(r#""Renamed""#)
+            );
+            assert!(
+                fields.contains_key("website") && !fields.contains_key("picture"),
+                "the event dropped another client's field or kept the photo"
+            );
+            assert!(
+                event.created_at > newer.created_at,
+                "the event does not supersede the copy it was built on"
+            );
+        }
+    }
+
+    /// A photo queued for upload and then removed leaves the outbox owing one
+    /// thing: a profile that names no picture. The sync publishes exactly
+    /// that, so nothing is left to send a second time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_removal_that_cancels_a_queued_photo_publishes_one_cleared_profile_and_nothing_more()
+    {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_sync_remove_cancelled_photo");
         let current = fx.profile(
             r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg"}"#,
             None,
@@ -21725,20 +21650,10 @@ mod maintenance_real_ffi_tests {
             .save_my_profile_picture_local(tiny_png())
             .await
             .expect("queue a photo");
-        assert!(
-            fx.circle
-                .profile_pending_state()
-                .await
-                .expect("pending state")
-                .pending,
-            "anti-vacuity: the photo is waiting to be published"
-        );
 
-        fx.circle
-            .remove_my_profile_picture(fx.secret())
-            .await
-            .expect("remove the picture");
+        let synced = remove_then_sync(&fx).await;
 
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::Published);
         let sent = fx.profiles_sent();
         assert_eq!(sent.len(), 3);
         assert!(sent
@@ -21758,83 +21673,175 @@ mod maintenance_real_ffi_tests {
                 .await
                 .expect("sync")
                 .outcome,
-            super::ProfileSyncOutcomeFfi::NothingPending
+            ProfileSyncOutcomeFfi::NothingPending
         ));
         assert_eq!(fx.profiles_sent().len(), 3, "and it is not published twice");
     }
 
-    /// The other direction: a removal built on the relays' copy does not carry
-    /// the queued name, and must not report it published.
+    /// The backoff of a sync that spent longer on the relays than the first
+    /// rung runs from when the sync ENDED: the status re-read that follows
+    /// must not find the retry already due and republish at once.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_queued_name_the_photo_removal_did_not_publish_stays_queued() {
+    async fn a_slow_sync_through_the_ffi_dates_its_backoff_from_when_it_ends() {
+        use haven_core::profile::PROFILE_SYNC_BACKOFF_SECS;
+        use std::sync::atomic::AtomicI64;
+
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
-        let fx = ScriptedProfilePool::start("profile_remove_keeps_queue");
-        let held = fx.profile(
-            r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg"}"#,
-            None,
-        );
-        fx.hold_as_published(&held);
-        // Another client has since published a newer copy; every relay serves
-        // it, so the removal is built on it and not on the row.
-        let newer = fx.profile(
-            r#"{"display_name":"Me","picture":"https://p.example.com/a.jpg","website":"https://w.example.com"}"#,
-            Some(held.created_at.as_secs() + 10),
-        );
-        let _asked = fx.count_requests(&newer, |_| true);
+        let fx = ScriptedProfilePool::start("profile_sync_slow");
         fx.circle
-            .save_my_profile_local(Some("Renamed".to_string()), None)
+            .save_my_profile_local(Some("Slow".to_string()), None)
             .await
             .expect("queue a name");
+        // The publish "takes" longer than the first rung: this task's clock
+        // jumps ahead at the moment the refusing relay is offered the event.
+        let took = PROFILE_SYNC_BACKOFF_SECS[0] + 10;
+        let ahead = std::sync::Arc::new(AtomicI64::new(0));
+        let offered = ahead.clone();
+        fx.pool[2].refuse(move |_| {
+            offered.store(took, Ordering::SeqCst);
+            true
+        });
 
-        let shown = fx
-            .circle
-            .remove_my_profile_picture(fx.secret())
+        let state = super::PROFILE_CLOCK_AHEAD_SECS
+            .scope(ahead.clone(), async {
+                let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+                assert!(synced.still_pending);
+                fx.circle
+                    .profile_pending_state()
+                    .await
+                    .expect("pending state")
+            })
+            .await;
+
+        assert_eq!(
+            ahead.load(Ordering::SeqCst),
+            took,
+            "anti-vacuity: the clock moved while the event was being published"
+        );
+        assert!(state.pending);
+        assert!(
+            !state.retry_due,
+            "a sync that took longer than the first rung came back with its retry due"
+        );
+        assert!(
+            state.next_retry_in_secs.is_some(),
+            "a pending save that is not due names how long until it is"
+        );
+    }
+
+    /// An owed relay that acknowledges the identical event the way khatru does
+    /// (`OK true`, and nothing said) while serving a NEWER copy another client
+    /// wrote has not taken our event. The sync redirects onto that copy: one
+    /// new event reaches every relay, carrying our pending name AND the other
+    /// client's field, newer than it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_owed_relay_that_acks_khatru_style_while_serving_a_newer_copy_redirects() {
+        use haven_core::relay::scripted_relay::{Frame, Verdict};
+        use std::sync::atomic::AtomicBool;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_sync_khatru_redirect");
+        fx.circle
+            .save_my_profile_local(Some("Mine".to_string()), None)
             .await
-            .expect("remove the picture");
-        let cached = fx
-            .circle
-            .get_cached_profile(fx.own_hex())
-            .await
-            .expect("cached read")
-            .expect("the own row");
-        for view in [&shown, &cached] {
+            .expect("queue a name");
+        let refusing = std::sync::Arc::new(AtomicBool::new(true));
+        let refuses = refusing.clone();
+        fx.pool[2].refuse(move |_| refuses.load(Ordering::SeqCst));
+        let first = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+        assert_eq!(first.outcome, ProfileSyncOutcomeFfi::Published);
+        assert!(first.still_pending, "anti-vacuity: one relay is owed");
+        let e1 = fx.pool[0].published().remove(0);
+        assert_eq!(fx.profiles_sent().len(), 2);
+
+        // Another client has since written a newer copy, which the owed relay
+        // serves while acknowledging our event.
+        let foreign = fx.profile(
+            r#"{"display_name":"Theirs","website":"https://w.example.com"}"#,
+            Some(e1.created_at.as_secs() + 10),
+        );
+        fx.pool[2].on_publish(|_| Verdict::KeepSaying(String::new()));
+        fx.pool[2].answer(|_| true, vec![Frame::Event(foreign.clone()), Frame::Eose]);
+        let second = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+
+        assert_eq!(second.outcome, ProfileSyncOutcomeFfi::Published);
+        assert!(!second.still_pending);
+        let at_owed = fx.pool[2].published();
+        assert_eq!(
+            at_owed.first().map(|event| event.id),
+            Some(e1.id),
+            "the owed relay was first sent the identical event"
+        );
+        let e2 = fx.pool[0].published().pop().expect("the redirect event");
+        assert_ne!(e2.id, e1.id, "the redirect signed nothing new");
+        assert!(
+            e2.created_at > foreign.created_at,
+            "the redirect event does not supersede the newer copy"
+        );
+        let fields = profile_fields(&e2);
+        assert_eq!(
+            fields.get("display_name").map(String::as_str),
+            Some(r#""Mine""#),
+            "our pending name was lost"
+        );
+        assert_eq!(
+            fields.get("website").map(String::as_str),
+            Some(r#""https://w.example.com""#),
+            "the other client's field was lost"
+        );
+        for relay in &fx.pool {
             assert_eq!(
-                view.display_name.as_deref(),
-                Some("Renamed"),
-                "the name the user saved is gone from the row their name field reads"
+                relay.published().last().map(|event| event.id),
+                Some(e2.id),
+                "the redirect event did not reach every relay"
             );
         }
+        assert!(
+            !fx.circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending
+        );
+    }
 
-        let sent = fx.profiles_sent();
-        assert_eq!(sent.len(), 3);
-        for event in &sent {
-            let fields = profile_fields(event);
-            assert_eq!(
-                fields.get("display_name").map(String::as_str),
-                Some(r#""Me""#),
-                "anti-vacuity: the removal was built on the relays' copy"
-            );
-            assert!(fields.contains_key("website") && !fields.contains_key("picture"));
-        }
+    /// A deletion whose relay-side retry keeps serving the deleted profile
+    /// after taking the blank has not been deleted there: the blank stays owed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_lagging_relay_that_keeps_the_blank_but_serves_the_deleted_copy_stays_owed() {
+        use haven_core::relay::scripted_relay::{Frame, Verdict};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let fx = ScriptedProfilePool::start("profile_delete_lagging");
+        let (refusing, deleted) = delete_with_one_relay_refusing(&fx).await;
+        let first_blank = fx.profiles_sent().remove(0);
+
+        refusing.store(false, Ordering::SeqCst);
+        fx.pool[2].on_publish(|_| Verdict::Keep);
+        fx.pool[2].answer(|_| true, vec![Frame::Event(deleted), Frame::Eose]);
+        let synced = fx.circle.sync_my_profile(fx.secret()).await.expect("sync");
+
+        assert_eq!(synced.outcome, ProfileSyncOutcomeFfi::PublishFailed);
+        assert!(synced.still_pending, "a relay still serving the profile");
+        let reached_it = fx.pool[2].published();
+        assert_eq!(reached_it.len(), 1);
+        assert_eq!(reached_it[0].id, first_blank.id);
         assert!(
             fx.circle
                 .profile_pending_state()
                 .await
                 .expect("pending state")
                 .pending,
-            "a name no relay was sent reads as published"
+            "a blank the relay does not serve reads as delivered"
         );
-        assert_eq!(
-            fx.circle
-                .inner
-                .pending_profile_sync(&fx.own_hex())
-                .expect("outbox read")
-                .expect("the name is still queued")
-                .edits
-                .display_name
-                .as_deref(),
-            Some("Renamed")
+        assert!(
+            fx.profiles_sent()
+                .iter()
+                .all(|event| profile_fields(event).is_empty()),
+            "a field of the deleted profile was signed back"
         );
     }
 
@@ -21878,8 +21885,6 @@ mod maintenance_real_ffi_tests {
         );
 
         assert_eq!(report.outcome, ProfileSyncOutcomeFfi::NothingPending);
-        assert_eq!(report.relays_acked, 0);
-        assert_eq!(report.relays_attempted, 0);
         assert!(!report.still_pending);
     }
 
@@ -21923,8 +21928,6 @@ mod maintenance_real_ffi_tests {
                  is ever used to build a signing key",
         );
         assert_eq!(report.outcome, ProfileSyncOutcomeFfi::PoolUnderflow);
-        assert_eq!(report.relays_acked, 0);
-        assert_eq!(report.relays_attempted, 0);
         assert!(report.still_pending, "the save is queued, never discarded");
 
         let state = circle.profile_pending_state().await.expect("pending state");
@@ -22358,65 +22361,27 @@ mod maintenance_real_ffi_tests {
             .save_my_profile_picture_local(tiny_png())
             .await
             .expect("queue a photo");
-        let err = isolated
-            .remove_my_profile_picture(secret_bytes(&keys))
+        isolated
+            .remove_my_profile_picture()
             .await
-            .expect_err("an unverifiable picture retraction must never be a silent no-op");
-        assert_eq!(err, super::PROFILE_RETRACTION_UNVERIFIED);
+            .expect("the removal is local");
         assert!(
             !pending(&isolated).is_some_and(|snapshot| snapshot.picture_staged),
-            "an unverifiable removal still cancels the queued photo"
+            "the removal cancels the queued photo"
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn remove_picture_rejects_a_secret_that_is_not_this_managers_identity() {
-        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
-        install_test_seams();
-
-        let keys = Keys::generate();
-        let own_hex = keys.public_key().to_hex();
-        let stranger = Keys::generate();
-        let dir = DataDir::new("profile_remove_foreign_secret");
-        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
-            .expect("CircleManagerFfi::new");
-        isolate_profile_plane(&circle);
-
-        circle
-            .save_my_profile_picture_local(tiny_png())
+        let held = isolated
+            .sync_my_profile(secret_bytes(&keys))
             .await
-            .expect("save picture locally");
-
-        let err = circle
-            .remove_my_profile_picture(secret_bytes(&stranger))
-            .await
-            .expect_err("a foreign secret must not retract this account's photo");
-        assert!(
-            !err.contains(&own_hex) && !err.contains(&stranger.public_key().to_hex()),
-            "the rejection must name neither identity",
+            .expect("the sync runs");
+        assert_eq!(
+            held.outcome,
+            super::ProfileSyncOutcomeFfi::PublishFailed,
+            "an unverifiable picture retraction must never be a silent no-op"
         );
-
+        assert!(held.still_pending);
         assert!(
-            circle
-                .inner
-                .profile_picture_is_staged(&own_hex)
-                .expect("staged read"),
-            "the queued upload must survive a rejected retraction",
-        );
-        assert!(
-            circle
-                .inner
-                .get_profile_picture(&own_hex)
-                .expect("picture read")
-                .is_some(),
-            "and so must its bytes",
-        );
-        assert!(
-            !circle
-                .inner
-                .has_published_profile(&keys.public_key())
-                .expect("gate read"),
-            "nothing was published",
+            pending(&isolated).is_some_and(|snapshot| snapshot.edits.clear_picture),
+            "the removal stays owed until a read can tell what to retract"
         );
     }
 

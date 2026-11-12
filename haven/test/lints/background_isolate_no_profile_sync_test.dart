@@ -43,6 +43,7 @@ String _codeOnly(String source) => source
 const _profileSyncSymbols = [
   'triggerProfileSync',
   'triggerProfileSyncRetry',
+  'retryIfPending',
   'ownProfileSyncProvider',
   'OwnProfileSyncController',
   'syncOwnProfile',

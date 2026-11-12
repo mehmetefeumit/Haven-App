@@ -1,8 +1,9 @@
 //! **S26** — the identity planes under a fault.
 //!
 //! Every device publishes its profile to its profile pool while one profile
-//! relay is down, every peer reads it back, and every member's key package is
-//! looked up where it published it.
+//! relay is down, and once it is back sends the owed event to that relay
+//! alone; every peer reads it back, and every member's key package is looked
+//! up where it published it.
 //!
 //! The promise is the plane separation (Rule 10), and O7 is what grades it
 //! here: a device's kind 0 and its profile lookups reach the profile planes
@@ -48,7 +49,9 @@ use nostr::{PublicKey, Timestamp};
 use crate::nemesis::types::Fault;
 use crate::oracle::vacuity::{ExpectationFloor, Observed};
 use crate::oracle::{Invariant, Reach, Recovery};
-use crate::rig::{DeviceTag, LogDrain, RelayPlane, RigError, SimDevice, Step, TimelineSink};
+use crate::rig::{
+    DeviceTag, LogDrain, RelayPlane, RelayTag, RigError, SimDevice, Step, TimelineSink,
+};
 use crate::scenarios::{
     closing_pairs, grade_round, round, Absence, Arm, ArmOutcome, Scenario, ScenarioReport,
     ScenarioWorld, WithheldAcks, NO_GATING_ROWS,
@@ -66,7 +69,7 @@ pub const ARMS: [Arm; 1] = [Arm {
         faults_applied: 1,
         epochs_crossed: 0,
         deliveries_observed: 1,
-        canaries_caught: 3,
+        canaries_caught: 4,
     },
 }];
 
@@ -126,7 +129,8 @@ async fn identity_planes<T: TimelineSink, L: LogDrain>(
     let mut canaries = 0_usize;
 
     // 1. Every device publishes with one profile relay down: the product
-    //    publishes to its whole pool and the two up relays acknowledge.
+    //    publishes to its whole pool, the up relays acknowledge, and the event
+    //    stays owed to the down one.
     let down = world.profile_relays()[0].tag();
     world.plane_mut(down)?.apply(Fault::Down).await?;
     let mut published = 0_usize;
@@ -137,19 +141,16 @@ async fn identity_planes<T: TimelineSink, L: LogDrain>(
         let manager = device.manager()?;
         let edits = PendingEdits {
             display_name: Some(name),
-            about: None,
+            ..PendingEdits::default()
         };
         manager
             .stage_own_profile_edits(&device.pubkey_hex(), &edits, now)
             .map_err(|_| RigError::Core(Step::Publish))?;
         let synced = manager
-            .sync_own_profile(&device.keys, now)
+            .sync_own_profile(&device.keys, || now)
             .await
             .map_err(|_| RigError::Core(Step::Publish))?;
-        if synced.outcome == ProfileSyncOutcome::Published
-            && usize::try_from(synced.relays_attempted) == Ok(planes)
-            && usize::try_from(synced.relays_acked) == Ok(planes - 1)
-        {
+        if synced.outcome == ProfileSyncOutcome::Published && synced.still_pending {
             published += 1;
         }
     }
@@ -158,7 +159,13 @@ async fn identity_planes<T: TimelineSink, L: LogDrain>(
         canaries += 1;
     }
 
-    // 2. Every device reads every peer's profile, walking the product's own
+    // 2. Back up, the healed relay is the only one sent anything: each device
+    //    re-sends the owed event to it alone, reads it back, and is done.
+    if healed_relay_alone_completes(world, &tags, down, now).await? {
+        canaries += 1;
+    }
+
+    // 3. Every device reads every peer's profile, walking the product's own
     //    retry ladder past the relay that missed the publish.
     let mut read = 0_usize;
     for &reader in &tags {
@@ -181,7 +188,7 @@ async fn identity_planes<T: TimelineSink, L: LogDrain>(
         canaries += 1;
     }
 
-    // 3. Every member's key package, published to its own key-package plane,
+    // 4. Every member's key package, published to its own key-package plane,
     //    is found there by the admin's invite lookup.
     let mut found = 0_usize;
     for &member in tags.iter().filter(|&&member| member != admin) {
@@ -221,6 +228,61 @@ async fn identity_planes<T: TimelineSink, L: LogDrain>(
         observed,
         tick,
     })
+}
+
+/// Whether a second sync of every device completes the owed event while the
+/// healed relay `down` is the only profile plane sent anything.
+async fn healed_relay_alone_completes<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    tags: &[DeviceTag],
+    down: RelayTag,
+    now: i64,
+) -> Result<bool, RigError> {
+    let before = profile_traffic(world);
+    let mut completed = 0_usize;
+    for &tag in tags {
+        let device = world.device(tag)?;
+        let synced = device
+            .manager()?
+            .sync_own_profile(&device.keys, || now)
+            .await
+            .map_err(|_| RigError::Core(Step::Publish))?;
+        if synced.outcome == ProfileSyncOutcome::Published && !synced.still_pending {
+            completed += 1;
+        }
+    }
+    let after = profile_traffic(world);
+    let only_the_healed = world
+        .profile_relays()
+        .iter()
+        .zip(before.iter().zip(&after))
+        .all(|(plane, (before, after))| match (before, after) {
+            (Some(before), Some(after)) if plane.tag() == down => after > before,
+            (Some(before), Some(after)) => after == before,
+            _ => false,
+        });
+    Ok(completed == tags.len() && only_the_healed)
+}
+
+/// Every `REQ` and `EVENT` frame each profile plane has been sent, in plane
+/// order; `None` for a plane that records no frames.
+fn profile_traffic<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+) -> Vec<Option<usize>> {
+    world
+        .profile_relays()
+        .iter()
+        .map(|plane| {
+            plane.plane_ledger().map(|ledger| {
+                ledger.reqs()
+                    + ledger
+                        .published_ids()
+                        .iter()
+                        .map(|id| ledger.published(id))
+                        .sum::<usize>()
+            })
+        })
+        .collect()
 }
 
 /// The display name `tag` publishes. Not a rig handle, for a circle name's
@@ -355,7 +417,7 @@ mod tests {
     #[test]
     fn the_arm_takes_one_fault_and_pays_one_identity_turn_per_member() {
         assert_eq!(ARMS[0].floor.faults_applied, 1);
-        assert_eq!(ARMS[0].floor.canaries_caught, 3);
+        assert_eq!(ARMS[0].floor.canaries_caught, 4);
         assert_eq!(ARMS[0].withheld_acks, WithheldAcks::IdentityTurns);
     }
 

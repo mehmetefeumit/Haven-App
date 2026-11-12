@@ -67,8 +67,6 @@ ProfileSyncResult toProfileSyncResult(ProfileSyncResultFfi ffi) {
       ProfileSyncOutcomeFfi.publishFailed => ProfileSyncOutcome.publishFailed,
       ProfileSyncOutcomeFfi.poolUnderflow => ProfileSyncOutcome.poolUnderflow,
     },
-    relaysAcked: ffi.relaysAcked,
-    relaysAttempted: ffi.relaysAttempted,
     stillPending: ffi.stillPending,
   );
 }
@@ -79,8 +77,8 @@ ProfileSyncResult toProfileSyncResult(ProfileSyncResultFfi ffi) {
 ProfilePendingState toProfilePendingState(ProfilePendingStateFfi ffi) {
   return ProfilePendingState(
     pending: ffi.pending,
-    partial: ffi.partial,
     retryDue: ffi.retryDue,
+    nextRetryInSecs: ffi.nextRetryInSecs,
   );
 }
 
@@ -268,7 +266,6 @@ class NostrProfileService implements ProfileService {
       // on a persistent local fault either.
       return const ProfilePendingState(
         pending: true,
-        partial: false,
         retryDue: false,
       );
     }
@@ -276,13 +273,10 @@ class NostrProfileService implements ProfileService {
 
   @override
   Future<Profile> removeOwnAvatar() async {
-    // Retraction is always allowed — see class doc.
+    // Local-only in Rust, so no secret is fetched (Rule 9).
     try {
       final manager = await _circleManagerFactory();
-      final ffi = await withFreshSecret(
-        _identityService.getSecretBytes,
-        (secret) => manager.removeMyProfilePicture(identitySecretBytes: secret),
-      );
+      final ffi = await manager.removeMyProfilePicture();
       return await _toProfile(manager, ffi, fullResolution: true);
     } on Object catch (e) {
       debugPrint('[Profile] removeOwnAvatar: ${e.runtimeType}');

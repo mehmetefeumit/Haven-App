@@ -15,11 +15,11 @@ import 'package:haven/src/constants/feature_flags.dart';
 import 'package:haven/src/constants/text_input_privacy.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
+import 'package:haven/src/providers/profile_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
-import 'package:haven/src/utils/profile_sync_trigger.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Possible UI states for the display-name editor.
@@ -110,21 +110,13 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
 
   Future<void> _save() async {
     final text = _controller.text.trim();
-    // The visible save state is carried by the circular button. To preserve
-    // the screen-reader feedback the removed live-region status row provided,
-    // announce save outcomes — most importantly failure, which the disabled
-    // ->re-enabled button alone may not reliably re-announce. Capture the view
-    // and text direction before the first await (no context use after await).
+    // The button carries the visible state; announce only the outcome — most
+    // importantly failure, which the disabled->re-enabled button alone may
+    // not reliably re-announce. Capture before the first await.
     final view = View.of(context);
     final textDirection = Directionality.of(context);
     final l10n = AppLocalizations.of(context);
-    unawaited(
-      SemanticsService.sendAnnouncement(
-        view,
-        l10n.displayNameCardSavingLabel,
-        textDirection,
-      ),
-    );
+    final syncController = ref.read(ownProfileSyncProvider.notifier);
     setState(() => _status = DisplayNameStatus.saving);
     try {
       await ref
@@ -136,15 +128,16 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
       // saving is unconditional (public-by-default, owner-directed
       // 2026-07-16, matching White Noise), no consent gate. This is now a
       // fast, local-only write (`ProfileService.updateOwnProfile` no longer
-      // touches a relay); `triggerProfileSync` below is what actually
+      // touches a relay); the sync below is what actually
       // publishes, in the background.
       await ref
           .read(profileServiceProvider)
           .updateOwnProfile(displayName: text);
+      // The local write is done: publish even if the card is gone, since
+      // `ref` is unusable then.
+      unawaited(syncController.sync());
       if (!mounted) return;
       ref.invalidate(ownProfileProvider);
-      triggerProfileSync(ref);
-      if (!mounted) return;
       unawaited(
         SemanticsService.sendAnnouncement(
           view,

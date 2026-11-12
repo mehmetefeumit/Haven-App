@@ -2376,7 +2376,7 @@ abstract class AppLocalizations {
   /// **'Save display name'**
   String get displayNameCardSaveLabel;
 
-  /// Accessible label/tooltip on the circular save button while a save is in flight; also announced to screen readers when saving begins.
+  /// Accessible label/tooltip on the circular save button while a save is in flight.
   ///
   /// In en, this message translates to:
   /// **'Saving display name'**
@@ -2399,36 +2399,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Save failed, try again'**
   String get displayNameCardSaveFailedAnnouncement;
-
-  /// Own-profile sync status line: a publish of the local name/photo edit is currently in flight to the relay pool.
-  ///
-  /// In en, this message translates to:
-  /// **'Syncing to your public profile…'**
-  String get profileSyncStatusSyncing;
-
-  /// Own-profile sync status line: at least one relay acknowledged the publish, but not the whole pool yet (or a newer edit is queued); a persisted backoff will retry automatically.
-  ///
-  /// In en, this message translates to:
-  /// **'Published — still syncing to some relays'**
-  String get profileSyncStatusPartial;
-
-  /// Own-profile sync status line: every relay in the pool has acknowledged the current name/photo.
-  ///
-  /// In en, this message translates to:
-  /// **'Public profile up to date'**
-  String get profileSyncStatusSynced;
-
-  /// Own-profile sync status line: the last publish attempt could not reach any relay; shown beside a Retry action (commonRetry).
-  ///
-  /// In en, this message translates to:
-  /// **'Couldn\'t sync yet.'**
-  String get profileSyncStatusFailed;
-
-  /// Accessibility label for the Retry button on the own-profile sync status line, more descriptive than its short visible "Retry" caption (commonRetry).
-  ///
-  /// In en, this message translates to:
-  /// **'Retry publishing your profile'**
-  String get profileSyncStatusRetrySemantics;
 
   /// Snackbar confirming the npub public key was copied to the clipboard from the QR widget.
   ///
@@ -2568,13 +2538,13 @@ abstract class AppLocalizations {
   /// **'Change profile photo'**
   String get photoHeaderChangePhotoSemantics;
 
-  /// Snackbar confirming the new profile photo was saved locally. FUTURE TENSE deliberately (profile-latency migration): the photo is saved instantly but the publish to the public Nostr profile (Blossom-hosted) now happens in the background, so past-tense "Published to" would be a claim this snackbar cannot back up. The Identity page's sync status line reports when it actually lands.
+  /// Spoken accessibility announcement (screen reader only, never shown as text) confirming the new profile photo was saved on this device. Says nothing about publishing.
   ///
   /// In en, this message translates to:
-  /// **'Photo updated. It will be published to your public Nostr profile.'**
-  String get avatarPickerPhotoUpdated;
+  /// **'Photo updated.'**
+  String get avatarPickerPhotoUpdatedAnnouncement;
 
-  /// Snackbar confirming the profile photo was removed.
+  /// Spoken accessibility announcement (screen reader only, never shown as text) confirming the profile photo was removed on this device. Says nothing about publishing.
   ///
   /// In en, this message translates to:
   /// **'Photo removed.'**

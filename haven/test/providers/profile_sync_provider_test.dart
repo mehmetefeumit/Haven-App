@@ -1,29 +1,33 @@
 /// Unit tests for [OwnProfileSyncController] / [ownProfileSyncProvider].
 ///
 /// Verifies:
-/// - build() starts at `unknown` (renders nothing) and, when the local
-///   outbox is clean, settles to `synced` WITHOUT ever calling
-///   [ProfileService.syncOwnProfile] (no network for a clean install).
-/// - build() resumes a save a prior session left pending, via
-///   [ProfileService.pendingSyncState]'s `retryDue`.
-/// - retryIfPending() is a true no-op (no `syncOwnProfile` call) both when
-///   the outbox is clean AND when it is pending but the backoff is not due.
-/// - sync() coalesces overlapping calls to exactly one queued follow-up.
-/// - a failed sync is retriable (state resets so a later `sync()` runs again).
-/// - no raw error text ever reaches `state` (it is a plain enum).
-/// - a partial acknowledgement resolves to `partial`, not `synced`/`failed`.
-/// - a fully-acked pass that is still pending (a newer edit landed mid-flight)
-///   queues exactly one immediate follow-up sync.
+/// - build() makes no service call at all: it neither reads the outbox nor
+///   syncs (the cold-start trigger lives in `map_shell.dart`).
+/// - retryIfPending() syncs ONLY when a save is pending AND the backoff is
+///   due, and is a true no-op (no `syncOwnProfile` call) when the outbox is
+///   clean or the backoff is not due.
+/// - sync() coalesces overlapping calls to exactly one queued follow-up, and
+///   a pass never starts an immediate follow-up of its own.
+/// - a failed sync never escapes, never leaks error text and is retriable.
+/// - the foreground retry timer: ONE timer, armed to `max(nextRetryInSecs, 1)`
+///   seconds only when the state is pending and not due AND the app is
+///   resumed; checked again when it fires and after every pass; never
+///   re-armed from a pass that left the state due; cancelled on pause and on
+///   an identity-scope reset; re-armed on resume.
 ///
-/// Every test first anchors the notifier and drains its build()-time
-/// `retryIfPending()` call BEFORE taking any further action — build() always
-/// starts that call unawaited, and racing a second call against it would
-/// make assertions depend on microtask scheduling order rather than on the
-/// behavior under test.
+/// Timer tests are `testWidgets` so the fake clock advances with
+/// `tester.pump(Duration)` instead of sleeping, and each dispatches
+/// `resumed` FIRST: the test binding resets the lifecycle state to null
+/// between tests, so without it no timer would ever arm and the assertions
+/// would pass without proving anything. Each also disposes its container in
+/// the body, because `addTearDown` runs after flutter_test's pending-timer
+/// check.
 library;
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/profile_sync_provider.dart';
@@ -47,105 +51,63 @@ ProviderContainer _makeContainer(MockProfileService svc) {
   );
 }
 
-/// Reads the notifier (triggering build()) and drains its internal
-/// `retryIfPending()` call, so callers start from a settled state.
+/// Reads the notifier (triggering build()) and drains microtasks, so callers
+/// start from a settled state.
 Future<OwnProfileSyncController> _anchor(ProviderContainer container) async {
   final notifier = container.read(ownProfileSyncProvider.notifier);
   await _settle();
   return notifier;
 }
 
-int _syncCalls(MockProfileService svc) =>
-    svc.methodCalls.where((c) => c.method == 'syncOwnProfile').length;
+int _syncCalls(MockProfileService svc) => svc.syncOwnProfileCalls;
 
-const _cleanState = ProfilePendingState(
-  pending: false,
-  partial: false,
+const _cleanState = ProfilePendingState(pending: false, retryDue: false);
+
+const _dueState = ProfilePendingState(pending: true, retryDue: true);
+
+ProfilePendingState _waitingState(int? nextRetryInSecs) => ProfilePendingState(
+  pending: true,
   retryDue: false,
+  nextRetryInSecs: nextRetryInSecs,
 );
 
-const _partialResult = ProfileSyncResult(
+const _publishedResult = ProfileSyncResult(
   outcome: ProfileSyncOutcome.published,
-  relaysAcked: 1,
-  relaysAttempted: 3,
-  stillPending: true,
-);
-
-const _fullyAckedStillPendingResult = ProfileSyncResult(
-  outcome: ProfileSyncOutcome.published,
-  relaysAcked: 3,
-  relaysAttempted: 3,
-  stillPending: true,
-);
-
-const _fullyAckedResult = ProfileSyncResult(
-  outcome: ProfileSyncOutcome.published,
-  relaysAcked: 3,
-  relaysAttempted: 3,
   stillPending: false,
 );
 
+const _publishedStillPendingResult = ProfileSyncResult(
+  outcome: ProfileSyncOutcome.published,
+  stillPending: true,
+);
+
+/// Lets the fake clock run [by] and then drains the microtasks the timer's
+/// callback started.
+Future<void> _elapse(WidgetTester tester, Duration by) async {
+  await tester.pump(by);
+  await tester.pump();
+}
+
+void _lifecycle(WidgetTester tester, AppLifecycleState state) =>
+    tester.binding.handleAppLifecycleStateChanged(state);
+
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   group('build()', () {
-    test('starts at unknown', () {
-      final svc = MockProfileService();
-      final container = _makeContainer(svc);
-      addTearDown(container.dispose);
-
-      // Checked BEFORE the build()-time retryIfPending() has a chance to
-      // run (no await yet) — this is the one assertion that must observe
-      // the pre-settle value.
-      container.read(ownProfileSyncProvider.notifier);
-      expect(
-        container.read(ownProfileSyncProvider),
-        ProfileSyncStatus.unknown,
-      );
-    });
-
-    test(
-      'a clean outbox settles to synced without ever calling syncOwnProfile',
-      () async {
-        final svc = MockProfileService()..nextPendingState = _cleanState;
-        final container = _makeContainer(svc);
-        addTearDown(container.dispose);
-
-        await _anchor(container);
-
-        expect(
-          container.read(ownProfileSyncProvider),
-          ProfileSyncStatus.synced,
-        );
-        expect(
-          _syncCalls(svc),
-          0,
-          reason: 'a clean install must never dial a relay just to discover '
-              'it had nothing to say',
-        );
-      },
-    );
-
-    test('resumes a save a prior session left pending (retryDue)', () async {
-      final svc = MockProfileService()
-        ..nextPendingState = const ProfilePendingState(
-          pending: true,
-          partial: false,
-          retryDue: true,
-        )
-        ..nextSyncResult = _fullyAckedResult;
+    test('makes no service call: it neither reads the outbox nor syncs',
+        () async {
+      final svc = MockProfileService()..nextPendingState = _dueState;
       final container = _makeContainer(svc);
       addTearDown(container.dispose);
 
       await _anchor(container);
 
       expect(
-        _syncCalls(svc),
-        1,
-        reason: 'a pending save with the backoff due must be resumed on '
-            'build()',
-      );
-      expect(
-        container.read(ownProfileSyncProvider),
-        ProfileSyncStatus.synced,
+        svc.methodCalls,
+        isEmpty,
+        reason: 'cold start and resume are triggered from map_shell.dart; a '
+            'second read here would be a second publish trigger',
       );
     });
   });
@@ -161,8 +123,28 @@ void main() {
 
       expect(_syncCalls(svc), 0);
       expect(
-        container.read(ownProfileSyncProvider),
-        ProfileSyncStatus.synced,
+        svc.pendingSyncStateCalls,
+        1,
+        reason: 'anti-vacuity: the outbox was consulted',
+      );
+    });
+
+    test('resumes a save a prior session left pending (retryDue)', () async {
+      final svc = MockProfileService()
+        ..nextPendingState = _dueState
+        ..nextSyncResult = _publishedResult;
+      final container = _makeContainer(svc);
+      addTearDown(container.dispose);
+      final notifier = await _anchor(container);
+      expect(_syncCalls(svc), 0, reason: 'build() syncs nothing by itself');
+
+      await notifier.retryIfPending();
+
+      expect(
+        _syncCalls(svc),
+        1,
+        reason: 'a pending save with the backoff due must be resumed when '
+            'the cold-start / resume trigger asks',
       );
     });
 
@@ -170,11 +152,7 @@ void main() {
       'is a true no-op when pending but the backoff is not due yet',
       () async {
         final svc = MockProfileService()
-          ..nextPendingState = const ProfilePendingState(
-            pending: true,
-            partial: true,
-            retryDue: false,
-          );
+          ..nextPendingState = _waitingState(null);
         final container = _makeContainer(svc);
         addTearDown(container.dispose);
         final notifier = await _anchor(container);
@@ -186,36 +164,7 @@ void main() {
           0,
           reason: 'relay metadata minimization — never dial unconditionally',
         );
-        expect(
-          container.read(ownProfileSyncProvider),
-          ProfileSyncStatus.partial,
-          reason: 'the resting state must still be honest even without a '
-              'network attempt',
-        );
-      },
-    );
-
-    test(
-      'resolves to failed (not partial) when pending, not due, and not '
-      'partial',
-      () async {
-        final svc = MockProfileService()
-          ..nextPendingState = const ProfilePendingState(
-            pending: true,
-            partial: false,
-            retryDue: false,
-          );
-        final container = _makeContainer(svc);
-        addTearDown(container.dispose);
-        final notifier = await _anchor(container);
-
-        await notifier.retryIfPending();
-
-        expect(
-          container.read(ownProfileSyncProvider),
-          ProfileSyncStatus.failed,
-        );
-        expect(_syncCalls(svc), 0);
+        expect(svc.pendingSyncStateCalls, 1);
       },
     );
 
@@ -224,7 +173,7 @@ void main() {
       () async {
         final svc = MockProfileService()
           ..nextPendingState = _cleanState
-          ..nextSyncResult = _partialResult;
+          ..nextSyncResult = _publishedStillPendingResult;
         final container = _makeContainer(svc);
         addTearDown(container.dispose);
         final notifier = await _anchor(container);
@@ -237,16 +186,12 @@ void main() {
 
         // A resume lands while that sync is publishing, and the outbox
         // still says a retry is due.
-        svc.nextPendingState = const ProfilePendingState(
-          pending: true,
-          partial: true,
-          retryDue: true,
-        );
+        svc.nextPendingState = _dueState;
         await notifier.retryIfPending();
         expect(
-          container.read(ownProfileSyncProvider),
-          ProfileSyncStatus.syncing,
-          reason: 'the in-flight sync resolves the status itself',
+          _syncCalls(svc),
+          1,
+          reason: 'the in-flight sync is already publishing what is pending',
         );
 
         gate.complete();
@@ -258,10 +203,6 @@ void main() {
           reason: 'a follow-up queued here would publish again at once, '
               'past the backoff the in-flight sync has just recorded',
         );
-        expect(
-          container.read(ownProfileSyncProvider),
-          ProfileSyncStatus.partial,
-        );
       },
     );
   });
@@ -272,7 +213,7 @@ void main() {
       () async {
         final svc = MockProfileService()
           ..nextPendingState = _cleanState
-          ..nextSyncResult = _fullyAckedResult;
+          ..nextSyncResult = _publishedResult;
         final container = _makeContainer(svc);
         addTearDown(container.dispose);
         final notifier = await _anchor(container);
@@ -292,10 +233,6 @@ void main() {
           reason: 'every call while in flight must queue, not start a '
               'parallel publish',
         );
-        expect(
-          container.read(ownProfileSyncProvider),
-          ProfileSyncStatus.syncing,
-        );
 
         gate.complete();
         await _settle();
@@ -306,9 +243,27 @@ void main() {
           reason: 'one in-flight publish plus exactly one coalesced '
               'follow-up — never one per queued call',
         );
+      },
+    );
+
+    test(
+      'a pass that is still pending starts no immediate follow-up of its own',
+      () async {
+        final svc = MockProfileService()
+          ..nextPendingState = _cleanState
+          ..nextSyncResult = _publishedStillPendingResult;
+        final container = _makeContainer(svc);
+        addTearDown(container.dispose);
+        final notifier = await _anchor(container);
+
+        await notifier.sync();
+        await _settle();
+
         expect(
-          container.read(ownProfileSyncProvider),
-          ProfileSyncStatus.synced,
+          _syncCalls(svc),
+          1,
+          reason: 'what a relay missed is left to the persisted backoff, not '
+              'an immediate retry (relay metadata minimization)',
         );
       },
     );
@@ -316,7 +271,8 @@ void main() {
 
   group('failure handling', () {
     test(
-      'a failed sync never leaks raw error text and is retriable',
+      'a failed sync never escapes, never leaks raw error text and is '
+      'retriable',
       () async {
         final svc = MockProfileService()
           ..nextPendingState = _cleanState
@@ -325,39 +281,42 @@ void main() {
         addTearDown(container.dispose);
         final notifier = await _anchor(container);
 
+        final logged = <String>[];
+        final original = debugPrint;
+        debugPrint = (message, {wrapWidth}) {
+          if (message != null) logged.add(message);
+        };
+        addTearDown(() => debugPrint = original);
+
         await notifier.sync();
 
+        expect(_syncCalls(svc), 1);
         expect(
-          container.read(ownProfileSyncProvider),
-          ProfileSyncStatus.failed,
+          logged,
+          isNotEmpty,
+          reason: 'anti-vacuity: the failure is logged',
         );
-        // The state is a plain enum with no message field at all — the
-        // strongest form of "no raw error text": there is no string
-        // channel for one to travel through in the first place.
         expect(
-          container.read(ownProfileSyncProvider).toString(),
+          logged.join('\n'),
           isNot(contains('generic')),
           reason: "MockProfileService's ProfileServiceException message "
-              'must never surface via the sync status',
+              'must never reach a log line (Rule 8)',
         );
 
         // Retriable: a later sync() (e.g. after fixing connectivity) runs
-        // again rather than staying wedged in `failed`.
+        // again rather than staying wedged.
         svc
           ..shouldThrowOnSyncOwnProfile = false
-          ..nextSyncResult = _fullyAckedResult;
+          ..nextSyncResult = _publishedResult;
         await notifier.sync();
 
-        expect(
-          container.read(ownProfileSyncProvider),
-          ProfileSyncStatus.synced,
-        );
         expect(_syncCalls(svc), 2);
       },
     );
 
     test(
-      'uploadFailed/publishFailed/poolUnderflow all resolve to failed',
+      'uploadFailed/publishFailed/poolUnderflow complete without escaping '
+      'and start no follow-up',
       () async {
         for (final outcome in [
           ProfileSyncOutcome.uploadFailed,
@@ -368,8 +327,6 @@ void main() {
             ..nextPendingState = _cleanState
             ..nextSyncResult = ProfileSyncResult(
               outcome: outcome,
-              relaysAcked: 0,
-              relaysAttempted: 3,
               stillPending: true,
             );
           final container = _makeContainer(svc);
@@ -377,105 +334,370 @@ void main() {
           final notifier = await _anchor(container);
 
           await notifier.sync();
+          await _settle();
 
-          expect(
-            container.read(ownProfileSyncProvider),
-            ProfileSyncStatus.failed,
-            reason: '$outcome must resolve to failed',
-          );
+          expect(_syncCalls(svc), 1, reason: '$outcome must not loop');
         }
       },
     );
   });
 
-  group('outcome resolution', () {
-    test(
-      'a partial acknowledgement resolves to partial, with no immediate '
-      'follow-up',
-      () async {
+  group('foreground retry timer', () {
+    testWidgets(
+      'a pending save that is not yet due arms exactly one timer and syncs '
+      'nothing until it fires',
+      (tester) async {
+        _lifecycle(tester, AppLifecycleState.resumed);
         final svc = MockProfileService()
-          ..nextPendingState = _cleanState
-          ..nextSyncResult = _partialResult;
+          ..nextPendingState = _waitingState(30)
+          ..nextSyncResult = _publishedResult;
         final container = _makeContainer(svc);
-        addTearDown(container.dispose);
-        final notifier = await _anchor(container);
+        final notifier = container.read(ownProfileSyncProvider.notifier);
 
-        await notifier.sync();
-        await _settle();
+        // Two reads arm twice; a second live timer would sync twice below.
+        await notifier.retryIfPending();
+        await notifier.retryIfPending();
+        expect(_syncCalls(svc), 0);
 
+        await _elapse(tester, const Duration(seconds: 29));
         expect(
-          container.read(ownProfileSyncProvider),
-          ProfileSyncStatus.partial,
+          _syncCalls(svc),
+          0,
+          reason: 'nothing syncs before nextRetryInSecs elapses',
         );
+
+        svc.nextPendingState = _dueState;
+        await _elapse(tester, const Duration(seconds: 1));
+        expect(_syncCalls(svc), 1, reason: 'the timer fired and synced');
+
+        await _elapse(tester, const Duration(hours: 1));
         expect(
           _syncCalls(svc),
           1,
-          reason: 'partial COVERAGE is left to the persisted backoff, not '
-              'an immediate retry (relay metadata minimization)',
+          reason: 'exactly one timer ever existed, and the due pass armed '
+              'no other',
         );
+        container.dispose();
       },
     );
 
-    test(
-      'a fully-acked pass that is still pending (a newer edit landed '
-      'mid-flight) queues exactly one follow-up sync',
-      () async {
+    testWidgets(
+      'a pass that ends pending and not due arms the retry timer',
+      (tester) async {
+        _lifecycle(tester, AppLifecycleState.resumed);
         final svc = MockProfileService()
-          ..nextPendingState = _cleanState
-          // First call: fully acked but a newer edit is still pending ->
-          // queues the follow-up. Second call (the follow-up): fully
-          // synced -> terminates the chain. `syncResultQueue` gives each
-          // call its answer deterministically, without racing a shared
-          // field mutation against exactly when each call reads it —
-          // reusing the still-pending result for both would loop forever,
-          // which would be a bug in the controller, not a slow test.
-          ..syncResultQueue.addAll([
-            _fullyAckedStillPendingResult,
-            _fullyAckedResult,
-          ]);
+          ..nextPendingState = _waitingState(30)
+          ..nextSyncResult = _publishedStillPendingResult;
         final container = _makeContainer(svc);
-        addTearDown(container.dispose);
-        final notifier = await _anchor(container);
+        final notifier = container.read(ownProfileSyncProvider.notifier);
 
         await notifier.sync();
-        await _settle();
+        expect(_syncCalls(svc), 1);
 
+        await _elapse(tester, const Duration(seconds: 29));
+        expect(_syncCalls(svc), 1);
+
+        svc.nextPendingState = _dueState;
+        await _elapse(tester, const Duration(seconds: 1));
         expect(
           _syncCalls(svc),
           2,
-          reason: 'fully-acked-but-still-pending must trigger exactly one '
-              'immediate follow-up, distinct from a merely partial pass',
+          reason: 'the pass left a save waiting on the ladder, so the timer '
+              'retries it when the rung is due',
         );
-        expect(
-          container.read(ownProfileSyncProvider),
-          ProfileSyncStatus.synced,
-        );
+        container.dispose();
       },
     );
 
-    test(
-      'nothingPending resolves the resting state from pendingSyncState',
-      () async {
-        final svc = MockProfileService()..nextPendingState = _cleanState;
-        final container = _makeContainer(svc);
-        addTearDown(container.dispose);
-        final notifier = await _anchor(container);
+    testWidgets('the timer syncs only if the state is due when it fires', (
+      tester,
+    ) async {
+      _lifecycle(tester, AppLifecycleState.resumed);
+      final svc = MockProfileService()..nextPendingState = _waitingState(30);
+      final container = _makeContainer(svc);
+      final notifier = container.read(ownProfileSyncProvider.notifier);
+      await notifier.retryIfPending();
+      final readsBefore = svc.pendingSyncStateCalls;
 
-        // A later, independent trigger observes new pending work that
-        // landed after build() already settled clean.
-        svc.nextPendingState = const ProfilePendingState(
-          pending: true,
-          partial: true,
-          retryDue: false,
+      // Another path published everything while the timer was waiting.
+      svc.nextPendingState = _cleanState;
+      await _elapse(tester, const Duration(seconds: 31));
+
+      expect(
+        svc.pendingSyncStateCalls,
+        greaterThan(readsBefore),
+        reason: 'anti-vacuity: the timer fired and asked',
+      );
+      expect(_syncCalls(svc), 0);
+      container.dispose();
+    });
+
+    testWidgets('a pass that leaves the state due does not re-arm a timer', (
+      tester,
+    ) async {
+      _lifecycle(tester, AppLifecycleState.resumed);
+      final svc = MockProfileService()
+        ..nextPendingState = _dueState
+        ..nextSyncResult = const ProfileSyncResult(
+          outcome: ProfileSyncOutcome.poolUnderflow,
+          stillPending: true,
         );
-        // nextSyncResult stays at its nothingPending default.
+      final container = _makeContainer(svc);
+      final notifier = container.read(ownProfileSyncProvider.notifier);
 
-        await notifier.sync();
+      await notifier.retryIfPending();
+      expect(_syncCalls(svc), 1);
+
+      await _elapse(tester, const Duration(hours: 1));
+
+      expect(
+        _syncCalls(svc),
+        1,
+        reason: 'a state that is still due after a pass waits for the next '
+            'resume or cold start, never a tight loop',
+      );
+      container.dispose();
+    });
+
+    testWidgets(
+      'backgrounding cancels the retry timer and resuming re-arms it through '
+      'retryIfPending',
+      (tester) async {
+        _lifecycle(tester, AppLifecycleState.resumed);
+        final svc = MockProfileService()
+          ..nextPendingState = _waitingState(30)
+          ..nextSyncResult = _publishedResult;
+        final container = _makeContainer(svc);
+        final notifier = container.read(ownProfileSyncProvider.notifier);
+        await notifier.retryIfPending();
+
+        _lifecycle(tester, AppLifecycleState.paused);
+        svc.nextPendingState = _dueState;
+        await _elapse(tester, const Duration(minutes: 5));
+        expect(
+          _syncCalls(svc),
+          0,
+          reason: 'a backgrounded process must not dial relays on a timer',
+        );
+
+        svc.nextPendingState = _waitingState(20);
+        _lifecycle(tester, AppLifecycleState.resumed);
+        await notifier.retryIfPending();
+        expect(_syncCalls(svc), 0);
+
+        svc.nextPendingState = _dueState;
+        await _elapse(tester, const Duration(seconds: 20));
+        expect(
+          _syncCalls(svc),
+          1,
+          reason: 'one timer, re-armed by the resume, fired',
+        );
+        container.dispose();
+      },
+    );
+
+    testWidgets(
+      'hidden and detached cancel the retry timer like paused',
+      (tester) async {
+        for (final away in [
+          AppLifecycleState.hidden,
+          AppLifecycleState.detached,
+        ]) {
+          _lifecycle(tester, AppLifecycleState.resumed);
+          final svc = MockProfileService()
+            ..nextPendingState = _waitingState(30);
+          final container = _makeContainer(svc);
+          final notifier = container.read(ownProfileSyncProvider.notifier);
+          await notifier.retryIfPending();
+
+          _lifecycle(tester, away);
+          svc.nextPendingState = _dueState;
+          await _elapse(tester, const Duration(minutes: 5));
+
+          expect(_syncCalls(svc), 0, reason: '$away must cancel the timer');
+          container.dispose();
+        }
+      },
+    );
+
+    testWidgets('a pass that ends while the app is paused arms no timer', (
+      tester,
+    ) async {
+      _lifecycle(tester, AppLifecycleState.resumed);
+      final svc = MockProfileService()
+        ..nextPendingState = _waitingState(30)
+        ..nextSyncResult = _publishedStillPendingResult;
+      final container = _makeContainer(svc);
+      final notifier = container.read(ownProfileSyncProvider.notifier);
+
+      final gate = Completer<void>();
+      svc.syncOwnProfileGate = gate;
+      unawaited(notifier.sync());
+      await tester.pump();
+      expect(_syncCalls(svc), 1, reason: 'anti-vacuity: the pass is running');
+
+      _lifecycle(tester, AppLifecycleState.paused);
+      gate.complete();
+      await tester.pump();
+
+      svc.nextPendingState = _dueState;
+      await _elapse(tester, const Duration(hours: 1));
+
+      expect(
+        _syncCalls(svc),
+        1,
+        reason: 'the main isolate stays alive under the foreground service '
+            'and the iOS location session; a pass ending there must not '
+            'start the ladder',
+      );
+      container.dispose();
+    });
+
+    testWidgets(
+      'a resume within the map-shell debounce window still re-arms the timer',
+      (tester) async {
+        _lifecycle(tester, AppLifecycleState.resumed);
+        final svc = MockProfileService()
+          ..nextPendingState = _waitingState(30)
+          ..nextSyncResult = _publishedResult;
+        final container = _makeContainer(svc);
+        final notifier = container.read(ownProfileSyncProvider.notifier);
+        await notifier.retryIfPending();
+
+        _lifecycle(tester, AppLifecycleState.paused);
+        await tester.pump();
+        final readsBefore = svc.pendingSyncStateCalls;
+
+        // Only the lifecycle event: map_shell's resume handler returns on
+        // its 30 s debounce before it reaches its own retry trigger.
+        _lifecycle(tester, AppLifecycleState.resumed);
+        await tester.pump();
+        expect(
+          svc.pendingSyncStateCalls,
+          greaterThan(readsBefore),
+          reason: "the controller's own observer re-read the outbox",
+        );
+
+        svc.nextPendingState = _dueState;
+        await _elapse(tester, const Duration(seconds: 30));
 
         expect(
-          container.read(ownProfileSyncProvider),
-          ProfileSyncStatus.partial,
+          _syncCalls(svc),
+          1,
+          reason: 'a brief app switch must not strand a pending save',
         );
+        container.dispose();
+      },
+    );
+
+    testWidgets('a resume with a due save syncs it at once', (tester) async {
+      _lifecycle(tester, AppLifecycleState.resumed);
+      final svc = MockProfileService()
+        ..nextPendingState = _cleanState
+        ..nextSyncResult = _publishedResult;
+      final container = _makeContainer(svc);
+      container.read(ownProfileSyncProvider.notifier);
+
+      _lifecycle(tester, AppLifecycleState.paused);
+      await tester.pump();
+      svc.nextPendingState = _dueState;
+      _lifecycle(tester, AppLifecycleState.resumed);
+      await tester.pump();
+
+      expect(_syncCalls(svc), 1);
+      container.dispose();
+    });
+
+    testWidgets(
+      'invalidating the provider (identity-scope reset) cancels the timer',
+      (tester) async {
+        _lifecycle(tester, AppLifecycleState.resumed);
+        final svc = MockProfileService()..nextPendingState = _waitingState(30);
+        final container = _makeContainer(svc);
+        final notifier = container.read(ownProfileSyncProvider.notifier);
+        await notifier.retryIfPending();
+
+        container.invalidate(ownProfileSyncProvider);
+        // Re-read so the rebuilt notifier is live and registered.
+        container.read(ownProfileSyncProvider.notifier);
+        svc.nextPendingState = _dueState;
+        await _elapse(tester, const Duration(minutes: 5));
+        expect(
+          _syncCalls(svc),
+          0,
+          reason: 'the old controller\'s timer fired nothing',
+        );
+
+        // One resume reaches exactly the new observer: it is registered once
+        // and the old one is gone. A not-due save keeps it to the one read.
+        svc.nextPendingState = _waitingState(30);
+        final readsBefore = svc.pendingSyncStateCalls;
+        _lifecycle(tester, AppLifecycleState.paused);
+        _lifecycle(tester, AppLifecycleState.resumed);
+        await tester.pump();
+        expect(svc.pendingSyncStateCalls, readsBefore + 1);
+        expect(_syncCalls(svc), 0);
+        container.dispose();
+      },
+    );
+
+    testWidgets(
+      'a pendingSyncState that throws or fails closed never arms a timer',
+      (tester) async {
+        _lifecycle(tester, AppLifecycleState.resumed);
+
+        final throwing = MockProfileService()
+          ..shouldThrowOnPendingSyncState = true;
+        final throwingContainer = _makeContainer(throwing);
+        await throwingContainer
+            .read(ownProfileSyncProvider.notifier)
+            .retryIfPending();
+
+        final failedClosed = MockProfileService()
+          ..nextPendingState = _waitingState(null);
+        final closedContainer = _makeContainer(failedClosed);
+        await closedContainer
+            .read(ownProfileSyncProvider.notifier)
+            .retryIfPending();
+
+        throwing
+          ..shouldThrowOnPendingSyncState = false
+          ..nextPendingState = _dueState;
+        failedClosed.nextPendingState = _dueState;
+        await _elapse(tester, const Duration(hours: 7));
+
+        expect(_syncCalls(throwing), 0);
+        expect(_syncCalls(failedClosed), 0);
+        throwingContainer.dispose();
+        closedContainer.dispose();
+      },
+    );
+
+    testWidgets(
+      'nextRetryInSecs of zero or a negative value waits at least one second',
+      (tester) async {
+        _lifecycle(tester, AppLifecycleState.resumed);
+        for (final secs in [0, -5]) {
+          final svc = MockProfileService()
+            ..nextPendingState = _waitingState(secs)
+            ..nextSyncResult = _publishedResult;
+          final container = _makeContainer(svc);
+          await container
+              .read(ownProfileSyncProvider.notifier)
+              .retryIfPending();
+
+          svc.nextPendingState = _dueState;
+          await _elapse(tester, const Duration(milliseconds: 900));
+          expect(
+            _syncCalls(svc),
+            0,
+            reason: '$secs must not become an immediate (tight-loop) timer',
+          );
+
+          await _elapse(tester, const Duration(milliseconds: 200));
+          expect(_syncCalls(svc), 1, reason: '$secs waits one second');
+          container.dispose();
+        }
       },
     );
   });

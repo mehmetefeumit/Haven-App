@@ -30,9 +30,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use haven_core::nostr::mls::types::UNRESOLVABLE_INPUT_MAX_AGE_SECS;
-use haven_core::profile::{
-    PROFILE_BATCH_DEADLINE, PROFILE_MAX_RELAY_RANK, PROFILE_OWN_FETCH_BUDGET,
-};
+use haven_core::profile::{PROFILE_BATCH_DEADLINE, PROFILE_MAX_RELAY_RANK, PROFILE_OWN_READ_BOUND};
 use haven_core::relay::live_sync::config::{
     delivery_silence_window_secs, BACKOFF_JITTER_FRACTION_BP, BACKOFF_MAX_SECS,
     BURST_BACKLOG_WAIT_SECS, COMMIT_SETTLE_WINDOW_SECS, SUBSCRIBE_CONNECT_WAIT_SECS,
@@ -158,19 +156,18 @@ pub const fn location_publish_window() -> Duration {
     Duration::from_secs(5)
 }
 
-/// What ONE profile publish costs when one relay of the pool is down and the
-/// rest acknowledge, at the most: its whole ladder.
+/// What ONE profile offer costs when one relay of the pool is down and the
+/// rest acknowledge, at the most: one attempt, each relay sent the event once
+/// its own connect succeeds.
 ///
-/// `PROFILE_PUBLISH_MAX_ATTEMPTS × (CONNECTION_TIMEOUT +
-/// PROFILE_PUBLISH_ACK_TIMEOUT) + (PROFILE_PUBLISH_MAX_ATTEMPTS − 1) ×
-/// PROFILE_PUBLISH_RETRY_BACKOFF` = 2 × (5 + 6) + 1 = **23 s**
-/// (`haven-core/src/relay/manager.rs:171`, `:121`, `:193`, `:177`). A literal
-/// with its citation for [`pool_reconnect`]'s reason: the relay manager's
-/// module is private, so no expression here can name them; the `soak-tooling`
-/// grep step is the control.
+/// `CONNECTION_TIMEOUT + PROFILE_PUBLISH_ACK_TIMEOUT` = 5 + 6 = **11 s**
+/// (`haven-core/src/relay/manager.rs:121`, `:193`). A literal with its
+/// citation for [`pool_reconnect`]'s reason: the relay manager's module is
+/// private, so no expression here can name them; the `soak-tooling` grep step
+/// is the control.
 #[must_use]
-pub const fn profile_publish_ladder() -> Duration {
-    Duration::from_secs(23)
+pub const fn profile_offer() -> Duration {
+    Duration::from_secs(11)
 }
 
 /// What ONE key-package publish and ONE lookup of it cost at the most.
@@ -178,7 +175,7 @@ pub const fn profile_publish_ladder() -> Duration {
 /// The publish ladder (`PUBLISH_LADDER_MS` = 3 × (5 + 10) + 2 × 2 = 49 s) and
 /// the lookup's connect and default wait (`CONNECTION_TIMEOUT +
 /// DEFAULT_TIMEOUT` = 15 s), `haven-core/src/relay/manager.rs:149`, `:121`,
-/// `:50`; literals and grep-guarded for [`profile_publish_ladder`]'s reason.
+/// `:50`; literals and grep-guarded for [`profile_offer`]'s reason.
 #[must_use]
 pub const fn key_package_round_trip() -> Duration {
     Duration::from_secs(49 + 15)
@@ -187,19 +184,21 @@ pub const fn key_package_round_trip() -> Duration {
 /// What S26's identity-plane turns cost at the most in a world of `members`
 /// devices.
 ///
-/// Each device reads its own profile (`PROFILE_OWN_FETCH_BUDGET`) and
-/// publishes it ([`profile_publish_ladder`]), then reads each of its
-/// `members − 1` peers' profiles walking the whole retry ladder — one batch of
+/// Each device syncs its profile twice: once reading its own profile
+/// (`PROFILE_OWN_READ_BOUND`) and offering it to the pool ([`profile_offer`]),
+/// and once the down relay is back, offering the owed event to that relay and
+/// reading it back — the same two terms. Each then reads its `members − 1`
+/// peers' profiles walking the whole retry ladder — one batch of
 /// `PROFILE_BATCH_DEADLINE` per rung, `PROFILE_MAX_RELAY_RANK + 1` rungs; each
 /// of the `members − 1` members then publishes a key package and the admin
 /// looks it up ([`key_package_round_trip`]), the publish's witness poll
-/// (`WITNESS_BOUND`) on top. With the product's values: `m × (12 + 23) + m ×
-/// (m − 1) × 3 × 20 + (m − 1) × (64 + 10)` seconds — 1 082 s for four devices,
-/// 1 671 s for five.
+/// (`WITNESS_BOUND`) on top. With the product's values: `m × 2 × (9 + 11) + m
+/// × (m − 1) × 3 × 20 + (m − 1) × (64 + 10)` seconds — 1 102 s for four
+/// devices, 1 696 s for five.
 #[must_use]
 pub fn identity_planes(members: u32) -> Duration {
     let peers = members.saturating_sub(1);
-    (PROFILE_OWN_FETCH_BUDGET + profile_publish_ladder()) * members
+    (PROFILE_OWN_READ_BOUND + profile_offer()) * 2 * members
         + PROFILE_BATCH_DEADLINE * profile_rungs() * members * peers
         + (key_package_round_trip() + crate::rig::circle::WITNESS_BOUND) * peers
 }
@@ -491,7 +490,7 @@ pub enum BoundDefect {
 ///
 /// Five bounds have no re-derivation here — [`pool_reconnect`],
 /// [`withheld_publish_ladder`], [`location_publish_window`],
-/// [`profile_publish_ladder`] and [`key_package_round_trip`] — because their
+/// [`profile_offer`] and [`key_package_round_trip`] — because their
 /// source constants are private to their own modules (`pub(super)` in the
 /// pinned pool crate, plain `const` in `haven-core`'s relay manager), so a case
 /// would compare this file to itself. The `soak-tooling` grep step against
@@ -553,13 +552,13 @@ pub fn self_check() -> Result<(), BoundDefect> {
     }
     // The public terms, named here once more over the smallest world that has
     // a peer; the two private ladders only by their relation to each other (a
-    // profile publish is two attempts, a key package's three).
+    // profile offer is one attempt, a key package's three).
     if identity_planes(2)
-        != (PROFILE_OWN_FETCH_BUDGET + profile_publish_ladder()) * 2
+        != (PROFILE_OWN_READ_BOUND + profile_offer()) * 2 * 2
             + PROFILE_BATCH_DEADLINE * profile_rungs() * 2
             + key_package_round_trip()
             + crate::rig::circle::WITNESS_BOUND
-        || profile_publish_ladder() >= key_package_round_trip()
+        || profile_offer() >= key_package_round_trip()
     {
         return Err(BoundDefect::ProfileRoundTrip);
     }
@@ -582,7 +581,7 @@ mod tests {
         self_check().expect("a bound drifted from its source constant");
         assert_eq!(
             (identity_planes(4), identity_planes(5)),
-            (Duration::from_secs(1_082), Duration::from_secs(1_671)),
+            (Duration::from_secs(1_102), Duration::from_secs(1_696)),
             "the identity-plane figures the doc quotes for the nightly and weekly worlds"
         );
     }

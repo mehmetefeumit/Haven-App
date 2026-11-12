@@ -1,12 +1,14 @@
 /// Shared own-avatar pick / crop / set / remove pipeline.
 ///
 /// Extracted so the Identity photo header and any other surface reuse the exact
-/// same gallery picker, square crop/rotate editor, and SnackBar feedback rather
-/// than duplicating it. EXIF stripping and downscaling happen inside
+/// same gallery picker, square crop/rotate editor, and feedback rather than
+/// duplicating it. EXIF stripping and downscaling happen inside
 /// `ProfileService.setOwnAvatar` (a fast, LOCAL save — no relay/Blossom I/O);
 /// this layer opens the system picker, runs the crop editor, hands the result
 /// to that local save, triggers the background publish
-/// (`utils/profile_sync_trigger.dart`), and shows user-facing feedback.
+/// (`utils/profile_sync_trigger.dart`), and gives user-facing feedback: a
+/// polite screen-reader announcement for the local outcome, a SnackBar only
+/// for a local fault. No feedback claims anything about the network.
 /// Saving is unconditional (public-by-default, owner-directed 2026-07-16) —
 /// there is no consent gate to check before opening the picker.
 ///
@@ -20,15 +22,17 @@
 /// needs no permission.
 library;
 
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
+import 'package:haven/src/providers/profile_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
-import 'package:haven/src/utils/profile_sync_trigger.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -111,24 +115,33 @@ Future<Uint8List?> pickAndCropAvatar(BuildContext context) async {
 /// Flow: [pickAndCropAvatar] (permission-free system picker → square-locked
 /// crop/rotate editor → cropped bytes) → `ProfileService.setOwnAvatar`
 /// (sanitizes and caches the bytes in milliseconds; no relay/Blossom I/O) →
-/// [triggerProfileSync] (fires the background publish). Cancelling the
-/// picker OR the crop editor is a silent no-op. Shows a success or
-/// generic-failure SnackBar; never surfaces raw errors to the user.
+/// `OwnProfileSyncController.sync` (fires the background publish). Cancelling the
+/// picker OR the crop editor is a silent no-op. Announces success politely;
+/// shows a generic-failure SnackBar; never surfaces raw errors to the user.
 Future<void> pickAndSetOwnAvatar(BuildContext context, WidgetRef ref) async {
-  // Capture localizations before the first await so the success message does
-  // not touch a possibly-unmounted context after the picker/crop round-trip.
+  // Capture before the first await so nothing touches a possibly-unmounted
+  // context after the picker/crop round-trip.
   final l10n = AppLocalizations.of(context);
+  final view = View.of(context);
+  final textDirection = Directionality.of(context);
+  final syncController = ref.read(ownProfileSyncProvider.notifier);
 
   final raw = await pickAndCropAvatar(context);
   if (raw == null || !context.mounted) return;
 
   try {
     await ref.read(profileServiceProvider).setOwnAvatar(raw);
+    // The local write is done: publish even if the page is gone, since `ref`
+    // is unusable then and the next resume would otherwise be the first try.
+    unawaited(syncController.sync());
     if (!context.mounted) return;
     ref.invalidate(ownProfileProvider);
-    triggerProfileSync(ref);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(l10n.avatarPickerPhotoUpdated)),
+    unawaited(
+      SemanticsService.sendAnnouncement(
+        view,
+        l10n.avatarPickerPhotoUpdatedAnnouncement,
+        textDirection,
+      ),
     );
   } on Object {
     if (context.mounted) _showGenericFailure(context);
@@ -182,32 +195,33 @@ Future<CroppedFile?> _cropToSquare(BuildContext context, String sourcePath) {
   );
 }
 
-/// Removes the own public profile picture via `ProfileService.removeOwnAvatar`,
-/// with SnackBars.
+/// Removes the own profile picture via `ProfileService.removeOwnAvatar`.
 ///
-/// Unlike [pickAndSetOwnAvatar], this stays a single blocking service call —
-/// retraction already publishes synchronously on the Rust side (now fast),
-/// so there is no local-then-sync split and no [triggerProfileSync] call.
-/// The removal can publish a name that was still waiting, and one a relay did
-/// not take is left waiting itself, so the sync status is re-read afterwards
-/// ([triggerProfileSyncRetry]) rather than left on what it said before: the
-/// status line is what says the removal has not reached every relay yet. A
-/// removal that fails has still cancelled a photo
-/// waiting to upload, so the own profile is re-read then too.
-/// Deliberately NOT consent-gated (retraction is always allowed, D1); the
-/// Rust core no-ops if nothing was actually published, so this can never
-/// mint a first public event for a pubkey that never opted in.
+/// Like [pickAndSetOwnAvatar] this is a local save plus a background publish:
+/// the service call clears the picture on the device in milliseconds and
+/// stages the removal, and `OwnProfileSyncController.sync` publishes it (a fresh edit
+/// resets the retry ladder). Announces the removal politely; a local failure
+/// shows the generic SnackBar and re-reads the own profile, because a failed
+/// removal has still cancelled a photo waiting to upload.
 Future<void> removeOwnAvatar(BuildContext context, WidgetRef ref) async {
-  // Capture localizations before the await so neither SnackBar touches a
-  // possibly-unmounted context after the remove round-trip.
+  // Capture before the await so nothing touches a possibly-unmounted context
+  // after the remove round-trip.
   final l10n = AppLocalizations.of(context);
+  final view = View.of(context);
+  final textDirection = Directionality.of(context);
+  final syncController = ref.read(ownProfileSyncProvider.notifier);
   try {
     await ref.read(profileServiceProvider).removeOwnAvatar();
+    // Same as [pickAndSetOwnAvatar]: the publish must not wait on the widget.
+    unawaited(syncController.sync());
     if (!context.mounted) return;
     ref.invalidate(ownProfileProvider);
-    triggerProfileSyncRetry(ref);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(l10n.avatarPickerPhotoRemoved)),
+    unawaited(
+      SemanticsService.sendAnnouncement(
+        view,
+        l10n.avatarPickerPhotoRemoved,
+        textDirection,
+      ),
     );
   } on Object {
     if (!context.mounted) return;

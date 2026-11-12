@@ -559,7 +559,17 @@ async fn retire_on_the_retry_budget(fx: &TwoMemberCircle, junk: &Event) -> Vec<u
         matches!(ingest.outcome, IngestOutcome::TransportDeferred { .. }),
         "precondition: the engine keeps the envelope for its own re-peel"
     );
-    for _ in 0..64 {
+    let announced = |events: &[GroupEvent]| {
+        events.iter().find_map(|event| match event {
+            GroupEvent::TransportObjectResourceRefused { message_id, .. } => {
+                Some(message_id.as_slice().to_vec())
+            }
+            _ => None,
+        })
+    };
+    // A round is a send, queued or staged; only a staged one moves the epoch,
+    // and retirement takes `MAX_DEFERRED_PEEL_ATTEMPTS` (32) of those.
+    for _ in 0..128 {
         let effects = fx
             .alice
             .session()
@@ -568,14 +578,34 @@ async fn retire_on_the_retry_budget(fx: &TwoMemberCircle, junk: &Event) -> Vec<u
             })
             .await
             .expect("alice self-updates");
-        let pending = effects
-            .publish
-            .iter()
-            .find_map(|work| match work {
-                PublishWork::GroupEvolution { pending, .. } => Some(*pending),
-                _ => None,
-            })
-            .expect("a self-update stages one group evolution");
+        if let Some(message_id) = announced(&effects.events) {
+            return message_id;
+        }
+        // The engine queues the self-update instead of staging it when the
+        // send's preflight has spent its deferred-row budget — four rows or
+        // 250 ms of wall clock (`message_processor/mod.rs:215-222,1208-1230`).
+        // Haven retires a queued self-update rather than draining it, and the
+        // advance that does so gives the rows the turn the preflight could
+        // not; the next round sends again.
+        let Some(pending) = effects.publish.iter().find_map(|work| match work {
+            PublishWork::GroupEvolution { pending, .. } => Some(*pending),
+            _ => None,
+        }) else {
+            assert!(
+                !effects.queued.is_empty(),
+                "a self-update is staged or queued"
+            );
+            let advanced = fx
+                .alice
+                .session()
+                .advance_convergence(&fx.mls_group_id)
+                .await
+                .unwrap();
+            if let Some(message_id) = announced(&advanced.events) {
+                return message_id;
+            }
+            continue;
+        };
         let confirmed = fx.alice.session().confirm_published(pending).await.unwrap();
         let advanced = fx
             .alice
@@ -584,21 +614,63 @@ async fn retire_on_the_retry_budget(fx: &TwoMemberCircle, junk: &Event) -> Vec<u
             .await
             .unwrap();
         if let Some(message_id) =
-            confirmed
-                .events
-                .iter()
-                .chain(&advanced.events)
-                .find_map(|event| match event {
-                    GroupEvent::TransportObjectResourceRefused { message_id, .. } => {
-                        Some(message_id.as_slice().to_vec())
-                    }
-                    _ => None,
-                })
+            announced(&confirmed.events).or_else(|| announced(&advanced.events))
         {
             return message_id;
         }
     }
     panic!("the deferred envelope was never retired on its retry budget");
+}
+
+/// A send's preflight tries at most `MAX_FOREGROUND_DEFERRED_ROWS` deferred
+/// rows, and 250 ms of wall clock, before it queues the send — as on a loaded
+/// machine — and Haven retires a queued self-update: the epoch still moves
+/// until a deferred row is retired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_self_update_the_engine_queues_still_moves_the_epoch() {
+    /// One envelope more than a preflight tries, all but the first deferred.
+    async fn defer_more_than_a_preflight_tries(fx: &TwoMemberCircle) -> Vec<Event> {
+        let junk: Vec<Event> = (0..=cgka_engine::message_processor::MAX_FOREGROUND_DEFERRED_ROWS)
+            .map(|_| undecryptable_445(&fx.group_hex(), now_secs()))
+            .collect();
+        for event in &junk[1..] {
+            let _ = fx.alice.session().process_event(event).await.unwrap();
+        }
+        junk
+    }
+
+    let premise = build_two_member_circle(vec!["wss://group.example.com".to_string()]).await;
+    let junk = defer_more_than_a_preflight_tries(&premise).await;
+    let _ = premise
+        .alice
+        .session()
+        .process_event(&junk[0])
+        .await
+        .unwrap();
+    let effects = premise
+        .alice
+        .session()
+        .send(SendIntent::SelfUpdate {
+            group_id: premise.mls_group_id.clone(),
+        })
+        .await
+        .expect("alice self-updates");
+    assert!(
+        !effects.queued.is_empty()
+            && !effects
+                .publish
+                .iter()
+                .any(|work| matches!(work, PublishWork::GroupEvolution { .. })),
+        "premise: a preflight with more deferred rows than it tries queues the self-update",
+    );
+
+    let fx = build_two_member_circle(vec!["wss://group.example.com".to_string()]).await;
+    let junk = defer_more_than_a_preflight_tries(&fx).await;
+    let message_id = retire_on_the_retry_budget(&fx, &junk[0]).await;
+    assert!(
+        junk.iter().any(|event| message_id == event.id.as_bytes()),
+        "the row retired is one of the deferred envelopes",
+    );
 }
 
 /// The id the engine announces a retired object under is the Nostr event id,

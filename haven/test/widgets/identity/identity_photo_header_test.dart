@@ -4,13 +4,12 @@
 /// Photo / Remove affordances (Remove gated on an existing avatar and behind
 /// a confirmation), the full-screen-on-tap behaviour, that both Edit and
 /// Remove are unconditional (saving is public-by-default, owner-directed
-/// 2026-07-16 — there is no consent gate on either), and the Remove button's
-/// own in-flight spinner. The full pick/set happy path (real picker + crop
-/// glue) is covered in `avatar_picker_test.dart`, which also mounts this
-/// widget. The header's local `_busy` state's independence from the
-/// page-scoped `ProfileSyncStatusLine` (which this header no longer renders
-/// — see [IdentityPhotoHeader]'s class doc) is covered where the two are
-/// actually siblings, in `test/pages/identity_page_test.dart`.
+/// 2026-07-16 — there is no consent gate on either), that a removal is local
+/// and instant (no spinner, one unconditional sync afterwards). The full
+/// pick/set happy path (real picker + crop glue) is covered in
+/// `avatar_picker_test.dart`, which also mounts this widget. That the page
+/// renders the same in every publish state is covered at page scope, in
+/// `test/pages/identity_page_test.dart`.
 library;
 
 import 'dart:async';
@@ -21,7 +20,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
-import 'package:haven/src/providers/profile_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/profile_service.dart';
@@ -183,7 +181,15 @@ void main() {
           svc.methodCalls.map((c) => c.method),
           contains('removeOwnAvatar'),
         );
-        expect(find.text('Photo removed.'), findsOneWidget);
+        await tester.pumpAndSettle();
+        expect(
+          find.text('Photo removed.'),
+          findsNothing,
+          reason: 'the removal is announced to a screen reader, not shown '
+              'in a SnackBar',
+        );
+        expect(find.widgetWithText(TextButton, 'Remove'), findsNothing);
+        expect(find.text('A'), findsOneWidget, reason: 'initials replace it');
       },
     );
 
@@ -266,10 +272,10 @@ void main() {
 
   });
 
-  group('IdentityPhotoHeader — remove-in-flight spinner (S7)', () {
+  group('IdentityPhotoHeader — a removal is local and instant', () {
     testWidgets(
-      'shows a spinner in place of the Remove label while the retraction '
-      'is in flight, and disables the picker actions until it resolves',
+      'Remove never shows a spinner and the header shows initials as soon as '
+      'the local removal resolves',
       (tester) async {
         final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
         final gate = Completer<void>();
@@ -296,26 +302,17 @@ void main() {
         );
         await tester.pump();
         // Lets the dialog's own 150ms dismiss transition finish so its
-        // "Remove" button text is gone before asserting on the header's —
-        // NOT pumpAndSettle: the header's own removal spinner (asserted
-        // below) is indeterminate and would hang it.
+        // "Remove" button text is gone before asserting on the header's.
         await tester.pump(const Duration(milliseconds: 200));
 
-        // Removal is in flight (gated): the Remove label is replaced by a
-        // spinner...
+        // Removal is in flight (gated): the label stays, no spinner...
         final removeButton = find.ancestor(
           of: find.byIcon(LucideIcons.trash2),
           matching: find.byType(TextButton),
         );
-        expect(find.text('Remove'), findsNothing);
-        expect(
-          find.descendant(
-            of: removeButton,
-            matching: find.byType(CircularProgressIndicator),
-          ),
-          findsOneWidget,
-        );
-        // ...both photo actions are disabled while `_busy`...
+        expect(find.text('Remove'), findsOneWidget);
+        expect(find.byType(CircularProgressIndicator), findsNothing);
+        // ...and both photo actions are disabled while `_busy`.
         expect(
           tester.widget<TextButton>(removeButton).onPressed,
           isNull,
@@ -334,15 +331,21 @@ void main() {
         gate.complete();
         await tester.pumpAndSettle();
 
-        // The retraction resolved and cleared the avatar, so the whole
-        // Remove control (spinner included) disappears — nothing is left
-        // spinning forever.
         expect(
           svc.methodCalls.map((c) => c.method),
           contains('removeOwnAvatar'),
         );
         expect(find.text('Remove'), findsNothing);
+        expect(find.text('A'), findsOneWidget, reason: 'initials replace it');
         expect(find.byType(CircularProgressIndicator), findsNothing);
+        expect(
+          tester
+              .widget<TextButton>(
+                find.widgetWithText(TextButton, 'Edit Photo'),
+              )
+              .onPressed,
+          isNotNull,
+        );
       },
     );
   });
@@ -359,58 +362,39 @@ void main() {
       );
     }
 
-    testWidgets(
-      'a removal that published what was waiting is reflected in the sync '
-      'status at once',
-      (tester) async {
-        final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
-        // A name save that failed is waiting, and its backoff is not due.
-        final svc =
-            MockProfileService(
-                ownProfile: Profile(
-                  pubkeyHex: _fakeIdentity.pubkeyHex,
-                  pictureBytes: jpegHeader,
-                  pictureHash: 'mock-hash',
-                ),
-              )
-              ..nextPendingState = const ProfilePendingState(
-                pending: true,
-                partial: false,
-                retryDue: false,
-              );
-        await tester.pumpWidget(_buildHeader(profileService: svc));
-        await tester.pumpAndSettle();
-        final container = ProviderScope.containerOf(
-          tester.element(find.byType(IdentityPhotoHeader)),
-        )..read(ownProfileSyncProvider);
-        await tester.pumpAndSettle();
-        expect(
-          container.read(ownProfileSyncProvider),
-          ProfileSyncStatus.failed,
-          reason: 'anti-vacuity: the status rests on the failed save',
-        );
+    testWidgets('a removal triggers one unconditional sync', (tester) async {
+      final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
+      // A name save is waiting and its backoff is not due: only an
+      // unconditional sync would publish now; the due-gated retry would not.
+      final svc =
+          MockProfileService(
+              ownProfile: Profile(
+                pubkeyHex: _fakeIdentity.pubkeyHex,
+                pictureBytes: jpegHeader,
+                pictureHash: 'mock-hash',
+              ),
+            )
+            ..nextPendingState = const ProfilePendingState(
+              pending: true,
+              retryDue: false,
+              nextRetryInSecs: 120,
+            );
+      await tester.pumpWidget(_buildHeader(profileService: svc));
+      await tester.pumpAndSettle();
+      expect(svc.syncOwnProfileCalls, 0, reason: 'anti-vacuity');
 
-        // The removal carries the waiting name and the outbox records it.
-        svc.nextPendingState = const ProfilePendingState(
-          pending: false,
-          partial: false,
-          retryDue: false,
-        );
-        await confirmRemove(tester);
-        await tester.pumpAndSettle();
+      await confirmRemove(tester);
+      await tester.pumpAndSettle();
 
-        expect(find.text('Photo removed.'), findsOneWidget);
-        expect(
-          container.read(ownProfileSyncProvider),
-          ProfileSyncStatus.synced,
-        );
-        expect(
-          svc.methodCalls.map((c) => c.method),
-          isNot(contains('syncOwnProfile')),
-          reason: 'the status is re-read; nothing is published for it',
-        );
-      },
-    );
+      expect(
+        svc.syncOwnProfileCalls,
+        1,
+        reason: 'a fresh edit resets the ladder, so the removal syncs at '
+            'once and exactly once',
+      );
+      expect(find.text('Photo removed.'), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+    });
 
     testWidgets(
       'a removal that failed does not leave a photo in view that the '

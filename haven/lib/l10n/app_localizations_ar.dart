@@ -1699,22 +1699,6 @@ class AppLocalizationsAr extends AppLocalizations {
   String get displayNameCardSaveFailedAnnouncement => 'فشل الحفظ، أعد المحاولة';
 
   @override
-  String get profileSyncStatusSyncing => 'جارٍ مزامنة ملفك الشخصي العام…';
-
-  @override
-  String get profileSyncStatusPartial =>
-      'منشور — لا تزال المزامنة جارية مع بعض المُرحِّلات';
-
-  @override
-  String get profileSyncStatusSynced => 'ملفك الشخصي العام مُحدَّث';
-
-  @override
-  String get profileSyncStatusFailed => 'تعذّرت المزامنة حتى الآن.';
-
-  @override
-  String get profileSyncStatusRetrySemantics => 'إعادة محاولة نشر ملفك الشخصي';
-
-  @override
   String get npubQrCopiedSnack => 'تم نسخ المفتاح العام إلى الحافظة';
 
   @override
@@ -1786,8 +1770,7 @@ class AppLocalizationsAr extends AppLocalizations {
   String get photoHeaderChangePhotoSemantics => 'تغيير صورة الملف الشخصي';
 
   @override
-  String get avatarPickerPhotoUpdated =>
-      'تم تحديث الصورة. ستُنشَر في ملفك الشخصي العام على Nostr.';
+  String get avatarPickerPhotoUpdatedAnnouncement => 'تم تحديث الصورة.';
 
   @override
   String get avatarPickerPhotoRemoved => 'تمت إزالة الصورة.';

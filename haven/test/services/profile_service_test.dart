@@ -34,9 +34,10 @@
 ///   a manager-factory failure — the one method here provably reachable to
 ///   completion (not just "reaches the factory") without the bridge, since
 ///   its own contract is to swallow every failure itself.
-/// - Two source-guard checks (`updateOwnProfile`/`setOwnAvatar` call only the
-///   LOCAL save, never the network sync; `syncOwnProfile` fetches its secret
-///   via `withFreshSecret`) pin structure the manager-factory-throws
+/// - Source-guard checks (`updateOwnProfile`/`setOwnAvatar` call only the
+///   LOCAL save, never the network sync; `removeOwnAvatar` calls the local
+///   removal and reads no secret; `syncOwnProfile` fetches its secret via
+///   `withFreshSecret`) pin structure the manager-factory-throws
 ///   technique above cannot reach, mirroring
 ///   `test/lints/publish_decorrelation_wiring_test.dart`'s bounded-span
 ///   technique.
@@ -77,6 +78,9 @@ final _testIdentity = Identity(
 class _FakeIdentityService implements IdentityService {
   _FakeIdentityService({this.identity, this.throwOnGetIdentity = false});
 
+  /// How many times [getSecretBytes] was called.
+  int secretReads = 0;
+
   /// The identity returned by [getIdentity]. `null` (the default)
   /// simulates "no identity exists yet".
   final Identity? identity;
@@ -112,7 +116,10 @@ class _FakeIdentityService implements IdentityService {
   Future<String> getPubkeyHex() async => identity!.pubkeyHex;
 
   @override
-  Future<List<int>> getSecretBytes() async => List<int>.filled(32, 0x11);
+  Future<List<int>> getSecretBytes() async {
+    secretReads++;
+    return List<int>.filled(32, 0x11);
+  }
 
   @override
   Future<void> deleteIdentity() async {}
@@ -430,10 +437,14 @@ void main() {
           result.retryDue,
           isFalse,
           reason: 'a persistent local fault must not force an automatic '
-              'network retry loop; the UI still shows a truthful "failed" '
-              'state with a manual Retry',
+              'network retry loop',
         );
-        expect(result.partial, isFalse);
+        expect(
+          result.nextRetryInSecs,
+          isNull,
+          reason: 'a persistent local fault must never arm the foreground '
+              'retry timer',
+        );
       },
     );
   });
@@ -453,17 +464,22 @@ void main() {
       expect(expected.keys.toSet(), ProfileSyncOutcomeFfi.values.toSet());
 
       for (final MapEntry(:key, :value) in expected.entries) {
-        final ffi = ProfileSyncResultFfi(
-          outcome: key,
-          relaysAcked: 2,
-          relaysAttempted: 3,
-          stillPending: true,
-        );
+        final ffi = ProfileSyncResultFfi(outcome: key, stillPending: true);
         final result = toProfileSyncResult(ffi);
         expect(result.outcome, value);
-        expect(result.relaysAcked, 2);
-        expect(result.relaysAttempted, 3);
         expect(result.stillPending, isTrue);
+      }
+    });
+
+    test('maps stillPending in both directions', () {
+      for (final stillPending in [true, false]) {
+        final result = toProfileSyncResult(
+          ProfileSyncResultFfi(
+            outcome: ProfileSyncOutcomeFfi.published,
+            stillPending: stillPending,
+          ),
+        );
+        expect(result.stillPending, stillPending);
       }
     });
   });
@@ -472,13 +488,39 @@ void main() {
     test('maps every field 1:1', () {
       const ffi = ProfilePendingStateFfi(
         pending: true,
-        partial: true,
         retryDue: false,
+        nextRetryInSecs: 90,
       );
       final result = toProfilePendingState(ffi);
       expect(result.pending, isTrue);
-      expect(result.partial, isTrue);
       expect(result.retryDue, isFalse);
+      expect(result.nextRetryInSecs, 90);
+    });
+
+    test('an absent nextRetryInSecs stays absent', () {
+      const ffi = ProfilePendingStateFfi(pending: true, retryDue: true);
+      expect(toProfilePendingState(ffi).nextRetryInSecs, isNull);
+    });
+
+    test('equality and hashCode include nextRetryInSecs', () {
+      const a = ProfilePendingState(
+        pending: true,
+        retryDue: false,
+        nextRetryInSecs: 30,
+      );
+      const same = ProfilePendingState(
+        pending: true,
+        retryDue: false,
+        nextRetryInSecs: 30,
+      );
+      const other = ProfilePendingState(
+        pending: true,
+        retryDue: false,
+        nextRetryInSecs: 120,
+      );
+      expect(a, same);
+      expect(a.hashCode, same.hashCode);
+      expect(a, isNot(other));
     });
   });
 
@@ -516,6 +558,14 @@ void main() {
     test('setOwnAvatar calls the LOCAL save, never the network sync', () {
       final body = methodBody(readSource(), 'Future<Profile> setOwnAvatar(');
       expect(body, contains('saveMyProfilePictureLocal('));
+      expect(body, isNot(contains('syncMyProfile(')));
+    });
+
+    test('removeOwnAvatar calls the LOCAL removal and fetches no secret', () {
+      final body = methodBody(readSource(), 'Future<Profile> removeOwnAvatar(');
+      expect(body, contains('removeMyProfilePicture()'));
+      expect(body, isNot(contains('withFreshSecret(')));
+      expect(body, isNot(contains('getSecretBytes')));
       expect(body, isNot(contains('syncMyProfile(')));
     });
 

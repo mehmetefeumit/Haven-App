@@ -215,6 +215,11 @@ const _allowedSites = <String, int>{
   // The moment the Bluetooth mesh turns itself off: the map's state is read
   // against the clock again; nothing is asked of the engine.
   'lib/src/providers/mesh_provider.dart#meshPhaseProvider': 1,
+  // The own-profile publish retry: armed only while the app is resumed and
+  // reaching the profile plane, never the engine, so it is no new wake.
+  'lib/src/providers/profile_sync_provider.dart#'
+          'OwnProfileSyncController._armFrom':
+      1,
   'lib/src/providers/sharing_health_provider.dart#'
           'SharingHealthNotifier.syncTick':
       1,
@@ -266,7 +271,7 @@ const _allowedSites = <String, int>{
 
 /// The sum of [_allowedSites]: a second pin, so an edit that moves a count
 /// from one site to another is still a visible change of this number.
-const _allowedTotal = 45;
+const _allowedTotal = 46;
 
 /// The sites of [_allowedSites] that reach the MLS or the live-sync engine,
 /// reviewed by hand: the existing wakes. A timer's callback reaches through

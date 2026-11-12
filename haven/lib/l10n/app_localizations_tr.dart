@@ -1630,24 +1630,6 @@ class AppLocalizationsTr extends AppLocalizations {
       'Kaydetme başarısız oldu, tekrar deneyin';
 
   @override
-  String get profileSyncStatusSyncing =>
-      'Herkese açık profilinize eşitleniyor…';
-
-  @override
-  String get profileSyncStatusPartial =>
-      'Yayımlandı — bazı aktarıcılarla hâlâ eşitleniyor';
-
-  @override
-  String get profileSyncStatusSynced => 'Herkese açık profiliniz güncel';
-
-  @override
-  String get profileSyncStatusFailed => 'Henüz eşitlenemedi.';
-
-  @override
-  String get profileSyncStatusRetrySemantics =>
-      'Profilinizi yayımlamayı yeniden dene';
-
-  @override
   String get npubQrCopiedSnack => 'Açık anahtar panoya kopyalandı';
 
   @override
@@ -1719,8 +1701,7 @@ class AppLocalizationsTr extends AppLocalizations {
   String get photoHeaderChangePhotoSemantics => 'Profil fotoğrafını değiştir';
 
   @override
-  String get avatarPickerPhotoUpdated =>
-      'Fotoğraf güncellendi. Herkese açık Nostr profilinizde yayımlanacak.';
+  String get avatarPickerPhotoUpdatedAnnouncement => 'Fotoğraf güncellendi.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Fotoğraf kaldırıldı.';

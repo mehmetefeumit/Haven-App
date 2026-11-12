@@ -17,6 +17,7 @@ library;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -30,6 +31,7 @@ import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/identity/display_name_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../helpers/accessibility_announcements.dart';
 import '../../mocks/mock_profile_service.dart';
 
 /// An identity used by tests that exercise the public-profile publish path,
@@ -47,6 +49,7 @@ void main() {
     AsyncValue<String?>? displayNameOverride,
     MockProfileService? profileService,
     bool resolveIdentity = false,
+    ValueNotifier<bool>? shown,
   }) {
     return ProviderScope(
       overrides: [
@@ -69,11 +72,24 @@ void main() {
             },
           ),
       ],
-      child: const MaterialApp(
+      child: MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         home: Scaffold(
-          body: Padding(padding: EdgeInsets.all(16), child: DisplayNameCard()),
+          body: shown == null
+              ? const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: DisplayNameCard(),
+                )
+              : ValueListenableBuilder<bool>(
+                  valueListenable: shown,
+                  builder: (_, on, _) => on
+                      ? const Padding(
+                          padding: EdgeInsets.all(16),
+                          child: DisplayNameCard(),
+                        )
+                      : const SizedBox(),
+                ),
         ),
       ),
     );
@@ -233,7 +249,7 @@ void main() {
 
       await tester.pumpWidget(buildHarness(service: service));
       await tester.pumpAndSettle();
-      final announcements = _captureAccessibilityAnnouncements(tester);
+      final announcements = captureAccessibilityAnnouncements(tester);
 
       await tester.enterText(find.byType(TextField), 'Bob');
       await tester.pump();
@@ -310,7 +326,7 @@ void main() {
 
       await tester.pumpWidget(buildHarness(service: service));
       await tester.pumpAndSettle();
-      final announcements = _captureAccessibilityAnnouncements(tester);
+      final announcements = captureAccessibilityAnnouncements(tester);
 
       await tester.enterText(find.byType(TextField), 'Bob');
       await tester.pump();
@@ -343,6 +359,47 @@ void main() {
         reason: 'screen readers are told the save failed',
       );
     });
+
+    testWidgets(
+      'a local save announces only the outcome, never a progress message',
+      (tester) async {
+        for (final throwOnSet in [false, true]) {
+          final service = _FakeIdentityService(
+            initialDisplayName: 'Alice',
+            throwOnSet: throwOnSet,
+          );
+          await tester.pumpWidget(buildHarness(service: service));
+          await tester.pumpAndSettle();
+          final announcements =
+              captureAccessibilityAnnouncementsWithPriority(tester);
+
+          await tester.enterText(find.byType(TextField), 'Bob');
+          await tester.pump();
+          await tester.tap(_findSaveButtonFinder());
+          await tester.pumpAndSettle();
+
+          expect(
+            announcements,
+            [
+              if (throwOnSet)
+                (
+                  message: 'Save failed, try again',
+                  assertiveness: Assertiveness.assertive,
+                )
+              else
+                (
+                  message: 'Display name saved',
+                  assertiveness: Assertiveness.polite,
+                ),
+            ],
+            reason: 'one announcement per outcome, none for the '
+                'in-between "saving" state; success is polite, failure '
+                'interrupts (throwOnSet: $throwOnSet)',
+          );
+          await tester.pumpWidget(const SizedBox());
+        }
+      },
+    );
 
     testWidgets('loading provider: field disabled, typing cannot mark dirty', (
       tester,
@@ -441,10 +498,8 @@ void main() {
         await tester.pump();
         await tester.tap(_findSaveButtonFinder());
         // Deliberately NOT pumpAndSettle — `syncOwnProfileGate` stays open
-        // for the rest of this test, and this card no longer mounts the
-        // sync status line itself (it moved to page scope; see
-        // `identity_page.dart`), so a bounded, explicit-duration pump lets
-        // the (now local-only, unGated) identity + profile-service saves
+        // for the rest of this test, so a bounded, explicit-duration pump
+        // lets the (local-only, unGated) identity + profile-service saves
         // resolve AND the button's 200ms AnimatedSwitcher cross-fade finish,
         // without ever waiting on the still-open sync gate.
         await tester.pump(const Duration(milliseconds: 250));
@@ -468,6 +523,48 @@ void main() {
         // Clean up: release the gate so nothing is left pending.
         profileService.syncOwnProfileGate!.complete();
         await tester.pumpAndSettle();
+      },
+    );
+
+    testWidgets(
+      'a save completed after the card unmounted still triggers one sync',
+      (tester) async {
+        final profileService = MockProfileService()
+          ..updateOwnProfileGate = Completer<void>();
+        final shown = ValueNotifier<bool>(true);
+        addTearDown(shown.dispose);
+        await tester.pumpWidget(
+          buildHarness(
+            service: _FakeIdentityService(initialDisplayName: 'Alice'),
+            profileService: profileService,
+            resolveIdentity: true,
+            shown: shown,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.enterText(find.byType(TextField), 'Bob');
+        await tester.pump();
+        await tester.tap(_findSaveButtonFinder());
+        await tester.pump();
+        expect(
+          profileService.methodCalls.map((c) => c.method),
+          contains('updateOwnProfile'),
+          reason: 'anti-vacuity: the local profile write is held in flight',
+        );
+        shown.value = false;
+        await tester.pump();
+        expect(find.byType(DisplayNameCard), findsNothing);
+
+        profileService.updateOwnProfileGate!.complete();
+        await tester.pump();
+
+        expect(
+          profileService.syncOwnProfileCalls,
+          1,
+          reason: 'the local write succeeded, so the publish must not wait '
+              'for the next resume',
+        );
       },
     );
 
@@ -671,33 +768,6 @@ ButtonStyleButton _findSaveButton() {
 
 Finder _findSaveButtonFinder() =>
     find.byKey(WidgetKeys.displayNameSaveButton);
-
-/// Captures accessibility announcements (`SemanticsService.sendAnnouncement`)
-/// sent on the platform channel, so tests can assert screen-reader feedback.
-/// The mock handler is torn down automatically after the test.
-List<String> _captureAccessibilityAnnouncements(WidgetTester tester) {
-  final announcements = <String>[];
-  tester.binding.defaultBinaryMessenger.setMockDecodedMessageHandler<dynamic>(
-    SystemChannels.accessibility,
-    (message) async {
-      if (message is Map &&
-          message['type'] == 'announce' &&
-          message['data'] is Map) {
-        final text = (message['data'] as Map)['message'];
-        if (text is String) announcements.add(text);
-      }
-      return null;
-    },
-  );
-  addTearDown(
-    () => tester.binding.defaultBinaryMessenger
-        .setMockDecodedMessageHandler<dynamic>(
-          SystemChannels.accessibility,
-          null,
-        ),
-  );
-  return announcements;
-}
 
 class _FakeIdentityService implements IdentityService {
   _FakeIdentityService({

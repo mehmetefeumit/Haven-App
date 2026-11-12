@@ -372,7 +372,6 @@ abstract class RustLibApi extends BaseApi {
 
   Future<ProfileMetadataFfi> crateApiCircleManagerFfiRemoveMyProfilePicture({
     required CircleManagerFfi that,
-    required List<int> identitySecretBytes,
   });
 
   Future<bool> crateApiCircleManagerFfiRemoveUserRelay({
@@ -3261,7 +3260,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @override
   Future<ProfileMetadataFfi> crateApiCircleManagerFfiRemoveMyProfilePicture({
     required CircleManagerFfi that,
-    required List<int> identitySecretBytes,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -3271,7 +3269,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          sse_encode_list_prim_u_8_loose(identitySecretBytes, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -3284,7 +3281,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiRemoveMyProfilePictureConstMeta,
-        argValues: [that, identitySecretBytes],
+        argValues: [that],
         apiImpl: this,
       ),
     );
@@ -3293,7 +3290,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiCircleManagerFfiRemoveMyProfilePictureConstMeta =>
       const TaskConstMeta(
         debugName: "CircleManagerFfi_remove_my_profile_picture",
-        argNames: ["that", "identitySecretBytes"],
+        argNames: ["that"],
       );
 
   @override
@@ -10119,8 +10116,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return ProfilePendingStateFfi(
       pending: dco_decode_bool(arr[0]),
-      partial: dco_decode_bool(arr[1]),
-      retryDue: dco_decode_bool(arr[2]),
+      retryDue: dco_decode_bool(arr[1]),
+      nextRetryInSecs: dco_decode_opt_box_autoadd_u_32(arr[2]),
     );
   }
 
@@ -10160,13 +10157,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ProfileSyncResultFfi dco_decode_profile_sync_result_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
     return ProfileSyncResultFfi(
       outcome: dco_decode_profile_sync_outcome_ffi(arr[0]),
-      relaysAcked: dco_decode_u_32(arr[1]),
-      relaysAttempted: dco_decode_u_32(arr[2]),
-      stillPending: dco_decode_bool(arr[3]),
+      stillPending: dco_decode_bool(arr[1]),
     );
   }
 
@@ -12525,12 +12520,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_pending = sse_decode_bool(deserializer);
-    var var_partial = sse_decode_bool(deserializer);
     var var_retryDue = sse_decode_bool(deserializer);
+    var var_nextRetryInSecs = sse_decode_opt_box_autoadd_u_32(deserializer);
     return ProfilePendingStateFfi(
       pending: var_pending,
-      partial: var_partial,
       retryDue: var_retryDue,
+      nextRetryInSecs: var_nextRetryInSecs,
     );
   }
 
@@ -12579,13 +12574,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_outcome = sse_decode_profile_sync_outcome_ffi(deserializer);
-    var var_relaysAcked = sse_decode_u_32(deserializer);
-    var var_relaysAttempted = sse_decode_u_32(deserializer);
     var var_stillPending = sse_decode_bool(deserializer);
     return ProfileSyncResultFfi(
       outcome: var_outcome,
-      relaysAcked: var_relaysAcked,
-      relaysAttempted: var_relaysAttempted,
       stillPending: var_stillPending,
     );
   }
@@ -14905,8 +14896,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_bool(self.pending, serializer);
-    sse_encode_bool(self.partial, serializer);
     sse_encode_bool(self.retryDue, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.nextRetryInSecs, serializer);
   }
 
   @protected
@@ -14947,8 +14938,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_profile_sync_outcome_ffi(self.outcome, serializer);
-    sse_encode_u_32(self.relaysAcked, serializer);
-    sse_encode_u_32(self.relaysAttempted, serializer);
     sse_encode_bool(self.stillPending, serializer);
   }
 
@@ -15679,9 +15668,9 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// rows.
   ///
   /// A blank some pool relay did not acknowledge is not a finished deletion:
-  /// that relay still serves the profile. The blank is left pending, partly
-  /// published, with the retry ladder advanced, for
-  /// [`Self::sync_my_profile`] to publish a blank to the whole pool again.
+  /// that relay still serves the profile. The identical blank is left owed
+  /// to the relays that did not take it, with the retry ladder advanced, for
+  /// [`Self::sync_my_profile`] to re-send to them alone.
   ///
   /// # Errors
   ///
@@ -16103,8 +16092,8 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
         giftWrapEventJson: giftWrapEventJson,
       );
 
-  /// Whether the own profile has unpublished work, how far it got, and
-  /// whether the persisted backoff permits another attempt.
+  /// Whether the own profile has unpublished work, whether the persisted
+  /// backoff permits another attempt, and if not, how long until it does.
   ///
   /// The read a resume trigger consults before calling
   /// [`Self::sync_my_profile`], so a clean install never dials a relay just
@@ -16288,39 +16277,20 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     senderPubkey: senderPubkey,
   );
 
-  /// Removes the local user's OWN profile picture (retraction republish).
+  /// Removes the local user's OWN profile picture, LOCALLY, and queues the
+  /// removal for publication, returning the row the UI should render.
   ///
-  /// A **no-op unless a profile was published** (`has_published_profile`) — a
-  /// retraction must never mint a first public event for a pubkey that never
-  /// published. Otherwise it clears the `picture` field on the freshest kind-0
-  /// — the relays' copy, or the cached one when that is newer or no relay
-  /// served one — and republishes. With neither a relay copy nor a dated
-  /// cached one it publishes nothing and fails: an empty profile is never
-  /// published over one this device cannot see.
-  ///
-  /// Either way, a photo still QUEUED for upload is cancelled: it was going
-  /// to publish the picture the user is removing. One saved while the
-  /// removal is running is kept, and stays queued. A queued NAME edit has
-  /// nothing to do with the photo and stays queued — unless the removal is
-  /// built on the cached row, which already carries it: the name is then
-  /// published with the removal and recorded as published.
-  ///
-  /// A removal some pool relay did not acknowledge is not finished: that
-  /// relay still serves the photo. It is left pending, partly published,
-  /// with the retry ladder advanced, for [`Self::sync_my_profile`] to
-  /// republish to the whole pool.
+  /// One transaction: the photo's bytes (published and staged alike) are
+  /// dropped, the row loses its `picture`, and the removal is staged with the
+  /// retry ladder reset. No secret, no lock, no relay: [`Self::sync_my_profile`]
+  /// publishes it, and decides under its lock whether there is anything
+  /// public to remove it from — a removal never mints a first public event.
   ///
   /// # Errors
   ///
-  /// Returns a redacted error string on a secret that is not this account's
-  /// identity, when no copy of the profile could be read to build on, or on
-  /// relay or database failure.
-  Future<ProfileMetadataFfi> removeMyProfilePicture({
-    required List<int> identitySecretBytes,
-  }) => RustLib.instance.api.crateApiCircleManagerFfiRemoveMyProfilePicture(
-    that: this,
-    identitySecretBytes: identitySecretBytes,
-  );
+  /// Returns a redacted error string on database failure.
+  Future<ProfileMetadataFfi> removeMyProfilePicture() => RustLib.instance.api
+      .crateApiCircleManagerFfiRemoveMyProfilePicture(that: this);
 
   /// Removes a relay from one category.
   ///

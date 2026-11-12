@@ -8,12 +8,18 @@
 /// fake [ImagePickerPlatform] and a fake [ImageCropperPlatform], plus a
 /// source-level regression guard that fails the build if a runtime photo
 /// permission is ever reintroduced.
+///
+/// A set or a removal succeeds on the device alone, so neither shows a
+/// SnackBar: each is confirmed to a screen reader by one polite announcement,
+/// and only a local fault shows (generic) copy.
 library;
 
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
@@ -27,6 +33,7 @@ import 'package:image_picker_platform_interface/image_picker_platform_interface.
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
+import '../../helpers/accessibility_announcements.dart';
 import '../../mocks/mock_profile_service.dart';
 
 /// A fake [ImagePickerPlatform] that returns a canned [XFile] (or throws)
@@ -111,17 +118,30 @@ File _writeTempFile(String name) {
   return file;
 }
 
-Widget _buildHeader(MockProfileService profileService) {
+/// [shown] lets a test unmount the header while the surrounding
+/// [ProviderScope] (and so the sync controller) stays alive.
+Widget _buildHeader(
+  MockProfileService profileService, {
+  ValueNotifier<bool>? shown,
+}) {
   return ProviderScope(
     overrides: [
       identityProvider.overrideWith((_) async => _fakeIdentity),
       displayNameProvider.overrideWith((_) async => 'Alice'),
       profileServiceProvider.overrideWithValue(profileService),
     ],
-    child: const MaterialApp(
+    child: MaterialApp(
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
-      home: Scaffold(body: IdentityPhotoHeader()),
+      home: Scaffold(
+        body: shown == null
+            ? const IdentityPhotoHeader()
+            : ValueListenableBuilder<bool>(
+                valueListenable: shown,
+                builder: (_, on, _) =>
+                    on ? const IdentityPhotoHeader() : const SizedBox(),
+              ),
+      ),
     ),
   );
 }
@@ -177,7 +197,8 @@ void main() {
   group('pickAndSetOwnAvatar (pick → square crop → set)', () {
     testWidgets(
       'picked + cropped image flows to setOwnAvatar with a square lock, '
-      'shows success, and deletes both temp files',
+      'announces the success without a SnackBar, and deletes both temp '
+      'files',
       (tester) async {
         final pickedFile = _writeTempFile('picked');
         final croppedFile = _writeTempFile('cropped');
@@ -190,6 +211,8 @@ void main() {
 
         final svc = MockProfileService();
         await _pumpHeader(tester, svc);
+        final announcements =
+            captureAccessibilityAnnouncementsWithPriority(tester);
 
         await _tapEditPhoto(tester);
 
@@ -212,16 +235,20 @@ void main() {
           contains('syncOwnProfile'),
         );
 
-        expect(find.textContaining('Photo updated'), findsOneWidget);
-        // Profile-latency migration: the photo is saved LOCALLY and
-        // published in the background — the SnackBar must stay future
-        // tense ("will be published"), never claim the past-tense
-        // "Published to" it can no longer honestly make at this point.
+        // Success is local truth only: no SnackBar, one polite announcement.
+        expect(find.byType(SnackBar), findsNothing);
         expect(
-          find.textContaining('Published to'),
-          findsNothing,
-          reason: 'saving no longer implies the publish has already '
-              'happened — see avatarPickerPhotoUpdated in app_en.arb',
+          announcements,
+          [
+            (
+              message: AppLocalizations.of(
+                tester.element(find.byType(IdentityPhotoHeader)),
+              ).avatarPickerPhotoUpdatedAnnouncement,
+              assertiveness: Assertiveness.polite,
+            ),
+          ],
+          reason: 'a screen-reader user hears the photo was updated, once, '
+              'without interrupting speech',
         );
 
         // Both temp files are cleaned up after the bytes are read (privacy).
@@ -229,6 +256,70 @@ void main() {
         expect(croppedFile.existsSync(), isFalse);
       },
     );
+
+    testWidgets('a local set failure shows only the generic error and '
+        'announces nothing', (tester) async {
+      final pickedFile = _writeTempFile('picked');
+      final croppedFile = _writeTempFile('cropped');
+      ImagePickerPlatform.instance = _FakeImagePicker(
+        result: XFile(pickedFile.path),
+      );
+      ImageCropperPlatform.instance = _FakeImageCropper(
+        result: CroppedFile(croppedFile.path),
+      );
+
+      final svc = MockProfileService()..shouldThrowOnSetOwnAvatar = true;
+      await _pumpHeader(tester, svc);
+      final announcements = captureAccessibilityAnnouncements(tester);
+
+      await _tapEditPhoto(tester);
+
+      expect(find.byType(SnackBar), findsOneWidget);
+      expect(
+        find.textContaining('Could not update your photo'),
+        findsOneWidget,
+      );
+      expect(announcements, isEmpty);
+      expect(svc.syncOwnProfileCalls, 0);
+    });
+
+    testWidgets('a set completed after the header unmounted still triggers '
+        'one sync', (tester) async {
+      final pickedFile = _writeTempFile('picked');
+      final croppedFile = _writeTempFile('cropped');
+      ImagePickerPlatform.instance = _FakeImagePicker(
+        result: XFile(pickedFile.path),
+      );
+      ImageCropperPlatform.instance = _FakeImageCropper(
+        result: CroppedFile(croppedFile.path),
+      );
+      final gate = Completer<void>();
+      final svc = MockProfileService()..setOwnAvatarGate = gate;
+      final shown = ValueNotifier<bool>(true);
+      addTearDown(shown.dispose);
+      await tester.pumpWidget(_buildHeader(svc, shown: shown));
+      await tester.pumpAndSettle();
+
+      await _tapEditPhoto(tester);
+      expect(
+        svc.methodCalls.map((c) => c.method),
+        contains('setOwnAvatar'),
+        reason: 'anti-vacuity: the local save is held in flight',
+      );
+      shown.value = false;
+      await tester.pump();
+      expect(find.byType(IdentityPhotoHeader), findsNothing);
+
+      gate.complete();
+      await tester.pump();
+
+      expect(
+        svc.syncOwnProfileCalls,
+        1,
+        reason: 'the local write succeeded, so the publish must not wait '
+            'for the next resume',
+      );
+    });
 
     testWidgets('cancelling the picker never opens the editor or sets', (
       tester,
@@ -323,6 +414,138 @@ void main() {
         findsOneWidget,
       );
     });
+  });
+
+  group('removeOwnAvatar (local removal, no SnackBar on success)', () {
+    MockProfileService serviceWithPhoto() => MockProfileService(
+      ownProfile: Profile(
+        pubkeyHex: _fakeIdentity.pubkeyHex,
+        pictureBytes: Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]),
+        pictureHash: 'mock-hash',
+      ),
+    );
+
+    Future<void> confirmRemove(WidgetTester tester) async {
+      await tester.tap(find.widgetWithText(TextButton, 'Remove'));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.widgetWithText(TextButton, 'Remove'),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets(
+      'removeOwnAvatar announces Photo removed without a SnackBar and '
+      'triggers a sync',
+      (tester) async {
+        // A save is waiting and its backoff is not due: only the
+        // unconditional trigger syncs now, the due-gated retry would not.
+        final svc = serviceWithPhoto()
+          ..nextPendingState = const ProfilePendingState(
+            pending: true,
+            retryDue: false,
+            nextRetryInSecs: 120,
+          );
+        await _pumpHeader(tester, svc);
+        final announcements =
+            captureAccessibilityAnnouncementsWithPriority(tester);
+
+        await confirmRemove(tester);
+
+        expect(
+          svc.methodCalls.where((c) => c.method == 'removeOwnAvatar'),
+          hasLength(1),
+        );
+        expect(find.byType(SnackBar), findsNothing);
+        expect(
+          announcements,
+          [
+            (
+              message: AppLocalizations.of(
+                tester.element(find.byType(IdentityPhotoHeader)),
+              ).avatarPickerPhotoRemoved,
+              assertiveness: Assertiveness.polite,
+            ),
+          ],
+          reason: 'a screen-reader user hears the photo was removed, once, '
+              'without interrupting speech',
+        );
+        expect(
+          svc.syncOwnProfileCalls,
+          1,
+          reason: 'a fresh edit resets the ladder, so the removal syncs at '
+              'once and exactly once',
+        );
+      },
+    );
+
+    testWidgets(
+      'a removal completed after the header unmounted still triggers one '
+      'sync',
+      (tester) async {
+        final gate = Completer<void>();
+        final svc = serviceWithPhoto()..removeOwnAvatarGate = gate;
+        final shown = ValueNotifier<bool>(true);
+        addTearDown(shown.dispose);
+        await tester.pumpWidget(_buildHeader(svc, shown: shown));
+        await tester.pumpAndSettle();
+
+        await confirmRemove(tester);
+        expect(
+          svc.methodCalls.where((c) => c.method == 'removeOwnAvatar'),
+          hasLength(1),
+          reason: 'anti-vacuity: the local removal is held in flight',
+        );
+        shown.value = false;
+        await tester.pump();
+        expect(find.byType(IdentityPhotoHeader), findsNothing);
+
+        gate.complete();
+        await tester.pump();
+
+        expect(svc.syncOwnProfileCalls, 1);
+      },
+    );
+
+    testWidgets(
+      'removeOwnAvatar failing locally shows only the generic remove error',
+      (tester) async {
+        final svc = serviceWithPhoto()..shouldThrowOnRemoveOwnAvatar = true;
+        await _pumpHeader(tester, svc);
+        final announcements = captureAccessibilityAnnouncements(tester);
+
+        await tester.tap(find.widgetWithText(TextButton, 'Remove'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.widgetWithText(TextButton, 'Remove'),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+
+        final l10n = AppLocalizations.of(
+          tester.element(find.byType(IdentityPhotoHeader)),
+        );
+        expect(find.byType(SnackBar), findsOneWidget);
+        expect(find.text(l10n.avatarPickerRemoveError), findsOneWidget);
+        expect(
+          find.textContaining('generic'),
+          findsNothing,
+          reason: 'the raw service error never reaches the UI (Rule 8)',
+        );
+        expect(
+          announcements,
+          isEmpty,
+          reason: 'a failed removal must not announce "Photo removed"',
+        );
+        expect(svc.syncOwnProfileCalls, 0);
+      },
+    );
   });
 
   group('avatar_picker source regression guard', () {

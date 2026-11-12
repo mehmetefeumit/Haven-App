@@ -2796,7 +2796,8 @@ genuine event with the same id is admitted normally afterwards.
 - A relay can serve a superseded, genuinely signed replaceable event as the
   newest. Where several relays are asked, the newest `created_at` wins and a
   tie goes to the lower id, as NIP-01 keeps it (`newest_authored`, the per-relay
-  page order, `fetch_own_profile`, the profile parser). Where one relay is
+  page order, `newest_own_copy` under `read_own_profile_on_relays`, the profile
+  parser). Where one relay is
   asked for one author — a member's profile — or one answers alone, the only
   defence is the local newer-wins gate, which protects once a newer copy has
   been cached and not before. Haven keeps no high-water mark for another
@@ -2826,47 +2827,67 @@ genuine event with the same id is admitted normally afterwards.
   with the user's own queued edits on top. A row created by saving on a
   device that has not yet fetched or published the profile holds only what
   was saved there, and is dated 0 so that no served copy is ever older.
-  Saving an edit and removing the photo both take their base this way; when
-  no relay serves the profile the base is the cached row. Removing the photo
-  with neither — no relay copy and no dated row — publishes nothing: a no-op
-  when every relay answers that no profile is published and this device has
-  no record of publishing one, and a failure otherwise. A removal built on
-  the cached row publishes a name still waiting in the outbox, since the row
-  carries it, and records it as published in the same transaction, with the
-  coverage it got; a name it did not publish stays queued and stays on the
-  row, as does one saved while the removal was being published. A removal
-  some relay of the pool did not acknowledge is not done — that relay still
-  serves the photo to the peers who read the profile from it — so it is
-  never recorded as synced: with nothing else waiting, the profile it
-  published is itself left pending, partly published, and the sync sends it
-  to the whole pool again on the backoff any partial publish keeps; with an
-  edit waiting, that edit's sync carries it. The blank a deletion publishes
-  is owed in the same way when some relay did not acknowledge it, in the
-  transaction that wipes the cache; what the retry publishes is a blank
-  again, since the row it builds on is the dated blank. The backoff runs
-  from when the retraction was recorded, so the status re-read that follows
-  it publishes nothing. A photo saved while a removal is running is neither
-  reported published nor deleted. One read of the pool serves both the
-  retraction's "was anything ever published" gate and its base, for the
-  removal and the deletion alike.
-- **A publish some pool relay never acknowledges is retried without a cap,
-  and each retry is a new public event.** This holds for a saved edit, a
-  photo removal and a deletion's blank alike. Every retry pass reads the
-  pool once and signs a NEW kind 0 — the same content, a new `created_at`
-  and so a new id — for the whole pool. Each relay that takes it therefore
-  holds a public mark of when the app was opened: at most four times in the
-  first hour (30 s, 2 min, 8 min and 30 min after the last pass) and then at
-  most once per six hours, only while the app is opened (cold start, resume,
-  and the re-read after a photo removal; never from a background isolate),
-  and for as long as one relay of the usable pool does not acknowledge. The
-  debt ends when every relay of the pool acknowledges one pass, or when the
-  relay that does not leaves the pool — retired in an app release, or
-  excluded as contaminated. Until then the status line reads "still
-  syncing". A relay that is no longer in this install's usable pool is
-  never sent the retraction at all, and the outbox reads synced without it.
-  Not bounded in this release (owner decision owed: re-send the one signed
-  event instead of minting a new one, and define when a relay holding a
-  newer copy from another client ends the debt).
+  Saving an edit and removing the photo both take their base this way, in
+  the sync that publishes them; when no relay serves the profile the base is
+  the cached row. Removing the photo is local (`stage_own_picture_removal`:
+  one transaction that drops the staged and the published bytes, clears the
+  row's `picture` and stages the clear as an outbox edit — no lock, no
+  secret, no relay), and `sync_own_profile` publishes it. For a pending set
+  that carries nothing saved — the clear alone, or an owed deletion blank —
+  the sync reads the retraction gate under its lock, before any footprint,
+  and decides on what the pass will actually publish (`retraction_gate`):
+  a relay copy was found, or this device published and holds a dated row —
+  publish; never published here and every relay answered that none holds a
+  profile — settle, leveled locally with nothing sent (never a version that
+  still carries a staged photo); anything less — hold, on the ladder (the
+  old fail-closed, kept). A pending set with saved content publishes
+  unconditionally. A name queued before the removal, or saved while its
+  sync was publishing, rides the next event that carries it and is never
+  recorded as published by one that did not; a photo saved while a removal
+  is pending is kept and stays pending, the removal is published first, and
+  a commit at least one relay acknowledged clears the removal only when its
+  version is at or past the one the removal was staged at. A removal some
+  relay of the pool did not take is not done — that relay still serves the
+  photo to the peers who read the profile from it — so it is never recorded
+  as synced: the event is owed to that relay (next bullet). The blank a
+  deletion publishes is owed the same way, in the transaction that wipes the
+  cache. The backoff is dated when a pass ends, never when it began, so a
+  slow upload cannot come back already due.
+- **A publish some pool relay never serves is re-sent, byte for byte, to that
+  relay alone, with no cap.** This holds for a saved edit, a photo removal
+  and a deletion's blank alike. A complete event at least one relay
+  acknowledged is kept, with the relays known to serve it, as the one owed
+  event (`profile_publish_debt`; every later save, removal, deletion or
+  redirect deletes it, and it is verified on load). A retry offers that same
+  event only to the relays that do not yet serve it; the relay's `OK` is not
+  read as coverage — nostr-rs-relay and khatru answer `OK true` to an older
+  replaceable, strfry `OK false` with a prefix no NIP names — so each relay
+  that answered is read back once and ordered against the event by
+  `(created_at, lowest id)`: one serving the event's own id is covered; one
+  serving a newer copy another client wrote redirects the debt (the copy is
+  cached, the debt dropped, and one new event merged onto it is signed for
+  the whole pool, at most once per pass); one serving less, or not ending
+  its answer, stays owed. A relay that refuses the owed event on timestamp
+  grounds (classified by prefix; the text is never logged) and serves
+  nothing earns one fresh signing per edit and then simply stays owed. The
+  cost of an owed relay is one dial, one `EVENT` and at most one `REQ` to
+  that relay alone, at most four times in the first hour (30 s, 2 min, 8 min
+  and 30 min after the last pass) and then at most once per six hours, only
+  while the app is opened (cold start, resume, and a foreground timer armed
+  to the ladder's due time while the app is in the foreground; never from a
+  background isolate); healthy relays see no connection, no frame and no new
+  `created_at`. The debt ends when every relay of the usable pool serves the
+  event, or when the relay that does not leaves the pool — retired in an app
+  release, excluded as contaminated, or removed by the user; it is not
+  capped (owner decision 2026-11-10: a cap would make "complete" untrue for
+  that relay's readers). What remains: in the pass that signs the event a
+  relay's `OK` counts as covered without a read-back, so a relay that held a
+  newer copy and did not answer that pass's read is believed covered until
+  the next edit; a pass no relay acknowledged records nothing and signs
+  fresh next time; and while Blossom is down each rung signs a text-only
+  event for a pending name or removal, with the picture left staged. No
+  screen reports any of this: the Identity page renders the local row, the
+  same in every publish state.
 - The policy is not a ban. A relay that sends a forgery is not disconnected,
   demoted or reported: that would be state a relay can reach and a surface the
   user would need, and it cannot be logged per relay.
@@ -6243,14 +6264,19 @@ the OS suspended the process.
 uploads the photo) immediately — there is no consent flag and no publish-time
 gate. That a saved profile is public on the Nostr network is disclosed to the
 user in **onboarding and on the Identity settings page** (a UI concern), not
-enforced by a toggle in the Rust layer. Retraction actions
-(`remove_my_profile_picture`, `delete_my_public_profile`) are a no-op unless a
-profile/picture was actually published — they must never CREATE a public
-footprint (blank kind-0 / kind-5) for a pubkey that has no prior published
-profile (the retraction no-op gate `has_published_profile`, CI-enforced). A
-profile the storage reset forgot is read back from the profile pool instead;
-when no pool relay answers, the action fails rather than doing nothing
-(`PROFILE_RETRACTION_UNVERIFIED`).
+enforced by a toggle in the Rust layer. Retraction publishes —
+`delete_my_public_profile`, and a pending set with nothing saved in it (a
+photo removal, an owed blank), which `sync_own_profile` publishes — are a
+no-op unless a profile/picture was actually published: they must never CREATE
+a public footprint (blank kind-0 / kind-5) for a pubkey that has no prior
+published profile (the retraction no-op gate `has_published_profile`, read
+under the sync lock before any footprint, CI-enforced). A profile the storage
+reset forgot is read back from the profile pool instead; when no pool relay
+answers, the deletion fails rather than doing nothing
+(`PROFILE_RETRACTION_UNVERIFIED`), and the removal's publish is held on the
+retry ladder (`retraction_gate` → `Hold`). The removal itself
+(`remove_my_profile_picture`) is local and takes no secret, no lock and no
+relay.
 `nip05` / `website` (DNS-verifiable dox handles) are never written by Haven's
 UI.
 
@@ -6317,8 +6343,9 @@ the FFI, and `Image.network` stays banned.
   profile" republishes a blank kind-0 and emits a NIP-09 kind-5 deletion —
   both cooperative-server best-effort, and per the retraction no-op gate they
   only run when a profile was actually published. A blank some pool relay
-  did not acknowledge is left owed and published again by the profile sync;
-  the kind-5 is sent once. **No Blossom DELETE is
+  did not acknowledge is left owed and re-sent, byte-identical, by the
+  profile sync to the relays that do not yet serve it; the kind-5 is sent
+  once. **No Blossom DELETE is
   issued.** This bullet claimed one until 2026-08-13; there is no `.delete(`,
   `Method::DELETE` or `"DELETE"` anywhere under `src/profile/` or `src/avatar/`,
   and the FFI's own doc comment on `delete_my_public_profile` records the blob

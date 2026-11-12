@@ -145,6 +145,10 @@ enum UnreadEpoch {
     Errs,
 }
 
+/// What [`CircleManager::during_next_profile_sync_for_test`] runs.
+#[cfg(any(test, feature = "test-utils"))]
+type MidProfileSync = Box<dyn FnOnce(&CircleManager) + Send>;
+
 /// High-level API for circle management.
 ///
 /// Combines MLS operations with application-level storage to provide a unified
@@ -179,6 +183,10 @@ pub struct CircleManager {
     /// persist: the next follow at the persist is not made.
     #[cfg(any(test, feature = "test-utils"))]
     skip_next_follow: std::sync::atomic::AtomicBool,
+    /// A test's stand-in for an edit saved while a sync is between its
+    /// outbox read and its staged-picture read: the next sync runs it there.
+    #[cfg(any(test, feature = "test-utils"))]
+    mid_profile_sync: Mutex<Option<MidProfileSync>>,
     /// Serializes everything that publishes or retracts the OWN public profile
     /// — see [`Self::profile_sync_lock`].
     profile_sync_lock: tokio::sync::Mutex<()>,
@@ -316,6 +324,8 @@ impl CircleManager {
             routing_moved: tokio::sync::Notify::new(),
             #[cfg(any(test, feature = "test-utils"))]
             skip_next_follow: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-utils"))]
+            mid_profile_sync: Mutex::new(None),
             profile_sync_lock: tokio::sync::Mutex::new(()),
             directory_lock: tokio::sync::Mutex::new(()),
             directory_flight: Mutex::new(DirectoryFlight::default()),
@@ -455,6 +465,8 @@ impl CircleManager {
             routing_moved: tokio::sync::Notify::new(),
             #[cfg(any(test, feature = "test-utils"))]
             skip_next_follow: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-utils"))]
+            mid_profile_sync: Mutex::new(None),
             profile_sync_lock: tokio::sync::Mutex::new(()),
             directory_lock: tokio::sync::Mutex::new(()),
             directory_flight: Mutex::new(DirectoryFlight::default()),
@@ -1662,6 +1674,25 @@ impl CircleManager {
     pub fn skip_next_follow_for_test(&self) {
         self.skip_next_follow
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Runs `edit` once, inside the next own-profile sync, after it has read
+    /// the outbox and before it reads the staged picture.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn during_next_profile_sync_for_test(&self, edit: impl FnOnce(&Self) + Send + 'static) {
+        *self
+            .mid_profile_sync
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(edit));
+    }
+
+    /// The edit [`Self::during_next_profile_sync_for_test`] queued, if any.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn take_mid_profile_sync(&self) -> Option<MidProfileSync> {
+        self.mid_profile_sync
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// [`Self::wake_routing_follow`], for a test that dated a routing.
@@ -6017,13 +6048,30 @@ impl CircleManager {
         self.storage.profile_picture_is_staged(pubkey_hex)
     }
 
-    /// See [`CircleStorage::cancel_staged_profile_picture`].
+    /// See [`CircleStorage::stage_own_picture_removal`].
     ///
     /// # Errors
     ///
     /// Propagates database errors.
-    pub fn cancel_staged_profile_picture(&self, pubkey_hex: &str) -> Result<()> {
-        self.storage.cancel_staged_profile_picture(pubkey_hex)
+    pub fn stage_own_picture_removal(
+        &self,
+        pubkey_hex: &str,
+        now: i64,
+    ) -> Result<crate::profile::CachedProfile> {
+        self.storage.stage_own_picture_removal(pubkey_hex, now)
+    }
+
+    /// See [`CircleStorage::profile_publish_debt`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn profile_publish_debt(
+        &self,
+        own: &PublicKey,
+        version: i64,
+    ) -> Result<Option<super::storage_profile_sync::ProfileDebt>> {
+        self.storage.profile_publish_debt(own, version)
     }
 
     /// See [`CircleStorage::clear_profile_sync_state`].
@@ -6222,13 +6270,13 @@ impl CircleManager {
     pub fn wipe_all_profiles(
         &self,
         own_pubkey: &PublicKey,
-        blank_id: &EventId,
-        blank_created_at: i64,
-        fully_acked: bool,
+        blank: &Event,
+        covered: &[String],
+        pool: &[String],
         now: i64,
     ) -> Result<()> {
         self.storage
-            .wipe_all_profiles(own_pubkey, blank_id, blank_created_at, fully_acked, now)
+            .wipe_all_profiles(own_pubkey, blank, covered, pool, now)
     }
 
     // ==================== Profile plane (relays + salt) ====================
