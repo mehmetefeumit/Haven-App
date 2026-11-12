@@ -4009,8 +4009,9 @@ fn assert_one_disconnect_closes_the_drive_pool(session: &str) {
     );
     assert_eq!(
         squashed(fn_body(&manager, "pub async fn shutdown").expect("manager.rs has shutdown")),
-        "{self.client.disconnect().await;}",
-        "`RelayManager::shutdown` is one `disconnect`",
+        "{self.client.disconnect().await;self.client.force_remove_all_relays().await;}",
+        "`RelayManager::shutdown` is one `disconnect`, then drops every relay: a relay \
+         object a `disconnect` found without a connection task ends its next dial",
     );
     let options = fn_body(&manager, "fn publish_relay_options")
         .expect("manager.rs must define publish_relay_options");

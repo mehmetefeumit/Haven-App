@@ -4484,7 +4484,7 @@ realized-gap term recorded under "The no-gap invariant" below). Which socket car
 * **The Android foreground service.** There is no engine socket on this plane at
   all — the service holds only a `NostrRelayService` publish pool — so the pool
   *is* the carrier. `RelayManager::shutdown` is a **collective**
-  `client.disconnect()`, and the service calls it at step 9b of every delivery
+  `client.disconnect()` (and then drops every relay), and the service calls it at step 9b of every delivery
   cycle and again in `onDestroy`, so a relay carrying exactly one circle in a pass sees
   connect-at-its-own-publish → disconnect-at-teardown: a tail that grows with
   the circles published *after* it and, over the CSPRNG burst permutation,

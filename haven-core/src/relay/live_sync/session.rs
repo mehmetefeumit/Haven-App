@@ -2375,8 +2375,9 @@ impl LiveSyncCore {
     ///
     /// Called only where the session cuts its own radio, after the in-flight
     /// gauge has drained: no drive is under way, and none begins until the
-    /// next foreground. The pool keeps its relays, so the next drive re-dials
-    /// what it needs.
+    /// next foreground. The pool drops its relays, so the next drive registers
+    /// and dials fresh ones: a relay object a `disconnect` found without a
+    /// connection task would end its next dial (`RelayManager::shutdown`).
     ///
     /// One `disconnect` is enough here, where the engine's own radio needs
     /// `terminate_all_relays`, only because a publish relay is registered
@@ -10206,5 +10207,64 @@ mod tests {
             "every supervisor task must join after a pause; a retained intake Sender \
              would park the worker forever and report TimedOut"
         );
+    }
+
+    /// The pause's close leaves the drive pool able to reach its relays again,
+    /// by the NIP-77 pass and by the fanout, whatever state a burst left a
+    /// relay in. Here: a pass's dial cut short by its bound, which leaves the
+    /// relay `Connecting` with no connection task.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_closed_drive_pool_reaches_its_relays_again() {
+        use futures::FutureExt;
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let server =
+            nostr_relay_builder::LocalRelay::new(nostr_relay_builder::RelayBuilder::default());
+        server.run().await.expect("local relay runs");
+        let url = server.url().await.to_string();
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
+        let pool = Arc::new(RelayManager::new());
+        let core = LiveSyncCore::new_local(circle, keys.public_key(), Arc::clone(&pool));
+        let probe = || pool.neg_probe_ids(&url, &[0xab; 32], 0, nostr::Timestamp::now().as_secs());
+
+        assert!(
+            pool.neg_prepare(std::slice::from_ref(&url))
+                .now_or_never()
+                .is_none(),
+            "the dial finished in one poll, so nothing was cut short",
+        );
+        assert!(
+            matches!(probe().await, crate::relay::NegProbe::NoAnswer),
+            "the cut dial did not strand the relay, so the close below heals nothing",
+        );
+
+        core.close_drive_pool().await;
+        assert!(
+            matches!(probe().await, crate::relay::NegProbe::Ids(_)),
+            "after the close a NIP-77 pass must reach the relay a cut dial stranded",
+        );
+        let event = nostr::EventBuilder::new(
+            nostr::Kind::Custom(crate::nostr::KIND_GROUP_MESSAGE),
+            "ciphertext",
+        )
+        .tag(nostr::Tag::parse(["h", &"ab".repeat(32)]).expect("an h tag"))
+        .sign_with_keys(&Keys::generate())
+        .expect("sign");
+        let message = crate::nostr::mls::SessionManager::event_to_transport_message(&event)
+            .expect("a kind-445 event converts");
+        let transport = pool.fanout_transport();
+        let taken = transport
+            .take(&url)
+            .await
+            .expect("the relay's gate is free");
+        assert!(
+            matches!(
+                transport.publish(&url, &message, taken).await,
+                crate::relay::fanout::FanoutTargetOutcome::Accepted
+            ),
+            "and so must a fanout send",
+        );
+        assert_eq!(core.drive_pool_connected_relays().await, Some(1));
     }
 }
