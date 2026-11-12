@@ -196,9 +196,14 @@ class _ResumeEngine implements SubscriptionService {
   bool paused = false;
   bool throwOnReanchor = false;
 
+  /// Parks every re-anchor until completed, as a held lifecycle lock does.
+  Completer<void>? held;
+
   @override
   Future<void> resumeAfterBackground() async {
     reanchors++;
+    final lock = held;
+    if (lock != null) await lock.future;
     paused = false;
     if (throwOnReanchor) throw const SubscriptionServiceException('no session');
   }
@@ -350,6 +355,11 @@ class _BurstPublisher implements BurstPublisher {
             longitude: -0.1,
           );
   }
+
+  // No seal is ever stranded here, so no pass is ever skipped.
+  @override
+  void recordBurstPublishSkipped(Iterable<Circle> circles) =>
+      throw UnimplementedError();
 
   @override
   Future<void> publishInBurst(Circle circle, BurstFix fix) async {
@@ -1148,6 +1158,44 @@ void main() {
         isTrue,
       );
       expect(engine.reanchors, 1);
+    });
+
+    test('a heal past its deadline joins the re-anchor still parked, never '
+        'queues another', () async {
+      // The backstop draws the next heal at `healDeadline` while a re-anchor
+      // waits on a held lifecycle lock, and heals land 90 s or more apart —
+      // past the 60 s throttle — so only the heal's latch stops each one
+      // queueing another pool reconnect and 96 h `#p` replay to run when the
+      // lock frees. `_healLiveSyncIfStopped` runs it through exactly this
+      // latch (pinned in map_shell_receive_recovery_test.dart).
+      final engine = _ResumeEngine()
+        ..paused = true
+        ..held = Completer<void>();
+      final flight = SingleFlight<bool>();
+      DateTime? lastReanchorAt;
+      Future<void> heal(DateTime at) async {
+        if (await flight.run(
+          () => MapShell.reanchorPausedEngine(
+            engine: engine,
+            foregrounded: true,
+            now: at,
+            lastReanchorAt: lastReanchorAt,
+          ),
+        )) {
+          lastReanchorAt = at;
+        }
+      }
+
+      final first = heal(t0);
+      final second = heal(t0.add(const Duration(seconds: 90)));
+      final third = heal(t0.add(const Duration(seconds: 180)));
+      await pumpEventQueue();
+      expect(engine.reanchors, 1);
+
+      engine.held!.complete();
+      await Future.wait([first, second, third]);
+      expect(engine.reanchors, 1);
+      expect(engine.isPaused, isFalse);
     });
   });
 

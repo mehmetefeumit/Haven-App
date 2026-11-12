@@ -449,9 +449,10 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
   /// ladder, plus up to a minute for a generation's first `KeyPackage` tick)
   /// and the pause's Rule-13 publish drain — so [burstBound] bounds the
   /// burst's own links only and no honest bound on a whole burst exists. A
-  /// report costs a log line and nothing else: moving on cannot start a second
-  /// burst, because the coordinator serializes them on its own chain and the
-  /// tick that follows a reported burst joins or queues behind it.
+  /// report costs a log line and nothing else: moving on starts no burst of its
+  /// own, because the coordinator serializes bursts on a lane and the tick that
+  /// follows joins or queues behind the running one until that one passes its
+  /// stall ceiling, when the coordinator itself supersedes it.
   Future<void> _dispatchBurst(List<_BurstTarget> burst, int generation) {
     final sink = _tickSink;
     if (sink == null) return _publishBurst(burst, generation);
@@ -737,6 +738,14 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
         _recordPublishOutcome(circle, acked: false);
       }
       return null;
+    }
+  }
+
+  @override
+  void recordBurstPublishSkipped(Iterable<Circle> circles) {
+    if (_disposed || !_active) return;
+    for (final circle in circles) {
+      _recordPublishOutcome(circle, acked: false);
     }
   }
 

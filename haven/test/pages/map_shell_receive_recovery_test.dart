@@ -726,6 +726,29 @@ void main() {
       );
     });
 
+    test('a heal joins the re-anchor an earlier heal left parked', () {
+      // The behavioural proof is in map_shell_burst_wiring_test.dart; this
+      // ties it to production. Past `healDeadline` heals overlap, 90 s or more
+      // apart and so past the 60 s throttle, and each one used to queue a full
+      // re-anchor behind the held lifecycle lock.
+      final body = methodSource(
+        source,
+        className: '_MapShellState',
+        method: '_healLiveSyncIfStopped',
+      );
+      expect(
+        body,
+        contains(
+          '_healReanchorFlight.run(() => MapShell.reanchorPausedEngine(',
+        ),
+      );
+      expect(
+        body,
+        isNot(contains('SingleFlight')),
+        reason: 'a latch built per heal latches nothing',
+      );
+    });
+
     test('concurrent installs are single-flighted through the latch', () {
       // The behavioural proof is the `SingleFlight` group above; this is what
       // ties it to production. Two installs would build two re-subscribers

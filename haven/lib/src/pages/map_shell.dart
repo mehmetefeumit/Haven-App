@@ -209,8 +209,8 @@ class LiveSyncHealBackstop {
   /// this backstop — the only periodic recovery the live-sync build has — for
   /// good. So a heal still running at [_deadline] is counted
   /// [LiveSyncHealOutcome.failed] and the next tick is drawn; the deadline
-  /// cancels nothing, and while the lock stays held each later heal queues
-  /// one more re-anchor behind it, at the backed-off cadence.
+  /// cancels nothing, and while the lock stays held each later heal joins the
+  /// re-anchor already queued behind it rather than queueing another.
   Future<LiveSyncHealOutcome> heal() async {
     final outcome = await _heal().timeout(
       _deadline,
@@ -1168,6 +1168,12 @@ class _MapShellState extends ConsumerState<MapShell>
   final SingleFlight<LiveSyncResubscriber?> _installFlight =
       SingleFlight<LiveSyncResubscriber?>();
 
+  /// Serializes the heal's paused-engine re-anchor: one parked behind a held
+  /// lifecycle lock outlives [LiveSyncHealBackstop.healDeadline], and every
+  /// later heal — 90 s or more on, past the 60 s re-anchor throttle — would
+  /// otherwise queue one more pool reconnect and 96 h `#p` replay behind it.
+  final SingleFlight<bool> _healReanchorFlight = SingleFlight<bool>();
+
   /// The `circlesProvider` listener feeding [_liveSyncResubscriber]. Closed on
   /// dispose so no re-subscribe fires after teardown.
   ProviderSubscription<AsyncValue<List<Circle>>>? _liveSyncCirclesSub;
@@ -2100,11 +2106,13 @@ class _MapShellState extends ConsumerState<MapShell>
       final outcome = await resubscriber.ensureRunning();
       if (outcome != LiveSyncHealOutcome.running || !mounted) return outcome;
       final at = DateTime.now();
-      if (await MapShell.reanchorPausedEngine(
-        engine: ref.read(subscriptionServiceProvider),
-        foregrounded: appIsResumed(),
-        now: at,
-        lastReanchorAt: _lastReanchorAt,
+      if (await _healReanchorFlight.run(
+        () => MapShell.reanchorPausedEngine(
+          engine: ref.read(subscriptionServiceProvider),
+          foregrounded: appIsResumed(),
+          now: at,
+          lastReanchorAt: _lastReanchorAt,
+        ),
       )) {
         _lastReanchorAt = at;
       }

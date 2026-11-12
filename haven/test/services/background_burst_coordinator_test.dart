@@ -220,6 +220,9 @@ class _RecordingPublisher implements BurstPublisher {
   /// for.
   final List<List<String>> windows = [];
 
+  /// One entry per [recordBurstPublishSkipped] call: the circles it named.
+  final List<List<String>> skipped = [];
+
   /// The scheduler's eligible roster, by circle key. A tick only ever happens
   /// for a circle in it (the scheduler arms no timer for anything else), so
   /// the harness's `tick` registers here; removing an entry is how a circle
@@ -256,6 +259,11 @@ class _RecordingPublisher implements BurstPublisher {
       latitude: 1.5,
       longitude: 2.5,
     );
+  }
+
+  @override
+  void recordBurstPublishSkipped(Iterable<Circle> circles) {
+    skipped.add(circles.map((c) => c.displayName).toList());
   }
 
   @override
@@ -3194,6 +3202,48 @@ void main() {
             'stranded one returned, not only between this burst own seals',
       );
       expect(gaps, hasLength(2));
+    });
+
+    test('a pass skipped beside a stranded seal is recorded against every '
+        'circle it drops', () async {
+      // The live lane's own open clears the stall report in the same tick, so
+      // without this a seal that never returns ends background sending with
+      // nothing on the banner, for the life of the process.
+      var clock = DateTime(2026, 9, 7, 12);
+      final env = build(now: () => clock);
+      env.publisher.duringPublish = () => Completer<void>().future;
+      final a = _circle('a', 1);
+      final b = _circle('b', 2);
+      final c = _circle('c', 3);
+
+      unawaited(tick(env, a));
+      await pumpEventQueue();
+      expect(env.publisher.skipped, isEmpty, reason: 'anti-vacuity');
+
+      clock = clock.add(ceiling(1) + const Duration(seconds: 1));
+      unawaited(tick(env, a));
+      unawaited(tick(env, b));
+      unawaited(tick(env, c));
+      env.publisher.roster.remove(c.displayName);
+      await pumpEventQueue();
+
+      expect(env.engine.opens, 2, reason: 'anti-vacuity: the live lane ran');
+      expect(env.publisher.published, ['a']);
+      expect(env.publisher.skipped, hasLength(1));
+      expect(
+        env.publisher.skipped.single,
+        unorderedEquals(['a', 'b']),
+        reason: 'every circle the pass dropped, and no circle that had '
+            'stopped being eligible',
+      );
+
+      await Future.wait([tick(env, a), tick(env, b)]);
+      expect(
+        env.publisher.skipped,
+        hasLength(2),
+        reason: 'every pass skipped behind the stuck seal is recorded, not '
+            'only the first',
+      );
     });
 
     test('a lane superseded inside its KeyPackage fold makes no further fold '

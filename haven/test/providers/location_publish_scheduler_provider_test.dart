@@ -1685,6 +1685,45 @@ void main() {
       expect(spy.publishOutcomes.every((o) => !o.acked), isTrue);
     });
 
+    test('a burst pass that skipped its publish is recorded against every '
+        'circle it dropped', () async {
+      // The pass a stranded seal makes the coordinator skip sends nothing, and
+      // the stall report that names it is cleared by the same burst's open:
+      // this record is all that keeps a seal stuck for good from reading as
+      // healthy.
+      final a = TestCircleFactory.createCircle(
+        mlsGroupId: const [1],
+        nostrGroupId: const [10],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+      );
+      final b = TestCircleFactory.createCircle(
+        mlsGroupId: const [2],
+        nostrGroupId: const [20],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+      );
+      final spy = _SpyHealthNotifier();
+      final env = build([a, b], health: spy);
+      final notifier = await ready(env.container)
+        ..recordBurstPublishSkipped([a, b]);
+
+      expect(
+        spy.publishOutcomes.map((o) => o.key),
+        [_hex(const [1]), _hex(const [2])],
+      );
+      expect(spy.publishOutcomes.every((o) => !o.acked), isTrue);
+      expect(env.mock.encryptedMlsGroupIds, isEmpty);
+
+      notifier
+        ..stopScheduling()
+        ..recordBurstPublishSkipped([a]);
+      expect(
+        spy.publishOutcomes,
+        hasLength(2),
+        reason: 'a stopped scheduler publishes nothing, so a burst behind it '
+            'skipped nothing',
+      );
+    });
+
     test('a burst publish the core holds sends nothing and routes to the '
         'health model as a deferral', () async {
       final a = TestCircleFactory.createCircle(

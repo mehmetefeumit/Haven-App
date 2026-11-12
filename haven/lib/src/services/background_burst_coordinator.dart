@@ -327,6 +327,13 @@ abstract class BurstPublisher {
   /// Never throws.
   Future<BurstFix?> openBurstPublishWindow(Iterable<Circle> circles);
 
+  /// Records a failed publish for each of [circles], due in a burst that
+  /// skipped its publish pass, so a pass that never sends reads as not
+  /// sharing rather than as silence.
+  ///
+  /// Never throws.
+  void recordBurstPublishSkipped(Iterable<Circle> circles);
+
   /// Publishes [circle] at [fix], recording the outcome. Never throws.
   Future<void> publishInBurst(Circle circle, BurstFix fix);
 }
@@ -998,10 +1005,15 @@ class _BurstLane {
   /// Publishes nothing while a superseded lane's seal is still out, and drops
   /// what is due, as a refused window does: a seal here could land in the same
   /// whole second as that one when it returns, and waiting for it would hold
-  /// this burst's REQs and sockets open for as long as it is stuck.
+  /// this burst's REQs and sockets open for as long as it is stuck. The drop
+  /// is attributed to each due circle, as the refused window's is: the stall
+  /// report is cleared by this lane's own open, so a seal that never returns
+  /// would otherwise end background sending with nothing on the banner.
   Future<void> _publishPass() async {
     if (_sealStranded()) {
+      final dropped = [for (final entry in _pendingCircles()) entry.circle];
       _due.clear();
+      _publisher.recordBurstPublishSkipped(dropped);
       debugPrint('[BackgroundBurst] a superseded burst is still sealing: '
           'nothing published');
       return;
