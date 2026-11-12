@@ -748,7 +748,7 @@ abstract class RustLibApi extends BaseApi {
     int? limit,
   });
 
-  Future<MemberKeyPackageFfi?> crateApiRelayManagerFfiFetchMemberKeypackage({
+  Future<MemberLookupFfi> crateApiRelayManagerFfiFetchMemberKeypackage({
     required RelayManagerFfi that,
     required String pubkey,
     required CircleManagerFfi circle,
@@ -6299,7 +6299,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<MemberKeyPackageFfi?> crateApiRelayManagerFfiFetchMemberKeypackage({
+  Future<MemberLookupFfi> crateApiRelayManagerFfiFetchMemberKeypackage({
     required RelayManagerFfi that,
     required String pubkey,
     required CircleManagerFfi circle,
@@ -6327,7 +6327,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_box_autoadd_member_key_package_ffi,
+          decodeSuccessData: sse_decode_member_lookup_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiRelayManagerFfiFetchMemberKeypackageConstMeta,
@@ -9227,8 +9227,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   KpMaintenanceOutcomeFfi dco_decode_kp_maintenance_outcome_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 8)
-      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return KpMaintenanceOutcomeFfi(
       action: dco_decode_kp_maintenance_action_ffi(arr[0]),
       canonicalOnRelays: dco_decode_u_32(arr[1]),
@@ -9237,7 +9237,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       relaysHealed: dco_decode_u_32(arr[4]),
       relayErrors: dco_decode_u_32(arr[5]),
       expiredInitKeyPurged: dco_decode_bool(arr[6]),
-      retiredMalformedSlot: dco_decode_bool(arr[7]),
+      publishedCurrent: dco_decode_bool(arr[7]),
+      retiredMalformedSlot: dco_decode_bool(arr[8]),
     );
   }
 
@@ -9509,6 +9510,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       nip65WriteRelays: dco_decode_list_String(arr[3]),
       authorNpub: dco_decode_String(arr[4]),
     );
+  }
+
+  @protected
+  MemberLookupFfi dco_decode_member_lookup_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return MemberLookupFfi(
+      verdict: dco_decode_member_lookup_verdict_ffi(arr[0]),
+      member: dco_decode_opt_box_autoadd_member_key_package_ffi(arr[1]),
+    );
+  }
+
+  @protected
+  MemberLookupVerdictFfi dco_decode_member_lookup_verdict_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return MemberLookupVerdictFfi.values[raw as int];
   }
 
   @protected
@@ -9971,13 +9990,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return RelayListCategoryOutcomeFfi(
       action: dco_decode_relay_list_action_ffi(arr[0]),
       respondersProbed: dco_decode_u_32(arr[1]),
       relaysHealed: dco_decode_u_32(arr[2]),
       relayErrors: dco_decode_u_32(arr[3]),
+      ownConfirmed: dco_decode_bool(arr[4]),
     );
   }
 
@@ -11294,6 +11314,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_relaysHealed = sse_decode_u_32(deserializer);
     var var_relayErrors = sse_decode_u_32(deserializer);
     var var_expiredInitKeyPurged = sse_decode_bool(deserializer);
+    var var_publishedCurrent = sse_decode_bool(deserializer);
     var var_retiredMalformedSlot = sse_decode_bool(deserializer);
     return KpMaintenanceOutcomeFfi(
       action: var_action,
@@ -11303,6 +11324,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       relaysHealed: var_relaysHealed,
       relayErrors: var_relayErrors,
       expiredInitKeyPurged: var_expiredInitKeyPurged,
+      publishedCurrent: var_publishedCurrent,
       retiredMalformedSlot: var_retiredMalformedSlot,
     );
   }
@@ -11730,6 +11752,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       nip65WriteRelays: var_nip65WriteRelays,
       authorNpub: var_authorNpub,
     );
+  }
+
+  @protected
+  MemberLookupFfi sse_decode_member_lookup_ffi(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_verdict = sse_decode_member_lookup_verdict_ffi(deserializer);
+    var var_member = sse_decode_opt_box_autoadd_member_key_package_ffi(
+      deserializer,
+    );
+    return MemberLookupFfi(verdict: var_verdict, member: var_member);
+  }
+
+  @protected
+  MemberLookupVerdictFfi sse_decode_member_lookup_verdict_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return MemberLookupVerdictFfi.values[inner];
   }
 
   @protected
@@ -12367,11 +12408,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_respondersProbed = sse_decode_u_32(deserializer);
     var var_relaysHealed = sse_decode_u_32(deserializer);
     var var_relayErrors = sse_decode_u_32(deserializer);
+    var var_ownConfirmed = sse_decode_bool(deserializer);
     return RelayListCategoryOutcomeFfi(
       action: var_action,
       respondersProbed: var_respondersProbed,
       relaysHealed: var_relaysHealed,
       relayErrors: var_relayErrors,
+      ownConfirmed: var_ownConfirmed,
     );
   }
 
@@ -13710,6 +13753,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.relaysHealed, serializer);
     sse_encode_u_32(self.relayErrors, serializer);
     sse_encode_bool(self.expiredInitKeyPurged, serializer);
+    sse_encode_bool(self.publishedCurrent, serializer);
     sse_encode_bool(self.retiredMalformedSlot, serializer);
   }
 
@@ -14091,6 +14135,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_list_String(self.nip65Relays, serializer);
     sse_encode_list_String(self.nip65WriteRelays, serializer);
     sse_encode_String(self.authorNpub, serializer);
+  }
+
+  @protected
+  void sse_encode_member_lookup_ffi(
+    MemberLookupFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_member_lookup_verdict_ffi(self.verdict, serializer);
+    sse_encode_opt_box_autoadd_member_key_package_ffi(self.member, serializer);
+  }
+
+  @protected
+  void sse_encode_member_lookup_verdict_ffi(
+    MemberLookupVerdictFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected
@@ -14678,6 +14741,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.respondersProbed, serializer);
     sse_encode_u_32(self.relaysHealed, serializer);
     sse_encode_u_32(self.relayErrors, serializer);
+    sse_encode_bool(self.ownConfirmed, serializer);
   }
 
   @protected
@@ -15085,7 +15149,9 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   ///
   /// Dart should publish both events to the returned `targets` and then
   /// also flip the toggle off via `set_publish_relay_list`. This method
-  /// itself does not change the toggle.
+  /// itself does not change the toggle. The targets include the lookup
+  /// relays: maintenance copies a published list there, so an opt-out that
+  /// skipped them would leave the list public.
   Future<BuiltUnpublishFfi> buildUnpublishRelayList({
     required List<int> identitySecretBytes,
     required RelayTypeFfi relayType,
@@ -17013,29 +17079,27 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
     limit: limit,
   );
 
-  /// Fetches a user's `KeyPackage` with their relay lists.
+  /// Looks a person up to invite them: their `KeyPackage` with their relay
+  /// lists, and whether "not found" was proven
+  /// (`RelayManager::lookup_member_for_invite`).
   ///
-  /// Concurrently fetches two replaceable relay-list events:
-  /// - kind 10050 for Welcome delivery (NIP-17 inbox)
-  /// - kind 10002 (NIP-65): its write-capable set for `KeyPackage`
-  ///   discovery, its read-capable set for the Welcome delivery fallback
-  ///
-  /// Then runs the `KeyPackage` discovery cascade for one invite target
-  /// (`RelayManager::fetch_keypackage_for_invite`): the person's NIP-65
-  /// write set, then the read-only discovery relays.
-  ///
-  /// Each relay-list fetch is tolerated independently: a transient failure
-  /// on one list does not abort the whole call. The returned
-  /// `MemberKeyPackageFfi` carries the 10050 list — the one place a Welcome
-  /// goes — and the 10002 read set.
+  /// Their kind 10050 (where a Welcome goes) and kind 10002 come from the
+  /// discovery relays; the `KeyPackage` from the 10002 write set,
+  /// then the discovery relays. The returned `MemberKeyPackageFfi` carries
+  /// the 10050 list and both 10002 sets; an absent 10050 leaves its list
+  /// empty and never changes the verdict.
   ///
   /// The selection is made for one invite target: `circle`'s existing circle
   /// `mls_group_id`, or — `None` — a new circle. MDK's own admission rule for
   /// that target is read once and applied to every candidate BEFORE they are
   /// ranked, so a fresher package the target cannot admit never hides an
   /// older one it can. When nothing is admissible the best valid candidate
-  /// is still returned, so [`CircleManagerFfi::check_member_key_package`]
+  /// is still `Found`, so [`CircleManagerFfi::check_member_key_package`]
   /// can say why the person cannot be invited.
+  ///
+  /// `NotFound` only when every relay holding the person's packages that
+  /// connected said it had sent everything, and at least one did; anything
+  /// less is `LookupIncomplete`, never an error.
   ///
   /// # Arguments
   ///
@@ -17043,11 +17107,11 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   /// * `circle` - The inviter's circle manager
   /// * `mls_group_id` - The circle the person is being added to, if it exists
   ///
-  /// # Returns
+  /// # Errors
   ///
-  /// A `MemberKeyPackageFfi` with the key package, inbox relays,
-  /// and NIP-65 relays, or `None` if no `KeyPackage` was found.
-  Future<MemberKeyPackageFfi?> fetchMemberKeypackage({
+  /// A pubkey that does not parse, a circle this device does not hold, or a
+  /// package that does not serialize.
+  Future<MemberLookupFfi> fetchMemberKeypackage({
     required String pubkey,
     required CircleManagerFfi circle,
     Uint8List? mlsGroupId,
@@ -17123,12 +17187,14 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   ///    unconditionally, before any relay decision, because that bound does
   ///    not depend on the transport.
   /// 3. Probe the user's OWN NIP-65 relays (dedup'd, own-relays-only — never a
-  ///    default union) for kind-30443 events authored by self, and build the
-  ///    presence snapshot.
+  ///    default union, never a lookup relay; an install never seeded is seeded
+  ///    first) for kind-30443 events authored by self, and build the presence
+  ///    snapshot.
   /// 4. A replacement staged by an earlier tick that no relay acknowledged is
   ///    republished, byte for byte, and promoted on the first acknowledgement.
   /// 5. Otherwise decide via [`decide_kp_maintenance`]: on `SeedD` record the
-  ///    slot; on a heal republish the tracked event's own bytes; on a
+  ///    slot and decide once more, so the same tick mints into it; on a heal
+  ///    republish the tracked event's own bytes; on a
   ///    replacement stage a fresh package (minted and frozen in one MDK
   ///    transaction), publish it to OWN relays only, and promote it on the
   ///    first acknowledgement — which deletes the private material of every
@@ -17168,24 +17234,29 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   );
 
   /// M8-1 relay-list maintenance — republish-if-missing/drifted for the
-  /// user's kind 10050 (inbox) + 10051 (`KeyPackage`) relay lists, honoring
-  /// the per-category privacy toggle.
+  /// user's kind 10002 (`KeyPackage`-discovery, NIP-65) and kind 10050
+  /// (inbox) relay lists, honoring the per-category privacy toggle.
   ///
   /// Dart-timer-driven; the secret bytes are consumed per-call and zeroized
   /// (Security Rule 9). Fail-soft + idempotent.
   ///
-  /// Per category: reads the user's OWN configured relays, NETWORK-PROBES the
-  /// user's OWN relays for a currently-reachable list (never a local-timestamp
-  /// check — a relay-side drop must be detected), and if missing/drifted
-  /// republishes via [`build_relay_list_event`] + [`dedup_relay_targets`]
-  /// (own relays only, no default union). When the toggle is off it skips (no
-  /// publish). Never NIP-65/kind-10002 (Haven posture). `record_published_event`
-  /// after a successful publish.
+  /// The 10002 goes first: `transports/nostr.md` orders an account's
+  /// publication 10002, then its `KeyPackage` to the 10002 write set, then
+  /// the 10050.
+  ///
+  /// Per category: reads the user's OWN configured relays (seeding an
+  /// install never seeded), NETWORK-PROBES each of them and each lookup
+  /// relay ([`discovery_relays`]) for a currently-reachable list (never a
+  /// local-timestamp check — a relay-side drop must be detected), and if
+  /// missing/drifted republishes the configured list via
+  /// [`build_relay_list_event`] to the responders that lack it. No default
+  /// union. When the toggle is off it skips (no publish).
+  /// `record_published_event` after a successful publish.
   ///
   /// Returns a presence-only [`RelayListMaintenanceOutcomeFfi`].
   ///
   /// [`build_relay_list_event`]: haven_core::relay::build_relay_list_event
-  /// [`dedup_relay_targets`]: haven_core::relay::dedup_relay_targets
+  /// [`discovery_relays`]: haven_core::relay::discovery_relays
   Future<RelayListMaintenanceOutcomeFfi> maintainRelayList({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,

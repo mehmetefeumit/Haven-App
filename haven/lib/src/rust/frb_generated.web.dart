@@ -574,6 +574,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MemberKeyPackageFfi dco_decode_member_key_package_ffi(dynamic raw);
 
   @protected
+  MemberLookupFfi dco_decode_member_lookup_ffi(dynamic raw);
+
+  @protected
+  MemberLookupVerdictFfi dco_decode_member_lookup_verdict_ffi(dynamic raw);
+
+  @protected
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
@@ -1422,6 +1428,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   MemberKeyPackageFfi sse_decode_member_key_package_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  MemberLookupFfi sse_decode_member_lookup_ffi(SseDeserializer deserializer);
+
+  @protected
+  MemberLookupVerdictFfi sse_decode_member_lookup_verdict_ffi(
     SseDeserializer deserializer,
   );
 
@@ -2492,6 +2506,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_member_key_package_ffi(
     MemberKeyPackageFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_member_lookup_ffi(
+    MemberLookupFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_member_lookup_verdict_ffi(
+    MemberLookupVerdictFfi self,
     SseSerializer serializer,
   );
 
