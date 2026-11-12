@@ -44,10 +44,12 @@ pub enum CargoStatus {
     /// holds a cargo transcript.
     #[default]
     Scanned,
-    /// The rules skip the lines matching cargo's status shape
+    /// S2 and S6 skip the lines matching cargo's status shape
     /// (`crate::rules::RuleSet::is_cargo_status`): cargo prints the public
     /// pinned git revision of every git dependency and the name of every crate
-    /// before a single test runs, and neither is a Haven identifier.
+    /// before a single test runs, and neither is a Haven identifier. S4 skips a
+    /// `Running` line's test-binary path
+    /// (`crate::rules::RuleSet::is_cargo_test_binary`).
     Exempt,
 }
 

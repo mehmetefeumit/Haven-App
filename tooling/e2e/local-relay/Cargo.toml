@@ -10,6 +10,7 @@
 [package]
 name = "haven-local-relay"
 version = "0.1.0"
+rust-version = "1.97.1"
 edition = "2021"
 publish = false
 description = "Hermetic in-memory Nostr relay for Haven's iOS E2E lane (no Docker)."
