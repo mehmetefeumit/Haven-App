@@ -801,6 +801,10 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   /// the delivery: until then the quiet is ordinary, and watching ordinary
   /// quiet proves nothing about what followed it while the app was away. In
   /// front throughout, this is the threshold alone.
+  ///
+  /// The threshold is asked first although the watching implies it: [_stood]
+  /// arms the confirm timer for whatever it withholds, and asked of a silence
+  /// still short of its threshold it would arm one on every healthy circle.
   bool _watchedPast(DateTime delivered, Duration threshold, DateTime now) =>
       now.difference(delivered) > threshold &&
       _stood(

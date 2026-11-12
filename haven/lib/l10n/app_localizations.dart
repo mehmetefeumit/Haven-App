@@ -2982,7 +2982,7 @@ abstract class AppLocalizations {
   /// **'Circle details, needs attention'**
   String get circleDetailsAttentionTooltip;
 
-  /// Accessible name of a circle row in the circle selector list while that circle has a sharing problem or a note about changes; also the accessible name (and tooltip) of the button beside the closed selector that marks a circle other than the selected one and opens its details. {circleName} is that circle's name; the placeholder lets word order follow the language. Not bidi-isolated: this is a semantics label.
+  /// Accessible name of a circle row in the circle selector list while that circle has a sharing problem or a note about changes; also the accessible name (and tooltip) of the button beside the closed selector that marks a circle other than the selected one and opens its details. {circleName} is that circle's name; the placeholder lets word order follow the language. Not bidi-isolated: a semantics label, shown only as that button's tooltip.
   ///
   /// In en, this message translates to:
   /// **'{circleName}, needs attention'**

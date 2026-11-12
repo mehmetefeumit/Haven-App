@@ -1775,6 +1775,35 @@ void main() {
     });
   });
 
+  group('a healthy circle is left alone', () {
+    test('a silence still short of its threshold arms no re-derivation', () {
+      // Only a withheld cause has a moment worth waking for. A timer armed
+      // for every recent delivery would re-derive a healthy circle for as
+      // long as the app is open.
+      fakeAsync((async) {
+        final h = _Harness()
+          ..health.stored = CircleHealthTimestamps(
+            lastPublishAckedAt: _t0,
+            lastPeerEventAt: _t0,
+          );
+        // The periodic tick cannot be what re-derives below.
+        h.notifier.tickIntervalForTest = const Duration(days: 1);
+        async.flushMicrotasks();
+        unawaited(h.notifier.refresh());
+        async.flushMicrotasks();
+        final reads = h.health.reads;
+
+        const elapsed = Duration(seconds: 300);
+        expect(elapsed, greaterThan(kSharingFaultConfirmationWindow));
+        expect(elapsed, lessThan(kPublishSilenceThreshold));
+        h.advance(elapsed);
+        async.elapse(elapsed);
+
+        expect(h.health.reads, reads);
+      });
+    });
+  });
+
   group('a delivery counts the moment it is stored', () {
     test(
       'a peer location ends a receive fault at once, not at the next tick',
