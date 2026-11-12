@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # CI guard: the Bluetooth mesh's radio reaches Rust through a fixed list of JNI
 # exports that decide nothing, and the bridge crate writes `unsafe` in two
-# files (docs/BLUETOOTH_MESH_M3_DESIGN.md §A.6, F-8, F-14).
+# files (docs/BLUETOOTH_MESH_M3_DESIGN.md §A.6, F-8, F-14); and the radio's
+# Kotlin logs nothing, names its modes at one site and keeps its JVM tests
+# (§B.1, §B.8–B.10).
 #
 # Android's radio service drives the mesh engine through two files of
 # `haven/rust_builder/src`:
@@ -10,10 +12,12 @@
 #     native method of the Kotlin class `com.oblivioustech.haven.mesh.MeshNative`.
 #     The crate's `unsafe_code` deny is lifted for this module, because the
 #     lint fires on `#[no_mangle]`; so INSIDE IT THE COMPILER CHECKS NOTHING
-#     of that kind — not an `unsafe` block, not a second exported symbol — and
-#     this guard is the whole control. It therefore reads every line: the file
-#     holds `use`s and the exports and nothing else, and each export is one
-#     call that hands its parameters on.
+#     of that kind — not an `unsafe` block, not a second exported symbol. Two
+#     things read the file in its place: this guard, and the Rust test
+#     `every_export_is_one_guarded_call`. The guard reads every line: each is
+#     blank, a comment, a one-line `use`, or part of an export — the file
+#     holds nothing else, has no quote but an export's `"system"`, and each
+#     export is one call that hands its parameters on.
 #   * `mesh_radio.rs` — what each export forwards to: the conversions, the one
 #     `radio_*` call under the panic guard, the answer. It is under the deny.
 #
@@ -39,7 +43,10 @@
 #     two modules: the generated bridge, and the exports' file. An allowance
 #     moved to the crate, or to `api.rs`, would compile.
 #
-# Pure-grep gate over comment-stripped Rust. Checks:
+# Pure-grep gate over Rust with its comments stripped as the compiler strips
+# them: a `//` or `/*` inside a string or character literal is text, on
+# whichever line the literal began, a raw string ends at its own hashes, and
+# block comments nest. Checks:
 #   1. Under haven/rust_builder/src, outside `frb_generated.rs` and
 #      `mesh_jni.rs`: no keyword `unsafe`, no keyword `extern` (with an ABI
 #      string or bare), and no `no_mangle`, `export_name` or `link_section`.
@@ -55,7 +62,11 @@
 #      export names its environment; an array by reference). The file names no
 #      `unsafe`, `export_name`, `link_section`, `used`, `mod`, `impl`,
 #      `static`, `cfg` or `JNIEnv::` and invokes no macro, and it has as many
-#      `extern` keywords, and as many `no_mangle`, as exports.
+#      `extern` keywords, and as many `no_mangle`, as exports. A `use` is
+#      one line — `use a::b;` or `use a::{B, C};` — with no rename, no glob
+#      and nothing after it; what the exports forward to is imported as
+#      `use crate::mesh_radio;` and in no other way; and the one quote in the
+#      file is the `"system"` of an export's header.
 #   4. The exports — name, Rust parameter types after the environment and the
 #      receiver, Rust return type, and the JNI descriptor those types make —
 #      are the lines of the fixture, in whatever order, and no others.
@@ -71,6 +82,30 @@
 #      or `thread_local`. Its tests are the one `#[cfg(test)]` directly above
 #      `mod tests {`, and nothing follows them: this check reads no further,
 #      so nothing that ships may sit there.
+#   6. The files read above are the files compiled: no file of the crate's
+#      hand-written source gives anything a `path = "…"` (`#[path]`, bare or
+#      under `cfg_attr`), and `lib.rs` declares `mesh_jni` and `mesh_radio`
+#      each as the one line `mod <name>;`.
+#
+# And over the radio's Kotlin — every `.kt` under a `mesh/` directory of
+# `haven/android/app/src`, whatever the source set — with comments stripped
+# the same way:
+#   7. No log call, logger or standard stream (`Log.`, `Timber.`, `println(`,
+#      `print(`, `printStackTrace(`, `System.out`, `System.err`, `Logger`,
+#      `logging`), and no UUID in canonical form there or in the JVM tests.
+#   8. `MeshRadioConstants.kt` names the Android scan mode, advertise mode,
+#      advertise power and connection priority it holds, and no other file
+#      names one.
+#   9. `scripts/ci/native_log_allowlist.txt` has no row for a file under a
+#      `mesh/` directory.
+#  10. No `AndroidManifest.xml` under `haven/android/app/src` but the mesh's
+#      own (`src/mesh/`) names Bluetooth, `connectedDevice` or the mesh.
+#  11. The tests of `haven/android/mesh-jvm/src/test` are JVM_TEST_NAMES, each
+#      `@Test` directly above `fun <name>()`, and none is ignored or assumes
+#      its way out.
+#
+# That the pure package imports nothing of Android is not checked here: its
+# JVM build has no Android SDK, so the compiler holds it (android-unit.yml).
 #
 # What this scan covers, and no more. It reads names. In the files under the
 # deny it cannot see `unsafe` that a macro writes: the compiler reports what a
@@ -87,9 +122,14 @@
 #
 # Not here yet, each with the change that makes it checkable:
 #   * The Kotlin half of check 4 — the `external fun`s of `MeshNative.kt`
-#     against the same fixture — lands with that file. No Kotlin of the mesh
-#     exists, and a check with nothing to read would report a parity it has
-#     not seen.
+#     against the same fixture — lands with that file, which does not exist:
+#     a check with nothing to read would report a parity it has not seen. The
+#     interface `MeshNative` will implement, `MeshEngineApi`, is held to the
+#     fixture by the JVM test `theEngineInterfaceIsTheNineExportsOfTheFixture`.
+#   * The mesh's own manifest (no `android:process`, `connectedDevice`, the
+#     receiver not exported, `neverForLocation`), that every adapter callback
+#     runs inside `MeshThread.run`, and what an advertisement may not carry:
+#     with the adapters.
 #   * That the built library exports the symbols (`nm -D`) belongs to
 #     `build-check.yml`, with the first unit that builds the radio for Android.
 #
@@ -100,8 +140,9 @@
 # Exit codes:
 #   0  all checks pass (or the self-test passed)
 #   1  a check failed (or the self-test failed)
-#   2  an expected file is missing, or the exports' file or the fixture lists
-#      no export — the scan would be reading nothing (misconfiguration)
+#   2  an expected file or directory is missing, or the exports' file or the
+#      fixture lists no export — the scan would be reading nothing
+#      (misconfiguration)
 
 set -euo pipefail
 
@@ -122,7 +163,47 @@ readonly -a ENV_MAY_CALL=(
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=80
+readonly SELF_TEST_FIXTURES=116
+
+# The Kotlin of the radio (design §B): the app's mesh packages, whatever the
+# source set, and the JVM build of the pure one with its tests.
+readonly APP_SRC='haven/android/app/src'
+readonly CORE="${APP_SRC}/main/kotlin/com/oblivioustech/haven/mesh/core"
+readonly CONSTANTS="${CORE}/MeshRadioConstants.kt"
+readonly JVM_TESTS='haven/android/mesh-jvm/src/test'
+readonly LOG_ALLOWLIST='scripts/ci/native_log_allowlist.txt'
+# The platform's radio modes: named in CONSTANTS, used by no other file.
+readonly MODES='(SCAN_MODE|ADVERTISE_MODE|ADVERTISE_TX_POWER|CONNECTION_PRIORITY)_[A-Z]'
+# The JVM tests, by name: design §B.10's and the ones M3f added. Pinned,
+# because a test that is deleted, renamed or ignored fails nothing.
+readonly -a JVM_TEST_NAMES=(
+  aPolledFrameIsSentOrItsLinkIsClosed
+  aLinkWithAFrameInFlightIsNotReady
+  everyInputChecksTheDeadlineBeforeAnythingElse
+  anAddressNeverReachesTheEngine
+  aConnectForAPeerNoLongerKnownFailsAtOnce
+  thePumpStopsAtItsBudgetAndComesBack
+  theWakeIsTheEnginesAndTheLockIsCapped
+  bluetoothOffTellsEveryLinkDownAndSendsNothing
+  unlinkedConnectionsAreCappedAndTimedOut
+  aRadioPortThatThrowsStopsTheRadioAndNothingEscapes
+  aFrameWhoseCompletionNeverComesClosesItsLink
+  theScanRestartIsATermOfTheAlarm
+  aStartWithoutTheBluetoothPermissionIsAStopWithTheNotice
+  outputsDecodeAsTheFixtureSays
+  theScanIsRestartedBeforeThirtyMinutesAndNeverTwiceInSixSeconds
+  theReminderComesOnceAtThirtyMinutesAndTheStopAtZero
+  whatIsAskedAndWhetherItCanSearchPerApiLevel
+  theAdvertisementIsTheServiceUuidAlone
+  theRadioModesComeFromOneSite
+  theEngineInterfaceIsTheNineExportsOfTheFixture
+  thePeerTableHoldsSixtyFourAndForgetsTheLeastRecentlySeen
+  aLinkBeyondTheEnginesEightIsClosed
+  aLinkTheEngineClosesIsClosedAndALinkLostIsToldDown
+  anEngineThatAnswersNoWakeIsGone
+  aStopTheUserDidNotMakeIsAStopWithTheNoticeAndIsFinal
+  anEngineWhoseTimeIsUpStopsTheServiceWithTheNotice
+)
 
 readonly B='(^|[^A-Za-z0-9_])'
 readonly E='([^A-Za-z0-9_]|$)'
@@ -138,33 +219,46 @@ fail() {
   FAILED=1
 }
 
-# Comment-stripped view of a Rust file, line numbering preserved. `//` starts a
-# comment unless a `:` precedes it, or a `"wss://relay"` literal would truncate
-# its own line.
-code_view() {
-  awk '
+# Comment-stripped view of a Rust file, line numbering preserved, read as the
+# compiler reads it: a comment opener inside a string or a character literal is
+# text, on whichever line the literal began; a raw string ends at its own
+# hashes; block comments nest. With `blank`, the text of every string literal
+# is dropped too: a keyword in a string is not the keyword.
+code_view() { # <file> [blank]
+  awk -v blank="${2:-}" '
+    function ident(at) { return at >= 1 && substr(line, at, 1) ~ /[A-Za-z0-9_]/ }
     {
       line = $0; out = ""; i = 1; n = length(line)
       while (i <= n) {
-        if (inblock) {
-          e = index(substr(line, i), "*/")
-          if (e == 0) { i = n + 1 } else { i += e + 1; inblock = 0 }
-        } else {
-          two = substr(line, i, 2)
-          prev = (i > 1) ? substr(line, i - 1, 1) : ""
-          if (two == "/*") { inblock = 1; i += 2 }
-          else if (two == "//" && prev != ":") { i = n + 1 }
-          else { out = out substr(line, i, 1); i += 1 }
+        c = substr(line, i, 1); two = substr(line, i, 2)
+        if (mode == "block") {
+          if (two == "*/") { i += 2; if (--depth == 0) mode = "" }
+          else if (two == "/*") { depth++; i += 2 }
+          else i++
+        } else if (mode == "str") {
+          if (c == "\\") { if (!blank) out = out two; i += 2 }
+          else if (c == "\"") { out = out c; mode = ""; i++ }
+          else { if (!blank) out = out c; i++ }
+        } else if (mode == "raw") {
+          if (substr(line, i, length(fin)) == fin) { out = out fin; i += length(fin); mode = "" }
+          else { if (!blank) out = out c; i++ }
         }
+        else if (two == "/*") { mode = "block"; depth = 1; i += 2 }
+        else if (two == "//") { i = n + 1 }
+        else if (substr(line, i, 3) == "\x27\"\x27") { out = out substr(line, i, 3); i += 3 }
+        else if (substr(line, i, 4) == "\x27\\\"\x27") { out = out substr(line, i, 4); i += 4 }
+        else if (c == "\"") {
+          # `r"…"`, `r#"…"#`, and the same after `b` or `c`: no escape inside.
+          r = i - 1; fin = "\""
+          while (r >= 1 && substr(line, r, 1) == "#") { fin = fin "#"; r-- }
+          raw = r >= 1 && substr(line, r, 1) == "r" \
+            && (!ident(r - 1) || (substr(line, r - 1, 1) ~ /[bc]/ && !ident(r - 2)))
+          mode = raw ? "raw" : "str"; out = out c; i++
+        }
+        else { out = out c; i++ }
       }
       print out
     }' "$1"
-}
-
-# A view on stdin with every string literal that opens and closes on one line
-# emptied: a keyword in a string is not the keyword.
-no_strings() {
-  sed -E 's/"(\\.|[^"\\])*"/""/g'
 }
 
 # "<first> <last>" for each item of a view on stdin declared `<prefix>…` at
@@ -257,11 +351,13 @@ export_rows() {
 run_check() {
   local file rel view hits shim calls shipped rows pinned names name row forward body first last
   local guards before after entries called alone outside tests want range method may ok
+  local kotlin jvm found
 
   [[ -d "${REPO_ROOT}/${SRC}" ]] || { echo "ERROR: ${REPO_ROOT}/${SRC} not found" >&2; exit 2; }
-  for file in "${LIB}" "${SHIM}" "${CALLS}" "${GENERATED}" "${EXPORTS}"; do
+  for file in "${LIB}" "${SHIM}" "${CALLS}" "${GENERATED}" "${EXPORTS}" "${CONSTANTS}" "${LOG_ALLOWLIST}" "${APP_SRC}/main/AndroidManifest.xml"; do
     [[ -f "${REPO_ROOT}/${file}" ]] || { echo "ERROR: ${REPO_ROOT}/${file} not found" >&2; exit 2; }
   done
+  [[ -d "${REPO_ROOT}/${JVM_TESTS}" ]] || { echo "ERROR: ${REPO_ROOT}/${JVM_TESTS} not found" >&2; exit 2; }
   shim="$(code_view "${REPO_ROOT}/${SHIM}")"
   calls="$(code_view "${REPO_ROOT}/${CALLS}")"
   rows="$(export_rows <<<"${shim}")"
@@ -271,14 +367,14 @@ run_check() {
     exit 2
   fi
 
-  log "Checking that unsafe is written in two files, and that the radio's JNI exports are the pinned ones, each one forward to one guarded call ..."
+  log "Checking that unsafe is written in two files, that the radio's JNI exports are the pinned ones, each one forward to one guarded call, and the radio's Kotlin ..."
 
   # Check 1: where `unsafe`, `extern` and an exported symbol are written.
   while IFS= read -r file; do
     rel="${file#"${REPO_ROOT}/"}"
     case "${rel}" in "${GENERATED}" | "${SHIM}") continue ;; esac
-    view="$(code_view "${file}")"
-    hits="$(no_strings <<<"${view}" | grep -nE "${B}(unsafe|extern|no_mangle|export_name|link_section)${E}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    view="$(code_view "${file}" blank)"
+    hits="$(grep -nE "${B}(unsafe|extern|no_mangle|export_name|link_section)${E}" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
     if [[ -n "${hits}" ]]; then
       fail "${rel} writes unsafe, extern, or an attribute that exports a symbol (line(s) ${hits}). In the bridge crate only ${GENERATED} and ${SHIM} may: every other file is safe Rust the compiler checks whole, and a symbol exported from anywhere else is one no guard has read."
     fi
@@ -296,7 +392,8 @@ run_check() {
   while IFS= read -r file; do
     rel="${file#"${REPO_ROOT}/"}"
     case "${rel}" in "${GENERATED}" | "${LIB}") continue ;; esac
-    hits="$(code_view "${file}" | grep -n 'unsafe_code' | cut -d: -f1 | tr '\n' ' ' || true)"
+    view="$(code_view "${file}")"
+    hits="$(grep -n 'unsafe_code' <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
     if [[ -n "${hits}" ]]; then
       fail "${rel} names the unsafe_code lint (line(s) ${hits}). Its level is set in ${LIB} alone: an allow inside a file undoes the crate's deny for that file."
     fi
@@ -305,7 +402,6 @@ run_check() {
   # Check 3: the exports' file is uses and exports, and each export one call.
   hits="$(awk -v header="${HEADER}" '
     function bad(n) { printf "%d ", n }
-    state == "use" { if ($0 ~ /^\};[[:space:]]*$/) state = ""; next }
     state == "attr" {
       if (index($0, header) != 1) { bad(NR); state = ""; next }
       state = ($0 ~ /\{[[:space:]]*$/) ? "body" : "sig"; next
@@ -313,17 +409,22 @@ run_check() {
     state == "sig" { if ($0 ~ /\{[[:space:]]*$/) state = "body"; next }
     state == "body" { if ($0 == "}") state = ""; next }
     /^[[:space:]]*$/ { next }
-    /^use [^;{]*;[[:space:]]*$/ || /^use [^;{]*\{[^;{}]*\};[[:space:]]*$/ { next }
-    /^use [^;{]*\{[[:space:]]*$/ { state = "use"; next }
+    /^use [A-Za-z0-9_]+(::[A-Za-z0-9_]+)*(::\{[A-Za-z0-9_]+(, [A-Za-z0-9_]+)*\})?;$/ { next }
     $0 == "#[no_mangle]" { state = "attr"; next }
     { bad(NR) }
     END { if (state != "") bad(NR) }' <<<"${shim}")"
   if [[ -n "${hits}" ]]; then
-    fail "${SHIM} holds something that is neither a use nor an export — '#[no_mangle]' directly above '${HEADER}…' (line(s) ${hits}). The crate's unsafe_code deny is lifted for this file, so nothing else may be in it: a function, a second way to export a symbol, a block of code after the exports. Put it in ${CALLS}, under the deny."
+    fail "${SHIM} holds something that is neither a use nor an export — '#[no_mangle]' directly above '${HEADER}…' (line(s) ${hits}). The crate's unsafe_code deny is lifted for this file, so nothing else may be in it: a function, a second way to export a symbol, a block of code after the exports. A use is one line, 'use a::b;' or 'use a::{B, C};', with nothing after it: no rename, no glob, none over several lines. Put anything else in ${CALLS}, under the deny."
   fi
-  hits="$({
-    no_strings <<<"${shim}" | grep -nE "${B}(unsafe|export_name|link_section|used|mod|impl|static|cfg)${E}|JNIEnv[[:space:]]*::|[A-Za-z0-9_]![^=]" || true
-  } | cut -d: -f1 | tr '\n' ' ')"
+  if [[ "$(grep -E "^use .*${B}mesh_radio${E}" <<<"${shim}" || true)" != 'use crate::mesh_radio;' ]]; then
+    fail "${SHIM} does not import what its exports forward to as the one line 'use crate::mesh_radio;'. Under any other import the exports call a module check 5 has not read."
+  fi
+  hits="$(sed -E 's/^pub extern "system" fn /pub extern fn /' <<<"${shim}" | grep -n '"' | cut -d: -f1 | tr '\n' ' ' || true)"
+  if [[ -n "${hits}" ]]; then
+    fail "${SHIM} has a quote that is not the \"system\" of an export's header (line(s) ${hits}). The file needs no string and no character literal, and what follows one is read as text by whoever reads the file less exactly than the compiler."
+  fi
+  view="$(code_view "${REPO_ROOT}/${SHIM}" blank)"
+  hits="$(grep -nE "${B}(unsafe|export_name|link_section|used|mod|impl|static|cfg)${E}|JNIEnv[[:space:]]*::|[A-Za-z0-9_]![^=]" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
   if [[ -n "${hits}" ]]; then
     fail "${SHIM} names unsafe, export_name, link_section, used, mod, impl, static, cfg or JNIEnv::, or invokes a macro (line(s) ${hits}). None has a place in a file of uses and one-call exports, and here the compiler would report none of it."
   fi
@@ -413,10 +514,88 @@ run_check() {
     fail "${CALLS} names a JavaVM, a reference that outlives a call, or state of its own (line(s) ${hits}). Every call is made by a Java thread and returns: the shim keeps nothing between two."
   fi
 
+  # Check 6: the files read above are the files compiled.
+  while IFS= read -r file; do
+    rel="${file#"${REPO_ROOT}/"}"
+    [[ "${rel}" == "${GENERATED}" ]] && continue
+    view="$(code_view "${file}" blank | tr -d '[:space:]')"
+    if grep -qE "${B}path=[bcr#]*\"" <<<"${view}"; then
+      fail "${rel} gives something a path (a 'path = \"…\"', as in #[path = …] or under cfg_attr). A module declared in ${SRC} is the file of its name there: under a path attribute the compiler builds another file, and every check here — and the Rust tests that read ${SHIM##*/} — goes on reading the one it left."
+    fi
+  done < <(find "${REPO_ROOT}/${SRC}" -type f -name '*.rs' | LC_ALL=C sort)
+  view="$(code_view "${REPO_ROOT}/${LIB}" | sed -E 's/[[:space:]]+$//')"
+  for name in mesh_jni mesh_radio; do
+    if [[ "$(grep -E "${B}mod[[:space:]]+${name}${E}" <<<"${view}" || true)" != "mod ${name};" ]]; then
+      fail "${LIB} does not declare '${name}' as the one line 'mod ${name};'. Declared with a body, twice, or from a macro, the module compiled is not ${SRC}/${name}.rs, which is the file read here."
+    fi
+  done
+
+  # Check 7: the radio's Kotlin writes no log line and holds no UUID.
+  kotlin="$(find "${REPO_ROOT}/${APP_SRC}" -type f -name '*.kt' -path '*/mesh/*' | LC_ALL=C sort)"
+  jvm="$(find "${REPO_ROOT}/${JVM_TESTS}" -type f -name '*.kt' | LC_ALL=C sort)"
+  while IFS= read -r file; do
+    rel="${file#"${REPO_ROOT}/"}"
+    view="$(code_view "${file}")"
+    hits="$(grep -nE "${B}(Log|Timber)[[:space:]]*\\.|${B}(println|print|printStackTrace)[[:space:]]*\\(|System[[:space:]]*\\.[[:space:]]*(out|err)${E}|${B}(Logger|logging)${E}" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    if [[ -n "${hits}" ]]; then
+      fail "${rel} writes a log line, or names a logger or a standard stream (line(s) ${hits}). The radio's Kotlin logs nothing, in any build (Security Rule 15): what it could say is a Bluetooth address, or a throwable that renders one."
+    fi
+  done <<<"${kotlin}"
+  while IFS= read -r file; do
+    [[ -n "${file}" ]] || continue
+    rel="${file#"${REPO_ROOT}/"}"
+    hits="$(grep -nE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' "${file}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    if [[ -n "${hits}" ]]; then
+      fail "${rel} holds a UUID in its canonical form (line(s) ${hits}). The service's and the characteristic's are kept as two Long constants each and built at run time: a canonical one in a tracked file fails check_no_committed_secrets.sh."
+    fi
+  done <<<"${kotlin}"$'\n'"${jvm}"
+
+  # Check 8: the platform's radio modes are named at one site.
+  if [[ "$(grep -oE "${B}${MODES}" "${REPO_ROOT}/${CONSTANTS}" | grep -oE '(SCAN_MODE|ADVERTISE_MODE|ADVERTISE_TX_POWER|CONNECTION_PRIORITY)' | LC_ALL=C sort -u | tr '\n' ' ' || true)" != 'ADVERTISE_MODE ADVERTISE_TX_POWER CONNECTION_PRIORITY SCAN_MODE ' ]]; then
+    fail "${CONSTANTS} does not name the scan mode, the advertise mode, the advertise power and the connection priority it holds — each the Android constant whose integer it is. It is the one site of the radio's modes (T-PWR-1)."
+  fi
+  while IFS= read -r file; do
+    rel="${file#"${REPO_ROOT}/"}"
+    [[ "${rel}" == "${CONSTANTS}" ]] && continue
+    view="$(code_view "${file}")"
+    hits="$(grep -nE "${B}${MODES}" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    if [[ -n "${hits}" ]]; then
+      fail "${rel} names a scan, advertise or connection-priority constant of the platform (line(s) ${hits}). An adapter passes on the value ${CONSTANTS##*/} holds: a mode chosen anywhere else is one the power table does not have."
+    fi
+  done <<<"${kotlin}"
+
+  # Check 9: no log call of the radio's is allowlisted.
+  hits="$(grep -nE '^[^#|]*/mesh/[^|]*\|' "${REPO_ROOT}/${LOG_ALLOWLIST}" | cut -d: -f1 | tr '\n' ' ' || true)"
+  if [[ -n "${hits}" ]]; then
+    fail "${LOG_ALLOWLIST} has a row for a file of the mesh (line(s) ${hits}). check_native_log_allowlist.sh passes a call that has a row; the radio has none to list."
+  fi
+
+  # Check 10: a build with the flag off declares nothing of the mesh.
+  while IFS= read -r file; do
+    rel="${file#"${REPO_ROOT}/"}"
+    [[ "${rel}" == "${APP_SRC}/mesh/AndroidManifest.xml" ]] && continue
+    hits="$(grep -niE 'bluetooth|connectedDevice|mesh' "${file}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    if [[ -n "${hits}" ]]; then
+      fail "${rel} names Bluetooth, the connectedDevice service type or the mesh (line(s) ${hits}; a comment counts). Every permission and component of the mesh is in ${APP_SRC}/mesh/AndroidManifest.xml, merged only into a build with HAVEN_MESH: a release with the flag off asks for nothing new."
+    fi
+  done < <(find "${REPO_ROOT}/${APP_SRC}" -type f -name 'AndroidManifest.xml' | LC_ALL=C sort)
+
+  # Check 11: the JVM tests are the pinned ones, and none is switched off.
+  view="$(while IFS= read -r file; do [[ -n "${file}" ]] && code_view "${file}"; done <<<"${jvm}")"
+  found="$(grep -A1 -E '^[[:space:]]*@Test[[:space:]]*$' <<<"${view}" | sed -nE 's/^[[:space:]]*fun ([A-Za-z0-9_]+)\(\).*/\1/p' | LC_ALL=C sort)"
+  if [[ "${found}" != "$(printf '%s\n' "${JVM_TEST_NAMES[@]}" | LC_ALL=C sort)" ]]; then
+    names="$(diff <(printf '%s\n' "${JVM_TEST_NAMES[@]}" | LC_ALL=C sort) <(printf '%s\n' "${found}") | grep -E '^[<>]' | tr '\n' ';' || true)"
+    fail "the tests of ${JVM_TESTS} — each '@Test' directly above 'fun <name>()' — are not the pinned ones ('<' pinned, '>' found: ${names}). A test that is gone or renamed fails nothing; change JVM_TEST_NAMES in the same change, where a reviewer sees it."
+  fi
+  hits="$(grep -cE "${B}(Ignore|Disabled|Assume|assumeTrue|assumeFalse|assumeThat)${E}" <<<"${view}" || true)"
+  if [[ "${hits}" != 0 ]]; then
+    fail "a test of ${JVM_TESTS} is ignored, or assumes its way out (${hits} line(s)). A skipped test reports a proof it did not make."
+  fi
+
   if (( FAILED )); then
     exit 1
   fi
-  log "OK: unsafe is written in the generated bridge and the exports' file alone, under the crate's deny; that file is uses and the ${want} pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's."
+  log "OK: unsafe is written in the generated bridge and the exports' file alone, under the crate's deny; that file is uses and the ${want} pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's. The radio's Kotlin logs nothing and holds no UUID, names its modes at one site, and has its ${#JVM_TEST_NAMES[@]} JVM tests; no manifest outside the mesh's own names Bluetooth."
 }
 
 # ---------------------------------------------------------------------------
@@ -473,6 +652,11 @@ fn qualifier(word: &str) -> bool {
 fn header(name: &str) -> String {
     format!("pub extern \"system\" fn Java_{name}(")
 }
+fn openers(word: &str, path: &str) -> bool {
+    let path = if word == "//" { "/*" } else { path }; // unsafe
+    word.contains('"') || word == r#"an "unsafe" // word"# || path == "a
+        // no_mangle \" extern */" /* nested /* unsafe */ extern */
+}
 RS
     cat >"${t}/${GENERATED}" <<'RS'
 #[no_mangle]
@@ -485,9 +669,7 @@ RS
 //! The exports. No unsafe block, no static, no mod, no macro!() here.
 
 use jni::objects::{JByteArray, JLongArray, JObject};
-use jni::sys::{
-    jbyteArray, jlong,
-};
+use jni::sys::{jbyteArray, jlong};
 use jni::JNIEnv;
 
 use crate::mesh_radio;
@@ -582,6 +764,60 @@ leftMs ()J - jlong
 receive (J[B)V jlong,JByteArray -
 poll ([J)[B JLongArray jbyteArray
 TXT
+    local name
+    mkdir -p "${t}/${CORE}" "${t}/${JVM_TESTS}/kotlin" "${t}/${APP_SRC}/debug" "${t}/${APP_SRC}/mesh" "${t}/scripts/ci"
+    cat >"${t}/${CONSTANTS}" <<'KT'
+package com.oblivioustech.haven.mesh.core
+
+object MeshRadioConstants {
+    /** `ScanSettings.SCAN_MODE_LOW_POWER`. */
+    const val SCAN_MODE = 0
+
+    /** `AdvertiseSettings.ADVERTISE_MODE_LOW_POWER`. */
+    const val ADVERTISE_MODE = 0
+
+    /** `AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM`. */
+    const val ADVERTISE_TX_POWER = 2
+
+    /** `BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER`. */
+    const val CONNECTION_PRIORITY = 2
+}
+KT
+    cat >"${t}/${CORE%/core}/ScannerAdapter.kt" <<'KT'
+package com.oblivioustech.haven.mesh
+
+import com.oblivioustech.haven.mesh.core.MeshRadioConstants
+
+// Never Log.d(TAG, …), println(…) or printStackTrace() here, and the mode is
+// not SCAN_MODE_LOW_LATENCY.
+class ScannerAdapter {
+    fun mode(): Int = MeshRadioConstants.SCAN_MODE /* not System.err */
+
+    fun blueprint(catalog: Int): Int = catalog + MeshRadioConstants.ADVERTISE_TX_POWER
+}
+KT
+    {
+      printf 'class RadioTest {\n'
+      for name in "${JVM_TEST_NAMES[@]}"; do
+        printf '    @Test\n    fun %s() {\n        // Never @Ignore.\n    }\n\n' "${name}"
+      done
+      printf '    private fun helper() {}\n}\n'
+    } >"${t}/${JVM_TESTS}/kotlin/RadioTest.kt"
+    printf '<manifest>\n    <uses-permission android:name="android.permission.INTERNET"/>\n</manifest>\n' \
+      | tee "${t}/${APP_SRC}/main/AndroidManifest.xml" >"${t}/${APP_SRC}/debug/AndroidManifest.xml"
+    cat >"${t}/${APP_SRC}/mesh/AndroidManifest.xml" <<'XML'
+<manifest>
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
+    <application>
+        <service android:name=".mesh.MeshService" android:foregroundServiceType="connectedDevice" android:exported="false"/>
+    </application>
+</manifest>
+XML
+    cat >"${t}/${LOG_ALLOWLIST}" <<'TXT'
+# <repo-relative path>|<first line of the call, trimmed>|<why it is safe>|<owner>
+# haven/android/app/src/main/kotlin/com/oblivioustech/haven/mesh/MeshService.kt|a row in a comment is no row|-|-
+haven/android/app/src/main/kotlin/com/oblivioustech/haven/HavenApplication.kt|Log.i(TAG, "started")|a fixed word|owner
+TXT
   }
   _case() { # <label> <want-rc> <want-msg-substring> <tree>
     local label="$1" want="$2" msg="$3" got=0 out
@@ -611,7 +847,7 @@ TXT
 
   echo "check_mesh_radio.sh --self-test"
   local t="${tmp}/ok"; _tree "${t}"
-  _case "the tree shape passes: three exports each one forward, comments and strings that only mention what is banned, a static in the calls' tests" 0 '' "${t}"
+  _case "the tree shape passes: three exports each one forward, comments and strings that only mention what is banned, a static in the calls' tests; an adapter and a mesh manifest beside the pure package" 0 '' "${t}"
 
   # Check 1: where unsafe, extern and an exported symbol are written.
   t="${tmp}/unsafe-block"; _tree "${t}"
@@ -665,6 +901,25 @@ TXT
   t="${tmp}/export-elsewhere"; _tree "${t}"
   _before_tests "${t}/${CALLS}" '#[no_mangle]\npub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_reset(_env: JNIEnv, _this: jni::objects::JObject) {}'
   _case "an export of MeshNative in another file of the crate fails" 1 "${CALLS} writes unsafe" "${t}"
+
+  # Checks 1 and 2 read a file as the compiler does: a comment opener in a
+  # string hides nothing after it.
+  t="${tmp}/string-slashes"; _tree "${t}"
+  printf 'const _Z: &str = "//"; #[allow(unsafe_code)] #[no_mangle] pub extern "C" fn haven_probe() -> u8 { unsafe { *core::ptr::null::<u8>() } }\n' >>"${t}/${SRC}/api.rs"
+  _case "the re-review's plant: an exported unsafe fn behind a \"//\" on its line fails check 1" 1 "${SRC}/api.rs writes unsafe" "${t}"
+  _case "the same plant fails check 2: its allowance is read" 1 "${SRC}/api.rs names the unsafe_code lint" "${t}"
+
+  t="${tmp}/string-block"; _tree "${t}"
+  printf 'const _A: &str = "/*";\n#[no_mangle]\npub extern "C" fn haven_probe() {}\nconst _B: &str = "*/";\n' >>"${t}/${SRC}/api.rs"
+  _case "an exported fn between a \"/*\" and a \"*/\" fails" 1 "${SRC}/api.rs writes unsafe" "${t}"
+
+  t="${tmp}/string-two-lines"; _tree "${t}"
+  printf 'const _A: &str = "\n//"; #[allow(unsafe_code)] #[no_mangle] pub fn haven_probe() {}\n' >>"${t}/${SRC}/api.rs"
+  _case "an allowance behind the // that ends a string begun on the line above fails" 1 "${SRC}/api.rs names the unsafe_code lint" "${t}"
+
+  t="${tmp}/string-raw"; _tree "${t}"
+  printf 'const _A: &str = r#"" // "#; #[allow(unsafe_code)] #[no_mangle] pub fn haven_probe() {}\n' >>"${t}/${SRC}/api.rs"
+  _case "an allowance behind a // inside a raw string that holds a quote fails" 1 "${SRC}/api.rs names the unsafe_code lint" "${t}"
 
   # Check 2: the lint.
   t="${tmp}/no-deny"; _tree "${t}"
@@ -790,6 +1045,34 @@ TXT
   sed -i 's/^    env: JNIEnv,$/    jni: JNIEnv,/' "${t}/${SHIM}"
   _line "${t}/${SHIM}" '    mesh_radio::receive(&env, link, &frame);' '    mesh_radio::receive(&jni, link, &frame);'
   _case "an export that names its environment otherwise fails" 1 '> ? receive' "${t}"
+
+  t="${tmp}/use-then-items"; _tree "${t}"
+  _line "${t}/${SHIM}" 'use jni::sys::{jbyteArray, jlong};' 'use jni::sys::{\n    jbyteArray, jlong,\n}; const _A: &str = "//"; #[no_mangle] pub extern "C" fn JNI_OnLoad(_vm: *mut u8, _r: *mut u8) -> i32 { unsafe { core::ptr::read_volatile(0x10 as *const i32) } }\nconst _B: () = {\n};'
+  _case "the re-review's plant: an exported unsafe fn on the line that closes a use fails" 1 'holds something that is neither a use nor an export' "${t}"
+
+  t="${tmp}/use-then-block"; _tree "${t}"
+  _line "${t}/${SHIM}" 'use jni::sys::{jbyteArray, jlong};' 'use jni::sys::{\n    jbyteArray, jlong,\n}; const _A: &str = "/*";\n#[no_mangle]\npub extern "C" fn JNI_OnLoad(_vm: *mut u8, _r: *mut u8) -> i32 {\n    unsafe { core::ptr::read_volatile(_vm.cast::<i32>()) }\n}\nconst _B: &str = "*/";\nconst _C: () = {\n};'
+  _case "the re-review's plant: an exported fn between two strings that read as a comment fails, and its quotes are named" 1 'has a quote that is not the "system" of an export' "${t}"
+
+  t="${tmp}/use-lines"; _tree "${t}"
+  _line "${t}/${SHIM}" 'use jni::sys::{jbyteArray, jlong};' 'use jni::sys::{\n    jbyteArray, jlong,\n};'
+  _case "a use over several lines fails: nothing in the file needs one, and its lines would be lines nobody reads" 1 'holds something that is neither a use nor an export' "${t}"
+
+  t="${tmp}/use-renames-calls"; _tree "${t}"
+  _line "${t}/${SHIM}" 'use crate::mesh_radio;' 'use crate::api as mesh_radio;'
+  _case "the re-review's plant: another module imported under the name of the calls' fails" 1 'does not import what its exports forward to' "${t}"
+
+  t="${tmp}/use-other-calls"; _tree "${t}"
+  _line "${t}/${SHIM}" 'use crate::mesh_radio;' 'use crate::test_keyring::mesh_radio;'
+  _case "a module of the calls' name imported from elsewhere fails" 1 'does not import what its exports forward to' "${t}"
+
+  t="${tmp}/use-renames"; _tree "${t}"
+  _line "${t}/${SHIM}" 'use jni::JNIEnv;' 'use jni::JNIEnv;\nuse jni::sys::jint as JObject;'
+  _case "a use that renames what it imports fails" 1 'holds something that is neither a use nor an export' "${t}"
+
+  t="${tmp}/use-glob"; _tree "${t}"
+  _line "${t}/${SHIM}" 'use jni::JNIEnv;' 'use jni::JNIEnv;\nuse crate::api::*;'
+  _case "a glob import fails" 1 'holds something that is neither a use nor an export' "${t}"
 
   # Check 4: the exports are the pinned ones.
   t="${tmp}/tenth"; _tree "${t}"
@@ -923,7 +1206,114 @@ TXT
   sed -i 's/^mod tests {$/mod checks {/' "${t}/${CALLS}"
   _case "a cfg(test) module under another name is read as code that ships" 1 'has a cfg(test) that is not the one' "${t}"
 
+  # Check 6: the files read are the files compiled.
+  t="${tmp}/path-exports"; _tree "${t}"
+  sed -i 's/^mod mesh_jni;$/#[path = "..\/other_jni.rs"]\nmod mesh_jni;/' "${t}/${LIB}"
+  _case "the re-review's plant: the allowed module built from another file fails" 1 "${LIB} gives something a path" "${t}"
+
+  t="${tmp}/path-calls"; _tree "${t}"
+  sed -i 's/^mod mesh_radio;$/#[path = "other_radio.rs"]\nmod mesh_radio;/' "${t}/${LIB}"
+  _case "the calls' module built from another file fails" 1 "${LIB} gives something a path" "${t}"
+
+  t="${tmp}/path-cfg-attr"; _tree "${t}"
+  sed -i 's/^mod mesh_radio;$/#[cfg_attr(\n    all(),\n    path = r"other_radio.rs"\n)]\nmod mesh_radio;/' "${t}/${LIB}"
+  _case "a path given under cfg_attr, over several lines, as a raw string, fails" 1 "${LIB} gives something a path" "${t}"
+
+  t="${tmp}/path-inside"; _tree "${t}"
+  printf '#[path = "elsewhere.rs"]\nmod more;\n' >>"${t}/${SRC}/api.rs"
+  _case "a path attribute in another file of the crate fails" 1 "${SRC}/api.rs gives something a path" "${t}"
+
+  t="${tmp}/calls-inline"; _tree "${t}"
+  sed -i 's/^mod mesh_radio;$/mod mesh_radio {\n    pub(crate) fn left_ms() -> i64 {\n        0\n    }\n}/' "${t}/${LIB}"
+  _case "the calls' module declared with a body, beside the file read here, fails" 1 "does not declare 'mesh_radio' as the one line" "${t}"
+
+  # Check 7: the radio's Kotlin writes no log line and holds no UUID.
+  local adapter="${CORE%/core}/ScannerAdapter.kt"
+  t="${tmp}/kotlin-log"; _tree "${t}"
+  _line "${t}/${adapter}" 'fun mode()' '    fun mode(): Int = MeshRadioConstants.SCAN_MODE.also { Log.d("Mesh", "scan from $device") }'
+  _case "a Log call in an adapter of the radio fails" 1 "${adapter} writes a log line" "${t}"
+
+  t="${tmp}/kotlin-println"; _tree "${t}"
+  printf 'fun trace(address: String) = println(address)\n' >>"${t}/${CONSTANTS}"
+  _case "a println in the pure package fails" 1 "${CONSTANTS} writes a log line" "${t}"
+
+  t="${tmp}/kotlin-stack-trace"; _tree "${t}"
+  _line "${t}/${adapter}" 'fun mode()' '    fun mode(): Int = try { MeshRadioConstants.SCAN_MODE } catch (e: Exception) { e.printStackTrace(); 0 }'
+  _case "a caught throwable rendered by printStackTrace fails" 1 "${adapter} writes a log line" "${t}"
+
+  t="${tmp}/kotlin-stderr"; _tree "${t}"
+  mkdir -p "${t}/${APP_SRC}/debug/kotlin/com/oblivioustech/haven/mesh"
+  printf 'package com.oblivioustech.haven.mesh\n\nfun note(link: Long) = System.err.write(link.toInt())\n' >"${t}/${APP_SRC}/debug/kotlin/com/oblivioustech/haven/mesh/LoopbackRadio.kt"
+  _case "a standard stream written from a mesh file of another source set fails" 1 "LoopbackRadio.kt writes a log line" "${t}"
+
+  # In two halves: whole, it would be a canonical UUID in this tracked file.
+  local uuid='4f3c2a10-9b7e-4d1a''-8c55-0e6f7a8b9c0d'
+  t="${tmp}/kotlin-uuid"; _tree "${t}"
+  printf '// The service is %s.\n' "${uuid}" >>"${t}/${adapter}"
+  _case "a canonical UUID in the radio's Kotlin fails, in a comment too" 1 "${adapter} holds a UUID" "${t}"
+
+  t="${tmp}/kotlin-test-uuid"; _tree "${t}"
+  printf 'val service = java.util.UUID.fromString("%s")\n' "${uuid^^}" >>"${t}/${JVM_TESTS}/kotlin/RadioTest.kt"
+  _case "a canonical UUID in a JVM test fails" 1 "RadioTest.kt holds a UUID" "${t}"
+
+  # Check 8: the platform's radio modes are named at one site.
+  t="${tmp}/mode-elsewhere"; _tree "${t}"
+  _line "${t}/${adapter}" 'fun mode()' '    fun mode(): Int = ScanSettings.SCAN_MODE_LOW_LATENCY'
+  _case "a scan mode named in an adapter fails" 1 "${adapter} names a scan, advertise or connection-priority constant" "${t}"
+
+  t="${tmp}/priority-elsewhere"; _tree "${t}"
+  _line "${t}/${adapter}" 'fun blueprint(' '    fun blueprint(catalog: Int): Int = catalog + BluetoothGatt.CONNECTION_PRIORITY_HIGH'
+  _case "a connection priority named in an adapter fails" 1 "${adapter} names a scan, advertise or connection-priority constant" "${t}"
+
+  t="${tmp}/mode-unnamed"; _tree "${t}"
+  sed -i '/ADVERTISE_TX_POWER_MEDIUM/d' "${t}/${CONSTANTS}"
+  _case "a mode held as a bare integer, its Android constant unnamed, fails" 1 "${CONSTANTS} does not name the scan mode" "${t}"
+
+  # Check 9: no log call of the radio's is allowlisted.
+  t="${tmp}/allowlisted"; _tree "${t}"
+  printf 'haven/android/app/src/main/kotlin/com/oblivioustech/haven/mesh/MeshService.kt|Log.w(TAG, "stopped")|a fixed word|owner\n' >>"${t}/${LOG_ALLOWLIST}"
+  _case "an allowlist row for a file of the mesh fails" 1 "${LOG_ALLOWLIST} has a row for a file of the mesh" "${t}"
+
+  # Check 10: a build with the flag off declares nothing of the mesh.
+  t="${tmp}/main-permission"; _tree "${t}"
+  sed -i 's|^</manifest>$|    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>\n</manifest>|' "${t}/${APP_SRC}/main/AndroidManifest.xml"
+  _case "a Bluetooth permission in the main manifest fails" 1 "${APP_SRC}/main/AndroidManifest.xml names Bluetooth" "${t}"
+
+  t="${tmp}/main-service"; _tree "${t}"
+  sed -i 's|^</manifest>$|    <application><service android:name=".radio.Relay" android:foregroundServiceType="connectedDevice"/></application>\n</manifest>|' "${t}/${APP_SRC}/main/AndroidManifest.xml"
+  _case "a connectedDevice service in the main manifest fails" 1 "${APP_SRC}/main/AndroidManifest.xml names Bluetooth" "${t}"
+
+  t="${tmp}/debug-component"; _tree "${t}"
+  sed -i 's|^</manifest>$|    <application><receiver android:name=".mesh.MeshReceiver"/></application>\n</manifest>|' "${t}/${APP_SRC}/debug/AndroidManifest.xml"
+  _case "a mesh component in the debug manifest fails" 1 "${APP_SRC}/debug/AndroidManifest.xml names Bluetooth" "${t}"
+
+  # Check 11: the JVM tests are the pinned ones, and none is switched off.
+  t="${tmp}/test-gone"; _tree "${t}"
+  sed -i '/fun anAddressNeverReachesTheEngine()/,/^$/d' "${t}/${JVM_TESTS}/kotlin/RadioTest.kt"
+  _case "a pinned test that is gone fails" 1 '< anAddressNeverReachesTheEngine' "${t}"
+
+  t="${tmp}/test-renamed"; _tree "${t}"
+  sed -i 's/fun everyInputChecksTheDeadlineBeforeAnythingElse()/fun someInputsCheckTheDeadline()/' "${t}/${JVM_TESTS}/kotlin/RadioTest.kt"
+  _case "a pinned test under another name fails" 1 '> someInputsCheckTheDeadline' "${t}"
+
+  t="${tmp}/test-unmarked"; _tree "${t}"
+  sed -i -z 's/    @Test\n    fun outputsDecodeAsTheFixtureSays()/    fun outputsDecodeAsTheFixtureSays()/' "${t}/${JVM_TESTS}/kotlin/RadioTest.kt"
+  _case "a pinned test that lost its @Test fails: it no longer runs" 1 '< outputsDecodeAsTheFixtureSays' "${t}"
+
+  t="${tmp}/test-ignored"; _tree "${t}"
+  sed -i 's/^    fun aPolledFrameIsSentOrItsLinkIsClosed()/    @Ignore\n    fun aPolledFrameIsSentOrItsLinkIsClosed()/' "${t}/${JVM_TESTS}/kotlin/RadioTest.kt"
+  sed -i -z 's/    @Test\n    @Ignore\n/    @Ignore\n    @Test\n/' "${t}/${JVM_TESTS}/kotlin/RadioTest.kt"
+  _case "an ignored test fails" 1 'is ignored, or assumes its way out' "${t}"
+
   # Misconfiguration.
+  t="${tmp}/no-constants"; _tree "${t}"
+  rm "${t}/${CONSTANTS}"
+  _case "a radio with no file of constants is a misconfiguration" 2 '' "${t}"
+
+  t="${tmp}/no-jvm-tests"; _tree "${t}"
+  rm -r "${t}/${JVM_TESTS}"
+  _case "a radio with no JVM tests is a misconfiguration" 2 '' "${t}"
+
   t="${tmp}/no-shim"; _tree "${t}"
   rm "${t}/${SHIM}"
   _case "a missing exports' file is a misconfiguration" 2 '' "${t}"

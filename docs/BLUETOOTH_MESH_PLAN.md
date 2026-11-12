@@ -2666,6 +2666,189 @@ reads them. Two stand, and only a JVM can kill them: the exception a failed
 JNI call left not cleared, and a change to what `receive` hands over —
 `receive` and `poll` read a Java array before anything else.
 
+Re-review of `bd7ff48` (independent, read-only): no behavioural regression
+found, and three ways past `check_mesh_radio.sh`, each reproduced on the
+reviewer's trees — the guard answered 0 on every one — and each fixed in
+the guard, with fixtures that fail without the fix. The first two predate
+that commit; the third was introduced by it.
+**A module built from another file.** `#[path = "../other.rs"]` above
+`mod mesh_jni;` put the allowance on a file no check reads, while the guard
+and the Rust tests went on reading `src/mesh_jni.rs`, compiled into
+nothing; the same on `mod mesh_radio;` gives check 5 a decoy. The guard now
+fails any `path = "…"` in the crate's hand-written source, bare or under
+`cfg_attr`, on one line or several, and holds `lib.rs` to the one line
+`mod <name>;` for each of the two modules (check 6).
+**A comment opener inside a string.** The view the guard reads treated the
+`//` of `"//"` and the `/*` of `"/*"` as comments, so the rest of the line,
+or the lines up to a later `"*/"`, were hidden from every check: one line
+appended to `api.rs` — an allowance, a `no_mangle`, an `extern fn`, an
+`unsafe` block — passed checks 1 and 2. The view is now made as the
+compiler reads the file: a string runs to its closing quote, on whichever
+line that is, with its escapes; a raw string to its own hashes; a
+character literal that holds a quote is one; block comments nest. A string
+begun on the line above and a raw string that holds a quote were not among
+the review's trees; they hid code the same way and are fixtures too. No
+line of the crate's source newly fails.
+**A `use` over several lines.** Check 3 skipped every line of one until a
+line that was exactly `};`, so `}; const _A: &str = "//"; …` and what
+followed it was read by nobody, and `use crate::api as mesh_radio;` passed
+as a `use`. Both were caught only by `every_export_is_one_guarded_call`. A
+`use` in the exports' file is now one line of the shape `use a::b;` or
+`use a::{B, C};`, with no rename, no glob and nothing after it; what the
+exports forward to is imported as `use crate::mesh_radio;` and in no other
+way; and the file's one quote is the `"system"` of an export's header.
+The guard's header, its step comment in `repo-guards.yml` and design §A.6
+no longer say the guard alone reads the exports' file: the Rust gate reads
+it too, and each now names both. The scans whose failure a trailing
+`|| true` could swallow — the guard passed with its string-blanking
+function deleted — take their view first, so a view that cannot be made
+ends the run. 97 self-test fixtures after these fixes (80, and 17: five for
+strings, seven for the `use` and the quote, five for check 6); 116 with
+M3f's Kotlin checks, below. The reviewer's six trees, in scratch copies
+with the new guard, each fail, at the check its plant belongs to.
+
+- **M3f**, the radio's pure Kotlin, its JVM tests and the `android-unit`
+  lane (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §B.1–B.10, §G;
+  `haven/android/app/src/main/kotlin/com/oblivioustech/haven/mesh/core/`,
+  `haven/android/mesh-jvm/`, `scripts/ci/run_mesh_jvm_tests.sh`,
+  `.github/workflows/android-unit.yml`, `scripts/ci/check_mesh_radio.sh`).
+  Kotlin that imports nothing of Android, a Gradle build of its own, one
+  workflow, the guard and documents: no Rust, no Dart, no adapter, no
+  manifest, no `MeshNative`. **Nothing but its tests constructs a
+  `MeshRadioCore`, and no Kotlin declares a native method, so none of it
+  runs in any build.**
+  **Classes**, package `com.oblivioustech.haven.mesh.core`:
+  `MeshEngineApi` (the nine calls of the fixture, as an interface),
+  `RadioOutput` (the reader of a poll's answer), `RadioPort` (every
+  platform effect), `MeshRadioCore` (the one operation queue),
+  `PeerTable`, `ScanPolicy`, `DeadlinePolicy`, `StartPolicy`,
+  `PermissionMatrix`, `MeshRadioConstants`, and `MeshThread` — the fault
+  wrapper, and the one stop.
+  **What the core holds**, each with the test that fails without it. The
+  time left is read first at every input, and with none left nothing else
+  is done (`everyInputChecksTheDeadlineBeforeAnythingElse`, T-AUTO-4). A
+  frame the engine handed over is sent, the same bytes offered again after
+  50 ms three times, or its link is closed and the engine told; a link
+  with a frame in flight is offered no other, and one whose completion
+  does not come in 10 s is closed (`aPolledFrameIsSentOrItsLinkIsClosed`,
+  `aLinkWithAFrameInFlightIsNotReady`,
+  `aFrameWhoseCompletionNeverComesClosesItsLink`). The engine is told a
+  table's number and never an address, and an inbound link has no peer
+  (`anAddressNeverReachesTheEngine`); a connect for a peer the table has
+  forgotten is failed at once (`aConnectForAPeerNoLongerKnownFailsAtOnce`).
+  A pump takes 64 outputs and comes back
+  (`thePumpStopsAtItsBudgetAndComesBack`). The wake is the earliest of the
+  engine's, the core's own timers, the scan's restart and the reminder
+  (`theWakeIsTheEnginesAndTheLockIsCapped`,
+  `theScanRestartIsATermOfTheAlarm`); the timed lock is taken only for an
+  inbound frame and a link coming up, for the engine's wake and 250 ms, 10 s
+  at most. Four connections may wait to become links, 10 s each, a fifth is
+  cancelled at once, and a ninth link is closed
+  (`unlinkedConnectionsAreCappedAndTimedOut`,
+  `aLinkBeyondTheEnginesEightIsClosed`). With Bluetooth off the engine is
+  told every link down and every dial failed, is not polled, and only the
+  deadline wakes the phone (`bluetoothOffTellsEveryLinkDownAndSendsNothing`).
+  An answer that is no output, and an engine that answers no wake, stop the
+  radio (`outputsDecodeAsTheFixtureSays`, `anEngineThatAnswersNoWakeIsGone`).
+  **`MeshThread`** (design F-14): anything thrown inside `run` becomes a
+  stop the user did not make — every step of it attempted whatever the
+  step before threw, then the stopped notice — and nothing leaves, is kept
+  or is written: `aRadioPortThatThrowsStopsTheRadioAndNothingEscapes`
+  makes each of the port's seven calls and the engine's eight throw in
+  turn, with an address in what is thrown, and reads both standard streams
+  empty. The test found one fault in the first draft: a link was dropped
+  with the port asked to close before the engine was told, so a `close`
+  that threw left the engine a link the table had forgotten; the engine is
+  now told first, everywhere.
+  **The JVM build.** `haven/android/mesh-jvm` is a Gradle build of its own
+  — Kotlin 2.2.20, the version the app pins; JVM target 17 as the app,
+  `-Xjdk-release=17`; warnings are errors — whose one source directory is
+  the package above and whose tests are its own. It is not in
+  `haven/android/settings.gradle.kts` and the app's build is unchanged.
+  Having no Android SDK, it is the proof that the package imports none:
+  an Android import fails its compile. The fixture tests read
+  `haven/rust_builder/fixtures/` itself: `outputsDecodeAsTheFixtureSays`
+  the file Rust's `an_output_is_encoded_as_the_fixture_says` reads, and
+  `theEngineInterfaceIsTheNineExportsOfTheFixture` the exports' list, by
+  reflection — name and JNI descriptor of each method, and no tenth.
+  **Run here:** 26 tests, none skipped, on JDK 21 with Gradle 8.14.3 and
+  with the 8.14 the lane fetches, through
+  `scripts/ci/run_mesh_jvm_tests.sh`, which reads the verdict from the
+  result files and fails when none ran or one was skipped (each tried
+  with a stand-in for Gradle). No test sleeps or reads a clock.
+  **Mutation pass:** 88 changes of a line or a few to the classes and
+  the two fixtures, each run against the whole suite. Eighty-five fail a
+  named test — every mutation design §B.10 names among them. Two fail the
+  compile: an Android import, and an unused variable, which stood until
+  the build's `extraWarnings` was turned on for it. One stands: a safe call
+  on a value that cannot be null, which changes no behaviour and draws no
+  warning. One more stood in the first pass and is closed: the twelve-hour
+  cut of a start was tested against the constant it reads, and is now
+  tested against twelve hours.
+  **The lane**, `android-unit.yml`, called from `ci.yml` in stage 1: a JDK
+  21, the Gradle distribution the app's wrapper pins — fetched and checked
+  against the SHA-256 pinned beside it, since the tree has no `gradlew` —
+  and the script. **It has never run**: CI runs on pushes and pull requests
+  to `main`. Its two commands were run by hand where this was built — the
+  fetch, whose checksum matched, and the script. It is not one of the
+  release gate's workflows (`check_ci_verdict.sh`), whose pinned job list
+  is unchanged. It tees and uploads nothing, and
+  `check_logscan_wired_everywhere.sh` records it so: a capture added later
+  fails until it is scanned.
+  **The guard**, `check_mesh_radio.sh`, checks 7 to 11: in every `.kt`
+  under a `mesh/` directory of `app/src` no log call, logger or standard
+  stream, and no canonical UUID there or in the JVM tests;
+  `MeshRadioConstants.kt` the one file naming an Android scan, advertise
+  or connection-priority constant; no row of the native log allowlist for
+  a mesh file; no `AndroidManifest.xml` of a flag-off build naming
+  Bluetooth, `connectedDevice` or the mesh; and the 26 tests by name,
+  each under `@Test`, none ignored. 19 fixtures, 116 in all; each of the
+  script's 28 failure sites, silenced in turn, fails the self-test.
+  **Not as the design has it** (each recorded in the design, "As built
+  (M3f)"). The package is `…mesh.core` and the tests are in the JVM build,
+  not `app/src/test`. `RadioPort.connect` takes the address, not the
+  peer's number, which the port has no way back from; the port gains
+  `scan()` and `remind()`, and the core `startRadio()` and
+  `onConnected(link)`, without which the scan's restart, the reminder and
+  the unlinked connections of §B.4 have no pure owner. The time left is
+  read at the start of an input, not at the start of the pump that ends
+  it. A completion that reports failure closes its link. `StartPolicy` is
+  one function that takes the foreground start as a step, so the order —
+  permission, foreground, engine — is tested; it asks for no engine when
+  the stored deadline has passed. With Bluetooth off the reminder's time
+  wakes the phone as well as the deadline's. `MeshThread` holds the stop
+  as well as the wrapper. The radio's four platform modes are integers
+  with the Android constant named beside each, not Android's own
+  constants: the package compiles without them. That the advertisement
+  carries no service data and no scan response has no constant, and no
+  test here.
+  **Owner questions still open, each built as designed and in one
+  place.** Q-2, an engine started with no session: one `if` of
+  `StartPolicy.start`. Q-13, a linked stranger keeping the phone awake: no
+  bound beyond `HOLD_CAP_MS`, in the one `holdAwake` of the core.
+  **Not proved.** The lane has not run on a runner. The app's own
+  Android build has not compiled the new package. No
+  adapter exists, so nothing here has met Bluetooth, a `HandlerThread`, an
+  alarm, a wake lock or a notification, and nothing ran on an emulator or
+  a device. The four integers were read off the platform's reference
+  pages (2026-11-12), not checked by a compiler. That the package uses
+  nothing absent from Android API 23 is by reading: the build holds it to
+  the JDK 17 API, not to Android's. The privacy manifest cites none of the
+  tests: `check_privacy_invariants.sh` reads a cited test in Rust or Dart
+  only (its rule 3), and the radio's invariants are M3i's.
+  **Owed by M3g**, beside what M3b left it: `MeshNative` as the
+  implementation of `MeshEngineApi`, with the guard's Kotlin half of check
+  4; every callback and handler message inside `MeshThread.run`, one
+  `MeshThread` a start, its steps the real ones; one counter of link
+  numbers across both roles, from the connection on for an inbound one;
+  `onConnected` for a central that connected to Haven's server and for no
+  other connection — the core cancels after 10 s whatever it is told of;
+  one answer to every `connect`; `send` answering false only when no
+  completion will follow; `close` of a number it does not know doing
+  nothing; `scan()` doing nothing where `PermissionMatrix.canSearch` is
+  false; the mesh's own manifest, and the guard's checks of it and of the
+  advertiser's source.
+
 ### Proposed CLAUDE.md wording (owner to approve)
 
 Each is the text as it stands, then the text proposed. Nothing in

@@ -98,7 +98,8 @@
 #   not recognise still owes its profile, build, rotation and discard.
 #
 # Plus: NO_CAPTURE_WORKFLOWS records the workflows that run tests-shaped steps
-# without capturing anything (flutter-check.yml runs `flutter analyze` only);
+# without capturing anything (flutter-check.yml runs `flutter analyze` only,
+# android-unit.yml the JVM tests of Kotlin that logs nothing);
 # an entry whose workflow starts capturing is stale and reds, so the record
 # is re-decided rather than silently outgrown. A floor on the number of
 # capturing jobs found, a floor on the tee'd transcripts, and a raw-grep
@@ -244,6 +245,7 @@ declare -A UPLOAD_ALLOWLIST=(
 # day one of them starts capturing, the record is re-decided in the diff.
 declare -A NO_CAPTURE_WORKFLOWS=(
   ['flutter-check.yml']='its only job, analyze, runs `flutter analyze` and nothing else — no `flutter test`, no tee, no `.log`, no upload'
+  ['android-unit.yml']='its only job, mesh-jvm, runs the JVM tests of the mesh radio'"'"'s pure Kotlin against fakes — code that logs nothing (check_mesh_radio.sh check 7) — with no tee, no `.log` and no upload'
 )
 
 VIOLATIONS=0
@@ -1065,6 +1067,7 @@ self_test() {
     write_ios_lane "$1/wf"
     write_transcript_lane "$1/wf" 'rust-check.yml'
     write_plain_workflow "$1/wf" 'flutter-check.yml'
+    write_plain_workflow "$1/wf" 'android-unit.yml'
     write_guards_workflow "$1/wf"
     write_runner "$1/harness" 'run-good.sh'
     printf '#!/usr/bin/env bash\nset -euo pipefail\nexec "$@"\n' > "$1/harness/run-with-deadline.sh"

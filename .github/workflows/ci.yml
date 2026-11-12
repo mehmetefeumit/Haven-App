@@ -66,6 +66,12 @@ jobs:
     name: Flutter Checks
     uses: ./.github/workflows/flutter-check.yml
 
+  # The Android mesh radio's pure Kotlin, compiled for the JVM with no Android
+  # SDK, and its unit tests.
+  android-unit:
+    name: Android Unit
+    uses: ./.github/workflows/android-unit.yml
+
   # `cargo check` for macOS/iOS/Windows/Android targets — catches breaks in
   # #[cfg(target_os)] code that native Linux CI misses.
   cross-compile:

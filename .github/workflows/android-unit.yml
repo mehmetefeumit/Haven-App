@@ -1,0 +1,50 @@
+# Reusable workflow: JVM unit tests of the Android mesh radio's pure Kotlin.
+#
+# `haven/android/mesh-jvm` compiles the app's package
+# `com.oblivioustech.haven.mesh.core` for the JVM, with no Android SDK, and runs
+# its tests (docs/BLUETOOTH_MESH_M3_DESIGN.md §B.1, §B.10). The compile is
+# itself the check that the package imports nothing of Android. It builds no
+# part of the app and no Rust: the Android adapters of the radio are compiled
+# by build-check.yml.
+#
+# No Gradle wrapper script is in the tree, so the job fetches the distribution
+# the app's wrapper pins, with the checksum pinned beside it
+# (haven/android/gradle/wrapper/gradle-wrapper.properties).
+#
+# Called from ci.yml.
+
+name: Android Unit
+
+on:
+  workflow_call:
+
+jobs:
+  mesh-jvm:
+    name: mesh radio (Kotlin, JVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # As build-check.yml.
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Fetch the pinned Gradle
+        run: |
+          props=haven/android/gradle/wrapper/gradle-wrapper.properties
+          url="$(sed -n 's/^distributionUrl=//p' "${props}" | tr -d '\\')"
+          sum="$(sed -n 's/^distributionSha256Sum=//p' "${props}")"
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/gradle.zip" "${url}"
+          echo "${sum}  ${RUNNER_TEMP}/gradle.zip" | sha256sum -c -
+          unzip -q "${RUNNER_TEMP}/gradle.zip" -d "${RUNNER_TEMP}/gradle"
+          echo "${RUNNER_TEMP}"/gradle/gradle-*/bin >>"${GITHUB_PATH}"
+
+      # Fails unless every test ran: a `test` task that found none is green.
+      - name: Run the tests
+        run: bash scripts/ci/run_mesh_jvm_tests.sh

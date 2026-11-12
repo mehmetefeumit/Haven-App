@@ -5,8 +5,9 @@
 > 2026-11-11.** The review's changes are folded in and listed in §L, with
 > the one premise of it that the code contradicts. Built so far, each with
 > its departures from this text in plan §16: M3a; M3b; M3c; M3d in English
-> only; M3e.
-> No Kotlin is built: the shim's exports (M3b) have no caller.
+> only; M3e; M3f.
+> The radio's pure Kotlin is built and tested on the JVM (M3f). No Android
+> adapter is, and no `MeshNative`: the shim's exports (M3b) have no caller.
 
 Studied at `132f5ca` (this file is in the tree since `8a76cf0`), with another
 agent's uncommitted work in `haven-core/`,
@@ -28,7 +29,7 @@ carries one of:
 | **[L]** | a Rust test in `rust_builder` or `haven-core` | yes |
 | **[D]** | a Dart unit or widget test | yes |
 | **[G]** | a bash guard with a self-test | yes |
-| **[J]** | a JVM unit test of Kotlin | **no** — no Android SDK here; CI only |
+| **[J]** | a JVM unit test of Kotlin | yes, since M3f: `haven/android/mesh-jvm`, a Gradle build of the pure package alone, needs a JDK and no Android SDK. Its lane, `android-unit.yml`, has never run |
 | **[C]** | compiling for Android (`build-check.yml`, `cross-check.yml`) | **no** — CI only |
 | **[E]** | an emulator lane | **no** — CI only, **and its feasibility is unproven** (G-1, G-6) |
 | **[H]** | a real device | **no** — DEFERRED; the project has none |
@@ -36,9 +37,11 @@ carries one of:
 
 CI (`ci.yml`) runs on pushes to `main` and pull requests to `main`
 (`.github/workflows/ci.yml:22-26`); this branch has no pull request. So
-**today [J], [C] and [E] are proved by nothing**, and no line of Kotlin can
-be compiled before a pull request exists (Q-1). The M0 spikes of plan §10
-were never run: G-1, G-6 and G-10 are unanswered.
+**today [C] and [E] are proved by nothing**, and no Kotlin that imports
+Android — every adapter — can be compiled before a pull request exists
+(Q-1). [J] is proved where the JVM build is run by hand (as built, M3f; the
+draft had it CI-only). The M0 spikes of plan §10 were never run: G-1, G-6
+and G-10 are unanswered.
 
 ---
 
@@ -89,7 +92,7 @@ complete with its tests, behind `HAVEN_MESH` (default off).
 | **M3c** | Dart: `MeshRadio` seam, turn-on / turn-off ordering, reconcile | [D] |
 | **M3d** | l10n: every string, 13 locales | [D], parity tool, `gen-l10n` |
 | **M3e** | UI: button, intro sheet, statistics sheet, Settings row, aura | [D] |
-| **M3f** | Kotlin: pure radio logic, JVM tests, the `android-unit` lane | [J] |
+| **M3f** | Kotlin: pure radio logic, JVM tests, the `android-unit` lane | [J], [G]; the lane itself [U] until a pull request runs it |
 | **M3g** | Kotlin: `MeshService`, GATT adapters, notices, manifest, channel | [C]; behaviour [E]/[H] |
 | **M3h** | The L4 lane: loopback radio first, then netsim | [E] |
 | **M3i** | Documents, privacy manifest, device matrix | [G] |
@@ -309,7 +312,13 @@ poll(ready: LongArray): ByteArray?   wakeInMs(): Long      // −1: none
   export one call that hands its parameters on, in the order declared, to
   the function of `mesh_radio.rs` named for it; the conversions, the guarded
   call and their tests are in `mesh_radio.rs`, under the deny. The guard
-  reads every line of the first file and holds it to exactly that; the seven
+  reads every line of the first file and holds it to exactly that, and the
+  Rust gate `every_export_is_one_guarded_call` reads it too. **After the
+  re-review of `bd7ff48`:** the guard strips comments as the compiler does
+  (a `//` or `/*` in a string hides nothing), takes a `use` on one line with
+  no rename and no glob, takes no quote in the file but an export's
+  `"system"`, and fails any `path = "…"` attribute in the crate, so that
+  the file it reads is the file compiled; the seven
   calls that take no array are run against the engine on the host
   (`the_calls_a_jni_export_forwards_reach_their_entries_each_argument_in_its_place`).
   `receive`, `poll` and every export still need a JVM.
@@ -350,9 +359,12 @@ poll(ready: LongArray): ByteArray?   wakeInMs(): Long      // −1: none
   agree in name, arity and types, and the status and kind constants agree —
   and, in `build-check.yml`, `nm -D` on the built library lists the nine
   symbols [C]. **As built (M3b):** the guard holds the exports to the fixture;
-  its Kotlin half lands with `MeshNative.kt` (M3f/M3g), read against the same
+  its Kotlin half lands with `MeshNative.kt` (M3g), read against the same
   fixture, and the `nm -D` step with the first unit that builds the radio
-  for Android. `cross-check.yml`'s Android step is a plain `cargo check`: it
+  for Android. **As built (M3f):** the interface `MeshNative` is to
+  implement, `MeshEngineApi`, is held to the fixture — the nine names, each
+  with its JNI descriptor, and no other method — by the JVM test
+  `theEngineInterfaceIsTheNineExportsOfTheFixture` [J]. `cross-check.yml`'s Android step is a plain `cargo check`: it
   denies no warning, so dead code that exists only in the Android
   configuration would pass it — owed to the same unit.
 - **`jni` logs** (found in M3b): its wrappers write a `trace` line naming
@@ -427,8 +439,15 @@ and `the_mesh_entries_log_nothing_and_format_nothing` (now also reading
 
 Package `com.oblivioustech.haven.mesh`. The split is what makes Kotlin
 testable without a device: **pure classes import nothing of `android.*`**
-(a guard holds the list) and take every platform effect through an
-interface; adapters are thin and hold no decision.
+and take every platform effect through an interface; adapters are thin and
+hold no decision. **As built (M3f):** the pure classes are a package of
+their own, `com.oblivioustech.haven.mesh.core`, in
+`kt/mesh/core/`, and the compiler holds the rule in place of a guard's
+list: `haven/android/mesh-jvm` is a Gradle build whose one source
+directory is that package and whose classpath has no Android SDK, so an
+Android import there does not compile (run in the mutation pass: plan
+§16). Its warnings are errors, the extended ones included. It is not part
+of the app's build and changes nothing in it.
 
 | Pure — [J] | Holds |
 |---|---|
@@ -441,6 +460,7 @@ interface; adapters are thin and hold no decision.
 | `PermissionMatrix` | per API level: what to ask, whether it may search |
 | `ScanPolicy` | restart before 30 min; no more than one start in 6 s |
 | `MeshRadioConstants` | every mode, interval and cap of §G, one site |
+| `RadioPort`, `MeshThread` (as built, M3f) | the interface of §B.2; the wrapper below, and the one stop of §B.5 |
 
 | Adapter — [C], behaviour [E]/[H] | Wraps |
 |---|---|
@@ -468,6 +488,19 @@ The service's own lifecycle methods use the same wrapper. A guard holds
 that every `override fun on…` of an adapter and every post to the handler
 goes through it.
 
+**As built (M3f): `MeshThread` is pure, and it is also the stop.**
+`MeshThread(running, steps, notice)`: `run { … }` drops the body once the
+thread has stopped; else runs it, and stops — with the notice — when it
+threw anything or when `running()` (the core's) is false after it.
+`stop(notice)` runs each of `steps` (the radio down, the flag and the copy
+cleared, the notification removed, the service ended), then `notice`
+unless it is the user's stop, **each step in its own `try`**: what made
+the stop — a dead adapter — throws again in the steps of it, and the flag
+and the notice must not depend on that. A stop is final: one `MeshThread`
+serves one start, and the service makes a new one for a start that comes
+after. Nothing caught is kept or rendered. The `HandlerThread`, and the
+guard that every callback is inside `run`, are M3g's.
+
 ### B.2 `MeshRadioCore`
 
 ```kotlin
@@ -491,6 +524,36 @@ class MeshRadioCore(engine: MeshEngineApi, port: RadioPort, clock: () -> Long) {
 }
 ```
 
+**As built (M3f), where the interface above could not be built as
+written or says too little:**
+
+- `RadioPort.connect(address: String)`, not `connect(peer: Long)`. The
+  port has no way from a peer's number to a device: `PeerTable` is the
+  core's. The core keeps the pending dial (address → the engine's number)
+  until the port answers with that address, so a peer forgotten meanwhile
+  is still bound to its link or reported failed.
+- `RadioPort.scan()` and `RadioPort.remind()` are added, and the core
+  holds `ScanPolicy` and `DeadlinePolicy`: the scan's restart and the
+  reminder are terms of the one wake the core asks for (§B.3, §B.5), and
+  a term somebody else must act on is a decision in an adapter. The
+  adapters start the server and the advertiser themselves, and the scan
+  only when told.
+- `MeshRadioCore.startRadio()` is added (Bluetooth on, the adapters up),
+  the counterpart of `stopRadio()`. A core is made with the radio down;
+  with Bluetooth off the service calls `onWake()` once, which arms the
+  deadline's wake.
+- `MeshRadioCore.onConnected(link)` is added: a central connected to the
+  server and is not a link yet. Without it §B.4's four unlinked
+  connections have no input. It is for inbound connections only: an
+  outgoing one has its own 25 s (§B.3). The adapter numbers links, inbound
+  ones from this call on.
+- `stopRadio()` asks nothing of the port but the deadline's wake: the
+  engine is told every link down and every pending dial failed, and the
+  adapters close their own objects wholesale (§B.6).
+- While the radio is down, sightings, connections and link-ups that still
+  arrive are dropped; the engine is not polled, and the wake asked for is
+  the reminder's or the deadline's alone.
+
 The engine's schedule runs here and nowhere else: no entry that holds a
 session runs an engine timer (§A.3), so a slot that fell due waits for
 `onWake` or the next radio event.
@@ -504,6 +567,20 @@ Every input ends in `pump()`:
    no longer in `PeerTable`.
 3. `port.wakeAt(engine.wakeInMs())`.
 
+**As built (M3f).** Step 1 is the first thing an input does, before its
+own engine call, not the first step of the pump after it (T-AUTO-4): with
+no time left an input makes that one call and nothing else, and once
+`running` is false an input makes none. `running` also goes false when
+`wakeInMs()` answers −1 (an engine that went in the middle of the input:
+a panic the shim caught) and when a poll answers bytes that are no output
+— then the engine is told every link down first. The re-post of step 2 is
+`wakeAt(0)`. The wake of step 3 is the earliest of the engine's, the next
+re-offer or give-up of a frame, the next cancel of an unlinked
+connection, the scan's restart and the reminder. What is done with a
+`Close` for a link that has a frame in flight is: closed at once (the
+engine queues a close behind its own `BYE`, and a `BYE` lost with the
+connection changes nothing for the peer, which sees the disconnect).
+
 - **`ready`** is the links that are up and have no frame in flight. One
   frame per link is in flight until its completion callback
   (`onCharacteristicWrite` for a central's write without response,
@@ -516,12 +593,20 @@ Every input ends in `pump()`:
   after 50 ms, three times; then the link is closed and `linkDown` told.
   Never a new poll for that link in between. A frame whose completion
   callback has not come in 10 s closes its link: a callback that never
-  arrives would otherwise leave the link not ready for ever.
+  arrives would otherwise leave the link not ready for ever. **As built
+  (M3f):** a completion that reports failure (`onSendDone(ok = false)`)
+  closes the link the same way — the text above does not say; and wherever
+  a link is dropped the engine is told before the port is asked to close,
+  so that a `close` that throws leaves the engine no link the table has
+  forgotten (found by `aRadioPortThatThrowsStopsTheRadioAndNothingEscapes`).
 - **Addresses never cross.** `PeerTable` numbers an advertiser when it is
   first seen; an inbound link is told with no peer, because a central's
   address is not the address it advertises under.
 - **Wake lock** only for `onFrame` and `onLinkUp`:
   `holdAwake(min(wakeInMs + 250, HOLD_CAP_MS))` (§G). Not for sightings.
+  **As built (M3f):** `wakeInMs` there is the engine's own, not the
+  earlier of the core's timers; and only for a frame of a link the table
+  holds and a link it admitted.
 
 ### B.3 Radio
 
@@ -590,7 +675,10 @@ Every input ends in `pump()`:
 Beside the engine's (§H): at most 4 devices connected and not yet linked,
 each cancelled 10 s after it connected; a fifth is cancelled at once. At
 most `max_outgoing` + `max_incoming` links in `MeshRadioCore`'s table (8,
-`eng:254-255`), since the engine closes what it does not admit.
+`eng:254-255`), since the engine closes what it does not admit. **As built
+(M3f):** a link beyond the eight is closed and the engine is not told of
+it (`aLinkBeyondTheEnginesEightIsClosed`); if it was one the engine had
+asked for, the engine is told the connect failed.
 
 ### B.5 Lifecycle, deadline and notices
 
@@ -608,6 +696,15 @@ most `max_outgoing` + `max_incoming` links in `MeshRadioCore`'s table (8,
   arm the alarm, start the radio if Bluetooth is on. `START_STICKY`.
   **[U]** whether a sticky restart may call `startForeground` on Android
   12+: reports disagree; the wrapper is the answer either way.
+  **As built (M3f):** the order is one pure function,
+  `StartPolicy.start(permission, engine, storedDeadline, wallClock,
+  foreground)`: no permission → a stop, with `foreground` not called and
+  the engine not touched; then `foreground()`; then the engine. It asks
+  for no engine when the stored deadline is not ahead (the text above
+  would call `resume` with nothing left and leave the refusal to Rust). It
+  answers the deadline copy to store, or null — a stop the service makes,
+  through `MeshThread.stop(notice = true)`. The session-less resume (Q-2)
+  is one `if` of it.
 - **The deadline is enforced by the engine**, read at every pump. The copy
   in `MeshPrefs` serves only a restart with no engine and the alarm. Like
   the session's own across a restart (`haven-core/SECURITY.md`,
@@ -621,7 +718,10 @@ most `max_outgoing` + `max_incoming` links in `MeshRadioCore`'s table (8,
   timer serves the engine on time.
 - **Reminder** when 30 minutes or less are left: one notification with
   **Keep on** (Q-3). **At the deadline** the service stops and the stopped
-  notice takes the reminder's id, so no Keep on outlives it.
+  notice takes the reminder's id, so no Keep on outlives it. **As built
+  (M3f):** `DeadlinePolicy` gives the reminder once, and again after a
+  Keep on took the time left back over 30 minutes; a service that starts
+  with less than that left gives it at its first input.
 - **Taps.** Keep on and the tap that opens the statistics sheet are
   `PendingIntent.getActivity` on `MainActivity`, each with an extra — never
   a broadcast that then starts the activity: an app targeting Android 12+
@@ -663,7 +763,10 @@ most `max_outgoing` + `max_incoming` links in `MeshRadioCore`'s table (8,
 every link is told down, GATT objects are closed, the notification reads
 "paused". On: server, advertiser and scan start again. The service stays
 in the foreground throughout (F-4), holds no wake lock and arms only the
-deadline alarm. The twelve hours keep running.
+deadline alarm. The twelve hours keep running. **As built (M3f):** "the
+deadline alarm" is the reminder's time while the reminder is still to
+come, then the deadline's: a paused mesh is reminded too. The engine is
+not polled meanwhile, so none of its timers wakes the phone.
 
 ### B.7 Notice copy
 
@@ -708,7 +811,12 @@ are declared already.
 Held by `check_mesh_radio.sh` [G] — the main manifest names no Bluetooth
 permission, no `connectedDevice` and no mesh component — and in
 `build-check.yml` [C]: the merged manifest of the default build has none
-of them, and the mesh lane's flag-on build has all.
+of them, and the mesh lane's flag-on build has all. **As built (M3f):**
+the guard reads every `AndroidManifest.xml` under `app/src` but
+`src/mesh/`'s — main, debug and profile today — and fails the words
+`bluetooth`, `connectedDevice` and `mesh` in any case, a comment
+included. The mesh's own manifest, the Gradle switch and the [C] half are
+M3g's.
 
 Play requires each foreground-service type to be declared in the Console
 with a description and a video [A13 — **[U]**, the page could not be
@@ -722,7 +830,12 @@ other (Q-12).
 build. A caught `Throwable` is dropped, never rendered; a
 `BluetoothDevice` is never interpolated. `check_native_log_allowlist.sh`
 already fails any unlisted call; `check_mesh_radio.sh` adds that the
-allowlist has no row under `mesh/`.
+allowlist has no row under `mesh/`. **As built (M3f):** it also fails, in
+any `.kt` under a `mesh/` directory of `app/src`, a `Log.`, `Timber.`,
+`println(`, `print(`, `printStackTrace(`, `System.out`, `System.err`,
+`Logger` or `logging`, in every build type, and a canonical UUID there or
+in the JVM tests. `aRadioPortThatThrowsStopsTheRadioAndNothingEscapes`
+plants an address in what is thrown and reads both standard streams empty.
 
 **Android logs for it (F-13).** The framework's GATT classes, running in
 Haven's process, write each peer's Bluetooth address to logcat at debug
@@ -742,6 +855,30 @@ Rule 15 gives here is the owner's to say: Q-10.
 [J], in `haven/android/app/src/test/kotlin/…/mesh/`, JUnit 4 and
 `kotlin-test` (test-only Gradle dependencies; no Robolectric), against a
 fake `MeshEngineApi` and a recording `RadioPort`.
+
+**As built (M3f).** The tests are in
+`haven/android/mesh-jvm/src/test/kotlin/…/mesh/core/`, in the JVM build of
+§B.1, not under `app/src/test`: the app's own unit-test source set stays
+empty and the app gains no dependency. Run with
+`bash scripts/ci/run_mesh_jvm_tests.sh` (a JDK and Gradle; no Android SDK),
+which fails unless every test ran. The clock is injected; no test sleeps or
+reads the time. Every test of the table exists under its name, and the
+guard pins the names. Three rows are narrower than the table has them,
+because the other half is an adapter's: the "stopped notice" and "the flag
+is cleared" of `aRadioPortThatThrows…` and `aStartWithout…` are a
+`MeshThread`'s steps and notice, recorded by the test — that the service
+hands it the real ones is M3g's; `theAdvertisementIsTheServiceUuidAlone`
+holds what has a switch (no name, no power level, not discoverable,
+connectable, no timeout) — that no service data and no scan response are
+set has no constant to hold it, and is the advertiser adapter's source;
+`theRadioModesComeFromOneSite` pins the values, the one site is the
+guard's. Added: `theEngineInterfaceIsTheNineExportsOfTheFixture` (§A.6),
+`thePeerTableHoldsSixtyFourAndForgetsTheLeastRecentlySeen`,
+`aLinkBeyondTheEnginesEightIsClosed` (§B.4),
+`aLinkTheEngineClosesIsClosedAndALinkLostIsToldDown`,
+`anEngineThatAnswersNoWakeIsGone`,
+`aStopTheUserDidNotMakeIsAStopWithTheNoticeAndIsFinal` (§B.5) and
+`anEngineWhoseTimeIsUpStopsTheServiceWithTheNotice` (T-AUTO-2).
 
 | Test | Proves | Mutation it kills |
 |---|---|---|
@@ -771,7 +908,12 @@ receiver not exported, `neverForLocation`; the main manifest has none of
 it (§B.8); the pure classes import no `android.`; `MeshRadioConstants` is
 the one file naming a scan, advertise or priority constant; every adapter
 callback and handler post goes through `MeshThread.run`; no canonical
-UUID.
+UUID. **As built (M3f):** in the guard — no manifest of a flag-off build
+names the mesh (§B.8), no log call and no UUID (§B.9), the one site of the
+modes, no allowlist row, and the JVM tests by name with none ignored. Not
+in it: that the pure classes import no `android.`, which the compiler
+holds (§B.1); the mesh manifest's own shape and the `MeshThread.run`
+check, which have nothing to read until M3g.
 
 **Not proved by any of this:** every adapter. That `connectGatt`, the GATT
 server, advertising and scanning behave as §B.3 says is [E] if the netsim
@@ -1130,7 +1272,7 @@ ui-ux-reviewer before M3e lands (plan §10).
 
 | Lane | Proves | Status |
 |---|---|---|
-| `android-unit.yml` (new; stage 1 of `ci.yml`) — `./gradlew :app:testDebugUnitTest` | every [J] test; and that all Kotlin compiles | feasible **[U]**: cargokit hooks the Rust build to `merge…NativeLibs` only (`haven/rust_builder/cargokit/gradle/plugin.gradle:166-170`), which a unit-test task does not need — read, not run |
+| `android-unit.yml` (new; stage 1 of `ci.yml`) — `./gradlew :app:testDebugUnitTest` | every [J] test; and that all Kotlin compiles | feasible **[U]**: cargokit hooks the Rust build to `merge…NativeLibs` only (`haven/rust_builder/cargokit/gradle/plugin.gradle:166-170`), which a unit-test task does not need — read, not run. **As built (M3f):** the lane does not build the app. It runs `scripts/ci/run_mesh_jvm_tests.sh` — `gradle test` in `haven/android/mesh-jvm` — on a JDK 21 with the Gradle distribution the app's wrapper pins, fetched and checked against the pinned SHA-256 (the tree has no `gradlew`). It proves every [J] test and that the pure package compiles with no Android; **not** that any other Kotlin compiles — that is `build-check.yml`'s, from M3g. The script was run where M3f was built; the workflow has never run |
 | `build-check.yml` (exists) + `nm` step | the nine JNI symbols are in the library [C] | feasible |
 | `cross-check.yml` (exists) | `mesh_jni.rs` compiles for Android [C] | feasible |
 | `repo-guards.yml` (exists) + one step | `check_mesh_radio.sh` | feasible; run here too |
@@ -1230,6 +1372,15 @@ vendor's Bluetooth stack. Battery. All [H], DEFERRED:
 (`docs/POWER_EFFICIENCY_PLAN.md` §2.5); every figure for this feature is
 **ESTIMATED** or absent, and `docs/POWER_MEASUREMENT.md` gains nothing.
 
+**As built (M3f).** `MeshRadioConstants` compiles without Android, so the
+four platform modes are held as the integers of the Android constants,
+each named in a comment beside it — `SCAN_MODE_LOW_POWER` 0,
+`ADVERTISE_MODE_LOW_POWER` 0, `ADVERTISE_TX_POWER_MEDIUM` 2,
+`CONNECTION_PRIORITY_LOW_POWER` 2, read off the platform's reference
+pages on 2026-11-12 — and an adapter passes them on unmapped, naming no
+platform constant itself (the guard). That the integers are the SDK's is
+proved by no compiler until M3g builds against it.
+
 | Choice (`MeshRadioConstants`) | Value | Basis |
 |---|---|---|
 | Scan | filtered, `SCAN_MODE_LOW_POWER` | the lowest duty the platform offers; 512 ms in 5.12 s, 10.24 s with the screen off (plan §2.3 [V]) |
@@ -1321,7 +1472,8 @@ the device's own log, the addresses it linked with.
 
 **Q-1. Open a draft pull request, and when?** Today no Kotlin can be
 compiled and no [J], [C] or [E] claim can be tested: CI runs only for pull
-requests to `main`.
+requests to `main`. (Since M3f the pure Kotlin compiles and [J] runs
+without CI; the rest stands, and M3g is the first unit written blind.)
 - *Now, with M3b:* `deny(unsafe_code)` over the whole crate and the
   Android-only shim get `cross-check.yml` — every platform's `cfg` code —
   before anything is built on them; later units get a compiler as they
@@ -1483,7 +1635,8 @@ wake lock in Doze (the review, on a mirror — [U] here, [H] for vendors).
 - Play's declaration: `support.google.com` [A13] and Bumble's pages
   `google.github.io` [A14] are outside this session's network.
 - That the Flutter tool hands Gradle the defines as designed, and AGP's
-  per-variant manifest API; that a Gradle unit-test task builds no Rust;
+  per-variant manifest API; that a Gradle unit-test task builds no Rust
+  (no longer asked: the lane of M3f builds no part of the app);
   grouping with the plugin's notification. (Settled by M3a and M3b: the
   codegen ignores a function that is not `pub` but lists it in a comment;
   `api.rs` compiles under `deny(unsafe_code)`.)
