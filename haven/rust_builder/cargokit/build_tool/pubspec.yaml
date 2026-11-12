@@ -13,6 +13,8 @@ environment:
 dependencies:
   # these are pinned on purpose because the bundle_tool_runner doesn't have
   # pubspec.lock. See run_build_tool.sh
+  # Haven note: it does now — build_tool_runner/pubspec.lock, which
+  # run_build_tool.sh enforces.
   logging: 1.2.0
   path: 1.8.0
   version: 3.0.0

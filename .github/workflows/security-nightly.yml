@@ -1,4 +1,5 @@
-# The nightly dependency scan: main, and the release users are running.
+# The nightly dependency scan: main, the release users are running, and the
+# workflows that build it.
 #
 # A push is scanned against the advisories known at that moment; an advisory
 # published tomorrow is invisible to it, and so is one against a lockfile that
@@ -8,7 +9,10 @@
 # latest published release was built from, with main's policy (ledger,
 # audit.toml, scanner pins), because a fix on main does not reach a user until
 # it ships. The tag gets no ledger liveness: its graph is not main's, so an
-# entry it does not match is not stale.
+# entry it does not match is not stale. And it runs zizmor's online audits over
+# main's workflows — a pinned action that is now known-vulnerable, a SHA no
+# branch or tag of its repository holds — which repo-guards.yml cannot, since
+# its zizmor runs offline so that a push's verdict is a property of the tree.
 #
 # Each scan job uploads its findings and its step outcomes, and the last job
 # turns them into issues (scripts/ci/file_security_issue.sh, whose header holds
@@ -164,7 +168,7 @@ jobs:
         run: |
           mapfile -t locks < <(find "${RUNNER_TEMP}/release-locks" -name Cargo.lock | sort)
           (( ${#locks[@]} )) || { echo "::error::the tag commits no Cargo.lock"; exit 2; }
-          bash scripts/ci/check_upstream_advisories.sh "${locks[@]}"
+          bash scripts/ci/check_upstream_advisories.sh --no-sdk "${locks[@]}"
 
       # The filer tells a finding from a scanner that never reached a verdict
       # by these outcomes: a failed gate must have filed a finding.
@@ -183,13 +187,74 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  workflow-audit:
+    name: Workflow audit (zizmor, online)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The online audits read the pinned actions' repositories: public reads.
+    permissions:
+      contents: read
+    steps:
+      - name: Findings file
+        id: findings
+        run: |
+          mkdir -p "${RUNNER_TEMP}/dependency-findings"
+          : >"${RUNNER_TEMP}/dependency-findings/findings.tsv"
+          echo "SECURITY_FINDINGS_OUT=${RUNNER_TEMP}/dependency-findings/findings.tsv" >>"${GITHUB_ENV}"
+
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      # setup-python's pip, as in repo-guards.yml: the image's system Python is
+      # PEP 668 externally managed.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+
+      - name: Install zizmor
+        id: install
+        run: |
+          set -euo pipefail
+          source scripts/ci/security_tools.env
+          printf 'zizmor==%s --hash=sha256:%s\n' "${ZIZMOR_VERSION}" "${ZIZMOR_WHEEL_SHA256}" > "${RUNNER_TEMP}/zizmor.txt"
+          pip install --no-deps --require-hashes --only-binary :all: -r "${RUNNER_TEMP}/zizmor.txt"
+
+      # The filer's --zizmor reads the exit code: a finding fails this step
+      # with a `zizmor:` line filed, an error fails it with none.
+      - name: Workflow audit (zizmor, online)
+        id: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rc=0
+          zizmor --min-severity low --format json .github/workflows >"${RUNNER_TEMP}/zizmor.json" || rc=$?
+          bash scripts/ci/file_security_issue.sh --zizmor "${rc}" "${RUNNER_TEMP}/zizmor.json"
+
+      - name: Keep the step outcomes with the findings
+        if: ${{ always() }}
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: printf '%s\n' "${STEPS}" >"${RUNNER_TEMP}/dependency-findings/steps.json"
+
+      - name: Upload the findings
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: dependency-findings-workflow-audit
+          path: ${{ runner.temp }}/dependency-findings/
+          retention-days: 7
+          if-no-files-found: error
+
   # `if: always()`: a red scan is exactly the night that has issues to file,
   # and a green one is the night that closes them. A missing artifact is
   # handed on as an empty directory, which the filer reads as a scan that did
   # not finish.
   file-issues:
     name: File, keep or close the dependency-security issues
-    needs: [main-audit, release-tag-scan]
+    needs: [main-audit, release-tag-scan, workflow-audit]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -216,6 +281,13 @@ jobs:
           name: dependency-findings-release-tag
           path: ${{ runner.temp }}/findings/release-tag
 
+      - name: Download the workflow audit's findings
+        continue-on-error: true
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: dependency-findings-workflow-audit
+          path: ${{ runner.temp }}/findings/workflow-audit
+
       - name: File, keep or close
         env:
           GH_TOKEN: ${{ github.token }}
@@ -223,8 +295,10 @@ jobs:
           MAIN_RESULT: ${{ needs.main-audit.result }}
           TAG: ${{ needs.release-tag-scan.outputs.tag }}
           TAG_RESULT: ${{ needs.release-tag-scan.result }}
+          WORKFLOW_RESULT: ${{ needs.workflow-audit.result }}
           FILE: ${{ github.ref == 'refs/heads/main' && '--file' || '' }}
         run: |
           bash scripts/ci/file_security_issue.sh ${FILE:+"${FILE}"} \
             --scan "${GITHUB_REF_NAME}" "${RUNNER_TEMP}/findings/main" "${MAIN_RESULT}" \
-            --scan "${TAG}" "${RUNNER_TEMP}/findings/release-tag" "${TAG_RESULT}"
+            --scan "${TAG}" "${RUNNER_TEMP}/findings/release-tag" "${TAG_RESULT}" \
+            --scan "${GITHUB_REF_NAME}" "${RUNNER_TEMP}/findings/workflow-audit" "${WORKFLOW_RESULT}"

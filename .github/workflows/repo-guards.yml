@@ -464,6 +464,12 @@
 #     carries another scheme, signer count or certificate, or loses its 16 KB
 #     alignment never reaches the Release.
 #
+#   Security issue filing             scripts/ci/file_security_issue.sh
+#     security-nightly.yml's last job files one issue per finding and closes
+#     it when the finding is gone. The fixtures, behind a stateful gh stub,
+#     prove a recurring finding is never filed twice, and that a scanner which
+#     crashed, did not run or left no artifact closes nothing.
+#
 #   Release-notes ledger listing      scripts/ci/release_ledger_notes.sh
 #     The Release body lists every advisory the release ships acknowledged; a
 #     ledger it cannot read fails the release instead of printing a shorter
@@ -1519,6 +1525,10 @@ jobs:
       - name: Android signing self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/sign_android_release.sh --self-test
+
+      - name: Security issue filing self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/file_security_issue.sh --self-test
 
       - name: Release-notes ledger listing self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

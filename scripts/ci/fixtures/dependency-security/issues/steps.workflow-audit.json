@@ -1,0 +1,22 @@
+{
+  "findings": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "checkout": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "install": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "zizmor": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  }
+}

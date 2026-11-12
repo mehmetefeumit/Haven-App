@@ -144,6 +144,14 @@ jobs:
             *) echo "::error::audit.yml mode must be pr or full (got '${MODE}')"; exit 2 ;;
           esac
 
+      # security-nightly.yml files one issue per line the gates append here.
+      - name: Findings file
+        id: findings
+        run: |
+          mkdir -p "${RUNNER_TEMP}/dependency-findings"
+          : >"${RUNNER_TEMP}/dependency-findings/findings.tsv"
+          echo "SECURITY_FINDINGS_OUT=${RUNNER_TEMP}/dependency-findings/findings.tsv" >>"${GITHUB_ENV}"
+
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
@@ -160,6 +168,7 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
 
       - name: Known-vulnerable or malicious packages (osv-scanner, every lockfile)
+        id: osv
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/run_osv_gate.sh --unfiltered-json "${RUNNER_TEMP}/osv-unfiltered.json"
 
@@ -167,22 +176,48 @@ jobs:
       # effectiveUntil and to match a git-sourced crate; this proves both on
       # the pinned binary and today's database.
       - name: osv-scanner honours the ledger's expiry (pinned-binary fixture)
+        id: osv-binary
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/run_osv_gate.sh --binary-self-test
 
       - name: No retracted pub version is locked
+        id: pub
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_pub_retractions.sh
 
       - name: Upstream advisories against git pins and the SDK (full mode)
+        id: watcher
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.mode == 'full' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/ci/check_upstream_advisories.sh --matches-out "${RUNNER_TEMP}/watcher-matches.tsv"
 
       - name: Acknowledgement ledger holds
+        id: ledger
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: |
           args=(--mode "${MODE}" --osv-json "${RUNNER_TEMP}/osv-unfiltered.json")
           [[ "${MODE}" != full ]] || args+=(--watcher-matches "${RUNNER_TEMP}/watcher-matches.tsv")
           bash scripts/ci/check_ledger.sh "${args[@]}"
+
+      # security-nightly.yml tells a finding from a gate that never reached a
+      # verdict by these outcomes: a failed gate must have filed a finding.
+      - name: Keep the step outcomes with the findings
+        if: ${{ always() }}
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/dependency-findings"
+          printf '%s\n' "${STEPS}" >"${RUNNER_TEMP}/dependency-findings/steps.json"
+
+      # Only the nightly reads it, and it reads a missing artifact as a scan
+      # that did not finish, so an upload that fails never fails the gates.
+      - name: Upload the findings
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: dependency-findings-${{ inputs.mode }}
+          path: ${{ runner.temp }}/dependency-findings/
+          retention-days: 7
+          if-no-files-found: error

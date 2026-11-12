@@ -1,41 +1,105 @@
 # Security Policy
 
-## Supported Versions
-
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
-
-## Reporting a Vulnerability
-
-If you discover a security vulnerability, please report it privately by emailing the maintainers. Do not open a public issue.
+How to report a vulnerability, and which versions receive fixes, is in the
+repository's [security policy](../SECURITY.md).
 
 ## Known Vulnerabilities
 
-New advisories are surfaced by the weekly `cargo audit` CI job; document them
-here as they appear. Advisories deliberately *not* blocking CI (unreachable
-transitive code, informational warnings) are justified individually in
-`haven-core/.cargo/audit.toml`, not here. An ignore that stops matching any
-advisory fails `audit.yml` (`scripts/ci/check_audit_ignores_live.sh`) and is
-deleted rather than left to silence the advisory's return.
+`.github/workflows/audit.yml` scans every committed lockfile (each crate's
+`Cargo.lock`, both `pubspec.lock`s, `haven/ios/Gemfile.lock`) with scanners
+pinned in `scripts/ci/security_tools.env`:
+
+- **Every push and pull request** (`ci.yml`, `mode: pr`): cargo-audit (RustSec)
+  per `Cargo.lock`; osv-scanner, always `--offline`, over every lockfile
+  (RustSec, GitHub-reviewed advisories and OpenSSF malicious packages, git
+  sources matched by name and version; `scripts/ci/run_osv_gate.sh`); and the
+  pub retraction gate (`check_pub_retractions.sh`).
+- **Every release** (`release-build.yml`'s `dependency-audit`, `mode: full`):
+  run fresh at the tag, never replayed from CI's verdict, and every build,
+  signing and publishing job needs it. `full` adds the upstream-advisory
+  watcher (`check_upstream_advisories.sh`): no scanner matches a git-pinned
+  crate, and an advisory published in a repository reaches no database unless
+  GitHub reviews it, so it reads the advisories of every git source's
+  repository and its fork parent, and of Flutter and the Dart SDK.
+- **Nightly** (`security-nightly.yml`): `full` on main, and the scanners and
+  the git-pin watcher over the lockfiles the latest published release was
+  built from. Each finding is a `dependency-security` issue, closed only by a
+  run that reached every verdict and no longer reports it.
+- **In real time**: Dependabot alerts, once the owner enables them
+  ([Owner actions](#owner-actions-repository-settings)).
+
+The release builds exactly the scanned graph: cargokit builds with `--locked`,
+`flutter pub get --enforce-lockfile` checks every package's hash, cargokit's
+build tool resolves from its committed lock, and Fastlane installs from the
+frozen `Gemfile.lock`.
+
+**Acknowledgements.** An advisory shipped on purpose is an `[[IgnoredVulns]]`
+entry in `/osv-scanner.toml`, the one ledger, and `scripts/ci/check_ledger.sh`
+holds its rules on every run: a `reason` carrying `owner-decision: YYYY-MM-DD`,
+why the advisory is acceptable and what lifts it; an `effectiveUntil` at most
+90 days out (renewing is a new, re-dated decision; the nightly files an issue
+14 days ahead; an expired entry fails); a mirror entry for every
+`haven-core/.cargo/audit.toml` ignore, whose own ignores cannot expire; and an
+entry that no longer matches any advisory fails in `full` mode and warns on a
+pull request. A stale `audit.toml` ignore fails `audit.yml`
+(`check_audit_ignores_live.sh`). Either is deleted rather than left to silence
+the advisory's return. A malicious package or a retracted pub version is never
+acknowledgeable, and the GitHub Release body lists every acknowledged id with
+its expiry. Advisories are justified in the ledger and `audit.toml`; this
+section records the ones a reader needs to know about.
+
+### Open, release-blocking
+
+- **OpenMLS fork behind four upstream security fixes** — GHSA-gc79-23g3-8g52
+  (High), GHSA-94v4-rg25-x625, GHSA-p276-g3f3-wwgh, GHSA-rrmv-c79f-cf5r. MDK
+  v0.10.4 builds on `erskingardner/openmls@59e7d3b` (openmls 0.8.1), which
+  carries none of the fixes:
+  - **gc79**: unbounded recursion decoding nested extensions aborts the
+    process (fixed in 0.8.2 / 0.9.1). MDK's v0.16.0 release notes call it
+    reachable from a Welcome, GroupInfo, Proposal or Commit, and note that
+    anyone can gift-wrap a Welcome to a user. A process abort is not
+    catchable. Plausibly a remote DoS against Haven; not exploit-verified.
+  - **94v4**: an external commit whose remove-prior truncated the tree brings
+    the removed leaf back (fixed in 0.8.3 / 0.9.2).
+  - **p276**: a rejected private message burns a generation of its sender's
+    ratchet, blocking that sender's later messages (fixed in 0.8.3).
+  - **rrmv**: an out-of-bounds panic on malformed input (fixed in 0.9.0).
+
+  None is in the GitHub Advisory Database or RustSec, so cargo-audit,
+  osv-scanner and Dependabot cannot see them; the upstream-advisory watcher
+  does, and fails every release and nightly run until they are resolved. No
+  acknowledgement is recorded: that is the owner's decision, still pending.
+  The paths under the MDK pin rule (released tags only) are an MDK v0.10.x
+  patch release on a fork rev with the fixes, or the migration to MDK v0.16.0,
+  the first MDK tag on upstream `openmls@6100df3`, which carries all four.
 
 ### Open, non-blocking
 
+- **RUSTSEC-2026-0459** — SQLite before 3.54.0 can read uninitialised
+  page-cache memory when it opens a crafted database together with a `-wal`
+  file of a different page size. SQLCipher 4.17 (the pinned `libsqlite3-sys`
+  0.38.1 from `rusqlite@5ae7fdf`) bundles SQLite 3.53.3. **Acknowledged** in
+  the ledger (owner decision 2026-11-12): the vector is local — an attacker
+  must write both files inside Haven's sandbox for Haven to open them — the
+  stores are SQLCipher-encrypted, and Android backup is off
+  (`allowBackup=false`). `libsqlite3-sys` 0.39 does not fix it for SQLCipher
+  builds (its SQLCipher bundles SQLite 3.53.4). cargo-audit cannot see it
+  (git source); osv-scanner does. **What lifts it:** a SQLCipher release that
+  bundles SQLite ≥ 3.54.0.
 - **RUSTSEC-2026-0237** — `nostr-relay-builder` is **unmaintained**
   (informational; `patched = []`, so there is no version to move to). It is a
   dev-dependency of `haven-core` and of `haven/rust_builder`, a real dependency
   of `tooling/e2e/local-relay`, and a real dependency of `tooling/soak`
   (the Tier-1 soak rig, which embeds it to build the hermetic relays it breaks
-  on a schedule). It appears in four of the five audited lockfiles and is
+  on a schedule). It appears in four of the six audited `Cargo.lock`s and is
   measured non-blocking: `cargo audit` returns rc 0 and counts it among its
-  allowed warnings.
+  allowed warnings, and the osv gate prints it as a warning.
 
-  **No `audit.toml` ignore, deliberately.** `cargo audit`'s ignore list has no
-  expiry field, so an ignore is a silencing change with no end date and nothing
-  that would ever bring it back for review. The controls instead are: the
-  per-lockfile `cargo audit` step for every crate that resolves it (five steps
-  in `audit.yml` since the soak crate landed), this row, and the residual
-  recorded in `docs/SOAK_LANE.md`.
+  **No acknowledgement, deliberately.** An informational advisory blocks
+  nothing, and an acknowledgement exists only to let a blocking advisory
+  through, with an expiry; `cargo audit`'s ignore list has none. The controls
+  instead are: the per-lockfile `cargo audit` step for every crate that
+  resolves it, this row, and the residual recorded in `docs/SOAK_LANE.md`.
 
   **What lifts it:** `nostr-sdk` ≥ 0.45 subsumes the crate. The whole tree is
   pinned to 0.44 against MDK's pinned `nostr` types, so lifting this is a
@@ -44,6 +108,28 @@ deleted rather than left to silence the advisory's return.
   `scripts/ci/check_soak_test_only.sh` / `check_wire_proxy_test_only.sh` are
   what keep it that way.
 
+### Residuals: what the scans do not cover
+
+- **Android Maven dependencies** pulled in by Flutter plugins, and **iOS native
+  plugin dependencies** (CocoaPods / Swift packages): no committed lockfile,
+  so no scanner sees them.
+- **The Flutter engine and SDK**: releases build on current stable, the only
+  line Flutter patches, and the watcher reads Flutter's and Dart's published
+  advisories against it.
+- **Vendored C code**: RustSec rarely files a CVE against code a `-sys` crate
+  bundles (SQLCipher / SQLite above all) until someone reports it there.
+- **The window before an advisory exists** (a malicious release): narrowed by
+  the lockfiles, Dependabot's cooldowns and the retraction gate, not closed.
+- **`subosito/flutter-action`** is pinned by SHA but itself uses
+  `actions/cache@v5` by tag. The release jobs set `cache: false`; the
+  non-release lanes that keep its cache take that tag as it moves.
+- **iOS signing is not isolated.** Android's is: the build job holds no
+  signing secret, `android-sign` re-signs and verifies on a runner that has
+  built nothing, and only `android-publish` can write the Release. iOS signs
+  inside Xcode's export, so the Match certificate and the App Store Connect key
+  share the job that compiles every dependency. And the isolation protects the
+  Android key, not the APK: code a compromised dependency put into the build is
+  signed like the rest.
 ### Resolved
 
 - **The 2026-10-29 batch**, lockfile-only, with no manifest change, in every

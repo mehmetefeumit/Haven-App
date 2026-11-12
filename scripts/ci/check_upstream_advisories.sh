@@ -34,10 +34,13 @@
 # inside every release — because it calls third-party services.
 #
 # Usage:
-#   bash scripts/ci/check_upstream_advisories.sh [--matches-out <file>] [<Cargo.lock>...]
+#   bash scripts/ci/check_upstream_advisories.sh [--matches-out <file>] [--no-sdk] [<Cargo.lock>...]
 #       defaults to every committed Cargo.lock. --matches-out writes
 #       `<id>\t<pkg>@<ver>` for every in-range advisory, acknowledged or not,
-#       GHSA and CVE ids alike, for check_ledger.sh's liveness rule.
+#       GHSA and CVE ids alike, for check_ledger.sh's liveness rule. --no-sdk
+#       watches the git pins alone: the release-tag scan's, since the SDK
+#       advisories are about today's stable, which main's scan already reports,
+#       and a second report would be a second issue.
 #   bash scripts/ci/check_upstream_advisories.sh --self-test   # stubbed gh and curl
 #
 # SECURITY_FINDINGS_OUT, when set, gets one `watcher:<GHSA>:<pkg>@<ver>\t<summary>`
@@ -59,7 +62,8 @@ readonly VERSION_RE='^v?([0-9]+(\.[0-9]+)*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=14
+readonly SELF_TEST_FIXTURES=15
+WATCH_SDK=1
 
 log() {
   printf '\033[1;34m[check_upstream_advisories]\033[0m %s\n' "$*"
@@ -161,15 +165,17 @@ check() { # <matches-out|""> <Cargo.lock>...
     awk -F'\t' -v r="${repo}" -v p="$(tr '[:upper:]' '[:lower:]' <<<"${parent}")" '$1 == r { print p "\t" $2 "\t" $3 }' "${tmp}/git" >>"${tmp}/watch"
   done < <(cut -f1 "${tmp}/git" | sort -u)
 
-  local flutter dart
-  curl -fsS --retry 3 --retry-all-errors "${FLUTTER_RELEASES}" -o "${tmp}/releases.json" \
-    || { echo "ERROR: Flutter's release manifest did not answer" >&2; return 2; }
-  flutter="$(jq -r '.current_release.stable as $h | .releases[] | select(.hash == $h) | .version' "${tmp}/releases.json" 2>/dev/null | head -1)"
-  dart="$(jq -r '.current_release.stable as $h | .releases[] | select(.hash == $h) | .dart_sdk_version' "${tmp}/releases.json" 2>/dev/null | head -1)"
-  dart="${dart%% *}"
-  [[ "${flutter}" =~ ${VERSION_RE} && "${dart}" =~ ${VERSION_RE} ]] \
-    || { echo "ERROR: no current stable Flutter and Dart version in Flutter's release manifest" >&2; return 2; }
-  printf 'flutter/flutter\t*flutter\t%s\ndart-lang/sdk\t*dart\t%s\n' "${flutter}" "${dart}" >>"${tmp}/watch"
+  local flutter='' dart=''
+  if (( WATCH_SDK )); then
+    curl -fsS --retry 3 --retry-all-errors "${FLUTTER_RELEASES}" -o "${tmp}/releases.json" \
+      || { echo "ERROR: Flutter's release manifest did not answer" >&2; return 2; }
+    flutter="$(jq -r '.current_release.stable as $h | .releases[] | select(.hash == $h) | .version' "${tmp}/releases.json" 2>/dev/null | head -1)"
+    dart="$(jq -r '.current_release.stable as $h | .releases[] | select(.hash == $h) | .dart_sdk_version' "${tmp}/releases.json" 2>/dev/null | head -1)"
+    dart="${dart%% *}"
+    [[ "${flutter}" =~ ${VERSION_RE} && "${dart}" =~ ${VERSION_RE} ]] \
+      || { echo "ERROR: no current stable Flutter and Dart version in Flutter's release manifest" >&2; return 2; }
+    printf 'flutter/flutter\t*flutter\t%s\ndart-lang/sdk\t*dart\t%s\n' "${flutter}" "${dart}" >>"${tmp}/watch"
+  fi
   sort -u -o "${tmp}/watch" "${tmp}/watch"
 
   local acks bad=0 n=0 rc adv ghsa cve summary vrange vname target tver id until
@@ -227,7 +233,7 @@ check() { # <matches-out|""> <Cargo.lock>...
     printf '\033[1;31m[check_upstream_advisories] FAIL:\033[0m an upstream advisory above applies to what Haven ships. Move to a release that fixes it; an owner-decided, expiring entry in %s is the only other way past it.\n' "${LEDGER_REL}" >&2
     return 1
   fi
-  log "OK: $(cut -f1 "${tmp}/watch" | sort -u | wc -l) upstream repositories, ${n} published advisories; nothing unacknowledged in range (Flutter ${flutter}, Dart ${dart})."
+  log "OK: $(cut -f1 "${tmp}/watch" | sort -u | wc -l) upstream repositories, ${n} published advisories; nothing unacknowledged in range ($( (( WATCH_SDK )) && echo "Flutter ${flutter}, Dart ${dart}" || echo 'SDKs not watched'))."
 }
 
 committed_cargo_locks() {
@@ -304,6 +310,14 @@ EOF
     fi
   }
 
+  # The flag through main, as the release-tag scan passes it.
+  _no_sdk() {
+    local rc=0
+    main --no-sdk "$@" || rc=$?
+    ! grep -qF ':dart@' "${SECURITY_FINDINGS_OUT}" || return 3
+    return "${rc}"
+  }
+
   echo "check_upstream_advisories.sh --self-test"
   # <version>|<range>|<rc: 0 in, 1 out, 2 unreadable>
   _table() {
@@ -367,6 +381,10 @@ EOF
   _case "an unreachable Flutter release manifest is a misconfiguration" 2 "release manifest did not answer" \
     check "${tmp}/matches" "${lock}"
 
+  _serve GHSA-gc79-23g3-8g52; rm "${tmp}/serve/releases_linux.json"; cp "${fx}/advisories.dart-lang__sdk.json" "${tmp}/serve/"; _ledger
+  _case "--no-sdk reads no release manifest and no SDK advisory, and still the git pins'" 1 \
+    'watcher:GHSA-gc79-23g3-8g52:openmls@0.8.1' _no_sdk "${lock}"
+
   if (( fails )); then
     echo "self-test: FAILED" >&2
     return 1
@@ -380,10 +398,14 @@ EOF
 
 main() {
   local matches=''
-  case "${1:-}" in
-    --self-test) self_test; return ;;
-    --matches-out) matches="${2:?--matches-out needs a path}"; shift 2 ;;
-  esac
+  [[ "${1:-}" != --self-test ]] || { self_test; return; }
+  while (( $# )); do
+    case "$1" in
+      --matches-out) matches="${2:?--matches-out needs a path}"; shift 2 ;;
+      --no-sdk) WATCH_SDK=0; shift ;;
+      *) break ;;
+    esac
+  done
   (( $# > 0 )) || mapfile -t LOCKS < <(committed_cargo_locks)
   (( $# > 0 )) && LOCKS=("$@")
   check "${matches}" "${LOCKS[@]}"

@@ -3,8 +3,8 @@
 # the finding is gone — and never closed on the word of a scan that did not
 # finish.
 #
-# security-nightly.yml scans main (audit.yml, `full`) and the latest release
-# tag's lockfiles. Each scan job uploads an artifact holding `findings.tsv` —
+# security-nightly.yml scans main (audit.yml, `full`), the latest release
+# tag's lockfiles and main's workflows (zizmor, online). Each scan job uploads an artifact holding `findings.tsv` —
 # the `<key>\t<summary>` lines every gate appends to SECURITY_FINDINGS_OUT — and
 # `steps.json`, the job's `toJSON(steps)`. A finding's issue is titled
 # `[dependency-security] <key> (<ref>)`: the key names the advisory, package
@@ -37,6 +37,12 @@
 # public advisory data, which goes in a fenced block with its backticks
 # replaced, so it can neither mention anyone nor break out of the block.
 #
+# --zizmor turns zizmor's JSON report into `zizmor:<rule>:<workflow file>`
+# findings for the workflow-audit job, and reads its exit code: 0 is no
+# finding, 11-14 are findings by severity, and anything else (1 error, 2 bad
+# arguments, 3 no input, every reserved code) is a zizmor that reached no
+# verdict, which files no finding, so the filer reads the night as incomplete.
+#
 # It also prepares the release scan, because that is where "the tag's
 # lockfiles" is defined: --latest-release prints the latest published
 # non-prerelease release's tag (nothing when the repository has none), and
@@ -49,6 +55,9 @@
 #       <ref> empty means the release scan found no release (only valid with
 #       result success). Without --file it prints what it would do and makes no
 #       `gh` call; security-nightly.yml passes --file on main only.
+#   file_security_issue.sh --zizmor <zizmor exit code> <its --format json report>
+#       appends to SECURITY_FINDINGS_OUT; exit 0 no finding, 1 findings,
+#       2 zizmor reached no verdict or its report is unreadable
 #   file_security_issue.sh --latest-release        # GH_TOKEN, GH_REPO
 #   file_security_issue.sh --materialise <tag checkout> <empty dest dir>
 #   file_security_issue.sh --self-test             # stubbed gh, temporary repos
@@ -79,19 +88,21 @@ readonly LIST_LIMIT=200
 readonly LOCKFILE_NAMES='Cargo.lock pubspec.lock Gemfile.lock'
 
 # Which finding a failed gate step must have filed, by step id (audit.yml's
-# `advisories` job and security-nightly.yml's release-tag-scan job).
+# `advisories` job and security-nightly.yml's release-tag-scan and
+# workflow-audit jobs).
 declare -rA GATE_PREFIXES=(
   [osv]='osv:'
   [pub]='retracted:'
   [watcher]='watcher:'
   [ledger]='ledger-'
   [cargo-audit]='osv:RUSTSEC-'
+  [zizmor]='zizmor:'
 )
 
 readonly RE_ID='[A-Za-z0-9][A-Za-z0-9-]*'
 readonly RE_PKG='[A-Za-z0-9][A-Za-z0-9._+-]*'
 readonly RE_VER='[0-9A-Za-z][0-9A-Za-z.+~-]*'
-readonly RE_KEY="^((osv|watcher):${RE_ID}:${RE_PKG}@${RE_VER}|retracted:${RE_PKG}@${RE_VER}|ledger-(expiring|expired|stale):${RE_ID})$"
+readonly RE_KEY="^((osv|watcher):${RE_ID}:${RE_PKG}@${RE_VER}|retracted:${RE_PKG}@${RE_VER}|ledger-(expiring|expired|stale):${RE_ID}|zizmor:${RE_ID}:[A-Za-z0-9][A-Za-z0-9._-]*)$"
 readonly RE_REF='^[A-Za-z0-9][A-Za-z0-9._+/-]{0,99}$'
 readonly RE_TAG='^[A-Za-z0-9][A-Za-z0-9._+-]{0,99}$'
 readonly RE_STEP='^[A-Za-z_][A-Za-z0-9_-]{0,99}$'
@@ -99,7 +110,7 @@ readonly RE_MANAGED='^\[dependency-security\] [^ ()]+ \([^ ()]+\)$'
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=29
+readonly SELF_TEST_FIXTURES=38
 
 # stdout is --latest-release's answer, so everything else goes to stderr.
 log() {
@@ -194,6 +205,8 @@ remedy() { # <key>
       printf '%s\n' "Re-lock to a version that is not retracted. A retraction is never acknowledgeable: a non-retracted version always exists." ;;
     ledger-stale:*)
       printf '%s\n' "Remove the entry from \`osv-scanner.toml\` (and its mirror in \`haven-core/.cargo/audit.toml\`): it matches nothing the scanners report, and would silence the advisory if it came back." ;;
+    zizmor:*)
+      printf '%s\n' "Fix the workflow as the rule's page says. Accepting the finding instead means an ignore for this file in \`.github/zizmor.yml\`, with its reason." ;;
     ledger-*)
       printf '%s\n' "Re-decide the acknowledgement in \`osv-scanner.toml\`: lift it by updating the lockfile, or renew it with a new \`owner-decision\` date and an \`effectiveUntil\` at most 90 days out." ;;
   esac
@@ -201,10 +214,11 @@ remedy() { # <key>
 
 compose() { # <title> <body file>
   local title="$1" key="${KEY_OF[$1]}" ref="${REF_OF[$1]}" summary="${SUMMARY_OF[$1]}"
-  local kind="${key%%:*}" rest="${key#*:}" advisory='' package=''
+  local kind="${key%%:*}" rest="${key#*:}" advisory='' package='' rule='' workflow=''
   case "${kind}" in
     osv|watcher) advisory="${rest%%:*}"; package="${rest#*:}" ;;
     retracted) package="${rest}" ;;
+    zizmor) rule="${rest%%:*}"; workflow="${rest#*:}" ;;
     *) advisory="${rest}" ;;
   esac
   summary="$(LC_ALL=C tr -d '\000-\010\013-\037\177' <<<"${summary//\`/\'}")"
@@ -213,6 +227,7 @@ compose() { # <title> <body file>
     printf -- '- Finding: `%s`\n' "${key}"
     [[ -z "${advisory}" ]] || printf -- '- Advisory: `%s`\n' "${advisory}"
     [[ -z "${package}" ]] || printf -- '- Package: `%s` version `%s`\n' "${package%@*}" "${package##*@}"
+    [[ -z "${rule}" ]] || printf -- '- Rule: `%s` (https://docs.zizmor.sh/audits/#%s)\n- Workflow: `.github/workflows/%s`\n' "${rule}" "${rule}" "${workflow}"
     printf -- '- Ref: `%s`\n' "${ref}"
     printf -- '- Run: %s\n\n' "${RUN_URL}"
     printf 'Scanner summary:\n\n```text\n%s\n```\n\n' "${summary:0:400}"
@@ -314,6 +329,35 @@ run() {
 }
 
 # ---------------------------------------------------------------------------
+# The workflow audit's findings.
+# ---------------------------------------------------------------------------
+zizmor_findings() { # <zizmor exit code> <json report>
+  local rc="$1" report="$2" lines n=0 key line
+  [[ -n "${SECURITY_FINDINGS_OUT:-}" ]] || refuse "--zizmor appends to SECURITY_FINDINGS_OUT, which is not set"
+  [[ "${rc}" =~ ^(0|1[1-4])$ ]] || refuse "zizmor exited ${rc}: an error, not a verdict"
+  # One line per finding, keyed by its primary location's file; a finding
+  # with none cannot be keyed, so the report is unreadable.
+  lines="$(jq -r 'if type == "array" then .[] else error end
+      | (first(.locations[]? | select(.symbolic.kind == "Primary")) // error) as $at
+      | ($at.symbolic.key.Local.verbatim_path | if type == "string" then split("/") | last else error end) as $file
+      | ["zizmor:\(.ident):\($file)", "\(.desc) (\(.determinations.severity)): \($at.concrete.feature // "" | .[:200])"] | @tsv' \
+      "${report}" 2>/dev/null)" || refuse "zizmor's report is unreadable"
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    key="${line%%$'\t'*}"
+    [[ "${key}" =~ ${RE_KEY} ]] || refuse "a zizmor finding whose key is off its shape"
+    n=$(( n + 1 ))
+  done <<<"${lines}"
+  # The exit code and the report must agree, or neither is a verdict.
+  [[ "${rc}" == 0 ]] && (( n == 0 )) && { log "zizmor: no finding"; return 0; }
+  [[ "${rc}" != 0 ]] && (( n > 0 )) || refuse "zizmor exited ${rc} with ${n} finding(s) in its report"
+  printf '%s\n' "${lines}" >>"${SECURITY_FINDINGS_OUT}"
+  sed 's/\t/ — /; s/^/  /' <<<"${lines}" >&2
+  log "zizmor: ${n} finding(s)"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Preparing the release scan.
 # ---------------------------------------------------------------------------
 latest_release() {
@@ -354,8 +398,9 @@ materialise() { # <tag checkout> <empty dest dir>
 }
 
 # ---------------------------------------------------------------------------
-# Self-test. steps.*.json are in the shape of the `toJSON(steps)` the two scan
-# jobs save; findings.tsv holds one line of each kind the gates write.
+# Self-test. steps.*.json are in the shape of the `toJSON(steps)` the three
+# scan jobs save; findings.tsv holds one line of each kind the gates write, and
+# zizmor.json is zizmor 1.31.1's own report on two fixture workflows.
 # ---------------------------------------------------------------------------
 self_test() {
   local fx="${REPO_ROOT}/scripts/ci/fixtures/dependency-security/issues" tmp checked=0 fails=0
@@ -435,11 +480,15 @@ STUB
   _scan "${main}" steps.main.json '.osv.outcome = "failure" | .pub.outcome = "failure" | .watcher.outcome = "failure"' "${fx}/findings.tsv"
   _scan "${rel}" steps.release-tag.json '.osv.outcome = "failure"' "${tmp}/osv.tsv"
   _scan "${clean}" steps.main.json .
+  local zrc=0 wa="${tmp}/wa"
+  : >"${tmp}/zizmor.tsv"
+  SECURITY_FINDINGS_OUT="${tmp}/zizmor.tsv" bash "${self}" --zizmor 14 "${fx}/zizmor.json" >/dev/null 2>&1 || zrc=$?
+  _scan "${wa}" steps.workflow-audit.json '.zizmor.outcome = "failure"' "${tmp}/zizmor.tsv"
 
   echo "file_security_issue.sh --self-test"
   echo "--- filing ---"
   _night
-  _run 0 --file --scan main "${main}" failure --scan v0.1.13 "${rel}" failure
+  _run 0 --file --scan main "${main}" failure --scan v0.1.13 "${rel}" failure --scan main "${wa}" failure
   _check "each finding is filed once, per ref, under its exact title" \
     test "$(_titles)" == "$(sort "${fx}/expected-titles.txt")"
   _check "...labelled dependency-security, closing nothing" \
@@ -452,10 +501,12 @@ STUB
     _contains "${body}" 'a `reason` carrying `owner-decision: YYYY-MM-DD`, why it is acceptable and what lifts it, and an `effectiveUntil` at most 90 days out'
   _fenced() { [[ "$(grep -c '^```' "$1")" == 2 ]] && _contains "$1" "x ''' @someone '''"; }
   _check "a summary's backticks cannot leave its fenced block" _fenced "$(_body_of GHSA-gc79-23g3-8g52)"
+  _check "a workflow finding's body names the rule, its page and the workflow" \
+    _contains "$(_body_of '- Rule: `template-injection`')" "$(printf -- '- Rule: `template-injection` (https://docs.zizmor.sh/audits/#template-injection)\n- Workflow: `.github/workflows/scan.yml`')"
 
   sed 's/\t.*/\tanother summary, another night/' "${fx}/findings.tsv" >"${main}/findings.tsv"
   : >"${calls}"
-  _run 0 --file --scan main "${main}" failure --scan v0.1.13 "${rel}" failure
+  _run 0 --file --scan main "${main}" failure --scan v0.1.13 "${rel}" failure --scan main "${wa}" failure
   _check "a second night, summaries changed, files nothing more and comments nowhere" \
     test "$(_count '^issue create')-$(_count '^issue comment')-$(_titles | wc -l)" == "0-0-${want_n}"
 
@@ -524,6 +575,29 @@ STUB
   _run 0 --scan main "${main}" failure
   _check "without --file nothing reaches gh" test ! -s "${calls}"
 
+  echo "--- the workflow audit's findings ---"
+  _check "--zizmor files one finding per zizmor finding, keyed by rule and workflow file" \
+    test "${zrc}|$(cut -f1 "${tmp}/zizmor.tsv" | tr '\n' ' ')|$(head -1 "${tmp}/zizmor.tsv" | cut -f2)" \
+      == "1|zizmor:unpinned-uses:other.yml zizmor:template-injection:scan.yml zizmor:unpinned-uses:scan.yml zizmor:unpinned-uses:scan.yml |unpinned action reference (High): actions/setup-python@v6"
+  _zizmor() { # <want rc> <zizmor exit code> <report>: a finding only when it says so
+    : >"${tmp}/z.tsv"
+    SECURITY_FINDINGS_OUT="${tmp}/z.tsv" _run "$1" --zizmor "$2" "$3"
+    [[ "$1" == 1 || ! -s "${tmp}/z.tsv" ]]
+  }
+  printf '[]\n' >"${tmp}/empty.json"; printf 'not json\n' >"${tmp}/garbled.json"
+  jq '.[0].locations = []' "${fx}/zizmor.json" >"${tmp}/nowhere.json"
+  _check "zizmor's exit 0 over an empty report is no finding" _zizmor 0 0 "${tmp}/empty.json"
+  _no_verdict() { local c; for c in 1 2 3 10 15 139; do _zizmor 2 "${c}" "${fx}/zizmor.json" || return 1; done; }
+  _check "every other exit code (an error, bad arguments, no input, a reserved code) is no verdict and files nothing" _no_verdict
+  _check "a findings exit code over an empty report is no verdict" _zizmor 2 13 "${tmp}/empty.json"
+  _check "...nor exit 0 over a report with findings" _zizmor 2 0 "${fx}/zizmor.json"
+  _check "an unreadable report is no verdict" _zizmor 2 14 "${tmp}/garbled.json"
+  _check "a finding with no primary location cannot be keyed: no verdict" _zizmor 2 14 "${tmp}/nowhere.json"
+  _scan "${tmp}/zcrash" steps.workflow-audit.json '.zizmor.outcome = "failure"' "${tmp}/osv.tsv"
+  _run 1 --scan main "${tmp}/zcrash" failure
+  _check "a failed zizmor step with no zizmor finding did not reach a verdict" \
+    grep -qF 'step `zizmor` failed without filing a finding' "${tmp}/out"
+
   echo "--- refusals ---"
   _night
   _label() { STUB_CREATE_FAIL=1 _run 2 --file --scan main "${main}" failure; grep -qF "does the label 'dependency-security' exist?" "${tmp}/out"; }
@@ -571,6 +645,7 @@ STUB
 
 case "${1:-}" in
   --self-test) self_test ;;
+  --zizmor) (( $# == 3 )) || refuse "usage: --zizmor <zizmor exit code> <json report>"; zizmor_findings "$2" "$3" ;;
   --latest-release) latest_release ;;
   --materialise) (( $# == 3 )) || refuse "usage: --materialise <tag checkout> <empty dest dir>"; materialise "$2" "$3" ;;
   *) run "$@" ;;

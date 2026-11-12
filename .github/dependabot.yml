@@ -1,7 +1,11 @@
 # Dependabot configuration for Haven.
 #
 # Encodes the project's "sweet-spot" dependency policy:
-#   - security advisories: 0-day cooldown (bypass)
+#   - security advisories: no cooldown (`cooldown` applies to version updates
+#     only) — but Dependabot opens security PRs only once the owner enables
+#     Dependabot alerts and security updates in the repository settings
+#     (haven-core/SECURITY.md, "Owner actions"); until then audit.yml's
+#     scanners are the only advisory signal
 #   - patch (z): 7-day cooldown
 #   - minor (y): 14-day cooldown
 #   - major (X): 30-day cooldown + manual review (we do not auto-merge majors)
@@ -17,10 +21,10 @@ version: 2
 
 updates:
   # ---------------------------------------------------------------------------
-  # Rust (haven-core)
+  # Rust (haven-core, and haven/rust_builder — the lockfile that ships)
   # ---------------------------------------------------------------------------
   - package-ecosystem: "cargo"
-    directory: "/haven-core"
+    directories: ["/haven-core", "/haven/rust_builder"]
     schedule:
       interval: "weekly"
       day: "monday"
@@ -32,20 +36,21 @@ updates:
       semver-major-days: 30
       semver-minor-days: 14
       semver-patch-days: 7
-      # Security advisories always bypass cooldown — no entry needed; this is
-      # Dependabot's documented default behavior for `security-updates`.
+      # Security updates never wait: Dependabot applies `cooldown` to version
+      # updates only.
     groups:
       # Patch updates can land together — low review burden.
       patch-updates:
         applies-to: version-updates
         update-types: ["patch"]
-      # Minor updates grouped per ecosystem area for focused review.
+      # Minor updates grouped per ecosystem area for focused review. MDK's
+      # crates and the OpenMLS fork are git dependencies, pinned in
+      # scripts/ci/mdk_pins.env and moved by hand to a released MDK tag, so no
+      # name pattern here is meant for them.
       crypto-and-protocol:
         applies-to: version-updates
         patterns:
-          - "mdk-*"
           - "nostr*"
-          - "openmls*"
           - "rustls*"
           - "rustls-webpki"
           - "ring"
@@ -57,8 +62,17 @@ updates:
           - "secp256k1*"
         update-types: ["minor", "patch"]
     ignore:
-      # MDK pin (93ae324) controls these transitive versions; only update when
-      # we deliberately bump the MDK rev in Cargo.toml. Auto-PRs would conflict.
+      # The MDK pin (scripts/ci/mdk_pins.env) fixes these: nostr/nostr-sdk must
+      # stay on the line MDK's types are built against, rusqlite and the
+      # SQLCipher libsqlite3-sys are exact pins with a git patch, and all four
+      # must resolve identically in haven-core, rust_builder and tooling/soak
+      # (check_lockfile_universe.sh), which a per-directory PR cannot do. They
+      # move by hand, in all three roots at once.
+      #
+      # An `ignore` also applies to security updates: Dependabot opens no
+      # security PR for these four. Its alerts are unaffected (dependabot.yml
+      # does not change alerts), and audit.yml fails on any advisory against
+      # them on every push.
       - dependency-name: "rusqlite"
       - dependency-name: "libsqlite3-sys"
       - dependency-name: "nostr"
@@ -99,6 +113,28 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "latlong2"
         update-types: ["version-update:semver-major"]
+
+  # ---------------------------------------------------------------------------
+  # Ruby (Fastlane, which runs beside the iOS signing secrets; Gemfile.lock is
+  # installed frozen)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "bundler"
+    directory: "/haven/ios"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 7
+    groups:
+      patch-updates:
+        applies-to: version-updates
+        update-types: ["patch"]
 
   # ---------------------------------------------------------------------------
   # GitHub Actions
