@@ -1398,21 +1398,29 @@ jobs:
         run: bash scripts/ci/check_mesh_seams.sh --self-test
 
       # The mesh's radio reaches Rust through JNI exports that decide nothing
-      # (docs/BLUETOOTH_MESH_M3_DESIGN.md §A.6): each is one radio entry called
-      # under the panic guard — an unwind out of one would abort the process
-      # that also publishes to relays — the exports are the ones pinned in
-      # fixtures/mesh_radio_exports.txt, the shim calls nothing of Java's, and
-      # the bridge crate writes unsafe in the generated bridge and the shim
-      # alone, under its own deny.
+      # (docs/BLUETOOTH_MESH_M3_DESIGN.md §A.6). The crate's unsafe_code deny
+      # is lifted for the file that holds them, so there the compiler checks
+      # nothing and this guard reads every line: uses and the exports pinned
+      # in fixtures/mesh_radio_exports.txt, each one call that hands its
+      # parameters on to mesh_radio.rs. There, under the deny, each call is
+      # one radio entry under the panic guard — an unwind out of an export
+      # would abort the process that also publishes to relays — and calls
+      # nothing of Java's. Nowhere else in the bridge crate is unsafe, extern
+      # or an exporting attribute written.
       - name: Mesh radio
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mesh_radio.sh
 
-      # Plants unsafe, no_mangle and an ABI string outside the two files, the
-      # deny removed and the allowance widened or moved, an export that calls
-      # its entry bare, twice, or calls something else, a symbol that is no
-      # method of MeshNative, an export added, missing, renamed or retyped
-      # against the fixture, and a call into Java or state kept in the shim.
+      # Plants unsafe, extern with and without an ABI string, no_mangle,
+      # export_name and link_section outside the two files; the deny removed
+      # and the allowance widened or moved; in the exports' file a second way
+      # to export a symbol, a function, a module, a static, a cfg, a macro, a
+      # tests module, and an export that does anything but forward its own
+      # parameters in order; an export added, missing, renamed or retyped
+      # against the fixture; a call that makes its entry bare, twice, beside
+      # something else, or makes another's; a call into Java by method or by
+      # path, a JNIEnv under a second name, state kept between calls; and code
+      # under a second cfg(test) or behind the tests the guard stops at.
       - name: Mesh radio guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mesh_radio.sh --self-test

@@ -13268,8 +13268,8 @@ pub struct MeshDriveFfi {
 // session and nothing else — so each checks the deadline and applies the
 // hand-off first, reads the clock here, and can reach no session, key or
 // store (Security Rule 14) — but `radio_resume`. A link and a peer are the
-// radio's own numbers, never an address. Their one caller is Android's JNI
-// shim (`mesh_jni.rs`), each through `radio_guarded`.
+// radio's own numbers, never an address. Their one caller is `mesh_radio.rs`
+// — what Android's JNI exports forward to — each through `radio_guarded`.
 
 /// The longest frame a radio carries: one ATT attribute value.
 pub(crate) const RADIO_MAX_FRAME: usize = 512;
@@ -13449,7 +13449,7 @@ pub(crate) fn radio_wake_in_ms() -> Option<u64> {
     })
 }
 
-/// One radio entry as the JNI shim makes it: `call`'s answer, or `none` —
+/// One radio entry as a JNI export makes it: `call`'s answer, or `none` —
 /// what that entry answers with no engine — when it panicked.
 ///
 /// An unwind out of an `extern` function aborts the process, and the process
@@ -26020,6 +26020,108 @@ mod mesh_ffi_tests {
         );
     }
 
+    /// The seven calls of the radio's service that hand over no array, made
+    /// as their JNI exports make them — on Java's own types — against the
+    /// engine: each reaches its own entry, each argument in its place and
+    /// each answer the right way round. No engine is no time left and a wake
+    /// of −1, and a start answers whether one runs. A sighting is of its
+    /// peer at its strength, and the link the dial made is under its own
+    /// number, to that peer, this phone the one that dialled: the attempt at
+    /// that peer is over, so the next is dialled. A failed connect is that
+    /// peer's, a link reported down is that link, and a peer below zero is
+    /// no peer, here as for the peer of a link — no entry is made for it.
+    /// `receive` and `poll` read a Java array and need a JVM.
+    #[test]
+    fn the_calls_a_jni_export_forwards_reach_their_entries_each_argument_in_its_place() {
+        use crate::mesh_radio::{
+            connect_failed, left_ms, link_down, link_up, resume, sighting, wake_in_ms,
+        };
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.blocking_lock();
+        let bench = Bench::new();
+        let hour = i64::try_from(HOUR).expect("an hour of milliseconds");
+        // What the engine asks of the radio at its next tick.
+        let asked = || {
+            bench.pass(TICK);
+            polled(&[])
+        };
+        let dial = |peer| {
+            Some(Output::Connect {
+                peer: PeerRef(peer),
+            })
+        };
+
+        assert!(
+            left_ms() == 0 && wake_in_ms() == -1,
+            "with no engine there is time left, or something to wake for"
+        );
+        assert!(
+            resume(0) == 0 && resume(-hour) == 0 && untouched().is_none(),
+            "no time left, or less, started an engine or was answered as one"
+        );
+        assert!(
+            resume(hour) == 1 && resume(hour) == 1 && untouched().is_some(),
+            "a start was answered as none, or started nothing"
+        );
+        assert!(
+            left_ms() == hour && (0..=hour).contains(&wake_in_ms()),
+            "a running engine's time left or next wake is not what it has"
+        );
+
+        let held = MESH_HOLDS.get();
+        sighting(-7, -40);
+        connect_failed(-7);
+        assert_eq!(MESH_HOLDS.get(), held, "a peer below zero made an entry");
+        sighting(8, -120);
+        assert!(asked().is_none(), "a peer too weak to reach was dialled");
+        sighting(7, -40);
+        assert!(
+            asked() == dial(7),
+            "the peer sighted is not the one dialled"
+        );
+
+        link_up(3, 1, 517, 7);
+        assert!(
+            matches!(
+                polled(&[3]),
+                Some(Output::Frame {
+                    link: LinkId(3),
+                    ..
+                })
+            ),
+            "the link this phone made did not start its handshake under its number"
+        );
+        sighting(9, -40);
+        assert!(
+            asked() == dial(9),
+            "the link did not end the attempt at its peer: the next was not dialled"
+        );
+
+        sighting(10, -40);
+        assert!(asked().is_none(), "premise: one attempt at a time");
+        connect_failed(9);
+        assert!(
+            asked() == dial(10),
+            "the failed connect was not that peer's"
+        );
+
+        link_up(4, 1, 517, -1);
+        link_down(4);
+        assert!(
+            polled(&[4]).is_none(),
+            "a link reported down still has a frame to send"
+        );
+        link_up(5, 0, 517, -1);
+        assert!(
+            polled(&[5]).is_none(),
+            "a link this phone took started a handshake"
+        );
+        link_up(6, 1, 23, -1);
+        assert!(
+            polled(&[]) == Some(Output::Close { link: LinkId(6) }),
+            "a link whose MTU carries no frame was not answered with its close"
+        );
+    }
+
     /// Through the radio's entries alone, with no other engine call: a link
     /// this phone made and one it took, over the shortest frame a radio
     /// carries and the longest, are each handshaken and greeted, and what one
@@ -27197,21 +27299,31 @@ mod mesh_ffi_tests {
         &source[..at.expect("this module is declared")]
     }
 
-    /// The radio's JNI shim as it ships: its text before its own tests,
-    /// without its comments.
-    fn shim() -> String {
-        let source = include_str!("mesh_jni.rs");
-        let at = source.find(concat!("#[cfg(test)]\nmod", " tests {"));
-        let code = source[..at.expect("the shim's tests are declared")].lines();
+    /// `source` without its comment lines.
+    fn code_of(source: &str) -> String {
+        let code = source.lines();
         let code = code.filter(|line| !line.trim_start().starts_with("//"));
-        code.collect::<Vec<_>>().join("\n")
+        code.collect::<Vec<_>>().join("\n") + "\n"
+    }
+
+    /// The JNI exports' file, all of it: it has no tests of its own.
+    fn shim() -> String {
+        code_of(include_str!("mesh_jni.rs"))
+    }
+
+    /// What the JNI exports forward to, as it ships: before its own tests.
+    fn radio_calls() -> String {
+        let source = include_str!("mesh_radio.rs");
+        let at = source.find(concat!("#[cfg(test)]\nmod", " tests {"));
+        code_of(&source[..at.expect("its tests are declared")])
     }
 
     /// The engine's lock is never held across an `.await`: `MESH` is named
     /// by the one function that locks it, and every function that calls that
     /// one — and so holds the guard — is not `async`, where nothing can be
     /// awaited. The closure `with_mesh` runs under the lock is a plain one.
-    /// The JNI shim names neither the static nor anything that locks it.
+    /// Neither file of the JNI shim names the static or anything that locks
+    /// it.
     #[test]
     fn the_engine_lock_is_taken_only_where_nothing_can_be_awaited() {
         let source = shipped();
@@ -27263,7 +27375,7 @@ mod mesh_ffi_tests {
             !body_of(source, "fn mesh_run<T>(").contains("mesh_home"),
             "what runs under the engine's lock takes it again"
         );
-        let shim = shim();
+        let shim = shim() + &radio_calls();
         for name in ["MESH", "mesh_home", "with_mesh", "mesh_run", "mesh_take"] {
             assert!(
                 !shim.contains(name),
@@ -27291,8 +27403,9 @@ mod mesh_ffi_tests {
     /// `with_mesh` with no session, once, and through nothing else — but the
     /// one that starts an engine, which says so to `mesh_take`, and the
     /// three that touch no engine at all. The list of them is exactly this
-    /// one. Their caller, the JNI shim, names nothing of this file but them
-    /// and the frame bound, and nothing a session is reached by.
+    /// one. Their caller, what the JNI exports forward to, names nothing of
+    /// this file but them and the frame bound; the exports' own file names
+    /// nothing of it at all; and neither names what a session is reached by.
     /// This reads the entries' own text and no further: what a function they
     /// call does is held by the tests that run them.
     #[test]
@@ -27365,16 +27478,22 @@ mod mesh_ffi_tests {
             "something that is no radio entry enters the engine as one"
         );
 
-        let shim = shim();
-        let used = shim.split_once("use crate::api::{");
-        let (used, _) = (used.and_then(|(_, rest)| rest.split_once("};"))).expect("the shim's use");
+        let (shim, calls) = (shim(), radio_calls());
+        let used = calls.split_once("use crate::api::{");
+        let (used, _) = (used.and_then(|(_, rest)| rest.split_once("};"))).expect("the one use");
         let used: Vec<&str> = used.split(',').map(str::trim).collect();
         assert!(
             used.iter().all(|name| {
                 name.is_empty() || name.starts_with("radio_") || *name == "RADIO_MAX_FRAME"
-            }) && shim.matches("crate::").count() == 1
+            }) && calls.matches("crate::").count() == 1
+                && !calls.contains("super::"),
+            "the radio's calls reach something of the bridge that is no radio entry: {used:?}"
+        );
+        assert!(
+            shim.matches("crate::").count() == 1
+                && shim.contains("use crate::mesh_radio;")
                 && !shim.contains("super::"),
-            "the radio's shim reaches something of the bridge that is no radio entry: {used:?}"
+            "the JNI exports' file reaches something other than what it forwards to"
         );
         for banned in [
             "session",
@@ -27385,53 +27504,87 @@ mod mesh_ffi_tests {
             "block_on",
         ] {
             assert!(
-                !shim.to_lowercase().contains(banned),
+                !(shim.clone() + &calls).to_lowercase().contains(banned),
                 "the radio's shim names `{banned}`: it holds no session"
             );
         }
     }
 
-    /// Every JNI export is its own radio entry, called once and under the
-    /// guard, with nothing else under it, and the exports are exactly these
-    /// nine: an entry called bare would take the process with it when it
-    /// panicked. Nothing else in the shim calls an entry, and nothing in it
-    /// panics by its own word. That an export hands each argument to the
-    /// entry in its place is read in the shim, and tested by nothing here;
-    /// its conversions are tested there.
+    /// The nine native methods, each with the radio entry it is.
+    const EXPORTS: [(&str, &str); 9] = [
+        ("resume", "radio_resume"),
+        ("leftMs", "radio_left_ms"),
+        ("sighting", "radio_sighting"),
+        ("linkUp", "radio_link_up"),
+        ("linkDown", "radio_link_down"),
+        ("connectFailed", "radio_connect_failed"),
+        ("receive", "radio_receive"),
+        ("poll", "radio_poll"),
+        ("wakeInMs", "radio_wake_in_ms"),
+    ];
+
+    /// Every JNI export is one guarded call of its own radio entry, in two
+    /// steps a reader can check line by line. The exports' file, which the
+    /// crate's `unsafe_code` deny does not cover, holds `use`s and these
+    /// nine exports and nothing else, and each export is one call that hands
+    /// its parameters on, in the order declared, to the function of the
+    /// entry's name. That function — in the file the deny does cover — makes
+    /// the entry's call once, under the guard and with nothing else under
+    /// it: an entry called bare would take the process with it when it
+    /// panicked. Nothing else there calls an entry, and neither file panics
+    /// by its own word or writes `unsafe`. What a function does with its
+    /// arguments is held by the tests that run it, where it can be run.
     #[test]
     fn every_export_is_one_guarded_call() {
-        const EXPORTS: [(&str, &str); 9] = [
-            ("resume", "radio_resume"),
-            ("leftMs", "radio_left_ms"),
-            ("sighting", "radio_sighting"),
-            ("linkUp", "radio_link_up"),
-            ("linkDown", "radio_link_down"),
-            ("connectFailed", "radio_connect_failed"),
-            ("receive", "radio_receive"),
-            ("poll", "radio_poll"),
-            ("wakeInMs", "radio_wake_in_ms"),
-        ];
-        let shim = shim();
+        let (shim, calls) = (shim(), radio_calls());
         let header = |name: &str| {
             format!("pub extern \"system\" fn Java_com_oblivioustech_haven_mesh_MeshNative_{name}(")
         };
-        let declared: Vec<&str> = (shim.lines())
-            .filter(|line| line.contains("fn Java_"))
-            .collect();
-        assert_eq!(declared, EXPORTS.map(|(name, _)| header(name)));
-
-        let mut outside = shim.clone();
+        let mut rest = shim.clone();
+        let mut outside = calls.clone();
         for (name, entry) in EXPORTS {
-            let body = body_of(&shim, &header(name));
+            let call = entry.strip_prefix("radio_").expect("an entry's name");
+
+            let export = body_of(&shim, &header(name));
+            let (declared, forward) = export.split_once("{\n").expect("the export has a body");
+            let (_, declared) = declared.split_once('(').expect("a signature");
+            let (declared, _) = declared.rsplit_once(')').expect("a signature");
+            let handed: Vec<&str> = (declared.split(','))
+                .filter_map(|parameter| parameter.split_once(':'))
+                .map(|(parameter, _)| parameter.trim())
+                .filter(|parameter| !parameter.starts_with('_'))
+                .collect();
+            let forward = forward.trim().trim_end_matches(';');
+            let taken = forward.strip_prefix(&format!("mesh_radio::{call}("));
+            let taken: Option<Vec<&str>> =
+                (taken.and_then(|taken| taken.strip_suffix(')'))).map(|taken| {
+                    taken
+                        .split(", ")
+                        .filter(|taken| !taken.is_empty())
+                        .collect()
+                });
+            assert!(
+                taken.is_some_and(|taken| {
+                    taken.len() == handed.len()
+                        && taken.iter().zip(&handed).all(|(taken, handed)| {
+                            taken == handed || taken.strip_prefix('&') == Some(*handed)
+                        })
+                }),
+                "the export {name} is not one call of mesh_radio::{call} on its own parameters, \
+                 in their order"
+            );
+            rest = rest.replace(&format!("#[no_mangle]\n{export}\n}}"), "");
+
+            let body = body_of(&calls, &format!("pub(crate) fn {call}("));
             let (before, guarded) = body.split_once("radio_guarded(").unwrap_or((body, ""));
             // Under the guard: the answer with no engine, then the entry —
             // itself, or its call on what was converted before the guard.
             let guarded: String = (guarded.chars())
                 .filter(|c| !c.is_whitespace() && !"{}".contains(*c))
                 .collect();
-            let call = guarded.split_once(',').map_or("", |(_, call)| call);
-            let call = call.strip_prefix("||").unwrap_or(call);
-            let alone = call.strip_prefix(entry).is_some_and(|rest| {
+            let made = guarded.split_once(',').map_or("", |(_, made)| made);
+            let made = made.strip_prefix("||").unwrap_or(made);
+            let alone = made.strip_prefix(entry).is_some_and(|rest| {
                 let called = rest.strip_prefix('(').and_then(|rest| rest.split_once(')'));
                 rest.starts_with(')')
                     || called
@@ -27439,17 +27592,26 @@ mod mesh_ffi_tests {
             });
             assert!(
                 !before.contains("radio_") && alone && guarded.matches("radio_").count() == 1,
-                "{name} is not one guarded call of {entry} and nothing else"
+                "mesh_radio::{call} is not one guarded call of {entry} and nothing else"
             );
             outside = outside.replace(body, "");
         }
-        let (_, used) = (outside.split_once("use crate::api::{")).expect("the shim's use");
+        let left: Vec<&str> = (rest.lines())
+            .filter(|line| !line.is_empty() && !(line.starts_with("use ") && line.ends_with(';')))
+            .collect();
+        assert!(
+            left.is_empty(),
+            "the JNI exports' file holds something that is neither a use nor one of the nine \
+             exports: {left:?}"
+        );
+        let (_, used) = (outside.split_once("use crate::api::{")).expect("the one use");
         let (used, _) = used.split_once("};").expect("the use ends");
         assert!(
             !outside.replace(used, "").contains("radio_"),
-            "something in the shim that is no export names a radio entry"
+            "something that is none of the nine calls names a radio entry"
         );
         for banned in [
+            "unsafe",
             "panic!",
             "unwrap()",
             ".expect(",
@@ -27459,8 +27621,8 @@ mod mesh_ffi_tests {
             "unimplemented!",
         ] {
             assert!(
-                !shim.contains(banned),
-                "the shim uses `{banned}`: a panic outside the guard aborts the process"
+                !shim.contains(banned) && !calls.contains(banned),
+                "the shim uses `{banned}`: it aborts the process, or the crate's deny is evaded"
             );
         }
     }
@@ -27524,11 +27686,11 @@ mod mesh_ffi_tests {
         );
     }
 
-    /// The mesh's part of the bridge, and the radio's JNI shim, write no log
-    /// line and render no value.
+    /// The mesh's part of the bridge, and both files of the radio's JNI
+    /// shim, write no log line and render no value.
     #[test]
     fn the_mesh_entries_log_nothing_and_format_nothing() {
-        let shim = shim();
+        let shim = shim() + &radio_calls();
         for text in mesh_part().into_iter().chain([shim.as_str()]) {
             for banned in [
                 "log::",

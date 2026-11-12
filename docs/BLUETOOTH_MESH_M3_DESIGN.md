@@ -290,14 +290,29 @@ poll(ready: LongArray): ByteArray?   wakeInMs(): Long      // −1: none
 - **Logic-free.** Each export converts its arguments, calls one `radio_*`
   function, converts the answer. `peer < 0` is `None`; `rssi` and `attMtu`
   are clamped into their types. **As built (M3b):** also, a negative
-  `leftMs` is none left; a link's or a peer's number crosses bit for bit; a
-  JNI call that fails (a null array, an array the JVM cannot allocate) is
+  `leftMs` is none left; a link's number crosses bit for bit; a peer below
+  zero is no peer in every call that names one — `sighting` and
+  `connectFailed` make no entry for it — so that no peer is dialled that a
+  link could not be bound to (the review of M3b; Kotlin numbers both from
+  zero); a JNI call that fails (a null array, an array the JVM cannot allocate) is
   answered as no engine would answer, with the exception it left cleared;
   and the second parameter of an export is typed `JObject` — the receiver,
   since `MeshNative` implements `MeshEngineApi` (§B.1), or the class if the
   methods are made static: the same pointer, never read. The exports, their
   JNI descriptors and Rust types are pinned in
   `haven/rust_builder/fixtures/mesh_radio_exports.txt`.
+- **Two files, after the review of M3b.** The allowance on `mod mesh_jni`
+  covers the whole module, so inside it the compiler reports neither an
+  `unsafe` block nor a second exported symbol (`#[export_name]`, a bare
+  `extern fn`), and a guard that reads names was the only control. So
+  `mesh_jni.rs` holds `use`s and the nine exports and nothing else, each
+  export one call that hands its parameters on, in the order declared, to
+  the function of `mesh_radio.rs` named for it; the conversions, the guarded
+  call and their tests are in `mesh_radio.rs`, under the deny. The guard
+  reads every line of the first file and holds it to exactly that; the seven
+  calls that take no array are run against the engine on the host
+  (`the_calls_a_jni_export_forwards_reach_their_entries_each_argument_in_its_place`).
+  `receive`, `poll` and every export still need a JVM.
 - **`unsafe`.** With `jni` 0.21's wrappers no export needs an `unsafe`
   block; the one thing the `unsafe_code` lint fires on is `#[no_mangle]`.
   `lib.rs` gains `#![deny(unsafe_code)]`, with `#[allow(unsafe_code)]` on
@@ -315,7 +330,10 @@ poll(ready: LongArray): ByteArray?   wakeInMs(): Long      // −1: none
   conversion. A panic under the lock poisons it, and the next `mesh_home`
   drops that engine (`api:12882-12890`); the service then reads
   `leftMs() == 0` and stops, with the stopped notice. **As built (M3b):** a
-  panic that held no lock leaves the engine, which was in no call. The
+  panic that held no lock leaves the engine, which was in no call. A caught
+  panic is silent in every build: the guard logs nothing, because the
+  mesh's part of the bridge writes no log line (a gate, and a claim of the
+  privacy manifest), and Android discards what the panic hook prints. The
   entries and the guard are dead code in a build that has neither the shim
   nor the tests — every target but Android — and each carries
   `expect(dead_code)` under exactly that condition.
@@ -334,7 +352,9 @@ poll(ready: LongArray): ByteArray?   wakeInMs(): Long      // −1: none
   symbols [C]. **As built (M3b):** the guard holds the exports to the fixture;
   its Kotlin half lands with `MeshNative.kt` (M3f/M3g), read against the same
   fixture, and the `nm -D` step with the first unit that builds the radio
-  for Android.
+  for Android. `cross-check.yml`'s Android step is a plain `cargo check`: it
+  denies no warning, so dead code that exists only in the Android
+  configuration would pass it — owed to the same unit.
 - **`jni` logs** (found in M3b): its wrappers write a `trace` line naming
   the JNI function they call — a fixed word, no value. The bridge's logger
   admits Haven's two targets alone and caps the level below `trace`, so none
@@ -389,6 +409,7 @@ second engine wired to the one in the slot, `api:24364`).
 | `an_output_is_encoded_as_the_fixture_says` | the three encodings, byte for byte, against the shared fixture | a field order change on one side |
 | `a_call_that_panics_under_the_guard_answers_its_no_engine_value_and_leaves_no_engine` | `radio_guarded` itself, on the host: no export can be called without a JVM | the `catch_unwind` removed |
 | `every_export_is_one_guarded_call` (source gate) | each `Java_…` body in `mesh_jni.rs` holds one `radio_guarded(` and names no `radio_*` outside it | an export that calls the engine bare |
+| `the_calls_a_jni_export_forwards_reach_their_entries_each_argument_in_its_place` (as built, after the review of M3b) | the seven calls that take no array, on Java's types, against the engine: `resume` true exactly when an engine runs; `leftMs`, and `wakeInMs` with its −1; a sighting of its peer at its strength; `linkUp` under its link's number, bound to its peer, in its role, over its MTU; `connectFailed` of its peer; `linkDown` of its link; a peer below zero makes no entry | a link's number taken from `peer`; `resume`'s answer inverted; a call that makes another call's entry |
 
 `the_engine_lock_is_taken_only_where_nothing_can_be_awaited` (four
 holders, `mesh_take` for `mesh_open`)

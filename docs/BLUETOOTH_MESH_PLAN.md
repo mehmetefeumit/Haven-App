@@ -2583,6 +2583,77 @@ that points nowhere, at the price of an `unsafe` in the shim's test module;
 not done. Each of the guard script's twelve failure sites, silenced in turn,
 fails its self-test.
 
+Review of M3b (independent, read-only, of `8a04ab3`): no blocker and no
+high finding — no crash, abort, deadlock or memory-safety problem reachable
+through the shim. One medium and four low, each checked against the code
+first; all were as stated. Fixed here, each with a test or a guard fixture
+that fails without the fix.
+**The guard was the only control inside `mesh_jni.rs`, and ordinary syntax
+got past it (medium).** The allowance on the module covers all of it, so
+there the compiler reports neither an `unsafe` block nor a second exported
+symbol. The guard stopped reading at the first `#[cfg(test)]` line, counted
+neither `#[export_name]`, `#[link_section]` nor an `extern fn` with no ABI
+string, and saw a call into Java only as `env.<method>(`; the Rust gate
+looked for `fn Java_` and banned no `unsafe`. Three plants passed both. The
+shim is now two files. `mesh_jni.rs` holds `use`s and the nine exports and
+nothing else, each export one call that hands its own parameters on, in the
+order declared, to the function of `mesh_radio.rs` named for it; it has no
+tests of its own. `mesh_radio.rs`, under the deny, holds the conversions,
+the one guarded call of each, and their tests. The guard reads every line
+of the first file and holds it to exactly that shape — no `unsafe`,
+`export_name`, `link_section`, `used`, `mod`, `impl`, `static`, `cfg`,
+`JNIEnv::` or macro in it, as many `extern` keywords as exports — and
+holds the second to one guarded call a method, a `JNIEnv` used only as the
+parameter `env` for five calls, one `#[cfg(test)]` above `mod tests {` and
+nothing behind it; across the crate it now also reads `extern` without an
+ABI string, `export_name` and `link_section`. The exports are compared with
+the fixture in any order. 80 self-test fixtures; each of the script's
+sixteen failure sites, silenced in turn, fails the self-test.
+`every_export_is_one_guarded_call` holds the same two steps from the Rust
+side. The review's plants, in the exports' file and again in the file under
+the deny, and ten variants — the 2024 spelling of `no_mangle`,
+`extern "C"`, a bare `extern fn`, an export, two `export_name`s and a
+`link_section` in other files of the crate, an `unsafe` block under the
+deny, a JNI method called by path, a `JNIEnv` under a second name — each
+fail the guard, and the Rust gate or the compiler where they reach.
+**Argument order and answers, on the host.**
+`the_calls_a_jni_export_forwards_reach_their_entries_each_argument_in_its_place`
+runs the seven calls that take no array, on Java's own types, against the
+engine: `resume` true exactly when an engine runs; `leftMs`, and `wakeInMs`
+with its −1; a sighting of its peer at its strength; `linkUp` under its
+link's number, bound to its peer, in its role, over its MTU; `connectFailed`
+of its peer; `linkDown` of its link. Two of the three changes that stood in
+the first pass now fail it — a link's number taken from `peer`, `resume`'s
+answer inverted — and an export that swaps two parameters fails the guard
+and the gate.
+**Peer numbers (low).** `sighting` and `connectFailed` passed a peer's
+number bit for bit while `linkUp` took one below zero for none, so a peer
+with the top bit set could be sighted and dialled and never bound to its
+link. A peer below zero is now no peer in all three: a sighting or a failed
+connect of one makes no entry. The fixture's header says that both numbers
+are never negative.
+**A caught panic is silent (low), and stays so.** A fixed warning in the
+guard would be a log line in the mesh's part of the bridge, which writes
+none: `the_mesh_entries_log_nothing_and_format_nothing` holds that and a
+ratcheted invariant of the privacy manifest cites it, so the line would
+loosen a stated promise, and it would need its own planted-identifier test.
+Recorded as a residual in `haven-core/SECURITY.md`: the one sign of a
+caught panic is the service stopping.
+**Owed, added.** `cross-check.yml`'s Android step is a plain `cargo check`
+and denies no warning (low): dead code or an unused import that exists only
+in the Android configuration would pass it. To the unit that first builds
+the radio for Android, beside the `nm -D` check; the workflow is shared and
+was not changed.
+The guard's header no longer says the compiler's deny reports `unsafe` a
+macro writes: that is relied on for a macro of this crate only, which is
+why the exports' file may invoke none.
+Mutation pass of this round: 44 changes. Thirteen plants of the kind the
+review made, each failing the guard; 29 changes to the calls, the exports
+and the conversions, each failing a named test, and the guard where it
+reads them. Two stand, and only a JVM can kill them: the exception a failed
+JNI call left not cleared, and a change to what `receive` hands over —
+`receive` and `poll` read a Java array before anything else.
+
 ### Proposed CLAUDE.md wording (owner to approve)
 
 Each is the text as it stands, then the text proposed. Nothing in
@@ -2719,9 +2790,10 @@ New:
 > - **Rust lints**: `haven-core` enables `clippy::pedantic` and
 >   `clippy::nursery` and denies `unsafe_code`. The bridge crate
 >   (`haven/rust_builder`) denies `unsafe_code` too, with two allowances and
->   no other: the generated bridge, and the Android radio's JNI shim
->   `mesh_jni.rs`, where the lint fires on `#[no_mangle]` and the file has no
->   `unsafe` block (`scripts/ci/check_mesh_radio.sh`)
+>   no other: the generated bridge, and the Android radio's JNI exports,
+>   `mesh_jni.rs`, where the lint fires on `#[no_mangle]`. Nothing but those
+>   exports may be in that file, each one call into `mesh_radio.rs`, which is
+>   under the deny (`scripts/ci/check_mesh_radio.sh`)
 
 Next: M3, the radio, and with it everything on screen, as
 `docs/BLUETOOTH_MESH_M3_DESIGN.md` has it; and, if Android is to pass

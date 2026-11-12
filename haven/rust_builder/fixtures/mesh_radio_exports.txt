@@ -1,13 +1,15 @@
 # The native methods of the Kotlin class
 # `com.oblivioustech.haven.mesh.MeshNative`, as the JNI shim exports them
 # (docs/BLUETOOTH_MESH_M3_DESIGN.md §A.6; haven/rust_builder/src/mesh_jni.rs):
-# each is the symbol `Java_com_oblivioustech_haven_mesh_MeshNative_<name>`.
+# each is the symbol `Java_com_oblivioustech_haven_mesh_MeshNative_<name>`,
+# and forwards to the function of `mesh_radio.rs` named for it in snake case.
 #
 # A JNI name or type that does not match is found when the method is first
 # called, not when either side is compiled. So the two sides are held to this
 # one list: the shim by `scripts/ci/check_mesh_radio.sh` — these methods and
 # no other, with these types — and the `external fun`s of `MeshNative.kt` by
-# the same guard, from the change that writes them. One method a line:
+# the same guard, from the change that writes them. One method a line, in any
+# order:
 #
 #   <name> <JNI descriptor> <Rust parameter types> <Rust return type>
 #
@@ -16,6 +18,12 @@
 # Boolean (`jboolean`), `[J` a LongArray (`JLongArray`), `[B` a ByteArray
 # (`JByteArray` taken; `jbyteArray` answered, null for no bytes) and `V`
 # nothing.
+#
+# A link's and a peer's number are Kotlin's own counters and are never
+# negative. A peer below zero is no peer: `linkUp` takes one for a link whose
+# peer is not known, and `sighting` and `connectFailed` do nothing with one.
+# A link's number crosses bit for bit, and comes back so in what `poll`
+# answers.
 
 resume (J)Z jlong jboolean
 leftMs ()J - jlong

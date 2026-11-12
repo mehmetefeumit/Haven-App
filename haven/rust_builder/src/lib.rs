@@ -11,10 +11,14 @@
 pub mod api;
 
 // The Android radio's JNI exports. The lint fires on `#[no_mangle]`, which
-// every export carries; the module holds no `unsafe` block.
+// every export carries, and the allowance covers the whole module: so it
+// holds the exports alone, each one call into `mesh_radio`, which is under
+// the deny.
 #[cfg(any(target_os = "android", test))]
 #[allow(unsafe_code)]
 mod mesh_jni;
+#[cfg(any(target_os = "android", test))]
+mod mesh_radio;
 
 // Test-only in-memory keyring backend. Compiled exclusively in debug builds
 // — release callers see only the stub in `api.rs` that returns an error.

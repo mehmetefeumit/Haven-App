@@ -3,63 +3,87 @@
 # exports that decide nothing, and the bridge crate writes `unsafe` in two
 # files (docs/BLUETOOTH_MESH_M3_DESIGN.md §A.6, F-8, F-14).
 #
-# Android's radio service drives the mesh engine through
-# `haven/rust_builder/src/mesh_jni.rs`: one `extern "system"` function for each
-# native method of the Kotlin class `com.oblivioustech.haven.mesh.MeshNative`.
-# Four things about that file are textual facts a review of a later change can
-# miss, and none of them is a compile error when it breaks:
+# Android's radio service drives the mesh engine through two files of
+# `haven/rust_builder/src`:
+#
+#   * `mesh_jni.rs` — the exports: one `extern "system"` function for each
+#     native method of the Kotlin class `com.oblivioustech.haven.mesh.MeshNative`.
+#     The crate's `unsafe_code` deny is lifted for this module, because the
+#     lint fires on `#[no_mangle]`; so INSIDE IT THE COMPILER CHECKS NOTHING
+#     of that kind — not an `unsafe` block, not a second exported symbol — and
+#     this guard is the whole control. It therefore reads every line: the file
+#     holds `use`s and the exports and nothing else, and each export is one
+#     call that hands its parameters on.
+#   * `mesh_radio.rs` — what each export forwards to: the conversions, the one
+#     `radio_*` call under the panic guard, the answer. It is under the deny.
+#
+# What a review of a later change can miss, none of it a compile error:
 #
 #   * A PANIC THAT LEAVES AN EXPORT ENDS THE PROCESS. An unwind out of an
 #     `extern` function aborts, and the process is also the one that publishes
-#     to relays. So every export makes its one `radio_*` call inside
-#     `radio_guarded` (`catch_unwind`), and nothing else in the file calls an
-#     entry.
+#     to relays. So every call makes its one `radio_*` call inside
+#     `radio_guarded` (`catch_unwind`), with nothing else under it, and
+#     nothing else in the file calls an entry.
 #
 #   * A JNI NAME OR TYPE THAT DOES NOT MATCH IS A RUN-TIME ERROR. Kotlin finds
 #     a native method by its symbol when it is first called. The exports are
 #     therefore pinned — name, JNI descriptor, Rust types — in
-#     `haven/rust_builder/fixtures/mesh_radio_exports.txt`, and the shim is
-#     held to that list here, both ways.
+#     `haven/rust_builder/fixtures/mesh_radio_exports.txt`, and held to that
+#     list here, both ways.
 #
 #   * THE SHIM CALLS NOTHING OF JAVA'S. It copies arrays in and one array out
 #     and clears an exception; it keeps no `JavaVM`, no reference and no state,
 #     so nothing of the engine can reach Kotlin except as an export's answer.
 #
 #   * `unsafe` IS CONFINED. The crate denies `unsafe_code` and allows it on
-#     two modules: the generated bridge, and the shim, where the lint fires on
-#     `#[no_mangle]`. An allowance moved to the crate, or to `api.rs`, would
-#     compile.
+#     two modules: the generated bridge, and the exports' file. An allowance
+#     moved to the crate, or to `api.rs`, would compile.
 #
 # Pure-grep gate over comment-stripped Rust. Checks:
-#   1. Under haven/rust_builder/src the keyword `unsafe`, the attribute
-#      `no_mangle` and an ABI string (`extern "…"`) appear only in
-#      `frb_generated.rs` and `mesh_jni.rs`.
+#   1. Under haven/rust_builder/src, outside `frb_generated.rs` and
+#      `mesh_jni.rs`: no keyword `unsafe`, no keyword `extern` (with an ABI
+#      string or bare), and no `no_mangle`, `export_name` or `link_section`.
 #   2. `lib.rs` carries `#![deny(unsafe_code)]`, and `unsafe_code` is named
 #      three times in the crate's hand-written source: that line, and one
 #      `#[allow(unsafe_code)]` directly above each of `mod frb_generated;` and
 #      `mod mesh_jni;`.
-#   3. In `mesh_jni.rs`: every `#[no_mangle]` stands directly above a
-#      `pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_…`
-#      and every ABI string is on such a line; the file has no `unsafe`; each
-#      export names `radio_guarded(` once, no `radio_*` before it and exactly
-#      one after it, and under the guard stands that entry alone — by name, or
-#      as a closure that is its call, with no call among its arguments; and
-#      outside the exports and the one `use crate::api::{…}` nothing names a
-#      `radio_*`.
+#   3. `mesh_jni.rs` is exactly `use`s and exports. Every line of code belongs
+#      to a `use …;` or to an item of the one shape — `#[no_mangle]` directly
+#      above `pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_<name>(`
+#      — whose body is one call, `mesh_radio::<name in snake case>(…)`, on the
+#      export's own parameters in the order declared (`&env` first when the
+#      export names its environment; an array by reference). The file names no
+#      `unsafe`, `export_name`, `link_section`, `used`, `mod`, `impl`,
+#      `static`, `cfg` or `JNIEnv::` and invokes no macro, and it has as many
+#      `extern` keywords, and as many `no_mangle`, as exports.
 #   4. The exports — name, Rust parameter types after the environment and the
 #      receiver, Rust return type, and the JNI descriptor those types make —
-#      are the lines of the fixture, in order, and no others.
-#   5. The shim's JNI surface: a `JNIEnv` is bound only as `env` / `_env`, the
-#      only calls on it are ENV_MAY_CALL, and the file names no `JavaVM`,
-#      `GlobalRef`, `WeakRef`, `JNI_OnLoad`, `static` or `thread_local`.
+#      are the lines of the fixture, in whatever order, and no others.
+#   5. `mesh_radio.rs`, up to its tests: for every pinned method, one
+#      `pub(crate) fn <name in snake case>(` that names `radio_guarded(` once,
+#      no `radio_*` before it, and under the guard `radio_<that name>` alone —
+#      by name, or as a closure that is its call, with no call among its
+#      arguments; outside those functions and the one `use crate::api::{…}`
+#      nothing names a `radio_*`. A `JNIEnv` is only ever a parameter
+#      `env: &JNIEnv`, used to call ENV_MAY_CALL or handed on as an argument:
+#      never bound under another name, never named as a path (`JNIEnv::`). The
+#      file names no `JavaVM`, `GlobalRef`, `WeakRef`, `JNI_OnLoad`, `static`
+#      or `thread_local`. Its tests are the one `#[cfg(test)]` directly above
+#      `mod tests {`, and nothing follows them: this check reads no further,
+#      so nothing that ships may sit there.
 #
-# What this scan covers, and no more. It reads names. It cannot see `unsafe`
-# a macro writes (the compiler's deny does), a `JNIEnv` passed on under a type
-# alias, or what an entry does once called. That an export passes its
-# arguments on unchanged is read in the shim; its conversions, the guard and
-# what a panic leaves are held by tests in `haven/rust_builder/src`
-# (`mesh_jni::tests`, `a_call_that_panics_under_the_guard_…`,
-# `every_export_is_one_guarded_call`, `the_radio_entries_take_no_session`).
+# What this scan covers, and no more. It reads names. In the files under the
+# deny it cannot see `unsafe` that a macro writes: the compiler reports what a
+# macro of this crate expands to, and is not relied on here for one that comes
+# from another crate — which is why the exports' file, where the compiler
+# reports nothing either way, may invoke no macro at all. It cannot see a
+# `JNIEnv` handed to a function that calls Java, nor what an entry does once
+# called. What each call does with its arguments is held by tests in
+# `haven/rust_builder/src`: `mesh_radio::tests` (the conversions),
+# `the_calls_a_jni_export_forwards_reach_their_entries_each_argument_in_its_place`
+# (the seven calls that take no array, against the engine),
+# `a_call_that_panics_under_the_guard_…`, `every_export_is_one_guarded_call`,
+# `the_radio_entries_take_no_session`.
 #
 # Not here yet, each with the change that makes it checkable:
 #   * The Kotlin half of check 4 — the `external fun`s of `MeshNative.kt`
@@ -76,8 +100,8 @@
 # Exit codes:
 #   0  all checks pass (or the self-test passed)
 #   1  a check failed (or the self-test failed)
-#   2  an expected file is missing, or the shim or the fixture lists no export
-#      — the scan would be reading nothing (misconfiguration)
+#   2  an expected file is missing, or the exports' file or the fixture lists
+#      no export — the scan would be reading nothing (misconfiguration)
 
 set -euo pipefail
 
@@ -85,6 +109,7 @@ REPO_ROOT="${REPO_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && 
 readonly SRC='haven/rust_builder/src'
 readonly LIB="${SRC}/lib.rs"
 readonly SHIM="${SRC}/mesh_jni.rs"
+readonly CALLS="${SRC}/mesh_radio.rs"
 readonly GENERATED="${SRC}/frb_generated.rs"
 readonly EXPORTS='haven/rust_builder/fixtures/mesh_radio_exports.txt'
 readonly HEADER='pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_'
@@ -97,10 +122,10 @@ readonly -a ENV_MAY_CALL=(
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=44
+readonly SELF_TEST_FIXTURES=80
 
-readonly UNSAFE='(^|[^A-Za-z0-9_])unsafe([^A-Za-z0-9_]|$)'
-readonly ABI='extern[[:space:]]*"'
+readonly B='(^|[^A-Za-z0-9_])'
+readonly E='([^A-Za-z0-9_]|$)'
 
 FAILED=0
 
@@ -137,16 +162,16 @@ code_view() {
 }
 
 # A view on stdin with every string literal that opens and closes on one line
-# emptied: the word `unsafe` in a string is not the keyword.
+# emptied: a keyword in a string is not the keyword.
 no_strings() {
   sed -E 's/"(\\.|[^"\\])*"/""/g'
 }
 
-# "<first> <last>" for each export in a view on stdin: from its declaration to
-# the brace that closes it.
-export_lines() {
-  awk -v header="${HEADER}" '
-    index($0, header) == 1 && !inside { inside = 1; first = NR; depth = 0; opened = 0 }
+# "<first> <last>" for each item of a view on stdin declared `<prefix>…` at
+# the start of a line: from its declaration to the brace that closes it.
+item_lines() { # <declaration prefix>
+  awk -v prefix="$1" '
+    index($0, prefix) == 1 && !inside { inside = 1; first = NR; depth = 0; opened = 0 }
     inside {
       n = split($0, chars, "")
       for (i = 1; i <= n; i++) {
@@ -157,8 +182,10 @@ export_lines() {
     }'
 }
 
-# The fixture's line for each export in a view on stdin, or `? <name>` for a
-# signature that is not an export's.
+# For each export of a view on stdin, on one line and tab-separated: its name;
+# the fixture's row for it, or `? <name>` for a signature that is not an
+# export's; the one call its body must be; and its body. The last two have no
+# whitespace.
 export_rows() {
   awk -v header="${HEADER}" '
     function letter(type) {
@@ -169,11 +196,19 @@ export_rows() {
       if (type == "JLongArray") return "[J"
       return ""
     }
-    index($0, header) == 1 { sig = ""; insig = 1 }
+    function snake(name,    out, i, c) {
+      out = ""
+      for (i = 1; i <= length(name); i++) {
+        c = substr(name, i, 1)
+        out = out ((c ~ /[A-Z]/) ? "_" tolower(c) : c)
+      }
+      return out
+    }
+    index($0, header) == 1 && !insig && !inbody { sig = ""; insig = 1 }
     insig {
       sig = sig $0
       if ($0 !~ /\{[[:space:]]*$/) next
-      insig = 0
+      insig = 0; inbody = 1; body = ""
       gsub(/[[:space:]]/, "", sig)
       head = header; gsub(/[[:space:]]/, "", head)
       sig = substr(sig, length(head) + 1)
@@ -185,53 +220,67 @@ export_rows() {
       ok = (answer == "" || answer ~ /^->/)
       sub(/^->/, "", answer)
       count = split(params, each, ",")
-      types = ""; taken = ""; seen = 0
+      types = ""; taken = ""; handed = ""; seen = 0
       for (i = 1; i <= count; i++) {
         if (each[i] == "") continue
         type = each[i]; sub(/^[^:]*:/, "", type)
+        param = each[i]; sub(/:.*$/, "", param)
         seen++
-        if (seen == 1) { if (type != "JNIEnv") ok = 0; continue }
-        if (seen == 2) { if (type != "JObject") ok = 0; continue }
+        if (seen == 1) {
+          if (type != "JNIEnv" || (param != "env" && param != "_env")) ok = 0
+          if (param == "env") handed = "&env"
+          continue
+        }
+        if (seen == 2) { if (type != "JObject" || param != "_this") ok = 0; continue }
         if (letter(type) == "" || type == "jbyteArray") ok = 0
         types = types (types == "" ? "" : ",") type
         taken = taken letter(type)
+        handed = handed (handed == "" ? "" : ",") ((type ~ /^J/) ? "&" : "") param
       }
       if (seen < 2) ok = 0
       if (answer != "" && (letter(answer) == "" || answer == "JByteArray" || answer == "JLongArray")) ok = 0
-      if (!ok) { print "? " name; next }
-      print name, "(" taken ")" (answer == "" ? "V" : letter(answer)), (types == "" ? "-" : types), (answer == "" ? "-" : answer)
+      row = ok ? name " (" taken ")" (answer == "" ? "V" : letter(answer)) " " (types == "" ? "-" : types) " " (answer == "" ? "-" : answer) : "? " name
+      forward = "mesh_radio::" snake(name) "(" handed ")"
+      next
+    }
+    inbody {
+      if ($0 == "}") {
+        inbody = 0
+        sub(/;$/, "", body); sub(/,\)$/, ")", body)
+        printf "%s\t%s\t%s\t%s\n", name, row, forward, body
+        next
+      }
+      line = $0; gsub(/[[:space:]]/, "", line); body = body line
     }'
 }
 
 run_check() {
-  local file rel view hits shim lines first last body name guards before after entries rows pinned names called alone
+  local file rel view hits shim calls shipped rows pinned names name row forward body first last
+  local guards before after entries called alone outside tests want range method may ok
 
   [[ -d "${REPO_ROOT}/${SRC}" ]] || { echo "ERROR: ${REPO_ROOT}/${SRC} not found" >&2; exit 2; }
-  for file in "${LIB}" "${SHIM}" "${GENERATED}" "${EXPORTS}"; do
+  for file in "${LIB}" "${SHIM}" "${CALLS}" "${GENERATED}" "${EXPORTS}"; do
     [[ -f "${REPO_ROOT}/${file}" ]] || { echo "ERROR: ${REPO_ROOT}/${file} not found" >&2; exit 2; }
   done
-  # The shim as it ships: its own tests, which call no export, are not read.
-  shim="$(code_view "${REPO_ROOT}/${SHIM}" | awk '$0 == "#[cfg(test)]" { exit } { print }')"
-  lines="$(export_lines <<<"${shim}")"
+  shim="$(code_view "${REPO_ROOT}/${SHIM}")"
+  calls="$(code_view "${REPO_ROOT}/${CALLS}")"
+  rows="$(export_rows <<<"${shim}")"
   pinned="$(grep -vE '^[[:space:]]*(#|$)' "${REPO_ROOT}/${EXPORTS}" || true)"
-  if [[ -z "${lines}" || -z "${pinned}" ]]; then
+  if [[ -z "${rows}" || -z "${pinned}" ]]; then
     echo "ERROR: ${SHIM} declares no '${HEADER}…', or ${EXPORTS} lists none — the checks would be reading nothing. If the shim moved, move this guard with it." >&2
     exit 2
   fi
 
-  log "Checking that unsafe is written in two files, and that the radio's JNI exports are the pinned ones, each one guarded call ..."
+  log "Checking that unsafe is written in two files, and that the radio's JNI exports are the pinned ones, each one forward to one guarded call ..."
 
-  # Check 1: where `unsafe`, `no_mangle` and an ABI string are written.
+  # Check 1: where `unsafe`, `extern` and an exported symbol are written.
   while IFS= read -r file; do
     rel="${file#"${REPO_ROOT}/"}"
     case "${rel}" in "${GENERATED}" | "${SHIM}") continue ;; esac
     view="$(code_view "${file}")"
-    hits="$({
-      grep -nE "no_mangle|${ABI}" <<<"${view}" || true
-      no_strings <<<"${view}" | grep -nE "${UNSAFE}" || true
-    } | cut -d: -f1 | LC_ALL=C sort -un | tr '\n' ' ')"
+    hits="$(no_strings <<<"${view}" | grep -nE "${B}(unsafe|extern|no_mangle|export_name|link_section)${E}" | cut -d: -f1 | tr '\n' ' ' || true)"
     if [[ -n "${hits}" ]]; then
-      fail "${rel} writes unsafe, no_mangle or an ABI string (line(s) ${hits}). In the bridge crate only ${GENERATED} and ${SHIM} may: every other file is safe Rust the compiler checks whole, and a symbol exported from anywhere else is one no guard has read."
+      fail "${rel} writes unsafe, extern, or an attribute that exports a symbol (line(s) ${hits}). In the bridge crate only ${GENERATED} and ${SHIM} may: every other file is safe Rust the compiler checks whole, and a symbol exported from anywhere else is one no guard has read."
     fi
   done < <(find "${REPO_ROOT}/${SRC}" -type f -name '*.rs' | LC_ALL=C sort)
 
@@ -253,24 +302,74 @@ run_check() {
     fi
   done < <(find "${REPO_ROOT}/${SRC}" -type f -name '*.rs' | LC_ALL=C sort)
 
-  # Check 3: every export is one guarded call.
+  # Check 3: the exports' file is uses and exports, and each export one call.
   hits="$(awk -v header="${HEADER}" '
-    index($0, header) == 1 && prev == "#[no_mangle]" { pairs++ }
-    { prev = $0 }
-    END { print pairs + 0 }' <<<"${shim}")"
-  if [[ "$(grep -c 'no_mangle' <<<"${shim}" || true)" != "${hits}" \
-    || "$(grep -cE "${ABI}" <<<"${shim}" || true)" != "${hits}" \
-    || "$(wc -l <<<"${lines}" | tr -d ' ')" != "${hits}" ]]; then
-    fail "${SHIM} exports something that is not '#[no_mangle]' directly above '${HEADER}…'. Every symbol the shim exports is a native method of MeshNative, declared one way, so that this guard reads every one."
+    function bad(n) { printf "%d ", n }
+    state == "use" { if ($0 ~ /^\};[[:space:]]*$/) state = ""; next }
+    state == "attr" {
+      if (index($0, header) != 1) { bad(NR); state = ""; next }
+      state = ($0 ~ /\{[[:space:]]*$/) ? "body" : "sig"; next
+    }
+    state == "sig" { if ($0 ~ /\{[[:space:]]*$/) state = "body"; next }
+    state == "body" { if ($0 == "}") state = ""; next }
+    /^[[:space:]]*$/ { next }
+    /^use [^;{]*;[[:space:]]*$/ || /^use [^;{]*\{[^;{}]*\};[[:space:]]*$/ { next }
+    /^use [^;{]*\{[[:space:]]*$/ { state = "use"; next }
+    $0 == "#[no_mangle]" { state = "attr"; next }
+    { bad(NR) }
+    END { if (state != "") bad(NR) }' <<<"${shim}")"
+  if [[ -n "${hits}" ]]; then
+    fail "${SHIM} holds something that is neither a use nor an export — '#[no_mangle]' directly above '${HEADER}…' (line(s) ${hits}). The crate's unsafe_code deny is lifted for this file, so nothing else may be in it: a function, a second way to export a symbol, a block of code after the exports. Put it in ${CALLS}, under the deny."
   fi
-  if no_strings <<<"${shim}" | grep -qE "${UNSAFE}"; then
-    fail "${SHIM} writes unsafe. The lint is allowed on it for #[no_mangle] alone: jni's wrappers need no unsafe block, and a raw JNI call is one the wrappers' checks do not cover."
+  hits="$({
+    no_strings <<<"${shim}" | grep -nE "${B}(unsafe|export_name|link_section|used|mod|impl|static|cfg)${E}|JNIEnv[[:space:]]*::|[A-Za-z0-9_]![^=]" || true
+  } | cut -d: -f1 | tr '\n' ' ')"
+  if [[ -n "${hits}" ]]; then
+    fail "${SHIM} names unsafe, export_name, link_section, used, mod, impl, static, cfg or JNIEnv::, or invokes a macro (line(s) ${hits}). None has a place in a file of uses and one-call exports, and here the compiler would report none of it."
   fi
-  local outside="${shim}"
-  while read -r first last; do
-    body="$(sed -n "${first},${last}p" <<<"${shim}")"
-    name="${body#"${HEADER}"}"
-    name="${name%%(*}"
+  want="$(wc -l <<<"${rows}" | tr -d ' ')"
+  if [[ "$(grep -oE "${B}extern${E}" <<<"${shim}" | wc -l | tr -d ' ' || true)" != "${want}" \
+    || "$(grep -o 'no_mangle' <<<"${shim}" | wc -l | tr -d ' ' || true)" != "${want}" ]]; then
+    fail "${SHIM} has ${want} export(s) of MeshNative and another number of extern keywords or of no_mangle. Every symbol the file exports is a native method of MeshNative, declared one way, so that this guard reads every one."
+  fi
+  while IFS=$'\t' read -r name row forward body; do
+    if [[ "${body}" != "${forward}" ]]; then
+      fail "the export ${name} is not the one call ${forward}: its body is '${body}'. An export hands its own parameters on, in the order declared, and does nothing else — what it would do here the compiler does not check, and no test can call it."
+    fi
+  done <<<"${rows}"
+
+  # Check 4: the exports are the pinned ones.
+  rows="$(cut -f2 <<<"${rows}" | LC_ALL=C sort)"
+  if [[ "${rows}" != "$(LC_ALL=C sort <<<"${pinned}")" ]]; then
+    names="$(diff <(LC_ALL=C sort <<<"${pinned}") <(printf '%s\n' "${rows}") | grep -E '^[<>]' | tr '\n' ';' || true)"
+    fail "the exports of ${SHIM} are not the lines of ${EXPORTS} ('<' pinned, '>' exported, '?' a signature that is no export's: ${names}). Kotlin finds a native method by name and passes what its own declaration says; a name or a type that differs is found when the method is first called. Change the fixture, the shim and MeshNative.kt together."
+  fi
+
+  # Check 5: what the exports forward to. Its tests are not read, so nothing
+  # that ships may sit in or behind them.
+  tests="$(awk '$0 == "#[cfg(test)]" { at = NR } $0 == "mod tests {" && at == NR - 1 && !found { found = at } END { print found + 0 }' <<<"${calls}")"
+  hits="$(awk -v tests="${tests}" '
+    /cfg/ && /(^|[^A-Za-z0-9_])test([^A-Za-z0-9_]|$)/ && NR != tests { printf "%d ", NR }
+    tests && NR > tests + 1 && closed && !/^[[:space:]]*$/ { printf "%d ", NR }
+    tests && NR > tests + 1 && $0 == "}" { closed = 1 }' <<<"${calls}")"
+  if [[ -n "${hits}" ]]; then
+    fail "${CALLS} has a cfg(test) that is not the one '#[cfg(test)]' directly above 'mod tests {', or something after that module (line(s) ${hits}). This guard stops reading at the tests: code under another cfg(test), or behind the tests, is code it has not read."
+  fi
+  shipped="${calls}"
+  if (( tests > 0 )); then
+    shipped="$(sed -n "1,$(( tests - 1 ))p" <<<"${calls}")"
+  fi
+  outside="${shipped}"
+  while read -r name _; do
+    [[ -n "${name}" ]] || continue
+    name="$(sed -E 's/([A-Z])/_\L\1/g' <<<"${name}")"
+    range="$(item_lines "pub(crate) fn ${name}(" <<<"${shipped}")"
+    if [[ "$(grep -c . <<<"${range}" || true)" != 1 ]]; then
+      fail "${CALLS} does not declare 'pub(crate) fn ${name}(' exactly once. Each pinned method has one function there, named for its radio entry, and its export forwards to it."
+      continue
+    fi
+    read -r first last <<<"${range}"
+    body="$(sed -n "${first},${last}p" <<<"${shipped}")"
     guards="$(grep -o 'radio_guarded(' <<<"${body}" | wc -l | tr -d ' ' || true)"
     before="${body%%radio_guarded(*}"
     after="${body#*radio_guarded(}"
@@ -278,51 +377,46 @@ run_check() {
     called="$(wc -w <<<"${entries}" | tr -d ' ')"
     # Under the guard: the answer with no engine, then the entry — itself, or a
     # closure that is its call on values converted before the guard.
-    alone="$(tr -d '[:space:]{}' <<<"${after}" | grep -cE '^[^,]*,(\|\|)?radio_[A-Za-z0-9_]+(\([^()]*\))?\)' || true)"
+    alone="$(tr -d '[:space:]{}' <<<"${after}" | grep -cE "^[^,]*,(\\|\\|)?radio_${name}(\\([^()]*\\))?\\)" || true)"
     if [[ "${guards}" != 1 || "${before}" == *radio_* || "${called}" != 1 || "${alone}" != 1 ]]; then
-      fail "the export ${name} is not one guarded call and nothing else: it names radio_guarded( ${guards} time(s) and, under it, ${entries:-no radio entry}. An entry called outside the guard takes the process — the relay path's too — with it when it panics; anything else under the guard is a decision made in the shim."
+      fail "the call ${name} of ${CALLS} is not one guarded call of radio_${name} and nothing else: it names radio_guarded( ${guards} time(s) and, under it, ${entries:-no radio entry}. An entry called outside the guard takes the process — the relay path's too — with it when it panics; anything else under the guard is a decision made in the shim."
     fi
     outside="$(awk -v first="${first}" -v last="${last}" 'NR < first || NR > last { print; next } { print "" }' <<<"${outside}")"
-  done <<<"${lines}"
+  done <<<"${pinned}"
   hits="$(awk '
     index($0, "use crate::api::{") == 1 { inuse = 1 }
     !inuse && /radio_/ { printf "%d ", NR }
     inuse && /};/ { inuse = 0 }' <<<"${outside}")"
   if [[ -n "${hits}" ]]; then
-    fail "${SHIM} names a radio entry outside an export and its one 'use crate::api::{…}' (line(s) ${hits}). Only an export calls an entry, and only under the guard."
+    fail "${CALLS} names a radio entry outside the pinned methods' functions and its one 'use crate::api::{…}' (line(s) ${hits}). Only such a function calls an entry, and only under the guard."
   fi
 
-  # Check 4: the exports are the pinned ones.
-  rows="$(export_rows <<<"${shim}")"
-  if [[ "${rows}" != "${pinned}" ]]; then
-    names="$(diff <(printf '%s\n' "${pinned}") <(printf '%s\n' "${rows}") | grep -E '^[<>]' | tr '\n' ';' || true)"
-    fail "the exports of ${SHIM} are not the lines of ${EXPORTS} ('<' pinned, '>' exported, '?' a signature that is no export's: ${names}). Kotlin finds a native method by name and passes what its own declaration says; a name or a type that differs is found when the method is first called. Change the fixture, the shim and MeshNative.kt together."
-  fi
-
-  # Check 5: what the shim does with a JNIEnv.
-  hits="$(grep -oE '[A-Za-z0-9_]+[[:space:]]*:[[:space:]]*&?(mut[[:space:]]+)?JNIEnv' <<<"${shim}" | sed -E 's/[[:space:]]*:.*//' | grep -vxE '_?env' | LC_ALL=C sort -u | tr '\n' ' ' || true)"
-  if [[ -n "${hits}" ]]; then
-    fail "${SHIM} binds a JNIEnv as '${hits% }'. It is bound as env or _env, so that every call made on one is read here."
-  fi
-  while IFS= read -r name; do
-    [[ -n "${name}" ]] || continue
-    local ok=0 may
+  # What it does with a JNIEnv, read with no whitespace so that a call broken
+  # over two lines is one call.
+  view="$(tr -d '[:space:]' <<<"${shipped}")"
+  while IFS= read -r method; do
+    [[ -n "${method}" ]] || continue
+    ok=0
     for may in "${ENV_MAY_CALL[@]}"; do
-      [[ "${name}" == "${may}" ]] && ok=1
+      [[ "${method}" == "${may}" ]] && ok=1
     done
     if (( ok == 0 )); then
-      fail "${SHIM} calls ${name} on a JNIEnv. The shim reads two arrays, makes one and clears an exception (${ENV_MAY_CALL[*]}): it calls no method of Java's, makes no reference and reaches no JavaVM, so the engine reaches Kotlin only as an export's answer."
+      fail "${CALLS} calls ${method} on a JNIEnv. The shim reads two arrays, makes one and clears an exception (${ENV_MAY_CALL[*]}): it calls no method of Java's, makes no reference and reaches no JavaVM, so the engine reaches Kotlin only as an export's answer."
     fi
-  done < <(tr -d '[:space:]' <<<"${shim}" | grep -oE '(^|[^A-Za-z0-9_])env\.[A-Za-z0-9_]+\(' | sed -E 's/.*env\.//; s/\($//' | LC_ALL=C sort -u || true)
-  hits="$(grep -nE '(^|[^A-Za-z0-9_])(JavaVM|GlobalRef|WeakRef|JNI_OnLoad|static|thread_local)([^A-Za-z0-9_]|$)' <<<"${shim}" | cut -d: -f1 | tr '\n' ' ' || true)"
+  done < <(grep -oE "${B}env\.[A-Za-z0-9_]+\(" <<<"${view}" | sed -E 's/.*env\.//; s/\($//' | LC_ALL=C sort -u || true)
+  hits="$(sed -E 's/usejni::JNIEnv;//g; s/([(,])env:&JNIEnv/\1/g; s/([^A-Za-z0-9_])env\.[A-Za-z0-9_]+\(/\1(/g; s/([(,])env([,)])/\1\2/g; s/([(,])env([,)])/\1\2/g' <<<"${view}" | grep -oE "${B}(env|JNIEnv)${E}.{0,24}" | head -n 3 | tr '\n' ' ' || true)"
   if [[ -n "${hits}" ]]; then
-    fail "${SHIM} names a JavaVM, a reference that outlives a call, or state of its own (line(s) ${hits}). Every call is made by a Java thread and returns: the shim keeps nothing between two."
+    fail "${CALLS} uses a JNIEnv otherwise than as a parameter 'env: &JNIEnv' that a whitelisted method is called on or that is handed on as an argument (at: ${hits}). Bound under another name, or named as a path, a call on it is one this guard does not read."
+  fi
+  hits="$(grep -nE "${B}(JavaVM|GlobalRef|WeakRef|JNI_OnLoad|static|thread_local)${E}" <<<"${shipped}" | cut -d: -f1 | tr '\n' ' ' || true)"
+  if [[ -n "${hits}" ]]; then
+    fail "${CALLS} names a JavaVM, a reference that outlives a call, or state of its own (line(s) ${hits}). Every call is made by a Java thread and returns: the shim keeps nothing between two."
   fi
 
   if (( FAILED )); then
     exit 1
   fi
-  log "OK: unsafe is written in the generated bridge and the shim alone, under the crate's deny; the $(wc -l <<<"${lines}" | tr -d ' ') exports are the pinned ones, each one guarded call of a radio entry, and the shim calls nothing of Java's."
+  log "OK: unsafe is written in the generated bridge and the exports' file alone, under the crate's deny; that file is uses and the ${want} pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's."
 }
 
 # ---------------------------------------------------------------------------
@@ -351,6 +445,8 @@ pub mod api;
 #[cfg(any(target_os = "android", test))]
 #[allow(unsafe_code)]
 mod mesh_jni;
+#[cfg(any(target_os = "android", test))]
+mod mesh_radio;
 
 #[cfg(debug_assertions)]
 mod test_keyring;
@@ -360,7 +456,7 @@ mod frb_generated;
 pub use frb_generated::*;
 RS
     cat >"${t}/${SRC}/api.rs" <<'RS'
-// Never unsafe here, no #[no_mangle] and no extern "C": see lib.rs.
+// Never unsafe here, no #[no_mangle], no #[export_name] and no extern "C".
 pub(crate) fn radio_left_ms() -> u64 {
     0
 }
@@ -372,7 +468,7 @@ pub(crate) fn radio_guarded<T>(none: T, call: impl FnOnce() -> T + std::panic::U
     std::panic::catch_unwind(call).unwrap_or(none)
 }
 fn qualifier(word: &str) -> bool {
-    matches!(word, "pub" | "unsafe") || word == "wss://relay.example unsafe"
+    matches!(word, "pub" | "unsafe" | "extern") || word == "wss://relay.example unsafe"
 }
 fn header(name: &str) -> String {
     format!("pub extern \"system\" fn Java_{name}(")
@@ -386,8 +482,46 @@ pub extern "C" fn frbgen_free(ptr: *mut u8) {
 RS
     printf 'pub fn install() {}\n' >"${t}/${SRC}/test_keyring.rs"
     cat >"${t}/${SHIM}" <<'RS'
-//! No unsafe block, no static, no JavaVM: env.new_global_ref( is never called.
+//! The exports. No unsafe block, no static, no mod, no macro!() here.
+
 use jni::objects::{JByteArray, JLongArray, JObject};
+use jni::sys::{
+    jbyteArray, jlong,
+};
+use jni::JNIEnv;
+
+use crate::mesh_radio;
+
+#[no_mangle]
+pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_leftMs(
+    _env: JNIEnv,
+    _this: JObject,
+) -> jlong {
+    mesh_radio::left_ms()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_receive(
+    env: JNIEnv,
+    _this: JObject,
+    link: jlong,
+    frame: JByteArray,
+) {
+    mesh_radio::receive(&env, link, &frame);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_poll(env: JNIEnv, _this: JObject, ready: JLongArray) -> jbyteArray {
+    mesh_radio::poll(
+        &env,
+        &ready,
+    )
+}
+RS
+    cat >"${t}/${CALLS}" <<'RS'
+//! What the exports forward to. No static, no JavaVM: env.new_global_ref( is
+//! never called.
+use jni::objects::{JByteArray, JLongArray};
 use jni::sys::{jbyteArray, jlong};
 use jni::JNIEnv;
 
@@ -406,48 +540,39 @@ fn settled<T>(env: &JNIEnv, answer: jni::errors::Result<T>) -> Option<T> {
     answer.ok()
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_leftMs(
-    _env: JNIEnv,
-    _this: JObject,
-) -> jlong {
+pub(crate) fn left_ms() -> jlong {
     millis_out(radio_guarded(0, radio_left_ms))
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_receive(
-    env: JNIEnv,
-    _this: JObject,
-    link: jlong,
-    frame: JByteArray,
-) {
+pub(crate) fn receive(env: &JNIEnv, link: jlong, frame: &JByteArray) {
     let read = env
-        .get_array_length(&frame)
-        .and_then(|_| env.convert_byte_array(&frame));
-    let Some(frame) = settled(&env, read) else {
+        .get_array_length(frame)
+        .and_then(|_| env.convert_byte_array(frame));
+    let Some(frame) = settled(env, read) else {
         return;
     };
     let link = link.cast_unsigned();
     radio_guarded((), || radio_receive(link, &frame));
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_poll(env: JNIEnv, _this: JObject, ready: JLongArray) -> jbyteArray {
+pub(crate) fn poll(env: &JNIEnv, ready: &JLongArray) -> jbyteArray {
     let mut links = [0; 1];
-    if settled(&env, env.get_long_array_region(&ready, 0, &mut links)).is_none() {
+    if settled(env, env.get_long_array_region(ready, 0, &mut links)).is_none() {
         return std::ptr::null_mut();
     }
     let links = links.map(jlong::cast_unsigned);
     let output = radio_guarded(None, || radio_poll(&links));
     output
-        .and_then(|output| settled(&env, env.byte_array_from_slice(&output)))
+        .and_then(|output| settled(env, env.byte_array_from_slice(&output)))
         .map_or(std::ptr::null_mut(), JByteArray::into_raw)
 }
 
 #[cfg(test)]
 mod tests {
     static CALLS: u8 = 0;
-    fn reads() { let _ = super::radio_left_ms(); }
+    fn reads() {
+        let _ = super::radio_left_ms();
+    }
 }
 RS
     cat >"${t}/${EXPORTS}" <<'TXT'
@@ -478,12 +603,17 @@ TXT
     awk -v text="$2" -v with="$3" 'index($0, text) { print with; next } { print }' "$1" >"$1.new"
     mv "$1.new" "$1"
   }
+  # Puts <text> — `\n` a line break — before the tests module of <file>.
+  _before_tests() { # <file> <text>
+    awk -v text="$2" '$0 == "#[cfg(test)]" { print text; print "" } { print }' "$1" >"$1.new"
+    mv "$1.new" "$1"
+  }
 
   echo "check_mesh_radio.sh --self-test"
   local t="${tmp}/ok"; _tree "${t}"
-  _case "the tree shape passes: three exports, comments and strings that only mention unsafe, a static in the shim's tests" 0 '' "${t}"
+  _case "the tree shape passes: three exports each one forward, comments and strings that only mention what is banned, a static in the calls' tests" 0 '' "${t}"
 
-  # Check 1: where unsafe, no_mangle and an ABI string are written.
+  # Check 1: where unsafe, extern and an exported symbol are written.
   t="${tmp}/unsafe-block"; _tree "${t}"
   printf 'fn read(ptr: *const u8) -> u8 { unsafe { *ptr } }\n' >>"${t}/${SRC}/api.rs"
   _case "an unsafe block in api.rs fails" 1 "${SRC}/api.rs writes unsafe" "${t}"
@@ -496,6 +626,14 @@ TXT
   printf 'struct Raw(*mut u8);\nunsafe impl Send for Raw {}\n' >"${t}/${SRC}/raw.rs"
   _case "an unsafe impl in a new file fails" 1 "${SRC}/raw.rs writes unsafe" "${t}"
 
+  t="${tmp}/unsafe-in-calls"; _tree "${t}"
+  _line "${t}/${CALLS}" 'jlong::try_from(ms).unwrap_or(jlong::MAX)' '    unsafe { i64::try_from(ms).unwrap_unchecked() }'
+  _case "an unsafe block in what the exports forward to fails" 1 "${CALLS} writes unsafe" "${t}"
+
+  t="${tmp}/unsafe-behind-tests"; _tree "${t}"
+  printf '\npub fn hidden() -> u8 {\n    unsafe { core::ptr::read(&1u8) }\n}\n' >>"${t}/${CALLS}"
+  _case "an unsafe block behind the calls' tests fails check 1, which reads the whole file" 1 "${CALLS} writes unsafe" "${t}"
+
   t="${tmp}/no-mangle"; _tree "${t}"
   printf '#[no_mangle]\npub fn haven_probe() {}\n' >>"${t}/${SRC}/api.rs"
   _case "a no_mangle in api.rs fails" 1 "${SRC}/api.rs writes unsafe" "${t}"
@@ -504,13 +642,29 @@ TXT
   printf '#[unsafe(no_mangle)]\npub fn haven_probe() {}\n' >"${t}/${SRC}/probe.rs"
   _case "the 2024 spelling of no_mangle in a new file fails" 1 "${SRC}/probe.rs writes unsafe" "${t}"
 
+  t="${tmp}/export-name"; _tree "${t}"
+  printf '#[export_name = "Java_com_oblivioustech_haven_mesh_MeshNative_extra"]\npub fn extra() {}\n' >>"${t}/${SRC}/api.rs"
+  _case "an export_name in api.rs fails" 1 "${SRC}/api.rs writes unsafe" "${t}"
+
+  t="${tmp}/link-section"; _tree "${t}"
+  printf '#[link_section = ".init_array"]\npub fn early() {}\n' >"${t}/${SRC}/early.rs"
+  _case "a link_section in a new file fails" 1 "${SRC}/early.rs writes unsafe" "${t}"
+
   t="${tmp}/extern-fn"; _tree "${t}"
   printf 'pub extern "C" fn haven_probe() {}\n' >>"${t}/${SRC}/api.rs"
   _case "an extern fn in api.rs fails" 1 "${SRC}/api.rs writes unsafe" "${t}"
 
+  t="${tmp}/bare-extern"; _tree "${t}"
+  printf 'pub extern fn haven_probe() {}\n' >>"${t}/${SRC}/api.rs"
+  _case "an extern fn with no ABI string in api.rs fails" 1 "${SRC}/api.rs writes unsafe" "${t}"
+
   t="${tmp}/extern-block"; _tree "${t}"
   printf 'extern "C" {\n    fn getpid() -> i32;\n}\n' >"${t}/${SRC}/sys.rs"
   _case "an extern block in a new file fails" 1 "${SRC}/sys.rs writes unsafe" "${t}"
+
+  t="${tmp}/export-elsewhere"; _tree "${t}"
+  _before_tests "${t}/${CALLS}" '#[no_mangle]\npub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_reset(_env: JNIEnv, _this: jni::objects::JObject) {}'
+  _case "an export of MeshNative in another file of the crate fails" 1 "${CALLS} writes unsafe" "${t}"
 
   # Check 2: the lint.
   t="${tmp}/no-deny"; _tree "${t}"
@@ -530,69 +684,117 @@ TXT
   _case "an allowance on a third module fails" 1 'names unsafe_code otherwise' "${t}"
 
   t="${tmp}/moved-allow"; _tree "${t}"
-  sed -i 's/^mod test_keyring;$/mod test_keyring;\nmod mesh_jni;/; 0,/^mod mesh_jni;$/{/^mod mesh_jni;$/d}' "${t}/${LIB}"
-  _case "the shim's allowance left on the module declared after it fails" 1 'names unsafe_code otherwise' "${t}"
+  sed -i '/^mod mesh_jni;$/d; s/^mod mesh_radio;$/mod mesh_radio;\nmod mesh_jni;/' "${t}/${LIB}"
+  sed -i '0,/^#\[cfg(any(target_os = "android", test))\]$/{/^#\[cfg(any(target_os = "android", test))\]$/d}' "${t}/${LIB}"
+  _case "the allowance left on what the exports forward to fails" 1 'names unsafe_code otherwise' "${t}"
 
   t="${tmp}/inner-allow"; _tree "${t}"
   sed -i '1s/^/#![allow(unsafe_code)]\n/' "${t}/${SRC}/api.rs"
   _case "an inner allowance in api.rs fails" 1 "${SRC}/api.rs names the unsafe_code lint" "${t}"
 
   t="${tmp}/item-allow"; _tree "${t}"
-  printf '#[allow(unsafe_code)]\nfn raw() {}\n' >>"${t}/${SRC}/test_keyring.rs"
-  _case "an allowance on one item of the test keyring fails" 1 "${SRC}/test_keyring.rs names the unsafe_code lint" "${t}"
+  _before_tests "${t}/${CALLS}" '#[allow(unsafe_code)]\nfn raw() {}'
+  _case "an allowance on one item of what the exports forward to fails" 1 "${CALLS} names the unsafe_code lint" "${t}"
 
-  # Check 3: every export is one guarded call.
-  t="${tmp}/bare"; _tree "${t}"
-  _line "${t}/${SHIM}" 'millis_out(radio_guarded(0, radio_left_ms))' '    millis_out(radio_left_ms())'
-  _case "an export that calls its entry bare fails" 1 'the export leftMs is not one guarded call' "${t}"
+  # Check 3: the exports' file is uses and exports, each export one call.
+  t="${tmp}/plant-export-name"; _tree "${t}"
+  printf '\n#[export_name = "Java_com_oblivioustech_haven_mesh_MeshNative_extra"]\npub extern fn extra(env: JNIEnv, _this: JObject) {\n    let e = &env;\n    let _ = JNIEnv::exception_check(e);\n}\n' >>"${t}/${SHIM}"
+  _case "the review's plant: a symbol exported by export_name from a bare extern fn that calls JNI by path fails" 1 'holds something that is neither a use nor an export' "${t}"
 
-  t="${tmp}/before-guard"; _tree "${t}"
-  _line "${t}/${SHIM}" 'radio_guarded((), || radio_receive(' '    let _ = radio_left_ms();\n    radio_guarded((), || radio_receive(link, &frame));'
-  _case "an entry called before the guard fails" 1 'the export receive is not one guarded call' "${t}"
+  t="${tmp}/plant-hidden"; _tree "${t}"
+  printf '\n#[cfg(test)]\nconst HIDE: u8 = 0;\n\npub fn hidden() -> u8 {\n    unsafe { core::ptr::read(&1u8) }\n}\n' >>"${t}/${SHIM}"
+  _case "the review's plant: an early cfg(test) and unsafe code behind it fail" 1 'holds something that is neither a use nor an export' "${t}"
 
-  t="${tmp}/two-under"; _tree "${t}"
-  _line "${t}/${SHIM}" 'radio_guarded((), || radio_receive(' '    radio_guarded((), || { let _ = radio_left_ms(); radio_receive(link, &frame) });'
-  _case "two entries under one guard fail" 1 'the export receive is not one guarded call' "${t}"
+  t="${tmp}/shim-tests"; _tree "${t}"
+  printf '\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn nothing() {}\n}\n' >>"${t}/${SHIM}"
+  _case "a tests module in the exports' file fails: every line of it is read" 1 'names unsafe, export_name, link_section, used, mod, impl, static, cfg' "${t}"
 
-  t="${tmp}/two-guards"; _tree "${t}"
-  _line "${t}/${SHIM}" 'millis_out(radio_guarded(0, radio_left_ms))' '    millis_out(radio_guarded(0, radio_left_ms) + radio_guarded(0, radio_left_ms))'
-  _case "two guarded calls in one export fail" 1 'the export leftMs is not one guarded call' "${t}"
-
-  t="${tmp}/beside"; _tree "${t}"
-  _line "${t}/${SHIM}" 'millis_out(radio_guarded(0, radio_left_ms))' '    millis_out(radio_guarded(0, || { crate::api::mesh_stop(); radio_left_ms() }))'
-  _case "something else called under the guard, beside the entry, fails" 1 'the export leftMs is not one guarded call' "${t}"
-
-  t="${tmp}/converted-under"; _tree "${t}"
-  _line "${t}/${SHIM}" 'radio_guarded((), || radio_receive(' '    radio_guarded((), || radio_receive(link.rotate_left(1), &frame));'
-  _case "a call made under the guard, among the entry's arguments, fails" 1 'the export receive is not one guarded call' "${t}"
-
-  t="${tmp}/not-an-entry"; _tree "${t}"
-  _line "${t}/${SHIM}" 'millis_out(radio_guarded(0, radio_left_ms))' '    millis_out(radio_guarded(0, crate::api::mesh_empty))'
-  _case "an export that calls something that is no radio entry fails" 1 'the export leftMs is not one guarded call' "${t}"
-
-  t="${tmp}/helper-calls"; _tree "${t}"
-  _line "${t}/${SHIM}" 'jlong::try_from(ms).unwrap_or(jlong::MAX)' '    jlong::try_from(ms.max(radio_left_ms())).unwrap_or(jlong::MAX)'
-  _case "an entry called from a helper, outside every export, fails" 1 'names a radio entry outside an export' "${t}"
-
-  t="${tmp}/unsafe-in-shim"; _tree "${t}"
-  _line "${t}/${SHIM}" 'jlong::try_from(ms).unwrap_or(jlong::MAX)' '    unsafe { i64::try_from(ms).unwrap_unchecked() }'
-  _case "an unsafe block in the shim fails" 1 "${SHIM} writes unsafe" "${t}"
+  t="${tmp}/unsafe-spelling"; _tree "${t}"
+  sed -i '0,/^#\[no_mangle\]$/s//#[unsafe(no_mangle)]/' "${t}/${SHIM}"
+  _case "an export under the 2024 spelling of no_mangle fails" 1 'holds something that is neither a use nor an export' "${t}"
 
   t="${tmp}/c-abi"; _tree "${t}"
   sed -i 's/^pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_leftMs(/pub extern "C" fn Java_com_oblivioustech_haven_mesh_MeshNative_leftMs(/' "${t}/${SHIM}"
-  _case "an export declared with another ABI fails" 1 'exports something that is not' "${t}"
+  _case "an export declared with another ABI fails" 1 'holds something that is neither a use nor an export' "${t}"
 
   t="${tmp}/mangled"; _tree "${t}"
   sed -i '0,/^#\[no_mangle\]$/{/^#\[no_mangle\]$/d}' "${t}/${SHIM}"
-  _case "an export without no_mangle fails" 1 'exports something that is not' "${t}"
+  _case "an export without no_mangle fails" 1 'holds something that is neither a use nor an export' "${t}"
 
   t="${tmp}/on-load"; _tree "${t}"
-  sed -i 's/^#\[cfg(test)\]$/#[no_mangle]\npub extern "system" fn JNI_OnLoad(vm: *mut u8, _reserved: *mut u8) -> i32 {\n    0x0001_0006\n}\n\n#[cfg(test)]/' "${t}/${SHIM}"
-  _case "a symbol exported from the shim that is no method of MeshNative fails" 1 'exports something that is not' "${t}"
+  printf '\n#[no_mangle]\npub extern "system" fn JNI_OnLoad(vm: *mut u8, _reserved: *mut u8) -> i32 {\n    0x0001_0006\n}\n' >>"${t}/${SHIM}"
+  _case "a symbol exported from the shim that is no method of MeshNative fails" 1 'holds something that is neither a use nor an export' "${t}"
+
+  t="${tmp}/bare-extern-in-shim"; _tree "${t}"
+  printf '\npub extern fn Java_com_oblivioustech_haven_mesh_MeshNative_extra(_env: JNIEnv, _this: JObject) {}\n' >>"${t}/${SHIM}"
+  _case "an extern fn with no ABI string in the exports' file is counted" 1 'another number of extern keywords or of no_mangle' "${t}"
+
+  t="${tmp}/helper"; _tree "${t}"
+  printf '\nfn twice(ms: jlong) -> jlong {\n    ms.saturating_mul(2)\n}\n' >>"${t}/${SHIM}"
+  _case "a function in the exports' file that is no export fails" 1 'holds something that is neither a use nor an export' "${t}"
+
+  t="${tmp}/shim-mod"; _tree "${t}"
+  printf '\nmod raw {\n    pub fn read() {}\n}\n' >>"${t}/${SHIM}"
+  _case "a module in the exports' file fails" 1 'names unsafe, export_name, link_section, used, mod, impl, static, cfg' "${t}"
+
+  t="${tmp}/shim-impl"; _tree "${t}"
+  printf '\nstruct Raw;\nimpl Drop for Raw {\n    fn drop(&mut self) {}\n}\n' >>"${t}/${SHIM}"
+  _case "an impl in the exports' file fails" 1 'names unsafe, export_name, link_section, used, mod, impl, static, cfg' "${t}"
+
+  t="${tmp}/shim-static"; _tree "${t}"
+  printf '\n#[used]\nstatic KEEP: u8 = 0;\n' >>"${t}/${SHIM}"
+  _case "a used static in the exports' file fails" 1 'names unsafe, export_name, link_section, used, mod, impl, static, cfg' "${t}"
+
+  t="${tmp}/shim-link-section"; _tree "${t}"
+  sed -i '0,/^#\[no_mangle\]$/s//#[link_section = ".text.hot"]\n#[no_mangle]/' "${t}/${SHIM}"
+  _case "a link_section on an export fails" 1 'names unsafe, export_name, link_section, used, mod, impl, static, cfg' "${t}"
+
+  t="${tmp}/shim-cfg"; _tree "${t}"
+  sed -i '0,/^#\[no_mangle\]$/s//#[cfg(target_os = "android")]\n#[no_mangle]/' "${t}/${SHIM}"
+  _case "a cfg on an export fails" 1 'names unsafe, export_name, link_section, used, mod, impl, static, cfg' "${t}"
+
+  t="${tmp}/body-unsafe"; _tree "${t}"
+  _line "${t}/${SHIM}" '    mesh_radio::left_ms()' '    unsafe { mesh_radio::left_ms() }'
+  _case "an unsafe block round a forward fails" 1 'names unsafe, export_name, link_section, used, mod, impl, static, cfg' "${t}"
+
+  t="${tmp}/body-macro"; _tree "${t}"
+  _line "${t}/${SHIM}" '    mesh_radio::left_ms()' '    debug_assert!(true);\n    mesh_radio::left_ms()'
+  _case "a macro invoked in an export fails" 1 'or invokes a macro' "${t}"
+
+  t="${tmp}/body-jni-path"; _tree "${t}"
+  _line "${t}/${SHIM}" '    mesh_radio::receive(&env, link, &frame);' '    let _ = JNIEnv::exception_check(&env);\n    mesh_radio::receive(&env, link, &frame);'
+  _case "a JNI call made by path in an export fails" 1 'the export receive is not the one call mesh_radio::receive(&env,link,&frame)' "${t}"
+
+  t="${tmp}/body-converts"; _tree "${t}"
+  _line "${t}/${SHIM}" '    mesh_radio::receive(&env, link, &frame);' '    mesh_radio::receive(&env, link.wrapping_add(1), &frame);'
+  _case "an export that changes an argument on the way fails" 1 'the export receive is not the one call' "${t}"
+
+  t="${tmp}/body-swapped"; _tree "${t}"
+  sed -i 's/^    frame: JByteArray,$/    peer: jlong,/' "${t}/${SHIM}"
+  _line "${t}/${SHIM}" '    mesh_radio::receive(&env, link, &frame);' '    mesh_radio::receive(&env, peer, link);'
+  _case "an export that hands two parameters on in each other's place fails" 1 'the export receive is not the one call mesh_radio::receive(&env,link,peer)' "${t}"
+
+  t="${tmp}/body-other-call"; _tree "${t}"
+  _line "${t}/${SHIM}" '    mesh_radio::left_ms()' '    mesh_radio::poll_now()'
+  _case "an export that forwards to a function of another name fails" 1 'the export leftMs is not the one call mesh_radio::left_ms()' "${t}"
+
+  t="${tmp}/body-bridge"; _tree "${t}"
+  _line "${t}/${SHIM}" '    mesh_radio::left_ms()' '    jlong::try_from(crate::api::radio_left_ms()).unwrap_or(0)'
+  _case "an export that calls a radio entry itself fails" 1 'the export leftMs is not the one call' "${t}"
+
+  t="${tmp}/body-two"; _tree "${t}"
+  _line "${t}/${SHIM}" '    mesh_radio::left_ms()' '    mesh_radio::receive_none();\n    mesh_radio::left_ms()'
+  _case "an export of two calls fails" 1 'the export leftMs is not the one call' "${t}"
+
+  t="${tmp}/env-unnamed"; _tree "${t}"
+  sed -i 's/^    env: JNIEnv,$/    jni: JNIEnv,/' "${t}/${SHIM}"
+  _line "${t}/${SHIM}" '    mesh_radio::receive(&env, link, &frame);' '    mesh_radio::receive(&jni, link, &frame);'
+  _case "an export that names its environment otherwise fails" 1 '> ? receive' "${t}"
 
   # Check 4: the exports are the pinned ones.
   t="${tmp}/tenth"; _tree "${t}"
-  sed -i 's/^#\[cfg(test)\]$/#[no_mangle]\npub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_reset(\n    _env: JNIEnv,\n    _this: JObject,\n) -> jlong {\n    millis_out(radio_guarded(0, radio_left_ms))\n}\n\n#[cfg(test)]/' "${t}/${SHIM}"
+  printf '\n#[no_mangle]\npub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_reset(\n    _env: JNIEnv,\n    _this: JObject,\n) -> jlong {\n    mesh_radio::reset()\n}\n' >>"${t}/${SHIM}"
+  _before_tests "${t}/${CALLS}" 'pub(crate) fn reset() -> jlong {\n    0\n}'
   _case "an export the fixture does not list fails" 1 '> reset ()J - jlong' "${t}"
 
   t="${tmp}/missing"; _tree "${t}"
@@ -601,6 +803,7 @@ TXT
 
   t="${tmp}/renamed"; _tree "${t}"
   sed -i 's/MeshNative_leftMs(/MeshNative_left(/' "${t}/${SHIM}"
+  _line "${t}/${SHIM}" '    mesh_radio::left_ms()' '    mesh_radio::left()'
   _case "an export under another name fails" 1 '> left ()J - jlong' "${t}"
 
   t="${tmp}/type"; _tree "${t}"
@@ -617,7 +820,7 @@ TXT
 
   t="${tmp}/order"; _tree "${t}"
   sed -i 's/^    link: jlong,$/    frame: JByteArray,/; 0,/^    frame: JByteArray,$/! s/^    frame: JByteArray,$/    link: jlong,/' "${t}/${SHIM}"
-  _case "two parameters in the other order fail" 1 '> receive ([BJ)V JByteArray,jlong -' "${t}"
+  _case "two parameters declared in the other order fail" 1 '> receive ([BJ)V JByteArray,jlong -' "${t}"
 
   t="${tmp}/no-receiver"; _tree "${t}"
   sed -i '0,/^    _this: JObject,$/{/^    _this: JObject,$/d}' "${t}/${SHIM}"
@@ -627,31 +830,107 @@ TXT
   sed -i 's/^    link: jlong,$/    link: jshort,/' "${t}/${SHIM}"
   _case "a parameter of a type the descriptors have no letter for fails" 1 '> ? receive' "${t}"
 
-  # Check 5: what the shim does with a JNIEnv.
+  t="${tmp}/pinned-order"; _tree "${t}"
+  printf 'poll ([J)[B JLongArray jbyteArray\nleftMs ()J - jlong\nreceive (J[B)V jlong,JByteArray -\n' >"${t}/${EXPORTS}"
+  _case "the fixture's lines in another order are the same exports" 0 '' "${t}"
+
+  # Check 5: what the exports forward to.
+  t="${tmp}/bare"; _tree "${t}"
+  _line "${t}/${CALLS}" 'millis_out(radio_guarded(0, radio_left_ms))' '    millis_out(radio_left_ms())'
+  _case "a call that makes its entry bare fails" 1 'the call left_ms of' "${t}"
+
+  t="${tmp}/before-guard"; _tree "${t}"
+  _line "${t}/${CALLS}" 'radio_guarded((), || radio_receive(' '    let _ = radio_left_ms();\n    radio_guarded((), || radio_receive(link, &frame));'
+  _case "an entry called before the guard fails" 1 'the call receive of' "${t}"
+
+  t="${tmp}/two-under"; _tree "${t}"
+  _line "${t}/${CALLS}" 'radio_guarded((), || radio_receive(' '    radio_guarded((), || { let _ = radio_left_ms(); radio_receive(link, &frame) });'
+  _case "two entries under one guard fail" 1 'the call receive of' "${t}"
+
+  t="${tmp}/two-guards"; _tree "${t}"
+  _line "${t}/${CALLS}" 'millis_out(radio_guarded(0, radio_left_ms))' '    millis_out(radio_guarded(0, radio_left_ms) + radio_guarded(0, radio_left_ms))'
+  _case "two guarded calls in one call fail" 1 'the call left_ms of' "${t}"
+
+  t="${tmp}/beside"; _tree "${t}"
+  _line "${t}/${CALLS}" 'millis_out(radio_guarded(0, radio_left_ms))' '    millis_out(radio_guarded(0, || { crate::api::mesh_stop(); radio_left_ms() }))'
+  _case "something else called under the guard, beside the entry, fails" 1 'the call left_ms of' "${t}"
+
+  t="${tmp}/converted-under"; _tree "${t}"
+  _line "${t}/${CALLS}" 'radio_guarded((), || radio_receive(' '    radio_guarded((), || radio_receive(link.rotate_left(1), &frame));'
+  _case "a call made under the guard, among the entry's arguments, fails" 1 'the call receive of' "${t}"
+
+  t="${tmp}/not-an-entry"; _tree "${t}"
+  _line "${t}/${CALLS}" 'millis_out(radio_guarded(0, radio_left_ms))' '    millis_out(radio_guarded(0, crate::api::mesh_empty))'
+  _case "a call that makes something that is no radio entry fails" 1 'the call left_ms of' "${t}"
+
+  t="${tmp}/other-entry"; _tree "${t}"
+  _line "${t}/${CALLS}" 'radio_guarded((), || radio_receive(' '    radio_guarded((), || radio_poll(&[link]));'
+  _case "a call that makes another call's entry fails" 1 'the call receive of' "${t}"
+
+  t="${tmp}/helper-calls"; _tree "${t}"
+  _line "${t}/${CALLS}" 'jlong::try_from(ms).unwrap_or(jlong::MAX)' '    jlong::try_from(ms.max(radio_left_ms())).unwrap_or(jlong::MAX)'
+  _case "an entry called from a helper, outside every call, fails" 1 "names a radio entry outside the pinned methods' functions" "${t}"
+
+  t="${tmp}/no-call"; _tree "${t}"
+  sed -i 's/^pub(crate) fn left_ms() -> jlong {$/pub(crate) fn time_left() -> jlong {/' "${t}/${CALLS}"
+  _case "a pinned method with no function of its name fails" 1 "does not declare 'pub(crate) fn left_ms(' exactly once" "${t}"
+
   t="${tmp}/global-ref"; _tree "${t}"
-  _line "${t}/${SHIM}" 'let mut links = [0; 1];' '    let mut links = [0; 1];\n    let _ = env.new_global_ref(&ready);'
+  _line "${t}/${CALLS}" 'let mut links = [0; 1];' '    let mut links = [0; 1];\n    let _ = env.new_global_ref(ready);'
   _case "a global reference made in the shim fails" 1 'calls new_global_ref on a JNIEnv' "${t}"
 
   t="${tmp}/callback"; _tree "${t}"
-  sed -i 's/^    let read = env$/    let read = env\n        .call_method(&frame, "size", "()I", &[])\n        .and_then(|_| env.get_array_length(&frame))\n        .map(drop);\n    let read = env/' "${t}/${SHIM}"
+  sed -i 's/^    let read = env$/    let read = env\n        .call_method(frame, "size", "()I", \&[])\n        .and_then(|_| env.get_array_length(frame))\n        .map(drop);\n    let read = env/' "${t}/${CALLS}"
   _case "a call into Java, split over two lines, fails" 1 'calls call_method on a JNIEnv' "${t}"
 
+  t="${tmp}/jni-path"; _tree "${t}"
+  _line "${t}/${CALLS}" 'let mut links = [0; 1];' '    let mut links = [0; 1];\n    let _ = JNIEnv::exception_check(env);'
+  _case "a JNI method called by its path fails" 1 'uses a JNIEnv otherwise' "${t}"
+
+  t="${tmp}/aliased"; _tree "${t}"
+  _line "${t}/${CALLS}" 'let mut links = [0; 1];' '    let mut links = [0; 1];\n    let e = env;\n    let _ = e.exception_check();'
+  _case "a JNIEnv bound under a second name fails" 1 'uses a JNIEnv otherwise' "${t}"
+
   t="${tmp}/other-name"; _tree "${t}"
-  sed -i 's/^fn settled<T>(env: &JNIEnv, /fn settled<T>(jni: \&JNIEnv, /; s/let _ = env.exception_clear();/let _ = jni.exception_clear();/' "${t}/${SHIM}"
-  _case "a JNIEnv bound under another name fails" 1 "binds a JNIEnv as 'jni'" "${t}"
+  sed -i 's/^fn settled<T>(env: &JNIEnv, /fn settled<T>(jni: \&JNIEnv, /; s/let _ = env.exception_clear();/let _ = jni.exception_clear();/' "${t}/${CALLS}"
+  _case "a JNIEnv parameter under another name fails" 1 'uses a JNIEnv otherwise' "${t}"
+
+  t="${tmp}/by-value"; _tree "${t}"
+  sed -i 's/^fn settled<T>(env: &JNIEnv, /fn settled<T>(env: JNIEnv, /' "${t}/${CALLS}"
+  _case "a JNIEnv taken by value fails" 1 'uses a JNIEnv otherwise' "${t}"
 
   t="${tmp}/vm"; _tree "${t}"
-  _line "${t}/${SHIM}" 'use jni::JNIEnv;' 'use jni::{JNIEnv, JavaVM};'
+  _line "${t}/${CALLS}" 'use jni::JNIEnv;' 'use jni::JNIEnv;\nuse jni::JavaVM;'
   _case "a JavaVM named in the shim fails" 1 'names a JavaVM' "${t}"
 
   t="${tmp}/state"; _tree "${t}"
-  sed -i 's/^fn millis_out(ms: u64) -> jlong {$/static LAST: std::sync::Mutex<u64> = std::sync::Mutex::new(0);\n\nfn millis_out(ms: u64) -> jlong {/' "${t}/${SHIM}"
+  sed -i 's/^fn millis_out(ms: u64) -> jlong {$/static LAST: std::sync::Mutex<u64> = std::sync::Mutex::new(0);\n\nfn millis_out(ms: u64) -> jlong {/' "${t}/${CALLS}"
   _case "state kept in the shim between calls fails" 1 'names a JavaVM' "${t}"
+
+  t="${tmp}/early-cfg-test"; _tree "${t}"
+  sed -i 's/^fn millis_out(ms: u64) -> jlong {$/#[cfg(test)]\nconst HIDE: u8 = 0;\n\nfn millis_out(ms: u64) -> jlong {/' "${t}/${CALLS}"
+  _case "a cfg(test) ahead of the calls' tests fails" 1 'has a cfg(test) that is not the one' "${t}"
+
+  t="${tmp}/cfg-any-test"; _tree "${t}"
+  sed -i 's/^fn millis_out(ms: u64) -> jlong {$/#[cfg(any(test, debug_assertions))]\nfn probe() {}\n\nfn millis_out(ms: u64) -> jlong {/' "${t}/${CALLS}"
+  _case "a cfg that only names test among others fails" 1 'has a cfg(test) that is not the one' "${t}"
+
+  t="${tmp}/behind-tests"; _tree "${t}"
+  printf '\npub(crate) fn hidden() -> u64 {\n    crate::api::radio_left_ms()\n}\n' >>"${t}/${CALLS}"
+  _case "code behind the calls' tests fails" 1 'or something after that module' "${t}"
+
+  t="${tmp}/tests-renamed"; _tree "${t}"
+  sed -i 's/^mod tests {$/mod checks {/' "${t}/${CALLS}"
+  _case "a cfg(test) module under another name is read as code that ships" 1 'has a cfg(test) that is not the one' "${t}"
 
   # Misconfiguration.
   t="${tmp}/no-shim"; _tree "${t}"
   rm "${t}/${SHIM}"
-  _case "a missing shim is a misconfiguration" 2 '' "${t}"
+  _case "a missing exports' file is a misconfiguration" 2 '' "${t}"
+
+  t="${tmp}/no-calls"; _tree "${t}"
+  rm "${t}/${CALLS}"
+  _case "a missing file of calls is a misconfiguration" 2 '' "${t}"
 
   t="${tmp}/vacuous"; _tree "${t}"
   sed -i 's/Java_com_oblivioustech_haven_mesh_MeshNative_/Java_com_oblivioustech_haven_radio_Native_/' "${t}/${SHIM}"
