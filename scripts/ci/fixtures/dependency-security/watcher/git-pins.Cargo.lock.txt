@@ -1,0 +1,29 @@
+# check_upstream_advisories.sh fixture: the git sources Haven's shipped lock
+# resolves (haven/rust_builder/Cargo.lock), and one registry package that
+# shares a name with a git repository.
+version = 4
+
+[[package]]
+name = "cgka-engine"
+version = "0.10.4"
+source = "git+https://github.com/marmot-protocol/mdk?rev=fcc85edd8dbd07c8293c899ee52230f72c54c897#fcc85edd8dbd07c8293c899ee52230f72c54c897"
+
+[[package]]
+name = "libsqlite3-sys"
+version = "0.38.1"
+source = "git+https://github.com/rusqlite/rusqlite.git?rev=5ae7fdf83085c595fd54f977b3a56ccacabaf16b#5ae7fdf83085c595fd54f977b3a56ccacabaf16b"
+
+[[package]]
+name = "openmls"
+version = "0.8.1"
+source = "git+https://github.com/erskingardner/openmls.git?rev=59e7d3b27a7e95237879dd5478de1fd90eff7ada#59e7d3b27a7e95237879dd5478de1fd90eff7ada"
+
+[[package]]
+name = "rusqlite"
+version = "0.40.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323"
+
+[[package]]
+name = "rust_lib_haven"
+version = "0.1.0"

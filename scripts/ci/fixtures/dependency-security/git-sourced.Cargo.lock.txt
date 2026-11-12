@@ -1,0 +1,10 @@
+# Parsed as a Cargo.lock by run_osv_gate.sh --binary-self-test. Named so that
+# neither a recursive osv-scanner scan nor GitHub's dependency graph takes it
+# for a real lockfile. The source is the one Haven's SQLCipher build resolves
+# from (scripts/ci/mdk_pins.env): a git source, which cargo-audit skips.
+version = 4
+
+[[package]]
+name = "libsqlite3-sys"
+version = "0.38.1"
+source = "git+https://github.com/rusqlite/rusqlite.git?rev=5ae7fdf83085c595fd54f977b3a56ccacabaf16b#5ae7fdf83085c595fd54f977b3a56ccacabaf16b"

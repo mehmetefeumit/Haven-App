@@ -1,0 +1,8 @@
+# check_ledger.sh fixture: an online scan, its flags continued over lines.
+jobs:
+  nightly:
+    steps:
+      - run: |
+          osv-scanner scan source \
+            --format json \
+            -r .

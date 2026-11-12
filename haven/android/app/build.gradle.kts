@@ -51,8 +51,9 @@ android {
     }
 
     // Load signing config from key.properties if available (for release builds).
-    // For local development, falls back to debug signing.
-    // CI builds should provide key.properties via secrets.
+    // For local development, falls back to debug signing. CI never writes
+    // key.properties: release-build.yml builds on the debug fallback and re-signs
+    // in a separate job (scripts/ci/sign_android_release.sh).
     val keyPropertiesFile = rootProject.file("key.properties")
     val useReleaseSigningConfig = keyPropertiesFile.exists()
 

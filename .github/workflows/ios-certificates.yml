@@ -30,20 +30,35 @@ concurrency:
   group: ios-certificates
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   match:
     name: Provision signing certificate + profile
     runs-on: macos-latest
+    # This job holds the certificate-minting secrets, so, as in
+    # release-build.yml, it restores no cache and installs the gems frozen from
+    # the committed Gemfile.lock (checksums included) rather than from
+    # bundler-cache.
+    env:
+      BUNDLE_FROZEN: 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
-      - name: Setup Ruby + Fastlane
-        uses: ruby/setup-ruby@v1
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
         with:
           ruby-version: '3.3'
-          bundler-cache: true
+          bundler-cache: false
           working-directory: haven/ios
+
+      - name: Install Fastlane (Gemfile.lock)
+        working-directory: haven/ios
+        run: bundle install
 
       - name: Run Fastlane Match (read-write)
         working-directory: haven/ios

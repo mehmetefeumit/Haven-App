@@ -1,0 +1,119 @@
+{
+  "results": [
+    {
+      "source": {
+        "path": "/ROOT/haven-core/Cargo.lock",
+        "type": "lockfile"
+      },
+      "packages": [
+        {
+          "package": {
+            "name": "adler2",
+            "version": "2.0.1",
+            "ecosystem": "crates.io"
+          }
+        },
+        {
+          "package": {
+            "name": "lru",
+            "version": "0.16.4",
+            "ecosystem": "crates.io"
+          },
+          "groups": [
+            {
+              "ids": [
+                "RUSTSEC-2026-0253"
+              ],
+              "aliases": [
+                "RUSTSEC-2026-0253"
+              ]
+            }
+          ],
+          "vulnerabilities": [
+            {
+              "id": "RUSTSEC-2026-0253",
+              "summary": "Potential use-after-free due to lack of panic safety in `LruCache::pop()`",
+              "aliases": null,
+              "affected": [
+                {
+                  "package": {
+                    "ecosystem": "crates.io",
+                    "name": "lru"
+                  },
+                  "database_specific": {
+                    "informational": "unsound"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "package": {
+            "name": "nostr-relay-builder",
+            "version": "0.44.1",
+            "ecosystem": "crates.io"
+          },
+          "groups": [
+            {
+              "ids": [
+                "RUSTSEC-2026-0237"
+              ],
+              "aliases": [
+                "RUSTSEC-2026-0237"
+              ]
+            }
+          ],
+          "vulnerabilities": [
+            {
+              "id": "RUSTSEC-2026-0237",
+              "summary": "`nostr-relay-builder` is unmaintained",
+              "aliases": null,
+              "affected": [
+                {
+                  "package": {
+                    "ecosystem": "crates.io",
+                    "name": "nostr-relay-builder"
+                  },
+                  "database_specific": {
+                    "informational": "unmaintained"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": {
+        "path": "/ROOT/haven/pubspec.lock",
+        "type": "lockfile"
+      },
+      "packages": [
+        {
+          "package": {
+            "name": "args",
+            "version": "2.7.0",
+            "ecosystem": "Pub"
+          }
+        }
+      ]
+    },
+    {
+      "source": {
+        "path": "/ROOT/tooling/soak/Cargo.lock",
+        "type": "lockfile"
+      },
+      "packages": [
+        {
+          "package": {
+            "name": "adler2",
+            "version": "2.0.1",
+            "ecosystem": "crates.io"
+          }
+        }
+      ]
+    }
+  ]
+}

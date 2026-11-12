@@ -418,11 +418,37 @@
 #     call `sqlcipher_init::ensure()` first in the same function.
 #
 #   Audit ignores are live            scripts/ci/check_audit_ignores_live.sh
-#     Only the self-test runs here: the check re-audits every lockfile without
-#     the ignore list, which needs cargo-audit and the advisory database, so it
-#     runs in audit.yml. The fixtures are real cargo-audit JSON, and pin that a
-#     stale ignore, an id seen only as an alias, and a filtered or unreadable
-#     report each fail rather than pass.
+#     The liveness check re-audits every lockfile without the ignore list,
+#     which needs cargo-audit and the advisory database, so it runs in
+#     audit.yml; its fixtures run here. They are real cargo-audit JSON, and pin
+#     that a stale ignore, an id seen only as an alias, and a filtered or
+#     unreadable report each fail rather than pass. `--lockfile-set` needs no
+#     toolchain and runs here too: audit.yml audits exactly the committed
+#     Cargo.lock files, so a new crate cannot sit unaudited the way
+#     local-blossom did.
+#
+#   Dependency-security gates         scripts/ci/run_osv_gate.sh
+#                                     scripts/ci/check_pub_retractions.sh
+#                                     scripts/ci/check_upstream_advisories.sh
+#     Each needs a scanner, its database or the network, so each enforces in
+#     audit.yml (the watcher in its full mode only: nightly and release); only
+#     their fixtures run here. The osv gate's are real osv-scanner output: an
+#     informational advisory warns, a vulnerability in a git-sourced crate, a
+#     GHSA record and a malware record (even acknowledged) fail, and a lockfile
+#     the scanner skipped is a misconfiguration. The pub gate's are real pub.dev
+#     answers behind a curl stub: a retracted version fails, and only hosted
+#     packages are asked about, at the registry their lock entry names. The
+#     watcher's are shaped field for field like GitHub's repository-advisory
+#     schema behind a gh stub: a fork's parent advisory in range fails, an
+#     unreadable range or package fails closed, a withdrawn or out-of-range one
+#     passes, and an expired acknowledgement stops counting.
+#
+#   Acknowledgement ledger            scripts/ci/check_ledger.sh
+#     osv-scanner.toml is the one place an advisory is shipped on purpose.
+#     `--static` holds the rules that need no scan here: a reason with an owner
+#     decision, an expiry at most 90 days out (expired fails), every
+#     audit.toml ignore mirrored, and every osv-scanner scan offline. The
+#     liveness rule needs the unfiltered scan, so it runs in audit.yml.
 #
 #   Release gate names CI's jobs      scripts/ci/check_ci_verdict.sh
 #     release-build.yml ships a tag only once ci.yml's push run has passed
@@ -1410,6 +1436,35 @@ jobs:
       - name: Audit-ignore liveness guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_audit_ignores_live.sh --self-test
+
+      - name: Every committed Cargo.lock is audited
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_audit_ignores_live.sh --lockfile-set
+
+      - name: osv-scanner gate self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/run_osv_gate.sh --self-test
+
+      - name: Pub retraction gate self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_pub_retractions.sh --self-test
+
+      - name: Upstream-advisory watcher self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_upstream_advisories.sh --self-test
+
+      - name: Acknowledgement ledger holds
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_ledger.sh --static
+
+      # Plants each broken rule in a scratch repository: no id, a MAL id, a
+      # duplicate, no or a future or an impossible owner decision, a bare date,
+      # no expiry, ignoreUntil, an expiry today and one 91 days out, an
+      # unmirrored audit.toml ignore, a PackageOverrides block, an unknown key,
+      # two online scans, and a stale entry in each mode.
+      - name: Acknowledgement ledger guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_ledger.sh --self-test
 
       - name: Release gate names CI's jobs
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

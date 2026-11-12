@@ -8,6 +8,9 @@
 #
 # Each ignore MUST cite: (1) why it is acceptable today, (2) what would lift it.
 # Re-evaluate on every upstream bump (mdk, nostr-sdk, openmls, hpke-rs).
+# cargo-audit ignores never expire, so each id also has an entry in the ledger,
+# /osv-scanner.toml, carrying its owner decision and expiry
+# (scripts/ci/check_ledger.sh fails an ignore without one).
 
 [advisories]
 ignore = [

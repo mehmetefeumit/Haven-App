@@ -22,13 +22,21 @@
 # this on a day nobody chose; the message names the ID and the fix is to delete
 # it. The audit steps above it in audit.yml carry the same exposure.
 #
+# `--lockfile-set` needs no toolchain: the lockfiles audit.yml audits must be
+# exactly `git ls-files '*Cargo.lock'`. tooling/e2e/local-blossom's lockfile
+# was committed with no audit step and sat unaudited; a crate added the same
+# way now fails here, in repo-guards, before it can.
+#
 # Usage:
 #   bash scripts/ci/check_audit_ignores_live.sh [-- <extra cargo-audit args>]
+#   bash scripts/ci/check_audit_ignores_live.sh --lockfile-set
 #   bash scripts/ci/check_audit_ignores_live.sh --self-test   # no cargo-audit
 #
 # Exit codes:
-#   0  every ignore is live (or the self-test passed)
-#   1  an ignore matches no advisory (or the self-test failed)
+#   0  every ignore is live, the audited set is the committed set (or the
+#      self-test passed)
+#   1  an ignore matches no advisory, a committed Cargo.lock is not audited or
+#      an audited one is not committed (or the self-test failed)
 #   2  misconfiguration: no ignore IDs, a malformed ID, a report that is not
 #      cargo-audit JSON or was filtered, or no lockfile derived from audit.yml
 
@@ -40,7 +48,7 @@ readonly WORKFLOW_REL='.github/workflows/audit.yml'
 
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=10
+readonly SELF_TEST_FIXTURES=13
 
 log() {
   printf '\033[1;34m[check_audit_ignores_live]\033[0m %s\n' "$*"
@@ -99,6 +107,20 @@ compare() {
   log "OK: all $(grep -c . <<<"${ids}") ignore(s) in ${AUDIT_TOML_REL} match a live advisory in $# unfiltered report(s)."
 }
 
+check_lockfile_set() { # <repo root>
+  local committed audited
+  committed="$(git -C "$1" ls-files -- '*Cargo.lock' | sort)"
+  audited="$(audited_lockfiles "$1" | sort)"
+  [[ -n "${audited}" ]] || { echo "ERROR: derived no lockfile from ${WORKFLOW_REL}" >&2; return 2; }
+  if [[ "${committed}" != "${audited}" ]]; then
+    diff <(printf '%s\n' "${committed}") <(printf '%s\n' "${audited}") \
+      | sed -n 's/^</  committed, not audited:/p; s/^>/  audited, not committed:/p' >&2 || true
+    printf '\033[1;31m[check_audit_ignores_live] FAIL:\033[0m %s must run `cargo audit --file` over every committed Cargo.lock, and over nothing else.\n' "${WORKFLOW_REL}" >&2
+    return 1
+  fi
+  log "OK: ${WORKFLOW_REL} audits all $(grep -c . <<<"${committed}") committed Cargo.lock file(s)."
+}
+
 run_check() {
   local tmp rel n=0
   tmp="$(mktemp -d)"
@@ -122,6 +144,8 @@ run_check() {
 # Self-test. The reports are real `cargo audit --json` output (0.22.1, advisory
 # DB of 2026-09-19) cut down to the fields read here, so the extractor is proven
 # against the shape cargo-audit writes rather than one it was written against.
+# The pinned 0.22.2 (scripts/ci/security_tools.env) writes every field read
+# here unchanged, re-checked against its output on 2026-11-12.
 # ---------------------------------------------------------------------------
 self_test() {
   local tmp fails=0 checked=0
@@ -206,6 +230,30 @@ EOF
     fails=1
   fi
 
+  # The audited set against the committed one, in a scratch repository.
+  local repo="${tmp}/repo"
+  mkdir -p "${repo}/.github/workflows" "${repo}/haven-core" "${repo}/tooling/soak" "${repo}/tooling/new"
+  git -C "${repo}" init -q
+  printf '      - name: a\n        run: cargo audit\n      - name: b\n        run: cargo audit --file ../tooling/soak/Cargo.lock\n' >"${repo}/${WORKFLOW_REL}"
+  : >"${repo}/haven-core/Cargo.lock"; : >"${repo}/tooling/soak/Cargo.lock"; : >"${repo}/tooling/new/Cargo.lock"
+  git -C "${repo}" add haven-core/Cargo.lock tooling/soak/Cargo.lock
+  _set_case() { # <label> <want-rc>
+    local got=0
+    checked=$(( checked + 1 ))
+    check_lockfile_set "${repo}" >/dev/null 2>&1 || got=$?
+    if [[ "${got}" -eq "$2" ]]; then
+      printf '  \033[1;32mPASS\033[0m %s\n' "$1"
+    else
+      printf '  \033[1;31mFAIL\033[0m %s (want rc=%d, got rc=%d)\n' "$1" "$2" "${got}" >&2
+      fails=1
+    fi
+  }
+  _set_case "every committed Cargo.lock audited, an untracked one ignored, passes" 0
+  git -C "${repo}" add tooling/new/Cargo.lock
+  _set_case "a committed Cargo.lock with no audit step fails" 1
+  git -C "${repo}" rm -q --cached tooling/new/Cargo.lock tooling/soak/Cargo.lock
+  _set_case "an audited Cargo.lock that is not committed fails" 1
+
   if (( fails )); then
     echo "self-test: FAILED" >&2
     return 1
@@ -219,7 +267,8 @@ EOF
 
 case "${1:-}" in
   --self-test) self_test ;;
+  --lockfile-set) check_lockfile_set "${REPO_ROOT}" ;;
   --) shift; run_check "$@" ;;
   '') run_check ;;
-  *) echo "usage: $(basename "$0") [--self-test | -- <extra cargo-audit args>]" >&2; exit 2 ;;
+  *) echo "usage: $(basename "$0") [--self-test | --lockfile-set | -- <extra cargo-audit args>]" >&2; exit 2 ;;
 esac

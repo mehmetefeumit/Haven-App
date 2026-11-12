@@ -1,0 +1,692 @@
+[
+ {
+  "ghsa_id": "GHSA-gc79-23g3-8g52",
+  "cve_id": null,
+  "url": "https://api.github.com/repos/openmls/openmls/security-advisories/GHSA-gc79-23g3-8g52",
+  "html_url": "https://github.com/openmls/openmls/security/advisories/GHSA-gc79-23g3-8g52",
+  "summary": "Unbounded recursion when decoding LeafNode extensions",
+  "description": "Unbounded recursion when decoding LeafNode extensions",
+  "severity": "high",
+  "author": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "publisher": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "identifiers": [
+   {
+    "type": "GHSA",
+    "value": "GHSA-gc79-23g3-8g52"
+   }
+  ],
+  "state": "published",
+  "created_at": "2026-10-01T00:00:00Z",
+  "updated_at": "2026-10-02T00:00:00Z",
+  "published_at": "2026-10-02T00:00:00Z",
+  "closed_at": null,
+  "withdrawn_at": null,
+  "submission": null,
+  "vulnerabilities": [
+   {
+    "package": {
+     "ecosystem": "rust",
+     "name": "openmls"
+    },
+    "vulnerable_version_range": "< 0.8.2",
+    "patched_versions": "0.8.2",
+    "vulnerable_functions": []
+   },
+   {
+    "package": {
+     "ecosystem": "rust",
+     "name": "openmls"
+    },
+    "vulnerable_version_range": ">= 0.9.0, < 0.9.1",
+    "patched_versions": "0.9.1",
+    "vulnerable_functions": []
+   }
+  ],
+  "cvss": null,
+  "cvss_severities": {
+   "cvss_v3": null,
+   "cvss_v4": null
+  },
+  "cwes": [],
+  "cwe_ids": [],
+  "credits": [],
+  "credits_detailed": [],
+  "collaborating_users": null,
+  "collaborating_teams": null,
+  "private_fork": null
+ },
+ {
+  "ghsa_id": "GHSA-2222-3333-4444",
+  "cve_id": null,
+  "url": "https://api.github.com/repos/openmls/openmls/security-advisories/GHSA-2222-3333-4444",
+  "html_url": "https://github.com/openmls/openmls/security/advisories/GHSA-2222-3333-4444",
+  "summary": "Out-of-range fixture: only the 0.9 line",
+  "description": "Out-of-range fixture: only the 0.9 line",
+  "severity": "medium",
+  "author": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "publisher": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "identifiers": [
+   {
+    "type": "GHSA",
+    "value": "GHSA-2222-3333-4444"
+   }
+  ],
+  "state": "published",
+  "created_at": "2026-10-01T00:00:00Z",
+  "updated_at": "2026-10-02T00:00:00Z",
+  "published_at": "2026-10-02T00:00:00Z",
+  "closed_at": null,
+  "withdrawn_at": null,
+  "submission": null,
+  "vulnerabilities": [
+   {
+    "package": {
+     "ecosystem": "rust",
+     "name": "openmls"
+    },
+    "vulnerable_version_range": ">= 0.9.0, < 0.9.1",
+    "patched_versions": "0.9.1",
+    "vulnerable_functions": []
+   }
+  ],
+  "cvss": null,
+  "cvss_severities": {
+   "cvss_v3": null,
+   "cvss_v4": null
+  },
+  "cwes": [],
+  "cwe_ids": [],
+  "credits": [],
+  "credits_detailed": [],
+  "collaborating_users": null,
+  "collaborating_teams": null,
+  "private_fork": null
+ },
+ {
+  "ghsa_id": "GHSA-3333-4444-5555",
+  "cve_id": "CVE-2026-0001",
+  "url": "https://api.github.com/repos/openmls/openmls/security-advisories/GHSA-3333-4444-5555",
+  "html_url": "https://github.com/openmls/openmls/security/advisories/GHSA-3333-4444-5555",
+  "summary": "In range, for the acknowledged and expired cases",
+  "description": "In range, for the acknowledged and expired cases",
+  "severity": "low",
+  "author": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "publisher": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "identifiers": [
+   {
+    "type": "GHSA",
+    "value": "GHSA-3333-4444-5555"
+   },
+   {
+    "type": "CVE",
+    "value": "CVE-2026-0001"
+   }
+  ],
+  "state": "published",
+  "created_at": "2026-10-01T00:00:00Z",
+  "updated_at": "2026-10-02T00:00:00Z",
+  "published_at": "2026-10-02T00:00:00Z",
+  "closed_at": null,
+  "withdrawn_at": null,
+  "submission": null,
+  "vulnerabilities": [
+   {
+    "package": {
+     "ecosystem": "rust",
+     "name": "openmls"
+    },
+    "vulnerable_version_range": "<= 0.8.1",
+    "patched_versions": "0.8.2",
+    "vulnerable_functions": []
+   }
+  ],
+  "cvss": null,
+  "cvss_severities": {
+   "cvss_v3": null,
+   "cvss_v4": null
+  },
+  "cwes": [],
+  "cwe_ids": [],
+  "credits": [],
+  "credits_detailed": [],
+  "collaborating_users": null,
+  "collaborating_teams": null,
+  "private_fork": null
+ },
+ {
+  "ghsa_id": "GHSA-4444-5555-6666",
+  "cve_id": null,
+  "url": "https://api.github.com/repos/openmls/openmls/security-advisories/GHSA-4444-5555-6666",
+  "html_url": "https://github.com/openmls/openmls/security/advisories/GHSA-4444-5555-6666",
+  "summary": "Withdrawn fixture, in range",
+  "description": "Withdrawn fixture, in range",
+  "severity": "high",
+  "author": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "publisher": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "identifiers": [
+   {
+    "type": "GHSA",
+    "value": "GHSA-4444-5555-6666"
+   }
+  ],
+  "state": "withdrawn",
+  "created_at": "2026-10-01T00:00:00Z",
+  "updated_at": "2026-10-02T00:00:00Z",
+  "published_at": "2026-10-02T00:00:00Z",
+  "closed_at": null,
+  "withdrawn_at": "2026-10-05T00:00:00Z",
+  "submission": null,
+  "vulnerabilities": [
+   {
+    "package": {
+     "ecosystem": "rust",
+     "name": "openmls"
+    },
+    "vulnerable_version_range": "< 1.0.0",
+    "patched_versions": "1.0.0",
+    "vulnerable_functions": []
+   }
+  ],
+  "cvss": null,
+  "cvss_severities": {
+   "cvss_v3": null,
+   "cvss_v4": null
+  },
+  "cwes": [],
+  "cwe_ids": [],
+  "credits": [],
+  "credits_detailed": [],
+  "collaborating_users": null,
+  "collaborating_teams": null,
+  "private_fork": null
+ },
+ {
+  "ghsa_id": "GHSA-5555-6666-7777",
+  "cve_id": null,
+  "url": "https://api.github.com/repos/openmls/openmls/security-advisories/GHSA-5555-6666-7777",
+  "html_url": "https://github.com/openmls/openmls/security/advisories/GHSA-5555-6666-7777",
+  "summary": "A crate not locked from this source",
+  "description": "A crate not locked from this source",
+  "severity": "high",
+  "author": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "publisher": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "identifiers": [
+   {
+    "type": "GHSA",
+    "value": "GHSA-5555-6666-7777"
+   }
+  ],
+  "state": "published",
+  "created_at": "2026-10-01T00:00:00Z",
+  "updated_at": "2026-10-02T00:00:00Z",
+  "published_at": "2026-10-02T00:00:00Z",
+  "closed_at": null,
+  "withdrawn_at": null,
+  "submission": null,
+  "vulnerabilities": [
+   {
+    "package": {
+     "ecosystem": "rust",
+     "name": "openmls_basic_credential"
+    },
+    "vulnerable_version_range": "< 9.0.0",
+    "patched_versions": "9.0.0",
+    "vulnerable_functions": []
+   }
+  ],
+  "cvss": null,
+  "cvss_severities": {
+   "cvss_v3": null,
+   "cvss_v4": null
+  },
+  "cwes": [],
+  "cwe_ids": [],
+  "credits": [],
+  "credits_detailed": [],
+  "collaborating_users": null,
+  "collaborating_teams": null,
+  "private_fork": null
+ },
+ {
+  "ghsa_id": "GHSA-6666-7777-8888",
+  "cve_id": null,
+  "url": "https://api.github.com/repos/openmls/openmls/security-advisories/GHSA-6666-7777-8888",
+  "html_url": "https://github.com/openmls/openmls/security/advisories/GHSA-6666-7777-8888",
+  "summary": "Unparseable range fixture",
+  "description": "Unparseable range fixture",
+  "severity": "high",
+  "author": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "publisher": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "identifiers": [
+   {
+    "type": "GHSA",
+    "value": "GHSA-6666-7777-8888"
+   }
+  ],
+  "state": "published",
+  "created_at": "2026-10-01T00:00:00Z",
+  "updated_at": "2026-10-02T00:00:00Z",
+  "published_at": "2026-10-02T00:00:00Z",
+  "closed_at": null,
+  "withdrawn_at": null,
+  "submission": null,
+  "vulnerabilities": [
+   {
+    "package": {
+     "ecosystem": "rust",
+     "name": "openmls"
+    },
+    "vulnerable_version_range": "~> 0.8",
+    "patched_versions": "0.9.0",
+    "vulnerable_functions": []
+   }
+  ],
+  "cvss": null,
+  "cvss_severities": {
+   "cvss_v3": null,
+   "cvss_v4": null
+  },
+  "cwes": [],
+  "cwe_ids": [],
+  "credits": [],
+  "credits_detailed": [],
+  "collaborating_users": null,
+  "collaborating_teams": null,
+  "private_fork": null
+ },
+ {
+  "ghsa_id": "GHSA-7777-8888-9999",
+  "cve_id": null,
+  "url": "https://api.github.com/repos/openmls/openmls/security-advisories/GHSA-7777-8888-9999",
+  "html_url": "https://github.com/openmls/openmls/security/advisories/GHSA-7777-8888-9999",
+  "summary": "No range fixture",
+  "description": "No range fixture",
+  "severity": "high",
+  "author": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "publisher": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "identifiers": [
+   {
+    "type": "GHSA",
+    "value": "GHSA-7777-8888-9999"
+   }
+  ],
+  "state": "published",
+  "created_at": "2026-10-01T00:00:00Z",
+  "updated_at": "2026-10-02T00:00:00Z",
+  "published_at": "2026-10-02T00:00:00Z",
+  "closed_at": null,
+  "withdrawn_at": null,
+  "submission": null,
+  "vulnerabilities": [
+   {
+    "package": {
+     "ecosystem": "rust",
+     "name": "openmls"
+    },
+    "vulnerable_version_range": null,
+    "patched_versions": null,
+    "vulnerable_functions": []
+   }
+  ],
+  "cvss": null,
+  "cvss_severities": {
+   "cvss_v3": null,
+   "cvss_v4": null
+  },
+  "cwes": [],
+  "cwe_ids": [],
+  "credits": [],
+  "credits_detailed": [],
+  "collaborating_users": null,
+  "collaborating_teams": null,
+  "private_fork": null
+ },
+ {
+  "ghsa_id": "GHSA-8888-9999-cccc",
+  "cve_id": null,
+  "url": "https://api.github.com/repos/openmls/openmls/security-advisories/GHSA-8888-9999-cccc",
+  "html_url": "https://github.com/openmls/openmls/security/advisories/GHSA-8888-9999-cccc",
+  "summary": "No package fixture",
+  "description": "No package fixture",
+  "severity": "high",
+  "author": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "publisher": {
+   "login": "openmls",
+   "id": 1,
+   "node_id": "MDQ6VXNlcjE=",
+   "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/openmls",
+   "html_url": "https://github.com/openmls",
+   "followers_url": "",
+   "following_url": "",
+   "gists_url": "",
+   "starred_url": "",
+   "subscriptions_url": "",
+   "organizations_url": "",
+   "repos_url": "",
+   "events_url": "",
+   "received_events_url": "",
+   "type": "User",
+   "site_admin": false
+  },
+  "identifiers": [
+   {
+    "type": "GHSA",
+    "value": "GHSA-8888-9999-cccc"
+   }
+  ],
+  "state": "published",
+  "created_at": "2026-10-01T00:00:00Z",
+  "updated_at": "2026-10-02T00:00:00Z",
+  "published_at": "2026-10-02T00:00:00Z",
+  "closed_at": null,
+  "withdrawn_at": null,
+  "submission": null,
+  "vulnerabilities": [
+   {
+    "package": null,
+    "vulnerable_version_range": "< 1.0.0",
+    "patched_versions": "1.0.0",
+    "vulnerable_functions": []
+   }
+  ],
+  "cvss": null,
+  "cvss_severities": {
+   "cvss_v3": null,
+   "cvss_v4": null
+  },
+  "cwes": [],
+  "cwe_ids": [],
+  "credits": [],
+  "credits_detailed": [],
+  "collaborating_users": null,
+  "collaborating_teams": null,
+  "private_fork": null
+ }
+]

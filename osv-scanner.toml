@@ -1,0 +1,51 @@
+# The acknowledgement ledger: every known advisory Haven ships with on purpose.
+#
+# osv-scanner reads this file (`--config osv-scanner.toml`, run_osv_gate.sh)
+# and drops an entry's advisory, with all its aliases, until `effectiveUntil`;
+# from that instant the advisory fails the gate again. cargo-audit's ignores in
+# haven-core/.cargo/audit.toml cannot expire, so each one is mirrored here and
+# this file supplies its end date. Rules, held by scripts/ci/check_ledger.sh on
+# every push and inside every release:
+#
+#   - `id`, `reason` and `effectiveUntil` (never the deprecated `ignoreUntil`).
+#     osv-scanner refuses any other key, so the owner's decision is the token
+#     `owner-decision: YYYY-MM-DD` inside `reason`, which also says why the
+#     advisory is acceptable today and what lifts it.
+#   - `effectiveUntil` lies in the future and at most 90 days out. Renewing is a
+#     new decision, re-dated; 14 days before an expiry the nightly files an
+#     issue.
+#   - Every entry still matches an advisory the scanners report. A stale entry
+#     would silence the advisory's return.
+#
+# Never acknowledge here what has a fix: update the lockfile. Never use pubspec
+# `ignored_advisories` (no expiry) or acknowledge a retracted pub version.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0384"
+effectiveUntil = 2027-02-09T00:00:00Z
+reason = "owner-decision: 2026-09-19. instant 0.1.x is unmaintained (informational), reached via nostr 0.44 <- nostr-sdk 0.44.1; a thin wrapper over std::time with no CVE. Lift when nostr-sdk drops instant or moves to web-time through an MDK/nostr-sdk release. Mirrors haven-core/.cargo/audit.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0097"
+effectiveUntil = 2027-02-09T00:00:00Z
+reason = "owner-decision: 2026-09-19. rand 0.8/0.9/0.10 rand::rng() is unsound only under a log::Log implementation that itself calls rand::rng(); Haven's logger forwards to flutter_rust_bridge and never does. Also covers its GHSA alias. Lift when rand ships a fix or every dependent moves to a fixed major. Mirrors haven-core/.cargo/audit.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0387"
+effectiveUntil = 2027-02-09T00:00:00Z
+reason = "owner-decision: 2026-10-30. crypto-bigint 0.5.5 timing variability, no semver-compatible fix under elliptic-curve 0.13; no secret reaches k256/p256/p384 in the shipped build (cgka-engine accepts ciphersuite 0x0001 only: Ed25519 + X25519; its one k256 call verifies a peer's public key). Lift when MDK/openmls/hpke-rs reach elliptic-curve 0.14; re-audit if MDK admits a P-256/P-384/secp256k1 suite. Mirrors haven-core/.cargo/audit.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0330"
+effectiveUntil = 2027-02-09T00:00:00Z
+reason = "owner-decision: 2026-10-30. libcrux-kem 0.0.9 short-seed panic: locked only as hpke-rs 0.7.0's optional hpke-rs-libcrux, which nothing enables (cargo tree --all-features -i hpke-rs-libcrux is empty), so it is not compiled. Lift when hpke-rs pins libcrux-kem >= 0.0.10; re-audit if anything enables hpke-rs libcrux. Mirrors haven-core/.cargo/audit.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0331"
+effectiveUntil = 2027-02-09T00:00:00Z
+reason = "owner-decision: 2026-10-30. libcrux-kem 0.0.9 short-key decode panic: same uncompiled optional hpke-rs-libcrux as RUSTSEC-2026-0330. Lift when hpke-rs pins libcrux-kem >= 0.0.10; re-audit if anything enables hpke-rs libcrux. Mirrors haven-core/.cargo/audit.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0459"
+effectiveUntil = 2027-02-09T00:00:00Z
+reason = "owner-decision: 2026-11-12. SQLite < 3.54.0 bundled by SQLCipher 4.17 (libsqlite3-sys 0.38.1, rusqlite@5ae7fdf, SQLite 3.53.3): local vector only, the victim must open an attacker-written database and -wal inside Haven's sandbox; Haven's stores are SQLCipher-encrypted and Android allowBackup=false. libsqlite3-sys 0.39 does not fix SQLCipher builds (SQLite 3.53.4). Lift when SQLCipher bundles SQLite >= 3.54.0. cargo-audit cannot see it (git source); osv-scanner does."

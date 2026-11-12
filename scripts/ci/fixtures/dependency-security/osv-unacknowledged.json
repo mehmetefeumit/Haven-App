@@ -1,0 +1,99 @@
+{
+  "vulnerable": {
+    "package": {
+      "name": "libsqlite3-sys",
+      "version": "0.38.1",
+      "ecosystem": "crates.io"
+    },
+    "groups": [
+      {
+        "ids": [
+          "RUSTSEC-2026-0459"
+        ],
+        "aliases": [
+          "CVE-2026-119375",
+          "GHSA-72w2-rjgg-q729",
+          "RUSTSEC-2026-0459",
+          "RUSTSEC-2026-0502"
+        ]
+      }
+    ],
+    "vulnerabilities": [
+      {
+        "id": "RUSTSEC-2026-0459",
+        "summary": "`libsqlite3-sys` via C SQLite CVE-2026-119375",
+        "aliases": [
+          "CVE-2026-119375",
+          "GHSA-72w2-rjgg-q729",
+          "RUSTSEC-2026-0502"
+        ],
+        "affected": [
+          {
+            "package": {
+              "ecosystem": "crates.io",
+              "name": "libsqlite3-sys"
+            },
+            "database_specific": {
+              "informational": null
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "ghsa_only": {
+    "package": {
+      "name": "rand",
+      "version": "0.8.5",
+      "ecosystem": "crates.io"
+    },
+    "groups": [
+      {
+        "ids": [
+          "GHSA-cq8v-f236-94qc"
+        ],
+        "aliases": [
+          "GHSA-cq8v-f236-94qc"
+        ]
+      }
+    ],
+    "vulnerabilities": [
+      {
+        "id": "GHSA-cq8v-f236-94qc",
+        "summary": "Rand is unsound with a custom logger using rand::rng()",
+        "aliases": [
+          "RUSTSEC-2026-0097"
+        ],
+        "affected": [
+          {
+            "package": {
+              "ecosystem": "crates.io",
+              "name": "rand"
+            },
+            "database_specific": {
+              "informational": null
+            }
+          },
+          {
+            "package": {
+              "ecosystem": "crates.io",
+              "name": "rand"
+            },
+            "database_specific": {
+              "informational": null
+            }
+          },
+          {
+            "package": {
+              "ecosystem": "crates.io",
+              "name": "rand"
+            },
+            "database_specific": {
+              "informational": null
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

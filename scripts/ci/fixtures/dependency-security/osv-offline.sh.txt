@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# check_ledger.sh fixture: a script whose osv-scanner scans are all offline.
+# osv-scanner scan source -r .   (a comment, not a scan)
+echo "osv-scanner exited 2"
+osv-scanner scan source --offline --format json -L "Cargo.lock:x" >out.json

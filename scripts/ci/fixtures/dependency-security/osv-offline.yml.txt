@@ -1,0 +1,12 @@
+# check_ledger.sh fixture: a workflow whose every osv-scanner scan is offline.
+# The prose, the install line and the version probe are not scans, and a
+# flag on a continued line belongs to the scan above it.
+jobs:
+  advisories:
+    steps:
+      - name: osv-scanner honours the ledger
+        run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.7.1
+      - run: osv-scanner --version
+      - run: |
+          osv-scanner scan source \
+            --offline --download-offline-databases --format json -r .

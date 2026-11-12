@@ -1,16 +1,26 @@
 # Reusable workflow: Dependency audit
-# Checks for known vulnerabilities in Rust dependencies
+# Checks every committed lockfile for known-vulnerable, malicious or retracted
+# dependencies, and every git-pinned dependency against its upstream's own
+# advisories.
+#
+# Called with `mode: pr` by ci.yml on every push and pull request, and with
+# `mode: full` inside release-build.yml (fresh at tag time, never replayed from
+# a CI verdict) and by security-nightly.yml. `full` adds the upstream-advisory
+# watcher, which calls GitHub's API for third-party repositories and Flutter's
+# release manifest, and makes a stale ledger entry fail rather than warn.
 #
 # EVERY Rust lockfile is scanned. They are separate crates with separate
 # `Cargo.lock`s, and `rust_builder`'s is the one whose resolution actually ships
 # inside the app — auditing only `haven-core` let rust_builder drift unnoticed
 # (it sat on rustls-webpki 0.103.9 with four cert/CRL-validation advisories, and
-# time 0.3.46, long after haven-core had resolved past both). The three tooling
+# time 0.3.46, long after haven-core had resolved past both). The tooling
 # crates never ship, but `haven-logscan` carries a secp256k1 implementation
 # (`k256`, to derive the E2E identities it hunts for), `haven-local-relay` sits
-# in the app's socket path on every E2E lane, and `haven-soak` links haven-core
-# itself with `test-utils` on, so an advisory against any of them is still a
-# finding this repository must see.
+# in the app's socket path on every E2E lane, `haven-soak` links haven-core
+# itself with `test-utils` on, and `haven-local-blossom` serves the profile
+# lane's photos, so an advisory against any of them is still a finding this
+# repository must see. `check_audit_ignores_live.sh --lockfile-set` (here and in
+# repo-guards) fails when a committed Cargo.lock has no step below.
 #
 # Every audit step runs from `haven-core` so cargo-audit picks up the single
 # `haven-core/.cargo/audit.toml` policy: that file reads relative to the working
@@ -19,14 +29,28 @@
 # list, turning the documented-unreachable libcrux findings into hard failures.
 # The last step applies no ignore list on purpose: it proves each ignore still
 # matches something.
+#
+# cargo-audit reads RustSec only and skips every git-sourced crate — MDK, the
+# OpenMLS fork and the SQLCipher libsqlite3-sys among them. The `advisories`
+# job covers what it cannot: osv-scanner (RustSec, GitHub-reviewed advisories
+# and the OpenSSF malicious-packages feed, every ecosystem's lockfile, git
+# sources matched by name and version, always --offline), pub retractions, and
+# the upstream-advisory watcher. Every acknowledged advisory is an expiring
+# entry in osv-scanner.toml; check_ledger.sh holds its rules. The scanners'
+# versions are pinned in scripts/ci/security_tools.env.
 
 name: Dependency Audit
 
 on:
   workflow_call:
-  schedule:
-    # Run weekly on Monday at 06:00 UTC
-    - cron: '0 6 * * 1'
+    inputs:
+      mode:
+        description: "pr (every push and pull request) or full (release and nightly: adds the upstream-advisory watcher; a stale ledger entry fails)"
+        type: string
+        default: pr
+
+permissions:
+  contents: read
 
 jobs:
   audit:
@@ -38,10 +62,14 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: |
+          source ../scripts/ci/security_tools.env
+          cargo install cargo-audit --locked --version "=${CARGO_AUDIT_VERSION}"
 
       - name: Run cargo audit (haven-core)
         run: cargo audit
@@ -65,12 +93,11 @@ jobs:
       # `test-utils` on and embeds nostr-relay-builder, so an advisory against
       # anything it resolves is a finding about the crate the rig is built to
       # exercise. It carries RUSTSEC-2026-0237 (nostr-relay-builder,
-      # unmaintained, no patched version) exactly as three of the four
-      # lockfiles above already do: measured non-blocking, recorded as a
-      # residual in haven-core/SECURITY.md and docs/SOAK_LANE.md, and
-      # deliberately NOT given an `audit.toml` ignore — cargo-audit's ignore
-      # list has no expiry field, so an ignore is a silencing change with no
-      # end date.
+      # unmaintained, no patched version) exactly as three of the lockfiles
+      # above already do: an informational warning, recorded as a residual in
+      # haven-core/SECURITY.md and docs/SOAK_LANE.md, and deliberately NOT
+      # acknowledged — a warning blocks nothing, and an acknowledgement exists
+      # only to let a blocking advisory through, with an expiry.
       #
       # What this crate resolves is also held by check_mdk_supply_chain.sh and
       # check_lockfile_universe.sh (repo-guards.yml), which read this lockfile
@@ -78,6 +105,15 @@ jobs:
       - name: Run cargo audit (haven-soak — the Tier-1 soak rig)
         if: always()
         run: cargo audit --file ../tooling/soak/Cargo.lock
+
+      - name: Run cargo audit (haven-local-blossom — the profile lane's Blossom mock)
+        if: always()
+        run: cargo audit --file ../tooling/e2e/local-blossom/Cargo.lock
+
+      - name: Every committed Cargo.lock is audited
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/ci/check_audit_ignores_live.sh --lockfile-set
 
       # cargo-audit is silent about an ignore that matches nothing, so a stale
       # entry in haven-core/.cargo/audit.toml would silence the advisory if it
@@ -87,3 +123,66 @@ jobs:
         if: always()
         working-directory: ${{ github.workspace }}
         run: bash scripts/ci/check_audit_ignores_live.sh
+
+  advisories:
+    name: Advisory gates (osv-scanner, pub retractions, upstream advisories, ledger)
+    runs-on: ubuntu-latest
+    env:
+      MODE: ${{ inputs.mode }}
+
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Mode is pr or full
+        run: |
+          case "${MODE}" in
+            pr|full) echo "mode: ${MODE}" ;;
+            *) echo "::error::audit.yml mode must be pr or full (got '${MODE}')"; exit 2 ;;
+          esac
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: stable
+          cache: false
+
+      # `go install` verifies the module graph against the Go checksum
+      # database; GOTOOLCHAIN=auto fetches the Go release osv-scanner's go.mod
+      # names when it is newer than the runner's, verified the same way.
+      - name: Install osv-scanner
+        run: |
+          source scripts/ci/security_tools.env
+          GOTOOLCHAIN=auto go install "github.com/google/osv-scanner/v2/cmd/osv-scanner@${OSV_SCANNER_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
+
+      - name: Known-vulnerable or malicious packages (osv-scanner, every lockfile)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/run_osv_gate.sh --unfiltered-json "${RUNNER_TEMP}/osv-unfiltered.json"
+
+      # The gate trusts osv-scanner to end an acknowledgement at its
+      # effectiveUntil and to match a git-sourced crate; this proves both on
+      # the pinned binary and today's database.
+      - name: osv-scanner honours the ledger's expiry (pinned-binary fixture)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/run_osv_gate.sh --binary-self-test
+
+      - name: No retracted pub version is locked
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_pub_retractions.sh
+
+      - name: Upstream advisories against git pins and the SDK (full mode)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.mode == 'full' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/check_upstream_advisories.sh --matches-out "${RUNNER_TEMP}/watcher-matches.tsv"
+
+      - name: Acknowledgement ledger holds
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          args=(--mode "${MODE}" --osv-json "${RUNNER_TEMP}/osv-unfiltered.json")
+          [[ "${MODE}" != full ]] || args+=(--watcher-matches "${RUNNER_TEMP}/watcher-matches.tsv")
+          bash scripts/ci/check_ledger.sh "${args[@]}"

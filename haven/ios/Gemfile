@@ -8,9 +8,8 @@ source "https://rubygems.org"
 # fastlane 3.0 with breaking changes can never be pulled in silently.
 gem "fastlane", "< 3"
 
-# For a byte-for-byte reproducible release pipeline, generate and COMMIT the
-# lockfile (CI's bundler-cache honors it). From haven/ios/, on Linux or macOS:
-#   bundle install
-#   bundle lock --add-platform x86_64-darwin arm64-darwin   # so it resolves on the macOS runner
-# then commit the resulting haven/ios/Gemfile.lock. Until it is committed, CI
-# resolves the newest 2.x fastlane fresh on each run (works, just not pinned).
+# Gemfile.lock is committed and CI installs it frozen (BUNDLE_FROZEN=true), so
+# the gems that run beside the signing secrets are exactly the locked, checksummed
+# ones. To change them, from haven/ios/:
+#   bundle lock --update --add-platform x86_64-darwin arm64-darwin x86_64-linux
+# and commit the resulting Gemfile.lock.

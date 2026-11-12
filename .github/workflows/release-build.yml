@@ -1,11 +1,21 @@
 # Release build: produces key-injected, obfuscated release artifacts.
 #
 # Triggered ONLY by version tags (v*) and manual dispatch — NEVER on PRs, so the
-# Stadia key and signing secrets never touch PR/debug builds. Both jobs go
+# Stadia key and signing secrets never touch PR/debug builds. Both builds go
 # through scripts/build_release.sh, which injects STADIA_API_KEY (from the repo
 # secret, via the env path so the key never appears in argv/logs), forces
 # --obfuscate --split-debug-info, runs the no-committed-secrets guard, and sets
 # HAVEN_RELEASE_WRAPPER=1 so the Gradle release gate passes.
+#
+# Every job that builds, signs, uploads or publishes needs both `gate` (ci.yml
+# passed on this commit) and `dependency-audit` (audit.yml in full mode, run
+# fresh here on every event, because a verdict recorded at merge cannot see an
+# advisory published since), directly or through another job;
+# scripts/ci/check_ci_verdict.sh holds that. Android signing is a job of its
+# own (android-sign), so the job that compiles third-party code never holds the
+# keystore, and only android-publish can write to the repository. Every action
+# is pinned to a commit SHA, and no job that holds a secret restores a cache:
+# nothing checks what a restore puts on disk (see HAVEN_GRADLE_CACHE-EXEMPT).
 #
 # # Why neither job passes HAVEN_LIVE_SYNC
 #
@@ -25,7 +35,8 @@
 #
 # Required repository secret:
 #   STADIA_API_KEY              Stadia Maps tile API key
-# Optional (Android signing — falls back to debug signing if unset):
+# Android signing (the android-sign job only; required on a tag, and a manual
+# run without them signs and publishes nothing):
 #   ANDROID_KEYSTORE_BASE64     base64 of the release keystore (.jks)
 #   ANDROID_KEYSTORE_PASSWORD   keystore password
 #   ANDROID_KEY_ALIAS           signing key alias
@@ -51,10 +62,10 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-# Least-privilege default: every job gets a read-only GITHUB_TOKEN; the android
-# job overrides to `contents: write` for the GitHub Release. This pins downstream
-# token scope (notably the zapstore job, which holds the Nostr publisher key)
-# independent of the repo's default-permissions setting.
+# Least-privilege default: every job gets a read-only GITHUB_TOKEN; only the
+# android-publish job overrides to `contents: write` for the GitHub Release.
+# This pins downstream token scope (notably the zapstore job, which holds the
+# Nostr publisher key) independent of the repo's default-permissions setting.
 permissions:
   contents: read
 
@@ -75,7 +86,8 @@ jobs:
   # them, and the gate then fails until they are re-run. The emulator E2E lanes are
   # deliberately NOT part of this gate: their AVD nondeterminism must never
   # block a release of an already-green commit, so they stay the PR/nightly
-  # functional signal.
+  # functional signal. The dependency audit is the exception that runs again:
+  # see dependency-audit below.
   # ---------------------------------------------------------------------------
   gate:
     name: CI passed on this commit
@@ -87,12 +99,26 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Require ci.yml's gate jobs to have passed on this commit
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/ci/check_ci_verdict.sh --sha "${GITHUB_SHA}"
+
+  # A fresh audit of every committed lockfile, with the upstream-advisory
+  # watcher and the ledger's liveness rule that only `full` mode runs. Never
+  # replayed from ci.yml's verdict: an advisory published between the merge
+  # and the tag must stop the release.
+  dependency-audit:
+    name: Dependency audit (fresh)
+    uses: ./.github/workflows/audit.yml
+    with:
+      mode: full
+    permissions:
+      contents: read
 
   android:
     name: Android release (per-ABI APKs)
@@ -100,7 +126,7 @@ jobs:
     # APK's receive path is live_sync_provider.dart's defaultValue, not a
     # value this workflow chooses.
     #
-    # HAVEN_GRADLE_CACHE-EXEMPT: this job signs and ships the artifact, and an
+    # HAVEN_GRADLE_CACHE-EXEMPT: this job builds the artifact that ships, and an
     # unverified cache is not an input a release build should take to save one
     # cold build per release. Nothing here would check what a restore put on
     # disk: there is no haven/android/gradle/verification-metadata.xml (Gradle
@@ -115,16 +141,17 @@ jobs:
     # `flutter build` itself rather than going through
     # scripts/ci/build_apk_with_retry.sh, so a transient here is a human
     # re-run of the tag, not an in-job recovery. Revisit only once both
-    # checksums are pinned and verified.
-    needs: [gate]
+    # checksums are pinned and verified. The same reasoning keeps the cargo
+    # and pub caches out (no rust-cache, flutter-action `cache: false`).
+    #
+    # This job holds no signing secret: with no haven/android/key.properties
+    # the build falls back to the debug key, exactly as a dry run always did,
+    # and android-sign replaces that signature. Any of the hundreds of
+    # packages this job compiles and runs could otherwise read the keystore.
+    needs: [gate, dependency-audit]
     runs-on: ubuntu-latest
-    # contents: write lets the built-in GITHUB_TOKEN create the GitHub Release and
-    # attach the signed APKs. The GitHub Release is the canonical Android channel:
-    # Obtainium and Zapstore both PULL from it (not from Actions artifacts, which
-    # are auth-gated and expire). Least-privilege: only this job gets write;
-    # everything else stays read-only.
     permissions:
-      contents: write
+      contents: read
     defaults:
       run:
         working-directory: haven
@@ -141,61 +168,34 @@ jobs:
           sudo rm -rf /usr/local/lib/android/sdk/system-images
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
           java-version: 21
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: haven-core
-          key: release-android
-          # A tag-scoped cache can never be restored (a later tag cannot read
-          # it, nor can main), and it evicts main's from the full 10 GB store.
-          save-if: ${{ github.ref_type != 'tag' }}
-
       - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
-          cache: true
+          cache: false
 
-      - name: Configure Android signing
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: bash ../scripts/ci/setup_android_signing.sh
-
-      # A tagged release MUST be release-signed. setup_android_signing.sh silently
-      # falls back to DEBUG signing when the keystore secrets are absent (intended
-      # only for workflow_dispatch dry-runs). A debug-signed APK on the public
-      # Release would be signed with the universal androiddebugkey (public password
-      # "android"), defeating update authentication and trapping early installers
-      # behind an uninstall-to-migrate wall (which wipes their encrypted identity/
-      # circles). Fail fast on tags if the release keystore wasn't configured.
-      - name: Require release signing for tagged releases
-        if: github.ref_type == 'tag'
-        run: |
-          test -f android/key.properties || {
-            echo "::error::No release keystore configured (haven/android/key.properties missing)."
-            echo "Refusing to build a tagged release that would be DEBUG-signed."
-            echo "Set the ANDROID_KEYSTORE_* repository secrets before tagging."
-            exit 1
-          }
-
+      # --enforce-lockfile: the release ships exactly the pubspec.lock that
+      # audit.yml scanned, with every package's content hash checked. When a
+      # Flutter stable bump moves the versions flutter_test / integration_test
+      # pin, this fails until a PR regenerates haven/pubspec.lock on that stable.
       - name: Get dependencies
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       # No Gradle dependency cache here, on purpose — see the
       # HAVEN_GRADLE_CACHE-EXEMPT reason on this job. This build resolves its
@@ -226,73 +226,196 @@ jobs:
             bash ../scripts/ci/check_sqlcipher_logger_omitted.sh "${out}/lib"
           done
 
+      # Debug-signed by Gradle's fallback; android-sign replaces the signature.
+      # A manual run without the keystore secrets leaves only this artifact.
+      #
+      # NOTE: the app-*-release.apk glob is contractually tied to
+      # scripts/build_release.sh apk producing --split-per-abi outputs; changing the
+      # ABI-split scheme means updating the globs here, in android-sign and in
+      # android-publish, AND zapstore.yaml's `match` together.
+      - name: Upload debug-signed APKs
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: haven-release-android-debug-signed
+          path: haven/build/app/outputs/flutter-apk/app-*-release.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload debug symbols (de-obfuscation)
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: haven-release-android-symbols
+          path: haven/build/symbols
+          retention-days: 90
+
+  # Re-signs the build job's APKs with the release key, on a runner that has
+  # built nothing: apksigner and zipalign come from the runner image's Android
+  # SDK, and the checkout holds only the one script and the README it checks
+  # the published fingerprint against. scripts/ci/sign_android_release.sh says
+  # what apksigner does to the debug signature and what each APK must pass.
+  android-sign:
+    name: Android release signing
+    needs: [gate, dependency-audit, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # A tagged release MUST be release-signed. A debug-signed APK on the public
+      # Release would be signed with the universal androiddebugkey (public password
+      # "android"), defeating update authentication and trapping early installers
+      # behind an uninstall-to-migrate wall (which wipes their encrypted identity/
+      # circles). A manual run without the secrets is a dry run that signs and
+      # publishes nothing.
+      - name: Require the release keystore on a tag
+        id: keystore
+        env:
+          HAS_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        run: |
+          if [[ "${HAS_KEYSTORE}" == true ]]; then
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+          elif [[ "${GITHUB_REF_TYPE}" == tag ]]; then
+            echo "::error::No release keystore configured (the ANDROID_KEYSTORE_* repository secrets)."
+            echo "Refusing to publish a tagged release that would be DEBUG-signed."
+            exit 1
+          else
+            echo "::notice::No release keystore configured: this run signs and publishes nothing. The debug-signed APKs are in the haven-release-android-debug-signed artifact."
+            echo "present=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Checkout the signing script
+        if: steps.keystore.outputs.present == 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci/sign_android_release.sh
+            README.md
+          sparse-checkout-cone-mode: false
+
+      - name: Download debug-signed APKs
+        if: steps.keystore.outputs.present == 'true'
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: haven-release-android-debug-signed
+          path: ${{ runner.temp }}/debug-signed
+
+      - name: Sign and verify with the release key
+        if: steps.keystore.outputs.present == 'true'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: bash scripts/ci/sign_android_release.sh "${RUNNER_TEMP}/debug-signed" "${RUNNER_TEMP}/signed"
+
       # SHA-256 sidecars so sideload users can verify integrity (the signing-cert
       # fingerprint published in the README verifies authenticity; these verify the
       # download). One per split APK, named <apk>.sha256.
       - name: Checksum APKs
+        if: steps.keystore.outputs.present == 'true'
         run: |
-          cd build/app/outputs/flutter-apk
+          cd "${RUNNER_TEMP}/signed"
           for apk in app-*-release.apk; do
             sha256sum "${apk}" > "${apk}.sha256"
           done
           ls -la
 
       - name: Upload Android artifacts
-        uses: actions/upload-artifact@v6
+        if: steps.keystore.outputs.present == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: haven-release-android
           path: |
-            haven/build/app/outputs/flutter-apk/app-*-release.apk
-            haven/build/app/outputs/flutter-apk/app-*-release.apk.sha256
+            ${{ runner.temp }}/signed/app-*-release.apk
+            ${{ runner.temp }}/signed/app-*-release.apk.sha256
+          if-no-files-found: error
           retention-days: 14
 
-      # The linchpin: attach the signed per-ABI APKs (+ checksums) to a real GitHub
-      # Release so Obtainium and Zapstore can pull them. The de-obfuscation symbols
-      # are NOT attached publicly (separate private artifact below) so the
-      # obfuscation map is never handed to attackers. Tag pushes only — a manual
-      # workflow_dispatch has no tag and must not publish a Release.
-      #
-      # NOTE: the app-*-release.apk glob is contractually tied to
-      # scripts/build_release.sh apk producing --split-per-abi outputs; changing the
-      # ABI-split scheme means updating this glob AND zapstore.yaml's `match` together.
+      # The script deletes it on exit; this also covers a cancelled step. The
+      # name is sign_android_release.sh's KEYSTORE_NAME.
+      - name: Delete the keystore
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/haven-release.jks" "${RUNNER_TEMP}/haven-release.jks.crt"
+
+  # The linchpin: attach the signed per-ABI APKs (+ checksums) to a real GitHub
+  # Release so Obtainium and Zapstore can pull them. The GitHub Release is the
+  # canonical Android channel: Obtainium and Zapstore both PULL from it (not from
+  # Actions artifacts, which are auth-gated and expire). The de-obfuscation
+  # symbols are NOT attached publicly (a separate private artifact) so the
+  # obfuscation map is never handed to attackers. Tag pushes only — a manual
+  # workflow_dispatch has no tag and must not publish a Release.
+  android-publish:
+    name: Publish GitHub Release
+    needs: [gate, dependency-audit, android-sign]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    # contents: write lets the built-in GITHUB_TOKEN create the GitHub Release
+    # and attach the signed APKs. Least-privilege: only this job gets write, and
+    # it holds no other secret.
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout the ledger
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci/release_ledger_notes.sh
+            osv-scanner.toml
+          sparse-checkout-cone-mode: false
+
+      - name: Download signed APKs
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: haven-release-android
+          path: ${{ runner.temp }}/signed
+
+      # The body lists every advisory this release ships acknowledged, with the
+      # day each acknowledgement expires; softprops puts it above the generated
+      # notes.
+      - name: Write release notes (acknowledged advisories)
+        run: bash scripts/ci/release_ledger_notes.sh osv-scanner.toml > "${RUNNER_TEMP}/release-notes.md"
+
       - name: Publish GitHub Release
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.ref_name }}
           name: Haven ${{ github.ref_name }}
+          body_path: ${{ runner.temp }}/release-notes.md
           generate_release_notes: true
           # v*-beta.N / v*-rc.N (any tag containing '-') -> pre-release, never "Latest".
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ !contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true
           files: |
-            haven/build/app/outputs/flutter-apk/app-*-release.apk
-            haven/build/app/outputs/flutter-apk/app-*-release.apk.sha256
-
-      - name: Upload debug symbols (de-obfuscation)
-        uses: actions/upload-artifact@v6
-        with:
-          name: haven-release-android-symbols
-          path: haven/build/symbols
-          retention-days: 90
+            ${{ runner.temp }}/signed/app-*-release.apk
+            ${{ runner.temp }}/signed/app-*-release.apk.sha256
 
   ios:
     name: iOS release (TestFlight)
     # HAVEN_LIVE_SYNC-INTENT: production-default — see the header. The shipped
     # IPA's receive path is live_sync_provider.dart's defaultValue, not a
     # value this workflow chooses.
-    needs: [gate]
+    #
+    # The signing assets and the App Store Connect key are in this job (iOS
+    # signs inside Xcode's export), so, as in android, it restores no cache:
+    # no rust-cache, flutter-action `cache: false`, and the gems installed
+    # frozen from the committed Gemfile.lock rather than from bundler-cache.
+    needs: [gate, dependency-audit]
     # Pin macos-15 (GA) rather than macos-latest: macos-latest is mid-migration
     # to macos-26 (started 2026-06-15), so the SDK it provides is ambiguous.
     # macos-15 ships Xcode 26.x (up to 26.3, the newest that runs on macOS 15).
     runs-on: macos-15
+    env:
+      BUNDLE_FROZEN: 'true'
     defaults:
       run:
         working-directory: haven
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       # App Store Connect rejects uploads not built with the iOS 26 SDK (Xcode
       # 26+). The macos-15 runner DEFAULTS to Xcode 16.4 (iOS 18.5 SDK), which is
@@ -301,39 +424,38 @@ jobs:
       # Xcode on the image (26.3 on macos-15); do NOT request 26.4+ here, as those
       # require macOS 26.
       - name: Select Xcode (iOS 26 SDK)
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
         with:
           xcode-version: latest-stable
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: aarch64-apple-ios
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: haven-core
-          key: release-ios
-          # A tag-scoped cache can never be restored (a later tag cannot read
-          # it, nor can main), and it evicts main's from the full 10 GB store.
-          save-if: ${{ github.ref_type != 'tag' }}
-
       - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
-          cache: true
+          cache: false
 
-      - name: Setup Ruby + Fastlane
-        uses: ruby/setup-ruby@v1
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
         with:
           ruby-version: '3.3'
-          bundler-cache: true
+          bundler-cache: false
           working-directory: haven/ios
 
+      # BUNDLE_FROZEN (job env): installs exactly Gemfile.lock, checksums
+      # included, and fails rather than re-resolve.
+      - name: Install Fastlane (Gemfile.lock)
+        working-directory: haven/ios
+        run: bundle install
+
+      # --enforce-lockfile: see the android job.
       - name: Get dependencies
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       # Install the Match-provisioned Apple Distribution cert + "match AppStore
       # com.oblivioustech.haven" profile READ-ONLY into a temporary CI keychain, and switch
@@ -385,30 +507,30 @@ jobs:
         run: bundle exec fastlane ios upload
 
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: haven-release-ios-ipa
           path: haven/build/ios/ipa/*.ipa
           retention-days: 30
 
       - name: Upload debug symbols (de-obfuscation)
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: haven-release-ios-symbols
           path: haven/build/symbols
           retention-days: 90
 
   # ===========================================================================
-  # PUSH fan-out. The Zapstore job depends ONLY on `android`, so a Zapstore
-  # failure never blocks the iOS/TestFlight job, and the GitHub Release created in
-  # the android job is already published regardless. It skips cleanly when its
+  # PUSH fan-out. The Zapstore job depends ONLY on `android-publish`, so a
+  # Zapstore failure never blocks the iOS/TestFlight job, and the GitHub Release
+  # created in android-publish is already published regardless. It skips cleanly when its
   # secret is absent (forks / before the publisher key exists) by gating every
   # step on a job-level env var (secrets cannot be referenced in a job-level `if:`).
   # The pull-based channels — direct GitHub Release download and Obtainium — need
   # NO job here; they read the GitHub Release on their own cadence.
   # ===========================================================================
 
-  # Zapstore (Nostr app store) — runs after the android job so the GitHub Release
+  # Zapstore (Nostr app store) — runs after android-publish so the GitHub Release
   # exists; `zsp` pulls the arm64-v8a APK straight from the Release (zapstore.yaml
   # metadata_sources: github + match) and signs the Nostr events with SIGN_WITH.
   # It does NOT re-sign the APK, so Zapstore stays in Haven's single signing
@@ -416,7 +538,7 @@ jobs:
   # in scripts/ci/publish_zapstore.sh).
   zapstore:
     name: Publish to Zapstore
-    needs: [android]
+    needs: [android-publish]
     if: ${{ github.ref_type == 'tag' }}
     runs-on: ubuntu-latest
     env:
@@ -426,7 +548,9 @@ jobs:
     steps:
       - name: Checkout
         if: ${{ env.SIGN_WITH != '' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Install zsp (pinned + sha256-verified)
         if: ${{ env.SIGN_WITH != '' }}

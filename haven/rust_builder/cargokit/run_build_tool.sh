@@ -33,6 +33,18 @@ dependencies:
     path: "$BUILD_TOOL_PKG_DIR"
 EOF
 
+# Haven patch: resolve the runner from the committed lock, never afresh. This
+# tool runs inside the release build, so an unlocked `pub get` let any newly
+# published transitive version into it, unaudited. The lock is committed for a
+# runner beside build_tool, so its one path entry is repointed at the absolute
+# path written above; a lock that no longer matches fails the build.
+RUNNER_LOCK="$BASEDIR/build_tool_runner/pubspec.lock"
+pub_get() {
+  sed -e "s|path: \"../build_tool\"|path: \"$BUILD_TOOL_PKG_DIR\"|" \
+    -e 's|relative: true|relative: false|' "$RUNNER_LOCK" > pubspec.lock
+  "$DART" pub get --no-precompile --enforce-lockfile
+}
+
 mkdir -p "bin"
 
 cat << EOF > "bin/build_tool_runner.dart"
@@ -55,10 +67,11 @@ fi
 # package directory. This should be good enough, as the build_tool package
 # itself is not meant to have any path dependencies.
 
+# Haven patch: the runner lock is hashed too, so a changed lock re-resolves.
 if [[ "$OSTYPE" == "darwin"* ]]; then
-  PACKAGE_HASH=$(ls -lTR "$BUILD_TOOL_PKG_DIR" | shasum)
+  PACKAGE_HASH=$({ ls -lTR "$BUILD_TOOL_PKG_DIR"; cat "$RUNNER_LOCK"; } | shasum)
 else
-  PACKAGE_HASH=$(ls -lR --full-time "$BUILD_TOOL_PKG_DIR" | shasum)
+  PACKAGE_HASH=$({ ls -lR --full-time "$BUILD_TOOL_PKG_DIR"; cat "$RUNNER_LOCK"; } | shasum)
 fi
 
 PACKAGE_HASH_FILE=".package_hash"
@@ -72,7 +85,7 @@ fi
 
 # Run pub get if needed.
 if [ ! -f "$PACKAGE_HASH_FILE" ]; then
-    "$DART" pub get --no-precompile
+    pub_get
     "$DART" compile kernel bin/build_tool_runner.dart
     echo "$PACKAGE_HASH" > "$PACKAGE_HASH_FILE"
 fi
@@ -90,7 +103,7 @@ exit_code=$?
 
 # 253 means invalid snapshot version.
 if [ $exit_code == 253 ]; then
-  "$DART" pub get --no-precompile
+  pub_get
   "$DART" compile kernel bin/build_tool_runner.dart
   "$DART" bin/build_tool_runner.dill "$@"
   exit_code=$?

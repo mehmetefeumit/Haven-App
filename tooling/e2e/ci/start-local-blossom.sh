@@ -35,7 +35,8 @@ readonly LOG_FILE="/tmp/haven-local-blossom.log"
 bash "${SCRIPT_DIR}/stop-local-blossom.sh" >/dev/null 2>&1 || true
 
 echo "Building host-native blossom server (release)..."
-cargo build --release --manifest-path "${CRATE_DIR}/Cargo.toml"
+# --locked: build exactly the resolution audit.yml audits.
+cargo build --release --locked --manifest-path "${CRATE_DIR}/Cargo.toml"
 readonly BIN="${CRATE_DIR}/target/release/haven-local-blossom"
 
 echo "Starting blossom server on 127.0.0.1:${PORT}..."

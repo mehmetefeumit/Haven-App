@@ -1,0 +1,13 @@
+{
+  "full_name": "erskingardner/openmls",
+  "html_url": "https://github.com/erskingardner/openmls",
+  "fork": true,
+  "parent": {
+    "full_name": "openmls/openmls",
+    "html_url": "https://github.com/openmls/openmls",
+    "fork": false
+  },
+  "source": {
+    "full_name": "openmls/openmls"
+  }
+}

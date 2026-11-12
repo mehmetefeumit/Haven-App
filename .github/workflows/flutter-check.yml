@@ -33,8 +33,12 @@ jobs:
           channel: stable
           cache: true
 
+      # --enforce-lockfile: analyze exactly the pubspec.lock that ships, and
+      # fail on a lock that no longer resolves. When a Flutter stable bump moves
+      # the versions flutter_test / integration_test pin, regenerate
+      # haven/pubspec.lock on that stable in a PR.
       - name: Get dependencies
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       - name: Analyze (errors + warnings gate; infos advisory)
         run: flutter analyze --no-fatal-infos

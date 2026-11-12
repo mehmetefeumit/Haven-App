@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# check_ledger.sh fixture: osv-scanner v2 scans with no subcommand at all.
+"$(go env GOPATH)/bin/osv-scanner" -r --offline-vulnerabilities .

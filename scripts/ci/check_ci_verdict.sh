@@ -24,8 +24,18 @@
 # set from the four reusable workflows and ci.yml's callers, and fails when the
 # two differ.
 #
+# A verdict recorded at merge cannot see an advisory published since, so the
+# dependency audit is the one check release-build.yml runs afresh: its
+# `dependency-audit` job calls audit.yml in `full` mode on every event. The
+# no-argument mode also holds that every other release-build.yml job needs
+# both `gate` and `dependency-audit`, directly or through the jobs it needs,
+# and that none overrides a failed need with always(), failure() or
+# cancelled(), so nothing is built, signed, uploaded or published unless both
+# passed.
+#
 # Usage:
-#   bash scripts/ci/check_ci_verdict.sh                # pinned list == workflows
+#   bash scripts/ci/check_ci_verdict.sh                # pinned list == workflows,
+#                                                      # and release-build.yml's needs
 #   bash scripts/ci/check_ci_verdict.sh --sha <sha>    # the gate (GH_TOKEN,
 #                                                      # GITHUB_REPOSITORY)
 #   bash scripts/ci/check_ci_verdict.sh --self-test
@@ -33,7 +43,8 @@
 # Exit codes:
 #   0  passed (or the self-test passed)
 #   1  a gate job failed, was cancelled, never passed, or never finished; no
-#      CI run exists for the commit; or the pinned list drifted
+#      CI run exists for the commit; the pinned list drifted; or a release job
+#      can run without the gate or the fresh audit
 #   2  misconfiguration: a bad argument, a missing token, an API that does not
 #      answer, or a workflow whose job names cannot be read
 
@@ -60,6 +71,9 @@ readonly REQUIRED_JOBS=(
   'Rust Checks / rust_builder (FFI surface)'
   'Rust Checks / soak tooling (Tier-1 soak rig)'
 )
+readonly RELEASE_YML_REL='.github/workflows/release-build.yml'
+# Every other release-build.yml job must need both of these.
+readonly RELEASE_ROOTS=(gate dependency-audit)
 POLL_SECS="${CI_VERDICT_POLL_SECS:-60}"
 # A tag pushed with main can arrive before GitHub has created main's run.
 NO_RUN_GRACE_SECS="${CI_VERDICT_NO_RUN_GRACE_SECS:-300}"
@@ -70,7 +84,7 @@ DEADLINE_SECS="${CI_VERDICT_DEADLINE_SECS:-5400}"
 readonly API_MISS_LIMIT=3
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=18
+readonly SELF_TEST_FIXTURES=24
 
 log() {
   printf '\033[1;34m[check_ci_verdict]\033[0m %s\n' "$*"
@@ -134,6 +148,75 @@ check_pinned() { # <repo root>
     return
   fi
   log "OK: the release gate requires all $(grep -c . <<<"${pinned}") jobs ci.yml runs from ${GATE_WORKFLOWS[*]}."
+}
+
+# ---------------------------------------------------------------------------
+# release-build.yml: nothing runs without the gate and the fresh audit.
+# ---------------------------------------------------------------------------
+
+# "<job>\t<field>\t<value>" for each release-build.yml job: one `job` row,
+# then a `needs` row per need and its `uses`, `with.mode` and `if`.
+release_jobs() { # <release-build.yml>
+  awk '
+    function value(s) { sub(/^[^:]*:[[:space:]]*/, "", s); sub(/[[:space:]]+#.*$/, "", s); gsub(/^["\047]|["\047]$/, "", s); return s }
+    function needs(s,   n, i, a) {
+      gsub(/[][]/, "", s); n = split(s, a, ",")
+      for (i = 1; i <= n; i++) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[i]); if (a[i] != "") print job "\tneeds\t" a[i] }
+    }
+    /^jobs:/ { j = 1; next }
+    j && /^[^[:space:]#]/ { j = 0 }
+    !j { next }
+    /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { job = $1; sub(/:$/, "", job); print job "\tjob\t"; blk = ""; next }
+    /^    [A-Za-z0-9_-]+:/ { blk = "" }
+    /^    needs:/ { v = value($0); if (v == "") blk = "needs"; else needs(v); next }
+    blk == "needs" && /^      - / { v = $0; sub(/^      - /, "", v); needs(v); next }
+    /^    uses:/ { print job "\tuses\t" value($0); next }
+    /^    with:[[:space:]]*$/ { blk = "with"; next }
+    blk == "with" && /^      mode:/ { print job "\tmode\t" value($0); next }
+    /^    if:/ { print job "\tif\t" value($0); next }
+  ' "$1"
+}
+
+check_release_needs() { # <repo root>
+  local yml="$1/${RELEASE_YML_REL}" rows job field value root next queue bad=''
+  local -A needs=() seen=()
+  local -a jobs=()
+  [[ -f "${yml}" ]] || { echo "ERROR: ${RELEASE_YML_REL} not found" >&2; return 2; }
+  rows="$(release_jobs "${yml}")"
+  _field() { awk -F'\t' -v j="$1" -v f="$2" '$1 == j && $2 == f { print $3 }' <<<"${rows}"; }
+  while IFS=$'\t' read -r job field value; do
+    case "${field}" in
+      job) jobs+=("${job}"); needs[${job}]='' ;;
+      needs) needs[${job}]+=" ${value}" ;;
+    esac
+  done <<<"${rows}"
+  for root in "${RELEASE_ROOTS[@]}"; do
+    [[ -v "needs[${root}]" ]] || bad+="  ${RELEASE_YML_REL} has no ${root} job"$'\n'
+  done
+  [[ "$(_field dependency-audit uses)" == './.github/workflows/audit.yml' ]] \
+    || bad+="  dependency-audit does not call ./.github/workflows/audit.yml"$'\n'
+  [[ "$(_field dependency-audit mode)" == full ]] \
+    || bad+="  dependency-audit does not run audit.yml with mode: full"$'\n'
+  for job in "${jobs[@]}"; do
+    [[ " ${RELEASE_ROOTS[*]} " == *" ${job} "* ]] && continue
+    [[ "$(_field "${job}" if)" =~ (always|failure|cancelled)\( ]] \
+      && bad+="  ${job} overrides its needs with a status function in its if:"$'\n'
+    seen=(); queue="${needs[${job}]}"
+    while read -r next queue <<<"${queue}" && [[ -n "${next}" ]]; do
+      [[ -v "seen[${next}]" ]] && continue
+      seen[${next}]=1
+      queue+=" ${needs[${next}]:-}"
+    done
+    for root in "${RELEASE_ROOTS[@]}"; do
+      [[ -v "seen[${root}]" ]] || bad+="  ${job} does not need ${root}, directly or through another job"$'\n'
+    done
+  done
+  if [[ -n "${bad}" ]]; then
+    printf '%s' "${bad}" >&2
+    fail 1 "every ${RELEASE_YML_REL} job must need gate and dependency-audit (audit.yml, mode: full), so nothing is built, signed, uploaded or published unless both passed on this run."
+    return
+  fi
+  log "OK: all $(( ${#jobs[@]} - ${#RELEASE_ROOTS[@]} )) other ${RELEASE_YML_REL} jobs need gate and a fresh full dependency audit."
 }
 
 # ---------------------------------------------------------------------------
@@ -347,16 +430,52 @@ self_test() {
   sed -i 's/^    name: Coverage$/    name: Coverage Gate/' "${tmp}/renamed/${CI_YML_REL}"
   _case "a renamed ci.yml caller fails" 1 check_pinned "${tmp}/renamed"
 
+  # release-build.yml's needs, over the real file and planted edits of it.
+  _release() { # <dir>
+    mkdir -p "$1/.github/workflows"
+    cp "${REPO_ROOT}/${RELEASE_YML_REL}" "$1/${RELEASE_YML_REL}"
+  }
+  _release "${tmp}/rel-ok"
+  _case "release-build.yml: every job needs the gate and the fresh full audit" 0 check_release_needs "${tmp}/rel-ok"
+
+  _release "${tmp}/rel-dropped"
+  sed -Ei '/^  ios:/,/^  [a-z]/ s/^    needs: \[gate, dependency-audit\]$/    needs: [gate]/' "${tmp}/rel-dropped/${RELEASE_YML_REL}"
+  _case "a release job (TestFlight's) that drops dependency-audit fails" 1 check_release_needs "${tmp}/rel-dropped"
+
+  _release "${tmp}/rel-transitive"
+  printf '\n  notes:\n    needs: android-sign\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n' \
+    >>"${tmp}/rel-transitive/${RELEASE_YML_REL}"
+  _case "a job that needs both only through another job passes" 0 check_release_needs "${tmp}/rel-transitive"
+
+  _release "${tmp}/rel-always"
+  printf '\n  late:\n    needs: [gate, dependency-audit]\n    if: ${{ always() }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n' \
+    >>"${tmp}/rel-always/${RELEASE_YML_REL}"
+  _case "a job whose if: runs it after a failed need fails" 1 check_release_needs "${tmp}/rel-always"
+
+  _release "${tmp}/rel-pr"
+  sed -i 's/^      mode: full$/      mode: pr/' "${tmp}/rel-pr/${RELEASE_YML_REL}"
+  _case "a dependency-audit in pr mode fails" 1 check_release_needs "${tmp}/rel-pr"
+
+  _release "${tmp}/rel-other"
+  sed -i 's#^    uses: \./\.github/workflows/audit\.yml$#    uses: ./.github/workflows/rust-check.yml#' "${tmp}/rel-other/${RELEASE_YML_REL}"
+  _case "a dependency-audit that calls another workflow fails" 1 check_release_needs "${tmp}/rel-other"
+
   if (( checked != SELF_TEST_FIXTURES )); then
     printf '  \033[1;31mFAIL\033[0m ran %d fixtures, expected %d\n' "${checked}" "${SELF_TEST_FIXTURES}" >&2
     fails=1
   fi
   (( fails == 0 )) || { echo "check_ci_verdict.sh --self-test: FAILED" >&2; return 1; }
-  log "OK: self-test passed — each way a gate job can fail, skip, go missing or never finish, a missing or bare run, an API blip and outage, both queries, and each way the pinned list can drift."
+  log "OK: self-test passed — each way a gate job can fail, skip, go missing or never finish, a missing or bare run, an API blip and outage, both queries, each way the pinned list can drift, and each way a release job can run without the gate or the fresh audit."
 }
 
 case "${1:-}" in
-  '') check_pinned "${REPO_ROOT}" ;;
+  '')
+    rc=0
+    check_pinned "${REPO_ROOT}" || rc=$?
+    r=0
+    check_release_needs "${REPO_ROOT}" || r=$?
+    if (( r > rc )); then rc=${r}; fi
+    exit "${rc}" ;;
   --self-test) self_test ;;
   --sha)
     [[ -n "${2:-}" ]] || { echo "ERROR: --sha needs a commit" >&2; exit 2; }
