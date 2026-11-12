@@ -8,6 +8,11 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart'
     show locationEventResultFromFfi;
 
+/// Whether the mesh's disclosure has been read to the end of a turn-on on
+/// this device: a flag in the app's preferences, cleared at a logout's first
+/// durable step (`PendingMlsWipeService.setPending`).
+const String kMeshIntroSeenKey = 'haven.mesh.intro_seen';
+
 /// How many times one [MeshService.drive] asks while packets still wait.
 /// The bridge reads 256 packets a time, so a drive that rides a receive
 /// stays a bounded piece of local work whatever the mesh carried meanwhile;

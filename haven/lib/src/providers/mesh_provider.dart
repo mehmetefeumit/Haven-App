@@ -20,6 +20,8 @@ import 'package:haven/src/services/mesh_radio.dart';
 import 'package:haven/src/services/mesh_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 
+export 'package:haven/src/services/mesh_service.dart' show kMeshIntroSeenKey;
+
 /// Master switch for the Bluetooth mesh (`docs/BLUETOOTH_MESH_PLAN.md`): an
 /// opt-in second carrier for the location events the relay path seals.
 ///
@@ -98,9 +100,6 @@ final meshNoticeCopyProvider = Provider<MeshNoticeCopyOf?>((ref) {
   );
 });
 
-/// Whether the mesh's disclosure has been read to the end of a turn-on on
-/// this device: a flag in the app's preferences, cleared at a logout.
-const String kMeshIntroSeenKey = 'haven.mesh.intro_seen';
 
 /// Whether mesh was turned off by something other than the user, who has not
 /// been told. Set by a reconcile that turned it off; flipped back by whoever

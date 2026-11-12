@@ -56,6 +56,7 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/mesh_radio.dart';
+import 'package:haven/src/services/mesh_service.dart' show kMeshIntroSeenKey;
 import 'package:haven/src/utils/log_alias.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -109,6 +110,9 @@ class PendingMlsWipeService {
   Future<void> setPending() async {
     try {
       await _prefs.setBool(kPendingMlsWipeKey, true);
+      // With the marker, so a logout that dies after this cannot leave it to
+      // the next identity, who reads the Bluetooth mesh's disclosure afresh.
+      await _prefs.remove(kMeshIntroSeenKey);
     } on Object catch (e) {
       // A failure to set the marker is logged but must not block identity
       // deletion.  Use runtimeType only — never log `e` itself (could carry

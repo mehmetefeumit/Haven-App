@@ -422,17 +422,6 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         'during identity deletion: ${e.runtimeType}',
       );
     }
-    // The next identity reads the Bluetooth mesh's disclosure for itself.
-    // Best-effort.
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.remove(kMeshIntroSeenKey);
-    } on Object catch (e) {
-      debugPrint(
-        '[IdentityNotifier] mesh disclosure flag clear failed during '
-        'identity deletion: ${e.runtimeType}',
-      );
-    }
     // circleServiceProvider is deliberately NOT invalidated anywhere in the
     // logout. `invalidate` would hand the NEXT read a FRESH, un-wiped instance,
     // and anything still running while logged out would use it to re-create
