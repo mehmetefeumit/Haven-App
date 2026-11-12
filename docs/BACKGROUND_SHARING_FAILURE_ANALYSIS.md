@@ -710,8 +710,9 @@ eleven independent diagnosticians, not a reconstruction of the owner's phone.
      continuous updates plus SLC. The "Downgraded hypotheses" entry below assumed the indicator was on;
      whether this posture survives hours on a desk is unmeasured (V-P3-3), and changing it is an owner
      decision.
-  3. **No background notice.** Every verdict is derived on the next foreground; nothing tells a
-     backgrounded user that sharing stopped (an owner decision).
+  3. **No background notice — owner decision 2026-11-12: none.** Every verdict is derived on the
+     next foreground and nothing notifies a backgrounded user that sharing stopped; do not add a
+     local notification for it.
 
 ### Downgraded hypotheses (kept so nobody re-investigates them)
 
