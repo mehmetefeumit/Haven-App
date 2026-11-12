@@ -86,6 +86,9 @@ concurrency:
   group: privacy-manifest-author
   cancel-in-progress: false
 
+# Each job grants exactly what it uses.
+permissions: {}
+
 jobs:
   propose:
     name: Propose manifest updates (pull request only)
@@ -102,7 +105,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           # The gate below runs its ratchet, and this job passes it no
           # `--baseline-ref`, so it takes the script's DEFAULT baseline:
@@ -162,7 +165,7 @@ jobs:
       - name: Author manifest updates
         id: author
         if: steps.existing.outputs.skip == 'false'
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@d5f7970ae232b6039636a16ea7f251e58e814f38 # v1.0.272
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # No Bash and no network tool: the model reads, edits the manifest,

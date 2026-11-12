@@ -1,0 +1,5 @@
+osv:RUSTSEC-2026-0459:libsqlite3-sys@0.38.1	libsqlite3-sys 0.38.1: `libsqlite3-sys` via C SQLite improperly validates WAL frames
+osv:RUSTSEC-2026-0459:libsqlite3-sys@0.38.1	libsqlite3-sys 0.38.1: `libsqlite3-sys` via C SQLite improperly validates WAL frames
+retracted:universal_file_viewer@0.1.5	universal_file_viewer 0.1.5 is retracted on https://pub.dev
+watcher:GHSA-gc79-23g3-8g52:openmls@0.8.1	openmls/openmls GHSA-gc79-23g3-8g52: openmls 0.8.1 in < 0.8.2 (x ``` @someone ```)
+ledger-expiring:RUSTSEC-2024-0384	acknowledgement of RUSTSEC-2024-0384 expires on 2027-02-09

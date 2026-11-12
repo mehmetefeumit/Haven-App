@@ -455,7 +455,27 @@
 #     every job of rust-check, cross-check, coverage and repo-guards on that
 #     commit. The jobs it requires are pinned; this holds the list equal to
 #     the jobs those workflows and ci.yml's callers define, so a job added or
-#     renamed cannot silently leave the release gate.
+#     renamed cannot silently leave the release gate, and every release-build.yml
+#     job needs gate and dependency-audit (audit.yml, mode: full).
+#
+#   Android signing                   scripts/ci/sign_android_release.sh
+#     The release key lives only in android-sign, a job that builds nothing.
+#     The fixtures are the proof that a re-signed APK which fails to verify,
+#     carries another scheme, signer count or certificate, or loses its 16 KB
+#     alignment never reaches the Release.
+#
+#   Release-notes ledger listing      scripts/ci/release_ledger_notes.sh
+#     The Release body lists every advisory the release ships acknowledged; a
+#     ledger it cannot read fails the release instead of printing a shorter
+#     list, and no ledger text can write markdown into the page.
+#
+#   Workflow static analysis          zizmor (pinned in scripts/ci/security_tools.env)
+#     Every workflow: actions pinned to a full commit SHA, least-privilege
+#     tokens, no template injection, no persisted checkout credential where a
+#     job does not need one. Offline audits only, so the verdict is a property
+#     of the tree; the network audits (known-vulnerable actions, impostor
+#     commits) run in security-nightly.yml. Accepted findings, each with its
+#     reason, are in .github/zizmor.yml.
 #
 #   Session-busy marker is log-only   scripts/ci/check_session_busy_marker_not_routed.sh
 #     The Rule-14 "an MLS session is already open" marker must never drive a
@@ -926,6 +946,9 @@ name: Repo Guards
 on:
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   guards:
     name: Static checks
@@ -937,7 +960,7 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       # xmllint (libxml2-utils) is pre-installed on ubuntu-latest, but ensure it
       # so the XML-comment-safe manifest/plist checks never depend on the image.
@@ -958,9 +981,24 @@ jobs:
       # which is why the canary self-test can live here with the other
       # invariants instead of behind the coverage job's toolchain.
       - name: Set up Dart
-        uses: dart-lang/setup-dart@v1
+        uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
         with:
           sdk: stable
+
+      # zizmor is one static binary in a wheel, installed by hash alone, with
+      # setup-python's pip so the image's system Python (PEP 668 externally
+      # managed on Ubuntu 24.04) is never asked to take a package.
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+
+      - name: Install zizmor
+        run: |
+          set -euo pipefail
+          source scripts/ci/security_tools.env
+          printf 'zizmor==%s --hash=sha256:%s\n' "${ZIZMOR_VERSION}" "${ZIZMOR_WHEEL_SHA256}" > "${RUNNER_TEMP}/zizmor.txt"
+          pip install --no-deps --require-hashes --only-binary :all: -r "${RUNNER_TEMP}/zizmor.txt"
 
       # Every guard below carries the same `if:` — run whenever checkout
       # succeeded, even if an earlier guard failed — so one red run reports the
@@ -1477,6 +1515,18 @@ jobs:
       - name: Release gate self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_ci_verdict.sh --self-test
+
+      - name: Android signing self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/sign_android_release.sh --self-test
+
+      - name: Release-notes ledger listing self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/release_ledger_notes.sh --self-test
+
+      - name: Workflow static analysis (zizmor)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: zizmor --offline --min-severity low .github/workflows
 
       # The Rule-14 busy marker is a LOG token. Routing on it would be
       # remotely influenceable: a circle admin controls the group's routing

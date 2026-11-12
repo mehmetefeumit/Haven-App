@@ -49,7 +49,9 @@ jobs:
       # GITHUB_SHA is "last commit on default branch", so omitting `ref` is what
       # makes that true.
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Classify failed jobs and re-run only runner losses
         env:

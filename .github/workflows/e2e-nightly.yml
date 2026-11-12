@@ -28,6 +28,9 @@ on:
     # Nightly at 03:00 UTC.
     - cron: '0 3 * * *'
 
+permissions:
+  contents: read
+
 jobs:
   # Full consolidated core flow — identical lane to the PR gate,
   # run on a schedule.

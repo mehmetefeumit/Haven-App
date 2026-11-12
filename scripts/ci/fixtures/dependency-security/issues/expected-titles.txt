@@ -1,0 +1,5 @@
+[dependency-security] osv:RUSTSEC-2026-0459:libsqlite3-sys@0.38.1 (main)
+[dependency-security] retracted:universal_file_viewer@0.1.5 (main)
+[dependency-security] watcher:GHSA-gc79-23g3-8g52:openmls@0.8.1 (main)
+[dependency-security] ledger-expiring:RUSTSEC-2024-0384 (main)
+[dependency-security] osv:RUSTSEC-2026-0459:libsqlite3-sys@0.38.1 (v0.1.13)

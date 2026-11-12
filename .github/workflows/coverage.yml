@@ -41,6 +41,9 @@ name: Coverage
 on:
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   rust-coverage:
     name: Rust Coverage
@@ -55,7 +58,9 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       # The pin lives in a checked-in file rather than inline here so the local
       # gate reads the same value; a version duplicated across a workflow and a
@@ -73,7 +78,7 @@ jobs:
           echo "Measuring with rustc ${HAVEN_COVERAGE_RUST_TOOLCHAIN} + cargo-llvm-cov ${HAVEN_COVERAGE_LLVM_COV_VERSION}"
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ steps.toolchain.outputs.rust }}
           components: llvm-tools-preview
@@ -84,12 +89,12 @@ jobs:
       # 33355064806 and 34488512808 with no commit — a silent change of
       # instrument under a manifest of pinned floors.
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-llvm-cov@${{ steps.toolchain.outputs.llvmcov }}
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: |
             haven-core
@@ -246,7 +251,7 @@ jobs:
 
       - name: Upload coverage reports
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: rust-coverage-report
           path: |
@@ -263,7 +268,9 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Read pinned coverage toolchains
         id: toolchain
@@ -281,7 +288,7 @@ jobs:
       # new SDK breaking the app must still surface, just not as a coverage
       # number nobody changed.
       - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           flutter-version: ${{ steps.toolchain.outputs.flutter }}
           channel: stable
@@ -295,10 +302,12 @@ jobs:
       # toolchain for. `stable` is deliberate and outside the pin above: the
       # pin is for the instrument that MEASURES, and the scanner only reads.
       - name: Setup Rust (log scanner)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       - name: Cache cargo (log scanner)
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tooling/logscan
           key: coverage-logscan
@@ -440,7 +449,7 @@ jobs:
 
       - name: Upload coverage reports
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: flutter-coverage-report
           path: |

@@ -1,0 +1,230 @@
+# The nightly dependency scan: main, and the release users are running.
+#
+# A push is scanned against the advisories known at that moment; an advisory
+# published tomorrow is invisible to it, and so is one against a lockfile that
+# has not changed since. So every night this re-runs audit.yml in `full` mode on
+# main — every gate, the upstream-advisory watcher, and the ledger's liveness
+# and 14-day expiry warning — and runs the scanners over the lockfiles the
+# latest published release was built from, with main's policy (ledger,
+# audit.toml, scanner pins), because a fix on main does not reach a user until
+# it ships. The tag gets no ledger liveness: its graph is not main's, so an
+# entry it does not match is not stale.
+#
+# Each scan job uploads its findings and its step outcomes, and the last job
+# turns them into issues (scripts/ci/file_security_issue.sh, whose header holds
+# the rules): one `dependency-security` issue per finding and ref, kept open
+# while it recurs, closed when a run that reached every verdict no longer
+# reports it, and a `nightly run failed` issue when a scanner did not reach a
+# verdict. The label must exist before the first night.
+#
+# Issues are filed from main only: a dispatch on another branch prints what it
+# would file, since its findings are not main's and its silence must not close
+# main's issues.
+#
+# `37 4 * * *`: off the hour, where scheduled runs queue hardest, and clear of
+# the soak (00:23), e2e-nightly (03:00) and the privacy-manifest author (Tue
+# 07:00).
+
+name: Security Nightly
+
+on:
+  schedule:
+    - cron: '37 4 * * *'
+  workflow_dispatch:
+
+# Each job grants what it needs and nothing more.
+permissions: {}
+
+# A cancelled scan reaches no verdict and closes nothing; a queued one is late.
+concurrency:
+  group: security-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  main-audit:
+    name: Dependency audit (main, full)
+    # The reusable checks out the repository and inherits this job's grant.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/audit.yml
+    with:
+      mode: full
+
+  release-tag-scan:
+    name: Dependency scan (latest release's lockfiles)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # `contents` reads the release and checks out the tag; the watcher's
+    # advisory reads are public.
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Findings file
+        id: findings
+        run: |
+          mkdir -p "${RUNNER_TEMP}/dependency-findings"
+          : >"${RUNNER_TEMP}/dependency-findings/findings.tsv"
+          echo "SECURITY_FINDINGS_OUT=${RUNNER_TEMP}/dependency-findings/findings.tsv" >>"${GITHUB_ENV}"
+
+      # Empty when the repository has no published release: nothing to scan.
+      - name: Latest published release
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="$(bash scripts/ci/file_security_issue.sh --latest-release)"
+          echo "tag=${tag}" >>"${GITHUB_OUTPUT}"
+
+      - name: Checkout the release tag
+        id: checkout-tag
+        if: ${{ steps.tag.outputs.tag != '' }}
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          path: release-tree
+          persist-credentials: false
+
+      # Out of the checkout and into a directory of their own, so osv-scanner
+      # reads the tag's committed lockfiles and nothing else in its tree. No
+      # code from the tag runs: every scanner and script below is main's.
+      - name: The tag's committed lockfiles
+        id: materialise
+        if: ${{ steps.checkout-tag.outcome == 'success' }}
+        run: |
+          mkdir "${RUNNER_TEMP}/release-locks"
+          bash scripts/ci/file_security_issue.sh --materialise release-tree "${RUNNER_TEMP}/release-locks"
+
+      - name: Install cargo-audit
+        id: install-cargo-audit
+        if: ${{ steps.materialise.outcome == 'success' }}
+        run: |
+          source scripts/ci/security_tools.env
+          cargo install cargo-audit --locked --version "=${CARGO_AUDIT_VERSION}"
+
+      - name: Set up Go
+        if: ${{ steps.materialise.outcome == 'success' }}
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install osv-scanner
+        id: install-osv
+        if: ${{ steps.materialise.outcome == 'success' }}
+        run: |
+          source scripts/ci/security_tools.env
+          GOTOOLCHAIN=auto go install "github.com/google/osv-scanner/v2/cmd/osv-scanner@${OSV_SCANNER_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
+
+      # From haven-core, so haven-core/.cargo/audit.toml applies (audit.yml's
+      # header says why). Every lockfile is audited before the step fails.
+      - name: cargo audit (the tag's Cargo.lock files)
+        id: cargo-audit
+        if: ${{ !cancelled() && steps.materialise.outcome == 'success' }}
+        working-directory: haven-core
+        run: |
+          mapfile -t locks < <(find "${RUNNER_TEMP}/release-locks" -name Cargo.lock | sort)
+          (( ${#locks[@]} )) || { echo "::error::the tag commits no Cargo.lock"; exit 2; }
+          rc=0
+          for lock in "${locks[@]}"; do
+            echo "cargo audit: ${lock#"${RUNNER_TEMP}/release-locks/"}"
+            cargo audit --file "${lock}" || rc=1
+          done
+          exit "${rc}"
+
+      - name: Known-vulnerable or malicious packages (osv-scanner)
+        id: osv
+        if: ${{ !cancelled() && steps.materialise.outcome == 'success' }}
+        run: bash scripts/ci/run_osv_gate.sh "${RUNNER_TEMP}/release-locks"
+
+      # With no argument both scripts read main's lockfiles, so an empty list
+      # is a misconfiguration, never a default.
+      - name: No retracted pub version is locked
+        id: pub
+        if: ${{ !cancelled() && steps.materialise.outcome == 'success' }}
+        run: |
+          mapfile -t locks < <(find "${RUNNER_TEMP}/release-locks" -name pubspec.lock | sort)
+          (( ${#locks[@]} )) || { echo "::error::the tag commits no pubspec.lock"; exit 2; }
+          bash scripts/ci/check_pub_retractions.sh "${locks[@]}"
+
+      - name: Upstream advisories against the tag's git pins
+        id: watcher
+        if: ${{ !cancelled() && steps.materialise.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t locks < <(find "${RUNNER_TEMP}/release-locks" -name Cargo.lock | sort)
+          (( ${#locks[@]} )) || { echo "::error::the tag commits no Cargo.lock"; exit 2; }
+          bash scripts/ci/check_upstream_advisories.sh "${locks[@]}"
+
+      # The filer tells a finding from a scanner that never reached a verdict
+      # by these outcomes: a failed gate must have filed a finding.
+      - name: Keep the step outcomes with the findings
+        if: ${{ always() }}
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: printf '%s\n' "${STEPS}" >"${RUNNER_TEMP}/dependency-findings/steps.json"
+
+      - name: Upload the findings
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: dependency-findings-release-tag
+          path: ${{ runner.temp }}/dependency-findings/
+          retention-days: 7
+          if-no-files-found: error
+
+  # `if: always()`: a red scan is exactly the night that has issues to file,
+  # and a green one is the night that closes them. A missing artifact is
+  # handed on as an empty directory, which the filer reads as a scan that did
+  # not finish.
+  file-issues:
+    name: File, keep or close the dependency-security issues
+    needs: [main-audit, release-tag-scan]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Download main's findings
+        continue-on-error: true
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: dependency-findings-full
+          path: ${{ runner.temp }}/findings/main
+
+      - name: Download the release tag's findings
+        continue-on-error: true
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: dependency-findings-release-tag
+          path: ${{ runner.temp }}/findings/release-tag
+
+      - name: File, keep or close
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MAIN_RESULT: ${{ needs.main-audit.result }}
+          TAG: ${{ needs.release-tag-scan.outputs.tag }}
+          TAG_RESULT: ${{ needs.release-tag-scan.result }}
+          FILE: ${{ github.ref == 'refs/heads/main' && '--file' || '' }}
+        run: |
+          bash scripts/ci/file_security_issue.sh ${FILE:+"${FILE}"} \
+            --scan "${GITHUB_REF_NAME}" "${RUNNER_TEMP}/findings/main" "${MAIN_RESULT}" \
+            --scan "${TAG}" "${RUNNER_TEMP}/findings/release-tag" "${TAG_RESULT}"

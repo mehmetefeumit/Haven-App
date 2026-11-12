@@ -81,6 +81,9 @@ on:
         default: false
         required: false
 
+permissions:
+  contents: read
+
 jobs:
   e2e_ios:
     name: e2e_ios
@@ -160,11 +163,14 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           # Simulator triple for Apple-Silicon runners — NOT the device
           # `aarch64-apple-ios` that build-check.yml installs. cargokit builds
           # the haven-core dylib for this target for the `flutter test` device
@@ -172,7 +178,7 @@ jobs:
           targets: aarch64-apple-ios-sim
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: |
             haven-core
@@ -190,7 +196,7 @@ jobs:
         run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
 
       - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
           cache: true
@@ -385,7 +391,7 @@ jobs:
           # as --dart-define=HAVEN_WIRE_SENTINEL=… only when it is non-empty;
           # that is the chain check_wire_oracle_lane_reachable.sh follows.
           HAVEN_WIRE_SENTINEL: ${{ env.HAVEN_WIRE_SENTINEL }}
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08 # v3.0.2
         with:
           timeout_minutes: ${{ inputs.live_sync && 45 || 30 }}
           max_attempts: 2
@@ -486,7 +492,7 @@ jobs:
           # scenario whose compiled defines every other iOS lane relies on
           # staying byte-identical. Empty means "not instrumented".
           HAVEN_WIRE_SENTINEL: ""
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08 # v3.0.2
         with:
           timeout_minutes: 20
           max_attempts: 2
@@ -860,7 +866,7 @@ jobs:
 
       - name: Upload failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           # Suffix the flag-on run so it never collides with the poll-path
           # e2e-ios job's artifact when BOTH are called in one ci.yml run

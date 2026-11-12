@@ -85,6 +85,9 @@ name: E2E Profile
 on:
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   # ==========================================================================
   # e2e_profile_android — single AVD; one Flutter UI process + in-process
@@ -147,7 +150,9 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       # Reclaim runner disk BEFORE the Gradle/Rust build — the multi-GB debug
       # build + NDK strip has run a default runner out of space.
@@ -155,18 +160,19 @@ jobs:
         run: bash tooling/e2e/ci/free-disk-space.sh
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
           java-version: 21
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: x86_64-linux-android
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: |
             haven-core
@@ -194,7 +200,7 @@ jobs:
           rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
       - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
           cache: true
@@ -222,7 +228,7 @@ jobs:
       # or unavailable cache service reddens a lane that would otherwise have
       # built cold and run every test.
       - name: Restore Gradle dependency cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         timeout-minutes: 2
         continue-on-error: true
         with:
@@ -294,7 +300,7 @@ jobs:
         run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64
 
       - name: AVD cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: avd-cache
         with:
           path: |
@@ -315,7 +321,7 @@ jobs:
         # emulator-boot-timeout below is the action's own inner bound (7 min,
         # matching the drive steps) and fires first with the action's message.
         timeout-minutes: 15
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           api-level: 34
           arch: x86_64
@@ -411,7 +417,7 @@ jobs:
       # lane, and 12m is ~4.4x its observed whole-step max.
       - name: Run e2e_profile_sharing on the emulator
         timeout-minutes: 45
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           api-level: 34
           arch: x86_64
@@ -451,7 +457,7 @@ jobs:
       # report step.
       - name: Upload egress observation
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: egress-profile-android-${{ github.run_id }}
           path: |
@@ -565,7 +571,7 @@ jobs:
 
       - name: Upload failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: e2e-profile-android-${{ github.run_id }}
           path: |
@@ -675,18 +681,21 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           # Simulator triple for Apple-Silicon runners; cargokit builds the
           # haven-core dylib for this target for the `flutter test` device
           # build. (`nc`/`curl`, used by the start scripts, are preinstalled.)
           targets: aarch64-apple-ios-sim
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # Cache all three crates the lane builds: the app core plus the two
           # host-native standalone test servers.
@@ -707,7 +716,7 @@ jobs:
         run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
 
       - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
           cache: true
@@ -776,7 +785,7 @@ jobs:
 
       - name: Run e2e_profile_sharing on the simulator
         timeout-minutes: 65
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08 # v3.0.2
         with:
           timeout_minutes: 30
           max_attempts: 2
@@ -862,7 +871,7 @@ jobs:
 
       - name: Upload failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: e2e-profile-ios-${{ github.run_id }}
           path: |

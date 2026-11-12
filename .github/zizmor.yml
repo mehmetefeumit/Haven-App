@@ -1,0 +1,35 @@
+# zizmor (GitHub Actions static analysis), run `--offline` by repo-guards.yml
+# and online by security-nightly.yml. Every acceptance below names its reason;
+# an ignore is per file, so a new workflow with the same finding still fails.
+rules:
+  # Stated, not left to the default: a moved tag is how tj-actions (2025) and
+  # trivy-action (2026-03) reached their users' runners.
+  unpinned-uses:
+    config:
+      policies:
+        "*": hash-pin
+
+  # Every in-repo `uses:` is a job-level reusable-workflow call (no step runs
+  # a `./` action, the runtime-filesystem case this audit exists for), and
+  # check_ci_verdict.sh, check_soak_lane_reachable.sh and
+  # check_privacy_invariants.sh read the `./.github/workflows/` spelling.
+  self-repository:
+    disable: true
+
+  dangerous-triggers:
+    ignore:
+      # claude-code-action acts only for an actor with write access (no
+      # allowed_non_write_users here), and the job's token is read-only.
+      - claude.yml
+      # Checks out the default branch only (no `ref:`), never the triggering
+      # run's code; see the comment on its checkout step.
+      - rerun-runner-losses.yml
+
+  artipacked:
+    ignore:
+      # The privacy-invariants ratchet fetches its baseline commit with the
+      # checkout's credential; the job uploads no artifact.
+      - repo-guards.yml
+      # Pushes the proposal branch with the checkout's credential; the job
+      # uploads no artifact.
+      - privacy-manifest-author.yml

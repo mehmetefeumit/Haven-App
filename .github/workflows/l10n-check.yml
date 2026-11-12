@@ -17,19 +17,24 @@ name: L10n Check
 on:
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   l10n-parity:
     name: ARB parity + gen-l10n
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       # channel: stable matches coverage.yml and the E2E lanes. gen-l10n output
       # is stable across stable minors; the parity script's drift check compares
       # the regenerated sources against the committed/indexed ones.
       - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
           cache: true

@@ -1,0 +1,59 @@
+{
+  "checkout": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "findings": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "tag": {
+    "outputs": {
+      "tag": "v0.1.13"
+    },
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "checkout-tag": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "materialise": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "install-cargo-audit": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "install-osv": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "cargo-audit": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "osv": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "pub": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "watcher": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  }
+}

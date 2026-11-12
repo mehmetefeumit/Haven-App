@@ -20,6 +20,9 @@ on:
     paths:
       - 'haven/lib/l10n/**.arb'
 
+# Each job grants exactly what it uses.
+permissions: {}
+
 jobs:
   l10n-ai-review:
     name: L10n AI Review (advisory)
@@ -33,14 +36,15 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           fetch-depth: 1
 
       - name: AI review of changed translations
         id: l10n-ai-review
         continue-on-error: true
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@d5f7970ae232b6039636a16ea7f251e58e814f38 # v1.0.272
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |

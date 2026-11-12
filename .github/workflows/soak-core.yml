@@ -84,6 +84,9 @@ on:
         type: string
         default: ''
 
+permissions:
+  contents: read
+
 jobs:
   # ---------------------------------------------------------------------------
   # pr — the per-commit profile: S01 (single-relay outage arm), S06, S11, S13.
@@ -114,10 +117,14 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       # ONE `shared-key` with rust-check.yml's soak-tooling job, deliberately:
       # `key:` appends to a JOB-scoped key, which would give this lane its own
@@ -125,7 +132,7 @@ jobs:
       # dependency this job needs, so the cache is written before the lane
       # starts.
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: |
             tooling/soak
@@ -188,7 +195,7 @@ jobs:
       # a second, misleading red on top of a plain compile failure.
       - name: Upload soak evidence
         if: ${{ !cancelled() && steps.soak.outcome != 'skipped' }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: soak-core-pr-${{ github.run_id }}
           path: ${{ runner.temp }}/soak-upload/
@@ -228,13 +235,17 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: |
             tooling/soak
@@ -265,7 +276,7 @@ jobs:
 
       - name: Upload soak evidence
         if: ${{ !cancelled() && steps.soak.outcome != 'skipped' }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: soak-core-nightly-${{ inputs.slot }}-${{ github.run_id }}
           path: ${{ runner.temp }}/soak-upload/
@@ -296,13 +307,17 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: |
             tooling/soak
@@ -333,7 +348,7 @@ jobs:
 
       - name: Upload soak evidence
         if: ${{ !cancelled() && steps.soak.outcome != 'skipped' }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: soak-core-weekly-${{ github.run_id }}
           path: ${{ runner.temp }}/soak-upload/

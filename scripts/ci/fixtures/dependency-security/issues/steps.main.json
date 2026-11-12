@@ -1,0 +1,37 @@
+{
+  "checkout": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "findings": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "osv": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "osv-binary": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "pub": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "watcher": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "ledger": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  }
+}

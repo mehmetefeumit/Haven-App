@@ -29,6 +29,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Every called workflow runs with at most this grant; one that needs more
+# is granted it on its calling job here, never file-wide.
+permissions:
+  contents: read
+
 jobs:
   # ---------------------------------------------------------------------------
   # Stage 1 — code quality
