@@ -2755,3 +2755,618 @@ Not from either pass, and this design's own: that the floor costs
 Haven's own lines (§M.2); that a peer's address type is left out (§M.6),
 which the research proposed and the confirmation called decidable; the
 mapping to `unsupported` and `failed` (§M.3).
+
+---
+
+## N. M3g as it will be built
+
+> **DRAFT, 2026-11-12, by one agent; not confirmed.** Paper only: nothing
+> of it is built or run. It settles what §M.2 left to M3g, orders the
+> unit into six that CI can compile one at a time, and lists what the
+> code will rest on unproved. Where it departs from §B, §C or §M it says
+> so; every such departure is the confirming review's to check first.
+
+### N.0 What was read, and what it changes
+
+Tags as §1. **[V1]** here is a source fetched and read for this draft
+alone, on 2026-11-12, in §M.0's mirrors and short forms; `base/` is
+libbase (`AM/platform_system_core` at Android 11). Also read: the
+Flutter SDK this machine has, 3.44.8, the version the coverage pin
+names (`scripts/ci/coverage_toolchain.env:46`; the build lanes float on
+`channel: stable`, `build-check.yml:111`); the crates as
+`haven/rust_builder/Cargo.lock` resolves them; the plugins in the pub
+cache; `developer.android.com/reference/tools/gradle-api/8.11/`.
+`dl.google.com` and `android.googlesource.com` were not reachable.
+
+| # | Finding | Consequence |
+|---|---|---|
+| N-1 | **The event, statistics and security buffers never reach the logger.** Each ends in `write_to_log` ([V1]: `liblog/logger_write.cpp:416-518` @11, `-22.2:487-579`); the logger is called from `__android_log_write_log_message` alone, and only for the main, system, radio and crash buffers (`:295-315` @11, `-23.2:363-383`). | Settles §M.2's **[U]**. The lever does not cover those buffers. Whether Android's Bluetooth classes write to them from an app's process is unread (N.5). |
+| N-2 | **Calling an API-30 symbol through an `extern` declaration would stop the library loading on Android 6 to 10** — an import the linker cannot bind there (**[U]** for the exact failure, memory). `android_log-sys 0.3.2`, in the lockfile (`Cargo.lock:89-93`), declares one ready to call (`src/lib.rs:99`). | Every one of the lever's symbols is found with `dlsym`, and the built library is held to import none of them (N.4). All of Haven on those phones depends on it, not the mesh alone. |
+| N-3 | **The library already exports a `Java_*` symbol that is not the radio's**: `Java_io_crates_keyring_Keyring_00024Companion_initializeNdkContext` (`android-native-keyring-store 0.5.0`, `src/lib.rs:36`; called at `kt/HavenApplication.kt:57`). | The `nm -D` step §A.6 owes cannot hold the library to "exactly the fixture": it holds it to the fixture and that one name. |
+| N-4 | **A tap on a notice that starts the app is lost.** The Dart side sets the state channel's handler when either stream is first listened to (`mesh_radio.dart:208-214`); the mesh's providers listen to `changes` (`mesh_provider.dart:164-167`), the button to `actions` only when it is built (`mesh_button.dart:73`), and a message with no listener of its kind is dropped (the contract test "with nobody listening…", `test/services/mesh_radio_test.dart:267`). The channel has no listen call the native end could wait for (`mesh_radio.dart:197-201`). | A pull, `takeAction` (N.2.8). |
+| N-5 | **A service started with `startForegroundService` that ends without `startForeground` takes its process down** (**[U]**, memory: the platform's "did not then call Service.startForeground()"), and the process is the relay path's (F-14). `StartPolicy.start` refuses before `foreground()` (`kt/mesh/core/StartPolicy.kt:22-23`). | Every refusal is made by whoever would start the service, before it does (N.1.5). |
+| N-6 | **§B.3's outgoing order cannot be kept if the server is to record nothing of a device that is not Haven's.** A server learns an MTU only from `onMtuChanged`, which it is sent for every connection (§M.1), and no public call reads it back later (**[U]**, memory). MTU before the subscription means keeping every LE device's MTU by address. | The dial subscribes first and asks for the MTU after (N.2.3, N.2.4). |
+
+### N.1 The lever
+
+**N.1.1 Where: a third pinned module, `haven/rust_builder/src/log_lever.rs`.**
+`mesh_jni.rs` is held to `use`s and exports (guard check 3,
+`check_mesh_radio.sh:71-83`); a callback and a lookup there would end
+the one shape that check reads. `lib.rs` gains `#[allow(unsafe_code)]
+mod log_lever;` under the `cfg` line of the other two (`lib.rs:17-21`).
+
+- **What is `unsafe` there**, and nothing else: `dlopen`, `dlsym`, the
+  cast of what `dlsym` answers to a function pointer, the calls through
+  those pointers, and — in a debug build's arm only — reading two
+  fields of the message handed in. The callback is `extern "C"`, a
+  keyword check 1 bans outside the allowed files.
+- **How the symbols are found.** `libc::dlopen("liblog.so", RTLD_NOW)`,
+  then `dlsym` on that handle, once; the handle is never closed. Not
+  `RTLD_DEFAULT`: its value and `RTLD_NOW`'s differ between Android's
+  32- and 64-bit ABIs (`libc 0.2.180`,
+  `src/unix/linux_like/android/b32/mod.rs:196-197`, `b64/mod.rs:153-154`)
+  — the reason the constants come from `libc` and are not written out —
+  and what it searches from an app's library is bionic's rule, unread.
+  Not an `extern` block (N-2). Stable Rust has no weak linkage (**[U]**,
+  memory).
+- **Dependency.** `libc = "0.2"`, for Android and as a dev-dependency
+  for the host's type-check and tests, as `jni` is
+  (`haven/rust_builder/Cargo.toml:56`, `:105`). The lockfile holds
+  `libc 0.2.180` (`Cargo.lock:2171-2172`): `rust_lib_haven`'s list
+  (`:3557-3580`) gains `"libc"` and no package. The other two lockfiles
+  do not change. `check_lockfile_universe.sh` and
+  `check_mdk_supply_chain.sh` read the MLS, MDK, SQLCipher and nostr
+  crates and need nothing. dependency-auditor on the direct use;
+  security-reviewer on the module and the third allowance.
+- **The five symbols**, each "available since API level 30" ([V1]:
+  `liblog/include/android/log.h -22.2:207-228`, `:233`, `:253`, `:265`,
+  `:275`, `:369`, `:378`):
+
+  ```c
+  struct __android_log_message {
+    size_t struct_size; int32_t buffer_id; int32_t priority;
+    const char* tag; const char* file; uint32_t line; const char* message; };
+  void    __android_log_set_logger(void (*)(const struct __android_log_message*));
+  void    __android_log_logd_logger(const struct __android_log_message*);
+  void    __android_log_write_log_message(struct __android_log_message*);
+  int32_t __android_log_set_minimum_priority(int32_t);   /* answers the one before */
+  int32_t __android_log_get_minimum_priority(void);
+  ```
+
+  The struct is declared in the module, `#[repr(C)]`, its size and
+  offsets asserted at compile time for both pointer widths ([L] for the
+  host's, [C] on the arm leg of `build-check.yml`).
+- **The callback** adds one to a static atomic counter. In a release
+  build that is all of it: it reads nothing of the message. In a debug
+  build it then reads `struct_size` and `tag` — a message shorter than
+  the struct, or with no tag, is dropped — and hands the message, as it
+  came, to `__android_log_logd_logger` when the tag passes N.1.2; that
+  function writes straight to `logd` and cannot come back through the
+  logger ([V1]: `liblog/logger_write.cpp:276-289` @11). It never reads
+  `message`. It calls nothing of the `log` crate, formats nothing,
+  allocates nothing, takes no lock, indexes nothing and does no
+  arithmetic but the wrapping add: nothing in it can panic, which
+  matters because an unwind out of it aborts the process.
+- **What the guard gains** (N.2, unit 1): the file among check 1's
+  exemptions and `lib.rs`'s pinned declarations (checks 2 and 6, a
+  third allowance and a fourth `unsafe_code`); and a check 13 of the
+  file itself — of `libc` it names `dlopen`, `dlsym`, `RTLD_NOW` and the
+  C types; its only string literals are the library's name and the five
+  symbols; one `extern "C" fn` outside its tests; a pinned count of
+  `unsafe` blocks and no `unsafe fn` or `unsafe impl`; no `no_mangle`,
+  `export_name`, `link_section`, `static mut`, `JNIEnv`, `radio_`,
+  `log::`, macro that formats, `unwrap`, `expect(`, `Box`, `Vec`,
+  `String`, `Mutex` or `RwLock`; and no file of the crate names
+  `android_log_sys` or, outside this one, any of the five. It is a
+  reader of text, as §A.6 says of the rest.
+
+**N.1.2 What is written: nothing in a release build; in a debug build,
+Haven's own lines (recommended; Q-14).** The three forms, weighed:
+
+| | (i) nothing, every build | (ii) Haven's tags, every build | (iii) release as (i), debug as (ii) |
+|---|---|---|---|
+| Privacy, shipped | nothing of the process is written | Rust warnings and errors, and whatever the engine itself writes under `flutter`; no floor behind it | as (i) |
+| List to keep | none | one, shipped | one, in debug builds only |
+| The floor (§M.2) | FATAL, as §M.2 decided | cannot be raised | FATAL in release; left alone in debug |
+| Debugging | blind once mesh has been on | as today for Haven's lines | as today for Haven's lines |
+| Lanes | every oracle read from Haven's log goes blind | few | few |
+
+- **What goes blind under (i)**, in the lanes §F.2 gives a `mesh` input
+  (found by reading the runners' marker tables, not every line):
+  `e2e-background-catchup.yml` takes its verdict from Dart lines in
+  logcat — `[CatchupWorker] bootstrap ok`, `sweep complete:` and the
+  counters parsed from it, the two no-op lines, the loopback opt-in
+  (`tooling/e2e/ci/run-m7-background-catchup.sh:217-220`, `:233-234`,
+  `:1132-1146`); `e2e-fgs-publish.yml` from some twenty
+  `[BackgroundTask]` and `[b1]` lines
+  (`tooling/e2e/ci/run-b1-fgs-publish.sh:333-458`); and in every lane the
+  scanner's Dart plant of the closing phase
+  (`tooling/logscan/README.md`, "Positive controls"). `e2e-android.yml`
+  was not read for this. Nothing replaces them today: each would need a
+  second way out of the process, written for the test alone.
+- **What goes blind under (iii)**: lines under tags that are not
+  Haven's — in those runners, WorkManager's (`:227`, `:779`, `:890`,
+  `:1226` of the catch-up runner), for which it already reads `dumpsys
+  jobscheduler` beside the log (`:745`, `:1111-1119`). M3h moves those
+  three reads to it.
+- **Why (iii) proves what ships.** Both arms are one installed
+  function and one check; they differ in one predicate, and the
+  release arm writes a subset of what the debug arm writes. A lane that
+  shows no platform line under Haven's pid with the debug arm shows it
+  for the release arm. What only a release build has — the floor and
+  its read-back — gets its own leg (N.1.6).
+- **The list is the scanner's**: `owned_tags` of
+  `tooling/logscan/policy.toml:135`, by the scanner's match (equal, or
+  the entry and then `::`). A debug build then writes exactly the lines
+  the runtime scanner answers for. Held by an [L] test that reads that
+  line of the policy; no second list exists to drift. `flutter` is in
+  it, so a debug build passes every Dart package's `print`: a debug
+  build, on a developer's phone or a runner.
+- **One function of the build's kind**, as `max_log_level` is
+  (`api:97`, `:158-164`), so that both arms are tested in the one build
+  `rust-check.yml` runs. The kind is the Rust library's: cargokit builds
+  it in release for every Flutter mode but debug
+  (`haven/rust_builder/cargokit/build_tool/lib/src/builder.dart:154`).
+
+**N.1.3 The check: a sentinel the logger must take, and the floor read
+back.** It replaces §M.2's item 5 and settles the "how often" of item 6.
+
+- `holds()`: read the counter; hand `__android_log_write_log_message` a
+  message with an empty tag and an empty text at ERROR; true when the
+  counter moved and, in a release build, the minimum priority read
+  back is FATAL or above. That call goes to the logger in force
+  without passing the floor (§M.2), and only Haven's callback moves the
+  counter, so a counter that moved is a line that reached Haven's
+  logger; a concurrent line can make it move too, and proves the same.
+  ERROR, not FATAL: a FATAL message is first stored as the process's
+  abort message ([V1]: `liblog/logger_write.cpp:308-312` @11). Where the
+  logger in force is not Haven's, the sentinel is written: one empty
+  line, and the radio is not started.
+- **Why not `Log.isLoggable(tag, ERROR)`.** It reads the floor and one
+  tag's property, and says nothing of the logger — the open point of
+  §M.2. It needs a list of the platform's tags, which a module update
+  can change under the app (§M.0). And with a logger that drops the
+  line whatever its tag, a property changes nothing that is written:
+  the check would stop the radio, or keep it from ever starting on a
+  vendor's image that ships such a property, for no line saved. Both
+  designs find a logger that was replaced only at the next check, so
+  nothing is given up between checks.
+- **What can undo the logger**: any native code in the process that
+  calls libbase's `SetLogger` or `InitLogging`, which install their own
+  ([V1]: `base/logging.cpp:400-405` @11). That is what the check is for.
+- **When.** At every start (N.1.5), and as the first thing every input
+  of `MeshRadioCore` does, before the time left (`MeshRadioCore.kt:137`):
+  one JNI call, no timer. A check that fails puts the lever back —
+  callbacks still arrive after a stop (§M.2 item 4) — and stops the
+  radio as a stop the user did not make.
+- §M.9 item 3 becomes: with `log.tag.BluetoothGatt` set to VERBOSE over
+  `adb` during a link, nothing of the platform's appears under Haven's
+  pid.
+
+**N.1.4 When it goes in: at the first thing that touches Bluetooth, not
+at process start.** The channel's `bluetoothOn`, `bluetoothName` and
+`start`, and the service's own start, each begin with it. §M.2 item 3
+names the last two; the first two make a `BluetoothAdapter` before any
+start (§C.2, steps 2 and 3). Where the lever is refused they fail, which
+the turn-on reads as "couldn't turn on" (`mesh_provider.dart:359-362`).
+So a phone on API 30 or later whose `liblog` lacked a symbol — which
+the NDK's contract excludes — would keep a button that fails, and never
+reach the `start` that answers `unsupported`.
+
+- **The late write is as safe as an early one.** The setter is a plain
+  store of one pointer and the writer a plain load of it ([V1]:
+  `liblog/logger_write.cpp:158-165`, `:314` @11; `-23.2:170-177`, `:382`;
+  no lock on either release). On Android's four ABIs an aligned pointer
+  is stored whole (**[U]**: the compiled `liblog` of no build was
+  read); a thread that loaded the old pointer writes that one line. No
+  Bluetooth object exists yet, so the line holds nothing of the mesh
+  (§M.8 item 3). The race is the platform's own at any moment an app can
+  call the setter: by `Application.onCreate` the runtime's own threads
+  are running (**[U]**, memory), and `HavenApplication` has itself
+  logged (`kt/HavenApplication.kt:44-46`). Process start buys nothing.
+- **A process that never turns mesh on pays nothing**: no symbol is
+  looked up and nothing of §M.8 applies to it. A user who opens the
+  turn-on and backs out at the name step (§C.2) has the lever for the
+  rest of that process.
+- **Native code does not learn the flag for this.** The lever's only
+  callers are the channel, which only flagged Dart calls
+  (`mesh_provider.dart:34`, `:70-76`), and components that are in no
+  flag-off manifest. The channel itself is registered only under
+  `BuildConfig.HAVEN_MESH`, written by the Gradle switch that merges
+  the manifest (N.3): a flag-off build has no native entry to the mesh,
+  rather than one nobody calls.
+
+**N.1.5 How Kotlin reaches it.**
+
+- Two native methods on `MeshNative`, eleven in the fixture
+  (`haven/rust_builder/fixtures/mesh_radio_exports.txt:28-36`):
+
+  ```
+  leverInstall ()Z - jboolean      // false: a symbol is missing
+  leverHolds ()Z - jboolean
+  ```
+
+  `mesh_jni.rs` gains two exports of the one shape, `mesh_radio.rs` two
+  functions, and `api.rs` the entries `radio_lever_install` and
+  `radio_lever_holds`, so the guard's checks 3 to 5 read eleven of what
+  they read nine of. Each runs under `radio_guarded(false, …)`: a panic
+  is a lever that is not there. They take no engine lock and may be
+  called from the main thread; every other export stays on the mesh
+  thread (§B.1).
+- A second pure interface, `LogLever`, beside `MeshEngineApi`:
+  `MeshNative` implements both, and
+  `theEngineInterfaceIsTheNineExportsOfTheFixture`
+  (`haven/android/mesh-jvm/…/FixtureTest.kt:69`) becomes the two
+  interfaces against the eleven lines, no method twice and no other.
+- **`StartPolicy`** answers the channel's four words in place of a
+  deadline or null:
+
+  ```kotlin
+  fun supported(api: Int, bluetoothLe: Boolean): Boolean    // api >= 30
+  fun refusal(api, bluetoothLe, lever, permission): MeshStart?  // null: go on
+  fun start(api, bluetoothLe, lever, wipePending, permission, engine,
+            storedDeadlineMs, wallClockMs, foreground): Start   // Refused(word) | Run(deadline)
+  ```
+
+  `refusal`, in §M.3's order: below API 30 or no Bluetooth LE →
+  `unsupported`, with the lever not called; `leverInstall()` false →
+  `unsupported`; `leverHolds()` false → `failed`; no permission →
+  `noPermission`. `start` is `refusal`, then a logout's marker
+  (N.2.7), then what it does today (`kt/mesh/core/StartPolicy.kt:23-32`).
+- **Whoever would start the service asks `refusal` first** (N-5): the
+  channel's `start` and the receiver. So `unsupported` and
+  `noPermission` are answered with no service started and nothing
+  stored. The service asks again in `start`; what can differ between
+  the two is a permission revoked in the milliseconds between
+  (N.5).
+
+**N.1.6 What is proved where.**
+
+| Claim | Where |
+|---|---|
+| The predicate, for both kinds of build; the list is the scanner's | [L] |
+| The callback counts every line and forwards only what passes — against a recording function in place of the platform's writer | [L] |
+| `install` then `holds` against four stand-ins for `liblog`: true; false once another logger is installed; false in a release build once the floor is moved | [L] |
+| A library without the symbols is no lever (looked up under a name that does not exist); the two calls a JNI export forwards answer false off Android, where no lookup is made; a panic answers false | [L] |
+| `below API 30 → unsupported, lever untouched`; `no lever → unsupported`; `lever not holding → failed, before the permission and the foreground`; a lever that stops holding stops the radio at the next input and is put back | [J] |
+| The module's shape; eleven exports both ways | [G] |
+| The lookup compiles for Android; the library exports the eleven and the keyring's one and imports none of the five | [C] |
+| The symbols resolve; `leverHolds` is true; no platform line under Haven's pid; a property does not bring one back | [E], API 30, 33, 34, 35, 36 |
+| The same on a vendor's `liblog` | [H] |
+
+**Required of M3h**, so that the lane cannot pass on a capture nothing
+was written to (§M.8). In a debug build, from the turn-on's own Dart
+line onward: every line under Haven's pid carries an owned tag; at
+least one such line is there; before the turn-on the same pid has at
+least one line under a tag that is not owned — the capture shows such
+lines while the lever is out; and, on a real Bluetooth stack, the
+address planted through a link in each role is found under the
+Bluetooth process's pid and under none of Haven's lines. One leg with
+a release build: the radio is still running at the end of the session
+(`dumpsys activity services`, the notification) — so the floor's
+read-back held — and Haven's pid has no line after the turn-on, with
+the system's own lines about that pid as the proof the capture was
+live.
+
+### N.2 The build order
+
+Six units. Each is pushed alone, compiles in CI with the flag off, and
+adds nothing a default build can reach: until unit 6 no Dart call has
+a native end, and from unit 3 a flag-on build is compiled by its own
+job (N.3). Each records itself in plan §16 and here as "As built".
+security-reviewer on units 1, 2 and 4 (§H) before each lands.
+
+| Unit | Files (`kt/mesh/` unless a path is given) | Tests it adds | [C] only | Guard gains | Unproved until [E] / [H] |
+|---|---|---|---|---|---|
+| **1. The lever** | in `haven/rust_builder`: `src/log_lever.rs`, `lib.rs`, `api.rs`, `mesh_radio.rs`, `mesh_jni.rs`, the fixture, `Cargo.toml`, `Cargo.lock`; `core/LogLever.kt` | [L] of N.1.6; the fixture test [J] | Android compile; the `nm` step | checks 1, 2, 4, 6 widened; check 13 | everything [E] of N.1.6 |
+| **2. Pure additions** | `core/`: `StartPolicy`, `MeshRadioCore` (the lever), `GattClientSteps`, `ServerLinks`, `ChannelWords`, `MeshRadioConstants` (UUIDs, GATT integers) | [J] below | — | test names; the constants' one site | — |
+| **3. `MeshNative`, the gate** | `MeshNative.kt`; `app/build.gradle.kts`; `app/src/mesh/AndroidManifest.xml` (permissions and the feature); `scripts/ci/check_mesh_manifest.sh` | the script's self-test [G] | the class compiles; both merged manifests | Kotlin half of check 4; the Gradle switch named once | that Kotlin finds the eleven symbols |
+| **4. Radio adapters** | `MeshLoop`, `GattServerAdapter`, `GattClientAdapter`, `AdvertiserAdapter`, `ScannerAdapter` | — | all of it; the SDK's integers | callbacks inside `MeshThread.run`; the never-bond and advertisement bans | all behaviour (§B.3) |
+| **5. The service** | `MeshService`, `MeshNotices`, `MeshPrefs`, `MeshReceiver`; the manifest's two components | — | all of it | the mesh manifest's shape; `startForegroundService` at two sites | lifecycle, notices, boot |
+| **6. The channel** | `MeshChannel`, `kt/MainActivity.kt`; `mesh_radio.dart`, `mesh_provider.dart` | [D] below | the channel | words agree, Dart and Kotlin; registration under the flag | the whole, on a phone |
+
+Rule for every adapter (§B.1): it reads the platform and calls it; what
+to do is a pure function's answer. Where this section finds a decision
+in an adapter it moves it: units 4 and 5 add no test because unit 2 has
+taken what was testable.
+
+**N.2.1 `MeshNative` and the library.** `object MeshNative :
+MeshEngineApi, LogLever`, eleven `external` methods, and
+`System.loadLibrary("rust_lib_haven")` in its initializer. Needed: the
+bridge opens the library from Dart
+(`haven/lib/src/rust/frb_generated.dart:73`), which registers nothing
+with the class loader that JNI resolves a native method through
+(**[U]**, memory). Safe twice: `Keyring` already loads it
+(`haven/android/app/src/main/kotlin/io/crates/keyring/Keyring.kt:7-9`,
+first used at `kt/HavenApplication.kt:57`). That a release build's
+shrinker keeps the class and its native methods by name, as it does
+`Keyring`'s, is **[U]** until a release build runs.
+
+**N.2.2 One thread.** `MeshLoop` owns the `HandlerThread` and the one
+function adapters are given: post this body, inside this start's
+`MeshThread.run`. An adapter holds no `Handler`. Each start makes a
+loop, a `MeshThread`, a core and adapters; a callback of an earlier
+start posts to a thread that has stopped and is dropped
+(`kt/mesh/core/MeshThread.kt:26-27`). One thing is read on the
+platform's own thread before the post: below API 33 a notification's
+value, which lives in the characteristic and is overwritten by the
+next. From API 33 the platform has a second form of that callback and
+of the write and notify calls that carries the value; each is
+implemented once, and the older form does nothing where the newer is
+called (**[U]**, memory of the reference; [C], [E]).
+
+**N.2.3 The server knows a device only once it has written to Haven's
+descriptor.**
+
+- `onConnectionStateChange(connected)` is dropped: not numbered, not
+  kept, not told to the core. So is `onMtuChanged`, and any write, from
+  a device the server does not know. Nothing Haven does reaches a
+  connection that is the user's watch or another app's (§M.1) — the
+  10-second cancel of §B.4 would otherwise fall on them, whatever
+  `cancelConnection` then does.
+- **`onConnected(link)`**: a device enables notifications on Haven's
+  characteristic. It is numbered there and is one of the four not yet
+  linked (`MeshRadioCore.kt:80-84`).
+- **`onLinkUp(central = false)`**: that device's `onMtuChanged`, at 51
+  or more. Once (§B.2). Below 51 it stays one of the four, and the
+  core's ten seconds end it.
+- **Down, and forgotten**: disconnect, notifications disabled, the
+  core's `close`, or the device starting to bond (N.2.5).
+- **A write**: prepared, at an offset, or wanting a response — refused,
+  and a linked device closed; from a device with no link — dropped;
+  else `onFrame`. The descriptor write is answered success or a plain
+  failure, never "insufficient authentication" or "insufficient
+  encryption", which would start the peer's pairing (§M.4).
+- All of it is `ServerLinks`, pure: addresses in, one of *connected,
+  link up, link down, frame, cancel, answer, nothing* out. The adapter
+  maps callbacks to its inputs and outputs to platform calls.
+- **What this gives up**: §B.4's cap no longer counts a stranger who
+  connects and never subscribes. Nothing could act on one without
+  acting on everyone's connections; §H already lists it with no bound.
+- **Owed to M4**: an iPhone that dials is expected to agree the MTU
+  before it subscribes (**[U]**), which this server never learns.
+  Either the peripheral keeps MTUs of devices it does not know — the
+  record this design refuses — or the MTU reaches it another way.
+
+**N.2.4 The client: `GattClientSteps`.** Connect (`TRANSPORT_LE`, no
+auto-connect) → discover → enable notifications and write the
+descriptor → `requestMtu(517)` → at `onMtuChanged`, 51 or more,
+`onLinkUp(central = true)` → connection priority. §B.3 has the MTU
+first (N-6). Pure, on an injected clock: each step waits for its
+callback; a step that fails, 25 s without a link, or a bond starting is
+disconnect, close and one `onConnectFailed`; a connection that fails
+before its link is closed and tried once more after 300 ms (§B.3);
+every `connect` is answered exactly once.
+
+**N.2.5 Never bond.** No attribute of Haven's has a permission bit
+beyond read and write; no call that reads a characteristic, writes one
+with a response, creates a bond or answers a pairing (the guard bans
+the names). The service registers for `ACTION_BOND_STATE_CHANGED`
+while it runs; the two pure classes decide: a device they hold that
+leaves `BOND_NONE` is closed at once, and a device they do not hold —
+the user pairing headphones — is left alone.
+
+**N.2.6 Advertisement, scan, UUIDs.** The advertisement is
+`addServiceUuid` and nothing else, no scan response, the settings of
+`MeshRadioConstants`, and `setDiscoverable(false)` where the level is
+34 or more (§B.3: 18 bytes there, 21 below). The scan is §B.3's; it
+does nothing where `PermissionMatrix.canSearch` is false. The service
+and characteristic UUIDs are two random 128-bit values drawn once,
+when unit 2 is written, from the system's generator, and kept as two
+`Long`s each beside the standard descriptor's; a [J] test holds the
+six numbers. They are fixed for good from the first release that has
+the flag on, and M4 takes the same numbers; until then a change costs
+nothing.
+
+**N.2.7 Service, notices, prefs, receiver.**
+
+- `MeshService` is §B.5 and §B.6 over the classes above. Its stop's
+  steps, in order: the adapters closed and `stopRadio()`; the alarm
+  cancelled (after, §B.2); flag and copy cleared; the notification
+  removed; the service and its thread ended. `holdAwake` is a timed
+  lock that does not count, as `PublishWakeLock`'s
+  (`kt/PublishWakeLock.kt:95-103`).
+- `MeshNotices` follows the location notice: its own channel under a
+  versioned id, low importance, hidden on the lock screen, title
+  "Haven", the app's icon, fixed ids
+  (`background_location_manager.dart:121`, `:129`, `:327-329`). Taps are
+  activity intents with an extra (§B.5).
+- `MeshPrefs`: one app-private file — the flag, the deadline copy, six
+  strings.
+- **Plan §16 (c): yes, the service reads the logout's marker.** A
+  logout sets it and then stops the radio
+  (`haven/lib/src/providers/identity_provider.dart:240`, `:253`); a
+  process that dies between the two leaves the flag set, and
+  a restart would resume a keyless engine for up to twelve hours after
+  the user logged out. `StartPolicy` takes the marker as an input: set,
+  the start is a stop with the flag cleared and no notice. It is read
+  from the plugin's own file — `FlutterSharedPreferences`
+  (`shared_preferences_android 2.4.23`,
+  `LegacySharedPreferencesPlugin.java:34`), key `flutter.` and
+  `kPendingMlsWipeKey` (`pending_mls_wipe_service.dart:67`); the guard
+  holds the key to the Dart constant. Stopping the radio before the
+  marker is written was weighed: the marker is first on purpose
+  (`identity_provider.dart:221-230`).
+- `MeshReceiver`, boot and package replaced: flag, deadline ahead,
+  `refusal` — then `startForegroundService`, in the wrapper.
+
+**N.2.8 The channel, as the Dart side has it** (`mesh_radio.dart:193`,
+`:203-206`, `:228-235`, `:265-302`), registered in
+`MainActivity.configureFlutterEngine` under the flag:
+
+| Method | Argument | Answer |
+|---|---|---|
+| `permission`, `requestPermission` | — | `granted` / `denied` / `deniedForGood` |
+| `bluetoothOn` | — | Boolean |
+| `bluetoothName` | — | String or null |
+| `openBluetoothSettings`, `sync`, `stop` | `sync`: the six strings | null |
+| `start` | the six strings: `channel`, `on`, `paused`, `reminder`, `keepOn`, `stopped` | `started` / `noPermission` / `unsupported` / `failed` |
+| `status` | — | `{state: stopped / running / paused, wanted, canSearch}` |
+| **`supported`** (new) | — | Boolean: `StartPolicy.supported` — the level and the Bluetooth LE feature, no Bluetooth object, no lever |
+| **`takeAction`** (new) | — | the tap that opened this activity, once; else null |
+
+On `haven.app/mesh_radio_state`: a status at every change; `openStats`
+or `keepOn` for a tap while the activity lives.
+
+- `requestPermission` is the activity's own request and its result
+  (F-11); which of the three words it answers is one pure function.
+  `sync` stores the strings; a running service then reads the engine's
+  time left again, re-stores its copy, re-arms and re-words its notice
+  (§C.3).
+- Every method answers on every path: one `try` round the handler, a
+  failure answered with a fixed code and no text of the exception
+  (plan §16 (b); Rules 8, 15). `start` answers when the service has
+  started or refused; the Dart bound and the unwind behind it
+  (`mesh_radio.dart:124`, `mesh_provider.dart:330-332`) are what bound
+  it, and no native timer is added.
+- Plan §16 (a): the service writes the flag and publishes its state
+  before `start`'s reply is posted. `stop` clears flag and copy whether
+  or not a service runs: the launch's retry calls it before any service
+  could (`haven/lib/main.dart:166-168`).
+- **The seam's two changes**, each with its [D] test. A new entry,
+  `supported()`: `meshAvailableProvider` (`mesh_provider.dart:491-495`)
+  is false until it has answered true, so no button is drawn and then
+  taken away (§M.3); an answer that fails is "no". `actions` asks
+  `takeAction` when it is first listened to (N-4). The two comments
+  that say "hardware" (`mesh_radio.dart:32-33`,
+  `mesh_provider.dart:483-485`) are reworded.
+
+**Tests, unit 2 [J]** (names provisional; the guard pins the final
+ones): `belowApiThirtyAStartIsUnsupportedAndTouchesNothing`,
+`aLeverThatIsMissingIsUnsupportedAndOneThatDoesNotHoldIsFailed`,
+`aStartBehindALogoutIsAStopWithNoNotice`,
+`aLeverThatStopsHoldingIsPutBackAndStopsTheRadio`,
+`anOutgoingLinkIsDiscoveryThenSubscriptionThenMtu`,
+`aStepThatFailsOrTwentyFiveSecondsIsOneFailedConnect`,
+`aConnectionThatFailsBeforeItsLinkIsTriedOnceMore`,
+`aConnectionThatNeverWritesHavensDescriptorIsNeverKnown`,
+`aSubscriptionIsConnectedAndItsMtuIsTheLink`,
+`aLongAnOffsetOrAnAnsweredWriteIsRefusedAndItsLinkClosed`,
+`aDeviceThatStartsToBondIsDroppedOnlyIfItIsHavens`,
+`theStopCancelsTheAlarmAfterTheRadioIsDown`,
+`theChannelsWordsAreTheseAndTheStatusIsOneFunction`,
+`theUuidsAreTheOnesDrawn`; and `StartPolicy`'s existing test, on the
+new answer. **Unit 6 [D]**: `supported` and `takeAction` in
+`mesh_radio_test.dart`'s contract groups; "nothing of the mesh is on
+screen until the radio says this phone can run it"; "a tap that opened
+the app reaches the first listener, once".
+
+### N.3 The manifest gate
+
+**How the flag reaches Gradle — read, no longer [U]** (Flutter 3.44.8):
+the tool passes `-Pdart-defines=`, each define encoded as base64 of its
+UTF-8 `KEY=value` and joined by commas
+(`packages/flutter_tools/lib/src/build_info.dart:412`, `:1162`,
+`:1176-1178`); a define from `--dart-define-from-file` is in the same
+list, ahead of those of the command line
+(`…/runner/flutter_command.dart:1669-1684`); the Flutter plugin reads
+the property the same way
+(`packages/flutter_tools/gradle/src/main/kotlin/FlutterPlugin.kt:645`).
+**How a manifest is added to a variant** ([V1], the reference for AGP
+8.11; the build pins 8.11.1, `haven/android/settings.gradle.kts:22`):
+`variant.sources.manifests.addStaticManifestFile(path)`, since 8.3.1 —
+the path relative to the project, the file merged with the highest
+priority.
+
+```kotlin
+// One switch for the Dart flag and its native half.
+val meshOn = (findProperty("dart-defines") as String?).orEmpty()
+    .split(',').filter { it.isNotEmpty() }
+    .map { String(java.util.Base64.getDecoder().decode(it)) }
+    .lastOrNull { it.startsWith("HAVEN_MESH=") } == "HAVEN_MESH=true"
+
+android { defaultConfig { buildConfigField("boolean", "HAVEN_MESH", "$meshOn") } }
+
+androidComponents {
+    onVariants { variant ->
+        if (meshOn) variant.sources.manifests.addStaticManifestFile("src/mesh/AndroidManifest.xml")
+    }
+}
+```
+
+`buildConfig` is already on (`app/build.gradle.kts:34-36`). The last
+define of the name decides, as the command line's does over a file's
+(**[U]** that Dart reads a repeated define the same way).
+
+**What proves each half**, both in `build-check.yml`, by
+`scripts/ci/check_mesh_manifest.sh <apk> on|off`, which reads `aapt2
+dump xmltree` of the built APK and has a self-test:
+
+- *off* — the three existing legs, on the APK they already build
+  (`build-check.yml:157-158`): no Bluetooth permission, no
+  `bluetooth_le` feature, no component of the mesh package.
+- *on* — a new job, `android-mesh`: `build_apk_with_retry.sh
+  android-x64 --dart-define=HAVEN_MESH=true`, then every entry of §B.8
+  with its attributes. One more runner for a build of the kind whose
+  measured worst is 17.9 minutes (`build-check.yml:48`); it restores
+  the Gradle cache and does not write it, and declares its receive
+  path as the file's other jobs do (`build-check.yml:28-32`). It is
+  also the only compile of the flag-on shape until M3h's lane.
+
+### N.4 CI
+
+| Workflow | Change | Unit |
+|---|---|---|
+| `cross-check.yml` | the Android step (`:107-109`) becomes `cargo clippy --target aarch64-linux-android -- -D warnings`, the host's own rule (`rust-check.yml:267`) on the configuration that has the shim and the lookup; `clippy` among its components. Owed since M3b (plan §16). What it finds in Android-only code already there is **[U]** | 1 |
+| `build-check.yml`, the three legs | after the SQLCipher probe, on the library that step unpacks (`:162-165`): its defined `Java_*` symbols are the fixture's eleven and N-3's one; its undefined symbols include none of the five (N-2). Then the *off* manifest check | 1; 3 |
+| `build-check.yml`, `android-mesh` | N.3; and `javap -constants` on the SDK's `android.jar` against the four integers of `MeshRadioConstants` (§G: "proved by no compiler") | 3; 4 |
+| `android-unit.yml` | none: the script runs what the sources declare | — |
+| `repo-guards.yml` | none in shape for `check_mesh_radio.sh` (more checks, more fixtures); one step, the manifest script's self-test | 1–6; 3 |
+
+**Deferred to M3h**: every emulator lane; the loopback radio and
+`tooling/mesh-peer` (§F.2); the `mesh` input of three lanes, with the
+three WorkManager reads moved (N.1.2); the release-build leg and the
+assertions of N.1.6; the netsim spike (§F.3). **To M3i**: the privacy
+manifest, `SECURITY.md` and Rule 15's wording (§I), written when the
+radio can run.
+
+### N.5 What M3g rests on and cannot prove
+
+| Claim | Source | Unit that rests on it | If it is false |
+|---|---|---|---|
+| The lever leaves Haven's pid empty of the platform's lines, on every level from 30 and on vendors' builds | §M.9 item 1 | 1, 5, 6 | the rule of §M.3 does not do what it says: the flag does not flip |
+| The framework's `Log` and Haven's library write through one `liblog`, and `dlopen("liblog.so")` answers that one | §M.2's premise; N.1.1 | 1 | the same |
+| A pointer store is whole on every build's compiled `liblog` | N.1.4 | 1 | a line torn at install — once a process |
+| Nothing in the process moves the floor or replaces the logger | §M.9 item 2 | 1, 2 | the radio stops itself, with its notice: function lost, nothing written |
+| The platform's Bluetooth classes write no identifier to the event or statistics buffers from an app's process | N-1; unread | 1 | lines the lever cannot reach |
+| No plugin in the process makes a Bluetooth object before the lever | unread | 1 | platform lines before the lever |
+| Dropping the link ends a pairing before keys are exchanged | §M.9 item 4 | 2, 4, 5 | a bond a user accepted stays (§M.4) |
+| The server's callback fires for the phone's other connections | §M.9 item 7 | 2 (`ServerLinks`) | nothing: the rule holds either way |
+| `cancelConnection` ends a connection the server did not make | §K | 4 | a device Haven refused stays connected, unknown to Haven |
+| A write without response is paced by its callback | §K, §B.2 | 4 | frames lost in the stack; the links' timeouts (R-1) |
+| `neverForLocation` does not filter a plain service-UUID advertisement | §K | 3, 4 | phones on API 31 and later do not find each other |
+| `setDiscoverable(false)` is the stack's rule on 14.0.0 itself, and an iPhone finds an advertisement without Flags | §M.9 items 5, 9 | 4 | the name to inbound peers on that release; M4 |
+| `startForeground` in a sticky restart on Android 12 and later; a dismissed notice posted again at screen-off; a Bluetooth state change reaching only a registered receiver | §K | 5 | the wrapper stops the service with its notice; a missing notice until the next screen-off |
+| A service ended before `startForeground` ends the process | N-5 | 5, 6 | nothing: the order is harmless |
+| The plugin's preferences file and key prefix | N.2.7, read at 2.4.23 | 2, 5 | the marker reads unset: the window of plan §16 (c) is open again |
+| The Flutter tool's `dart-defines`, on the `stable` CI floats on; AGP's `addStaticManifestFile` | N.3, read | 3 | the build fails, or the *on* check does |
+| JNI resolves the eleven by name; a release build keeps `MeshNative` | §K; N.2.1 | 3 | the first call throws; `MeshThread` stops the radio |
+| The four integers are the SDK's | §G | 4 | the `javap` step fails |
+| The server is sent `onMtuChanged` when the dial asks for 517 after it subscribed — also where the two stacks had already agreed an MTU on that link | N-6; unread | 2, 4 | no inbound link comes up on such a phone; each is cancelled at ten seconds |
+| An iPhone agrees its MTU before it subscribes | N.2.3 | — | M4 |
+
+§M.9 items 3, 6 and 8 carry nothing of M3g: 3 is replaced (N.1.3), the
+name read is the platform's, and no entry is cleared.
+
+### N.6 For the owner
+
+**Q-14. Debug builds keep Haven's own log lines once mesh has been on
+(N.1.2).** §M.2 left the floor's level to the owner if Haven's lines
+were to be kept.
+
+- *(iii), recommended.* A release build writes nothing from the
+  process, at any priority, with the floor at FATAL behind the logger.
+  A debug build — a developer's, or a CI lane's — writes the lines the
+  runtime scanner answers for and no other, and leaves the floor where
+  it is: it has the logger and no second line. No user's phone is
+  affected. The lanes keep their oracles, and the scanner keeps reading
+  Haven's own lines with mesh on.
+- *(i).* Nothing in any build. One rule, no list. A debug build is
+  blind from the first turn-on, and of the three lanes that prove the
+  relay path is unmoved by the mesh (§F.2) the two read for this lose
+  every oracle they take from the log; each would need a second way
+  out of the process before M3h can count them.
+
+Not the owner's, and for the confirming review: the check of N.1.3 in
+place of §M.2's; the dial's order (N-6); reading the logout's marker
+(N.2.7); the two changes to the Dart seam (N.2.8).
