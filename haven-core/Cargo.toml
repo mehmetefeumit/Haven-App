@@ -1,6 +1,7 @@
 [package]
 name = "haven-core"
 version = "0.1.0"
+rust-version = "1.97.1"
 edition = "2021"
 description = "Core library for Haven - private family location sharing"
 license = "MIT"

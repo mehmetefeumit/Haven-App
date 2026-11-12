@@ -2324,7 +2324,7 @@ impl SessionManager {
             }
             let retired = session.confirm_regenerated_queued_intent(&QueuedIntentRef {
                 group_id: queued.group_id.clone(),
-                intent_id: queued.id.clone(),
+                intent_id: queued.id,
             });
             if let Err(e) = retired {
                 log::warn!(
@@ -5673,7 +5673,7 @@ impl SessionManager {
                     self.state_input_at
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .entry(group_id.clone())
+                        .entry(group_id)
                         .and_modify(|at| *at = (*at).max(now_ms))
                         .or_insert(now_ms);
                 }

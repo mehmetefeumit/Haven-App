@@ -3588,7 +3588,7 @@ impl RepairPlane {
                 && !held(&active.inbox_sub_id, &url)
             {
                 unheld.push(RepairKey {
-                    relay_url: url.clone(),
+                    relay_url: url,
                     sub_id: active.inbox_sub_id.clone(),
                 });
             }
