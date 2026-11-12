@@ -1397,6 +1397,26 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mesh_seams.sh --self-test
 
+      # The mesh's radio reaches Rust through JNI exports that decide nothing
+      # (docs/BLUETOOTH_MESH_M3_DESIGN.md §A.6): each is one radio entry called
+      # under the panic guard — an unwind out of one would abort the process
+      # that also publishes to relays — the exports are the ones pinned in
+      # fixtures/mesh_radio_exports.txt, the shim calls nothing of Java's, and
+      # the bridge crate writes unsafe in the generated bridge and the shim
+      # alone, under its own deny.
+      - name: Mesh radio
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mesh_radio.sh
+
+      # Plants unsafe, no_mangle and an ABI string outside the two files, the
+      # deny removed and the allowance widened or moved, an export that calls
+      # its entry bare, twice, or calls something else, a symbol that is no
+      # method of MeshNative, an export added, missing, renamed or retyped
+      # against the fixture, and a call into Java or state kept in the shim.
+      - name: Mesh radio guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mesh_radio.sh --self-test
+
       - name: SQLCipher logger omitted
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_sqlcipher_logger_omitted.sh

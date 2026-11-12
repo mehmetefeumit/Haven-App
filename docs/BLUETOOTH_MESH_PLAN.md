@@ -2459,6 +2459,130 @@ the disclosure took an owed notice away with it — only a flow that ended
 or failed does. Left: two requests for the statistics sheet in one frame
 open two.
 
+- **M3b**, the JNI shim over the radio's entries, and `unsafe` confined
+  (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §A.6, §A.7;
+  `haven/rust_builder/src/mesh_jni.rs`, `lib.rs`, `api.rs`;
+  `scripts/ci/check_mesh_radio.sh`). Rust in the bridge crate, one guard and
+  documents: no Kotlin, no Gradle, no Dart, nothing in `haven-core/src` or
+  `tooling/soak`. **No Kotlin declares or calls an export, so nothing runs
+  the shim in any build.**
+  **Exports**, nine, each `#[no_mangle] pub extern "system" fn
+  Java_com_oblivioustech_haven_mesh_MeshNative_<name>`, here with its JNI
+  descriptor: `resume (J)Z`, `leftMs ()J`, `sighting (JI)V`,
+  `linkUp (JZIJ)V`, `linkDown (J)V`, `connectFailed (J)V`,
+  `receive (J[B)V`, `poll ([J)[B`, `wakeInMs ()J`. They are pinned, with
+  their Rust types, in `haven/rust_builder/fixtures/mesh_radio_exports.txt`,
+  which the Kotlin `external fun`s are to be read against. Each converts its
+  arguments, makes one `radio_*` call under the guard and converts the
+  answer; of the bridge the shim names the entries, the guard and the frame
+  bound, and nothing else. It calls nothing of Java's, keeps no `JavaVM`, no
+  reference and no state, attaches no thread, logs and renders nothing.
+  **Conversions**, plain functions tested with no JVM: a frame's length is
+  read first and one over 512 bytes is not copied out of Java; a poll's list
+  is cut to 32 before it is read; `peer < 0` on a link is no peer; a
+  negative `leftMs` is none left; `rssi` and `attMtu` are clamped into their
+  types; a link's and a peer's number cross bit for bit; `wakeInMs` answers
+  −1 for no engine. A JNI call that fails is answered as no engine would
+  answer, and the exception it may have left is cleared.
+  **The guard** (`radio_guarded`, `catch_unwind`): an unwind out of an
+  `extern` function aborts the process, which is the relay path's too
+  (design F-14). **What a panic leaves:** the guard answers that entry's
+  no-engine value; every engine call runs under the engine's lock, so the
+  lock is poisoned before the guard has the panic — the guard hides nothing
+  from that path — and the next entry of any kind drops the engine and
+  leaves `Off`, from where the radio starts no other. A panic that held no
+  lock met no engine and leaves it
+  (`a_call_that_panics_under_the_guard_answers_its_no_engine_value_and_leaves_no_engine`).
+  **`unsafe`** (design F-8): `lib.rs` denies `unsafe_code` and allows it on
+  `mod frb_generated` and `mod mesh_jni`, nowhere else. `api.rs` and the test
+  keyring compiled under the deny unchanged — the design's open question. In
+  the shim the lint fires on `#[no_mangle]` alone; the file has no `unsafe`
+  block.
+  **Dead code.** With the shim their only caller, the entries and the guard
+  are dead in a build that has neither the shim nor the tests — every
+  target but Android. Deleting the nine `expect(dead_code)` outright left 14
+  dead-code errors in the host's non-test build (the nine, the guard,
+  `radio_frame_len`, `radio_encoded`, `RADIO_MAX_FRAME`, `Taker::Radio`).
+  Each of the ten now carries the expectation under the negation of its
+  caller's own condition, `not(any(target_os = "android", test))`: ten
+  attributes, where compiling the entries out would take fourteen and a
+  second shape of `mesh_take`. A host build with the shim compiled in and no
+  tests (a probe `cfg` in place of `target_os = "android"`) is clean, and is
+  not when an entry still expects to be dead.
+  **`jni`** 0.21, direct for Android and a dev-dependency for the host's
+  type-check: `haven/rust_builder/Cargo.lock` gained one line — `"jni"` in
+  `rust_lib_haven`'s list — and no package (525 before and after); the other
+  two lockfiles did not change. RustSec's advisory database at `fd6f398`
+  (2026-11-11) has no advisory for `jni`, `jni-sys`, `cesu8`, `combine`,
+  `walkdir` or `same-file`; `cargo-audit` is not installed where this was
+  built and was not run.
+  **The guard script**, `check_mesh_radio.sh`, two steps of
+  `repo-guards.yml`: `unsafe`, `no_mangle` and an ABI string under
+  `haven/rust_builder/src` in the generated bridge and the shim alone; the
+  deny and its two allowances, and `unsafe_code` named nowhere else; every
+  export `#[no_mangle]` above the one header shape, one guarded call of one
+  entry with nothing else under the guard, no entry named outside an export;
+  the exports equal to the fixture, descriptor included; and on a `JNIEnv`
+  the five calls the shim makes (`get_array_length`,
+  `get_long_array_region`, `convert_byte_array`, `byte_array_from_slice`,
+  `exception_clear`) and no other. 44 self-test fixtures.
+  **Source gates**, extended: `the_radio_entries_take_no_session` (the
+  shim's one `use` of the bridge names `radio_*` and the frame bound, and it
+  names nothing a session is reached by),
+  `the_engine_lock_is_taken_only_where_nothing_can_be_awaited` (the shim
+  names neither the static nor a lock holder),
+  `the_mesh_entries_log_nothing_and_format_nothing` (also reads the shim);
+  new: `every_export_is_one_guarded_call` — the nine by name, each its own
+  entry and nothing else under the guard, and no `panic!`, `unwrap()` or
+  `.expect(` in the shim.
+  **Owner question Q-2 is still open.** The `resume` export exists as
+  designed, in one place: if the owner says no it goes with `radio_resume` —
+  one export, one fixture line, one row of the gate's list.
+  **Not as the design has it.** A frame too long is not dropped by a
+  `return` (§A.5), which would leave its link up with a frame lost: the
+  entry is handed 513 bytes of nothing and closes the link, as it does for
+  any frame that long. The second parameter of an export is `JObject`, not
+  `JClass`: `MeshNative` implements `MeshEngineApi` (§B.1), so its methods
+  have a receiver; the pointer is the same and is never read. The guard
+  script's parity check has one side: no `MeshNative.kt` exists, and its
+  half lands with the Kotlin. A JNI failure and a negative `leftMs` are
+  answered as above, which the design does not say. `clippy::pedantic` and
+  `nursery` are `haven-core`'s lints, not this crate's, which has no
+  `[lints]` table. Found: `jni`'s wrappers write a `trace` line naming the
+  JNI function they call, a fixed word; the bridge's logger admits Haven's
+  two targets alone and caps the level below `trace`, so none is emitted.
+  **The generated bridge** was not regenerated and no pin moved. A
+  regeneration in a scratch copy changed one comment line of
+  `haven/lib/src/rust/api.dart` — `radio_guarded` joins the functions listed
+  as not `pub` — and left the other four Dart files and `frb_generated.rs`
+  byte for byte.
+  **Owed.** By the unit that writes `MeshNative.kt` (M3f/M3g): the Kotlin
+  half of the guard's check 4, against the same fixture. By the unit that
+  first builds the radio for Android: `nm -D` on the built library in
+  `build-check.yml`, listing the nine symbols.
+
+Residuals of M3b. No Android target is installed where this was built, so
+the `target_os = "android"` configuration was never compiled: that it
+compiles, that the nine symbols are exported from the built library, and
+that a Kotlin caller reaches them, is proved by nothing until a pull request
+runs `cross-check.yml` and `build-check.yml`, and an emulator lane or a
+device calls them. On the host the shim is type-checked against `jni` in the
+test build and its conversions run; no export is called. When the JVM
+cannot allocate a poll's answer the frame that poll took is spent and lost,
+and its link ends when the peer refuses the next one. The independent review
+and the security-reviewer pass design §H asks for on M3b were not run by the
+agent that built it.
+Mutation pass: 33 changes of a line or a few to the shim, the guard
+function, `lib.rs` and the fixture. Thirty each fail a named test, the
+compiler or the guard script. Three stand, and only a call of an export can
+kill them: the exception a failed JNI call left not cleared, an argument
+converted from another parameter of the same Java type (`linkUp`'s link
+taken from `peer`), and an answer inverted (`resume`). Seven of the nine
+exports never read their `JNIEnv` and could be called on the host with one
+that points nowhere, at the price of an `unsafe` in the shim's test module;
+not done. Each of the guard script's twelve failure sites, silenced in turn,
+fails its self-test.
+
 ### Proposed CLAUDE.md wording (owner to approve)
 
 Each is the text as it stands, then the text proposed. Nothing in
@@ -2581,6 +2705,23 @@ New:
 > sealing (Rule 13.1); the FFI's plain publish entry refuses a kind 445. With
 > mesh on the same location event also travels in mesh packets, which
 > outlive its `expiration` by design (Rule 17).
+
+**7. "Rust lints" (Code Quality).** The line says of every crate what holds
+for `haven-core`, and since M3b the bridge crate has a rule of its own.
+
+Old:
+
+> - **Rust lints**: `clippy::pedantic` and `clippy::nursery` are enabled;
+>   `unsafe_code` is denied
+
+New:
+
+> - **Rust lints**: `haven-core` enables `clippy::pedantic` and
+>   `clippy::nursery` and denies `unsafe_code`. The bridge crate
+>   (`haven/rust_builder`) denies `unsafe_code` too, with two allowances and
+>   no other: the generated bridge, and the Android radio's JNI shim
+>   `mesh_jni.rs`, where the lint fires on `#[no_mangle]` and the file has no
+>   `unsafe` block (`scripts/ci/check_mesh_radio.sh`)
 
 Next: M3, the radio, and with it everything on screen, as
 `docs/BLUETOOTH_MESH_M3_DESIGN.md` has it; and, if Android is to pass

@@ -3291,9 +3291,10 @@ twelve hours later.
 (`haven-core/src/mesh/`, `nostr/mls/manager/mesh.rs`) and the bridge
 (`haven/rust_builder/src/api.rs`, "Bluetooth mesh FFI") are built and tested.
 The radio is not. The entries a radio drives the engine through are built
-and tested ("The radio's entries" below), and nothing calls them: no shim
-exports them and no platform code scans, advertises or connects, so no packet
-leaves or reaches a device in any build. The Dart side is built behind the
+and tested, and so is the JNI shim that exports them to an Android build
+("The radio's entries" below); no Kotlin declares or calls an export, and no
+platform code scans, advertises or connects, so no packet leaves or reaches a
+device in any build. The Dart side is built behind the
 compile-time define `HAVEN_MESH`, which is off unless a build passes it and
 which no build script or workflow passes ("The Dart side" below): in a
 shipped build no Dart code calls a mesh entry, so mesh cannot be turned on,
@@ -3495,8 +3496,9 @@ and
 A radio drives the engine through nine functions of the bridge crate
 (`radio_*` in `haven/rust_builder/src/api.rs`;
 `docs/BLUETOOTH_MESH_M3_DESIGN.md` §A). They are no part of the generated
-bridge, Dart cannot call them, and in this build nothing does: the shim that
-will export them to the Android service is not built.
+bridge and Dart cannot call them. An Android build exports them to the
+radio's service through a JNI shim ("The shim", below); no Kotlin calls an
+export yet, and on no other target does anything call an entry.
 
 - **No session, and no way to one.** Each takes numbers and bytes and nothing
   else: a link and a peer are the radio's own counters, never a Bluetooth
@@ -3553,6 +3555,46 @@ will export them to the Android service is not built.
   Nothing in Rust bounds it across process restarts: each new process takes
   the service's word again, so that bound is the service's own stored
   deadline, which is not built.
+- **The shim** (`haven/rust_builder/src/mesh_jni.rs`; built for Android, and
+  into the host's test build so that every signature is type-checked against
+  `jni`). Nine `extern "system"` functions, one for each native method of the
+  Kotlin class `com.oblivioustech.haven.mesh.MeshNative`, pinned with their
+  JNI descriptors and Rust types in
+  `haven/rust_builder/fixtures/mesh_radio_exports.txt`. An export converts
+  its arguments, makes one `radio_*` call and converts the answer; it decides
+  nothing, and of the bridge it names the entries, the guard and the frame
+  bound alone. What crosses is bounded before it is copied: a frame's length
+  is read first, and one longer than 512 bytes is not copied out of Java —
+  513 bytes of nothing are handed to the entry in its place, which closes the
+  link; a poll's list is cut to 32 before it is read; a negative peer of a
+  link is no peer and a negative time left is none; signal strength and MTU
+  are clamped into their types; a link's and a peer's number cross bit for
+  bit. The shim calls no method of Java's, keeps no `JavaVM`, no reference
+  and no state between two calls, attaches no thread, and logs and renders
+  nothing. A JNI call that fails — an array that is null, one the JVM cannot
+  allocate — is answered as no engine would answer, and the exception it may
+  have left is cleared, so nothing is thrown into the service. The `jni`
+  crate's own wrappers write a `trace` line naming the JNI function they call
+  — a fixed word, no value — which no build emits: the bridge's logger admits
+  Haven's two targets alone (`HavenTargetFilter`, `init_app`) and caps the
+  level below `trace`.
+- **A panic stops at the export.** An unwind out of an `extern` function
+  aborts the process, and the mesh shares its process with the relay path.
+  Every export makes its one entry call under `radio_guarded`
+  (`catch_unwind`), which answers what that entry answers with no engine and
+  reads nothing of the panic. Every engine call runs under the engine's lock,
+  so a panic in one has poisoned the lock by the time the guard has it: the
+  next entry of any kind drops that engine, and the process is left where
+  only a session starts another — the service is told no time is left. A
+  panic that held no lock met no engine and leaves it.
+- **`unsafe`.** The bridge crate denies `unsafe_code` and allows it on two
+  modules: the generated bridge, and the shim, where the lint fires on
+  `#[no_mangle]` — which every export carries — and on nothing else: `jni`'s
+  wrappers need no `unsafe` block and the file has none. `api.rs` and the
+  test keyring compile under the deny. `jni` is the 0.21 line
+  `android-native-keyring-store` had already resolved: a direct dependency
+  for Android and a dev-dependency for the host's type-check, one new edge in
+  `haven/rust_builder/Cargo.lock` and no new package.
 
 Residuals. An entry with no session cannot delete a key or restart the twelve
 hours: at the deadline it drops the engine, and the keys wait for a session
@@ -3563,7 +3605,16 @@ off the full unread queue unread — which is how a keyless engine nobody
 drains comes to count at all. Where the
 service's word comes from — its own copy of the deadline — is not built, and
 whether a start with no session should exist at all is an open owner question
-(design Q-2): it is one function, `radio_resume`, and its tests.
+(design Q-2): it is one function, `radio_resume`, its export `resume`, and
+their tests. Of the shim, what runs here is its conversions and the guard;
+calling an export needs a JVM. That the nine link under their names, are
+exported from the built library and answer a Kotlin caller, and that the
+Android configuration compiles at all — no Android target is installed where
+this was built — is proved by nothing until an Android build and an emulator
+lane run. An export's arguments reach its entry in the order written, which
+is read, not tested. And when the JVM cannot allocate a poll's answer, the
+frame that poll took is spent and lost: its link ends when the peer refuses
+the next one.
 
 Proof, all in `mesh_ffi_tests`: the two named above, and
 `the_radio_carries_a_packet_between_this_phone_and_another`,
@@ -3579,7 +3630,16 @@ Proof, all in `mesh_ffi_tests`: the two named above, and
 `a_session_that_opens_takes_over_the_engine_the_radio_started`,
 `a_session_whose_mesh_is_off_ends_the_engine_the_radio_started`,
 `once_a_session_has_spoken_the_radio_starts_no_engine`,
-`what_passed_through_with_no_session_is_read_by_the_first_drive`.
+`what_passed_through_with_no_session_is_read_by_the_first_drive`; for the
+shim, `a_call_that_panics_under_the_guard_answers_its_no_engine_value_and_leaves_no_engine`,
+`every_export_is_one_guarded_call`, the shim's clauses of
+`the_radio_entries_take_no_session`,
+`the_engine_lock_is_taken_only_where_nothing_can_be_awaited` and
+`the_mesh_entries_log_nothing_and_format_nothing`, the conversions' tests in
+`mesh_jni::tests`, and `scripts/ci/check_mesh_radio.sh` — the two files that
+may write `unsafe`, the crate's deny and its two allowances, each export one
+guarded call, the exports against the fixture, and the five calls the shim
+may make on a `JNIEnv`.
 
 #### The mesh ingress
 

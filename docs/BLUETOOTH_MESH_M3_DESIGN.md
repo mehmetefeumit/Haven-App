@@ -4,9 +4,9 @@
 > by one agent and confirmed with changes by an independent review, both
 > 2026-11-11.** The review's changes are folded in and listed in §L, with
 > the one premise of it that the code contradicts. Built so far, each with
-> its departures from this text in plan §16: M3a; M3c; M3d in English only;
-> M3e.
-> Nothing native is built.
+> its departures from this text in plan §16: M3a; M3b; M3c; M3d in English
+> only; M3e.
+> No Kotlin is built: the shim's exports (M3b) have no caller.
 
 Studied at `132f5ca` (this file is in the tree since `8a76cf0`), with another
 agent's uncommitted work in `haven-core/`,
@@ -260,10 +260,13 @@ T-INDEP-4, by the lane [E].
 ### A.5 Bytes across the boundary
 
 - **In.** `receive(link, frame: ByteArray)`: the shim reads the array's
-  length and returns if it exceeds `RADIO_MAX_FRAME`, *then* copies
-  (`JNIEnv::convert_byte_array`, at most 512 bytes). `poll(ready:
-  LongArray)`: length cut to `MAX_LINKS` = 32 (`store.rs:42`), then read into
-  a stack array. Rust owns every copy; Java keeps its arrays.
+  length first and copies only a frame of at most `RADIO_MAX_FRAME`
+  (`JNIEnv::convert_byte_array`, at most 512 bytes). **As built (M3b):** for
+  a longer one it does not return — that would leave the link up with a frame
+  lost — but hands `radio_receive` 513 bytes of nothing, which closes the
+  link as the frame itself would. `poll(ready: LongArray)`: length cut to
+  `MAX_LINKS` = 32 (`store.rs:42`), then read into a stack array. Rust owns
+  every copy; Java keeps its arrays.
 - **Out.** `poll` returns a new `ByteArray` or `null`:
   `kind:1 ‖ id:8 big-endian ‖ bytes`, kind 1 = send `bytes` on link `id`,
   2 = close link `id`, 3 = connect to peer `id`. At most 9 + 512 bytes. One
@@ -286,13 +289,21 @@ poll(ready: LongArray): ByteArray?   wakeInMs(): Long      // −1: none
 
 - **Logic-free.** Each export converts its arguments, calls one `radio_*`
   function, converts the answer. `peer < 0` is `None`; `rssi` and `attMtu`
-  are clamped into their types.
+  are clamped into their types. **As built (M3b):** also, a negative
+  `leftMs` is none left; a link's or a peer's number crosses bit for bit; a
+  JNI call that fails (a null array, an array the JVM cannot allocate) is
+  answered as no engine would answer, with the exception it left cleared;
+  and the second parameter of an export is typed `JObject` — the receiver,
+  since `MeshNative` implements `MeshEngineApi` (§B.1), or the class if the
+  methods are made static: the same pointer, never read. The exports, their
+  JNI descriptors and Rust types are pinned in
+  `haven/rust_builder/fixtures/mesh_radio_exports.txt`.
 - **`unsafe`.** With `jni` 0.21's wrappers no export needs an `unsafe`
   block; the one thing the `unsafe_code` lint fires on is `#[no_mangle]`.
   `lib.rs` gains `#![deny(unsafe_code)]`, with `#[allow(unsafe_code)]` on
-  `mod frb_generated` and `mod mesh_jni` and nowhere else. **[U]** that
-  `api.rs` and `test_keyring.rs` compile under the deny — the compiler
-  answers in M3b. Guard `check_mesh_radio.sh` [G] — one script for every
+  `mod frb_generated` and `mod mesh_jni` and nowhere else. `api.rs` and
+  `test_keyring.rs` compile under the deny (M3b: the host's test and
+  non-test builds). Guard `check_mesh_radio.sh` [G] — one script for every
   textual fact of the radio, its checks named where they apply: `unsafe`,
   `no_mangle` and `extern "` appear under `haven/rust_builder/src` in
   those two files only.
@@ -303,7 +314,11 @@ poll(ready: LongArray): ByteArray?   wakeInMs(): Long      // −1: none
   `radio_guarded(…)` around the one `radio_*` call, then the answer's
   conversion. A panic under the lock poisons it, and the next `mesh_home`
   drops that engine (`api:12882-12890`); the service then reads
-  `leftMs() == 0` and stops, with the stopped notice.
+  `leftMs() == 0` and stops, with the stopped notice. **As built (M3b):** a
+  panic that held no lock leaves the engine, which was in no call. The
+  entries and the guard are dead code in a build that has neither the shim
+  nor the tests — every target but Android — and each carries
+  `expect(dead_code)` under exactly that condition.
 - **No callbacks, no stored `JavaVM`, no global reference, no thread
   attach**: every call is made by a Java thread and returns.
 - **Thread.** One: the service's `HandlerThread` (§B.1). Never the main
@@ -316,7 +331,15 @@ poll(ready: LongArray): ByteArray?   wakeInMs(): Long      // −1: none
   `external fun`s of `MeshNative.kt` and the `Java_…MeshNative_*` exports
   agree in name, arity and types, and the status and kind constants agree —
   and, in `build-check.yml`, `nm -D` on the built library lists the nine
-  symbols [C].
+  symbols [C]. **As built (M3b):** the guard holds the exports to the fixture;
+  its Kotlin half lands with `MeshNative.kt` (M3f/M3g), read against the same
+  fixture, and the `nm -D` step with the first unit that builds the radio
+  for Android.
+- **`jni` logs** (found in M3b): its wrappers write a `trace` line naming
+  the JNI function they call — a fixed word, no value. The bridge's logger
+  admits Haven's two targets alone and caps the level below `trace`, so none
+  is emitted; a service that calls an export before `init_app` has run has
+  no logger at all.
 - **Type-checked here.** The module also compiles under `cfg(test)`, so the
   host test build checks every signature against `jni` [L]. Calling an
   export needs a JVM: [E] or [H] only.
@@ -335,6 +358,13 @@ bridge against `api.rs`, so M3a re-pins it; **[U]** that the codegen skips
 `pub(crate)` items — `scripts/regenerate_frb.sh` must leave
 `frb_generated.rs` and the Dart bindings unchanged. dependency-auditor on
 `jni` 0.21.1 before M3b lands.
+
+**As built (M3b).** The lockfile gained the one edge and no package (525
+before and after). The codegen lists `radio_guarded` in the not-`pub`
+comment of `haven/lib/src/rust/api.dart` at the next regeneration and
+changes nothing else. RustSec's advisory database (commit `fd6f398`,
+2026-11-11) has no entry for `jni`, `jni-sys`, `cesu8`, `combine`, `walkdir`
+or `same-file`; `cargo-audit` was not run where this was built.
 
 ### A.8 Tests
 
@@ -1432,10 +1462,12 @@ wake lock in Doze (the review, on a mirror — [U] here, [H] for vendors).
 - Play's declaration: `support.google.com` [A13] and Bumble's pages
   `google.github.io` [A14] are outside this session's network.
 - That the Flutter tool hands Gradle the defines as designed, and AGP's
-  per-variant manifest API; that the codegen ignores `pub(crate)`
-  functions; that `api.rs` compiles under `deny(unsafe_code)`; that a
-  Gradle unit-test task builds no Rust; grouping with the plugin's
-  notification.
+  per-variant manifest API; that a Gradle unit-test task builds no Rust;
+  grouping with the plugin's notification. (Settled by M3a and M3b: the
+  codegen ignores a function that is not `pub` but lists it in a comment;
+  `api.rs` compiles under `deny(unsafe_code)`.)
+- That the shim compiles for Android, links under its nine names and is
+  callable: no Android target where M3b was built ([C], [E]).
 - [A9] and [A10] were read through a summarizing fetch, not in full.
 - Nothing was built or run for this design or its revision.
 

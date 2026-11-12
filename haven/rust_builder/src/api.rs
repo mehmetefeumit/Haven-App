@@ -13268,8 +13268,8 @@ pub struct MeshDriveFfi {
 // session and nothing else — so each checks the deadline and applies the
 // hand-off first, reads the clock here, and can reach no session, key or
 // store (Security Rule 14) — but `radio_resume`. A link and a peer are the
-// radio's own numbers, never an address. Nothing calls them in this build:
-// the JNI shim is not built yet.
+// radio's own numbers, never an address. Their one caller is Android's JNI
+// shim (`mesh_jni.rs`), each through `radio_guarded`.
 
 /// The longest frame a radio carries: one ATT attribute value.
 pub(crate) const RADIO_MAX_FRAME: usize = 512;
@@ -13302,19 +13302,28 @@ pub(crate) const fn radio_frame_len(att_mtu: u16) -> Option<usize> {
 /// The engine is keyless and so is this start: it carries and emits cover,
 /// and seals and opens nothing until a session adopts it — whose deadline
 /// then overrules the service's, at once when its mesh is off.
-#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+#[cfg_attr(
+    not(any(target_os = "android", test)),
+    expect(dead_code, reason = "only Android's JNI shim calls it")
+)]
 pub(crate) fn radio_resume(left_ms: u64) -> bool {
     mesh_take(Taker::Radio { left_ms }) != MeshStartFfi::Off
 }
 
 /// How long the engine still runs; 0 when none does.
-#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+#[cfg_attr(
+    not(any(target_os = "android", test)),
+    expect(dead_code, reason = "only Android's JNI shim calls it")
+)]
 pub(crate) fn radio_left_ms() -> u64 {
     with_mesh(None, |slot, now_ms| slot.until_ms - now_ms).unwrap_or(0)
 }
 
 /// The scan saw `peer` advertising at `rssi` dBm.
-#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+#[cfg_attr(
+    not(any(target_os = "android", test)),
+    expect(dead_code, reason = "only Android's JNI shim calls it")
+)]
 pub(crate) fn radio_sighting(peer: u64, rssi: i8) {
     with_mesh(None, |slot, now_ms| {
         slot.engine.sighting(PeerRef(peer), rssi, now_ms);
@@ -13324,7 +13333,10 @@ pub(crate) fn radio_sighting(peer: u64, rssi: i8) {
 /// The radio has a connection, `link`: one this phone made (`central`) or
 /// took, over `att_mtu`, to `peer` when the radio knows. One whose MTU
 /// carries no link is answered with its close.
-#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+#[cfg_attr(
+    not(any(target_os = "android", test)),
+    expect(dead_code, reason = "only Android's JNI shim calls it")
+)]
 pub(crate) fn radio_link_up(link: u64, central: bool, att_mtu: u16, peer: Option<u64>) {
     let role = if central {
         Role::Central
@@ -13339,7 +13351,10 @@ pub(crate) fn radio_link_up(link: u64, central: bool, att_mtu: u16, peer: Option
 }
 
 /// The radio lost `link`, or closed it as told.
-#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+#[cfg_attr(
+    not(any(target_os = "android", test)),
+    expect(dead_code, reason = "only Android's JNI shim calls it")
+)]
 pub(crate) fn radio_link_down(link: u64) {
     with_mesh(None, |slot, now_ms| {
         slot.engine.link_down(LinkId(link), now_ms);
@@ -13347,7 +13362,10 @@ pub(crate) fn radio_link_down(link: u64) {
 }
 
 /// The connect the engine asked for, to `peer`, made no link.
-#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+#[cfg_attr(
+    not(any(target_os = "android", test)),
+    expect(dead_code, reason = "only Android's JNI shim calls it")
+)]
 pub(crate) fn radio_connect_failed(peer: u64) {
     with_mesh(None, |slot, now_ms| {
         slot.engine.connect_failed(PeerRef(peer), now_ms);
@@ -13356,7 +13374,10 @@ pub(crate) fn radio_connect_failed(peer: u64) {
 
 /// One frame arrived on `link`, whole. A frame longer than
 /// [`RADIO_MAX_FRAME`] closes its link unread.
-#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+#[cfg_attr(
+    not(any(target_os = "android", test)),
+    expect(dead_code, reason = "only Android's JNI shim calls it")
+)]
 pub(crate) fn radio_receive(link: u64, frame: &[u8]) {
     // The engine is handed none of it: an empty frame closes a link whatever
     // the link expects next.
@@ -13379,7 +13400,10 @@ pub(crate) fn radio_receive(link: u64, frame: &[u8]) {
 /// close or reported down, each once. Only its first `MAX_LINKS` ids are
 /// read — more than any engine has links — so an id that names no link takes
 /// the place of one that does.
-#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+#[cfg_attr(
+    not(any(target_os = "android", test)),
+    expect(dead_code, reason = "only Android's JNI shim calls it")
+)]
 pub(crate) fn radio_poll(ready: &[u64]) -> Option<Vec<u8>> {
     let mut links = [LinkId(0); MAX_LINKS as usize];
     let count = ready.len().min(links.len());
@@ -13412,7 +13436,10 @@ fn radio_encoded(output: Output) -> Vec<u8> {
 
 /// Milliseconds until the engine next has work or its deadline passes;
 /// `None` when no engine runs.
-#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+#[cfg_attr(
+    not(any(target_os = "android", test)),
+    expect(dead_code, reason = "only Android's JNI shim calls it")
+)]
 pub(crate) fn radio_wake_in_ms() -> Option<u64> {
     with_mesh(None, |slot, now_ms| {
         let until_ms = slot.until_ms;
@@ -13420,6 +13447,20 @@ pub(crate) fn radio_wake_in_ms() -> Option<u64> {
             (slot.engine.next_wake_ms()).map_or(until_ms, |wake_ms| wake_ms.min(until_ms));
         wake_ms.saturating_sub(now_ms)
     })
+}
+
+/// One radio entry as the JNI shim makes it: `call`'s answer, or `none` —
+/// what that entry answers with no engine — when it panicked.
+///
+/// An unwind out of an `extern` function aborts the process, and the process
+/// is also the relay path's. A panic under the engine's lock still poisons
+/// it on the way here, so the next entry drops that engine ([`mesh_home`]).
+#[cfg_attr(
+    not(any(target_os = "android", test)),
+    expect(dead_code, reason = "only Android's JNI shim calls it")
+)]
+pub(crate) fn radio_guarded<T>(none: T, call: impl FnOnce() -> T + std::panic::UnwindSafe) -> T {
+    std::panic::catch_unwind(call).unwrap_or(none)
 }
 
 // ========================= M3c: Live-Sync Engine FFI =========================
@@ -24605,8 +24646,8 @@ mod mesh_ffi_tests {
     use super::{
         mesh_clock_ms, mesh_empty, mesh_home, mesh_keep_on, mesh_open, mesh_reset_counts,
         mesh_resume, mesh_sharing_stopped, mesh_start, mesh_stats, mesh_stop, radio_connect_failed,
-        radio_encoded, radio_frame_len, radio_left_ms, radio_link_down, radio_link_up, radio_poll,
-        radio_receive, radio_resume, radio_sighting, radio_wake_in_ms,
+        radio_encoded, radio_frame_len, radio_guarded, radio_left_ms, radio_link_down,
+        radio_link_up, radio_poll, radio_receive, radio_resume, radio_sighting, radio_wake_in_ms,
         sealed_location_event_json_for_test, wipe_all_mls_state, with_mesh, CircleManagerFfi,
         LocationMessage, LocationMessageResultKindFfi, LocationPublishFfi, MeshHome, MeshSlot,
         MeshStartFfi, MeshStatsFfi, RelayManagerFfi, SealedLocationFfi, SendHeldFfi, MAX_LINKS,
@@ -25945,6 +25986,40 @@ mod mesh_ffi_tests {
         assert!(mesh_stats(&device.circle).await.on);
     }
 
+    /// The guard every JNI export makes its radio entry under: a panic stops
+    /// at it — past it the process would abort, the relay path's too — and
+    /// the export answers what it answers with no engine. One under the
+    /// engine's lock, where every engine call runs, has poisoned the lock by
+    /// then, so the next entry finds no engine and the radio starts no other;
+    /// one outside it met no engine and leaves it. The exports themselves
+    /// need a JVM to be called: this is the guard, and
+    /// `every_export_is_one_guarded_call` that each is under it.
+    #[test]
+    fn a_call_that_panics_under_the_guard_answers_its_no_engine_value_and_leaves_no_engine() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.blocking_lock();
+        let _bench = Bench::new();
+        assert_eq!(radio_guarded(0, || 3), 3, "the guard changed an answer");
+
+        assert!(radio_resume(HOUR));
+        let outside = radio_guarded(0, || panic!("a call panics, holding no lock"));
+        assert!(
+            outside == 0 && radio_left_ms() == HOUR,
+            "a panic that met no engine was let through, or cost the engine"
+        );
+
+        let under = radio_guarded(0, || {
+            engine(|_| panic!("an engine call panics")).unwrap_or(1)
+        });
+        assert_eq!(
+            under, 0,
+            "the panic was answered otherwise than as no engine"
+        );
+        assert!(
+            radio_left_ms() == 0 && is_off() && !radio_resume(HOUR),
+            "an engine whose call panicked under the guard is still there, or was replaced"
+        );
+    }
+
     /// Through the radio's entries alone, with no other engine call: a link
     /// this phone made and one it took, over the shortest frame a radio
     /// carries and the longest, are each handshaken and greeted, and what one
@@ -27122,10 +27197,21 @@ mod mesh_ffi_tests {
         &source[..at.expect("this module is declared")]
     }
 
+    /// The radio's JNI shim as it ships: its text before its own tests,
+    /// without its comments.
+    fn shim() -> String {
+        let source = include_str!("mesh_jni.rs");
+        let at = source.find(concat!("#[cfg(test)]\nmod", " tests {"));
+        let code = source[..at.expect("the shim's tests are declared")].lines();
+        let code = code.filter(|line| !line.trim_start().starts_with("//"));
+        code.collect::<Vec<_>>().join("\n")
+    }
+
     /// The engine's lock is never held across an `.await`: `MESH` is named
     /// by the one function that locks it, and every function that calls that
     /// one — and so holds the guard — is not `async`, where nothing can be
     /// awaited. The closure `with_mesh` runs under the lock is a plain one.
+    /// The JNI shim names neither the static nor anything that locks it.
     #[test]
     fn the_engine_lock_is_taken_only_where_nothing_can_be_awaited() {
         let source = shipped();
@@ -27177,6 +27263,13 @@ mod mesh_ffi_tests {
             !body_of(source, "fn mesh_run<T>(").contains("mesh_home"),
             "what runs under the engine's lock takes it again"
         );
+        let shim = shim();
+        for name in ["MESH", "mesh_home", "with_mesh", "mesh_run", "mesh_take"] {
+            assert!(
+                !shim.contains(name),
+                "the radio's shim names `{name}`: it reaches the engine through an entry"
+            );
+        }
     }
 
     /// Whether `line` opens a function's declaration, whatever its
@@ -27196,8 +27289,10 @@ mod mesh_ffi_tests {
     /// and every one checks the deadline first: each is declared with plain
     /// numbers and bytes, is not `async`, and reaches the engine through
     /// `with_mesh` with no session, once, and through nothing else — but the
-    /// one that starts an engine, which says so to `mesh_take`, and the two
-    /// that touch no engine at all. The list of them is exactly this one.
+    /// one that starts an engine, which says so to `mesh_take`, and the
+    /// three that touch no engine at all. The list of them is exactly this
+    /// one. Their caller, the JNI shim, names nothing of this file but them
+    /// and the frame bound, and nothing a session is reached by.
     /// This reads the entries' own text and no further: what a function they
     /// call does is held by the tests that run them.
     #[test]
@@ -27209,7 +27304,7 @@ mod mesh_ffi_tests {
             .collect();
         let name_of = |header: &str| {
             let rest = &header[header.find("fn radio_").expect("a radio entry") + 3..];
-            rest[..rest.find('(').expect("a signature")].to_owned()
+            rest[..rest.find(['(', '<']).expect("a signature")].to_owned()
         };
         let names: Vec<String> = declared.iter().map(|header| name_of(header)).collect();
         assert_eq!(
@@ -27226,6 +27321,7 @@ mod mesh_ffi_tests {
                 "radio_poll",
                 "radio_encoded",
                 "radio_wake_in_ms",
+                "radio_guarded",
             ]
         );
         for header in declared {
@@ -27251,7 +27347,7 @@ mod mesh_ffi_tests {
                 );
             }
             let (through, takes) = match name.as_str() {
-                "radio_frame_len" | "radio_encoded" => (0, 0),
+                "radio_frame_len" | "radio_encoded" | "radio_guarded" => (0, 0),
                 "radio_resume" => (0, 1),
                 _ => (1, 0),
             };
@@ -27268,6 +27364,105 @@ mod mesh_ffi_tests {
                 && source.matches("Taker::Radio { left_ms })").count() == 1,
             "something that is no radio entry enters the engine as one"
         );
+
+        let shim = shim();
+        let used = shim.split_once("use crate::api::{");
+        let (used, _) = (used.and_then(|(_, rest)| rest.split_once("};"))).expect("the shim's use");
+        let used: Vec<&str> = used.split(',').map(str::trim).collect();
+        assert!(
+            used.iter().all(|name| {
+                name.is_empty() || name.starts_with("radio_") || *name == "RADIO_MAX_FRAME"
+            }) && shim.matches("crate::").count() == 1
+                && !shim.contains("super::"),
+            "the radio's shim reaches something of the bridge that is no radio entry: {used:?}"
+        );
+        for banned in [
+            "session",
+            "circle",
+            "managerffi",
+            ".await",
+            "async",
+            "block_on",
+        ] {
+            assert!(
+                !shim.to_lowercase().contains(banned),
+                "the radio's shim names `{banned}`: it holds no session"
+            );
+        }
+    }
+
+    /// Every JNI export is its own radio entry, called once and under the
+    /// guard, with nothing else under it, and the exports are exactly these
+    /// nine: an entry called bare would take the process with it when it
+    /// panicked. Nothing else in the shim calls an entry, and nothing in it
+    /// panics by its own word. That an export hands each argument to the
+    /// entry in its place is read in the shim, and tested by nothing here;
+    /// its conversions are tested there.
+    #[test]
+    fn every_export_is_one_guarded_call() {
+        const EXPORTS: [(&str, &str); 9] = [
+            ("resume", "radio_resume"),
+            ("leftMs", "radio_left_ms"),
+            ("sighting", "radio_sighting"),
+            ("linkUp", "radio_link_up"),
+            ("linkDown", "radio_link_down"),
+            ("connectFailed", "radio_connect_failed"),
+            ("receive", "radio_receive"),
+            ("poll", "radio_poll"),
+            ("wakeInMs", "radio_wake_in_ms"),
+        ];
+        let shim = shim();
+        let header = |name: &str| {
+            format!("pub extern \"system\" fn Java_com_oblivioustech_haven_mesh_MeshNative_{name}(")
+        };
+        let declared: Vec<&str> = (shim.lines())
+            .filter(|line| line.contains("fn Java_"))
+            .collect();
+        assert_eq!(declared, EXPORTS.map(|(name, _)| header(name)));
+
+        let mut outside = shim.clone();
+        for (name, entry) in EXPORTS {
+            let body = body_of(&shim, &header(name));
+            let (before, guarded) = body.split_once("radio_guarded(").unwrap_or((body, ""));
+            // Under the guard: the answer with no engine, then the entry —
+            // itself, or its call on what was converted before the guard.
+            let guarded: String = (guarded.chars())
+                .filter(|c| !c.is_whitespace() && !"{}".contains(*c))
+                .collect();
+            let call = guarded.split_once(',').map_or("", |(_, call)| call);
+            let call = call.strip_prefix("||").unwrap_or(call);
+            let alone = call.strip_prefix(entry).is_some_and(|rest| {
+                let called = rest.strip_prefix('(').and_then(|rest| rest.split_once(')'));
+                rest.starts_with(')')
+                    || called
+                        .is_some_and(|(with, rest)| !with.contains('(') && rest.starts_with(')'))
+            });
+            assert!(
+                !before.contains("radio_") && alone && guarded.matches("radio_").count() == 1,
+                "{name} is not one guarded call of {entry} and nothing else"
+            );
+            outside = outside.replace(body, "");
+        }
+        let (_, used) = (outside.split_once("use crate::api::{")).expect("the shim's use");
+        let (used, _) = used.split_once("};").expect("the use ends");
+        assert!(
+            !outside.replace(used, "").contains("radio_"),
+            "something in the shim that is no export names a radio entry"
+        );
+        for banned in [
+            "panic!",
+            "unwrap()",
+            ".expect(",
+            "unreachable!",
+            "assert",
+            "todo!",
+            "unimplemented!",
+        ] {
+            assert!(
+                !shim.contains(banned),
+                "the shim uses `{banned}`: a panic outside the guard aborts the process"
+            );
+        }
     }
 
     /// The mesh's part of the bridge: its section, and its two entries on the
@@ -27329,10 +27524,12 @@ mod mesh_ffi_tests {
         );
     }
 
-    /// The mesh's part of the bridge writes no log line and renders no value.
+    /// The mesh's part of the bridge, and the radio's JNI shim, write no log
+    /// line and render no value.
     #[test]
     fn the_mesh_entries_log_nothing_and_format_nothing() {
-        for text in mesh_part() {
+        let shim = shim();
+        for text in mesh_part().into_iter().chain([shim.as_str()]) {
             for banned in [
                 "log::",
                 "println!",

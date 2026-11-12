@@ -50,6 +50,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 # sits in `#[cfg(test)]`. Dev-only, and only ever dev-only (check 2): the crate
 # also builds the recording wire proxy.
 planes = { package = "haven-local-relay", path = "../../tooling/e2e/local-relay" }
+# The host half of the radio's JNI shim (`src/mesh_jni.rs`; the Android half is
+# below): the shim is compiled into the test build too, which type-checks every
+# export against `jni` on a machine with no Android target.
+jni = "0.21"
 
 # MDK's SQLCipher 4.17 source (tracked exception T-LIBSQLITE-PATCH). Only a
 # root's `[patch]` applies, and none is inherited through the haven-core path
@@ -95,3 +99,7 @@ android-native-keyring-store = "0.5"
 # FRB's later call a no-op. If a future `cargo update` ever split the version,
 # the U1 CI secret-scan is the backstop. See `init_app` in src/api.rs.
 android_logger = "0.15"
+# The radio's JNI shim (`src/mesh_jni.rs`). The 0.21 line
+# `android-native-keyring-store` already resolves, so the lockfile gains an edge
+# and no package; 0.22 changes the API and would add one.
+jni = "0.21"
