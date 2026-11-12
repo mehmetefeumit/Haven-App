@@ -912,7 +912,7 @@ tier and says which.
    `HavenBackgroundSessionHandler.alwaysConfirmed`, and not by `authorizationStatus`: only a
    POSITIVELY confirmed Always (iOS 18+, a `CLServiceSessionDiagnostic` with
    `alwaysAuthorizationDenied`, `authorizationRequestInProgress` and `insufficientlyInUse` all
-   false) releases the `CLBackgroundActivitySession` and clears
+   false) releases the `CLBackgroundActivitySession` and — with Precise Location on — clears
    `showsBackgroundLocationIndicator`. When-In-Use, a *provisional* Always (iOS reports
    `.authorizedAlways` while the second prompt is unanswered, though it still treats the app as
    When-In-Use) and every iOS 17 Always (no diagnostics API to confirm with) keep the activity
@@ -946,8 +946,8 @@ tier and says which.
    *Steps:* open Haven, wait for a fix on the map, press Home (do **not** force-quit), leave the
    phone stationary with the screen off for **≥ 2 h**. Then walk ≥ 150 m and stop.
    **Expected:**
-   * **No blue bar at any point** — the status-bar location **arrow** only. This is the OD1
-     claim, and it is the observation no simulator can make.
+   * **No blue bar at any point (Precise Location on)** — the status-bar location **arrow**
+     only. This is the OD1 claim, and it is the observation no simulator can make.
    * Settings → Privacy & Security → Location Services shows the arrow next to Haven.
    * Settings → Battery lists Haven with **Background Activity**.
    * The peer keeps receiving on the normal 72–168 s cadence for the whole 2 h, with **no
@@ -967,11 +967,26 @@ tier and says which.
      client's accuracy drops to 100 within about 2 minutes of backgrounding.
    * After the ≥ 150 m walk: the accuracy returns to Best and the peer sees the move within one
      interval.
+   * **Then Precise Location OFF (added 2026-11-12).** Settings → Privacy & Security → Location
+     Services → Haven → Precise Location off; open Haven, press Home, and repeat the stationary
+     window (30 min is enough). Expected: the **blue bar IS shown** — with reduced accuracy the
+     `desiredAccuracy` writes have no effect, so `indicatorRequested` keeps the indicator on, the
+     other lever Apple's 16.4 rule names — the settings card names the bar, and Console shows
+     no `Suspending task`. Record what the peer receives too, as a finding rather than a pass
+     criterion: reduced accuracy is kilometre-scale and Apple documents it as updating at most
+     a few times an hour, so how often a fresh coordinate arrives was never measured. Note
+     whether the bar appears when Precise Location is turned off while Haven is BACKGROUNDED,
+     or only after the next open-and-leave: the system reads the flag when an app moves to the
+     background, so the second is the expected, accepted residual
+     (`docs/POWER_EFFICIENCY_PLAN.md` D2).
    **If it fails** — any gap > 228 s, or any `Suspending task` — the confirmed-Always branch is
-   wrong, and the revert is one line: drop `!alwaysConfirmed` from `wantsActivitySession` in
-   `HavenBackgroundSessionHandler.arm()` so confirmed Always keeps the activity session and the
-   bar like every other tier. The settings copy needs no change; it already follows the
-   handler's own state. Record the failure here and in `docs/POWER_EFFICIENCY_PLAN.md` §5.3.
+   wrong, and the revert is the indicator FLAG, the lever Apple's 16.4 rule names: make
+   `HavenBackgroundSessionHandler.indicatorRequested` read `true` for every tier, so the stream
+   handler asks for the indicator under confirmed Always too. Dropping `!alwaysConfirmed` from
+   `wantsActivitySession` in `arm()` as well keeps the activity session like every other tier,
+   but on its own it changes only the session and leaves the flag false, which is not the
+   documented lever. The settings copy needs no change; it selects its sentence from
+   `indicatorRequested`. Record the failure here and in `docs/POWER_EFFICIENCY_PLAN.md` §5.3.
 
    0a-provisional. **Provisional Always — the fail-safe cohort, and the upgrade edge.**
    *Setup:* reset Haven's location permission (Settings → General → Transfer or Reset iPhone →

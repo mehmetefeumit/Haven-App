@@ -116,6 +116,20 @@ final class HavenBackgroundSessionHandler: NSObject {
   /// while it is false.
   private(set) var armed = false
 
+  /// Whether the stream handler asks the OS for the background location
+  /// indicator — and, over the status channel, which indicator sentence the
+  /// settings copy names. One reading for both, so they cannot disagree.
+  ///
+  /// False only under a CONFIRMED Always with full accuracy (OD1). With
+  /// Precise Location off, `desiredAccuracy` writes have no effect, so the
+  /// session may sit outside the iOS 16.4 delivery shape, and the indicator
+  /// is Apple's other documented way to keep it running. Read at call time,
+  /// never cached: the user can turn Precise Location off in Settings at any
+  /// moment.
+  var indicatorRequested: Bool {
+    !alwaysConfirmed || CLLocationManager().accuracyAuthorization == .reducedAccuracy
+  }
+
   // MARK: - Registration
 
   /// Registers the MethodChannel on the given binary messenger.
@@ -184,8 +198,9 @@ final class HavenBackgroundSessionHandler: NSObject {
     if #available(iOS 17.0, *) {
       // The activity session is what keeps a When-In-Use app executing while
       // backgrounded, and it is inseparable from the blue bar. Under CONFIRMED
-      // Always neither is needed; a provisional Always and every iOS 17 Always
-      // (no diagnostics API) stay unconfirmed and therefore keep both.
+      // Always it is not needed (any bar there comes from the stream handler's
+      // flag, per `indicatorRequested`); a provisional Always and every iOS 17
+      // Always (no diagnostics API) stay unconfirmed and therefore keep both.
       let wantsActivitySession = status == .authorizedWhenInUse || !alwaysConfirmed
       if wantsActivitySession {
         if backgroundActivity == nil { backgroundActivity = CLBackgroundActivitySession() }
@@ -315,6 +330,7 @@ final class HavenBackgroundSessionHandler: NSObject {
       "serviceSessionHeld": alwaysSession != nil,
       "alwaysConfirmed": alwaysConfirmed,
       "armed": armed,
+      "indicatorRequested": indicatorRequested,
     ]
   }
 }
