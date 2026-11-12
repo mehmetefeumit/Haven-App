@@ -4,7 +4,8 @@
 // registered under in docs/privacy/privacy_invariants.json. What this file
 // holds are the owner's two rules for the copy itself:
 //
-//   1. no em or en dash in any locale's rendering of the page;
+//   1. no dash used as punctuation (em, en and their kin) in any locale's
+//      rendering of the page;
 //   2. the English reads in three to five minutes, at the 238 words a minute
 //      an adult reads non-fiction silently (Brysbaert 2019, a meta-analysis
 //      of 190 studies), so the page cannot quietly grow into a manual.
@@ -18,6 +19,10 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+
+/// The dashes the rule bans: figure, en, em and horizontal bar (the one
+/// Japanese prints as a long dash), and the two- and three-em dashes.
+final _dash = RegExp(r'[\u2012\u2013\u2014\u2015\u2E3A\u2E3B]');
 
 Map<String, String> _pageStrings(String locale) {
   final arb =
@@ -46,12 +51,11 @@ void main() {
   });
 
   for (final locale in locales) {
-    test('$locale: the page carries no em or en dash', () {
+    test('$locale: the page carries no dash', () {
       final strings = _pageStrings(locale);
       expect(strings.length, greaterThanOrEqualTo(28));
       for (final MapEntry(:key, :value) in strings.entries) {
-        expect(value, isNot(contains('—')), reason: '$key has an em dash');
-        expect(value, isNot(contains('–')), reason: '$key has an en dash');
+        expect(value, isNot(contains(_dash)), reason: '$key has a dash');
       }
     });
   }
