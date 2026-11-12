@@ -5941,7 +5941,9 @@ impl CircleManager {
         self.storage.record_profile_sync_attempt(pubkey_hex, now)
     }
 
-    /// See [`CircleStorage::profile_pending_state`].
+    /// Whether the own profile has a save to publish or a pool relay its
+    /// coverage was never settled against, and when the retry ladder next
+    /// permits a pass. See [`CircleStorage::profile_owing_state`].
     ///
     /// # Errors
     ///
@@ -5951,7 +5953,8 @@ impl CircleManager {
         pubkey_hex: &str,
         now: i64,
     ) -> Result<super::storage_profile_sync::ProfilePendingState> {
-        self.storage.profile_pending_state(pubkey_hex, now)
+        let owed = self.own_profile_owes_sync(pubkey_hex)?;
+        self.storage.profile_owing_state(pubkey_hex, now, owed)
     }
 
     /// See [`CircleStorage::profile_picture_is_staged`].

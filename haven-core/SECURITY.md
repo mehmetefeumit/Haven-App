@@ -136,8 +136,9 @@ save — see *Public Nostr Profiles* below), three additional exposures apply:
   which pubkeys a client asks about. Haven asks the curated profile pool
   (`profile::relay_pool`) — never a circle's relays, never the discovery plane —
   ONE author per REQ, each from the one pool relay a salted rendezvous hash
-  assigns it and at most one more on a miss, in one-shot REQs with no standing
-  subscription and no NIP-42 AUTH answer. No relay sees a roster in one request,
+  assigns it and at most one more — on a miss, or in the same cycle when the
+  first did not answer — in one-shot REQs with no standing subscription and no
+  NIP-42 AUTH answer. No relay sees a roster in one request,
   but each sees an install-specific slice of the union of all circles' members,
   and two members of one circle can land on the same relay (P1, under
   *Profile-plane relay separation* below).
@@ -2856,6 +2857,50 @@ genuine event with the same id is admitted normally afterwards.
   event for a pending name or removal, with the picture left staged. No
   screen reports any of this: the Identity page renders the local row, the
   same in every publish state.
+- **A pool relay the profile was never sent to is sent it, byte for byte,
+  though nothing is saved.** "Every usable pool relay serves it" is a
+  statement about the pool as it was, and the pool changes: a release swaps
+  relays (four of eight on 2026-10-31), the user adds one. The outbox records
+  the pool coverage was last settled against (`covered_pool_json`), and
+  coverage is owed when none is recorded — an upgraded install, an install
+  whose record a storage reset took — or the usable pool has a relay it
+  lacks. A deletion records that no pool is owed, so nothing is re-sent
+  after one — not the blank, and not a profile whose deletion could not be
+  verified — until the next save. A coverage pass (`sync_own_profile` with nothing pending, on the
+  same triggers and ladder as a save) reads the own kind-0 from every pool
+  relay and offers the newest copy any relay serves, unchanged, to the relays
+  that answered without it; each is covered only by a read-back that serves
+  that id. It signs nothing and is handed no key. It publishes nothing for an
+  account no relay serves a profile of. It acts only on a WHOLE read — every
+  relay ended its answer or serves the newest copy — because a relay that did
+  not answer may hold a blank or a rename newer than the copy in hand, and
+  re-sending the older one would put a retracted profile on a relay that
+  never had it; and it does not offer a copy older than the dated own row,
+  for the same reason. Its records are keyed to the version it started from,
+  so a save made meanwhile keeps its own owed event and its own ladder. What
+  remains: with a pool relay permanently unreachable the read is never whole,
+  so each rung (the 6 h one at most, foreground only) asks every pool relay
+  for the own pubkey again and nothing is re-sent; a relay that refuses the
+  served copy as too old stays owed on the ladder, since nothing may re-date
+  it; and a relay that takes the profile and drops it LATER is not noticed —
+  a settled pool is not read again. Disclosure is what a save already makes:
+  one single-author `REQ` for the own pubkey, and the own already-public
+  event, to relays of the profile pool only.
+- **A member's relay that does not answer is not a miss.** Only a relay's own
+  `EOSE` says it holds nothing for an author. A failed connect, a `CLOSED`
+  (rate limit, auth-required) or a `REQ` that outlives its bound stamps
+  nothing: the author is asked once more in the same cycle, at the other of
+  its two assigned relays, and left unstamped when that one does not answer
+  either — so a device that is offline does not walk every unresolved member
+  up a backoff with no relay having said no. A relay that did not answer one
+  author is not asked for the rest of its slice, nor sent another author's
+  second request, in that cycle. A real miss alternates the author between
+  its two relays (never a third) behind `30 s → 2 min → 8 min → 30 min`, then
+  every 30 minutes: the authors asked for are the people in the user's
+  circles, a resolved one is re-asked on a 15 to 30 minute tier anyway, and a
+  longer last rung only hid a member for hours after their profile appeared.
+  A lookup of a key the user typed asks at once whatever the backoff, at the
+  rung the misses reached.
 - The policy is not a ban. A relay that sends a forgery is not disconnected,
   demoted or reported: that would be state a relay can reach and a surface the
   user would need, and it cannot be logged per relay.
@@ -5635,9 +5680,10 @@ history prior to 2026-07-14.
 
 Haven routes kind-0 profile traffic to a curated relay pool
 (`profile::relay_pool`) that is disjoint from every relay carrying the user's
-kind-445 / kind-1059 traffic, and requests each member's kind-0 from exactly
-ONE pool relay chosen by a stable salted rendezvous hash
-(`profile::assignment`). A relay therefore sees either the user's encrypted
+kind-445 / kind-1059 traffic, and requests each member's kind-0 from the ONE
+pool relay a stable salted rendezvous hash picks, and from that author's
+second-ranked relay only on a miss or when the first did not answer — two at
+most, for the life of the install (`profile::assignment`). A relay therefore sees either the user's encrypted
 location traffic or their profile queries — never both. The pool is
 host-disjoint from the account seed, the discovery plane and, since 2026-10-31,
 the location pool (`tests/profile_plane_separation.rs`). The same day four
@@ -5677,7 +5723,10 @@ which pool relay a peer will read it from. Publishing the user's own kind-0 to
 a subset would make them invisible to every peer assigned elsewhere, so publish
 targets the **entire** usable pool. Consequence: every pool relay learns
 `(our pubkey, our IP)`, and the one that also serves our reads can link our
-identity to our ~`1/N` contact sample. Reads remain unauthenticated — the fetch
+identity to our ~`1/N` contact sample. "The entire usable pool" includes a
+relay that joins it later: a coverage pass re-sends the published kind-0 to
+it unchanged (see *A pool relay the profile was never sent to* above), or the
+peers assigned there would read a bare key until the next edit. Reads remain unauthenticated — the fetch
 path is built with no signer and structurally cannot answer a NIP-42 challenge
 — so this is IP-level linkage only, never an authenticated one.
 

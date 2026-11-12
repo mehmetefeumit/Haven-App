@@ -199,19 +199,28 @@ pub enum Served {
 /// [`parse_newest_metadata`](super::parse::parse_newest_metadata) skips it.
 #[must_use]
 pub fn served_against(own: &PublicKey, ours: &Event, served: &[Event]) -> Served {
-    let newest = served
-        .iter()
-        .filter(|e| {
-            e.pubkey == *own && e.kind == Kind::Metadata && Metadata::from_json(&e.content).is_ok()
-        })
-        .max_by_key(|e| (e.created_at, Reverse(e.id)));
-    match newest {
+    match newest_own_event(own, served) {
         Some(e) if e.id == ours.id => Served::Holds,
         Some(e) if (e.created_at, Reverse(e.id)) > (ours.created_at, Reverse(ours.id)) => {
             Served::Newer
         }
         _ => Served::Lacks,
     }
+}
+
+/// The own kind-0 of `served` that NIP-01 keeps.
+///
+/// The latest `created_at`, then the lower id. An own kind-0 whose content is
+/// not metadata is skipped, as
+/// [`parse_newest_metadata`](super::parse::parse_newest_metadata) skips it.
+#[must_use]
+pub fn newest_own_event<'a>(own: &PublicKey, served: &'a [Event]) -> Option<&'a Event> {
+    served
+        .iter()
+        .filter(|e| {
+            e.pubkey == *own && e.kind == Kind::Metadata && Metadata::from_json(&e.content).is_ok()
+        })
+        .max_by_key(|e| (e.created_at, Reverse(e.id)))
 }
 
 /// The pool relays, as given and in pool order, that `covered` does not name.

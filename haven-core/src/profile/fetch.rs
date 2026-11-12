@@ -4,16 +4,17 @@
 //! profile relay pool. It is deliberately **not** a standing subscription: each
 //! call issues a small number of one-shot `REQ`s and returns.
 //!
-//! # One author per `REQ`, one relay per author
+//! # One author per `REQ`, two relays per author at most
 //!
 //! The predecessor of this module put the union of every known member pubkey
 //! into one filter's `authors` array and broadcast it to the whole relay set,
 //! handing each of those relays a k-clique of the user's social graph in a
 //! single request — the same disclosure Haven refuses to make as a kind-3
-//! contact list. Instead, every author is requested ALONE, from the ONE relay
-//! that [`assigned_relay_for_attempt`] pins it to, so no relay ever observes a
-//! co-membership set. A relay only ever sees the install-specific ~`1/N` slice
-//! of the blended cross-circle union that hashes to it; see
+//! contact list. Instead, every author is requested ALONE, from the relay
+//! that [`assigned_relay_for_attempt`] pins it to — and from its one other
+//! relay only when that one did not answer — so no relay ever observes a
+//! co-membership set. A relay only ever sees the install-specific slice of the
+//! blended cross-circle union that hashes to it; see
 //! [`crate::profile::assignment`] for what that does and does NOT guarantee.
 //!
 //! # Why the schedule matters as much as the filter
@@ -268,6 +269,11 @@ struct Cycle {
     missed: Vec<PublicKey>,
     /// Every author a relay answered for, in either direction.
     settled: HashSet<PublicKey>,
+    /// Relays sent a `REQ` this cycle: the next one to any of them waits out
+    /// the jitter, whichever round sends it.
+    asked: HashSet<String>,
+    /// Relays that did not answer a `REQ` this cycle, and are not sent another.
+    unanswering: HashSet<String>,
 }
 
 /// Runs one cycle under an injectable `deadline` (tests drive it to zero).
@@ -337,7 +343,8 @@ async fn drain_round(
 /// The authors of `requests` no relay has answered for, each at its OTHER
 /// relay: the next attempt, which [`assigned_relay_for_attempt`] wraps over the
 /// ranks an author may be disclosed to. An author with no second relay (a
-/// one-relay pool) is left out.
+/// one-relay pool), or whose second relay has itself not answered this cycle,
+/// is left out.
 fn other_relay_requests(
     requests: &[(PublicKey, u8)],
     salt: &ProfileRelaySalt,
@@ -350,8 +357,9 @@ fn other_relay_requests(
         .filter(|(author, _)| !state.settled.contains(author))
         .map(|(author, attempt)| (*author, attempt.wrapping_add(1)))
         .filter(|(author, other)| {
-            assigned_relay_for_attempt(salt, author, pool, *other)
-                != assigned_relay_for_attempt(salt, author, pool, other.wrapping_sub(1))
+            let relay = assigned_relay_for_attempt(salt, author, pool, *other);
+            relay != assigned_relay_for_attempt(salt, author, pool, other.wrapping_sub(1))
+                && relay.is_some_and(|relay| !state.unanswering.contains(&relay))
         })
         .collect()
 }
@@ -368,8 +376,13 @@ async fn drain_relay_batch(
     cycle: &Mutex<Cycle>,
 ) {
     let targets = [batch.relay.clone()];
+    let asked_before = !cycle
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .asked
+        .insert(batch.relay.clone());
     for (index, author) in batch.authors.iter().enumerate() {
-        if index > 0 {
+        if index > 0 || asked_before {
             tokio::time::sleep(inter_req_delay()).await;
         }
 
@@ -391,11 +404,12 @@ async fn drain_relay_batch(
         // Presence needs no `EOSE`; absence does. A relay that did not answer
         // this author is not asked for the rest of its slice either — the same
         // condition would recur, each at the cost of a full timeout.
+        let mut state = cycle.lock().unwrap_or_else(PoisonError::into_inner);
         if resolved.is_none() && !drained {
             log::debug!("[profile] assigned relay did not answer; leaving its slice unanswered");
+            state.unanswering.insert(batch.relay.clone());
             break;
         }
-        let mut state = cycle.lock().unwrap_or_else(PoisonError::into_inner);
         state.settled.insert(*author);
         match resolved {
             Some(profile) => state.resolved.push(profile),
@@ -925,6 +939,132 @@ mod tests {
         assert_eq!(out.resolved.len(), 1);
         assert_eq!(out.resolved[0].metadata.name(), Some("Found"));
         assert!(out.missed.is_empty() && out.unattempted.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_relay_that_did_not_answer_one_author_is_not_asked_for_the_rest_of_its_slice() {
+        // The same condition would recur for every author behind it, each at
+        // the cost of a full timeout — and each a request to a relay that has
+        // just asked to be left alone.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let (_closing, closing_url, closing_seen) = closing_relay().await;
+        let (_other, other_url, other_seen) = counting_relay().await;
+        let pool = vec![closing_url.clone(), other_url.clone()];
+        let authors: Vec<PublicKey> = (0..3)
+            .map(|_| author_ranked(&pool, &closing_url, &other_url).public_key())
+            .collect();
+        let requests: Vec<(PublicKey, u8)> = authors.iter().map(|a| (*a, 0)).collect();
+
+        let relay = RelayManager::new();
+        let out = fetch_profiles_assigned(&relay, &requests, &salt(), &pool, 100)
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(closing_seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            other_seen.load(std::sync::atomic::Ordering::SeqCst),
+            authors.len(),
+            "every author of the slice is asked of its other relay",
+        );
+        assert_eq!(
+            out.missed.iter().collect::<HashSet<_>>(),
+            authors.iter().collect::<HashSet<_>>(),
+            "the other relay answered for each of them",
+        );
+        assert!(out.resolved.is_empty() && out.unattempted.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_relay_that_did_not_answer_is_not_sent_another_authors_second_request() {
+        // `first` is asked of the closing relay and is not answered. `second`'s
+        // own relay is dead, and its other relay is that same closing one —
+        // which is not asked again in the cycle it just declined.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let (_closing, closing_url, closing_seen) = closing_relay().await;
+        let (_live, live_url, _) = counting_relay().await;
+        let dead_url = dead_relay_url();
+        let pool = vec![closing_url.clone(), dead_url.clone(), live_url.clone()];
+        let first = author_ranked(&pool, &closing_url, &live_url).public_key();
+        let second = author_ranked(&pool, &dead_url, &closing_url).public_key();
+
+        let relay = RelayManager::new();
+        let out = fetch_profiles_assigned(&relay, &[(first, 0), (second, 0)], &salt(), &pool, 100)
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(
+            closing_seen.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the relay that declined `first` was asked about `second` too",
+        );
+        assert_eq!(
+            out.missed,
+            vec![first],
+            "the live relay answered for `first`"
+        );
+        assert_eq!(out.unattempted, vec![second]);
+    }
+
+    /// Admits every `REQ` and records when it arrived.
+    #[derive(Debug)]
+    struct TimeEveryQuery {
+        arrivals: std::sync::Arc<Mutex<Vec<std::time::Instant>>>,
+    }
+
+    impl nostr_relay_builder::prelude::QueryPolicy for TimeEveryQuery {
+        fn admit_query<'a>(
+            &'a self,
+            _query: &'a Filter,
+            _addr: &'a std::net::SocketAddr,
+        ) -> nostr::util::BoxedFuture<'a, nostr_relay_builder::prelude::PolicyResult> {
+            self.arrivals
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(std::time::Instant::now());
+            Box::pin(async { nostr_relay_builder::prelude::PolicyResult::Accept })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_second_request_to_a_relay_waits_out_the_jitter_across_rounds() {
+        // The gap between two `REQ`s on one socket is what the jitter exists
+        // for, whichever round sends the second. A lower bound only: a sleep
+        // never returns early, so this cannot fail on a slow machine.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let arrivals = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let timed = nostr_relay_builder::prelude::LocalRelay::new(
+            nostr_relay_builder::prelude::RelayBuilder::default().query_policy(TimeEveryQuery {
+                arrivals: std::sync::Arc::clone(&arrivals),
+            }),
+        );
+        timed.run().await.expect("local relay runs");
+        let timed_url = timed.url().await.to_string();
+        let (_closing, closing_url, _) = closing_relay().await;
+        let pool = vec![timed_url.clone(), closing_url.clone()];
+        // One author asks the timed relay in the first round; the other
+        // reaches it in the second, after the closing relay declined.
+        let direct = author_ranked(&pool, &timed_url, &closing_url).public_key();
+        let fallen_back = author_ranked(&pool, &closing_url, &timed_url).public_key();
+
+        let relay = RelayManager::new();
+        let out = fetch_profiles_assigned(
+            &relay,
+            &[(direct, 0), (fallen_back, 0)],
+            &salt(),
+            &pool,
+            100,
+        )
+        .await
+        .expect("cycle runs");
+        assert_eq!(out.missed.len(), 2, "the timed relay answered for both");
+
+        let arrivals = arrivals.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(arrivals.len(), 2);
+        assert!(
+            arrivals[1].duration_since(arrivals[0])
+                >= Duration::from_millis(*PROFILE_INTER_REQ_JITTER_MS.start()),
+            "the second round's request followed the first with no gap",
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

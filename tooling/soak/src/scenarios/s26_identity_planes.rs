@@ -147,7 +147,7 @@ async fn identity_planes<T: TimelineSink, L: LogDrain>(
             .stage_own_profile_edits(&device.pubkey_hex(), &edits, now)
             .map_err(|_| RigError::Core(Step::Publish))?;
         let synced = manager
-            .sync_own_profile(&device.keys, || now)
+            .sync_own_profile(&device.keys.public_key(), Some(&device.keys), || now)
             .await
             .map_err(|_| RigError::Core(Step::Publish))?;
         if synced.outcome == ProfileSyncOutcome::Published && synced.still_pending {
@@ -244,7 +244,7 @@ async fn healed_relay_alone_completes<T: TimelineSink, L: LogDrain>(
         let device = world.device(tag)?;
         let synced = device
             .manager()?
-            .sync_own_profile(&device.keys, || now)
+            .sync_own_profile(&device.keys.public_key(), Some(&device.keys), || now)
             .await
             .map_err(|_| RigError::Core(Step::Publish))?;
         if synced.outcome == ProfileSyncOutcome::Published && !synced.still_pending {

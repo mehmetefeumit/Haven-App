@@ -43,8 +43,8 @@ use crate::profile::{merge_edits, picture_is_current, uncovered, PICTURE_CACHE_M
 /// lowercase hex characters.
 const PROFILE_RELAY_SALT_KEY: &str = "profile_relay_salt_v1";
 
-/// Retry ladder (seconds) for an author whose kind-0 MISSED on its assigned
-/// relay: `30s → 2min → 8min → 30min → 6h`, then 6h forever.
+/// Retry ladder (seconds) for an author whose relay answered WITHOUT a kind-0:
+/// `30s → 2min → 8min → 30min`, then 30min forever.
 ///
 /// Indexed by the author's `miss_count` **before** the miss being recorded is
 /// counted (equivalently `new_miss_count - 1`), saturating at the last rung, so
@@ -52,16 +52,22 @@ const PROFILE_RELAY_SALT_KEY: &str = "profile_relay_salt_v1";
 ///
 /// # Why the first rung is only 30 seconds
 ///
-/// Under one-relay-per-member assignment a miss means "*that* relay did not
-/// have it", not "nobody has it" — the member very likely exists and is simply
-/// not mirrored there. The retry walks to the next-ranked relay
-/// (`assigned_relay_for_attempt`), so a short first rung is what turns a
-/// transient `Unknown` into a resolved name inside one UI session instead of
-/// pinning the member as `Unknown` for a staleness tier. The ladder then grows
-/// quickly, so an author whose kind-0 genuinely does not exist costs at most a
-/// handful of REQs per day (and, per `PROFILE_MAX_RELAY_RANK`, is disclosed to
-/// a bounded number of relays no matter how long the ladder runs).
-pub const PROFILE_MISS_BACKOFF_SECS: &[i64] = &[30, 120, 480, 1_800, 21_600];
+/// A miss means "*that* relay did not have it", not "nobody has it" — the
+/// member very likely exists and is simply not mirrored there. The retry asks
+/// the author's other relay (`assigned_relay_for_attempt`), so a short first
+/// rung is what turns a transient `Unknown` into a resolved name inside one UI
+/// session instead of pinning the member as `Unknown` for a staleness tier.
+///
+/// # Why the last rung is only 30 minutes
+///
+/// The authors asked for are the people in the user's circles, and one of them
+/// who had not published yet — a new install, a publish still on its own
+/// ladder — is exactly who a longer rung would hide for hours after their
+/// profile appeared. A resolved member is re-asked on a 15 to 30 minute
+/// staleness tier already, so this rung asks no more often than that, of the
+/// same two relays (`PROFILE_MAX_RELAY_RANK`), and only while the app is in
+/// the foreground.
+pub const PROFILE_MISS_BACKOFF_SECS: &[i64] = &[30, 120, 480, 1_800];
 
 /// Everything a renderer needs about one pubkey's cached profile: the row plus
 /// the two picture facts that live in a different table.
@@ -990,6 +996,7 @@ impl CircleStorage {
             },
         )?;
         Self::write_published_event_row(&tx, 0, "", &blank.id, own_pubkey, now)?;
+        Self::ensure_profile_sync_row(&tx, &own_hex)?;
         Self::reset_profile_sync_rows(&tx, None)?;
         if !uncovered(pool, covered).is_empty() {
             Self::write_unqueued_publish_owed(&tx, &own_hex, now)?;
@@ -2822,6 +2829,12 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_unresolved_member_is_never_parked_for_longer_than_half_an_hour() {
+        // The authors asked for are the people in the user's circles. A longer
+        // last rung hides one of them for hours after their profile appears.
+        assert_eq!(PROFILE_MISS_BACKOFF_SECS.last(), Some(&1_800));
+    }
     #[test]
     fn miss_on_an_unseen_pubkey_seeds_an_unknown_row() {
         let storage = CircleStorage::in_memory().unwrap();
