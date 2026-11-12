@@ -37,7 +37,7 @@ android {
         applicationId = "com.oblivioustech.haven"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion   // 23 — do not lower
+        minSdk = flutter.minSdkVersion   // 24 (Android 7.0) since Flutter 3.50 — do not lower
         // targetSdk pins the runtime behaviour the app opts into. Keep at 35
         // (Android 15) so SDK upgrades never silently change FGS-type
         // enforcement or background-start behaviour. Bumping requires a
