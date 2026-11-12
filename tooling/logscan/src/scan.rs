@@ -1079,11 +1079,13 @@ fn handle_line(
             {
                 // A `Compiling <crate> v<semver>` line carries the public pinned
                 // git revision of a dependency (S2) and a crate name (S6), and
-                // nothing else of ours. Those two rules only, on that shape
-                // only, in a class that says so: every other rule still fires
-                // here, and the needle pass above read every byte of the line.
+                // nothing else of ours; a `Running` line's test-binary path
+                // reads as an S4 run. Those rules only, on those shapes only,
+                // in a class that says so: every other rule still fires here,
+                // and the needle pass above read every byte of the line.
                 if ctx.spec.cargo_status == CargoStatus::Exempt
-                    && ctx.rules.is_cargo_furniture(hit.rule, segment)
+                    && (ctx.rules.is_cargo_furniture(hit.rule, segment)
+                        || ctx.rules.is_cargo_test_binary(&hit, segment))
                 {
                     continue;
                 }
@@ -3202,6 +3204,24 @@ mod tests {
         );
     }
 
+    /// Cargo 1.100's test-binary path is furniture on the cargo transcript
+    /// alone: the same line on any other sink is an S4 run like any other.
+    #[test]
+    fn a_running_lines_test_binary_path_is_furniture_only_on_a_cargo_transcript() {
+        let dir = Dir::new("cargotestbinary");
+        let manifest = manifest(&[]);
+        let body = "     Running unittests src/lib.rs (target/debug/build/haven-logscan/237a2bf5f9252714/out/haven_logscan-237a2bf5f9252714)\n";
+        let cargo = dir.write("binary.rust-test.log", body);
+        assert!(run(&manifest, "rust-test", &[cargo]).findings.is_empty());
+        let drive = dir.write("binary.drive.log", body);
+        let rules: Vec<String> = run(&manifest, "drive", &[drive])
+            .findings
+            .iter()
+            .filter_map(|f| f.rule.clone())
+            .collect();
+        assert_eq!(rules, vec!["S4".to_owned()]);
+    }
+
     /// The evasions a wider exemption allowed, each now a rule hit again.
     ///
     /// `--rules-only` is the whole net on a unit-test transcript: there is no
@@ -3245,6 +3265,21 @@ mod tests {
                 "buildhash",
                 "     Running unittests src/lib.rs (target/debug/deps/haven_core-78272f4b45ab4866)",
                 None,
+            ),
+            (
+                "buildpath",
+                "     Running unittests src/lib.rs (target/debug/build/haven-logscan/237a2bf5f9252714/out/haven_logscan-237a2bf5f9252714)",
+                None,
+            ),
+            (
+                "buildpathtail",
+                "     Running unittests src/lib.rs (target/debug/build/haven-logscan/237a2bf5f9252714/out/haven_logscan-237a2bf5f9252714) 7mK4pQzXbRvTyLwN3cJhDgFaSeUiOpZxCvBnMq",
+                Some("S4"),
+            ),
+            (
+                "buildpathsource",
+                "     Running tests/k7wq2zp9xm4rv8tn3yb6hc1dj5fg0slaeuoi.rs (target/debug/build/haven-logscan/237a2bf5f9252714/out/cli_contract-237a2bf5f9252714)",
+                Some("S4"),
             ),
         ] {
             let path = dir.write(&format!("{name}.rust-test.log"), &format!("{line}\n"));

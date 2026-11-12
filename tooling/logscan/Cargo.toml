@@ -20,6 +20,7 @@
 [package]
 name = "haven-logscan"
 version = "0.1.0"
+rust-version = "1.97.1"
 edition = "2021"
 publish = false
 description = "Runtime log-privacy scanner for Haven's E2E lanes (needle manifest + structural rules)."
