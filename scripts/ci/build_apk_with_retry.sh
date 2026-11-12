@@ -50,21 +50,21 @@
 # resolves from disk and issues no request that can draw the limit — four
 # cached jobs, zero 429s.
 #
-# ## Gradle's OWN retry, and why it is not enough (VERIFIED, 8.14)
+# ## Gradle's OWN retry, and why it is not enough (VERIFIED, 8.14 and 9.5.0)
 #
-# Gradle 8.14 does retry 429 — in `NetworkingIssueVerifier.isLikelyTransient
+# Gradle does retry 429 — in `NetworkingIssueVerifier.isLikelyTransient
 # NetworkingIssue` (429 and 408 are the only retriable client errors; 401/403
 # are explicitly NOT retried), driven by the loop in `ErrorHandlingModule
 # ComponentRepository`. But its defaults are 3 TOTAL attempts with a backoff of
 # 1000 ms doubling once: ~3 s of waiting before the failure is final. That is
 # why the MEASURED attempts above died in 16-44 s. `haven/android/gradle.
 # properties` widens that window via the two properties that genuinely exist in
-# 8.14 — `org.gradle.internal.repository.max.tentatives` (TOTAL attempts,
+# 8.14 and 9.5.0 — `org.gradle.internal.repository.max.tentatives` (TOTAL attempts,
 # default 3) and `org.gradle.internal.repository.initial.backoff` (ms, default
 # 1000, doubling).
 #
 # Do NOT cite `org.gradle.internal.repository.max.retries`: it does not exist in
-# Gradle, at 8.14 or anywhere (no hit in the shipped distribution's jars or in
+# Gradle, at 8.14, 9.5.0 or anywhere (no hit in the shipped distribution's jars or in
 # gradle/gradle). Gradle also ignores `Retry-After` — no `ServiceUnavailable
 # RetryStrategy` is ever registered — so the wait is its own fixed schedule.
 #
@@ -261,7 +261,7 @@ readonly RC_BROKEN=2
 #   UNMEASURED "Read timed out", "Connection reset", "Connection timed out",
 #              "Could not HEAD", "Could not download", and the 408/5xx codes:
 #              never seen in this repo's logs. They are Gradle's own transient
-#              class (VERIFIED in 8.14's NetworkingIssueVerifier, which retries
+#              class (VERIFIED in 8.14's and 9.5.0's NetworkingIssueVerifier, which retries
 #              408, 429 and every 5xx), kept so the first occurrence is ridden
 #              out rather than discovered.
 #
