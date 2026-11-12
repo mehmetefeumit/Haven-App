@@ -207,7 +207,7 @@ class AppLocalizationsEs extends AppLocalizations {
   String get settingsAboutTitle => 'Acerca de';
 
   @override
-  String get settingsHowItWorksTitle => 'How It Works';
+  String get settingsHowItWorksTitle => 'Cómo funciona';
 
   @override
   String get settingsDebugOverlayTitle =>
@@ -557,103 +557,103 @@ class AppLocalizationsEs extends AppLocalizations {
   }
 
   @override
-  String get howItWorksTitle => 'How It Works';
+  String get howItWorksTitle => 'Cómo funciona';
 
   @override
   String get howItWorksIntro =>
-      'Haven lets you share your live location with small groups of people, called circles. Your location is locked on your phone before it leaves, so the services that carry it can\'t read it, and neither can the people who make Haven.';
+      'Haven te permite compartir tu ubicación en tiempo real con grupos pequeños de personas, llamados círculos. Tu ubicación se cierra con llave en tu teléfono antes de salir de él, así que los servicios que la transportan no pueden leerla, y tampoco las personas que crean Haven.';
 
   @override
-  String get howItWorksIdentityHeading => 'Your identity';
+  String get howItWorksIdentityHeading => 'Tu identidad';
 
   @override
   String get howItWorksIdentityKeys =>
-      'When you first open Haven, your phone creates your identity. It is a pair of matching keys, which are long codes. Your public key works like a username. It\'s safe to share, and people scan or paste it to invite you to a circle. Your secret key proves that you are you. It stays in a protected part of your phone, and Haven never sends it over the internet.';
+      'La primera vez que abres Haven, tu teléfono crea tu identidad. Tu identidad es un par de claves que van juntas, y esas claves son códigos largos. Tu clave pública funciona como un nombre de usuario. Es seguro compartirla, y otras personas la escanean o la pegan para invitarte a un círculo. Tu clave secreta demuestra que tú eres tú. Se guarda en una zona protegida de tu teléfono, y Haven nunca la envía por internet.';
 
   @override
   String get howItWorksIdentityBackup =>
-      'There is no sign-up, email or phone number, so no company can reset your identity for you, and Haven keeps no other copy of your secret key. You can view it in Settings, under Identity, and keep a copy somewhere safe and private. Your circles can\'t be moved to another phone, so a new phone would need new invitations to rejoin them.';
+      'No hay registro, ni correo electrónico, ni número de teléfono, así que ninguna empresa puede restablecer tu identidad por ti, y Haven no guarda ninguna otra copia de tu clave secreta. Puedes verla en Ajustes, en Identidad, y guardar una copia en un lugar seguro y privado. Tus círculos no se pueden pasar a otro teléfono, así que en un teléfono nuevo necesitarías invitaciones nuevas para volver a unirte a ellos.';
 
   @override
   String get howItWorksIdentityProfile =>
-      'Your display name and photo are public. When you save them, Haven publishes them as your profile on the Nostr network, with the photo on a separate photo server, and anyone can look them up. Haven starts you off with a random made-up name, so you don\'t have to use your real one.';
+      'Tu nombre visible y tu foto son públicos. Cuando los guardas, Haven los publica como tu perfil en la red Nostr, con la foto en un servidor de fotos aparte, y cualquiera puede consultarlos. Para empezar, Haven te da un nombre inventado al azar, así que no tienes que usar el tuyo de verdad.';
 
   @override
-  String get howItWorksNostrHeading => 'The Nostr network';
+  String get howItWorksNostrHeading => 'La red Nostr';
 
   @override
   String get howItWorksNostrRelays =>
-      'Haven runs on Nostr, an open network for passing messages over the internet. Nobody owns or controls it. Messages travel through relays, which are servers (computers that stay online) run by many independent people and organizations. Anyone can run a relay, and Haven runs none of its own.';
+      'Haven funciona sobre Nostr, una red abierta para enviar mensajes por internet. Nadie es su dueño ni la controla. Los mensajes viajan a través de relés, que son servidores (equipos que siempre están en línea) gestionados por muchas personas y organizaciones independientes. Cualquiera puede gestionar un relé, y Haven no tiene ninguno propio.';
 
   @override
   String get howItWorksNostrChecks =>
-      'Haven checks every message it receives, so a relay can\'t secretly change a message or fake one from someone else. A relay can still delay or delete messages, and each relay decides for itself what to accept and how long to keep it. Because the network has no central server, no single company runs it or can lock you out of your identity.';
+      'Haven comprueba cada mensaje que recibe, así que un relé no puede cambiar un mensaje a escondidas ni falsificar uno en nombre de otra persona. Un relé sí puede retrasar o borrar mensajes, y cada relé decide por su cuenta qué acepta y cuánto tiempo lo guarda. Como la red no tiene un servidor central, ninguna empresa la gestiona por sí sola ni puede dejarte sin acceso a tu identidad.';
 
   @override
   String get howItWorksNostrYourRelays =>
-      'Your identity uses its own relays, which hold your profile and receive your invitations. You can see them on the Relays page in Settings and add others. Each circle sends its updates through its own set of relays, which you can see in that circle\'s details.';
+      'Tu identidad usa sus propios relés, que guardan tu perfil y reciben tus invitaciones. Puedes verlos en la página Relés de Ajustes y añadir otros. Cada círculo envía sus actualizaciones a través de su propio conjunto de relés, que puedes ver en los detalles de ese círculo.';
 
   @override
-  String get howItWorksEncryptionHeading => 'Encryption with MLS and Marmot';
+  String get howItWorksEncryptionHeading => 'Cifrado con MLS y Marmot';
 
   @override
   String get howItWorksEncryptionStandards =>
-      'This locking is called encryption. It scrambles information so that only someone with the right key can unscramble (decrypt) it. Haven uses MLS (Messaging Layer Security), an open standard for encrypted group messaging published by the IETF, a group of experts that develops internet standards. Marmot is a protocol, a shared set of rules, that carries MLS messages over Nostr. Other apps use Marmot too.';
+      'Este cierre con llave se llama cifrado. Desordena la información para que solo alguien con la clave correcta pueda volver a ordenarla (descifrarla). Haven usa MLS (Messaging Layer Security), un estándar abierto para mensajes de grupo cifrados publicado por el IETF, un grupo de expertos que desarrolla estándares de internet. Marmot es un protocolo, es decir, un conjunto de reglas compartidas, que lleva los mensajes de MLS a través de Nostr. Otras apps también usan Marmot.';
 
   @override
   String get howItWorksEncryptionCircleKeys =>
-      'Each circle has its own secret keys, separate from your identity keys and held only by the phones of its members. Your phone encrypts your location with them before it leaves, and only phones in that circle can decrypt it. Because each circle has different keys, members of one circle can\'t see your other circles or who is in them.';
+      'Cada círculo tiene sus propias claves secretas, distintas de las claves de tu identidad, y solo las tienen los teléfonos de sus miembros. Tu teléfono cifra tu ubicación con ellas antes de que salga, y solo los teléfonos de ese círculo pueden descifrarla. Como cada círculo tiene claves diferentes, los miembros de un círculo no pueden ver tus otros círculos ni quién está en ellos.';
 
   @override
-  String get howItWorksInvitationsHeading => 'Invitations and members';
+  String get howItWorksInvitationsHeading => 'Invitaciones y miembros';
 
   @override
   String get howItWorksInvitations =>
-      'Haven publishes a public invitation key for you on your relays, so people can invite you even while your phone is offline. Circles are run by admins, who decide who is invited and who is removed. An invitation is sealed in layers of encryption. A relay can see who it is addressed to, but the invitation itself doesn\'t show who sent it or which circle it is for. Someone who is invited doesn\'t share their location with the circle until they accept.';
+      'Haven publica en tus relés una clave pública de invitación para ti, así otras personas pueden invitarte aunque tu teléfono esté sin conexión. Los círculos los dirigen las personas con el rol de Administrador, que deciden a quién se invita y a quién se quita. Una invitación va sellada en varias capas de cifrado. Un relé puede ver a quién va dirigida, pero la invitación en sí no muestra quién la envió ni para qué círculo es. Una persona invitada no comparte su ubicación con el círculo hasta que acepta.';
 
   @override
   String get howItWorksMembership =>
-      'When someone is invited or removed, the circle switches to new keys. When someone leaves, their phone asks the others to make that switch. If nobody does, they stay in the circle until an admin removes them. A new member can read what the circle shares from the moment they are invited, but nothing from before. After a switch, someone who left or was removed can\'t read anything new, though they may still be able to tell when the circle is active. Anything that already reached their phone stays there. Members can see each other\'s locations, display names, photos and public keys.';
+      'Cuando se invita a alguien o se le quita del círculo, el círculo cambia a claves nuevas. Cuando alguien sale, su teléfono pide a los demás que hagan ese cambio. Si nadie lo hace, esa persona sigue en el círculo hasta que alguien con el rol de Administrador la quite. Un miembro nuevo puede leer lo que se comparte en el círculo desde el momento en que se le invita, pero nada de antes. Después de un cambio de claves, quien salió del círculo, o a quien quitaron de él, ya no puede leer nada nuevo, aunque quizá todavía pueda saber cuándo hay actividad en el círculo. Lo que ya llegó a su teléfono se queda ahí. Los miembros pueden ver la ubicación, el nombre visible, la foto y la clave pública de los demás.';
 
   @override
-  String get howItWorksSharingHeading => 'Sharing your location';
+  String get howItWorksSharingHeading => 'Compartir tu ubicación';
 
   @override
   String get howItWorksSharingWhen =>
-      'While Haven is open, it regularly shares your location with each of your circles. You can also turn on background sharing on the Location page in Settings, so sharing continues while you use other apps. How well that works depends on your phone and its settings.';
+      'Mientras Haven está abierto, comparte tu ubicación con regularidad con cada uno de tus círculos. También puedes activar el uso compartido en segundo plano en la página Ubicación de Ajustes, para que se siga compartiendo mientras usas otras apps. Que funcione mejor o peor depende de tu teléfono y de sus ajustes.';
 
   @override
   String get howItWorksSharingUpdate =>
-      'Each update is encrypted on your phone and sent to the circle\'s relays under a brand-new key that is used once and then thrown away, so the update by itself doesn\'t name who sent it. It also asks relays to delete it after a few minutes. Relays are expected to do so, but nothing forces them to, and the update stays encrypted either way. Your circle members\' phones pick it up, decrypt it, and show you on their map.';
+      'Cada actualización se cifra en tu teléfono y se envía a los relés del círculo con una clave totalmente nueva, que se usa una sola vez y luego se desecha, así que la actualización por sí sola no dice quién la envió. La actualización también pide a los relés que la borren al cabo de unos minutos. Se espera que los relés lo hagan, pero nada los obliga, y la actualización sigue cifrada en cualquier caso. Los teléfonos de los miembros de tu círculo la reciben, la descifran y te muestran en su mapa.';
 
   @override
-  String get howItWorksMapHeading => 'The map';
+  String get howItWorksMapHeading => 'El mapa';
 
   @override
   String get howItWorksMap =>
-      'Map images come from an online map service. Haven asks it for the areas you view and the areas around your circle members, so the service can tell roughly which places those are. It doesn\'t learn your name, your keys, or who is in your circles.';
+      'Las imágenes del mapa vienen de un servicio de mapas en línea. Haven le pide las zonas que estás viendo y las zonas que rodean a los miembros de tus círculos, así que el servicio puede saber más o menos qué lugares son. No llega a saber tu nombre, ni tus claves, ni quién está en tus círculos.';
 
   @override
-  String get howItWorksOnDeviceHeading => 'On your phone';
+  String get howItWorksOnDeviceHeading => 'En tu teléfono';
 
   @override
   String get howItWorksOnDevice =>
-      'Haven keeps your circles in an encrypted database on your phone, and stores the key to that database in the phone\'s protected storage. Haven runs no servers of its own and contains no code that tracks how you use it or shows you ads. Its source code, the instructions that make up the app, is public, so anyone can check how it works.';
+      'Haven guarda tus círculos en una base de datos cifrada en tu teléfono, y guarda la clave de esa base de datos en el almacenamiento protegido del teléfono. Haven no tiene servidores propios y no contiene ningún código que rastree cómo lo usas ni que te muestre anuncios. Su código fuente, es decir, las instrucciones que forman la app, es público, así que cualquiera puede comprobar cómo funciona.';
 
   @override
-  String get howItWorksLimitsHeading => 'What Haven can\'t hide';
+  String get howItWorksLimitsHeading => 'Lo que Haven no puede ocultar';
 
   @override
   String get howItWorksLimitsAddress =>
-      'Relays, the map service and photo servers can see your phone\'s network address (its IP address), a number that identifies your internet connection. It can hint at your general area, and it can let relays link your updates, your circles and your public key to each other, especially if they share what they see. A VPN, a service that sends your internet traffic through its own computers, can hide your address by showing its own instead.';
+      'Los relés, el servicio de mapas y los servidores de fotos pueden ver la dirección de red de tu teléfono (su dirección IP), un número que identifica tu conexión a internet. Esa dirección puede dar pistas sobre la zona general en la que estás, y puede permitir a los relés relacionar entre sí tus actualizaciones, tus círculos y tu clave pública, sobre todo si comparten lo que ven. Una VPN, un servicio que hace pasar tu tráfico de internet por sus propios equipos, puede ocultar tu dirección mostrando la suya en su lugar.';
 
   @override
   String get howItWorksLimitsPatterns =>
-      'Relays can see when updates are sent, roughly how large they are, and which updates belong to the same circle. Their timing can also show which circles belong to the same phone, and roughly how many you are in. Someone watching internet traffic, such as an internet provider, may be able to tell that you use Haven and which phones are probably in the same circle. Haven isn\'t designed to hide your activity from someone who can watch many relays at once.';
+      'Los relés pueden ver cuándo se envían las actualizaciones, qué tamaño tienen aproximadamente y qué actualizaciones pertenecen al mismo círculo. El momento en que se envían también puede mostrar qué círculos pertenecen al mismo teléfono y, más o menos, en cuántos estás. Alguien que observe el tráfico de internet, como un proveedor de internet, podría llegar a saber que usas Haven y qué teléfonos probablemente están en el mismo círculo. Haven no está diseñado para ocultar tu actividad a alguien que pueda observar muchos relés a la vez.';
 
   @override
   String get howItWorksLimitsPeople =>
-      'The people in your circles see where you are, as precisely as your phone reports it, so share only with people you trust. Removing your name or photo later doesn\'t delete copies others already have, and a removed photo stays on the server that stored it. Haven also can\'t protect your information from someone who controls your phone.';
+      'Las personas de tus círculos ven dónde estás, con toda la precisión con la que lo indique tu teléfono, así que comparte solo con personas de confianza. Si más adelante quitas tu nombre o tu foto, no se borran las copias que otras personas ya tengan, y una foto quitada sigue en el servidor que la guardaba. Haven tampoco puede proteger tu información de alguien que tenga el control de tu teléfono.';
 
   @override
   String get relaySettingsBackendCaption =>
