@@ -141,10 +141,14 @@ pub struct Entries<'a>(&'a [u8]);
 impl<'a> Entries<'a> {
     /// Each packet id with its lifetime units left, in frame order.
     pub fn iter(self) -> impl Iterator<Item = (PacketId, u8)> + 'a {
-        self.0.chunks_exact(ENTRY_LEN).filter_map(|entry| {
-            let (id, rest) = entry.split_first_chunk()?;
-            Some((PacketId(*id), *rest.first()?))
-        })
+        self.0
+            .as_chunks::<ENTRY_LEN>()
+            .0
+            .iter()
+            .filter_map(|entry| {
+                let (id, rest) = entry.split_first_chunk()?;
+                Some((PacketId(*id), *rest.first()?))
+            })
     }
 }
 
@@ -155,9 +159,7 @@ pub struct Ids<'a>(&'a [u8]);
 impl<'a> Ids<'a> {
     /// Each packet id, in frame order.
     pub fn iter(self) -> impl Iterator<Item = PacketId> + 'a {
-        self.0
-            .chunks_exact(ID_LEN)
-            .filter_map(|id| Some(PacketId(id.try_into().ok()?)))
+        self.0.as_chunks().0.iter().map(|id| PacketId(*id))
     }
 }
 
@@ -225,7 +227,8 @@ pub fn have(entries: &[(PacketId, u8)], size: FrameSize) -> Option<Vec<u8>> {
         return None;
     }
     build(HAVE, size, entries.len() * ENTRY_LEN, |body| {
-        for (slot, (id, remaining)) in body.chunks_exact_mut(ENTRY_LEN).zip(entries) {
+        let slots = body.as_chunks_mut::<ENTRY_LEN>().0;
+        for (slot, (id, remaining)) in slots.iter_mut().zip(entries) {
             let (id_bytes, remaining_byte) = slot.split_at_mut(ID_LEN);
             id_bytes.copy_from_slice(&id.0);
             remaining_byte.copy_from_slice(&[*remaining]);
@@ -241,8 +244,8 @@ pub fn want(ids: &[PacketId], size: FrameSize) -> Option<Vec<u8>> {
         return None;
     }
     build(WANT, size, ids.len() * ID_LEN, |body| {
-        for (slot, id) in body.chunks_exact_mut(ID_LEN).zip(ids) {
-            slot.copy_from_slice(&id.0);
+        for (slot, id) in body.as_chunks_mut().0.iter_mut().zip(ids) {
+            *slot = id.0;
         }
     })
 }
