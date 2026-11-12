@@ -6825,8 +6825,7 @@ impl std::fmt::Debug for CircleManagerFfi {
 
 use haven_core::relay::{
     PublishResult as CorePublishResult, RelayConnectionStatus as CoreRelayConnectionStatus,
-    RelayEventCheck as CoreRelayEventCheck, RelayManager as CoreRelayManager,
-    RelayStatus as CoreRelayStatus,
+    RelayManager as CoreRelayManager, RelayStatus as CoreRelayStatus,
 };
 
 /// Relay connection status (FFI-friendly).
@@ -6909,41 +6908,84 @@ impl std::fmt::Debug for RelayRejectionFfi {
     }
 }
 
-/// Result of checking whether events exist on a specific relay (FFI-friendly).
-#[derive(Clone)]
-pub struct RelayEventCheckFfi {
-    /// The relay URL that was checked.
-    pub relay_url: String,
-    /// Whether at least one matching event was found.
-    pub found: bool,
-    /// Number of matching events found.
-    pub event_count: u32,
-    /// Newest event timestamp (Unix seconds), if any.
-    pub newest_timestamp: Option<i64>,
+/// What one relay serves of one of the user's own events
+/// (`haven_core::relay::maintenance::OwnEventPresence`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnEventPresenceFfi {
+    /// The relay is on no list this kind is published to, and was not asked.
+    NotExpected,
+    /// It serves what maintenance would leave in place.
+    Current,
+    /// It serves an event of this account that maintenance would replace.
+    Outdated,
+    /// It answered in full and holds nothing of this account's.
+    Missing,
+    /// It could not be reached, or did not finish its answer.
+    NoAnswer,
 }
 
-/// Redacting `Debug`: a salted relay handle plus the one boolean the check
-/// exists to answer. The exact event count and the newest event's instant are
-/// this account's traffic on that relay (Rule 15).
-impl std::fmt::Debug for RelayEventCheckFfi {
+impl From<haven_core::relay::maintenance::OwnEventPresence> for OwnEventPresenceFfi {
+    fn from(presence: haven_core::relay::maintenance::OwnEventPresence) -> Self {
+        use haven_core::relay::maintenance::OwnEventPresence as P;
+        match presence {
+            P::NotExpected => Self::NotExpected,
+            P::Current => Self::Current,
+            P::Outdated => Self::Outdated,
+            P::Missing => Self::Missing,
+            P::NoAnswer => Self::NoAnswer,
+        }
+    }
+}
+
+/// One relay of the reachability check and what it serves of the user's own
+/// `KeyPackage` (30443), relay list (10002) and inbox relay list (10050).
+#[derive(Clone)]
+pub struct OwnRelayPresenceFfi {
+    /// The configured or lookup entry, verbatim.
+    pub relay_url: String,
+    /// On the user's own inbox or `KeyPackage` list.
+    pub own: bool,
+    /// A lookup (discovery) relay.
+    pub lookup: bool,
+    /// The handshake succeeded for at least one of its probes.
+    pub reachable: bool,
+    /// Kind 30443.
+    pub key_package: OwnEventPresenceFfi,
+    /// Kind 10002.
+    pub relay_list: OwnEventPresenceFfi,
+    /// Kind 10050.
+    pub inbox_relay_list: OwnEventPresenceFfi,
+}
+
+/// Redacting `Debug`: a relay URL is a fingerprint of a customised pool, so
+/// the relay is named by a salted handle (Rule 15).
+impl std::fmt::Debug for OwnRelayPresenceFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RelayEventCheckFfi")
+        f.debug_struct("OwnRelayPresenceFfi")
             .field(
                 "relay",
                 &haven_core::log_alias::relay(RelayUrl(&self.relay_url)),
             )
-            .field("found", &self.found)
+            .field("own", &self.own)
+            .field("lookup", &self.lookup)
+            .field("reachable", &self.reachable)
+            .field("key_package", &self.key_package)
+            .field("relay_list", &self.relay_list)
+            .field("inbox_relay_list", &self.inbox_relay_list)
             .finish()
     }
 }
 
-impl From<CoreRelayEventCheck> for RelayEventCheckFfi {
-    fn from(c: CoreRelayEventCheck) -> Self {
+impl From<haven_core::relay::maintenance::OwnRelayPresence> for OwnRelayPresenceFfi {
+    fn from(row: haven_core::relay::maintenance::OwnRelayPresence) -> Self {
         Self {
-            relay_url: c.relay_url,
-            found: c.found,
-            event_count: c.event_count as u32,
-            newest_timestamp: c.newest_timestamp,
+            relay_url: row.relay_url,
+            own: row.own,
+            lookup: row.lookup,
+            reachable: row.reachable,
+            key_package: row.key_package.into(),
+            relay_list: row.relay_list.into(),
+            inbox_relay_list: row.inbox_relay_list.into(),
         }
     }
 }
@@ -9158,32 +9200,78 @@ impl RelayManagerFfi {
 
     // ==================== Event Checking ====================
 
-    /// Checks whether events of a given kind by an author exist on a relay.
+    /// The relay settings check: what each relay of the user's own inbox and
+    /// `KeyPackage` lists, and each lookup relay, serves of this account's
+    /// kind 30443, 10002 and 10050, judged as maintenance judges them
+    /// ([`own_presence`]). One row per relay, the inbox list first, then the
+    /// `KeyPackage` list, then the lookup relays.
     ///
-    /// Queries a single relay for events matching the given kind and author.
-    /// Used to verify that KeyPackage (30443) and relay list (10002 / 10050)
-    /// events are published.
-    pub async fn check_event_on_relay(
+    /// Only reads: unlike maintenance it does not wait for the storage-reset
+    /// notice, which holds back what is published, not what is asked.
+    ///
+    /// [`own_presence`]: haven_core::relay::maintenance::own_presence
+    pub async fn check_own_reachability(
         &self,
-        relay_url: String,
-        author_pubkey: String,
-        event_kind: u16,
-    ) -> Result<RelayEventCheckFfi, String> {
-        let pk = nostr::PublicKey::parse(&author_pubkey)
-            .map_err(|e| format!("Invalid author pubkey: {e}"))?;
+        circle: &CircleManagerFfi,
+        own_pubkey: String,
+    ) -> Result<Vec<OwnRelayPresenceFfi>, String> {
+        use haven_core::relay::maintenance::{
+            own_presence, read_kp_lifetime, OwnRelayLists, TrackedKpLifetime, TrackedKpSlot,
+        };
 
-        let filter = nostr::Filter::new()
-            .kind(nostr::Kind::Custom(event_kind))
-            .author(pk)
-            .limit(5);
-
-        let result = self
-            .inner
-            .check_event_on_relay(&relay_url, filter)
+        let own = nostr::PublicKey::parse(&own_pubkey).map_err(|_| "Invalid pubkey".to_string())?;
+        let circle_mgr = circle.inner.clone();
+        // Read before the probe: a tick that promotes a newer package meanwhile
+        // leaves it in the same slot, newer, which still reads current.
+        let tracked = circle_mgr
+            .session()
+            .tracked_key_package()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| "Could not read the KeyPackage record".to_string())?;
+        let tracked_id = tracked
+            .as_ref()
+            .and_then(|t| t.published.as_ref())
+            .map(|event| event.id.to_hex())
+            .unwrap_or_default();
+        let tracked_lifetime = tracked
+            .as_ref()
+            .map_or(TrackedKpLifetime::Absent, |t| read_kp_lifetime(&t.package));
+        let (inbox, key_package) = run_blocking({
+            let mgr = circle_mgr.clone();
+            move || {
+                let list = |relay_type| {
+                    mgr.list_user_relays(relay_type)
+                        .map(|user| haven_core::relay::dedup_relay_targets(&user))
+                        .map_err(|_| "Could not read the relay lists".to_string())
+                };
+                Ok((
+                    list(haven_core::circle::RelayType::Inbox)?,
+                    list(haven_core::circle::RelayType::KeyPackage)?,
+                ))
+            }
+        })
+        .await?;
+        let lookup = haven_core::relay::discovery_relays();
 
-        Ok(RelayEventCheckFfi::from(result))
+        let rows = own_presence(
+            &self.inner,
+            &own,
+            &OwnRelayLists {
+                inbox: &inbox,
+                key_package: &key_package,
+                lookup: &lookup,
+            },
+            tracked.as_ref().map(|t| TrackedKpSlot {
+                d_tag: &t.slot,
+                event_id: &tracked_id,
+                created_at: t.created_at.unwrap_or(0),
+                adopted: t.adopted,
+                replacement_owed: t.replacement_owed,
+            }),
+            tracked_lifetime,
+        )
+        .await;
+        Ok(rows.into_iter().map(OwnRelayPresenceFfi::from).collect())
     }
 
     // ==================== Event Fetching ====================
@@ -15140,6 +15228,217 @@ mod maintenance_real_ffi_tests {
             .maintain_key_package(circle, secret)
             .await
             .expect("maintain_key_package must not error")
+    }
+
+    async fn reachability(
+        relay_mgr: &RelayManagerFfi,
+        circle: &CircleManagerFfi,
+        keys: &Keys,
+    ) -> Vec<super::OwnRelayPresenceFfi> {
+        relay_mgr
+            .check_own_reachability(circle, keys.public_key().to_hex())
+            .await
+            .expect("the reachability check runs")
+    }
+
+    /// The relay settings check reads, per relay and per kind, what the
+    /// maintenance ticks publish: missing before, current after; an own relay
+    /// that cannot be reached is no answer, never missing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_reachability_check_reads_what_maintenance_published_via_real_ffi() {
+        use super::OwnEventPresenceFfi::{Current, Missing, NoAnswer, NotExpected};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let inbox_relay = MockRelay::run().await.expect("start MockRelay");
+        let kp_relay = MockRelay::run().await.expect("start MockRelay");
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("reachability");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        for (url, relay_type) in [
+            (inbox_relay.url().await.to_string(), RelayTypeFfi::Inbox),
+            (dead_loopback_relay(), RelayTypeFfi::Inbox),
+            (kp_relay.url().await.to_string(), RelayTypeFfi::Nip65),
+        ] {
+            circle
+                .add_user_relay(url, relay_type)
+                .await
+                .expect("register an own relay");
+        }
+        let stored = |relay_type| {
+            circle
+                .inner
+                .list_user_relays(relay_type)
+                .expect("the stored list")
+        };
+        let [inbox, dead] = <[String; 2]>::try_from(stored(RelayType::Inbox)).expect("two");
+        let [key_package] = <[String; 1]>::try_from(stored(RelayType::KeyPackage)).expect("one");
+        let [lookup] = <[String; 1]>::try_from(haven_core::relay::discovery_relays()).expect("one");
+        let shape = |row: &super::OwnRelayPresenceFfi| {
+            (
+                row.relay_url.clone(),
+                row.own,
+                row.lookup,
+                row.reachable,
+                [row.key_package, row.relay_list, row.inbox_relay_list],
+            )
+        };
+
+        let before = reachability(&relay_mgr, &circle, &keys).await;
+        assert_eq!(
+            before.iter().map(shape).collect::<Vec<_>>(),
+            [
+                (
+                    inbox.clone(),
+                    true,
+                    false,
+                    true,
+                    [NotExpected, NotExpected, Missing]
+                ),
+                (
+                    dead.clone(),
+                    true,
+                    false,
+                    false,
+                    [NotExpected, NotExpected, NoAnswer]
+                ),
+                (
+                    key_package.clone(),
+                    true,
+                    false,
+                    true,
+                    [Missing, Missing, NotExpected]
+                ),
+                (
+                    lookup.clone(),
+                    false,
+                    true,
+                    true,
+                    [NotExpected, Missing, Missing]
+                ),
+            ],
+            "nothing is published yet, and a lookup relay is never asked for a KeyPackage",
+        );
+
+        relay_mgr
+            .maintain_relay_list(&circle, secret.clone())
+            .await
+            .expect("maintain_relay_list must not error");
+        circle_maintain(&relay_mgr, &circle, secret).await;
+
+        let after = reachability(&relay_mgr, &circle, &keys).await;
+        assert_eq!(
+            after[..3].iter().map(shape).collect::<Vec<_>>(),
+            [
+                (
+                    inbox,
+                    true,
+                    false,
+                    true,
+                    [NotExpected, NotExpected, Current]
+                ),
+                (
+                    dead,
+                    true,
+                    false,
+                    false,
+                    [NotExpected, NotExpected, NoAnswer]
+                ),
+                (
+                    key_package,
+                    true,
+                    false,
+                    true,
+                    [Current, Current, NotExpected]
+                ),
+            ],
+        );
+        assert_eq!(
+            (after[3].relay_url.as_str(), after[3].key_package),
+            (lookup.as_str(), NotExpected)
+        );
+
+        inbox_relay.shutdown();
+        kp_relay.shutdown();
+    }
+
+    /// An older package of this account in the tracked slot is not this
+    /// device's current one: the check reads it outdated, and one maintenance
+    /// tick, republishing the tracked event, makes it current.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_older_package_in_the_slot_reads_outdated_until_one_tick_heals_it_via_real_ffi() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("reachability_heal");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(relay.url().await.to_string(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+        let own = circle
+            .inner
+            .list_user_relays(RelayType::KeyPackage)
+            .expect("the stored list");
+
+        let older = haven_core::relay::maintenance::build_kp_maintenance_events(
+            circle.inner.session(),
+            &keys,
+            &own,
+            None,
+            None,
+        )
+        .await
+        .expect("mint the older package");
+        relay_mgr
+            .inner
+            .publish_event(&older.event, &own)
+            .await
+            .expect("publish the older package");
+        let tracked = haven_core::relay::maintenance::build_kp_maintenance_events(
+            circle.inner.session(),
+            &keys,
+            &own,
+            Some(&older.d_tag),
+            i64::try_from(older.event.created_at.as_secs()).ok(),
+        )
+        .await
+        .expect("mint the tracked package into the same slot");
+        track_published(&circle, &tracked).await;
+        let key_package = |rows: &[super::OwnRelayPresenceFfi]| {
+            rows.iter()
+                .find(|row| row.relay_url == own[0])
+                .expect("the own relay's row")
+                .key_package
+        };
+
+        assert_eq!(
+            key_package(&reachability(&relay_mgr, &circle, &keys).await),
+            super::OwnEventPresenceFfi::Outdated,
+        );
+        let tick = circle_maintain(&relay_mgr, &circle, secret).await;
+        assert_eq!(
+            tick.action,
+            KpMaintenanceActionFfi::RepublishedStableD,
+            "premise: the tick heals the slot with the tracked event"
+        );
+        assert_eq!(
+            key_package(&reachability(&relay_mgr, &circle, &keys).await),
+            super::OwnEventPresenceFfi::Current,
+        );
+
+        relay.shutdown();
     }
 
     // ------------------------------------------------------------------------
@@ -23008,8 +23307,8 @@ mod log_anonymity_tests {
         InMemoryStorage, InvitationFfi, LastKnownLocationFfi, LeavePlanFfi, LeavePlanKindFfi,
         LocationMessage, LocationMessageResultFfi, LocationMessageResultKindFfi, LogAliasClassFfi,
         MemberKeyPackageFfi, MemberLookupFfi, MemberLookupVerdictFfi, NostrIdentityManager,
-        OwnProfileRelayAnswerFfi, ProfileMetadataFfi, ProfilePictureRefFfi, PublicIdentity,
-        RejoinOfferFfi, RejoinOffersOutcomeFfi, RelayConnectionStatusFfi, RelayEventCheckFfi,
+        OwnProfileRelayAnswerFfi, OwnRelayPresenceFfi, ProfileMetadataFfi, ProfilePictureRefFfi,
+        PublicIdentity, RejoinOfferFfi, RejoinOffersOutcomeFfi, RelayConnectionStatusFfi,
         RelayGiftWrapFetchFfi, RelayManagerFfi, RelayRejectionFfi, SignedLocationEventFfi,
         SkipReasonFfi,
     };
@@ -23777,14 +24076,17 @@ mod log_anonymity_tests {
     }
 
     #[test]
-    fn relay_event_check_ffi_debug_redacts_the_url_and_count() {
-        let check = RelayEventCheckFfi {
+    fn own_relay_presence_ffi_debug_redacts_the_url() {
+        let row = OwnRelayPresenceFfi {
             relay_url: RELAY.to_string(),
-            found: true,
-            event_count: COUNTER,
-            newest_timestamp: Some(INSTANT),
+            own: true,
+            lookup: true,
+            reachable: true,
+            key_package: super::OwnEventPresenceFfi::Current,
+            relay_list: super::OwnEventPresenceFfi::Outdated,
+            inbox_relay_list: super::OwnEventPresenceFfi::NoAnswer,
         };
-        assert_debug_redacted!(check, "RelayEventCheckFfi", NEEDLES);
+        assert_debug_redacted!(row, "OwnRelayPresenceFfi", NEEDLES);
     }
 
     #[test]

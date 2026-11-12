@@ -1334,24 +1334,27 @@ fn a_limit_beyond_its_row_is_unknown() {
     }
 }
 
-/// R4: the relay-status page asks every own relay for all three own kinds.
+/// R4: an account reads each of its own kinds off the list that kind is
+/// published to, whatever the `limit`; the relay settings check sends
+/// maintenance's probes, so no shape is admitted on the other own list.
 #[test]
-fn the_status_probe_shape_is_admitted_on_either_own_list_only() {
+fn an_own_kind_is_read_off_its_own_list_only() {
     let w = world();
     let a = alice();
     for kind in [30443, 10002, 10050] {
-        let probe = json!(["REQ", "sub-s", {"kinds": [kind], "authors": [a], "limit": 5}]);
-        let other = json!(["REQ", "sub-s", {"kinds": [kind], "authors": [a], "limit": 4}]);
-        for sender in [None, Some(a.as_str())] {
-            assert!(admitted(&w.table, w.a_inbox, sender, &probe));
-            assert!(admitted(&w.table, w.a_kp, sender, &probe));
-            assert!(class_of(&w.table, w.b_inbox, sender, &probe).is_some());
+        let (own_list, wrong_list) = if kind == 10050 {
+            (w.a_inbox, w.a_kp)
+        } else {
+            (w.a_kp, w.a_inbox)
+        };
+        for limit in [4, 5, 64] {
+            let read = json!(["REQ", "sub-s", {"kinds": [kind], "authors": [a], "limit": limit}]);
+            assert!(admitted(&w.table, own_list, Some(&a), &read));
+            assert_eq!(
+                class_of(&w.table, wrong_list, Some(&a), &read),
+                Some(Class::CrossedRequest)
+            );
         }
-        let wrong_list = if kind == 10050 { w.a_kp } else { w.a_inbox };
-        assert_eq!(
-            class_of(&w.table, wrong_list, Some(&a), &other),
-            Some(Class::CrossedRequest)
-        );
     }
     let self_on_discovery =
         json!(["REQ", "sub-k", {"kinds": [30443], "authors": [a], "limit": 10}]);

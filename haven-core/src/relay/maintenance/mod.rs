@@ -23,9 +23,13 @@
 //!   -drifted for the user's kind 10050 (inbox) + 10002 (`KeyPackage`-discovery)
 //!   relay lists, on the user's own relays and the lookup relays. Pure decision
 //!   only; the network probe + signed publish are composed at the FFI boundary.
+//! * [`own_presence`] — what each own relay and each lookup relay serves of
+//!   the user's own `KeyPackage` and relay lists, asked with the probes above
+//!   and judged by their rules (the relay settings check).
 
 pub mod key_package;
 pub mod kp_lifetime;
+pub mod own_presence;
 pub mod relay_list;
 
 pub use kp_lifetime::{
@@ -41,6 +45,7 @@ pub use key_package::{
     KpMaintenanceOutcome, KpSlotRetirement, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
     TrackedKpSlot, KIND_MARMOT_KEY_PACKAGE,
 };
+pub use own_presence::{own_presence, OwnEventPresence, OwnRelayLists, OwnRelayPresence};
 pub use relay_list::{
     decide_relay_list, list_relay_healthy, own_list_confirmed, RelayListAction,
     RelayListCategoryOutcome, RelayListDecision, RelayListMaintenanceOutcome, RelayListPerRelay,

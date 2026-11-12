@@ -15,7 +15,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use super::frame::{Event, Filter, Frame};
 use super::policy::{
     Author, Limit, Plane, Row, Verb, LOCATION_RETENTION_MAX_SECS, NEG_INITIAL_MESSAGE, ROWS,
-    STATUS_PROBE_LIMIT,
 };
 use super::table::{PlaneTable, RelayIx, Unusable};
 
@@ -598,17 +597,6 @@ impl Judge<'_> {
         } else {
             (Plane::OwnKeyPackage, Plane::InviteeNip65Write)
         };
-        // The relay-status probe asks each of an account's own relays about
-        // all three of its own kinds, whichever list the relay is on.
-        let probed = || {
-            (filter.limit == Some(STATUS_PROBE_LIMIT))
-                .then(|| {
-                    [Plane::OwnInbox, Plane::OwnKeyPackage]
-                        .into_iter()
-                        .find(|plane| self.own(*plane, author, obs))
-                })
-                .flatten()
-        };
         match obs.sender {
             Some(sender) if sender == author => {
                 require(self.table.is_account(author), row, Class::NoGroundTruth)?;
@@ -629,7 +617,7 @@ impl Judge<'_> {
                 } else {
                     Class::NoGroundTruth
                 };
-                probed().ok_or((Some(row), class))
+                Err((Some(row), class))
             }
             sender => {
                 if self
@@ -637,9 +625,6 @@ impl Judge<'_> {
                     .current(Plane::Discovery, None, obs.relay, obs.at)
                 {
                     return Ok(Plane::Discovery);
-                }
-                if let Some(plane) = probed().filter(|_| sender.is_none()) {
-                    return Ok(plane);
                 }
                 self.list_of(row, author, obs, lists, sender.is_none())
             }

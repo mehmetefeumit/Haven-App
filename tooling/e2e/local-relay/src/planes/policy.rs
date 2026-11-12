@@ -291,10 +291,6 @@ pub const NEG_INITIAL_MESSAGE: &str = "6100000200";
 /// component 0x8005, `RetentionBoundPeeler`).
 pub const LOCATION_RETENTION_MAX_SECS: u64 = 228;
 
-/// The `limit` of the relay-status probe, the one lookup shape admitted on
-/// either own list (`check_event_on_relay`).
-pub const STATUS_PROBE_LIMIT: u64 = 5;
-
 /// Haven's key-package tags, each exactly once (MDK's publication template).
 const KEY_PACKAGE_TAGS: &[&str] = &[
     "d",
@@ -438,7 +434,7 @@ pub static ROWS: [RowSpec; 16] = [
         limit: Limit::AtMost(64),
         author: Author::NotAnEvent,
         roles: &[Role::Inbox, Role::KeyPackage, Role::Discovery],
-        admitted_on: "one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list; `limit` 5 (the status probe) also either own list of an account",
+        admitted_on: "one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list",
     },
     RowSpec {
         row: Row::Req10002A,
@@ -449,7 +445,7 @@ pub static ROWS: [RowSpec; 16] = [
         limit: Limit::AtMost(64),
         author: Author::NotAnEvent,
         roles: &[Role::Inbox, Role::KeyPackage, Role::Discovery],
-        admitted_on: "one author: the sender's own key-package list or a discovery relay when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list; `limit` 5 (the status probe) also either own list of an account",
+        admitted_on: "one author: the sender's own key-package list or a discovery relay when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list",
     },
     RowSpec {
         row: Row::Req10050A,
@@ -460,7 +456,7 @@ pub static ROWS: [RowSpec; 16] = [
         limit: Limit::AtMost(64),
         author: Author::NotAnEvent,
         roles: &[Role::Inbox, Role::KeyPackage, Role::Discovery],
-        admitted_on: "one author: the sender's own inbox list or a discovery relay when it is the sender; otherwise a discovery relay or the author's inbox list; `limit` 5 (the status probe) also either own list of an account",
+        admitted_on: "one author: the sender's own inbox list or a discovery relay when it is the sender; otherwise a discovery relay or the author's inbox list",
     },
     RowSpec {
         row: Row::Req0A,

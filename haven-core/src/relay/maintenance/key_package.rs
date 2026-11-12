@@ -318,7 +318,7 @@ impl RelayKpPerRelay {
     /// in the tracked slot (a relay that missed the last publish), does NOT
     /// count.
     #[must_use]
-    fn serves_tracked(&self, tracked: &TrackedKpSlot<'_>) -> bool {
+    pub(super) fn serves_tracked(&self, tracked: &TrackedKpSlot<'_>) -> bool {
         self.canonical.iter().any(|e| {
             e.d_tag == tracked.d_tag
                 && (e.event_id == tracked.event_id || e.created_at >= tracked.created_at)

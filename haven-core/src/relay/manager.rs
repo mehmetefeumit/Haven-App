@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use cgka_traits::app_components::{is_loopback_host, is_public_ip};
 use cgka_traits::TransportEndpoint;
-use nostr::filter::MatchEventOptions;
 #[cfg(debug_assertions)]
 use nostr::Url;
 use nostr::{
@@ -38,9 +37,7 @@ use super::fanout::{self, FanoutTargetOutcome};
 use super::maintenance::key_package::{
     is_pre_migration_key_package_of, kp_event_d_tag, KeyPackageCandidate,
 };
-use super::types::{
-    PublishResult, RelayConnectionStatus, RelayEventCheck, RelayFetchOutcome, RelayStatus,
-};
+use super::types::{PublishResult, RelayConnectionStatus, RelayFetchOutcome, RelayStatus};
 use super::url_norm;
 use super::verified::verified_client;
 use crate::circle::MemberKeyPackage;
@@ -1800,59 +1797,6 @@ impl RelayManager {
             })
     }
 
-    /// Checks whether events matching a filter exist on a specific relay.
-    ///
-    /// Queries a single relay for events matching the given filter and returns
-    /// a summary of what was found.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the relay URL is invalid or the fetch fails.
-    pub async fn check_event_on_relay(
-        &self,
-        relay_url: &str,
-        filter: Filter,
-    ) -> RelayResult<RelayEventCheck> {
-        let relay_urls = Self::validate_relay_urls(&[relay_url.to_string()])?;
-
-        // Add relay, connect, and wait for WebSocket handshake
-        Self::add_relays_and_connect(&self.client, &relay_urls).await;
-
-        // Fetch events from this specific relay
-        let events = self
-            .client
-            .fetch_events_from(
-                relay_urls.iter().map(nostr::RelayUrl::as_str),
-                filter.clone(),
-                DEFAULT_TIMEOUT,
-            )
-            .await
-            .map_err(|e| {
-                log::debug!("[RelayManager] check_event_on_relay failed");
-                RelayError::Fetch(e.to_string())
-            })?;
-
-        // The relay answers with whatever it likes and this client does not
-        // hold it to the filter, so only an event matching what was asked for —
-        // this author, this kind — is evidence the event is published here.
-        let events: Vec<Event> = events
-            .into_iter()
-            .filter(|e| filter.match_event(e, MatchEventOptions::new()))
-            .collect();
-        let event_count = events.len();
-        let newest_timestamp = events
-            .iter()
-            .map(|e| e.created_at.as_secs().cast_signed())
-            .max();
-
-        Ok(RelayEventCheck {
-            relay_url: relay_url.to_string(),
-            found: event_count > 0,
-            event_count,
-            newest_timestamp,
-        })
-    }
-
     /// Fetches events matching `filter` from each relay independently,
     /// reporting per-relay reachability AND whether each relay finished
     /// answering.
@@ -2906,27 +2850,6 @@ mod tests {
         let err =
             allow_ws_loopback_for_test().expect_err("second install must report already-installed");
         assert!(err.contains("already installed"), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn check_event_on_relay_rejects_plaintext() {
-        let manager = RelayManager::new();
-        let filter = Filter::new().kind(Kind::Custom(443)).limit(1);
-        let result = manager
-            .check_event_on_relay("ws://insecure.relay.com", filter)
-            .await;
-        assert!(matches!(
-            result,
-            Err(RelayError::InvalidUrl(InvalidUrlReason::PlaintextWs))
-        ));
-    }
-
-    #[tokio::test]
-    async fn check_event_on_relay_rejects_invalid_url() {
-        let manager = RelayManager::new();
-        let filter = Filter::new().kind(Kind::Custom(443)).limit(1);
-        let result = manager.check_event_on_relay("not-a-url", filter).await;
-        assert!(matches!(result, Err(RelayError::InvalidUrl(_))));
     }
 
     #[tokio::test]
@@ -6642,11 +6565,26 @@ mod tests {
             .expect("the relay answers");
         assert_no_long_lived_subscription(&manager, "fetch_events").await;
 
-        manager
-            .check_event_on_relay(&url, answered.clone())
-            .await
-            .expect("the relay answers");
-        assert_no_long_lived_subscription(&manager, "check_event_on_relay").await;
+        let presence = crate::relay::maintenance::own_presence(
+            &manager,
+            &nostr::Keys::generate().public_key(),
+            &crate::relay::maintenance::OwnRelayLists {
+                inbox: &relays,
+                key_package: &relays,
+                lookup: &[],
+            },
+            None,
+            crate::relay::maintenance::TrackedKpLifetime::Absent,
+        )
+        .await;
+        let missing = crate::relay::maintenance::OwnEventPresence::Missing;
+        assert!(
+            presence[0].key_package == missing
+                && presence[0].relay_list == missing
+                && presence[0].inbox_relay_list == missing,
+            "each of the three REQs was answered in full: {presence:?}",
+        );
+        assert_no_long_lived_subscription(&manager, "own_presence").await;
 
         let drained = manager
             .fetch_events_per_relay(answered, &relays)

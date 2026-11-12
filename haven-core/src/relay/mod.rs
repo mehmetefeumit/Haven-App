@@ -72,9 +72,7 @@ pub use publishers::{
     build_unpublish_event, dedup_relay_targets, superseding_created_at, PublisherError,
     PublisherResult,
 };
-pub use types::{
-    PublishResult, RelayConnectionStatus, RelayEventCheck, RelayFetchOutcome, RelayStatus,
-};
+pub use types::{PublishResult, RelayConnectionStatus, RelayFetchOutcome, RelayStatus};
 pub use url_norm::{canonicalize, normalize_relay_url};
 
 use crate::log_alias::{self, LogAliasClass, LogHandle};

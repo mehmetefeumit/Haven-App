@@ -28,6 +28,9 @@
 mod helpers;
 
 use std::sync::Arc;
+
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use std::time::Duration;
 
 use haven_core::circle::{
@@ -46,7 +49,10 @@ use haven_core::relay::fanout::{
     LocationSeal, Publishing, RelayMappedFanout, WallClock,
 };
 use haven_core::relay::live_sync::{CircleSpec, LiveSyncCore};
-use haven_core::relay::maintenance::build_kp_maintenance_events;
+use haven_core::relay::maintenance::{
+    build_kp_maintenance_events, kp_event_d_tag, own_presence, read_kp_lifetime, OwnEventPresence,
+    OwnRelayLists, TrackedKpSlot,
+};
 use haven_core::relay::recording_front::{RecordedFrame, RecordingFront};
 use haven_core::relay::{
     allow_ws_loopback_for_test, build_nip65_relay_list_event, build_relay_list_event,
@@ -705,7 +711,7 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
 
     // Step 1: each account's own traffic on its own lists. Bob's key package
     // to his key-package relay; Alice's key package and relay lists, and the
-    // status probe of each.
+    // relay settings check of her own relays and the lookup relay.
     w.next();
     let bob_kp = bob.key_package(&w.url(R::BWrite)).await;
     bob.pool
@@ -724,19 +730,6 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
             .publish_event(event, &[w.url(relay)])
             .await
             .expect("alice's own event is published");
-        let probe = Filter::new()
-            .kind(event.kind)
-            .author(alice.keys.public_key())
-            .limit(5);
-        assert!(
-            alice
-                .pool
-                .check_event_on_relay(&w.url(relay), probe)
-                .await
-                .expect("the status probe")
-                .found,
-            "the status probe does not find what was just published",
-        );
     }
     // Her relay lists go to the discovery relay too, after the heal's probe
     // there; her key package does not (plant 6 below).
@@ -746,6 +739,40 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
         &[&alice_10002, &alice_10050],
     ))
     .await;
+    let (slot, kp_id) = (
+        kp_event_d_tag(&alice_kp).expect("a slot"),
+        alice_kp.id.to_hex(),
+    );
+    let package = BASE64
+        .decode(&alice_kp.content)
+        .expect("the 30443 content is base64");
+    let (inbox, key_packages, lookup) = ([w.url(R::AInbox)], [w.url(R::AKp)], [w.url(R::Disc)]);
+    let rows = Box::pin(own_presence(
+        &alice.pool,
+        &alice.keys.public_key(),
+        &OwnRelayLists {
+            inbox: &inbox,
+            key_package: &key_packages,
+            lookup: &lookup,
+        },
+        Some(TrackedKpSlot {
+            d_tag: &slot,
+            event_id: &kp_id,
+            created_at: alice_kp.created_at.as_secs(),
+            adopted: false,
+            replacement_owed: false,
+        }),
+        read_kp_lifetime(&package),
+    ))
+    .await;
+    assert!(
+        rows[0].inbox_relay_list == OwnEventPresence::Current
+            && rows[1].key_package == OwnEventPresence::Current
+            && rows[1].relay_list == OwnEventPresence::Current
+            && rows[2].relay_list == OwnEventPresence::Current
+            && rows[2].inbox_relay_list == OwnEventPresence::Current,
+        "the relay settings check does not find what was just published",
+    );
 
     // Step 2: Alice looks her invitees up, as an invite does.
     w.next();

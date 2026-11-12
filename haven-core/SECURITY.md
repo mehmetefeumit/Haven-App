@@ -196,9 +196,9 @@ when it was sent; a circle's routing counts from the commit's staging.
 | `REQ-445-H` | REQ | 445 | `kinds`, `#h` | `since`, `until`, `limit` | any | - | a relay where every `#h` circle's routing stands |
 | `REQ-445-IDS` | REQ | 445 | `ids`, `kinds`, `limit` | `#h` | = ids | - | a relay where the routing of every id's circle (the event index) and of every `#h` circle is kept; `limit` = the number of ids |
 | `REQ-1059-P` | REQ | 1059 | `kinds`, `#p` | `since`, `limit` | at most 1000 | - | the inbox list of the one `#p` value, which is the sender when the sender is known |
-| `REQ-30443-A` | REQ | 30443 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list; `limit` 5 (the status probe) also either own list of an account |
-| `REQ-10002-A` | REQ | 10002 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own key-package list or a discovery relay when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list; `limit` 5 (the status probe) also either own list of an account |
-| `REQ-10050-A` | REQ | 10050 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own inbox list or a discovery relay when it is the sender; otherwise a discovery relay or the author's inbox list; `limit` 5 (the status probe) also either own list of an account |
+| `REQ-30443-A` | REQ | 30443 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own key-package list when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list |
+| `REQ-10002-A` | REQ | 10002 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own key-package list or a discovery relay when it is the sender; otherwise a discovery relay or the author's key-package or NIP-65 write list |
+| `REQ-10050-A` | REQ | 10050 | `kinds`, `authors` | `limit` | at most 64 | - | one author: the sender's own inbox list or a discovery relay when it is the sender; otherwise a discovery relay or the author's inbox list |
 | `REQ-0-A` | REQ | 0 | `kinds`, `authors` | `limit` | at most 4 | - | one author, a profile relay |
 | `NEG-445-H` | NEG-OPEN | 445 | `kinds`, `#h`, `since`, `until`, `limit` | none | at most 16384 | - | one `#h` circle whose routing stands; opening message `6100000200` |
 
