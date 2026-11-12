@@ -599,6 +599,42 @@ void main() {
       ]);
     });
 
+    testWidgets(
+      'loads every list still being built over a service that failed',
+      (tester) async {
+        final ref = await widgetRef(tester);
+        serviceFails = true;
+        await expectLater(
+          c.read(relayPreferencesServiceProvider.future),
+          throwsA(isA<StateError>()),
+        );
+        serviceFails = false;
+        final lists = [
+          inboxRelaysProvider,
+          keyPackageRelaysProvider,
+          profileRelaysProvider,
+        ];
+        // First read on the Relays page's first frame: each build is still
+        // awaiting the service's cached failure when the retry runs.
+        for (final list in lists) {
+          c.read(list.future).ignore();
+        }
+        expect(lists.every((l) => c.read(l).isLoading), isTrue);
+
+        retryFailedRelayLoads(ref);
+
+        expect(await c.read(inboxRelaysProvider.future), [
+          'wss://inbox.example.com',
+        ]);
+        expect(await c.read(keyPackageRelaysProvider.future), [
+          'wss://kp.example.com',
+        ]);
+        expect(await c.read(profileRelaysProvider.future), [
+          'wss://profile.example.com',
+        ]);
+      },
+    );
+
     testWidgets('loads the relay status read from a failed list', (
       tester,
     ) async {
@@ -617,6 +653,22 @@ void main() {
         'wss://inbox.example.com',
         'wss://kp.example.com',
       ]);
+    });
+
+    testWidgets('loads the profile-pool status whose read failed', (
+      tester,
+    ) async {
+      final ref = await widgetRef(tester);
+      prefs.profilePoolStatusThrows = const RelayPreferencesException('down');
+      await expectLater(
+        c.read(profilePoolStatusProvider.future),
+        throwsA(isA<RelayPreferencesException>()),
+      );
+      prefs.profilePoolStatusThrows = null;
+
+      retryFailedRelayLoads(ref);
+
+      expect((await c.read(profilePoolStatusProvider.future)).usable, 8);
     });
 
     testWidgets('re-reads nothing that loaded and builds nothing never read', (

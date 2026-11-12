@@ -1125,6 +1125,46 @@ void main() {
       },
     );
 
+    testWidgets(
+      'opening the page loads every list over a service that failed earlier, '
+      'when the KeyPackage and Profile lists were never read',
+      (tester) async {
+        growSurface(tester);
+        final mock = seededMock();
+        var failing = true;
+        final container = ProviderContainer(
+          overrides: appOverrides(
+            mock: mock,
+            openService: () async {
+              if (failing) throw StateError('handoff');
+              return mock;
+            },
+          ),
+        );
+        addTearDown(container.dispose);
+        // Only the Inbox list was read while the manager could not be opened;
+        // the KeyPackage and Profile lists are first built by the page itself,
+        // on its first frame, over the service's cached failure.
+        await expectLater(
+          container.read(inboxRelaysProvider.future),
+          throwsA(anything),
+        );
+        await container.read(identityProvider.future);
+        failing = false;
+
+        await tester.pumpWidget(
+          UncontrolledProviderScope(container: container, child: page),
+        );
+        await tester.pumpAndSettle();
+
+        expect(tester.takeException(), isNull);
+        expect(find.text('Failed to load relays.'), findsNothing);
+        expect(find.text('inbox.example.com'), findsOneWidget);
+        expect(find.text('kp.example.com'), findsOneWidget);
+        expect(find.text('profile.example.com'), findsOneWidget);
+      },
+    );
+
     testWidgets('Restore defaults still opens its confirmation', (
       tester,
     ) async {

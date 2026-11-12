@@ -167,7 +167,9 @@ class InboxRelaysNotifier extends AsyncNotifier<List<String>>
     implements RelayCategoryNotifier {
   @override
   Future<List<String>> build() async {
-    final service = await ref.read(relayPreferencesServiceProvider.future);
+    // Watched, so a rebuilt service rebuilds this list — including a build
+    // still awaiting the service's earlier failure (all three lists).
+    final service = await ref.watch(relayPreferencesServiceProvider.future);
     var list = await service.listRelays(RelayCategory.inbox);
     // Self-heal: cover upgrade users who never went through onboarding.
     // If seeding fails (e.g., a transient SQLite lock at startup), we
@@ -273,7 +275,7 @@ class KeyPackageRelaysNotifier extends AsyncNotifier<List<String>>
     implements RelayCategoryNotifier {
   @override
   Future<List<String>> build() async {
-    final service = await ref.read(relayPreferencesServiceProvider.future);
+    final service = await ref.watch(relayPreferencesServiceProvider.future);
     var list = await service.listRelays(RelayCategory.keyPackage);
     // Self-heal: cover upgrade users; fall back to compile-time defaults
     // on storage failure rather than stranding the UI in AsyncError.
@@ -380,7 +382,7 @@ class ProfileRelaysNotifier extends AsyncNotifier<List<String>>
     implements RelayCategoryNotifier {
   @override
   Future<List<String>> build() async {
-    final service = await ref.read(relayPreferencesServiceProvider.future);
+    final service = await ref.watch(relayPreferencesServiceProvider.future);
     var list = await service.listRelays(RelayCategory.profile);
     // Self-heal: cover upgrade users who never went through onboarding. On a
     // transient seed failure, fall back to the PROFILE-PLANE compile-time
@@ -568,10 +570,10 @@ final profilePoolStatusProvider = FutureProvider<ProfilePoolStatus>((
 /// retries instead of showing "Failed to load relays." for the rest of the
 /// process.
 ///
-/// Each one is dropped on its own because none watches the service or the
-/// lists it is built from — they `ref.read` them — so rebuilding the service
-/// alone never rebuilds a list that already failed. A provider never read is
-/// left unbuilt, and one holding data is left alone.
+/// The lists watch the service, so dropping it rebuilds them; each is still
+/// dropped on its own for a read of its own that failed over a healthy
+/// service, as is the profile-pool status, which `ref.read`s the service. A
+/// provider never read is left unbuilt, and one holding data is left alone.
 void retryFailedRelayLoads(WidgetRef ref) {
   var dropped = false;
   for (final provider in <ProviderBase<AsyncValue<Object?>>>[
