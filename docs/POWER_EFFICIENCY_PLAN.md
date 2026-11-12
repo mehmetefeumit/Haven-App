@@ -809,7 +809,7 @@ so under D5 alone the socket would linger ≤ 70 s), and KP/relay-list/health ar
 platforms (D8 — today the Android UI isolate's 10-/30-min timers ride the publish pool ungated,
 `maintenance_scheduler_provider.dart:224-225,255-264`); the statement says "connects briefly" (D5 worst
 10 s, a P4 burst worst ≈ 33 s — never "a few seconds") and that the circles' updates are picked up at the same instants (the
-FGS fetch is once per `kLocationUpdateInterval`, `:1406-1408`); the two-socket fact (§1.2) is recorded in the RC1
+FGS fetch was once per `kLocationUpdateInterval`, `:1406-1408`, and is once per publish cycle since 2026-11-12, L-137); the two-socket fact (§1.2) is recorded in the RC1
 summary; NEW enforced invariant `INV-R-BACKGROUND-PRESENCE-ONLY-AT-PUBLISH` (no disclosure key);
 `INV-R-CROSS-PLANE-CORRELATION` (statement narrowed to "in the foreground" + the inbox-relay cadence residual; no
 ARB keys since 2026-08-29); no ratchet item. (vii) The 15-min health tick is NOT folded
@@ -3596,8 +3596,9 @@ hermetic strfry (or `nak req` against the owner's relays) capturing the `#h` REQ
 bound; `--self-test` fixture pair — a healthy sequence passes, a 229 s gap fails; NOT `summarize-wire-journal.sh`,
 which parses the wire-PROXY ndjson journal, `tooling/e2e/ci/summarize-wire-journal.sh:1-20`, and never a relay
 capture) — and the column "max relay gap (s)" is that script's output. The
-receiver's screen is NOT a liveness instrument: the Android peer's FGS fetch runs once per `kLocationUpdateInterval` and the
-age pill thresholds at 5 min, so a receiver-side gap routinely reads 168 + 120 s on a healthy run. Threshold, **per API
+receiver's screen is NOT a liveness instrument: the Android peer's FGS fetch runs once per publish cycle (once per
+`kLocationUpdateInterval` until 2026-11-12, L-137) and the age pill thresholds at 5 min, so a receiver-side gap can read
+two publish intervals, 168 + 168 s, on a healthy run. Threshold, **per API
 level for a baseline row too — a flat ≤ 228 s here contradicted the correction four lines down until 2026-09-09**: ≤ 228 s
 (`kLocationMessageRetention`) on iOS and on Android API 31+, and **≤ 248 s on API 23–30**, because a baseline row is a row
 of the SHIPPED build and that regime's derived worst realized gap IS 248 s (same shape as `POWER_MEASUREMENT.md` §3.5).
@@ -4420,8 +4421,8 @@ so it is a refinement of `DECIDED`, never a third thing. §9.8 lists the chains 
 | **Cost** | The honest downside the decision buys. `—` means the record states none, which is itself worth noticing. |
 | **Invalidated by** | The observation that would mean this decision is wrong. This is the column the ledger exists for: it is written so that someone who sees that observation knows to come back here, and so that "we never thought about it" is never the answer. |
 
-**Size.** 134 rows, `L-01`–`L-134`, contiguous and each id used once, across §9.1–§9.10 (§9.7a, §9.7b, §9.7c, §9.7d,
-§9.7e and §9.7f included). **It read "119 rows, `L-01`–`L-119`" until 2026-09-09 — already stale by one before that day's five rows
+**Size.** 137 rows, `L-01`–`L-137`, contiguous and each id used once, across §9.1–§9.10 (§9.7a, §9.7b, §9.7c, §9.7d,
+§9.7e, §9.7f, §9.7g, §9.7h and §9.7i included); it read "134" until 2026-11-12, though §9.7g and §9.7h had each added a row. **It read "119 rows, `L-01`–`L-119`" until 2026-09-09 — already stale by one before that day's five rows
 were added, because L-120 was appended to §9.10 without this sentence being touched, and it then read "125" for as
 long as it took OD4-d's implementation to add §9.7b's five, and "131" for as long as it took the roster bound's own
 landing to add §9.7d's one, and "132" for as long as it took OD4-c's own implementation to add §9.7e's one, and "133" for as
@@ -4709,6 +4710,15 @@ would have left a second way for a commit to leave the device.
 | # | Date | Status | Decision | Rejected — and why | Cost | Invalidated by |
 |---|---|---|---|---|---|---|
 | **L-136** | 2026-10-24 | **RETIRED** — (iv)'s mechanism; (i) unchanged | **OD4-c (iv) is kept by construction, not by a park.** Since the MDK v0.10.4 migration's W9q every commit is staged under a durable MDK fanout record in the engine hold that staged it, and only the fanout driver (`haven-core/src/relay/fanout.rs`) sends, confirms or rolls one back (`security_rule_gates.rs::a_fanout_is_the_only_way_a_commit_leaves_the_device`). A background burst, a session only started and every wake sweep drive only to finish, which makes no commit: a departing peer's eviction comes due in the engine and stays due, a location send in that mode is answered `SendHeld::DepartureDue`, and the first full drive in a claimed foreground makes the eviction under its record (`live_plane_drive_e2e::a_started_session_and_a_burst_make_nothing_of_a_departure`; `security_rule_gates.rs::od4c_a_background_burst_cannot_publish_a_removal_bearing_auto_commit`, which now pins that a burst stages nothing). A process killed between SEND and OK leaves the record; a later drive sends the same bytes and never rolls the commit back while a relay may hold it, and a removal is never undone for want of a reachable relay (privacy invariant `INV-E-REMOVAL-NOT-UNDONE-FOR-WANT-OF-A-RELAY`). Deleted with the paths they served: `ReceiveAutoCommitPolicy` and `defer_removal_commit` (2026-10-10), then `owe_removal_publish`, the `deferred_removal_commits` table (dropped where an older build created it), `redeem_removal_deferrals`, `orphaned_removal_deferrals`, `relay/auto_commit.rs`, `CircleManager::{confirm_published, publish_failed}` and the gate `od4c_no_plane_can_roll_back_or_hide_a_removal_bearing_auto_commit`. (i) stands, re-built on MDK's own verdict: the halt is MDK's persisted group state, which every circle read carries (`CircleEngineState::Unrecoverable`, `CircleManager::unrecoverable_circles`); `LiveSyncEvent::GroupUnrecoverable` is only the nudge to refresh, acted on at the first one, and the sharing-health banner still offers the re-create (`legacyCircleRecreateCta`). The Dart latch (`markCircleBlocked`), its two-observation debounce and the repeat sweep `report_unrecoverable_circles` are deleted. | Keeping the park beside the driver: two ways for a commit to leave the device, and a durable row whose redemption needs a `PendingStateRef` that the engine now restores from the fanout record itself. | While an eviction is due and unmade, that circle shares nothing from the background until a foreground (residual 4 (a) of `SECURITY.md`'s P4 section); a commit recorded in the foreground that no relay may hold is given no first transmission by a background wake, so its circle is silent and deaf until the app is opened (tracker T-FANOUT (41)). | A plane that makes a commit outside a durable fanout record, or a background plane that stages one. |
+
+### 9.7i 2026-11-12 — the Android foreground service fetches on every publish cycle
+
+One row, taken by the owner. It reverses the fetch throttle the FGS has carried since the per-circle schedules,
+because the store the throttle let age is what the map shows when the app opens.
+
+| # | Date | Status | Decision | Rejected — and why | Cost | Invalidated by |
+|---|---|---|---|---|---|---|
+| **L-137** | 2026-11-12 | **DECIDED** (owner) | **The Android foreground service fetches its circles' peer locations on every publish cycle, not once per `kLocationUpdateInterval`.** What the encrypted last-known store holds when the app opens is what the map shows until the live plane catches up, so a skipped fetch reads as a stale marker on open. At the nominal jittered cadence the throttle skipped one cycle in three and left up to 288 s between fetches on the scheduled cadence; every cycle leaves at most one publish interval. The fetch takes no wake of its own: it runs inside a cycle that already holds the fix, the publish hold and the publish pool. A cycle that handed publishing back to the foreground fetches nothing. → `_publishCycle` step 9 (`background_location_task.dart`) | **Keeping the throttle** — the stale marker on open is the defect the owner raised. **A shorter throttle** — any floor at or above the spacing a burst can realize still skips cycles, so it shortens the gap on average and not in the worst case. | Fetches per hour at the nominal 120 s cadence rise from 20 to 30, each one relay round trip per circle; a burst whose tail the stagger budget defers, or whose publish failed, is followed by an earlier cycle that fetches too. Model E (§6.5a) prices wakes and this adds none, so it carries no estimate of this cost, and nothing has measured it. | The device protocol (`docs/POWER_MEASUREMENT.md`) attributing a material share of Android background drain to the fetch step; or an Android receiver with background sharing on still opening to markers older than one publish interval, which would mean the store's age is set by something other than the fetch cadence |
 
 ### 9.8 The correction chains
 

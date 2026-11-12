@@ -14,7 +14,14 @@
 //
 // The claim is a quotable sentence, so it is pinned as one, in BOTH directions:
 // the disproved wording must be absent from every production Dart file, and the
-// correction must be present at each of the three sites. A one-directional
+// correction must be present at each site that stated it.
+//
+// Since the MDK v0.10.4 migration no plane claiming no foreground makes such a
+// commit at all: its drive runs in `DriveMode::FinishOnly`, and the departure
+// stays due until a foreground makes the removal under its fanout record. The
+// pin follows the mechanism, and the symbol it names must still exist in the
+// core — the previous pin named a function the migration deleted, and went on
+// passing. A one-directional
 // guard would pass on a file that simply deleted the explanation, which is how
 // the claim came back the last time — the reader is then free to re-derive it.
 //
@@ -48,12 +55,15 @@ const _requiredCorrections = <String, String>{
   // `background_deferred_send.dart`) are gone: a seal's commits are driven in
   // Rust.
   'lib/src/services/background_location_task.dart':
-      'does NOT roll the commit back',
+      'makes its removal under its fanout record',
 };
 
-/// Every site must point at the Rust symbol that actually keeps the removal, so
-/// the correction is checkable rather than merely reassuring.
-const _obligationSymbol = 'owe_removal_publish';
+/// Every site must point at the Rust symbol that decides no such commit is
+/// made there, so the correction is checkable rather than merely reassuring.
+const _obligationSymbol = 'DriveMode::FinishOnly';
+
+/// Where [_obligationSymbol] is defined.
+const _obligationSource = '../haven-core/src/relay/fanout.rs';
 
 /// The scan itself: every pinned claim [source] contains, labelled by [path].
 ///
@@ -97,8 +107,9 @@ void main() {
             'these files claim an unacked receive-side auto-commit is retried '
             'by a later tick: $offenders. A probe against the engine at the '
             'pinned MDK rev disproved it — the eviction is never re-derived '
-            'once the schedule is dropped. What keeps it is the durable '
-            'obligation Rust records before the commit crosses the FFI.',
+            'once the schedule is dropped. What keeps it is that a plane '
+            'claiming no foreground makes no such commit: the departure '
+            'stays due until a foreground makes the removal.',
       );
     });
 
@@ -153,11 +164,26 @@ void main() {
           src,
           contains(_obligationSymbol),
           reason:
-              '${entry.key} must name `$_obligationSymbol`, the Rust symbol '
-              'that records the removal as owed. A correction that points at '
-              'no mechanism cannot be checked by the next reader.',
+              '${entry.key} must name `$_obligationSymbol`, the mode in which '
+              'a drive makes no new commit. A correction that points at no '
+              'mechanism cannot be checked by the next reader.',
         );
       }
+    });
+
+    test('names a mechanism the core still has', () {
+      // A pin on a deleted symbol keeps passing while the prose around it
+      // turns false.
+      final source = File(_obligationSource);
+      expect(source.existsSync(), isTrue, reason: _obligationSource);
+      final variant = _obligationSymbol.split('::').last;
+      expect(
+        source.readAsStringSync(),
+        allOf(contains('pub enum DriveMode'), contains('    $variant,')),
+        reason: '`$_obligationSymbol` is gone from $_obligationSource; '
+            'the correction it backs must be re-checked against what now '
+            'keeps the removal, and the pin moved with it',
+      );
     });
   });
 }
