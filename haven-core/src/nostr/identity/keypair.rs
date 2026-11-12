@@ -185,8 +185,7 @@ impl IdentityKeypair {
                 .map_err(|e| IdentityError::KeyDerivation(e.to_string()))?;
 
             let keys = Keys::new(secret_key);
-            let Ok(nsec) = keys.secret_key().to_bech32();
-            Ok(nsec)
+            keys.secret_key().to_bech32().map_err(|e| match e {})
         })();
 
         // Zeroize temporary copy
@@ -234,8 +233,7 @@ impl IdentityKeypair {
         let pubkey = PublicKey::from_slice(&self.pubkey_bytes)
             .map_err(|e| IdentityError::KeyDerivation(e.to_string()))?;
 
-        let Ok(npub) = pubkey.to_bech32();
-        Ok(npub)
+        pubkey.to_bech32().map_err(|e| match e {})
     }
 
     /// Returns the raw public key bytes.

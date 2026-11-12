@@ -3817,10 +3817,6 @@ impl RepairPlane {
 
     /// `relays` as this session dials them: themselves, but under a test's
     /// relay map ([`LiveSyncCore::new_local_with_relay_map_for_test`]).
-    #[cfg_attr(
-        not(any(test, feature = "test-utils")),
-        allow(clippy::unused_self, clippy::missing_const_for_fn)
-    )]
     fn dialled(&self, relays: Vec<String>) -> Vec<String> {
         #[cfg(any(test, feature = "test-utils"))]
         if let Some(dial) = &self.dial {

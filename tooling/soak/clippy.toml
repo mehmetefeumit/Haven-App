@@ -1,8 +1,3 @@
-# The oldest compiler every build of this crate must accept: the pinned
-# coverage toolchain (`scripts/ci/coverage_toolchain.env`). Without it a newer
-# clippy suggests APIs that toolchain does not have.
-msrv = "1.97.1"
-
 # Deliberately NOT a copy of haven-core/clippy.toml.
 #
 # That file bans `rand::thread_rng` because jitter a relay observer could

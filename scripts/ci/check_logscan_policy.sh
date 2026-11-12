@@ -112,8 +112,7 @@ readonly MIN_CLASSES=14
 declare -A STRUCTURAL_RULES_OFF=(
   ['relay']='a relay log legitimately holds pubkeys, event ids and #h tags; the public classes are scoped out and the secret classes, names and coordinates stay searched'
 )
-# Sinks that skip cargo's own furniture (S2/S6 on the crate-build line, S4 on a
-# `Running` line's artifact path), with the reason; the
+# Sinks that skip cargo's crate-build line for S2 and S6, with the reason; the
 # README must explain the knob and name each one. A second entry here is a
 # second capture claiming to be a cargo transcript — which is what the scanner's
 # narrowest exemption rests on.
@@ -225,13 +224,13 @@ check_policy() { # check_policy <policy> <readme>
       violation "${rel}: sink \`${name}\` has declared_plants_expected = ${v} but is not in DECLARED_PLANTS_OFF. Waiving the positive control is the one way a dead capture reads as clean; list the sink with its reason and name it in the README's positive-controls bullet."
     fi
     # P6: the cargo exemption, which skips S2 and S6 on cargo's crate-build
-    # line and S4 on a `Running` line's artifact path. Absent means scanned, so only an explicit `"exempt"` is a decision.
+    # line. Absent means scanned, so only an explicit `"exempt"` is a decision.
     v="$(field_of "${body}" cargo_status)"
     v="${v//\"/}"
     if [[ -n "${CARGO_STATUS_EXEMPT[${name}]+x}" ]]; then
       [[ "${v}" == "exempt" ]] || violation "${rel}: sink \`${name}\` is listed in CARGO_STATUS_EXEMPT (${CARGO_STATUS_EXEMPT[${name}]}) but has cargo_status = ${v:-<absent>}. Re-decide: set it, or delete the entry from the list in the same change."
     elif [[ -n "${v}" && "${v}" != "scanned" ]]; then
-      violation "${rel}: sink \`${name}\` has cargo_status = ${v}. Only a class that holds a CARGO transcript may skip cargo's furniture (S2 and S6 on its crate-build line, S4 on a Running line's artifact path); on any other capture those shapes are app output. List the sink with its reason here and in the README, or delete the key."
+      violation "${rel}: sink \`${name}\` has cargo_status = ${v}. Only a class that holds a CARGO transcript may skip cargo's crate-build line (S2 and S6 on it); on any other capture that shape is app output. List the sink with its reason here and in the README, or delete the key."
     fi
     # P7: the per-emitter NEEDLE exemption, pinned as a literal. A needle is a
     # value this run minted, so not searching for it somewhere is the widest
@@ -275,7 +274,7 @@ check_policy() { # check_policy <policy> <readme>
     violation "${README_REL}: nothing explains \`cargo_status = \"exempt\"\`. It is the only exemption that belongs to a sink class rather than a rule; a knob the README does not explain is a knob the next reader widens blind."
   else
     for s in "${!CARGO_STATUS_EXEMPT[@]}"; do
-      grep -qF -- "\`${s}\`" "${readme}" || violation "${README_REL}: the README does not name \`${s}\`, which the policy exempts from S2 and S6 on cargo's crate-build line and S4 on a Running line's artifact path. Say why, there."
+      grep -qF -- "\`${s}\`" "${readme}" || violation "${README_REL}: the README does not name \`${s}\`, which the policy exempts from S2 and S6 on cargo's crate-build line. Say why, there."
     done
   fi
 

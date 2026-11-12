@@ -3418,10 +3418,7 @@ impl SessionManager {
 
     /// Counts one advance of `group_id` (tests only; nothing in a shipped
     /// build).
-    #[cfg_attr(
-        not(any(test, feature = "test-utils")),
-        allow(clippy::unused_self, clippy::missing_const_for_fn)
-    )]
+    #[allow(clippy::unused_self)]
     fn count_advance(&self, group_id: &GroupId) {
         #[cfg(any(test, feature = "test-utils"))]
         {
@@ -6356,10 +6353,6 @@ impl SessionManager {
 
     /// Whether this session asks for its removals set aside again on its own
     /// ([`REQUEUE_SET_ASIDE_REMOVALS`], or a test's word for one session).
-    #[cfg_attr(
-        not(any(test, feature = "test-utils")),
-        allow(clippy::unused_self, clippy::missing_const_for_fn)
-    )]
     fn requeues(&self) -> bool {
         #[cfg(any(test, feature = "test-utils"))]
         if self.requeues_for_test.load(Ordering::SeqCst) {
@@ -10557,10 +10550,6 @@ impl SessionManager {
 
     /// Whether the engine is asked for the Welcomes it owes; not while a test
     /// has it refusing ([`StoreFault::SentWelcome`]).
-    #[cfg_attr(
-        not(any(test, feature = "test-utils")),
-        allow(clippy::unused_self, clippy::missing_const_for_fn)
-    )]
     fn engine_answers_welcomes(&self) -> bool {
         #[cfg(any(test, feature = "test-utils"))]
         return self
