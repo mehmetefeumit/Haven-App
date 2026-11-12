@@ -1526,6 +1526,63 @@ the device's own log, the addresses it linked with.
 
 ## J. Open questions for the owner
 
+### Decided by the owner, 2026-11-12
+
+The six questions put to the owner after M3f, and what was answered. Each
+binds M3g and later units; the question's own text below is kept as the
+record of what was weighed.
+
+- **Q-10 — Android's own log lines: accepted, as (a), on conditions.** The
+  owner's words: Haven must do "everything to reduce this amount of
+  exposure as much as possible", for example "randomization of ALL
+  identifiers such that the debug logs do not mean anything to anyone who
+  has access to them"; "we cannot have **some** parts of the logs
+  anonymized if other parts cannot and therefore we need an all-or-nothing
+  approach"; "if the amount of information which the Bluetooth logs reveal
+  can be reduced, we should do that as much as possible as well"; and,
+  "since this is a system-level reality, we have to accept what we have
+  to". What that requires of M3g, before any adapter is written:
+  1. an inventory, per API level, of every line the platform's Bluetooth
+     classes write from Haven's process for the calls Haven makes, and of
+     every identifier in them (addresses in both roles, names, interface
+     and connection numbers, UUIDs);
+  2. for every identifier Haven's choices decide, the choice that leaves
+     nothing but a random, rotating value — this phone's address as an
+     advertiser and as the one that dials, no bonding or pairing (which
+     would exchange an identity address), no name, no data in the
+     advertisement — taken for all of them or the radio is not started:
+     never one identifier randomized beside another that is fixed;
+  3. no call that logs more than the link needs, where another call makes
+     the same link;
+  4. what is left, stated exactly — in `haven-core/SECURITY.md`, as a
+     declared deviation in the privacy manifest, in Rule 15's text (owner
+     to approve the wording, plan §16), and as one logscan rule scoped to
+     the platform's tags and message shapes and to nothing of Haven's.
+  The inventory and the levers are **not established yet**: they are
+  M3g's first step, researched against the platform's source and
+  documentation and confirmed independently before code.
+- **Q-11 (and Q-6) — the Bluetooth name: accept and disclose**; and, in the
+  owner's words, "if there is a way to remove/obfuscate this information,
+  do it". Disclosure is built (the intro sheet's name step, M3d/M3e).
+  Whether a way exists that is Haven's to take is M3g's to establish:
+  `setDiscoverable(false)` from API 34 is designed and unverified (§B.3);
+  renaming the phone's Bluetooth name (Q-6 (c)) changes a system setting
+  the user's other devices see, and is not taken without the owner's word.
+- **Q-13 — a linked stranger can keep the phone awake: accept and record.**
+  Recorded in §H; narrowed, not bounded, by M3f's review (a link or frame
+  the engine closes at once holds no lock).
+- **Q-2 — a keyless engine started by the service with no session: yes.**
+  As built in M3a (`radio_resume`) and M3f (`StartPolicy`).
+- **Q-1 — a draft pull request: yes, now**; "both the old and the new CI
+  steps" must be working.
+- **Emission times and relay times (plan §7.3, R1/R2): the conditional
+  guarantee is enough.** Session code runs no mesh timer (R1, built); the
+  unconditional form, in which only the radio's alarm ever serves a late
+  slot (R2), is not built and not owed.
+
+Still on the design's recommended default, the owner not having been
+asked again: Q-3, Q-4, Q-5, Q-7, Q-8, Q-9, Q-12.
+
 **Q-1. Open a draft pull request, and when?** Today no Kotlin can be
 compiled and no [J], [C] or [E] claim can be tested: CI runs only for pull
 requests to `main`. (Since M3f the pure Kotlin compiles and [J] runs

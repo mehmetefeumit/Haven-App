@@ -2974,6 +2974,19 @@ in the pump of its own frame, is told down with no close from the engine,
 so the hold for that frame stands; it gives a peer nothing a valid frame
 does not.
 
+Owner decisions, 2026-11-12 (recorded in full in
+`docs/BLUETOOTH_MESH_M3_DESIGN.md` §J, "Decided by the owner"): Android's
+own Bluetooth log lines are accepted as the platform's, on the condition
+that Haven reduces what they can show as far as it can and randomizes
+every identifier it decides, all of them or none; the Bluetooth name is
+accepted and disclosed, and removed or obscured if a way exists that is
+Haven's to take; a linked stranger keeping the phone awake is accepted and
+recorded; the service may start a keyless engine with no session; a draft
+pull request is opened now and every lane, old and new, must pass; and the
+conditional guarantee on emission times (R1) is enough, R2 not owed. None
+of the log or name levers is established yet: M3g begins with that
+research.
+
 ### Proposed CLAUDE.md wording (owner to approve)
 
 Each is the text as it stands, then the text proposed. Nothing in
