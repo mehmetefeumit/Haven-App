@@ -6923,7 +6923,7 @@
     {
       "id": "INV-P-A-KEY-THE-USER-ENTERS-IS-LOOKED-UP-AND-SAID-SO",
       "title": "Entering someone's key on an invite screen looks up their published name and photo, and the typed row says exactly who learns what.",
-      "statement": "Owner-directed 2026-11-12 (docs/MEMBER_PICKER_PLAN.md §10 D2, reversing 'no picture until the person is selected'). A complete, valid npub typed or pasted into the invite search, or staged by the paste button, Done or a QR scan, is resolved through resolve_stranger_profile: the same single-author REQ a member lookup issues, to the one or two relays that author's assignment allows, with no signer. A key that has not resolved is asked again each time it is entered, past the miss backoff a background refresh honours, and after a relay answered without a profile the next entry asks the other of the two. Whenever the device's own directory can answer it does and nothing is asked: a key already in the local directory is named from it, and a directory read that is degraded, failed or still on its first load asks nothing, because 'not already known locally' cannot be judged from a read that did not complete. A key that resolved with no picture cached then has its picture fetched once (strangerPictureProvider → downloadMemberPictures), from the HTTPS URL its own kind-0 names, through the anti-SSRF filter and re-encode — never as part of the lookup, so the name is not held back, and never for a key that did not resolve or was abandoned before it did. That photo host is chosen by the person, so it learns this device's network address and when it asked, and a person can publish a URL unique to themselves. memberPickerStrangerLookupNote on the typed row discloses both: a relay Haven asked — two at most, the two that key's assignment allows — sees this device ask about this key now, unsigned and so not tied to the Haven identity, and a published photo is downloaded from the server the person chose, which sees this device's network address. Opening the picker, and filtering it, still ask nothing. Not covered: a staged row (paste button, Done, QR) shows no note of its own — staging is the user's decision to invite that person, whose photo a roster refresh fetches once they are a member; this is an owner-reviewable choice. This becomes false if the lookup batches authors, fans out past the two assigned relays, downloads a picture for a key that did not resolve, or asks about a key the local directory holds.",
+      "statement": "Owner-directed 2026-11-12 (docs/MEMBER_PICKER_PLAN.md §10 D2, reversing 'no picture until the person is selected'). A complete, valid npub typed or pasted into the invite search, or staged by the paste button, Done or a QR scan, is resolved through resolve_stranger_profile: the same single-author REQ a member lookup issues, to the one or two relays that author's assignment allows, with no signer. A key that has not resolved is asked again each time it is entered, past the miss backoff a background refresh honours, and after a relay answered without a profile the next entry asks the other of the two. Whenever the device's own directory can answer it does and nothing is asked: a key already in the local directory is named from it, and a directory read that is degraded, failed or still on its first load asks nothing, because 'not already known locally' cannot be judged from a read that did not complete. A key that resolved with no picture cached then has its picture fetched once (strangerPictureProvider → downloadMemberPictures), from the HTTPS URL its own kind-0 names, through the anti-SSRF filter and re-encode — never as part of the lookup, so the name is not held back, and never for a key that did not resolve or was abandoned before it did. That photo host is chosen by the person, so it learns this device's network address and when it asked, and a person can publish a URL unique to themselves. memberPickerStrangerLookupNote on the typed row discloses both: a relay Haven asked — two at most, the two that key's assignment allows — sees this device ask about this key now, unsigned and so not tied to the Haven identity, and a published photo is downloaded from the server the person chose, which sees this device's network address. Opening the picker, and filtering it, still ask nothing. A staged row (paste button, Done, QR, or a tap on the typed row) whose key was looked up shows the same note beneath it, in the same style and in its spoken label, whether or not a profile resolved (owner-directed 2026-11-12) — set by the very branch of stagedMemberIdentityProvider that asks, so the note cannot drift from the lookup; a staged co-member named from the directory, and a key behind a degraded or unfinished directory read, show none, because nothing was asked. The note follows the directory read the row is built from: a staged stranger who later appears in the directory is shown from it, and a directory refresh that comes back degraded drops the looked-up name and note with it, as on the typed row. This becomes false if the lookup batches authors, fans out past the two assigned relays, downloads a picture for a key that did not resolve, asks about a key the local directory holds, or a staged row built from a directory read that leads it to ask shows no note.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
@@ -6985,6 +6985,30 @@
         {
           "file": "haven/test/pages/circles/create_circle_page_test.dart",
           "name": "CS5. pasting a co-member's npub asks no relay about them"
+        },
+        {
+          "file": "haven/test/providers/stranger_profile_provider_test.dart",
+          "name": "a stranger is marked looked up from the moment relays are asked, whether or not a profile resolves"
+        },
+        {
+          "file": "haven/test/providers/stranger_profile_provider_test.dart",
+          "name": "a co-member, and a stranger behind a degraded directory, are not marked looked up"
+        },
+        {
+          "file": "haven/test/pages/circles/create_circle_page_test.dart",
+          "name": "CS10. a stranger staged by the paste button carries the lookup note under their row, as the typed row does"
+        },
+        {
+          "file": "haven/test/pages/circles/create_circle_page_test.dart",
+          "name": "CS11. a co-member staged by the paste button carries no lookup note"
+        },
+        {
+          "file": "haven/test/pages/circles/add_member_page_test.dart",
+          "name": "S7. a stranger staged by the paste button carries the lookup note under their row, even when no profile resolves"
+        },
+        {
+          "file": "haven/test/pages/circles/add_member_page_test.dart",
+          "name": "S8. a co-member staged by the paste button carries no lookup note"
         },
         {
           "file": "haven/rust_builder/src/api.rs",

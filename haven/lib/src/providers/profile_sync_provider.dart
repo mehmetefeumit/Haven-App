@@ -50,6 +50,10 @@ class OwnProfileSyncController extends Notifier<void>
   /// by a pass that completes and by a resume.
   bool _failureRetryArmed = false;
 
+  /// Whether the fallback fired while a pass was in flight, and is honoured
+  /// when that pass settles instead of being spent on a no-op.
+  bool _fallbackOwed = false;
+
   /// The wait before the one retry after a pass that threw while the ladder
   /// still reads due — a throw before Rust recorded an attempt.
   static const _failureRetryDelay = Duration(seconds: 30);
@@ -60,6 +64,7 @@ class OwnProfileSyncController extends Notifier<void>
     _queued = false;
     _disposed = false;
     _failureRetryArmed = false;
+    _fallbackOwed = false;
     WidgetsBinding.instance.addObserver(this);
     ref.onDispose(() {
       _disposed = true;
@@ -81,6 +86,7 @@ class OwnProfileSyncController extends Notifier<void>
     } else {
       _timer?.cancel();
       _timer = null;
+      _fallbackOwed = false;
     }
   }
 
@@ -109,9 +115,14 @@ class OwnProfileSyncController extends Notifier<void>
     } finally {
       _inFlight = false;
       final queued = _queued;
+      final owed = _fallbackOwed;
       _queued = false;
+      // A queued pass is itself the attempt the fallback was for.
+      _fallbackOwed = false;
       if (queued && !_disposed) {
         unawaited(sync());
+      } else if (owed && !_disposed) {
+        unawaited(retryIfPending());
       }
     }
   }
@@ -123,7 +134,9 @@ class OwnProfileSyncController extends Notifier<void>
   /// When pending but not yet due it arms the retry timer instead. While a
   /// sync is in flight it does nothing: it neither starts nor queues another,
   /// and that pass arms the timer itself when it ends.
-  Future<void> retryIfPending() async {
+  Future<void> retryIfPending() => _retryIfPending();
+
+  Future<void> _retryIfPending({bool fallback = false}) async {
     if (_disposed) return;
     final ProfilePendingState pendingState;
     try {
@@ -136,7 +149,17 @@ class OwnProfileSyncController extends Notifier<void>
       );
       return;
     }
-    if (_disposed || _inFlight) return;
+    if (_disposed) return;
+    if (_inFlight) {
+      // That pass, if it throws too, finds the streak's fallback spent and
+      // arms nothing, so the fallback is held for when it settles — unless
+      // the app was paused during the read above, which drops it.
+      if (fallback &&
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+        _fallbackOwed = true;
+      }
+      return;
+    }
     if (pendingState.pending && pendingState.retryDue) {
       await sync();
       return;
@@ -179,6 +202,7 @@ class OwnProfileSyncController extends Notifier<void>
       return;
     }
     final int wait;
+    final fallback = s.retryDue;
     if (!s.retryDue) {
       final next = s.nextRetryInSecs;
       if (next == null) return;
@@ -194,7 +218,7 @@ class OwnProfileSyncController extends Notifier<void>
       if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
         return;
       }
-      unawaited(retryIfPending());
+      unawaited(_retryIfPending(fallback: fallback));
     });
   }
 }

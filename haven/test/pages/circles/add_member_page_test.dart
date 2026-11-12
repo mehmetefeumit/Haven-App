@@ -14,6 +14,7 @@ import 'dart:typed_data';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
@@ -1737,6 +1738,100 @@ void main() {
         fieldFocus().hasPrimaryFocus,
         isTrue,
         reason: 'the tapped row is gone, so focus left there is focus lost',
+      );
+    });
+
+    /// Stages [npub] through the picker's paste button.
+    Future<void> pasteStaging(
+      WidgetTester tester,
+      String npub,
+      MockProfileService profiles,
+    ) async {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async => call.method == 'Clipboard.getData'
+            ? <String, dynamic>{'text': npub}
+            : null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: _overrides(
+            mockRelay: MockRelayService(
+              keyPackageResult: _makeKp(_newMemberHex),
+            ),
+            mockCircle: MockCircleService(),
+            directory: _aliceDirectory(),
+            profileService: profiles,
+          ),
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: AddMemberPage(circle: _makeCircle()),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.clipboard));
+      await tester.pumpAndSettle();
+    }
+
+    String lookupNote(WidgetTester tester) =>
+        l10nOf(tester, AddMemberPage).memberPickerStrangerLookupNote;
+
+    testWidgets('S7. a stranger staged by the paste button carries the lookup '
+        'note under their row, even when no profile resolves', (tester) async {
+      final handle = tester.ensureSemantics();
+      final profiles = MockProfileService();
+      await pasteStaging(tester, _newMemberNpub, profiles);
+
+      final note = lookupNote(tester);
+      expect(
+        find.descendant(
+          of: find.byType(PendingMemberTile),
+          matching: find.text(note),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .getSemantics(find.bySemanticsLabel(RegExp('^\u2068npub ')))
+            .label,
+        endsWith(', $note'),
+        reason: 'the disclosure is spoken in the row label, not a hint',
+      );
+      expect(
+        profiles.methodCalls.where(
+          (c) => c.method == 'resolveTypedStrangerProfile',
+        ),
+        hasLength(1),
+      );
+      handle.dispose();
+    });
+
+    testWidgets('S8. a co-member staged by the paste button carries no lookup '
+        'note', (tester) async {
+      final profiles = MockProfileService();
+      await pasteStaging(tester, _aliceNpub, profiles);
+
+      expect(
+        find.descendant(
+          of: find.byType(PendingMemberTile),
+          matching: find.text('Alice Aardvark'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text(lookupNote(tester)), findsNothing);
+      expect(
+        profiles.methodCalls.where(
+          (c) => c.method == 'resolveTypedStrangerProfile',
+        ),
+        isEmpty,
       );
     });
 

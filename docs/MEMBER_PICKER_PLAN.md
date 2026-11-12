@@ -1318,11 +1318,11 @@ fetched."* What ships:
   (`stagedMemberIdentityProvider`): a co-member is answered from the local
   directory with **no** request; anyone else gets the same single lookup (the
   typed row's, reused when it is still in flight) and the same picture
-  download. The naming step's confirmation chips show the same name. **There
-  is no inline disclosure note on a staged row**: staging is the user's
-  commitment to invite that person, whose photo would be fetched once they are
-  a member anyway. **Owner-reviewable:** this is a choice made in
-  implementation, not one the owner stated.
+  download. The naming step's confirmation chips show the same name. **A
+  staged row whose person was looked up shows the typed row's disclosure note**
+  beneath it and in its spoken label, found or not; a co-member named from the
+  directory shows none. (Resolved, owner-directed 2026-11-12: this replaced an
+  implementation-time choice to show no note on a staged row.)
 
 **The trade-off, plainly.** Typing, pasting or scanning someone's key — even
 without adding them — now makes this device download their photo from a server
@@ -1331,7 +1331,7 @@ moment of the lookup (not the Haven identity: the GET carries no key and no
 signature). Because the person controls the URL, they can make it unique to
 the one key they handed out and use it as a **tracking pixel**: a hit on it
 tells them that key was just typed, from that address. `memberPickerStrangerLookupNote`
-discloses the download on the typed row. The relay half: two relays at most —
+discloses the download on the typed row and on a looked-up staged row. The relay half: two relays at most —
 the two that key's assignment allows. A key typed again after a relay
 answered without a profile is asked of the other one.
 

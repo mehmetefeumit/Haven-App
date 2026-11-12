@@ -79,6 +79,7 @@ class StagedMemberTile extends ConsumerWidget {
       status: status,
       pubkeyHex: identity?.pubkeyHex,
       name: identity?.name,
+      lookedUp: identity?.lookedUp ?? false,
       errorMessage: errorMessage,
       onRemove: onRemove,
       onRetry: onRetry,

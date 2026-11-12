@@ -133,6 +133,9 @@ class MockProfileService implements ProfileService {
   /// When set, [syncOwnProfile] blocks on this until it completes.
   Completer<void>? syncOwnProfileGate;
 
+  /// When set, [pendingSyncState] blocks on this until it completes.
+  Completer<void>? pendingSyncStateGate;
+
   /// Set to make [syncOwnProfile] throw.
   bool shouldThrowOnSyncOwnProfile = false;
 
@@ -261,6 +264,7 @@ class MockProfileService implements ProfileService {
   @override
   Future<ProfilePendingState> pendingSyncState() async {
     methodCalls.add((method: 'pendingSyncState', args: const {}));
+    await pendingSyncStateGate?.future;
     if (shouldThrowOnPendingSyncState) throw _genericError;
     return nextPendingState;
   }

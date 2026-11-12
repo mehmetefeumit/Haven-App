@@ -2055,6 +2055,7 @@ void main() {
       Locale locale = const Locale('en'),
       TextScaler textScaler = TextScaler.noScaling,
       VoidCallback? onRetry,
+      bool lookedUp = false,
     }) async {
       await tester.pumpWidget(
         ProviderScope(
@@ -2078,6 +2079,7 @@ void main() {
                     status: status,
                     name: name,
                     pubkeyHex: pubkeyHex,
+                    lookedUp: lookedUp,
                     onRemove: () {},
                     onRetry: onRetry,
                   ),
@@ -2235,7 +2237,8 @@ void main() {
     for (final locale in const [Locale('de'), Locale('ar')]) {
       testWidgets(
         'at 2x on a 320dp phone in ${locale.languageCode} the row does not '
-        'overflow and the key wraps unclipped, left to right',
+        'overflow, with the lookup note, and the key wraps unclipped, left '
+        'to right',
         (tester) async {
           tester.view.devicePixelRatio = 1.0;
           tester.view.physicalSize = const Size(320, 568);
@@ -2250,9 +2253,14 @@ void main() {
             locale: locale,
             textScaler: const TextScaler.linear(2),
             onRetry: () {},
+            lookedUp: true,
           );
 
           expect(tester.takeException(), isNull);
+          expect(
+            find.text(l10nOf(tester).memberPickerStrangerLookupNote),
+            findsOneWidget,
+          );
           final npub = tester.renderObject<RenderParagraph>(
             find.text(shortNpub(otherNpub)),
           );
