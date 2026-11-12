@@ -16,6 +16,18 @@ maintenance cost in the repository, and an explanation the app cannot keep
 accurate is worse than none. A different way to inform the user may be built
 later; nothing here reserves this one.
 
+## The How It Works page (owner directive, 2026-11-12)
+
+Settings → How It Works is that different way: one plain-language page, its
+`howItWorks*` strings in all 13 locales, written at the level of design and
+protocol so that ordinary code changes do not falsify it. It is a claim
+surface like any other. Every paragraph that promises something is an
+assertion under the invariant whose tests prove it, and its closing "What Haven
+can't hide" paragraphs are disclosures under the deviations they describe
+(network-address visibility and linking, traffic metadata, the Haven-only
+location pool, the threat-model boundary). The ratchet therefore keeps those
+disclosures from being dropped, exactly as for the consent dialog.
+
 What that changes, precisely:
 
 * **No `privacy*` ARB key exists.** Rule 12 still classifies every user-visible
@@ -78,11 +90,15 @@ no longer wired fails.
 you have accepted deviating from. The second half of that rule — *and at least
 one disclosure*, so that no deviation is recorded which the user was never told
 about — was dropped on 2026-08-29 when the surface that carried every
-deviation's disclosure was deleted; 9 of the accepted-deviation invariants now
-carry none. What that rule bought is not recoverable by CI while there is no
-explanation surface: the honest statement is that these costs are recorded here
-and in `SECURITY.md`, and are not told to the user. Restoring the requirement is
-the first thing to do if an explanation surface returns.
+deviation's disclosure was deleted; 9 of the accepted-deviation invariants then
+carried none. The How It Works page brought that to 6, but the requirement
+itself was NOT restored when it arrived: the owner scoped the page to a
+non-technical overview that does not go stale, and the six still undisclosed
+(no periodic re-key, `INV-E-NO-PERIODIC-REKEY` and `INV-K-M5-SELF-UPDATE-DISABLED`,
+and the profile-plane P1, P2, P3 and P5) are internals that page deliberately
+leaves out. Those costs are recorded here and in `SECURITY.md`, and are not told
+to the user. Whether to restore the requirement, and where those six would be
+told, is an open owner decision.
 
 Each declared deviation mirrors a section of some document in this repository,
 and rule 15 checks that the citation resolves — but **not that the document is

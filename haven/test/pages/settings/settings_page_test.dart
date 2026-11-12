@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/location.dart';
+import 'package:haven/src/pages/settings/how_it_works_page.dart';
 import 'package:haven/src/pages/settings/settings_page.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/widgets/widgets.dart';
@@ -52,7 +53,20 @@ void main() {
     expect(find.text('Location'), findsOneWidget);
     expect(find.text('Map style'), findsOneWidget);
     expect(find.text('Appearance'), findsOneWidget);
+    expect(find.text('How It Works'), findsOneWidget);
     expect(find.text('About'), findsOneWidget);
+  });
+
+  testWidgets('the How It Works row opens the How It Works page', (
+    tester,
+  ) async {
+    await tester.pumpWidget(build());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('How It Works'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(HowItWorksPage), findsOneWidget);
   });
 
   testWidgets('every hub row but Location is title-only', (tester) async {

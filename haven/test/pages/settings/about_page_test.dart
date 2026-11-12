@@ -3,7 +3,9 @@
 /// About carries only identity, attribution and legal content. The negative
 /// assertions below are the guard that the removed privacy explainer does not
 /// creep back in: copy across 13 locales is how the claims drifted out of sync
-/// with the code in the first place.
+/// with the code in the first place. The high-level overview that replaced it
+/// lives on `HowItWorksPage`, with each claim registered in the privacy
+/// manifest.
 library;
 
 import 'package:flutter/material.dart';
@@ -62,7 +64,7 @@ void main() {
   testWidgets('no longer carries the privacy disclosures', (tester) async {
     await pumpLocalized(tester, const AboutPage());
 
-    // The explainer was removed from the app outright; if any of it reappears
+    // The detailed explainer was removed from the app; if any of it reappears
     // here it has to be kept accurate again in thirteen languages.
     expect(find.text('Who can see what'), findsNothing);
     expect(find.textContaining('Relay operators'), findsNothing);

@@ -4,8 +4,10 @@
 /// OpenStreetMap/Stadia attribution links, and the version footer.
 ///
 /// The privacy and technology explanations that used to live here were removed
-/// from the app (owner decision, 2026-08-29): keeping that copy accurate across
-/// thirteen locales cost more than it returned. Do not reintroduce them here.
+/// (owner decision, 2026-08-29): keeping that copy accurate across thirteen
+/// locales cost more than it returned. A deliberately high-level overview now
+/// has its own page, `HowItWorksPage` (owner decision, 2026-11-12). Do not
+/// reintroduce explanations here.
 library;
 
 import 'package:flutter/material.dart';
