@@ -9,7 +9,7 @@
 //!
 //! Real MDK engines over `SQLCipher` stores; the transport is scripted
 //! ([`ScriptedFanout`]) and sends nothing, so no relay is ever dialled. The
-//! only real time paid is the engine's own announced deadline in the two tests
+//! only real time paid is the engine's own announced deadline in the tests
 //! that need a received proposal or commit applied
 //! (`docs/MDK_UPSTREAM_TRACKER.md` T-CONVERGENCE-CLOCK).
 
@@ -28,7 +28,8 @@ use haven_core::nostr::mls::{SessionManager, StorageConfig};
 use haven_core::relay::fanout::scripted::{Answer, ScriptedFanout};
 use haven_core::relay::fanout::UnrecordedPublisher as _;
 use haven_core::relay::fanout::{
-    disown_for_test, drive_one, is_owned, DriveMode, FanoutClock, FanoutStatus,
+    disown_for_test, drive_one, is_owned, DriveMode, FanoutClock, FanoutStatus, LocationSeal,
+    SendHeld,
 };
 use haven_core::relay::{RelayError, RelayManager};
 use helpers::{assert_no_needles, capture_haven_log, setup_circle, CircleFixture, CircleMember};
@@ -2170,23 +2171,10 @@ async fn traffic_buffered_behind_a_pending_commit_is_delivered_by_either_resolut
     }
 }
 
-/// A commit every relay refused is gone for good, and the circle goes on: a
-/// peer's commit from the same epoch is applied over it.
-#[tokio::test]
-async fn a_peers_commit_from_the_same_epoch_applies_after_a_rollback() {
-    let fx = setup_circle(3, &[ONE]).await;
-    let (admin, peer, leaver) = (fx.admin(), &fx.members[1], &fx.members[2]);
-    let id = the_one_fanout(
-        admin
-            .session()
-            .update_relays_staging(&fx.group, vec![TWO.to_string()], STAGED_AT)
-            .await
-            .expect("a relay change is staged"),
-    );
-    let refusing = answering(&[(ONE, &[Answer::Refused])]);
-    assert_eq!(drive(&fx, &refusing, &id).await, FanoutStatus::RolledBack);
-
-    // The other member evicts a leaver from the epoch the rollback returned to.
+/// The leaver's eviction a peer committed from `fx`'s current epoch, with the
+/// leave proposal it commits.
+async fn a_peers_eviction(fx: &CircleFixture) -> (nostr::Event, nostr::Event) {
+    let (peer, leaver) = (&fx.members[1], &fx.members[2]);
     let leave = leaver
         .session()
         .leave_group(&fx.group)
@@ -2197,7 +2185,6 @@ async fn a_peers_commit_from_the_same_epoch_applies_after_a_rollback() {
         .into_iter()
         .next()
         .expect("the leave proposal");
-    let mut eviction = None;
     let ingested = peer
         .session()
         .process_event(&proposal)
@@ -2208,19 +2195,23 @@ async fn a_peers_commit_from_the_same_epoch_applies_after_a_rollback() {
         ScreenedIngest::RejectedBeforeAuth(_) => panic!("rejected"),
     };
     for _ in 0..8 {
-        if let Some(found) = batches
-            .iter()
-            .flat_map(|batch| &batch.publish)
-            .find_map(|work| match work {
-                PublishWork::AutoPublish { msg, pending } => Some((
-                    SessionManager::transport_message_to_event(msg).expect("a commit"),
-                    *pending,
-                )),
-                _ => None,
-            })
+        if let Some((commit, pending)) =
+            batches
+                .iter()
+                .flat_map(|batch| &batch.publish)
+                .find_map(|work| match work {
+                    PublishWork::AutoPublish { msg, pending } => Some((
+                        SessionManager::transport_message_to_event(msg).expect("a commit"),
+                        *pending,
+                    )),
+                    _ => None,
+                })
         {
-            eviction = Some(found);
-            break;
+            peer.session()
+                .confirm_published(pending)
+                .await
+                .expect("the peer confirms");
+            return (proposal, commit);
         }
         let wait = peer
             .session()
@@ -2234,11 +2225,49 @@ async fn a_peers_commit_from_the_same_epoch_applies_after_a_rollback() {
             .await
             .expect("advance")];
     }
-    let (commit, pending) = eviction.expect("the peer staged the eviction");
-    peer.session()
-        .confirm_published(pending)
+    panic!("the peer never staged the eviction");
+}
+
+/// What the driver's seal answers for `member`'s circle now.
+async fn driver_seal(member: &CircleMember, group: &GroupId) -> Result<nostr::Event, SendHeld> {
+    let (transport, outbox, clock) = (
+        ScriptedFanout::default(),
+        helpers::drive::Recorder::acking(true),
+        helpers::drive::ManualClock::at(0),
+    );
+    match helpers::drive::through(&transport, &outbox, &clock, &DriveMode::Full)
+        .seal_location(
+            &member.circle,
+            group,
+            &haven_core::location::LocationMessage::new(51.5, -0.12),
+        )
         .await
-        .expect("the peer confirms");
+        .expect("the seal runs")
+        .seal
+    {
+        LocationSeal::Sealed { event, .. } => Ok(*event),
+        LocationSeal::Deferred(held) => Err(held),
+    }
+}
+
+/// A commit every relay refused is gone for good, and the circle goes on: a
+/// peer's commit from the same epoch is applied over it.
+#[tokio::test]
+async fn a_peers_commit_from_the_same_epoch_applies_after_a_rollback() {
+    let fx = setup_circle(3, &[ONE]).await;
+    let (admin, peer) = (fx.admin(), &fx.members[1]);
+    let id = the_one_fanout(
+        admin
+            .session()
+            .update_relays_staging(&fx.group, vec![TWO.to_string()], STAGED_AT)
+            .await
+            .expect("a relay change is staged"),
+    );
+    let refusing = answering(&[(ONE, &[Answer::Refused])]);
+    assert_eq!(drive(&fx, &refusing, &id).await, FanoutStatus::RolledBack);
+
+    // The other member evicts a leaver from the epoch the rollback returned to.
+    let (proposal, commit) = a_peers_eviction(&fx).await;
 
     let _ = admin
         .session()
@@ -2265,6 +2294,76 @@ async fn a_peers_commit_from_the_same_epoch_applies_after_a_rollback() {
             .is_empty(),
         "after a rollback the device did not follow the peer's commit",
     );
+}
+
+/// A peer's commit buffered behind this device's pending commit, and held
+/// again by a later page that still reads it as current, is released by
+/// either resolution: MDK replays it when the pending commit resolves, and
+/// records it then, so the hold waits on no refetch.
+#[tokio::test]
+async fn a_commit_buffered_behind_a_pending_commit_and_held_again_is_released_by_either_resolution()
+{
+    for (answer, expected) in [
+        (Answer::Refused, FanoutStatus::RolledBack),
+        (Answer::Accepted, FanoutStatus::Confirmed),
+    ] {
+        let fx = setup_circle(3, &[ONE]).await;
+        let (admin, peer, leaver) = (fx.admin(), &fx.members[1], &fx.members[2]);
+        let (proposal, eviction) = a_peers_eviction(&fx).await;
+        let id = the_one_fanout(
+            admin
+                .session()
+                .update_relays_staging(&fx.group, vec![TWO.to_string()], STAGED_AT)
+                .await
+                .expect("a relay change is staged"),
+        );
+        for event in [&proposal, &eviction] {
+            let _ = admin
+                .session()
+                .process_event(event)
+                .await
+                .expect("the admin's engine takes the event");
+        }
+        admin
+            .session()
+            .hold_pager_commits_for_test(&fx.group, &[eviction.id]);
+        assert!(
+            !admin.session().engine_processed(&eviction.id)
+                && admin.session().holds_unread_input_for_test(&fx.group),
+            "premise: the peer's commit is held, buffered raw behind the pending commit"
+        );
+
+        let resolved = drive(&fx, &answering(&[(ONE, &[answer])]), &id).await;
+        assert_eq!(resolved, expected);
+        assert!(
+            admin.session().engine_processed(&eviction.id),
+            "premise: MDK's replay at the resolution ({resolved:?}) recorded the commit"
+        );
+        assert!(
+            !admin.session().holds_unread_input_for_test(&fx.group),
+            "the hold outlived the replay that took the commit in ({resolved:?})"
+        );
+        serve_deadlines(admin, &fx.group).await;
+        let sealed = match driver_seal(admin, &fx.group).await {
+            Err(SendHeld::Nothing) => driver_seal(admin, &fx.group).await,
+            first => first,
+        }
+        .unwrap_or_else(|held| panic!("the seal is held after {resolved:?}: {held:?}"));
+        if answer == Answer::Refused {
+            // The peer's eviction is the only commit from the epoch.
+            assert_eq!(settled_member_count(admin, &fx.group).await, Some(2));
+            assert!(
+                !helpers::drive::reads(leaver, &sealed).await
+                    && helpers::drive::reads(peer, &sealed).await,
+                "after the rollback the seal is not on the peer's eviction"
+            );
+        } else {
+            // The admin's relay change is a privileged commit, which outranks
+            // the peer's eviction from the same epoch in MDK's branch
+            // selection: the leaver is still listed, its leave superseded.
+            assert_eq!(settled_member_count(admin, &fx.group).await, Some(3));
+        }
+    }
 }
 
 // ── The real classifier under the driver ─────────────────────────────────────

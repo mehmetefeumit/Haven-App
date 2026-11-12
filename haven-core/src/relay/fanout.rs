@@ -3079,8 +3079,12 @@ pub enum SendHeld {
     /// or retained rows MDK queues a send behind are still untried — a wake
     /// too short for the pre-send drain leaves them — or the engine could not
     /// be had for the send at all: input stranded in the circle is still
-    /// owed to it, or a rolled-back commit is not yet retired. The next call
-    /// carries on from there.
+    /// owed to it, or a rolled-back commit is not yet retired. Or this device
+    /// fetched input for the circle it has not taken in: a commit the
+    /// catch-up pager held back, which no ingest took in and the engine does
+    /// not record, or stored replay a live REQ holds until its relay's
+    /// `EOSE` (`SessionManager::holds_unread_input`). The next call carries
+    /// on from there.
     StoredInput,
     /// Nothing: whatever deferred the send was resolved in the call, and the
     /// next one is sealed.
@@ -4597,7 +4601,8 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
                 {
                     SendHeld::DepartureDue
                 }
-                None if session.send_gated(group_id).await
+                None if session.holds_unread_input(group_id)
+                    || session.send_gated(group_id).await
                     || session.deferred_peels_due(group_id).await =>
                 {
                     SendHeld::StoredInput

@@ -701,15 +701,28 @@ eleven independent diagnosticians, not a reconstruction of the owner's phone.
     `geolocator_location_service_test.dart`, and the refused-start restart in
     `location_provider_test.dart`.
 - **Open (not fixed here; recorded so they are not lost).**
-  1. **W5:** an orphanable in-memory `UnreadInput.pager` hold (`nostr/mls/manager.rs`) can keep every
-     seal of a circle `SendHeld::StoredInput` until a kill, while `circle_recovery` names no cause. It
-     stops sending only. On screen the banner reads publish-failing, but the circle card says healthy
-     and Repair cannot clear it.
-  2. **OS suspension in the stationary tier.** Under confirmed Always the indicator is off (OD1) and the
-     coarse tier sits at `kCLLocationAccuracyHundredMeters`, the boundary Apple DTS names for
-     continuous updates plus SLC. The "Downgraded hypotheses" entry below assumed the indicator was on;
-     whether this posture survives hours on a desk is unmeasured (V-P3-3), and changing it is an owner
-     decision.
+  1. **W5 — FIXED 2026-11-12.** An in-memory `UnreadInput.pager` hold (`nostr/mls/manager.rs`) set
+     after another plane's ingest had taken the commit in, or on a commit MDK replays when this
+     device's own pending commit resolves, could keep every seal of a circle `SendHeld::StoredInput`
+     until a kill while `circle_recovery` named no cause. `SessionManager::holds_unread_input` now
+     releases, at every seal and recovery read, a held commit the engine already records as
+     processed (`engine_processed`, read outside the hold's lock; a store fault keeps the hold), and
+     `Publishing::send_held` reads the hold, so the circle card names `StoredInput`. A commit no
+     ingest took in stays held, with no timeout. Tests: `commit_before_proposal_e2e`
+     `a_hold_set_after_another_plane_took_the_commit_in_never_holds_the_circle`,
+     `a_held_commit_no_ingest_took_in_still_holds_every_seal_and_recovery_read`,
+     `a_held_commit_is_read_as_stored_input_by_the_circles_recovery`; `fanout_driver_e2e`
+     `a_commit_buffered_behind_a_pending_commit_and_held_again_is_released_by_either_resolution`.
+  2. **OS suspension in the stationary tier — ADDRESSED 2026-11-12 (owner directive) as far as a
+     documented setting reaches.** Every tier is now inside one of Apple's two documented 16.4
+     conditions: the Precise tiers meet the shape (background updates, no distance filter, 100 m or
+     better — `kCLLocationAccuracyHundredMeters` is inside it, not at risk), and every other tier asks
+     for the indicator. The one cohort that was outside both, a confirmed Always with Precise Location
+     off, now keeps the indicator on (`indicatorRequested`; `docs/POWER_EFFICIENCY_PLAN.md` D2, amended).
+     What remains is not configurable: termination under memory or resource pressure, after which a
+     publish waits for the user to open Haven; an indicator that may only appear after the next
+     foreground→background transition following a Precise toggle made in Settings; and V-P3-3, still
+     unmeasured on a device.
   3. **No background notice — owner decision 2026-11-12: none.** Every verdict is derived on the
      next foreground and nothing notifies a backgrounded user that sharing stopped; do not add a
      local notification for it.
@@ -740,6 +753,16 @@ eleven independent diagnosticians, not a reconstruction of the owner's phone.
   2026-08-20. See `docs/M7_BACKGROUND_SHARING.md` §6 item 0a (DEFERRED, still authoritative) and
   `docs/POWER_EFFICIENCY_PLAN.md` §5.3 Risks / rollback for the containment and the one-line
   revert.
+  **Amended 2026-11-12 (owner directive) — inside Apple's documented conditions in every tier.** A
+  confirmed Always with Precise Location OFF was outside both alternatives: its `desiredAccuracy`
+  writes have no effect (the accuracy is always reduced, kilometre-scale), so the shape was doubtful,
+  and the indicator was off. It now keeps the indicator on (`indicatorRequested = !alwaysConfirmed ||
+  accuracyAuthorization == .reducedAccuracy`), so every tier meets one alternative or the other. The
+  residual is what no setting covers: termination under memory or resource pressure (and no publish
+  until the user reopens Haven), plus an indicator that may only appear after the next
+  foreground→background transition following a Precise toggle made in Settings. The revert lever, if
+  the shape-only posture ever fails on a device, is that indicator flag, not the activity session
+  (`docs/M7_BACKGROUND_SHARING.md` §6 0a).
 - **Android Doze / wake lock** — see C6.
 - **`circlesProvider` cached `[]` during the handoff window** — requires a provider
   re-evaluation while `_handoffHolds`, which nothing normally triggers on Android (engine

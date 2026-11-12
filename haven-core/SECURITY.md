@@ -3479,16 +3479,26 @@ epoch moved, stably, to the front.
     with any answer but a want of room (processed, rejected by the protocol,
     invalidated, buffered or retained), so a commit the engine rejects never
     holds sharing back; MDK's `ResourceRefused`, its want of room, is not
-    such an answer and leaves the hold standing. No pass that completes
-    without it ends the hold, and a join of the group anew — a Welcome
-    accepted over a removed copy, or a replacement offer consented to — ends
-    every hold of the copy it replaced. While the
-    cursor is held below a deferred commit every sweep fetches it again, and
-    the live plane's REQ from the cursor asks for it too. A relay that served
-    it and then withholds it from every plane keeps the hold — fail closed,
-    never silent: every seal answers `SendHeld::StoredInput` — until it is
-    taken in or the process restarts (the hold is in memory, and nothing
-    fetched survives a restart).
+    such an answer and leaves the hold standing. Or until the engine's record
+    shows one already did, read at every seal and every recovery read: a
+    hold set after another plane's ingest took the commit in, or a commit
+    MDK replays when this device's pending commit resolves, waits on no
+    refetch, which could only answer `Duplicate`. MDK writes that record
+    when it admits a commit to convergence, before a verdict, so recorded is
+    not applied: a commit still unresolved holds the circle through the
+    engine's own send gate (`send_gated`), not through this hold. A commit
+    buffered raw behind this device's own pending commit (until its
+    resolution replays it), refused for want of room, or deferred unpeeled
+    has no record and stays held. No pass that completes without it ends
+    the hold, and a join of the group anew — a Welcome accepted over a
+    removed copy, or a replacement offer consented to — ends every hold of
+    the copy it replaced. While the cursor is held below a deferred commit
+    every sweep fetches it again, and the live plane's REQ from the cursor
+    asks for it too. A relay that served it and then withholds it from every
+    plane keeps the hold — fail closed, never silent: every seal answers
+    `SendHeld::StoredInput` and the circle's recovery read names
+    `StoredInput` — until it is taken in or the process restarts (the hold
+    is in memory, and nothing fetched survives a restart); no time ends it.
   - *The live plane's*: whatever a REQ holds of its stored replay, counted
     under the lock its flush releases under, until it is taken in — at an
     endpoint's `EOSE` or `CLOSED`, a pause, the release of a relay silent
@@ -3505,6 +3515,10 @@ epoch moved, stably, to the front.
   `a_pass_that_completes_without_the_held_commit_never_ends_the_hold`,
   `a_held_commit_the_live_plane_takes_in_ends_the_hold`,
   `a_held_commit_a_plain_ingest_takes_in_ends_the_hold`,
+  `a_hold_set_after_another_plane_took_the_commit_in_never_holds_the_circle`,
+  `a_commit_buffered_behind_a_pending_commit_and_held_again_is_released_by_either_resolution`,
+  `a_held_commit_no_ingest_took_in_still_holds_every_seal_and_recovery_read`,
+  `a_held_commit_is_read_as_stored_input_by_the_circles_recovery`,
   `no_location_is_sealed_while_a_live_req_holds_its_stored_replay`,
   `session::tests::a_relay_left_out_of_coverage_sends_no_stored_replay`).
 - **Refetch by id.** It orders what each REQ brings back.
