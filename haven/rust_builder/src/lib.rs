@@ -4,7 +4,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 // Allow frb macro cfg attribute
 #![allow(unexpected_cfgs)]
-// `unsafe` is written in the two modules allowed below and nowhere else in
+// `unsafe` is written in the three modules allowed below and nowhere else in
 // this crate (`scripts/ci/check_mesh_radio.sh`).
 #![deny(unsafe_code)]
 
@@ -19,6 +19,12 @@ pub mod api;
 mod mesh_jni;
 #[cfg(any(target_os = "android", test))]
 mod mesh_radio;
+// The log lever, for the radio's service to put in before its first
+// Bluetooth object: a symbol lookup, a C callback and calls through function
+// pointers, each `unsafe`. What it decides is `api.rs`'s, under the deny.
+#[cfg(any(target_os = "android", test))]
+#[allow(unsafe_code)]
+mod log_lever;
 
 // Test-only in-memory keyring backend. Compiled exclusively in debug builds
 // — release callers see only the stub in `api.rs` that returns an error.

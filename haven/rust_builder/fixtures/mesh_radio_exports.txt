@@ -24,6 +24,10 @@
 # peer is not known, and `sighting` and `connectFailed` do nothing with one.
 # A link's number crosses bit for bit, and comes back so in what `poll`
 # answers.
+#
+# The last two are the log lever's (§N.1.5; `log_lever.rs`), not the engine's:
+# `leverInstall` answers false where this Android has no lever, `leverHolds`
+# whether it is in force.
 
 resume (J)Z jlong jboolean
 leftMs ()J - jlong
@@ -34,3 +38,5 @@ connectFailed (J)V jlong -
 receive (J[B)V jlong,JByteArray -
 poll ([J)[B JLongArray jbyteArray
 wakeInMs ()J - jlong
+leverInstall ()Z - jboolean
+leverHolds ()Z - jboolean

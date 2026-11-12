@@ -3516,8 +3516,9 @@ and
 
 A radio drives the engine through nine functions of the bridge crate
 (`radio_*` in `haven/rust_builder/src/api.rs`;
-`docs/BLUETOOTH_MESH_M3_DESIGN.md` §A). They are no part of the generated
-bridge and Dart cannot call them. An Android build exports them to the
+`docs/BLUETOOTH_MESH_M3_DESIGN.md` §A), and two more put in and check the
+log lever ("The log lever", below). They are no part of the generated
+bridge and Dart cannot call them. An Android build exports the eleven to the
 radio's service through a JNI shim ("The shim", below); no Kotlin calls an
 export yet, and on no other target does anything call an entry.
 
@@ -3577,7 +3578,7 @@ export yet, and on no other target does anything call an entry.
   the service's word again, so that bound is the service's own stored
   deadline, which is not built.
 - **The shim**, two files of `haven/rust_builder/src`, built for Android and
-  into the host's test build. `mesh_jni.rs` holds the nine
+  into the host's test build. `mesh_jni.rs` holds the eleven
   `extern "system"` functions, one for each native method of the Kotlin
   class `com.oblivioustech.haven.mesh.MeshNative`, pinned with their JNI
   descriptors and Rust types in
@@ -3617,12 +3618,13 @@ export yet, and on no other target does anything call an entry.
   until that deadline, a turn-off, or the Dart side's reconcile, which finds
   a radio beside no engine, stops the radio and deletes the keys ("The Dart
   side" below); until then the statistics read off.
-- **`unsafe`.** The bridge crate denies `unsafe_code` and allows it on two
-  modules: the generated bridge, and `mesh_jni.rs`, where the lint fires on
-  `#[no_mangle]`, which every export carries. The allowance covers the whole
+- **`unsafe`.** The bridge crate denies `unsafe_code` and allows it on
+  three modules: the generated bridge; `mesh_jni.rs`, where the lint fires on
+  `#[no_mangle]`, which every export carries; and `log_lever.rs` ("The log
+  lever", below). The allowance covers the whole
   module, so inside it the compiler reports no `unsafe` block and no second
   exported symbol either; that is why the file is held to `use`s and the
-  nine exports, each one forward — by `scripts/ci/check_mesh_radio.sh` and
+  eleven exports, each one forward — by `scripts/ci/check_mesh_radio.sh` and
   by `every_export_is_one_guarded_call` — and why everything else of the
   shim is in `mesh_radio.rs`, under the deny. Both of those read the text of
   the crate's `src/`: they stop ordinary erosion and make a deliberate one
@@ -3631,12 +3633,60 @@ export yet, and on no other target does anything call an entry.
   `RUSTFLAGS`, a `build.rs`: the crate has neither table nor script, the
   one `RUSTFLAGS` its Android build passes is a library search path, and
   nothing pins that). The check no way of writing the source gets past — the built
-  library's exported `Java_*` symbols against the nine of the fixture — is
-  owed by the first unit that builds the radio for Android. `api.rs` and
-  the test keyring compile under the deny too. `jni` is the 0.21
+  library's exported `Java_*` symbols against the eleven of the fixture and
+  the keyring's one — is `scripts/ci/check_mesh_radio_symbols.sh`, a step of
+  `build-check.yml` on each ABI's debug APK; it has run on no runner yet.
+  `api.rs` and the test keyring compile under the deny too. `jni` is the 0.21
   line `android-native-keyring-store` had already resolved: a direct
   dependency for Android and a dev-dependency for the host's type-check, one
   new edge in `haven/rust_builder/Cargo.lock` and no new package.
+- **The log lever** (`haven/rust_builder/src/log_lever.rs`;
+  `docs/BLUETOOTH_MESH_M3_DESIGN.md` §M.2, §N.1). Android's Bluetooth
+  classes log, from the app's own process and in every build, the address
+  of whatever connects; from Android 11 a process decides what its own log
+  calls write. The lever is a logger of Haven's own handed to the process's
+  `liblog`, for the radio's service to put in before it makes a Bluetooth
+  object. **Built and exported; nothing calls it, so it is in force in no
+  build, and it has run on no Android.** What the code does: `leverInstall`
+  finds five functions of `liblog` by name (`dlopen`, `dlsym`) — they exist
+  from API 30, and an import of one would stop the library, and so all of
+  Haven, loading on Android 6 to 10 — hands `liblog` the logger and, in a
+  release build, raises the process's minimum priority to FATAL behind it;
+  it answers `false` where a function is missing. The logger counts every
+  line it is handed. In a release build that is all it does: it reads
+  nothing of the line and writes none. In a debug build it reads the
+  message's size and at most the first eighteen bytes of its tag, never
+  past the tag's NUL and never its text, and hands the line on to the
+  platform's writer only when the tag is one of the runtime scanner's
+  `owned_tags` (`tooling/logscan/policy.toml`), or one and then `::`.
+  `leverHolds` hands the logger in force one empty line and answers whether
+  Haven's logger counted it and, in a release build, whether the minimum
+  priority still reads FATAL or above. The logger and what it calls log
+  nothing, format nothing, allocate nothing, take no lock, index nothing and
+  add nothing but a wrapping count, so there is no panic in it to unwind; it
+  is `extern "C"`, at which a panic would abort the process and never
+  unwind into `liblog`. The module's `unsafe` is eleven blocks, each with
+  its argument: the lookup and the cast of what it found, the read of a
+  message's size, tag pointer and tag bytes, and the five calls through
+  `liblog`'s functions. What it decides is in `api.rs`, under the deny
+  (`lever_owns`, `lever_line`, `lever_held`, `lever_writes_own`), and its
+  two entries run under `radio_guarded` like the others. `libc` is the
+  version the lockfile already held: a direct dependency for Android and a
+  dev-dependency for a Unix host's tests, one new edge and no new package.
+  Proof, on the host: `the_levers_tags_are_the_scanners`,
+  `a_tag_is_havens_when_it_is_an_entry_or_an_entry_and_two_colons`,
+  `a_release_build_reads_and_writes_no_line_and_a_debug_build_writes_only_havens`,
+  `the_lever_holds_when_its_logger_took_the_sentinel_and_a_release_builds_floor_stands`,
+  `the_levers_two_calls_answer_no_lever_off_android_and_nothing_else_reaches_it`,
+  `the_lever_holds_nothing_that_panics_allocates_or_locks`, the four tests
+  of `log_lever::tests`, and check 13 of `scripts/ci/check_mesh_radio.sh`.
+  **Not proved by anything yet:** that the five functions resolve on a
+  device; that the logger is the one in force after the call; that a
+  platform line is dropped; that a property set over `adb` does not bring
+  one back; the calls through `liblog`'s functions at all — a host has no
+  `liblog`, and the tests hand the logger its messages themselves. The
+  event, statistics and security buffers never pass through a logger: the
+  lever does not cover them (design N-1).
 
 Residuals. An entry with no session cannot delete a key or restart the twelve
 hours: at the deadline it drops the engine, and the keys wait for a session
@@ -3649,14 +3699,16 @@ service's word comes from — its own copy of the deadline — is not built, and
 whether a start with no session should exist at all is an open owner question
 (design Q-2): it is one function, `radio_resume`, its export `resume`, and
 their tests. Of the shim, what runs here is its conversions, the guard, and
-the seven calls that take no array, against the engine; `receive` and `poll`
-read a Java array, and they and every export need a JVM. That the nine link
+the seven calls that take no array, against the engine, and the lever's two,
+which answer that a host has none; `receive` and `poll`
+read a Java array, and they and every export need a JVM. That the eleven link
 under their names, are exported from the built library and answer a Kotlin
-caller, and that the Android configuration compiles at all — no Android
-target is installed where this was built — is proved by nothing until an
-Android build and an emulator lane run; and that build's own check
-(`cross-check.yml`) does not deny warnings, so dead code that exists only
-there would pass it. That a failed JNI call leaves no exception is read, not
+caller, and that the Android configuration compiles at all — the bridge
+crate was never built for Android where this was written; the lever's own
+file alone was type-checked for four Android ABIs — is proved by nothing
+until an Android build and an emulator lane run. That build's own check
+(`cross-check.yml`) is now clippy with warnings denied, as the host's is,
+and has not run. That a failed JNI call leaves no exception is read, not
 tested. When the JVM cannot allocate a poll's answer, the frame that poll
 took is spent and lost: its link ends when the peer refuses the next one.
 And a caught panic is silent in every build: the guard logs nothing — the
@@ -3686,9 +3738,9 @@ shim, `a_call_that_panics_under_the_guard_answers_its_no_engine_value_and_leaves
 `the_radio_entries_take_no_session`,
 `the_engine_lock_is_taken_only_where_nothing_can_be_awaited` and
 `the_mesh_entries_log_nothing_and_format_nothing`, the conversions' tests in
-`mesh_radio::tests`, and `scripts/ci/check_mesh_radio.sh` — the two files
-that may write `unsafe`, `extern` or an attribute that exports a symbol; the
-crate's deny and its two allowances; the exports' file as `use`s and exports
+`mesh_radio::tests`, and `scripts/ci/check_mesh_radio.sh` — the three files
+that may write `unsafe` or `extern`, two of them an attribute that exports
+a symbol; the crate's deny and its three allowances; the exports' file as `use`s and exports
 alone, each export one forward of its own parameters; the exports against
 the fixture; each call one guarded call of its entry; and a `JNIEnv` used
 for five calls and under no other name.

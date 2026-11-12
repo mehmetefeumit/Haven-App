@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # CI guard: the Bluetooth mesh's radio reaches Rust through a fixed list of JNI
-# exports that decide nothing, and the bridge crate writes `unsafe` in two
-# files (docs/BLUETOOTH_MESH_M3_DESIGN.md §A.6, F-8, F-14); and the radio's
-# Kotlin logs nothing, names its modes at one site and keeps its JVM tests
-# (§B.1, §B.8–B.10).
+# exports that decide nothing, and the bridge crate writes `unsafe` in three
+# files (docs/BLUETOOTH_MESH_M3_DESIGN.md §A.6, F-8, F-14, §N.1.1); and the
+# radio's Kotlin logs nothing, names its modes at one site and keeps its JVM
+# tests (§B.1, §B.8–B.10).
 #
 # Android's radio service drives the mesh engine through two files of
 # `haven/rust_builder/src`:
@@ -20,6 +20,18 @@
 #     export is one call that hands its parameters on.
 #   * `mesh_radio.rs` — what each export forwards to: the conversions, the one
 #     `radio_*` call under the panic guard, the answer. It is under the deny.
+#
+# And before it makes a Bluetooth object the service is to install the log
+# lever (§M.2, §N.1), a third file:
+#
+#   * `log_lever.rs` — five functions of the platform's `liblog` found by name
+#     at run time, a logger of Haven's own handed to it, and the check that it
+#     is the one in force. The deny is lifted for this module too, because a
+#     symbol lookup, a C callback and a call through a function pointer are
+#     each `unsafe`; so here as well the compiler reports nothing, and check
+#     13 reads the file in its place. What the lever decides — which tags are
+#     Haven's, what a build writes, what a check comes to — is `lever_*` in
+#     `api.rs`, under the deny.
 #
 # What a review of a later change can miss, none of it a compile error:
 #
@@ -40,8 +52,18 @@
 #     so nothing of the engine can reach Kotlin except as an export's answer.
 #
 #   * `unsafe` IS CONFINED. The crate denies `unsafe_code` and allows it on
-#     two modules: the generated bridge, and the exports' file. An allowance
-#     moved to the crate, or to `api.rs`, would compile.
+#     three modules: the generated bridge, the exports' file and the log
+#     lever. An allowance moved to the crate, or to `api.rs`, would compile.
+#
+#   * AN API-30 SYMBOL IMPORTED STOPS THE LIBRARY LOADING ON ANDROID 6 TO 10 —
+#     all of Haven there, not the mesh. The lever's five functions are
+#     therefore looked up with `dlsym`, never declared `extern`, and named in
+#     no other file; `android_log_sys`, which declares one ready to call, is
+#     named in none.
+#
+#   * THE LEVER'S LOGGER RUNS INSIDE THE PLATFORM'S LOG CALL, on whichever
+#     thread logs. A log call, a lock or an allocation there can deadlock or
+#     recurse, and an unwind out of it aborts the process.
 #
 # WHAT THIS GUARD IS. A reader of text, not the compiler. It stops ordinary
 # and careless erosion — an `unsafe` block added to `api.rs`, a helper grown
@@ -54,20 +76,24 @@
 # table and no `build.rs`, and the one `RUSTFLAGS` its Android build passes
 # is a library search path (cargokit); nothing here pins that. What no text
 # check stands in for is a check of the built library: that its exported
-# `Java_*` symbols are exactly the nine of the fixture (`nm -D`; owed below).
+# `Java_*` symbols are the eleven of the fixture and the keyring's one, and
+# that it imports no `__android_log_*` symbol newer than the oldest Android
+# Haven runs on — `check_mesh_radio_symbols.sh`, on the library
+# `build-check.yml` builds.
 #
 # How it reads Rust: line by line, with comments taken out by a small lexer
 # of its own — a `//` or `/*` inside a string is text, on whichever line the
 # string began; a raw string ends at its own hashes; a character literal is
 # taken whole and a lifetime or label is not one; block comments nest. That
 # is what the review plants needed, not the language's whole grammar. Checks:
-#   1. Under haven/rust_builder/src, outside `frb_generated.rs` and
-#      `mesh_jni.rs`: no keyword `unsafe`, no keyword `extern` (with an ABI
-#      string or bare), and no `no_mangle`, `export_name` or `link_section`.
+#   1. Under haven/rust_builder/src, outside `frb_generated.rs`,
+#      `mesh_jni.rs` and `log_lever.rs`: no keyword `unsafe`, no keyword
+#      `extern` (with an ABI string or bare), and no `no_mangle`,
+#      `export_name` or `link_section`.
 #   2. `lib.rs` carries `#![deny(unsafe_code)]`, and `unsafe_code` is named
-#      three times in the crate's hand-written source: that line, and one
-#      `#[allow(unsafe_code)]` directly above each of `mod frb_generated;` and
-#      `mod mesh_jni;`.
+#      four times in the crate's hand-written source: that line, and one
+#      `#[allow(unsafe_code)]` directly above each of `mod frb_generated;`,
+#      `mod mesh_jni;` and `mod log_lever;`.
 #   3. `mesh_jni.rs` is exactly `use`s and exports. Every line of code belongs
 #      to a `use …;` or to an item of the one shape — `#[no_mangle]` directly
 #      above `pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_<name>(`
@@ -96,14 +122,15 @@
 #      or `thread_local`. Its tests are the one `#[cfg(test)]` directly above
 #      `mod tests {`, and nothing follows them: this check reads no further,
 #      so nothing that ships may sit there.
-#   6. The ways found so far of building one of the two modules from a file
-#      other than the one read above: no file of the crate's hand-written
+#   6. The ways found so far of building one of the three modules from a
+#      file other than the one read above: no file of the crate's hand-written
 #      source writes `path` and an `=` where an attribute's argument starts
 #      (`#[path = …]`, bare, under `cfg_attr` or from a macro; a variable
-#      named `path` may be assigned) or invokes `include!`; and `lib.rs` names `mesh_jni`
-#      and `mesh_radio` once each, as `mod <name>;` directly under the pinned
-#      attribute lines — `#[cfg(any(target_os = "android", test))]`, and for
-#      `mesh_jni` the allowance — which follow the end of another item.
+#      named `path` may be assigned) or invokes `include!`; and `lib.rs` names
+#      `mesh_jni`, `mesh_radio` and `log_lever` once each, as `mod <name>;`
+#      directly under the pinned attribute lines —
+#      `#[cfg(any(target_os = "android", test))]`, and for `mesh_jni` and
+#      `log_lever` the allowance — which follow the end of another item.
 #
 # And over the radio's Kotlin — every `.kt` under a `mesh/` directory of
 # `haven/android/app/src`, whatever the source set — with comments stripped
@@ -129,6 +156,24 @@
 #      `impl Default for Config {` of `haven-core/src/mesh/engine.rs`, against
 #      the line `const val RSSI_FLOOR = <integer>`.
 #
+# And over the log lever, back in the crate's Rust:
+#  13. `log_lever.rs`. Its `unsafe` is LEVER_UNSAFE_BLOCKS blocks — no
+#      `unsafe fn`, no `unsafe impl` — and the function-pointer types it
+#      declares as `type <Name> = unsafe extern "C" fn(…`; its one `extern`
+#      function is the logger. Up to its tests: it names no `no_mangle`,
+#      `export_name`, `link_section`, `used`, `static mut`, `thread_local`,
+#      `impl`, `mod`, `macro_rules`, `JNIEnv`, `radio_`, `log::`, `unwrap`,
+#      `expect(`, `Box`, `Vec`, `String`, `Mutex` or `RwLock`; invokes no
+#      macro but `cfg!` and the struct layout's one compile-time
+#      `assert!(matches!(… offset_of!(…`; holds no string but the library's
+#      name, the five functions', the ABI of a pointer type and the target of
+#      its one `cfg!`; names of
+#      `libc` only `dlopen`, `dlsym` and `RTLD_NOW`, each by its path; and of
+#      the bridge only `lever_*` and `LEVER_*`, in one `use crate::api::{…};`.
+#      Its tests are the one `#[cfg(test)]` directly above `mod tests {`, and
+#      nothing follows them. No file of the crate names `android_log_sys`,
+#      and none but this one names any of the five functions.
+#
 # The Kotlin is read with the lexer made for Rust: comments and plain strings
 # as above, not Kotlin's string templates or raw strings.
 #
@@ -141,28 +186,33 @@
 # from another crate — which is why the exports' file, where the compiler
 # reports nothing either way, may invoke no macro at all. It cannot see a
 # `JNIEnv` handed to a function that calls Java, nor what an entry does once
-# called. What each call does with its arguments is held by tests in
+# called. Of the lever it cannot see an index that could panic, nor that an
+# `unsafe` block's argument is true: the count is pinned so that a new block
+# is a change to this file, which a reviewer reads. What each call does with
+# its arguments is held by tests in
 # `haven/rust_builder/src`: `mesh_radio::tests` (the conversions),
 # `the_calls_a_jni_export_forwards_reach_their_entries_each_argument_in_its_place`
 # (the seven calls that take no array, against the engine),
 # `a_call_that_panics_under_the_guard_…`, `every_export_is_one_guarded_call`,
-# `the_radio_entries_take_no_session`.
+# `the_radio_entries_take_no_session`; and for the lever by `log_lever::tests`
+# and, in `api.rs`, `the_levers_tags_are_the_scanners`,
+# `a_tag_is_havens_when_it_is_an_entry_or_an_entry_and_two_colons`,
+# `a_release_build_reads_and_writes_no_line_and_a_debug_build_writes_only_havens`,
+# `the_lever_holds_when_its_logger_took_the_sentinel_and_a_release_builds_floor_stands`,
+# `the_levers_two_calls_answer_no_lever_off_android_and_nothing_else_reaches_it`,
+# `the_lever_holds_nothing_that_panics_allocates_or_locks`.
 #
 # Not here yet, each with the change that makes it checkable:
 #   * The Kotlin half of check 4 — the `external fun`s of `MeshNative.kt`
 #     against the same fixture — lands with that file, which does not exist:
 #     a check with nothing to read would report a parity it has not seen. The
-#     interface `MeshNative` will implement, `MeshEngineApi`, is held to the
-#     fixture by the JVM test `theEngineInterfaceIsTheNineExportsOfTheFixture`.
+#     two interfaces `MeshNative` will implement, `MeshEngineApi` and
+#     `LogLever`, are held to the fixture by the JVM test
+#     `theTwoNativeInterfacesAreTheElevenExportsOfTheFixture`.
 #   * The mesh's own manifest (no `android:process`, `connectedDevice`, the
 #     receiver not exported, `neverForLocation`), that every adapter callback
 #     runs inside `MeshThread.run`, and what an advertisement may not carry:
 #     with the adapters.
-#   * That the built library exports the symbols belongs to
-#     `build-check.yml`, with the first unit that builds the radio for
-#     Android: `nm -D` on the library, its `Java_*` symbols exactly the nine
-#     of the fixture — the one check here that no way of writing the source
-#     gets past.
 #
 # Usage:
 #   bash scripts/ci/check_mesh_radio.sh
@@ -182,6 +232,7 @@ readonly SRC='haven/rust_builder/src'
 readonly LIB="${SRC}/lib.rs"
 readonly SHIM="${SRC}/mesh_jni.rs"
 readonly CALLS="${SRC}/mesh_radio.rs"
+readonly LEVER="${SRC}/log_lever.rs"
 readonly GENERATED="${SRC}/frb_generated.rs"
 readonly EXPORTS='haven/rust_builder/fixtures/mesh_radio_exports.txt'
 readonly HEADER='pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_'
@@ -192,9 +243,25 @@ readonly -a ENV_MAY_CALL=(
   get_array_length get_long_array_region convert_byte_array byte_array_from_slice exception_clear
 )
 
+# The `unsafe` blocks of LEVER, each with its SAFETY argument: two for the
+# lookup and one for the cast of what it found, three for a message's size,
+# tag pointer and tag bytes, one for each of the five calls through a function
+# of `liblog`. Pinned, because a twelfth compiles.
+readonly LEVER_UNSAFE_BLOCKS=11
+# What LEVER looks up: the only strings it holds beside an ABI and the target
+# of its `cfg!`.
+readonly -a LEVER_STRINGS=(
+  liblog.so
+  __android_log_set_logger
+  __android_log_logd_logger
+  __android_log_write_log_message
+  __android_log_set_minimum_priority
+  __android_log_get_minimum_priority
+)
+
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=129
+readonly SELF_TEST_FIXTURES=165
 
 # The Kotlin of the radio (design §B): the app's mesh packages, whatever the
 # source set, and the JVM build of the pure one with its tests.
@@ -230,7 +297,7 @@ readonly -a JVM_TEST_NAMES=(
   whatIsAskedAndWhetherItCanSearchPerApiLevel
   theAdvertisementIsTheServiceUuidAlone
   theRadioModesComeFromOneSite
-  theEngineInterfaceIsTheNineExportsOfTheFixture
+  theTwoNativeInterfacesAreTheElevenExportsOfTheFixture
   thePeerTableHoldsSixtyFourAndForgetsOnePickedAmongThoseNotHeld
   aFloodOfAddressesDoesNotPushOutAPeerUnlessItIsPicked
   theTableABuildHasForgetsByNoFixedRule
@@ -401,13 +468,29 @@ export_rows() {
     }'
 }
 
+# The line of the `#[cfg(test)]` directly above `mod tests {` in a view on
+# stdin, or 0.
+tests_at() {
+  awk '$0 == "#[cfg(test)]" { at = NR } $0 == "mod tests {" && at == NR - 1 && !found { found = at } END { print found + 0 }'
+}
+
+# The lines of a view on stdin that a reader which stops at the tests would
+# not read as shipped: a cfg(test) that is not the tests', or anything after
+# their module.
+beyond_tests() { # <the tests' line>
+  awk -v tests="$1" '
+    /cfg/ && /(^|[^A-Za-z0-9_])test([^A-Za-z0-9_]|$)/ && NR != tests { printf "%d ", NR }
+    tests && NR > tests + 1 && closed && !/^[[:space:]]*$/ { printf "%d ", NR }
+    tests && NR > tests + 1 && $0 == "}" { closed = 1 }'
+}
+
 run_check() {
   local file rel view hits shim calls shipped rows pinned names name row forward body first last
   local guards before after entries called alone outside tests want range method may ok
-  local kotlin jvm found floor
+  local kotlin jvm found floor lever
 
   [[ -d "${REPO_ROOT}/${SRC}" ]] || { echo "ERROR: ${REPO_ROOT}/${SRC} not found" >&2; exit 2; }
-  for file in "${LIB}" "${SHIM}" "${CALLS}" "${GENERATED}" "${EXPORTS}" "${CONSTANTS}" "${LOG_ALLOWLIST}" "${APP_SRC}/main/AndroidManifest.xml" "${ENGINE}"; do
+  for file in "${LIB}" "${SHIM}" "${CALLS}" "${LEVER}" "${GENERATED}" "${EXPORTS}" "${CONSTANTS}" "${LOG_ALLOWLIST}" "${APP_SRC}/main/AndroidManifest.xml" "${ENGINE}"; do
     [[ -f "${REPO_ROOT}/${file}" ]] || { echo "ERROR: ${REPO_ROOT}/${file} not found" >&2; exit 2; }
   done
   [[ -d "${REPO_ROOT}/${JVM_TESTS}" ]] || { echo "ERROR: ${REPO_ROOT}/${JVM_TESTS} not found" >&2; exit 2; }
@@ -420,16 +503,16 @@ run_check() {
     exit 2
   fi
 
-  log "Checking that unsafe is written in two files, that the radio's JNI exports are the pinned ones, each one forward to one guarded call, and the radio's Kotlin ..."
+  log "Checking that unsafe is written in three files, that the radio's JNI exports are the pinned ones, each one forward to one guarded call, the log lever's file, and the radio's Kotlin ..."
 
   # Check 1: where `unsafe`, `extern` and an exported symbol are written.
   while IFS= read -r file; do
     rel="${file#"${REPO_ROOT}/"}"
-    case "${rel}" in "${GENERATED}" | "${SHIM}") continue ;; esac
+    case "${rel}" in "${GENERATED}" | "${SHIM}" | "${LEVER}") continue ;; esac
     view="$(code_view "${file}" blank)"
     hits="$(grep -nE "${B}(unsafe|extern|no_mangle|export_name|link_section)${E}" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
     if [[ -n "${hits}" ]]; then
-      fail "${rel} writes unsafe, extern, or an attribute that exports a symbol (line(s) ${hits}). In the bridge crate only ${GENERATED} and ${SHIM} may: every other file is safe Rust the compiler checks whole, and a symbol exported from anywhere else is one no guard has read."
+      fail "${rel} writes unsafe, extern, or an attribute that exports a symbol (line(s) ${hits}). In the bridge crate only ${GENERATED}, ${SHIM} and ${LEVER} may write unsafe or extern, and only the first two export a symbol: every other file is safe Rust the compiler checks whole, and a symbol exported from anywhere else is one no guard has read."
     fi
   done < <(find "${REPO_ROOT}/${SRC}" -type f -name '*.rs' | LC_ALL=C sort)
 
@@ -439,8 +522,8 @@ run_check() {
     fail "${LIB} does not carry #![deny(unsafe_code)] exactly once. Without it nothing but check 1's reading of names keeps unsafe out of api.rs."
   fi
   hits="$(grep -A1 -xF '#[allow(unsafe_code)]' <<<"${view}" | grep -vxF -e '#[allow(unsafe_code)]' -e '--' | LC_ALL=C sort | tr '\n' ' ' || true)"
-  if [[ "${hits}" != 'mod frb_generated; mod mesh_jni; ' || "$(grep -c 'unsafe_code' <<<"${view}" || true)" != 3 ]]; then
-    fail "${LIB} names unsafe_code otherwise than as the crate's deny and one #[allow(unsafe_code)] directly above each of 'mod frb_generated;' and 'mod mesh_jni;' (found above: ${hits:-nothing}). An allowance on the crate or on another module lets unsafe into code no guard reads."
+  if [[ "${hits}" != 'mod frb_generated; mod log_lever; mod mesh_jni; ' || "$(grep -c 'unsafe_code' <<<"${view}" || true)" != 4 ]]; then
+    fail "${LIB} names unsafe_code otherwise than as the crate's deny and one #[allow(unsafe_code)] directly above each of 'mod frb_generated;', 'mod mesh_jni;' and 'mod log_lever;' (found above: ${hits:-nothing}). An allowance on the crate or on another module lets unsafe into code no guard reads."
   fi
   while IFS= read -r file; do
     rel="${file#"${REPO_ROOT}/"}"
@@ -501,11 +584,8 @@ run_check() {
 
   # Check 5: what the exports forward to. Its tests are not read, so nothing
   # that ships may sit in or behind them.
-  tests="$(awk '$0 == "#[cfg(test)]" { at = NR } $0 == "mod tests {" && at == NR - 1 && !found { found = at } END { print found + 0 }' <<<"${calls}")"
-  hits="$(awk -v tests="${tests}" '
-    /cfg/ && /(^|[^A-Za-z0-9_])test([^A-Za-z0-9_]|$)/ && NR != tests { printf "%d ", NR }
-    tests && NR > tests + 1 && closed && !/^[[:space:]]*$/ { printf "%d ", NR }
-    tests && NR > tests + 1 && $0 == "}" { closed = 1 }' <<<"${calls}")"
+  tests="$(tests_at <<<"${calls}")"
+  hits="$(beyond_tests "${tests}" <<<"${calls}")"
   if [[ -n "${hits}" ]]; then
     fail "${CALLS} has a cfg(test) that is not the one '#[cfg(test)]' directly above 'mod tests {', or something after that module (line(s) ${hits}). This guard stops reading at the tests: code under another cfg(test), or behind the tests, is code it has not read."
   fi
@@ -586,13 +666,15 @@ run_check() {
     { line[NR] = $0 }
     /(^|[^A-Za-z0-9_])mesh_jni([^A-Za-z0-9_]|$)/ { jni++; j = NR }
     /(^|[^A-Za-z0-9_])mesh_radio([^A-Za-z0-9_]|$)/ { radio++; r = NR }
+    /(^|[^A-Za-z0-9_])log_lever([^A-Za-z0-9_]|$)/ { lever++; l = NR }
     END {
-      if (jni != 1 || radio != 1) { print "it names mesh_jni " jni + 0 " time(s) and mesh_radio " radio + 0; exit }
+      if (jni != 1 || radio != 1 || lever != 1) { print "it names mesh_jni " jni + 0 " time(s), mesh_radio " radio + 0 " and log_lever " lever + 0; exit }
       if (line[j] != "mod mesh_jni;" || line[j - 1] != "#[allow(unsafe_code)]" || line[j - 2] != cfg || line[j - 3] !~ /[;}]$/) { print "above and at mesh_jni: " line[j - 3] " | " line[j - 2] " | " line[j - 1] " | " line[j]; exit }
       if (line[r] != "mod mesh_radio;" || line[r - 1] != cfg || line[r - 2] !~ /[;}]$/) { print "above and at mesh_radio: " line[r - 2] " | " line[r - 1] " | " line[r]; exit }
+      if (line[l] != "mod log_lever;" || line[l - 1] != "#[allow(unsafe_code)]" || line[l - 2] != cfg || line[l - 3] !~ /[;}]$/) { print "above and at log_lever: " line[l - 3] " | " line[l - 2] " | " line[l - 1] " | " line[l]; exit }
     }' <<<"${view}")"
   if [[ -n "${hits}" ]]; then
-    fail "${LIB} does not declare the radio's two modules as pinned — '${RADIO_CFG}' and '#[allow(unsafe_code)]' above 'mod mesh_jni;', '${RADIO_CFG}' above 'mod mesh_radio;', each after the end of another item, and neither name anywhere else in the file (${hits}). Under another condition, a body, a second declaration, an import under the same name or a macro, what an Android build compiles as mesh_radio or mesh_jni need not be ${SRC}/<name>.rs, which is the file read here."
+    fail "${LIB} does not declare the radio's three modules as pinned — '${RADIO_CFG}' and '#[allow(unsafe_code)]' above 'mod mesh_jni;' and above 'mod log_lever;', '${RADIO_CFG}' above 'mod mesh_radio;', each after the end of another item, and none of the names anywhere else in the file (${hits}). Under another condition, a body, a second declaration, an import under the same name or a macro, what an Android build compiles as one of them need not be ${SRC}/<name>.rs, which is the file read here."
   fi
 
   # Check 7: the radio's Kotlin writes no log line and holds no UUID.
@@ -669,10 +751,73 @@ run_check() {
     fail "${CONSTANTS} holds RSSI_FLOOR '${found% }' and the default of ${ENGINE} is rssi_floor '${floor}'. They are one number: below it the engine takes in no peer it does not know, and the radio gives such an address no number. Move both, or neither."
   fi
 
+  # Check 13: the log lever's file, which the deny does not cover either.
+  # `unsafe` and `extern` are counted in the whole file, its tests too; the
+  # rest is read up to the tests.
+  lever="$(code_view "${REPO_ROOT}/${LEVER}")"
+  hits="$(awk -v pin="${LEVER_UNSAFE_BLOCKS}" '
+    {
+      line = $0
+      if (line ~ /^type [A-Za-z0-9_]+ = unsafe extern "C" fn\(/) sub(/^type [A-Za-z0-9_]+ = unsafe extern "C" fn\(/, "", line)
+      else if (line == "extern \"C\" fn logger(message: *const Message) {") { loggers++; line = "" }
+      blocks += gsub(/(^|[^A-Za-z0-9_])unsafe \{/, " ", line)
+      if (line ~ /(^|[^A-Za-z0-9_])(unsafe|extern)([^A-Za-z0-9_]|$)/) other = other NR " "
+    }
+    END { if (blocks != pin || loggers != 1 || other != "") printf "%d unsafe block(s), %d logger(s), other line(s): %s", blocks, loggers, (other == "" ? "none" : other) }' <<<"${lever}")"
+  if [[ -n "${hits}" ]]; then
+    fail "${LEVER} writes unsafe or extern otherwise than as its ${LEVER_UNSAFE_BLOCKS} unsafe blocks, its function-pointer types — 'type <Name> = unsafe extern \"C\" fn(…' — and the one logger 'extern \"C\" fn logger(message: *const Message) {' (found: ${hits}). No unsafe fn, no unsafe impl, no extern block and no second function liblog could call; a new unsafe block is a new argument a reviewer has to read, so the count moves here, in the same change."
+  fi
+  tests="$(tests_at <<<"${lever}")"
+  hits="$(beyond_tests "${tests}" <<<"${lever}")"
+  if [[ -n "${hits}" ]]; then
+    fail "${LEVER} has a cfg(test) that is not the one '#[cfg(test)]' directly above 'mod tests {', or something after that module (line(s) ${hits}). This guard reads the lever up to its tests: code under another cfg(test), or behind the tests, is code it has not read."
+  fi
+  shipped="${lever}"
+  if (( tests > 0 )); then
+    shipped="$(sed -n "1,$(( tests - 1 ))p" <<<"${lever}")"
+  fi
+  view="$(code_view "${REPO_ROOT}/${LEVER}" blank)"
+  if (( tests > 0 )); then
+    view="$(sed -n "1,$(( tests - 1 ))p" <<<"${view}")"
+  fi
+  hits="$(grep -nE "${B}(no_mangle|export_name|link_section|used|thread_local|impl|mod|macro_rules|JNIEnv|Box|Vec|String|Mutex|RwLock)${E}|${B}static[[:space:]]+mut${E}|radio_|${B}log::|unwrap|expect[[:space:]]*\(" <<<"${view}" | cut -d: -f1 | tr '\n' ' ' || true)"
+  if [[ -n "${hits}" ]]; then
+    fail "${LEVER} names what the lever has no use for (line(s) ${hits}): an attribute that exports or keeps a symbol, static mut or thread_local, an impl, a module or a macro of its own, JNIEnv, a radio entry, the log crate, unwrap or expect, Box, Vec, String, Mutex or RwLock. Its logger runs inside the platform's log call, on whichever thread logs: it must not log, lock, allocate or panic, and the file exports nothing."
+  fi
+  hits="$(grep -oE "[A-Za-z_][A-Za-z0-9_]*![[:space:]]*[([{]" <<<"${view}" | sed -E 's/!.*$//' | LC_ALL=C sort -u | tr '\n' ' ' || true)"
+  if [[ "${hits}" != 'assert cfg matches offset_of ' \
+    || "$(grep -c 'assert!' <<<"${shipped}" || true)" != 1 \
+    || "$(grep -cE '^const _: \(\) = assert!\(matches!\($' <<<"${shipped}" || true)" != 1 ]]; then
+    fail "${LEVER} invokes a macro that is not cfg!, or the one compile-time 'const _: () = assert!(matches!(' of the struct's layout with its offset_of! (found: ${hits:-none}). A macro that formats, panics or asserts at run time has no place in code liblog calls, and one from another crate writes what this guard does not read."
+  fi
+  hits="$(grep -oE '"[^"]*"' <<<"${shipped}" | LC_ALL=C sort -u | tr '\n' ' ' || true)"
+  want="$(printf '"%s"\n' C android "${LEVER_STRINGS[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
+  if [[ "${hits}" != "${want}" ]]; then
+    fail "${LEVER} holds a string that is not the library's name, one of the five functions', the ABI of a pointer type or the target of its one cfg! — or lacks one of them (found: ${hits:-none}). It looks up five names in one library and writes no text: any other string is a tag, a message or a symbol nobody reviewed."
+  fi
+  hits="$(grep -oE "${B}libc::[A-Za-z0-9_]+" <<<"${view}" | sed -E 's/^[^l]*//' | LC_ALL=C sort -u | tr '\n' ' ' || true)"
+  if [[ "${hits}" != 'libc::RTLD_NOW libc::dlopen libc::dlsym ' \
+    || "$(grep -oE "${B}libc${E}" <<<"${view}" | wc -l | tr -d ' ' || true)" != "$(grep -oE "${B}libc::[A-Za-z0-9_]+" <<<"${view}" | wc -l | tr -d ' ' || true)" ]]; then
+    fail "${LEVER} names of libc something other than dlopen, dlsym and RTLD_NOW, each by its path (found: ${hits:-none}). The lookup is all the lever asks of libc; under an import, or with another function, what it calls is not what was reviewed."
+  fi
+  hits="$(tr -d '[:space:]' <<<"${shipped}" | grep -oE 'usecrate::api::\{[^}]*\};' | sed -E 's/^usecrate::api::\{//; s/\};$//' | tr ',' '\n' | grep -vE '^(lever_[a-z0-9_]+|LEVER_[A-Z0-9_]+)?$' | tr '\n' ' ' || true)"
+  if [[ -n "${hits}" || "$(grep -oE "${B}(crate|super)[[:space:]]*::" <<<"${shipped}" | wc -l | tr -d ' ' || true)" != 1 \
+    || "$(grep -cE '^use crate::api::\{' <<<"${shipped}" || true)" != 1 ]]; then
+    fail "${LEVER} reaches something of the bridge that is not one of the lever's decisions — it names the crate once, in one 'use crate::api::{…};' of lever_* and LEVER_* names (other names: ${hits:-none}). Its logger runs inside the platform's log call: an engine's lock, a session or a log line reached from there is a deadlock or a line of Haven's own."
+  fi
+  while IFS= read -r file; do
+    rel="${file#"${REPO_ROOT}/"}"
+    view="$(code_view "${file}")"
+    hits="$(grep -nE "android_log_sys$([[ "${rel}" == "${LEVER}" ]] || printf '|__android_log_(%s)' "$(printf '%s\n' "${LEVER_STRINGS[@]:1}" | sed 's/^__android_log_//' | paste -sd '|' -)")" <<<"${view}" | cut -d: -f1 | head -n 5 | tr '\n' ' ' || true)"
+    if [[ -n "${hits}" ]]; then
+      fail "${rel} names android_log_sys, or — outside ${LEVER} — one of liblog's five API-30 functions (line(s) ${hits}; a string counts). Declared or imported, such a function is a symbol the linker of Android 6 to 10 cannot bind, and the library — all of Haven — would not load there: the lever finds them with dlsym, in its own file."
+    fi
+  done < <(find "${REPO_ROOT}/${SRC}" -type f -name '*.rs' | LC_ALL=C sort)
+
   if (( FAILED )); then
     exit 1
   fi
-  log "OK: unsafe is written in the generated bridge and the exports' file alone, under the crate's deny; that file is uses and the ${want} pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's. The radio's Kotlin logs nothing and holds no UUID, names its modes at one site, takes the engine's signal floor, and has its ${#JVM_TEST_NAMES[@]} JVM tests; no manifest outside the mesh's own names Bluetooth."
+  log "OK: unsafe is written in the generated bridge, the exports' file and the log lever alone, under the crate's deny; the exports' file is uses and the $(grep -c . <<<"${pinned}") pinned exports, each one call into ${CALLS##*/}; each of those is one guarded call of its radio entry, and calls nothing of Java's; the lever is its ${LEVER_UNSAFE_BLOCKS} unsafe blocks and one logger, looks up five functions by name and names nothing it could log, lock or panic with. The radio's Kotlin logs nothing and holds no UUID, names its modes at one site, takes the engine's signal floor, and has its ${#JVM_TEST_NAMES[@]} JVM tests; no manifest outside the mesh's own names Bluetooth."
 }
 
 # ---------------------------------------------------------------------------
@@ -703,6 +848,10 @@ pub mod api;
 mod mesh_jni;
 #[cfg(any(target_os = "android", test))]
 mod mesh_radio;
+// A lookup and a C callback are unsafe.
+#[cfg(any(target_os = "android", test))]
+#[allow(unsafe_code)]
+mod log_lever;
 
 #[cfg(debug_assertions)]
 mod test_keyring;
@@ -712,7 +861,8 @@ mod frb_generated;
 pub use frb_generated::*;
 RS
     cat >"${t}/${SRC}/api.rs" <<'RS'
-// Never unsafe here, no #[no_mangle], no #[export_name] and no extern "C".
+// Never unsafe here, no #[no_mangle], no #[export_name] and no extern "C",
+// and __android_log_set_logger is looked up in log_lever.rs, not declared.
 pub(crate) fn radio_left_ms() -> u64 {
     0
 }
@@ -841,6 +991,160 @@ mod tests {
     }
 }
 RS
+    cat >"${t}/${LEVER}" <<'RS'
+//! The lever. No unsafe fn, no println!("a line"), no Vec and no static mut
+//! here: none of it is code.
+
+use std::ffi::{c_char, c_void, CStr};
+use std::mem::{offset_of, transmute};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
+
+use crate::api::{lever_held, lever_line, lever_writes_own, LEVER_FLOOR, LEVER_TAG_READ};
+
+const WRITES_OWN: bool = lever_writes_own(cfg!(debug_assertions));
+
+#[repr(C)]
+struct Message {
+    struct_size: usize,
+    priority: i32,
+    tag: *const c_char,
+    message: *const c_char,
+}
+
+const _: () = assert!(matches!(
+    (size_of::<usize>(), offset_of!(Message, tag)),
+    (8, 16) | (4, 8)
+));
+
+type Logger = unsafe extern "C" fn(*const Message);
+type SetLogger = unsafe extern "C" fn(Logger);
+type Write = unsafe extern "C" fn(*mut Message);
+type SetFloor = unsafe extern "C" fn(i32) -> i32;
+type Floor = unsafe extern "C" fn() -> i32;
+
+struct Liblog {
+    set_logger: SetLogger,
+    logd_logger: Logger,
+    write_log_message: Write,
+    set_minimum_priority: SetFloor,
+    get_minimum_priority: Floor,
+}
+
+static LIBLOG: OnceLock<Option<Liblog>> = OnceLock::new();
+static LINES: AtomicU32 = AtomicU32::new(0);
+
+fn lookup(library: &CStr) -> Option<Liblog> {
+    // SAFETY: an unsafe { block } in a comment is not counted.
+    let handle = unsafe { libc::dlopen(library.as_ptr(), libc::RTLD_NOW) };
+    if handle.is_null() {
+        return None;
+    }
+    let find = |name: &CStr| {
+        // SAFETY: the handle is never closed.
+        let found = unsafe { libc::dlsym(handle, name.as_ptr()) };
+        (!found.is_null()).then_some(found)
+    };
+    let set_logger = find(c"__android_log_set_logger")?;
+    let logd_logger = find(c"__android_log_logd_logger")?;
+    let write_log_message = find(c"__android_log_write_log_message")?;
+    let set_minimum_priority = find(c"__android_log_set_minimum_priority")?;
+    let get_minimum_priority = find(c"__android_log_get_minimum_priority")?;
+    // SAFETY: none is null.
+    Some(unsafe {
+        Liblog {
+            set_logger: transmute::<*mut c_void, SetLogger>(set_logger),
+            logd_logger: transmute::<*mut c_void, Logger>(logd_logger),
+            write_log_message: transmute::<*mut c_void, Write>(write_log_message),
+            set_minimum_priority: transmute::<*mut c_void, SetFloor>(set_minimum_priority),
+            get_minimum_priority: transmute::<*mut c_void, Floor>(get_minimum_priority),
+        }
+    })
+}
+
+fn tag_start(message: *const Message) -> Option<[u8; LEVER_TAG_READ]> {
+    // SAFETY: the size is the first field.
+    let size = unsafe { (*message).struct_size };
+    if size < size_of::<Message>() {
+        return None;
+    }
+    // SAFETY: the field is inside the message.
+    let mut next = unsafe { (*message).tag }.cast::<u8>();
+    if next.is_null() {
+        return None;
+    }
+    let mut start = [0; LEVER_TAG_READ];
+    for byte in &mut start {
+        // SAFETY: never past the NUL.
+        *byte = unsafe { next.read() };
+        if *byte == 0 {
+            break;
+        }
+        next = next.wrapping_add(1);
+    }
+    Some(start)
+}
+
+extern "C" fn logger(message: *const Message) {
+    if !lever_line(WRITES_OWN, &LINES, || tag_start(message)) {
+        return;
+    }
+    if let Some(liblog) = LIBLOG.get().and_then(Option::as_ref) {
+        // SAFETY: handed on as it came.
+        unsafe { (liblog.logd_logger)(message) };
+    }
+}
+
+pub(crate) fn install() -> bool {
+    let found = LIBLOG.get_or_init(|| {
+        if cfg!(target_os = "android") {
+            lookup(c"liblog.so")
+        } else {
+            None
+        }
+    });
+    let Some(liblog) = found else {
+        return false;
+    };
+    // SAFETY: the logger cannot unwind.
+    unsafe { (liblog.set_logger)(logger) };
+    if !WRITES_OWN {
+        // SAFETY: a plain integer.
+        unsafe { (liblog.set_minimum_priority)(LEVER_FLOOR) };
+    }
+    true
+}
+
+pub(crate) fn holds() -> bool {
+    let Some(liblog) = LIBLOG.get().and_then(Option::as_ref) else {
+        return false;
+    };
+    let empty: [c_char; 1] = [0];
+    let mut sentinel = Message {
+        struct_size: size_of::<Message>(),
+        priority: 6,
+        tag: empty.as_ptr(),
+        message: empty.as_ptr(),
+    };
+    let before = LINES.load(Ordering::Relaxed);
+    // SAFETY: a whole message.
+    unsafe { (liblog.write_log_message)(&raw mut sentinel) };
+    // SAFETY: a plain integer.
+    let floor = unsafe { (liblog.get_minimum_priority)() };
+    lever_held(WRITES_OWN, before, LINES.load(Ordering::Relaxed), floor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{lookup, tag_start, Message};
+
+    #[test]
+    fn a_library_that_is_absent_is_no_lever() {
+        let tags: Vec<String> = vec![format!("{}", "flutter")];
+        assert!(lookup(c"libhaven-no-such-library.so").is_none() && tags.len() == 1);
+    }
+}
+RS
     cat >"${t}/${EXPORTS}" <<'TXT'
 # <name> <JNI descriptor> <Rust parameter types> <Rust return type>
 
@@ -957,7 +1261,7 @@ TXT
 
   echo "check_mesh_radio.sh --self-test"
   local t="${tmp}/ok"; _tree "${t}"
-  _case "the tree shape passes: three exports each one forward, comments and strings that only mention what is banned, a static in the calls' tests; an adapter and a mesh manifest beside the pure package" 0 '' "${t}"
+  _case "the tree shape passes: three exports each one forward, comments and strings that only mention what is banned, a static in the calls' tests, a Vec and a format! in the lever's; an adapter and a mesh manifest beside the pure package" 0 '' "${t}"
 
   # Check 1: where unsafe, extern and an exported symbol are written.
   t="${tmp}/unsafe-block"; _tree "${t}"
@@ -1353,7 +1657,7 @@ RS
 
   t="${tmp}/calls-inline"; _tree "${t}"
   sed -i 's/^mod mesh_radio;$/mod mesh_radio {\n    pub(crate) fn left_ms() -> i64 {\n        0\n    }\n}/' "${t}/${LIB}"
-  _case "the calls' module declared with a body, beside the file read here, fails" 1 "does not declare the radio's two modules as pinned" "${t}"
+  _case "the calls' module declared with a body, beside the file read here, fails" 1 "does not declare the radio's three modules as pinned" "${t}"
 
   t="${tmp}/calls-two-ways"; _tree "${t}"
   awk -v cfg='#[cfg(any(target_os = "android", test))]' '
@@ -1365,7 +1669,7 @@ RS
         if (held[i] == "mod mesh_radio;") { print "#[cfg(all(target_os = \"android\", not(test)))]"; print "use api::radio_shim as mesh_radio;" }
       }
     }' "${t}/${LIB}" >"${t}/${LIB}.new" && mv "${t}/${LIB}.new" "${t}/${LIB}"
-  _case "the second review's plant: the calls' file compiled for tests only, and another module under its name for Android, fails" 1 "does not declare the radio's two modules as pinned" "${t}"
+  _case "the second review's plant: the calls' file compiled for tests only, and another module under its name for Android, fails" 1 "does not declare the radio's three modules as pinned" "${t}"
 
   t="${tmp}/calls-by-macro"; _tree "${t}"
   awk -v cfg='#[cfg(any(target_os = "android", test))]' '
@@ -1385,7 +1689,7 @@ RS
 
   t="${tmp}/calls-third-attribute"; _tree "${t}"
   sed -i 's/^pub mod api;$/pub mod api;\n#[cfg(not(feature = "radio"))]/' "${t}/${LIB}"
-  _case "one more attribute above the pinned ones of a radio module fails" 1 "does not declare the radio's two modules as pinned" "${t}"
+  _case "one more attribute above the pinned ones of a radio module fails" 1 "does not declare the radio's three modules as pinned" "${t}"
 
   t="${tmp}/included"; _tree "${t}"
   printf '#[allow(unsafe_code)]\n#[no_mangle]\npub extern "C" fn included_export(p: *const u8) -> u8 {\n    unsafe { *p }\n}\n' >"${t}/${SRC}/extra.in"
@@ -1496,7 +1800,153 @@ RS
   sed -i 's/^impl Default for Config {$/impl Config {/' "${t}/${ENGINE}"
   _case "an engine whose default the pin cannot find fails, and is not read from a test's config" 1 "is rssi_floor ''" "${t}"
 
+  # Checks 2 and 6, for the third module.
+  t="${tmp}/lever-denied"; _tree "${t}"
+  sed -i -z 's/#\[allow(unsafe_code)\]\nmod log_lever;/mod log_lever;/' "${t}/${LIB}"
+  _case "the lever's allowance gone fails: lib.rs is not what was reviewed" 1 'names unsafe_code otherwise' "${t}"
+
+  t="${tmp}/lever-other-condition"; _tree "${t}"
+  sed -i -z 's/#\[cfg(any(target_os = "android", test))\]\n#\[allow(unsafe_code)\]\nmod log_lever;/#[cfg(target_os = "android")]\n#[allow(unsafe_code)]\nmod log_lever;/' "${t}/${LIB}"
+  _case "the lever compiled under another condition fails" 1 "does not declare the radio's three modules as pinned" "${t}"
+
+  t="${tmp}/lever-two-ways"; _tree "${t}"
+  printf '#[cfg(all(target_os = "android", not(test)))]\nuse api::shipped_lever as log_lever;\n' >>"${t}/${LIB}"
+  _case "another module under the lever's name fails" 1 "does not declare the radio's three modules as pinned" "${t}"
+
+  t="${tmp}/lever-path"; _tree "${t}"
+  sed -i 's/^mod log_lever;$/#[path = "other_lever.rs"]\nmod log_lever;/' "${t}/${LIB}"
+  _case "the lever built from another file fails" 1 "${LIB} gives something a path" "${t}"
+
+  # Check 13: the lever's own file.
+  t="${tmp}/lever-twelfth"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let mut start = [0; LEVER_TAG_READ];' '    let mut start = [0; LEVER_TAG_READ];\n    let _ = unsafe { next.add(64).read() };'
+  _case "a twelfth unsafe block in the lever fails: the count is pinned" 1 "${LEVER} writes unsafe or extern otherwise" "${t}"
+
+  t="${tmp}/lever-fewer"; _tree "${t}"
+  _line "${t}/${LEVER}" 'unsafe { (liblog.set_minimum_priority)(LEVER_FLOOR) };' '        (liblog.set_minimum_priority)(LEVER_FLOOR);'
+  _case "an unsafe block gone from the lever fails too: the pin is the count" 1 '10 unsafe block(s)' "${t}"
+
+  t="${tmp}/lever-unsafe-fn"; _tree "${t}"
+  sed -i 's/^fn tag_start(message: \*const Message)/unsafe fn tag_start(message: *const Message)/' "${t}/${LEVER}"
+  _case "an unsafe fn in the lever fails" 1 "${LEVER} writes unsafe or extern otherwise" "${t}"
+
+  t="${tmp}/lever-second-callback"; _tree "${t}"
+  _before_tests "${t}/${LEVER}" 'extern "C" fn second(message: *const Message) {\n    logger(message);\n}'
+  _case "a second extern fn in the lever fails" 1 "${LEVER} writes unsafe or extern otherwise" "${t}"
+
+  t="${tmp}/lever-extern-block"; _tree "${t}"
+  _before_tests "${t}/${LEVER}" 'extern "C" {\n    fn getpid() -> i32;\n}'
+  _case "an extern block in the lever fails: an import the linker must bind" 1 "${LEVER} writes unsafe or extern otherwise" "${t}"
+
+  t="${tmp}/lever-unwind-abi"; _tree "${t}"
+  sed -i 's/^extern "C" fn logger(/extern "C-unwind" fn logger(/' "${t}/${LEVER}"
+  _case "the logger under an ABI that lets a panic unwind into liblog fails" 1 '0 logger(s)' "${t}"
+
+  t="${tmp}/lever-unsafe-in-tests"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let tags: Vec<String>' '        let tags: Vec<String> = vec![format!("{}", unsafe { *c"flutter".as_ptr() })];'
+  _case "an unsafe block in the lever's tests fails: the count is the file's" 1 '12 unsafe block(s)' "${t}"
+
+  t="${tmp}/lever-early-cfg-test"; _tree "${t}"
+  sed -i 's/^fn lookup(library: &CStr) -> Option<Liblog> {$/#[cfg(test)]\nconst HIDE: u8 = 0;\n\nfn lookup(library: \&CStr) -> Option<Liblog> {/' "${t}/${LEVER}"
+  _case "a cfg(test) ahead of the lever's tests fails" 1 "${LEVER} has a cfg(test) that is not the one" "${t}"
+
+  t="${tmp}/lever-behind-tests"; _tree "${t}"
+  printf '\nfn hidden() -> String {\n    format!("{:?}", LINES)\n}\n' >>"${t}/${LEVER}"
+  _case "code behind the lever's tests fails" 1 "${LEVER} has a cfg(test) that is not the one" "${t}"
+
+  t="${tmp}/lever-exported"; _tree "${t}"
+  sed -i 's/^extern "C" fn logger(/#[no_mangle]\nextern "C" fn logger(/' "${t}/${LEVER}"
+  _case "a symbol exported from the lever fails" 1 "${LEVER} names what the lever has no use for" "${t}"
+
+  t="${tmp}/lever-static-mut"; _tree "${t}"
+  sed -i 's/^static LINES: AtomicU32 = AtomicU32::new(0);$/static mut LINES: u32 = 0;/' "${t}/${LEVER}"
+  _case "a static mut in the lever fails" 1 "${LEVER} names what the lever has no use for" "${t}"
+
+  t="${tmp}/lever-unwrap"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let Some(liblog) = found else {' '    let liblog = found.as_ref().unwrap();\n    let Some(liblog) = Some(liblog) else {'
+  _case "an unwrap in the lever fails" 1 "${LEVER} names what the lever has no use for" "${t}"
+
+  t="${tmp}/lever-expect"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let set_logger = find(c"__android_log_set_logger")?;' '    let set_logger = Some(find(c"__android_log_set_logger").expect ("a symbol"))?;'
+  _case "an expect in the lever fails, a space before its parenthesis or none" 1 "${LEVER} names what the lever has no use for" "${t}"
+
+  t="${tmp}/lever-allocates"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let mut start = [0; LEVER_TAG_READ];' '    let mut start = [0; LEVER_TAG_READ];\n    let _copy = Box::new(start);'
+  _case "an allocation in the lever fails" 1 "${LEVER} names what the lever has no use for" "${t}"
+
+  t="${tmp}/lever-locks"; _tree "${t}"
+  sed -i 's/^static LINES: AtomicU32 = AtomicU32::new(0);$/static LINES: AtomicU32 = AtomicU32::new(0);\nstatic HELD: std::sync::Mutex<u32> = std::sync::Mutex::new(0);/' "${t}/${LEVER}"
+  _case "a lock in the lever fails" 1 "${LEVER} names what the lever has no use for" "${t}"
+
+  t="${tmp}/lever-logs"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let Some(liblog) = found else {' '    let Some(liblog) = found else {\n        log::warn!("no lever");'
+  _case "a log line in the lever fails" 1 "${LEVER} names what the lever has no use for" "${t}"
+
+  t="${tmp}/lever-radio"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let before = LINES.load(Ordering::Relaxed);' '    let before = LINES.load(Ordering::Relaxed) ^ u32::from(crate::api::radio_left_ms() == 0);'
+  _case "a radio entry called from the lever fails" 1 "${LEVER} names what the lever has no use for" "${t}"
+
+  t="${tmp}/lever-formats"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let before = LINES.load(Ordering::Relaxed);' '    let before = LINES.load(Ordering::Relaxed);\n    let _ = format_args!("{before}");'
+  _case "a macro that formats in the lever fails" 1 "${LEVER} invokes a macro that is not cfg!" "${t}"
+
+  t="${tmp}/lever-asserts"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let before = LINES.load(Ordering::Relaxed);' '    let before = LINES.load(Ordering::Relaxed);\n    assert!(before < u32::MAX);'
+  _case "an assertion at run time in the lever fails: a panic inside liblog's call" 1 "${LEVER} invokes a macro that is not cfg!" "${t}"
+
+  t="${tmp}/lever-debug-asserts"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let before = LINES.load(Ordering::Relaxed);' '    let before = LINES.load(Ordering::Relaxed);\n    debug_assert!(before < u32::MAX);'
+  _case "a debug assertion in the lever fails" 1 "${LEVER} invokes a macro that is not cfg!" "${t}"
+
+  t="${tmp}/lever-layout-unchecked"; _tree "${t}"
+  sed -i 's/^const _: () = assert!(matches!($/const _: bool = (matches!(/' "${t}/${LEVER}"
+  _case "the layout's compile-time assertion gone fails" 1 "${LEVER} invokes a macro that is not cfg!" "${t}"
+
+  t="${tmp}/lever-sixth-symbol"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let set_logger = find(c"__android_log_set_logger")?;' '    let set_logger = find(c"__android_log_set_logger")?;\n    let _aborter = find(c"__android_log_set_aborter")?;'
+  _case "a sixth function looked up fails" 1 "${LEVER} holds a string that is not the library's name" "${t}"
+
+  t="${tmp}/lever-other-library"; _tree "${t}"
+  sed -i 's/lookup(c"liblog.so")/lookup(c"libbase.so")/' "${t}/${LEVER}"
+  _case "another library looked in fails" 1 "${LEVER} holds a string that is not the library's name" "${t}"
+
+  t="${tmp}/lever-tag-literal"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let empty: [c_char; 1] = [0];' '    let empty = c"HavenLever";'
+  _case "a tag of its own in the lever fails: the sentinel has none" 1 "${LEVER} holds a string that is not the library's name" "${t}"
+
+  t="${tmp}/lever-libc-more"; _tree "${t}"
+  _line "${t}/${LEVER}" 'if handle.is_null() {' '    let _ = unsafe { libc::strlen(library.as_ptr()) };\n    if handle.is_null() {'
+  _case "another function of libc in the lever fails" 1 "${LEVER} names of libc something other than dlopen" "${t}"
+
+  t="${tmp}/lever-libc-imported"; _tree "${t}"
+  sed -i 's/^use std::sync::OnceLock;$/use std::sync::OnceLock;\n\nuse libc::{dlopen, dlsym};/; s/libc::dlopen(/dlopen(/; s/libc::dlsym(/dlsym(/' "${t}/${LEVER}"
+  _case "libc's functions imported, and called by a bare name, fail" 1 "${LEVER} names of libc something other than dlopen" "${t}"
+
+  t="${tmp}/lever-reaches-engine"; _tree "${t}"
+  sed -i 's/^use crate::api::{lever_held, /use crate::api::{mesh_stop, lever_held, /' "${t}/${LEVER}"
+  _case "something of the bridge that is no decision of the lever's, imported, fails" 1 "${LEVER} reaches something of the bridge" "${t}"
+
+  t="${tmp}/lever-reaches-by-path"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let before = LINES.load(Ordering::Relaxed);' '    let before = LINES.load(Ordering::Relaxed) ^ u32::from(crate::api::mesh_empty() == 0);'
+  _case "the bridge reached by a path from the lever fails" 1 "${LEVER} reaches something of the bridge" "${t}"
+
+  t="${tmp}/log-sys"; _tree "${t}"
+  printf 'pub fn loggable() -> bool {\n    android_log_sys::LogPriority::DEBUG as i32 > 0\n}\n' >>"${t}/${SRC}/api.rs"
+  _case "android_log_sys named in api.rs fails" 1 "${SRC}/api.rs names android_log_sys" "${t}"
+
+  t="${tmp}/log-sys-in-lever"; _tree "${t}"
+  _line "${t}/${LEVER}" 'let before = LINES.load(Ordering::Relaxed);' '    let before = LINES.load(Ordering::Relaxed) ^ android_log_sys::LogPriority::DEBUG as u32;'
+  _case "android_log_sys named in the lever itself fails" 1 "${LEVER} names android_log_sys" "${t}"
+
+  t="${tmp}/symbol-elsewhere"; _tree "${t}"
+  printf 'const FLOOR: &str = "__android_log_set_minimum_priority";\n' >>"${t}/${CALLS}"
+  _case "one of the five functions named outside the lever fails, in a string too" 1 "${CALLS} names android_log_sys" "${t}"
+
   # Misconfiguration.
+  t="${tmp}/no-lever"; _tree "${t}"
+  rm "${t}/${LEVER}"
+  _case "a missing lever is a misconfiguration" 2 '' "${t}"
+
   t="${tmp}/no-engine"; _tree "${t}"
   rm "${t}/${ENGINE}"
   _case "a tree with no engine to read the floor from is a misconfiguration" 2 '' "${t}"

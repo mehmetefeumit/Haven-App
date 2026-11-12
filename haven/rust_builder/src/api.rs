@@ -13105,9 +13105,10 @@ pub struct MeshDriveFfi {
 // (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §A). Each is `with_mesh` with no
 // session and nothing else — so each checks the deadline and applies the
 // hand-off first, reads the clock here, and can reach no session, key or
-// store (Security Rule 14) — but `radio_resume`. A link and a peer are the
-// radio's own numbers, never an address. Their one caller is `mesh_radio.rs`
-// — what Android's JNI exports forward to — each through `radio_guarded`.
+// store (Security Rule 14) — but `radio_resume`, and the log lever's two,
+// which touch no engine. A link and a peer are the radio's own numbers,
+// never an address. Their one caller is `mesh_radio.rs` — what Android's
+// JNI exports forward to — each through `radio_guarded`.
 
 /// The longest frame a radio carries: one ATT attribute value.
 pub(crate) const RADIO_MAX_FRAME: usize = 512;
@@ -13287,6 +13288,20 @@ pub(crate) fn radio_wake_in_ms() -> Option<u64> {
     })
 }
 
+/// Puts the log lever in, or back (`log_lever.rs`): `false` where this
+/// Android has none. It takes no engine and no lock; the radio's service is
+/// to call it before it makes a Bluetooth object, and nothing calls it yet.
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn radio_lever_install() -> bool {
+    crate::log_lever::install()
+}
+
+/// Whether the log lever is in force now.
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn radio_lever_holds() -> bool {
+    crate::log_lever::holds()
+}
+
 /// One radio entry as a JNI export makes it: `call`'s answer, or `none` —
 /// what that entry answers with no engine — when it panicked.
 ///
@@ -13299,6 +13314,93 @@ pub(crate) fn radio_wake_in_ms() -> Option<u64> {
 )]
 pub(crate) fn radio_guarded<T>(none: T, call: impl FnOnce() -> T + std::panic::UnwindSafe) -> T {
     std::panic::catch_unwind(call).unwrap_or(none)
+}
+
+// ---- the log lever's decisions ----------------------------------------------
+//
+// `log_lever.rs` is exempt from the crate's `unsafe_code` deny, so what it
+// decides is decided here, under it, by functions the host's tests run for
+// both kinds of build (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §N.1.2, §N.1.3).
+// [`lever_line`] and what it calls run inside the platform's logger, on
+// whichever thread logs: they write no log line, format and allocate
+// nothing, take no lock and cannot panic.
+
+/// The logcat tags a debug build still writes under once the lever is in:
+/// the runtime scanner's `owned_tags` (`tooling/logscan/policy.toml`), so
+/// that such a build writes the lines the scanner answers for and no other.
+#[cfg(any(target_os = "android", test))]
+pub(crate) const LEVER_OWNED_TAGS: [&str; 8] = [
+    "flutter",
+    "haven_core",
+    "rust_lib_haven",
+    "RustStdoutStderr",
+    "frb_user",
+    "HavenApplication",
+    "MainActivity",
+    "PublishWakeLock",
+];
+
+/// How many bytes of a tag decide whether it is one of [`LEVER_OWNED_TAGS`]:
+/// the longest of them, and the two of `::`.
+#[cfg(any(target_os = "android", test))]
+pub(crate) const LEVER_TAG_READ: usize = {
+    let (mut longest, mut at) = (0, 0);
+    while at < LEVER_OWNED_TAGS.len() {
+        if LEVER_OWNED_TAGS[at].len() > longest {
+            longest = LEVER_OWNED_TAGS[at].len();
+        }
+        at += 1;
+    }
+    longest + 2
+};
+
+/// `ANDROID_LOG_FATAL`: the minimum priority a build that writes nothing
+/// keeps behind its logger.
+#[cfg(any(target_os = "android", test))]
+pub(crate) const LEVER_FLOOR: i32 = 7;
+
+/// Whether a build still writes Haven's own lines once the lever is in
+/// (design Q-14, form (iii)): a debug build does, and has no floor; a release
+/// build writes nothing, with the floor behind its logger. Form (i), nothing
+/// in any build, is `false` here.
+#[cfg(any(target_os = "android", test))]
+pub(crate) const fn lever_writes_own(debug_build: bool) -> bool {
+    debug_build
+}
+
+/// Whether a tag is one of Haven's own, by the scanner's rule: an entry of
+/// [`LEVER_OWNED_TAGS`], or one and then `::`. `start` is the tag's first
+/// bytes, zeros after its end.
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn lever_owns(start: &[u8; LEVER_TAG_READ]) -> bool {
+    let tag = start.split(|byte| *byte == 0).next().unwrap_or(start);
+    LEVER_OWNED_TAGS.iter().any(|own| {
+        tag.strip_prefix(own.as_bytes())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(b"::"))
+    })
+}
+
+/// One line of the process, handed to the lever: counted, and written — as
+/// the answer says — only by a build that writes Haven's own lines, under one
+/// of their tags. A build that writes nothing never calls `tag`: it reads
+/// nothing of the line. `tag` answers `None` for a line with no tag to read.
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn lever_line(
+    writes_own: bool,
+    lines: &std::sync::atomic::AtomicU32,
+    tag: impl FnOnce() -> Option<[u8; LEVER_TAG_READ]>,
+) -> bool {
+    lines.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    writes_own && tag().is_some_and(|start| lever_owns(&start))
+}
+
+/// What a check of the lever comes to. `before` and `after` are the count of
+/// lines around a sentinel handed to the logger in force: only Haven's logger
+/// counts, so a count that moved is a line that reached it. A build that
+/// writes nothing also needs the floor read back at [`LEVER_FLOOR`] or above.
+#[cfg(any(target_os = "android", test))]
+pub(crate) const fn lever_held(writes_own: bool, before: u32, after: u32, floor: i32) -> bool {
+    after != before && (writes_own || floor >= LEVER_FLOOR)
 }
 
 // ========================= M3c: Live-Sync Engine FFI =========================
@@ -24609,14 +24711,16 @@ mod mesh_ffi_tests {
 
     use super::maintenance_real_ffi_tests::{install_test_seams, secret_bytes, DataDir};
     use super::{
-        mesh_clock_ms, mesh_empty, mesh_home, mesh_keep_on, mesh_open, mesh_reset_counts,
-        mesh_resume, mesh_sharing_stopped, mesh_start, mesh_stats, mesh_stop, radio_connect_failed,
-        radio_encoded, radio_frame_len, radio_guarded, radio_left_ms, radio_link_down,
-        radio_link_up, radio_poll, radio_receive, radio_resume, radio_sighting, radio_wake_in_ms,
+        lever_held, lever_line, lever_owns, lever_writes_own, mesh_clock_ms, mesh_empty, mesh_home,
+        mesh_keep_on, mesh_open, mesh_reset_counts, mesh_resume, mesh_sharing_stopped, mesh_start,
+        mesh_stats, mesh_stop, radio_connect_failed, radio_encoded, radio_frame_len, radio_guarded,
+        radio_left_ms, radio_lever_holds, radio_lever_install, radio_link_down, radio_link_up,
+        radio_poll, radio_receive, radio_resume, radio_sighting, radio_wake_in_ms,
         sealed_location_event_json_for_test, wipe_all_mls_state, with_mesh, CircleManagerFfi,
         LocationMessage, LocationMessageResultKindFfi, LocationPublishFfi, MeshHome, MeshSlot,
-        MeshStartFfi, MeshStatsFfi, RelayManagerFfi, SealedLocationFfi, SendHeldFfi, MAX_LINKS,
-        MESH_CLOCK_OVERRIDE_MS, MESH_DRIVE_PACKETS, MESH_HOLDS, MESH_OFFER_MAX_MS, RADIO_MAX_FRAME,
+        MeshStartFfi, MeshStatsFfi, RelayManagerFfi, SealedLocationFfi, SendHeldFfi, LEVER_FLOOR,
+        LEVER_OWNED_TAGS, LEVER_TAG_READ, MAX_LINKS, MESH_CLOCK_OVERRIDE_MS, MESH_DRIVE_PACKETS,
+        MESH_HOLDS, MESH_OFFER_MAX_MS, RADIO_MAX_FRAME,
     };
 
     const SECOND: u64 = 1_000;
@@ -27283,6 +27387,13 @@ mod mesh_ffi_tests {
         code_of(&source[..at.expect("its tests are declared")])
     }
 
+    /// The log lever's file, as it ships: before its own tests.
+    fn lever() -> String {
+        let source = include_str!("log_lever.rs");
+        let at = source.find(concat!("#[cfg(test)]\nmod", " tests {"));
+        code_of(&source[..at.expect("its tests are declared")])
+    }
+
     /// The engine's lock is never held across an `.await`: `MESH` is named
     /// by the one function that locks it, and every function that calls that
     /// one — and so holds the guard — is not `async`, where nothing can be
@@ -27367,7 +27478,7 @@ mod mesh_ffi_tests {
     /// numbers and bytes, is not `async`, and reaches the engine through
     /// `with_mesh` with no session, once, and through nothing else — but the
     /// one that starts an engine, which says so to `mesh_take`, and the
-    /// three that touch no engine at all. The list of them is exactly this
+    /// five that touch no engine at all. The list of them is exactly this
     /// one. Their caller, what the JNI exports forward to, names nothing of
     /// this file but them and the frame bound; the exports' own file names
     /// nothing of it at all; and neither names what a session is reached by.
@@ -27399,6 +27510,8 @@ mod mesh_ffi_tests {
                 "radio_poll",
                 "radio_encoded",
                 "radio_wake_in_ms",
+                "radio_lever_install",
+                "radio_lever_holds",
                 "radio_guarded",
             ]
         );
@@ -27425,7 +27538,11 @@ mod mesh_ffi_tests {
                 );
             }
             let (through, takes) = match name.as_str() {
-                "radio_frame_len" | "radio_encoded" | "radio_guarded" => (0, 0),
+                "radio_frame_len"
+                | "radio_encoded"
+                | "radio_guarded"
+                | "radio_lever_install"
+                | "radio_lever_holds" => (0, 0),
                 "radio_resume" => (0, 1),
                 _ => (1, 0),
             };
@@ -27475,8 +27592,8 @@ mod mesh_ffi_tests {
         }
     }
 
-    /// The nine native methods, each with the radio entry it is.
-    const EXPORTS: [(&str, &str); 9] = [
+    /// The eleven native methods, each with the radio entry it is.
+    const EXPORTS: [(&str, &str); 11] = [
         ("resume", "radio_resume"),
         ("leftMs", "radio_left_ms"),
         ("sighting", "radio_sighting"),
@@ -27486,12 +27603,14 @@ mod mesh_ffi_tests {
         ("receive", "radio_receive"),
         ("poll", "radio_poll"),
         ("wakeInMs", "radio_wake_in_ms"),
+        ("leverInstall", "radio_lever_install"),
+        ("leverHolds", "radio_lever_holds"),
     ];
 
     /// Every JNI export is one guarded call of its own radio entry, in two
     /// steps a reader can check line by line. The exports' file, which the
     /// crate's `unsafe_code` deny does not cover, holds `use`s and these
-    /// nine exports and nothing else, and each export is one call that hands
+    /// eleven exports and nothing else, and each export is one call that hands
     /// its parameters on, in the order declared, to the function of the
     /// entry's name. That function — in the file the deny does cover — makes
     /// the entry's call once, under the guard and with nothing else under
@@ -27566,14 +27685,14 @@ mod mesh_ffi_tests {
             .collect();
         assert!(
             left.is_empty(),
-            "the JNI exports' file holds something that is neither a use nor one of the nine \
+            "the JNI exports' file holds something that is neither a use nor one of the eleven \
              exports: {left:?}"
         );
         let (_, used) = (outside.split_once("use crate::api::{")).expect("the one use");
         let (used, _) = used.split_once("};").expect("the use ends");
         assert!(
             !outside.replace(used, "").contains("radio_"),
-            "something that is none of the nine calls names a radio entry"
+            "something that is none of the eleven calls names a radio entry"
         );
         for banned in [
             "unsafe",
@@ -27590,6 +27709,244 @@ mod mesh_ffi_tests {
                 "the shim uses `{banned}`: it aborts the process, or the crate's deny is evaded"
             );
         }
+    }
+
+    /// A tag's first bytes as the lever's logger reads them: cut at the bytes
+    /// that decide, zeros after its end.
+    fn tag_start(tag: &str) -> [u8; LEVER_TAG_READ] {
+        let mut start = [0; LEVER_TAG_READ];
+        for (byte, of) in start.iter_mut().zip(tag.bytes()) {
+            *byte = of;
+        }
+        start
+    }
+
+    /// The lever's list is the runtime scanner's: the `owned_tags` of its
+    /// `logcat` sink, in its order, so that a debug build with the lever in
+    /// writes the lines the scanner answers for and no other. And the bytes
+    /// of a tag that are read are enough to tell: the longest entry and the
+    /// two of `::`.
+    #[test]
+    fn the_levers_tags_are_the_scanners() {
+        let policy = include_str!("../../../tooling/logscan/policy.toml");
+        let sinks: Vec<&str> = (policy.lines())
+            .filter(|line| line.starts_with("logcat = {"))
+            .collect();
+        assert_eq!(sinks.len(), 1, "the policy has not one logcat sink");
+        let (_, list) = (sinks[0].split_once("owned_tags = [")).expect("the sink owns tags");
+        let (list, _) = list.split_once(']').expect("the list ends");
+        let owned: Vec<&str> = (list.split(','))
+            .map(|tag| tag.trim().trim_matches('"'))
+            .collect();
+        assert_eq!(owned, LEVER_OWNED_TAGS);
+        let longest = owned.iter().map(|tag| tag.len()).max();
+        assert_eq!(longest.map(|longest| longest + 2), Some(LEVER_TAG_READ));
+    }
+
+    /// A tag is one of Haven's own when it is an entry of the list, or an
+    /// entry and then `::` — the scanner's rule, exact and case included,
+    /// never a bare prefix: `flutter` does not own `FlutterJNI`, nor a
+    /// crate named like one of Haven's. A tag longer than the bytes read is
+    /// told by those bytes.
+    #[test]
+    fn a_tag_is_havens_when_it_is_an_entry_or_an_entry_and_two_colons() {
+        for own in LEVER_OWNED_TAGS {
+            for tag in [
+                own.to_owned(),
+                format!("{own}::"),
+                format!("{own}::relay::live_sync::session"),
+            ] {
+                assert!(lever_owns(&tag_start(&tag)), "`{tag}` is not Haven's");
+            }
+            for tag in [
+                format!("{own}:"),
+                format!("{own}:x:"),
+                format!("{own}x"),
+                format!("{own}_extra"),
+                format!("{own}{}", "x".repeat(LEVER_TAG_READ)),
+                format!(" {own}"),
+                own[..own.len() - 1].to_owned(),
+                own.to_uppercase(),
+            ] {
+                assert!(!lever_owns(&tag_start(&tag)), "`{tag}` is Haven's");
+            }
+        }
+        for tag in [
+            "",
+            "::",
+            "::flutter",
+            "FlutterJNI",
+            "haven",
+            "BluetoothGatt",
+            "BluetoothGattServer",
+            "BluetoothAdapter",
+            "bt_stack",
+        ] {
+            assert!(!lever_owns(&tag_start(tag)), "`{tag}` is Haven's");
+        }
+    }
+
+    /// One line through the lever (design §N.1.2, form (iii)). Every line is
+    /// counted, in both kinds of build, and the count wraps. A release build
+    /// reads nothing of a line and writes none, whatever its tag; a debug
+    /// build writes a line under one of Haven's tags, and none under another
+    /// or with no tag to read.
+    #[test]
+    fn a_release_build_reads_and_writes_no_line_and_a_debug_build_writes_only_havens() {
+        let (release, debug) = (lever_writes_own(false), lever_writes_own(true));
+        let lines = std::sync::atomic::AtomicU32::new(u32::MAX);
+        let mut read = false;
+        let written = lever_line(release, &lines, || {
+            read = true;
+            Some(tag_start("flutter"))
+        });
+        assert!(
+            !written && !read,
+            "a release build read a line's tag, or wrote the line"
+        );
+        assert_eq!(
+            lines.load(Ordering::Relaxed),
+            0,
+            "the line was not counted, or the count does not wrap"
+        );
+
+        assert!(lever_line(debug, &lines, || Some(tag_start("flutter"))));
+        assert!(lever_line(debug, &lines, || Some(tag_start(
+            "haven_core::mesh"
+        ))));
+        assert!(!lever_line(debug, &lines, || Some(tag_start(
+            "BluetoothGatt"
+        ))));
+        assert!(!lever_line(debug, &lines, || None));
+        assert_eq!(lines.load(Ordering::Relaxed), 4, "a line was not counted");
+    }
+
+    /// What a check of the lever comes to (design §N.1.3). It holds only
+    /// when the sentinel was counted — only Haven's logger counts — and, in
+    /// a release build, the minimum priority read back is still FATAL or
+    /// above: one a property or another library lowered is no second line.
+    /// A debug build has no floor to read. A count that wrapped has moved.
+    #[test]
+    fn the_lever_holds_when_its_logger_took_the_sentinel_and_a_release_builds_floor_stands() {
+        let (release, debug) = (lever_writes_own(false), lever_writes_own(true));
+        assert_eq!(LEVER_FLOOR, 7, "the floor is not ANDROID_LOG_FATAL");
+        for (floor, stands) in [
+            (i32::MIN, false),
+            (0, false),
+            (1, false),
+            (6, false),
+            (7, true),
+            (8, true),
+            (i32::MAX, true),
+        ] {
+            assert!(
+                !lever_held(release, 5, 5, floor) && !lever_held(debug, 5, 5, floor),
+                "a lever whose logger did not take the sentinel holds (floor {floor})"
+            );
+            assert!(
+                lever_held(debug, 5, 6, floor),
+                "a debug build's lever waits on a floor it does not raise (floor {floor})"
+            );
+            assert_eq!(
+                lever_held(release, 5, 6, floor),
+                stands,
+                "a release build's lever, its floor read back as {floor}"
+            );
+        }
+        assert!(lever_held(release, u32::MAX, 0, LEVER_FLOOR));
+    }
+
+    /// The lever's two calls as their JNI exports make them. Off Android no
+    /// `liblog` is looked for: there is no lever to put in and none holds.
+    /// Each answers `false` when its entry panics. And nothing else reaches
+    /// the lever: the bridge names its module in those two entries alone,
+    /// and the generated bridge — what Dart can call — names nothing of it.
+    #[test]
+    fn the_levers_two_calls_answer_no_lever_off_android_and_nothing_else_reaches_it() {
+        use crate::mesh_radio::{lever_holds, lever_install};
+        assert!(
+            lever_holds() == 0 && lever_install() == 0 && lever_holds() == 0,
+            "a host has a log lever"
+        );
+        assert!(!radio_lever_install() && !radio_lever_holds());
+
+        let (source, calls) = (shipped(), radio_calls());
+        for (entry, reaches) in [
+            ("radio_lever_install", "crate::log_lever::install()"),
+            ("radio_lever_holds", "crate::log_lever::holds()"),
+        ] {
+            let call = entry.strip_prefix("radio_").expect("an entry's name");
+            assert!(
+                body_of(&calls, &format!("pub(crate) fn {call}("))
+                    .contains(&format!("radio_guarded(false, {entry})")),
+                "{call} does not answer false when {entry} panics"
+            );
+            assert!(
+                body_of(source, &format!("pub(crate) fn {entry}(")).contains(reaches)
+                    && source.matches(entry).count() == 1,
+                "{entry} is not the one call {reaches}, or something of the bridge calls it"
+            );
+        }
+        assert_eq!(
+            source.matches("log_lever::").count(),
+            2,
+            "the bridge reaches the lever otherwise than through its two entries"
+        );
+        assert!(
+            !include_str!("frb_generated.rs").contains("lever"),
+            "the generated bridge names the lever"
+        );
+    }
+
+    /// The lever's logger runs inside the platform's log call, on whichever
+    /// thread logs, and an unwind out of it would abort the process. So its
+    /// file, and the decisions it asks this one for, hold no word that
+    /// panics, allocates or locks, and no arithmetic but the wrapping count;
+    /// the one assertion is the struct's layout, checked when it is
+    /// compiled.
+    #[test]
+    fn the_lever_holds_nothing_that_panics_allocates_or_locks() {
+        let source = shipped();
+        let mut text = lever();
+        for header in [
+            "pub(crate) const fn lever_writes_own(",
+            "pub(crate) fn lever_owns(",
+            "pub(crate) fn lever_line(",
+            "pub(crate) const fn lever_held(",
+        ] {
+            text += body_of(source, header);
+        }
+        for banned in [
+            "unwrap()",
+            ".expect(",
+            "panic!",
+            "unreachable!",
+            "todo!",
+            "unimplemented!",
+            "Box",
+            "Vec",
+            "String",
+            "to_owned",
+            "Mutex",
+            "RwLock",
+            ".lock(",
+            "static mut",
+            "thread_local",
+            " + ",
+            " - ",
+            " * ",
+            " / ",
+            " % ",
+            "+=",
+            "-=",
+        ] {
+            assert!(!text.contains(banned), "the lever uses `{banned}`");
+        }
+        assert!(
+            text.matches("assert!").count() == 1
+                && text.contains("const _: () = assert!(matches!("),
+            "the lever asserts something at run time"
+        );
     }
 
     /// The mesh's part of the bridge: its section, and its two entries on the
@@ -27651,11 +28008,12 @@ mod mesh_ffi_tests {
         );
     }
 
-    /// The mesh's part of the bridge, and both files of the radio's JNI
-    /// shim, write no log line and render no value.
+    /// The mesh's part of the bridge — the log lever's decisions among it —
+    /// both files of the radio's JNI shim and the lever's own file write no
+    /// log line and render no value.
     #[test]
     fn the_mesh_entries_log_nothing_and_format_nothing() {
-        let shim = shim() + &radio_calls();
+        let shim = shim() + &radio_calls() + &lever();
         for text in mesh_part().into_iter().chain([shim.as_str()]) {
             for banned in [
                 "log::",

@@ -1,5 +1,6 @@
-//! What Android's radio service asks of the mesh engine, call by call
-//! (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §A.6): one function for each native
+//! What Android's radio service asks of the mesh engine and, in its last
+//! two calls, of the log lever (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §A.6,
+//! §N.1.5): one function for each native
 //! method of the Kotlin class `com.oblivioustech.haven.mesh.MeshNative`,
 //! taking what JNI hands over. `mesh_jni.rs` exports each under its JNI name
 //! and does nothing else: that file is exempt from the crate's `unsafe_code`
@@ -19,8 +20,9 @@ use jni::sys::{jboolean, jbyteArray, jint, jlong, jsize, JNI_FALSE};
 use jni::JNIEnv;
 
 use crate::api::{
-    radio_connect_failed, radio_guarded, radio_left_ms, radio_link_down, radio_link_up, radio_poll,
-    radio_receive, radio_resume, radio_sighting, radio_wake_in_ms, RADIO_MAX_FRAME,
+    radio_connect_failed, radio_guarded, radio_left_ms, radio_lever_holds, radio_lever_install,
+    radio_link_down, radio_link_up, radio_poll, radio_receive, radio_resume, radio_sighting,
+    radio_wake_in_ms, RADIO_MAX_FRAME,
 };
 
 /// The most ready links one poll reads: the engine reads no more.
@@ -155,10 +157,18 @@ pub(crate) fn wake_in_ms() -> jlong {
     wake_out(radio_guarded(None, radio_wake_in_ms))
 }
 
+pub(crate) fn lever_install() -> jboolean {
+    jboolean::from(radio_guarded(false, radio_lever_install))
+}
+
+pub(crate) fn lever_holds() -> jboolean {
+    jboolean::from(radio_guarded(false, radio_lever_holds))
+}
+
 /// The conversions, which need no JVM. The seven calls that take no array
 /// are run against the engine in `api.rs`'s `mesh_ffi_tests`; `receive` and
 /// `poll` read a Java array and need a JVM, and so does every export: that
-/// the nine link under their names and answer a Kotlin caller is proved only
+/// the eleven link under their names and answer a Kotlin caller is proved only
 /// by an Android build and an emulator lane or a device, none of which runs
 /// here.
 #[cfg(test)]

@@ -404,6 +404,14 @@ poll(ready: LongArray): ByteArray?   wakeInMs(): Long      // −1: none
   `theEngineInterfaceIsTheNineExportsOfTheFixture` [J]. `cross-check.yml`'s Android step is a plain `cargo check`: it
   denies no warning, so dead code that exists only in the Android
   configuration would pass it — owed to the same unit.
+  **As built (M3g, unit 1; §N.7):** the exports are eleven, with the log
+  lever's `leverInstall` and `leverHolds`; the two interfaces,
+  `MeshEngineApi` and `LogLever`, are held to the fixture by
+  `theTwoNativeInterfacesAreTheElevenExportsOfTheFixture`; the `nm -D`
+  step is `scripts/ci/check_mesh_radio_symbols.sh` in `build-check.yml`,
+  which also holds the keyring's one `Java_*` symbol (N-3) and the
+  library's `liblog` imports; and the Android step of `cross-check.yml`
+  is clippy with warnings denied. Neither step has run on a runner.
 - **`jni` logs** (found in M3b): its wrappers write a `trace` line naming
   the JNI function they call — a fixed word, no value. The bridge's logger
   admits Haven's two targets alone and caps the level below `trace`, so none
@@ -2765,7 +2773,8 @@ mapping to `unsupported` and `failed` (§M.3).
 ## N. M3g as it will be built
 
 > **Drafted by one agent and confirmed with changes by an independent
-> review, both 2026-11-12.** Paper only: nothing of it is built or run.
+> review, both 2026-11-12.** Paper only when written; unit 1 has been
+> built since (N.7), and nothing of this section has run on Android.
 > It settles what §M.2 left to M3g, orders the unit into six that CI can
 > compile one at a time, and lists what the code will rest on unproved.
 > Where it departs from §B, §C or §M it says so.
@@ -3565,3 +3574,60 @@ Not the owner's. Confirmed by the review: the check of N.1.3 in place
 of §M.2's; reading the logout's marker (N.2.7); the two changes to the
 Dart seam (N.2.8). Changed by it: the dial's order and the server's MTU
 (N-6).
+
+### N.7 As built
+
+**Unit 1, the lever (2026-11-12).** Built as N.1 and N.4 say, with form
+(iii) of Q-14 — the other form is one line, `lever_writes_own` answering
+`false`. **Nothing calls it and nothing of it has run on Android**; plan
+§16 has what is proved and how. Where the code differs from this
+section:
+
+- **Where the decisions are (N.1.1, N.1.2).** `log_lever.rs` holds the
+  lookup, the logger and the calls through `liblog`'s functions. Which
+  tags are Haven's, what a build writes and what a check comes to are
+  four functions of `api.rs`, under the crate's deny (`lever_owns`,
+  `lever_line`, `lever_held`, `lever_writes_own`), with the list
+  (`LEVER_OWNED_TAGS`) beside them: so a second list does exist, in Rust,
+  held to the policy's line by `the_levers_tags_are_the_scanners`.
+- **What a debug build reads (N.1.1).** Three reads, not two fields: the
+  message's size, its tag pointer, and the tag's bytes — at most the
+  eighteen that decide (the longest entry and `::`), one at a time and
+  never past the NUL, so no `strlen` over a string of the platform's.
+  The message's text is never read.
+- **The platform's writer (N.1.1)** is not a static of its own: the
+  logger takes it from the one table the lookup filled, a `OnceLock`
+  that is set before the logger is handed over and read without a lock.
+- **Check 13 (N.1.1).** Of `libc` the file names `dlopen`, `dlsym` and
+  `RTLD_NOW` only: the C types are `std::ffi`'s. Its strings are the
+  library, the five functions, the `"C"` of a pointer type and the
+  `"android"` of its one `cfg!`. The `unsafe` count (eleven) and the one
+  `extern "C" fn` are the whole file's, tests included. Added to the
+  list: no `impl`, `mod`, `macro_rules` or `thread_local`; no macro but
+  `cfg!` and the layout's one compile-time assertion; nothing of the
+  bridge but `lever_*` and `LEVER_*`.
+- **The entries (N.1.5)** are compiled for Android and for tests only
+  (`#[cfg]`), where the other nine are compiled everywhere and expected
+  dead: the module they call exists nowhere else.
+- **[L] of N.1.6, rows 2 to 4.** No stand-in for `liblog` was written,
+  and no recording writer. What runs on the host: the four decisions,
+  for both kinds of build; the logger itself, handed messages the tests
+  build, with no platform writer to hand them on to; the tag's read; a
+  lookup in a library that is absent and in one without the functions;
+  and the two calls answering `false`. **Not run anywhere:** `install`
+  and `holds` past their first line — the order of the calls, the
+  sentinel, the floor raised and read back — and the forward to the
+  platform's writer. That a host makes no lookup is read, not tested: a
+  host has no `liblog.so` to tell the two apart.
+- **The JVM test (N.1.5)** is
+  `theTwoNativeInterfacesAreTheElevenExportsOfTheFixture`.
+- **The import list (N.4)** is six functions, not two: those
+  `android/log.h` declares with no `__INTRODUCED_IN`, read at
+  `android-11.0.0_r1` — `__android_log_write`, `_print`, `_vprint`,
+  `_assert`, `_buf_write`, `_buf_print`. The Flutter engine's own
+  library imports three of them. The check is
+  `scripts/ci/check_mesh_radio_symbols.sh`; a weak reference fails it
+  too.
+- **A host that is not Unix** cannot build the crate's tests: `libc` has
+  no `dlopen` there. CI's host is Linux.
+

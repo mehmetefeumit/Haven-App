@@ -69,6 +69,10 @@ plant = { kind = "plant" }
 # limit (`haven_core::relay::man`), so `haven_core` has to cover both. Never a
 # bare prefix: `flutter` would then own the five `Flutter*` plugin tags CI run
 # 35280144455's logcats carry, and vendor text is not Haven's to answer for.
+# The app's log lever (`haven/rust_builder/src/log_lever.rs`) writes, in a debug
+# build, the lines under the `logcat` sink's tags and no other, by this same
+# match; `the_levers_tags_are_the_scanners` reads that line of this file, so a
+# tag added here is added to `LEVER_OWNED_TAGS` in the same change.
 # `owned_emitters` is the `ios` twin, matched EXACTLY against the record's own
 # emitter — its os_log subsystem, else the emitting library, else the process —
 # because on iOS the process is `Runner` for Haven's records and for every Apple

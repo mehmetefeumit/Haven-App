@@ -1,9 +1,10 @@
 package com.oblivioustech.haven.mesh.core
 
 /**
- * The mesh engine as the radio drives it: the nine native methods pinned in
- * `haven/rust_builder/fixtures/mesh_radio_exports.txt`, each with the types
- * its JNI descriptor names. `MeshNative` is the one real implementation.
+ * The mesh engine as the radio drives it: nine of the eleven native methods
+ * pinned in `haven/rust_builder/fixtures/mesh_radio_exports.txt`, each with
+ * the types its JNI descriptor names; [LogLever] is the other two.
+ * `MeshNative` is the one real implementation.
  *
  * A link's and a peer's number are this side's own counters, never negative
  * and never an address.

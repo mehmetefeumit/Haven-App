@@ -64,9 +64,12 @@ class FixtureTest {
         }
     }
 
-    /** A name or a type JNI does not find is a run-time error: the interface is the pinned exports, and no other method. */
+    /**
+     * A name or a type JNI does not find is a run-time error: the two interfaces `MeshNative` implements are the
+     * pinned exports between them, no method twice and no other.
+     */
     @Test
-    fun theEngineInterfaceIsTheNineExportsOfTheFixture() {
+    fun theTwoNativeInterfacesAreTheElevenExportsOfTheFixture() {
         val letters = mapOf<Class<*>, String>(
             Long::class.java to "J",
             Int::class.java to "I",
@@ -75,12 +78,13 @@ class FixtureTest {
             ByteArray::class.java to "[B",
             Void.TYPE to "V",
         )
-        val declared = MeshEngineApi::class.java.declaredMethods.map { method ->
+        val methods = listOf(MeshEngineApi::class.java, LogLever::class.java).flatMap { it.declaredMethods.toList() }
+        val declared = methods.map { method ->
             val taken = method.parameterTypes.joinToString("") { letters.getValue(it) }
             "${method.name} ($taken)${letters.getValue(method.returnType)}"
         }
         val pinned = fixture("mesh_radio_exports.txt").map { "${it[0]} ${it[1]}" }
-        assertEquals(9, pinned.size)
+        assertEquals(11, pinned.size)
         assertEquals(pinned.sorted(), declared.sorted())
     }
 }

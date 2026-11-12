@@ -3564,6 +3564,7 @@ dependencies = [
  "hex",
  "jni",
  "keyring-core",
+ "libc",
  "log",
  "nostr",
  "nostr-relay-builder",

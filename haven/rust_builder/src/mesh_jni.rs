@@ -102,3 +102,19 @@ pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_wakeInMs(
 ) -> jlong {
     mesh_radio::wake_in_ms()
 }
+
+#[no_mangle]
+pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_leverInstall(
+    _env: JNIEnv,
+    _this: JObject,
+) -> jboolean {
+    mesh_radio::lever_install()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_oblivioustech_haven_mesh_MeshNative_leverHolds(
+    _env: JNIEnv,
+    _this: JObject,
+) -> jboolean {
+    mesh_radio::lever_holds()
+}

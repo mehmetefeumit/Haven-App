@@ -54,6 +54,9 @@ planes = { package = "haven-local-relay", path = "../../tooling/e2e/local-relay"
 # below): the shim is compiled into the test build too, which type-checks every
 # export against `jni` on a machine with no Android target.
 jni = "0.21"
+# The host half of the log lever (`src/log_lever.rs`; the Android half is
+# below), for the same type-check: `dlopen` and `dlsym`, on a Unix host.
+libc = "0.2"
 
 # MDK's SQLCipher 4.17 source (tracked exception T-LIBSQLITE-PATCH). Only a
 # root's `[patch]` applies, and none is inherited through the haven-core path
@@ -103,3 +106,8 @@ android_logger = "0.15"
 # `android-native-keyring-store` already resolves, so the lockfile gains an edge
 # and no package; 0.22 changes the API and would add one.
 jni = "0.21"
+# The log lever (`src/log_lever.rs`) finds `liblog`'s API-30 functions with
+# `dlopen` and `dlsym`: imported, they would stop the library loading on
+# Android 6 to 10. The version the lockfile already resolves: an edge, no
+# package.
+libc = "0.2"

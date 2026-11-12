@@ -3035,6 +3035,130 @@ the privacy manifest and `CLAUDE.md` are unchanged: they describe what
 is built. §0.4 owes, with M3g, an item for Android 6 to 10 and, in
 item 6, that address rotation is the build's; §7.1 carries a note now.
 
+- **M3g unit 1**, the log lever (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §N.1,
+  §N.4, and §N.7 for where the code differs;
+  `haven/rust_builder/src/log_lever.rs`, `api.rs`, `mesh_radio.rs`,
+  `mesh_jni.rs`, `lib.rs`; `…/mesh/core/LogLever.kt`;
+  `scripts/ci/check_mesh_radio.sh`, `check_mesh_radio_symbols.sh`). Rust in
+  the bridge crate, one Kotlin interface, two guards, two workflow steps
+  and documents: no adapter, no service, no Dart, nothing in
+  `haven-core/src` or `tooling/soak`. **Nothing calls the lever: no Kotlin
+  declares its two exports, the generated bridge does not name it, and a
+  default build differs by two exported symbols. Nothing of it has run on
+  Android.**
+  **What it is.** A third module the crate's `unsafe_code` deny is lifted
+  for. `leverInstall` finds five functions of the platform's `liblog` by
+  name — `__android_log_set_logger`, `_logd_logger`, `_write_log_message`,
+  `_set_minimum_priority`, `_get_minimum_priority`, each from API 30 — with
+  `dlopen("liblog.so")` and `dlsym`, never an `extern` declaration, which
+  would be an import Android 6 to 10 cannot bind; hands `liblog` a logger
+  of Haven's own; and, in a release build, raises the minimum priority to
+  FATAL behind it. `false` where a function is missing. `leverHolds` hands
+  the logger in force one empty line for the main buffer at ERROR and
+  answers whether Haven's logger counted it and, in a release build,
+  whether the floor still reads FATAL or above.
+  **What a build writes (owner question Q-14, the recommended form
+  built).** A release build's logger counts the line and returns: it reads
+  nothing of it and writes none. A debug build's reads the message's size
+  and at most eighteen bytes of its tag — never past the NUL, never the
+  text — and hands the line to the platform's writer only under one of
+  the runtime scanner's `owned_tags`, or one and then `::`; it leaves the
+  floor alone. The other form, nothing in any build, is one function
+  answering `false` (`lever_writes_own`).
+  **Where the decisions are.** In `api.rs`, under the deny: the list
+  (`LEVER_OWNED_TAGS`), the match (`lever_owns`), what a line comes to
+  (`lever_line`), what a check comes to (`lever_held`), the build's kind
+  (`lever_writes_own`). `log_lever.rs` holds what must be `unsafe`: eleven
+  blocks, each with its argument — two for the lookup, one for the cast of
+  what it found, three for a message's size, tag pointer and tag bytes,
+  five for the calls through `liblog`'s functions. The logger and what it
+  calls log nothing, format nothing, allocate nothing, take no lock, index
+  nothing and add nothing but a wrapping count; it is `extern "C"`, where
+  a panic aborts and cannot unwind into `liblog`.
+  **Exports**, eleven: `leverInstall ()Z` and `leverHolds ()Z` beside the
+  nine, each one forward to `mesh_radio.rs`, there one guarded call of
+  `radio_lever_install` / `radio_lever_holds`, which answer `false` when
+  they panic. `LogLever` is the pure interface beside `MeshEngineApi`.
+  `libc 0.2.180`, already in the lockfile: one edge in
+  `haven/rust_builder/Cargo.lock`, no package; the other two lockfiles
+  unchanged.
+  **Proved here, on the host** (278 Rust tests pass in the bridge crate,
+  ten of them new; 33 JVM tests, one renamed): the list is the `logcat` line
+  of `tooling/logscan/policy.toml`, read by the test; the match, for every
+  entry — itself, with `::`, cut at the bytes read — and against a bare
+  prefix, one colon, another case and the platform's own Bluetooth tags;
+  that a release build never asks for a line's tag and writes none, that a
+  debug build writes only Haven's, that every line is counted and the
+  count wraps; what a check comes to for a count that moved or did not
+  and each floor from below DEFAULT to SILENT; the logger itself and the
+  tag's read, on messages the tests build; a lookup in a library that is
+  absent and in one that lacks the functions; both calls answering `false`
+  off Android; and, from the source, that the bridge reaches the lever
+  through its two entries alone, the generated bridge not at all, and
+  that the lever's file and its four decisions hold no word that panics,
+  allocates or locks. The lever's file alone, with its decisions, was
+  type-checked and linted — clippy, warnings denied — for four Android
+  ABIs (`aarch64`, `armv7`, `x86_64`, `i686`) on rustc 1.97.1 and for the
+  first two on 1.99, those two in both profiles: the layout assertion
+  holds for both pointer widths and `libc` has the three names there.
+  **The guard**, `check_mesh_radio.sh`: checks 1, 2 and 6 take a third
+  module; check 13 is the lever's file — its `unsafe` as eleven blocks and
+  five pointer types, one `extern "C" fn`, no export, no `static mut`, no
+  `impl` or `mod`, no `unwrap`, `expect(`, `Box`, `Vec`, `String`, `Mutex`,
+  `RwLock`, `radio_`, `log::` or `JNIEnv`, no macro but `cfg!` and the
+  layout's one compile-time assertion, no string but the library, the five
+  functions, an ABI and the `cfg!`'s target, of `libc` three names by
+  their path, of the bridge `lever_*` alone, its tests last; and no file
+  of the crate naming `android_log_sys`, or outside the lever one of the
+  five. 165 self-test fixtures (129, and 36); each of the eight failure
+  sites of check 13, and those of checks 1, 2 and 6, silenced in turn,
+  fails the self-test. It reads text: it cannot see an index that could
+  panic, nor that an `unsafe` block's argument is true.
+  **The artifact**, `check_mesh_radio_symbols.sh`, the step M3b and M3f
+  owed: on each ABI's debug APK in `build-check.yml`, the library's
+  defined `Java_*` symbols are the fixture's eleven and the keyring's one
+  (design N-3), and every undefined `__android_log_*` symbol is one of the
+  six `android/log.h` declares with no `__INTRODUCED_IN`. 19 self-test
+  fixtures over listings a stand-in for `nm` prints; each of its failure
+  sites silenced fails it. Run here against the Flutter engine's own
+  library for three ABIs, which the host's `nm` reads: the listing parses
+  and that library's three `liblog` imports pass. **It has run on no
+  runner**, and what Haven's library imports today is its first run's to
+  say. `cross-check.yml`'s Android step is now clippy with warnings
+  denied, owed since M3b, **and has not run either**: what it finds in
+  the Android-only code already there is not known.
+  **Mutation pass**, 22 changes to the Rust and one to the Kotlin: the
+  match loosened to a bare prefix, or to one colon; a release build
+  writing Haven's lines; the logger forwarding whatever the build, not
+  counting, or not asking the decision at all; the check ignoring the
+  count, or the floor in a release build; the floor at ERROR; a tag
+  dropped from the list, or added; one byte fewer read; an export, a call
+  or an entry forwarding to the other's; a panic answered `true`; a short
+  message's tag read; the read not stopping at the NUL; a log line or an
+  `unwrap` where the logger runs; the Kotlin interface's method retyped —
+  each fails a named test. Two stand. A host that looks `liblog.so` up as
+  Android does finds none either, so "off Android no lookup is made" is
+  read, not tested. And a lookup that takes a missing function for a found
+  one answers a table whose null pointer reads, through the option's
+  niche, as no table: undefined behaviour the test cannot tell from the
+  right answer, so the null check rests on its SAFETY argument alone.
+  **Not proved, by anything.** No Android build of the bridge crate was
+  made: there is no NDK where this was written. The five functions were
+  never resolved; `install` and `holds` have never run past their first
+  line — the order of the calls, the sentinel, the floor raised and read
+  back — and neither has the forward to the platform's writer: a host has
+  no `liblog`, and no stand-in for it was written (design N.1.6's third
+  row is not built). So it is not shown that the logger is the one in
+  force after the call, that a platform line is dropped, that a property
+  set over `adb` brings none back, or that the library still loads on
+  Android 6 to 10 — that last is what the artifact step is for. The event,
+  statistics and security buffers never reach a logger (design N-1).
+  Everything [E] and [H] of design N.1.6 stands as it was. `haven-core/
+  SECURITY.md` has the lever under "The radio's entries"; the privacy
+  manifest and `CLAUDE.md` are unchanged — the lever is in force in no
+  build — and §0.4's two items stay owed to the unit that makes a phone
+  refuse.
+
 ### Proposed CLAUDE.md wording (owner to approve)
 
 Each is the text as it stands, then the text proposed. Nothing in
@@ -3159,7 +3283,8 @@ New:
 > outlive its `expiration` by design (Rule 17).
 
 **7. "Rust lints" (Code Quality).** The line says of every crate what holds
-for `haven-core`, and since M3b the bridge crate has a rule of its own.
+for `haven-core`, and since M3b the bridge crate has a rule of its own —
+three allowances since M3g's first unit, which the wording below now says.
 
 Old:
 
@@ -3170,11 +3295,14 @@ New:
 
 > - **Rust lints**: `haven-core` enables `clippy::pedantic` and
 >   `clippy::nursery` and denies `unsafe_code`. The bridge crate
->   (`haven/rust_builder`) denies `unsafe_code` too, with two allowances and
->   no other: the generated bridge, and the Android radio's JNI exports,
->   `mesh_jni.rs`, where the lint fires on `#[no_mangle]`. Nothing but those
->   exports may be in that file, each one call into `mesh_radio.rs`, which is
->   under the deny (`scripts/ci/check_mesh_radio.sh`)
+>   (`haven/rust_builder`) denies `unsafe_code` too, with three allowances
+>   and no other: the generated bridge; the Android radio's JNI exports,
+>   `mesh_jni.rs`, where the lint fires on `#[no_mangle]` — nothing but
+>   those exports may be in that file, each one call into `mesh_radio.rs`,
+>   which is under the deny; and the log lever, `log_lever.rs` — a symbol
+>   lookup, a C callback and calls through function pointers, whose
+>   decisions are `api.rs`'s, under the deny
+>   (`scripts/ci/check_mesh_radio.sh`)
 
 Next: M3, the radio, and with it everything on screen, as
 `docs/BLUETOOTH_MESH_M3_DESIGN.md` has it; and, if Android is to pass

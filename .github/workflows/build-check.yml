@@ -164,6 +164,15 @@ jobs:
           unzip -q -o build/app/outputs/flutter-apk/app-debug.apk 'lib/*/librust_lib_haven.so' -d "${RUNNER_TEMP}/apk-lib"
           bash ../scripts/ci/check_sqlcipher_logger_omitted.sh "${RUNNER_TEMP}/apk-lib/lib"
 
+      # Of the library just unpacked: its exported Java_* symbols are the
+      # radio's pinned native methods and the keyring's one — Kotlin finds a
+      # native method by name at its first call — and it imports no
+      # __android_log_* symbol newer than the oldest Android Haven runs on,
+      # which would stop the library loading there (the log lever finds its
+      # API-30 functions at run time for that reason).
+      - name: Probe the library's JNI exports and liblog imports
+        run: bash ../scripts/ci/check_mesh_radio_symbols.sh "${RUNNER_TEMP}/apk-lib/lib"
+
       # Saved ONLY from a successful build: a cache written by a build that died
       # mid-resolution would carry exactly the gaps that made it fail, and every
       # lane restoring it would inherit them. This job is the single writer of
