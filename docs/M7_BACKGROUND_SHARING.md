@@ -1505,7 +1505,10 @@ nostr_group_id_hex=?` in the `delete_circle` cascade (`storage.rs:824-877`) = wi
   the native `backgrounded` status instead of an in-process hint, a relaunched process is
   receive-only BY CONSTRUCTION on both paths — which is what
   `INV-L-IOS-WAKES-RECEIVE-ONLY` may now claim, and what closes the hole the failure analysis
-  recorded under its downgraded-hypotheses list. Indicator/session policy moved onto one predicate,
+  recorded under its downgraded-hypotheses list. The refusal ends that session only: since W4
+  (2026-11-12) the location service keeps its own stream open and the next foreground
+  `resumeStream()` starts a new session (before W4 the stream stayed closed until the process
+  died). Indicator/session policy moved onto one predicate,
   `HavenBackgroundSessionHandler.alwaysConfirmed` (false until a `CLServiceSessionDiagnostic`
   positively confirms Always on iOS 18+, and always false on iOS 17): confirmed Always releases the
   `CLBackgroundActivitySession` and clears `showsBackgroundLocationIndicator`; When-In-Use, a
