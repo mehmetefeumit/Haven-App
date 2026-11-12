@@ -3251,8 +3251,9 @@ impl CircleManagerFfi {
         let inner =
             CoreCircleManager::new(path, &keys, Some(&circle_db_key)).map_err(|e| e.to_string())?;
         // A session opened while the mesh engine runs: the engine takes this
-        // session's hand-off, or the one it holds is fed by nobody.
-        mesh_adopt(inner.session());
+        // session's hand-off, or the one it holds is fed by nobody. Opening a
+        // session starts no engine.
+        mesh_take(Taker::of(inner.session(), false, false));
         Ok(Self {
             inner: Arc::new(inner),
             own_pubkey_hex,
@@ -12739,14 +12740,17 @@ mod tests {
 // ============================ Bluetooth mesh FFI =============================
 //
 // The mesh engine's home (`docs/BLUETOOTH_MESH_PLAN.md` §5, §7.5, §7.6). One
-// engine a process, in `MESH`, reached only through `with_mesh`, which applies
+// engine a process, in `MESH`, reached only through `mesh_run`, which applies
 // what the open session left for it before every engine call and runs nothing
 // once the deadline has passed. The lock is taken only in functions that are
-// not `async`, so it is never held across an `.await`. The radio is not built
-// yet: nothing here links the engine to another phone.
+// not `async`, so it is never held across an `.await`. The radio's entries
+// (`radio_*`, below) hold no session and are no part of the generated bridge.
 
-use haven_core::mesh::engine::{CircleSlot, Config as MeshConfig, MeshEngine};
+use haven_core::mesh::engine::{
+    CircleSlot, Config as MeshConfig, LinkId, MeshEngine, Output, PeerRef, Role,
+};
 use haven_core::mesh::handoff::{Handoff, Op};
+use haven_core::mesh::store::MAX_LINKS;
 
 /// How many packets one [`RelayManagerFfi::mesh_drive_driven`] reads.
 const MESH_DRIVE_PACKETS: usize = 256;
@@ -12879,7 +12883,15 @@ enum MeshHome {
 
 static MESH: Mutex<MeshHome> = Mutex::new(MeshHome::Off);
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: how often this thread has taken the engine's lock.
+    static MESH_HOLDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 fn mesh_home() -> std::sync::MutexGuard<'static, MeshHome> {
+    #[cfg(test)]
+    MESH_HOLDS.set(MESH_HOLDS.get() + 1);
     MESH.lock().unwrap_or_else(|poisoned| {
         // An engine call panicked: that engine is not run again.
         let mut home = poisoned.into_inner();
@@ -12889,7 +12901,8 @@ fn mesh_home() -> std::sync::MutexGuard<'static, MeshHome> {
     })
 }
 
-/// Runs `f` on the engine, at the engine's clock: the only way to it.
+/// Runs `f` on the engine in `home`, at the engine's clock: the only way to
+/// it.
 ///
 /// Before `f`, every time: the deadline, then the hand-off. `session_left_ms`
 /// is how long the caller's session says mesh stays on, when the caller holds
@@ -12897,12 +12910,12 @@ fn mesh_home() -> std::sync::MutexGuard<'static, MeshHome> {
 /// that finds the deadline passed — by the engine's clock, which no change of
 /// the wall clock moves, or by the session's — drops the engine with every
 /// packet it held, and runs nothing. `None` when no engine runs.
-fn with_mesh<T>(
+fn mesh_run<T>(
+    home: &mut MeshHome,
     session_left_ms: Option<u64>,
     f: impl FnOnce(&mut MeshSlot, u64) -> T,
 ) -> Option<T> {
-    let mut home = mesh_home();
-    let MeshHome::On(slot) = &mut *home else {
+    let MeshHome::On(slot) = home else {
         return None;
     };
     let now_ms = mesh_clock_ms();
@@ -12918,6 +12931,14 @@ fn with_mesh<T>(
         haven_core::relay::fanout::FanoutClock::now_ms(&haven_core::relay::fanout::WallClock);
     slot.apply(now_ms, wall_ms);
     Some(f(slot, now_ms))
+}
+
+/// [`mesh_run`] under the engine's lock, held for that one call.
+fn with_mesh<T>(
+    session_left_ms: Option<u64>,
+    f: impl FnOnce(&mut MeshSlot, u64) -> T,
+) -> Option<T> {
+    mesh_run(&mut mesh_home(), session_left_ms, f)
 }
 
 /// What an engine that ended by its deadline had passed on, taken: the
@@ -12941,48 +12962,113 @@ fn mesh_empty() -> u64 {
     }
 }
 
-/// Hands the running engine `session`'s hand-off and deadline, and answers
-/// whether one runs. A session that opens while the engine runs, and one
-/// asked for again, are so never left filling a hand-off nobody takes from.
-/// The engine's deadline only ever comes nearer here.
-fn mesh_adopt(session: &haven_core::nostr::mls::SessionManager) -> bool {
-    let (left_ms, handoff) = (session.mesh_on_for_ms(), session.mesh_handoff());
-    with_mesh(Some(left_ms), |slot, now_ms| slot.adopt(handoff, now_ms)).is_some()
+/// Who asks [`mesh_take`] for the engine.
+enum Taker {
+    /// A session.
+    Session {
+        /// Where it leaves the locations it wraps.
+        handoff: Arc<Handoff>,
+        /// How long it says mesh stays on; zero when its mesh is off.
+        left_ms: u64,
+        /// Whether the user has just asked for mesh.
+        confirmed: bool,
+        /// Whether to start an engine when none runs.
+        install: bool,
+    },
+    /// The radio's service, which holds no session.
+    Radio {
+        /// How long it says mesh stays on.
+        left_ms: u64,
+    },
 }
 
-/// The engine for a session whose mesh is on: the running one, adopted, or a
-/// new one. No engine is started for a session whose mesh is off, nor over
-/// one that ended and is not yet paid for. `confirmed` is whether the user
-/// has just asked for mesh.
-fn mesh_open(session: &haven_core::nostr::mls::SessionManager, confirmed: bool) -> MeshStartFfi {
-    let left_ms = session.mesh_on_for_ms();
-    if confirmed {
-        // Before the adoption below can find the old deadline passed: the
-        // user asked in its last moments, and the session has taken the ask.
-        let mut home = mesh_home();
-        if let MeshHome::On(slot) = &mut *home {
-            slot.until_ms = mesh_clock_ms().saturating_add(left_ms);
+impl Taker {
+    /// `session`'s ask.
+    fn of(
+        session: &haven_core::nostr::mls::SessionManager,
+        confirmed: bool,
+        install: bool,
+    ) -> Self {
+        Self::Session {
+            handoff: session.mesh_handoff(),
+            left_ms: session.mesh_on_for_ms(),
+            confirmed,
+            install,
         }
     }
-    if mesh_adopt(session) {
+}
+
+/// The engine for whoever asks, found or started under one hold of the lock:
+/// a session and the radio that start together end with one engine, and the
+/// session's hand-off in it.
+///
+/// A session adopts a running engine: the engine takes its hand-off, so a
+/// session that opens while the engine runs, and one asked for again, are
+/// never left filling a hand-off nobody takes from; and its deadline, which
+/// only ever brings the engine's nearer — unless `confirmed`, when the
+/// session has taken the user's ask and the engine's deadline moves to it
+/// first. The radio adopts nothing: a running engine keeps the hand-off and
+/// the deadline it has. With none running, one is started for a radio, or
+/// for a session that `install`s, when `left_ms` is not zero — and never over
+/// one that ended and is not yet paid for.
+fn mesh_take(taker: Taker) -> MeshStartFfi {
+    let mut home = mesh_home();
+    let running = match &taker {
+        Taker::Session {
+            handoff,
+            left_ms,
+            confirmed,
+            ..
+        } => {
+            if let (true, MeshHome::On(slot)) = (*confirmed, &mut *home) {
+                // Before the adoption below can find the old deadline passed:
+                // the user asked in its last moments, and the session has
+                // taken the ask.
+                slot.until_ms = mesh_clock_ms().saturating_add(*left_ms);
+            }
+            mesh_run(&mut home, Some(*left_ms), |slot, now_ms| {
+                slot.adopt(Arc::clone(handoff), now_ms);
+            })
+        }
+        Taker::Radio { .. } => mesh_run(&mut home, None, |_, _| ()),
+    };
+    if running.is_some() {
         return MeshStartFfi::AlreadyOn;
     }
-    let mut home = mesh_home();
+    let (handoff, left_ms) = match taker {
+        Taker::Session { install: false, .. } => return MeshStartFfi::Off,
+        Taker::Session {
+            handoff, left_ms, ..
+        } => (handoff, left_ms),
+        // The service's word is not the store's: it buys no more than the
+        // user could have asked for.
+        Taker::Radio { left_ms } => (
+            Arc::default(),
+            left_ms.min(haven_core::nostr::mls::MESH_ON_MAX_MS),
+        ),
+    };
     if left_ms == 0 || !matches!(*home, MeshHome::Off) {
         return MeshStartFfi::Off;
     }
     let now_ms = mesh_clock_ms();
     *home = MeshHome::On(Box::new(MeshSlot {
         engine: MeshEngine::new(MeshConfig::default(), rand::rngs::OsRng, now_ms),
-        handoff: session.mesh_handoff(),
+        handoff,
         until_ms: now_ms.saturating_add(left_ms),
         folded: 0,
     }));
     MeshStartFfi::Started
 }
 
+/// The engine for a session whose mesh is on: the running one, adopted, or a
+/// new one. No engine is started for a session whose mesh is off. `confirmed`
+/// is whether the user has just asked for mesh.
+fn mesh_open(session: &haven_core::nostr::mls::SessionManager, confirmed: bool) -> MeshStartFfi {
+    mesh_take(Taker::of(session, confirmed, true))
+}
+
 /// [`with_mesh`] for a caller that holds the session, which is every entry
-/// until the radio is built. Where the twelve-hour deadline is enforced when
+/// but the radio's. Where the twelve-hour deadline is enforced when
 /// nobody turned mesh off: an entry that finds it passed — this one, or an
 /// earlier one that held no session — turns the session's mesh off too, so
 /// every key is deleted, and adds what the engine had passed on to the
@@ -13129,6 +13215,161 @@ pub struct MeshDriveFfi {
     pub errored: bool,
     /// Whether packets still wait to be read: drive again.
     pub more: bool,
+}
+
+// ---- the radio's entries ----------------------------------------------------
+//
+// What the radio's service drives the engine through
+// (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §A). Each is `with_mesh` with no
+// session and nothing else — so each checks the deadline and applies the
+// hand-off first, reads the clock here, and can reach no session, key or
+// store (Security Rule 14) — but `radio_resume`. A link and a peer are the
+// radio's own numbers, never an address. Nothing calls them in this build:
+// the JNI shim is not built yet.
+
+/// The longest frame a radio carries: one ATT attribute value.
+pub(crate) const RADIO_MAX_FRAME: usize = 512;
+
+/// The radio frame length of a link, or `None` when the MTU carries no link:
+/// an ATT write or notification carries three bytes less than the MTU, and
+/// the engine takes no link whose frame is shorter than a handshake message.
+/// The radio hands over the MTU and never a length, so the two ends of a link
+/// compute one.
+pub(crate) const fn radio_frame_len(att_mtu: u16) -> Option<usize> {
+    let carried = (att_mtu as usize).saturating_sub(3);
+    let frame = if carried < RADIO_MAX_FRAME {
+        carried
+    } else {
+        RADIO_MAX_FRAME
+    };
+    if frame < haven_core::mesh::frame::MIN_FRAME_LEN {
+        return None;
+    }
+    Some(frame)
+}
+
+/// Starts an engine for a mesh an earlier process left on, with no session:
+/// `left_ms` is the service's word, cut to twelve hours. Starts nothing when
+/// one runs, when `left_ms` is 0, or over an engine that ended and is not yet
+/// paid for. Answers whether an engine runs.
+///
+/// The engine is keyless and so is this start: it carries and emits cover,
+/// and seals and opens nothing until a session adopts it — whose deadline
+/// then overrules the service's, at once when its mesh is off.
+#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+pub(crate) fn radio_resume(left_ms: u64) -> bool {
+    mesh_take(Taker::Radio { left_ms }) != MeshStartFfi::Off
+}
+
+/// How long the engine still runs; 0 when none does.
+#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+pub(crate) fn radio_left_ms() -> u64 {
+    with_mesh(None, |slot, now_ms| slot.until_ms - now_ms).unwrap_or(0)
+}
+
+/// The scan saw `peer` advertising at `rssi` dBm.
+#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+pub(crate) fn radio_sighting(peer: u64, rssi: i8) {
+    with_mesh(None, |slot, now_ms| {
+        slot.engine.sighting(PeerRef(peer), rssi, now_ms);
+    });
+}
+
+/// The radio has a connection, `link`: one this phone made (`central`) or
+/// took, over `att_mtu`, to `peer` when the radio knows. One whose MTU
+/// carries no link is answered with its close.
+#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+pub(crate) fn radio_link_up(link: u64, central: bool, att_mtu: u16, peer: Option<u64>) {
+    let role = if central {
+        Role::Central
+    } else {
+        Role::Peripheral
+    };
+    // No frame length is one the engine refuses.
+    let frame = radio_frame_len(att_mtu).unwrap_or(0);
+    with_mesh(None, |slot, now_ms| {
+        (slot.engine).link_up(LinkId(link), role, frame, peer.map(PeerRef), now_ms);
+    });
+}
+
+/// The radio lost `link`, or closed it as told.
+#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+pub(crate) fn radio_link_down(link: u64) {
+    with_mesh(None, |slot, now_ms| {
+        slot.engine.link_down(LinkId(link), now_ms);
+    });
+}
+
+/// The connect the engine asked for, to `peer`, made no link.
+#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+pub(crate) fn radio_connect_failed(peer: u64) {
+    with_mesh(None, |slot, now_ms| {
+        slot.engine.connect_failed(PeerRef(peer), now_ms);
+    });
+}
+
+/// One frame arrived on `link`, whole. A frame longer than
+/// [`RADIO_MAX_FRAME`] closes its link unread.
+#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+pub(crate) fn radio_receive(link: u64, frame: &[u8]) {
+    // The engine is handed none of it: an empty frame closes a link whatever
+    // the link expects next.
+    let frame = if frame.len() > RADIO_MAX_FRAME {
+        &[]
+    } else {
+        frame
+    };
+    with_mesh(None, |slot, now_ms| {
+        slot.engine.receive(LinkId(link), frame, now_ms);
+    });
+}
+
+/// The next thing for the radio to do, as [`radio_encoded`] writes it, after
+/// the timers that fell due: `None` when there is nothing, or no engine. A
+/// frame comes out only for a link in `ready`, and is spent by this call:
+/// the radio delivers it or closes its link. `ready` beyond the engine's
+/// link slots is cut.
+#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+pub(crate) fn radio_poll(ready: &[u64]) -> Option<Vec<u8>> {
+    let mut links = [LinkId(0); MAX_LINKS as usize];
+    let count = ready.len().min(links.len());
+    for (link, id) in links.iter_mut().zip(ready) {
+        *link = LinkId(*id);
+    }
+    with_mesh(None, |slot, now_ms| {
+        (slot.engine).poll_output_ready(&links[..count], now_ms)
+    })
+    .flatten()
+    .map(radio_encoded)
+}
+
+/// One output as it crosses to the radio: `kind ‖ id ‖ bytes`, the id eight
+/// bytes big-endian. Kind 1 sends `bytes` on link `id` as one frame, 2 closes
+/// link `id`, 3 connects to peer `id`; only a send carries bytes, a frame of
+/// at most [`RADIO_MAX_FRAME`].
+fn radio_encoded(output: Output) -> Vec<u8> {
+    let (kind, id, bytes) = match output {
+        Output::Frame { link, bytes } => (1, link.0, bytes),
+        Output::Close { link } => (2, link.0, Vec::new()),
+        Output::Connect { peer } => (3, peer.0, Vec::new()),
+    };
+    let mut encoded = Vec::with_capacity(9 + bytes.len());
+    encoded.push(kind);
+    encoded.extend_from_slice(&id.to_be_bytes());
+    encoded.extend_from_slice(&bytes);
+    encoded
+}
+
+/// Milliseconds until the engine next has work or its deadline passes;
+/// `None` when no engine runs.
+#[cfg_attr(not(test), expect(dead_code, reason = "the JNI shim calls it"))]
+pub(crate) fn radio_wake_in_ms() -> Option<u64> {
+    with_mesh(None, |slot, now_ms| {
+        let until_ms = slot.until_ms;
+        let wake_ms =
+            (slot.engine.next_wake_ms()).map_or(until_ms, |wake_ms| wake_ms.min(until_ms));
+        wake_ms.saturating_sub(now_ms)
+    })
 }
 
 // ========================= M3c: Live-Sync Engine FFI =========================
@@ -24298,23 +24539,28 @@ mod publish_event_ffi_tests {
 mod mesh_ffi_tests {
     use std::sync::atomic::Ordering;
 
-    use haven_core::mesh::engine::{CircleSlot, Config, LinkId, MeshEngine, Output, Role};
+    use haven_core::mesh::engine::{
+        CircleSlot, Config, LinkId, MeshEngine, Output, PeerRef, Role, Stats,
+    };
     use haven_core::mesh::handoff::{Handoff, Op};
     use haven_core::mesh::packet::{cover_packet, Packet};
     use haven_core::nostr::mls::types::GroupId;
     use haven_core::nostr::mls::MESH_ON_MAX_MS;
     use nostr::Keys;
     use nostr_relay_builder::MockRelay;
-    use rand::rngs::OsRng;
+    use rand::rngs::{OsRng, StdRng};
+    use rand::{Rng, SeedableRng};
 
     use super::maintenance_real_ffi_tests::{install_test_seams, secret_bytes, DataDir};
     use super::{
         mesh_clock_ms, mesh_empty, mesh_home, mesh_keep_on, mesh_open, mesh_reset_counts,
-        mesh_resume, mesh_sharing_stopped, mesh_start, mesh_stats, mesh_stop,
+        mesh_resume, mesh_sharing_stopped, mesh_start, mesh_stats, mesh_stop, radio_connect_failed,
+        radio_encoded, radio_frame_len, radio_left_ms, radio_link_down, radio_link_up, radio_poll,
+        radio_receive, radio_resume, radio_sighting, radio_wake_in_ms,
         sealed_location_event_json_for_test, wipe_all_mls_state, with_mesh, CircleManagerFfi,
         LocationMessage, LocationMessageResultKindFfi, LocationPublishFfi, MeshHome, MeshSlot,
-        MeshStartFfi, MeshStatsFfi, RelayManagerFfi, SealedLocationFfi, SendHeldFfi,
-        MESH_CLOCK_OVERRIDE_MS, MESH_DRIVE_PACKETS, MESH_OFFER_MAX_MS,
+        MeshStartFfi, MeshStatsFfi, RelayManagerFfi, SealedLocationFfi, SendHeldFfi, MAX_LINKS,
+        MESH_CLOCK_OVERRIDE_MS, MESH_DRIVE_PACKETS, MESH_HOLDS, MESH_OFFER_MAX_MS, RADIO_MAX_FRAME,
     };
 
     const SECOND: u64 = 1_000;
@@ -24361,6 +24607,39 @@ mod mesh_ffi_tests {
         matches!(*mesh_home(), MeshHome::Off)
     }
 
+    /// The engine's counts, read past every entry: nothing is applied to the
+    /// engine and no deadline is checked. `None` when no engine is held.
+    fn untouched() -> Option<Stats> {
+        match &*mesh_home() {
+            MeshHome::On(slot) => Some(slot.engine.stats()),
+            MeshHome::Off | MeshHome::Ended(_) => None,
+        }
+    }
+
+    /// What `radio_poll` answered, as a radio reads it; `None` for bytes
+    /// that are no output. The Kotlin radio's reader is held to the same
+    /// cases by the fixture both sides read.
+    fn read_output(encoded: &[u8]) -> Option<Output> {
+        let (kind, rest) = encoded.split_first()?;
+        let (id, bytes) = rest.split_first_chunk::<8>()?;
+        let id = u64::from_be_bytes(*id);
+        match (kind, bytes.len()) {
+            (1, 1..=RADIO_MAX_FRAME) => Some(Output::Frame {
+                link: LinkId(id),
+                bytes: bytes.to_vec(),
+            }),
+            (2, 0) => Some(Output::Close { link: LinkId(id) }),
+            (3, 0) => Some(Output::Connect { peer: PeerRef(id) }),
+            _ => None,
+        }
+    }
+
+    /// The radio's next poll with `ready` able to send, read.
+    fn polled(ready: &[u64]) -> Option<Output> {
+        let encoded = radio_poll(ready)?;
+        Some(read_output(&encoded).expect("a poll answers with an output the radio can read"))
+    }
+
     /// Another phone: an engine of the test's own, wired to the one in the
     /// slot. It emits nothing by itself unless told to.
     struct Phone {
@@ -24396,6 +24675,20 @@ mod mesh_ffi_tests {
             })
             .expect("premise: an engine runs");
             self.engine.link_up(wire, Role::Central, FRAME, None, now);
+        }
+
+        /// As [`Self::link`], through the radio's entries: over a link of
+        /// `att_mtu` that this phone made (`dials`) or the one in the slot
+        /// did.
+        fn radio_link(&mut self, dials: bool, att_mtu: u16) {
+            let frame = radio_frame_len(att_mtu).expect("premise: the MTU carries a link");
+            let role = if dials {
+                Role::Central
+            } else {
+                Role::Peripheral
+            };
+            radio_link_up(self.wire.0, !dials, att_mtu, None);
+            (self.engine).link_up(self.wire, role, frame, None, mesh_clock_ms());
         }
 
         /// The radio lost the link; each side keeps what it carries.
@@ -24449,6 +24742,60 @@ mod mesh_ffi_tests {
         }
     }
 
+    /// As [`carry`], by the radio's entries alone: every link able to send.
+    /// Answers what the engine asked of the radio besides frames.
+    fn radio_carry(phones: &mut [&mut Phone]) -> Vec<Output> {
+        let ready: Vec<u64> = phones.iter().map(|phone| phone.wire.0).collect();
+        let (mut asked, mut moved) = (Vec::new(), true);
+        while std::mem::take(&mut moved) {
+            while let Some(output) = polled(&ready) {
+                moved = true;
+                let Output::Frame { link, bytes } = output else {
+                    asked.push(output);
+                    continue;
+                };
+                let phone = (phones.iter_mut().find(|phone| phone.wire == link)).expect("wired");
+                phone.engine.receive(link, &bytes, mesh_clock_ms());
+            }
+            for phone in phones.iter_mut() {
+                while let Some(output) = phone.engine.poll_output(mesh_clock_ms()) {
+                    moved = true;
+                    let Output::Frame { link, bytes } = output else {
+                        panic!("premise: a phone keeps its link");
+                    };
+                    radio_receive(link.0, &bytes);
+                }
+            }
+        }
+        asked
+    }
+
+    /// As [`run`], by the radio's entries alone: the engine in the slot is
+    /// never advanced, only polled.
+    fn radio_run(bench: &Bench, phones: &mut [&mut Phone], ms: u64) -> Vec<Output> {
+        let mut asked = radio_carry(phones);
+        for _ in 0..ms / TICK {
+            bench.pass(TICK);
+            for phone in phones.iter_mut() {
+                phone.engine.advance(mesh_clock_ms());
+            }
+            asked.extend(radio_carry(phones));
+        }
+        asked
+    }
+
+    /// Every entry the radio has but the one that starts an engine, called
+    /// once. Answers whether any of them said an engine runs.
+    fn every_radio_entry_finds_an_engine() -> bool {
+        radio_sighting(7, -40);
+        radio_link_up(1, false, 517, None);
+        radio_link_up(2, true, 517, Some(7));
+        radio_receive(1, &[0; 32]);
+        radio_connect_failed(7);
+        radio_link_down(2);
+        radio_poll(&[1, 2]).is_some() || radio_wake_in_ms().is_some() || radio_left_ms() != 0
+    }
+
     /// A device: its identity, its store's directory and its open session.
     struct Device {
         keys: Keys,
@@ -24463,12 +24810,22 @@ mod mesh_ffi_tests {
             Self { keys, dir, circle }
         }
 
-        /// The session closed and opened again, as a restart opens it.
-        fn reopened(self) -> Self {
+        /// The session closed: what a process that ended leaves behind.
+        fn closed(self) -> (Keys, DataDir) {
             let Self { keys, dir, circle } = self;
             drop(circle);
+            (keys, dir)
+        }
+
+        /// A session over what [`Self::closed`] left.
+        fn opened((keys, dir): (Keys, DataDir)) -> Self {
             let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys)).expect("reopens");
             Self { keys, dir, circle }
+        }
+
+        /// The session closed and opened again, as a restart opens it.
+        fn reopened(self) -> Self {
+            Self::opened(self.closed())
         }
 
         fn session(&self) -> &haven_core::nostr::mls::SessionManager {
@@ -25418,7 +25775,7 @@ mod mesh_ffi_tests {
                 "turned off" => mesh_stop(&device.circle).await,
                 "deadline" => {
                     bench.pass(MESH_ON_MAX_MS);
-                    assert!(engine(|_| ()).is_none());
+                    assert!(radio_poll(&[]).is_none());
                     assert!(
                         matches!(*mesh_home(), MeshHome::Ended(owed) if owed == sent_on),
                         "an engine ended by its deadline did not keep what it had passed on"
@@ -25502,6 +25859,877 @@ mod mesh_ffi_tests {
         assert!(mesh_stats(&device.circle).await.on);
     }
 
+    /// Through the radio's entries alone, with no other engine call: a link
+    /// this phone made and one it took, over the shortest frame a radio
+    /// carries and the longest, are each handshaken and greeted, and what one
+    /// phone emits crosses this one to the other. The engine's timers run in
+    /// the poll, and no frame comes out for a link that cannot send now.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_radio_carries_a_packet_between_this_phone_and_another() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let device = Device::new("mesh_radio_carries");
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        let (mut near, mut far) = (Phone::new(1, TICK), Phone::quiet(2));
+
+        // This phone dialled the far one: its handshake message waits until
+        // that link can send.
+        far.radio_link(false, 51);
+        assert!(
+            polled(&[]).is_none() && polled(&[near.wire.0]).is_none(),
+            "a frame came out for a link that cannot send now"
+        );
+        let Some(Output::Frame { link, bytes }) = polled(&[far.wire.0]) else {
+            panic!("the link this phone made was not handed its handshake message");
+        };
+        assert!(link == far.wire && bytes.len() == haven_core::mesh::noise::HELLO_LEN);
+        far.engine.receive(link, &bytes, mesh_clock_ms());
+
+        near.radio_link(true, 517);
+        let asked = radio_run(&bench, &mut [&mut near, &mut far], 6 * TICK);
+        assert!(
+            asked.is_empty() && untouched().is_some_and(|stats| stats.links == 2),
+            "a link made through the radio's entries was not greeted, or was closed"
+        );
+        assert!(
+            far.engine.stats().accepted >= 2 && mesh_stats(&device.circle).await.linked,
+            "what one phone emitted did not cross this one to the other"
+        );
+    }
+
+    /// One formula says how long a link's frames are, from the ATT MTU: three
+    /// bytes less, never more than one attribute value, and no link at all
+    /// below a handshake message. Every length it gives is one the engine
+    /// takes.
+    #[test]
+    fn the_frame_length_of_a_link_is_one_formula() {
+        for (att_mtu, frame) in [
+            (0, None),
+            (3, None),
+            (23, None),
+            (50, None),
+            (51, Some(48)),
+            (185, Some(182)),
+            (514, Some(511)),
+            (515, Some(512)),
+            (517, Some(512)),
+            (u16::MAX, Some(512)),
+        ] {
+            assert!(
+                radio_frame_len(att_mtu) == frame,
+                "an ATT MTU of {att_mtu} does not give a frame of {frame:?}"
+            );
+        }
+        for att_mtu in 0..=u16::MAX {
+            let frame = radio_frame_len(att_mtu);
+            assert!(
+                frame.is_some() == (att_mtu >= 51)
+                    && frame.is_none_or(|frame| {
+                        frame <= RADIO_MAX_FRAME
+                            && haven_core::mesh::frame::FrameSize::of_link(frame).is_some()
+                    }),
+                "an ATT MTU of {att_mtu} gives a frame the engine or the radio does not take"
+            );
+        }
+    }
+
+    /// A frame longer than a radio carries closes its link, and none of it
+    /// is handed to the engine — not even on a link that would take it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_frame_longer_than_the_radio_carries_closes_its_link() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let _bench = Bench::new();
+        let device = Device::new("mesh_radio_long_frame");
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+
+        // On a link this phone took, and on one it made.
+        for (link, central) in [(1, false), (3, true)] {
+            radio_link_up(link, central, 517, None);
+            radio_receive(link, &[0; RADIO_MAX_FRAME + 1]);
+            let link = LinkId(link);
+            assert!(
+                polled(&[]) == Some(Output::Close { link }) && polled(&[link.0]).is_none(),
+                "a frame of one byte too many did not close its link"
+            );
+        }
+
+        // A link the engine was told carries frames twice as long, as no
+        // radio entry tells it, handshaken with a phone that sends them: the
+        // greeting that phone sends is a frame the engine would open.
+        const LONG: usize = 2 * RADIO_MAX_FRAME;
+        let (mut long, now) = (Phone::quiet(2), mesh_clock_ms());
+        engine(|slot| {
+            (slot.engine).link_up(long.wire, Role::Peripheral, LONG, None, now);
+        });
+        long.engine
+            .link_up(long.wire, Role::Central, LONG, None, now);
+        let sends = |phone: &mut Phone| match phone.engine.poll_output(now) {
+            Some(Output::Frame { bytes, .. }) => bytes,
+            _ => panic!("premise: the phone has a frame to send"),
+        };
+        radio_receive(2, &sends(&mut long));
+        let Some(Output::Frame { bytes, .. }) = polled(&[2]) else {
+            panic!("premise: the handshake is answered");
+        };
+        long.engine.receive(long.wire, &bytes, now);
+        let greeting = sends(&mut long);
+        assert!(
+            greeting.len() == LONG,
+            "premise: a frame the link takes, and no radio carries"
+        );
+        radio_receive(2, &greeting);
+        assert!(
+            untouched().is_some_and(|stats| stats.links == 0)
+                && polled(&[]) == Some(Output::Close { link: LinkId(2) }),
+            "a frame longer than a radio carries was handed to the engine"
+        );
+    }
+
+    /// With no engine — mesh off, or ended by its deadline and not yet paid
+    /// for — every radio entry does nothing: none starts an engine, none
+    /// answers as if one ran, and what an ended engine is owed stays owed.
+    #[test]
+    fn with_no_engine_every_radio_entry_does_nothing() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.blocking_lock();
+        let _bench = Bench::new();
+        assert!(
+            !every_radio_entry_finds_an_engine() && is_off(),
+            "a radio entry made with mesh off started an engine or answered as one"
+        );
+        *mesh_home() = MeshHome::Ended(3);
+        assert!(
+            !every_radio_entry_finds_an_engine() && matches!(*mesh_home(), MeshHome::Ended(3)),
+            "a radio entry made after the engine ended started one or took what it is owed"
+        );
+    }
+
+    /// Nobody turns mesh off at its deadline: the first entry after it does,
+    /// and that holds for every entry the radio has. Each runs the engine
+    /// until the deadline and drops it at the deadline, having held no
+    /// session; the keys go with the next entry that holds one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_radio_entry_after_the_deadline_drops_the_engine_and_the_next_session_entry_deletes_the_keys(
+    ) {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let (_relay, url, _relays) = relay().await;
+        let device = Device::new("mesh_radio_deadline");
+        let group = device.founds(&url, &[]).await;
+        let entries: [(&str, fn()); 8] = [
+            ("sighting", || radio_sighting(7, -40)),
+            ("link up", || radio_link_up(1, false, 517, None)),
+            ("link down", || radio_link_down(1)),
+            ("connect failed", || radio_connect_failed(7)),
+            ("receive", || radio_receive(1, &[0; 32])),
+            ("poll", || {
+                let _ = radio_poll(&[1]);
+            }),
+            ("wake", || {
+                let _ = radio_wake_in_ms();
+            }),
+            ("left", || {
+                let _ = radio_left_ms();
+            }),
+        ];
+
+        for (name, entry) in entries {
+            // The session's clock stands still: only the engine's passes.
+            device.session().set_legacy_clock_for_test(wall_ms());
+            assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+            bench.pass(MESH_ON_MAX_MS - 1);
+            entry();
+            assert!(
+                untouched().is_some(),
+                "the radio's {name} ended the engine before its deadline"
+            );
+            bench.pass(1);
+            entry();
+            assert!(
+                matches!(*mesh_home(), MeshHome::Ended(0)),
+                "the radio's {name}, at the deadline, ran the engine or kept it"
+            );
+            assert!(device.keys_of(&group) == 1, "premise: no session was told");
+            assert!(
+                !mesh_stats(&device.circle).await.on
+                    && is_off()
+                    && device.keys_of(&group) == 0
+                    && device.session().mesh_on_until_for_test() == 0,
+                "the session entry after the radio's {name} found the deadline left the keys"
+            );
+        }
+    }
+
+    /// What the session leaves for the engine is taken by the radio's next
+    /// entry and goes out in the engine's slot, to a linked phone, with no
+    /// entry of the session's in between.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_location_left_by_the_session_goes_out_at_the_radios_next_poll() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let (_relay, url, relays) = relay().await;
+        let device = Device::new("mesh_radio_handoff");
+        let group = device.founds(&url, &[]).await;
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        let mut near = Phone::quiet(1);
+        near.radio_link(true, 517);
+        radio_carry(&mut [&mut near]);
+
+        assert_eq!(
+            device.shares(&relays, &group).await,
+            LocationPublishFfi::Accepted
+        );
+        assert!(
+            untouched().is_some_and(|stats| stats.outbox == 0),
+            "premise: the send left its location for the engine and entered none"
+        );
+        assert!(polled(&[]).is_none());
+        assert!(
+            untouched().is_some_and(|stats| stats.outbox == 1),
+            "the radio's poll did not take what the session left for the engine"
+        );
+        radio_run(&bench, &mut [&mut near], PAST_A_SLOT);
+        assert!(
+            untouched().is_some_and(|stats| stats.outbox == 0 && stats.emitted >= 1)
+                && near.engine.stats().accepted >= 1,
+            "the location did not go out in the engine's slot on the radio's polls alone"
+        );
+    }
+
+    /// The radio is told whom to dial, once a tick has weighed what the scan
+    /// saw, and never a peer too weak. What became of a dial is the engine's
+    /// to weigh: one that failed frees the engine to dial another at once,
+    /// and its peer is left alone for the engine's back-off, then tried
+    /// again; the link a dial made is that dial's, so the next peer is
+    /// dialled without waiting for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_radio_is_told_whom_to_dial_and_what_became_of_a_dial_is_the_engines_to_weigh() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let device = Device::new("mesh_radio_dial");
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        let dial = |peer| {
+            Some(Output::Connect {
+                peer: PeerRef(peer),
+            })
+        };
+
+        radio_sighting(8, -100);
+        radio_sighting(7, -40);
+        assert!(
+            polled(&[]).is_none() && radio_wake_in_ms() == Some(TICK),
+            "the radio is not woken for the tick that weighs a sighting"
+        );
+        bench.pass(TICK);
+        assert!(
+            polled(&[]) == dial(7) && polled(&[]).is_none(),
+            "the radio was not told to dial the one peer near enough"
+        );
+
+        radio_connect_failed(7);
+        radio_sighting(6, -50);
+        bench.pass(TICK);
+        assert!(
+            polled(&[]) == dial(6),
+            "a dial the radio said had failed still holds up the next"
+        );
+        // The engine's back-off is a minute, and up to half as long again.
+        radio_connect_failed(6);
+        for _ in 0..10 {
+            radio_sighting(7, -40);
+            bench.pass(TICK);
+            assert!(
+                polled(&[]).is_none(),
+                "a failed dial was tried again at once"
+            );
+        }
+        let again = (0..8).any(|_| {
+            radio_sighting(7, -40);
+            bench.pass(TICK);
+            polled(&[]) == dial(7)
+        });
+        assert!(again, "a peer whose dial failed is never dialled again");
+
+        radio_link_up(9, true, 517, Some(7));
+        radio_sighting(8, -40);
+        bench.pass(TICK);
+        assert!(
+            polled(&[]) == dial(8),
+            "the link a dial made was not taken as that dial's"
+        );
+        assert!(
+            matches!(polled(&[9]), Some(Output::Frame { link, .. }) if link == LinkId(9)),
+            "the link this phone made was handed no handshake message"
+        );
+    }
+
+    /// The radio brings no limit of its own: which links are wide enough,
+    /// how many there are and how fast they come is the engine's to say; a
+    /// link the radio gave up frees its slot; and one poll serves as many
+    /// ready links as the engine has slots and no more.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_radios_links_are_bounded_by_the_engine_and_a_link_given_up_frees_its_slot() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let device = Device::new("mesh_radio_limits");
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        let closed = |link| Some(Output::Close { link: LinkId(link) });
+
+        // An MTU that carries no frame carries no link, made or taken.
+        radio_link_up(50, false, 50, None);
+        radio_link_up(23, true, 23, None);
+        assert!(
+            polled(&[23, 50]) == closed(50) && polled(&[23, 50]) == closed(23),
+            "a link too narrow for a frame was not closed"
+        );
+        // The engine takes four incoming links.
+        for link in 1..=5 {
+            radio_link_up(link, false, 517, None);
+        }
+        assert!(
+            polled(&[]) == closed(5) && polled(&[]).is_none(),
+            "the engine's limit on incoming links did not bound the radio's"
+        );
+        // One more may come every five seconds.
+        radio_link_down(1);
+        bench.pass(TICK);
+        radio_link_up(6, false, 517, None);
+        assert!(
+            polled(&[]).is_none(),
+            "a link the radio gave up still holds its slot"
+        );
+        bench.pass(TICK);
+        radio_link_up(7, false, 517, None);
+        assert!(polled(&[]) == closed(7));
+
+        // A link this phone made has its handshake message waiting.
+        radio_link_up(40, true, 517, None);
+        let mut ready: Vec<u64> = (100..100 + u64::from(MAX_LINKS)).collect();
+        ready.push(40);
+        assert!(
+            polled(&ready).is_none(),
+            "a poll read more ready links than the engine has slots"
+        );
+        ready.remove(0);
+        assert!(
+            matches!(polled(&ready), Some(Output::Frame { link, .. }) if link == LinkId(40)),
+            "a poll did not read every ready link the engine has a slot for"
+        );
+    }
+
+    /// The radio is told how long until the engine next has work — alone,
+    /// its next emission slot — and never a time past the deadline; how long
+    /// the engine still runs is the deadline's, and nothing once it passed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_radio_is_woken_for_the_engines_next_work_and_never_past_the_deadline() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let device = Device::new("mesh_radio_wake");
+        device.session().set_legacy_clock_for_test(wall_ms());
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        assert!(radio_left_ms() == MESH_ON_MAX_MS);
+
+        // A slot falls a minute to two after the engine starts.
+        let slot = radio_wake_in_ms().expect("an engine runs");
+        assert!(
+            (60 * SECOND..=120 * SECOND).contains(&slot),
+            "a phone alone is not woken for its emission slot"
+        );
+        bench.pass(slot - 1);
+        assert!(
+            polled(&[]).is_none()
+                && untouched().is_some_and(|stats| stats.emitted == 0)
+                && radio_wake_in_ms() == Some(1),
+            "the engine's slot is not when the radio was told"
+        );
+        bench.pass(1);
+        assert!(
+            polled(&[]).is_none() && untouched().is_some_and(|stats| stats.emitted == 1),
+            "the radio's poll at the slot did not run it"
+        );
+
+        // Ten seconds before the deadline the next slot is a minute away.
+        bench.pass(MESH_ON_MAX_MS - slot - 10 * SECOND);
+        assert!(polled(&[]).is_none());
+        assert!(
+            radio_wake_in_ms() == Some(10 * SECOND) && radio_left_ms() == 10 * SECOND,
+            "the radio is not woken for the deadline"
+        );
+        bench.pass(10 * SECOND);
+        assert!(
+            radio_wake_in_ms().is_none() && radio_left_ms() == 0 && untouched().is_none(),
+            "an engine past its deadline still answers the radio"
+        );
+    }
+
+    /// What the radio hands in is not trusted: frames of any length and
+    /// content on links in any state, links and peers under any number, any
+    /// MTU, ready lists of any length, in any order. No entry panics, the
+    /// engine stays, and everything a poll answers is an output the radio can
+    /// read, no longer than a frame and its header.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_input_a_radio_can_make_panics_an_entry_or_draws_an_output_it_cannot_read() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let device = Device::new("mesh_radio_inputs");
+        assert_eq!(mesh_start(&device.circle).await, MeshStartFfi::Started);
+        let mut rng = StdRng::seed_from_u64(0x004d_3361);
+        let mut outputs = 0;
+
+        for _ in 0..3_000 {
+            let link = rng.gen_range(0..6);
+            match rng.gen_range(0..8) {
+                0 => {
+                    let peer = rng.gen::<bool>().then(|| rng.gen_range(0..6));
+                    radio_link_up(link, rng.gen(), rng.gen(), peer);
+                }
+                1 => radio_link_up(link, rng.gen(), 517, None),
+                2 => radio_link_down(link),
+                3 => radio_sighting(rng.gen_range(0..6), rng.gen()),
+                4 => radio_connect_failed(rng.gen_range(0..6)),
+                5 => bench.pass(rng.gen_range(0..2 * TICK)),
+                _ => {
+                    // The lengths the engine looks for, and any other.
+                    let len = match rng.gen_range(0..6) {
+                        0 => 32,
+                        1 => 48,
+                        2 => RADIO_MAX_FRAME,
+                        3 => RADIO_MAX_FRAME + 1,
+                        _ => rng.gen_range(0..=2 * RADIO_MAX_FRAME),
+                    };
+                    let mut frame = vec![0; len];
+                    rng.fill(frame.as_mut_slice());
+                    radio_receive(link, &frame);
+                }
+            }
+            let ready: Vec<u64> = (0..rng.gen_range(0..40))
+                .map(|_| rng.gen_range(0..6))
+                .collect();
+            while let Some(encoded) = radio_poll(&ready) {
+                outputs += 1;
+                assert!(
+                    encoded.len() <= 9 + RADIO_MAX_FRAME && read_output(&encoded).is_some(),
+                    "a poll answered with bytes the radio cannot read"
+                );
+            }
+            assert!(
+                radio_wake_in_ms().is_some() && radio_left_ms() != 0,
+                "an input of the radio's ended the engine"
+            );
+        }
+        assert!(outputs > 100, "premise: the engine answered the radio");
+    }
+
+    /// Every output is read back as it was encoded, and bytes are read as an
+    /// output only when that output encodes to exactly them: an encoding cut
+    /// short, run on, or with one bit changed is another output's or none.
+    #[test]
+    fn an_output_is_read_back_as_it_was_encoded_and_no_other_bytes_are_read_as_it() {
+        let mut rng = StdRng::seed_from_u64(0x004d_3362);
+        for _ in 0..20_000 {
+            let id = rng.gen();
+            let output = match rng.gen_range(0..3) {
+                0 => {
+                    let mut bytes = vec![0; rng.gen_range(1..=RADIO_MAX_FRAME)];
+                    rng.fill(bytes.as_mut_slice());
+                    let link = LinkId(id);
+                    Output::Frame { link, bytes }
+                }
+                1 => Output::Close { link: LinkId(id) },
+                _ => Output::Connect { peer: PeerRef(id) },
+            };
+            let encoded = radio_encoded(output.clone());
+            assert!(
+                read_output(&encoded) == Some(output),
+                "an output was not read back as it was encoded"
+            );
+
+            let mut bent = encoded;
+            match rng.gen_range(0..3) {
+                0 => bent.truncate(rng.gen_range(0..bent.len())),
+                1 => bent.extend((0..rng.gen_range(1..600)).map(|_| rng.gen::<u8>())),
+                _ => {
+                    let at = rng.gen_range(0..bent.len());
+                    bent[at] ^= 1 << rng.gen_range(0..8);
+                }
+            }
+            assert!(
+                read_output(&bent).is_none_or(|output| radio_encoded(output) == bent),
+                "bytes that are no output's encoding were read as an output"
+            );
+        }
+    }
+
+    /// What crosses to the radio is written down once, in a file the Kotlin
+    /// radio's test reads too: each output there is encoded to exactly the
+    /// bytes beside it and read back from them, and each line of bytes that
+    /// are no output is read as none.
+    #[test]
+    fn an_output_is_encoded_as_the_fixture_says() {
+        let fixture = include_str!("../fixtures/mesh_radio_outputs.txt");
+        let bytes = |hex: &str| match hex {
+            "-" => Vec::new(),
+            hex => hex::decode(hex).expect("the fixture's bytes are hex"),
+        };
+        let id = |hex: &str| u64::from_str_radix(hex, 16).expect("the fixture's ids are hex");
+        let (mut outputs, mut rejects) = ([0; 3], 0);
+        for line in fixture.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let (output, encoding) = match fields[..] {
+                [] => continue,
+                [first, ..] if first.starts_with('#') => continue,
+                ["send", link, frame, encoding] => {
+                    outputs[0] += 1;
+                    let (link, bytes) = (LinkId(id(link)), bytes(frame));
+                    (Some(Output::Frame { link, bytes }), encoding)
+                }
+                ["close", link, encoding] => {
+                    outputs[1] += 1;
+                    let link = LinkId(id(link));
+                    (Some(Output::Close { link }), encoding)
+                }
+                ["connect", peer, encoding] => {
+                    outputs[2] += 1;
+                    let peer = PeerRef(id(peer));
+                    (Some(Output::Connect { peer }), encoding)
+                }
+                ["reject", encoding] => {
+                    rejects += 1;
+                    (None, encoding)
+                }
+                _ => panic!("a fixture line of no known form: {line}"),
+            };
+            let encoding = bytes(encoding);
+            assert!(
+                (output.clone()).is_none_or(|output| radio_encoded(output) == encoding),
+                "an output is not encoded as the fixture says: {line}"
+            );
+            assert!(
+                read_output(&encoding) == output,
+                "the fixture's bytes are not read as it says: {line}"
+            );
+        }
+        assert!(
+            outputs == [4, 3, 3] && rejects == 12,
+            "the fixture lost a case, or gained one this test does not count"
+        );
+    }
+
+    // ---- the start that holds no session (owner question Q-2) --------------
+    //
+    // Everything below goes with `radio_resume`: were the radio's service not
+    // to start an engine before a session opens, these tests go with it.
+
+    /// The radio's service starts an engine with no session in the process,
+    /// and that engine does what a keyless one can: it links, carries what
+    /// one phone emits to another, emits cover in its own slot, and runs
+    /// down the deadline it was started under.
+    #[test]
+    fn the_radio_starts_an_engine_with_no_session_and_carries_with_it() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.blocking_lock();
+        let bench = Bench::new();
+        assert!(
+            radio_resume(HOUR) && radio_left_ms() == HOUR,
+            "the radio's service started no engine"
+        );
+        let (mut near, mut far) = (Phone::new(1, TICK), Phone::quiet(2));
+        near.radio_link(true, 517);
+        far.radio_link(false, 185);
+        let asked = radio_run(&bench, &mut [&mut near, &mut far], PAST_A_SLOT);
+        let stats = untouched().expect("an engine runs");
+        assert!(
+            asked.is_empty() && stats.links == 2 && far.engine.stats().accepted >= 2,
+            "an engine started with no session did not carry between two phones"
+        );
+        assert!(
+            stats.emitted >= 1 && near.engine.stats().accepted >= 1,
+            "an engine started with no session emitted nothing in its slot"
+        );
+        assert!(radio_left_ms() == HOUR - PAST_A_SLOT);
+    }
+
+    /// The service's word buys no more than twelve hours and cannot be given
+    /// twice: no time at all starts nothing; asked again while the engine
+    /// runs, it moves no deadline; and once the engine ended it starts no
+    /// other until an entry that holds a session has paid for the one that
+    /// ended.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_radio_cannot_keep_an_engine_past_twelve_hours_nor_start_over_one_that_ended() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let device = Device::new("mesh_radio_cap");
+
+        assert!(
+            !radio_resume(0) && is_off(),
+            "no time left started an engine"
+        );
+        assert!(
+            radio_resume(u64::MAX) && radio_left_ms() == MESH_ON_MAX_MS,
+            "the service's word bought more than twelve hours, or nothing"
+        );
+        bench.pass(HOUR);
+        assert!(
+            radio_resume(u64::MAX) && radio_left_ms() == MESH_ON_MAX_MS - HOUR,
+            "asked again, the service moved the deadline of an engine that runs"
+        );
+
+        bench.pass(MESH_ON_MAX_MS - HOUR);
+        assert!(radio_left_ms() == 0);
+        assert!(
+            !radio_resume(HOUR) && matches!(*mesh_home(), MeshHome::Ended(0)),
+            "the service started an engine over one that ended and is not paid for"
+        );
+        assert!(!mesh_stats(&device.circle).await.on && is_off());
+        assert!(
+            radio_resume(HOUR) && radio_left_ms() == HOUR,
+            "an engine that ended and was paid for keeps the service from starting another"
+        );
+    }
+
+    /// A session that opens beside the engine the radio's service started
+    /// takes it over as it is: resuming answers that it runs, what it carries
+    /// is kept, its deadline becomes the nearer of the service's and the
+    /// session's, and what the session then sends goes out through it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_that_opens_takes_over_the_engine_the_radio_started() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let (_relay, url, relays) = relay().await;
+        let device = Device::new("mesh_radio_adopted");
+        let group = device.founds(&url, &[]).await;
+        // Mesh on as an earlier process left it, and that process gone.
+        let wall = wall_ms();
+        device.session().set_legacy_clock_for_test(wall);
+        assert!(device.session().mesh_on_until(u64::MAX).await);
+        let left = device.closed();
+
+        assert!(radio_resume(6 * HOUR));
+        let mut near = Phone::new(1, TICK);
+        near.radio_link(true, 517);
+        radio_run(&bench, &mut [&mut near], 4 * TICK);
+        let carried = untouched().expect("an engine runs");
+        assert!(carried.held >= 2, "premise: the engine carries packets");
+
+        let device = Device::opened(left);
+        assert_eq!(mesh_resume(&device.circle).await, MeshStartFfi::AlreadyOn);
+        assert!(
+            untouched().is_some_and(|stats| stats.held == carried.held && stats.links == 1),
+            "a session that opened replaced the engine the radio started"
+        );
+        assert!(
+            mesh_stats(&device.circle).await.on_for_ms == 6 * HOUR - 4 * TICK,
+            "a session with longer left lengthened the deadline the engine was started under"
+        );
+        device.session().set_legacy_clock_for_test(wall + 9 * HOUR);
+        assert!(
+            mesh_stats(&device.circle).await.on_for_ms == 3 * HOUR && radio_left_ms() == 3 * HOUR,
+            "the session's nearer deadline did not overrule the service's"
+        );
+
+        device.session().set_legacy_clock_for_test(0);
+        assert_eq!(
+            device.shares(&relays, &group).await,
+            LocationPublishFfi::Accepted
+        );
+        assert!(waiting() == 1, "the session hands off to nobody");
+        let before = near.engine.stats().accepted;
+        radio_run(&bench, &mut [&mut near], PAST_A_SLOT);
+        assert!(
+            waiting() == 0 && near.engine.stats().accepted > before,
+            "what the session sent did not go out through the engine the radio started"
+        );
+    }
+
+    /// Whichever of a session and the radio's service asks first, there is
+    /// one engine and the session feeds it (F-16). The radio first: the
+    /// session is told the engine runs — never that mesh is off beside a
+    /// running engine — and keeps that engine. The session first: the radio
+    /// is told the same, and takes neither the session's hand-off, nor what
+    /// waits in it, nor its deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn whichever_of_a_session_and_the_radio_asks_first_there_is_one_engine_and_the_session_feeds_it(
+    ) {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let (_relay, url, relays) = relay().await;
+        let device = Device::new("mesh_radio_both");
+        let group = device.founds(&url, &[]).await;
+        assert!(device.session().mesh_on_until(u64::MAX).await);
+
+        assert!(radio_resume(HOUR));
+        bench.pass(PAST_A_SLOT);
+        assert!(polled(&[]).is_none());
+        let emitted = untouched().expect("an engine runs").emitted;
+        assert!(emitted >= 1, "premise: the engine's first slot passed");
+        assert_eq!(mesh_resume(&device.circle).await, MeshStartFfi::AlreadyOn);
+        assert!(
+            untouched().is_some_and(|stats| stats.emitted == emitted)
+                && radio_left_ms() == HOUR - PAST_A_SLOT,
+            "a session that asked after the radio replaced its engine or moved its deadline on"
+        );
+        assert_eq!(
+            device.shares(&relays, &group).await,
+            LocationPublishFfi::Accepted
+        );
+        assert!(
+            waiting() == 1,
+            "a session that asked after the radio hands off to nobody"
+        );
+
+        // The process ends; in the next the session asks first.
+        let _ = mesh_empty();
+        assert_eq!(mesh_resume(&device.circle).await, MeshStartFfi::Started);
+        assert_eq!(
+            device.shares(&relays, &group).await,
+            LocationPublishFfi::Accepted
+        );
+        assert!(radio_resume(HOUR), "the radio was told no engine runs");
+        assert!(
+            untouched().is_some_and(|stats| stats.outbox == 1),
+            "the radio, asking after the session, took its hand-off or what waited in it"
+        );
+        assert!(
+            mesh_stats(&device.circle).await.on_for_ms > HOUR,
+            "the radio, asking after the session, moved the session's deadline"
+        );
+        assert_eq!(
+            device.shares(&relays, &group).await,
+            LocationPublishFfi::Accepted
+        );
+        assert!(
+            waiting() == 1 && untouched().is_some_and(|stats| stats.emitted == 0),
+            "after the radio asked, the session feeds another engine or none"
+        );
+    }
+
+    /// A start takes the engine's lock once (F-16): for a session's start
+    /// that finds no engine, for one that finds the engine and moves its
+    /// deadline, and for the radio's. Under one hold the other start cannot
+    /// come between finding no engine and starting one; a start that took
+    /// the lock twice once let it, and answered that mesh was off beside the
+    /// engine that came in between.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_finds_the_engine_or_starts_one_under_one_hold_of_the_lock() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let _bench = Bench::new();
+        let device = Device::new("mesh_radio_one_hold");
+        assert!(device.session().mesh_on_until(u64::MAX).await);
+        // How often `start` took the lock, on this thread.
+        let holds = |start: &dyn Fn() -> bool| {
+            let before = MESH_HOLDS.get();
+            assert!(
+                start(),
+                "premise: the start is answered that an engine runs"
+            );
+            MESH_HOLDS.get() - before
+        };
+        let session = |confirmed| mesh_open(device.session(), confirmed) != MeshStartFfi::Off;
+
+        assert!(
+            holds(&|| session(false)) == 1,
+            "a session's start let go of the engine's lock before it started the engine"
+        );
+        assert!(
+            holds(&|| session(true)) == 1,
+            "a start the user asked for let go of the lock between moving the deadline and \
+             adopting the engine"
+        );
+        let _ = mesh_empty();
+        assert!(
+            holds(&|| radio_resume(HOUR)) == 1 && holds(&|| radio_resume(HOUR)) == 1,
+            "the radio's start let go of the engine's lock before it started the engine"
+        );
+    }
+
+    /// The session overrules the service. An engine the radio's service
+    /// started is ended by the first session to open whose mesh is off: the
+    /// radio is told nothing is left, and no key was ever stored for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_whose_mesh_is_off_ends_the_engine_the_radio_started() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let _bench = Bench::new();
+        let (_relay, url, _relays) = relay().await;
+        let device = Device::new("mesh_radio_overruled");
+        let group = device.founds(&url, &[]).await;
+        let left = device.closed();
+        assert!(radio_resume(HOUR) && radio_left_ms() == HOUR);
+
+        let device = Device::opened(left);
+        assert!(
+            radio_left_ms() == 0 && untouched().is_none(),
+            "a session whose mesh is off opened, and the engine the radio started runs on"
+        );
+        let stats = mesh_stats(&device.circle).await;
+        assert!(
+            !stats.on
+                && is_off()
+                && device.keys_of(&group) == 0
+                && device.session().mesh_on_until_for_test() == 0,
+            "an engine the radio started turned the session's mesh on, or left a key"
+        );
+    }
+
+    /// What passes through with no session open is not lost to the session
+    /// that opens next (T-BG-3 at the bridge): a fellow member's update the
+    /// engine took in while it ran keyless waits unread, and that session's
+    /// first drive takes it in and counts it, once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn what_passed_through_with_no_session_is_read_by_the_first_drive() {
+        let _keyring = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        let bench = Bench::new();
+        let (_relay, url, relays) = relay().await;
+        let (alice, bob) = (
+            Device::new("mesh_radio_unread_a"),
+            Device::new("mesh_radio_unread_b"),
+        );
+        let group = alice.founds(&url, &[&bob]).await;
+        // His mesh is on, and his process ends: the keys stay in his store.
+        assert_eq!(mesh_start(&bob.circle).await, MeshStartFfi::Started);
+        let _ = mesh_empty();
+        let left = bob.closed();
+
+        // Her update leaves on a phone that can read nothing of it.
+        assert_eq!(mesh_start(&alice.circle).await, MeshStartFfi::Started);
+        assert_eq!(
+            alice.shares(&relays, &group).await,
+            LocationPublishFfi::Accepted
+        );
+        let mut carrier = Phone::quiet(1);
+        carrier.radio_link(true, 517);
+        radio_run(&bench, &mut [&mut carrier], PAST_A_SLOT);
+        assert!(
+            carrier.engine.stats().accepted >= 1,
+            "premise: her update left"
+        );
+        carrier.unlink();
+        mesh_stop(&alice.circle).await;
+
+        // His phone, with no session of his open, takes it from that phone.
+        assert!(radio_resume(HOUR));
+        carrier.radio_link(true, 517);
+        radio_run(&bench, &mut [&mut carrier], 4 * TICK);
+        assert!(
+            untouched().is_some_and(|stats| stats.unread >= 1),
+            "premise: a packet waits unread in an engine no session reads"
+        );
+
+        let bob = Device::opened(left);
+        let drive = relays.mesh_drive_driven(&bob.circle).await;
+        assert!(
+            !drive.errored
+                && !drive.more
+                && drive.replayed.len() == 1
+                && drive.replayed[0].kind == LocationMessageResultKindFfi::Location,
+            "the first drive did not show the update that came with no session open"
+        );
+        assert!(
+            counts(&mesh_stats(&bob.circle).await) == [1, 0, 1, 0],
+            "the update was not counted once as one from this device's circles"
+        );
+        let again = relays.mesh_drive_driven(&bob.circle).await;
+        assert!(again.replayed.is_empty() && !again.errored);
+        assert!(counts(&mesh_stats(&bob.circle).await) == [1, 0, 1, 0]);
+    }
+
     /// The text of `fn name`'s body in `source`, from its header.
     fn body_of<'a>(source: &'a str, header: &str) -> &'a str {
         let at = source.find(header).expect("the function is declared");
@@ -25537,29 +26765,128 @@ mod mesh_ffi_tests {
 
         let (mut holder, mut holders) = ("", Vec::new());
         for line in source.lines() {
-            let header = line.trim_start();
-            if header.starts_with("fn ")
-                || header.starts_with("pub fn ")
-                || header.starts_with("async fn ")
-                || header.starts_with("pub async fn ")
-            {
-                holder = header;
+            if declares_fn(line) {
+                holder = line.trim_start();
             } else if line.contains("mesh_home()") {
                 holders.push(holder);
             }
         }
         holders.dedup();
         assert!(
-            holders.len() == 4,
-            "premise: with_mesh, mesh_owed, mesh_empty and mesh_open take the lock, not {holders:?}"
+            holders
+                == [
+                    "fn with_mesh<T>(",
+                    "fn mesh_owed() -> Option<u64> {",
+                    "fn mesh_empty() -> u64 {",
+                    "fn mesh_take(taker: Taker) -> MeshStartFfi {",
+                ],
+            "with_mesh, mesh_owed, mesh_empty and mesh_take take the lock, not {holders:?}"
+        );
+        for header in ["fn mesh_run<T>(", "fn with_mesh<T>("] {
+            assert!(
+                body_of(source, header).contains("f: impl FnOnce(&mut MeshSlot, u64) -> T"),
+                "what runs under the engine's lock is no longer a plain closure"
+            );
+        }
+        // Finding the running engine and starting one are one hold: a start
+        // that locked twice let a second start in between (F-16).
+        let take = body_of(source, "fn mesh_take(");
+        assert!(
+            take.matches("mesh_home()").count() == 1 && !take.contains("drop("),
+            "a start takes the engine's lock more than once, or lets go of it"
         );
         assert!(
-            holders.iter().all(|holder| !holder.contains("async")),
-            "the engine's lock is taken in an async function: {holders:?}"
+            !body_of(source, "fn mesh_run<T>(").contains("mesh_home"),
+            "what runs under the engine's lock takes it again"
         );
+    }
+
+    /// Whether `line` opens a function's declaration, whatever its
+    /// visibility and qualifiers.
+    fn declares_fn(line: &str) -> bool {
+        line.split_once("fn ").is_some_and(|(before, _)| {
+            before.split_whitespace().all(|word| {
+                matches!(
+                    word,
+                    "pub" | "pub(crate)" | "pub(super)" | "const" | "async" | "unsafe"
+                )
+            })
+        })
+    }
+
+    /// No radio entry takes a session or can reach one (Security Rule 14),
+    /// and every one checks the deadline first: each is declared with plain
+    /// numbers and bytes, is not `async`, and reaches the engine through
+    /// `with_mesh` with no session, once, and through nothing else — but the
+    /// one that starts an engine, which says so to `mesh_take`, and the two
+    /// that touch no engine at all. The list of them is exactly this one.
+    #[test]
+    fn the_radio_entries_take_no_session() {
+        let source = shipped();
+        let declared: Vec<&str> = source
+            .lines()
+            .filter(|line| declares_fn(line) && line.contains("fn radio_"))
+            .collect();
+        let name_of = |header: &str| {
+            let rest = &header[header.find("fn radio_").expect("a radio entry") + 3..];
+            rest[..rest.find('(').expect("a signature")].to_owned()
+        };
+        let names: Vec<String> = declared.iter().map(|header| name_of(header)).collect();
+        assert_eq!(
+            names,
+            [
+                "radio_frame_len",
+                "radio_resume",
+                "radio_left_ms",
+                "radio_sighting",
+                "radio_link_up",
+                "radio_link_down",
+                "radio_connect_failed",
+                "radio_receive",
+                "radio_poll",
+                "radio_encoded",
+                "radio_wake_in_ms",
+            ]
+        );
+        for header in declared {
+            let (name, body) = (name_of(header), body_of(source, header));
+            assert!(!header.contains("async"), "{name} is async");
+            for banned in [
+                "session",
+                "circle",
+                "managerffi",
+                ".await",
+                "block_on",
+                "mesh_entry",
+                "mesh_home",
+                "mesh_run",
+                "mesh_owed",
+                "mesh_empty",
+                "mesh_open",
+            ] {
+                assert!(
+                    !body.to_lowercase().contains(banned),
+                    "{name} names `{banned}`: a radio entry holds no session and takes no lock \
+                     but through with_mesh"
+                );
+            }
+            let (through, takes) = match name.as_str() {
+                "radio_frame_len" | "radio_encoded" => (0, 0),
+                "radio_resume" => (0, 1),
+                _ => (1, 0),
+            };
+            assert!(
+                body.matches("with_mesh(None, ").count() == through
+                    && body.matches("with_mesh(").count() == through
+                    && body.matches("mesh_take(Taker::Radio { left_ms })").count() == takes
+                    && body.matches("mesh_take(").count() == takes,
+                "{name} reaches the engine otherwise than a radio entry may"
+            );
+        }
         assert!(
-            body_of(source, "fn with_mesh<T>(").contains("f: impl FnOnce(&mut MeshSlot, u64) -> T"),
-            "what runs under the engine's lock is no longer a plain closure"
+            source.matches("with_mesh(None, ").count() == 8
+                && source.matches("Taker::Radio { left_ms })").count() == 1,
+            "something that is no radio entry enters the engine as one"
         );
     }
 

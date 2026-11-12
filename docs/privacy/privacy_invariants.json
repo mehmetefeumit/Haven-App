@@ -7649,9 +7649,9 @@
     {
       "id": "INV-D-MESH-ENGINE-IS-MEMORY-ONLY-AND-ENDS-AT-ITS-DEADLINE",
       "title": "The mesh engine and every packet it carries live in memory only, and the first entry after the twelve-hour deadline drops them",
-      "statement": "The mesh engine's store, its per-packet records, its outbox and its queue of unread packets are never written to disk. One engine a process, reached only through with_mesh, which before every engine call checks the deadline and applies what the session left for the engine — an offer for as long as its event still has by the wall clock and never longer than a location lives, a purge at once. The engine's clock is read in Rust for every entry and never handed in by a caller: monotonic and counting the time the device sleeps (CLOCK_BOOTTIME on Android and Linux, CLOCK_MONOTONIC on Apple targets), so no change of the wall clock moves a packet's lifetime or the deadline. Nobody turns mesh off at its deadline; the first entry after it does, before it runs anything: the engine is dropped with every packet it held, and an entry that holds the session deletes every key. Turning mesh off, and deleting the identity, drop the engine first. The engine's lock is never held across an await. Persisting a packet, taking the engine's clock from a caller, or running the engine after its deadline falsifies this.",
+      "statement": "The mesh engine's store, its per-packet records, its outbox and its queue of unread packets are never written to disk. One engine a process, reached only through mesh_run — by every entry under with_mesh, by every start under mesh_take — which before every engine call checks the deadline and applies what the session left for the engine — an offer for as long as its event still has by the wall clock and never longer than a location lives, a purge at once. The engine's clock is read in Rust for every entry and never handed in by a caller: monotonic and counting the time the device sleeps (CLOCK_BOOTTIME on Android and Linux, CLOCK_MONOTONIC on Apple targets), so no change of the wall clock moves a packet's lifetime or the deadline. Nobody turns mesh off at its deadline; the first entry after it does, before it runs anything: the engine is dropped with every packet it held, and an entry that holds the session deletes every key. That holds for the entries a radio drives the engine through, which hold no session and can reach none: each checks the deadline first, and one that finds it passed drops the engine and leaves the keys to the next entry that holds a session. An engine started with no session, on the word of the radio's service, runs for at most twelve hours, is keyless, and is overruled by the first session that opens: its deadline is brought no later than that session's, which is at once when that session's mesh is off. Turning mesh off, and deleting the identity, drop the engine first. The engine's lock is never held across an await. Persisting a packet, taking the engine's clock from a caller, or running the engine after its deadline falsifies this.",
       "status": "ratcheted",
-      "residual": "With no entry at all the engine sits in memory past its deadline — it can do nothing, since only an entry runs it — and is freed at the next entry or when the process ends; the keys then end by the session's own wall-clock paths. No test can show that the clock runs while a device sleeps: that rests on the platform's documented behaviour (clock_gettime(3) on Apple, clock_gettime(2) on Linux), and on any other target the clock may stop with the machine. No radio is built: nothing links the engine to another phone in any build. Dart starts and resumes the engine only in a build with the HAVEN_MESH define, which no shipped build passes, and there nothing on screen turns mesh on yet.",
+      "residual": "With no entry at all the engine sits in memory past its deadline — it can do nothing, since only an entry runs it — and is freed at the next entry or when the process ends; the keys then end by the session's own wall-clock paths. No test can show that the clock runs while a device sleeps: that rests on the platform's documented behaviour (clock_gettime(3) on Apple, clock_gettime(2) on Linux), and on any other target the clock may stop with the machine. No radio is built: the entries a radio would drive the engine through exist and nothing calls them, so nothing links the engine to another phone in any build, and nothing starts an engine with no session. Until the first session opens, an engine so started would run on the service's word alone, with the store's own deadline unread. Dart starts and resumes the engine only in a build with the HAVEN_MESH define, which no shipped build passes, and there a turn-on asks a radio that has no native end, fails and stores nothing.",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
@@ -7688,6 +7688,22 @@
         {
           "file": "haven/rust_builder/src/api.rs",
           "name": "wiping_local_state_leaves_no_engine_key_or_count"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_radio_entry_after_the_deadline_drops_the_engine_and_the_next_session_entry_deletes_the_keys"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "the_radio_entries_take_no_session"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "the_radio_cannot_keep_an_engine_past_twelve_hours_nor_start_over_one_that_ended"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "a_session_whose_mesh_is_off_ends_the_engine_the_radio_started"
         },
         {
           "file": "haven/rust_builder/src/api.rs",

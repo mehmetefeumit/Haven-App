@@ -2002,6 +2002,91 @@ shell reconciles at its start-up and at a resume is pinned from the source,
 like its other handlers. Mutation pass: 45 changes of a line or two to the
 shipped code, each failing a test.
 
+- **M3a**, the radio's entries over the one engine
+  (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §A.1–A.5;
+  `haven/rust_builder/src/api.rs`, "Bluetooth mesh FFI"). Rust only, in the
+  bridge crate: `haven-core` is not changed, no dependency is added, and
+  there is no shim, no Kotlin and no Dart. **Nothing calls the entries in
+  this build.**
+  **Entries**, all `pub(crate)`, none `async`, none taking a session:
+  `radio_resume(left_ms) -> bool`, `radio_left_ms() -> u64`,
+  `radio_sighting(peer, rssi)`, `radio_link_up(link, central, att_mtu,
+  peer)`, `radio_link_down(link)`, `radio_connect_failed(peer)`,
+  `radio_receive(link, frame)`, `radio_poll(ready) -> Option<Vec<u8>>` and
+  `radio_wake_in_ms() -> Option<u64>`, with `radio_frame_len(att_mtu)` and
+  `RADIO_MAX_FRAME` = 512. Each but the start is `with_mesh` with no session
+  and nothing else, so on every one the deadline is checked and the hand-off
+  applied before the engine runs, and the clock is read in Rust
+  (`the_radio_entries_take_no_session`, a source gate;
+  `a_radio_entry_after_the_deadline_drops_the_engine_and_the_next_session_entry_deletes_the_keys`,
+  entry by entry). A link and a peer are the radio's numbers.
+  **Frame length** is one formula, in Rust: `min(att_mtu − 3, 512)`, and no
+  link below 48 — an ATT MTU of 51. The radio hands over the MTU, never a
+  length.
+  **Bytes.** A frame longer than 512 closes its link and none of it is
+  handed to the engine. `ready` is cut to the engine's 32 link slots, into a
+  stack array. A poll answers one output, `kind ‖ id big-endian ‖ bytes`
+  (1 send, 2 close, 3 connect), 9 + 512 bytes at most; the cases are written
+  once, in `haven/rust_builder/fixtures/mesh_radio_outputs.txt`, which the
+  Kotlin test is to read too. The links' number and rate, and who is
+  dialled, stay the engine's.
+  **One start (design F-16).** `with_mesh` is the lock and `mesh_run`, which
+  takes none; `mesh_take` looks for the running engine and starts one under
+  a single hold, for a session's open, for `mesh_open` and for the radio.
+  The lock's holders stay four — `with_mesh`, `mesh_owed`, `mesh_empty`,
+  `mesh_take` — and the gate names them. A session adopts a running engine;
+  the radio adopts nothing, and leaves its hand-off and its deadline alone.
+  **The start with no session** (`radio_resume`; design F-1, **owner
+  question Q-2, open**): the service's word for how long mesh stays on, cut
+  to twelve hours, starting nothing over an engine that runs, or that ended
+  and is not paid for. Built because §0.4 item 3 promises mesh after a
+  reboot. It is that one function, one arm of `mesh_take` and the tests
+  under "the start that holds no session": if the owner says no, they go and
+  nothing else changes.
+  **The session overrules the service.** A session that opens adopts the
+  engine and brings its deadline no later than its own — at once, when that
+  session's mesh is off.
+  **Not as the design has it.** No `proptest`: it is in no lockfile of the
+  bridge crate, and adding it adds packages; the two property tests draw
+  from a fixed seed with `rand`, which the crate has. A frame too long
+  closes its link by an empty frame handed to the engine, which closes a
+  link whatever it expects next — the engine has no other way to be told;
+  and for a link a radio entry made the bound changes nothing the engine
+  would not do itself, since it refuses by length before it reads, so the
+  test that holds the bound makes a link the engine was told carries longer
+  frames. `check_generated_bridge_pinned.sh` pins the generated files, not
+  `api.rs` (design §A.7): nothing was regenerated and no pin moved. The
+  codegen does skip a function that is not `pub` — but it lists every such
+  function, and every unused type, in a comment at the head of
+  `haven/lib/src/rust/api.dart`, so **the next regeneration changes those
+  two comment lines** (`mesh_adopt` leaves; `mesh_run`, `mesh_take`, `of`,
+  the eleven `radio_*` and the type `Taker` arrive) and nothing else: a
+  regeneration in a scratch copy left the other five generated files byte
+  for byte. Until the shim calls them the entries are dead code in a build
+  that is not a test: each carries
+  `#[cfg_attr(not(test), expect(dead_code, …))]`, which M3b must delete —
+  an expectation nothing fulfils is a warning. One test seam was added: a
+  count, in a test build, of how often a thread took the engine's lock.
+  **Not built here.** The shim, `jni`, the confinement of `unsafe`, the
+  panic guard and the parity guard (M3b); the gate's clauses about
+  `mesh_jni.rs`; the service and its copy of the deadline (M3g).
+
+Residuals of M3a. A location the session leaves is applied by the radio's
+next entry, and `MeshEngine::offer` runs the clock — so a slot that fell
+due — before it stores the offer: a phone with no link and no sighting,
+which the radio wakes for its slot alone, emits cover at that slot and the
+location one slot later (60 to 120 s), or never if the event expires first.
+The order is the engine's own and holds for a session's entry too; the
+radio's wake makes it the rule for a phone alone. Not changed here.
+The reader the tests decode a poll with is the tests' own; the Kotlin
+reader is held to the same cases by the fixture, once it exists. Nothing
+was type-checked for Android or iOS: no such target is installed here.
+Mutation pass: 35 changes of a line or a few to the shipped code, each
+failing a named test. The first pass left two standing — a link too narrow
+for a frame handed one all the same, and a start that let go of the lock
+and took it again ahead of the point a first seam probed — and the tests
+were changed until both fell.
+
 ### Proposed CLAUDE.md wording (owner to approve)
 
 Each is the text as it stands, then the text proposed. Nothing in
