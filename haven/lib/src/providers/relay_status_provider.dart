@@ -1,106 +1,123 @@
-/// Relay status provider for monitoring event publication.
+/// Relay status provider for the relay settings check.
 ///
-/// Tracks per-relay publication status for KeyPackage (30443) and
-/// relay list (10002) events.
+/// Per relay of the user's own inbox and `KeyPackage` lists, and per lookup
+/// relay, what it serves of the kinds expected there — kind 30443 on an own
+/// `KeyPackage` relay, kind 10002 there and on a lookup relay, kind 10050 on
+/// an own inbox relay and on a lookup relay — judged as maintenance judges
+/// them (`RelayService.checkOwnReachability`).
 library;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/models/relay_ring_slot.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/own_reachability_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
-import 'package:haven/src/services/identity_service.dart';
-import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/rust/api.dart'
+    show OwnEventPresenceFfi, OwnRelayPresenceFfi;
 
-/// Status of an event check on a relay.
-enum EventCheckStatus {
-  /// Not yet checked.
-  pending,
+/// What one relay serves of one expected kind.
+enum KindPresence {
+  /// Not checked yet.
+  notChecked,
 
-  /// Currently checking.
+  /// The check is running.
   checking,
 
-  /// Event found on the relay.
-  found,
+  /// It serves what maintenance would leave in place.
+  current,
 
-  /// Event not found on the relay.
-  notFound,
+  /// It serves an older event of this account that maintenance would
+  /// replace — for a `KeyPackage`, one this device cannot open.
+  outdated,
 
-  /// Error occurred during check.
-  error,
+  /// It answered in full and holds nothing of this account's.
+  missing,
+
+  /// It could not be reached, or did not finish its answer.
+  noAnswer,
 }
 
-/// Per-kind event check result.
+/// One relay's row: which lists it is on and, per expected kind, what it
+/// serves. A `null` kind is not expected on this relay and is never asked.
 @immutable
-class KindCheckResult {
-  /// Creates a [KindCheckResult].
-  const KindCheckResult({
-    this.status = EventCheckStatus.pending,
-    this.newestTimestamp,
-    this.errorMessage,
-  });
-
-  /// The check status.
-  final EventCheckStatus status;
-
-  /// Newest event timestamp, if found.
-  final DateTime? newestTimestamp;
-
-  /// Error message, if status is [EventCheckStatus.error].
-  final String? errorMessage;
-
-  /// Creates a copy with the given fields replaced.
-  KindCheckResult copyWith({
-    EventCheckStatus? status,
-    DateTime? newestTimestamp,
-    String? errorMessage,
-  }) {
-    return KindCheckResult(
-      status: status ?? this.status,
-      newestTimestamp: newestTimestamp ?? this.newestTimestamp,
-      errorMessage: errorMessage ?? this.errorMessage,
-    );
-  }
-}
-
-/// Per-relay event status for kinds 30443 (KeyPackage), 10002 (NIP-65 KP
-/// discovery list), and 10050 (Inbox relay list).
-@immutable
-class RelayEventStatus {
-  /// Creates a [RelayEventStatus].
-  const RelayEventStatus({
+class RelayPresence {
+  /// Creates a [RelayPresence].
+  const RelayPresence({
     required this.relayUrl,
-    this.keyPackage = const KindCheckResult(),
-    this.relayList = const KindCheckResult(),
-    this.inboxRelayList = const KindCheckResult(),
+    required this.own,
+    required this.lookup,
+    this.keyPackage,
+    this.relayList,
+    this.inboxRelayList,
   });
 
-  /// The relay URL.
+  /// The configured or lookup entry, verbatim.
   final String relayUrl;
 
-  /// Status of kind 30443 (KeyPackage) on this relay.
-  final KindCheckResult keyPackage;
+  /// On the user's own inbox or `KeyPackage` list.
+  final bool own;
 
-  /// Status of kind 10002 (NIP-65 KeyPackage-discovery list) on this relay.
-  final KindCheckResult relayList;
+  /// A lookup (discovery) relay.
+  final bool lookup;
 
-  /// Status of kind 10050 (NIP-17 Inbox relay list) on this relay.
-  final KindCheckResult inboxRelayList;
+  /// Kind 30443, if expected here.
+  final KindPresence? keyPackage;
 
-  /// Creates a copy with the given fields replaced.
-  RelayEventStatus copyWith({
-    KindCheckResult? keyPackage,
-    KindCheckResult? relayList,
-    KindCheckResult? inboxRelayList,
-  }) {
-    return RelayEventStatus(
-      relayUrl: relayUrl,
-      keyPackage: keyPackage ?? this.keyPackage,
-      relayList: relayList ?? this.relayList,
-      inboxRelayList: inboxRelayList ?? this.inboxRelayList,
-    );
+  /// Kind 10002, if expected here.
+  final KindPresence? relayList;
+
+  /// Kind 10050, if expected here.
+  final KindPresence? inboxRelayList;
+
+  /// Every expected kind's presence.
+  List<KindPresence> get expected => [?keyPackage, ?relayList, ?inboxRelayList];
+
+  /// This row with every expected kind set to [presence].
+  RelayPresence withEvery(KindPresence presence) => RelayPresence(
+    relayUrl: relayUrl,
+    own: own,
+    lookup: lookup,
+    keyPackage: keyPackage == null ? null : presence,
+    relayList: relayList == null ? null : presence,
+    inboxRelayList: inboxRelayList == null ? null : presence,
+  );
+}
+
+/// The one summary of a set of kinds, shared by the app-bar ring and each
+/// row's dot: `ok` only when every kind is current.
+RelayRingSlotState summarizePresence(Iterable<KindPresence> kinds) {
+  if (kinds.isEmpty) return RelayRingSlotState.pending;
+  if (kinds.any((k) => k == KindPresence.checking)) {
+    return RelayRingSlotState.checking;
   }
+  if (kinds.every((k) => k == KindPresence.current)) {
+    return RelayRingSlotState.ok;
+  }
+  if (kinds.any(
+    (k) =>
+        k == KindPresence.outdated ||
+        k == KindPresence.missing ||
+        k == KindPresence.noAnswer,
+  )) {
+    return RelayRingSlotState.error;
+  }
+  return RelayRingSlotState.pending;
+}
+
+/// What a Republish achieved, for its fixed SnackBar copy.
+enum RepublishOutcome {
+  /// Every relay that answered serves every expected kind.
+  allCurrent,
+
+  /// A relay that answered still misses an expected kind, or serves an old
+  /// one.
+  incomplete,
+
+  /// Nothing is published until the storage-reset notice is answered.
+  heldForReset,
 }
 
 /// Overall relay status state.
@@ -110,63 +127,50 @@ class RelayStatusState {
   const RelayStatusState({
     required this.relays,
     this.isRefreshing = false,
+    this.isRepublishing = false,
     this.lastChecked,
   });
 
-  /// Per-relay event status.
-  final List<RelayEventStatus> relays;
+  /// One row per relay: the inbox list, then the `KeyPackage` list, then
+  /// the lookup relays.
+  final List<RelayPresence> relays;
 
-  /// Whether a refresh is currently in progress.
+  /// Whether a check is running.
   final bool isRefreshing;
+
+  /// Whether a Republish is running.
+  final bool isRepublishing;
 
   /// When the last check completed.
   final DateTime? lastChecked;
 
   /// Creates a copy with the given fields replaced.
   RelayStatusState copyWith({
-    List<RelayEventStatus>? relays,
+    List<RelayPresence>? relays,
     bool? isRefreshing,
+    bool? isRepublishing,
     DateTime? lastChecked,
   }) {
     return RelayStatusState(
       relays: relays ?? this.relays,
       isRefreshing: isRefreshing ?? this.isRefreshing,
+      isRepublishing: isRepublishing ?? this.isRepublishing,
       lastChecked: lastChecked ?? this.lastChecked,
     );
   }
 
-  /// Maps each relay to a [RelayRingSlotState] for the app-bar refresh ring.
-  ///
-  /// Aggregation per relay: any kind still `checking` →
-  /// [RelayRingSlotState.checking]; else any kind `found` (the relay is
-  /// reachable and holds at least one of our events) → [RelayRingSlotState.ok];
-  /// else any kind `notFound`/`error` (unreachable or missing all events) →
-  /// [RelayRingSlotState.error]; else [RelayRingSlotState.pending].
-  ///
-  /// This MUST stay in sync with `_StatusDot._summarize` in
-  /// `relay_settings_page.dart`, which derives the per-row status dot from the
-  /// same any-found heuristic. The per-kind detail lives in those rows; the
-  /// ring is only the aggregate. Derived (not stored) so the incremental
-  /// per-relay writes during a check do not each allocate a slots list.
-  List<RelayRingSlotState> get ringSlots => relays
-      .map((r) {
-        final kinds = [r.keyPackage, r.relayList, r.inboxRelayList];
-        if (kinds.any((k) => k.status == EventCheckStatus.checking)) {
-          return RelayRingSlotState.checking;
-        }
-        if (kinds.any((k) => k.status == EventCheckStatus.found)) {
-          return RelayRingSlotState.ok;
-        }
-        if (kinds.any(
-          (k) =>
-              k.status == EventCheckStatus.notFound ||
-              k.status == EventCheckStatus.error,
-        )) {
-          return RelayRingSlotState.error;
-        }
-        return RelayRingSlotState.pending;
-      })
-      .toList(growable: false);
+  /// One ring slot per relay, from [summarizePresence] over its expected
+  /// kinds — the same summary each row's dot shows.
+  List<RelayRingSlotState> get ringSlots =>
+      relays.map((r) => summarizePresence(r.expected)).toList(growable: false);
+
+  /// Whether a relay that answered misses an expected kind or serves an old
+  /// one: what a Republish can fix.
+  bool get needsRepublish => relays.any(
+    (r) => r.expected.any(
+      (k) => k == KindPresence.missing || k == KindPresence.outdated,
+    ),
+  );
 }
 
 /// Provider for relay event publication status.
@@ -175,13 +179,27 @@ final relayStatusProvider =
       RelayStatusNotifier.new,
     );
 
+KindPresence? _presenceOf(OwnEventPresenceFfi p) => switch (p) {
+  OwnEventPresenceFfi.notExpected => null,
+  OwnEventPresenceFfi.current => KindPresence.current,
+  OwnEventPresenceFfi.outdated => KindPresence.outdated,
+  OwnEventPresenceFfi.missing => KindPresence.missing,
+  OwnEventPresenceFfi.noAnswer => KindPresence.noAnswer,
+};
+
+RelayPresence _rowOf(OwnRelayPresenceFfi r) => RelayPresence(
+  relayUrl: r.relayUrl,
+  own: r.own,
+  lookup: r.lookup,
+  keyPackage: _presenceOf(r.keyPackage),
+  relayList: _presenceOf(r.relayList),
+  inboxRelayList: _presenceOf(r.inboxRelayList),
+);
+
 /// Notifier for relay event publication status.
 class RelayStatusNotifier extends AsyncNotifier<RelayStatusState> {
-  /// Generation counter incremented on every [`checkAllRelays`] call.
-  /// Inflight checks compare against this and discard their per-relay
-  /// state mutations if a newer check has started — prevents two
-  /// concurrent refreshes from racing on `state` and prevents a check
-  /// from continuing to mutate state after the user navigates away.
+  /// Incremented on every [checkAllRelays]: a check superseded by a newer one
+  /// writes nothing.
   int _checkGeneration = 0;
 
   @override
@@ -189,161 +207,109 @@ class RelayStatusNotifier extends AsyncNotifier<RelayStatusState> {
     // Coupling to the relay-preferences invalidator: when the user changes
     // their relay lists, the status page rebuilds.
     ref.watch(relayStatusInvalidatorProvider);
-    // Show exactly the relays the user has configured across both lists
-    // (kind 10050 inbox + kind 10002 KeyPackage-discovery). Two-plane model:
-    // public
-    // defaults are NOT surfaced here — they are no longer force-added to
-    // publishes, so listing them would misrepresent where the user's data
-    // actually goes. If both lists are empty (pre-seed), show no rows.
     final inbox = await ref.read(inboxRelaysProvider.future);
     final keyPackage = await ref.read(keyPackageRelaysProvider.future);
-    final union = <String>{...inbox, ...keyPackage}.toList();
-    return RelayStatusState(
-      relays: union.map((url) => RelayEventStatus(relayUrl: url)).toList(),
-    );
+    // The rows the check will answer for, in its order and by its rules, so
+    // each shows the kinds it expects before the first answer. The check's
+    // own rows replace these.
+    Set<String> keys(List<String> urls) => {
+      for (final url in urls) normalizeRelayUrlForComparison(url),
+    };
+    final inboxKeys = keys(inbox);
+    final kpKeys = keys(keyPackage);
+    final lookupKeys = keys(discoveryRelays);
+    final rows = <String, RelayPresence>{};
+    for (final url in [...inbox, ...keyPackage, ...discoveryRelays]) {
+      final key = normalizeRelayUrlForComparison(url);
+      if (rows.containsKey(key)) continue;
+      final inInbox = inboxKeys.contains(key);
+      final inKp = kpKeys.contains(key);
+      final lookup = lookupKeys.contains(key);
+      rows[key] = RelayPresence(
+        relayUrl: url,
+        own: inInbox || inKp,
+        lookup: lookup,
+        keyPackage: inKp ? KindPresence.notChecked : null,
+        relayList: inKp || lookup ? KindPresence.notChecked : null,
+        inboxRelayList: inInbox || lookup ? KindPresence.notChecked : null,
+      );
+    }
+    return RelayStatusState(relays: rows.values.toList());
   }
 
-  /// Checks all relays for KeyPackage and relay-list events.
-  ///
-  /// Per-relay checks fan out via [`Future.wait`] so the overall refresh
-  /// completes in O(slowest_relay) instead of O(sum_of_relays). Every
-  /// call increments [`_checkGeneration`]; in-flight calls observe the
-  /// generation and abort their `state` mutations as soon as a newer
-  /// check supersedes them. This makes rapid refresh-button taps safe
-  /// and lets the notifier no-op gracefully if the user navigates away.
+  /// Checks every row. Each expected kind reads checking until the one
+  /// answer arrives; a check superseded meanwhile writes nothing.
   Future<void> checkAllRelays() async {
-    final identityAsync = ref.read(identityProvider);
-    final Identity? identity;
-    if (identityAsync.hasValue) {
-      identity = identityAsync.value;
-    } else {
-      identity = await ref.read(identityProvider.future);
-    }
+    final identity = await ref.read(identityProvider.future);
     if (identity == null) return;
-
-    final relayService = ref.read(relayServiceProvider);
-    final currentState = state.valueOrNull;
-    if (currentState == null) return;
-
-    final myGeneration = ++_checkGeneration;
-    // Mark every relay as "checking" up front so the UI flips dots
-    // immediately rather than per-relay.
-    final pending = currentState.relays
-        .map(
-          (r) => r.copyWith(
-            keyPackage: const KindCheckResult(
-              status: EventCheckStatus.checking,
-            ),
-            relayList: const KindCheckResult(status: EventCheckStatus.checking),
-            inboxRelayList: const KindCheckResult(
-              status: EventCheckStatus.checking,
-            ),
-          ),
-        )
-        .toList();
-    state = AsyncData(
-      currentState.copyWith(relays: pending, isRefreshing: true),
-    );
-
-    // Each relay writes its result into `state` as soon as it resolves, so the
-    // app-bar ring fills in relay-by-relay instead of all at once on
-    // completion. Each write re-reads the freshest state and is gated by the
-    // generation counter.
-    Future<RelayEventStatus> checkOne(RelayEventStatus relay) async {
-      final result = await _doCheckOne(relayService, relay, identity!);
-      // Guard before the state write: a superseded check must not mutate state.
-      if (myGeneration != _checkGeneration) return result;
-      // Re-read state FRESHLY here (not the pre-fan-out snapshot) so concurrent
-      // per-relay completions compose rather than overwrite one another.
-      final current = state.valueOrNull;
-      if (current == null) return result;
-      final patched = [
-        for (final r in current.relays)
-          if (r.relayUrl == relay.relayUrl) result else r,
-      ];
-      state = AsyncData(current.copyWith(relays: patched, isRefreshing: true));
-      return result;
-    }
-
-    // Fan out across all relays in parallel.
-    final updated = await Future.wait(pending.map(checkOne));
-
-    // If a newer checkAllRelays superseded us, drop our results
-    // silently — the newer call owns `state` from here on.
-    if (myGeneration != _checkGeneration) {
-      debugPrint('[RelayStatus] check superseded; dropping stale results');
+    // The page asks on open, often before the rows have loaded.
+    final RelayStatusState current;
+    try {
+      current = state.valueOrNull ?? await future;
+    } on Object catch (e) {
+      debugPrint('[RelayStatus] no rows to check: ${e.runtimeType}');
       return;
     }
+
+    final generation = ++_checkGeneration;
     state = AsyncData(
-      currentState.copyWith(
-        relays: updated,
+      current.copyWith(
+        relays: [
+          for (final r in current.relays) r.withEvery(KindPresence.checking),
+        ],
+        isRefreshing: true,
+      ),
+    );
+
+    List<RelayPresence> checked;
+    try {
+      final rows = await ref
+          .read(relayServiceProvider)
+          .checkOwnReachability(ownPubkey: identity.pubkeyHex);
+      checked = rows.map(_rowOf).toList();
+    } on Object catch (e) {
+      debugPrint('[RelayStatus] check failed: ${e.runtimeType}');
+      checked = [
+        for (final r in current.relays) r.withEvery(KindPresence.noAnswer),
+      ];
+    }
+    if (generation != _checkGeneration) return;
+    final latest = state.valueOrNull ?? current;
+    state = AsyncData(
+      latest.copyWith(
+        relays: checked,
         isRefreshing: false,
         lastChecked: DateTime.now(),
       ),
     );
   }
 
-  /// Runs the three concurrent kind-checks (30443 / 10002 / 10050) for one
-  /// relay and folds them back into an updated [`RelayEventStatus`].
-  Future<RelayEventStatus> _doCheckOne(
-    RelayService relayService,
-    RelayEventStatus relay,
-    Identity identity,
-  ) async {
-    // Three concurrent kind-checks per relay; let them race.
-    final results = await Future.wait([
-      _checkKind(
-        relayService,
-        relay.relayUrl,
-        identity.pubkeyHex,
-        eventKind: 30443,
-      ),
-      _checkKind(
-        relayService,
-        relay.relayUrl,
-        identity.pubkeyHex,
-        eventKind: 10002,
-      ),
-      _checkKind(
-        relayService,
-        relay.relayUrl,
-        identity.pubkeyHex,
-        eventKind: 10050,
-      ),
-    ]);
-    return relay.copyWith(
-      keyPackage: results[0],
-      relayList: results[1],
-      inboxRelayList: results[2],
-    );
-  }
-
-  /// Checks a single (relay, kind) pair, mapping success / not-found /
-  /// failure into a [`KindCheckResult`].
-  Future<KindCheckResult> _checkKind(
-    RelayService relayService,
-    String relayUrl,
-    String authorPubkey, {
-    required int eventKind,
-  }) async {
+  /// Publishes the relay lists and the `KeyPackage` again, in maintenance's
+  /// order, then checks every relay again. Never throws.
+  Future<RepublishOutcome> republish() async {
+    final current = state.valueOrNull;
+    if (current != null) {
+      state = AsyncData(current.copyWith(isRepublishing: true));
+    }
     try {
-      final check = await relayService.checkEventOnRelay(
-        relayUrl: relayUrl,
-        authorPubkey: authorPubkey,
-        eventKind: eventKind,
-      );
-      return KindCheckResult(
-        status: check.found
-            ? EventCheckStatus.found
-            : EventCheckStatus.notFound,
-        newestTimestamp: check.newestTimestamp,
-      );
-    } on Object catch (_) {
-      debugPrint('[RelayStatus] Kind $eventKind check failed');
-      return const KindCheckResult(
-        status: EventCheckStatus.error,
-        errorMessage: 'Check failed',
-      );
+      final reachability = ref.read(ownReachabilityProvider.notifier);
+      await reachability.republish();
+      if (ref.read(ownReachabilityProvider).status ==
+          OwnReachability.awaitingReset) {
+        return RepublishOutcome.heldForReset;
+      }
+      await checkAllRelays();
+      final answered = (state.valueOrNull?.relays ?? const <RelayPresence>[])
+          .expand((r) => r.expected)
+          .where((k) => k != KindPresence.noAnswer);
+      return answered.every((k) => k == KindPresence.current)
+          ? RepublishOutcome.allCurrent
+          : RepublishOutcome.incomplete;
+    } finally {
+      final latest = state.valueOrNull;
+      if (latest != null) {
+        state = AsyncData(latest.copyWith(isRepublishing: false));
+      }
     }
   }
 }

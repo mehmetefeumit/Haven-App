@@ -2,7 +2,11 @@
 ///
 /// Shows three independent relay categories — Inbox (kind 10050), KeyPackage
 /// (kind 10002), and Profile (kind-0, local-only policy — never published)
-/// — with add/remove/restore controls, plus a short framing caption.
+/// — with add/remove/restore controls, then the read-only lookup relays
+/// inviters search, plus a short framing caption. Each Inbox, KeyPackage and
+/// lookup row says, per kind expected there, whether the relay serves it
+/// (`relayStatusProvider`); "Republish" appears when one misses a kind or
+/// serves an old one.
 ///
 /// The Profile section's remove control is deliberately absent on the curated
 /// pool entries — `usable_profile_relays()` unions
@@ -26,11 +30,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/relays.dart';
+import 'package:haven/src/models/relay_ring_slot.dart';
 import 'package:haven/src/pages/settings/add_relay_sheet.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/relay_status_provider.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/common/refresh_ring/refresh_ring_button.dart';
 import 'package:haven/src/widgets/widgets.dart';
@@ -151,6 +157,10 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
           subtitle: l10n.relaySettingsProfileSubtitle,
         ),
         const SizedBox(height: HavenSpacing.lg),
+        // After the lists the user edits: Haven's own, read-only.
+        const _LookupSection(),
+        const _RepublishAction(),
+        const SizedBox(height: HavenSpacing.lg),
         const _BackendCaption(),
         const SizedBox(height: HavenSpacing.base),
       ],
@@ -231,7 +241,7 @@ class _RelaySection extends ConsumerWidget {
                       children: [
                         _EditableRelayRow(
                           url: urls[i],
-                          status: _statusFor(status, urls[i]),
+                          kinds: _kindsFor(category, _rowFor(status, urls[i])),
                           onRemove:
                               unremovable.contains(
                                 normalizeRelayUrlForComparison(urls[i]),
@@ -373,24 +383,48 @@ ProviderListenable<AsyncValue<List<String>>> _listProviderFor(
   RelayCategory.profile => profileRelaysProvider,
 };
 
-RelayEventStatus? _statusFor(RelayStatusState? state, String url) {
+RelayPresence? _rowFor(RelayStatusState? state, String url) {
   if (state == null) return null;
+  final key = normalizeRelayUrlForComparison(url);
   for (final r in state.relays) {
-    if (r.relayUrl == url) return r;
+    if (normalizeRelayUrlForComparison(r.relayUrl) == key) return r;
   }
   return null;
 }
 
+/// A kind a relay row reports on.
+enum _Kind { keyPackage, relayList, inboxList }
+
+/// The kinds a section's row reports: what that list is published for. A
+/// relay on two lists shows each list's kinds in that list's section.
+List<(_Kind, KindPresence)> _kindsFor(
+  RelayCategory category,
+  RelayPresence? row,
+) => switch (category) {
+  RelayCategory.inbox => [
+    (_Kind.inboxList, row?.inboxRelayList ?? KindPresence.notChecked),
+  ],
+  RelayCategory.keyPackage => [
+    (_Kind.keyPackage, row?.keyPackage ?? KindPresence.notChecked),
+    (_Kind.relayList, row?.relayList ?? KindPresence.notChecked),
+  ],
+  // Profile relays carry only the public profile, which this check does
+  // not ask about.
+  RelayCategory.profile => const [],
+};
+
 class _EditableRelayRow extends StatelessWidget {
   const _EditableRelayRow({
     required this.url,
-    required this.status,
+    required this.kinds,
     required this.onRemove,
     this.isContaminated = false,
   });
 
   final String url;
-  final RelayEventStatus? status;
+
+  /// The kinds this row reports, each with what the relay serves of it.
+  final List<(_Kind, KindPresence)> kinds;
 
   /// Removes this relay, or `null` to suppress the control — the curated
   /// profile-pool rows, which Haven dials regardless of whether a remove
@@ -407,12 +441,13 @@ class _EditableRelayRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    final theme = Theme.of(context);
     final displayUrl = url.replaceFirst('wss://', '');
     final remove = onRemove;
     return ListTile(
-      leading: _StatusDot(status: status),
-      title: Text(displayUrl, style: theme.textTheme.bodyMedium),
+      leading: kinds.isEmpty
+          ? null
+          : _PresenceDot(slot: summarizePresence(kinds.map((k) => k.$2))),
+      title: _RelayRowText(url: displayUrl, kinds: kinds),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -432,9 +467,8 @@ class _EditableRelayRow extends StatelessWidget {
 /// Advisory warning icon shown next to a Profile-relay row whose URL also
 /// carries the account's circle or inbox traffic.
 ///
-/// Follows the same [Tooltip] + [Semantics] pattern as [_StatusDot]: a short
-/// visible tooltip plus a fuller screen-reader label that names the relay so
-/// the warning is understandable out of visual context.
+/// A short visible [Tooltip] plus a fuller screen-reader label that names the
+/// relay, so the warning is understandable out of visual context.
 class _ContaminationWarningIcon extends StatelessWidget {
   const _ContaminationWarningIcon({required this.url});
 
@@ -532,68 +566,185 @@ class _ProfilePoolUnderflowBanner extends ConsumerWidget {
   }
 }
 
-class _StatusDot extends StatelessWidget {
-  const _StatusDot({required this.status});
+/// A relay's address and one line per kind it reports ("KeyPackage:
+/// Published"), merged so a screen reader reads the row as one sentence.
+class _RelayRowText extends StatelessWidget {
+  const _RelayRowText({required this.url, required this.kinds});
 
-  final RelayEventStatus? status;
+  final String url;
+  final List<(_Kind, KindPresence)> kinds;
 
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
+    final theme = Theme.of(context);
+    final lineStyle = theme.textTheme.bodySmall?.copyWith(
+      color: theme.colorScheme.onSurfaceVariant,
+    );
+    return MergeSemantics(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(url, style: theme.textTheme.bodyMedium),
+          for (final (kind, presence) in kinds)
+            Text(
+              l10n.relaySettingsKindLine(
+                _kindLabel(l10n, kind),
+                _presenceLabel(l10n, presence),
+              ),
+              style: lineStyle,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+String _kindLabel(AppLocalizations l10n, _Kind kind) => switch (kind) {
+  _Kind.keyPackage => l10n.relaySettingsKindKeyPackage,
+  _Kind.relayList => l10n.relaySettingsKindRelayList,
+  _Kind.inboxList => l10n.relaySettingsKindInboxList,
+};
+
+String _presenceLabel(AppLocalizations l10n, KindPresence presence) =>
+    switch (presence) {
+      KindPresence.notChecked => l10n.relaySettingsStatusNotChecked,
+      KindPresence.checking => l10n.relaySettingsStatusChecking,
+      KindPresence.current => l10n.relaySettingsPresencePublished,
+      KindPresence.outdated => l10n.relaySettingsPresenceOutdated,
+      KindPresence.missing => l10n.relaySettingsPresenceMissing,
+      KindPresence.noAnswer => l10n.relaySettingsStatusUnreachable,
+    };
+
+/// The row's summary, as colour and shape. Decorative: the row's lines say
+/// the same in words.
+class _PresenceDot extends StatelessWidget {
+  const _PresenceDot({required this.slot});
+
+  final RelayRingSlotState slot;
+
+  @override
+  Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final overall = _summarize(status);
-    final (Color color, IconData icon, String label) = switch (overall) {
-      _OverallStatus.connected => (
+    final (Color color, IconData icon) = switch (slot) {
+      RelayRingSlotState.ok => (
         HavenSecurityColors.encrypted,
         LucideIcons.circleCheck,
-        l10n.relaySettingsStatusConnected,
       ),
-      _OverallStatus.checking => (
+      RelayRingSlotState.checking => (
         scheme.onSurfaceVariant,
         LucideIcons.loaderCircle,
-        l10n.relaySettingsStatusChecking,
       ),
-      _OverallStatus.unreachable => (
+      RelayRingSlotState.error => (
         HavenSecurityColors.warning,
         LucideIcons.circleAlert,
-        l10n.relaySettingsStatusUnreachable,
       ),
-      _OverallStatus.notChecked => (
-        scheme.outline,
-        LucideIcons.circle,
-        l10n.relaySettingsStatusNotChecked,
-      ),
+      RelayRingSlotState.pending => (scheme.outline, LucideIcons.circle),
     };
-    return Tooltip(
-      message: label,
-      child: Semantics(
-        label: l10n.relaySettingsStatusSemantics(label),
-        child: Icon(icon, color: color, size: 20),
+    return ExcludeSemantics(child: Icon(icon, color: color, size: 20));
+  }
+}
+
+/// The lookup relays inviters search, with what each serves of this
+/// account's relay lists. Read-only: the list is Haven's, not the user's.
+class _LookupSection extends ConsumerWidget {
+  const _LookupSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = AppLocalizations.of(context);
+    final theme = Theme.of(context);
+    final rows = [
+      for (final r
+          in ref.watch(relayStatusProvider).valueOrNull?.relays ??
+              const <RelayPresence>[])
+        if (r.lookup) r,
+    ];
+    if (rows.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          l10n.relaySettingsLookupTitle,
+          style: theme.textTheme.titleSmall?.copyWith(
+            color: theme.colorScheme.primary,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          l10n.relaySettingsLookupSubtitle,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: HavenSpacing.sm),
+        Card(
+          child: Column(
+            children: [
+              for (var i = 0; i < rows.length; i++) ...[
+                _EditableRelayRow(
+                  url: rows[i].relayUrl,
+                  kinds: [
+                    if (rows[i].relayList case final p?) (_Kind.relayList, p),
+                    if (rows[i].inboxRelayList case final p?)
+                      (_Kind.inboxList, p),
+                  ],
+                  onRemove: null,
+                ),
+                if (i < rows.length - 1)
+                  const Divider(height: 1, indent: HavenSpacing.base),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// "Republish", offered when a relay that answered misses an expected kind
+/// or serves an old one: the same ordered publish maintenance runs, then a
+/// fresh check, reported in fixed copy.
+class _RepublishAction extends ConsumerWidget {
+  const _RepublishAction();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = AppLocalizations.of(context);
+    final state = ref.watch(relayStatusProvider).valueOrNull;
+    if (state == null || !(state.needsRepublish || state.isRepublishing)) {
+      return const SizedBox.shrink();
+    }
+    final busy = state.isRepublishing || state.isRefreshing;
+    return Padding(
+      padding: const EdgeInsets.only(top: HavenSpacing.sm),
+      child: Align(
+        alignment: AlignmentDirectional.centerStart,
+        child: FilledButton.tonalIcon(
+          key: WidgetKeys.relaySettingsRepublish,
+          icon: const Icon(LucideIcons.upload, size: 16),
+          label: Text(l10n.relaySettingsRepublish),
+          onPressed: busy ? null : () => _republish(context, ref),
+        ),
       ),
     );
   }
 
-  _OverallStatus _summarize(RelayEventStatus? s) {
-    if (s == null) return _OverallStatus.notChecked;
-    final all = [s.keyPackage, s.relayList, s.inboxRelayList];
-    if (all.any((r) => r.status == EventCheckStatus.checking)) {
-      return _OverallStatus.checking;
-    }
-    if (all.any((r) => r.status == EventCheckStatus.found)) {
-      return _OverallStatus.connected;
-    }
-    if (all.any(
-      (r) =>
-          r.status == EventCheckStatus.notFound ||
-          r.status == EventCheckStatus.error,
-    )) {
-      return _OverallStatus.unreachable;
-    }
-    return _OverallStatus.notChecked;
+  Future<void> _republish(BuildContext context, WidgetRef ref) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final l10n = AppLocalizations.of(context);
+    final outcome = await ref.read(relayStatusProvider.notifier).republish();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(switch (outcome) {
+          RepublishOutcome.allCurrent => l10n.relaySettingsRepublishDone,
+          RepublishOutcome.incomplete => l10n.relaySettingsRepublishIncomplete,
+          RepublishOutcome.heldForReset => l10n.relaySettingsRepublishHeld,
+        }),
+      ),
+    );
   }
 }
-
-enum _OverallStatus { connected, checking, unreachable, notChecked }
 
 class _EmptyCategoryState extends ConsumerWidget {
   const _EmptyCategoryState({required this.category});
