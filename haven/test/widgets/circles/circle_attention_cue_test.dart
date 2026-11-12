@@ -1,8 +1,14 @@
 /// The non-text "needs attention" cue: a circle with a fault or a note it has
 /// not been shown is marked where the user can see it with Circle details
-/// closed, and one tap opens that circle's details. It carries no message of
-/// its own (OD-1); it has an accessible name, and its badge is visible
-/// against the sheet in both themes (WCAG 2.1 SC 1.4.11).
+/// closed. It carries no message of its own (OD-1); it has an accessible
+/// name, and its badge is visible against the sheet in both themes (WCAG 2.1
+/// SC 1.4.11).
+///
+/// The SELECTED circle's cue is its details button itself — the alert glyph
+/// in the info glyph's place, never a second control beside it — and a dot on
+/// its avatar in the selector, which is all of the circle a resting sheet
+/// shows. A circle NOT selected keeps a cue of its own beside the selector,
+/// and one tap on it selects that circle and opens its details.
 library;
 
 import 'package:flutter/foundation.dart';
@@ -20,7 +26,9 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/widgets/circles/circle_attention_cue.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../helpers/fake_change_notices.dart';
 import '../../helpers/sheet_health_overrides.dart';
@@ -126,46 +134,98 @@ AppLocalizations _l10n(WidgetTester tester) =>
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  /// Whether the dot on the selected circle's avatar is drawn.
+  bool dotShown(WidgetTester tester) => tester
+      .widget<Badge>(find.byKey(WidgetKeys.circleSelectedAttentionDot))
+      .isLabelVisible;
+
+  /// Pulls the sheet up until the header row is on screen.
+  Future<void> raiseSheet(WidgetTester tester) async {
+    await tester.drag(find.text('Home'), const Offset(0, -400));
+    await tester.pumpAndSettle();
+  }
+
   for (final scale in const [1.0, 2.0]) {
-    testWidgets('at ${scale}x, a fault shows a labelled cue at the resting '
-        'detent, and one tap opens Circle details', (tester) async {
+    testWidgets('at ${scale}x, a fault dots the selected circle at the resting '
+        'detent, and its one details button is the labelled cue that opens '
+        'Circle details', (tester) async {
       final handle = tester.ensureSemantics();
       await _pump(
         tester,
         health: SharingHealth.publishFailing(DateTime.utc(2026, 8, 28, 12)),
         scale: scale,
       );
-      final cue = find.byKey(WidgetKeys.circleAttentionCue);
-      expect(cue, findsOneWidget);
+      expect(dotShown(tester), isTrue);
       expect(
-        tester.getRect(cue).bottom,
+        tester
+            .getRect(find.byKey(WidgetKeys.circleSelectedAttentionDot))
+            .bottom,
         lessThanOrEqualTo(844),
         reason: 'on screen with the sheet at rest',
       );
       expect(
-        tester.getSemantics(cue).tooltip,
+        find.byKey(WidgetKeys.circleAttentionCue),
+        findsNothing,
+        reason: 'no second control beside the selector for the selected circle',
+      );
+
+      await raiseSheet(tester);
+      final details = find.byKey(WidgetKeys.circleDetailsButton);
+      expect(details, findsOneWidget);
+      expect(tester.widget(details), isA<CircleAttentionCue>());
+      expect(
+        find.byIcon(LucideIcons.info),
+        findsNothing,
+        reason: "the alert glyph stands in the info glyph's place",
+      );
+      expect(tester.getRect(details).bottom, lessThanOrEqualTo(844));
+      expect(
+        tester.getSemantics(details).tooltip,
         _l10n(tester).circleDetailsAttentionTooltip,
       );
 
-      await tester.tap(cue);
+      await tester.tap(details);
       await tester.pumpAndSettle();
       expect(find.byKey(WidgetKeys.leaveCircleCta), findsOneWidget);
       handle.dispose();
     });
   }
 
-  testWidgets('a healthy circle with no note shows no cue', (tester) async {
+  testWidgets('a healthy circle with no note shows no cue: no dot, and the '
+      'details button keeps its info glyph and its plain name', (tester) async {
+    final handle = tester.ensureSemantics();
     await _pump(tester);
     expect(find.byKey(WidgetKeys.circleAttentionCue), findsNothing);
+    expect(dotShown(tester), isFalse);
+
+    await raiseSheet(tester);
+    final details = find.byKey(WidgetKeys.circleDetailsButton);
+    expect(tester.widget(details), isNot(isA<CircleAttentionCue>()));
+    expect(
+      find.descendant(of: details, matching: find.byIcon(LucideIcons.info)),
+      findsOneWidget,
+    );
+    expect(find.byIcon(LucideIcons.triangleAlert), findsNothing);
+    expect(
+      tester.getSemantics(details).tooltip,
+      _l10n(tester).circleDetailsButtonTooltip,
+    );
+    handle.dispose();
   });
 
-  testWidgets('a note the selected circle has not been shown shows the cue',
-      (tester) async {
-    await _pump(
-      tester,
-      notices: FakeNoticeManager(notes: const [ChangeNoteFfi.changeUndone]),
+  testWidgets('a note the selected circle has not been shown dots it and '
+      'turns its details button into the cue', (tester) async {
+    final notices = FakeNoticeManager()
+      ..notesFor = (id) => listEquals(id, _home.mlsGroupId)
+          ? const [ChangeNoteFfi.changeUndone]
+          : const [];
+    await _pump(tester, notices: notices);
+    expect(dotShown(tester), isTrue);
+    expect(find.byKey(WidgetKeys.circleAttentionCue), findsNothing);
+    expect(
+      tester.widget(find.byKey(WidgetKeys.circleDetailsButton)),
+      isA<CircleAttentionCue>(),
     );
-    expect(find.byKey(WidgetKeys.circleAttentionCue), findsOneWidget);
   });
 
   testWidgets('level notes alone show no cue', (tester) async {
@@ -174,6 +234,8 @@ void main() {
       notices: FakeNoticeManager(notes: const [ChangeNoteFfi.unreadLocation]),
     );
     expect(find.byKey(WidgetKeys.circleAttentionCue), findsNothing);
+    expect(dotShown(tester), isFalse);
+    expect(find.byIcon(LucideIcons.triangleAlert), findsNothing);
   });
 
   testWidgets('a note in a circle NOT selected marks its row in the list, '
@@ -228,6 +290,12 @@ void main() {
     final cue = find.byKey(WidgetKeys.circleAttentionCue);
     expect(cue, findsOneWidget);
     expect(tester.getRect(cue).bottom, lessThanOrEqualTo(844));
+    // The mark is that circle's alone: the selected one carries none.
+    expect(dotShown(tester), isFalse);
+    expect(
+      tester.widget(find.byKey(WidgetKeys.circleDetailsButton)),
+      isNot(isA<CircleAttentionCue>()),
+    );
 
     await tester.tap(cue);
     await tester.pumpAndSettle();
@@ -243,7 +311,7 @@ void main() {
     ('light', HavenTheme.light()),
     ('dark', HavenTheme.dark()),
   ]) {
-    testWidgets('$name: the badge clears 3:1 against the sheet surface', (
+    testWidgets('$name: both badges clear 3:1 against the sheet surface', (
       tester,
     ) async {
       await _pump(
@@ -251,23 +319,28 @@ void main() {
         health: SharingHealth.publishFailing(DateTime.utc(2026, 8, 28, 12)),
         theme: theme,
       );
-      final badge = tester.widget<Badge>(
-        find.descendant(
-          of: find.byKey(WidgetKeys.circleAttentionCue),
-          matching: find.byType(Badge),
-        ),
-      );
       final scheme = Theme.of(
         tester.element(find.byType(CirclesBottomSheet)),
       ).colorScheme;
-      final colour = badge.backgroundColor!;
-      expect(colour, scheme.error);
-      for (final surface in [scheme.surface, scheme.surfaceContainerLow]) {
-        expect(
-          _contrast(colour, surface),
-          greaterThanOrEqualTo(3),
-          reason: '$name badge on $surface',
-        );
+      final badges = [
+        tester.widget<Badge>(find.byKey(WidgetKeys.circleSelectedAttentionDot)),
+        tester.widget<Badge>(
+          find.descendant(
+            of: find.byKey(WidgetKeys.circleDetailsButton),
+            matching: find.byType(Badge),
+          ),
+        ),
+      ];
+      for (final badge in badges) {
+        final colour = badge.backgroundColor!;
+        expect(colour, scheme.error);
+        for (final surface in [scheme.surface, scheme.surfaceContainerLow]) {
+          expect(
+            _contrast(colour, surface),
+            greaterThanOrEqualTo(3),
+            reason: '$name badge on $surface',
+          );
+        }
       }
     });
   }

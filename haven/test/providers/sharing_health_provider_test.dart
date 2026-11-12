@@ -13,6 +13,7 @@ library;
 
 import 'dart:async';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -100,6 +101,9 @@ class _FakeHealthService implements CircleHealthService {
   Completer<void>? gate;
   Completer<void>? _held;
 
+  /// How many times the model has read the stored evidence.
+  int reads = 0;
+
   void releaseGate() => _held?.complete();
 
   @override
@@ -111,6 +115,7 @@ class _FakeHealthService implements CircleHealthService {
     // finally completes. Reading `stored` after the await made every held call
     // return the NEWEST value, so the stale answer the generation fence exists
     // to discard never existed and the fence was untestable.
+    reads++;
     final snapshot = stored;
     final held = gate;
     if (held != null) {
@@ -188,6 +193,10 @@ class _Harness {
     );
     addTearDown(container.dispose);
     addTearDown(foreground.dispose);
+    // Built now, as the app builds it when it comes up: the model counts a
+    // cause only through time it was in front to watch, and a model first
+    // built after the clock was moved would have watched none of it.
+    container.read(sharingHealthProvider);
   }
 
   final _FakeHealthService health;
@@ -1406,26 +1415,377 @@ void main() {
       expect(h.notifier.isTickingForTest, isFalse);
     });
 
-    test('re-arms AND re-derives immediately on return to the foreground',
-        () async {
-      // A returning user must see a fresh verdict, not the one that was true
-      // when they left.
+    test(
+      're-arms AND re-derives immediately on return to the foreground',
+      () async {
+        // A returning user must see a fresh verdict, not the one that was true
+        // when they left: here a fault the app watched begin, which the other
+        // isolate's ack ended while the app was away.
+        final h = _Harness()
+          ..health.stored = CircleHealthTimestamps(lastPublishAckedAt: _t0)
+          ..advance(kPublishSilenceThreshold + const Duration(seconds: 1));
+        expect(
+          await h.settle(),
+          SharingHealth.publishFailing(_t0),
+          reason: 'premise: the fault is on screen when the app leaves',
+        );
+        h.foreground.value = false;
+
+        h.advance(const Duration(minutes: 10));
+        h.health.stored = CircleHealthTimestamps(lastPublishAckedAt: h.now);
+        h.foreground.value = true;
+        expect(h.notifier.isTickingForTest, isTrue);
+
+        // The re-derivation the resume kicked off is async; let it land.
+        await pumpEventQueue();
+        expect(
+          h.container.read(sharingHealthProvider),
+          SharingHealth.healthy.about(sharingCircleKey(_circle())),
+        );
+      },
+    );
+  });
+
+  group('a cause is confirmed only through time the app watched it', () {
+    // The stored delivery instants only age while the app is away — nothing
+    // may be sending or receiving at all — so read at the moment it returns
+    // they say how long it was gone, not that the circle is broken. And the
+    // resume's own publish and reconnect are the repair, already under way.
+    // Both halves are held here: nothing is shown that the return itself is
+    // about to disprove, and nothing that stands is ever left unshown.
+
+    /// The app leaves, [away] passes, and it comes back.
+    void leaveAndReturn(_Harness h, Duration away) {
+      h.foreground.value = false;
+      h.advance(away);
+      h.foreground.value = true;
+    }
+
+    const second = Duration(seconds: 1);
+
+    test('an ack that only aged while the app was away is no fault on return, '
+        'and the resume publish leaves nothing to show', () async {
+      final h = _Harness()
+        ..health.stored = CircleHealthTimestamps(lastPublishAckedAt: _t0);
+      expect(await h.settle(), SharingHealth.healthy, reason: 'premise');
+
+      leaveAndReturn(h, const Duration(hours: 1));
+      expect(
+        h.now.difference(_t0),
+        greaterThan(kPublishSilenceThreshold),
+        reason: 'anti-vacuity: the ack is far past the silence threshold',
+      );
+      expect(await h.settle(), SharingHealth.healthy);
+
+      // The publish every resume makes is acknowledged a moment later.
+      h.advance(const Duration(seconds: 3));
+      h.health.stored = CircleHealthTimestamps(lastPublishAckedAt: h.now);
+      h.notifier.recordPublishOutcome('010203', acked: true);
+      h.advance(kSharingFaultConfirmationWindow + second);
+      expect(await h.settle(), SharingHealth.healthy);
+    });
+
+    test('a send silence that still stands after one window in front is '
+        'shown, dated from the last ack', () async {
       final h = _Harness()
         ..health.stored = CircleHealthTimestamps(lastPublishAckedAt: _t0);
       await h.settle();
-      h.foreground.value = false;
+      leaveAndReturn(h, const Duration(hours: 1));
 
-      h.advance(kPublishSilenceThreshold + const Duration(seconds: 1));
-      h.foreground.value = true;
-      expect(h.notifier.isTickingForTest, isTrue);
-
-      // The re-derivation the resume kicked off is async; let it land.
-      await Future<void>.delayed(Duration.zero);
+      h.advance(kSharingFaultConfirmationWindow);
       expect(
-        h.container.read(sharingHealthProvider),
-        SharingHealth.publishFailing(_t0).about(sharingCircleKey(_circle())),
+        await h.settle(),
+        SharingHealth.healthy,
+        reason: 'exactly the window is not yet outlasted',
+      );
+
+      h.advance(second);
+      expect(await h.settle(), SharingHealth.publishFailing(_t0));
+    });
+
+    test(
+      'a receipt that only aged while the app was away is no fault on '
+      'return, and one that still stands after a window in front is',
+      () async {
+        final h = _Harness()
+          ..health.stored = CircleHealthTimestamps(lastPeerEventAt: _t0);
+        expect(await h.settle(), SharingHealth.healthy, reason: 'premise');
+
+        leaveAndReturn(h, const Duration(hours: 1));
+        expect(
+          h.now.difference(_t0),
+          greaterThan(kReceiveSilenceThreshold),
+          reason: 'anti-vacuity',
+        );
+        expect(await h.settle(), SharingHealth.healthy);
+
+        h.advance(kSharingFaultConfirmationWindow + second);
+        expect(await h.settle(), SharingHealth.receiveSilent(_t0));
+      },
+    );
+
+    test('a cold start watches before it judges', () async {
+      // Stamps older than the process: it has watched none of that silence.
+      final h = _Harness()
+        ..health.stored = CircleHealthTimestamps(
+          lastPublishAckedAt: _t0.subtract(const Duration(days: 1)),
+          lastPeerEventAt: _t0.subtract(const Duration(days: 1)),
+        );
+      expect(await h.settle(), SharingHealth.healthy);
+
+      h.advance(kSharingFaultConfirmationWindow + second);
+      expect(
+        await h.settle(),
+        SharingHealth.publishFailing(_t0.subtract(const Duration(days: 1))),
       );
     });
+
+    test('a fault the app watched before it left is shown the moment it '
+        'returns', () async {
+      // Nothing delivered while it was away, so nothing is new to confirm.
+      final h = _Harness()
+        ..health.stored = CircleHealthTimestamps(lastPeerEventAt: _t0)
+        ..advance(kReceiveSilenceThreshold + second);
+      expect(await h.settle(), SharingHealth.receiveSilent(_t0));
+
+      leaveAndReturn(h, const Duration(hours: 6));
+      expect(await h.settle(), SharingHealth.receiveSilent(_t0));
+    });
+
+    test('a fault on screen when the app leaves is not withdrawn behind it',
+        () async {
+      // The visits kept are the newest that make a window; one that is
+      // exactly a window long must not push out the watching that confirmed
+      // the fault, or leaving would read as a recovery.
+      final h = _Harness()
+        ..health.stored = CircleHealthTimestamps(lastPublishAckedAt: _t0);
+      await h.settle();
+      leaveAndReturn(h, const Duration(hours: 1));
+      h.advance(const Duration(seconds: 100));
+      leaveAndReturn(h, const Duration(hours: 1));
+      h.advance(const Duration(seconds: 69));
+      expect(await h.settle(), SharingHealth.publishFailing(_t0));
+
+      h.advance(kSharingFaultConfirmationWindow - const Duration(seconds: 69));
+      h.foreground.value = false;
+      h.advance(const Duration(hours: 1));
+      expect(await h.settle(), SharingHealth.publishFailing(_t0));
+    });
+
+    test('short visits add up: a fault no single visit outlasts is still '
+        'shown, and from then on at every return', () async {
+      final h = _Harness()
+        ..health.stored = CircleHealthTimestamps(lastPublishAckedAt: _t0);
+      await h.settle();
+      const visit = Duration(seconds: 60);
+      expect(
+        visit * 2,
+        lessThan(kSharingFaultConfirmationWindow),
+        reason: 'anti-vacuity: two visits do not make a window',
+      );
+
+      for (var i = 0; i < 2; i++) {
+        leaveAndReturn(h, const Duration(hours: 1));
+        h.advance(visit);
+        expect(await h.settle(), SharingHealth.healthy, reason: 'visit $i');
+      }
+
+      leaveAndReturn(h, const Duration(hours: 1));
+      h.advance(visit);
+      expect(await h.settle(), SharingHealth.publishFailing(_t0));
+
+      leaveAndReturn(h, const Duration(hours: 1));
+      expect(await h.settle(), SharingHealth.publishFailing(_t0));
+    });
+
+    test(
+      'an unacked publish just before the app left is no fault on return',
+      () async {
+        // One failed publish is a transient until it has stood for a window in
+        // which the next one could have been made.
+        final h = _Harness()
+          ..health.stored = CircleHealthTimestamps(lastPublishAckedAt: _t0);
+        h.notifier.recordPublishOutcome('010203', acked: false);
+        h.advance(const Duration(seconds: 10));
+        await h.settle();
+
+        leaveAndReturn(h, kSharingFaultConfirmationWindow);
+        expect(
+          h.now.difference(_t0),
+          lessThan(kPublishSilenceThreshold),
+          reason: 'anti-vacuity: only the unacked publish could report here',
+        );
+        expect(await h.settle(), SharingHealth.healthy);
+
+        h.advance(kSharingFaultConfirmationWindow - const Duration(seconds: 9));
+        expect(await h.settle(), SharingHealth.publishFailing(_t0));
+      },
+    );
+
+    test('a session still held at the pause is no fault on return, and one '
+        'the restart does not release is', () async {
+      // The stop that leaves a session held is the pause's own; the start
+      // every resume makes is what releases it.
+      final h = _Harness();
+      await h.settle();
+      h.notifier.recordStopOutcome(LiveSyncStopOutcome.stillHolding);
+
+      leaveAndReturn(h, const Duration(hours: 1));
+      expect(await h.settle(), SharingHealth.healthy);
+
+      h.advance(kSharingFaultConfirmationWindow + second);
+      expect(
+        (await h.settle()).pausedReason,
+        SharingPausedReason.sessionStillHeld,
+      );
+    });
+
+    test('a transient core cause read before the app left waits out its '
+        'window in front', () async {
+      final h = _Harness();
+      h.service.recoveryCause = CircleRecoveryCause.storedInput;
+      expect(await h.settle(), SharingHealth.healthy, reason: 'premise');
+
+      leaveAndReturn(h, const Duration(hours: 1));
+      expect(await h.settle(), SharingHealth.healthy);
+
+      h.advance(kSharingFaultConfirmationWindow + second);
+      expect((await h.settle()).pausedReason, SharingPausedReason.storedInput);
+    });
+
+    test('a cause that stands until the circle changes is shown on return '
+        'at once', () async {
+      // Anti-vacuity for the whole group: only what clears in the course of
+      // ordinary work waits to be watched.
+      final h = _Harness();
+      await h.settle();
+      h.service.recoveryCause = CircleRecoveryCause.stalled;
+
+      leaveAndReturn(h, const Duration(hours: 1));
+      expect((await h.settle()).pausedReason, SharingPausedReason.stalled);
+    });
+
+    test('a withheld cause is shown when its window ends, not at the next '
+        'tick, and never while the app is away', () {
+      fakeAsync((async) {
+        final h = _Harness()
+          ..health.stored = CircleHealthTimestamps(
+            lastPublishAckedAt: _t0.subtract(const Duration(hours: 1)),
+          );
+        // The periodic tick cannot be what re-derives below.
+        h.notifier.tickIntervalForTest = const Duration(days: 1);
+        async.flushMicrotasks();
+        SharingHealthState shown() =>
+            h.container.read(sharingHealthProvider).state;
+        void elapse(Duration by) {
+          h.advance(by);
+          async.elapse(by);
+        }
+
+        expect(shown(), SharingHealthState.healthy);
+
+        // Away with a minute still to watch: the window does not run out
+        // behind the user's back, however long that is.
+        elapse(kSharingFaultConfirmationWindow - const Duration(minutes: 1));
+        h.foreground.value = false;
+        async.flushMicrotasks();
+        var readsWhileAway = h.health.reads;
+        elapse(const Duration(hours: 1));
+        expect(h.health.reads, readsWhileAway, reason: 'the armed timer');
+        // A derivation made while away, as an engine status change makes
+        // one, must arm nothing either: a timer here is a background wake.
+        unawaited(h.notifier.refresh());
+        async.flushMicrotasks();
+        readsWhileAway = h.health.reads;
+        elapse(const Duration(hours: 1));
+        expect(h.health.reads, readsWhileAway, reason: 'a timer armed away');
+        expect(shown(), SharingHealthState.healthy);
+
+        h.foreground.value = true;
+        async.flushMicrotasks();
+        expect(shown(), SharingHealthState.healthy);
+
+        elapse(const Duration(minutes: 1));
+        expect(
+          shown(),
+          SharingHealthState.healthy,
+          reason: 'exactly the window is not yet outlasted',
+        );
+        elapse(second);
+        expect(shown(), SharingHealthState.publishFailing);
+      });
+    });
+  });
+
+  group('a delivery counts the moment it is stored', () {
+    test(
+      'a peer location ends a receive fault at once, not at the next tick',
+      () async {
+        final h = _Harness()
+          ..health.stored = CircleHealthTimestamps(lastPeerEventAt: _t0)
+          ..advance(kReceiveSilenceThreshold + const Duration(seconds: 1));
+        expect(await h.settle(), SharingHealth.receiveSilent(_t0));
+
+        h.health.stored = CircleHealthTimestamps(lastPeerEventAt: h.now);
+        h.notifier.recordPeerDelivery();
+        await pumpEventQueue();
+
+        expect(
+          h.container.read(sharingHealthProvider),
+          SharingHealth.healthy.about(sharingCircleKey(_circle())),
+        );
+      },
+    );
+
+    test('one stored while a derivation is reading older evidence is not '
+        'lost', () async {
+      final h = _Harness()
+        ..health.stored = CircleHealthTimestamps(lastPeerEventAt: _t0);
+      await h.settle();
+      final published = <SharingHealth>[];
+      h.container.listen(sharingHealthProvider, (_, next) {
+        published.add(next);
+      });
+
+      // Held mid-read on evidence that, landed, would say receiveSilent.
+      h
+        ..advance(kReceiveSilenceThreshold + const Duration(seconds: 1))
+        ..health.gate = Completer<void>();
+      final stale = h.notifier.refresh();
+      await pumpEventQueue();
+
+      h.health.gate = null;
+      h.health.stored = CircleHealthTimestamps(lastPeerEventAt: h.now);
+      h.notifier.recordPeerDelivery();
+      h.health.releaseGate();
+      await stale;
+
+      expect(
+        h.container.read(sharingHealthProvider).state,
+        SharingHealthState.healthy,
+      );
+      expect(
+        published.where((v) => v.state == SharingHealthState.receiveSilent),
+        isEmpty,
+        reason: 'the verdict the delivery disproved must never be published',
+      );
+    });
+
+    test(
+      'one on a healthy model with nothing in flight reads nothing',
+      () async {
+        // Every decrypted location reaches this: the common case must be free.
+        final h = _Harness()
+          ..health.stored = CircleHealthTimestamps(lastPeerEventAt: _t0);
+        await h.settle();
+        final reads = h.health.reads;
+
+        h.notifier.recordPeerDelivery();
+        await pumpEventQueue();
+
+        expect(h.health.reads, reads);
+      },
+    );
   });
 
   group('concurrent derivations', () {
@@ -1498,7 +1858,10 @@ void main() {
         ..health.stored = CircleHealthTimestamps(lastPublishAckedAt: _t0);
       expect(await h.settle(), SharingHealth.healthy, reason: 'premise');
 
-      h.container.invalidate(sharingHealthProvider);
+      // Rebuilt before the clock moves: the new lifecycle watches the silence.
+      h.container
+        ..invalidate(sharingHealthProvider)
+        ..read(sharingHealthProvider);
       h.advance(kPublishSilenceThreshold + const Duration(seconds: 1));
 
       expect(await h.settle(), SharingHealth.publishFailing(_t0));

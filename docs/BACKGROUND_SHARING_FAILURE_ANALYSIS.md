@@ -1502,6 +1502,23 @@ history.)*
   user. It deliberately refuses three verdicts it cannot distinguish from ordinary quiet: a circle
   that has never published, a circle that has never received (a peer who never shared looks
   identical to a dead receive plane), and a solo circle.
+- **A cause is confirmed through time the app WATCHED it (owner-directed 2026-11-12).** The
+  field report: the card asked for a repair the moment the app was opened, on a circle with
+  nothing wrong, and kept asking after the fresh locations had arrived. Two causes. The model
+  re-derives at the resume instant, where the stored instants have only aged — nothing may have
+  been sending or receiving while the app was away — and the resume's own publish and re-anchor
+  (the Repair legs themselves) have not landed yet. And a peer location arriving re-derived
+  nothing: only the 72 s tick did. So the confirmation window is now counted in time the app was
+  in front, summed across visits (`SharingHealthNotifier._watchedSince`), and the two silence
+  verdicts wait it out as every named transient cause does (`_stood`). In front throughout, that
+  is the wall-clock rule it replaces, to the second. A cause that began unwatched is shown once
+  it has outlasted one window of watching — re-derived by a one-shot timer at that instant, not at
+  the next tick — and from then on at every return until a delivery ends it; a cause that stands
+  until the circle changes (disbanded, halted, quarantined, a collision, a leave, a stall, a
+  removal unmade) is still shown the moment it is read. The visits are held in memory, so a
+  process restart watches afresh. A peer location stored by the UI isolate re-derives at once
+  (`recordPeerDelivery`, told by `NostrCircleHealthService` after the write), so a receive fault
+  ends with the delivery that disproves it.
 - **Typed inputs for B and C, live now.** `recordDeferredSend(circleKey)` →
   `paused(sendDeferred)`, cleared by the next acknowledged publish for that circle;
   `recordRelaySubscriptionLost()` / `recordRelaySubscriptionRestored()` →

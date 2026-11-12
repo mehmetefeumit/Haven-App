@@ -29,8 +29,9 @@ class CircleAttentionCue extends StatelessWidget {
         // `error` clears 3:1 against both the sheet surface and the selector
         // panel in both themes (WCAG 2.1 SC 1.4.11; circle_attention_cue_test).
         backgroundColor: scheme.error,
-        // Not the details button's own `info` glyph: the two can sit on
-        // screen together, and must not read as one control twice.
+        // Not the details button's `info` glyph: on the header this stands in
+        // its place, and a cue for another circle can sit on screen with it;
+        // the two must not read as one control.
         child: Icon(
           LucideIcons.triangleAlert,
           color: scheme.onSurfaceVariant,

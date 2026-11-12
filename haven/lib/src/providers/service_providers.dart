@@ -350,6 +350,10 @@ final circleHealthServiceProvider = Provider<CircleHealthService>((ref) {
       }
       return circleService.getCircleManagerFfi();
     },
+    onPeerEvent: () => _safeInvalidate(
+      () => ref.read(sharingHealthProvider.notifier).recordPeerDelivery(),
+      'sharingHealth',
+    ),
   );
 });
 

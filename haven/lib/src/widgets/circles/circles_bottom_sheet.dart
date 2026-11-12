@@ -30,6 +30,7 @@ import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/map_focus.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/widgets/circles/change_notice_card.dart';
+import 'package:haven/src/widgets/circles/circle_attention_cue.dart';
 import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/circles/circle_selector.dart';
 import 'package:haven/src/widgets/circles/remove_member_action.dart';
@@ -914,8 +915,11 @@ Future<void> showCircleDetails(
   }
 }
 
-/// Header showing circle member count and an info button that opens the
-/// circle details sheet. The Leave Circle action lives inside that sheet.
+/// Header showing circle member count and the one button that opens the
+/// circle details sheet: the info glyph, or the attention cue in its place
+/// while the circle needs attention — never both, so the mark sits on the
+/// circle it is about and one control leads to its details. The Leave Circle
+/// action lives inside that sheet.
 class _CircleHeader extends ConsumerWidget {
   const _CircleHeader({required this.circle});
 
@@ -925,6 +929,10 @@ class _CircleHeader extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
+    final needsAttention = ref.watch(
+      circleNeedsAttentionProvider(sharingCircleKey(circle)),
+    );
+    void openDetails() => showCircleDetails(context, ref, circle);
 
     return Padding(
       padding: const EdgeInsets.symmetric(
@@ -941,12 +949,18 @@ class _CircleHeader extends ConsumerWidget {
               ),
             ),
           ),
-          IconButton(
-            key: WidgetKeys.circleDetailsButton,
-            tooltip: l10n.circleDetailsButtonTooltip,
-            icon: const Icon(LucideIcons.info),
-            onPressed: () => showCircleDetails(context, ref, circle),
-          ),
+          if (needsAttention)
+            CircleAttentionCue(
+              key: WidgetKeys.circleDetailsButton,
+              onPressed: openDetails,
+            )
+          else
+            IconButton(
+              key: WidgetKeys.circleDetailsButton,
+              tooltip: l10n.circleDetailsButtonTooltip,
+              icon: const Icon(LucideIcons.info),
+              onPressed: openDetails,
+            ),
         ],
       ),
     );

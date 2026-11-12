@@ -2098,9 +2098,9 @@ class BackgroundLocationTaskHandler extends TaskHandler {
             // or refused. No relay verdict: nothing is stamped, no failure is
             // raised and the retry is not pulled forward, so a hold that
             // lasts until a foreground costs no extra wake; the circle stays
-            // due. This isolate has no Riverpod container: the hold surfaces
-            // on the next foreground open through the health model, which
-            // reads the missing publish-ack stamp and its age.
+            // due. This isolate has no Riverpod container: a hold the next
+            // foreground does not end surfaces there through the health
+            // model, which reads the missing publish-ack stamp and its age.
             debugPrint('[BackgroundTask] send held by the core — skipping '
                 'this circle');
             continue;
