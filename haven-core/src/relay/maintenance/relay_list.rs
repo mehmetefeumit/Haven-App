@@ -1,9 +1,8 @@
 //! B1 `RelayListMaintenance` (M8-1): the pure decision core.
 //!
 //! This module answers one question idempotently, per relay-list category
-//! (kind 10050 inbox / kind 10051 `KeyPackage`): **does the user's relay list
-//! need republishing to their own relays right now, and if so, to WHICH
-//! relays?** It never touches the network and never signs — the network probe
+//! (kind 10050 inbox / kind 10002 `KeyPackage`-discovery): **does the user's
+//! relay list need republishing right now, and if so, to WHICH relays?** It never touches the network and never signs — the network probe
 //! and the signed publish are composed at the FFI boundary (which owns the
 //! identity secret and the [`RelayManager`]). Everything here is fully pure
 //! ([`decide_relay_list`], [`RelayListSnapshot`], [`RelayListMaintenanceOutcome`]).
@@ -18,8 +17,8 @@
 //! own relays) hides a PARTIAL drop: present on relay A, dropped from B — the
 //! user is undiscoverable to any peer that queries B, yet the merge reports
 //! "present". A peer discovering the list queries a *subset* of the advertised
-//! relays, never the union. The FFI therefore probes each of the user's OWN
-//! relays INDEPENDENTLY ([`RelayManager::fetch_events_per_relay`]) and this
+//! relays, never the union. The FFI therefore probes each target relay
+//! INDEPENDENTLY ([`RelayManager::fetch_events_per_relay`]) and this
 //! decision runs on the per-relay verdicts — see [`RelayListSnapshot::responders`].
 //!
 //! # Drift detection
@@ -58,22 +57,28 @@
 //! list is a separate, user-initiated flow (`build_unpublish_relay_list`);
 //! maintenance only ever *re-asserts* a list the user chose to publish.
 //!
-//! # Own-relays-only (PSI-8)
+//! # Own relays and the lookup relays (owner-directed 2026-11-12)
 //!
-//! Both the probe (read) and the republish (write) target the user's OWN
-//! configured relays only — never the discovery plane, NIP-65/kind-10002, or a
-//! default union. The republish TARGETS are a subset of the configured set, so
-//! `targets ⊆ configured ⊆ own` holds structurally. Haven's kind-10050/10051
-//! posture diverges from the current Marmot spec's 10002 KP discovery on
-//! purpose; see the module docs on [`crate::relay::publishers`].
+//! The probe (read) and the republish (write) target the user's OWN configured
+//! relays for the category AND the discovery (lookup) relays
+//! ([`crate::relay::discovery::discovery_relays`]), as White Noise and MDK do:
+//! an inviter that knows only a bare pubkey looks the lists up there
+//! (`transports/nostr.md`: relay lists go "through metadata lookup paths where
+//! intended inviters can retrieve it"). The CONTENT is always the configured
+//! list, so a lookup relay learns exactly what an own relay does — any private
+//! relay the user configured included, the cost the owner accepted. A
+//! `KeyPackage` (kind 30443) never goes to a lookup relay this way, and no
+//! default relay is ever unioned in. Only an own relay can confirm the account
+//! reachable ([`own_list_confirmed`]): a lookup relay keeps a copy, it is not
+//! where the user said their lists live.
 //!
 //! [`RelayManager`]: crate::relay::RelayManager
 //! [`RelayManager::fetch_events_per_relay`]: crate::relay::RelayManager::fetch_events_per_relay
 //! [`dedup_key`]: crate::relay::publishers::dedup_key
 
-/// One RESPONDING own-relay's verdict for a relay-list category (FFI-built).
+/// One RESPONDING relay's verdict for a relay-list category (FFI-built).
 ///
-/// `relay_url` is a user-configured own-relay URL — callers MUST NOT log this
+/// `relay_url` is an own or a lookup relay URL — callers MUST NOT log this
 /// struct, and it MUST NEVER enter a maintenance OUTCOME (only integer counts
 /// cross the FFI). Non-responders are NOT represented here: they are neither a
 /// heal target nor "unhealthy" (you cannot write to an unreachable relay), so
@@ -81,17 +86,21 @@
 /// STRUCTURAL invariant rather than a defensive check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayListPerRelay {
-    /// The own-relay URL this verdict is for. MUST NOT be logged / put in an
+    /// The relay URL this verdict is for. MUST NOT be logged / put in an
     /// outcome.
     pub relay_url: String,
+    /// Whether this is one of the user's own relays for the category, rather
+    /// than a lookup relay only.
+    pub own: bool,
     /// Whether this relay serves a current (newest), non-drifted list that
     /// matches the configured relay set. `false` when the list is absent,
     /// stale, or enumerates a different set.
     pub healthy: bool,
 }
 
-/// What the FFI's per-relay network probe found on the user's OWN relays for one
-/// relay-list category, plus the local configuration inputs.
+/// What the FFI's per-relay network probe found on the user's own and the
+/// lookup relays for one relay-list category, plus the local configuration
+/// inputs.
 ///
 /// `responders` carries RESPONDING relays only. `publish_enabled` +
 /// `configured_relays` carry no secret material, MLS group ids, or hex, but
@@ -107,33 +116,35 @@ pub struct RelayListSnapshot {
     /// Whether the user has opted IN to publishing this category (the privacy
     /// toggle). When `false`, maintenance is always a no-op.
     pub publish_enabled: bool,
-    /// Per-relay verdicts for RESPONDING own relays only. Empty means every
-    /// configured relay was unreachable this tick (or none configured).
+    /// Per-relay verdicts for RESPONDING relays only. Empty means every target
+    /// was unreachable this tick (or none configured).
     pub responders: Vec<RelayListPerRelay>,
     /// The user's currently-configured relays for this category (the republish
-    /// content + drift baseline, own-relays-only, already dedup'd by the caller).
+    /// content + drift baseline, already dedup'd by the caller).
     pub configured_relays: Vec<String>,
 }
 
 /// The maintenance decision for one relay-list category tick.
 ///
-/// [`Suppressed`](Self::Suppressed)/[`NoOp`](Self::NoOp) are payload-free; the
-/// [`Republish`](Self::Republish) variant carries own-relay URLs, so a
+/// Every variant but [`Republish`](Self::Republish) is payload-free; that one
+/// carries relay URLs, so a
 /// `RelayListDecision` MUST NOT be logged (only the presence-only OUTCOME
 /// crosses the FFI).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayListDecision {
     /// The storage-reset notice has not been acknowledged yet.
     AwaitingResetAcknowledgement,
-    /// Publishing is suppressed by the privacy toggle (or nothing configured).
+    /// Publishing is suppressed by the privacy toggle.
     Suppressed,
+    /// The category has no relay configured, so there is no list to publish.
+    NothingConfigured,
     /// Every responding relay already serves a current, non-drifted list (or no
     /// relay responded this tick) — do nothing.
     NoOp,
     /// Republish the (full configured) list to exactly these responding +
     /// unhealthy relays. Always non-empty.
     Republish {
-        /// The responding, unhealthy own-relay URLs to (re)publish to.
+        /// The responding, unhealthy relay URLs to (re)publish to.
         targets: Vec<String>,
     },
 }
@@ -145,23 +156,29 @@ pub enum RelayListDecision {
 /// 0. **Reset notice not yet acknowledged** ⇒
 ///    [`RelayListDecision::AwaitingResetAcknowledgement`], before anything else:
 ///    the toggle it would read is the post-reset default, not the user's choice.
-/// 1. **Toggle OFF or nothing configured** ⇒ [`RelayListDecision::Suppressed`].
-///    We never publish a list the user opted out of, we never *unpublish* here
-///    (that is a separate user-initiated flow), and with nothing configured
-///    there is no legitimate own-relays-only publish target.
-/// 2. **No responders** (all transiently unreachable this tick) ⇒
+/// 1. **Toggle OFF** ⇒ [`RelayListDecision::Suppressed`]. We never publish a
+///    list the user opted out of, and we never *unpublish* here (that is a
+///    separate user-initiated flow).
+/// 2. **Nothing configured** ⇒ [`RelayListDecision::NothingConfigured`]: an
+///    empty list is no list, and a lookup relay alone is not where the user's
+///    lists live. The FFI seeds an install that was never seeded before it
+///    reads the list, so this is reached only when that seed failed.
+/// 3. **No responders** (all transiently unreachable this tick) ⇒
 ///    [`RelayListDecision::NoOp`] (fail-closed; retry next tick — never a blind
 ///    republish we cannot even confirm is needed).
-/// 3. **≥1 responding unhealthy relay** ⇒ [`RelayListDecision::Republish`] to
+/// 4. **≥1 responding unhealthy relay** ⇒ [`RelayListDecision::Republish`] to
 ///    exactly those relays (missing or drifted on the wire).
-/// 4. **Every responder healthy** ⇒ [`RelayListDecision::NoOp`].
+/// 5. **Every responder healthy** ⇒ [`RelayListDecision::NoOp`].
 #[must_use]
 pub fn decide_relay_list(snapshot: &RelayListSnapshot) -> RelayListDecision {
     if !snapshot.reset_acknowledged {
         return RelayListDecision::AwaitingResetAcknowledgement;
     }
-    if !snapshot.publish_enabled || snapshot.configured_relays.is_empty() {
+    if !snapshot.publish_enabled {
         return RelayListDecision::Suppressed;
+    }
+    if snapshot.configured_relays.is_empty() {
+        return RelayListDecision::NothingConfigured;
     }
     // Fail-closed: no responders (all transiently unreachable) ⇒ NoOp, retry
     // next tick. We never blind-republish when we could not confirm a drop.
@@ -179,6 +196,30 @@ pub fn decide_relay_list(snapshot: &RelayListSnapshot) -> RelayListDecision {
     } else {
         RelayListDecision::Republish { targets }
     }
+}
+
+/// Whether, after a tick, one of the user's OWN relays serves a current list.
+///
+/// PURE: an own responder that was already healthy, or an own relay among
+/// `acknowledged_by`, the relays that OK-acked this tick's republish. A
+/// lookup relay never counts.
+#[must_use]
+pub fn own_list_confirmed(snapshot: &RelayListSnapshot, acknowledged_by: &[String]) -> bool {
+    let acked: std::collections::BTreeSet<Option<String>> =
+        acknowledged_by.iter().map(|url| relay_key(url)).collect();
+    snapshot
+        .responders
+        .iter()
+        .filter(|r| r.own)
+        .any(|r| r.healthy || acked.contains(&relay_key(&r.relay_url)))
+}
+
+/// The one spelling two URLs for the same relay share: the pool names an
+/// acknowledging relay by its parsed URL, not as the list spelled it.
+fn relay_key(url: &str) -> Option<String> {
+    nostr::RelayUrl::parse(url)
+        .ok()
+        .map(|parsed| crate::relay::url_norm::canonicalize(parsed.as_str()))
 }
 
 /// Returns whether one responding relay's on-relay list is CURRENT (PURE).
@@ -212,20 +253,25 @@ fn canonical_set(urls: &[String]) -> std::collections::BTreeSet<String> {
 /// derived `Debug` cannot leak (Security Rule 4/6).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RelayListAction {
-    /// Publishing is suppressed by the privacy toggle (or nothing configured).
+    /// Publishing is suppressed by the privacy toggle.
     #[default]
     Suppressed,
     /// Every responding relay was already current — no change.
     AlreadyCurrent,
-    /// The list was (re)published to one or more own relays this tick.
+    /// The list was (re)published and at least one relay acknowledged it.
     Republished,
     /// Nothing was published: the storage-reset notice has not been
     /// acknowledged yet.
     AwaitingResetAcknowledgement,
+    /// The category has no relay configured (its seed failed), so there is
+    /// no list to publish.
+    NothingConfigured,
+    /// A republish was needed and no relay acknowledged it.
+    Unacknowledged,
 }
 
 /// Presence-only tally of a relay-list maintenance tick, per category (one for
-/// inbox 10050, one for `KeyPackage` 10051).
+/// inbox 10050, one for `KeyPackage`-discovery 10002).
 ///
 /// Every field is an enum or a count — no urls, hex, or group ids — so the
 /// derived `Debug` is leak-free by construction (Security Rule 4/6). This is
@@ -235,12 +281,16 @@ pub enum RelayListAction {
 pub struct RelayListCategoryOutcome {
     /// What the tick did for this category.
     pub action: RelayListAction,
-    /// Responding own relays probed this tick (non-responders excluded).
+    /// Responding relays probed this tick, own and lookup (non-responders
+    /// excluded).
     pub responders_probed: usize,
     /// Responding + unhealthy relays this tick was (re)published to.
     pub relays_healed: usize,
     /// Relay probes/publishes that errored (tallied, never fatal).
     pub relay_errors: usize,
+    /// Whether one of the user's OWN relays serves a current list after this
+    /// tick ([`own_list_confirmed`]).
+    pub own_confirmed: bool,
 }
 
 impl RelayListCategoryOutcome {
@@ -253,6 +303,7 @@ impl RelayListCategoryOutcome {
             responders_probed: 0,
             relays_healed: 0,
             relay_errors: 0,
+            own_confirmed: false,
         }
     }
 }
@@ -265,7 +316,7 @@ impl RelayListCategoryOutcome {
 pub struct RelayListMaintenanceOutcome {
     /// The inbox (kind 10050) category outcome.
     pub inbox: RelayListCategoryOutcome,
-    /// The `KeyPackage` (kind 10051) category outcome.
+    /// The `KeyPackage`-discovery (kind 10002) category outcome.
     pub key_package: RelayListCategoryOutcome,
 }
 
@@ -276,7 +327,15 @@ mod tests {
     fn per(url: &str, healthy: bool) -> RelayListPerRelay {
         RelayListPerRelay {
             relay_url: url.to_owned(),
+            own: true,
             healthy,
+        }
+    }
+
+    fn lookup(url: &str, healthy: bool) -> RelayListPerRelay {
+        RelayListPerRelay {
+            own: false,
+            ..per(url, healthy)
         }
     }
 
@@ -418,10 +477,61 @@ mod tests {
     }
 
     #[test]
-    fn no_configured_relays_is_suppressed() {
-        // Own-relays-only: nothing configured ⇒ no legitimate publish target.
-        let s = snap(true, vec![], &[]);
-        assert_eq!(decide_relay_list(&s), RelayListDecision::Suppressed);
+    fn no_configured_relays_is_nothing_configured_not_suppressed() {
+        // An empty list is no list — and a lookup relay that answered is not
+        // where the user's lists live. Told apart from the opt-out, whose
+        // remedy is the user's choice, not a relay to add.
+        let s = snap(true, vec![lookup("wss://index.example.com", false)], &[]);
+        assert_eq!(decide_relay_list(&s), RelayListDecision::NothingConfigured);
+        assert_eq!(
+            decide_relay_list(&snap(false, vec![], &[])),
+            RelayListDecision::Suppressed
+        );
+    }
+
+    #[test]
+    fn a_lookup_relay_missing_the_list_is_healed_like_an_own_one() {
+        let s = snap(
+            true,
+            vec![
+                per("wss://own.example.com", true),
+                lookup("wss://index.example.com", false),
+            ],
+            &["wss://own.example.com"],
+        );
+        assert_eq!(
+            decide_relay_list(&s),
+            RelayListDecision::Republish {
+                targets: vec!["wss://index.example.com".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn only_an_own_relay_confirms_the_list() {
+        let configured = ["wss://own.example.com"];
+        let healthy = snap(true, vec![per("wss://own.example.com", true)], &configured);
+        assert!(own_list_confirmed(&healthy, &[]));
+        // A healthy lookup relay never confirms, nor does its acknowledgement.
+        let lookup_only = snap(
+            true,
+            vec![
+                per("wss://own.example.com", false),
+                lookup("wss://index.example.com", true),
+            ],
+            &configured,
+        );
+        assert!(!own_list_confirmed(&lookup_only, &[]));
+        assert!(!own_list_confirmed(
+            &lookup_only,
+            &["wss://index.example.com".to_owned()]
+        ));
+        // An own relay's acknowledgement does, however the pool spells it.
+        assert!(own_list_confirmed(
+            &lookup_only,
+            &["wss://OWN.example.com/".to_owned()]
+        ));
+        assert!(!own_list_confirmed(&snap(true, vec![], &configured), &[]));
     }
 
     // ---- Test 7: targets contain ONLY unhealthy responders, in order ------
@@ -537,6 +647,7 @@ mod tests {
                 responders_probed: 3,
                 relays_healed: 2,
                 relay_errors: 1,
+                own_confirmed: true,
             },
             key_package: RelayListCategoryOutcome::no_publish(RelayListAction::AlreadyCurrent),
         };
@@ -558,5 +669,6 @@ mod tests {
         assert_eq!(o.responders_probed, 0);
         assert_eq!(o.relays_healed, 0);
         assert_eq!(o.relay_errors, 0);
+        assert!(!o.own_confirmed);
     }
 }

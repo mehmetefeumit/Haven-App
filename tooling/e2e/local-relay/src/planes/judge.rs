@@ -367,16 +367,20 @@ impl Judge<'_> {
             }
             Row::Ev10002 | Row::Ev10050 => {
                 self.account_author(row, event, obs)?;
-                let (plane, tag) = if row == Row::Ev10002 {
+                let (own, tag) = if row == Row::Ev10002 {
                     (Plane::OwnKeyPackage, "r")
                 } else {
                     (Plane::OwnInbox, "relay")
                 };
-                require(
-                    self.own(plane, &event.pubkey, obs),
-                    row,
-                    Class::CrossedEvent,
-                )?;
+                // The lookup relays carry an account's own lists too, so an
+                // inviter holding only a pubkey finds them (2026-11-12).
+                let plane = if self.own(own, &event.pubkey, obs) {
+                    own
+                } else if self.table.current(Plane::Discovery, None, relay, at) {
+                    Plane::Discovery
+                } else {
+                    return Err((Some(row), Class::CrossedEvent));
+                };
                 for named in event.tag_values(tag) {
                     require(
                         !self.foreign_plane(named, &event.pubkey, at),
@@ -468,6 +472,9 @@ impl Judge<'_> {
                 0 if self.table.current(Plane::Profile, None, relay, at) => Plane::Profile,
                 10050 if own_or_former(Plane::OwnInbox) => Plane::OwnInbox,
                 10002 if own_or_former(Plane::OwnKeyPackage) => Plane::OwnKeyPackage,
+                10050 | 10002 if self.table.current(Plane::Discovery, None, relay, at) => {
+                    Plane::Discovery
+                }
                 30443 if self.table.current(Plane::OwnKeyPackage, author, relay, at) => {
                     Plane::OwnKeyPackage
                 }
@@ -607,6 +614,15 @@ impl Judge<'_> {
                 require(self.table.is_account(author), row, Class::NoGroundTruth)?;
                 if self.own(lists.0, author, obs) {
                     return Ok(lists.0);
+                }
+                // An account's own lists are kept on the lookup relays too, and
+                // asked there for the heal; its key package never is.
+                if row != Row::Req30443A
+                    && self
+                        .table
+                        .current(Plane::Discovery, None, obs.relay, obs.at)
+                {
+                    return Ok(Plane::Discovery);
                 }
                 let class = if self.table.has_list(lists.0, author) {
                     Class::CrossedRequest

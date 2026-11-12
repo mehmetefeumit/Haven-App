@@ -160,6 +160,7 @@ async fn list_snapshot(
             .unwrap_or_default();
         responders.push(RelayListPerRelay {
             relay_url: o.relay_url.clone(),
+            own: true,
             healthy: list_relay_healthy(&on_relay, configured),
         });
     }

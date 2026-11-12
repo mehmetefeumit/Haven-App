@@ -3314,7 +3314,7 @@ pub trait ReinviteLookup: Send + Sync {
 
 /// The invite lookup the app's own invite makes: the invitee's kind-10050
 /// list, their NIP-65 list, and a `KeyPackage` from their write relays (the
-/// read-only discovery relays as the fallback) that the circle admits.
+/// discovery relays as the fallback) that the circle admits.
 impl ReinviteLookup for super::RelayManager {
     fn member<'a>(
         &'a self,

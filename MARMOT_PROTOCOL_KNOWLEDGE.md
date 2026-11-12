@@ -419,7 +419,7 @@ in the template's order, with the values a Haven package carries today:
 - **Discovery**: published to the account's own **NIP-65 (kind 10002)** list — the stored list
   Haven's 10002 is built from, unmarked `r` tags, so every entry is write-capable — and fetched
   from an invitee's 10002 write-capable set (`write` or unmarked, `transports/nostr.md:297-302`),
-  falling back to the read-only discovery plane when that set is empty or holds no usable package
+  falling back to the discovery plane when that set is empty or holds no usable package
   (`RelayManager::lookup_member_for_invite`, one throwaway client per lookup). "Not found" is
   claimed only when every relay of that write set (the discovery plane when it is empty) that
   connected ended its answer with `EOSE`, at least one did, and the 10002 lookup itself ended
@@ -1360,7 +1360,7 @@ by the MLS exporter); NIP-59's internals still use NIP-44 for the seal, inside t
 
 **KeyPackage publishing**: the account's **own NIP-65 (10002) relays** — never a
 discovery/default union (own-relays-only invariant in `key_package.rs` maintenance). **Fetching an
-invitee's**: their 10002 write-capable set, with the read-only discovery plane as fallback.
+invitee's**: their 10002 write-capable set, with the discovery plane as fallback.
 
 **Group messages (445)**: published to the group's relays from the `NostrRoutingV1` component
 (0x8004); subscribed by `#h` filter on the same set. A routing update's commit goes to the prior

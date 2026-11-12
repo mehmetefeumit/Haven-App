@@ -306,7 +306,7 @@ fn fixture(w: &World, row: Row) -> (Value, Option<String>, Vec<RelayIx>, Plane) 
         Row::Ev10002 => (
             json!(["EVENT", event(&id(14), &a, 10002, 1_000, &[&["r", A_KP]])]),
             a_str,
-            vec![w.a_kp],
+            vec![w.a_kp, w.disc],
             Plane::OwnKeyPackage,
         ),
         Row::Ev10050 => (
@@ -315,7 +315,7 @@ fn fixture(w: &World, row: Row) -> (Value, Option<String>, Vec<RelayIx>, Plane) 
                 event(&id(15), &a, 10050, 1_000, &[&["relay", A_INBOX]])
             ]),
             a_str,
-            vec![w.a_inbox],
+            vec![w.a_inbox, w.disc],
             Plane::OwnInbox,
         ),
         Row::Ev0 => (
@@ -526,17 +526,69 @@ fn the_gift_wrap_ids_shape_is_bound_to_the_value_s_own_list() {
     );
 }
 
+/// Owner-directed 2026-11-12: the lookup relays carry an account's own relay
+/// lists, and their retraction, and no other event — a key package least of all.
 #[test]
-fn discovery_never_admits_an_event() {
+fn discovery_admits_an_accounts_relay_lists_and_no_other_event() {
     let w = world();
+    let a = alice();
     for spec in ROWS.iter().filter(|spec| spec.verb == Verb::Event) {
         let (value, sender, _, _) = fixture(&w, spec.row);
-        assert!(
-            class_of(&w.table, w.disc, sender.as_deref(), &value).is_some(),
-            "{} admitted on discovery",
+        assert_eq!(
+            admitted(&w.table, w.disc, sender.as_deref(), &value),
+            matches!(spec.row, Row::Ev10002 | Row::Ev10050),
+            "{} on discovery",
             spec.row.id()
         );
     }
+    let judgement = judge_one(&w.table, w.disc, Some(&a), 10, &fixture(&w, Row::Ev10050).0);
+    assert!(
+        judgement
+            .hits
+            .keys()
+            .all(|&(_, _, p)| p == Plane::Discovery),
+        "a list on a relay that is no list of the author's is admitted as discovery's"
+    );
+    let retract = json!([
+        "EVENT",
+        event(
+            &id(39),
+            &a,
+            5,
+            1_000,
+            &[&["a", &format!("10050:{a}:")], &["k", "10050"]]
+        )
+    ]);
+    assert!(admitted(&w.table, w.disc, Some(&a), &retract));
+    let kp_retract = json!([
+        "EVENT",
+        event(
+            &id(40),
+            &a,
+            5,
+            1_000,
+            &[&["a", &format!("30443:{a}:5107")], &["k", "30443"]]
+        )
+    ]);
+    assert_eq!(
+        class_of(&w.table, w.disc, Some(&a), &kp_retract),
+        Some(Class::CrossedEvent)
+    );
+    let naming_profile = json!([
+        "EVENT",
+        event(
+            &id(41),
+            &a,
+            10050,
+            1_000,
+            &[&["relay", A_INBOX], &["relay", PROF]]
+        )
+    ]);
+    assert_eq!(
+        class_of(&w.table, w.disc, Some(&a), &naming_profile),
+        Some(Class::ListNamesForeignPlane),
+        "the copy is held to the list's own content rule"
+    );
 }
 
 #[test]
@@ -1307,6 +1359,11 @@ fn the_status_probe_shape_is_admitted_on_either_own_list_only() {
         class_of(&w.table, w.disc, Some(&a), &self_on_discovery),
         Some(Class::CrossedRequest)
     );
+    // The heal asks the lookup relays for the account's own lists (2026-11-12).
+    for kind in [10002, 10050] {
+        let heal_probe = json!(["REQ", "sub-h", {"kinds": [kind], "authors": [a], "limit": 4}]);
+        assert!(admitted(&w.table, w.disc, Some(&a), &heal_probe));
+    }
 }
 
 #[test]
@@ -1439,7 +1496,10 @@ fn the_exported_matrix_is_current() {
         .as_array()
         .expect("events");
     assert_eq!(location_kinds, &[json!(445)]);
-    assert_eq!(parsed["roles"]["discovery"]["events"], json!([]));
+    assert_eq!(
+        parsed["roles"]["discovery"]["events"],
+        json!([10002, 10050, 5])
+    );
 }
 
 #[test]
@@ -1929,13 +1989,9 @@ fn cases() -> Vec<Case> {
             }),
         ),
         (
-            "C8.1 a 10050 on discovery",
+            "C8.1 a key package on discovery",
             Box::new(|j: &mut J| {
-                j.c2r(
-                    APP_DISC,
-                    7790,
-                    list_event(5, &alice(), 10050, 200, &[&["7788"]]),
-                );
+                j.c2r(APP_DISC, 7790, json!(["EVENT", kp_event(&id(5), &alice())]));
             }),
         ),
         (
@@ -1949,7 +2005,7 @@ fn cases() -> Vec<Case> {
             }),
         ),
         (
-            "C8.1 a kind 5 on discovery",
+            "C8.1 a key-package retraction on discovery",
             Box::new(|j: &mut J| {
                 let a = alice();
                 j.c2r(
@@ -1962,7 +2018,7 @@ fn cases() -> Vec<Case> {
                             &a,
                             5,
                             1_000,
-                            &[&["k", "10050"], &["a", &format!("10050:{a}:")]]
+                            &[&["k", "30443"], &["a", &format!("30443:{a}:5107")]]
                         )
                     ]),
                 );

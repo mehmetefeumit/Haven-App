@@ -3041,7 +3041,8 @@ pub struct BuiltUnpublishFfi {
     /// publication was recorded.
     pub deletion_event_json: Option<String>,
     /// Resolved targets. For `build_unpublish_relay_list` (full opt-out)
-    /// these are the user's own configured relays (no default union). For
+    /// these are the user's own configured relays and the lookup relays
+    /// maintenance copies the list to (no default union). For
     /// `build_relay_removal_scrub` these are the specific dropped relays.
     pub targets: Vec<String>,
     /// `true` when nothing should be published (no prior record AND
@@ -3216,6 +3217,42 @@ fn retain_own_events(
             .events
             .retain(|event| event.pubkey == *own && event.kind == kind);
     }
+}
+
+/// The account's own relays for `relay_type`, deduplicated.
+///
+/// A list that is empty because the defaults were never seeded — a publish
+/// that ran before onboarding seeded them — is seeded here and read again, so
+/// the first publish reaches the seeded relays. The seed's sentinel keeps a
+/// list the user has edited from ever being seeded again.
+fn own_relays_seeding_once(
+    mgr: &CoreCircleManager,
+    relay_type: haven_core::circle::RelayType,
+) -> Result<Vec<String>, String> {
+    let mut user = mgr
+        .list_user_relays(relay_type)
+        .map_err(|e| e.to_string())?;
+    if user.is_empty()
+        && mgr
+            .seed_relay_defaults_if_unseeded()
+            .map_err(|e| e.to_string())?
+    {
+        user = mgr
+            .list_user_relays(relay_type)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(haven_core::relay::dedup_relay_targets(&user))
+}
+
+/// Where a relay list goes: `own`, the account's own relays for its category,
+/// first, then every dialable lookup relay not among them — an inviter holding
+/// only a bare pubkey looks the lists up there (owner-directed 2026-11-12).
+/// Never a `KeyPackage`'s targets.
+fn relay_list_targets(own: &[String]) -> Vec<String> {
+    let lookup = haven_core::relay::discovery_relays()
+        .into_iter()
+        .filter(|url| haven_core::relay::url_norm::may_dial_str(url));
+    haven_core::relay::dedup_relay_targets(&own.iter().cloned().chain(lookup).collect::<Vec<_>>())
 }
 
 #[inline]
@@ -4581,7 +4618,9 @@ impl CircleManagerFfi {
     ///
     /// Dart should publish both events to the returned `targets` and then
     /// also flip the toggle off via `set_publish_relay_list`. This method
-    /// itself does not change the toggle.
+    /// itself does not change the toggle. The targets include the lookup
+    /// relays: maintenance copies a published list there, so an opt-out that
+    /// skipped them would leave the list public.
     pub async fn build_unpublish_relay_list(
         &self,
         identity_secret_bytes: Vec<u8>,
@@ -4625,7 +4664,7 @@ impl CircleManagerFfi {
         .await?;
         let (last_event, user_list) = lookup;
 
-        let targets = haven_core::relay::dedup_relay_targets(&user_list);
+        let targets = relay_list_targets(&haven_core::relay::dedup_relay_targets(&user_list));
 
         let last_published_at = last_event.as_ref().map(|r| r.published_at);
         let replacement = build_relay_list_unpublish_for(relay_type, &keys, last_published_at)?;
@@ -6478,13 +6517,14 @@ pub fn set_default_relays_for_test(_relays: Vec<String>) -> Result<(), String> {
     Err("set_default_relays_for_test is disabled in release builds".to_string())
 }
 
-/// Returns the read-only discovery-plane relay list (public indexers).
+/// Returns the discovery-plane relay list (public indexers).
 ///
 /// Single source of truth for
-/// [`haven_core::relay::discovery_relays`]. These relays are queried ONLY to
-/// discover *other* users' metadata/relay lists by bare pubkey; they are
-/// NEVER a publish or gift-wrap-poll target. Dart's `discoveryRelays` getter
-/// is backed by this so a private relay is never sent to a public indexer.
+/// [`haven_core::relay::discovery_relays`]. These relays are queried to
+/// discover *other* users' metadata/relay lists by bare pubkey, and the
+/// relay-list heal copies this account's own kind 10002 / 10050 there
+/// (owner-directed 2026-11-12); they are never a `KeyPackage`, gift-wrap or
+/// gift-wrap-poll target. Dart's `discoveryRelays` getter is backed by this.
 /// In debug builds this honors any override installed via
 /// [`set_discovery_relays_for_test`].
 #[frb(sync)]
@@ -8682,6 +8722,11 @@ pub struct KpMaintenanceOutcomeFfi {
     /// together with `relays_healed == 0` it is the worst reachable state: no
     /// usable init key AND no published replacement.
     pub expired_init_key_purged: bool,
+    /// Whether, after this tick, at least one responding own `KeyPackage`
+    /// relay serves this device's current package — one it holds the key to —
+    /// or acknowledged this tick's publish of it. Never `true` after a tick
+    /// that only adopted a slot ([`KpMaintenanceActionFfi::SeededD`]).
+    pub published_current: bool,
     /// Whether this tick COMPLETED the one-time retirement of a malformed
     /// (pre-width-fix) kind-30443 `d` slot: the account now publishes a
     /// binding-shaped coordinate, the orphaned one's NIP-09 retraction was
@@ -8706,6 +8751,7 @@ impl From<haven_core::relay::maintenance::KpMaintenanceOutcome> for KpMaintenanc
             relay_errors: c(o.relay_errors),
             expired_init_key_purged: o.expired_init_key_purged,
             retired_malformed_slot: o.retired_malformed_slot,
+            published_current: o.published_current,
         }
     }
 }
@@ -8735,6 +8781,34 @@ fn maintenance_now_secs() -> u64 {
         0 => haven_core::relay::maintenance::now_secs(),
         overridden => overridden,
     }
+}
+
+/// Whether a responder of `snapshot` serves the package `tracked` names as one
+/// an inviter can use: published by this device, its key still held and not
+/// lost, its lifetime current, in a slot a conformant inviter accepts.
+fn serves_current_package(
+    snapshot: &haven_core::relay::maintenance::RelayKpSnapshot,
+    tracked: Option<&haven_core::nostr::mls::TrackedKeyPackage>,
+    lifetime: haven_core::relay::maintenance::TrackedKpLifetime,
+) -> bool {
+    use haven_core::relay::maintenance::{is_conformant_slot_id, TrackedKpLifetime, TrackedKpSlot};
+    tracked.is_some_and(|t| {
+        let Some(published) = t.published.as_ref() else {
+            return false;
+        };
+        let openable = !t.package.is_empty()
+            && matches!(lifetime, TrackedKpLifetime::Known(_))
+            && (!t.replacement_owed || t.consumed_but_held);
+        openable
+            && is_conformant_slot_id(&t.slot)
+            && snapshot.serves_tracked(&TrackedKpSlot {
+                d_tag: &t.slot,
+                event_id: &published.id.to_hex(),
+                created_at: t.created_at.unwrap_or(0),
+                adopted: t.adopted,
+                replacement_owed: t.replacement_owed,
+            })
+    })
 }
 
 /// What became of one publish of a staged `KeyPackage` — INTERNAL.
@@ -8807,15 +8881,20 @@ struct KpRetirementTick {
 /// Fieldless / payload-free, so leak-free by construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayListActionFfi {
-    /// Publishing is suppressed by the privacy toggle (or nothing configured).
+    /// Publishing is suppressed by the privacy toggle.
     Suppressed,
     /// A current list was already reachable — no change.
     AlreadyCurrent,
-    /// The list was (re)published to own relays this tick.
+    /// The list was (re)published and at least one relay acknowledged it.
     Republished,
     /// Nothing was published: the storage-reset notice has not been
     /// acknowledged yet.
     AwaitingResetAcknowledgement,
+    /// The category has no relay configured even after the seed, so there is
+    /// no list to publish.
+    NothingConfigured,
+    /// A republish was needed and no relay acknowledged it.
+    Unacknowledged,
 }
 
 impl From<haven_core::relay::maintenance::RelayListAction> for RelayListActionFfi {
@@ -8826,6 +8905,8 @@ impl From<haven_core::relay::maintenance::RelayListAction> for RelayListActionFf
             A::AlreadyCurrent => Self::AlreadyCurrent,
             A::Republished => Self::Republished,
             A::AwaitingResetAcknowledgement => Self::AwaitingResetAcknowledgement,
+            A::NothingConfigured => Self::NothingConfigured,
+            A::Unacknowledged => Self::Unacknowledged,
         }
     }
 }
@@ -8835,13 +8916,18 @@ impl From<haven_core::relay::maintenance::RelayListAction> for RelayListActionFf
 pub struct RelayListCategoryOutcomeFfi {
     /// What the tick did for this category.
     pub action: RelayListActionFfi,
-    /// Responding own relays the probe reached this tick (non-responders
-    /// excluded).
+    /// Responding relays the probe reached this tick, own and lookup
+    /// (non-responders excluded).
     pub responders_probed: u32,
     /// Responding + unhealthy relays this tick republished to.
     pub relays_healed: u32,
     /// Relay probes/publishes that errored (tallied, never fatal).
     pub relay_errors: u32,
+    /// Whether at least one of the user's OWN relays for this category serves
+    /// a current list after this tick: a healthy own responder, or an own
+    /// relay that acknowledged this tick's republish. A lookup relay's copy
+    /// never sets it.
+    pub own_confirmed: bool,
 }
 
 impl From<haven_core::relay::maintenance::RelayListCategoryOutcome>
@@ -8854,6 +8940,7 @@ impl From<haven_core::relay::maintenance::RelayListCategoryOutcome>
             responders_probed: c(o.responders_probed),
             relays_healed: c(o.relays_healed),
             relay_errors: c(o.relay_errors),
+            own_confirmed: o.own_confirmed,
         }
     }
 }
@@ -8864,7 +8951,7 @@ impl From<haven_core::relay::maintenance::RelayListCategoryOutcome>
 pub struct RelayListMaintenanceOutcomeFfi {
     /// The inbox (kind 10050) category outcome.
     pub inbox: RelayListCategoryOutcomeFfi,
-    /// The `KeyPackage` (kind 10051) category outcome.
+    /// The `KeyPackage`-discovery (kind 10002) category outcome.
     pub key_package: RelayListCategoryOutcomeFfi,
 }
 
@@ -9106,7 +9193,7 @@ impl RelayManagerFfi {
     /// (`RelayManager::lookup_member_for_invite`).
     ///
     /// Their kind 10050 (where a Welcome goes) and kind 10002 come from the
-    /// read-only discovery relays; the `KeyPackage` from the 10002 write set,
+    /// discovery relays; the `KeyPackage` from the 10002 write set,
     /// then the discovery relays. The returned `MemberKeyPackageFfi` carries
     /// the 10050 list and both 10002 sets; an absent 10050 leaves its list
     /// empty and never changes the verdict.
@@ -9370,12 +9457,14 @@ impl RelayManagerFfi {
     ///    unconditionally, before any relay decision, because that bound does
     ///    not depend on the transport.
     /// 3. Probe the user's OWN NIP-65 relays (dedup'd, own-relays-only — never a
-    ///    default union) for kind-30443 events authored by self, and build the
-    ///    presence snapshot.
+    ///    default union, never a lookup relay; an install never seeded is seeded
+    ///    first) for kind-30443 events authored by self, and build the presence
+    ///    snapshot.
     /// 4. A replacement staged by an earlier tick that no relay acknowledged is
     ///    republished, byte for byte, and promoted on the first acknowledgement.
     /// 5. Otherwise decide via [`decide_kp_maintenance`]: on `SeedD` record the
-    ///    slot; on a heal republish the tracked event's own bytes; on a
+    ///    slot and decide once more, so the same tick mints into it; on a heal
+    ///    republish the tracked event's own bytes; on a
     ///    replacement stage a fresh package (minted and frozen in one MDK
     ///    transaction), publish it to OWN relays only, and promote it on the
     ///    first acknowledgement — which deletes the private material of every
@@ -9475,19 +9564,15 @@ impl RelayManagerFfi {
         // discovery plane. Persisted under the `KeyPackage` slot (W2).
         let own_relays: Vec<String> = run_blocking({
             let mgr = circle_mgr.clone();
-            move || {
-                let user = mgr
-                    .list_user_relays(haven_core::circle::RelayType::KeyPackage)
-                    .map_err(|e| e.to_string())?;
-                Ok::<Vec<String>, String>(haven_core::relay::dedup_relay_targets(&user))
-            }
+            move || own_relays_seeding_once(&mgr, haven_core::circle::RelayType::KeyPackage)
         })
         .await?;
 
         if own_relays.is_empty() {
-            // `relays_targeted: 0` is what tells the caller this is the
-            // await-user-action case and NOT "every relay was unreachable" —
-            // both otherwise land on AlreadyHealthy with zero responders.
+            // Reached only when the seed failed. `relays_targeted: 0` is what
+            // tells the caller this is the await-user-action case and NOT
+            // "every relay was unreachable" — both otherwise land on
+            // AlreadyHealthy with zero responders.
             log::debug!("[maintain_key_package] no KeyPackage relays configured; skipping");
             return Ok(KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome {
                 expired_init_key_purged,
@@ -9540,6 +9625,7 @@ impl RelayManagerFfi {
         let responders_probed = responders.len();
         let canonical_on_relays: usize = responders.iter().map(|r| r.canonical.len()).sum();
         let snapshot = RelayKpSnapshot { responders };
+        let served_before = serves_current_package(&snapshot, tracked.as_ref(), tracked_lifetime);
         let outcome = |action, relays_healed, relay_errors, retired_malformed_slot| {
             KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome {
                 action,
@@ -9550,6 +9636,10 @@ impl RelayManagerFfi {
                 relay_errors,
                 expired_init_key_purged,
                 retired_malformed_slot,
+                // A publish is acknowledged only for a package this device
+                // staged; an adoption publishes nothing it can open.
+                published_current: action != KpMaintenanceAction::SeededD
+                    && (relays_healed > 0 || served_before),
             })
         };
 
@@ -9660,130 +9750,149 @@ impl RelayManagerFfi {
             }
         }
 
-        // Decide. The slot, the tracked event and the lifetime all come from the
-        // one record read above.
-        let tracked_event_id = tracked
-            .as_ref()
-            .and_then(|t| t.published.as_ref())
-            .map(|event| event.id.to_hex())
-            .unwrap_or_default();
-        let prev_created_at = tracked
-            .as_ref()
-            .and_then(|t| t.created_at)
-            .and_then(|at| i64::try_from(at).ok());
-        // A package a Welcome consumed can still open the other invitations
-        // made for it, and replacing it deletes its key at the first
-        // acknowledgement. While the user holds an invitation unanswered that
-        // replacement waits, for a bounded time; a lost bundle, the rotation
-        // and the `not_after` deletion do not.
-        let replacement_waits = if tracked
-            .as_ref()
-            .is_some_and(|t| t.replacement_owed && t.consumed_but_held)
-        {
-            run_blocking({
-                let mgr = circle_mgr.clone();
-                move || {
-                    mgr.consumed_key_package_replacement_waits(now)
-                        .map_err(|e| e.to_string())
-                }
-            })
-            .await?
-        } else {
-            false
-        };
-        let decision = decide_kp_maintenance(
-            &snapshot,
-            tracked.as_ref().map(|t| TrackedKpSlot {
-                d_tag: &t.slot,
-                event_id: &tracked_event_id,
-                created_at: t.created_at.unwrap_or(0),
-                adopted: t.adopted,
-                replacement_owed: t.replacement_owed && !replacement_waits,
-            }),
-            tracked_lifetime,
-            now,
-        );
+        // Decide. The slot, the tracked event and the lifetime all come from one
+        // record read: the one above, or the one read again after an adoption.
+        let mut tracked = tracked;
+        let mut tracked_lifetime = tracked_lifetime;
+        let mut adopted_this_tick = false;
+        let (action, relays_healed) = loop {
+            let tracked_event_id = tracked
+                .as_ref()
+                .and_then(|t| t.published.as_ref())
+                .map(|event| event.id.to_hex())
+                .unwrap_or_default();
+            let prev_created_at = tracked
+                .as_ref()
+                .and_then(|t| t.created_at)
+                .and_then(|at| i64::try_from(at).ok());
+            // A package a Welcome consumed can still open the other invitations
+            // made for it, and replacing it deletes its key at the first
+            // acknowledgement. While the user holds an invitation unanswered
+            // that replacement waits, for a bounded time; a lost bundle, the
+            // rotation and the `not_after` deletion do not.
+            let replacement_waits = if tracked
+                .as_ref()
+                .is_some_and(|t| t.replacement_owed && t.consumed_but_held)
+            {
+                run_blocking({
+                    let mgr = circle_mgr.clone();
+                    move || {
+                        mgr.consumed_key_package_replacement_waits(now)
+                            .map_err(|e| e.to_string())
+                    }
+                })
+                .await?
+            } else {
+                false
+            };
+            let decision = decide_kp_maintenance(
+                &snapshot,
+                tracked.as_ref().map(|t| TrackedKpSlot {
+                    d_tag: &t.slot,
+                    event_id: &tracked_event_id,
+                    created_at: t.created_at.unwrap_or(0),
+                    adopted: t.adopted,
+                    replacement_owed: t.replacement_owed && !replacement_waits,
+                }),
+                tracked_lifetime,
+                now,
+            );
 
-        let mint = |existing_d, targets, action| KpMintPlan {
-            existing_d,
-            targets,
-            prev_created_at,
-            action,
-        };
-        let (action, relays_healed) = match &decision {
-            KpMaintenanceDecision::NoOp => (KpMaintenanceAction::AlreadyHealthy, 0),
-            KpMaintenanceDecision::SeedD { d } => {
-                // Record the slot BEFORE any future mint so stability holds
-                // from cycle 1; the next tick mints into it. No publish this
-                // tick. The wall clock, at or after the adopted event's own
-                // stamp, is the floor that mint must clear.
-                let floor = haven_core::relay::maintenance::now_secs();
-                if session.adopt_key_package_slot(d, floor).await.is_err() {
-                    relay_errors += 1;
-                }
-                (KpMaintenanceAction::SeededD, 0)
-            }
-            KpMaintenanceDecision::Republish {
+            let mint = |existing_d, targets, action| KpMintPlan {
                 existing_d,
                 targets,
-            } => {
-                // HEAL when the tracked package's own signed event can be sent
-                // again; otherwise the slot has no package to re-advertise (an
-                // adopted slot, a purged one, a first publish) and one is minted.
-                let frozen = tracked.as_ref().and_then(|t| {
-                    t.published
-                        .as_ref()
-                        .filter(|_| existing_d.as_deref() == Some(t.slot.as_str()))
-                });
-                match frozen {
-                    Some(event) => {
-                        let healed = match self.inner.publish_event(event, targets).await {
-                            Ok(_) => targets.len(),
-                            Err(_) => {
-                                relay_errors += 1;
-                                log::debug!("[maintain_key_package] 30443 publish failed");
-                                0
-                            }
-                        };
-                        (KpMaintenanceAction::RepublishedStableD, healed)
-                    }
-                    None => {
-                        let plan = mint(
-                            existing_d.as_deref(),
-                            targets,
-                            KpMaintenanceAction::RepublishedFreshD,
-                        );
-                        self.mint_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
-                            .await?
+                prev_created_at,
+                action,
+            };
+            break match &decision {
+                KpMaintenanceDecision::NoOp => (KpMaintenanceAction::AlreadyHealthy, 0),
+                KpMaintenanceDecision::SeedD { d } => {
+                    // Record the slot BEFORE any mint so stability holds from
+                    // cycle 1. The wall clock, at or after the adopted event's own
+                    // stamp, is the floor that mint must clear. The package found
+                    // there is one this device cannot open — a reinstall's old
+                    // self minted it — so the same tick decides once more and mints
+                    // into the slot before an inviter picks the old one.
+                    let floor = haven_core::relay::maintenance::now_secs();
+                    if adopted_this_tick {
+                        (KpMaintenanceAction::SeededD, 0)
+                    } else if session.adopt_key_package_slot(d, floor).await.is_err() {
+                        relay_errors += 1;
+                        (KpMaintenanceAction::SeededD, 0)
+                    } else {
+                        adopted_this_tick = true;
+                        tracked = session
+                            .tracked_key_package()
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        tracked_lifetime = tracked
+                            .as_ref()
+                            .map_or(TrackedKpLifetime::Absent, |t| read_kp_lifetime(&t.package));
+                        continue;
                     }
                 }
-            }
-            KpMaintenanceDecision::Replace {
-                existing_d,
-                targets,
-            } => {
-                let plan = mint(
-                    Some(existing_d.as_str()),
+                KpMaintenanceDecision::Republish {
+                    existing_d,
                     targets,
-                    KpMaintenanceAction::RepublishedStableD,
-                );
-                self.mint_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
-                    .await?
-            }
-            KpMaintenanceDecision::Rotate {
-                existing_d,
-                targets,
-                lifetime_unreadable,
-            } => {
-                let action = if *lifetime_unreadable {
-                    KpMaintenanceAction::RotatedUnreadableLifetime
-                } else {
-                    KpMaintenanceAction::RotatedExpiringMaterial
-                };
-                let plan = mint(Some(existing_d.as_str()), targets, action);
-                self.mint_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
-                    .await?
-            }
+                } => {
+                    // HEAL when the tracked package's own signed event can be sent
+                    // again; otherwise the slot has no package to re-advertise (an
+                    // adopted slot, a purged one, a first publish) and one is minted.
+                    let frozen = tracked.as_ref().and_then(|t| {
+                        t.published
+                            .as_ref()
+                            .filter(|_| existing_d.as_deref() == Some(t.slot.as_str()))
+                    });
+                    match frozen {
+                        Some(event) => {
+                            let healed = match self.inner.publish_event(event, targets).await {
+                                Ok(_) => targets.len(),
+                                Err(_) => {
+                                    relay_errors += 1;
+                                    log::debug!("[maintain_key_package] 30443 publish failed");
+                                    0
+                                }
+                            };
+                            (KpMaintenanceAction::RepublishedStableD, healed)
+                        }
+                        None => {
+                            let plan = mint(
+                                existing_d.as_deref(),
+                                targets,
+                                KpMaintenanceAction::RepublishedFreshD,
+                            );
+                            self.mint_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
+                                .await?
+                        }
+                    }
+                }
+                KpMaintenanceDecision::Replace {
+                    existing_d,
+                    targets,
+                } => {
+                    let plan = mint(
+                        Some(existing_d.as_str()),
+                        targets,
+                        KpMaintenanceAction::RepublishedStableD,
+                    );
+                    self.mint_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
+                        .await?
+                }
+                KpMaintenanceDecision::Rotate {
+                    existing_d,
+                    targets,
+                    lifetime_unreadable,
+                } => {
+                    let action = if *lifetime_unreadable {
+                        KpMaintenanceAction::RotatedUnreadableLifetime
+                    } else {
+                        KpMaintenanceAction::RotatedExpiringMaterial
+                    };
+                    let plan = mint(Some(existing_d.as_str()), targets, action);
+                    self.mint_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
+                        .await?
+                }
+            };
         };
 
         // Ordinary maintenance retires nothing: a tick that completed the
@@ -10158,24 +10267,29 @@ impl RelayManagerFfi {
     }
 
     /// M8-1 relay-list maintenance — republish-if-missing/drifted for the
-    /// user's kind 10050 (inbox) + 10051 (`KeyPackage`) relay lists, honoring
-    /// the per-category privacy toggle.
+    /// user's kind 10002 (`KeyPackage`-discovery, NIP-65) and kind 10050
+    /// (inbox) relay lists, honoring the per-category privacy toggle.
     ///
     /// Dart-timer-driven; the secret bytes are consumed per-call and zeroized
     /// (Security Rule 9). Fail-soft + idempotent.
     ///
-    /// Per category: reads the user's OWN configured relays, NETWORK-PROBES the
-    /// user's OWN relays for a currently-reachable list (never a local-timestamp
-    /// check — a relay-side drop must be detected), and if missing/drifted
-    /// republishes via [`build_relay_list_event`] + [`dedup_relay_targets`]
-    /// (own relays only, no default union). When the toggle is off it skips (no
-    /// publish). Never NIP-65/kind-10002 (Haven posture). `record_published_event`
-    /// after a successful publish.
+    /// The 10002 goes first: `transports/nostr.md` orders an account's
+    /// publication 10002, then its `KeyPackage` to the 10002 write set, then
+    /// the 10050.
+    ///
+    /// Per category: reads the user's OWN configured relays (seeding an
+    /// install never seeded), NETWORK-PROBES each of them and each lookup
+    /// relay ([`discovery_relays`]) for a currently-reachable list (never a
+    /// local-timestamp check — a relay-side drop must be detected), and if
+    /// missing/drifted republishes the configured list via
+    /// [`build_relay_list_event`] to the responders that lack it. No default
+    /// union. When the toggle is off it skips (no publish).
+    /// `record_published_event` after a successful publish.
     ///
     /// Returns a presence-only [`RelayListMaintenanceOutcomeFfi`].
     ///
     /// [`build_relay_list_event`]: haven_core::relay::build_relay_list_event
-    /// [`dedup_relay_targets`]: haven_core::relay::dedup_relay_targets
+    /// [`discovery_relays`]: haven_core::relay::discovery_relays
     pub async fn maintain_relay_list(
         &self,
         circle: &CircleManagerFfi,
@@ -10196,20 +10310,20 @@ impl RelayManagerFfi {
         };
 
         let circle_mgr = circle.inner.clone();
-        let inbox = self
-            .maintain_relay_list_category(
-                &circle_mgr,
-                &keys,
-                &own_pk,
-                haven_core::circle::RelayType::Inbox,
-            )
-            .await;
         let key_package = self
             .maintain_relay_list_category(
                 &circle_mgr,
                 &keys,
                 &own_pk,
                 haven_core::circle::RelayType::KeyPackage,
+            )
+            .await;
+        let inbox = self
+            .maintain_relay_list_category(
+                &circle_mgr,
+                &keys,
+                &own_pk,
+                haven_core::circle::RelayType::Inbox,
             )
             .await;
 
@@ -10228,8 +10342,8 @@ impl RelayManagerFfi {
         relay_type: haven_core::circle::RelayType,
     ) -> haven_core::relay::maintenance::RelayListCategoryOutcome {
         use haven_core::relay::maintenance::{
-            decide_relay_list, list_relay_healthy, RelayListAction, RelayListCategoryOutcome,
-            RelayListDecision, RelayListPerRelay, RelayListSnapshot,
+            decide_relay_list, list_relay_healthy, own_list_confirmed, RelayListAction,
+            RelayListCategoryOutcome, RelayListDecision, RelayListPerRelay, RelayListSnapshot,
         };
 
         let mut relay_errors: usize = 0;
@@ -10244,7 +10358,7 @@ impl RelayManagerFfi {
             );
         }
 
-        // Toggle + configured relays (own-relays-only, dedup'd).
+        // Toggle + configured relays (dedup'd).
         let prep: Result<(bool, Vec<String>), String> = run_blocking({
             let mgr = circle_mgr.clone();
             move || {
@@ -10261,10 +10375,7 @@ impl RelayManagerFfi {
                     }
                 }
                 .map_err(|e| e.to_string())?;
-                let user = mgr
-                    .list_user_relays(relay_type)
-                    .map_err(|e| e.to_string())?;
-                Ok((enabled, haven_core::relay::dedup_relay_targets(&user)))
+                Ok((enabled, own_relays_seeding_once(&mgr, relay_type)?))
             }
         })
         .await;
@@ -10272,17 +10383,18 @@ impl RelayManagerFfi {
             Ok(v) => v,
             Err(_) => {
                 return RelayListCategoryOutcome {
-                    action: RelayListAction::Suppressed,
-                    responders_probed: 0,
-                    relays_healed: 0,
                     relay_errors: 1,
+                    ..RelayListCategoryOutcome::no_publish(RelayListAction::Suppressed)
                 };
             }
         };
 
-        // Fast-path suppression before any network probe.
-        if !publish_enabled || configured.is_empty() {
+        // Fast paths before any network probe.
+        if !publish_enabled {
             return RelayListCategoryOutcome::no_publish(RelayListAction::Suppressed);
+        }
+        if configured.is_empty() {
+            return RelayListCategoryOutcome::no_publish(RelayListAction::NothingConfigured);
         }
 
         // Dark Matter W2: the KeyPackage-discovery list is published as NIP-65
@@ -10294,13 +10406,14 @@ impl RelayManagerFfi {
             return RelayListCategoryOutcome::no_publish(RelayListAction::Suppressed);
         };
 
-        // PER-RELAY network probe of the user's OWN relays for a current list
-        // (the wire kind authored by self). Unlike a merged fetch, this detects
-        // a PARTIAL drop (present on A, dropped from B) so we can heal B only. A
-        // top-level Err (e.g. URL validation) yields NO responders ⇒
-        // decide_relay_list returns NoOp (fail-closed).
+        // PER-RELAY network probe of the own and lookup relays for a current
+        // list (the wire kind authored by self). Unlike a merged fetch, this
+        // detects a PARTIAL drop (present on A, dropped from B) so we can heal
+        // B only. The own relays lead the targets, so a position below
+        // `configured.len()` is an own relay.
+        let targets = relay_list_targets(&configured);
         let filter = nostr::Filter::new().kind(kind).author(*own_pk).limit(4);
-        let mut per_relay = match self.inner.fetch_events_per_relay(filter, &configured).await {
+        let mut per_relay = match self.inner.fetch_events_per_relay(filter, &targets).await {
             Ok(v) => v,
             Err(_) => {
                 relay_errors += 1;
@@ -10316,7 +10429,7 @@ impl RelayManagerFfi {
         // lower id on a tie, the one NIP-01 keeps. An absent list ⇒ empty
         // on-relay set ⇒ unhealthy. Non-responders are excluded structurally.
         let mut responders: Vec<RelayListPerRelay> = Vec::new();
-        for outcome in &per_relay {
+        for (at, outcome) in per_relay.iter().enumerate() {
             if !outcome.responded {
                 continue;
             }
@@ -10328,6 +10441,7 @@ impl RelayManagerFfi {
             let healthy = list_relay_healthy(&on_relay_urls, &configured);
             responders.push(RelayListPerRelay {
                 relay_url: outcome.relay_url.clone(),
+                own: at < configured.len(),
                 healthy,
             });
         }
@@ -10339,6 +10453,13 @@ impl RelayManagerFfi {
             responders,
             configured_relays: configured.clone(),
         };
+        let unpublished = |action| RelayListCategoryOutcome {
+            action,
+            responders_probed,
+            relays_healed: 0,
+            relay_errors: relay_errors + 1,
+            own_confirmed: own_list_confirmed(&snapshot, &[]),
+        };
 
         match decide_relay_list(&snapshot) {
             RelayListDecision::AwaitingResetAcknowledgement => {
@@ -10347,11 +10468,15 @@ impl RelayManagerFfi {
             RelayListDecision::Suppressed => {
                 RelayListCategoryOutcome::no_publish(RelayListAction::Suppressed)
             }
+            RelayListDecision::NothingConfigured => {
+                RelayListCategoryOutcome::no_publish(RelayListAction::NothingConfigured)
+            }
             RelayListDecision::NoOp => RelayListCategoryOutcome {
                 action: RelayListAction::AlreadyCurrent,
                 responders_probed,
                 relays_healed: 0,
                 relay_errors,
+                own_confirmed: own_list_confirmed(&snapshot, &[]),
             },
             RelayListDecision::Republish { targets } => {
                 // Floor the republish `created_at` above the previous publication
@@ -10375,27 +10500,19 @@ impl RelayManagerFfi {
                 // The event CONTENT stays the FULL configured relay set (the
                 // list always advertises all configured relays); only the
                 // publish TARGET is the responded-and-unhealthy subset.
-                let event = match build_relay_list_event_for(
+                let Ok(event) = build_relay_list_event_for(
                     ffi_type,
                     keys,
                     &configured,
                     Some(haven_core::relay::superseding_created_at(last_published_at)),
-                ) {
-                    Ok(ev) => ev,
-                    Err(_) => {
-                        return RelayListCategoryOutcome {
-                            action: RelayListAction::Suppressed,
-                            responders_probed,
-                            relays_healed: 0,
-                            relay_errors: relay_errors + 1,
-                        };
-                    }
+                ) else {
+                    return unpublished(RelayListAction::Unacknowledged);
                 };
                 let event_id = event.id;
                 let created_at = i64::try_from(event.created_at.as_secs()).unwrap_or(0);
 
                 match self.inner.publish_event(&event, &targets).await {
-                    Ok(_) => {
+                    Ok(published) => {
                         let pk = *own_pk;
                         // Single per-kind published_events row (NOT per-relay):
                         // the replaceable list is one addressable event.
@@ -10415,16 +10532,12 @@ impl RelayManagerFfi {
                             responders_probed,
                             relays_healed: targets.len(),
                             relay_errors,
+                            own_confirmed: own_list_confirmed(&snapshot, &published.accepted_by),
                         }
                     }
                     Err(_) => {
                         log::debug!("[maintain_relay_list] publish failed");
-                        RelayListCategoryOutcome {
-                            action: RelayListAction::Suppressed,
-                            responders_probed,
-                            relays_healed: 0,
-                            relay_errors: relay_errors + 1,
-                        }
+                        unpublished(RelayListAction::Unacknowledged)
                     }
                 }
             }
@@ -14030,8 +14143,16 @@ mod maintenance_real_ffi_tests {
         // Idempotent; a second install returns Err which we ignore.
         let _ = use_in_memory_keyring_for_test();
         let _ = allow_ws_loopback_for_test();
+        // A maintenance tick seeds an account never seeded: without this the
+        // seed would be the production relays — real public hosts.
+        let _ = super::set_default_relays_for_test(vec![UNANSWERING_SEED.to_owned()]);
         discovery_plane();
     }
+
+    /// The account seed of this test binary: a loopback port nothing listens
+    /// on, so whatever is sent to a seeded relay is refused at once. Port 1 is
+    /// never handed out as an ephemeral port, so no test's relay can take it.
+    pub(super) const UNANSWERING_SEED: &str = "ws://127.0.0.1:1";
 
     /// The discovery plane of this test binary: one in-process relay that
     /// holds nothing and records which accounts it was asked about. Without
@@ -14814,7 +14935,7 @@ mod maintenance_real_ffi_tests {
     /// Another live client of the same account — a second Haven install here,
     /// White Noise in the field — keeps a current package in a slot this install
     /// adopts. That slot is the other client's (`transports/nostr.md:310-314`):
-    /// the next tick mints a slot of its own and leaves the other package alone,
+    /// the same tick mints a slot of its own and leaves the other package alone,
     /// instead of the two replacing each other's package for ever.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_package_another_client_keeps_live_is_left_alone_via_real_ffi() {
@@ -14859,20 +14980,14 @@ mod maintenance_real_ffi_tests {
         this.add_user_relay(url.clone(), RelayTypeFfi::Nip65)
             .await
             .expect("register own NIP-65 relay");
+        let first = circle_maintain(&relay_mgr, &this, secret.clone()).await;
         assert_eq!(
-            circle_maintain(&relay_mgr, &this, secret.clone())
-                .await
-                .action,
-            KpMaintenanceActionFfi::SeededD,
-            "the first tick adopts the slot the relay already serves"
-        );
-        assert_eq!(
-            circle_maintain(&relay_mgr, &this, secret.clone())
-                .await
-                .action,
+            first.action,
             KpMaintenanceActionFfi::RepublishedFreshD,
-            "a current package in the adopted slot is another client's"
+            "the first tick adopts the slot the relay already serves, and — a \
+             current package in it being another client's — mints its own"
         );
+        assert!(first.relays_healed > 0 && first.published_current);
         let tracked = tracked_row(&this).await.expect("a tracked package");
         assert!(!tracked.key_package.is_empty(), "fresh material was minted");
         assert_ne!(tracked.d_tag, their_d, "into a slot of its own");
@@ -15418,19 +15533,20 @@ mod maintenance_real_ffi_tests {
     }
 
     // ------------------------------------------------------------------------
-    // TC-7: the `not_after` bound fires — and is REPORTED — on a tick that has
-    // no `KeyPackage` relays configured at all, and that same tick is
-    // distinguishable from "every relay was unreachable".
+    // TC-7: the `not_after` bound fires — and is REPORTED — on a tick on which
+    // no `KeyPackage` relay answers.
     //
-    // Two claims in one, both about ORDERING in `maintain_key_package`:
-    //   * the purge runs BEFORE the "no relays configured" early return, so a
-    //     transport-independent MUST is not skipped by a transport check;
-    //   * `relays_targeted == 0` is what separates await-user-action (nothing
-    //     configured) from retry-promptly (nothing reachable), which every other
-    //     field reports identically.
+    // A claim about ORDERING in `maintain_key_package`: the purge runs BEFORE
+    // any relay work, so a transport-independent MUST is not skipped by a
+    // transport check. The account configures no relay; the tick's seed guard
+    // gives it this binary's seed, which never answers. "Nothing configured" is
+    // reachable now only when that seed fails (the last relay of a category
+    // cannot be removed), and `relays_targeted == 0` telling it apart from
+    // "nothing reachable" is pinned by the core's
+    // `no_op_separates_nothing_configured_from_nothing_reachable`.
     // ------------------------------------------------------------------------
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn tc7_not_after_purge_runs_and_reports_even_with_no_relays_configured() {
+    async fn tc7_not_after_purge_runs_and_reports_even_when_no_relay_answers() {
         use haven_core::relay::maintenance::{read_kp_lifetime, TrackedKpLifetime};
 
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
@@ -15445,7 +15561,8 @@ mod maintenance_real_ffi_tests {
             .await
             .expect("RelayManagerFfi::new_instance");
 
-        // A REAL tracked package. NO relay is configured — deliberately.
+        // A REAL tracked package. NO relay is configured — deliberately: the
+        // first tick seeds the one that never answers.
         let kp = circle
             .inner
             .session()
@@ -15459,16 +15576,24 @@ mod maintenance_real_ffi_tests {
         };
 
         // Before `not_after`: nothing to purge, and the tick is the plain
-        // "no relays configured" shape.
+        // "nothing reachable" shape.
         let before = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
         assert_eq!(before.action, KpMaintenanceActionFfi::AlreadyHealthy);
         assert_eq!(
-            before.relays_targeted, 0,
-            "no KeyPackage relay is configured — this is await-user-action, not \
-             a transient outage"
+            circle
+                .inner
+                .list_user_relays(RelayType::KeyPackage)
+                .expect("the key-package list"),
+            [UNANSWERING_SEED],
+            "the tick seeded the account it found unseeded"
         );
-        assert_eq!(before.responders_probed, 0);
+        assert_eq!(before.relays_targeted, 1);
+        assert_eq!(
+            before.responders_probed, 0,
+            "the seeded relay never answers"
+        );
         assert!(!before.expired_init_key_purged);
+        assert!(!before.published_current);
 
         // At `not_after`: the bound MUST fire even though the tick never
         // contacts (or even resolves) a relay.
@@ -15483,9 +15608,11 @@ mod maintenance_real_ffi_tests {
              into a no-op for exactly the accounts least able to recover"
         );
         assert_eq!(
-            after.relays_targeted, 0,
-            "still nothing configured; the purge does not invent a target"
+            (after.relays_targeted, after.responders_probed),
+            (1, 0),
+            "still no relay answers; the purge does not invent a target"
         );
+        assert!(!after.published_current);
         let row = tracked_row(&circle).await.expect("row");
         assert!(
             row.key_package.is_empty(),
@@ -17917,6 +18044,10 @@ mod maintenance_real_ffi_tests {
             outcome.relays_healed, 0,
             "adoption is local bookkeeping — no KeyPackage is published"
         );
+        assert!(
+            !outcome.published_current,
+            "an adopt-only tick never reports a current package"
+        );
         assert!(outcome.retired_malformed_slot);
         assert_eq!(
             tracked_row(&circle).await.map(|row| row.d_tag),
@@ -18634,7 +18765,11 @@ mod maintenance_real_ffi_tests {
 
     /// A relay that serves two of this account's lists stamped the same second
     /// is serving one the protocol has discarded: NIP-01 keeps the lower id. The
-    /// heal judges the relay by that one, whichever the relay sent first.
+    /// heal judges the relay by that one, whichever the relay sent first: it
+    /// republishes there exactly when the kept list is not the current one.
+    /// (The lookup relay never holds this fresh account's list, so the tick
+    /// republishes there in every case; only the own relay tells the cases
+    /// apart.)
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_relay_list_heal_reads_the_list_nip01_keeps_on_a_same_second_tie() {
         use haven_core::relay::scripted_relay::{Frame, ScriptedRelay};
@@ -18653,6 +18788,11 @@ mod maintenance_real_ffi_tests {
                     .add_user_relay(relay.url().to_owned(), RelayTypeFfi::Inbox)
                     .await
                     .expect("register own inbox relay");
+                // Configured, so the tick seeds nothing into the inbox list.
+                circle
+                    .add_user_relay(UNANSWERING_SEED.to_owned(), RelayTypeFfi::Nip65)
+                    .await
+                    .expect("register a key-package relay");
                 let list = |names: &str, at: u64| {
                     nostr::EventBuilder::new(Kind::InboxRelays, "")
                         .tag(nostr::Tag::parse(["relay", names]).expect("relay tag"))
@@ -18695,18 +18835,387 @@ mod maintenance_real_ffi_tests {
                     .maintain_relay_list(&circle, secret)
                     .await
                     .expect("maintain_relay_list must not error");
-                let expected = if current_is_kept {
-                    super::RelayListActionFfi::AlreadyCurrent
-                } else {
-                    super::RelayListActionFfi::Republished
-                };
+                let healed_here = relay
+                    .published()
+                    .iter()
+                    .any(|event| event.kind == Kind::InboxRelays);
                 assert_eq!(
-                    outcome.inbox.action, expected,
+                    healed_here, !current_is_kept,
                     "the relay was judged by the discarded list \
                      (current list kept: {current_is_kept}, kept list sent first: {kept_sent_first})"
                 );
+                assert!(
+                    outcome.inbox.own_confirmed,
+                    "the own relay serves the current list, or took it this tick"
+                );
             }
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // Invitable from the first tick: an install never seeded publishes to the
+    // seeded relays; its lists go out 10002, 10050, then its KeyPackage
+    // (`transports/nostr.md`); the lists — never the KeyPackage — are copied
+    // to the lookup relays (owner-directed 2026-11-12); and each outcome says
+    // whether an own relay now serves what an inviter needs.
+    // ------------------------------------------------------------------------
+
+    /// This binary's lookup (discovery) relay.
+    fn lookup_relay() -> String {
+        discovery_plane();
+        haven_core::relay::discovery_relays().remove(0)
+    }
+
+    /// Records the id and kind of every event a relay is offered, in order.
+    #[derive(Debug)]
+    struct RecordWrites(std::sync::Arc<std::sync::Mutex<Vec<(nostr::EventId, Kind)>>>);
+
+    impl nostr_relay_builder::builder::WritePolicy for RecordWrites {
+        fn admit_event<'a>(
+            &'a self,
+            event: &'a nostr::Event,
+            _addr: &'a std::net::SocketAddr,
+        ) -> nostr_sdk::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult>
+        {
+            self.0
+                .lock()
+                .expect("the record of writes")
+                .push((event.id, event.kind));
+            Box::pin(async { nostr_relay_builder::builder::PolicyResult::Accept })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_first_publish_goes_out_in_spec_order_and_lookup_relays_get_the_lists_only() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let offered = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let relay = nostr_relay_builder::LocalRelay::new(
+            nostr_relay_builder::RelayBuilder::default()
+                .write_policy(RecordWrites(offered.clone())),
+        );
+        relay.run().await.expect("run the own relay");
+        let url = relay.url().await.to_string();
+        let lookup = lookup_relay();
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("spec_order");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        for relay_type in [RelayTypeFfi::Inbox, RelayTypeFfi::Nip65] {
+            circle
+                .add_user_relay(url.clone(), relay_type)
+                .await
+                .expect("register the own relay");
+        }
+
+        let lists = relay_mgr
+            .maintain_relay_list(&circle, secret.clone())
+            .await
+            .expect("the relay-list tick");
+        let kp = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        for list in [lists.key_package, lists.inbox] {
+            assert_eq!(list.action, super::RelayListActionFfi::Republished);
+            assert!(list.own_confirmed, "the own relay took the list");
+        }
+        assert_eq!(kp.action, KpMaintenanceActionFfi::RepublishedFreshD);
+        assert!(kp.published_current, "the own relay took the package");
+
+        let mut seen = std::collections::HashSet::new();
+        let order: Vec<Kind> = offered
+            .lock()
+            .expect("the record of writes")
+            .iter()
+            .filter(|(id, _)| seen.insert(*id))
+            .map(|(_, kind)| *kind)
+            .collect();
+        assert_eq!(
+            order,
+            [Kind::RelayList, Kind::InboxRelays, Kind::Custom(30443)],
+            "the own relay is offered the 10002, then the 10050, then the KeyPackage"
+        );
+
+        for kind in [Kind::RelayList, Kind::InboxRelays] {
+            let copies = fetch_by_kind(author, kind, &lookup).await;
+            assert!(
+                copies.iter().any(|copy| copy
+                    .tags
+                    .iter()
+                    .any(|tag| tag.as_slice().get(1) == Some(&url))),
+                "the lookup relay holds the account's kind {kind}, naming its relay"
+            );
+        }
+        assert!(
+            fetch_by_kind(author, Kind::Custom(30443), &lookup)
+                .await
+                .is_empty(),
+            "a KeyPackage never reaches a lookup relay"
+        );
+
+        // Every relay now serves what it should: nothing is republished, and
+        // the healthy own relay alone confirms each.
+        let again = relay_mgr
+            .maintain_relay_list(&circle, secret.clone())
+            .await
+            .expect("the second relay-list tick");
+        for list in [again.key_package, again.inbox] {
+            assert_eq!(list.action, super::RelayListActionFfi::AlreadyCurrent);
+            assert!(list.own_confirmed);
+        }
+        let kp_again = circle_maintain(&relay_mgr, &circle, secret).await;
+        assert_eq!(kp_again.action, KpMaintenanceActionFfi::AlreadyHealthy);
+        assert!(kp_again.published_current, "a healthy own relay serves it");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unseeded_account_is_seeded_by_its_first_tick_and_never_again() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let lookup = lookup_relay();
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("unseeded");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+
+        // The onboarding race: a publish before anything seeded the defaults.
+        let lists = relay_mgr
+            .maintain_relay_list(&circle, secret.clone())
+            .await
+            .expect("the relay-list tick");
+        for relay_type in [RelayType::KeyPackage, RelayType::Inbox] {
+            assert_eq!(
+                circle.inner.list_user_relays(relay_type).expect("the list"),
+                [UNANSWERING_SEED],
+                "the tick seeded the account"
+            );
+        }
+        for (list, kind) in [
+            (lists.key_package, Kind::RelayList),
+            (lists.inbox, Kind::InboxRelays),
+        ] {
+            assert_eq!(
+                list.action,
+                super::RelayListActionFfi::Republished,
+                "the seeded list is published, not reported as nothing configured"
+            );
+            assert!(
+                !list.own_confirmed,
+                "the seeded relay never answered: only the lookup relay holds the list"
+            );
+            let copies = fetch_by_kind(author, kind, &lookup).await;
+            assert!(
+                copies.iter().any(|copy| copy.tags.iter().any(|tag| tag
+                    .as_slice()
+                    .get(1)
+                    .map(String::as_str)
+                    == Some(UNANSWERING_SEED))),
+                "the published kind {kind} names the seeded relay"
+            );
+        }
+        let kp = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert_eq!(
+            (kp.relays_targeted, kp.responders_probed),
+            (1, 0),
+            "the KeyPackage tick targets the seeded relay"
+        );
+        assert!(!kp.published_current);
+
+        // The user replaces the seed. The last relay of a category cannot be
+        // removed, so the list never empties, and the seed never comes back.
+        let own = MockRelay::run().await.expect("start the user's relay");
+        let own_url = own.url().await.to_string();
+        circle
+            .add_user_relay(own_url.clone(), RelayTypeFfi::Inbox)
+            .await
+            .expect("add the user's relay");
+        assert!(circle
+            .remove_user_relay(UNANSWERING_SEED.to_owned(), RelayTypeFfi::Inbox)
+            .await
+            .expect("remove the seed"));
+        assert!(
+            circle
+                .remove_user_relay(own_url.clone(), RelayTypeFfi::Inbox)
+                .await
+                .is_err(),
+            "the last relay of a category cannot be removed"
+        );
+        let edited = relay_mgr
+            .maintain_relay_list(&circle, secret)
+            .await
+            .expect("the relay-list tick after the edit");
+        assert_eq!(
+            circle
+                .inner
+                .list_user_relays(RelayType::Inbox)
+                .expect("the list"),
+            [own_url],
+            "an edited list is never seeded again"
+        );
+        assert!(edited.inbox.own_confirmed, "the user's relay took the list");
+    }
+
+    /// Only an own relay confirms a list: a lookup relay's copy never does. A
+    /// republish no relay acknowledged is `Unacknowledged`, never `Suppressed`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_list_only_a_lookup_relay_took_is_not_confirmed_and_a_refused_one_is_unacknowledged()
+    {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = nostr_relay_builder::LocalRelay::new(
+            nostr_relay_builder::RelayBuilder::default().write_policy(RejectWritesWhenFlipped {
+                flipped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                only_kind: None,
+            }),
+        );
+        relay.run().await.expect("run the refusing relay");
+        let url = relay.url().await.to_string();
+        let lookup = lookup_relay();
+
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("lookup_only");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        for relay_type in [RelayTypeFfi::Inbox, RelayTypeFfi::Nip65] {
+            circle
+                .add_user_relay(url.clone(), relay_type)
+                .await
+                .expect("register the own relay");
+        }
+        // The lookup relay already holds the current inbox list, so the own
+        // relay is that list's only target.
+        let current = super::build_relay_list_event_for(
+            RelayTypeFfi::Inbox,
+            &keys,
+            std::slice::from_ref(&url),
+            None,
+        )
+        .expect("the current inbox list");
+        relay_mgr
+            .inner
+            .publish_event(&current, std::slice::from_ref(&lookup))
+            .await
+            .expect("the lookup relay takes it");
+
+        let lists = relay_mgr
+            .maintain_relay_list(&circle, secret)
+            .await
+            .expect("the relay-list tick");
+        assert_eq!(
+            lists.key_package.action,
+            super::RelayListActionFfi::Republished,
+            "the lookup relay acknowledged the 10002"
+        );
+        assert!(
+            !lists.key_package.own_confirmed,
+            "a lookup relay's copy never confirms the list"
+        );
+        assert_eq!(
+            lists.inbox.action,
+            super::RelayListActionFfi::Unacknowledged,
+            "the one target refused the 10050"
+        );
+        assert!(!lists.inbox.own_confirmed);
+        assert_eq!(lists.inbox.relays_healed, 0);
+        assert!(lists.inbox.relay_errors > 0);
+    }
+
+    /// An opt-out retracts the list wherever maintenance copied it: the own
+    /// relays and the lookup relays, nothing else.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_opt_out_retracts_the_list_from_the_lookup_relays_too() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let dir = DataDir::new("opt_out_targets");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+        let own = "wss://own.example.com".to_owned();
+        for relay_type in [RelayTypeFfi::Inbox, RelayTypeFfi::Nip65] {
+            circle
+                .add_user_relay(own.clone(), relay_type)
+                .await
+                .expect("register the own relay");
+            let built = circle
+                .build_unpublish_relay_list(secret_bytes(&keys), relay_type)
+                .await
+                .expect("build the opt-out");
+            assert_eq!(built.targets, [own.clone(), lookup_relay()]);
+        }
+    }
+
+    /// A reinstall finds its old slot on the relay and adopts it; the package
+    /// there is not one this device can open. Adoption alone never reports
+    /// the account invitable, and the same tick tries to fill the slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_adopted_slot_is_never_reported_as_a_current_package() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let reject = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let relay = nostr_relay_builder::LocalRelay::new(
+            nostr_relay_builder::RelayBuilder::default().write_policy(RejectWritesWhenFlipped {
+                flipped: reject.clone(),
+                only_kind: Some(Kind::Custom(30443)),
+            }),
+        );
+        relay.run().await.expect("run relay");
+        let url = relay.url().await.to_string();
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+
+        let old_dir = DataDir::new("adopt_old_install");
+        let old = CircleManagerFfi::new(old_dir.as_str(), secret.clone()).expect("the old install");
+        old.add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+        assert!(
+            circle_maintain(&relay_mgr, &old, secret.clone())
+                .await
+                .published_current
+        );
+
+        reject.store(true, Ordering::Relaxed);
+        let new_dir = DataDir::new("adopt_new_install");
+        let reinstall =
+            CircleManagerFfi::new(new_dir.as_str(), secret.clone()).expect("the reinstall");
+        reinstall
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+        let first = circle_maintain(&relay_mgr, &reinstall, secret).await;
+        assert_ne!(
+            first.action,
+            KpMaintenanceActionFfi::SeededD,
+            "the tick that adopted the slot went on to mint into it"
+        );
+        assert_eq!(
+            first.relays_healed, 0,
+            "premise: the relay refused the mint"
+        );
+        assert!(
+            !first.published_current,
+            "the relay serves only the old install's package, which this device cannot open"
+        );
+        assert!(
+            tracked_row(&reinstall).await.is_some(),
+            "the slot was recorded before the mint"
+        );
     }
 
     // ------------------------------------------------------------------------

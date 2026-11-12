@@ -214,8 +214,9 @@ one is REQUIRED: without any, containment is unprovable and a clean verdict
 would mean nothing. A kind that is SENT but has no pool is a META-FLOOR, never
 a pass.
 
---discovery-relay marks an endpoint as read-only (REQ yes, EVENT never). A URL
-may not appear both as a discovery relay and inside a pool.
+--discovery-relay marks an endpoint as a lookup relay: REQ yes, and EVENT only
+for the account's own relay lists (kinds 10002 / 10050, owner-directed
+2026-11-12). A URL may not appear both as a discovery relay and inside a pool.
 
 --exclude-conn drops a connection from every assertion. Use it for the E2E
 harness's own socket, whose conn_id the proxy returns in the sentinel ack: its
@@ -933,9 +934,10 @@ evaluate() {
     # C5.6 — publish-target containment, scoped PER KIND
     # ======================================================================
     # A flat URL allow-list would false-green here. The discovery plane
-    # (haven-core/src/relay/discovery.rs:20-21) is never a publish target, yet
-    # it is a strict SUPERSET of the account seed (discovery.rs:38-41) — so
-    # every account-plane URL is also a discovery URL, and one flat list
+    # (haven-core/src/relay/discovery.rs, "The one write") takes the account's
+    # relay lists and no other event, yet it is a strict SUPERSET of the
+    # account seed (PRODUCTION_DISCOVERY_RELAYS) — so every account-plane URL is
+    # also a discovery URL, and one flat list
     # containing both would accept a write to a public indexer.
     | ( [ $sent[] | select(.epKey == "") ] ) as $unrouted
     | ( [ $sent[] | .kind ] | unique ) as $sentKinds
@@ -955,8 +957,8 @@ evaluate() {
         | . as $s
         | ($POOL[$s.kind | tostring]) as $pool
         | (
-            ( if ($s.epKey != "") and ($DISC | index($s.epKey)) then
-                "C5.6 publish containment: a kind-\($s.kind) EVENT was PUBLISHED to \($s.epName), a declared DISCOVERY relay. haven-core/src/relay/discovery.rs:20-21 states the discovery plane is never a publish target and never carries the local user's writes: it is a curated set of PUBLIC indexers, queried read-only precisely so that resolving somebody else's pubkey never exposes the local user. A write there attaches this user's identity, and this event, to a public indexer — and note that a flat URL allow-list could not have caught it, because the discovery set is a strict SUPERSET of the account seed (discovery.rs:38-41), so every legitimate account-plane URL is also a discovery URL. REQ yes; EVENT never."
+            ( if ($s.epKey != "") and ($DISC | index($s.epKey)) and ([10002, 10050] | index($s.kind) | not) then
+                "C5.6 publish containment: a kind-\($s.kind) EVENT was PUBLISHED to \($s.epName), a declared DISCOVERY relay. haven-core/src/relay/discovery.rs (\"The one write\") states the discovery plane takes the account's own relay lists (kinds 10002 and 10050) and no other event of the local user's: it is a curated set of PUBLIC indexers, and a key package, gift wrap or group event there attaches this user's identity, and this event, to a public indexer that is no destination for it — and note that a flat URL allow-list could not have caught it, because the discovery set is a strict SUPERSET of the account seed (PRODUCTION_DISCOVERY_RELAYS), so every legitimate account-plane URL is also a discovery URL. REQ yes; EVENT only for the relay lists."
               else empty end ),
             ( if ($s.epKey != "") and ($pool != null) and (($pool | index($s.epKey)) == null) and (($DISC | index($s.epKey)) == null) then
                 "C5.6 publish containment: a kind-\($s.kind) EVENT was PUBLISHED to \($s.epName), which is not in the declared pool for that kind (\($pool | tojson)). Each kind has its OWN pool for a reason — a kind-445 belongs only to its circle's relays, a 1059 only to the recipient's inbox relays, a 30443 only to the account's NIP-65 relays — so an event reaching a relay outside its kind's pool hands that operator both the event and the pubkey that signed it, on a plane it was never routed to."
@@ -1466,8 +1468,8 @@ main() {
     if [[ -n "${overlap}" ]]; then
       echo "ERROR: a URL is declared BOTH as a --discovery-relay and inside a --pool:" >&2
       echo "       ${overlap}" >&2
-      echo "       The discovery plane is never a publish target (haven-core/src/relay/" >&2
-      echo "       discovery.rs:20-21). Declaring it as both would make one of the two" >&2
+      echo "       The discovery plane takes the account's relay lists and no other event" >&2
+      echo "       (haven-core/src/relay/discovery.rs). Declaring it as both would make one of the two" >&2
       echo "       rules dead, and this check exists because the discovery set is a" >&2
       echo "       strict superset of the account seed, so the confusion is easy to make." >&2
       usage; exit "${RC_USAGE}"
@@ -1841,7 +1843,8 @@ emit_declaration() {
 #   * TWO circles each publishing an application message, at DIFFERENT
 #     created_at (C5.1's precondition met, its assertion held);
 #   * a multiplexed two-value `#h` REQ (C5.2's accepted shape);
-#   * a REQ to the discovery relay, and no EVENT to it (C5.6's read-only rule).
+#   * a REQ to the discovery relay, and no EVENT to it but the account's relay
+#     lists (C5.6's discovery rule).
 write_healthy() {
   fx_begin "$1"
   jopen c1
@@ -1855,10 +1858,13 @@ write_healthy() {
   jline c2r c1 "[\"REQ\",\"sub-kp\",{\"kinds\":[30443],\"authors\":[\"${PK_B}\"],\"limit\":5}]"
   jline r2c c1 "[\"EVENT\",\"sub-kp\",$(ev 30443 "e05" "${PK_B}" "${KP_TAGS}")]"
   jline r2c c1 '["EOSE","sub-kp"]'
-  # Read-only discovery query: REQ yes, EVENT never.
+  # Discovery: a lookup REQ, and the account's own relay lists as the heal
+  # copies them there.
   jopen c8 "${DISCOVERY}" "127.0.0.1:7998"
   jline c2r c8 "[\"REQ\",\"sub-disc\",{\"kinds\":[10002],\"authors\":[\"${PK_B}\"],\"limit\":1}]" "${DISCOVERY}" "127.0.0.1:7998"
   jline r2c c8 '["EOSE","sub-disc"]' "${DISCOVERY}" "127.0.0.1:7998"
+  jline c2r c8 "[\"EVENT\",$(ev 10002 "e02" "${PK_A}" "[[\"r\",\"${RELAY_A}\"]]")]" "${DISCOVERY}" "127.0.0.1:7998"
+  jline c2r c8 "[\"EVENT\",$(ev 10050 "e03" "${PK_A}" "[[\"relay\",\"${RELAY_A}\"]]")]" "${DISCOVERY}" "127.0.0.1:7998"
   # Invitation.
   jline c2r c1 "[\"EVENT\",$(ev 1059 "e07" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"]]")]"
   # The multiplexed group-plane REQ: two circles, one filter, one relay set.
@@ -2542,14 +2548,15 @@ self_test() {
   emit_sentinel c0
   expect_rc 1 "C5.6 an EVENT to a discovery relay is a violation" \
     --journal "${c56disc}" "${base[@]}" || fail=1
-  expect_msg "REQ yes; EVENT never" "C5.6 names the read-only discovery rule" \
+  expect_msg "REQ yes; EVENT only for the relay lists" "C5.6 names the discovery rule" \
     --journal "${c56disc}" "${base[@]}" || fail=1
 
-  # ...and the discovery relay is genuinely exercised read-only in the healthy
-  # fixture, so the rule is not passing merely because nothing touched it.
-  if ! grep -aq 'sub-disc' "${healthy}"; then
-    echo "SELF-TEST FAIL: the healthy fixture no longer REQs the discovery relay, so" >&2
-    echo "  C5.6's read-only rule is untested in the passing direction." >&2
+  # ...and the discovery relay is genuinely exercised in the healthy fixture —
+  # asked, and sent the account's relay lists — so the rule is not passing
+  # merely because nothing touched it.
+  if ! grep -aq 'sub-disc' "${healthy}" || ! grep -aq '"e03"' "${healthy}"; then
+    echo "SELF-TEST FAIL: the healthy fixture no longer REQs the discovery relay or" >&2
+    echo "  sends it a relay list, so C5.6's discovery rule is untested in the passing direction." >&2
     fail=1
   fi
 

@@ -1287,7 +1287,7 @@ impl RelayManager {
     ///
     /// * `filter` - Nostr filter for the query
     /// * `relays` - List of relay URLs to query
-    /// * `timeout` - Optional timeout (defaults to 30 seconds)
+    /// * `timeout` - Optional timeout (defaults to 10 seconds)
     ///
     /// # Errors
     ///
@@ -1334,7 +1334,7 @@ impl RelayManager {
 
     /// Fetches a user's relay list for the given event kind.
     ///
-    /// Queries the read-only discovery plane
+    /// Queries the discovery plane
     /// ([`discovery_relays`][crate::relay::discovery::discovery_relays]) for
     /// the user's replaceable relay list event and extracts `wss://` URLs
     /// from `"relay"` tags. This resolves *another* user's relays by bare
@@ -1447,7 +1447,7 @@ impl RelayManager {
     /// and discovery use these to read selection without a session.
     ///
     /// Resolves the user's NIP-65 write-capable relays (kind 10002) and fetches
-    /// from them, falling back to the read-only discovery plane
+    /// from them, falling back to the discovery plane
     /// ([`discovery_relays`][crate::relay::discovery::discovery_relays]) when
     /// that set is empty or holds no usable `KeyPackage`.
     ///

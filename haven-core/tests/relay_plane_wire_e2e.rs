@@ -9,7 +9,9 @@
 //! her invitees — run the account traffic, the lookups an invite makes, two
 //! circles (one drawn from the location pool, one on a relay list that is then
 //! changed), locations, a leave, both catch-up planes, the live plane and the
-//! profile plane. The ground truth is the test's own: who listed which relay
+//! profile plane; Alice's relay lists also go to the discovery relay, as the
+//! relay-list heal sends them (owner-directed 2026-11-12), and her key package
+//! never does. The ground truth is the test's own: who listed which relay
 //! and which routing each circle had, with `[added, removed)` in the step
 //! counter, a routing recorded at the call that stages it. Every frame a front
 //! recorded is judged; the run is clean, every row it drove was admitted
@@ -540,6 +542,27 @@ fn junk(h: &str, count: usize, secs: u64) -> Vec<Event> {
         .collect()
 }
 
+/// What the relay-list heal sends `relay` for `lists`: the probe of the
+/// author's own list, then the list.
+async fn heal_onto(device: &Device, relay: &str, lists: &[&Event]) {
+    for event in lists {
+        let probe = Filter::new()
+            .kind(event.kind)
+            .author(device.keys.public_key())
+            .limit(4);
+        device
+            .pool
+            .fetch_events(probe, &[relay.to_owned()], Some(budget()))
+            .await
+            .expect("the heal's probe");
+        device
+            .pool
+            .publish_event(event, &[relay.to_owned()])
+            .await
+            .expect("the relay list is published");
+    }
+}
+
 /// The rows the lifecycle drives, each of which must be admitted at least
 /// once: a row nobody sent would pass vacuously.
 const DRIVEN: [Row; 15] = [
@@ -562,7 +585,8 @@ const DRIVEN: [Row; 15] = [
 
 /// The clean judgement's own assertions: no finding, every driven row
 /// admitted, the key-package lookup both on an invitee's write relay and on
-/// discovery, every front reached.
+/// discovery, both of an account's relay lists on discovery, every front
+/// reached.
 fn assert_clean(world: &mut World) {
     let judgement = world.judge();
     let findings: Vec<Seen> = judgement.findings.iter().map(seen).collect();
@@ -586,6 +610,10 @@ fn assert_clean(world: &mut World) {
     assert!(
         hit(Row::Req30443A, Some(R::BWrite)) && hit(Row::Req30443A, Some(R::Disc)),
         "a key package was not looked up both on an invitee's write relay and on discovery",
+    );
+    assert!(
+        hit(Row::Ev10002, Some(R::Disc)) && hit(Row::Ev10050, Some(R::Disc)),
+        "an account's relay lists did not both reach discovery",
     );
     for role in ROLES {
         assert!(
@@ -710,6 +738,14 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
             "the status probe does not find what was just published",
         );
     }
+    // Her relay lists go to the discovery relay too, after the heal's probe
+    // there; her key package does not (plant 6 below).
+    Box::pin(heal_onto(
+        &alice,
+        &w.url(R::Disc),
+        &[&alice_10002, &alice_10050],
+    ))
+    .await;
 
     // Step 2: Alice looks her invitees up, as an invite does.
     w.next();
@@ -1102,7 +1138,25 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
         )],
     );
 
-    // Plant 6, last: an invitee whose lists steer an invite. Dave's inbox
+    // Plant 6: Alice's key package on the discovery relay, which takes her
+    // relay lists and nothing else of hers.
+    w.next();
+    Box::pin(alice.pool.publish_event(&alice_kp, &[w.url(R::Disc)]))
+        .await
+        .expect("the relay takes it");
+    plant(
+        &mut w,
+        6,
+        "a key package on discovery",
+        &[(
+            R::Disc as u32,
+            Verb::Event,
+            Some(Row::Ev30443),
+            Class::CrossedEvent,
+        )],
+    );
+
+    // Plant 7, last: an invitee whose lists steer an invite. Dave's inbox
     // list names circle A's location relay and a profile relay ahead of
     // Alice's inbox (the seed every install shares, so that overlap is
     // declared), and his NIP-65 write set names the profile relay; his ground
@@ -1144,7 +1198,7 @@ async fn lifecycle_then_plants(watch: &DialWatch, needles: &mut Vec<String>) {
     );
     plant(
         &mut w,
-        6,
+        7,
         "an invitee's lists steering the invite",
         &[
             (

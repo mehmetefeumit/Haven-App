@@ -23,11 +23,12 @@ use crate::nostr::mls::types::GroupId;
 /// user may freely edit or remove them afterwards.
 ///
 /// This is a **one-time seed only** — NOT a runtime publish or fetch
-/// fallback. The user's own relay-list events are published solely to the
-/// user's configured relays (see
-/// [`dedup_relay_targets`][crate::relay::publishers::dedup_relay_targets]), and
-/// *other* users' metadata is resolved via the read-only discovery plane
-/// ([`discovery_relays`][crate::relay::discovery::discovery_relays]).
+/// fallback. The user's own relay-list events are published to the user's
+/// configured relays (see
+/// [`dedup_relay_targets`][crate::relay::publishers::dedup_relay_targets]) and
+/// copied to the discovery plane
+/// ([`discovery_relays`][crate::relay::discovery::discovery_relays]), where
+/// *other* users' metadata is resolved too.
 /// Force-unioning this set into publishes would leak any private relay the
 /// user configured.
 ///

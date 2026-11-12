@@ -353,6 +353,15 @@ pub struct RelayKpSnapshot {
     pub responders: Vec<RelayKpPerRelay>,
 }
 
+impl RelayKpSnapshot {
+    /// Returns whether at least one responder serves the tracked package
+    /// ([`RelayKpPerRelay::serves_tracked`]).
+    #[must_use]
+    pub fn serves_tracked(&self, tracked: &TrackedKpSlot<'_>) -> bool {
+        self.responders.iter().any(|r| r.serves_tracked(tracked))
+    }
+}
+
 /// The deterministic canonical seed-`d`: the byte-order-MIN over each
 /// responder's own min non-empty on-relay `d` — i.e. the global byte-min
 /// non-empty `d` across all responders. Fully stable regardless of relay
@@ -1257,6 +1266,12 @@ pub struct KpMaintenanceOutcome {
     /// — reports `false` and leaves the sentinel unset, so this is "the account
     /// is now conformant", never "the migration was attempted".
     pub retired_malformed_slot: bool,
+    /// Whether, after this tick, at least one responding own relay serves this
+    /// device's current package — one it holds the key to — or acknowledged
+    /// this tick's publish of it. Never set by a tick that only adopted a slot
+    /// ([`KpMaintenanceAction::SeededD`]): the package there is not one this
+    /// device can open.
+    pub published_current: bool,
 }
 
 impl KpMaintenanceOutcome {
@@ -1276,6 +1291,7 @@ impl KpMaintenanceOutcome {
             relay_errors: 0,
             expired_init_key_purged: false,
             retired_malformed_slot: false,
+            published_current: false,
         }
     }
 }
@@ -1345,6 +1361,32 @@ mod tests {
     /// the pre-existing (lifetime-agnostic) behaviour these tests pin.
     fn decide_fresh(snap: &RelayKpSnapshot, stored_d: Option<&str>) -> KpMaintenanceDecision {
         decide_kp_maintenance(snap, stored_d.map(tracked), fresh_lifetime(), NOW)
+    }
+
+    #[test]
+    fn the_snapshot_serves_the_tracked_package_when_any_responder_does() {
+        let tracked = TrackedKpSlot {
+            event_id: "ev-tracked",
+            created_at: 10,
+            ..tracked("d-slot")
+        };
+        let entry_at = |d: &str, id: &str, at| RelayKpEntry {
+            created_at: at,
+            ..entry(d, id)
+        };
+        let missing = snapshot(vec![
+            per("wss://a.example.com", vec![]),
+            per("wss://b.example.com", vec![entry_at("other", "ev-x", 20)]),
+            per("wss://c.example.com", vec![entry_at("d-slot", "ev-old", 9)]),
+        ]);
+        assert!(!missing.serves_tracked(&tracked));
+        assert!(!RelayKpSnapshot::default().serves_tracked(&tracked));
+        let mut one = missing;
+        one.responders.push(per(
+            "wss://d.example.com",
+            vec![entry("d-slot", "ev-tracked")],
+        ));
+        assert!(one.serves_tracked(&tracked));
     }
 
     #[test]
@@ -1542,6 +1584,7 @@ mod tests {
             relay_errors: 1,
             expired_init_key_purged: true,
             retired_malformed_slot: true,
+            published_current: true,
         };
         let dbg = format!("{o:?}");
         assert!(
@@ -1604,6 +1647,7 @@ mod tests {
             relay_errors: 1,
             expired_init_key_purged: true,
             retired_malformed_slot: false,
+            published_current: false,
         };
         assert_eq!(
             unacked_rotation.relays_healed, 0,

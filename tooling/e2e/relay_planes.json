@@ -29,7 +29,7 @@
       "neg": []
     },
     "discovery": {
-      "events": [],
+      "events": [10002, 10050, 5],
       "reqs": [
         {"row": "REQ-30443-A", "kinds": [30443], "required": ["kinds", "authors"], "optional": ["limit"]},
         {"row": "REQ-10002-A", "kinds": [10002], "required": ["kinds", "authors"], "optional": ["limit"]},
