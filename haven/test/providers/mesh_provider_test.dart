@@ -149,7 +149,7 @@ void main() {
             reason: 'a build without the mesh has no mesh state',
           );
           final mesh = t.container.read(meshProvider.notifier);
-          expect(await mesh.turnOn(), isFalse);
+          expect(await mesh.turnOn(), MeshTurnOn.failed);
           expect(await mesh.isOn(), isFalse);
         }
       },
@@ -257,7 +257,11 @@ void main() {
 
         final turnedOn = await t.container.read(meshProvider.notifier).turnOn();
 
-        expect(turnedOn, on, reason: '$answer');
+        expect(
+          turnedOn,
+          on ? MeshTurnOn.on : MeshTurnOn.failed,
+          reason: '$answer',
+        );
         expect(t.mesh.calls, ['stats', 'start', 'stats'], reason: '$answer');
         expect(
           t.container.read(meshProvider).requireValue!.on_,
@@ -326,7 +330,7 @@ void main() {
         t.mesh.throws[entry] = StateError('group 0xdeadbeefcafe');
       }
 
-      expect(await mesh.turnOn(), isFalse);
+      expect(await mesh.turnOn(), MeshTurnOn.failed);
       expect(await mesh.keepOn(), isFalse);
       expect(await mesh.isOn(), isFalse, reason: 'unreadable is not on');
       await mesh.turnOff();

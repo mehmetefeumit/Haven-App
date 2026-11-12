@@ -14,7 +14,13 @@
 //  * the service is built in two places, each behind the flag — the
 //    provider (`meshEnabledProvider`) and the Android service's isolate,
 //    which has no provider container (`_mesh`, defaulting to the same
-//    const).
+//    const);
+//  * the radio's platform channels are named in one file, the radio's, and
+//    the radio is built in one, behind the flag and the platform — by the
+//    provider, and by the one function that stands in for it where no
+//    container exists yet (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §C.1). With
+//    either off no channel is touched, by execution in
+//    `test/providers/mesh_radio_flow_test.dart`.
 @TestOn('vm')
 library;
 
@@ -107,5 +113,46 @@ void main() {
         'NostrMeshService(',
       ),
     );
+  });
+
+  test("the radio's channels are named in the radio's file alone, and the "
+      'radio is built only behind the build flag and the platform', () {
+    expect(_filesCalling(sources, 'haven.app/mesh_radio'), {
+      'lib/src/services/mesh_radio.dart',
+    });
+    expect(_filesCalling(sources, RegExp(r'\bAndroidMeshRadio\(')), {
+      // Its own constructor.
+      'lib/src/services/mesh_radio.dart',
+      'lib/src/providers/mesh_provider.dart',
+    });
+    expect(_filesCalling(sources, 'meshRadioProvider'), {
+      'lib/src/providers/mesh_provider.dart',
+      // A logout, and the retry of its wipe before a new identity.
+      'lib/src/providers/identity_provider.dart',
+    });
+    expect(_filesCalling(sources, RegExp(r'\bplatformMeshRadio\(')), {
+      'lib/src/providers/mesh_provider.dart',
+      // The launch's retry of a logout's wipe, before any container exists.
+      'lib/main.dart',
+    });
+
+    String flat(String path) => sources[path]!.replaceAll(RegExp(r'\s+'), ' ');
+    final provider = flat('lib/src/providers/mesh_provider.dart');
+    expect(
+      provider,
+      contains(
+        'if (!ref.watch(meshEnabledProvider) || '
+        '!ref.watch(platformIsAndroidProvider)) { return null; } '
+        'return const AndroidMeshRadio();',
+      ),
+    );
+    expect(
+      provider,
+      contains(
+        'MeshRadio? platformMeshRadio() => meshEnabled && Platform.isAndroid '
+        '? const AndroidMeshRadio() : null;',
+      ),
+    );
+    expect(flat('lib/main.dart'), contains('meshRadio: platformMeshRadio(),'));
   });
 }

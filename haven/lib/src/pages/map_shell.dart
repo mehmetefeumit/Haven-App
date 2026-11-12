@@ -1382,6 +1382,13 @@ class _MapShellState extends ConsumerState<MapShell>
       // A Bluetooth mesh an earlier process left on gets its engine back at
       // this read of its state; a build without the mesh reads nothing.
       ..read(meshProvider);
+    // Then its engine and its radio are brought back to one answer. Not
+    // under a pause this shell missed: a radio the system will not start
+    // from the background would be taken for one that cannot come back, and
+    // mesh turned off for it. The first resume reconciles.
+    if (!pausedAtMount(currentLifecycle)) {
+      unawaited(ref.read(meshProvider.notifier).reconcile());
+    }
     // Receive plane: the live-sync engine, when enabled; it reads for itself
     // whether a session is wanted. The flag-off pollers are relay contact.
     if (liveSyncEnabled) unawaited(_startLiveSync());
@@ -2947,6 +2954,13 @@ class _MapShellState extends ConsumerState<MapShell>
     // the replay above, so the (possibly empty) snapshot it just fed the
     // re-subscriber is superseded well inside that class's 500 ms debounce.
     _invalidateHandoffWindowPoison();
+
+    // The Bluetooth mesh's engine and radio, back to one answer: a permission
+    // revoked or a service stopped while away is seen here. Behind the
+    // hand-off's end, since it reads the engine through the session, and
+    // ahead of the debounce: leaving to change a system setting and coming
+    // straight back is how the two come apart.
+    unawaited(ref.read(meshProvider.notifier).reconcile());
 
     // Re-anchor the engine's subscriptions BEFORE the debounce, deliberately —
     // but on a guard of its own, NOT unthrottled.

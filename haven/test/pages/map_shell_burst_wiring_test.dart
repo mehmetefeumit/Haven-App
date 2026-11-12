@@ -503,6 +503,26 @@ void main() {
         'what brings back the engine of a mesh left on', () {
       expect(flat('_runStartupTasks'), contains('..read(meshProvider);'));
     });
+
+    test('the start-up and every resume bring the mesh and its radio back '
+        'to one answer: the start-up not under a pause it missed, a resume '
+        'once the session is handed back and ahead of the debounce', () {
+      const reconcile =
+          'unawaited(ref.read(meshProvider.notifier).reconcile());';
+      expect(
+        flat('_runStartupTasks'),
+        contains('if (!pausedAtMount(currentLifecycle)) {$reconcile}'),
+      );
+      final resumed = flat('_onResumed');
+      final handedBack = resumed.indexOf('_endMlsSessionHandoff();');
+      final reconciled = resumed.indexOf(reconcile);
+      expect(handedBack, isNonNegative);
+      expect(reconciled, greaterThan(handedBack));
+      expect(
+        resumed.indexOf('if (!resumeExtrasDue()) return;'),
+        greaterThan(reconciled),
+      );
+    });
   });
 
   group('a live-sync-off burst', () {

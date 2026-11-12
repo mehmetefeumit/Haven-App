@@ -3605,6 +3605,46 @@ the mesh calls no mesh entry").
 - **Sharing stopped.** Turning background sharing off
   (`BackgroundSharingNotifier.setEnabled(enabled: false)`) calls
   `mesh_sharing_stopped` once.
+- **The radio's seam.** `MeshRadio` (`haven/lib/src/services/mesh_radio.dart`)
+  is the platform's mesh service as Dart drives it, over two platform
+  channels named in that file alone — one the app asks on, one the service
+  reports on, which needs no listen call. `meshRadioProvider` answers `null`
+  unless the build has the flag and the platform is Android; with `null` no
+  radio channel is touched and the mesh is driven as it is without one
+  (`mesh_radio_flow_test.dart`, "there is no radio, and no radio channel is
+  touched whatever is asked of the mesh";
+  `mesh_entries_behind_flag_test.dart`, "the radio's channels are named in
+  the radio's file alone, and the radio is built only behind the build flag
+  and the platform"). **The channels have no native end in this tree**:
+  every call fails — a start as `failed`, anything else as one fixed-text
+  exception carrying nothing the platform threw (`mesh_radio_test.dart`) —
+  so an Android build with the flag cannot turn mesh on either, and stores
+  nothing trying. What crosses the channels is a permission, whether
+  Bluetooth is on, a state with two booleans, six strings of fixed copy with
+  a time in one, and the phone's Bluetooth name, handed to its caller and
+  held nowhere; no address and no count.
+- **On only with its radio.** Where there is a radio, `MeshNotifier.turnOn`
+  asks the permission, the caller's confirmation and whether Bluetooth is on
+  before anything is stored, then starts the engine — the deadline and the
+  keys — and then the radio; a radio that does not start is stopped and the
+  engine with it, which deletes the keys and the deadline ("a radio that
+  does not start takes the keys back: the radio is stopped, then the engine,
+  once"). Turning off stops the radio first and the engine whatever the
+  radio did; keeping on moves the engine's deadline, then tells the service.
+  A turn-on, a turn-off, a keep-on and a reconcile run one at a time in the
+  order asked, and a reconcile asked while one of the user's is asked or
+  running is dropped, so the radio's own report cannot undo what the user is
+  doing ("a stopped event in the middle of a turn-off starts nothing"). A
+  reconcile — at the shell's start-up, at every resume, on every report of
+  the radio — reads both: a radio up beside an engine that is off is
+  stopped and the engine's keys deleted; an engine on beside a radio that
+  stopped gets the radio back, asked once, if the service still wants it and
+  holds its permission, and otherwise is turned off with a notice owed to
+  the user ("is this table"; "asks a radio that will not come back once, and
+  mesh goes off with one notice, whatever reports follow"). A logout stops
+  the radio before `wipe_all_mls_state`, and so does the retry of that wipe
+  at a launch and before a new identity ("stops the radio before the wipe,
+  and a radio that cannot be asked costs the wipe nothing").
 - **Logs.** The mesh's Dart code writes no log line, and a location the mesh
   brought is logged by the shared ingest in the very line a location a seal's
   relay drive replayed is, so no line tells which carrier brought it — that
@@ -3619,7 +3659,11 @@ burst's pause. A device with no circle eligible to publish arms no tick, so
 it drives the mesh at none: what it carried is counted as passed on only at
 its next drive. The state the provider holds is read when it is built and
 after each of its own entries; a deadline that passes is seen at the next
-read, not pushed.
+read, not pushed. The radio's notices have no strings yet, so no radio is
+started in any build: a turn-on where there is a radio fails before anything
+is asked or stored. An engine that would not stop keeps its keys until a
+later reconcile stops it, or the deadline. Nothing consumes a tap on a
+notice and nothing asks the notification permission: both wait for the UI.
 
 #### Statistics, and what crosses the bridge
 

@@ -13,6 +13,7 @@ import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/member_profile_refresh_provider.dart';
+import 'package:haven/src/providers/mesh_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_prefetch_provider.dart';
 import 'package:haven/src/services/background_location_manager.dart';
@@ -197,6 +198,7 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
       final marker = PendingMlsWipeService(
         prefs: prefs,
         circleService: ref.read(circleServiceProvider),
+        meshRadio: ref.read(meshRadioProvider),
       );
       await marker.retryWipeIfPending();
       // A still-set marker means the wipe threw and the orphaned state was NOT
@@ -356,6 +358,16 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     // must not keep the key on the device.
     await _stopLiveSync(stopsGivenUp.future);
     stopBudget?.cancel();
+    // The Bluetooth mesh's radio goes before the wipe that empties its
+    // engine: the service keeps a copy of the deadline to come back by itself
+    // after a restart, and that copy must not outlive the identity. Nothing
+    // where the build or the platform has no radio.
+    try {
+      await ref.read(meshRadioProvider)?.stop();
+    } on Object {
+      // A service left running finds no engine at its next entry and stops
+      // itself; the pending-wipe marker's retry stops it again.
+    }
     // (The M10.1 pending-wipe marker was already set as the FIRST action of
     // this method — see the top of deleteIdentity — so it covers the whole
     // logout, not just the wipe call.)

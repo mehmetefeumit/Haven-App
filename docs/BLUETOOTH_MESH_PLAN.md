@@ -1929,6 +1929,79 @@ relay record is kept per connection, so the same frame sent twice on one
 connection is one frame. `CLAUDE.md`'s CI section still calls the PR soak
 profile "four durability scenarios"; it is six, and the file is the owner's.
 
+- **M3c**, the Dart seam to the radio, the turn-on, turn-off and keep-on
+  ordering and the reconcile (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §C;
+  `haven/lib/src/services/mesh_radio.dart`,
+  `haven/lib/src/providers/mesh_provider.dart`). Dart only. No UI: no
+  button, no sheet, no string. No Kotlin, no Rust, no new package.
+  **The seam.** `MeshRadio` (interface) and `AndroidMeshRadio`, over
+  `haven.app/mesh_radio` (methods) and `haven.app/mesh_radio_state` (what
+  the service reports: a status, or the name of a tapped notice's action).
+  `meshRadioProvider` answers `null` unless the build has the flag and the
+  platform is Android; with `null` no channel is touched and the mesh is
+  driven as M2g-2a left it. The channels are named in that file alone and
+  the radio is built in one, behind both gates
+  (`mesh_entries_behind_flag_test.dart`). **The channels have no native
+  end**: a start answers `failed`, every other entry throws one fixed-text
+  exception, nothing is logged — so an Android build with the flag cannot
+  turn mesh on, and stores nothing trying.
+  **Turning on** (`MeshNotifier.turnOn`, answering a typed `MeshTurnOn`):
+  the radio's permission, the caller's confirmation, whether Bluetooth is
+  on — each a refusal with nothing to unwind — then `mesh.start()`, then
+  `radio.start` with the notices' words under the deadline the engine holds.
+  A radio that does not start is stopped and the engine with it, which
+  deletes the keys and the deadline; if that fails the keys stay until a
+  reconcile.
+  **Turning off**: the radio, then the engine whatever the radio did.
+  **Keeping on**: the engine, then `radio.sync` with the new deadline.
+  **One queue.** A turn-on, a turn-off, a keep-on and a reconcile run one at
+  a time in the order asked; a reconcile asked while one of the user's is
+  asked or running is dropped, and each of those ends with one of its own.
+  **Reconcile** runs at the shell's start-up, at every resume once the
+  session is handed back, and on every report of the radio, from what the
+  engine and the radio report then: equal, nothing; a radio up beside an
+  engine that is off, the radio is stopped and the engine's keys deleted;
+  an engine on beside a radio that stopped, the radio is started again if
+  the service still wants it and holds its permission, and otherwise — or
+  if that start fails — mesh is turned off and `meshStoppedNoticeProvider`
+  set, once; an engine that cannot be read, nothing.
+  **Logout** stops the radio before `wipe_all_mls_state`; so does the retry
+  of that wipe, at a launch and before a new identity.
+  **Not as the design has it.** The reporting channel is a message channel,
+  not an `EventChannel`: `check_ios_background_publish.sh` allows one
+  `receiveBroadcastStream(` under `lib/`, the iOS position stream's. It has
+  no listen call, so a missing native end fails nothing, and the native end
+  is not told when Dart starts listening. The notices' six strings do not
+  exist yet (M3d), so `meshNoticeCopyProvider` answers `null`, and with
+  `null` no radio is started: a turn-on fails before anything is asked. The
+  Bluetooth-name step is a callback the caller hands `turnOn`, so the name
+  never passes through the provider. Both unwinds stop the radio before the
+  engine, where the design stops the engine alone: "never a second start"
+  would otherwise rest on the native end clearing its flag at every failed
+  start. A radio whose status cannot be read is taken as stopped by its own
+  doing, so an engine on beside it goes off; the design's table has no such
+  row. The start-up's reconcile is skipped under a pause the shell missed —
+  a start the system refuses from the background would turn mesh off — and
+  left to the first resume. `every_failure_has_fixed_copy` has no ARB key to
+  map to: each failure is a variant of `MeshTurnOn`, and no exception text
+  leaves the provider. The notification permission is not asked: §C.1 has
+  no entry for it.
+  **Not built here.** The native end. The strings and everything on screen;
+  nothing calls `turnOn` outside a test. A consumer of notice taps
+  (`actions`): one listener must take both actions, since a second would
+  miss what the native end hands over at the first listen.
+
+Residuals of M3c. A turn-off whose engine stop failed leaves the failure as
+the state; if the reconcile that ends it then succeeds, mesh is off, the
+state still shows the failure until the next read, and the notice is set
+for a stop the user asked for. A radio stopped beside an engine that is off
+is left alone whatever the service's flag says, as the design's table has
+it. With the flag on and no radio — iOS — turning on still starts an engine
+no radio serves, as at M2g-2a, and nothing on screen reaches it. That the
+shell reconciles at its start-up and at a resume is pinned from the source,
+like its other handlers. Mutation pass: 45 changes of a line or two to the
+shipped code, each failing a test.
+
 ### Proposed CLAUDE.md wording (owner to approve)
 
 Each is the text as it stands, then the text proposed. Nothing in
