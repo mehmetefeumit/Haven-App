@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/text_input_privacy.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
+import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
@@ -16,6 +17,7 @@ import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/own_reachability_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/storage_reset_notice_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
@@ -45,7 +47,10 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 /// 2. Seed default relays — before anything is published, since an unseeded
 ///    relay list reads as empty and a publish to it does nothing.
 /// 3. Start the reachability publish: relay lists (kind 10002, then 10050),
-///    then the KeyPackage (kind 30443).
+///    then the KeyPackage (kind 30443). When the storage-reset notice is owed
+///    the core publishes nothing until it is answered, and MapShell, which
+///    otherwise shows it, comes only after this screen: it is answered here
+///    first, and again if a publish reports it still held.
 /// 4. Save the display name locally (a fast SQLCipher write; no relay yet).
 /// 5. Save the optional photo, if one was chosen, LOCALLY too — chained
 ///    *after* the name save so the local merge always carries the name —
@@ -109,6 +114,10 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
 
   /// The reachability publish timed out or proved a failure: Retry is offered.
   bool _setupFailed = false;
+
+  /// The storage-reset notice's answer was not saved, so nothing was
+  /// published: Retry asks it again (its own snackbar says why).
+  bool _resetUnanswered = false;
 
   /// The identity exists and the profile is saved: a Retry only publishes.
   bool _profileSaved = false;
@@ -186,11 +195,12 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
     // `context` across an async gap.
     final l10n = AppLocalizations.of(context);
     final messenger = ScaffoldMessenger.of(context);
-    final reachability = ref.read(ownReachabilityProvider.notifier);
 
-    final Future<void> publish;
+    Future<void>? publish;
+    void published(Future<void> run) => publish = run;
     if (_profileSaved) {
-      publish = reachability.republish();
+      await _startPublish(published);
+      if (!mounted) return;
     } else {
       // (1) Create the keypair — only when none exists (idempotent resume).
       final hasIdentity = await ref.read(identityServiceProvider).hasIdentity();
@@ -227,7 +237,8 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
 
       // (3) Relay lists (10002, then 10050), then the KeyPackage (30443).
       // Started now so it runs while the profile is saved; awaited in (6).
-      publish = reachability.republish();
+      await _startPublish(published);
+      if (!mounted) return;
 
       // Make sure the existing-name restore has finished before reading the
       // field, so a very fast tap on a resume can't publish a fresh random
@@ -282,13 +293,28 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
     // (6) Finishing setup: nobody can invite this account until its relay
     // lists and KeyPackage are where an inviter looks.
     setState(() => _finishing = true);
-    final ready = await _awaitReachable(publish);
+    final first = publish;
+    var ready = first != null && await _awaitReachable(first);
     if (!mounted) return;
+    // Held for a notice no launch flag announced (an answer whose save
+    // failed earlier): answer it, then publish and wait once more.
+    if (first != null &&
+        !ready &&
+        ref.read(ownReachabilityProvider).status ==
+            OwnReachability.awaitingReset) {
+      publish = null;
+      await _startPublish(published);
+      if (!mounted) return;
+      final again = publish;
+      ready = again != null && await _awaitReachable(again);
+      if (!mounted) return;
+    }
     if (!ready) {
       setState(() {
         _busy = false;
         _finishing = false;
-        _setupFailed = true;
+        _resetUnanswered = publish == null;
+        _setupFailed = !_resetUnanswered;
       });
       return;
     }
@@ -300,6 +326,32 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
     if (!mounted) return;
     // (8) Complete onboarding — AppRouter swaps in the main shell.
     await ref.read(onboardingControllerProvider.notifier).markCompleted();
+  }
+
+  /// Starts the reachability publish and hands it to [onPublish] — once the
+  /// storage-reset notice is answered, when the core holds publishing for it.
+  /// An answer that is not saved starts nothing; its snackbar's Try Again
+  /// starts the publish once it is.
+  Future<void> _startPublish(void Function(Future<void> run) onPublish) async {
+    if (!_resetUnanswered &&
+        !ref.read(storageResetNoticeProvider) &&
+        ref.read(ownReachabilityProvider).status !=
+            OwnReachability.awaitingReset) {
+      onPublish(ref.read(ownReachabilityProvider.notifier).republish());
+      return;
+    }
+    final navigator = Navigator.of(context);
+    await answerStorageResetNotice(
+      context,
+      openRelaySettings: () => openRelaySettingsForNotice(
+        navigator,
+        (_) => const RelaySettingsPage(),
+      ),
+      onAcknowledged: (container) {
+        if (mounted) setState(() => _resetUnanswered = false);
+        onPublish(container.read(ownReachabilityProvider.notifier).republish());
+      },
+    );
   }
 
   /// Whether [publish] proved others can invite this account within
@@ -460,7 +512,7 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
                     : l10n.onboardingCreateIdentityLoading,
               )
             : Text(
-                _setupFailed
+                _setupFailed || _resetUnanswered
                     ? l10n.commonRetry
                     : l10n.onboardingCreateIdentityCta,
               ),

@@ -109,11 +109,12 @@ RelayRingSlotState summarizePresence(Iterable<KindPresence> kinds) {
 
 /// What a Republish achieved, for its fixed SnackBar copy.
 enum RepublishOutcome {
-  /// Every relay that answered serves every expected kind.
+  /// Every own relay answered serving every expected kind, and no lookup
+  /// relay that answered misses one or serves an old one.
   allCurrent,
 
-  /// A relay that answered still misses an expected kind, or serves an old
-  /// one.
+  /// An own relay did not answer, or a relay that answered still misses an
+  /// expected kind or serves an old one.
   incomplete,
 
   /// Nothing is published until the storage-reset notice is answered.
@@ -299,10 +300,21 @@ class RelayStatusNotifier extends AsyncNotifier<RelayStatusState> {
         return RepublishOutcome.heldForReset;
       }
       await checkAllRelays();
-      final answered = (state.valueOrNull?.relays ?? const <RelayPresence>[])
+      final relays = state.valueOrNull?.relays ?? const <RelayPresence>[];
+      final own = relays.where((r) => r.own);
+      // An inviter finds the KeyPackage only on an own relay, so an own relay
+      // that did not answer proves nothing; a lookup relay is a fallback that
+      // may be down, but one that answered and lacks a list is not "done".
+      final ownCurrent =
+          own.isNotEmpty &&
+          own.expand((r) => r.expected).every((k) => k == KindPresence.current);
+      final lookupCurrent = relays
+          .where((r) => !r.own)
           .expand((r) => r.expected)
-          .where((k) => k != KindPresence.noAnswer);
-      return answered.every((k) => k == KindPresence.current)
+          .every(
+            (k) => k == KindPresence.current || k == KindPresence.noAnswer,
+          );
+      return ownCurrent && lookupCurrent
           ? RepublishOutcome.allCurrent
           : RepublishOutcome.incomplete;
     } finally {

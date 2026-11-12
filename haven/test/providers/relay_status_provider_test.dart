@@ -345,7 +345,10 @@ void main() {
                 _row(_inbox, inboxRelayList: OwnEventPresenceFfi.current),
                 _row(
                   'wss://down.example.com',
+                  own: false,
+                  lookup: true,
                   relayList: OwnEventPresenceFfi.noAnswer,
+                  inboxRelayList: OwnEventPresenceFfi.noAnswer,
                 ),
               ];
               const kp = KeyPackageMaintenancePublished(
@@ -375,7 +378,9 @@ void main() {
         expect(
           outcome,
           RepublishOutcome.allCurrent,
-          reason: 'a relay that did not answer is not counted against it',
+          reason:
+              'a lookup relay that did not answer is not counted '
+              'against it',
         );
         expect(
           container.read(relayStatusProvider).value!.isRepublishing,
@@ -383,6 +388,93 @@ void main() {
         );
       },
     );
+
+    /// Republishes against a check that answers [after].
+    Future<RepublishOutcome> republishAgainst(
+      List<OwnRelayPresenceFfi> after,
+    ) async {
+      final relay = MockRelayService()..ownPresence = after;
+      final container = _container(
+        relay,
+        extra: [
+          keyPackagePublisherProvider.overrideWith((ref) async {
+            await Future<void>.value();
+            const kp = KeyPackageMaintenancePublished(
+              relaysAcked: 1,
+              isFreshSlotMinted: false,
+            );
+            ref.read(ownReachabilityProvider.notifier)
+              ..recordRelayLists(relayListsCurrent)
+              ..recordKeyPackage(kp);
+            return kp;
+          }),
+        ],
+      );
+      await container.read(relayStatusProvider.future);
+      return container.read(relayStatusProvider.notifier).republish();
+    }
+
+    OwnRelayPresenceFfi ownKp(OwnEventPresenceFfi p) =>
+        _row(_kp, keyPackage: p, relayList: p);
+    OwnRelayPresenceFfi ownInbox(OwnEventPresenceFfi p) =>
+        _row(_inbox, inboxRelayList: p);
+    OwnRelayPresenceFfi lookup(OwnEventPresenceFfi p) => _row(
+      fallbackDiscoveryRelays.first,
+      own: false,
+      lookup: true,
+      relayList: p,
+      inboxRelayList: p,
+    );
+
+    test('no relay answering is never reported as done', () async {
+      expect(
+        await republishAgainst([
+          ownInbox(OwnEventPresenceFfi.noAnswer),
+          ownKp(OwnEventPresenceFfi.noAnswer),
+          lookup(OwnEventPresenceFfi.noAnswer),
+        ]),
+        RepublishOutcome.incomplete,
+      );
+    });
+
+    test('a lookup relay answering does not stand in for an own relay that '
+        'did not', () async {
+      // The KeyPackage lives only on own relays: without one heard, nobody
+      // is shown to be able to invite the user.
+      expect(
+        await republishAgainst([
+          ownInbox(OwnEventPresenceFfi.current),
+          ownKp(OwnEventPresenceFfi.noAnswer),
+          lookup(OwnEventPresenceFfi.current),
+        ]),
+        RepublishOutcome.incomplete,
+      );
+    });
+
+    test(
+      'a lookup relay that answered without the lists is not done',
+      () async {
+        expect(
+          await republishAgainst([
+            ownInbox(OwnEventPresenceFfi.current),
+            ownKp(OwnEventPresenceFfi.current),
+            lookup(OwnEventPresenceFfi.missing),
+          ]),
+          RepublishOutcome.incomplete,
+        );
+      },
+    );
+
+    test('every own relay current is done', () async {
+      expect(
+        await republishAgainst([
+          ownInbox(OwnEventPresenceFfi.current),
+          ownKp(OwnEventPresenceFfi.current),
+          lookup(OwnEventPresenceFfi.current),
+        ]),
+        RepublishOutcome.allCurrent,
+      );
+    });
 
     test('a relay still missing a kind after it is reported', () async {
       final relay = MockRelayService()

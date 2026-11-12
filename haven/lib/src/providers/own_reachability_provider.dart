@@ -159,8 +159,8 @@ class OwnReachabilityNotifier extends Notifier<OwnReachabilityState> {
       _settle(keyPackage: state.keyPackage, relayLists: result);
 
   /// Runs the publisher again (relay lists, then the `KeyPackage`) and
-  /// completes when it has reported; [OwnReachability.checking] meanwhile.
-  /// Never throws.
+  /// completes when it has reported; [OwnReachability.checking] meanwhile,
+  /// unless it is [OwnReachability.ready]. Never throws.
   Future<void> republish() async {
     final republish = ++_republishes;
     _retrying = true;
@@ -187,9 +187,11 @@ class OwnReachabilityNotifier extends Notifier<OwnReachabilityState> {
     var status = _retrying
         ? OwnReachability.checking
         : reachabilityOf(keyPackage, relayLists);
-    // An offline tick proves nothing, so it does not take back a ready.
+    // Neither a Retry still running nor an offline tick proves anything, so
+    // neither takes back a ready.
     if (state.status == OwnReachability.ready &&
-        status == OwnReachability.cantCheck) {
+        (status == OwnReachability.checking ||
+            status == OwnReachability.cantCheck)) {
       status = OwnReachability.ready;
     }
     state = OwnReachabilityState(

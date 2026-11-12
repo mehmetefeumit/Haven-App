@@ -1650,6 +1650,33 @@ void main() {
       }
     });
 
+    test('a write only a lookup relay refused keeps the nominal cadence', () {
+      // Rust reports Unacknowledged with ownConfirmed when an own relay
+      // already serves the list and only a lookup relay refused the heal:
+      // the account is invitable, and any of the lookup relays can refuse.
+      fakeAsync((async) {
+        foreground();
+        final fake = _FakeMaintenanceService()
+          ..relayListOutcome = _bothLists(
+            const RelayListCategoryResult(
+              action: RelayListMaintenanceAction.unacknowledged,
+              ownConfirmed: true,
+              respondersProbed: 2,
+            ),
+          );
+        final container = _containerWith(fake)
+          ..read(maintenanceSchedulerProvider.notifier);
+
+        _timeToNextRelayListTick(async, fake);
+        expect(
+          _timeToNextRelayListTick(async, fake),
+          _withinJitterOf(relayListMaintenanceInterval),
+        );
+
+        container.dispose();
+      });
+    });
+
     test('a confirmed tick clears the ladder', () {
       fakeAsync((async) {
         foreground();

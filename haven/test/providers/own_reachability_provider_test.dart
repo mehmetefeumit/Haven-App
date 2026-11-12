@@ -265,6 +265,52 @@ void main() {
       expect(c.read(ownReachabilityProvider).status, OwnReachability.ready);
     });
 
+    test('a Retry while offline does not take back a ready; one that proves '
+        'a failure does', () async {
+      final gate = Completer<void>();
+      KeyPackageMaintenanceOutcome answer = _failed(
+        KeyPackageFailureKind.noRelayResponded,
+      );
+      var lists = _offlineLists;
+      final c = container(
+        overrides: [
+          keyPackagePublisherProvider.overrideWith((ref) async {
+            await gate.future;
+            ref.read(ownReachabilityProvider.notifier)
+              ..recordRelayLists(lists)
+              ..recordKeyPackage(answer);
+            return answer;
+          }),
+        ],
+      );
+      c.read(ownReachabilityProvider.notifier)
+        ..recordRelayLists(relayListsCurrent)
+        ..recordKeyPackage(_published);
+      final notifier = c.read(ownReachabilityProvider.notifier);
+
+      final retry = notifier.republish();
+      expect(
+        c.read(ownReachabilityProvider).status,
+        OwnReachability.ready,
+        reason: 'a Retry running proves nothing yet',
+      );
+      gate.complete();
+      await retry;
+      expect(
+        c.read(ownReachabilityProvider).status,
+        OwnReachability.ready,
+        reason: 'a Retry that reached no relay proves nothing',
+      );
+
+      answer = _failed(KeyPackageFailureKind.publishNotAcked);
+      lists = _lists(
+        RelayListMaintenanceAction.unacknowledged,
+        respondersProbed: 1,
+      );
+      await notifier.republish();
+      expect(c.read(ownReachabilityProvider).status, OwnReachability.notReady);
+    });
+
     test('a superseded Retry does not end the newer one\'s checking', () async {
       final gates = [Completer<void>(), Completer<void>()];
       var runs = 0;

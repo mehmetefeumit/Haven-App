@@ -16,14 +16,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/onboarding/create_identity_screen.dart';
 import 'package:haven/src/pages/onboarding/import_nsec_screen.dart';
+import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/storage_reset_notice_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/maintenance_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/widgets/common/storage_reset_notice_dialog.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:haven/src/widgets/identity/public_profile_notice.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -50,16 +53,19 @@ void main() {
     _FakeLocationService? locationService,
     _FakeMaintenance? maintenance,
     MockRelayPreferencesService? relayPrefs,
+    MockCircleService? circles,
+    bool resetNoticeOwed = false,
   }) {
     final prefs = relayPrefs ?? MockRelayPreferencesService();
     return [
+      storageResetNoticeProvider.overrideWith((ref) => resetNoticeOwed),
       identityServiceProvider.overrideWithValue(service),
       onboardingControllerProvider.overrideWith(
         (ref) => OnboardingController(
           const OnboardingFlags(introSeen: true, completed: false),
         ),
       ),
-      circleServiceProvider.overrideWithValue(MockCircleService()),
+      circleServiceProvider.overrideWithValue(circles ?? MockCircleService()),
       relayServiceProvider.overrideWithValue(MockRelayService()),
       profileServiceProvider.overrideWithValue(
         profileService ?? MockProfileService(),
@@ -601,6 +607,196 @@ void main() {
     },
   );
 
+  // ── The storage-reset notice during onboarding ──────────────────────────
+  //
+  // The core publishes nothing until the notice is answered, and MapShell,
+  // which otherwise shows it, comes only after this screen: a user who owes
+  // it must be able to answer it here, or Retry can never succeed.
+
+  bool resetNoticeStillOwed(WidgetTester tester) => ProviderScope.containerOf(
+    tester.element(find.byType(CreateIdentityScreen)),
+  ).read(storageResetNoticeProvider);
+
+  testWidgets(
+    'an owed notice is answered before anything is published, then the user '
+    'enters, and the map is not shown it again',
+    (tester) async {
+      final circles = _ResetCircles();
+      final maintenance = _FakeMaintenance(MockRelayPreferencesService())
+        ..held = () => !circles.acknowledged;
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: _RecordingIdentityService(),
+          maintenance: maintenance,
+          circles: circles,
+          resetNoticeOwed: true,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+
+      expect(find.byType(StorageResetNoticeDialog), findsOneWidget);
+      expect(maintenance.calls, isEmpty, reason: 'it would be held anyway');
+
+      await tester.tap(find.byKey(WidgetKeys.storageResetContinue));
+      await pumpFrames(tester);
+
+      expect(circles.acknowledged, isTrue);
+      expect(maintenance.calls, ['relayList', 'kp'], reason: 'one publish');
+      expect(find.text(setupError), findsNothing);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      expect(await onboardingCompleted(), isTrue);
+      expect(
+        resetNoticeStillOwed(tester),
+        isFalse,
+        reason: 'answered here, so MapShell does not ask again',
+      );
+    },
+  );
+
+  testWidgets(
+    'Relay settings from the notice: nothing is acknowledged or published '
+    'until the user comes back',
+    (tester) async {
+      final circles = _ResetCircles();
+      final maintenance = _FakeMaintenance(MockRelayPreferencesService())
+        ..held = () => !circles.acknowledged;
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: _RecordingIdentityService(),
+          maintenance: maintenance,
+          circles: circles,
+          resetNoticeOwed: true,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.storageResetOpenRelaySettings));
+      await pumpFrames(tester);
+
+      expect(find.byType(RelaySettingsPage), findsOneWidget);
+      expect(circles.acknowledged, isFalse);
+      expect(maintenance.calls, isEmpty);
+
+      await tester.pageBack();
+      await pumpFrames(tester);
+
+      expect(circles.acknowledged, isTrue);
+      expect(maintenance.calls, ['relayList', 'kp']);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+      expect(await onboardingCompleted(), isTrue);
+    },
+  );
+
+  testWidgets(
+    'a publish held for a notice no launch flag announced shows the notice, '
+    'not the connection error, and then enters',
+    (tester) async {
+      final circles = _ResetCircles();
+      final maintenance = _FakeMaintenance(MockRelayPreferencesService())
+        ..held = () => !circles.acknowledged;
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: _RecordingIdentityService(),
+          maintenance: maintenance,
+          circles: circles,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+
+      expect(find.byType(StorageResetNoticeDialog), findsOneWidget);
+      expect(find.text(setupError), findsNothing);
+
+      await tester.tap(find.byKey(WidgetKeys.storageResetContinue));
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      expect(await onboardingCompleted(), isTrue);
+      expect(maintenance.calls, ['relayList', 'kp', 'relayList', 'kp']);
+    },
+  );
+
+  testWidgets('an answer that is not saved publishes nothing and blames no '
+      'connection; Retry asks again, and Try Again alone releases it', (
+    tester,
+  ) async {
+    final circles = _ResetCircles()
+      ..shouldThrowOnAcknowledgeStorageReset = true;
+    final maintenance = _FakeMaintenance(MockRelayPreferencesService())
+      ..held = () => !circles.acknowledged;
+
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(
+        service: _RecordingIdentityService(),
+        maintenance: maintenance,
+        circles: circles,
+        resetNoticeOwed: true,
+      ),
+      settle: false,
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+    await pumpFrames(tester);
+    await tester.tap(find.byKey(WidgetKeys.storageResetContinue));
+    await pumpFrames(tester);
+
+    final l10n = l10nOf(tester, CreateIdentityScreen);
+    expect(find.text(l10n.storageResetAcknowledgeFailed), findsOneWidget);
+    expect(find.text(setupError), findsNothing);
+    expect(find.text('Retry'), findsOneWidget);
+    expect(maintenance.calls, isEmpty);
+    expect(await onboardingCompleted(), isFalse);
+
+    // Retry asks the notice again rather than publishing into the hold.
+    await tester.tap(find.byIcon(Icons.close));
+    await pumpFrames(tester);
+    await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+    await pumpFrames(tester);
+    expect(find.byType(StorageResetNoticeDialog), findsOneWidget);
+    await tester.tap(find.byKey(WidgetKeys.storageResetContinue));
+    await pumpFrames(tester);
+    expect(maintenance.calls, isEmpty);
+
+    // The snackbar's Try Again saves it and starts the publish.
+    circles.shouldThrowOnAcknowledgeStorageReset = false;
+    await tester.tap(find.text(l10n.commonTryAgain));
+    await pumpFrames(tester);
+    expect(maintenance.calls, ['relayList', 'kp']);
+
+    await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+    await pumpFrames(tester);
+    expect(find.byType(StorageResetNoticeDialog), findsNothing);
+    await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+    await pumpFrames(tester);
+    expect(await onboardingCompleted(), isTrue);
+  });
+
   // ── Optional profile photo ────────────────────────────────────────────────
 
   testWidgets('shows the optional add-photo affordance, not a remove action', (
@@ -988,12 +1184,21 @@ class _FakeMaintenance extends MaintenanceService {
   /// When set, the relay-list step throws it.
   Object? relayListThrows;
 
+  /// While true, the core holds both steps for the storage-reset notice.
+  bool Function() held = () => false;
+
   @override
   Future<RelayListMaintenanceResult> maintainRelayList() async {
     calls.add('relayList');
     seededAtFirstPublish ??= _prefs.didSeed;
     final boom = relayListThrows;
     if (boom != null) throw boom;
+    if (held()) {
+      return const RelayListMaintenanceResult(
+        inbox: _heldList,
+        keyPackage: _heldList,
+      );
+    }
     return relayListsCurrent;
   }
 
@@ -1001,7 +1206,29 @@ class _FakeMaintenance extends MaintenanceService {
   Future<KeyPackageMaintenanceOutcome> maintainKeyPackage() async {
     calls.add('kp');
     seededAtFirstPublish ??= _prefs.didSeed;
+    if (held()) {
+      return const KeyPackageMaintenanceFailed(
+        KeyPackageFailureKind.awaitingResetAcknowledgement,
+      );
+    }
     if (kpAnswers.isEmpty) return _published;
     return kpAnswers.removeAt(0)();
+  }
+}
+
+const _heldList = RelayListCategoryResult(
+  action: RelayListMaintenanceAction.awaitingResetAcknowledgement,
+  ownConfirmed: false,
+);
+
+/// Records whether the storage reset was acknowledged — a save that threw
+/// was not.
+class _ResetCircles extends MockCircleService {
+  bool acknowledged = false;
+
+  @override
+  Future<void> acknowledgeStorageReset() async {
+    await super.acknowledgeStorageReset();
+    acknowledged = true;
   }
 }

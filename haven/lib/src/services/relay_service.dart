@@ -410,15 +410,16 @@ class RelayListCategoryResult {
   /// Relay probes/publishes that errored (tallied, never fatal).
   final int relayErrors;
 
-  /// Whether the next tick should come sooner than the nominal cadence: the
-  /// list may not be findable, and a relay coming back can fix that. The
-  /// other actions wait on the user (or on their deliberate setting), which no
-  /// retry substitutes for.
+  /// Whether the next tick should come sooner than the nominal cadence: no
+  /// own relay is known to serve the list, and a relay coming back can fix
+  /// that. A write only a lookup relay refused leaves an own-confirmed list
+  /// findable, so it waits for the nominal tick. The other actions wait on the
+  /// user (or on their deliberate setting), which no retry substitutes for.
   bool get needsPromptRetry => switch (action) {
-    RelayListMaintenanceAction.failed ||
-    RelayListMaintenanceAction.unacknowledged => true,
+    RelayListMaintenanceAction.failed => true,
     RelayListMaintenanceAction.alreadyCurrent ||
-    RelayListMaintenanceAction.republished => !ownConfirmed,
+    RelayListMaintenanceAction.republished ||
+    RelayListMaintenanceAction.unacknowledged => !ownConfirmed,
     RelayListMaintenanceAction.suppressed ||
     RelayListMaintenanceAction.awaitingResetAcknowledgement ||
     RelayListMaintenanceAction.nothingConfigured => false,

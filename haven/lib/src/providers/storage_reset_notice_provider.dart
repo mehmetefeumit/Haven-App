@@ -4,8 +4,9 @@
 /// reset, which deletes every pre-migration store and answers `true` while its
 /// marker file is on disk — whichever isolate's reset wrote it, since a
 /// background isolate may open a store first. `MapShell` reads this once on
-/// its first frame, shows the notice if `true`, then flips it back to `false`
-/// so a rebuild never re-shows it within the same app session. The marker
+/// its first frame — or onboarding, before it publishes, for a user who has
+/// not finished it — shows the notice if `true`, then flips it back to
+/// `false` so neither shows it again within the same app session. The marker
 /// itself is only removed when the user answers the notice, so a notice that
 /// was never answered is owed again next launch.
 library;
@@ -40,17 +41,33 @@ Future<void> showStorageResetNoticeIfOwed(
   required Future<void> Function() openRelaySettings,
 }) async {
   if (!ref.read(storageResetNoticeProvider)) return;
-  ref.read(storageResetNoticeProvider.notifier).state = false;
-  // The container, not `ref`: an answer saved by a later Try Again may land
-  // after the shell that asked has gone.
+  await answerStorageResetNotice(
+    context,
+    openRelaySettings: openRelaySettings,
+    onAcknowledged: (container) => container
+      ..invalidate(keyPackagePublisherProvider)
+      ..read(keyPackagePublisherProvider),
+  );
+}
+
+/// Runs the notice to its answer ([StorageResetNoticeDialog.answer]) for
+/// whichever screen reaches it first — MapShell, or onboarding for a user who
+/// owes it before finishing — and marks it no longer owed this session, so
+/// the other never shows it again. [onAcknowledged] is handed the container,
+/// not a `ref`: an answer saved by a later Try Again may land after the
+/// screen that asked has gone.
+Future<bool> answerStorageResetNotice(
+  BuildContext context, {
+  required Future<void> Function() openRelaySettings,
+  required void Function(ProviderContainer container) onAcknowledged,
+}) {
   final container = ProviderScope.containerOf(context, listen: false);
-  await StorageResetNoticeDialog.answer(
+  container.read(storageResetNoticeProvider.notifier).state = false;
+  return StorageResetNoticeDialog.answer(
     context,
     openRelaySettings: openRelaySettings,
     acknowledge: container.read(circleServiceProvider).acknowledgeStorageReset,
-    onAcknowledged: () => container
-      ..invalidate(keyPackagePublisherProvider)
-      ..read(keyPackagePublisherProvider),
+    onAcknowledged: () => onAcknowledged(container),
   );
 }
 
