@@ -217,9 +217,10 @@ No run is accepted without it. The evidence cannot come from:
 * **The app under test.** A wedged publisher is usually still convinced it is
   publishing; the defendant does not get to testify.
 * **The receiving phone's screen.** The Android peer's foreground-service fetch
-  runs once per `kLocationUpdateInterval` (120 s) and the marker age pill only
-  thresholds at 5 min, so a perfectly healthy run routinely *reads* as
-  168 + 120 s stale. The pill is a UI affordance, not an instrument.
+  runs once per publish cycle (once per `kLocationUpdateInterval`, 120 s, until
+  2026-11-12) and the marker age pill only thresholds at 5 min, so a perfectly
+  healthy run can *read* as up to two publish intervals stale, 168 + 168 s. The
+  pill is a UI affordance, not an instrument.
 
 It comes from the relay: the sequence of `created_at` values the phone actually
 landed there.

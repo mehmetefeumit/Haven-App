@@ -381,6 +381,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// that exists only inside the foreground-service engine.
   final PublishWakeLock _wakeLock = const PublishWakeLock();
 
+  /// When this isolate last fetched. Read only by a cycle that got no publish
+  /// to a relay (step 9).
+  DateTime? _lastBackgroundFetchAt;
+
   /// Number of completed publish cycles since the last prune. The bg
   /// isolate calls `pruneExpiredLastKnown` once every
   /// [_cyclesPerPrune] cycles to bound the SQLCipher last-known table
@@ -2187,14 +2191,19 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    stale during long backgrounded sessions and the foreground
       //    rehydrates to old data on resume.
       //
-      //    On every cycle that reaches here, i.e. one per publish burst
-      //    (owner-directed 2026-11-12): what the store holds when the app
-      //    opens is what the map shows until the live plane catches up, so
-      //    the gap between fetches is the age a returning user sees. A
-      //    burst whose tail the stagger budget defers, or whose publish
-      //    failed, is followed sooner by another cycle, which fetches too. A
-      //    cycle that handed publishing back to the foreground fetches
-      //    nothing: the foreground receives for itself.
+      //    On every cycle that got a publish to a relay (owner-directed
+      //    2026-11-12): what the store holds when the app opens is what the
+      //    map shows until the live plane catches up, so the gap between
+      //    fetches is the age a returning user sees. A burst whose tail the
+      //    stagger budget defers is followed sooner by another cycle, which
+      //    fetches too. A cycle that got none to a relay — every due circle
+      //    held by the core, or no relay reached — fetches at most once per
+      //    `kLocationUpdateInterval`, as every cycle used to: while a circle
+      //    stays overdue the watchdog runs a cycle every 72 s, for as long
+      //    as a hold lasts, and fetching in each would dial relays twice as
+      //    often as before for no publish. A cycle that handed publishing
+      //    back to the foreground fetches nothing: the foreground receives
+      //    for itself.
       //
       //    Ingested claiming no foreground, so each drive runs in
       //    `DriveMode::FinishOnly`: it finishes what is recorded and makes
@@ -2202,9 +2211,16 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    makes its removal under its fanout record (Security Rule 13). A
       //    failed fetch costs one circle (catch + debugPrint).
       var fetchCount = 0;
-      if (!yieldedToForeground &&
+      final fetchDue =
+          publishCount > 0 ||
+          _lastBackgroundFetchAt == null ||
+          timestamp.difference(_lastBackgroundFetchAt!) >=
+              kLocationUpdateInterval;
+      if (fetchDue &&
+          !yieldedToForeground &&
           !_shuttingDown &&
           _locationSharingService != null) {
+        _lastBackgroundFetchAt = timestamp;
         // The burst above may have spent most of the hold on stagger waits and
         // relay ladders; the fetch drives what its circles owe and must not
         // run on the tail of an expiring one.

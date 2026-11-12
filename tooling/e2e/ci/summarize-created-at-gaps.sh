@@ -25,8 +25,9 @@
 #   * the app under test — the defendant testifying; a wedged publisher is
 #     usually still convinced it is publishing, and
 #   * the receiving phone's screen — the peer's foreground-service fetch runs
-#     once per `kLocationUpdateInterval` and the age pill only thresholds at
-#     5 min, so a perfectly healthy run routinely READS as 168 + 120 s stale.
+#     once per publish cycle and the age pill only thresholds at 5 min, so a
+#     perfectly healthy run can READ as up to two publish intervals stale,
+#     168 + 168 s.
 #
 # It comes from the relay: the sequence of `created_at` values the device under
 # test actually landed there.

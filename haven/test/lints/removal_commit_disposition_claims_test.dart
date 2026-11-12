@@ -14,16 +14,16 @@
 //
 // The claim is a quotable sentence, so it is pinned as one, in BOTH directions:
 // the disproved wording must be absent from every production Dart file, and the
-// correction must be present at each site that stated it.
+// correction must be present at each site that stated it. A one-directional
+// guard would pass on a file that simply deleted the explanation, which is how
+// the claim came back the last time — the reader is then free to re-derive it.
 //
 // Since the MDK v0.10.4 migration no plane claiming no foreground makes such a
 // commit at all: its drive runs in `DriveMode::FinishOnly`, and the departure
 // stays due until a foreground makes the removal under its fanout record. The
 // pin follows the mechanism, and the symbol it names must still exist in the
 // core — the previous pin named a function the migration deleted, and went on
-// passing. A one-directional
-// guard would pass on a file that simply deleted the explanation, which is how
-// the claim came back the last time — the reader is then free to re-derive it.
+// passing.
 //
 // What this deliberately does NOT do is police the word "rollback". Two of
 // these files describe a rollback in order to say it does not happen, and one

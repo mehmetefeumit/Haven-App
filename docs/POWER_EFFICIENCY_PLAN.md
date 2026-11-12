@@ -3598,7 +3598,7 @@ which parses the wire-PROXY ndjson journal, `tooling/e2e/ci/summarize-wire-journ
 capture) — and the column "max relay gap (s)" is that script's output. The
 receiver's screen is NOT a liveness instrument: the Android peer's FGS fetch runs once per publish cycle (once per
 `kLocationUpdateInterval` until 2026-11-12, L-137) and the age pill thresholds at 5 min, so a receiver-side gap can read
-two publish intervals, 168 + 168 s, on a healthy run. Threshold, **per API
+two publish intervals, 168 + 168 s, on a healthy run (more by a multi-circle burst's spread). Threshold, **per API
 level for a baseline row too — a flat ≤ 228 s here contradicted the correction four lines down until 2026-09-09**: ≤ 228 s
 (`kLocationMessageRetention`) on iOS and on Android API 31+, and **≤ 248 s on API 23–30**, because a baseline row is a row
 of the SHIPPED build and that regime's derived worst realized gap IS 248 s (same shape as `POWER_MEASUREMENT.md` §3.5).
@@ -3881,8 +3881,8 @@ that has grown instead of shrunk is a finding; look at the status bar after back
 the peer device whether the marker ever aged past the 5-minute pill. That is a **weak proxy for** the 228 s
 liveness clause, not the *user-visible form* of it (corrected 2026-09-09): the pill thresholds at
 `kMemberAgePillThreshold` = **300 s**, above the 228 s bound, and the receiving phone's own fetch runs once per
-`kLocationUpdateInterval` — `POWER_MEASUREMENT.md` §3.1 argues from exactly that pair that a healthy run
-routinely *reads* as `168 + 120 s` stale, so the pill cannot resolve the clause and the evidence has to come
+publish cycle (once per `kLocationUpdateInterval` until 2026-11-12, L-137) — `POWER_MEASUREMENT.md` §3.1 argues from exactly that pair that a healthy run
+can *read* as up to `168 + 168 s` stale, so the pill cannot resolve the clause and the evidence has to come
 from the relay. A pill that DOES go grey is worth reporting; a pill that does not is not a pass. From users, unprompted and unsolicited: "my battery got better/worse after the update", "the blue
 bar is gone", "it stopped sharing again" — the third is the one to treat as a P0 incident, because it is the FA
 wedge reported in the only channel that exists. None of this is data collection; all of it is somebody looking at
@@ -4713,12 +4713,12 @@ would have left a second way for a commit to leave the device.
 
 ### 9.7i 2026-11-12 — the Android foreground service fetches on every publish cycle
 
-One row, taken by the owner. It reverses the fetch throttle the FGS has carried since the per-circle schedules,
-because the store the throttle let age is what the map shows when the app opens.
+One row, taken by the owner. It lifts the fetch throttle the FGS has carried since the per-circle schedules for
+every cycle that publishes, because the store the throttle let age is what the map shows when the app opens.
 
 | # | Date | Status | Decision | Rejected — and why | Cost | Invalidated by |
 |---|---|---|---|---|---|---|
-| **L-137** | 2026-11-12 | **DECIDED** (owner) | **The Android foreground service fetches its circles' peer locations on every publish cycle, not once per `kLocationUpdateInterval`.** What the encrypted last-known store holds when the app opens is what the map shows until the live plane catches up, so a skipped fetch reads as a stale marker on open. At the nominal jittered cadence the throttle skipped one cycle in three and left up to 288 s between fetches on the scheduled cadence; every cycle leaves at most one publish interval. The fetch takes no wake of its own: it runs inside a cycle that already holds the fix, the publish hold and the publish pool. A cycle that handed publishing back to the foreground fetches nothing. → `_publishCycle` step 9 (`background_location_task.dart`) | **Keeping the throttle** — the stale marker on open is the defect the owner raised. **A shorter throttle** — any floor at or above the spacing a burst can realize still skips cycles, so it shortens the gap on average and not in the worst case. | Fetches per hour at the nominal 120 s cadence rise from 20 to 30, each one relay round trip per circle; a burst whose tail the stagger budget defers, or whose publish failed, is followed by an earlier cycle that fetches too. Model E (§6.5a) prices wakes and this adds none, so it carries no estimate of this cost, and nothing has measured it. | The device protocol (`docs/POWER_MEASUREMENT.md`) attributing a material share of Android background drain to the fetch step; or an Android receiver with background sharing on still opening to markers older than one publish interval, which would mean the store's age is set by something other than the fetch cadence |
+| **L-137** | 2026-11-12 | **DECIDED** (owner) | **The Android foreground service fetches its circles' peer locations on every cycle that got a publish to a relay, not once per `kLocationUpdateInterval`.** What the encrypted last-known store holds when the app opens is what the map shows until the live plane catches up, so a skipped fetch reads as a stale marker on open. At the nominal jittered cadence the throttle skipped one cycle in three and left up to 288 s between fetches on the scheduled cadence; fetching every publish cycle leaves at most one publish interval, more by a multi-circle burst's spread. Such a cycle already holds the fix, the publish hold and a pool a relay answered on. **A cycle that got no publish to a relay keeps the old floor**: while a circle stays overdue — every due circle held by the core (a departure owed until a foreground, a change awaiting its relays) or no relay reached — `_runWatchdog` runs a cycle every 72 s for as long as that lasts, and fetching in each would dial relays twice as often as the throttle did, for no publish. A cycle that handed publishing back to the foreground fetches nothing. → `_publishCycle` step 9 (`background_location_task.dart`) | **Keeping the throttle** — the stale marker on open is the defect the owner raised. **A shorter throttle** — any floor at or above the spacing a burst can realize still skips cycles, so it shortens the gap on average and not in the worst case. **Fetching on every cycle, held or not** — taken first and reverted the same day, when review found the held state's 72 s cycles. | Fetches per hour at the nominal 120 s cadence rise from 20 to 30, each one relay round trip per circle, inside cycles whose publish already reached a relay; a burst whose tail the stagger budget defers is followed by an earlier cycle that fetches too. A cycle that reached no relay fetches no more often than before. Nothing has estimated or measured what the extra fetches cost. | The device protocol (`docs/POWER_MEASUREMENT.md`) attributing a material share of Android background drain to the fetch step; or an Android receiver with background sharing on still opening to markers older than two publish intervals plus a burst's spread, which would mean the store's age is set by something other than the fetch cadence |
 
 ### 9.8 The correction chains
 

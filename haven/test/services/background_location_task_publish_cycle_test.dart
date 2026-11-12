@@ -961,6 +961,7 @@ void main() {
 
       await harness.tick(DateTime.now());
 
+      expect(logs.joined, contains('Foreground reclaimed ownership mid-loop'));
       expect(logs.joined, isNot(contains(_fetchStandDownMarker)));
       expect(harness.location.streamListeners, 0);
     });
@@ -1154,7 +1155,8 @@ void main() {
     });
   });
 
-  group('the peer fetch runs every cycle, fault-tolerant and abortable', () {
+  group('the peer fetch runs every publish cycle, fault-tolerant and '
+      'abortable', () {
     test(
       'every cycle that publishes fetches, however soon after the last',
       () async {
@@ -1183,6 +1185,7 @@ void main() {
         for (final (i, at) in [
           kLocationPublishMinInterval,
           kLocationPublishMinInterval + const Duration(seconds: 30),
+          kLocationPublishMinInterval + const Duration(seconds: 31),
         ].indexed) {
           dueNow();
           await harness.tick(base.add(at));
@@ -1191,6 +1194,76 @@ void main() {
         }
       },
     );
+
+    for (final (why, setUp) in <(String, void Function(BackgroundTaskHarness))>[
+      (
+        'every due circle held by the core',
+        (h) => h.manager.sealOutcome =
+            (_) => const SealOutcomeFfi(replayed: [], errored: false),
+      ),
+      (
+        'no relay reached',
+        (h) => h.relay.publishAnswer = LocationPublishFfi.unreachable,
+      ),
+    ]) {
+      test('a cycle that got no publish to a relay keeps the two-minute '
+          'floor: $why', () async {
+        // The circle stays overdue, so the watchdog runs a cycle on every
+        // tick for as long as this lasts; fetching in each would dial relays
+        // twice as often as the floor allows, for no publish.
+        final circle = circleFixture(seed: 1);
+        final harness = await BackgroundTaskHarness.start(circles: [circle]);
+        setUp(harness);
+        final base = DateTime.now();
+
+        for (final (ticks, fetches) in [(0, 1), (1, 1), (2, 2), (3, 2)]) {
+          await harness.tick(base.add(kBackgroundRepeatInterval * ticks));
+          expect(
+            harness.manager.sealCalls,
+            hasLength(ticks + 1),
+            reason: 'premise: every tick ran a cycle with the circle due',
+          );
+          expect(harness.manager.acks, isEmpty, reason: 'premise: no ack');
+          expect(
+            harness.sharing.fetched,
+            hasLength(fetches),
+            reason: 'after $ticks watchdog tick(s)',
+          );
+        }
+      });
+    }
+
+    test('a cycle where one publish failed and another reached a relay '
+        'fetches every circle', () async {
+      // One circle's relay down must not cost every other circle its
+      // inbound locations, cycle after cycle.
+      final down = circleFixture(seed: 1);
+      final up = circleFixture(seed: 2);
+      final harness = await BackgroundTaskHarness.start(circles: [down, up]);
+      final downHex = hexOf(down.circle.nostrGroupId);
+      harness.relay.onPublish = (event) {
+        if (event.eventJson.contains(downHex)) {
+          throw Exception('relay down');
+        }
+      };
+      final base = DateTime.now();
+
+      for (final ticks in [0, 1]) {
+        // The healthy circle is due again; the failed one never stopped
+        // being due.
+        harness.handler.dueTrackerForTest.markBurstPublished(
+          [scheduleKeyOf(up)],
+          DateTime.now(),
+        );
+        await harness.tick(base.add(kBackgroundRepeatInterval * ticks));
+        expect(
+          harness.manager.acks.map((a) => hexOf(a.nostrGroupId)).toList(),
+          List.filled(ticks + 1, hexOf(up.circle.nostrGroupId)),
+          reason: 'premise: only the healthy circle reached a relay',
+        );
+        expect(harness.sharing.fetched, hasLength(2 * (ticks + 1)));
+      }
+    });
 
     test('a cycle with nothing due fetches nothing', () async {
       // Anti-vacuity for the above: the fetch rides a publish, never a wake
