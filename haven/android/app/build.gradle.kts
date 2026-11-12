@@ -3,7 +3,9 @@ import java.util.Properties
 
 plugins {
     id("com.android.application")
-    id("kotlin-android")
+    // No `kotlin-android`: while ../gradle.properties holds
+    // android.builtInKotlin=false the Flutter Gradle plugin applies it, and
+    // warns of an app that does so itself.
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
@@ -22,10 +24,6 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
     }
 
     // `BuildConfig.DEBUG` gates every native log call out of release builds
@@ -88,6 +86,12 @@ dependencies {
     // even though it's a dev dependency, causing release builds to fail.
     // compileOnly makes the class available at compile time without shipping it.
     compileOnly(project(":integration_test"))
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
 }
 
 flutter {

@@ -2,7 +2,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     // The version ../settings.gradle.kts pins for the app's Kotlin.
-    kotlin("jvm") version "2.2.20"
+    kotlin("jvm") version "2.4.20"
 }
 
 repositories {

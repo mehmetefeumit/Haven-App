@@ -2764,7 +2764,8 @@ with the new guard, each fail, at the check its plant belongs to.
   that threw left the engine a link the table had forgotten; the engine is
   now told first, everywhere.
   **The JVM build.** `haven/android/mesh-jvm` is a Gradle build of its own
-  — Kotlin 2.2.20, the version the app pins; JVM target 17 as the app,
+  — the Kotlin version the app pins (2.2.20 when this landed); JVM target 17
+  as the app,
   `-Xjdk-release=17`; warnings are errors — whose one source directory is
   the package above and whose tests are its own. It is not in
   `haven/android/settings.gradle.kts` and the app's build is unchanged.
