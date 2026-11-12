@@ -2184,10 +2184,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         );
       }
 
-      // 9. Fetch peer locations for each accepted circle. Piggybacks on
-      //    the wake-up the publish step already paid for: the radio is
-      //    awake, the relay WebSocket is open, and the GPS fix is
-      //    cached. Without this, the SQLCipher last-known store grows
+      // 9. Fetch peer locations for each accepted circle, inside the wake
+      //    this cycle already took for a due circle: the GPS fix is cached
+      //    and, when a publish reached a relay, the WebSocket is open.
+      //    Without this, the SQLCipher last-known store grows
       //    stale during long backgrounded sessions and the foreground
       //    rehydrates to old data on resume.
       //

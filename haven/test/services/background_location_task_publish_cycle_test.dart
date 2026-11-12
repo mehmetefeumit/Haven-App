@@ -23,8 +23,9 @@
 ///  * a foreground resume or a service stop mid-loop stops the cycle where it
 ///    stands rather than advancing another MLS epoch behind the new owner's
 ///    back, and a stop still hands the Rule-14 single-session slot back;
-///  * the peer-location fetch rides the wake-up the publish already paid for,
-///    on its own nominal throttle (battery parity), and the periodic prune
+///  * the peer-location fetch runs on every cycle that got a publish to a
+///    relay, and a cycle that got none keeps the `kLocationUpdateInterval`
+///    floor; a cycle with nothing due fetches nothing; and the periodic prune
 ///    yields to a foreground that came back mid-cycle;
 ///  * two circles served by one cycle never publish in the same wall-clock
 ///    second, and a burst that cannot fit its budget defers rather than
@@ -1233,6 +1234,31 @@ void main() {
       });
     }
 
+    test("a publishing cycle's fetch starts the floor a held cycle reads",
+        () async {
+      // A publish that turns into a hold must not buy an extra fetch: the
+      // floor runs from the last fetch, whichever cycle made it.
+      final circle = circleFixture(seed: 1);
+      final harness = await BackgroundTaskHarness.start(circles: [circle]);
+      final base = DateTime.now();
+      await harness.tick(base);
+      expect(harness.manager.acks, hasLength(1), reason: 'premise: published');
+      expect(harness.sharing.fetched, hasLength(1));
+
+      harness.manager.sealOutcome =
+          (_) => const SealOutcomeFfi(replayed: [], errored: false);
+      harness.handler.dueTrackerForTest.markBurstPublished(
+        [scheduleKeyOf(circle)],
+        DateTime.now(),
+      );
+      await harness.tick(base.add(kBackgroundRepeatInterval));
+      expect(harness.manager.sealCalls, hasLength(2), reason: 'premise');
+      expect(harness.sharing.fetched, hasLength(1));
+
+      await harness.tick(base.add(kBackgroundRepeatInterval * 2));
+      expect(harness.sharing.fetched, hasLength(2));
+    });
+
     test('a cycle where one publish failed and another reached a relay '
         'fetches every circle', () async {
       // One circle's relay down must not cost every other circle its
@@ -1266,15 +1292,24 @@ void main() {
     });
 
     test('a cycle with nothing due fetches nothing', () async {
-      // Anti-vacuity for the above: the fetch rides a publish, never a wake
-      // of its own. A delivery always runs a cycle, where a watchdog tick
-      // with a healthy registration runs none.
+      // The fetch rides a cycle that has a circle due, never a delivery that
+      // beat its due-time. A delivery always runs a cycle, where a watchdog
+      // tick with a healthy registration runs none; and it lands past the
+      // floor, so only the cycle's own early return can stop the fetch.
       final circle = circleFixture(seed: 1);
       final harness = await BackgroundTaskHarness.start(circles: [circle]);
-      await harness.tick(DateTime.now());
+      final base = DateTime.now();
+      await harness.tick(base);
       expect(harness.sharing.fetched, hasLength(1), reason: 'premise');
 
-      await harness.deliverFix(freshFix());
+      harness.handler.dueTrackerForTest.markBurstPublished(
+        [scheduleKeyOf(circle)],
+        base.add(const Duration(hours: 1)),
+      );
+      final later = base.add(kLocationUpdateInterval * 2);
+      harness.handler.clockForTest = () => later;
+      harness.location.clock = () => later;
+      await harness.deliverFix(freshFix(at: later));
 
       expect(
         harness.manager.sealCalls,
