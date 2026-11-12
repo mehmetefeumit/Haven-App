@@ -15,18 +15,20 @@ import 'package:haven/src/pages/settings/map_style_settings_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
+import 'package:haven/src/providers/mesh_provider.dart';
+import 'package:haven/src/widgets/mesh/mesh_stats_sheet.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page displaying app settings.
 ///
 /// Provides navigation to the sub-settings pages.
-class SettingsPage extends StatelessWidget {
+class SettingsPage extends ConsumerWidget {
   /// Creates the settings page.
   const SettingsPage({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
 
     return Scaffold(
@@ -80,6 +82,17 @@ class SettingsPage extends StatelessWidget {
               },
             ),
           ),
+          // The Bluetooth mesh, where the build has one: the same sheet the
+          // mesh button's hold opens.
+          if (ref.watch(meshAvailableProvider))
+            HavenSettingsTile(
+              icon: LucideIcons.bluetooth,
+              title: l10n.settingsMeshTitle,
+              subtitle: ref.watch(meshPhaseProvider) == MeshPhase.off
+                  ? l10n.settingsMeshOff
+                  : l10n.settingsMeshOn,
+              onTap: () => showMeshStatsSheet(context),
+            ),
           HavenSettingsTile(
             icon: LucideIcons.layers,
             title: l10n.settingsMapStyleTitle,

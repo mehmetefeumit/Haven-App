@@ -212,6 +212,9 @@ const _allowedSites = <String, int>{
   '$_maintenance._armLeaveFollowUp': 1,
   '$_maintenance._armProfileAntiEntropy': 1,
   '$_maintenance._armRelayList': 1,
+  // The moment the Bluetooth mesh turns itself off: the map's state is read
+  // against the clock again; nothing is asked of the engine.
+  'lib/src/providers/mesh_provider.dart#meshPhaseProvider': 1,
   'lib/src/providers/sharing_health_provider.dart#'
           'SharingHealthNotifier.syncTick':
       1,
@@ -255,11 +258,15 @@ const _allowedSites = <String, int>{
   'lib/src/widgets/map/sharing_health_banner.dart#'
           '_SharingHealthBannerState._armRerender':
       1,
+  // The open statistics sheet reads the mesh's counts again each minute
+  // (a read folds what was counted into the store; it drives nothing). The
+  // timer is cancelled while the app is away and armed again at its return.
+  'lib/src/widgets/mesh/mesh_stats_sheet.dart#_MeshStatsSheetState._arm': 1,
 };
 
 /// The sum of [_allowedSites]: a second pin, so an edit that moves a count
 /// from one site to another is still a visible change of this number.
-const _allowedTotal = 43;
+const _allowedTotal = 45;
 
 /// The sites of [_allowedSites] that reach the MLS or the live-sync engine,
 /// reviewed by hand: the existing wakes. A timer's callback reaches through

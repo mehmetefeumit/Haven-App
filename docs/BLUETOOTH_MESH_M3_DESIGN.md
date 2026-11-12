@@ -2,8 +2,11 @@
 
 > Status: **DESIGN for milestone M3 of `docs/BLUETOOTH_MESH_PLAN.md` — drafted
 > by one agent and confirmed with changes by an independent review, both
-> 2026-11-11; nothing here is built.** The review's changes are folded in
-> and listed in §L, with the one premise of it that the code contradicts.
+> 2026-11-11.** The review's changes are folded in and listed in §L, with
+> the one premise of it that the code contradicts. Built so far, each with
+> its departures from this text in plan §16: M3a; M3c; M3d in English only;
+> M3e.
+> Nothing native is built.
 
 Studied at `132f5ca` (this file is in the tree since `8a76cf0`), with another
 agent's uncommitted work in `haven-core/`,

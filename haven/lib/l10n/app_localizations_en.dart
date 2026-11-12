@@ -2252,4 +2252,236 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get avatarSemanticsOffline => 'offline';
+
+  @override
+  String get meshButtonLabel => 'Bluetooth mesh';
+
+  @override
+  String get meshButtonValueConnected => 'connected to a nearby phone';
+
+  @override
+  String get meshButtonValuePaused => 'paused, Bluetooth is off';
+
+  @override
+  String get meshButtonHintTurnOn => 'turn on';
+
+  @override
+  String get meshButtonHintTurnOff => 'turn off';
+
+  @override
+  String get meshButtonHintStats => 'show mesh activity';
+
+  @override
+  String get meshTurningOn => 'Turning on Bluetooth mesh…';
+
+  @override
+  String get meshTurnOn => 'Turn on';
+
+  @override
+  String get meshTurnOff => 'Turn off';
+
+  @override
+  String get meshTurnedOn =>
+      'Bluetooth mesh is on. Press and hold the button to see activity.';
+
+  @override
+  String get meshUndo => 'Undo';
+
+  @override
+  String get meshErrorNoPermission =>
+      'Bluetooth mesh needs the Nearby devices permission.';
+
+  @override
+  String get meshErrorBluetoothOff => 'Turn on Bluetooth to use mesh.';
+
+  @override
+  String get meshErrorUnsupported => 'This phone can\'t use Bluetooth mesh.';
+
+  @override
+  String get meshErrorStartFailed =>
+      'Couldn\'t turn Bluetooth mesh on. Try again.';
+
+  @override
+  String get meshErrorStopFailed =>
+      'Couldn\'t turn Bluetooth mesh off. Try again.';
+
+  @override
+  String get meshStoppedNotice => 'Bluetooth mesh turned off.';
+
+  @override
+  String get meshStoppedAfterDeadline =>
+      'Bluetooth mesh turned off after 12 hours.';
+
+  @override
+  String get meshStoppedOk => 'OK';
+
+  @override
+  String get meshIntroTitle => 'Bluetooth mesh';
+
+  @override
+  String get meshIntroHeadingDoes => 'What it does';
+
+  @override
+  String get meshIntroWhat =>
+      'Even with no internet, mesh can pass your encrypted location updates, and your circles\', from phone to phone over Bluetooth when phones with mesh on are nearby. Updates can be late or lost. Your phone also carries other people\'s encrypted packets, which it can\'t read.';
+
+  @override
+  String get meshIntroAutoOff =>
+      'Mesh turns itself off after 12 hours. If notifications are allowed, you get a reminder 30 minutes before.';
+
+  @override
+  String get meshIntroBattery => 'Mesh uses more battery.';
+
+  @override
+  String get meshIntroClosed =>
+      'Mesh keeps running when Haven is closed. With Haven closed and background sharing off, it carries other people\'s packets but doesn\'t send your location or read your circles\' locations until you open Haven.';
+
+  @override
+  String get meshIntroHeadingLearn => 'What others can learn';
+
+  @override
+  String get meshIntroNearby =>
+      'Anyone nearby can tell that this phone has Haven\'s mesh on, and can locate it from its radio signal. A phone that connects to yours can recognise your phone again later, even after your phone\'s Bluetooth address changes. They can\'t read your location or see your circles.';
+
+  @override
+  String get meshIntroConnected =>
+      'A phone that connects to yours can see which encrypted packets your phone sends out, roughly how old each is, and when your phone is asleep. Unless it\'s in one of your circles, it can\'t read them, and can\'t be sure which are your own updates.';
+
+  @override
+  String get meshIntroName =>
+      'Phones that mesh connects with can read your phone\'s Bluetooth name and see which other Bluetooth services it offers.';
+
+  @override
+  String meshIntroNameIs(String name) {
+    return 'Your phone\'s Bluetooth name is “$name”.';
+  }
+
+  @override
+  String get meshBluetoothSettings => 'Bluetooth settings';
+
+  @override
+  String get meshIntroBridge =>
+      'When you\'re online, your phone can pass a nearby circle member\'s update on to your circle\'s relays, and theirs can pass on yours. A relay can then tell that a member of that circle is offline near the phone that passed it on. If both phones are online, it can tell they are near each other.';
+
+  @override
+  String get meshIntroRemoved =>
+      'While you\'re offline, someone removed from a circle can still read your updates until your phone learns they were removed.';
+
+  @override
+  String get meshIntroHeadingKnow => 'Good to know';
+
+  @override
+  String get meshIntroStats =>
+      'Press and hold the mesh button to see how many updates it has carried.';
+
+  @override
+  String get meshNameStepTitle => 'Your phone\'s Bluetooth name';
+
+  @override
+  String get meshNameStepChange =>
+      'You can change it in your phone\'s Bluetooth settings.';
+
+  @override
+  String get meshStatsTitle => 'Mesh activity';
+
+  @override
+  String get meshStatsThisSession => 'This session';
+
+  @override
+  String get meshStatsLastSession => 'Last session';
+
+  @override
+  String get meshStatsAllTime => 'All time';
+
+  @override
+  String get meshStatsFromCircles => 'Received from your circles';
+
+  @override
+  String get meshStatsPassedOn => 'Passed on for others';
+
+  @override
+  String meshStatsCell(String row, String column, String count) {
+    return '$row, $column: $count';
+  }
+
+  @override
+  String get meshStatsFootnote =>
+      'Passed-on packets can\'t be read by this phone. They include other people\'s updates and decoy packets that hide which ones are real.';
+
+  @override
+  String get meshStatsUnavailable => 'Couldn\'t read mesh activity.';
+
+  @override
+  String get meshStatsAbout => 'About Bluetooth mesh';
+
+  @override
+  String get meshStatusConnected => 'Mesh is on · connected';
+
+  @override
+  String get meshStatusSearching => 'Mesh is on · looking for nearby phones';
+
+  @override
+  String get meshStatusFindable =>
+      'Mesh is on · other phones can find this one, but it can\'t look for them';
+
+  @override
+  String get meshStatusPaused => 'Mesh is paused · Bluetooth is off';
+
+  @override
+  String get meshStatusOff => 'Mesh is off';
+
+  @override
+  String meshTurnsOffAt(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'Turns off at $timeString';
+  }
+
+  @override
+  String get meshKeepOn => 'Keep on for 12 hours';
+
+  @override
+  String get meshStatsReset => 'Reset counts';
+
+  @override
+  String get meshStatsResetTitle => 'Reset mesh counts?';
+
+  @override
+  String get meshStatsResetBody => 'All four counts go back to zero.';
+
+  @override
+  String get meshStatsResetConfirm => 'Reset';
+
+  @override
+  String get settingsMeshTitle => 'Bluetooth mesh';
+
+  @override
+  String get settingsMeshOn => 'On';
+
+  @override
+  String get settingsMeshOff => 'Off';
+
+  @override
+  String get meshNoticeChannel => 'Bluetooth mesh';
+
+  @override
+  String get meshNoticeOn => 'Bluetooth mesh is on';
+
+  @override
+  String get meshNoticePaused => 'Bluetooth mesh is paused — Bluetooth is off';
+
+  @override
+  String get meshNoticeStopped => 'Bluetooth mesh has turned off';
+
+  @override
+  String meshNoticeReminder(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'Bluetooth mesh turns off at $timeString';
+  }
+
+  @override
+  String get meshNoticeKeepOn => 'Keep on';
 }

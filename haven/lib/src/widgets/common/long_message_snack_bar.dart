@@ -24,12 +24,23 @@ const double _kMaxMessageHeightFraction = 0.4;
 /// Persisting holds the messenger's queue: a later snackbar waits behind this
 /// one until the user closes it. So no caller may clear the queue to make room
 /// for its own ([ScaffoldMessengerState.clearSnackBars] would throw the remedy
-/// away); replace only your own, as `LocationSettingsPage` does.
+/// away); replace only your own, as `LocationSettingsPage` does. [onVisible]
+/// runs once this one is on screen, which is how a caller knows that the
+/// current snackbar is its own. [margin] is where it floats, for a caller
+/// with something on screen it must stay clear of. With [lasts] it is a
+/// message nothing has to be done about, and goes by itself after that
+/// long. [dismiss] is the closing button's label where Dismiss would
+/// mislead: in some languages it is the word for "turn off", which under a
+/// message about something that is on reads as a way to turn it off.
 SnackBar longMessageSnackBar(
   BuildContext context,
   String message, {
   bool error = false,
   SnackBarAction? action,
+  VoidCallback? onVisible,
+  EdgeInsetsGeometry? margin,
+  Duration? lasts,
+  String? dismiss,
 }) {
   final theme = Theme.of(context);
   return SnackBar(
@@ -40,12 +51,16 @@ SnackBar longMessageSnackBar(
           theme.snackBarTheme.actionTextColor ??
           theme.colorScheme.inversePrimary,
     ),
-    persist: true,
+    persist: lasts == null,
+    duration: lasts ?? const Duration(seconds: 4),
     backgroundColor: error ? theme.colorScheme.error : null,
+    onVisible: onVisible,
+    behavior: margin == null ? null : SnackBarBehavior.floating,
+    margin: margin,
     showCloseIcon: action != null,
     action: action == null
         ? SnackBarAction(
-            label: AppLocalizations.of(context).commonDismiss,
+            label: dismiss ?? AppLocalizations.of(context).commonDismiss,
             onPressed: () {},
           )
         : null,

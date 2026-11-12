@@ -166,7 +166,13 @@ class FakeMeshService with _Asked implements MeshService {
   });
 
   @override
-  Future<MeshStartFfi> keepOn() => _called('keepOn', () => keepOnAnswer);
+  Future<MeshStartFfi> keepOn() => _called('keepOn', () {
+    // As the bridge: a mesh it answers is on reads as on.
+    if (keepOnAnswer != MeshStartFfi.off && !statsAnswer.on_) {
+      statsAnswer = meshState(on: true, onForMs: startsForMs);
+    }
+    return keepOnAnswer;
+  });
 
   @override
   Future<void> stop() => _called('stop', () {

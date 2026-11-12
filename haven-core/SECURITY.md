@@ -3761,7 +3761,12 @@ the mesh calls no mesh entry").
   every call fails — a start as `failed`, anything else as one fixed-text
   exception carrying nothing the platform threw (`mesh_radio_test.dart`) —
   so an Android build with the flag cannot turn mesh on either, and stores
-  nothing trying. What crosses the channels is a permission, whether
+  nothing trying. Every call is bounded where it is made — five seconds, and
+  two minutes for the permission dialog, which waits on a person — and one
+  the service has not answered by then failed as one the platform refused
+  ("fails each entry at its bound as a platform error would, and not
+  before"): the queue below, a logout and a launch wait on the radio no
+  longer than that. What crosses the channels is a permission, whether
   Bluetooth is on, a state with two booleans, six strings of fixed copy with
   a time in one, and the phone's Bluetooth name, handed to its caller and
   held nowhere; no address and no count.
@@ -3775,8 +3780,15 @@ the mesh calls no mesh entry").
   radio did; keeping on moves the engine's deadline, then tells the service.
   A turn-on, a turn-off, a keep-on and a reconcile run one at a time in the
   order asked, and a reconcile asked while one of the user's is asked or
-  running is dropped, so the radio's own report cannot undo what the user is
-  doing ("a stopped event in the middle of a turn-off starts nothing"). A
+  running runs behind it, once however often it was asked: the radio's own
+  report cannot undo what the user is doing, and none is lost ("a stopped
+  event in the middle of a turn-off starts nothing"; "a report that lands
+  behind a transition's own closing reconcile is not lost"). A turn-on and a
+  keep-on answer from the state they left, their closing reconcile included:
+  a turn-on whose state cannot then be read turns mesh off again before it
+  answers that it failed, so no radio runs beside a failure ("a turn-on
+  that started and then cannot be read turns mesh off again"), and a
+  keep-on that cannot be read took the new deadline all the same. A
   reconcile — at the shell's start-up, at every resume, on every report of
   the radio — reads both: a radio up beside an engine that is off is
   stopped and the engine's keys deleted; an engine on beside a radio that
@@ -3784,9 +3796,44 @@ the mesh calls no mesh entry").
   holds its permission, and otherwise is turned off with a notice owed to
   the user ("is this table"; "asks a radio that will not come back once, and
   mesh goes off with one notice, whatever reports follow"). A logout stops
-  the radio before `wipe_all_mls_state`, and so does the retry of that wipe
-  at a launch and before a new identity ("stops the radio before the wipe,
-  and a radio that cannot be asked costs the wipe nothing").
+  the radio as soon as its wipe marker is set, ahead of everything that
+  takes time and of `wipe_all_mls_state`, and so does the retry of that wipe
+  at a launch and before a new identity ("stops the radio first, ahead of
+  everything that takes time, and a radio that cannot be asked costs the
+  wipe nothing"; "costs a logout its bound, and the wipe is made all the
+  same").
+- **On screen.** Only where there is a radio that has not answered that the
+  phone cannot run the mesh — an answer held for the life of the process
+  and stored nowhere: the mesh button on the map, its disclosure and its
+  statistics sheet, a Settings row, and the aura. With none, the map
+  shell's layers, the own-location layer and the Settings page are what
+  they are without the mesh (`map_shell_mesh_test.dart`). Mesh is turned on
+  and off by one flow (`mesh_flow.dart`), from the button, from the notice
+  of a stop and from the statistics sheet. The first
+  turn-on shows the disclosure and then, once the permission lets it be
+  read, the phone's Bluetooth name — before anything is stored; the name is
+  held by the widget that shows it and by nothing else
+  (`mesh_button_test.dart`, "shows the phone's Bluetooth name once it can be
+  read, before anything is stored; backing out stores nothing"). The four
+  counts are shown and never logged (`mesh_sheets_test.dart`). The map shows
+  mesh as on only while the radio reports that it runs, the engine was on
+  when last read and the deadline has not passed by the device's clock
+  (`mesh_phase_test.dart`). A read of the radio that fails leaves its last
+  report standing, and an answer that lands behind a later read or report
+  is dropped: one unanswered question does not show mesh as off, and the
+  reconcile, which reads the radio for itself, is what turns off a mesh
+  whose radio cannot be asked. The ripple on the user's own dot follows the
+  hand-off — a publish pass whose send got past the send-time check, with
+  the radio running and a phone linked — and not the radio's emission:
+  nothing crosses the bridge to say which emission was real. Telling the
+  ripple is not waited for and what it throws goes nowhere, so no relay
+  send waits on the mesh's decoration or fails with it
+  (`location_publish_scheduler_provider_test.dart`,
+  `location_sharing_provider_test.dart`). Someone watching the unlocked
+  screen learns when a location was handed over. A stop the user did not
+  make is told beside the button until dismissed or until mesh is turned on
+  from it, with the one cause Dart can know — the clock passed the deadline
+  — and otherwise none; the notice is dropped with the identity.
 - **Logs.** The mesh's Dart code writes no log line, and a location the mesh
   brought is logged by the shared ingest in the very line a location a seal's
   relay drive replayed is, so no line tells which carrier brought it — that
@@ -3801,11 +3848,15 @@ burst's pause. A device with no circle eligible to publish arms no tick, so
 it drives the mesh at none: what it carried is counted as passed on only at
 its next drive. The state the provider holds is read when it is built and
 after each of its own entries; a deadline that passes is seen at the next
-read, not pushed. The radio's notices have no strings yet, so no radio is
-started in any build: a turn-on where there is a radio fails before anything
-is asked or stored. An engine that would not stop keeps its keys until a
-later reconcile stops it, or the deadline. Nothing consumes a tap on a
-notice and nothing asks the notification permission: both wait for the UI.
+read, not pushed; the map's own clock comparison is what takes the hue and
+the button's state away at the deadline. The radio's channels have no
+native end, so no radio is started in any build: a turn-on where there is a
+radio fails at its first question, before anything is stored. An engine
+that would not stop keeps its keys until a later reconcile stops it, or the
+deadline. Nothing asks the notification permission: the radio's seam has no
+entry for it, so on Android 13 and later a stop may be told by the in-app
+notice alone. A notice the radio's own stop raises behind a logout is
+dropped when the next identity is made.
 
 #### Statistics, and what crosses the bridge
 

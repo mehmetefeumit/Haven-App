@@ -2267,4 +2267,237 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get avatarSemanticsOffline => 'ऑफ़लाइन';
+
+  @override
+  String get meshButtonLabel => 'ब्लूटूथ मेश';
+
+  @override
+  String get meshButtonValueConnected => 'आस-पास के किसी फ़ोन से कनेक्टेड';
+
+  @override
+  String get meshButtonValuePaused => 'रुका हुआ, ब्लूटूथ बंद है';
+
+  @override
+  String get meshButtonHintTurnOn => 'चालू करने';
+
+  @override
+  String get meshButtonHintTurnOff => 'बंद करने';
+
+  @override
+  String get meshButtonHintStats => 'मेश गतिविधि देखने';
+
+  @override
+  String get meshTurningOn => 'ब्लूटूथ मेश चालू हो रहा है…';
+
+  @override
+  String get meshTurnOn => 'चालू करें';
+
+  @override
+  String get meshTurnOff => 'बंद करें';
+
+  @override
+  String get meshTurnedOn =>
+      'ब्लूटूथ मेश चालू है। गतिविधि देखने के लिए बटन को दबाकर रखें।';
+
+  @override
+  String get meshUndo => 'पूर्ववत करें';
+
+  @override
+  String get meshErrorNoPermission =>
+      'ब्लूटूथ मेश को “आस-पास मौजूद डिवाइस” की अनुमति चाहिए।';
+
+  @override
+  String get meshErrorBluetoothOff =>
+      'मेश इस्तेमाल करने के लिए ब्लूटूथ चालू करें।';
+
+  @override
+  String get meshErrorUnsupported =>
+      'यह फ़ोन ब्लूटूथ मेश इस्तेमाल नहीं कर सकता।';
+
+  @override
+  String get meshErrorStartFailed =>
+      'ब्लूटूथ मेश चालू नहीं हो सका। फिर कोशिश करें।';
+
+  @override
+  String get meshErrorStopFailed =>
+      'ब्लूटूथ मेश बंद नहीं हो सका। फिर कोशिश करें।';
+
+  @override
+  String get meshStoppedNotice => 'ब्लूटूथ मेश बंद हो गया।';
+
+  @override
+  String get meshStoppedAfterDeadline => '12 घंटे बाद ब्लूटूथ मेश बंद हो गया।';
+
+  @override
+  String get meshStoppedOk => 'ठीक है';
+
+  @override
+  String get meshIntroTitle => 'ब्लूटूथ मेश';
+
+  @override
+  String get meshIntroHeadingDoes => 'यह क्या करता है';
+
+  @override
+  String get meshIntroWhat =>
+      'इंटरनेट न होने पर भी, जब आस-पास ऐसे फ़ोन हों जिनमें मेश चालू है, तब मेश आपके और आपके सर्कलों के एन्क्रिप्टेड स्थान अपडेट ब्लूटूथ के ज़रिए एक फ़ोन से दूसरे फ़ोन तक आगे बढ़ा सकता है। अपडेट देर से पहुँच सकते हैं या खो सकते हैं। आपका फ़ोन दूसरे लोगों के एन्क्रिप्टेड पैकेट भी ले जाता है, जिन्हें वह पढ़ नहीं सकता।';
+
+  @override
+  String get meshIntroAutoOff =>
+      'मेश 12 घंटे बाद अपने आप बंद हो जाता है। अगर नोटिफ़िकेशन की अनुमति है, तो उससे 30 मिनट पहले आपको एक रिमाइंडर मिलता है।';
+
+  @override
+  String get meshIntroBattery => 'मेश से बैटरी ज़्यादा खर्च होती है।';
+
+  @override
+  String get meshIntroClosed =>
+      'Haven बंद होने पर भी मेश चलता रहता है। जब Haven बंद हो और बैकग्राउंड साझाकरण भी बंद हो, तब मेश दूसरे लोगों के पैकेट तो ले जाता है, पर जब तक आप Haven नहीं खोलते, वह न आपका स्थान भेजता है, न आपके सर्कलों के स्थान पढ़ता है।';
+
+  @override
+  String get meshIntroHeadingLearn => 'दूसरे क्या जान सकते हैं';
+
+  @override
+  String get meshIntroNearby =>
+      'आस-पास मौजूद कोई भी यह जान सकता है कि इस फ़ोन में Haven का मेश चालू है, और इसके रेडियो सिग्नल से पता लगा सकता है कि यह फ़ोन कहाँ है। जो फ़ोन आपके फ़ोन से कनेक्ट होता है, वह आपके फ़ोन को बाद में फिर पहचान सकता है, आपके फ़ोन का ब्लूटूथ पता बदल जाने के बाद भी। इनमें से कोई भी न आपका स्थान पढ़ सकता है, न आपके सर्कल देख सकता है।';
+
+  @override
+  String get meshIntroConnected =>
+      'जो फ़ोन आपके फ़ोन से कनेक्ट होता है, वह देख सकता है कि आपका फ़ोन कौन-से एन्क्रिप्टेड पैकेट भेजता है, हर पैकेट मोटे तौर पर कितना पुराना है, और आपका फ़ोन कब स्लीप मोड में है। जब तक वह आपके किसी सर्कल में न हो, वह उन्हें पढ़ नहीं सकता, और पक्के तौर पर नहीं जान सकता कि उनमें से कौन-से आपके अपने अपडेट हैं।';
+
+  @override
+  String get meshIntroName =>
+      'मेश जिन फ़ोनों से कनेक्ट होता है, वे आपके फ़ोन का ब्लूटूथ नाम पढ़ सकते हैं और देख सकते हैं कि आपका फ़ोन और कौन-सी ब्लूटूथ सेवाएँ देता है।';
+
+  @override
+  String meshIntroNameIs(String name) {
+    return 'आपके फ़ोन का ब्लूटूथ नाम “$name” है।';
+  }
+
+  @override
+  String get meshBluetoothSettings => 'ब्लूटूथ सेटिंग';
+
+  @override
+  String get meshIntroBridge =>
+      'जब आप ऑनलाइन होते हैं, तो आपका फ़ोन आस-पास मौजूद किसी सर्कल सदस्य का अपडेट आपके सर्कल के रिले तक आगे बढ़ा सकता है, और उनका फ़ोन आपका अपडेट आगे बढ़ा सकता है। तब कोई रिले यह जान सकता है कि उस सर्कल का कोई सदस्य ऑफ़लाइन है और उस फ़ोन के पास है जिसने अपडेट आगे बढ़ाया। अगर दोनों फ़ोन ऑनलाइन हों, तो वह यह जान सकता है कि वे एक-दूसरे के पास हैं।';
+
+  @override
+  String get meshIntroRemoved =>
+      'आपके ऑफ़लाइन रहने के दौरान, किसी सर्कल से हटाया गया व्यक्ति अब भी आपके अपडेट पढ़ सकता है, जब तक आपके फ़ोन को यह पता नहीं चल जाता कि उसे हटा दिया गया है।';
+
+  @override
+  String get meshIntroHeadingKnow => 'जानने लायक';
+
+  @override
+  String get meshIntroStats =>
+      'यह देखने के लिए कि मेश कितने अपडेट ले जा चुका है, मेश बटन को दबाकर रखें।';
+
+  @override
+  String get meshNameStepTitle => 'आपके फ़ोन का ब्लूटूथ नाम';
+
+  @override
+  String get meshNameStepChange =>
+      'आप इसे अपने फ़ोन की ब्लूटूथ सेटिंग में बदल सकते हैं।';
+
+  @override
+  String get meshStatsTitle => 'मेश गतिविधि';
+
+  @override
+  String get meshStatsThisSession => 'इस बार';
+
+  @override
+  String get meshStatsLastSession => 'पिछली बार';
+
+  @override
+  String get meshStatsAllTime => 'अब तक कुल';
+
+  @override
+  String get meshStatsFromCircles => 'आपके सर्कलों से मिले अपडेट';
+
+  @override
+  String get meshStatsPassedOn => 'दूसरों के लिए आगे बढ़ाए गए पैकेट';
+
+  @override
+  String meshStatsCell(String row, String column, String count) {
+    return '$row, $column: $count';
+  }
+
+  @override
+  String get meshStatsFootnote =>
+      'आगे बढ़ाए गए पैकेट यह फ़ोन पढ़ नहीं सकता। इनमें दूसरे लोगों के अपडेट होते हैं, और नकली पैकेट भी, जो यह छिपाते हैं कि असली कौन-से हैं।';
+
+  @override
+  String get meshStatsUnavailable => 'मेश गतिविधि पढ़ी नहीं जा सकी।';
+
+  @override
+  String get meshStatsAbout => 'ब्लूटूथ मेश के बारे में';
+
+  @override
+  String get meshStatusConnected => 'मेश चालू है · कनेक्टेड';
+
+  @override
+  String get meshStatusSearching => 'मेश चालू है · आस-पास के फ़ोन खोज रहा है';
+
+  @override
+  String get meshStatusFindable =>
+      'मेश चालू है · दूसरे फ़ोन इस फ़ोन को खोज सकते हैं, पर यह उन्हें नहीं खोज सकता';
+
+  @override
+  String get meshStatusPaused => 'मेश रुका हुआ है · ब्लूटूथ बंद है';
+
+  @override
+  String get meshStatusOff => 'मेश बंद है';
+
+  @override
+  String meshTurnsOffAt(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return '$timeString पर बंद हो जाएगा';
+  }
+
+  @override
+  String get meshKeepOn => '12 घंटे चालू रखें';
+
+  @override
+  String get meshStatsReset => 'गिनती रीसेट करें';
+
+  @override
+  String get meshStatsResetTitle => 'मेश की गिनती रीसेट करें?';
+
+  @override
+  String get meshStatsResetBody => 'चारों गिनतियाँ वापस शून्य हो जाएँगी।';
+
+  @override
+  String get meshStatsResetConfirm => 'रीसेट करें';
+
+  @override
+  String get settingsMeshTitle => 'ब्लूटूथ मेश';
+
+  @override
+  String get settingsMeshOn => 'चालू';
+
+  @override
+  String get settingsMeshOff => 'बंद';
+
+  @override
+  String get meshNoticeChannel => 'ब्लूटूथ मेश';
+
+  @override
+  String get meshNoticeOn => 'ब्लूटूथ मेश चालू है';
+
+  @override
+  String get meshNoticePaused => 'ब्लूटूथ मेश रुका हुआ है — ब्लूटूथ बंद है';
+
+  @override
+  String get meshNoticeStopped => 'ब्लूटूथ मेश बंद हो गया है';
+
+  @override
+  String meshNoticeReminder(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'ब्लूटूथ मेश $timeString पर बंद हो जाएगा';
+  }
+
+  @override
+  String get meshNoticeKeepOn => 'चालू रखें';
 }

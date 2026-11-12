@@ -70,6 +70,8 @@ final List<ProviderOrFamily> identityScopedProviders = [
   memberProfileRefreshProvider,
   sharingHealthProvider,
   meshProvider,
+  meshOnUntilProvider,
+  meshStoppedNoticeProvider,
   syncStatusProvider,
   ownProfileSyncProvider,
   memberRemovalProvider,

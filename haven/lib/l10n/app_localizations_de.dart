@@ -2292,4 +2292,242 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get avatarSemanticsOffline => 'Offline';
+
+  @override
+  String get meshButtonLabel => 'Bluetooth-Mesh';
+
+  @override
+  String get meshButtonValueConnected =>
+      'mit einem Telefon in der Nähe verbunden';
+
+  @override
+  String get meshButtonValuePaused => 'pausiert, Bluetooth ist aus';
+
+  @override
+  String get meshButtonHintTurnOn => 'Einschalten';
+
+  @override
+  String get meshButtonHintTurnOff => 'Ausschalten';
+
+  @override
+  String get meshButtonHintStats => 'Anzeigen der Mesh-Aktivität';
+
+  @override
+  String get meshTurningOn => 'Bluetooth-Mesh wird eingeschaltet …';
+
+  @override
+  String get meshTurnOn => 'Einschalten';
+
+  @override
+  String get meshTurnOff => 'Ausschalten';
+
+  @override
+  String get meshTurnedOn =>
+      'Bluetooth-Mesh ist an. Halte die Schaltfläche gedrückt, um die Aktivität zu sehen.';
+
+  @override
+  String get meshUndo => 'Rückgängig';
+
+  @override
+  String get meshErrorNoPermission =>
+      'Das Bluetooth-Mesh benötigt die Berechtigung „Geräte in der Nähe“.';
+
+  @override
+  String get meshErrorBluetoothOff =>
+      'Schalte Bluetooth ein, um das Mesh zu nutzen.';
+
+  @override
+  String get meshErrorUnsupported =>
+      'Dieses Telefon kann das Bluetooth-Mesh nicht nutzen.';
+
+  @override
+  String get meshErrorStartFailed =>
+      'Bluetooth-Mesh konnte nicht eingeschaltet werden. Bitte versuche es erneut.';
+
+  @override
+  String get meshErrorStopFailed =>
+      'Bluetooth-Mesh konnte nicht ausgeschaltet werden. Bitte versuche es erneut.';
+
+  @override
+  String get meshStoppedNotice => 'Bluetooth-Mesh wurde ausgeschaltet.';
+
+  @override
+  String get meshStoppedAfterDeadline =>
+      'Bluetooth-Mesh hat sich nach 12 Stunden ausgeschaltet.';
+
+  @override
+  String get meshStoppedOk => 'OK';
+
+  @override
+  String get meshIntroTitle => 'Bluetooth-Mesh';
+
+  @override
+  String get meshIntroHeadingDoes => 'Was das Mesh tut';
+
+  @override
+  String get meshIntroWhat =>
+      'Auch ohne Internet kann das Mesh deine verschlüsselten Standortaktualisierungen und die deiner Kreise per Bluetooth von Telefon zu Telefon weitergeben, wenn Telefone mit eingeschaltetem Mesh in der Nähe sind. Aktualisierungen können verspätet ankommen oder verloren gehen. Dein Telefon transportiert außerdem verschlüsselte Datenpakete anderer Leute, kann sie aber nicht lesen.';
+
+  @override
+  String get meshIntroAutoOff =>
+      'Das Mesh schaltet sich nach 12 Stunden von allein aus. Wenn Benachrichtigungen erlaubt sind, bekommst du 30 Minuten vorher eine Erinnerung.';
+
+  @override
+  String get meshIntroBattery => 'Das Mesh verbraucht mehr Akku.';
+
+  @override
+  String get meshIntroClosed =>
+      'Das Mesh läuft weiter, wenn Haven geschlossen ist. Ist Haven geschlossen und das Teilen im Hintergrund ausgeschaltet, transportiert das Mesh zwar die Datenpakete anderer Leute, sendet aber weder deinen Standort noch liest es die Standorte deiner Kreise, bis du Haven öffnest.';
+
+  @override
+  String get meshIntroHeadingLearn => 'Was andere erfahren können';
+
+  @override
+  String get meshIntroNearby =>
+      'Wer in der Nähe ist, kann erkennen, dass auf diesem Telefon Havens Mesh eingeschaltet ist, und das Telefon anhand seines Funksignals orten. Ein Telefon, das sich mit deinem verbindet, kann dein Telefon später wiedererkennen, auch nachdem sich die Bluetooth-Adresse deines Telefons geändert hat. Keiner von beiden kann deinen Standort lesen oder deine Kreise sehen.';
+
+  @override
+  String get meshIntroConnected =>
+      'Ein Telefon, das sich mit deinem verbindet, kann sehen, welche verschlüsselten Datenpakete dein Telefon aussendet, wie alt jedes ungefähr ist und wann dein Telefon im Ruhezustand ist. Wenn es zu keinem deiner Kreise gehört, kann es sie nicht lesen und kann sich nicht sicher sein, welche davon deine eigenen Aktualisierungen sind.';
+
+  @override
+  String get meshIntroName =>
+      'Telefone, mit denen sich das Mesh verbindet, können den Bluetooth-Namen deines Telefons lesen und sehen, welche anderen Bluetooth-Dienste dein Telefon anbietet.';
+
+  @override
+  String meshIntroNameIs(String name) {
+    return 'Der Bluetooth-Name deines Telefons ist „$name“.';
+  }
+
+  @override
+  String get meshBluetoothSettings => 'Bluetooth-Einstellungen';
+
+  @override
+  String get meshIntroBridge =>
+      'Wenn du online bist, kann dein Telefon die Aktualisierung eines Kreismitglieds in der Nähe an die Relays deines Kreises weitergeben, und das Telefon des Mitglieds kann deine weitergeben. Ein Relay kann dann erkennen, dass ein Mitglied dieses Kreises offline ist und sich in der Nähe des Telefons befindet, das die Aktualisierung weitergegeben hat. Sind beide Telefone online, kann es erkennen, dass sie nahe beieinander sind.';
+
+  @override
+  String get meshIntroRemoved =>
+      'Während du offline bist, kann jemand, der aus einem Kreis entfernt wurde, deine Aktualisierungen weiterhin lesen, bis dein Telefon erfährt, dass die Person entfernt wurde.';
+
+  @override
+  String get meshIntroHeadingKnow => 'Gut zu wissen';
+
+  @override
+  String get meshIntroStats =>
+      'Halte die Mesh-Schaltfläche gedrückt, um zu sehen, wie viele Aktualisierungen das Mesh transportiert hat.';
+
+  @override
+  String get meshNameStepTitle => 'Bluetooth-Name deines Telefons';
+
+  @override
+  String get meshNameStepChange =>
+      'Du kannst ihn in den Bluetooth-Einstellungen deines Telefons ändern.';
+
+  @override
+  String get meshStatsTitle => 'Mesh-Aktivität';
+
+  @override
+  String get meshStatsThisSession => 'Diese Sitzung';
+
+  @override
+  String get meshStatsLastSession => 'Letzte Sitzung';
+
+  @override
+  String get meshStatsAllTime => 'Insgesamt';
+
+  @override
+  String get meshStatsFromCircles => 'Von deinen Kreisen empfangen';
+
+  @override
+  String get meshStatsPassedOn => 'Für andere weitergegeben';
+
+  @override
+  String meshStatsCell(String row, String column, String count) {
+    return '$row, $column: $count';
+  }
+
+  @override
+  String get meshStatsFootnote =>
+      'Weitergegebene Datenpakete kann dieses Telefon nicht lesen. Dazu gehören Aktualisierungen anderer Leute und Scheinpakete, die verbergen, welche Datenpakete echt sind.';
+
+  @override
+  String get meshStatsUnavailable =>
+      'Mesh-Aktivität konnte nicht geladen werden.';
+
+  @override
+  String get meshStatsAbout => 'Über Bluetooth-Mesh';
+
+  @override
+  String get meshStatusConnected => 'Mesh ist an · verbunden';
+
+  @override
+  String get meshStatusSearching =>
+      'Mesh ist an · sucht nach Telefonen in der Nähe';
+
+  @override
+  String get meshStatusFindable =>
+      'Mesh ist an · andere Telefone können dieses Telefon finden, es kann aber nicht nach ihnen suchen';
+
+  @override
+  String get meshStatusPaused => 'Mesh ist pausiert · Bluetooth ist aus';
+
+  @override
+  String get meshStatusOff => 'Mesh ist aus';
+
+  @override
+  String meshTurnsOffAt(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'Schaltet sich um $timeString aus';
+  }
+
+  @override
+  String get meshKeepOn => '12 Stunden anlassen';
+
+  @override
+  String get meshStatsReset => 'Zähler zurücksetzen';
+
+  @override
+  String get meshStatsResetTitle => 'Mesh-Zähler zurücksetzen?';
+
+  @override
+  String get meshStatsResetBody =>
+      'Alle vier Zähler werden auf null zurückgesetzt.';
+
+  @override
+  String get meshStatsResetConfirm => 'Zurücksetzen';
+
+  @override
+  String get settingsMeshTitle => 'Bluetooth-Mesh';
+
+  @override
+  String get settingsMeshOn => 'An';
+
+  @override
+  String get settingsMeshOff => 'Aus';
+
+  @override
+  String get meshNoticeChannel => 'Bluetooth-Mesh';
+
+  @override
+  String get meshNoticeOn => 'Bluetooth-Mesh ist an';
+
+  @override
+  String get meshNoticePaused => 'Bluetooth-Mesh pausiert – Bluetooth ist aus';
+
+  @override
+  String get meshNoticeStopped => 'Bluetooth-Mesh hat sich ausgeschaltet';
+
+  @override
+  String meshNoticeReminder(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'Bluetooth-Mesh schaltet sich um $timeString aus';
+  }
+
+  @override
+  String get meshNoticeKeepOn => 'Eingeschaltet lassen';
 }

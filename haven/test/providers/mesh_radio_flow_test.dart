@@ -9,8 +9,14 @@
 //    that does not start takes the keys back;
 //  * turning off stops the radio first and the engine whatever the radio did;
 //  * a turn-on, a turn-off, a keep-on and a reconcile run one at a time, in
-//    the order asked, and a reconcile asked in the middle of one is dropped —
-//    so a radio's own report can never undo what the user is doing;
+//    the order asked: a reconcile asked in the middle of one runs behind it,
+//    once however often it was asked — so a radio's own report can never
+//    undo what the user is doing, and none is lost;
+//  * a turn-on and a keep-on answer from what they left, their own closing
+//    reconcile included;
+//  * no entry of the radio is waited for past its bound: a service that
+//    never answers costs a turn-off, a logout and a launch that bound and
+//    nothing else;
 //  * a reconcile does what its table says from what the two report, asks a
 //    radio that will not come back once, and never undoes a stop the service
 //    made;
@@ -20,6 +26,7 @@
 //  * nothing of any of it is logged.
 import 'dart:async';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -104,11 +111,24 @@ class _Identity implements IdentityService {
       throw UnimplementedError('unexpected call: ${invocation.memberName}');
 }
 
-/// A circle service whose wipe is written into the radio's journal.
+/// A circle service whose wipe, and the first and last of a logout's steps
+/// ahead of it, are written into the radio's journal.
 class _Circles extends MockCircleService {
   _Circles(this.journal);
 
   final List<String> journal;
+
+  @override
+  Future<void> resetAllSyncCursors() {
+    journal.add('cursors');
+    return super.resetAllSyncCursors();
+  }
+
+  @override
+  Future<void> closeAndInvalidate() {
+    journal.add('close');
+    return super.closeAndInvalidate();
+  }
 
   @override
   Future<void> wipeAllMlsState() {
@@ -424,7 +444,16 @@ void main() {
       await turnOff;
       await pumpEventQueue();
 
-      expect(t.journal, ['radio.stop', 'mesh.stop', ..._agreed, ..._read]);
+      // The turn-off's own reconcile, then the one the report asked for:
+      // both find the two agreed.
+      expect(t.journal, [
+        'radio.stop',
+        'mesh.stop',
+        ..._agreed,
+        ..._read,
+        ..._agreed,
+        ..._read,
+      ]);
       expect(t.state.on_, isFalse);
       expect(t.stoppedNotice, isFalse);
     });
@@ -453,8 +482,8 @@ void main() {
       expect(t.state.on_, isTrue);
     });
 
-    test('a reconcile asked while a transition waits its turn is dropped '
-        'too', () async {
+    test('a reconcile asked while a transition waits its turn runs behind '
+        'it, once however often it was asked', () async {
       final t = _Mesh();
       await t.on();
       final status = Completer<void>();
@@ -464,9 +493,9 @@ void main() {
       await t.radio.reached('status');
       final turnOff = t.notifier.turnOff();
       t.radio.emit(radioStatus(MeshRadioState.running, wanted: true));
-      await t.notifier.reconcile();
+      final asked = t.notifier.reconcile();
       status.complete();
-      await Future.wait([reconcile, turnOff]);
+      await Future.wait([reconcile, turnOff, asked]);
       await pumpEventQueue();
 
       expect(t.journal, [
@@ -476,7 +505,94 @@ void main() {
         'mesh.stop',
         ..._agreed,
         ..._read,
+        ..._agreed,
+        ..._read,
       ]);
+      expect(t.journal, isNot(contains('radio.start')));
+    });
+
+    test("a report that lands behind a transition's own closing reconcile "
+        'is not lost: a service that stopped itself behind a start that '
+        'answered takes the engine with it, with the notice', () async {
+      final t = _Mesh();
+      await t.built();
+      final turnOn = t.notifier.turnOn();
+      // The closing reconcile has read the radio: what it reports from here
+      // on, that reconcile does not see.
+      await t.radio.reached('status');
+      final released = Completer<void>();
+      t.mesh.held['stats'] = released.future;
+      t.radio.emit(radioStatus(MeshRadioState.stopped));
+      await pumpEventQueue();
+      expect(t.journal, isNot(contains('mesh.stop')));
+
+      released.complete();
+      unawaited(t.mesh.held.remove('stats'));
+      await turnOn;
+      await pumpEventQueue();
+
+      expect(t.count('mesh.stop'), 1);
+      expect(t.count('radio.start'), 1);
+      expect(t.state.on_, isFalse);
+      expect(t.stoppedNotice, isTrue);
+    });
+
+    test('a turn-on answers from what it left: one whose radio had stopped '
+        'by its own closing reconcile did not turn mesh on', () async {
+      final t = _Mesh();
+      await t.built();
+      final turnOn = t.notifier.turnOn();
+      await t.radio.reached('start');
+      // The start answers, and the service then stops itself.
+      t.radio.statusAnswer = radioStatus(MeshRadioState.stopped);
+
+      expect(await turnOn, MeshTurnOn.failed);
+      expect(t.state.on_, isFalse);
+      expect(t.count('mesh.stop'), 1);
+    });
+
+    test('a turn-on that started and then cannot be read turns mesh off '
+        'again, so that "it failed" is true: never a failure beside a radio '
+        'that runs', () async {
+      final t = _Mesh();
+      await t.built();
+      final turnOn = t.notifier.turnOn();
+      // The closing reconcile has read both; the read that ends the turn
+      // fails, and so does every one after it.
+      await t.radio.reached('status');
+      t.mesh.throws['stats'] = StateError('link to $_address lost');
+
+      expect(await turnOn, MeshTurnOn.failed);
+
+      expect(t.journal, containsAllInOrder(['radio.start', 'radio.stop']));
+      expect(t.count('mesh.stop'), 1);
+      expect(t.radio.statusAnswer.state, MeshRadioState.stopped);
+      t.mesh.throws.clear();
+      await t.notifier.refresh();
+      expect(t.state.on_, isFalse);
+    });
+
+    test('a keep-on that cannot be read afterwards was kept all the '
+        'same', () async {
+      final t = _Mesh();
+      await t.on();
+      final keepOn = t.notifier.keepOn();
+      await t.radio.reached('status');
+      t.mesh.throws['stats'] = StateError('link to $_address lost');
+
+      expect(await keepOn, isTrue);
+      expect(t.journal, isNot(contains('mesh.stop')));
+    });
+
+    test('a keep-on answers from what it left', () async {
+      final t = _Mesh();
+      await t.on();
+      final keepOn = t.notifier.keepOn();
+      await t.radio.reached('sync');
+      t.radio.statusAnswer = radioStatus(MeshRadioState.stopped);
+
+      expect(await keepOn, isFalse);
+      expect(t.state.on_, isFalse);
     });
 
     test('transitions run in the order asked, each whole before the '
@@ -487,16 +603,16 @@ void main() {
       t.mesh.held['start'] = start.future;
 
       final turnOn = t.notifier.turnOn();
-      final turnOff = t.notifier.turnOff();
       final keepOn = t.notifier.keepOn();
+      final turnOff = t.notifier.turnOff();
       await t.mesh.reached('start');
       await pumpEventQueue();
       expect(t.journal, [..._asked, 'mesh.start']);
       start.complete();
 
       expect(await turnOn, MeshTurnOn.on);
-      await turnOff;
       expect(await keepOn, isTrue);
+      await turnOff;
 
       expect(t.journal, [
         ..._asked,
@@ -505,13 +621,13 @@ void main() {
         'radio.start',
         ..._agreed,
         ..._read,
-        'radio.stop',
-        'mesh.stop',
-        ..._agreed,
-        ..._read,
         'mesh.keepOn',
         'mesh.stats',
         'radio.sync',
+        ..._agreed,
+        ..._read,
+        'radio.stop',
+        'mesh.stop',
         ..._agreed,
         ..._read,
       ]);
@@ -701,8 +817,8 @@ void main() {
   });
 
   group('a logout', () {
-    test('stops the radio before the wipe, and a radio that cannot be asked '
-        'costs the wipe nothing', () async {
+    test('stops the radio first, ahead of everything that takes time, and a '
+        'radio that cannot be asked costs the wipe nothing', () async {
       SharedPreferences.setMockInitialValues({});
       for (final deaf in [false, true]) {
         final journal = <String>[];
@@ -721,8 +837,80 @@ void main() {
             .read(identityNotifierProvider.notifier)
             .deleteIdentity();
 
-        expect(journal, ['radio.stop', 'wipe'], reason: 'deaf: $deaf');
+        expect(journal, [
+          'radio.stop',
+          'cursors',
+          'close',
+          'wipe',
+        ], reason: 'deaf: $deaf');
       }
+    });
+
+    test("takes the disclosure's read flag and an owed stop notice with it: "
+        'the next identity reads the disclosure for itself', () async {
+      SharedPreferences.setMockInitialValues({kMeshIntroSeenKey: true});
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(_Identity()),
+          circleServiceProvider.overrideWithValue(_Circles([])),
+          meshRadioProvider.overrideWithValue(FakeMeshRadio()),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.read(meshStoppedNoticeProvider.notifier).state = true;
+
+      await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.containsKey(kMeshIntroSeenKey), isFalse);
+      expect(container.read(meshStoppedNoticeProvider), isFalse);
+    });
+
+    test("a notice the radio's own stop raises late in a logout is not the "
+        "next identity's", () async {
+      SharedPreferences.setMockInitialValues({});
+      final mesh = FakeMeshService()..statsAnswer = meshState(on: true);
+      final radio = FakeMeshRadio()
+        ..statusAnswer = radioStatus(MeshRadioState.running, wanted: true);
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(_Identity()),
+          circleServiceProvider.overrideWithValue(_Circles([])),
+          meshServiceProvider.overrideWithValue(mesh),
+          meshRadioProvider.overrideWithValue(radio),
+          meshNoticeCopyProvider.overrideWithValue(meshCopy),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(meshProvider.future);
+      // The engine's stop answers only once the logout has ended.
+      final stop = Completer<void>();
+      mesh.held['stop'] = stop.future;
+
+      final logout = container
+          .read(identityNotifierProvider.notifier)
+          .deleteIdentity();
+      await radio.reached('stop');
+      // The service reports the stop the logout asked for: to the reconcile
+      // it is a radio that stopped beside an engine still on.
+      radio.emit(radioStatus(MeshRadioState.stopped));
+      await logout;
+      stop.complete();
+      await pumpEventQueue();
+      expect(
+        container.read(meshStoppedNoticeProvider),
+        isTrue,
+        reason: 'premise: the notice was raised behind the logout',
+      );
+
+      // The next identity is set up: the import fails on the fake, behind
+      // the point where what the last identity left is dropped.
+      await container
+          .read(identityNotifierProvider.notifier)
+          .importFromNsec('nsec1')
+          .then<void>((_) {}, onError: (Object _) {});
+
+      expect(container.read(meshStoppedNoticeProvider), isFalse);
     });
 
     test('the retry of its wipe stops the radio before the wipe; with no '
@@ -919,6 +1107,196 @@ void main() {
       expect(mesh.calls, isNot(contains('start')));
       expect(logs.lines, isEmpty);
       expect(reported, isEmpty);
+    });
+  });
+
+  group('a radio that never answers', () {
+    const bound = Duration(seconds: 3);
+    const permissionBound = Duration(seconds: 40);
+    const radio = AndroidMeshRadio(
+      bound: bound,
+      permissionBound: permissionBound,
+    );
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final asked = <String>[];
+
+    /// Every entry in [deaf] is never answered; the others answer as a
+    /// service that runs would.
+    void serviceDeafTo(Set<String> deaf) {
+      asked.clear();
+      messenger.setMockMethodCallHandler(AndroidMeshRadio.channel, (call) {
+        asked.add(call.method);
+        if (deaf.contains(call.method)) return Completer<Object?>().future;
+        return Future.value(switch (call.method) {
+          'permission' || 'requestPermission' => 'granted',
+          'bluetoothOn' => true,
+          'start' => 'started',
+          'status' => {'state': 'running', 'wanted': true, 'canSearch': true},
+          _ => null,
+        });
+      });
+      addTearDown(
+        () =>
+            messenger.setMockMethodCallHandler(AndroidMeshRadio.channel, null),
+      );
+    }
+
+    /// What [entry] came to once [waited] had passed: `null` while it is
+    /// still out.
+    Object? after<T>(Duration waited, Future<T> Function() entry) {
+      Object? ended;
+      fakeAsync((async) {
+        unawaited(
+          entry().then<void>(
+            (answer) => ended = answer ?? 'answered',
+            onError: (Object error) => ended = error,
+          ),
+        );
+        async.elapse(waited);
+      });
+      return ended;
+    }
+
+    test('fails each entry at its bound as a platform error would, and not '
+        'before', () {
+      const all = {
+        'permission',
+        'requestPermission',
+        'bluetoothOn',
+        'bluetoothName',
+        'openBluetoothSettings',
+        'start',
+        'sync',
+        'stop',
+        'status',
+      };
+      final entries = <String, Future<Object?> Function()>{
+        'permission': radio.permission,
+        'bluetoothOn': radio.bluetoothOn,
+        'bluetoothName': radio.bluetoothName,
+        'openBluetoothSettings': radio.openBluetoothSettings,
+        'sync': () => radio.sync(meshCopy(Duration.zero)),
+        'stop': radio.stop,
+        'status': radio.status,
+      };
+      const justUnder = Duration(milliseconds: 1);
+      for (final MapEntry(key: name, value: entry) in entries.entries) {
+        serviceDeafTo(all);
+        expect(after(bound - justUnder, entry), isNull, reason: name);
+        expect(after(bound, entry), isA<MeshRadioException>(), reason: name);
+      }
+
+      serviceDeafTo(all);
+      Future<Object?> start() => radio.start(meshCopy(Duration.zero));
+      expect(after(bound - justUnder, start), isNull);
+      expect(after(bound, start), MeshRadioStart.failed);
+
+      // The system's dialog waits on a person: longer, and still not for
+      // ever.
+      serviceDeafTo(all);
+      expect(
+        after(permissionBound - justUnder, radio.requestPermission),
+        isNull,
+      );
+      expect(
+        after(permissionBound, radio.requestPermission),
+        isA<MeshRadioException>(),
+      );
+    });
+
+    ({ProviderContainer container, FakeMeshService mesh}) on() {
+      final mesh = FakeMeshService()..statsAnswer = meshState(on: true);
+      final container = ProviderContainer(
+        overrides: [
+          meshServiceProvider.overrideWithValue(mesh),
+          meshRadioProvider.overrideWithValue(radio),
+          meshNoticeCopyProvider.overrideWithValue(meshCopy),
+        ],
+      );
+      addTearDown(container.dispose);
+      return (container: container, mesh: mesh);
+    }
+
+    test('costs a turn-off its bound, and the engine is stopped all the '
+        'same', () {
+      serviceDeafTo({'stop'});
+      final t = on();
+      fakeAsync((async) {
+        unawaited(t.container.read(meshProvider.notifier).turnOff());
+        async.elapse(bound - const Duration(milliseconds: 1));
+        expect(t.mesh.calls, isNot(contains('stop')));
+
+        async.elapse(const Duration(milliseconds: 1));
+        expect(t.mesh.calls, contains('stop'));
+      });
+    });
+
+    test('at a keep-on leaves a turn-off asked behind it working', () {
+      serviceDeafTo({'sync'});
+      final t = on();
+      fakeAsync((async) {
+        final mesh = t.container.read(meshProvider.notifier);
+        unawaited(mesh.keepOn());
+        unawaited(mesh.turnOff());
+        async.elapse(bound);
+
+        expect(asked, containsAllInOrder(['sync', 'stop']));
+        expect(t.mesh.calls, containsAllInOrder(['keepOn', 'stop']));
+        expect(t.container.read(meshProvider).requireValue!.on_, isFalse);
+      });
+    });
+
+    test('costs a logout its bound, and the wipe is made all the same', () {
+      SharedPreferences.setMockInitialValues({});
+      serviceDeafTo({'stop'});
+      final journal = <String>[];
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(_Identity()),
+          circleServiceProvider.overrideWithValue(_Circles(journal)),
+          meshRadioProvider.overrideWithValue(radio),
+        ],
+      );
+      addTearDown(container.dispose);
+      fakeAsync((async) {
+        unawaited(
+          container.read(identityNotifierProvider.notifier).deleteIdentity(),
+        );
+        async.elapse(bound - const Duration(milliseconds: 1));
+        expect(asked, ['stop']);
+        expect(journal, isEmpty);
+
+        async.elapse(const Duration(milliseconds: 1));
+        expect(journal, ['cursors', 'close', 'wipe']);
+      });
+    });
+
+    test('costs the retry of a wipe at a launch its bound, and the wipe is '
+        'made all the same', () {
+      SharedPreferences.setMockInitialValues({kPendingMlsWipeKey: true});
+      serviceDeafTo({'stop'});
+      final journal = <String>[];
+      fakeAsync((async) {
+        late final SharedPreferences prefs;
+        unawaited(
+          SharedPreferences.getInstance().then((got) async {
+            prefs = got;
+            await PendingMlsWipeService(
+              prefs: prefs,
+              circleService: _Circles(journal),
+              meshRadio: radio,
+            ).retryWipeIfPending();
+          }),
+        );
+        async.elapse(bound - const Duration(milliseconds: 1));
+        expect(asked, ['stop']);
+        expect(journal, isEmpty);
+
+        async.elapse(const Duration(milliseconds: 1));
+        expect(journal, ['wipe']);
+        expect(prefs.getBool(kPendingMlsWipeKey), isFalse);
+      });
     });
   });
 

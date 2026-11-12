@@ -2352,4 +2352,240 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get avatarSemanticsOffline => 'غير متصل';
+
+  @override
+  String get meshButtonLabel => 'شبكة البلوتوث المتداخلة';
+
+  @override
+  String get meshButtonValueConnected => 'متصلة بهاتف قريب';
+
+  @override
+  String get meshButtonValuePaused => 'متوقّفة مؤقتًا، البلوتوث مُعطّل';
+
+  @override
+  String get meshButtonHintTurnOn => 'تفعيلها';
+
+  @override
+  String get meshButtonHintTurnOff => 'تعطيلها';
+
+  @override
+  String get meshButtonHintStats => 'عرض نشاط الشبكة المتداخلة';
+
+  @override
+  String get meshTurningOn => 'جارٍ تفعيل شبكة البلوتوث المتداخلة…';
+
+  @override
+  String get meshTurnOn => 'تفعيل';
+
+  @override
+  String get meshTurnOff => 'تعطيل';
+
+  @override
+  String get meshTurnedOn =>
+      'شبكة البلوتوث المتداخلة مفعّلة. اضغط مع الاستمرار على الزر لعرض النشاط.';
+
+  @override
+  String get meshUndo => 'تراجع';
+
+  @override
+  String get meshErrorNoPermission =>
+      'تحتاج شبكة البلوتوث المتداخلة إلى إذن «الأجهزة المجاورة».';
+
+  @override
+  String get meshErrorBluetoothOff =>
+      'فعّل البلوتوث لاستخدام الشبكة المتداخلة.';
+
+  @override
+  String get meshErrorUnsupported =>
+      'لا يستطيع هذا الهاتف استخدام شبكة البلوتوث المتداخلة.';
+
+  @override
+  String get meshErrorStartFailed =>
+      'تعذّر تفعيل شبكة البلوتوث المتداخلة. يُرجى إعادة المحاولة.';
+
+  @override
+  String get meshErrorStopFailed =>
+      'تعذّر تعطيل شبكة البلوتوث المتداخلة. يُرجى إعادة المحاولة.';
+
+  @override
+  String get meshStoppedNotice => 'تم تعطيل شبكة البلوتوث المتداخلة.';
+
+  @override
+  String get meshStoppedAfterDeadline =>
+      'تم تعطيل شبكة البلوتوث المتداخلة بعد مرور 12 ساعة.';
+
+  @override
+  String get meshStoppedOk => 'حسنًا';
+
+  @override
+  String get meshIntroTitle => 'شبكة البلوتوث المتداخلة';
+
+  @override
+  String get meshIntroHeadingDoes => 'ما تفعله الشبكة المتداخلة';
+
+  @override
+  String get meshIntroWhat =>
+      'حتى بلا إنترنت، يمكن للشبكة المتداخلة أن تمرّر تحديثات الموقع المشفّرة، تحديثاتك وتحديثات دوائرك، من هاتف إلى هاتف عبر البلوتوث عندما تكون هناك هواتف قريبة فُعِّلت فيها الشبكة المتداخلة. وقد تتأخّر التحديثات أو تضيع. ويحمل هاتفك أيضًا حُزَمًا مشفّرة لأشخاص آخرين، وهو لا يستطيع قراءتها.';
+
+  @override
+  String get meshIntroAutoOff =>
+      'تُعطَّل الشبكة المتداخلة تلقائيًا بعد 12 ساعة. وإذا كانت الإشعارات مسموحًا بها، يصلك تذكير قبل ذلك بـ 30 دقيقة.';
+
+  @override
+  String get meshIntroBattery => 'تستهلك الشبكة المتداخلة مزيدًا من البطارية.';
+
+  @override
+  String get meshIntroClosed =>
+      'تواصل الشبكة المتداخلة عملها عندما يكون Haven مغلقًا. وإذا كان Haven مغلقًا والمشاركة في الخلفية مُعطّلة، فإنها تحمل حُزَم الآخرين لكنها لا ترسل موقعك ولا تقرأ مواقع دوائرك إلى أن تفتح Haven.';
+
+  @override
+  String get meshIntroHeadingLearn => 'ما يستطيع الآخرون معرفته';
+
+  @override
+  String get meshIntroNearby =>
+      'يستطيع أي شخص قريب أن يعرف أن شبكة Haven المتداخلة مفعّلة على هذا الهاتف، وأن يحدّد مكانه من إشارته اللاسلكية. والهاتف الذي يتصل بهاتفك يستطيع أن يتعرّف عليه مجددًا فيما بعد، حتى بعد أن يتغيّر عنوان البلوتوث لهاتفك. وهم لا يستطيعون قراءة موقعك ولا رؤية دوائرك.';
+
+  @override
+  String get meshIntroConnected =>
+      'الهاتف الذي يتصل بهاتفك يستطيع أن يرى أيّ الحُزَم المشفّرة يرسلها هاتفك، وعمر كل حزمة منها تقريبًا، ومتى يكون هاتفك في وضع السكون. وما لم يكن ذلك الهاتف في إحدى دوائرك، فإنه لا يستطيع قراءتها، ولا يستطيع أن يعرف على وجه اليقين أيّها تحديثاتك أنت.';
+
+  @override
+  String get meshIntroName =>
+      'الهواتف التي ترتبط بها الشبكة المتداخلة تستطيع قراءة اسم البلوتوث لهاتفك ورؤية خدمات البلوتوث الأخرى التي يقدّمها.';
+
+  @override
+  String meshIntroNameIs(String name) {
+    return 'اسم البلوتوث لهاتفك هو «$name».';
+  }
+
+  @override
+  String get meshBluetoothSettings => 'إعدادات البلوتوث';
+
+  @override
+  String get meshIntroBridge =>
+      'عندما تكون متصلًا بالإنترنت، يمكن لهاتفك أن يمرّر تحديث عضو في دائرتك قريب منك إلى مُرحِّلات دائرتك، ويمكن لهاتفه أن يمرّر تحديثك. وعندها يستطيع المُرحِّل أن يعرف أن أحد أعضاء تلك الدائرة غير متصل بالإنترنت وقريب من الهاتف الذي مرّر التحديث. وإذا كان الهاتفان متصلين بالإنترنت، استطاع المُرحِّل أن يعرف أنهما قريبان أحدهما من الآخر.';
+
+  @override
+  String get meshIntroRemoved =>
+      'ما دمت غير متصل بالإنترنت، يظل مَن أُزيل من دائرة قادرًا على قراءة تحديثاتك إلى أن يعلم هاتفك بإزالته.';
+
+  @override
+  String get meshIntroHeadingKnow => 'معلومة مفيدة';
+
+  @override
+  String get meshIntroStats =>
+      'اضغط مع الاستمرار على زر الشبكة المتداخلة لترى عدد التحديثات التي حملتها الشبكة.';
+
+  @override
+  String get meshNameStepTitle => 'اسم البلوتوث لهاتفك';
+
+  @override
+  String get meshNameStepChange => 'يمكنك تغييره من إعدادات البلوتوث في هاتفك.';
+
+  @override
+  String get meshStatsTitle => 'نشاط الشبكة المتداخلة';
+
+  @override
+  String get meshStatsThisSession => 'هذه الجلسة';
+
+  @override
+  String get meshStatsLastSession => 'آخر جلسة';
+
+  @override
+  String get meshStatsAllTime => 'الإجمالي';
+
+  @override
+  String get meshStatsFromCircles => 'تحديثات واردة من دوائرك';
+
+  @override
+  String get meshStatsPassedOn => 'حُزَم مُمرَّرة لصالح الآخرين';
+
+  @override
+  String meshStatsCell(String row, String column, String count) {
+    return '$row، $column: $count';
+  }
+
+  @override
+  String get meshStatsFootnote =>
+      'الحُزَم المُمرَّرة لا يستطيع هذا الهاتف قراءتها. وهي تشمل تحديثات أشخاص آخرين وحُزَمًا وهمية للتمويه تُخفي أيّ الحُزَم هي الحقيقية.';
+
+  @override
+  String get meshStatsUnavailable => 'تعذّرت قراءة نشاط الشبكة المتداخلة.';
+
+  @override
+  String get meshStatsAbout => 'حول شبكة البلوتوث المتداخلة';
+
+  @override
+  String get meshStatusConnected => 'الشبكة المتداخلة مفعّلة · متصلة';
+
+  @override
+  String get meshStatusSearching =>
+      'الشبكة المتداخلة مفعّلة · تبحث عن هواتف قريبة';
+
+  @override
+  String get meshStatusFindable =>
+      'الشبكة المتداخلة مفعّلة · تستطيع الهواتف الأخرى العثور على هذا الهاتف، لكنه لا يستطيع البحث عنها';
+
+  @override
+  String get meshStatusPaused =>
+      'الشبكة المتداخلة متوقّفة مؤقتًا · البلوتوث مُعطّل';
+
+  @override
+  String get meshStatusOff => 'الشبكة المتداخلة مُعطّلة';
+
+  @override
+  String meshTurnsOffAt(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'ستُعطَّل تلقائيًا الساعة $timeString';
+  }
+
+  @override
+  String get meshKeepOn => 'إبقاؤها مفعّلة لمدة 12 ساعة';
+
+  @override
+  String get meshStatsReset => 'تصفير العدّادات';
+
+  @override
+  String get meshStatsResetTitle => 'تصفير عدّادات الشبكة المتداخلة؟';
+
+  @override
+  String get meshStatsResetBody => 'ستعود العدّادات الأربعة كلها إلى الصفر.';
+
+  @override
+  String get meshStatsResetConfirm => 'تصفير';
+
+  @override
+  String get settingsMeshTitle => 'شبكة البلوتوث المتداخلة';
+
+  @override
+  String get settingsMeshOn => 'مفعّلة';
+
+  @override
+  String get settingsMeshOff => 'مُعطّلة';
+
+  @override
+  String get meshNoticeChannel => 'شبكة البلوتوث المتداخلة';
+
+  @override
+  String get meshNoticeOn => 'شبكة البلوتوث المتداخلة مفعّلة';
+
+  @override
+  String get meshNoticePaused =>
+      'الشبكة المتداخلة متوقّفة مؤقتًا — البلوتوث مُعطّل';
+
+  @override
+  String get meshNoticeStopped => 'تم تعطيل شبكة البلوتوث المتداخلة';
+
+  @override
+  String meshNoticeReminder(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'ستُعطَّل شبكة البلوتوث المتداخلة الساعة $timeString';
+  }
+
+  @override
+  String get meshNoticeKeepOn => 'إبقاؤها مفعّلة';
 }

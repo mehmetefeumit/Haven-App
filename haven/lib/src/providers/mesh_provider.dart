@@ -4,11 +4,13 @@ library;
 import 'dart:async';
 import 'dart:io' show Platform;
 
+import 'package:clock/clock.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
+import 'package:haven/src/providers/locale_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
@@ -23,9 +25,10 @@ import 'package:haven/src/services/nostr_circle_service.dart';
 ///
 /// Off unless a build passes `--dart-define=HAVEN_MESH=true`. With it off no
 /// Dart code calls a mesh entry, so mesh cannot be turned on, no mesh key is
-/// stored and nothing is passed on to a relay. The radio has no native end
-/// yet: with it on, an Android build's turn-on fails and stores nothing, and
-/// no packet moves between phones in any build.
+/// stored, nothing is passed on to a relay, and the map has no mesh button,
+/// sheet or aura. The radio has no native end yet: with it on, an Android
+/// build's turn-on fails and stores nothing, and no packet moves between
+/// phones in any build.
 const meshEnabled = bool.fromEnvironment('HAVEN_MESH');
 
 /// [meshEnabled], read through a provider so the default test run executes
@@ -79,11 +82,25 @@ MeshRadio? platformMeshRadio() =>
 /// [left].
 typedef MeshNoticeCopyOf = MeshNoticeCopy Function(Duration left);
 
-/// The radio's notices in the language the app renders in, or `null` in a
-/// build that has no words for them. None exist yet: the strings land with
-/// the UI. Without them no radio is started — one whose notices say nothing
-/// would run unseen — so a turn-on fails before anything is stored.
-final meshNoticeCopyProvider = Provider<MeshNoticeCopyOf?>((ref) => null);
+/// The radio's notices in the language the app renders in. `null` only where
+/// a test takes the words away: without them no radio is started — one whose
+/// notices say nothing would run unseen — so a turn-on fails before anything
+/// is stored.
+final meshNoticeCopyProvider = Provider<MeshNoticeCopyOf?>((ref) {
+  final l10n = ref.watch(appLocalizationsProvider);
+  return (left) => MeshNoticeCopy(
+    channel: l10n.meshNoticeChannel,
+    on: l10n.meshNoticeOn,
+    paused: l10n.meshNoticePaused,
+    reminder: l10n.meshNoticeReminder(clock.now().add(left)),
+    keepOn: l10n.meshNoticeKeepOn,
+    stopped: l10n.meshNoticeStopped,
+  );
+});
+
+/// Whether the mesh's disclosure has been read to the end of a turn-on on
+/// this device: a flag in the app's preferences, cleared at a logout.
+const String kMeshIntroSeenKey = 'haven.mesh.intro_seen';
 
 /// Whether mesh was turned off by something other than the user, who has not
 /// been told. Set by a reconcile that turned it off; flipped back by whoever
@@ -131,13 +148,17 @@ final meshProvider = AsyncNotifierProvider<MeshNotifier, MeshStatsFfi?>(
 /// Where the platform has a radio, mesh is on only with both its engine and
 /// its radio: [turnOn], [turnOff], [keepOn] and [reconcile] run one at a
 /// time, in the order asked (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §C.2–§C.4).
+/// Every entry of the radio is bounded where the radio is asked
+/// ([AndroidMeshRadio]), so one that never answers holds the queue no longer
+/// than that.
 class MeshNotifier extends AsyncNotifier<MeshStatsFfi?> implements BurstMesh {
   /// The turn-on, turn-off, keep-on or reconcile asked last: the next one
   /// runs behind it.
   Future<void> _last = Future.value();
 
-  /// The user's transitions asked and not yet finished.
-  int _transitions = 0;
+  /// The reconcile asked whose turn has not come: one asked meanwhile is
+  /// this one.
+  Future<void>? _owed;
 
   @override
   Future<MeshStatsFfi?> build() async {
@@ -159,7 +180,16 @@ class MeshNotifier extends AsyncNotifier<MeshStatsFfi?> implements BurstMesh {
     await _transition((mesh, radio) async {
       ended = await _turnOn(mesh, radio, confirm);
     });
-    return ended;
+    if (ended != MeshTurnOn.on) return ended;
+    // Answered from what the transition left: its own closing reconcile turns
+    // off a mesh whose radio stopped behind a start that answered.
+    final on = _reads;
+    if (on ?? false) return MeshTurnOn.on;
+    // A mesh that started and cannot be read is turned off again: "it
+    // failed" is then true, and no radio runs beside a state that says
+    // nothing.
+    if (on == null) await turnOff();
+    return MeshTurnOn.failed;
   }
 
   /// Restarts the twelve hours. Answers whether mesh is on: after the
@@ -177,7 +207,9 @@ class MeshNotifier extends AsyncNotifier<MeshStatsFfi?> implements BurstMesh {
         // it there at its next wake.
       }
     });
-    return kept;
+    // Not kept only where the state says so: one that cannot be read took
+    // the new deadline all the same.
+    return kept && (_reads ?? true);
   }
 
   /// Turns mesh off.
@@ -190,18 +222,43 @@ class MeshNotifier extends AsyncNotifier<MeshStatsFfi?> implements BurstMesh {
   /// and otherwise goes off, with [meshStoppedNoticeProvider] set. Does
   /// nothing where there is no radio, or while the engine cannot be read.
   ///
-  /// Dropped while a transition of the user's is asked or running, since
-  /// each ends with a reconcile of its own: one run in the middle of a
-  /// turn-off reads an engine still on beside a radio already stopped, and
-  /// would start the radio again.
-  Future<void> reconcile() async {
+  /// Runs in its turn, so never in the middle of a transition of the
+  /// user's: read there, a turn-off is an engine still on beside a radio
+  /// already stopped, and would start the radio again. Never dropped: a
+  /// report of the radio that lands behind a transition's own closing
+  /// reconcile is the only word of a service that stopped itself. Asked again
+  /// before its turn comes, it is the one already waiting.
+  Future<void> reconcile() {
     final radio = ref.read(meshRadioProvider);
-    if (radio == null || _transitions > 0) return;
-    await _inTurn((mesh) => _reconcile(mesh, radio));
+    if (radio == null) return Future.value();
+    return _owed ??= _last = _last.then((_) {
+      _owed = null;
+      return _then((mesh) => _reconcile(mesh, radio));
+    });
   }
 
   /// Forgets all four counts.
   Future<void> resetCounts() => _then((mesh) => mesh.resetCounts());
+
+  /// The phone's Bluetooth name, to be shown and kept nowhere. `null` where
+  /// there is no radio or the name cannot be read. Never throws.
+  Future<String?> bluetoothName() async {
+    try {
+      return await ref.read(meshRadioProvider)?.bluetoothName();
+    } on Object {
+      return null;
+    }
+  }
+
+  /// Opens the system's Bluetooth settings. Never throws: settings that did
+  /// not open are seen not to have.
+  Future<void> openBluetoothSettings() async {
+    try {
+      await ref.read(meshRadioProvider)?.openBluetoothSettings();
+    } on Object catch (_) {
+      // See above.
+    }
+  }
 
   /// Reads the state again.
   Future<void> refresh() => _then((_) async {});
@@ -268,6 +325,9 @@ class MeshNotifier extends AsyncNotifier<MeshStatsFfi?> implements BurstMesh {
       MeshRadioStart.unsupported => MeshTurnOn.unsupported,
       MeshRadioStart.failed => MeshTurnOn.failed,
     };
+    if (ended == MeshTurnOn.unsupported) {
+      ref.read(meshUnsupportedProvider.notifier).state = true;
+    }
     if (ended != MeshTurnOn.on) {
       try {
         await _off(mesh, radio);
@@ -380,20 +440,27 @@ class MeshNotifier extends AsyncNotifier<MeshStatsFfi?> implements BurstMesh {
     return copy(Duration(milliseconds: left.toInt()));
   }
 
-  /// Runs a transition of the user's in its turn, then the reconcile that
-  /// makes up for every one dropped meanwhile.
+  /// Whether mesh is on, as the state reads now; `null` where it does not
+  /// read. An error keeps the value of the read before it, which is not a
+  /// reading.
+  bool? get _reads => switch (state) {
+    AsyncData(:final value) => value?.on_ ?? false,
+    _ => null,
+  };
+
+  /// Runs a transition of the user's in its turn, then a reconcile of its
+  /// own: a step that failed half-way reports nothing to bring one.
   Future<void> _transition(
     Future<void> Function(MeshService mesh, MeshRadio? radio) step,
   ) {
     final radio = ref.read(meshRadioProvider);
-    _transitions++;
     return _inTurn((mesh) async {
       try {
         await step(mesh, radio);
       } finally {
         if (radio != null) await _reconcile(mesh, radio);
       }
-    }).whenComplete(() => _transitions--);
+    });
   }
 
   Future<void> _inTurn(Future<void> Function(MeshService mesh) step) =>
@@ -411,5 +478,174 @@ class MeshNotifier extends AsyncNotifier<MeshStatsFfi?> implements BurstMesh {
       await entry(mesh);
       return mesh.stats();
     });
+  }
+}
+
+/// Whether this phone's radio answered that it cannot run the mesh. Held
+/// for the life of the process and stored nowhere: a phone does not grow the
+/// hardware, and a process that forgets asks once more.
+final meshUnsupportedProvider = StateProvider<bool>((ref) => false);
+
+/// Whether the mesh is on screen: this build, on this platform, has a radio,
+/// and the radio has not answered that this phone cannot use it. Where the
+/// mesh button, its sheets, the Settings row and the aura exist.
+final meshAvailableProvider = Provider<bool>(
+  (ref) =>
+      ref.watch(meshRadioProvider) != null &&
+      !ref.watch(meshUnsupportedProvider),
+);
+
+/// Every tap on one of the radio's notices. One listener takes them all: a
+/// second would miss what the service hands over at the first listen.
+final meshNoticeTapsProvider = Provider<Stream<MeshRadioAction>>(
+  (ref) => ref.watch(meshRadioProvider)?.actions ?? const Stream.empty(),
+);
+
+/// The radio as it last reported itself: every report as it is pushed, and a
+/// live read beside every read of the engine's state — the shell's start-up,
+/// each resume and the end of each transition. `null` where there is no
+/// radio and before its first answer.
+///
+/// A read that fails changes nothing: the map must not say mesh turned off
+/// because one question went unanswered. (The reconcile reads the radio for
+/// itself, and there a radio that cannot be asked is a radio that stopped.)
+/// An answer that lands behind a later read or report is dropped.
+final meshRadioStatusProvider =
+    NotifierProvider<MeshRadioStatusNotifier, MeshRadioStatus?>(
+      MeshRadioStatusNotifier.new,
+    );
+
+/// Holds [meshRadioStatusProvider].
+class MeshRadioStatusNotifier extends Notifier<MeshRadioStatus?> {
+  @override
+  MeshRadioStatus? build() {
+    final radio = ref.watch(meshRadioProvider);
+    if (radio == null) return null;
+    // What was asked or reported last: an answer to anything before it is
+    // stale. Left past every answer once the provider is rebuilt.
+    var latest = 0;
+    final changes = radio.changes.listen((status) {
+      latest++;
+      state = status;
+    });
+    ref
+      ..onDispose(() {
+        latest = -1;
+        unawaited(changes.cancel());
+      })
+      ..listen(meshProvider, (_, _) async {
+        final asked = ++latest;
+        final MeshRadioStatus read;
+        try {
+          read = await radio.status();
+        } on Object {
+          return;
+        }
+        if (asked == latest) state = read;
+      }, fireImmediately: true);
+    return null;
+  }
+}
+
+/// When mesh turns itself off, by this device's clock: the time the engine
+/// said was left, counted from the read that said it. `null` while the
+/// engine is off, and before its first read. A read that fails changes
+/// nothing: its state still carries the read before it, whose time left is
+/// no longer counted from now.
+final meshOnUntilProvider = NotifierProvider<MeshOnUntilNotifier, DateTime?>(
+  MeshOnUntilNotifier.new,
+);
+
+/// Holds [meshOnUntilProvider].
+class MeshOnUntilNotifier extends Notifier<DateTime?> {
+  @override
+  DateTime? build() {
+    ref.listen(meshProvider, (_, read) {
+      if (read is AsyncData<MeshStatsFfi?>) state = _until(read.value);
+    });
+    return switch (ref.read(meshProvider)) {
+      AsyncData(:final value) => _until(value),
+      _ => null,
+    };
+  }
+
+  DateTime? _until(MeshStatsFfi? stats) => stats == null || !stats.on_
+      ? null
+      : clock.now().add(Duration(milliseconds: stats.onForMs.toInt()));
+}
+
+/// What the mesh is doing, as the map tells it.
+enum MeshPhase {
+  /// Off: no radio runs.
+  off,
+
+  /// On: the radio is advertising, searching and linking.
+  on,
+
+  /// On, with the radio waiting for Bluetooth to be switched back on.
+  paused,
+}
+
+/// [MeshPhase] now (signal S1 of `docs/BLUETOOTH_MESH_AURA_DESIGN.md` §7).
+/// On only while the radio itself reports that it runs, the engine was on
+/// when last read, and the deadline has not passed by this device's clock —
+/// never inferred from a permission or from Bluetooth being on.
+///
+/// Nothing pushes a deadline that passes, so a timer of this provider's own
+/// reads the clock again then; it asks nothing of the engine. A timer runs
+/// late in a process that slept, so the shell invalidates this at a resume:
+/// the first frame behind one compares with the clock too.
+final meshPhaseProvider = Provider<MeshPhase>((ref) {
+  final status = ref.watch(meshRadioStatusProvider);
+  if (status == null || status.state == MeshRadioState.stopped) {
+    return MeshPhase.off;
+  }
+  final until = ref.watch(meshOnUntilProvider);
+  if (until == null) return MeshPhase.off;
+  final left = until.difference(clock.now());
+  if (left <= Duration.zero) return MeshPhase.off;
+  ref.onDispose(Timer(left, ref.invalidateSelf).cancel);
+  return status.state == MeshRadioState.paused
+      ? MeshPhase.paused
+      : MeshPhase.on;
+});
+
+/// How many publish passes handed this device's own location to a mesh that
+/// was running with a phone linked (signal S2 of the aura design): what the
+/// ripple on the map follows. A count, so that every pass is a change.
+final meshHandOffProvider = NotifierProvider<MeshHandOffNotifier, int>(
+  MeshHandOffNotifier.new,
+);
+
+/// Tells [meshHandOffProvider] that a publish pass handed a location over.
+/// Decoration: it is not waited for, and whatever it throws, now or later,
+/// stays here — nothing a relay is sent waits on the mesh or fails with it.
+void noteMeshHandOff(Ref<Object?> ref) {
+  try {
+    unawaited(
+      ref
+          .read(meshHandOffProvider.notifier)
+          .handedOff()
+          .catchError((Object _) {}),
+    );
+  } on Object catch (_) {
+    // See above.
+  }
+}
+
+/// Holds [meshHandOffProvider].
+class MeshHandOffNotifier extends Notifier<int> {
+  @override
+  int build() => 0;
+
+  /// A publish pass made a send past the send-time check, where the core
+  /// leaves the sealed location for the mesh. It is the hand-off, not the
+  /// radio's emission: the packet goes out at the engine's next slot, and
+  /// nothing tells Dart which emission was real. Counted only while the
+  /// radio runs and, read afresh, a phone is linked. Never throws.
+  Future<void> handedOff() async {
+    if (ref.read(meshPhaseProvider) != MeshPhase.on) return;
+    await ref.read(meshProvider.notifier).refresh();
+    if (ref.read(meshProvider).valueOrNull?.linked ?? false) state++;
   }
 }

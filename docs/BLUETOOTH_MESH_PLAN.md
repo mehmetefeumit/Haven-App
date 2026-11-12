@@ -2139,6 +2139,282 @@ engine's first slot is drawn from the instant it starts, which follows a
 relay send when a session's `mesh_resume` starts it: one weak observation a
 process start.
 
+- **M3d (English) and M3e**, the mesh's strings and everything on screen
+  (`docs/BLUETOOTH_MESH_M3_DESIGN.md` §D, §E;
+  `docs/BLUETOOTH_MESH_AURA_DESIGN.md`, whose §11 has what the build found).
+  Dart only, behind `HAVEN_MESH` and only where there is a radio. No Kotlin,
+  no Rust, no bridge regeneration, no new package. The native end is still
+  missing, so a turn-on asks the channel, fails with fixed words and stores
+  nothing.
+  **Strings.** 67 keys in `app_en.arb`, each with a description that tells
+  a translator what the string stands beside and where its length or its
+  grammar matters; the English has been through a code review and a review
+  of rendered screens (below). All thirteen locales carry them
+  ("Localization", below), and `arb_parity_check.dart` passes. `meshNoticeCopyProvider` is filled from them, so a radio can
+  be handed its notices; the time mesh turns itself off is a clock time in
+  the language's own short form — the `jm` format of the `{time}`
+  placeholder in the two keys that tell it, which is the whole of that
+  choice (Q-7).
+  **What the map is told** (`mesh_provider.dart`; nothing else names the
+  radio). `meshAvailableProvider`: a radio exists and has not answered that
+  this phone cannot run the mesh — an answer kept for the life of the
+  process and stored nowhere, with which the button that could never work
+  goes, and the Settings row, the aura and the sheet's own control with it.
+  `meshRadioStatusProvider`: the radio's last report, taken as it is pushed
+  and read beside every read of the engine's state; a read that fails
+  changes nothing, and an answer that lands behind a later read or report
+  is dropped. `meshOnUntilProvider`: the deadline by the device's clock,
+  kept through a read of the engine that fails and dropped with the
+  identity. `meshPhaseProvider` — S1:
+  on only while the radio reports that it runs, the engine was on when last
+  read, and the deadline has not passed by the device's clock; a timer of
+  its own reads the clock again at the deadline and asks nothing of the
+  engine, and the shell invalidates it at every resume, where a timer may
+  be late. `meshHandOffProvider` — S2: the foreground publish tick and the
+  one-shot publisher tell it once a pass, at the first send that got past
+  the send-time check (a relay took it or did not, or it was for the mesh
+  alone); it counts only while S1 holds and, read afresh, a phone is linked.
+  Both tell it through `noteMeshHandOff`, which is not waited for and keeps
+  whatever the telling throws, at once or later. It is the hand-off, not
+  the radio's emission, and a background burst tells it nothing.
+  **Turning on and off** is one flow (`widgets/mesh/mesh_flow.dart`),
+  whether asked from the button, from the notice of a stop or from the
+  statistics sheet, and one at a time wherever asked. The first turn-on
+  shows the disclosure, then asks the permission, then — where the name can
+  be read — shows the phone's Bluetooth name, large and first, with the way
+  to the system settings that change it, and only then is anything stored;
+  the disclosure counts as read once that step is passed, and a logout
+  forgets it. Every `MeshTurnOn` has fixed copy, with its remedy where
+  there is one. A turn-off is judged by a read made after it: a stop the
+  step could not make and its closing reconcile then made is the user's
+  own.
+  **The button** (`MeshButton`), bottom-left above the collapsed sheet on
+  `meshButtonRect`, the same in a right-to-left language, level with the map
+  controls opposite and under the expanded sheet; above the map page's own
+  scrim and error overlay, since the mesh needs neither tiles nor a fix. A
+  tap turns mesh on or off; a hold, the screen reader's own action, the
+  Settings row and a tapped notice each open the one statistics sheet
+  ("Keep on" from a notice restarts the twelve hours first). To a screen
+  reader it is "Bluetooth mesh", on or off as a toggle, and "paused" or
+  "connected" as its value: the state is said once. To the eye it is the
+  plain Bluetooth icon, outlined while off and on a filled blue while on;
+  the connected icon with a dot while a phone is linked; the struck-through
+  icon with a blue edge and a pause mark while Bluetooth is off — never
+  colour alone. A turn-on under way is a ring on the button, still where
+  motion is reduced, and announced once. What the button says — that mesh
+  is on, with where the statistics are and an Undo; a failure, with its
+  remedy — is said in the app's snackbar for long messages, floated above
+  the button and clear of the map controls so that neither is covered, at
+  200 % text on a small phone too; it goes by itself after eight seconds
+  unless it carries a remedy.
+  **A stop the user did not make** — the deadline, a service that stopped,
+  the reconcile's own — is a notice beside the button, announced once, that
+  stays until dismissed or until mesh is turned on from it. It says "after
+  12 hours" where the device's clock has passed the deadline the engine
+  gave, the one cause Dart can know, and gives none otherwise.
+  `meshStoppedNoticeProvider` is what holds it, set by the reconcile or by
+  the button on an unasked change to off, and dropped with the identity. A
+  pause is announced. The user's own stop is neither, whenever the radio's
+  report of it arrives; a turn-off that failed is not their stop, and nor
+  is one that follows their turning mesh on again.
+  **The disclosure**, under three headings — what it does, what others can
+  learn, good to know — tells §0.4 items 3, 5, 6 (presence, direction
+  finding, and that a phone which connects can recognise this one again
+  after its address changes), 7, 7a, 7b, 8, 9a and 11a (both of a relay's
+  inferences), the Bluetooth name in both directions of connection (F-6),
+  and — more than the design's text — that it works only between nearby
+  phones with mesh on and that updates can be late or lost. It is reachable
+  again from the statistics sheet, with no "Turn on".
+  **The statistics sheet**: one status line, the time mesh turns itself
+  off, Turn on or Turn off through the flow above with a failure said in
+  the sheet, the Bluetooth settings while paused, Keep on, the two things
+  counted each with its two counts, the footnote, Reset behind a question.
+  A count is one line: drawn smaller where it does not fit, never wrapped
+  or cut, in digits of one width. With mesh off the first column is "Last
+  session": the core keeps what was counted since the last turn-on until
+  the next one (`storage_mesh.rs`: a total less a baseline that only a
+  turn-on sets). The sheet drives the mesh once when it opens and reads the
+  state; while it is open and the app in front it reads again each minute —
+  away, its timer is cancelled — and on every report of the radio. The
+  counts are shown and never logged.
+  **The aura**: the wave, the hue and the ripple, as the aura design has
+  them and its §11 qualifies; the hue is 0.35 at the edge, and the ripple a
+  lighter blue on the dark basemap.
+  **Not as the designs have them.** The design's keys, as the reviews
+  left them: `meshButtonOff`, `…On`, `…OnConnected` and `…Paused` are one
+  name and two values (`meshButtonLabel`, `meshButtonValuePaused`,
+  `meshButtonValueConnected`); `meshIntroTurnOn` is `meshTurnOn`, used
+  wherever mesh is turned on, with `meshTurnOff` beside it;
+  `meshStatsSinceOn` is `meshStatsThisSession` and `meshStatsLastSession`;
+  and there is no `meshName`, which nothing showed. New:
+  `meshButtonHintStats` (the hold's hint is read after "double tap and hold
+  to", so it is a verb phrase, not the sheet's title),
+  `meshStatsUnavailable`, `meshStatsAbout`, `meshStoppedAfterDeadline`,
+  `meshTurningOn`, the disclosure's three headings and the name step's two
+  lines. The statistics sheet lays its four counts out as two rows of
+  two, each count over its caption, not as a table with column headings: a
+  three-column table does not survive 200 % text on a small phone. The
+  Bluetooth name is in the disclosure, one tap from the statistics sheet,
+  not on the sheet itself: the sheet is to be succinct. An unasked stop is
+  a notice that stays, not an announcement alone: an announcement made
+  while the app is away is heard by nobody, and M3g's review makes the
+  in-app notice the one that must be seen (below). The hold's haptic is the
+  ink well's own, on Android; no second one is made. Everything the button
+  says is said in the wrapping snackbar the app already has: the Material
+  action slot overflows at 200 % text, and a plain snackbar lifted clear of
+  the button runs off the top of a small screen. The minute's read drives
+  nothing: a timer that drives would be a new wake of the engine
+  (`engine_work_no_background_timer_test.dart`). The reduced-motion and
+  resume tests of S1 are of the provider, the shell being unpumpable.
+  T-NOTIF-3's Dart half is not built: the radio's seam has no entry for the
+  notification permission (M3c).
+  **Not built here.** The native end, so nothing
+  of this has run against a radio. Anything on iOS. A look at any of it on
+  a device: the aura's softness, the hue's strength (`kMeshHueEdgeAlpha`,
+  0.35 as built; the owner had 0.50 against 0.35 open, and it is that one
+  constant) and the ripple's two blues were judged on rendered frames, by
+  nobody on a screen.
+
+Residuals of M3d/M3e. `meshNoticeCopyProvider` is still typed to answer
+`null`, which now only a test makes it do; the branches that refuse a radio
+without words are unreachable in a build and could go with their tests. The
+clock time follows the language and not the device's 24-hour switch. The
+time shown is the engine's time left added to the clock at each read, so it
+can move by a minute between two reads either side of a minute's edge.
+"Linked" is as fresh as the last read of the state — a transition, a
+reconcile, a publish pass while mesh runs, the open sheet's minute — so the
+button's mark can lag a link by as long. The twelve hours in three
+strings, and the half hour in one, are tied to no constant Dart can read:
+the figures are Rust's. "After 12 hours" is said where the device's clock
+has passed the deadline; a clock set forward says it of a stop with
+another cause. With the flag on and no
+radio — iOS — nothing of the mesh is on screen, and the engine a `turnOn`
+would start there is still reachable only from a test. That a phone cannot
+run the mesh is forgotten with the process, so the next launch shows the
+button once more and asks once more. The statistics sheet's title is "Mesh
+activity", not "Bluetooth mesh activity": the longer one takes a third
+line at 200 % text on a small phone. There, the name step shows its title,
+the name and its two buttons; the sentence about the name, which the
+disclosure has just told, and the way to the settings are reached by
+scrolling it. The disclosure's assurances about what
+a carrying or a connected phone cannot read rest on the core's packet
+envelope, which has no row in the privacy manifest yet (owed with the
+radio).
+
+Localization of M3d. One translating agent a language for the twelve other
+locales, then one independent reviewing agent a language, whose changes the
+translator applied or answered; every language was approved with changes,
+none as it stood. What the translators found in the English, fixed there:
+"doesn't send or read your circles' locations" did not say whose location
+is not sent (six languages); "its Bluetooth address" could be either
+phone's; and the notice's Dismiss is, in Hindi, Nepali and Turkish, the
+word for "turn off" — so the notice and the mesh's brief messages close
+with a key of their own, `meshStoppedOk`, never `commonDismiss`. What the
+reviewers ruled: "Bluetooth" is written as Android's own interface writes
+it in each language — in native script in Arabic, Persian, Hindi, Nepali
+and Urdu (where a notification that begins with a Latin word also takes a
+left-to-right base direction), in Latin in the other seven; Persian says
+«شبکهٔ مش» and never a bare «مش», a homograph; Brazilian Portuguese says
+"rede mesh", not "malha". Each language's screen-reader fragments were
+written against TalkBack's published templates for that language; in Hindi
+those templates are themselves ungrammatical and no fragment makes a
+correct sentence — the least bad form is used, and a full-sentence hint in
+the app's own words would be the fix. On Android the button's value is
+spoken before its name, not after as the first notes said; every
+language's fragment stands on its own. Not checked by anyone: any of it on
+a device, a screen reader's actual speech, and whether the one-line
+notification texts fit a narrow phone — several are longer than the
+English and their translators say so.
+
+Reviews of M3d/M3e (two, independent and read-only: the code, then the
+screens, rendered from the real widgets at 320×568 and at 200 % text, for
+use and accessibility). No blocker. Each finding was checked against the
+code or §0.4 first; each behaviour changed has a test that fails without
+it. From the code: **the word that mesh is on never left** — in this
+Flutter a snackbar with an action persists — and held every later word in
+the app behind it; **the word to the ripple could reach a relay publish**,
+the scheduler calling the notifier bare, and no test said otherwise — both
+publishers now tell it through one guarded helper, tested with a word that
+throws at once, one that fails later and one that never answers; **a read
+of the radio that failed or came late showed mesh as off** and raised the
+notice; **a turn-on answered that it failed beside a mesh that was on**,
+where the state could not be read behind a start that answered — it is
+turned off again first; **the user's own stop stayed theirs** after a
+turn-off that failed; the state was said twice to a screen reader; the
+sheet's timer ran while the app was away; a hand-off told while away
+played its ripple at the return; and the disclosure left out
+re-identification (§0.4 item 6) and the second of a relay's inferences
+from bridging (11a). From the screens: a count broken in the middle of a
+number at 200 %; the word that mesh is on, lying over the button it came
+from; no way on from the sheet the Settings row opens, or from the notice
+of a stop; "since turned on" beside "mesh is off"; a name step whose name
+was below the fold; icons that struck Bluetooth through while it was on
+and not while it was off; a hue that read as a line and a ripple lost on
+the dark basemap; a button left on a phone that cannot run the mesh; and
+a disclosure of eleven paragraphs with no heading.
+Found by the mutation pass, by neither review: a turn-off whose engine
+stop failed once and was then made by the turn-off's own closing reconcile
+was told as "couldn't turn off" beside a notice that mesh had turned off.
+A turn-off is now judged by a read made after it.
+Not as a reviewer had it. A stopped notice does not reach the next login:
+one raised behind a logout is dropped when the next identity is made
+(`mesh_radio_flow_test.dart`, "a notice the radio's own stop raises late
+in a logout is not the next identity's"); nothing was changed. A count
+needs no line limit inside the box that scales it. "Hold the button" is
+"Press and hold": the reviewer's own note that "hold" alone translates
+poorly. Not taken: a line for counts that are all zero; "Bluetooth mesh
+activity" as the sheet's title (above).
+Mutation pass, on the tree as it stands: 163 changes of a line or a few to
+the shipped code, each failing a named test — one of them, a deadline
+check without which the provider re-arms a timer already due for ever, by
+tests that do not complete. Survivors on the way, each now a test or
+gone: a pause's mark, a painter's repaint, a ripple that took a member
+marker's tap and a key nothing needed (first pass); the paused button's
+blue edge, a start announced twice across the name step, a remedy's word
+taken away after eight seconds, a word shown for four seconds and not
+eight, the hue's falloff, a stop told as the user's after they had turned
+mesh on again, an old failure left in the sheet through the next try, and
+two line limits and a dialog inset that changed nothing, which went.
+
+Review of M3c (independent, read-only): no blocker; two medium and four
+low findings, each checked against the code first. Fixed here, each with a
+test that fails without the fix. **A reconcile was dropped while a
+transition was asked or running**, and the transition's own closing
+reconcile reads the radio before the transition is released: a service that
+stopped itself in that window — after a start that answered — left the
+engine on with its keys and no radio until the next resume. A reconcile now
+runs in its turn behind the transition, once however often it was asked
+meanwhile; nothing is dropped. **No radio call was bounded**, so a service
+that never answered would hold a logout before its wipe, a launch before
+its first frame, and the queue for the life of the process. Every call is
+now bounded where it is made (`AndroidMeshRadio`: five seconds; two minutes
+for the permission dialog, which waits on a person and whose answer an
+activity recreated under it loses), and one not answered by then failed as
+one the platform refused. The permission's bound answers as a failure, not
+as a refusal: "needs the permission" would be said of a dialog nobody had
+answered. **A turn-on and a keep-on answered before their own closing
+reconcile**; they answer from the state it left — and where that state
+cannot be read, a turn-on turns mesh off again before it answers that it
+failed, and a keep-on was kept (the review of that fix, above). **A logout
+stopped the
+radio late**, behind the live-sync stop and the close; it stops it as soon
+as the wipe marker is set. The reason the code had for the late stop was
+that behind the close a reconcile could read no engine and so raised no
+notice; one raised now is dropped with the identity.
+
+Owed by the native unit, M3g — its acceptance tests on the Dart side's
+terms. (a) Once `start` answers `started`, `status` reads a state other
+than stopped with `wanted` true before that reply is sent; `stop` clears
+`wanted`, and so does a service that stops itself — otherwise the turn-on's
+own closing reconcile undoes every turn-on with a notice of a stop by
+something else, or reconciles loop. (b) Every channel method answers,
+inside the Dart bound. (c) Whether the service reads the logout's wipe
+marker itself, so that a logout that died after its radio stop cannot be
+followed by a sticky restart. (d) On Android 13 and later without the
+notification permission the service's stopped notice is seen by nobody, so
+"never on with no radio and no notice" rests on the in-app notice alone;
+that notice is built here and stays until dismissed.
+
 ### Proposed CLAUDE.md wording (owner to approve)
 
 Each is the text as it stands, then the text proposed. Nothing in

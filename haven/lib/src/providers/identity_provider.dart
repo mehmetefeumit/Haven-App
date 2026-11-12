@@ -244,6 +244,17 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         '${e.runtimeType}',
       );
     }
+    // The Bluetooth mesh's radio goes next, ahead of everything that takes
+    // time: the service keeps a copy of the deadline to come back by itself
+    // after a restart, and a logout that died later would leave it relaying
+    // with no Dart running until the next launch. The radio bounds its own
+    // answer. Nothing where the build or the platform has no radio.
+    try {
+      await ref.read(meshRadioProvider)?.stop();
+    } on Object {
+      // A service left running finds no engine at its next entry and stops
+      // itself; the pending-wipe marker's retry stops it again.
+    }
     // Cancel any in-flight tile prefetch burst first so no further
     // member-area tile writes occur after the identity is wiped.
     ref.read(tilePrefetchServiceProvider).cancel();
@@ -358,16 +369,6 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     // must not keep the key on the device.
     await _stopLiveSync(stopsGivenUp.future);
     stopBudget?.cancel();
-    // The Bluetooth mesh's radio goes before the wipe that empties its
-    // engine: the service keeps a copy of the deadline to come back by itself
-    // after a restart, and that copy must not outlive the identity. Nothing
-    // where the build or the platform has no radio.
-    try {
-      await ref.read(meshRadioProvider)?.stop();
-    } on Object {
-      // A service left running finds no engine at its next entry and stops
-      // itself; the pending-wipe marker's retry stops it again.
-    }
     // (The M10.1 pending-wipe marker was already set as the FIRST action of
     // this method — see the top of deleteIdentity — so it covers the whole
     // logout, not just the wipe call.)
@@ -419,6 +420,17 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
       debugPrint(
         '[SECURITY][IdentityNotifier] pending-leave marker clear failed '
         'during identity deletion: ${e.runtimeType}',
+      );
+    }
+    // The next identity reads the Bluetooth mesh's disclosure for itself.
+    // Best-effort.
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(kMeshIntroSeenKey);
+    } on Object catch (e) {
+      debugPrint(
+        '[IdentityNotifier] mesh disclosure flag clear failed during '
+        'identity deletion: ${e.runtimeType}',
       );
     }
     // circleServiceProvider is deliberately NOT invalidated anywhere in the

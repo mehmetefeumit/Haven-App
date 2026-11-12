@@ -102,6 +102,7 @@ void main() {
     _SpyHealthNotifier? health,
     PublishStagger? stagger,
     MeshService? mesh,
+    MeshHandOffNotifier? handOff,
   }) {
     SharedPreferences.setMockInitialValues({
       if (disclosureAccepted) kLocationDisclosureAcceptedKey: true,
@@ -115,6 +116,7 @@ void main() {
       overrides: [
         if (health != null) sharingHealthProvider.overrideWith(() => health),
         if (mesh != null) meshServiceProvider.overrideWithValue(mesh),
+        if (handOff != null) meshHandOffProvider.overrideWith(() => handOff),
         identityServiceProvider.overrideWithValue(
           _MockIdentityService(identity: identity),
         ),
@@ -1436,6 +1438,94 @@ void main() {
       }
     });
 
+    test("the map's ripple is told once a tick, at its first send past the "
+        'send-time check, however many circles it sends for — a relay that '
+        'took nothing included', () async {
+      final told = _RecordingHandOff();
+      final env = build([a, b], handOff: told);
+      final notifier = await ready(env.container);
+
+      await notifier.triggerTickForTest();
+      expect(told.told, 1);
+
+      // No relay took either: each was still handed to the mesh.
+      env.mock.publishAnswers = [
+        LocationPublishFfi.unreachable,
+        LocationPublishFfi.refused,
+      ];
+      await notifier.triggerTickForTest();
+      expect(told.told, 2);
+    });
+
+    test("the tick's relay publishes are the same whatever becomes of the "
+        'word to the ripple: one that throws at once, one that fails later, '
+        'one that never answers', () async {
+      // Owner requirement: nothing a relay is sent waits on the mesh or
+      // fails with it — the map's decoration least of all.
+      final words = <String, MeshHandOffNotifier Function()>{
+        'told': _RecordingHandOff.new,
+        'throws at once': _ThrowingHandOff.new,
+        'fails later': _FailingHandOff.new,
+        'never answers': _HangingHandOff.new,
+      };
+      final runs = <String, (List<String>, List<String>, List<bool>)>{};
+      for (final MapEntry(key: name, value: word) in words.entries) {
+        final spy = _SpyHealthNotifier();
+        final env = build([a, b], health: spy, handOff: word());
+        final notifier = await ready(env.container);
+
+        await notifier.triggerTickForTest();
+        await notifier.triggerTickForTest();
+        await pumpEventQueue();
+
+        runs[name] = (
+          env.mock.methodCalls
+              .where((c) => c == 'sealLocation' || c == 'publishSealedLocation')
+              .toList(),
+          env.mock.encryptedMlsGroupIds.map(_hex).toList(),
+          spy.publishOutcomes.map((o) => o.acked).toList(),
+        );
+      }
+
+      final told = runs['told']!;
+      expect(told.$1, hasLength(8), reason: 'premise: two ticks, two circles');
+      expect(told.$3, List.filled(4, true));
+      for (final name in words.keys) {
+        final run = runs[name]!;
+        expect(run.$1, told.$1, reason: name);
+        expect(run.$2, told.$2, reason: name);
+        expect(run.$3, told.$3, reason: name);
+      }
+    });
+
+    test("the map's ripple is told nothing by a tick that handed nothing "
+        'over: every send held, not sent, or failed', () async {
+      final told = _RecordingHandOff();
+      final env = build([a], handOff: told);
+      final notifier = await ready(env.container);
+
+      env.mock.holdNextSeal = true;
+      await notifier.triggerTickForTest();
+      for (final unsent in [
+        LocationPublishFfi.expired,
+        LocationPublishFfi.superseded,
+        LocationPublishFfi.ended,
+        LocationPublishFfi.inFlight,
+      ]) {
+        env.mock.publishAnswers = [unsent];
+        await notifier.triggerTickForTest();
+      }
+      env.mock.publishSealedThrows = const CircleServiceException('boom');
+      await notifier.triggerTickForTest();
+
+      expect(
+        env.mock.methodCalls.where((call) => call == 'sealLocation'),
+        hasLength(6),
+        reason: 'premise: each tick reached its seal',
+      );
+      expect(told.told, 0);
+    });
+
     test('a tick the pause overtook drives no mesh behind it', () async {
       // Paused, this isolate may have handed its session to the background
       // service: the tick's own publishes stop there, and so does its drive.
@@ -1755,6 +1845,32 @@ void main() {
 /// actually delivers to a listener is one empty emission followed by a healthy
 /// one. [MockCircleService.shouldThrowOnGetCircles] cannot express that: it is
 /// final and fails for the container's whole life.
+/// Counts what the publish pass tells the map's ripple.
+class _RecordingHandOff extends MeshHandOffNotifier {
+  int told = 0;
+
+  @override
+  Future<void> handedOff() async => told++;
+}
+
+/// A word to the ripple that throws before it returns.
+class _ThrowingHandOff extends MeshHandOffNotifier {
+  @override
+  Future<void> handedOff() => throw StateError('thrown at once');
+}
+
+/// One that fails after it returned.
+class _FailingHandOff extends MeshHandOffNotifier {
+  @override
+  Future<void> handedOff() async => throw StateError('failed later');
+}
+
+/// One that never answers.
+class _HangingHandOff extends MeshHandOffNotifier {
+  @override
+  Future<void> handedOff() => Completer<void>().future;
+}
+
 class _FlakyCircleService extends MockCircleService {
   _FlakyCircleService({required List<Circle> circles})
       : super(circles: circles);

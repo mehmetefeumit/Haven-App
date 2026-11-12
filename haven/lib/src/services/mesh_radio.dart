@@ -118,6 +118,18 @@ class MeshRadioException implements Exception {
   String toString() => 'MeshRadioException: the mesh radio did not answer';
 }
 
+/// How long the service is given to answer an entry that asks nobody: a
+/// logout, a launch and the mesh's one queue each wait on the radio, and none
+/// may wait on a service that never answers.
+const Duration kMeshRadioBound = Duration(seconds: 5);
+
+/// How long the system's permission dialog may stay open. A person answers
+/// it, so the bound is generous; it exists because an activity recreated
+/// under the dialog loses its answer, and the queue would wait for it for the
+/// life of the process. Past it the turn-on fails with nothing stored, and
+/// what the person then answers is found by the next one.
+const Duration kMeshRadioPermissionBound = Duration(minutes: 2);
+
 /// The radio as the app drives it.
 ///
 /// Every entry but [start] throws [MeshRadioException] when it could not be
@@ -164,7 +176,17 @@ abstract interface class MeshRadio {
 /// [MeshRadio] over the Android mesh service's platform channels.
 class AndroidMeshRadio implements MeshRadio {
   /// The channels are the process's, so every instance is the same radio.
-  const AndroidMeshRadio();
+  const AndroidMeshRadio({
+    this.bound = kMeshRadioBound,
+    this.permissionBound = kMeshRadioPermissionBound,
+  });
+
+  /// How long an entry waits for the service; one that has not answered by
+  /// then failed, as one the platform refused did.
+  final Duration bound;
+
+  /// [bound] for [requestPermission], which waits on a person.
+  final Duration permissionBound;
 
   /// What the app asks of the service.
   @visibleForTesting
@@ -224,11 +246,16 @@ class AndroidMeshRadio implements MeshRadio {
 
   Future<T> _ask<T>(
     String method,
-    T Function(Object? answer) read, [
+    T Function(Object? answer) read, {
     Object? arguments,
-  ]) async {
+    Duration? within,
+  }) async {
     try {
-      return read(await channel.invokeMethod<Object?>(method, arguments));
+      return read(
+        await channel
+            .invokeMethod<Object?>(method, arguments)
+            .timeout(within ?? bound),
+      );
     } on Object {
       throw const MeshRadioException();
     }
@@ -239,7 +266,7 @@ class AndroidMeshRadio implements MeshRadio {
 
   @override
   Future<MeshRadioPermission> requestPermission() =>
-      _ask('requestPermission', _permission);
+      _ask('requestPermission', _permission, within: permissionBound);
 
   @override
   Future<bool> bluetoothOn() => _ask('bluetoothOn', (on) => on! as bool);
@@ -257,7 +284,7 @@ class AndroidMeshRadio implements MeshRadio {
       return await _ask(
         'start',
         (started) => MeshRadioStart.values.byName(started! as String),
-        _copy(copy),
+        arguments: _copy(copy),
       );
     } on MeshRadioException {
       return MeshRadioStart.failed;
@@ -265,7 +292,8 @@ class AndroidMeshRadio implements MeshRadio {
   }
 
   @override
-  Future<void> sync(MeshNoticeCopy copy) => _ask('sync', (_) {}, _copy(copy));
+  Future<void> sync(MeshNoticeCopy copy) =>
+      _ask('sync', (_) {}, arguments: _copy(copy));
 
   @override
   Future<void> stop() => _ask('stop', (_) {});

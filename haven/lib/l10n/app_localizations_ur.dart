@@ -2266,4 +2266,236 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get avatarSemanticsOffline => 'آف لائن';
+
+  @override
+  String get meshButtonLabel => 'بلوٹوتھ میش';
+
+  @override
+  String get meshButtonValueConnected => 'کسی قریبی فون سے منسلک';
+
+  @override
+  String get meshButtonValuePaused => 'رکا ہوا، بلوٹوتھ بند ہے';
+
+  @override
+  String get meshButtonHintTurnOn => 'آن کریں';
+
+  @override
+  String get meshButtonHintTurnOff => 'بند کریں';
+
+  @override
+  String get meshButtonHintStats => 'میش کی سرگرمی دیکھنے';
+
+  @override
+  String get meshTurningOn => 'بلوٹوتھ میش آن ہو رہا ہے…';
+
+  @override
+  String get meshTurnOn => 'آن کریں';
+
+  @override
+  String get meshTurnOff => 'میش بند کریں';
+
+  @override
+  String get meshTurnedOn =>
+      'بلوٹوتھ میش آن ہے۔ سرگرمی دیکھنے کے لیے بٹن دبائے رکھیں۔';
+
+  @override
+  String get meshUndo => 'کالعدم کریں';
+
+  @override
+  String get meshErrorNoPermission =>
+      'بلوٹوتھ میش کو «قریبی آلات» کی اجازت درکار ہے۔';
+
+  @override
+  String get meshErrorBluetoothOff =>
+      'میش استعمال کرنے کے لیے بلوٹوتھ آن کریں۔';
+
+  @override
+  String get meshErrorUnsupported => 'یہ فون بلوٹوتھ میش استعمال نہیں کر سکتا۔';
+
+  @override
+  String get meshErrorStartFailed =>
+      'بلوٹوتھ میش آن نہ ہو سکا۔ دوبارہ کوشش کریں۔';
+
+  @override
+  String get meshErrorStopFailed =>
+      'بلوٹوتھ میش بند نہ ہو سکا۔ دوبارہ کوشش کریں۔';
+
+  @override
+  String get meshStoppedNotice => 'بلوٹوتھ میش بند ہو گیا۔';
+
+  @override
+  String get meshStoppedAfterDeadline => 'بلوٹوتھ میش 12 گھنٹے بعد بند ہو گیا۔';
+
+  @override
+  String get meshStoppedOk => 'ٹھیک ہے';
+
+  @override
+  String get meshIntroTitle => 'بلوٹوتھ میش';
+
+  @override
+  String get meshIntroHeadingDoes => 'یہ کیا کرتا ہے';
+
+  @override
+  String get meshIntroWhat =>
+      'انٹرنیٹ نہ ہو تب بھی، جب آس پاس ایسے فون موجود ہوں جن میں میش آن ہو، میش آپ کے اور آپ کے حلقوں کے مقام کی خفیہ کردہ اپ ڈیٹس بلوٹوتھ کے ذریعے ایک فون سے دوسرے فون تک آگے پہنچا سکتا ہے۔ اپ ڈیٹس دیر سے پہنچ سکتی ہیں یا ضائع ہو سکتی ہیں۔ آپ کا فون دوسرے لوگوں کے خفیہ کردہ پیکٹ بھی لے جاتا ہے، جنہیں وہ پڑھ نہیں سکتا۔';
+
+  @override
+  String get meshIntroAutoOff =>
+      'میش 12 گھنٹے بعد خود ہی بند ہو جاتا ہے۔ اگر اطلاعات کی اجازت ہو تو اس سے 30 منٹ پہلے آپ کو یاد دہانی ملتی ہے۔';
+
+  @override
+  String get meshIntroBattery => 'میش زیادہ بیٹری استعمال کرتا ہے۔';
+
+  @override
+  String get meshIntroClosed =>
+      'Haven بند ہونے پر بھی میش چلتا رہتا ہے۔ جب Haven بند ہو اور پس منظر میں شیئرنگ بھی بند ہو، تو میش دوسرے لوگوں کے پیکٹ تو لے جاتا ہے، مگر جب تک آپ Haven نہ کھولیں، نہ آپ کا مقام بھیجتا ہے نہ آپ کے حلقوں کے مقامات پڑھتا ہے۔';
+
+  @override
+  String get meshIntroHeadingLearn => 'دوسرے کیا جان سکتے ہیں';
+
+  @override
+  String get meshIntroNearby =>
+      'آس پاس موجود کوئی بھی یہ جان سکتا ہے کہ اس فون میں Haven کا میش آن ہے، اور اس کے ریڈیو سگنل سے اس فون کی جگہ معلوم کر سکتا ہے۔ جو فون آپ کے فون سے منسلک ہو، وہ آپ کے فون کو بعد میں دوبارہ پہچان سکتا ہے، آپ کے فون کا بلوٹوتھ پتہ بدل جانے کے بعد بھی۔ وہ نہ آپ کا مقام پڑھ سکتے ہیں نہ آپ کے حلقے دیکھ سکتے ہیں۔';
+
+  @override
+  String get meshIntroConnected =>
+      'جو فون آپ کے فون سے منسلک ہو، وہ دیکھ سکتا ہے کہ آپ کا فون کون سے خفیہ کردہ پیکٹ بھیجتا ہے، ہر پیکٹ تقریباً کتنا پرانا ہے، اور آپ کا فون کب سویا ہوا ہوتا ہے۔ اگر وہ فون آپ کے کسی حلقے میں شامل نہیں تو وہ انہیں پڑھ نہیں سکتا، اور یقین سے نہیں جان سکتا کہ ان میں سے کون سے پیکٹ آپ کی اپنی اپ ڈیٹس ہیں۔';
+
+  @override
+  String get meshIntroName =>
+      'میش جن فونوں سے منسلک ہوتا ہے، وہ آپ کے فون کا بلوٹوتھ نام پڑھ سکتے ہیں اور یہ دیکھ سکتے ہیں کہ آپ کا فون اور کون سی بلوٹوتھ سروسز پیش کرتا ہے۔';
+
+  @override
+  String meshIntroNameIs(String name) {
+    return 'آپ کے فون کا بلوٹوتھ نام «$name» ہے۔';
+  }
+
+  @override
+  String get meshBluetoothSettings => 'بلوٹوتھ کی ترتیبات';
+
+  @override
+  String get meshIntroBridge =>
+      'جب آپ آن لائن ہوں تو آپ کا فون قریب موجود کسی حلقہ رکن کی اپ ڈیٹ آپ کے حلقے کے ریلے تک آگے پہنچا سکتا ہے، اور ان کا فون آپ کی اپ ڈیٹ آگے پہنچا سکتا ہے۔ ایسے میں ریلے جان سکتا ہے کہ اُس حلقے کا کوئی رکن اُس فون کے قریب آف لائن ہے جس نے اپ ڈیٹ آگے پہنچائی۔ اگر دونوں فون آن لائن ہوں تو ریلے جان سکتا ہے کہ دونوں ایک دوسرے کے قریب ہیں۔';
+
+  @override
+  String get meshIntroRemoved =>
+      'آپ کے آف لائن ہونے کے دوران، کسی حلقے سے ہٹایا گیا شخص پھر بھی آپ کی اپ ڈیٹس پڑھ سکتا ہے، جب تک آپ کے فون کو یہ معلوم نہ ہو جائے کہ اسے ہٹا دیا گیا ہے۔';
+
+  @override
+  String get meshIntroHeadingKnow => 'یہ بھی جان لیں';
+
+  @override
+  String get meshIntroStats =>
+      'یہ دیکھنے کے لیے کہ میش کتنی اپ ڈیٹس لے جا چکا ہے، میش کا بٹن دبائے رکھیں۔';
+
+  @override
+  String get meshNameStepTitle => 'آپ کے فون کا بلوٹوتھ نام';
+
+  @override
+  String get meshNameStepChange =>
+      'اسے آپ کے فون کی بلوٹوتھ ترتیبات میں بدلا جا سکتا ہے۔';
+
+  @override
+  String get meshStatsTitle => 'میش کی سرگرمی';
+
+  @override
+  String get meshStatsThisSession => 'اس بار';
+
+  @override
+  String get meshStatsLastSession => 'پچھلی بار';
+
+  @override
+  String get meshStatsAllTime => 'مجموعی';
+
+  @override
+  String get meshStatsFromCircles => 'آپ کے حلقوں سے موصول';
+
+  @override
+  String get meshStatsPassedOn => 'دوسروں کے لیے آگے پہنچائے گئے';
+
+  @override
+  String meshStatsCell(String row, String column, String count) {
+    return '$row، $column: $count';
+  }
+
+  @override
+  String get meshStatsFootnote =>
+      'آگے پہنچائے گئے پیکٹ یہ فون نہیں پڑھ سکتا۔ ان میں دوسرے لوگوں کی اپ ڈیٹس بھی ہوتی ہیں اور فرضی پیکٹ بھی، جو یہ چھپاتے ہیں کہ اصلی کون سے ہیں۔';
+
+  @override
+  String get meshStatsUnavailable => 'میش کی سرگرمی پڑھی نہ جا سکی۔';
+
+  @override
+  String get meshStatsAbout => 'بلوٹوتھ میش کے بارے میں';
+
+  @override
+  String get meshStatusConnected => 'میش آن ہے · منسلک';
+
+  @override
+  String get meshStatusSearching => 'میش آن ہے · قریبی فونوں کی تلاش جاری ہے';
+
+  @override
+  String get meshStatusFindable =>
+      'میش آن ہے · دوسرے فون اس فون کو ڈھونڈ سکتے ہیں، مگر یہ خود انہیں تلاش نہیں کر سکتا';
+
+  @override
+  String get meshStatusPaused => 'میش رکا ہوا ہے · بلوٹوتھ بند ہے';
+
+  @override
+  String get meshStatusOff => 'میش بند ہے';
+
+  @override
+  String meshTurnsOffAt(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return '$timeString پر بند ہو جائے گا';
+  }
+
+  @override
+  String get meshKeepOn => '12 گھنٹے آن رکھیں';
+
+  @override
+  String get meshStatsReset => 'گنتی صفر کریں';
+
+  @override
+  String get meshStatsResetTitle => 'میش کی گنتی صفر کریں؟';
+
+  @override
+  String get meshStatsResetBody => 'چاروں گنتیاں دوبارہ صفر ہو جائیں گی۔';
+
+  @override
+  String get meshStatsResetConfirm => 'صفر کریں';
+
+  @override
+  String get settingsMeshTitle => 'بلوٹوتھ میش';
+
+  @override
+  String get settingsMeshOn => 'آن';
+
+  @override
+  String get settingsMeshOff => 'بند';
+
+  @override
+  String get meshNoticeChannel => 'بلوٹوتھ میش';
+
+  @override
+  String get meshNoticeOn => 'بلوٹوتھ میش آن ہے';
+
+  @override
+  String get meshNoticePaused => 'بلوٹوتھ میش رکا ہوا ہے — بلوٹوتھ بند ہے';
+
+  @override
+  String get meshNoticeStopped => 'بلوٹوتھ میش بند ہو گیا ہے';
+
+  @override
+  String meshNoticeReminder(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'بلوٹوتھ میش $timeString پر بند ہو جائے گا';
+  }
+
+  @override
+  String get meshNoticeKeepOn => 'آن رکھیں';
 }

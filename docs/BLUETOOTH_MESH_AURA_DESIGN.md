@@ -2,8 +2,11 @@
 
 Status: **drafted by a Flutter specialist agent and confirmed with changes
 by an independent Opus 5.5 review, both 2026-11-11**; the review's changes
-are folded in below and listed in §10. Built in M3 with the mesh button
-(`docs/BLUETOOTH_MESH_PLAN.md` §7.5). Nothing here is built yet.
+are folded in below and listed in §10. **Built in M3e, 2026-11-12, with the
+mesh button** (`docs/BLUETOOTH_MESH_PLAN.md` §7.5, §16 "M3d and M3e"), in
+Dart, behind `HAVEN_MESH` and only where there is a radio; §11 lists where
+the build differs from the text below. Never seen on a device: the project
+has none (§8, "Not provable without a device").
 
 The owner's request: when the mesh is turned on, a soft blue wave ripples
 out of the mesh button to the edges of the screen and leaves a blue hue
@@ -249,6 +252,87 @@ deferred with the power measurements.
   changes the user did not make (§5), a log-capture test (§8).
 - Not verified by either pass: behaviour on a real device, including iOS
   Control Centre ending the mesh (plan §0.4), and smoothness.
+
+## 11. What the build found
+
+Built as above except where stated here; each is in the code and under a
+test (`haven/test/widgets/map/mesh_aura_overlay_test.dart`,
+`own_location_ripple_test.dart`, `test/utils/mesh_aura_geometry_test.dart`,
+`test/providers/mesh_phase_test.dart`, `test/pages/map_shell_mesh_test.dart`).
+
+- **§2, the front.** `easeOutSine` is Flutter's `Curves.easeOutSine`, a cubic
+  that reads 0.736 at half time where a sine reads 0.707; the test computes
+  the front with the same curve.
+- **§2, the hue** is 0.35 at the edge, not 0.50, and thins sooner: of the
+  edge's alpha, all of it at the edge, half at 30 % of the width in, 0.15
+  at 65 %, none at 100 %. A UX review of rendered frames (2026-11-12, no
+  device) found 0.50 with the designed stops to read as a line drawn round
+  the screen, and 0.35 with these as a glow. Every stop scales with one
+  constant, `kMeshHueEdgeAlpha`; the owner had 0.50 against 0.35 open (§9,
+  decision 4), and changing it back is that one number. The contrast
+  figures of §6 were computed for 0.50 and are lower at 0.35; the hue was
+  never what tells the state (§5).
+- **§3, the ripple's layer** is a widget, `OwnLocationLayer`, not a static
+  builder: it owns the ripple's controller, and a widget can be pumped. It
+  is built only where there is a radio; elsewhere the map builds the dot's
+  layer it always built, unkeyed. Only the dot's marker is keyed: the key
+  keeps the dot's element, and the node a screen reader may be on, when the
+  ripple's marker comes and goes ahead of it. The ripple's needs none — its
+  controller is the layer's, so a remount of it changes nothing seen.
+- **§3, the ripple itself** was not specified beyond "two `drawCircle`
+  calls": two soft rings from the dot's edge to 72 px, the second a quarter
+  of the run behind the first, 1.6 s. With motion reduced, one ring of a
+  fixed size that fades in and out.
+- **§6, the ripple's colour follows the basemap**, the one place the single
+  blue did not hold: `HavenMeshColors.active` (`0xFF2563EB`) at a peak
+  alpha of 0.34 on the light basemaps, and on the dark one
+  (`kStyleIdAlidadeSmoothDark`) `HavenMeshColors.activeOnDark`
+  (`0xFF60A5FA`) at 0.5 — the darker blue all but vanished there in the
+  rendered frames. The map page tells the layer which basemap it draws; the
+  two colours are in `theme/colors.dart` and nowhere else. The wave, the
+  hue and the button keep the one blue.
+- **§4, a hue coming back.** Turned on again while the hue is still leaving,
+  the hue returns from where it is with no second wave: a wave over it
+  would blank it first.
+- **§4, mesh already running.** The shell's aura builds nothing until the
+  radio and the engine have both answered once, so what it first shows is
+  the settled state. A read of the radio that fails later changes nothing
+  — the last report stands — so an unanswered question neither removes the
+  hue nor replays the wave; an answer that lands behind a later read or
+  report is dropped.
+- **§5, a stop the user did not make** is told by a notice beside the button
+  that stays until dismissed or until mesh is turned on from it, and
+  announced once; it gives the one cause Dart can know — the clock passed
+  the deadline — and otherwise none. A pause (Bluetooth off) is announced.
+  The user's own stop is neither, whenever the radio's report of it
+  arrives; a turn-off that failed is not their stop.
+- **§5, the button** says its state once: the name "Bluetooth mesh", on or
+  off as the toggle, and "paused" or "connected" as the value. While a
+  turn-on is under way it shows a ring, which does not turn where motion is
+  reduced, and the start is announced once.
+- **§7, S1** is `meshPhaseProvider`: the radio's last report says running,
+  **and** the engine was on when last read, **and** the deadline has not
+  passed by the device's clock. The clock comparison is synchronous — a
+  timer of the provider's own at the deadline, and an invalidation by the
+  shell at every resume. The radio's own state at a resume is a channel
+  call and is not synchronous: a radio that stopped while the app was away,
+  whose report did not reach Dart, shows its hue until that call answers.
+- **§7, S2** is `meshHandOffProvider`, told by the foreground publish tick
+  and the one-shot publisher at the first send of a pass that got past the
+  send-time check (a relay took it or did not; or it was for the mesh
+  alone). It counts only while S1 holds and, read afresh, a phone is linked.
+  Both tell it through one helper, `noteMeshHandOff`, which is not waited
+  for and keeps whatever the telling throws, at once or later: no relay
+  send waits on the ripple or fails with it. A background burst tells
+  nothing, and a hand-off told while the app is not in front is dropped by
+  the layer: no frame runs there, and it would play at the return for a
+  hand-off long past. As M3 design §E.5 says, a ripple can show for a
+  location the hand-off then dropped.
+- **§8, tests not written.** "Permission revoked" has no state of its own in
+  Dart: it is the radio reporting that it stopped, which is tested. The
+  first-frame-after-resume tests are of the provider, with the clock moved
+  and its timer not run, since the shell cannot be pumped; that the shell
+  invalidates at a resume is pinned from its source.
 
 ## References
 

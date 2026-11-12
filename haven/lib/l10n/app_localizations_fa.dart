@@ -2265,4 +2265,239 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get avatarSemanticsOffline => 'آفلاین';
+
+  @override
+  String get meshButtonLabel => 'شبکهٔ مش بلوتوث';
+
+  @override
+  String get meshButtonValueConnected => 'متصل به یک گوشی در نزدیکی';
+
+  @override
+  String get meshButtonValuePaused => 'موقتاً متوقف، بلوتوث خاموش است';
+
+  @override
+  String get meshButtonHintTurnOn => 'روشن کردن';
+
+  @override
+  String get meshButtonHintTurnOff => 'خاموش کردن';
+
+  @override
+  String get meshButtonHintStats => 'نمایش فعالیت شبکهٔ مش';
+
+  @override
+  String get meshTurningOn => 'در حال روشن کردن شبکهٔ مش بلوتوث…';
+
+  @override
+  String get meshTurnOn => 'روشن کردن';
+
+  @override
+  String get meshTurnOff => 'خاموش کردن';
+
+  @override
+  String get meshTurnedOn =>
+      'شبکهٔ مش بلوتوث روشن است. برای دیدن فعالیتش، دکمه را لمس کن و نگه دار.';
+
+  @override
+  String get meshUndo => 'واگرد';
+
+  @override
+  String get meshErrorNoPermission =>
+      'شبکهٔ مش بلوتوث به مجوز «دستگاه‌های اطراف» نیاز دارد.';
+
+  @override
+  String get meshErrorBluetoothOff =>
+      'برای استفاده از شبکهٔ مش، بلوتوث را روشن کن.';
+
+  @override
+  String get meshErrorUnsupported =>
+      'این گوشی نمی‌تواند از شبکهٔ مش بلوتوث استفاده کند.';
+
+  @override
+  String get meshErrorStartFailed =>
+      'شبکهٔ مش بلوتوث روشن نشد. دوباره تلاش کن.';
+
+  @override
+  String get meshErrorStopFailed =>
+      'شبکهٔ مش بلوتوث خاموش نشد. دوباره تلاش کن.';
+
+  @override
+  String get meshStoppedNotice => 'شبکهٔ مش بلوتوث خاموش شد.';
+
+  @override
+  String get meshStoppedAfterDeadline =>
+      'شبکهٔ مش بلوتوث پس از ۱۲ ساعت خاموش شد.';
+
+  @override
+  String get meshStoppedOk => 'باشه';
+
+  @override
+  String get meshIntroTitle => 'شبکهٔ مش بلوتوث';
+
+  @override
+  String get meshIntroHeadingDoes => 'چه کار می‌کند';
+
+  @override
+  String get meshIntroWhat =>
+      'حتی بدون اینترنت، وقتی گوشی‌هایی در نزدیکی باشند که شبکهٔ مش رویشان روشن است، این شبکه می‌تواند به‌روزرسانی‌های رمزگذاری‌شدهٔ موقعیت مکانی تو و حلقه‌هایت را از طریق بلوتوث از گوشی به گوشی منتقل کند. به‌روزرسانی‌ها ممکن است دیر برسند یا گم شوند. گوشی‌ات بسته‌های رمزگذاری‌شدهٔ دیگران را هم حمل می‌کند و نمی‌تواند آن‌ها را بخواند.';
+
+  @override
+  String get meshIntroAutoOff =>
+      'شبکهٔ مش پس از ۱۲ ساعت خودش خاموش می‌شود. اگر اعلان‌ها مجاز باشند، ۳۰ دقیقه پیش از آن یک یادآوری دریافت می‌کنی.';
+
+  @override
+  String get meshIntroBattery => 'شبکهٔ مش باتری بیشتری مصرف می‌کند.';
+
+  @override
+  String get meshIntroClosed =>
+      'شبکهٔ مش وقتی Haven بسته است هم به کارش ادامه می‌دهد. وقتی Haven بسته و اشتراک‌گذاری در پس‌زمینه خاموش است، این شبکه بسته‌های دیگران را حمل می‌کند، اما تا وقتی Haven را باز نکنی، نه موقعیت مکانی تو را می‌فرستد و نه موقعیت‌های مکانی حلقه‌هایت را می‌خواند.';
+
+  @override
+  String get meshIntroHeadingLearn => 'دیگران چه می‌توانند بفهمند';
+
+  @override
+  String get meshIntroNearby =>
+      'هر کسی که در نزدیکی باشد می‌تواند بفهمد که شبکهٔ مشِ Haven روی این گوشی روشن است، و می‌تواند از روی سیگنال رادیویی‌اش جای آن را پیدا کند. گوشی‌ای که به گوشی تو وصل شود می‌تواند بعداً دوباره گوشی‌ات را بشناسد، حتی پس از آنکه نشانی بلوتوث گوشی‌ات عوض شود. هیچ‌کدامشان نمی‌توانند موقعیت مکانی‌ات را بخوانند یا حلقه‌هایت را ببینند.';
+
+  @override
+  String get meshIntroConnected =>
+      'گوشی‌ای که به گوشی تو وصل شود می‌تواند ببیند گوشی‌ات کدام بسته‌های رمزگذاری‌شده را می‌فرستد، هر کدام تقریباً چقدر قدیمی است، و گوشی‌ات چه وقت‌هایی در حالت خواب است. اگر در هیچ‌کدام از حلقه‌هایت نباشد، نمی‌تواند آن‌ها را بخواند و نمی‌تواند مطمئن باشد کدام‌ها به‌روزرسانی‌های خودِ تو هستند.';
+
+  @override
+  String get meshIntroName =>
+      'گوشی‌هایی که از طریق شبکهٔ مش با گوشی‌ات متصل می‌شوند می‌توانند نام بلوتوث گوشی‌ات را بخوانند و ببینند گوشی‌ات چه سرویس‌های بلوتوث دیگری ارائه می‌کند.';
+
+  @override
+  String meshIntroNameIs(String name) {
+    return 'نام بلوتوث گوشی‌ات «$name» است.';
+  }
+
+  @override
+  String get meshBluetoothSettings => 'تنظیمات بلوتوث';
+
+  @override
+  String get meshIntroBridge =>
+      'وقتی آنلاین هستی، گوشی‌ات می‌تواند به‌روزرسانی یکی از اعضای حلقه را که در نزدیکی توست به رله‌های حلقه‌ات منتقل کند، و گوشی او هم می‌تواند به‌روزرسانی تو را منتقل کند. آن‌وقت یک رله می‌تواند بفهمد که یکی از اعضای آن حلقه آفلاین است و نزدیک گوشی‌ای است که به‌روزرسانی را منتقل کرده. اگر هر دو گوشی آنلاین باشند، رله می‌تواند بفهمد که آن‌ها نزدیک هم هستند.';
+
+  @override
+  String get meshIntroRemoved =>
+      'در مدتی که آفلاین هستی، کسی که از یک حلقه حذف شده همچنان می‌تواند به‌روزرسانی‌هایت را بخواند، تا زمانی که گوشی‌ات بفهمد او حذف شده است.';
+
+  @override
+  String get meshIntroHeadingKnow => 'خوب است بدانی';
+
+  @override
+  String get meshIntroStats =>
+      'دکمهٔ شبکهٔ مش را لمس کن و نگه دار تا ببینی این شبکه چند به‌روزرسانی را حمل کرده است.';
+
+  @override
+  String get meshNameStepTitle => 'نام بلوتوث گوشی‌ات';
+
+  @override
+  String get meshNameStepChange =>
+      'می‌توانی آن را در تنظیمات بلوتوث گوشی‌ات تغییر بدهی.';
+
+  @override
+  String get meshStatsTitle => 'فعالیت شبکهٔ مش';
+
+  @override
+  String get meshStatsThisSession => 'این بار';
+
+  @override
+  String get meshStatsLastSession => 'بار قبل';
+
+  @override
+  String get meshStatsAllTime => 'در مجموع';
+
+  @override
+  String get meshStatsFromCircles => 'دریافت‌شده از حلقه‌هایت';
+
+  @override
+  String get meshStatsPassedOn => 'منتقل‌شده برای دیگران';
+
+  @override
+  String meshStatsCell(String row, String column, String count) {
+    return '$row، $column: $count';
+  }
+
+  @override
+  String get meshStatsFootnote =>
+      'این گوشی نمی‌تواند بسته‌های منتقل‌شده را بخواند. این بسته‌ها شامل به‌روزرسانی‌های دیگران و بسته‌های بدلی می‌شوند؛ بسته‌های بدلی پنهان می‌کنند که کدام بسته‌ها واقعی‌اند.';
+
+  @override
+  String get meshStatsUnavailable => 'نتوانستیم فعالیت شبکهٔ مش را بخوانیم.';
+
+  @override
+  String get meshStatsAbout => 'دربارهٔ شبکهٔ مش بلوتوث';
+
+  @override
+  String get meshStatusConnected => 'شبکهٔ مش روشن است · متصل';
+
+  @override
+  String get meshStatusSearching =>
+      'شبکهٔ مش روشن است · در جست‌وجوی گوشی‌های اطراف';
+
+  @override
+  String get meshStatusFindable =>
+      'شبکهٔ مش روشن است · گوشی‌های دیگر می‌توانند این گوشی را پیدا کنند، اما خودش نمی‌تواند آن‌ها را جست‌وجو کند';
+
+  @override
+  String get meshStatusPaused => 'شبکهٔ مش موقتاً متوقف است · بلوتوث خاموش است';
+
+  @override
+  String get meshStatusOff => 'شبکهٔ مش خاموش است';
+
+  @override
+  String meshTurnsOffAt(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'ساعت $timeString خاموش می‌شود';
+  }
+
+  @override
+  String get meshKeepOn => '۱۲ ساعت روشن نگه دار';
+
+  @override
+  String get meshStatsReset => 'صفر کردن شمارنده‌ها';
+
+  @override
+  String get meshStatsResetTitle => 'شمارنده‌های شبکهٔ مش صفر شوند؟';
+
+  @override
+  String get meshStatsResetBody => 'هر چهار شمارنده به صفر برمی‌گردند.';
+
+  @override
+  String get meshStatsResetConfirm => 'صفر کردن';
+
+  @override
+  String get settingsMeshTitle => 'شبکهٔ مش بلوتوث';
+
+  @override
+  String get settingsMeshOn => 'روشن';
+
+  @override
+  String get settingsMeshOff => 'خاموش';
+
+  @override
+  String get meshNoticeChannel => 'شبکهٔ مش بلوتوث';
+
+  @override
+  String get meshNoticeOn => 'شبکهٔ مش بلوتوث روشن است';
+
+  @override
+  String get meshNoticePaused => 'شبکهٔ مش موقتاً متوقف است — بلوتوث خاموش است';
+
+  @override
+  String get meshNoticeStopped => 'شبکهٔ مش بلوتوث خاموش شد';
+
+  @override
+  String meshNoticeReminder(DateTime time) {
+    final intl.DateFormat timeDateFormat = intl.DateFormat.jm(localeName);
+    final String timeString = timeDateFormat.format(time);
+
+    return 'شبکهٔ مش بلوتوث ساعت $timeString خاموش می‌شود';
+  }
+
+  @override
+  String get meshNoticeKeepOn => 'روشن نگه دار';
 }
