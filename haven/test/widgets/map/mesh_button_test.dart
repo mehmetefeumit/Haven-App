@@ -498,7 +498,7 @@ void main() {
       );
     });
 
-    testWidgets('the name step leads with the name: on a small phone at '
+    testWidgets('the name step leads with the name — on a small phone at '
         '200 % text it is in view without scrolling', (tester) async {
       const name = "Ada's Galaxy Z Fold6";
       await loadAppFont();
